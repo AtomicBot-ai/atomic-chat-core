@@ -35,6 +35,8 @@ export interface SpawnSpec {
 
 export interface ReadyOptions {
   timeoutMs: number
+  /** Cancel process startup (owner shutdown); the child is terminated before rejection. */
+  signal?: AbortSignal
   readyMarkers?: readonly string[]
   /** Poll for readiness (e.g. `GET /health` → 2xx); omitted for backends without a health route. */
   healthCheck?: () => Promise<boolean>
@@ -129,6 +131,8 @@ export interface SpawnReadyResult {
 }
 
 export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): Promise<SpawnReadyResult> {
+  if (opts.signal?.aborted)
+    throw new AtomicCoreError('CORE_NOT_RUNNING', 'The runtime stopped before the process could start.')
   const markers = opts.readyMarkers ?? LLAMA_READY_MARKERS
   let resolveReady: ((via: 'log' | 'health') => void) | undefined
   const ready = new Promise<'log' | 'health'>((r) => (resolveReady = r))
@@ -162,12 +166,18 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
   }
 
   const timeout = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), opts.timeoutMs).unref())
+  let resolveAbort: (() => void) | undefined
+  const aborted = new Promise<'aborted'>((resolve) => {
+    resolveAbort = () => resolve('aborted')
+    opts.signal?.addEventListener('abort', resolveAbort, { once: true })
+  })
 
   try {
     const outcome = await Promise.race([
       ready.then((via) => ({ kind: 'ready' as const, via })),
       proc.exited.then((exit) => ({ kind: 'exit' as const, exit })),
       timeout.then(() => ({ kind: 'timeout' as const })),
+      aborted.then(() => ({ kind: 'aborted' as const })),
     ])
     if (outcome.kind === 'ready') return { process: proc, readyVia: outcome.via }
     if (outcome.kind === 'exit') {
@@ -184,6 +194,9 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
       throw opts.classifyExit(outcome.exit, stderr, stdout)
     }
     await proc.terminate(1000)
+    if (outcome.kind === 'aborted') {
+      throw new AtomicCoreError('CORE_NOT_RUNNING', 'The runtime stopped while the process was starting.')
+    }
     const { stderr } = proc.output()
     throw new AtomicCoreError(
       'MODEL_LOAD_TIMED_OUT',
@@ -192,6 +205,7 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
     )
   } finally {
     stopHealth()
+    if (resolveAbort) opts.signal?.removeEventListener('abort', resolveAbort)
   }
 }
 

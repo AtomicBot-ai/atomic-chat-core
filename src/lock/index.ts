@@ -1,7 +1,8 @@
 /**
- * One owner per data folder (instance.lock); CLI attaches to a running owner.
- *
- * Ported from: new
- * See PLAN.md §3.2. Public API of this module is exported from this file only.
+ * Single-owner coordination for a data folder: the instance lock and its process-start identity,
+ * the control token, and the journal of spawned backend processes. PLAN.md §3.4, §3.6.
  */
-export {}
+export * from './process-identity.js'
+export * from './instance-lock.js'
+export * from './control-token.js'
+export * from './process-journal.js'

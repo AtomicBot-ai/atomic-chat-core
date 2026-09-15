@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import { classifyProcessOutput } from './llamacpp/errors.js'
 import { isProcessAlive, isReadyLogLine, spawnAndAwaitReady, spawnManaged } from './process.js'
@@ -101,6 +104,37 @@ describe('spawnAndAwaitReady', () => {
         { timeoutMs: 1000, classifyExit: classify }
       )
     ).rejects.toMatchObject({ code: 'IO_ERROR' })
+  })
+
+  it('does not spawn for an already-aborted signal and terminates a startup aborted later', async () => {
+    await expect(
+      spawnAndAwaitReady(node('setInterval(()=>{},1000)'), {
+        timeoutMs: 5000,
+        signal: AbortSignal.abort(),
+        classifyExit: classify,
+      })
+    ).rejects.toMatchObject({ code: 'CORE_NOT_RUNNING' })
+
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-process-abort-'))
+    const pidFile = join(dir, 'pid')
+    const controller = new AbortController()
+    const pending = spawnAndAwaitReady(
+      node(
+        `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(()=>{},1000)`
+      ),
+      { timeoutMs: 5000, signal: controller.signal, classifyExit: classify }
+    )
+    let pid = 0
+    const deadline = Date.now() + 2000
+    while (!pid && Date.now() < deadline) {
+      pid = Number(await readFile(pidFile, 'utf8').catch(() => '0'))
+      if (!pid) await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'CORE_NOT_RUNNING' })
+    expect(pid).toBeGreaterThan(0)
+    expect(isProcessAlive(pid)).toBe(false)
+    await rm(dir, { recursive: true, force: true })
   })
 
   it('spawnManaged collects output and resolves exited', async () => {

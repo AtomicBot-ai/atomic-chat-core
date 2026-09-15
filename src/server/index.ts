@@ -1,7 +1,8 @@
 /**
- * HTTP server: /v1/* (OpenAI surface), /atomic/v1/* (control), gates, SSE relay, shims, state file.
- *
- * Ported from: server/{proxy,responses_shim,sse,state_file}.rs
- * See PLAN.md §3.2. Public API of this module is exported from this file only.
+ * The two listeners: the loopback-only control API (`/atomic/v1`) and the optional public
+ * OpenAI-compatible API (`/v1`), plus the client registry they share. PLAN.md §3.6.
  */
-export {}
+export * from './http.js'
+export * from './clients.js'
+export * from './control.js'
+export * from './public.js'

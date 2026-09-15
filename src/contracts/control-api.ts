@@ -7,15 +7,18 @@ import type { ErrorBody } from './errors.js'
 export const CONTROL_API_PREFIX = '/atomic/v1'
 export const CONTROL_PROTOCOL_VERSION = 1
 
-/** First stdout line of `serve --sidecar`. */
+/**
+ * The core's first and only stdout line, printed by `daemon` once the control listener is bound
+ * (PLAN.md §3.6). It describes *control* readiness only: the public `/v1` listener is separate and
+ * its address comes from the snapshot, never from here.
+ */
 export interface ReadyLine {
   event: 'core:ready'
+  pid: number
+  instance_id: string
   protocol: typeof CONTROL_PROTOCOL_VERSION
   version: string
-  pid: number
-  host: string
-  port: number
-  prefix: string
+  control_host: string
   control_port: number
 }
 

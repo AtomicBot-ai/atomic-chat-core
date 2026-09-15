@@ -11,6 +11,8 @@
  * Pure: every environment fact is injected so the Windows/Linux branches are testable anywhere.
  */
 
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export const CONFIGURATION_FILE_NAME = 'settings.json'
@@ -27,6 +29,23 @@ export type AutostartPreference = 'pending_default_on' | 'unmanaged' | 'enabled'
 export interface AppConfiguration {
   data_folder: string
   autostart_preference: AutostartPreference
+}
+
+/** The real environment: what every caller outside tests passes to the resolvers below. */
+export function nodeDataFolderEnv(env: NodeJS.ProcessEnv = process.env): DataFolderEnv {
+  return {
+    platform: process.platform,
+    env,
+    homedir: homedir(),
+    exists: (path) => existsSync(path),
+    readFile: (path) => {
+      try {
+        return readFileSync(path, 'utf8')
+      } catch {
+        return undefined
+      }
+    },
+  }
 }
 
 export interface DataFolderEnv {

@@ -58,6 +58,37 @@ const input = {
   port: 8080,
 }
 
+describe('argument-type guard', () => {
+  it('treats a missing string field as absent instead of emitting the word "null"', () => {
+    const argv = planLlamaArgs({ ...base(), override_tensor_buffer_t: null as unknown as string }, input).argv
+    expect(argv).not.toContain('--override-tensor')
+    expect(argv.every((a) => typeof a === 'string')).toBe(true)
+  })
+
+  it('refuses a value that is neither absent nor a string, instead of spawning with it', () => {
+    // Rust's types made this impossible; the port has to check, or llama.cpp receives "123".
+    try {
+      planLlamaArgs({ ...base(), device: 123 as unknown as string }, input)
+      throw new Error('expected a rejection')
+    } catch (e) {
+      expect((e as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+      expect((e as AtomicCoreError).details).toContain('--device')
+    }
+  })
+
+  it('fills the per-model string fields the app carries outside its settings file', () => {
+    const filled = withLlamacppDefaults({
+      ...base(),
+      chat_template: undefined,
+      override_tensor_buffer_t: undefined,
+    } as never)
+    expect(filled.chat_template).toBe('')
+    expect(filled.override_tensor_buffer_t).toBe('')
+    expect(planLlamaArgs(filled, input).argv).not.toContain('--override-tensor')
+    expect(planLlamaArgs(filled, input).argv).not.toContain('--chat-template')
+  })
+})
+
 describe('parseVersionBackend', () => {
   it.each([
     ['b6325/macos-arm64', 'b6325', 'macos-arm64'],

@@ -47,6 +47,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/backend/scan.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
   "src/backend/select.ts": {
     "statements": 100,
     "branches": 95,
@@ -65,15 +71,39 @@
     "functions": 100,
     "lines": 100
   },
-  "src/cli/main.ts": {
-    "statements": 100,
+  "src/cli/commands.ts": {
+    "statements": 94,
+    "branches": 65,
+    "functions": 93,
+    "lines": 94
+  },
+  "src/cli/io.ts": {
+    "statements": 78,
     "branches": 100,
+    "functions": 66,
+    "lines": 78
+  },
+  "src/cli/main.ts": {
+    "statements": 92,
+    "branches": 88,
     "functions": 100,
-    "lines": 100
+    "lines": 92
+  },
+  "src/cli/owner.ts": {
+    "statements": 96,
+    "branches": 61,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/client/control-client.ts": {
+    "statements": 96,
+    "branches": 74,
+    "functions": 100,
+    "lines": 96
   },
   "src/config/data-folder.ts": {
     "statements": 100,
-    "branches": 94,
+    "branches": 95,
     "functions": 100,
     "lines": 100
   },
@@ -84,10 +114,10 @@
     "lines": 100
   },
   "src/core.ts": {
-    "statements": 100,
-    "branches": 100,
-    "functions": 100,
-    "lines": 100
+    "statements": 90,
+    "branches": 79,
+    "functions": 94,
+    "lines": 90
   },
   "src/downloads/archive.ts": {
     "statements": 98,
@@ -102,10 +132,10 @@
     "lines": 100
   },
   "src/downloads/downloader.ts": {
-    "statements": 81,
-    "branches": 78,
-    "functions": 83,
-    "lines": 81
+    "statements": 84,
+    "branches": 79,
+    "functions": 87,
+    "lines": 84
   },
   "src/downloads/protocol.ts": {
     "statements": 100,
@@ -126,10 +156,34 @@
     "lines": 96
   },
   "src/events/emitter.ts": {
+    "statements": 98,
+    "branches": 94,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/lock/control-token.ts": {
+    "statements": 98,
+    "branches": 95,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/lock/instance-lock.ts": {
     "statements": 95,
-    "branches": 86,
+    "branches": 92,
     "functions": 100,
     "lines": 95
+  },
+  "src/lock/process-identity.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 83,
+    "lines": 100
+  },
+  "src/lock/process-journal.ts": {
+    "statements": 97,
+    "branches": 98,
+    "functions": 100,
+    "lines": 97
   },
   "src/models/gguf/classify.ts": {
     "statements": 100,
@@ -143,9 +197,15 @@
     "functions": 100,
     "lines": 94
   },
+  "src/models/gguf/read-file.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/models/gguf/reader.ts": {
     "statements": 87,
-    "branches": 70,
+    "branches": 75,
     "functions": 86,
     "lines": 87
   },
@@ -161,6 +221,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/models/registry.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
   "src/models/shards.ts": {
     "statements": 100,
     "branches": 100,
@@ -169,8 +235,8 @@
   },
   "src/runtime/env.ts": {
     "statements": 97,
-    "branches": 93,
-    "functions": 85,
+    "branches": 94,
+    "functions": 90,
     "lines": 97
   },
   "src/runtime/llamacpp/args.ts": {
@@ -192,10 +258,10 @@
     "lines": 100
   },
   "src/runtime/llamacpp/load-plan.ts": {
-    "statements": 90,
-    "branches": 87,
+    "statements": 91,
+    "branches": 90,
     "functions": 87,
-    "lines": 90
+    "lines": 91
   },
   "src/runtime/llamacpp/policy.ts": {
     "statements": 99,
@@ -211,9 +277,15 @@
   },
   "src/runtime/llamacpp/runtime-device.ts": {
     "statements": 100,
-    "branches": 93,
+    "branches": 94,
     "functions": 100,
     "lines": 100
+  },
+  "src/runtime/llamacpp/runtime.ts": {
+    "statements": 89,
+    "branches": 81,
+    "functions": 78,
+    "lines": 89
   },
   "src/runtime/paths.ts": {
     "statements": 100,
@@ -223,25 +295,49 @@
   },
   "src/runtime/ports.ts": {
     "statements": 100,
-    "branches": 86,
-    "functions": 75,
+    "branches": 100,
+    "functions": 100,
     "lines": 100
   },
   "src/runtime/process.ts": {
     "statements": 94,
-    "branches": 85,
+    "branches": 88,
     "functions": 100,
     "lines": 94
   },
+  "src/server/clients.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control.ts": {
+    "statements": 95,
+    "branches": 88,
+    "functions": 92,
+    "lines": 95
+  },
+  "src/server/http.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public.ts": {
+    "statements": 96,
+    "branches": 86,
+    "functions": 100,
+    "lines": 96
+  },
   "src/settings/schema.ts": {
     "statements": 98,
-    "branches": 90,
+    "branches": 91,
     "functions": 100,
     "lines": 98
   },
   "src/settings/store.ts": {
     "statements": 99,
-    "branches": 96,
+    "branches": 98,
     "functions": 100,
     "lines": 99
   },

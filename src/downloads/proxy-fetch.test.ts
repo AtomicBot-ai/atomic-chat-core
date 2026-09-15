@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { createServer } from 'node:net'
+import type { Socket } from 'node:net'
 import {
   BIG_SIZE,
   PROXY_PASS,
@@ -151,6 +153,122 @@ describe('HTTP semantics the downloader relies on', () => {
     })
   })
 
+  it('aborts while waiting for response headers', async () => {
+    const stalled = await rawServer(() => undefined)
+    try {
+      const controller = new AbortController()
+      const pending = createPolicyFetch({ proxy: { url: s.httpProxy, no_proxy: ['*'] } })(stalled.url, {
+        signal: controller.signal,
+      })
+      setTimeout(() => controller.abort(), 30)
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    } finally {
+      await stalled.close()
+    }
+  })
+
+  it('aborts stalled CONNECT, SOCKS5, and TLS handshakes', async () => {
+    const cases: Array<(signal: AbortSignal) => Promise<Response>> = []
+    const stalled = await rawServer(() => undefined)
+    const port = new URL(stalled.url).port
+    cases.push(
+      (signal) => createPolicyFetch({ proxy: { url: stalled.url } })('https://example.test/file', { signal }),
+      (signal) =>
+        createPolicyFetch({ proxy: { url: `socks5://127.0.0.1:${port}` } })('http://example.test/file', {
+          signal,
+        }),
+      (signal) =>
+        createPolicyFetch({ proxy: { url: s.httpProxy, no_proxy: ['*'] } })(
+          `https://127.0.0.1:${port}/file`,
+          { signal }
+        )
+    )
+    try {
+      for (const start of cases) {
+        const controller = new AbortController()
+        const pending = start(controller.signal)
+        setTimeout(() => controller.abort(), 30)
+        await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+      }
+    } finally {
+      await stalled.close()
+    }
+  })
+
+  it('rejects truncated Content-Length and chunked bodies', async () => {
+    for (const response of [
+      'HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort',
+      'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nabc',
+    ]) {
+      const raw = await rawServer((socket) => socket.end(response))
+      try {
+        const res = await createPolicyFetch({ proxy: { url: s.httpProxy, no_proxy: ['*'] } })(raw.url)
+        await expect(res.text()).rejects.toThrow(/ended/i)
+      } finally {
+        await raw.close()
+      }
+    }
+  })
+
+  it('accepts chunk trailers and close-delimited bodies, but rejects malformed chunks', async () => {
+    for (const [response, expected] of [
+      ['HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nX-Test: yes\r\n\r\n', 'abc'],
+      ['HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose body', 'close body'],
+    ] as const) {
+      const raw = await rawServer((socket) => socket.end(response))
+      try {
+        const res = await createPolicyFetch({ proxy: { url: s.httpProxy, no_proxy: ['*'] } })(raw.url)
+        expect(await res.text()).toBe(expected)
+      } finally {
+        await raw.close()
+      }
+    }
+
+    for (const malformed of ['Z\r\n', '3\r\nabcXX']) {
+      const raw = await rawServer((socket) =>
+        socket.end(`HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n${malformed}`)
+      )
+      try {
+        const res = await createPolicyFetch({ proxy: { url: s.httpProxy, no_proxy: ['*'] } })(raw.url)
+        await expect(res.text()).rejects.toThrow(/invalid chunk/i)
+      } finally {
+        await raw.close()
+      }
+    }
+  })
+
+  it('cancels an unfinished body and serializes supported request-body types', async () => {
+    const stalled = await rawServer((socket) =>
+      socket.write('HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc')
+    )
+    try {
+      const res = await createPolicyFetch({ proxy: { url: s.httpProxy, no_proxy: ['*'] } })(stalled.url)
+      await res.body?.cancel()
+    } finally {
+      await stalled.close()
+    }
+
+    const raw = await rawServer((socket) => socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'))
+    try {
+      const f = createPolicyFetch({ proxy: { url: s.httpProxy, no_proxy: ['*'] } })
+      const bodies: Array<NonNullable<RequestInit['body']>> = [
+        'text',
+        new Uint8Array([1, 2]),
+        new ArrayBuffer(2),
+        new Blob(['blob']),
+      ]
+      for (const body of bodies) expect(await (await f(raw.url, { method: 'POST', body })).text()).toBe('ok')
+    } finally {
+      await raw.close()
+    }
+  })
+
+  it('converts POST to GET across a 302 redirect', async () => {
+    const f = createPolicyFetch({ proxy: { url: s.httpProxy } })
+    const res = await f(`${s.httpOrigin}/redir`, { method: 'POST' })
+    expect((await res.json()) as object).toMatchObject({ method: 'GET', url: '/echo' })
+  })
+
   it('follows redirects with a fresh tunnel per hop, drops Authorization cross-origin, caps loops', async () => {
     const f = createPolicyFetch({ proxy: { url: s.httpProxy }, ca })
     const same = await f(`${s.httpsOrigin}/redir`, { headers: { Authorization: 'Bearer t' } })
@@ -163,6 +281,24 @@ describe('HTTP semantics the downloader relies on', () => {
     expect(manual.status).toBe(302)
   })
 })
+
+async function rawServer(
+  reply: (socket: Socket) => void
+): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((socket) => {
+    socket.once('data', () => reply(socket))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('missing test server address')
+  return {
+    url: `http://127.0.0.1:${address.port}/`,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve())
+      }),
+  }
+}
 
 describe('policyFetchFor', () => {
   it('returns the base fetch for items without a proxy and a policy fetch otherwise', async () => {

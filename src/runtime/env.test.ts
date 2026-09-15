@@ -3,6 +3,7 @@ import {
   buildProcessEnv,
   discoverCudaPaths,
   exeDirOf,
+  nodeCudaProbeEnv,
   stripVerbatimPrefix,
   textMentionsCudaRuntime,
 } from './env.js'
@@ -128,5 +129,18 @@ describe('buildProcessEnv', () => {
     expect(exeDirOf('/a/b/llama-server')).toBe('/a/b')
     expect(exeDirOf('C:\\a\\b\\llama-server.exe')).toBe('C:\\a\\b')
     expect(exeDirOf('llama-server')).toBe('.')
+  })
+})
+
+describe('nodeCudaProbeEnv', () => {
+  it('probes the real filesystem and reports an unreadable directory as empty', () => {
+    const probe = nodeCudaProbeEnv('linux', { CUDA_PATH: '/opt/cuda' })
+    expect(probe.platform).toBe('linux')
+    expect(probe.env['CUDA_PATH']).toBe('/opt/cuda')
+    expect(probe.exists(process.cwd())).toBe(true)
+    expect(probe.exists('/definitely/not/here')).toBe(false)
+    expect(probe.listDir('/definitely/not/here')).toEqual([])
+    expect(probe.listDir(process.cwd())).toContain('src')
+    expect(nodeCudaProbeEnv().platform).toBe(process.platform)
   })
 })

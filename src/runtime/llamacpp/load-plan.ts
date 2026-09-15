@@ -55,6 +55,11 @@ export interface LoadPlanInput {
   engine: LlamacppEngineSettings
   /** Per-model overrides (`settings` argument of `load()`), canonical keys. */
   overrides?: Partial<LlamacppConfig> | undefined
+  /** Explicit CLI paths bypass the installed-model registry. */
+  modelPath?: string | undefined
+  mmprojPath?: string | undefined
+  /** CLI `--timeout` is exact; provider loads keep the application readiness floor. */
+  timeoutSecs?: number | undefined
   isEmbedding: boolean
   dataFolder: string
   /** Model ids that must never be auto-unloaded (the transcription companion). */
@@ -170,16 +175,25 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
   const exePath = ready.exePath
 
   // 8-9. model.yml, port, key, env
-  const modelConfig = await deps.readModelYml(modelId)
+  const modelConfig: ModelYmlDocument = input.modelPath
+    ? {
+        model_path: input.modelPath,
+        ...(input.mmprojPath ? { mmproj_path: input.mmprojPath } : {}),
+        name: modelId,
+        size_bytes: 0,
+      }
+    : await deps.readModelYml(modelId)
   const port = await deps.randomPort()
   const apiKey = generateApiKey(modelId, port, deps.apiSecret)
+  const timeoutSecs = input.timeoutSecs ?? modelLoadReadyTimeoutSecs(input.engine.timeout)
   env['LLAMA_API_KEY'] = apiKey
-  env['LLAMA_ARG_TIMEOUT'] = String(input.engine.timeout)
+  env['LLAMA_ARG_TIMEOUT'] = String(input.timeoutSecs ?? input.engine.timeout)
   if (input.engine.llamacpp_env) parseEnvString(input.engine.llamacpp_env, env)
 
   // 10. paths: first shard, mmproj
   const modelPath = await resolveShardedModelPath(deps.joinData(modelConfig.model_path), deps, warn)
-  const mmprojPath = modelConfig.mmproj_path ? deps.joinData(modelConfig.mmproj_path) : undefined
+  const configuredMmproj = input.mmprojPath ?? modelConfig.mmproj_path
+  const mmprojPath = configuredMmproj ? deps.joinData(configuredMmproj) : undefined
 
   // 11. artifact validation
   await assertCompleteGguf(modelPath, modelConfig.model_size_bytes, deps)
@@ -292,7 +306,7 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     modelPath,
     mmprojPath,
     isEmbedding: input.isEmbedding,
-    timeoutSecs: modelLoadReadyTimeoutSecs(input.engine.timeout),
+    timeoutSecs,
     maxCtxTrain,
     warnings,
   }

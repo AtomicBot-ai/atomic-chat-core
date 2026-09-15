@@ -37,11 +37,15 @@ instance.lock, control-token, processes.json, logs/). Anything else needs an ADR
 
 The permanent control listener binds only to loopback and requires the control token. The independently
 configured public listener exposes inference routes; stopping it does not stop control or unload models.
+Public transitions are serialized. Starting the same effective configuration is idempotent; starting a
+different host, port, prefix, key or gate while it is running returns `CORE_ALREADY_RUNNING` and leaves
+the old listener reachable. Reconfiguration therefore means an explicit stop followed by start.
 Tauri uses a Rust command/event relay, not browser fetch to control; the token stays outside the webview.
 App and CLI attach to the same owner, survive each other's exit, and reject incompatible owner versions.
 Legacy resource guards and an owner-aware reaper are required before distributing the new CLI.
 
-The target ready line is `{event:"core:ready", pid, instance_id, protocol, version, control_host, control_port}`.
+The ready line is `{event:"core:ready", pid, instance_id, protocol, version, control_host, control_port}`,
+printed by `daemon` as its first and only stdout line (`src/contracts/control-api.ts`, phase 1).
 It describes control readiness only. Public host/port/prefix/running state comes from snapshot and events.
 SSE ids are `<instance_id>:<seq>`; snapshot includes a consistent cursor. A different instance or an
 expired replay cursor requires resync. Stdout carries no event stream. A restarted owner clears dead
@@ -50,4 +54,20 @@ sessions after confirmed orphan cleanup; it never silently retries generation.
 Settings transfer per scope before that scope's first core operation. Revisions, imported baseline and
 acknowledged legacy mirror detect CLI/downgrade divergence; conflicts need resolution before transfer.
 See PLAN.md §3.4–3.6 and the [superseding ADR](decisions/2026-09-15-independent-core-owner-and-migration-contracts.md).
-These are planned contracts: existing TypeScript declarations remain scaffolding until their implementation phase.
+Implemented in phase 1: the instance lock and its process-start identity, the control token,
+`/atomic/v1/{health,snapshot,events,clients,sessions,models/:p/*id/{load,unload},server,shutdown}`,
+the separate public listener, and the CLI (`daemon`, `serve`, `models list`, `server status`,
+`shutdown`). The rest of the route list and the settings-transfer rules remain scaffolding until
+their phase.
+
+CLI surface kept compatible with the Rust `jan-cli`: `serve` accepts `--model-path`, `--bin`, `--port`,
+`--mmproj`, `--embedding`, `--timeout`, `--n-gpu-layers`, `--ctx-size`, `--fit`, `--threads`,
+`--api-key`, `--detach/-d`, `--log`, `--verbose/-v`, `--select`, `--data-folder`, and `--json`.
+Its defaults are port 6767, timeout 120 seconds, GPU layers -1, context 32768, fit off and threads 0;
+fit forces context 0. `owner/repository` downloads a GGUF into the shared model tree, preferring
+`Q4_K_XL` and validating size/sha256 before writing `model.yml`. `models list`
+hides embedding models and prints `{id,name,model_path,size_bytes,capabilities,mmproj_path}` under
+`--json`, `server status` exits 1 when nothing answers and reads `ATOMIC_API_KEY`. The deliberate
+difference is ownership — `serve` attaches to a core that outlives it, so Ctrl+C detaches instead of
+unloading. `--detach` is consequently a compatibility no-op for ownership and selects the default
+`<data>/atomic-core/logs/serve.log`; the help text states this difference.

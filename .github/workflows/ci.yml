@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
 
 jobs:
   gate:
@@ -35,6 +38,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: npm run test:coverage
       - run: npm run test:runtime-compat
+      - run: bun test test/runtime-compat
       - run: npm run build
       - run: npm run build:bin
       - run: npm run test:e2e
@@ -43,7 +47,36 @@ jobs:
           name: atomic-chat-core-${{ matrix.os }}
           path: dist/bin/
 
-  live:
+  # A shell-script fake backend cannot be named llama-server.exe, so Windows proves the
+  # spawn-a-backend path with a real llama-server and a small GGUF instead (PLAN.md §4 phase 1).
+  live-backend:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: latest }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: bun install --frozen-lockfile
+      - name: Fetch a llama.cpp build and a small GGUF
+        shell: bash
+        run: node scripts/fetch-live-fixtures.mjs --out "$RUNNER_TEMP/live"
+      - name: Live backend tests
+        shell: bash
+        env:
+          ATOMIC_LIVE: '1'
+        run: |
+          export ATOMIC_LIVE_UPSTREAM_BIN="$(cat "$RUNNER_TEMP/live/bin-path.txt")"
+          export ATOMIC_LIVE_UPSTREAM_MODEL="$(cat "$RUNNER_TEMP/live/model-path.txt")"
+          npm run test:live
+
+  live-cloud:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     needs: test
     runs-on: ubuntu-latest

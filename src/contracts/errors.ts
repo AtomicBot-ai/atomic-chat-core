@@ -38,10 +38,13 @@ export type ExtensionErrorCode =
 /** Codes raised by the core itself (new; not present in the Rust app). */
 export type CoreErrorCode =
   | 'CORE_ALREADY_RUNNING'
+  | 'CORE_NOT_RUNNING'
   | 'CORE_START_FAILED'
+  | 'CORE_PROTOCOL_MISMATCH'
   | 'ALREADY_MIGRATED'
   | 'NO_MODEL_LOADED'
   | 'MODEL_NOT_LOADED'
+  | 'MODEL_NOT_FOUND'
   | 'PROVIDER_NOT_FOUND'
   | 'UNAUTHORIZED'
   | 'FORBIDDEN_HOST'

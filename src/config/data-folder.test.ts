@@ -4,6 +4,7 @@ import {
   configDir,
   dataDir,
   defaultDataFolder,
+  nodeDataFolderEnv,
   parseAppConfiguration,
   resolveConfigFilePath,
   resolveDataFolder,
@@ -84,5 +85,23 @@ describe('defaultDataFolder / resolveDataFolder', () => {
     ).toBe('unmanaged')
     expect(parseAppConfiguration('{}')).toBeUndefined()
     expect(parseAppConfiguration('null')).toBeUndefined()
+  })
+})
+
+describe('nodeDataFolderEnv', () => {
+  it('wires the real filesystem and this machine, and reads a missing file as undefined', async () => {
+    const env = nodeDataFolderEnv({ CUSTOM: '1' })
+    expect(env.platform).toBe(process.platform)
+    expect(env.env['CUSTOM']).toBe('1')
+    expect(env.homedir.length).toBeGreaterThan(0)
+    expect(env.exists(env.homedir)).toBe(true)
+    expect(env.exists('/definitely/not/here')).toBe(false)
+    expect(env.readFile('/definitely/not/here')).toBeUndefined()
+    const { writeFile, mkdtemp } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-core-env-'))
+    await writeFile(join(dir, 'f.json'), '{"a":1}')
+    expect(env.readFile(join(dir, 'f.json'))).toBe('{"a":1}')
   })
 })

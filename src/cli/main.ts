@@ -1,48 +1,96 @@
 /**
- * CLI dispatcher (pure). The executable entry is `bin.ts`.
- * Subcommands land per phase (PLAN.md §4): daemon, serve, models, server, shutdown (phase 1);
- * launch (phase 2); backends, hardware, settings, providers, auth, doctor (phases 3–5).
+ * CLI dispatcher. `bin.ts` is the only file with side effects; everything here takes a `CliIo`, so
+ * a test can run a command and read what it printed without spawning a process.
+ *
+ * Phase 1 ships `daemon`, `serve`, `models`, `server` and `shutdown` (PLAN.md §4); `launch` and the
+ * rest land with their phases.
  */
 
-import { parseArgs } from 'node:util'
+import { AtomicCoreError } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
+import { daemonCommand, modelsCommand, serveCommand, serverCommand, shutdownCommand } from './commands.js'
+import type { CliIo } from './io.js'
 
 export const USAGE = `atomic-chat-core ${CORE_VERSION}
 
 Usage: atomic-chat-core <command> [options]
 
 Commands:
-  serve       Load a local model and expose it over an OpenAI-compatible API   (phase 1)
-  models      List / import / delete models in the Atomic Chat data folder      (phase 1)
-  server      Inspect or control the local API server on :1337                 (phase 1)
-  launch      Start a model and launch a coding agent wired to it              (phase 2)
+  serve <model>   Load a model in the core and expose it over an OpenAI-compatible API
+  models list     List the chat models installed in the Atomic Chat data folder
+  server status   Report whether a local API server is reachable
+  daemon          Run the core that owns this data folder (started for you by other commands)
+  shutdown        Stop the core that owns this data folder
+  launch          Start a model and launch a coding agent wired to it            (phase 2)
 
-Options:
-  -h, --help      Show this help
-  -v, --version   Print the version
+Common options:
+  --data-folder <path>   Data folder to work with (default: the app's)
+  -h, --help             Show this help
+  -v, --version          Print the version
+
+Serve compatibility options:
+  --model-path <gguf>    Serve a GGUF directly; model id defaults to its filename
+  --bin <path>           Use this llama-server executable
+  --port <port>          Public OpenAI API port (default: 6767; 0 = random)
+  --mmproj <path>        Vision projector path
+  --embedding            Start in embedding mode
+  --timeout <seconds>    Readiness timeout (default: 120)
+  --n-gpu-layers <n>     GPU layers (-1 = all; default: -1)
+  --ctx-size <tokens>    Context size (default: 32768)
+  --fit                  Let llama.cpp choose context size for available memory
+  --threads <n>          CPU inference threads (0 = auto)
+  --api-key <key>        Require this key on the public API
+  -d, --detach           Compatibility flag; the persistent owner is already detached
+  --log <path>           Append llama.cpp stdout/stderr to a file
+  -v, --verbose          Relay llama.cpp output while the model loads
+  --select               Pick a GGUF when downloading owner/repository from Hugging Face
+  --json                 Print the result as JSON
+
+Notes:
+  The core keeps running when a command exits, so a model stays loaded between commands and
+  Ctrl+C detaches instead of unloading. Stop it explicitly with \`atomic-chat-core shutdown\`.
 `
 
-export interface CliResult {
-  exitCode: number
-  stdout?: string
-  stderr?: string
+export async function runCli(argv: string[], io: CliIo): Promise<number> {
+  const command = argv[0]
+  // Parse global flags only before the command. In particular, `serve -v` is verbose backend
+  // output, not the top-level version flag.
+  if (command === '--version' || command === '-v') {
+    io.stdout(`${CORE_VERSION}\n`)
+    return 0
+  }
+  if (command === '--help' || command === '-h' || !command) {
+    io.stdout(USAGE)
+    return command ? 0 : 2
+  }
+
+  const rest = argv.slice(1)
+  try {
+    switch (command) {
+      case 'daemon':
+        return await daemonCommand(rest, io)
+      case 'serve':
+        return await serveCommand(rest, io)
+      case 'models':
+        return await modelsCommand(rest, io)
+      case 'server':
+        return await serverCommand(rest, io)
+      case 'shutdown':
+        return await shutdownCommand(rest, io)
+      default:
+        io.stderr(`Unknown command: ${command}\n\n${USAGE}`)
+        return 2
+    }
+  } catch (e) {
+    io.stderr(`Error: ${describe(e)}\n`)
+    return 1
+  }
 }
 
-/** Pure dispatcher so tests can drive it without spawning. */
-export function runCli(argv: string[]): CliResult {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    options: {
-      help: { type: 'boolean', short: 'h' },
-      version: { type: 'boolean', short: 'v' },
-    },
-    allowPositionals: true,
-    strict: false,
-  })
-
-  if (values.version) return { exitCode: 0, stdout: `${CORE_VERSION}\n` }
-  if (values.help || positionals.length === 0) return { exitCode: values.help ? 0 : 2, stdout: USAGE }
-
-  const command = positionals[0]
-  return { exitCode: 2, stderr: `Unknown or not yet implemented command: ${command}\n\n${USAGE}` }
+function describe(error: unknown): string {
+  if (error instanceof AtomicCoreError) {
+    return `${error.message}${error.details ? `\n  ${error.details}` : ''} [${error.code}]`
+  }
+  if (error instanceof Error) return error.message
+  return String(error)
 }

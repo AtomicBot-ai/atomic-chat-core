@@ -48,6 +48,8 @@ export function policyFetchFor(item: { proxy?: ProxyConfig | null }, base: typeo
 
 export function createPolicyFetch(policy: ProxyPolicy): typeof fetch {
   const once = async (url: URL, init: RequestInit & { headers?: PlainHeaders }): Promise<Response> => {
+    const signal = init.signal ?? null
+    throwIfAborted(signal)
     const proxy = policy.proxy ?? null
     const useProxy = proxy !== null && !shouldBypassProxy(url.href, proxy.no_proxy ?? [])
     const isHttps = url.protocol === 'https:'
@@ -62,18 +64,17 @@ export function createPolicyFetch(policy: ProxyPolicy): typeof fetch {
     let requestTarget = url.pathname + url.search
     if (useProxy && !isHttps && isHttpProxy(proxy)) {
       // plain HTTP through an HTTP proxy: absolute-form request line, no tunnel
-      socket = await connectToProxy(proxy, policy)
+      socket = await connectToProxy(proxy, policy, signal)
       requestTarget = url.href
       const auth = proxyAuthorization(proxy)
       if (auth) headers['proxy-authorization'] = auth
     } else {
       socket = useProxy
-        ? await tunnel(proxy, url.hostname, port, policy)
-        : await connectTcp(url.hostname, port)
-      if (isHttps) socket = await upgradeTls(socket, url.hostname, policy)
+        ? await tunnel(proxy, url.hostname, port, policy, signal)
+        : await connectTcp(url.hostname, port, signal)
+      if (isHttps) socket = await upgradeTls(socket, url.hostname, policy, signal)
     }
 
-    const signal = init.signal ?? null
     const onAbort = () => socket.destroy(abortError())
     if (signal?.aborted) onAbort()
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -88,7 +89,7 @@ export function createPolicyFetch(policy: ProxyPolicy): typeof fetch {
     socket.write(head)
     if (init.body !== undefined && init.body !== null) socket.write(await bodyBytes(init.body))
 
-    const { status, statusText, headers: responseHeaders, rest } = await readHead(socket)
+    const { status, statusText, headers: responseHeaders, rest } = await readHead(socket, signal)
     const body = bodyStream(socket, rest, responseHeaders, method, status)
     return new Response(body, { status, statusText, headers: responseHeaders })
   }
@@ -139,29 +140,52 @@ export function proxyAuthorization(proxy: ProxyConfig): string | undefined {
   return user ? `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}` : undefined
 }
 
-function connectTcp(host: string, port: number): Promise<Socket> {
+function connectTcp(host: string, port: number, signal: AbortSignal | null = null): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = netConnect(port, host)
+    let settled = false
+    const cleanup = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      const error = abortError()
+      socket.destroy()
+      reject(error)
+    }
     const timer = setTimeout(
       () => socket.destroy(new ProxyTunnelError(`connect ${host}:${port} timed out`)),
       PROXY_CONNECT_TIMEOUT_MS
     )
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
     socket.once('connect', () => {
-      clearTimeout(timer)
+      if (settled) return
+      settled = true
+      cleanup()
       resolve(socket)
     })
     socket.once('error', (e) => {
-      clearTimeout(timer)
+      if (settled) return
+      settled = true
+      cleanup()
       reject(e)
     })
   })
 }
 
-async function connectToProxy(proxy: ProxyConfig, policy: ProxyPolicy): Promise<Socket> {
+async function connectToProxy(
+  proxy: ProxyConfig,
+  policy: ProxyPolicy,
+  signal: AbortSignal | null
+): Promise<Socket> {
   const url = new URL(proxy.url)
   const port = Number(url.port) || (url.protocol === 'https:' ? 443 : 80)
-  const socket = await connectTcp(url.hostname, port)
-  return url.protocol === 'https:' ? upgradeTls(socket, url.hostname, policy) : socket
+  const socket = await connectTcp(url.hostname, port, signal)
+  return url.protocol === 'https:' ? upgradeTls(socket, url.hostname, policy, signal) : socket
 }
 
 /** A raw socket connected to `host:port` through the proxy, ready for the request (or a TLS upgrade). */
@@ -169,11 +193,13 @@ export async function tunnel(
   proxy: ProxyConfig,
   host: string,
   port: number,
-  policy: ProxyPolicy
+  policy: ProxyPolicy,
+  signal: AbortSignal | null = null
 ): Promise<Socket> {
   const scheme = new URL(proxy.url).protocol
-  if (scheme === 'http:' || scheme === 'https:') return connectViaHttpConnect(proxy, host, port, policy)
-  if (scheme === 'socks5:' || scheme === 'socks5h:') return connectViaSocks5(proxy, host, port)
+  if (scheme === 'http:' || scheme === 'https:')
+    return connectViaHttpConnect(proxy, host, port, policy, signal)
+  if (scheme === 'socks5:' || scheme === 'socks5h:') return connectViaSocks5(proxy, host, port, signal)
   if (scheme === 'socks4:') throw new ProxyTunnelError('socks4 proxies are not supported')
   throw new ProxyTunnelError(`unsupported proxy scheme ${scheme}`)
 }
@@ -182,15 +208,17 @@ async function connectViaHttpConnect(
   proxy: ProxyConfig,
   host: string,
   port: number,
-  policy: ProxyPolicy
+  policy: ProxyPolicy,
+  signal: AbortSignal | null
 ): Promise<Socket> {
-  const socket = await connectToProxy(proxy, policy)
+  const socket = await connectToProxy(proxy, policy, signal)
   const auth = proxyAuthorization(proxy)
   socket.write(
     `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth ? `Proxy-Authorization: ${auth}\r\n` : ''}\r\n`
   )
-  const { status, rest } = await readHead(socket).catch((e: Error) => {
+  const { status, rest } = await readHead(socket, signal).catch((e: Error) => {
     socket.destroy()
+    if (e.name === 'AbortError') throw e
     throw new ProxyTunnelError(`CONNECT ${host}:${port} via ${new URL(proxy.url).host} failed: ${e.message}`)
   })
   if (status !== 200) {
@@ -202,53 +230,87 @@ async function connectViaHttpConnect(
 }
 
 /** RFC 1928 CONNECT with domain-name address type; RFC 1929 user/pass when credentials exist. */
-async function connectViaSocks5(proxy: ProxyConfig, host: string, port: number): Promise<Socket> {
+async function connectViaSocks5(
+  proxy: ProxyConfig,
+  host: string,
+  port: number,
+  signal: AbortSignal | null
+): Promise<Socket> {
   const url = new URL(proxy.url)
   const user = proxy.username ?? (url.username ? decodeURIComponent(url.username) : '')
   const pass = proxy.password ?? (url.password ? decodeURIComponent(url.password) : '')
-  const socket = await connectTcp(url.hostname, Number(url.port) || 1080)
-  const reader = new SocketReader(socket)
+  const socket = await connectTcp(url.hostname, Number(url.port) || 1080, signal)
+  const reader = new SocketReader(socket, signal)
   const fail = (msg: string): never => {
     reader.detach()
     socket.destroy()
     throw new ProxyTunnelError(`socks5 via ${url.host}: ${msg}`)
   }
+  const read = (count: number) =>
+    reader.read(count).catch((error: Error) => {
+      if (error.name === 'AbortError') throw error
+      return fail(error.message)
+    })
   socket.write(Buffer.from(user ? [5, 2, 0, 2] : [5, 1, 0]))
-  const greeting = await reader.read(2).catch((e: Error) => fail(e.message))
+  const greeting = await read(2)
   if (greeting[0] !== 5) fail('bad version')
   if (greeting[1] === 0xff) fail('no acceptable auth method')
   if (greeting[1] === 2) {
     const u = Buffer.from(user)
     const p = Buffer.from(pass)
     socket.write(Buffer.concat([Buffer.from([1, u.length]), u, Buffer.from([p.length]), p]))
-    const reply = await reader.read(2).catch((e: Error) => fail(e.message))
+    const reply = await read(2)
     if (reply[1] !== 0) fail('authentication failed')
   } else if (greeting[1] !== 0) fail(`unexpected auth method ${greeting[1]}`)
   const h = Buffer.from(host)
   socket.write(Buffer.concat([Buffer.from([5, 1, 0, 3, h.length]), h, Buffer.from([port >> 8, port & 0xff])]))
-  const reply = await reader.read(4).catch((e: Error) => fail(e.message))
+  const reply = await read(4)
   if (reply[1] !== 0) fail(`connect rejected (rep=${reply[1]})`)
   const atyp = reply[3]
-  if (atyp === 1) await reader.read(4 + 2)
+  if (atyp === 1) await read(4 + 2)
   else if (atyp === 3) {
-    const [len] = await reader.read(1)
-    await reader.read((len as number) + 2)
-  } else if (atyp === 4) await reader.read(16 + 2)
+    const [len] = await read(1)
+    await read((len as number) + 2)
+  } else if (atyp === 4) await read(16 + 2)
   else fail('bad address type in reply')
   const rest = reader.detach()
   if (rest.length) socket.unshift(rest)
   return socket
 }
 
-function upgradeTls(socket: Socket, servername: string, policy: ProxyPolicy): Promise<Socket> {
+function upgradeTls(
+  socket: Socket,
+  servername: string,
+  policy: ProxyPolicy,
+  signal: AbortSignal | null
+): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const options: ConnectionOptions = { socket }
     if (!isIP(servername)) options.servername = servername
     if (policy.ignore_ssl ?? policy.proxy?.ignore_ssl) options.rejectUnauthorized = false
     if (policy.ca) options.ca = policy.ca
     const secure = tlsConnect(options)
-    secure.once('secureConnect', () => resolve(secure))
+    let settled = false
+    const cleanup = () => signal?.removeEventListener('abort', onAbort)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      secure.destroy()
+      reject(abortError())
+    }
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
+    secure.once('secureConnect', () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(secure)
+    })
     secure.once('error', (e) => {
+      if (settled) return
+      settled = true
+      cleanup()
       socket.destroy()
       reject(e)
     })
@@ -265,14 +327,31 @@ class SocketReader {
     this.buf = Buffer.concat([this.buf, chunk])
     this.pump()
   }
-  private readonly onEnd = () => this.want?.reject(new Error('connection closed during handshake'))
-  constructor(private readonly socket: Socket) {
+  private ended: Error | undefined
+  private readonly onEnd = () => {
+    this.ended ??= new Error('connection closed during handshake')
+    this.want?.reject(this.ended)
+    this.want = null
+  }
+  private readonly onAbort = () => {
+    this.ended = abortError()
+    this.want?.reject(this.ended)
+    this.want = null
+    this.socket.destroy()
+  }
+  constructor(
+    private readonly socket: Socket,
+    private readonly signal: AbortSignal | null
+  ) {
     socket.on('data', this.onData)
     socket.once('end', this.onEnd)
     socket.once('error', this.onEnd)
+    if (signal?.aborted) this.onAbort()
+    else signal?.addEventListener('abort', this.onAbort, { once: true })
   }
   read(n: number): Promise<Buffer> {
     return new Promise((resolve, reject) => {
+      if (this.ended) return reject(this.ended)
       this.want = { n, resolve, reject }
       this.pump()
     })
@@ -291,6 +370,7 @@ class SocketReader {
     this.socket.off('data', this.onData)
     this.socket.off('end', this.onEnd)
     this.socket.off('error', this.onEnd)
+    this.signal?.removeEventListener('abort', this.onAbort)
     return this.buf
   }
 }
@@ -302,19 +382,24 @@ interface ResponseHead {
   rest: Buffer
 }
 
-function readHead(socket: Socket): Promise<ResponseHead> {
+function readHead(socket: Socket, signal: AbortSignal | null = null): Promise<ResponseHead> {
   return new Promise((resolve, reject) => {
     let buf = Buffer.alloc(0)
     const cleanup = () => {
       socket.off('data', onData)
       socket.off('error', onError)
       socket.off('end', onEnd)
+      signal?.removeEventListener('abort', onAbort)
     }
     const onError = (e: Error) => {
       cleanup()
       reject(e)
     }
     const onEnd = () => onError(new Error('connection closed before response head'))
+    const onAbort = () => {
+      socket.destroy()
+      onError(abortError())
+    }
     const onData = (chunk: Buffer) => {
       buf = Buffer.concat([buf, chunk])
       const i = buf.indexOf('\r\n\r\n')
@@ -330,48 +415,83 @@ function readHead(socket: Socket): Promise<ResponseHead> {
       }
       resolve({ status: Number(m[1]), statusText: m[2] ?? '', headers, rest: buf.subarray(i + 4) })
     }
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
     socket.on('data', onData)
     socket.once('error', onError)
     socket.once('end', onEnd)
   })
 }
 
-type Decoder = (chunk: Buffer) => { out: Buffer[]; done: boolean }
+interface Decoder {
+  feed: (chunk: Buffer) => { out: Buffer[]; done: boolean }
+  finish: () => Error | undefined
+}
 
 function makeDecoder(headers: Headers): Decoder {
   const te = headers.get('transfer-encoding')
   if (te && /chunked/i.test(te)) {
     let buf = Buffer.alloc(0)
     let size = -1
-    return (chunk) => {
-      buf = Buffer.concat([buf, chunk])
-      const out: Buffer[] = []
-      for (;;) {
-        if (size < 0) {
-          const i = buf.indexOf('\r\n')
-          if (i < 0) return { out, done: false }
-          size = parseInt(buf.subarray(0, i).toString('latin1'), 16)
-          buf = buf.subarray(i + 2)
-          if (size === 0) return { out, done: true }
+    let terminal = false
+    let done = false
+    return {
+      feed(chunk) {
+        buf = Buffer.concat([buf, chunk])
+        const out: Buffer[] = []
+        for (;;) {
+          if (terminal) {
+            if (buf.subarray(0, 2).equals(Buffer.from('\r\n'))) {
+              done = true
+              return { out, done }
+            }
+            const trailersEnd = buf.indexOf('\r\n\r\n')
+            if (trailersEnd < 0) return { out, done: false }
+            done = true
+            return { out, done }
+          }
+          if (size < 0) {
+            const i = buf.indexOf('\r\n')
+            if (i < 0) return { out, done: false }
+            const line = buf.subarray(0, i).toString('latin1').split(';', 1)[0]?.trim() ?? ''
+            if (!/^[0-9a-f]+$/i.test(line)) throw new ProxyTunnelError('invalid chunk size')
+            size = Number.parseInt(line, 16)
+            buf = buf.subarray(i + 2)
+            if (size === 0) {
+              terminal = true
+              continue
+            }
+          }
+          if (buf.length < size + 2) return { out, done: false }
+          if (buf[size] !== 13 || buf[size + 1] !== 10) throw new ProxyTunnelError('invalid chunk terminator')
+          out.push(buf.subarray(0, size))
+          buf = buf.subarray(size + 2)
+          size = -1
         }
-        if (buf.length < size + 2) return { out, done: false }
-        out.push(buf.subarray(0, size))
-        buf = buf.subarray(size + 2)
-        size = -1
-      }
+      },
+      finish: () => (done ? undefined : new ProxyTunnelError('response ended before the final chunk')),
     }
   }
   const cl = headers.get('content-length')
   if (cl !== null) {
     let left = Number(cl)
-    if (left === 0) return () => ({ out: [], done: true })
-    return (chunk) => {
-      const take = chunk.subarray(0, left)
-      left -= take.length
-      return { out: take.length ? [take] : [], done: left === 0 }
+    if (!Number.isSafeInteger(left) || left < 0) throw new ProxyTunnelError('invalid Content-Length')
+    return {
+      feed(chunk) {
+        const take = chunk.subarray(0, left)
+        left -= take.length
+        return { out: take.length ? [take] : [], done: left === 0 }
+      },
+      finish: () =>
+        left === 0
+          ? undefined
+          : new ProxyTunnelError(`response ended with ${left} Content-Length bytes missing`),
     }
   }
-  return (chunk) => ({ out: [chunk], done: false }) // delimited by connection close
+  return {
+    feed: (chunk) => ({ out: [chunk], done: false }),
+    finish: () => undefined,
+  } // delimited by connection close
 }
 
 function bodyStream(
@@ -406,13 +526,26 @@ function bodyStream(
     {
       start(ctrl) {
         const feed = (chunk: Buffer) => {
-          const { out, done } = decode(chunk)
-          for (const b of out) ctrl.enqueue(new Uint8Array(b))
-          if (done) close(ctrl)
-          else if (ctrl.desiredSize !== null && ctrl.desiredSize <= 0) socket.pause()
+          try {
+            const { out, done } = decode.feed(chunk)
+            for (const b of out) ctrl.enqueue(new Uint8Array(b))
+            if (done) close(ctrl)
+            else if (ctrl.desiredSize !== null && ctrl.desiredSize <= 0) socket.pause()
+          } catch (error) {
+            closed = true
+            ctrl.error(error)
+            socket.destroy()
+          }
         }
         socket.on('data', feed)
-        socket.on('end', () => close(ctrl))
+        socket.on('end', () => {
+          if (closed) return
+          const error = decode.finish()
+          if (error) {
+            closed = true
+            ctrl.error(error)
+          } else close(ctrl)
+        })
         socket.on('error', (e) => {
           if (closed) return
           closed = true
@@ -440,6 +573,10 @@ function bodyStream(
 
 function abortError(): Error {
   return new DOMException('This operation was aborted', 'AbortError')
+}
+
+function throwIfAborted(signal: AbortSignal | null): void {
+  if (signal?.aborted) throw abortError()
 }
 
 function headersToPlain(headers: RequestHeaders | undefined): PlainHeaders {

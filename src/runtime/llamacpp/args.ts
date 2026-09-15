@@ -42,7 +42,14 @@ export const STANDARD_CACHE_TYPES: readonly string[] = [
 ]
 
 /** Fields with `#[serde(default)]` in Rust; every other `LlamacppConfig` field is required. */
+/**
+ * Fields Rust deserialisation fills in when the app leaves them out. The two string fields are not
+ * engine settings — the extension carries them per model — so a core that loads a model the app has
+ * never configured must supply `String::default()` itself, or the builder emits a flag with no value.
+ */
 export const LLAMACPP_CONFIG_SERDE_DEFAULTS = {
+  chat_template: '',
+  override_tensor_buffer_t: '',
   parallel: 1,
   concurrent_mode: false,
   concurrent_slots: 8,
@@ -60,9 +67,14 @@ export const LLAMACPP_CONFIG_SERDE_DEFAULTS = {
 export type LlamacppConfigInput = Omit<LlamacppConfig, keyof typeof LLAMACPP_CONFIG_SERDE_DEFAULTS> &
   Partial<Pick<LlamacppConfig, keyof typeof LLAMACPP_CONFIG_SERDE_DEFAULTS>>
 
-/** Fill the serde-default fields the way Rust deserialisation would. */
+/**
+ * Fill the serde-default fields the way Rust deserialisation would. A key present with the value
+ * `undefined` counts as absent — in JSON it would simply not be there, and letting it through would
+ * overwrite a default with nothing.
+ */
 export function withLlamacppDefaults(input: LlamacppConfigInput): LlamacppConfig {
-  return { ...LLAMACPP_CONFIG_SERDE_DEFAULTS, ...input }
+  const provided = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined))
+  return { ...LLAMACPP_CONFIG_SERDE_DEFAULTS, ...provided } as LlamacppConfig
 }
 
 export interface LlamaArgsInput {
@@ -206,7 +218,7 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
 
   if (cfg.cpu_moe) push('--cpu-moe')
   if (cfg.n_cpu_moe > 0) push('--n-cpu-moe', String(cfg.n_cpu_moe))
-  if (cfg.override_tensor_buffer_t !== '') push('--override-tensor', cfg.override_tensor_buffer_t)
+  if (cfg.override_tensor_buffer_t) push('--override-tensor', cfg.override_tensor_buffer_t)
 
   if (input.mmprojPath) {
     push('--mmproj', input.mmprojPath)
@@ -216,7 +228,7 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   push('-a', input.modelId)
   push('--port', String(input.port))
 
-  if (cfg.chat_template !== '') push('--chat-template', cfg.chat_template)
+  if (cfg.chat_template) push('--chat-template', cfg.chat_template)
 
   const ngl = cfg.n_gpu_layers >= 0 && cfg.n_gpu_layers !== 100 ? cfg.n_gpu_layers : -1
   push('-ngl', String(ngl))
@@ -366,6 +378,17 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
     push(...parseExtraArgs(cfg.extra_args))
   } catch (error) {
     warnings.push(`Ignoring invalid extra llama-server arguments: ${(error as Error).message}`)
+  }
+
+  // A config field that arrives as null/undefined would otherwise reach the process as the string
+  // "null"; Rust's types made that impossible, so the port checks it explicitly.
+  const bad = argv.findIndex((a) => typeof a !== 'string')
+  if (bad >= 0) {
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      'Invalid configuration argument provided.',
+      `argument ${bad} after "${argv[bad - 1] ?? ''}" is ${String(argv[bad])}`
+    )
   }
 
   return { argv, warnings, version, backend }

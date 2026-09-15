@@ -7,6 +7,7 @@
  * both are prepended: `<exe dir>;<cuda bins...>;<PATH>`.
  */
 
+import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 export interface CudaPaths {
@@ -14,6 +15,27 @@ export interface CudaPaths {
   libDirs: string[]
   /** Directories with CUDA binaries/DLLs (→ PATH). */
   binDirs: string[]
+}
+
+/** The real filesystem probe used outside tests; `discoverCudaPaths` takes the seams instead of fs. */
+export function nodeCudaProbeEnv(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env
+): CudaProbeEnv {
+  return {
+    platform,
+    env,
+    exists: (path) => existsSync(path),
+    listDir: (dir) => {
+      try {
+        return readdirSync(dir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name)
+      } catch {
+        return []
+      }
+    },
+  }
 }
 
 export interface CudaProbeEnv {
