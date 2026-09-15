@@ -1,0 +1,4 @@
+{
+  "_comment": "Files exempt from the sibling-test rule. Key = repo-relative path, value = reason. Keep this short.",
+  "files": {}
+}

@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Tests
+coverage/
+test/fixtures/live-cloud/*.local.json
+test/tmp/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Scratch
+scripts/dist/
+
+# Bun compile temp files
+*.bun-build

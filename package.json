@@ -1,0 +1,68 @@
+{
+  "name": "atomic-chat-core",
+  "version": "0.1.0",
+  "description": "Inference core of Atomic Chat: local llama.cpp/MLX/Foundation Models runtime, cloud providers, model router and the OpenAI-compatible server on :1337.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "atomic-chat-core": "./dist/cli/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "import": "./dist/contracts/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src/settings/schema"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "build:bin": "node scripts/build-binaries.mjs --host",
+    "build:bin:all": "node scripts/build-binaries.mjs --all",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . && node scripts/check-runtime-agnostic.mjs && node scripts/check-test-quality.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run --project unit --project contract",
+    "test:watch": "vitest --project unit --project contract",
+    "test:e2e": "vitest run --project e2e",
+    "test:app-e2e": "vitest run --project app-e2e",
+    "test:runtime-compat": "vitest run --project runtime-compat",
+    "test:live": "ATOMIC_LIVE=1 vitest run --project live",
+    "test:coverage": "vitest run --project unit --project contract --coverage && node scripts/check-coverage-floor.mjs",
+    "fixtures:import": "node scripts/import-app-fixtures.mjs",
+    "verify": "npm run lint && npm run typecheck && npm run format:check && npm run test:coverage && npm run build && npm run build:bin && npm run test:e2e"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^1.0.28",
+    "ai": "^5.0.121",
+    "tar": "^7.4.3",
+    "yaml": "^2.8.1",
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@types/node": "^22.18.0",
+    "@types/yauzl": "^2.10.3",
+    "@vitest/coverage-v8": "^3.2.4",
+    "eslint": "^9.36.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.44.0",
+    "vitest": "^3.2.4"
+  }
+}

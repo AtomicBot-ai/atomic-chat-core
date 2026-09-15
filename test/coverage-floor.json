@@ -1,0 +1,302 @@
+{
+  "src/backend/amd-rocm-pci-ids.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/archive.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/bundled-manifest-baseline.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/cuda-family.ts": {
+    "statements": 100,
+    "branches": 89,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/installed.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/manifest.ts": {
+    "statements": 98,
+    "branches": 95,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/backend/migrate.ts": {
+    "statements": 97,
+    "branches": 93,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/backend/optimal-cache.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/select.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 97,
+    "lines": 100
+  },
+  "src/backend/types.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/version.ts": {
+    "statements": 100,
+    "branches": 89,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/cli/main.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/config/data-folder.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/config/paths.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/core.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/downloads/archive.ts": {
+    "statements": 98,
+    "branches": 82,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/downloads/disk.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/downloads/downloader.ts": {
+    "statements": 81,
+    "branches": 78,
+    "functions": 83,
+    "lines": 81
+  },
+  "src/downloads/protocol.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/downloads/proxy-fetch.ts": {
+    "statements": 94,
+    "branches": 79,
+    "functions": 89,
+    "lines": 94
+  },
+  "src/downloads/verify.ts": {
+    "statements": 96,
+    "branches": 97,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/events/emitter.ts": {
+    "statements": 95,
+    "branches": 86,
+    "functions": 100,
+    "lines": 95
+  },
+  "src/models/gguf/classify.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/models/gguf/kv-cache.ts": {
+    "statements": 94,
+    "branches": 89,
+    "functions": 100,
+    "lines": 94
+  },
+  "src/models/gguf/reader.ts": {
+    "statements": 87,
+    "branches": 70,
+    "functions": 86,
+    "lines": 87
+  },
+  "src/models/gguf/support.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/models/model-yml.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/models/shards.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/env.ts": {
+    "statements": 97,
+    "branches": 93,
+    "functions": 85,
+    "lines": 97
+  },
+  "src/runtime/llamacpp/args.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/llamacpp/devices.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/llamacpp/errors.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/llamacpp/load-plan.ts": {
+    "statements": 90,
+    "branches": 87,
+    "functions": 87,
+    "lines": 90
+  },
+  "src/runtime/llamacpp/policy.ts": {
+    "statements": 99,
+    "branches": 87,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/runtime/llamacpp/probe.ts": {
+    "statements": 86,
+    "branches": 91,
+    "functions": 100,
+    "lines": 86
+  },
+  "src/runtime/llamacpp/runtime-device.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/paths.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/ports.ts": {
+    "statements": 100,
+    "branches": 86,
+    "functions": 75,
+    "lines": 100
+  },
+  "src/runtime/process.ts": {
+    "statements": 94,
+    "branches": 85,
+    "functions": 100,
+    "lines": 94
+  },
+  "src/settings/schema.ts": {
+    "statements": 98,
+    "branches": 90,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/settings/store.ts": {
+    "statements": 99,
+    "branches": 96,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/speculative/chat-template-overrides.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/speculative/dflash-registry.ts": {
+    "statements": 99,
+    "branches": 94,
+    "functions": 94,
+    "lines": 99
+  },
+  "src/speculative/gemma-mtp-registry.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/speculative/mlx-dflash-registry.ts": {
+    "statements": 92,
+    "branches": 76,
+    "functions": 100,
+    "lines": 92
+  },
+  "src/speculative/mlx-eagle3-registry.ts": {
+    "statements": 100,
+    "branches": 81,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/speculative/mlx-mtp-registry.ts": {
+    "statements": 100,
+    "branches": 81,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/speculative/transcription-registry.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/util/rust-number.ts": {
+    "statements": 95,
+    "branches": 94,
+    "functions": 100,
+    "lines": 95
+  },
+  "src/version.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  }
+}
