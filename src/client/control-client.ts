@@ -41,6 +41,7 @@ export interface CoreSnapshot {
   server: LocalApiServerState
   clients: Array<{ id: string; name: string; pid: number | null }>
   downloads: unknown[]
+  optimal_backends?: Record<string, { revision: number; optimal: unknown | null }>
 }
 
 export interface CoreEventMessage {

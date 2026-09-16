@@ -373,14 +373,33 @@ export class SettingsStore {
    * Record that the app has mirrored the core's settings up to `revision`.
    *
    * Only meaningful after an import: it is how a planned rollback knows whether the app's copy is
-   * current enough to hand ownership back (PLAN.md §3.4).
+   * current enough to hand ownership back (PLAN.md §3.4). The acknowledgement itself is a
+   * metadata-only write, but it advances the file's revision like every other write. Store that
+   * resulting revision as the equivalent mirrored state so status is in sync immediately after it.
    */
   async acknowledge(scope: SettingsScope, revision: number): Promise<UpdateResult> {
     return this.mutate({}, (doc) => {
       const record = doc.state.migrations[scope]
-      if (!record || record.acknowledged_revision === revision) return []
-      record.acknowledged_revision = revision
-      return [{ scope: 'state', key: `migrations.${scope}.acknowledged_revision`, value: revision }]
+      if (!record) return []
+      // The app can retry after losing the response. Both its original snapshot revision and
+      // the post-ack revision identify the same provider values, so neither retry is a new write.
+      if (
+        record.acknowledged_revision === doc.revision &&
+        (revision === doc.revision || revision === doc.revision - 1)
+      )
+        return []
+      // A value changed while the app was copying the snapshot. Acknowledging that stale copy
+      // would authorize rollback with settings that the core has already replaced.
+      if (revision !== doc.revision) {
+        throw new AtomicCoreError(
+          'INVALID_ARGUMENT',
+          `settings revision conflict: expected ${revision}, current ${doc.revision}`,
+          this.path
+        )
+      }
+      const acknowledged = doc.revision + 1
+      record.acknowledged_revision = acknowledged
+      return [{ scope: 'state', key: `migrations.${scope}.acknowledged_revision`, value: acknowledged }]
     })
   }
 

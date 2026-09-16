@@ -48,4 +48,24 @@ Flags in the app: `ATOMIC_CORE_RUNTIME=off|llamacpp-upstream|all`, `ATOMIC_CORE_
 
 These are target scenarios, not claims of implemented coverage. Record evidence/grade before each phase exit.
 
-Run: `ATOMIC_APP_E2E=1 npm run test:app-e2e` here, and `make test-app-e2e` in the app repo.
+## Stage 3 evidence (2026-09-16)
+
+- `npm run verify` builds and drives the core binary on an isolated data folder. `test/e2e/owner.test.ts`
+  covers 3b settings import/409/owner replacement, 3c local HTTPS manifest+archive via proxy,
+  checksum/fallback/cancellation/SSE progress and revisioned optimal cache, and 3d embedding after
+  a real child-process 501/reload. Windows adds a CUDA companion zip; shell-script backend tests
+  are POSIX-only. The settings case caught an acknowledgement defect and now checks that the
+  post-write revision stays `in_sync` across restart, then becomes stale after another edit.
+- With the binary path supplied, `make test-core-live ATOMIC_CORE_BIN=/absolute/path/to/core-binary`
+  in `../Atomic-Chat` drives the actual app supervisor and relay: startup without a call, crash
+  recovery, three-restart ceiling, snapshot before SSE deltas and replacement generation.
+- Existing extension tests exercise ownership routing and event translations with mocked Tauri IPC.
+  They are not desktop end-to-end tests.
+
+There is **no implemented desktop-UI runner** at `test/app-e2e/` and no `make test-app-e2e` target in
+the app today. Do not treat `npm run test:app-e2e` (zero cases) as a passing gate. Before stage 4,
+the still-missing acceptance tests must launch an app with an isolated data/config root and assert
+actual UI state for load/session resolution, off→on→off and rollback, backend install/update/optimal
+with progress/error/cancel, embedding/RAG, and snapshot recovery after an owner crash. A deterministic
+desktop driver would need a separately approved test dependency or runner; AutoQA's model-driven
+computer tests are not a deterministic CI substitute.

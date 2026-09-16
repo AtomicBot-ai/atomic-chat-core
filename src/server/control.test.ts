@@ -8,6 +8,7 @@ import type { ControlServerDeps, ControlSnapshot, SessionSummary } from './contr
 import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
 import type { FakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
 import type { CtxIncreaseResult } from '../runtime/llamacpp/runtime.js'
+import type { BackendControl, ModelControl } from './control.js'
 import { HardwareOverrideStore } from '../hardware/index.js'
 
 const TOKEN = 'test-control-token'
@@ -24,6 +25,8 @@ interface Harness {
   shutdowns: Array<{ force: boolean; requestedBy?: string | undefined }>
   settings: FakeSettingsControl
   hardware: HardwareOverrideStore
+  backends: BackendControl
+  models: ModelControl
   ctxIncrease: CtxIncreaseResult
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
@@ -66,6 +69,40 @@ async function start(over: Partial<ControlServerDeps> = {}): Promise<Harness> {
     unloadResult: async () => ({ success: true }),
     settings: fakeSettingsControl({ 'llamacpp-upstream': { ctx_size: 4096 } }),
     hardware: new HardwareOverrideStore(),
+    backends: {
+      list: async () => [],
+      install: async (_provider: string, version: string, backend: string) => ({
+        version,
+        backend,
+        installed: true,
+        path: '/tmp/pack',
+      }),
+      remove: async () => true,
+      cancel: () => false,
+      getOptimal: async () => ({ revision: 0, optimal: null }),
+      setOptimal: async () => ({ status: 'updated', current: { revision: 1, optimal: null } }),
+      optimalSnapshot: () => ({}),
+    },
+    models: {
+      capabilities: async (_provider: string, modelId: string) => ({
+        modelId,
+        mmprojExists: false,
+        isEmbedding: false,
+        vision: false,
+        audio: false,
+        gemmaMtp: false,
+        dflash: false,
+        dflashDrafts: [],
+      }),
+      validateGguf: async (path: string) => ({ isValid: !path.endsWith('.txt') }),
+      devices: async () => [],
+      embed: async (_provider: string, modelId: string) => ({
+        model: modelId,
+        object: 'list',
+        usage: { prompt_tokens: 0, total_tokens: 0 },
+        data: [],
+      }),
+    },
     ctxIncrease: { ok: true, new_ctx_len: 32768, session: session() },
   } as unknown as Harness
   const server = await ControlServer.start({
@@ -77,6 +114,8 @@ async function start(over: Partial<ControlServerDeps> = {}): Promise<Harness> {
     clients,
     settings: harness.settings,
     hardware: harness.hardware,
+    backends: harness.backends,
+    models: harness.models,
     increaseCtx: async (provider, modelId, reason) => {
       calls.push(`increaseCtx ${provider} ${modelId} ${reason ?? '-'}`)
       return harness.ctxIncrease
@@ -185,6 +224,14 @@ describe('health, snapshot and sessions', () => {
     expect(snapshot.instance_id).toBe('instance-under-test')
     const sessions = (await (await h.get('/atomic/v1/sessions')).json()) as { sessions: SessionSummary[] }
     expect(sessions.sessions).toHaveLength(1)
+  })
+
+  it('captures optimal state and cursor in the same snapshot', async () => {
+    h.backends.optimalSnapshot = () => ({ 'llamacpp-upstream': { revision: 7, optimal: null } })
+    h.emitter.emit('backend:optimal-changed', { provider: 'llamacpp-upstream', revision: 7, optimal: null })
+    const snapshot = (await (await h.get('/atomic/v1/snapshot')).json()) as ControlSnapshot
+    expect(snapshot.optimal_backends['llamacpp-upstream']).toEqual({ revision: 7, optimal: null })
+    expect(snapshot.cursor).toBe(h.emitter.cursor())
   })
 })
 
@@ -554,5 +601,218 @@ describe('hardware override routes', () => {
     expect(
       ((await (await h.get('/atomic/v1/hardware/override')).json()) as { override: unknown }).override
     ).toBeNull()
+  })
+})
+
+describe('backend routes', () => {
+  it('lists installed packs and passes the selected one through', async () => {
+    const seen: string[] = []
+    h.backends.list = async (provider: string, current?: string) => {
+      seen.push(`${provider} ${current ?? ''}`)
+      return [{ version: 'b6325', backend: 'macos-arm64', path: '/packs/b6325', active: true }]
+    }
+
+    const res = await h.get('/atomic/v1/backends/llamacpp-upstream?current=b6325/macos-arm64')
+
+    expect(res.status).toBe(200)
+    expect((await res.json()) as { backends: unknown[] }).toMatchObject({
+      backends: [{ version: 'b6325', active: true }],
+    })
+    expect(seen).toEqual(['llamacpp-upstream b6325/macos-arm64'])
+  })
+
+  it('installs under the task id the caller named', async () => {
+    // The progress bar listens on a name built from this id; the core must not invent its own.
+    const res = await h.get('/atomic/v1/backends/llamacpp-upstream/install', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: 'b6325', backend: 'macos-arm64', task_id: 'install-1' }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ version: 'b6325', installed: true })
+  })
+
+  it('refuses an install that does not say what to install or under which task', async () => {
+    const missing = await h.get('/atomic/v1/backends/llamacpp-upstream/install', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: 'b6325' }),
+    })
+
+    expect(missing.status).toBe(400)
+    expect((await missing.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: 'INVALID_ARGUMENT' },
+    })
+  })
+
+  it('removes a pack and says whether there was one', async () => {
+    const res = await h.get('/atomic/v1/backends/llamacpp-upstream/b6325/macos-arm64', {
+      method: 'DELETE',
+    })
+
+    expect(await res.json()).toEqual({ removed: true })
+  })
+
+  it('passes proxy policy to install without changing its response', async () => {
+    let seen: unknown
+    h.backends.install = async (_provider, version, backend, options) => {
+      seen = options.proxy
+      return { version, backend, installed: true, path: '/pack' }
+    }
+    const res = await h.get('/atomic/v1/backends/llamacpp-upstream/install', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        version: 'b1',
+        backend: 'macos-arm64',
+        task_id: 't',
+        proxy: { url: 'http://proxy:8080' },
+      }),
+    })
+    expect(res.status).toBe(200)
+    expect(seen).toEqual({ url: 'http://proxy:8080' })
+  })
+
+  it('cancels the task id that owns the UI row', async () => {
+    let seen = ''
+    h.backends.cancel = (taskId) => {
+      seen = taskId
+      return true
+    }
+    const res = await h.get('/atomic/v1/downloads/llamacpp-backend-b1/macos-arm64/cancel', { method: 'POST' })
+    expect(await res.json()).toEqual({ cancelled: true })
+    expect(seen).toBe('llamacpp-backend-b1/macos-arm64')
+  })
+
+  it('returns revisioned optimal state and refuses an obsolete write with 409', async () => {
+    h.backends.getOptimal = async () => ({ revision: 2, optimal: null })
+    h.backends.setOptimal = async () => ({ status: 'conflict', current: { revision: 2, optimal: null } })
+    expect(await (await h.get('/atomic/v1/backends/llamacpp-upstream/optimal')).json()).toEqual({
+      revision: 2,
+      optimal: null,
+    })
+    const res = await h.get('/atomic/v1/backends/llamacpp-upstream/optimal', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ optimal: null, expected_revision: 1 }),
+    })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({ status: 'conflict', current: { revision: 2, optimal: null } })
+  })
+})
+
+describe('model capability routes', () => {
+  it('delegates embeddings with input and ubatch size intact', async () => {
+    let seen: unknown
+    h.models.embed = async (provider, modelId, input, ubatchSize) => {
+      seen = { provider, modelId, input, ubatchSize }
+      return {
+        model: modelId,
+        object: 'list',
+        usage: { prompt_tokens: 1, total_tokens: 1 },
+        data: [{ embedding: [1], index: 0 }],
+      }
+    }
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/sentence-transformer-mini/embed', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input: ['hello'], ubatch_size: 64 }),
+    })
+    expect(res.status).toBe(200)
+    expect(seen).toEqual({
+      provider: 'llamacpp-upstream',
+      modelId: 'sentence-transformer-mini',
+      input: ['hello'],
+      ubatchSize: 64,
+    })
+    expect(await res.json()).toMatchObject({ object: 'list', data: [{ index: 0 }] })
+  })
+  it('answers what a model is without loading it', async () => {
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/vendor/model-7b/capabilities')
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ modelId: 'vendor/model-7b', isEmbedding: false })
+  })
+
+  it('answers "not a model" with 200, because that is the answer to the question asked', async () => {
+    // The user pointed at a file. Rendering "not a model" is the caller's job; a 4xx would make it
+    // look like the request was malformed.
+    const res = await h.get('/atomic/v1/gguf/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/x/notes.txt' }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ isValid: false })
+  })
+
+  it('refuses a validate that names no file', async () => {
+    const res = await h.get('/atomic/v1/gguf/validate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+
+    expect(res.status).toBe(400)
+  })
+
+  it('lists devices, defaulting to the provider the core owns first', async () => {
+    const asked: string[] = []
+    h.models.devices = async (provider: string) => {
+      asked.push(provider)
+      return []
+    }
+
+    await h.get('/atomic/v1/hardware/devices')
+    await h.get('/atomic/v1/hardware/devices?provider=llamacpp')
+
+    expect(asked).toEqual(['llamacpp-upstream', 'llamacpp'])
+  })
+})
+
+describe('settings status', () => {
+  it('reports a scope that has never been imported as not migrated', async () => {
+    const body = (await (await h.get('/atomic/v1/settings/status')).json()) as {
+      revision: number
+      scopes: Record<string, { migrated: boolean; in_sync: boolean }>
+    }
+
+    expect(body.scopes['llamacpp-upstream']).toMatchObject({ migrated: false, in_sync: false })
+  })
+
+  it('reports a migrated scope, and whether the app has confirmed it saw the result', async () => {
+    // The runtime flag must not be turned on for a scope that is not migrated: the core would load
+    // with its own defaults instead of the user's.
+    h.settings.migrations['llamacpp-upstream'] = {
+      baseline: { ctx_size: 8192 },
+      legacy_hash: 'abc',
+      acknowledged_revision: 7,
+    }
+
+    const body = (await (await h.get('/atomic/v1/settings/status')).json()) as {
+      scopes: Record<string, { migrated: boolean; in_sync: boolean; acknowledged_revision: number }>
+    }
+
+    expect(body.scopes['llamacpp-upstream']).toMatchObject({
+      migrated: true,
+      acknowledged_revision: 7,
+      in_sync: true,
+    })
+  })
+
+  it('reports a scope whose mirror has fallen behind as out of sync', async () => {
+    h.settings.migrations['llamacpp-upstream'] = {
+      baseline: {},
+      legacy_hash: 'abc',
+      acknowledged_revision: 3,
+    }
+
+    const body = (await (await h.get('/atomic/v1/settings/status')).json()) as {
+      scopes: Record<string, { migrated: boolean; in_sync: boolean }>
+    }
+
+    expect(body.scopes['llamacpp-upstream']).toMatchObject({ migrated: true, in_sync: false })
   })
 })

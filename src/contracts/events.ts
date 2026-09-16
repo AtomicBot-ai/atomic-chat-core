@@ -51,6 +51,11 @@ export interface CoreEvents {
     runtimeDevice: RuntimeDeviceInfo | null
     mismatch: boolean
   }
+  'backend:optimal-changed': {
+    provider: LocalProviderId
+    revision: number
+    optimal: unknown | null
+  }
 
   'settings:changed': { provider: LocalProviderId | 'server' | 'cloud'; key: string; value: unknown }
 

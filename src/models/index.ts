@@ -8,5 +8,7 @@
 export * from './model-yml.js'
 export * from './shards.js'
 export * from './gguf/index.js'
+export * from './capabilities.js'
+export * from './embed.js'
 export * from './registry.js'
 export * from './hf.js'

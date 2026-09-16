@@ -53,6 +53,9 @@ sessions after confirmed orphan cleanup; it never silently retries generation.
 
 Settings transfer per scope before that scope's first core operation. Revisions, imported baseline and
 acknowledged legacy mirror detect CLI/downgrade divergence; conflicts need resolution before transfer.
+The app acknowledges the revision it mirrored; the core persists the post-acknowledgement revision
+(a metadata-only step) as the equivalent mirror point. A stale acknowledgement is rejected, while
+a retry of the same acknowledgement does not advance the revision again.
 See PLAN.md §3.4–3.6 and the [superseding ADR](decisions/2026-09-15-independent-core-owner-and-migration-contracts.md).
 Implemented in phase 1: the instance lock and its process-start identity, the control token,
 `/atomic/v1/{health,snapshot,events,clients,sessions,models/:p/*id/{load,unload},server,shutdown}`,

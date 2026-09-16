@@ -103,7 +103,17 @@ function startServer() {
     if (url.pathname === '/apply-template')
       return readBody(req).then((b) => json(200, { prompt: JSON.stringify(b?.messages ?? []) }))
     if (url.pathname === '/embedding' || url.pathname === '/v1/embeddings')
-      return readBody(req).then(() => json(200, { data: [{ embedding: [0.1, 0.2, 0.3], index: 0 }] }))
+      return readBody(req).then((body) => {
+        if (!argv.includes('--embedding'))
+          return json(501, { error: { message: 'embedding mode is disabled' } })
+        const input = Array.isArray(body?.input) ? body.input : [body?.input]
+        return json(200, {
+          object: 'list',
+          model: modelAlias,
+          data: input.map((text, index) => ({ embedding: [String(text).length, 0.2, 0.3], index })),
+          usage: { prompt_tokens: input.length, total_tokens: input.length },
+        })
+      })
     // Real llama-server answers both the prefixed and unprefixed forms.
     if (url.pathname === '/v1/chat/completions' || url.pathname === '/chat/completions')
       return readBody(req).then((b) => completions(b, res))

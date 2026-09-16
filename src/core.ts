@@ -28,13 +28,22 @@ import {
 } from './lock/index.js'
 import type { ChildProcessRecord } from './lock/index.js'
 import type { ModelClaimHandle } from './lock/index.js'
-import { ModelRegistry } from './models/index.js'
+import { EmbedService, ModelCapabilityService, ModelRegistry } from './models/index.js'
 import { ensureBackend, readRuntimeSettings } from './backend/runtime-backend.js'
 import { LlamacppRuntime } from './runtime/llamacpp/index.js'
 import type { LoadOptions } from './runtime/llamacpp/index.js'
 import { SettingsStore } from './settings/index.js'
 import type { SettingsScope } from './settings/index.js'
 import { HardwareOverrideStore } from './hardware/index.js'
+import {
+  BackendService,
+  ManifestSessionCache,
+  OptimalBackendStore,
+  fetchLiveManifest,
+  manifestTransportFromFetch,
+  selectInstalledBackend,
+} from './backend/index.js'
+import { Downloader, createPolicyFetch } from './downloads/index.js'
 import type { CtxIncreaseResult } from './runtime/llamacpp/runtime.js'
 import {
   ClientRegistry,
@@ -178,6 +187,58 @@ export class AtomicCore {
         ],
       ])
 
+      // One downloader per core process: it owns the active-task table that `cancel` works from, so
+      // two of them would each know only half of what is running.
+      const downloader = new Downloader({
+        dataFolder: layout.root,
+        platform: process.platform,
+        fetch: options.fetch ?? fetch,
+        emit: (name, payload) => emitter.emit(name, payload),
+      })
+      const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
+        emitter.emit('backend:optimal-changed', { provider, ...state })
+      })
+      const manifestCache = new ManifestSessionCache()
+      const capabilities = new ModelCapabilityService({
+        layout,
+        registry: (provider) => registries.get(provider) as ModelRegistry,
+      })
+      const embeddings = new EmbedService({
+        findSession: (provider, modelId) =>
+          sessionsOf(runtimes).find(
+            (session) => session.provider === provider && session.model_id === modelId
+          ),
+        load: async (provider, modelId) =>
+          (await (core as AtomicCore).acquire(provider, modelId, { isEmbedding: true })).session,
+        unload: (provider, modelId) => (core as AtomicCore).unload(provider, modelId),
+        fetch: options.fetch ?? fetch,
+      })
+      const backendServices = new Map<LocalProviderId, BackendService>()
+      const backendService = (provider: LocalProviderId): BackendService => {
+        const existing = backendServices.get(provider)
+        if (existing) return existing
+        const created = new BackendService({
+          layout,
+          provider,
+          downloader,
+          optimalStore,
+          readManifest: async (proxy) => {
+            const cached = manifestCache.get()
+            if (cached) return cached
+            const fetchImpl = proxy
+              ? createPolicyFetch({ proxy, ignore_ssl: proxy.ignore_ssl })
+              : (options.fetch ?? fetch)
+            return fetchLiveManifest({
+              cache: manifestCache,
+              transports: [manifestTransportFromFetch('core fetch', fetchImpl)],
+              onWarn: (message) => log('warn', message),
+            })
+          },
+        })
+        backendServices.set(provider, created)
+        return created
+      }
+
       const control = await ControlServer.start(
         {
           token,
@@ -194,6 +255,36 @@ export class AtomicCore {
           increaseCtx: (provider: string, modelId: string, reason?: string) =>
             (core as AtomicCore).increaseCtx(provider as LocalProviderId, modelId, reason),
           hardware,
+          models: {
+            capabilities: (provider, modelId) =>
+              capabilities.capabilities(provider as LocalProviderId, modelId),
+            validateGguf: (path) => capabilities.validateGguf(path),
+            devices: async (provider) => {
+              // Asking a backend what devices it sees needs a backend; with none installed the
+              // honest answer is an empty list, not an error about a missing binary.
+              const resolved = await selectInstalledBackend(
+                layout,
+                provider as LocalProviderId,
+                hardware
+              ).catch(() => undefined)
+              if (!resolved) return []
+              return (core as AtomicCore).runtime(provider as LocalProviderId).getDevices(resolved.path)
+            },
+            embed: (provider, modelId, input, ubatchSize) =>
+              embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
+          },
+          backends: {
+            list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),
+            install: (provider, version, backend, opts) =>
+              backendService(provider as LocalProviderId).install(version, backend, opts),
+            remove: (provider, version, backend) =>
+              backendService(provider as LocalProviderId).remove(version, backend),
+            cancel: (taskId) => downloader.cancel(taskId),
+            getOptimal: (provider) => backendService(provider as LocalProviderId).getOptimalCache(),
+            setOptimal: (provider, record, expectedRevision) =>
+              backendService(provider as LocalProviderId).setOptimalCache(record, expectedRevision),
+            optimalSnapshot: () => optimalStore.snapshot(),
+          },
           settings: {
             get: (provider) => settings.get(provider),
             revision: () => settings.revision,

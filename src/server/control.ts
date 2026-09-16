@@ -11,8 +11,10 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
+import { LOCAL_PROVIDER_IDS } from '../settings/index.js'
 import type {
   CoreEventRecord,
+  DeviceInfo,
   LocalApiServerState,
   LocalProviderId,
   SessionInfo,
@@ -20,7 +22,16 @@ import type {
 } from '../contracts/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import type { CtxIncreaseResult } from '../runtime/llamacpp/runtime.js'
+import type { GgufValidation, ModelCapabilities } from '../models/index.js'
+import type { EmbeddingResponse } from '../models/index.js'
+import type { ProxyConfig } from '../downloads/index.js'
 import type { HardwareOverrideInput, HardwareOverrideStore } from '../hardware/index.js'
+import type {
+  InstallBackendResult,
+  InstalledBackendPack,
+  OptimalBackendCacheRecord,
+} from '../backend/index.js'
+import type { OptimalState, OptimalUpdate } from '../backend/index.js'
 import { bearerToken, controlTokenMatches } from '../lock/index.js'
 import type {
   ImportOptions,
@@ -81,6 +92,46 @@ export interface SettingsControl {
   acknowledge: (scope: string, revision: number) => Promise<UpdateResult>
 }
 
+/**
+ * The backend surface the app drives. Narrow on purpose: the updater screen installs, removes and
+ * lists, and everything else it shows it computes from those three answers.
+ */
+export interface BackendControl {
+  list: (provider: string, currentVersionBackend?: string) => Promise<InstalledBackendPack[]>
+  install: (
+    provider: string,
+    version: string,
+    backend: string,
+    options: { taskId: string; force?: boolean; proxy?: ProxyConfig | null }
+  ) => Promise<InstallBackendResult>
+  remove: (provider: string, version: string, backend: string) => Promise<boolean>
+  cancel: (taskId: string) => boolean
+  getOptimal: (provider: string) => Promise<OptimalState>
+  setOptimal: (
+    provider: string,
+    record: OptimalBackendCacheRecord | null,
+    expectedRevision: number
+  ) => Promise<OptimalUpdate>
+  optimalSnapshot: () => Record<string, OptimalState>
+}
+
+/**
+ * The questions the app asks about models it has not loaded. Each answers rather than throws: the
+ * caller is usually deciding what to show in a list, and one unreadable file must not empty it.
+ */
+export interface ModelControl {
+  capabilities: (provider: string, modelId: string) => Promise<ModelCapabilities>
+  validateGguf: (path: string) => Promise<GgufValidation>
+  /** Devices the installed backend reports, which needs a backend to ask. */
+  devices: (provider: string) => Promise<DeviceInfo[]>
+  embed: (
+    provider: string,
+    modelId: string,
+    input: string[],
+    ubatchSize: number
+  ) => Promise<EmbeddingResponse>
+}
+
 export interface ControlServerDeps {
   token: string
   instanceId: string
@@ -106,6 +157,10 @@ export interface ControlServerDeps {
   settings: SettingsControl
   /** Hardware facts the app injects, which outrank the core's own probe (PLAN.md §2 decision 10). */
   hardware: HardwareOverrideStore
+  /** Installing and removing llama.cpp backends (PLAN.md §4, stage 3c). */
+  backends: BackendControl
+  /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
+  models: ModelControl
   /** Stop the whole core. The server has already answered by the time this runs. */
   shutdown: (options: { force: boolean; requestedBy?: string | undefined }) => Promise<void>
   startedAt?: number
@@ -125,6 +180,7 @@ export interface ControlSnapshot {
   server: LocalApiServerState
   clients: ReturnType<ClientRegistry['list']>
   downloads: unknown[]
+  optimal_backends: Record<string, OptimalState>
 }
 
 export class ControlServer {
@@ -263,6 +319,7 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
     server: deps.publicServer.status(),
     clients: deps.clients.list(),
     downloads: [],
+    optimal_backends: deps.backends.optimalSnapshot(),
   })
 
   const router = new Router()
@@ -359,6 +416,113 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
     sendJson(res, 200, result)
   })
 
+  router.get(p('/models/:provider/*modelId/capabilities'), async (_req, res, { params }) => {
+    sendJson(
+      res,
+      200,
+      await deps.models.capabilities(params['provider'] as string, params['modelId'] as string)
+    )
+  })
+
+  router.post(p('/models/:provider/*modelId/embed'), async (req, res, { params }) => {
+    const body = await readJsonBody<{ input?: string[]; ubatch_size?: number }>(req)
+    sendJson(
+      res,
+      200,
+      await deps.models.embed(
+        params['provider'] as string,
+        params['modelId'] as string,
+        body.input as string[],
+        body.ubatch_size ?? 512
+      )
+    )
+  })
+
+  // Answers `{isValid:false, error}` for a file that is not a model: the user pointed at it, and
+  // "that is not a model" is the answer to their question, not a failure of the core.
+  router.post(p('/gguf/validate'), async (req, res) => {
+    const body = await readJsonBody<{ path?: string }>(req)
+    if (!body.path) return sendError(res, new AtomicCoreError('INVALID_ARGUMENT', 'validate needs a path'))
+    sendJson(res, 200, await deps.models.validateGguf(body.path))
+  })
+
+  router.get(p('/hardware/devices'), async (req, res) => {
+    const provider = queryOf(req).get('provider') ?? 'llamacpp-upstream'
+    sendJson(res, 200, { devices: await deps.models.devices(provider) })
+  })
+
+  router.get(p('/backends/:provider'), async (req, res, { params }) => {
+    const current = queryOf(req).get('current') ?? ''
+    sendJson(res, 200, {
+      backends: await deps.backends.list(params['provider'] as string, current),
+    })
+  })
+
+  // The task id comes from the caller, because the app's progress bar listens on an event named
+  // after it. A core-invented id would leave that bar stranded.
+  router.post(p('/backends/:provider/install'), async (req, res, { params }) => {
+    const body = await readJsonBody<{
+      version?: string
+      backend?: string
+      task_id?: string
+      force?: boolean
+      proxy?: ProxyConfig | null
+    }>(req)
+    if (!body.version || !body.backend || !body.task_id)
+      return sendError(
+        res,
+        new AtomicCoreError('INVALID_ARGUMENT', 'install needs version, backend and task_id')
+      )
+    sendJson(
+      res,
+      200,
+      await deps.backends.install(params['provider'] as string, body.version, body.backend, {
+        taskId: body.task_id,
+        ...(body.force !== undefined ? { force: body.force } : {}),
+        ...(body.proxy !== undefined ? { proxy: body.proxy } : {}),
+      })
+    )
+  })
+
+  // Where the detection result lives now. The CLI could not see the webview's `localStorage`;
+  // this route gives both clients one revisioned answer. Hardware-change invalidation is separate.
+  router.get(p('/backends/:provider/optimal'), async (_req, res, { params }) => {
+    sendJson(res, 200, await deps.backends.getOptimal(params['provider'] as string))
+  })
+
+  router.put(p('/backends/:provider/optimal'), async (req, res, { params }) => {
+    const body = await readJsonBody<{
+      optimal?: OptimalBackendCacheRecord | null
+      expected_revision?: number
+    }>(req)
+    if (!Object.hasOwn(body, 'optimal') || body.expected_revision === undefined) {
+      return sendError(
+        res,
+        new AtomicCoreError('INVALID_ARGUMENT', 'optimal and expected_revision are required')
+      )
+    }
+    const result = await deps.backends.setOptimal(
+      params['provider'] as string,
+      body.optimal ?? null,
+      body.expected_revision
+    )
+    sendJson(res, result.status === 'conflict' ? 409 : 200, result)
+  })
+
+  router.post(p('/downloads/*taskId/cancel'), (_req, res, { params }) => {
+    sendJson(res, 200, { cancelled: deps.backends.cancel(params['taskId'] as string) })
+  })
+
+  router.delete(p('/backends/:provider/:version/:backend'), async (_req, res, { params }) => {
+    sendJson(res, 200, {
+      removed: await deps.backends.remove(
+        params['provider'] as string,
+        params['version'] as string,
+        params['backend'] as string
+      ),
+    })
+  })
+
   // The app measures the machine with NVML and Vulkan; the core cannot. Injection has to land
   // before a backend is chosen, which is why the app sends it as soon as it attaches.
   router.get(p('/hardware/override'), (_req, res) =>
@@ -373,6 +537,26 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
   router.delete(p('/hardware/override'), (_req, res) =>
     sendJson(res, 200, { cleared: deps.hardware.clear() })
   )
+
+  // Whether a provider's settings have been handed over, and whether the app has confirmed it saw
+  // the result. The migration flag must not be turned on for a scope that has not reached
+  // `migrated` — the core would load with its own defaults instead of the user's (PLAN.md §3.4).
+  router.get(p('/settings/status'), (_req, res) => {
+    const scopes: Record<string, unknown> = {}
+    for (const provider of LOCAL_PROVIDER_IDS) {
+      const migration = deps.settings.migration(provider)
+      scopes[provider] = {
+        migrated: migration?.legacy_hash != null,
+        acknowledged_revision: migration?.acknowledged_revision ?? null,
+        // True once the app has confirmed it mirrored everything the core currently holds; a
+        // planned rollback needs this before handing ownership back.
+        in_sync:
+          migration?.acknowledged_revision != null &&
+          migration.acknowledged_revision === deps.settings.revision(),
+      }
+    }
+    sendJson(res, 200, { revision: deps.settings.revision(), scopes })
+  })
 
   router.get(p('/settings/:provider'), (_req, res, { params }) => {
     const provider = params['provider'] as LocalProviderId

@@ -154,10 +154,40 @@ describe('acknowledge', () => {
     const imported = await store.importProvider(PROVIDER, { ctx_size: 8192 })
 
     const first = await store.acknowledge(PROVIDER, imported.revision)
-    expect(store.migration(PROVIDER)?.acknowledged_revision).toBe(imported.revision)
+    expect(first.revision).toBe(imported.revision + 1)
+    expect(store.migration(PROVIDER)?.acknowledged_revision).toBe(first.revision)
 
     const again = await store.acknowledge(PROVIDER, imported.revision)
     expect(again.revision, 'acknowledging the same revision twice is not a write').toBe(first.revision)
+    expect((await store.acknowledge(PROVIDER, first.revision)).revision).toBe(first.revision)
+  })
+
+  it('rejects a snapshot that went stale while the app was mirroring it', async () => {
+    const store = await openStore()
+    const imported = await store.importProvider(PROVIDER, { ctx_size: 8192 })
+    const changed = await store.update(PROVIDER, { ctx_size: 4096 })
+
+    await expect(store.acknowledge(PROVIDER, imported.revision)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    expect(store.migration(PROVIDER)?.acknowledged_revision).toBeNull()
+    expect(store.revision).toBe(changed.revision)
+
+    const acknowledged = await store.acknowledge(PROVIDER, changed.revision)
+    expect(store.migration(PROVIDER)?.acknowledged_revision).toBe(acknowledged.revision)
+  })
+
+  it('does not turn an old retry into a new acknowledgement after a later edit', async () => {
+    const store = await openStore()
+    const imported = await store.importProvider(PROVIDER, { ctx_size: 8192 })
+    const first = await store.acknowledge(PROVIDER, imported.revision)
+    await store.update(PROVIDER, { ctx_size: 4096 })
+
+    await expect(store.acknowledge(PROVIDER, imported.revision)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    expect(store.migration(PROVIDER)?.acknowledged_revision).toBe(first.revision)
+    expect(store.revision).toBe(first.revision + 1)
   })
 
   it('does nothing for a scope that was never imported', async () => {
@@ -173,11 +203,11 @@ describe('acknowledge', () => {
   it('keeps the acknowledgement across a later import', async () => {
     const store = await openStore()
     const imported = await store.importProvider(PROVIDER, { ctx_size: 8192 })
-    await store.acknowledge(PROVIDER, imported.revision)
+    const acknowledged = await store.acknowledge(PROVIDER, imported.revision)
 
     await store.importProvider(PROVIDER, { ctx_size: 4096 })
 
-    expect(store.migration(PROVIDER)?.acknowledged_revision).toBe(imported.revision)
+    expect(store.migration(PROVIDER)?.acknowledged_revision).toBe(acknowledged.revision)
   })
 })
 

@@ -1,6 +1,6 @@
 import { chmod, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../test/helpers/fake-backend-pack.js'
 import { makeTmpDataFolder } from '../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../test/helpers/tmp-data-folder.js'
@@ -141,6 +141,115 @@ describe('taking ownership', () => {
     const stopped = await call('/server/stop', 'POST', {})
     expect(stopped.status).toBe(200)
     expect(await stopped.json()).toMatchObject({ running: false })
+  })
+
+  it('wires revisioned optimal state, snapshots and backend controls to the owner', async () => {
+    const core = await createCore()
+    const call = (path: string, method = 'GET', body?: unknown) =>
+      fetch(`${core.control.url}/atomic/v1${path}`, {
+        method,
+        headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      })
+    const record = {
+      schemaVersion: 1,
+      provider: 'llamacpp-upstream',
+      detectedAt: 1,
+      detectionKind: 'cpu-optimal',
+      currentBackend: 'b1/macos-arm64',
+      recommendedCategory: 'CPU',
+    }
+    const changed = new Promise((resolve) => core.events.once('backend:optimal-changed', resolve))
+    const updated = await call('/backends/llamacpp-upstream/optimal', 'PUT', {
+      optimal: record,
+      expected_revision: 0,
+    })
+    expect(updated.status).toBe(200)
+    expect(await changed).toMatchObject({ provider: 'llamacpp-upstream', revision: 1 })
+    expect(await (await call('/backends/llamacpp-upstream/optimal')).json()).toEqual({
+      revision: 1,
+      optimal: record,
+    })
+    const snapshot = (await (await call('/snapshot')).json()) as {
+      cursor: string
+      optimal_backends: Record<string, unknown>
+    }
+    expect(snapshot.optimal_backends['llamacpp-upstream']).toEqual({ revision: 1, optimal: record })
+    expect(snapshot.cursor).toBe(core.events.cursor())
+    expect(await (await call('/backends/llamacpp-upstream')).json()).toEqual({ backends: [] })
+    expect(await (await call('/backends/llamacpp-upstream/b1/macos-arm64', 'DELETE')).json()).toEqual({
+      removed: false,
+    })
+    expect(await (await call('/downloads/absent/cancel', 'POST')).json()).toEqual({ cancelled: false })
+    expect(await (await call('/hardware/devices')).json()).toEqual({ devices: [] })
+    expect(await (await call('/models/llamacpp-upstream/absent/capabilities')).json()).toMatchObject({
+      modelId: 'absent',
+      mmprojExists: false,
+    })
+    expect(await (await call('/gguf/validate', 'POST', { path: '/missing.gguf' })).json()).toMatchObject({
+      isValid: false,
+    })
+    const embedding = await call('/models/llamacpp-upstream/absent/embed', 'POST', {
+      input: ['a'],
+      ubatch_size: 64,
+    })
+    expect(embedding.status).not.toBe(200)
+  })
+
+  it('uses the live signed manifest in production backend installation', async () => {
+    const seen: string[] = []
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      seen.push(url)
+      if (url.endsWith('/backends/manifest.json'))
+        return new Response(
+          JSON.stringify({
+            tag_name: 'b1',
+            download_base: 'https://mirror.example/releases',
+            assets: [{ name: 'llama-b1-bin-macos-arm64.tar.gz', sha256: 'a'.repeat(64), size: 12 }],
+          }),
+          { status: 200 }
+        )
+      return new Response('unavailable', { status: 404 })
+    }) as typeof fetch
+    const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, fetch: fetchImpl })
+    cores.push(core)
+    const res = await fetch(`${core.control.url}/atomic/v1/backends/llamacpp-upstream/install`, {
+      method: 'POST',
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ version: 'b1', backend: 'macos-arm64', task_id: 'task-1' }),
+    })
+    expect(res.status).not.toBe(200)
+    expect(seen).toContain('https://mirror.example/releases/b1/llama-b1-bin-macos-arm64.tar.gz')
+    expect(seen.filter((url) => url.endsWith('/backends/manifest.json'))).toHaveLength(1)
+  })
+
+  it('logs a failed manifest fetch and tries the unmirrored fallback', async () => {
+    const seen: string[] = []
+    const warnings: string[] = []
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      seen.push(String(input))
+      return new Response('missing', { status: 404 })
+    }) as typeof fetch
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      fetch: fetchImpl,
+      logger: (level, message) => {
+        if (level === 'warn') warnings.push(message)
+      },
+    })
+    cores.push(core)
+    const res = await fetch(`${core.control.url}/atomic/v1/backends/llamacpp-upstream/install`, {
+      method: 'POST',
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ version: 'b1', backend: 'macos-arm64', task_id: 'task-1' }),
+    })
+    expect(res.status).not.toBe(200)
+    expect(seen).toContain(
+      'https://github.com/ggml-org/llama.cpp/releases/download/b1/llama-b1-bin-macos-arm64.tar.gz'
+    )
+    expect(warnings.some((message) => message.includes('Backend manifest returned 404'))).toBe(true)
   })
 })
 

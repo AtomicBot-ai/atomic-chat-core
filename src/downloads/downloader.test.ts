@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { CoreEvents } from '../contracts/index.js'
 import { FixtureHttpServer } from '../../test/helpers/fixture-http-server.js'
+import { PROGRESS_EMIT_INTERVAL_BYTES } from './protocol.js'
 import {
   canonicalizeExistingPrefix,
   defaultAvailableSpace,
@@ -241,5 +242,48 @@ describe('helpers', () => {
   it('defaultAvailableSpace reports a number for an existing or future path', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'atomic-space-'))
     expect(typeof (await defaultAvailableSpace(join(dir, 'not', 'yet')))).toBe('number')
+  })
+})
+
+describe('the progress cadence the app draws its bar from', () => {
+  it('reports on the 10 MiB boundary and always finishes on the total', async () => {
+    // The app's bar is fed by one event stream and nothing else. Two properties it depends on: the
+    // events are sparse enough not to flood the webview (hence the 10 MiB step), and the last one
+    // says the transfer reached the total — a bar that stops at 97 % never completes.
+    const size = Math.round(PROGRESS_EMIT_INTERVAL_BYTES * 2.5)
+    const big = Buffer.alloc(size, 0x41)
+    server.files.set('/big.bin', { body: big })
+    const { dl, events } = await make()
+
+    await dl.download('cadence', [{ url: server.url('/big.bin'), save_path: 'x/big.bin' }])
+
+    const progress = events
+      .filter((e) => e.name === 'download:progress')
+      .map((e) => e.payload as { taskId: string; transferred: number; total: number })
+
+    expect(progress.length, 'sparse, not one event per chunk').toBeLessThan(6)
+    expect(progress.every((p) => p.taskId === 'cadence')).toBe(true)
+    expect(progress.at(-1)?.transferred).toBe(size)
+    expect(progress.at(-1)?.total).toBe(size)
+
+    // Monotonic: a bar that goes backwards is a bar the user stops believing.
+    const transferred = progress.map((p) => p.transferred)
+    expect([...transferred].sort((a, b) => a - b)).toEqual(transferred)
+  })
+
+  it('names every event after the task the caller gave, which is what the listener keys on', async () => {
+    server.files.set('/named.bin', { body })
+    const { dl, events } = await make()
+
+    await dl.download('llamacpp-backend-b6325/macos-arm64', [
+      { url: server.url('/named.bin'), save_path: 'x/named.bin' },
+    ])
+
+    const tasks = new Set(
+      events
+        .filter((e) => e.name === 'download:progress')
+        .map((e) => (e.payload as { taskId: string }).taskId)
+    )
+    expect([...tasks]).toEqual(['llamacpp-backend-b6325/macos-arm64'])
   })
 })
