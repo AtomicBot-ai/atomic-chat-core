@@ -19,7 +19,16 @@ import type {
   UnloadResult,
 } from '../contracts/index.js'
 import type { CoreEmitter } from '../events/index.js'
+import type { CtxIncreaseResult } from '../runtime/llamacpp/runtime.js'
+import type { HardwareOverrideInput, HardwareOverrideStore } from '../hardware/index.js'
 import { bearerToken, controlTokenMatches } from '../lock/index.js'
+import type {
+  ImportOptions,
+  ImportResult,
+  MigrationRecord,
+  ProviderValues,
+  UpdateResult,
+} from '../settings/index.js'
 import type { ClientRegistry } from './clients.js'
 import { CLIENT_HEARTBEAT_INTERVAL_MS } from './clients.js'
 import {
@@ -50,6 +59,28 @@ export interface PublicServerControl {
   stop: () => Promise<LocalApiServerState>
 }
 
+/**
+ * The settings surface the control API exposes. Narrower than `SettingsStore` on purpose: the app
+ * reads a provider's values, patches them with a revision, and migrates its own copy across — it has
+ * no business writing the migration bookkeeping directly.
+ */
+export interface SettingsControl {
+  get: (provider: LocalProviderId) => ProviderValues
+  revision: () => number
+  migration: (scope: string) => MigrationRecord | null
+  update: (
+    provider: LocalProviderId,
+    patch: ProviderValues,
+    options: { expectedRevision?: number }
+  ) => Promise<UpdateResult>
+  importProvider: (
+    provider: LocalProviderId,
+    values: ProviderValues,
+    options: ImportOptions
+  ) => Promise<ImportResult>
+  acknowledge: (scope: string, revision: number) => Promise<UpdateResult>
+}
+
 export interface ControlServerDeps {
   token: string
   instanceId: string
@@ -64,7 +95,17 @@ export interface ControlServerDeps {
     body: Record<string, unknown>
   ) => Promise<SessionInfo | { session: SessionInfo; created: boolean }>
   unloadModel: (provider: string, modelId: string) => Promise<UnloadResult>
+  /**
+   * Reload a model one context step larger because a request overflowed. Answers rather than
+   * throws when it declines: "the ladder is at its top" is an outcome the caller acts on, not an
+   * error, and the proxy has to tell it apart from a failed reload.
+   */
+  increaseCtx: (provider: string, modelId: string, reason?: string) => Promise<CtxIncreaseResult>
   publicServer: PublicServerControl
+  /** The settings store, for the routes that read and migrate provider settings (PLAN.md §3.4). */
+  settings: SettingsControl
+  /** Hardware facts the app injects, which outrank the core's own probe (PLAN.md §2 decision 10). */
+  hardware: HardwareOverrideStore
   /** Stop the whole core. The server has already answered by the time this runs. */
   shutdown: (options: { force: boolean; requestedBy?: string | undefined }) => Promise<void>
   startedAt?: number
@@ -306,6 +347,78 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
   router.post(p('/models/:provider/*modelId/unload'), async (_req, res, { params }) => {
     const result = await deps.unloadModel(params['provider'] as string, params['modelId'] as string)
     sendJson(res, 200, result)
+  })
+
+  router.post(p('/models/:provider/*modelId/ctx/increase'), async (req, res, { params }) => {
+    const body = await readJsonBody<{ reason?: string }>(req)
+    const result = await deps.increaseCtx(
+      params['provider'] as string,
+      params['modelId'] as string,
+      body.reason
+    )
+    sendJson(res, 200, result)
+  })
+
+  // The app measures the machine with NVML and Vulkan; the core cannot. Injection has to land
+  // before a backend is chosen, which is why the app sends it as soon as it attaches.
+  router.get(p('/hardware/override'), (_req, res) =>
+    sendJson(res, 200, { override: deps.hardware.get() ?? null })
+  )
+
+  router.put(p('/hardware/override'), async (req, res) => {
+    const body = await readJsonBody<HardwareOverrideInput>(req)
+    sendJson(res, 200, { override: deps.hardware.set(body) })
+  })
+
+  router.delete(p('/hardware/override'), (_req, res) =>
+    sendJson(res, 200, { cleared: deps.hardware.clear() })
+  )
+
+  router.get(p('/settings/:provider'), (_req, res, { params }) => {
+    const provider = params['provider'] as LocalProviderId
+    sendJson(res, 200, {
+      provider,
+      revision: deps.settings.revision(),
+      values: deps.settings.get(provider),
+      migration: deps.settings.migration(provider),
+    })
+  })
+
+  router.patch(p('/settings/:provider'), async (req, res, { params }) => {
+    const body = await readJsonBody<{ values?: ProviderValues; expected_revision?: number }>(req)
+    const result = await deps.settings.update(params['provider'] as LocalProviderId, body.values ?? {}, {
+      ...(typeof body.expected_revision === 'number' ? { expectedRevision: body.expected_revision } : {}),
+    })
+    sendJson(res, 200, result)
+  })
+
+  // Hand the app's own settings over (PLAN.md §3.4). Answers 409 on a conflict, because the caller
+  // has to put the choice to the user before this scope can be migrated at all.
+  router.post(p('/settings/:provider/import'), async (req, res, { params }) => {
+    const body = await readJsonBody<{
+      values?: ProviderValues
+      resolutions?: ImportOptions['resolutions']
+      expected_revision?: number
+    }>(req)
+    const result = await deps.settings.importProvider(
+      params['provider'] as LocalProviderId,
+      body.values ?? {},
+      {
+        ...(body.resolutions ? { resolutions: body.resolutions } : {}),
+        ...(typeof body.expected_revision === 'number' ? { expectedRevision: body.expected_revision } : {}),
+      }
+    )
+    sendJson(res, result.status === 'conflict' ? 409 : 200, result)
+  })
+
+  router.post(p('/settings/:scope/acknowledge'), async (req, res, { params }) => {
+    const body = await readJsonBody<{ revision?: number }>(req)
+    if (typeof body.revision !== 'number')
+      return sendError(
+        res,
+        new AtomicCoreError('INVALID_ARGUMENT', 'acknowledge needs the revision being confirmed')
+      )
+    sendJson(res, 200, await deps.settings.acknowledge(params['scope'] as string, body.revision))
   })
 
   router.get(p('/server'), (_req, res) => sendJson(res, 200, deps.publicServer.status()))

@@ -95,6 +95,20 @@ async function makeRuntime(over: Partial<LlamacppRuntimeOptions> = {}): Promise<
 const payloads = (name: keyof CoreEvents) => events.filter((e) => e.name === name).map((e) => e.payload)
 
 describe('load', () => {
+  it('uses a no-op event sink when the embedding owner did not supply one', async () => {
+    const runtime = await makeRuntime()
+    const noEmitter = new LlamacppRuntime({
+      layout: data.layout,
+      registry: new ModelRegistry(data.layout),
+      instanceId: 'without-events',
+      readSettings: async () => settings(),
+    })
+    runtimes.push(noEmitter)
+
+    expect(runtime.list()).toEqual([])
+    expect(noEmitter.list()).toEqual([])
+  })
+
   it('starts a process, reports a usable session and journals it for the next owner', async () => {
     await data.writeModel('demo')
     const runtime = await makeRuntime()
@@ -459,3 +473,83 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void
     await new Promise((r) => setTimeout(r, 20))
   }
 }
+
+describe('autoIncreaseCtx', () => {
+  it('reloads the model one step up the ladder and reports the move', async () => {
+    await data.writeModel('demo')
+    const runtime = await makeRuntime()
+    const before = await runtime.load('demo')
+
+    const result = await runtime.autoIncreaseCtx('demo', 'proxy-overflow')
+
+    expect(result).toMatchObject({ ok: true, new_ctx_len: 8192 })
+    expect(runtime.getCtxSize('demo')).toBe(8192)
+    expect(runtime.findSession('demo')?.pid).not.toBe(before.pid)
+    expect(payloads('session:ctx-increased')).toEqual([
+      {
+        provider: 'llamacpp-upstream',
+        modelId: 'demo',
+        oldCtx: 2048,
+        newCtx: 8192,
+        reason: 'proxy-overflow',
+      },
+    ])
+  })
+
+  it('publishes the new port through session:started, which is what a mirror follows', async () => {
+    await data.writeModel('demo')
+    const runtime = await makeRuntime()
+    await runtime.load('demo')
+
+    const result = await runtime.autoIncreaseCtx('demo')
+
+    const started = payloads('session:started') as Array<{ port: number }>
+    expect(started).toHaveLength(2)
+    expect(result.ok && result.session.port).toBe(started[1]?.port)
+  })
+
+  it('declines for a model that is not loaded', async () => {
+    const runtime = await makeRuntime()
+
+    expect(await runtime.autoIncreaseCtx('nothing')).toEqual({ ok: false, reason: 'not-loaded' })
+  })
+
+  it('declines when fit is on, because the engine sizes the window itself', async () => {
+    // Under fit, `--ctx-size` is not even emitted, so the reload would cost a model load and change
+    // nothing at all.
+    await data.writeModel('demo')
+    const runtime = await makeRuntime({
+      readSettings: async () => {
+        const s = settings()
+        return { ...s, config: { ...s.config, fit: true } }
+      },
+    })
+    await runtime.load('demo')
+
+    expect(await runtime.autoIncreaseCtx('demo')).toEqual({ ok: false, reason: 'fit' })
+    expect(payloads('session:ctx-increased')).toEqual([])
+  })
+
+  it('declines once the ladder reaches what the model was trained for', async () => {
+    // A 8192-context model already loaded at 8192: the ladder caps at the trained context, so the
+    // next step is the size it is already running. Reloading would loop — the next request would
+    // overflow again and ask again.
+    await data.writeModel('small')
+    const runtime = await makeRuntime({
+      readGgufMetadata: async () => ({ 'general.architecture': 'llama', 'llama.context_length': '8192' }),
+      readSettings: async () => {
+        const s = settings()
+        return { ...s, config: { ...s.config, ctx_size: 8192 } }
+      },
+    })
+    await runtime.load('small')
+    expect(runtime.getCtxSize('small')).toBe(8192)
+    const pidBefore = runtime.findSession('small')?.pid
+
+    const result = await runtime.autoIncreaseCtx('small')
+
+    expect(result).toEqual({ ok: false, reason: 'at_max', current_ctx_len: 8192, max_ctx_len: 8192 })
+    expect(runtime.findSession('small')?.pid, 'nothing was reloaded').toBe(pidBefore)
+    expect(payloads('session:ctx-increased')).toEqual([])
+  })
+})

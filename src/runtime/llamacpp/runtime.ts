@@ -26,6 +26,7 @@ import type {
   SessionInfo,
   UnloadResult,
 } from '../../contracts/index.js'
+import { DEFAULT_CTX_LEN, computeNextCtxLen } from './ctx-ladder.js'
 import type { DataLayout } from '../../config/index.js'
 import type { ChildProcessRecord, ProcessJournal } from '../../lock/index.js'
 import { processStartId } from '../../lock/index.js'
@@ -55,6 +56,16 @@ export interface RuntimeSettings {
   config: LlamacppConfigInput
   engine: LlamacppEngineSettings
 }
+
+/** What `autoIncreaseCtx` did, or why it declined to do anything. */
+export type CtxIncreaseResult =
+  | { ok: true; new_ctx_len: number; session: SessionInfo }
+  | {
+      ok: false
+      reason: 'fit' | 'at_max' | 'not-loaded'
+      current_ctx_len?: number
+      max_ctx_len?: number
+    }
 
 export interface LoadOptions {
   /** Per-model overrides, canonical keys (the `settings` argument of the extension's `load()`). */
@@ -100,6 +111,12 @@ export interface LlamacppRuntimeOptions {
   ensureDflashDraft?: LoadPlanDeps['ensureDflashDraft'] | undefined
   /** Model that must never be auto-unloaded. */
   transcriptionModelId?: string
+  /**
+   * Read a model's GGUF metadata. A seam because the model's trained context comes from here, and
+   * it is what decides when the context ladder has nowhere left to climb — untestable otherwise
+   * without hand-building a GGUF file.
+   */
+  readGgufMetadata?: LoadPlanDeps['readGgufMetadata'] | undefined
   /** Test seam. */
   spawn?: typeof spawnAndAwaitReady | undefined
   probeDevicesWith?: ((spec: SpawnSpec) => ManagedProcess) | undefined
@@ -301,7 +318,8 @@ export class LlamacppRuntime {
           () => undefined
         )
       },
-      readGgufMetadata: async (path) => (await readGgufMetadataFromFile(path)).metadata,
+      readGgufMetadata:
+        this.options.readGgufMetadata ?? (async (path) => (await readGgufMetadataFromFile(path)).metadata),
       randomPort: () => randomFreePort(this.usedPorts()),
       checkGemmaMtpSupport,
       ensureGemmaMtpDraft: this.options.ensureGemmaMtpDraft ?? draftDownloadUnavailable,
@@ -472,6 +490,67 @@ export class LlamacppRuntime {
   async unload(modelId: string): Promise<UnloadResult> {
     this.assertRunning()
     return this.unloadSession(modelId)
+  }
+
+  /** The context window a loaded session is actually running with. */
+  getCtxSize(modelId: string): number | undefined {
+    const configured = this.sessions.get(modelId)?.plan.config.ctx_size
+    return typeof configured === 'number' && configured > 0 ? configured : undefined
+  }
+
+  /**
+   * Reload a model with the next context size up the ladder, because a request did not fit.
+   *
+   * Ported from the app's `auto_increase_ctx` handler, including the two cases where it declines:
+   *
+   * - `fit`: with fit on, llama.cpp sizes the window itself at load and `--ctx-size` is not even
+   *   emitted, so a reload would change nothing and cost the user a model load.
+   * - `at_max`: the ladder has reached what the model was trained for. Reloading at the same size
+   *   would loop — the next request would overflow again and ask again.
+   *
+   * The unload is allowed to fail: a session that is already gone is still a reload candidate, and
+   * refusing to reload because the corpse would not die is worse than reloading.
+   */
+  async autoIncreaseCtx(modelId: string, reason = 'ctx-overflow'): Promise<CtxIncreaseResult> {
+    this.assertRunning()
+    const session = this.sessions.get(modelId)
+    if (!session) return { ok: false, reason: 'not-loaded' }
+    if (session.plan.config.fit === true) return { ok: false, reason: 'fit' }
+
+    const currentCtxLen = this.getCtxSize(modelId) ?? DEFAULT_CTX_LEN
+    const maxCtxLen = session.plan.maxCtxTrain
+    const newCtxLen = computeNextCtxLen(currentCtxLen, maxCtxLen)
+    if (newCtxLen <= currentCtxLen)
+      return {
+        ok: false,
+        reason: 'at_max',
+        current_ctx_len: currentCtxLen,
+        ...(maxCtxLen !== undefined ? { max_ctx_len: maxCtxLen } : {}),
+      }
+
+    const unloaded = await this.unloadSession(modelId)
+    if (!unloaded.success)
+      this.emit('core:log', {
+        level: 'warn',
+        msg: `auto_increase_ctx: unload of ${modelId} failed, reloading anyway: ${unloaded.error}`,
+      })
+
+    // `bypassAutoUnload`: this is a reload of the model the user is talking to, not a new model
+    // taking its place, so it must not evict anything else.
+    const info = await this.load(modelId, {
+      overrides: { ctx_size: newCtxLen },
+      bypassAutoUnload: true,
+    })
+    // Informational only: the reload emitted `session:started` with the new port and pid, so a
+    // mirror that is following events already knows where the model moved to. This says why.
+    this.emit('session:ctx-increased', {
+      provider: this.provider,
+      modelId,
+      oldCtx: currentCtxLen,
+      newCtx: newCtxLen,
+      reason,
+    })
+    return { ok: true, new_ctx_len: newCtxLen, session: info }
   }
 
   private async unloadSession(modelId: string): Promise<UnloadResult> {

@@ -25,6 +25,18 @@ async function createCore(): Promise<AtomicCore> {
   return core
 }
 
+async function putHardwareOverride(core: AtomicCore, body: Record<string, unknown>): Promise<void> {
+  const response = await fetch(`${core.control.url}/atomic/v1/hardware/override`, {
+    method: 'PUT',
+    headers: {
+      'authorization': `Bearer ${core.controlToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  expect(response.status).toBe(200)
+}
+
 describe('taking ownership', () => {
   it('locks the folder, mints a token, starts control and publishes where it listens', async () => {
     const core = await createCore()
@@ -79,9 +91,137 @@ describe('taking ownership', () => {
     expect(() => core.runtime('mlx')).toThrow(/Unknown provider/)
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
   })
+
+  it('wires settings, context and public-server control routes to the facade', async () => {
+    const core = await createCore()
+    const call = (path: string, method = 'GET', body?: unknown) =>
+      fetch(`${core.control.url}/atomic/v1${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${core.controlToken}`,
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      })
+
+    const settings = await call('/settings/llamacpp-upstream')
+    expect(settings.status).toBe(200)
+    expect(await settings.json()).toMatchObject({
+      provider: 'llamacpp-upstream',
+      migration: null,
+    })
+
+    const changed = new Promise<{ provider: string; key: string; value: unknown }>((resolve) =>
+      core.events.once('settings:changed', resolve)
+    )
+    const patched = await call('/settings/llamacpp-upstream', 'PATCH', {
+      values: { timeout: 601 },
+    })
+    expect(patched.status).toBe(200)
+    expect(await changed).toEqual({
+      provider: 'llamacpp-upstream',
+      key: 'timeout',
+      value: 601,
+    })
+
+    const eventSeqBeforeMigrationBookkeeping = core.events.lastSeq
+    const imported = await call('/settings/llamacpp-upstream/import', 'POST', { values: {} })
+    expect(imported.status).toBe(200)
+    const importResult = (await imported.json()) as { revision: number }
+
+    const acknowledged = await call('/settings/llamacpp-upstream/acknowledge', 'POST', {
+      revision: importResult.revision,
+    })
+    expect(acknowledged.status).toBe(200)
+    expect(core.events.lastSeq).toBe(eventSeqBeforeMigrationBookkeeping)
+
+    const increased = await call('/models/llamacpp-upstream/not-loaded/ctx/increase', 'POST', {})
+    expect(await increased.json()).toEqual({ ok: false, reason: 'not-loaded' })
+
+    const stopped = await call('/server/stop', 'POST', {})
+    expect(stopped.status).toBe(200)
+    expect(await stopped.json()).toMatchObject({ running: false })
+  })
 })
 
 describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
+  it('passes an injected CPU feature set into the real load plan', async () => {
+    const core = await createCore()
+    await data.writeModel('cpu-model')
+    await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cpu-x64' })
+    await core.settings.update('llamacpp-upstream', {
+      version_backend: 'b7000/win-cpu-x64',
+    })
+    await putHardwareOverride(core, {
+      gpus: [],
+      cpu_extensions: ['avx2'],
+      os_type: 'windows',
+    })
+
+    await expect(core.load('llamacpp-upstream', 'cpu-model')).resolves.toMatchObject({
+      model_id: 'cpu-model',
+    })
+  })
+
+  it.skipIf(process.arch !== 'x64')(
+    'uses the app hardware override for CPU preflight before spawning',
+    async () => {
+      const core = await createCore()
+      await data.writeModel('cpu-model')
+      await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cpu-x64' })
+      await core.settings.update('llamacpp-upstream', {
+        version_backend: 'b7000/win-cpu-x64',
+      })
+
+      await putHardwareOverride(core, { gpus: [], cpu_extensions: [], os_type: 'windows' })
+      await expect(core.load('llamacpp-upstream', 'cpu-model')).rejects.toMatchObject({
+        code: 'CPU_NO_AVX',
+      })
+
+      await putHardwareOverride(core, {
+        gpus: [],
+        cpu_extensions: ['AVX2'],
+        os_type: 'windows',
+      })
+      await expect(core.load('llamacpp-upstream', 'cpu-model')).resolves.toMatchObject({
+        model_id: 'cpu-model',
+      })
+    }
+  )
+
+  it.skipIf(process.arch !== 'x64')(
+    'uses injected GPU facts when choosing an installed fallback backend',
+    async () => {
+      const core = await createCore()
+      await data.writeModel('gpu-model')
+      await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cpu-x64' })
+      await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cuda-13.3-x64' })
+      await core.settings.update('llamacpp-upstream', { version_backend: 'none' })
+      await putHardwareOverride(core, {
+        os_type: 'windows',
+        cpu_extensions: ['avx2'],
+        gpus: [
+          {
+            vendor: 'NVIDIA',
+            driver_version: '581.42',
+            total_memory: 24_576,
+            nvidia_info: { compute_capability: '8.9' },
+            vulkan_info: { device_type: 'DiscreteGpu', device_id: 9860 },
+          },
+        ],
+      })
+      const reported = new Promise<{ configuredVersionBackend: string }>((resolve) => {
+        core.events.once('backend:runtime-reported', resolve)
+      })
+
+      await core.load('llamacpp-upstream', 'gpu-model')
+
+      await expect(reported).resolves.toMatchObject({
+        configuredVersionBackend: 'b7000/win-cuda-13.3-x64',
+      })
+    }
+  )
+
   it('loads through the facade, serves it over /v1 and unloads again', async () => {
     const core = await createCore()
     await data.writeModel('demo')

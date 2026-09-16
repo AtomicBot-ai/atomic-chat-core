@@ -5,6 +5,10 @@ import { CoreEmitter } from '../events/index.js'
 import { ClientRegistry } from './clients.js'
 import { ControlServer } from './control.js'
 import type { ControlServerDeps, ControlSnapshot, SessionSummary } from './control.js'
+import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
+import type { FakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
+import type { CtxIncreaseResult } from '../runtime/llamacpp/runtime.js'
+import { HardwareOverrideStore } from '../hardware/index.js'
 
 const TOKEN = 'test-control-token'
 
@@ -18,6 +22,9 @@ interface Harness {
   loadResult: () => Promise<SessionInfo>
   unloadResult: () => Promise<UnloadResult>
   shutdowns: Array<{ force: boolean; requestedBy?: string | undefined }>
+  settings: FakeSettingsControl
+  hardware: HardwareOverrideStore
+  ctxIncrease: CtxIncreaseResult
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
 
@@ -57,6 +64,9 @@ async function start(over: Partial<ControlServerDeps> = {}): Promise<Harness> {
     shutdowns,
     loadResult: async () => session(),
     unloadResult: async () => ({ success: true }),
+    settings: fakeSettingsControl({ 'llamacpp-upstream': { ctx_size: 4096 } }),
+    hardware: new HardwareOverrideStore(),
+    ctxIncrease: { ok: true, new_ctx_len: 32768, session: session() },
   } as unknown as Harness
   const server = await ControlServer.start({
     token: TOKEN,
@@ -65,6 +75,12 @@ async function start(over: Partial<ControlServerDeps> = {}): Promise<Harness> {
     dataFolder: '/tmp/data',
     emitter,
     clients,
+    settings: harness.settings,
+    hardware: harness.hardware,
+    increaseCtx: async (provider, modelId, reason) => {
+      calls.push(`increaseCtx ${provider} ${modelId} ${reason ?? '-'}`)
+      return harness.ctxIncrease
+    },
     sessions: () => sessions,
     loadModel: async (provider, modelId, body) => {
       calls.push(`load ${provider} ${modelId} ${JSON.stringify(body)}`)
@@ -359,3 +375,184 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
     await new Promise((r) => setTimeout(r, 10))
   }
 }
+
+describe('settings routes', () => {
+  const json = (path: string, method: string, body: unknown) =>
+    h.get(path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+  it('reads a provider’s values with the revision and migration record', async () => {
+    const res = await h.get('/atomic/v1/settings/llamacpp-upstream')
+    const body = (await res.json()) as {
+      provider: string
+      revision: number
+      values: Record<string, unknown>
+      migration: unknown
+    }
+
+    expect(res.status).toBe(200)
+    expect(body.provider).toBe('llamacpp-upstream')
+    expect(body.values['ctx_size']).toBe(4096)
+    expect(body.revision).toBe(7)
+    expect(body.migration, 'never imported yet').toBeNull()
+  })
+
+  it('patches values and passes the expected revision through', async () => {
+    const res = await json('/atomic/v1/settings/llamacpp-upstream', 'PATCH', {
+      values: { ctx_size: 8192 },
+      expected_revision: 7,
+    })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ revision: 8, changed: ['ctx_size'] })
+    expect(h.settings.calls).toContain('update llamacpp-upstream {"ctx_size":8192} expected=7')
+  })
+
+  it('treats omitted patch values and revision as an empty unconditional patch', async () => {
+    const res = await json('/atomic/v1/settings/llamacpp-upstream', 'PATCH', {})
+
+    expect(res.status).toBe(200)
+    expect(h.settings.calls.at(-1)).toBe('update llamacpp-upstream {} expected=any')
+  })
+
+  it('imports the app’s settings and reports what it applied', async () => {
+    const res = await json('/atomic/v1/settings/llamacpp-upstream/import', 'POST', {
+      values: { ctx_size: 8192, n_gpu_layers: 20 },
+    })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ status: 'imported', applied: ['ctx_size', 'n_gpu_layers'] })
+  })
+
+  it('answers 409 for a conflict, so the caller cannot mistake it for a migrated scope', async () => {
+    h.settings.nextImport = {
+      status: 'conflict',
+      applied: [],
+      conflicts: [{ key: 'ctx_size', base: 4096, core: 2048, legacy: 8192 }],
+      revision: 7,
+    }
+
+    const res = await json('/atomic/v1/settings/llamacpp-upstream/import', 'POST', {
+      values: { ctx_size: 8192 },
+    })
+
+    expect(res.status).toBe(409)
+    expect((await res.json()) as { conflicts: unknown[] }).toMatchObject({
+      status: 'conflict',
+      conflicts: [{ key: 'ctx_size' }],
+    })
+  })
+
+  it('forwards the caller’s conflict resolutions', async () => {
+    await json('/atomic/v1/settings/llamacpp-upstream/import', 'POST', {
+      values: { ctx_size: 8192 },
+      resolutions: { ctx_size: 'core' },
+    })
+
+    expect(h.settings.calls.at(-1)).toContain('resolutions={"ctx_size":"core"}')
+  })
+
+  it('passes an import revision even when the legacy payload has no values', async () => {
+    const res = await json('/atomic/v1/settings/llamacpp-upstream/import', 'POST', {
+      expected_revision: 7,
+    })
+
+    expect(res.status).toBe(200)
+    expect(h.settings.calls.at(-1)).toContain('import llamacpp-upstream {}')
+    expect(h.settings.calls.at(-1)).toContain('expected=7')
+  })
+
+  it('records an acknowledgement and refuses one without a revision', async () => {
+    const ok = await json('/atomic/v1/settings/llamacpp-upstream/acknowledge', 'POST', { revision: 8 })
+    expect(ok.status).toBe(200)
+    expect(h.settings.calls).toContain('acknowledge llamacpp-upstream 8')
+
+    const bad = await json('/atomic/v1/settings/llamacpp-upstream/acknowledge', 'POST', {})
+    expect(bad.status).toBe(400)
+    expect((await bad.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: 'INVALID_ARGUMENT' },
+    })
+  })
+})
+
+describe('context increase route', () => {
+  it('reloads a model one step up and returns the new session', async () => {
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/vendor/model-7b/ctx/increase', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'proxy-overflow' }),
+    })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ ok: true, new_ctx_len: 32768 })
+    expect(h.calls).toContain('increaseCtx llamacpp-upstream vendor/model-7b proxy-overflow')
+  })
+
+  it('answers 200 with a reason when it declines, not an error', async () => {
+    // The proxy branches on this: "the ladder is at its top" means stop retrying and return the
+    // model's own overflow error, which is not the same as a reload that failed.
+    h.ctxIncrease = { ok: false, reason: 'at_max', current_ctx_len: 8192, max_ctx_len: 8192 }
+
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/m/ctx/increase', { method: 'POST' })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      ok: false,
+      reason: 'at_max',
+      current_ctx_len: 8192,
+      max_ctx_len: 8192,
+    })
+  })
+})
+
+describe('hardware override routes', () => {
+  const put = (body: unknown) =>
+    h.get('/atomic/v1/hardware/override', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+
+  it('accepts what the app measured and reads it back', async () => {
+    const gpus = [{ vendor: 'NVIDIA', driver_version: '551.23', nvidia_info: { compute_capability: '8.9' } }]
+
+    const stored = await put({ gpus, cpu_extensions: ['AVX2'], source: 'tauri-plugin-hardware' })
+    expect(stored.status).toBe(200)
+
+    const read = (await (await h.get('/atomic/v1/hardware/override')).json()) as {
+      override: { gpus: unknown[]; cpu_extensions: string[]; source: string }
+    }
+    expect(read.override.gpus).toEqual(gpus)
+    expect(read.override.cpu_extensions).toEqual(['avx2'])
+    expect(read.override.source).toBe('tauri-plugin-hardware')
+  })
+
+  it('reports no override before the app injects one', async () => {
+    const read = (await (await h.get('/atomic/v1/hardware/override')).json()) as { override: unknown }
+
+    expect(read.override).toBeNull()
+  })
+
+  it('refuses a payload it cannot read', async () => {
+    const res = await put({ cpu_extensions: ['avx2'] })
+
+    expect(res.status).toBe(400)
+    expect((await res.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: 'INVALID_ARGUMENT' },
+    })
+  })
+
+  it('can be cleared, which puts the core back on its own probe', async () => {
+    await put({ gpus: [] })
+
+    const cleared = await h.get('/atomic/v1/hardware/override', { method: 'DELETE' })
+
+    expect(await cleared.json()).toEqual({ cleared: true })
+    expect(
+      ((await (await h.get('/atomic/v1/hardware/override')).json()) as { override: unknown }).override
+    ).toBeNull()
+  })
+})

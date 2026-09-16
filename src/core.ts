@@ -29,11 +29,13 @@ import {
 import type { ChildProcessRecord } from './lock/index.js'
 import type { ModelClaimHandle } from './lock/index.js'
 import { ModelRegistry } from './models/index.js'
-import { discoverBackendBinary, resolveBackendExe } from './backend/index.js'
-import { isConcreteVersionBackend } from './runtime/llamacpp/index.js'
+import { ensureBackend, readRuntimeSettings } from './backend/runtime-backend.js'
 import { LlamacppRuntime } from './runtime/llamacpp/index.js'
-import type { LoadOptions, RuntimeSettings } from './runtime/llamacpp/index.js'
-import { SettingsStore, canonicalProviderDefaults } from './settings/index.js'
+import type { LoadOptions } from './runtime/llamacpp/index.js'
+import { SettingsStore } from './settings/index.js'
+import type { SettingsScope } from './settings/index.js'
+import { HardwareOverrideStore } from './hardware/index.js'
+import type { CtxIncreaseResult } from './runtime/llamacpp/runtime.js'
 import {
   ClientRegistry,
   ControlServer,
@@ -130,8 +132,25 @@ export class AtomicCore {
       const token = await writeControlToken(layout)
       const emitter = new CoreEmitter({ instanceId: lock.instanceId })
       const settings = await SettingsStore.open(layout.core.settings)
+      // Settings written through the CLI/control API must reach the attached app immediately so it
+      // can refresh the legacy rollback copy before acknowledging the revision. Migration
+      // bookkeeping lives under `state`; it is deliberately not a provider event, otherwise an
+      // acknowledge would trigger another mirror+acknowledge cycle forever.
+      settings.onChange((change) => {
+        if (change.scope === 'state') return
+        emitter.emit('settings:changed', {
+          provider: change.scope,
+          key: change.key,
+          value: change.value,
+        })
+      })
       const journal = await ProcessJournal.open(layout)
       const clients = new ClientRegistry()
+      // One per core process, in memory: hardware changes between runs, and a stale file claiming
+      // a GPU that is gone would pick a backend that cannot start. The same store is deliberately
+      // shared by control and the runtime: accepting an override that load never reads is worse
+      // than rejecting the endpoint, because it tells the app a hardware handover succeeded.
+      const hardware = new HardwareOverrideStore()
 
       const registries = new Map<LocalProviderId, ModelRegistry>([
         [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
@@ -146,8 +165,14 @@ export class AtomicCore {
             provider: LOCAL_PROVIDER,
             journal,
             emit: (name, payload) => emitter.emit(name, payload),
-            readSettings: () => readRuntimeSettings(settings, LOCAL_PROVIDER, layout),
-            ensureBackendReady: (backend, version) => ensureBackend(layout, LOCAL_PROVIDER, backend, version),
+            readSettings: () => readRuntimeSettings(settings, LOCAL_PROVIDER, layout, hardware),
+            ensureBackendReady: (backend, version) =>
+              ensureBackend(layout, LOCAL_PROVIDER, backend, version, hardware),
+            cpuInfo: async () => {
+              const injected = hardware.get()
+              if (!injected?.cpu_extensions) return undefined
+              return { arch: process.arch, extensions: hardware.cpuExtensions([]) }
+            },
             ...(options.fetch ? { fetch: options.fetch } : {}),
           }),
         ],
@@ -166,6 +191,17 @@ export class AtomicCore {
             (core as AtomicCore).acquire(provider as LocalProviderId, modelId, body as LoadOptions),
           unloadModel: (provider: string, modelId: string) =>
             (core as AtomicCore).unload(provider as LocalProviderId, modelId),
+          increaseCtx: (provider: string, modelId: string, reason?: string) =>
+            (core as AtomicCore).increaseCtx(provider as LocalProviderId, modelId, reason),
+          hardware,
+          settings: {
+            get: (provider) => settings.get(provider),
+            revision: () => settings.revision,
+            migration: (scope) => settings.migration(scope as SettingsScope),
+            update: (provider, patch, opts) => settings.update(provider, patch, opts),
+            importProvider: (provider, values, opts) => settings.importProvider(provider, values, opts),
+            acknowledge: (scope, revision) => settings.acknowledge(scope as SettingsScope, revision),
+          },
           publicServer: {
             status: () => (core as AtomicCore).publicState(),
             start: (opts) => (core as AtomicCore).startPublicServer(opts),
@@ -275,6 +311,16 @@ export class AtomicCore {
       }
       throw e
     }
+  }
+
+  /**
+   * Reload a model with a larger context because a request did not fit. Guarded like `load`: the
+   * desktop app may still own this model, and reloading it here would take it from under the app.
+   */
+  async increaseCtx(provider: LocalProviderId, modelId: string, reason?: string): Promise<CtxIncreaseResult> {
+    this.assertRunning()
+    await assertNotLoadedByLegacy(this.layout, modelId)
+    return this.runtime(provider).autoIncreaseCtx(modelId, reason)
   }
 
   async unload(provider: LocalProviderId, modelId: string): Promise<UnloadResult> {
@@ -468,59 +514,6 @@ function unknownProvider(provider: string): AtomicCoreError {
     'PROVIDER_NOT_FOUND',
     `Unknown provider "${provider}".`,
     'llamacpp-upstream is available'
-  )
-}
-
-/** Provider settings plus the engine-level keys the load plan reads. */
-async function readRuntimeSettings(
-  settings: SettingsStore,
-  provider: LocalProviderId,
-  layout: DataLayout
-): Promise<RuntimeSettings> {
-  const values = { ...canonicalProviderDefaults(provider), ...settings.get(provider) }
-  // A folder the app never configured has no `version_backend`, and the plan refuses to guess a
-  // feature set from nothing. The Rust CLI solves this by discovering the newest installed
-  // `llama-server` and deriving the tag from its path; the core does the same.
-  const configured = String(values['version_backend'] ?? '').trim()
-  if (!isConcreteVersionBackend(configured)) {
-    const discovered = await discoverBackendBinary(layout, provider)
-    if (discovered) values['version_backend'] = discovered.version_backend
-    // Leave empty/none untouched when no pack is installed. The runtime can still replace it with
-    // an explicit CLI `--bin`; without one it reports BINARY_NOT_FOUND before planning the load.
-    // A non-empty but malformed value is a broken configuration; the load plan reports it as such.
-  }
-  return {
-    config: values as RuntimeSettings['config'],
-    engine: {
-      timeout: (values['timeout'] as number | string | undefined) ?? 600,
-      llamacpp_env: (values['llamacpp_env'] as string | undefined) ?? '',
-      ...(values['dflash_block_size'] !== undefined
-        ? { dflash_block_size: values['dflash_block_size'] as number | string }
-        : {}),
-    },
-  }
-}
-
-/**
- * Phase 1 resolves a backend that is already installed; downloading one is the backend service's
- * job (phase 3c). An empty or unresolvable pair falls back to whatever is installed, which is what
- * `serve` without configuration needs.
- */
-async function ensureBackend(
-  layout: DataLayout,
-  provider: LocalProviderId,
-  backend: string,
-  version: string
-): Promise<{ version: string; backend: string; exePath: string }> {
-  const exact = await resolveBackendExe(layout, provider, version, backend)
-  if (exact) return { version, backend, exePath: exact }
-  const discovered = await discoverBackendBinary(layout, provider)
-  if (discovered)
-    return { version: discovered.version, backend: discovered.backend, exePath: discovered.path }
-  throw new AtomicCoreError(
-    'BINARY_NOT_FOUND',
-    'No llama.cpp backend is installed in this data folder.',
-    `looked for ${version}/${backend} under ${layout.provider(provider).backendsDir}`
   )
 }
 

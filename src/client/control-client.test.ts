@@ -9,6 +9,8 @@ import { CoreEmitter } from '../events/index.js'
 import { ClientRegistry } from '../server/clients.js'
 import { ControlServer } from '../server/control.js'
 import { CoreClient } from './control-client.js'
+import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
+import { HardwareOverrideStore } from '../hardware/index.js'
 
 const TOKEN = 'client-test-token'
 
@@ -42,6 +44,9 @@ beforeEach(async () => {
     dataFolder: '/tmp/data',
     emitter,
     clients,
+    increaseCtx: async () => ({ ok: false, reason: 'not-loaded' as const }),
+    hardware: new HardwareOverrideStore(),
+    settings: fakeSettingsControl(),
     sessions: () => sessions,
     loadModel: async (_provider, modelId) => {
       if (loadFailure) throw loadFailure

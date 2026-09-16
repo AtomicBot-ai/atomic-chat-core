@@ -27,6 +27,8 @@ import { dirname } from 'node:path'
 import { AtomicCoreError, DEFAULT_SERVER_SETTINGS } from '../contracts/index.js'
 import type { LocalProviderId, ServerSettings } from '../contracts/index.js'
 import { LOCAL_PROVIDER_IDS, canonicalizeSettingValues, defaultSettingValues } from './schema.js'
+import { classifyImport, legacyHash, planImport } from './import.js'
+import type { ImportOutcome, Resolutions } from './import.js'
 
 export const SETTINGS_FILE_VERSION = 1
 
@@ -92,6 +94,15 @@ export interface UpdateResult {
   revision: number
   /** Keys whose value actually changed (empty ⇒ nothing was written). */
   changed: string[]
+}
+
+export interface ImportOptions extends UpdateOptions {
+  /** How to settle keys both sides changed; without one, the import reports the conflict instead. */
+  resolutions?: Resolutions
+}
+
+export interface ImportResult extends ImportOutcome {
+  revision: number
 }
 
 /** The subset of `node:fs/promises` the store needs; tests pass an in-memory fake. */
@@ -308,6 +319,75 @@ export class SettingsStore {
         value,
       }))
     )
+  }
+
+  /**
+   * Take the desktop app's settings for a provider (PLAN.md §3.4).
+   *
+   * Three-way, not a copy: see `import.ts`. Nothing is written when any key conflicts, so a scope
+   * is either fully migrated or not migrated at all — a half-applied import would leave the app and
+   * the core disagreeing about settings neither side accepted.
+   *
+   * The migration record is written even when the merge applies no values, because the record is
+   * what stops the next start from merging the same change all over again.
+   */
+  async importProvider(
+    provider: LocalProviderId,
+    legacyValues: ProviderValues,
+    options: ImportOptions = {}
+  ): Promise<ImportResult> {
+    assertProvider(provider)
+    const canonicalLegacy = canonicalizeSettingValues(provider, legacyValues)
+    const hash = legacyHash(canonicalLegacy)
+    let outcome: ImportOutcome = { status: 'unchanged', applied: [], conflicts: [] }
+
+    const result = await this.mutate(options, (doc) => {
+      const record = doc.state.migrations[provider] ?? null
+      // A first import has no base of its own: the provider's defaults stand in, so a value the CLI
+      // already changed reads as a change rather than as where both sides started.
+      const base = record?.baseline ?? canonicalProviderDefaults(provider)
+      const core = doc.providers[provider]
+      const plan = planImport(base, core, canonicalLegacy, options.resolutions ?? {})
+      const status = classifyImport(record?.legacy_hash ?? null, record?.baseline != null, hash, plan)
+      outcome = { status, applied: Object.keys(plan.apply), conflicts: plan.conflicts }
+      if (status === 'conflict' || status === 'unchanged') return []
+
+      const changes = applyPatch(core, plan.apply, (key, value) => ({
+        scope: provider,
+        key,
+        value,
+      }))
+      doc.state.migrations[provider] = {
+        ...(record ?? { acknowledged_revision: null }),
+        baseline: structuredClone(canonicalLegacy),
+        legacy_hash: hash,
+      }
+      changes.push({ scope: 'state', key: `migrations.${provider}`, value: hash })
+      return changes
+    })
+
+    return { ...outcome, revision: result.revision }
+  }
+
+  /**
+   * Record that the app has mirrored the core's settings up to `revision`.
+   *
+   * Only meaningful after an import: it is how a planned rollback knows whether the app's copy is
+   * current enough to hand ownership back (PLAN.md §3.4).
+   */
+  async acknowledge(scope: SettingsScope, revision: number): Promise<UpdateResult> {
+    return this.mutate({}, (doc) => {
+      const record = doc.state.migrations[scope]
+      if (!record || record.acknowledged_revision === revision) return []
+      record.acknowledged_revision = revision
+      return [{ scope: 'state', key: `migrations.${scope}.acknowledged_revision`, value: revision }]
+    })
+  }
+
+  /** What the core knows about a scope's migration, or `null` when it has never been imported. */
+  migration(scope: SettingsScope): MigrationRecord | null {
+    const record = this.doc.state.migrations[scope]
+    return record ? structuredClone(record) : null
   }
 
   /** Called once per changed key after the write landed; returns the unsubscribe function. */

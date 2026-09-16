@@ -7,4 +7,5 @@
  * See PLAN.md §3.2 / §3.4. Public API of this module is exported from this file only.
  */
 export * from './schema.js'
+export * from './import.js'
 export * from './store.js'
