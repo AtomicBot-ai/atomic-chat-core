@@ -4,6 +4,8 @@ import {
   identityPermitsTakeover,
   isProcessAlive,
   processStartId,
+  processStartEpoch,
+  runProbe,
   verifyProcessIdentity,
 } from './process-identity.js'
 
@@ -55,6 +57,56 @@ describe('processStartId', () => {
     await new Promise((r) => child.on('exit', r))
     expect(isProcessAlive(child.pid as number)).toBe(false)
     expect(await verifyProcessIdentity(child.pid as number, id)).toBe('dead')
+  })
+})
+
+describe('processStartEpoch', () => {
+  it('normalises Linux, macOS and Windows identities for Rust interoperability', async () => {
+    expect(
+      await processStartEpoch(4242, {
+        platform: 'linux',
+        readText: async (path) => (path === '/proc/stat' ? 'cpu  1\nbtime 1000\n' : LINUX_STAT),
+      })
+    ).toBe('epoch:9877543')
+    expect(
+      await processStartEpoch(1, {
+        platform: 'darwin',
+        run: async () => 'Mon Sep 15 10:00:00 2026',
+      })
+    ).toMatch(/^epoch:\d+$/)
+    expect(await processStartEpoch(1, { platform: 'win32', run: async () => '1700000000\n' })).toBe(
+      'epoch:1700000000'
+    )
+  })
+
+  it('returns undefined for bad input, failed probes and unsupported systems', async () => {
+    expect(await processStartEpoch(0)).toBeUndefined()
+    expect(
+      await processStartEpoch(1, {
+        platform: 'linux',
+        readText: async () => {
+          throw new Error('gone')
+        },
+      })
+    ).toBeUndefined()
+    expect(await processStartEpoch(1, { platform: 'aix' as NodeJS.Platform })).toBeUndefined()
+    expect(await processStartEpoch(1, { platform: 'darwin', run: async () => 'not a date' })).toBeUndefined()
+    expect(
+      await processStartEpoch(1, { platform: 'win32', run: async () => 'not an integer' })
+    ).toBeUndefined()
+    expect(
+      await processStartEpoch(1, {
+        platform: 'linux',
+        readText: async (path) => (path === '/proc/stat' ? 'no btime' : 'bad stat'),
+      })
+    ).toBeUndefined()
+  })
+})
+
+describe('runProbe', () => {
+  it('captures stdout and rejects failed commands', async () => {
+    await expect(runProbe(process.execPath, ['-e', 'process.stdout.write("ok")'])).resolves.toBe('ok')
+    await expect(runProbe(process.execPath, ['-e', 'process.exit(2)'])).rejects.toBeTruthy()
   })
 })
 

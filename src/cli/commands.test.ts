@@ -113,6 +113,34 @@ describe('server status', () => {
     expect(out.out.join('')).toContain('No Local API Server at http://127.0.0.1:1/v1')
   })
 
+  it("prefers the core's published state over the app's state file", async () => {
+    await writeFile(
+      data.layout.core.publicServerState,
+      JSON.stringify({
+        running: true,
+        host: '127.0.0.1',
+        port: 5555,
+        prefix: '/v1',
+        requires_api_key: false,
+        pid: 7,
+      })
+    )
+    await writeFile(
+      data.layout.serverStateFile,
+      JSON.stringify({
+        running: true,
+        host: '127.0.0.1',
+        port: 4321,
+        prefix: '/v1',
+        requires_api_key: false,
+        pid: 5,
+      })
+    )
+    const out = io()
+    expect(await serverCommand(['status', '--json', ...folder()], out)).toBe(1)
+    expect(JSON.parse(out.out.join(''))).toMatchObject({ url: 'http://127.0.0.1:5555/v1' })
+  })
+
   it('falls back to the app state file when no core is running', async () => {
     await writeFile(
       data.layout.serverStateFile,

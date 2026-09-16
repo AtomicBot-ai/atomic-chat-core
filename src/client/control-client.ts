@@ -131,11 +131,19 @@ export class CoreClient {
     modelId: string,
     body: Record<string, unknown> = {}
   ): Promise<SessionInfo> {
-    const result = await this.call<{ session: SessionInfo }>(`/models/${provider}/${modelId}/load`, {
+    return (await this.acquireModel(provider, modelId, body)).session
+  }
+
+  /** Load or attach, while preserving whether this request created the session. */
+  async acquireModel(
+    provider: string,
+    modelId: string,
+    body: Record<string, unknown> = {}
+  ): Promise<{ session: SessionInfo; created: boolean }> {
+    return this.call<{ session: SessionInfo; created: boolean }>(`/models/${provider}/${modelId}/load`, {
       method: 'POST',
       body: JSON.stringify(body),
     })
-    return result.session
   }
 
   unloadModel(provider: string, modelId: string): Promise<UnloadResult> {

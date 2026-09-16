@@ -444,14 +444,27 @@ async function readServerState(
     const owner = await attachToOwner({ layout, clientName: 'atomic-chat-core server status' })
     state = await owner.client.serverStatus()
   } catch {
-    const fromFile = await io.readFile(layout.serverStateFile)
-    if (fromFile) {
+    // A crashed core can leave a stale discovery file beside a live legacy app state. Parse both
+    // and prefer the first endpoint that actually answers instead of letting file age decide.
+    const candidates: LocalApiServerState[] = []
+    for (const fromFile of [
+      await io.readFile(layout.core.publicServerState),
+      await io.readFile(layout.serverStateFile),
+    ]) {
+      if (!fromFile) continue
       try {
         const parsed = JSON.parse(fromFile) as Partial<LocalApiServerState>
         if (typeof parsed.port === 'number' && typeof parsed.host === 'string')
-          state = { ...state, ...parsed, pid: parsed.pid ?? null }
+          candidates.push({ ...state, ...parsed, pid: parsed.pid ?? null })
       } catch {
         /* a malformed state file means "unknown", not "crash" */
+      }
+    }
+    state = candidates[0] ?? state
+    for (const candidate of candidates) {
+      if (await probe(candidate, io)) {
+        state = candidate
+        break
       }
     }
   }

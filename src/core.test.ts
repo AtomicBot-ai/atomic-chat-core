@@ -120,6 +120,28 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     expect((await client.sessions()).sessions).toEqual([])
   })
 
+  it('refuses a model the desktop app already holds, instead of loading a second copy', async () => {
+    const core = await createCore()
+    await data.writeModel('demo')
+    await installFakeBackend(data.layout)
+    const { writeFile } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    await writeFile(
+      join(data.layout.core.dir, 'legacy-runtime.json'),
+      JSON.stringify({
+        pid: process.pid,
+        updated_at: 1,
+        provider: 'llamacpp-upstream',
+        sessions: [{ model_id: 'demo', port: 3311, pid: 4242, is_embedding: false }],
+      })
+    )
+    await expect(core.load('llamacpp-upstream', 'demo')).rejects.toMatchObject({
+      code: 'CORE_ALREADY_RUNNING',
+      details: expect.stringContaining('127.0.0.1:3311') as unknown as string,
+    })
+    expect(core.sessions(), 'nothing was spawned').toEqual([])
+  })
+
   it('reports a model with no backend installed as BINARY_NOT_FOUND', async () => {
     const core = await createCore()
     await data.writeModel('demo')
@@ -191,6 +213,38 @@ describe('the public listener is independent', () => {
     })
     expect((await fetch(`http://127.0.0.1:${first.port}/`)).status).toBe(200)
     expect(core.publicState()).toMatchObject({ running: true, port: first.port, requires_api_key: false })
+  })
+
+  it("publishes its address in the core's own file, never the app's", async () => {
+    const core = await createCore()
+    const appState = {
+      running: true,
+      host: '127.0.0.1',
+      port: 1337,
+      prefix: '/v1',
+      requires_api_key: false,
+      pid: 999,
+    }
+    await writeFile(data.layout.serverStateFile, JSON.stringify(appState))
+
+    const started = await core.startPublicServer({ port: 0 })
+    const published = JSON.parse(await readFile(data.layout.core.publicServerState, 'utf8')) as {
+      running: boolean
+      port: number
+      pid: number
+    }
+    expect(published).toMatchObject({ running: true, port: started.port, pid: process.pid })
+    expect(
+      JSON.parse(await readFile(data.layout.serverStateFile, 'utf8')),
+      "the app's state file belongs to the legacy server until phase 4"
+    ).toEqual(appState)
+
+    await core.stopPublicServer()
+    const afterStop = JSON.parse(await readFile(data.layout.core.publicServerState, 'utf8')) as {
+      running: boolean
+      pid: number | null
+    }
+    expect(afterStop).toMatchObject({ running: false, pid: null })
   })
 
   it('reports a bind failure as an event instead of silently running nowhere', async () => {

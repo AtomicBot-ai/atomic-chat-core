@@ -63,6 +63,12 @@ describe('InstanceLock.acquire', () => {
     expect(await inspectLock(data.layout)).toEqual({ kind: 'free' })
   })
 
+  it('records a null portable identity when the platform cannot provide one', async () => {
+    const lock = await InstanceLock.acquire(data.layout, { platform: 'aix' as NodeJS.Platform })
+    expect(lock.record.owner_started_at).toBeNull()
+    await lock.release()
+  })
+
   it('refuses a second owner while the first is alive, and names where control lives', async () => {
     const first = await InstanceLock.acquire(data.layout)
     await first.publish('127.0.0.1', 5_000)
@@ -154,6 +160,9 @@ describe('readLockRecord and parseLockRecord', () => {
       control_port: 0,
       state: 'starting',
       process_start_id: null,
+    })
+    expect(parseLockRecord('{"instance_id":"a","pid":7,"owner_started_at":"epoch:123"}')).toMatchObject({
+      owner_started_at: 'epoch:123',
     })
     expect(parseLockRecord('{"pid":7}')).toBeUndefined()
     expect(parseLockRecord('[]')).toBeUndefined()

@@ -156,6 +156,10 @@ export class LlamacppRuntime {
     return this.sessions.get(modelId)?.plan.maxCtxTrain
   }
 
+  isLoading(modelId: string): boolean {
+    return this.loading.has(modelId)
+  }
+
   /** Load a model, or join the load already in flight for it. */
   async load(modelId: string, opts: LoadOptions = {}): Promise<SessionInfo> {
     this.assertRunning()

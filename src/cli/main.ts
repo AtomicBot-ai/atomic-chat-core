@@ -9,6 +9,7 @@
 import { AtomicCoreError } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import { daemonCommand, modelsCommand, serveCommand, serverCommand, shutdownCommand } from './commands.js'
+import { launchCommand } from './launch.js'
 import type { CliIo } from './io.js'
 
 export const USAGE = `atomic-chat-core ${CORE_VERSION}
@@ -21,7 +22,7 @@ Commands:
   server status   Report whether a local API server is reachable
   daemon          Run the core that owns this data folder (started for you by other commands)
   shutdown        Stop the core that owns this data folder
-  launch          Start a model and launch a coding agent wired to it            (phase 2)
+  launch <agent>  Start a model and launch a coding agent already wired to it
 
 Common options:
   --data-folder <path>   Data folder to work with (default: the app's)
@@ -40,6 +41,7 @@ Serve compatibility options:
   --fit                  Let llama.cpp choose context size for available memory
   --threads <n>          CPU inference threads (0 = auto)
   --api-key <key>        Require this key on the public API
+  --standalone           Run a foreground owner in an explicit, separate --data-folder
   -d, --detach           Compatibility flag; the persistent owner is already detached
   --log <path>           Append llama.cpp stdout/stderr to a file
   -v, --verbose          Relay llama.cpp output while the model loads
@@ -75,6 +77,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await modelsCommand(rest, io)
       case 'server':
         return await serverCommand(rest, io)
+      case 'launch':
+        return await launchCommand(rest, io)
       case 'shutdown':
         return await shutdownCommand(rest, io)
       default:

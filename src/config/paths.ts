@@ -36,12 +36,19 @@ export interface ProviderPaths {
 
 export interface CoreFiles {
   dir: string
+  /**
+   * The core's own copy of the local-API-server state, in the same schema as the app's
+   * `<data>/local-api-server.json`. The app owns that file until phase 4, and two writers would
+   * fight over it, so a core that serves `/v1` publishes its address here instead.
+   */
+  publicServerState: string
   settings: string
   credentials: string
   optimalBackend: string
   instanceLock: string
   controlToken: string
   processes: string
+  modelClaims: string
   logsDir: string
 }
 
@@ -61,12 +68,14 @@ export function dataLayout(root: string): DataLayout {
     chatgptAuthFile: join(root, CHATGPT_AUTH_FILE),
     core: {
       dir: coreDir,
+      publicServerState: join(coreDir, LOCAL_API_SERVER_STATE_FILE),
       settings: join(coreDir, 'settings.json'),
       credentials: join(coreDir, 'credentials.json'),
       optimalBackend: join(coreDir, 'optimal-backend.json'),
       instanceLock: join(coreDir, 'instance.lock'),
       controlToken: join(coreDir, 'control-token'),
       processes: join(coreDir, 'processes.json'),
+      modelClaims: join(coreDir, 'model-claims'),
       logsDir: join(coreDir, 'logs'),
     },
     provider(id) {

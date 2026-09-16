@@ -14,16 +14,20 @@ import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from './contracts/index.js'
 import type { ReadyLine } from './contracts/index.js'
 import type { LocalApiServerState, LocalProviderId, SessionInfo, UnloadResult } from './contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveDataFolder } from './config/index.js'
+import { writeFile } from 'node:fs/promises'
 import type { DataLayout } from './config/index.js'
 import { CoreEmitter } from './events/index.js'
 import {
   InstanceLock,
   ProcessJournal,
+  assertNotLoadedByLegacy,
+  acquireModelClaim,
   isProcessAlive,
   verifyProcessIdentity,
   writeControlToken,
 } from './lock/index.js'
 import type { ChildProcessRecord } from './lock/index.js'
+import type { ModelClaimHandle } from './lock/index.js'
 import { ModelRegistry } from './models/index.js'
 import { discoverBackendBinary, resolveBackendExe } from './backend/index.js'
 import { isConcreteVersionBackend } from './runtime/llamacpp/index.js'
@@ -89,6 +93,8 @@ export class AtomicCore {
   private shutdownPromise: Promise<void> | undefined
   private publicConfig: NormalizedPublicServerOptions | undefined
   private publicTransition: Promise<void> = Promise.resolve()
+  private readonly modelClaims = new Map<string, ModelClaimHandle>()
+  private readonly claimingModels = new Map<string, Promise<ModelClaimHandle>>()
   private resolveStopped: (() => void) | undefined
   /** Resolves once this core has stopped, however that was triggered (API, signal, or in-process). */
   readonly stopped: Promise<void> = new Promise<void>((resolve) => {
@@ -157,7 +163,7 @@ export class AtomicCore {
           clients,
           sessions: () => sessionsOf(runtimes),
           loadModel: (provider: string, modelId: string, body: Record<string, unknown>) =>
-            (core as AtomicCore).load(provider as LocalProviderId, modelId, body as LoadOptions),
+            (core as AtomicCore).acquire(provider as LocalProviderId, modelId, body as LoadOptions),
           unloadModel: (provider: string, modelId: string) =>
             (core as AtomicCore).unload(provider as LocalProviderId, modelId),
           publicServer: {
@@ -227,13 +233,60 @@ export class AtomicCore {
   }
 
   async load(provider: LocalProviderId, modelId: string, options: LoadOptions = {}): Promise<SessionInfo> {
+    return (await this.acquire(provider, modelId, options)).session
+  }
+
+  /** Load or attach without making an attaching client accidentally own the shared session. */
+  async acquire(
+    provider: LocalProviderId,
+    modelId: string,
+    options: LoadOptions = {}
+  ): Promise<{ session: SessionInfo; created: boolean }> {
     this.assertRunning()
-    return this.runtime(provider).load(modelId, options)
+    // The desktop app can still own this data folder until it becomes a core client. A second copy
+    // of a model it already holds would double the VRAM and race for the GPU, so refuse before
+    // anything is spawned, and say where the app is already serving it.
+    const runtime = this.runtime(provider)
+    const key = `${provider}\0${modelId}`
+    let claim = this.modelClaims.get(key)
+    if (!claim) {
+      let pending = this.claimingModels.get(key)
+      if (!pending) {
+        pending = acquireModelClaim(this.layout, provider, modelId, this.instanceId)
+        this.claimingModels.set(key, pending)
+      }
+      try {
+        claim = await pending
+        this.modelClaims.set(key, claim)
+      } finally {
+        if (this.claimingModels.get(key) === pending) this.claimingModels.delete(key)
+      }
+    }
+    const created = !runtime.findSession(modelId) && !runtime.isLoading(modelId)
+    try {
+      await assertNotLoadedByLegacy(this.layout, modelId)
+      const session = await runtime.load(modelId, options)
+      await claim.update('ready')
+      return { session, created }
+    } catch (e) {
+      if (created) {
+        await claim.release().catch(() => {})
+        this.modelClaims.delete(key)
+      }
+      throw e
+    }
   }
 
   async unload(provider: LocalProviderId, modelId: string): Promise<UnloadResult> {
     this.assertRunning()
-    return this.runtime(provider).unload(modelId)
+    const result = await this.runtime(provider).unload(modelId)
+    const key = `${provider}\0${modelId}`
+    await this.modelClaims
+      .get(key)
+      ?.release()
+      .catch(() => {})
+    this.modelClaims.delete(key)
+    return result
   }
 
   publicState(): LocalApiServerState {
@@ -275,6 +328,7 @@ export class AtomicCore {
       this.publicServer = server
       this.publicConfig = { ...requested, port: server.port }
       this.lastPublicState = server.state()
+      await this.publishServerState(server.state())
       this.events.emit('server:started', { host: server.host, port: server.port })
       this.log('info', `public API on ${server.url}`)
       return server.state()
@@ -292,8 +346,20 @@ export class AtomicCore {
     await this.publicServer.close()
     this.publicServer = undefined
     this.publicConfig = undefined
+    await this.publishServerState(this.lastPublicState)
     this.events.emit('server:stopped', {})
     return { ...this.lastPublicState }
+  }
+
+  /**
+   * Publish where the public API is, for clients that have no control token — `server status` and,
+   * later, the app. Never the app's `<data>/local-api-server.json`: that file belongs to the legacy
+   * server until phase 4 hands the writer over, and two writers would race.
+   */
+  private async publishServerState(state: LocalApiServerState): Promise<void> {
+    await writeFile(this.layout.core.publicServerState, `${JSON.stringify(state, null, 2)}\n`).catch(
+      (e: Error) => this.log('warn', `could not publish the public server state: ${e.message}`)
+    )
   }
 
   /**
@@ -323,6 +389,8 @@ export class AtomicCore {
     this.shutdownPromise = (async () => {
       await this.withPublicTransition(() => this.stopPublicServerNow())
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
+      await Promise.all([...this.modelClaims.values()].map((claim) => claim.release().catch(() => {})))
+      this.modelClaims.clear()
       await this.control.close()
       await this.lock.release()
       this.lifecycle = 'stopped'

@@ -27,6 +27,8 @@ export interface IdentityDeps {
 
 export const IDENTITY_PROBE_TIMEOUT_MS = 5000
 
+const readUtf8 = (path: string) => readFile(path, 'utf8')
+
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
@@ -37,7 +39,7 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-function runProbe(file: string, args: string[]): Promise<string> {
+export function runProbe(file: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(file, args, { timeout: IDENTITY_PROBE_TIMEOUT_MS, windowsHide: true }, (err, stdout) => {
       if (err) reject(err)
@@ -53,7 +55,7 @@ function runProbe(file: string, args: string[]): Promise<string> {
 export async function processStartId(pid: number, deps: IdentityDeps = {}): Promise<string | undefined> {
   if (!Number.isInteger(pid) || pid <= 0) return undefined
   const platform = deps.platform ?? process.platform
-  const readText = deps.readText ?? ((p: string) => readFile(p, 'utf8'))
+  const readText = deps.readText ?? readUtf8
   const run = deps.run ?? runProbe
   try {
     if (platform === 'linux') {
@@ -86,6 +88,46 @@ export async function processStartId(pid: number, deps: IdentityDeps = {}): Prom
     }
   } catch {
     return undefined // process gone, probe missing or refused
+  }
+  return undefined
+}
+
+/** Cross-language process identity used in files shared with the Rust desktop app. */
+export async function processStartEpoch(pid: number, deps: IdentityDeps = {}): Promise<string | undefined> {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  const platform = deps.platform ?? process.platform
+  const readText = deps.readText ?? readUtf8
+  const run = deps.run ?? runProbe
+  try {
+    if (platform === 'linux') {
+      const [stat, procStat] = await Promise.all([readText(`/proc/${pid}/stat`), readText('/proc/stat')])
+      const tail = stat
+        .slice(stat.lastIndexOf(')') + 1)
+        .trim()
+        .split(/\s+/)
+      const ticks = Number(tail[19])
+      const boot = Number(/^btime\s+(\d+)$/m.exec(procStat)?.[1])
+      if (!Number.isFinite(ticks) || !Number.isFinite(boot)) return undefined
+      // Linux USER_HZ is 100 on the desktop targets Atomic Chat supports.
+      return `epoch:${Math.floor(boot + ticks / 100)}`
+    }
+    if (platform === 'darwin') {
+      const out = (await run('/bin/ps', ['-o', 'lstart=', '-p', String(pid)])).trim()
+      const epoch = Math.floor(Date.parse(out) / 1000)
+      return Number.isFinite(epoch) ? `epoch:${epoch}` : undefined
+    }
+    if (platform === 'win32') {
+      const out = await run('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `[DateTimeOffset](Get-Process -Id ${pid} -ErrorAction Stop).StartTime | ForEach-Object { $_.ToUnixTimeSeconds() }`,
+      ])
+      const epoch = Number(out.trim())
+      return Number.isInteger(epoch) ? `epoch:${epoch}` : undefined
+    }
+  } catch {
+    return undefined
   }
   return undefined
 }

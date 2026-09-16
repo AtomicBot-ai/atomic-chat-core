@@ -58,7 +58,11 @@ export interface ControlServerDeps {
   emitter: CoreEmitter
   clients: ClientRegistry
   sessions: () => SessionSummary[]
-  loadModel: (provider: string, modelId: string, body: Record<string, unknown>) => Promise<SessionInfo>
+  loadModel: (
+    provider: string,
+    modelId: string,
+    body: Record<string, unknown>
+  ) => Promise<SessionInfo | { session: SessionInfo; created: boolean }>
   unloadModel: (provider: string, modelId: string) => Promise<UnloadResult>
   publicServer: PublicServerControl
   /** Stop the whole core. The server has already answered by the time this runs. */
@@ -295,8 +299,8 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
 
   router.post(p('/models/:provider/*modelId/load'), async (req, res, { params }) => {
     const body = await readJsonBody<Record<string, unknown>>(req)
-    const session = await deps.loadModel(params['provider'] as string, params['modelId'] as string, body)
-    sendJson(res, 200, { session })
+    const result = await deps.loadModel(params['provider'] as string, params['modelId'] as string, body)
+    sendJson(res, 200, 'session' in result ? result : { session: result, created: true })
   })
 
   router.post(p('/models/:provider/*modelId/unload'), async (_req, res, { params }) => {

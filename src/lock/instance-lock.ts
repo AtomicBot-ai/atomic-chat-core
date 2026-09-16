@@ -18,13 +18,19 @@ import { realpath } from 'node:fs/promises'
 import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import { CORE_VERSION } from '../version.js'
-import { identityPermitsTakeover, processStartId, verifyProcessIdentity } from './process-identity.js'
+import {
+  identityPermitsTakeover,
+  processStartEpoch,
+  processStartId,
+  verifyProcessIdentity,
+} from './process-identity.js'
 import type { IdentityDeps, IdentityVerdict } from './process-identity.js'
 
 export interface LockRecord {
   instance_id: string
   pid: number
   process_start_id: string | null
+  owner_started_at?: string | null
   protocol: number
   version: string
   /** Canonical data folder: the lock's scope, so two paths to the same folder collide as they should. */
@@ -104,6 +110,7 @@ export function parseLockRecord(text: string): LockRecord | undefined {
     instance_id: r['instance_id'],
     pid: r['pid'],
     process_start_id: typeof r['process_start_id'] === 'string' ? r['process_start_id'] : null,
+    owner_started_at: typeof r['owner_started_at'] === 'string' ? r['owner_started_at'] : null,
     protocol: typeof r['protocol'] === 'number' ? r['protocol'] : 0,
     version: typeof r['version'] === 'string' ? r['version'] : '',
     data_folder: typeof r['data_folder'] === 'string' ? r['data_folder'] : '',
@@ -150,6 +157,7 @@ export class InstanceLock {
     await mkdir(layout.core.dir, { recursive: true })
     const dataFolder = await canonicalDataFolder(layout.root)
     const selfId = deps.selfStartId ? await deps.selfStartId() : await processStartId(process.pid, deps)
+    const ownerStartedAt = await processStartEpoch(process.pid, deps)
 
     for (let attempt = 0; attempt < TAKEOVER_ATTEMPTS; attempt++) {
       const handle = await open(path, 'wx').catch((e: unknown) => {
@@ -165,6 +173,7 @@ export class InstanceLock {
           instance_id: randomUUID(),
           pid: process.pid,
           process_start_id: selfId ?? null,
+          owner_started_at: ownerStartedAt ?? null,
           protocol: CONTROL_PROTOCOL_VERSION,
           version: CORE_VERSION,
           data_folder: dataFolder,

@@ -1,0 +1,70 @@
+name: release
+
+# Publishes the binaries the desktop app downloads (`scripts/download-core.mjs` there pins a version
+# and verifies the checksums). Assets are named `atomic-chat-core-<version>-<triple>` so the app can
+# build the URL from `atomicCore.version` alone, plus a `SHA256SUMS` covering all of them.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (defaults to package.json)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: latest }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: bun install --frozen-lockfile
+
+      # Never publish something the gates have not seen.
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:coverage
+
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          test "$tag" = "$pkg" || { echo "tag $tag != package.json $pkg"; exit 1; }
+
+      # Bun cross-compiles every target from one host; the app signs the macOS ones itself.
+      - run: npm run build:bin -- --all
+
+      - name: Name the assets and checksum them
+        id: package
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p release
+          for path in dist/bin/atomic-chat-core-*; do
+            name="$(basename "$path")"
+            triple="${name#atomic-chat-core-}"
+            cp "$path" "release/atomic-chat-core-$version-$triple"
+          done
+          cd release
+          sha256sum atomic-chat-core-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atomic-chat-core-binaries
+          path: release/
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
