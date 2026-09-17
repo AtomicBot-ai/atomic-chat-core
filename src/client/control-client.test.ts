@@ -128,6 +128,7 @@ beforeEach(async () => {
     },
     cancelModelLoad: (_provider, modelId) => modelId === 'Owner/Loading-GGUF',
     disk: { available: async (path) => (path === undefined ? 42 : null) },
+    remoteAccess: { lanAddresses: async () => ['192.168.1.5'] },
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -337,6 +338,12 @@ describe('disk space', () => {
   it('asks for the data folder by default, for a path when given one, and passes an unknown through', async () => {
     expect(await client.availableDiskSpace()).toBe(42)
     expect(await client.availableDiskSpace('/data/diffusion/models')).toBeNull()
+  })
+})
+
+describe('LAN addresses', () => {
+  it('lists what a device on the network can dial', async () => {
+    expect(await client.lanAddresses()).toEqual(['192.168.1.5'])
   })
 })
 

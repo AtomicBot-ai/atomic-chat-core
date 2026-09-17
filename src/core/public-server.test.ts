@@ -1,5 +1,6 @@
-import { createServer } from 'node:net'
+import { connect, createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
+import { networkInterfaces } from 'node:os'
 import { readFile, writeFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import { cores, createCore, createOnPort, data, useCoreHarness } from '../../test/helpers/core-harness.js'
@@ -7,6 +8,28 @@ import { CoreClient } from '../client/index.js'
 import { AtomicCore } from './index.js'
 
 useCoreHarness()
+
+/** A non-internal IPv4 address of this machine, which is what a LAN client would dial. */
+function lanAddress(): string | undefined {
+  for (const addresses of Object.values(networkInterfaces()))
+    for (const entry of addresses ?? [])
+      if (entry.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.'))
+        return entry.address
+  return undefined
+}
+
+/** The status of one `GET /v1/models` sent to `connectTo` with exactly this `Host`. */
+function hostRequest(port: number, connectTo: string, host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, connectTo)
+    let raw = ''
+    socket.setEncoding('utf8')
+    socket.on('data', (chunk: string) => (raw += chunk))
+    socket.on('error', reject)
+    socket.on('close', () => resolve(Number(raw.split(' ')[1])))
+    socket.write(`GET /v1/models HTTP/1.1\r\nhost: ${host}\r\nconnection: close\r\n\r\n`)
+  })
+}
 
 describe('cloud routing through the core', () => {
   it('routes a registered cloud model with the stored key, and still does after the core restarts', async () => {
@@ -167,6 +190,23 @@ describe('the public listener is independent', () => {
     expect((await fetch(`http://127.0.0.1:${first.port}/`)).status).toBe(200)
     expect(core.publicState()).toMatchObject({ running: true, port: first.port, requires_api_key: false })
   })
+
+  it.skipIf(lanAddress() === undefined)(
+    'lets a LAN client in by the address it reached, without a Trusted Hosts entry and without a restart',
+    async () => {
+      const address = lanAddress() as string
+      const core = await createCore()
+      const { port } = await core.startPublicServer({ host: '0.0.0.0', port: 0 })
+
+      const reached = await fetch(`http://${address}:${port}/v1/models`)
+      expect(reached.status).toBe(200)
+      // The same listener still refuses a name that is not the socket's own address.
+      const stranger = await hostRequest(port, address, 'evil.example')
+      expect(stranger).toBe(403)
+      // Nothing about the group is part of the listener's identity: a repeated start is still idempotent.
+      await expect(core.startPublicServer({ host: '0.0.0.0', port })).resolves.toMatchObject({ port })
+    }
+  )
 
   it("publishes its address in the core's own file, never the app's", async () => {
     const core = await createCore()

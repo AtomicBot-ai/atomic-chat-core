@@ -127,6 +127,12 @@ export interface DiskControl {
   available: (path: unknown) => Promise<number | null>
 }
 
+/** Reaching the public listener from outside this machine (stage 7c–7d). */
+export interface RemoteAccessControl {
+  /** IPv4 literals a device on the network can dial, default-route address first. Display only. */
+  lanAddresses: () => Promise<string[]>
+}
+
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
 export interface ExternalSessionControl {
   publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
@@ -195,6 +201,7 @@ export interface ControlServerDeps {
   backends: BackendControl
   /** Free space inside the data folder, which the app asks before a download (stage 7b). */
   disk: DiskControl
+  remoteAccess: RemoteAccessControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /**

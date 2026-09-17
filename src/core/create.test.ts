@@ -165,6 +165,22 @@ describe('taking ownership', () => {
     expect(await stopped.json()).toMatchObject({ running: false })
   })
 
+  it('wires free disk space to its own data folder and the LAN addresses to this machine', async () => {
+    const core = await createCore()
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+
+    expect(await client.availableDiskSpace()).toBeGreaterThan(0)
+    expect(await client.availableDiskSpace(join(data.root, 'diffusion', 'models'))).toBeGreaterThan(0)
+    // The data folder is the owner's own: another folder is refused, however real it is.
+    await expect(client.availableDiskSpace(join(data.root, '..'))).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+
+    const addresses = await client.lanAddresses()
+    expect(Array.isArray(addresses)).toBe(true)
+    for (const address of addresses) expect(address).toMatch(/^\d{1,3}(\.\d{1,3}){3}$/)
+  })
+
   it('wires revisioned optimal state, snapshots and backend controls to the owner', async () => {
     const core = await createCore()
     const call = (path: string, method = 'GET', body?: unknown) =>

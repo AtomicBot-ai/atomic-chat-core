@@ -23,6 +23,7 @@ import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult 
 import type { SettingsStore } from '../settings/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
+import { DynamicTrustedHosts } from '../server/index.js'
 import type { ClientRegistry, ControlServer, SessionSummary } from '../server/index.js'
 import { CORE_VERSION } from '../version.js'
 import { createAtomicCore } from './create.js'
@@ -87,6 +88,8 @@ export class AtomicCore {
   private readonly localSessions: LocalSessions
   /** The public `/v1` listener and its serialized start/stop. */
   private readonly publicServer: PublicServerLifecycle
+  /** What the public listener trusts beyond its configuration: the tunnel name, the socket's address. */
+  private readonly trustedHosts = new DynamicTrustedHosts()
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -128,6 +131,7 @@ export class AtomicCore {
           this.localSessions.serverCtxRequest(provider, modelId, trigger),
         emit: (name, payload) => this.events.emit(name, payload),
         inspecting: () => this.inspecting,
+        dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
       }),
     })
   }

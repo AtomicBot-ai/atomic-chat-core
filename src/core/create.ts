@@ -34,6 +34,7 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
+import { lanAddresses } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
@@ -298,6 +299,7 @@ export async function createAtomicCore(
           optimalSnapshot: () => optimalStore.snapshot(),
         },
         disk: { available: (path) => availableDiskSpace(layout.root, path) },
+        remoteAccess: { lanAddresses },
         settings: {
           get: (provider) => settings.get(provider),
           revision: () => settings.revision,

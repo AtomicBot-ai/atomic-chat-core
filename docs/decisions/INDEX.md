@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-17** — [Trust the live tunnel name and the accepted socket's address as a per-request group](2026-09-17-trust-the-tunnel-name-and-the-accepted-socket-address-per-request.md)
 - **2026-09-17** — [Report download stages as their own event, and answer free disk space inside the data folder](2026-09-17-report-download-stages-as-their-own-event.md)
 - **2026-09-17** — [Cancel a model load through a shared per-model registry outside the transition queue](2026-09-17-cancel-a-model-load-through-a-shared-registry.md)
 - **2026-09-17** — [Validate downloaded macOS backends and repair installed upstream CUDA packs](2026-09-17-validate-downloaded-macos-backends-and-repair-upstream-cuda.md)

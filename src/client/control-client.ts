@@ -180,6 +180,11 @@ export class CoreClient {
     return result.bytes
   }
 
+  /** IPv4 literals a device on the network can dial, default-route address first. Display only. */
+  async lanAddresses(): Promise<string[]> {
+    return (await this.call<{ addresses: string[] }>('/lan-addresses')).addresses
+  }
+
   /** Restart a poisoned engine at the context it already has. */
   recreateSession(provider: string, modelId: string): Promise<{ ok: boolean; reason?: string }> {
     return this.call(`/models/${provider}/${modelId}/recreate`, { method: 'POST' })

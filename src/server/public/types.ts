@@ -46,6 +46,12 @@ export interface PublicServerDeps {
   inspecting?: () => boolean
   /** The ChatGPT subscription, for models registered under the `chatgpt` provider. */
   chatgpt?: ChatGptBackend
+  /**
+   * Hosts trusted for this one request besides the configured ones: the live tunnel name, and the
+   * accepted socket's own address when the listener is reachable from the LAN. Asked per request,
+   * not per connection — a keep-alive connection outlives a tunnel (see `dynamic-hosts.ts`).
+   */
+  dynamicTrustedHosts?: (localAddress: string | undefined) => readonly string[]
   emit?: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
   fetch?: typeof fetch
 }

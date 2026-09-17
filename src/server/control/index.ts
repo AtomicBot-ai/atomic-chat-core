@@ -20,6 +20,7 @@ export type {
   ExternalSessionControl,
   ModelControl,
   PublicServerControl,
+  RemoteAccessControl,
   SessionSummary,
   SettingsControl,
 } from './types.js'

@@ -8,7 +8,10 @@
  * Contract: test/fixtures/app/proxy-http, replayed by test/contract/proxy-http.test.ts.
  *
  * A request passes, in this order: CORS preflight (answered outright), prefix removal, the
- * host/key/hidden-path gates, then routing. Per-session engine keys never leave the server:
+ * host/key/hidden-path gates, then routing. The trusted hosts those gates read are the configured
+ * ones plus a group that is only known per request (the live tunnel name, the accepted socket's
+ * address); it is appended to a copy, so the gates themselves and the listener's identity stay as
+ * they were. Per-session engine keys never leave the server:
  * clients authenticate with the server's own key and the upstream key is attached on the way out.
  */
 
@@ -29,6 +32,7 @@ import { sendWhole } from './wire.js'
 
 export type { CtxIncreaseOutcome, LocalTarget, PublicServerConfig, PublicServerDeps } from './types.js'
 export { isValidHost, removePrefix } from './gates.js'
+export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
 
 export const DEFAULT_PUBLIC_PORT = 1337
 export const DEFAULT_PUBLIC_HOST = '127.0.0.1'
@@ -94,14 +98,27 @@ function requestPath(url: string | undefined): string {
   return q >= 0 ? target.slice(0, q) : target
 }
 
+/** The configuration one request is checked against: the listener's, plus what is trusted just for it. */
+function configFor(
+  req: IncomingMessage,
+  listener: PublicServerConfig,
+  deps: PublicServerDeps
+): PublicServerConfig {
+  const dynamic = deps.dynamicTrustedHosts?.(req.socket.localAddress) ?? []
+  return dynamic.length === 0
+    ? listener
+    : { ...listener, trustedHosts: [...listener.trustedHosts, ...dynamic] }
+}
+
 export async function handlePublicRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  config: PublicServerConfig,
+  listener: PublicServerConfig,
   deps: PublicServerDeps
 ): Promise<void> {
   const trace = new RequestTrace(req.method ?? 'GET', deps)
   trace.attach(res)
+  const config = configFor(req, listener, deps)
 
   if (req.method === 'OPTIONS') {
     // Preflight is browser bookkeeping, not a product signal, whatever its outcome.

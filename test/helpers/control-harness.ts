@@ -40,6 +40,8 @@ export interface ControlHarness {
   ctxIncrease: CtxIncreaseResult
   /** What `POST /disk/available` answers; `null` models a platform that cannot say. */
   diskBytes: number | null
+  /** What `GET /lan-addresses` answers. */
+  lanAddresses: string[]
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
 
@@ -116,6 +118,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     },
     ctxIncrease: { ok: true, new_ctx_len: 32768, session: session() },
     diskBytes: 5_000_000_000,
+    lanAddresses: ['192.168.1.5', '10.0.0.9'],
   } as unknown as ControlHarness
   const server = await ControlServer.start({
     token: CONTROL_TOKEN,
@@ -134,6 +137,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       },
     },
     models: harness.models,
+    remoteAccess: { lanAddresses: async () => harness.lanAddresses },
     externalSessions: {
       publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),
       heartbeat: () => ({ alive: true }),
