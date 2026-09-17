@@ -1,6 +1,6 @@
 /**
  * Reads what the desktop app's legacy runtime is holding, so the core does not load a model the app
- * already has (PLAN.md §3.4, "Совместное существование с legacy").
+ * already has (PLAN.md §3.4, "Coexistence with legacy").
  *
  * Until the app becomes a core client, both runtimes can be live on one data folder. Two copies of
  * one model double the VRAM and race for the GPU, and neither side can ask the other over IPC — so

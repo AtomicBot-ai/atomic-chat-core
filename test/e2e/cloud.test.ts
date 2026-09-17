@@ -28,6 +28,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   for (const daemon of daemons.splice(0)) daemon.kill('SIGKILL')
+  core.reapJournalledChildren(dataFolder)
   await Promise.all(stubs.splice(0).map((s) => s.close()))
   await rm(dataFolder, { recursive: true, force: true })
 })

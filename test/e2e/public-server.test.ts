@@ -1,5 +1,5 @@
 /**
- * The Local API Server of stage 4b, run through the compiled binary (PLAN.md §5.1 "E2E (бинарь)").
+ * The Local API Server of stage 4b, run through the compiled binary (PLAN.md §5.1 "E2E (binary)").
  *
  * The wire contract itself is replayed in `test/contract/proxy-http.test.ts`; this file proves the
  * same server works when it is what users actually run: a Bun-compiled daemon, the documentation
@@ -32,6 +32,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   for (const daemon of daemons.splice(0)) daemon.kill('SIGKILL')
+  core.reapJournalledChildren(dataFolder)
   await rm(dataFolder, { recursive: true, force: true })
 })
 

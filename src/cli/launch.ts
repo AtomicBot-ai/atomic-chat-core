@@ -12,7 +12,7 @@ import { execFile, spawn } from 'node:child_process'
 import { parseArgs } from 'node:util'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreClient } from '../client/index.js'
-import { LOCAL_PROVIDER } from '../core.js'
+import { LOCAL_PROVIDER } from '../core/index.js'
 import { configureAgent } from '../integrations/configure/index.js'
 import {
   AGENTS,
@@ -25,7 +25,7 @@ import {
 } from '../integrations/index.js'
 import type { Agent, AgentDetection } from '../integrations/index.js'
 import { ModelRegistry } from '../models/index.js'
-import { layoutFor } from './commands.js'
+import { layoutFor } from './commands/index.js'
 import type { CliIo } from './io.js'
 import { withAttachedOwner } from './owner.js'
 
@@ -125,7 +125,7 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
 
   const standaloneCore = values.standalone
     ? await (
-        await import('../core.js')
+        await import('../core/index.js')
       ).AtomicCore.create({ dataFolder: layout.root, controlPort: 0, env: io.env })
     : undefined
   const execute = async (client?: CoreClient): Promise<number> => {

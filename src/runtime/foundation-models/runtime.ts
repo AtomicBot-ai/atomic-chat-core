@@ -20,12 +20,21 @@ import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
 import type { SessionInfo, UnloadResult } from '../../contracts/index.js'
-import type { CtxIncreaseResult, LocalLoadOptions, LocalRuntime, RecreateResult } from '../local-runtime.js'
-import { closeLogStream, openLogStream } from '../log-stream.js'
-import { generateApiKey, randomFreePort } from '../ports.js'
-import { spawnAndAwaitReady } from '../process.js'
-import { SidecarTable } from '../sidecar.js'
-import type { EmitFn } from '../sidecar.js'
+import type {
+  CtxIncreaseResult,
+  EmitFn,
+  LocalLoadOptions,
+  LocalRuntime,
+  RecreateResult,
+} from '../shared/index.js'
+import {
+  closeLogStream,
+  generateApiKey,
+  openLogStream,
+  randomFreePort,
+  SidecarTable,
+  spawnAndAwaitReady,
+} from '../shared/index.js'
 import {
   FOUNDATION_MODELS_ERROR_PREFIX,
   FOUNDATION_MODELS_READY_MARKERS,

@@ -5,8 +5,8 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import { spawnManaged } from '../process.js'
-import type { ManagedProcess, SpawnSpec } from '../process.js'
+import { spawnManaged } from '../shared/index.js'
+import type { ManagedProcess, SpawnSpec } from '../shared/index.js'
 
 export const DFLASH_SPEC_TYPE = 'draft-dflash'
 export const PROBE_TIMEOUT_MS = 5000

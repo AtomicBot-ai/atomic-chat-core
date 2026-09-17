@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { storedZip } from '../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -11,6 +11,7 @@ import {
   determineBestTurboquantBackend,
   determineTurboquantSupportedBackends,
   ensureTurboquantCudart,
+  ensureUpstreamCudart,
   filterTurboquantBackendsBySupport,
   findUpstreamCudaDonor,
   getTurboquantBackendCategory,
@@ -379,6 +380,63 @@ describe('archives', () => {
     expect(await ensureTurboquantCudart('windows-x64-cuda-12.4', pack, 't', deps)).toBe('copied')
     expect(await readdir(bin)).toEqual(['cudart64_12.dll'])
     expect(await ensureTurboquantCudart('windows-x64-cuda-12.4', pack, 't', deps)).toBe('present')
+  })
+
+  it('repairs an already-installed upstream CUDA pack, including the legacy lib location', async () => {
+    const pack = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b10205', 'win-cuda-12.4-x64')
+    const legacy = join(data.root, 'llamacpp', 'lib')
+    await mkdir(legacy, { recursive: true })
+    await writeFile(join(legacy, 'cudart64_12.dll'), 'old')
+    const downloads: string[] = []
+    const deps = {
+      layout: data.layout,
+      platform: 'win32' as const,
+      downloader: {
+        download: async (_task: string, items: Array<{ url: string; save_path: string }>) => {
+          downloads.push(items[0]!.url)
+          await writeFile(items[0]!.save_path, storedZip('bin/cudart64_12.dll', Buffer.from('new')))
+        },
+      },
+    }
+    expect(await ensureUpstreamCudart('b10205', 'win-cuda-12.4-x64', pack, 't', deps)).toBe('present')
+    expect(downloads).toHaveLength(0)
+    const bin = join(pack, 'build', 'bin')
+    expect(await readdir(bin)).toEqual(['cudart64_12.dll'])
+    await rm(join(bin, 'cudart64_12.dll'))
+    expect(await ensureUpstreamCudart('b10205', 'win-cuda-12.4-x64', pack, 't', deps)).toBe('downloaded')
+    expect(downloads).toHaveLength(1)
+    expect(await readdir(bin)).toEqual(['cudart64_12.dll'])
+  })
+
+  it('does not fetch for other platforms or backends, and rejects a companion without the required DLL', async () => {
+    const pack = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b10205', 'win-cuda-13.3-x64')
+    const seen: Array<{ task: string; url: string; proxy?: unknown }> = []
+    const deps = {
+      layout: data.layout,
+      platform: 'win32' as const,
+      proxy: { url: 'http://proxy' },
+      downloader: {
+        download: async (task: string, items: Array<{ url: string; save_path: string; proxy?: unknown }>) => {
+          seen.push({ task, url: items[0]!.url, proxy: items[0]!.proxy })
+          await writeFile(items[0]!.save_path, storedZip('readme.txt', Buffer.from('no runtime')))
+        },
+      },
+    }
+    expect(
+      await ensureUpstreamCudart('b10205', 'win-cuda-13.3-x64', pack, 't', { ...deps, platform: 'darwin' })
+    ).toBe('not-needed')
+    expect(await ensureUpstreamCudart('b10205', 'win-cpu-x64', pack, 't', deps)).toBe('not-needed')
+    await expect(ensureUpstreamCudart('b10205', 'win-cuda-13.3-x64', pack, 't', deps)).rejects.toThrow(
+      'did not contain cudart64_13.dll'
+    )
+    expect(seen).toEqual([
+      {
+        task: 't',
+        url: 'https://github.com/ggml-org/llama.cpp/releases/download/b10205/cudart-llama-bin-win-cuda-13.3-x64.zip',
+        proxy: { url: 'http://proxy' },
+      },
+    ])
+    expect(await readdir(data.layout.provider('llamacpp-upstream').tmpDir)).toEqual([])
   })
 
   it('downloads the companion into the pack and cleans up, and refuses an archive with no DLLs', async () => {

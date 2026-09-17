@@ -27,12 +27,20 @@ import type { ProcessJournal } from '../../lock/index.js'
 import type { ModelRegistry } from '../../models/index.js'
 import { resolveEagle3Draft, resolveMlxDflashDraft, resolveMtpDraft } from '../../speculative/index.js'
 import { DEFAULT_CTX_LEN, computeNextCtxLen } from '../llamacpp/ctx-ladder.js'
-import type { CtxIncreaseResult, LocalLoadOptions, LocalRuntime, RecreateResult } from '../local-runtime.js'
-import { closeLogStream, openLogStream } from '../log-stream.js'
-import { randomFreePort } from '../ports.js'
-import { spawnAndAwaitReady } from '../process.js'
-import { SidecarTable } from '../sidecar.js'
-import type { EmitFn } from '../sidecar.js'
+import type {
+  CtxIncreaseResult,
+  EmitFn,
+  LocalLoadOptions,
+  LocalRuntime,
+  RecreateResult,
+} from '../shared/index.js'
+import {
+  closeLogStream,
+  openLogStream,
+  randomFreePort,
+  SidecarTable,
+  spawnAndAwaitReady,
+} from '../shared/index.js'
 import { buildMlxServerArgs, normalizeMlxModelPath } from './args.js'
 import { asNumber, buildMlxConfig, selectMlxDraftSettings } from './config.js'
 import type { MlxDraftKind, MlxExtensionConfigInput } from './config.js'

@@ -16,7 +16,7 @@ title: "backend/ keeps one Rust-derived category function and explicit recheck o
   `refreshOptimalBackendCache` and `detectIdealBackendType` return a discriminated outcome
   (`detection_failed`, `cpu_optimal`, `already_optimal`, `no_catalog_entry`, `recommend`); the
   caller decides whether to throw `BACKEND_DETECTION_FAILED`, persist the record and emit events.
-  Owner decision 2026-09-15: "единая функция в ядре, та что в TS отстала".
+  Owner decision 2026-09-15: "one function in the core; the TS one has fallen behind".
 - **Consequences:** The only user-visible difference is that a ROCm recommendation's
   `recommendedCategory` reads `rocm` instead of `unknown`. The phase 3 adapter must map the
   outcome union back onto the extension's `null`/throw contract until the extension is removed.

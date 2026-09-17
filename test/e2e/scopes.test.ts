@@ -5,7 +5,14 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { APP_BIN, BIN, control, startDaemon, writeModel } from '../helpers/compiled-core.js'
+import {
+  APP_BIN,
+  BIN,
+  control,
+  reapJournalledChildren,
+  startDaemon,
+  writeModel,
+} from '../helpers/compiled-core.js'
 
 const daemons: ChildProcess[] = []
 const folders: string[] = []
@@ -16,6 +23,7 @@ async function folder(): Promise<string> {
 }
 afterEach(async () => {
   for (const child of daemons.splice(0)) child.kill('SIGKILL')
+  for (const path of folders) reapJournalledChildren(path)
   await Promise.all(folders.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 

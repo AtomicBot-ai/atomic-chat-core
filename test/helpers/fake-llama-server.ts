@@ -6,8 +6,8 @@
  * the same path as macOS and Linux.
  */
 import { fileURLToPath } from 'node:url'
-import { spawnAndAwaitReady, spawnManaged } from '../../src/runtime/process.js'
-import type { ManagedProcess, ReadyOptions, SpawnSpec } from '../../src/runtime/process.js'
+import { spawnAndAwaitReady, spawnManaged } from '../../src/runtime/index.js'
+import type { ManagedProcess, ReadyOptions, SpawnSpec } from '../../src/runtime/index.js'
 
 export const FAKE_LLAMA_SCRIPT = fileURLToPath(new URL('./fake-llama-server.mjs', import.meta.url))
 

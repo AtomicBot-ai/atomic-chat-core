@@ -50,13 +50,14 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
 | `src/events/`                       | Typed `EventEmitter`; the catalog is in `src/contracts/events.ts`.                                                    |
 | `src/hardware/`                     | CPU/GPU/VRAM probes via system tools; override endpoint for NVML/Vulkan facts injected by the app.                    |
 | `src/downloads/`                    | Resumable downloads (`.tmp` + `.url`), sha256, disk-error tags, `.tar.gz`/`.zip` extraction.                         |
-| `src/backend/`                      | llama.cpp backend packs: manifest, hardware tier selection, install/update, optimal-backend cache.                    |
+| `src/backend/`                      | llama.cpp backend packs: `catalog/` (manifest, archive names, id migration), `select/` (hardware tiers), `installed/` + `install/` (packs on disk, install/update), `optimal/` (optimal-backend cache), `turboquant.ts`. |
 | `src/models/`                       | `model.yml`, model registry, import (URL/HF/local/sharded), GGUF metadata + KV-cache estimate.                        |
 | `src/speculative/`                  | MTP / DFlash / EAGLE-3 draft registries, transcription model, chat-template overrides.                                |
-| `src/runtime/`                      | `process.ts` (spawn / readiness / kill), `llamacpp/` (provider-parameterised), `mlx/`, `foundation-models/`.          |
-| `src/cloud/` `src/router/` `src/server/` | Providers + key injection; model→target resolution; HTTP server (`/v1/*` public, `/atomic/v1/*` control).      |
+| `src/runtime/`                      | `shared/` (spawn / readiness / kill, ports, env, sidecar table), `llamacpp/` (provider-parameterised), `mlx/`, `foundation-models/`. |
+| `src/core/`                         | `AtomicCore` facade (`atomic-core.ts`), service wiring (`create.ts`), local sessions, public-server lifecycle.         |
+| `src/cloud/` `src/router/` `src/server/` | Providers + key injection; model→target resolution; HTTP server (`/v1/*` public in `server/public/`, `/atomic/v1/*` control in `server/control/`, one file per route family). |
 | `src/lock/`                         | One owner per canonical data folder; PID/start identity, attach, child-process journal and legacy-resource guards. |
-| `src/cli/`                          | Subcommands; `main.ts` is the binary entry.                                                                           |
+| `src/cli/`                          | `main.ts` is the binary entry; one file per subcommand in `commands/`.                                                |
 | `test/`                             | `contract/`, `e2e/`, `app-e2e/`, `runtime-compat/`, `live/`, `fixtures/`, `helpers/`. Unit tests live next to code.  |
 | `scripts/`                          | CI gates: `check-runtime-agnostic.mjs`, `check-test-quality.mjs`, `check-coverage-floor.mjs`; `build-binaries.mjs`; `import-app-fixtures.mjs`. |
 | `docs/decisions/`                   | ADR log, one file per decision, append-only.                                                                          |
@@ -87,6 +88,9 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
 10. **Never commit unless explicitly asked.**
 11. **Record non-trivial decisions** as a new file in `docs/decisions/` (template `_TEMPLATE.md`), in the
     same session, and add one line to `INDEX.md`.
+12. **Everything written in the repo is English** — code, comments, commit messages, docs, ADRs, `PLAN.md`
+    and its journal, scripts and their output. The only exception is non-English test data that a test
+    exists to exercise (Unicode paths, UTF-8 boundaries, fixtures imported from the app).
 
 ---
 

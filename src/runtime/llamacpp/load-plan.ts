@@ -20,7 +20,7 @@ import {
   matchesMtpLoadFailure,
   parseGgufShard,
 } from '../../models/index.js'
-import { generateApiKey } from '../ports.js'
+import { generateApiKey } from '../shared/index.js'
 import { withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
 import {

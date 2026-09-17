@@ -1,6 +1,6 @@
 /**
  * Importing the desktop app's legacy settings into the core (PLAN.md §3.4,
- * "Миграция настроек — до первого core-load").
+ * "Settings migration — before the first core-load").
  *
  * Until a provider's settings are imported, the app's copy is the truth and the core must not own
  * that provider's runtime. Import is what moves that line — and it has to survive being run more

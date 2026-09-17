@@ -21,7 +21,7 @@ const MODEL_URL =
 
 /**
  * Release asset for this platform, in the naming llama.cpp actually publishes (macOS and Linux ship
- * `.tar.gz`, Windows `.zip`) — the same mapping `src/backend/archive.ts` encodes.
+ * `.tar.gz`, Windows `.zip`) — the same mapping `src/backend/catalog/archive.ts` encodes.
  */
 function assetPattern() {
   if (process.env.ATOMIC_LIVE_ASSET) return new RegExp(`^${escape(process.env.ATOMIC_LIVE_ASSET)}$`)

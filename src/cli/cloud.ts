@@ -11,7 +11,7 @@ import { parseArgs } from 'node:util'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CloudProviderView } from '../cloud/index.js'
 import type { CoreClient } from '../client/index.js'
-import { layoutFor } from './commands.js'
+import { layoutFor } from './commands/index.js'
 import type { CliIo } from './io.js'
 import { withAttachedOwner } from './owner.js'
 

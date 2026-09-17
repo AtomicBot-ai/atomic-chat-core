@@ -43,7 +43,7 @@ export interface ProviderRuntimeState {
   [extra: string]: unknown
 }
 
-/** One migration scope (a provider, `server` or `cloud`), see PLAN.md §3.4 "Миграция настроек". */
+/** One migration scope (a provider, `server` or `cloud`), see PLAN.md §3.4 "Settings migration". */
 export interface MigrationRecord {
   baseline: Record<string, unknown> | null
   legacy_hash: string | null

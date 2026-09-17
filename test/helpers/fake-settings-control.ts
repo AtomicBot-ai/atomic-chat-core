@@ -7,7 +7,7 @@
  * what is under test rather than the store's.
  */
 
-import type { SettingsControl } from '../../src/server/control.js'
+import type { SettingsControl } from '../../src/server/control/index.js'
 import type { ImportResult, MigrationRecord, ProviderValues, UpdateResult } from '../../src/settings/index.js'
 
 export interface FakeSettingsControl extends SettingsControl {

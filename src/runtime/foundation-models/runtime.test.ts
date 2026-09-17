@@ -6,7 +6,7 @@ import type { FakeSidecarOptions } from '../../../test/helpers/fake-sidecar-serv
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { ProcessJournal } from '../../lock/index.js'
-import { generateApiKey } from '../ports.js'
+import { generateApiKey } from '../shared/index.js'
 import { APPLE_MODEL_ID, AVAILABILITY_TTL_MS, FoundationModelsRuntime } from './runtime.js'
 import type { FoundationModelsRuntimeOptions } from './runtime.js'
 

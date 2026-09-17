@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Dedicated app-owned binary. It has no CLI command dispatcher or path override for CLI commands. */
 import { parseArgs } from 'node:util'
-import { AtomicCore } from './core.js'
+import { AtomicCore } from './core/index.js'
 import { CORE_VERSION } from './version.js'
 import { nodeCliIo } from './cli/io.js'
 

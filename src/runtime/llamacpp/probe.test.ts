@@ -29,7 +29,7 @@ describe('checkSpecTypeSupport', () => {
   })
 })
 
-const spawnModule = await import('../process.js')
+const spawnModule = await import('../shared/index.js')
 const spawnHelp = (spec: { exe: string; args: string[] }) =>
   spawnModule.spawnManaged({
     exe: spec.exe,

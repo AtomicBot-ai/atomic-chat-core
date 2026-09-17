@@ -1,5 +1,5 @@
 /**
- * The phase-1 exit criteria, run against the compiled binary (PLAN.md §4, §5.1 "E2E (бинарь)"):
+ * The phase-1 exit criteria, run against the compiled binary (PLAN.md §4, §5.1 "E2E (binary)"):
  * a daemon that owns a data folder, two clients attached at once, the public listener stopping and
  * starting without control noticing, a second owner refused, a crashed owner recovered, and an
  * explicit shutdown that leaves no backend process behind.
@@ -32,6 +32,7 @@ afterEach(async () => {
   for (const daemon of daemons.splice(0)) {
     daemon.kill('SIGKILL')
   }
+  core.reapJournalledChildren(dataFolder)
   await Promise.all(fixtures.splice(0).map((fixture) => fixture.close()))
   await rm(dataFolder, { recursive: true, force: true })
 })

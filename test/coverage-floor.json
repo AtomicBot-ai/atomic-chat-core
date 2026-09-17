@@ -1,62 +1,80 @@
 {
-  "src/backend/amd-rocm-pci-ids.ts": {
-    "statements": 100,
-    "branches": 100,
-    "functions": 100,
-    "lines": 100
-  },
-  "src/backend/archive.ts": {
+  "src/backend/catalog/archive.ts": {
     "statements": 100,
     "branches": 98,
     "functions": 100,
     "lines": 100
   },
-  "src/backend/bundled-manifest-baseline.ts": {
+  "src/backend/catalog/bundled-manifest-baseline.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
     "lines": 100
   },
-  "src/backend/cuda-family.ts": {
+  "src/backend/catalog/cuda-family.ts": {
     "statements": 100,
     "branches": 89,
     "functions": 100,
     "lines": 100
   },
-  "src/backend/installed.ts": {
-    "statements": 100,
-    "branches": 91,
-    "functions": 100,
-    "lines": 100
-  },
-  "src/backend/manifest.ts": {
+  "src/backend/catalog/manifest.ts": {
     "statements": 98,
     "branches": 95,
     "functions": 100,
     "lines": 98
   },
-  "src/backend/migrate.ts": {
+  "src/backend/catalog/migrate.ts": {
     "statements": 97,
     "branches": 93,
     "functions": 100,
     "lines": 97
   },
-  "src/backend/optimal-cache.ts": {
+  "src/backend/installed/installed.ts": {
     "statements": 100,
-    "branches": 90,
+    "branches": 91,
     "functions": 100,
     "lines": 100
   },
-  "src/backend/scan.ts": {
+  "src/backend/installed/scan.ts": {
     "statements": 100,
     "branches": 92,
     "functions": 100,
     "lines": 100
   },
-  "src/backend/select.ts": {
+  "src/backend/optimal/optimal-cache.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/select/amd-rocm-pci-ids.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/select/categories.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/select/features.ts": {
     "statements": 100,
     "branches": 95,
-    "functions": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/select/recovery.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/backend/select/tiers.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 91,
     "lines": 100
   },
   "src/backend/turboquant.ts": {
@@ -83,11 +101,41 @@
     "functions": 85,
     "lines": 97
   },
-  "src/cli/commands.ts": {
-    "statements": 98,
-    "branches": 81,
-    "functions": 95,
-    "lines": 98
+  "src/cli/commands/daemon.ts": {
+    "statements": 100,
+    "branches": 66,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/cli/commands/models.ts": {
+    "statements": 100,
+    "branches": 80,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/cli/commands/serve.ts": {
+    "statements": 99,
+    "branches": 89,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/cli/commands/server.ts": {
+    "statements": 95,
+    "branches": 65,
+    "functions": 100,
+    "lines": 95
+  },
+  "src/cli/commands/shared.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/cli/commands/shutdown.ts": {
+    "statements": 93,
+    "branches": 75,
+    "functions": 100,
+    "lines": 93
   },
   "src/cli/io.ts": {
     "statements": 86,
@@ -143,11 +191,35 @@
     "functions": 100,
     "lines": 100
   },
-  "src/core.ts": {
-    "statements": 92,
-    "branches": 83,
-    "functions": 95,
-    "lines": 92
+  "src/core/atomic-core.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/core/create.ts": {
+    "statements": 97,
+    "branches": 90,
+    "functions": 92,
+    "lines": 97
+  },
+  "src/core/public-server.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/core/reap-orphans.ts": {
+    "statements": 70,
+    "branches": 50,
+    "functions": 100,
+    "lines": 70
+  },
+  "src/core/sessions.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
   },
   "src/credentials/api-keys.ts": {
     "statements": 100,
@@ -467,18 +539,6 @@
     "functions": 100,
     "lines": 100
   },
-  "src/runtime/env.ts": {
-    "statements": 97,
-    "branches": 94,
-    "functions": 90,
-    "lines": 97
-  },
-  "src/runtime/external-sessions.ts": {
-    "statements": 100,
-    "branches": 96,
-    "functions": 100,
-    "lines": 100
-  },
   "src/runtime/foundation-models/errors.ts": {
     "statements": 100,
     "branches": 100,
@@ -539,12 +599,6 @@
     "functions": 81,
     "lines": 89
   },
-  "src/runtime/log-stream.ts": {
-    "statements": 100,
-    "branches": 100,
-    "functions": 100,
-    "lines": 100
-  },
   "src/runtime/mlx/args.ts": {
     "statements": 100,
     "branches": 100,
@@ -581,25 +635,43 @@
     "functions": 100,
     "lines": 100
   },
-  "src/runtime/paths.ts": {
+  "src/runtime/shared/env.ts": {
+    "statements": 97,
+    "branches": 94,
+    "functions": 90,
+    "lines": 97
+  },
+  "src/runtime/shared/external-sessions.ts": {
     "statements": 100,
-    "branches": 90,
+    "branches": 96,
     "functions": 100,
     "lines": 100
   },
-  "src/runtime/ports.ts": {
+  "src/runtime/shared/log-stream.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
     "lines": 100
   },
-  "src/runtime/process.ts": {
+  "src/runtime/shared/paths.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/shared/ports.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/shared/process.ts": {
     "statements": 95,
     "branches": 90,
     "functions": 100,
     "lines": 95
   },
-  "src/runtime/sidecar.ts": {
+  "src/runtime/shared/sidecar.ts": {
     "statements": 99,
     "branches": 91,
     "functions": 100,
@@ -611,11 +683,71 @@
     "functions": 100,
     "lines": 100
   },
-  "src/server/control.ts": {
-    "statements": 96,
-    "branches": 93,
+  "src/server/control/router.ts": {
+    "statements": 100,
+    "branches": 100,
     "functions": 100,
-    "lines": 96
+    "lines": 100
+  },
+  "src/server/control/routes/backends.ts": {
+    "statements": 92,
+    "branches": 91,
+    "functions": 100,
+    "lines": 92
+  },
+  "src/server/control/routes/clients.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/cloud.ts": {
+    "statements": 91,
+    "branches": 100,
+    "functions": 100,
+    "lines": 91
+  },
+  "src/server/control/routes/external-sessions.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/hardware.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/lifecycle.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/models.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/public-server.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/settings.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/server.ts": {
+    "statements": 91,
+    "branches": 89,
+    "functions": 100,
+    "lines": 91
   },
   "src/server/http.ts": {
     "statements": 100,

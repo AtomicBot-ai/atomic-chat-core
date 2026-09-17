@@ -22,10 +22,11 @@ import type { DataLayout } from '../config/index.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { Downloader, ProxyConfig } from '../downloads/index.js'
 import { extractArchive } from '../downloads/index.js'
-import { cudaRuntimeLibName } from './installed.js'
+import { cudaRuntimeLibName, isCudaInstalled } from './installed/index.js'
+import { getCudartArchiveName, getCudartDownloadUrl, getCudaToolkitVersion } from './catalog/index.js'
 import type { BackendFeatures, BackendVersion, GpuProbeInfo, SupportedFeatures } from './types.js'
 import { compareVersions, parseBackendVersion, parseRustU32, stripBom } from './version.js'
-import { gpuMeetsCuda13ArchFloor, isAmdGpu } from './select.js'
+import { gpuMeetsCuda13ArchFloor, isAmdGpu } from './select/index.js'
 
 export const TURBOQUANT_DOWNLOAD_BASE =
   'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/download'
@@ -518,6 +519,70 @@ export interface CudartRepairDeps {
   platform?: NodeJS.Platform
   proxy?: ProxyConfig | null
   log?: (message: string) => void
+}
+
+/** Repair an already-installed upstream pack as well as a newly downloaded one. The old app ran
+ * this before every load; installing the companion only during install misses older packs. */
+export async function ensureUpstreamCudart(
+  version: string,
+  backend: string,
+  backendDir: string,
+  taskId: string,
+  deps: CudartRepairDeps
+): Promise<'not-needed' | 'present' | 'downloaded'> {
+  if ((deps.platform ?? process.platform) !== 'win32') return 'not-needed'
+  const toolkit = getCudaToolkitVersion(backend)
+  const url = getCudartDownloadUrl(version, backend)
+  const name = getCudartArchiveName(backend)
+  if (!toolkit || !url || !name) return 'not-needed'
+  const bin = join(backendDir, 'build', 'bin')
+  const legacyLibDir = join(deps.layout.root, 'llamacpp', 'lib')
+  const present = await isCudaInstalled({
+    backendDir,
+    version: toolkit,
+    osType: 'windows',
+    legacyLibDir,
+    fs: {
+      exists,
+      mkdir: (path) => mkdir(path, { recursive: true }).then(() => {}),
+      rename,
+    },
+  })
+  if (present) return 'present'
+
+  const tmp = deps.layout.provider('llamacpp-upstream').tmpDir
+  const archive = join(tmp, name)
+  const extracted = join(tmp, `cudart-${version}-${backend}`)
+  await mkdir(tmp, { recursive: true })
+  try {
+    await deps.downloader.download(taskId, [
+      { url, save_path: archive, ...(deps.proxy ? { proxy: deps.proxy } : {}) },
+    ])
+    await mkdir(extracted, { recursive: true })
+    await extractArchive(archive, extracted)
+    await mkdir(bin, { recursive: true })
+    let copied = 0
+    const stack = [extracted]
+    while (stack.length > 0) {
+      const dir = stack.pop() as string
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name)
+        if (entry.isDirectory()) stack.push(path)
+        else if (entry.name.toLowerCase().endsWith('.dll')) {
+          await copyFile(path, join(bin, entry.name))
+          copied++
+        }
+      }
+    }
+    const lib = cudaRuntimeLibName('windows', toolkit)
+    if (!copied || !lib || !(await exists(join(bin, lib)))) {
+      throw new AtomicCoreError('IO_ERROR', `cudart archive for ${backend} did not contain ${lib}`)
+    }
+    return 'downloaded'
+  } finally {
+    await rm(archive, { force: true }).catch(() => {})
+    await rm(extracted, { recursive: true, force: true }).catch(() => {})
+  }
 }
 
 /**

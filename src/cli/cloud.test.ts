@@ -6,7 +6,7 @@ import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { accessTokenFor, json, startStub } from '../../test/helpers/chatgpt-stub.js'
 import type { Stub } from '../../test/helpers/chatgpt-stub.js'
-import { AtomicCore } from '../core.js'
+import { AtomicCore } from '../core/index.js'
 import { authCommand, providersCommand } from './cloud.js'
 import { recordingIo } from './io.js'
 

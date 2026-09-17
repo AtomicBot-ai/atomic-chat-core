@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { APP_BIN, control, startDaemon } from '../helpers/compiled-core.js'
+import { APP_BIN, control, reapJournalledChildren, startDaemon } from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 
 const fake = fileURLToPath(new URL('../helpers/fake-sidecar-server.mjs', import.meta.url))
@@ -21,6 +21,7 @@ afterEach(async () => {
     })
   )
   for (const daemon of daemons.splice(0)) daemon.kill('SIGKILL')
+  for (const folder of folders) reapJournalledChildren(folder)
   await Promise.all(folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })))
 })
 

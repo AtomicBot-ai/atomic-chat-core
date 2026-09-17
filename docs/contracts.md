@@ -16,7 +16,7 @@ without a demonstrated consumer. See PLAN.md §5.1 for comparison rules and §8 
 | `llama-server` argv, TurboQuant provider (turbo caches, no Vulkan override, no MTP/DFlash) | `src/runtime/llamacpp/args.ts` | `tauri-plugin-llamacpp/src/args.rs` | `test/fixtures/app/args-llamacpp/*.json` |
 | `mlx-server` argv and stderr classification | `src/runtime/mlx/{args,errors}.ts` | `tauri-plugin-mlx/src/{commands,error}.rs` | `test/fixtures/app/mlx-args/*.json`, `test/fixtures/app/mlx-errors/*.json` |
 | Foundation Models startup errors | `src/runtime/foundation-models/errors.ts` | `tauri-plugin-foundation-models/src/error.rs` | `test/fixtures/app/foundation-models-errors/*.json` (one case corrected on purpose, asserted in the test) |
-| Readiness lines | `src/runtime/process.ts` | `commands.rs:58-63`, `tauri-plugin-mlx/src/commands.rs:284-330`, `tauri-plugin-foundation-models/src/commands.rs:125` | `test/fixtures/app/readiness/*.txt` |
+| Readiness lines | `src/runtime/shared/process.ts` | `commands.rs:58-63`, `tauri-plugin-mlx/src/commands.rs:284-330`, `tauri-plugin-foundation-models/src/commands.rs:125` | `test/fixtures/app/readiness/*.txt` |
 | `--list-devices` parsing | `src/runtime/llamacpp/devices.ts` | `device.rs` | `test/fixtures/app/devices/*.json` |
 | Provider settings keys | `src/settings/schema/*.json` | `extensions/*/settings.json` | copied verbatim |
 | `<data>` layout | `src/config/` | PLAN.md §8.1 | `test/helpers/tmp-data-folder.ts` |
@@ -29,7 +29,7 @@ without a demonstrated consumer. See PLAN.md §5.1 for comparison rules and §8 
 | Anthropic `/messages` ↔ Chat shim | `src/server/shims/anthropic.ts` | `proxy.rs` (`transform_anthropic_to_openai`, `transform_openai_response_to_anthropic`, `transform_and_forward_stream`) | `test/fixtures/app/anthropic-shim/*.json`, replayed by `test/contract/shims.test.ts`; one recorded case is a known divergence (split `data:` line) |
 | Request inspector: prompt preview, stream telemetry, `include_usage` injection | `src/server/public/telemetry.ts` | `src-tauri/src/core/server/request_inspector.rs` | `test/fixtures/app/inspector-telemetry/*.json`, replayed by `test/contract/inspector-telemetry.test.ts` |
 | `api:request` event (core → app analytics and API screen) | `src/contracts/events.ts` `ApiRequestEvent`, `src/server/public/trace.ts` | consumers `api_request_analytics.rs` (`observation_from_core`), `request_inspector.rs` (`ingest_core_event`) | app Rust tests with the core's event shapes; `test/e2e/api-events.test.ts` |
-| External sessions `PUT/DELETE /external-sessions/:owner`, heartbeat, ctx request/answer | `src/runtime/external-sessions.ts` | `src-tauri/src/core/atomic_core/external.rs` (publisher, `external-sessions:ctx-requested` handler) | unit + `test/e2e/api-events.test.ts` |
+| External sessions `PUT/DELETE /external-sessions/:owner`, heartbeat, ctx request/answer | `src/runtime/shared/external-sessions.ts` | `src-tauri/src/core/atomic_core/external.rs` (publisher, `external-sessions:ctx-requested` handler) | unit + `test/e2e/api-events.test.ts` |
 | Download progress event `download-<taskId>` `{transferred,total}` | `src/downloads/` | `src-tauri/src/core/downloads/models.rs:66-70` | `test/fixtures/app/downloads/events-*.json` |
 | Legacy event names (17) | `src/contracts/events.ts` → app `CoreEventBridge` | `extensions/llamacpp-upstream-extension/src/index.ts` (`events.emit`) | relay mapping test in the app |
 

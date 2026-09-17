@@ -33,12 +33,25 @@ import { readGgufMetadataFromFile } from '../../models/index.js'
 import { resolveLlama3TemplateOverride, STRICT_SYSTEM_GUARD_SIGNATURE } from '../../speculative/index.js'
 import { checkDflashSupport } from '../../speculative/dflash-registry.js'
 import { checkGemmaMtpSupport } from '../../speculative/gemma-mtp-registry.js'
-import { buildProcessEnv, discoverCudaPaths, nodeCudaProbeEnv, textMentionsCudaRuntime } from '../env.js'
-import { randomFreePort } from '../ports.js'
-import { spawnAndAwaitReady, spawnManaged, LLAMA_READY_MARKERS } from '../process.js'
-import { closeLogStream, openLogStream } from '../log-stream.js'
-import type { ManagedProcess, SpawnSpec } from '../process.js'
-import type { CtxIncreaseResult, LocalRuntime, RecreateResult } from '../local-runtime.js'
+import {
+  buildProcessEnv,
+  discoverCudaPaths,
+  nodeCudaProbeEnv,
+  textMentionsCudaRuntime,
+  randomFreePort,
+  spawnAndAwaitReady,
+  spawnManaged,
+  LLAMA_READY_MARKERS,
+  closeLogStream,
+  openLogStream,
+} from '../shared/index.js'
+import type {
+  ManagedProcess,
+  SpawnSpec,
+  CtxIncreaseResult,
+  LocalRuntime,
+  RecreateResult,
+} from '../shared/index.js'
 import { planLlamaArgs } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
 import { parseDeviceOutput } from './devices.js'
@@ -57,7 +70,7 @@ export interface RuntimeSettings {
   engine: LlamacppEngineSettings
 }
 
-export type { CtxIncreaseResult } from '../local-runtime.js'
+export type { CtxIncreaseResult } from '../shared/index.js'
 
 export interface LoadOptions {
   /** Per-model overrides, canonical keys (the `settings` argument of the extension's `load()`). */

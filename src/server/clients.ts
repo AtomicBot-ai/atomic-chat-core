@@ -1,6 +1,6 @@
 /**
  * Who is attached to this core. The app and the CLI register, heartbeat while they are up, and
- * unregister on exit; the core keeps running either way (PLAN.md §3.6: "выход клиента делает detach").
+ * unregister on exit; the core keeps running either way (PLAN.md §3.6, "Client exit": "detach and heartbeat stop").
  *
  * The registry exists for one decision: `shutdown` must tell "nobody is using this core" from
  * "somebody else is using it", and a client that vanished without unregistering must age out rather

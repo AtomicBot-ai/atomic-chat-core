@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { AtomicCore } from '../core.js'
+import { AtomicCore } from '../core/index.js'
 import { attachToOwner, selfCommand, withAttachedOwner } from './owner.js'
 
 let data: TmpDataFolder

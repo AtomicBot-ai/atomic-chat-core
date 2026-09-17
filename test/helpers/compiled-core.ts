@@ -85,6 +85,37 @@ export async function startDaemon(
   return { ready, child }
 }
 
+/**
+ * Kill the fake backends a daemon journalled in `dataFolder`. Tests end with `SIGKILL` on the daemon,
+ * which gives it no chance to stop its children, and then delete the data folder with the journal a
+ * later owner would have reaped them from — so without this every run left its fake `llama-server`
+ * and sidecar processes running. Only processes that are still a fake server are touched, in case a
+ * journalled PID was already reused.
+ */
+export function reapJournalledChildren(dataFolder: string): void {
+  let processes: Array<{ pid?: unknown }> = []
+  try {
+    const journal = JSON.parse(readFileSync(join(dataFolder, 'atomic-core', 'processes.json'), 'utf8')) as {
+      processes?: Array<{ pid?: unknown }>
+    }
+    processes = journal.processes ?? []
+  } catch {
+    return
+  }
+  for (const { pid } of processes) {
+    if (typeof pid !== 'number') continue
+    if (process.platform !== 'win32') {
+      const command = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' }).stdout
+      if (!/fake-[a-z-]+-server/.test(command)) continue
+    }
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
 export const controlToken = (dataFolder: string) =>
   readFileSync(join(dataFolder, 'atomic-core', 'control-token'), 'utf8').trim()
 

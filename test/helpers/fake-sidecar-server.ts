@@ -4,8 +4,8 @@
  * fail-fast lines, exit classification and SIGTERM handling are the production code path.
  */
 import { fileURLToPath } from 'node:url'
-import { spawnAndAwaitReady } from '../../src/runtime/process.js'
-import type { ReadyOptions, SpawnSpec } from '../../src/runtime/process.js'
+import { spawnAndAwaitReady } from '../../src/runtime/index.js'
+import type { ReadyOptions, SpawnSpec } from '../../src/runtime/index.js'
 
 export const FAKE_SIDECAR_SCRIPT = fileURLToPath(new URL('./fake-sidecar-server.mjs', import.meta.url))
 

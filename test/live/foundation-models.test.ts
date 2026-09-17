@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
-import { AtomicCore } from '../../src/core.js'
+import { AtomicCore } from '../../src/core/index.js'
 import type { FoundationModelsRuntime } from '../../src/runtime/foundation-models/index.js'
 
 const RESOURCES = process.env['ATOMIC_LIVE_FM_RESOURCES'] ?? ''

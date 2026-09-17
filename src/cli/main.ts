@@ -8,7 +8,13 @@
 
 import { AtomicCoreError } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
-import { daemonCommand, modelsCommand, serveCommand, serverCommand, shutdownCommand } from './commands.js'
+import {
+  daemonCommand,
+  modelsCommand,
+  serveCommand,
+  serverCommand,
+  shutdownCommand,
+} from './commands/index.js'
 import { launchCommand } from './launch.js'
 import { authCommand, providersCommand } from './cloud.js'
 import type { CliIo } from './io.js'

@@ -65,7 +65,7 @@ describe('runCli', () => {
   it('formats structured core errors and non-Error throws', async () => {
     const data = await makeTmpDataFolder('atomic-core-main-errors-')
     const core = await (
-      await import('../core.js')
+      await import('../core/index.js')
     ).AtomicCore.create({
       dataFolder: data.root,
       controlPort: 0,

@@ -1,6 +1,6 @@
 /** An isolated HTTPS mirror behind a CONNECT proxy for compiled-binary backend-install tests. */
 import { createHash } from 'node:crypto'
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { connect as netConnect } from 'node:net'
@@ -116,7 +116,12 @@ export async function startBackendInstallFixture(
 async function createTar(folder: string, exe: string): Promise<Buffer> {
   const dir = join(folder, 'archive-source')
   await mkdir(join(dir, 'build', 'bin'), { recursive: true })
-  await writeFile(join(dir, 'build', 'bin', exe), 'fixture backend')
+  const binary = join(dir, 'build', 'bin', exe)
+  await writeFile(
+    binary,
+    process.platform === 'win32' ? 'fixture backend' : '#!/bin/sh\necho "version: 99999 (fixture)"\n'
+  )
+  if (process.platform !== 'win32') await chmod(binary, 0o755)
   const archive = join(folder, 'fixture-backend.tar.gz')
   await tarCreate({ gzip: true, cwd: dir, file: archive }, ['build'])
   return readFile(archive)
