@@ -163,6 +163,11 @@ export interface ControlServerDeps {
     modelId: string,
     body: Record<string, unknown>
   ) => Promise<SessionInfo | { session: SessionInfo; created: boolean }>
+  /**
+   * Cancel a load that has not answered yet. Answers rather than throws when there is nothing to
+   * cancel: the app retries while its load request is still travelling, and unloads once it lands.
+   */
+  cancelModelLoad: (provider: string, modelId: string) => boolean
   unloadModel: (provider: string, modelId: string) => Promise<UnloadResult>
   /**
    * Reload a model one context step larger because a request overflowed. Answers rather than

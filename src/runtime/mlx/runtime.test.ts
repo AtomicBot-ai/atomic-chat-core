@@ -247,6 +247,55 @@ describe('MlxRuntime', () => {
     })
   })
 
+  it('kills a server that is still coming up when the user cancels, and keeps the models that were loaded', async () => {
+    await writeMlxModel('resident')
+    await writeMlxModel('huge')
+    const r = runtime({ auto_unload: false })
+    await r.load('resident')
+    const hanging = new MlxRuntime({
+      layout: data.layout,
+      registry,
+      instanceId: 'test-instance',
+      resourcesDir: '/resources/bin',
+      readSettings: async () => ({ auto_unload: false }),
+      journal,
+      emit: (name, payload) => events.push({ name, payload: payload as Record<string, unknown> }),
+      exists: (path) => path === '/resources/bin/mlx-server' || !path.startsWith('/resources'),
+      spawn: fakeSidecarSpawn({ kind: 'mlx', mode: 'hang', argvFile }),
+    })
+    runtimes.push(hanging)
+    const before = (await argvs()).length
+    const cancel = new AbortController()
+    const load = hanging.load('huge', { signal: cancel.signal })
+    // The fake records its argv on startup: a new line means the child is running.
+    while ((await argvs()).length === before) await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(hanging.isLoading('huge')).toBe(true)
+
+    cancel.abort()
+    await expect(load).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+      message: 'The model load was cancelled.',
+    })
+    expect(hanging.list()).toEqual([])
+    expect(hanging.isLoading('huge')).toBe(false)
+    expect(journal.list().map((entry) => entry.model_id)).toEqual(['resident'])
+    expect(events.filter((e) => e.name === 'session:started').map((e) => e.payload['model_id'])).toEqual([
+      'resident',
+    ])
+  })
+
+  it('does not unload anything for a load that was cancelled before it started', async () => {
+    await writeMlxModel('resident')
+    await writeMlxModel('never')
+    const r = runtime()
+    await r.load('resident')
+    await expect(r.load('never', { signal: AbortSignal.abort() })).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+    })
+    // Auto-unload is on by default; a cancelled load must not have evicted the resident model.
+    expect(r.getLoadedModels()).toEqual(['resident'])
+  })
+
   it('heals a mis-named first shard before loading', async () => {
     const dir = await writeMlxModel('sharded')
     await writeFile(

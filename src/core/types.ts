@@ -24,5 +24,9 @@ export interface AtomicCoreOptions {
 
 export const LOCAL_PROVIDER: LocalProviderId = 'llamacpp-upstream'
 
-/** Load options as the control API carries them: the shared ones plus llama.cpp's explicit paths. */
-export type CoreLoadOptions = LocalLoadOptions & Omit<LoadOptions, 'overrides'>
+/**
+ * Load options as the control API carries them: the shared ones plus llama.cpp's explicit paths.
+ * Without `signal`: a load is cancelled through `AtomicCore.cancelLoad`, and the control route casts
+ * a JSON body straight into these options, so a `signal` key arriving there must never be trusted.
+ */
+export type CoreLoadOptions = Omit<LocalLoadOptions, 'signal'> & Omit<LoadOptions, 'overrides' | 'signal'>

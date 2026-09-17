@@ -29,6 +29,8 @@ export interface ControlHarness {
   serverState: LocalApiServerState
   calls: string[]
   loadResult: () => Promise<SessionInfo>
+  /** What `POST …/load/cancel` answers; tests flip it to model "nothing was pending". */
+  cancelLoadResult: boolean
   unloadResult: () => Promise<UnloadResult>
   shutdowns: Array<{ force: boolean; requestedBy?: string | undefined }>
   settings: FakeSettingsControl
@@ -72,6 +74,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     calls,
     shutdowns,
     loadResult: async () => session(),
+    cancelLoadResult: true,
     unloadResult: async () => ({ success: true }),
     settings: fakeSettingsControl({ 'llamacpp-upstream': { ctx_size: 4096 } }),
     hardware: new HardwareOverrideStore(),
@@ -158,6 +161,10 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     loadModel: async (provider, modelId, body) => {
       calls.push(`load ${provider} ${modelId} ${JSON.stringify(body)}`)
       return harness.loadResult()
+    },
+    cancelModelLoad: (provider, modelId) => {
+      calls.push(`cancel-load ${provider} ${modelId}`)
+      return harness.cancelLoadResult
     },
     unloadModel: async (provider, modelId) => {
       calls.push(`unload ${provider} ${modelId}`)

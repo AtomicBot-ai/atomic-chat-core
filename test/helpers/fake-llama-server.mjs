@@ -11,9 +11,11 @@
  *   FAKE_LLAMA_MIN_CTX  chat answers llama.cpp's context-overflow 400 while `--ctx-size` is below this
  *   FAKE_LLAMA_COMPUTE_ERROR_MARKER  path; the first chat request anywhere creates it and answers
  *                     llama.cpp's poisoned-backend 500 ("Compute error"), later ones succeed
+ *   FAKE_LLAMA_PID_FILE  path; the pid is appended there on startup, one per line, so a test can
+ *                     find (and count) children that never became sessions
  *   LLAMA_API_KEY     when set, every route but `/health` demands `Authorization: Bearer <key>`
  */
-import { existsSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 
 const argv = process.argv.slice(2)
@@ -41,6 +43,8 @@ if (argv.includes('-h') || argv.includes('--help')) {
   )
   process.exit(0)
 }
+
+if (process.env.FAKE_LLAMA_PID_FILE) appendFileSync(process.env.FAKE_LLAMA_PID_FILE, `${process.pid}\n`)
 
 // ── startup log, as llama.cpp prints it ───────────────────────────────────────
 err(`build: 6325 (fake) with cc (GCC) 13.2.0 for x86_64-linux-gnu`)

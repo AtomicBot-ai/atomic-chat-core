@@ -211,6 +211,15 @@ export class AtomicCore {
     return this.runtime(provider).recreateSession(modelId)
   }
 
+  /**
+   * Cancel a load that has not answered yet. `false` when nothing is pending for the model — it has
+   * already loaded (unload it instead) or the load has not arrived.
+   */
+  cancelLoad(provider: LocalProviderId, modelId: string): boolean {
+    this.assertRunning()
+    return this.localSessions.cancelLoad(provider, modelId)
+  }
+
   async unload(provider: LocalProviderId, modelId: string): Promise<UnloadResult> {
     this.assertRunning()
     return this.localSessions.unload(provider, modelId)

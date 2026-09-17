@@ -134,6 +134,7 @@ export function statusForCode(code: ErrorCode): number {
       return 404
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
+    case 'MODEL_LOAD_CANCELLED':
       return 409
     case 'AUTH_FAILED':
     case 'UPSTREAM_ERROR':

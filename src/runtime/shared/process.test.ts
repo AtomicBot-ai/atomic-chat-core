@@ -174,6 +174,67 @@ describe('spawnAndAwaitReady', () => {
     await rm(dir, { recursive: true, force: true })
   })
 
+  it('never spawns for a load that was already cancelled', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-process-cancel-'))
+    const pidFile = join(dir, 'pid')
+    await expect(
+      spawnAndAwaitReady(
+        node(
+          `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(()=>{},1000)`
+        ),
+        { timeoutMs: 5000, cancelSignal: AbortSignal.abort(), classifyExit: classify }
+      )
+    ).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED', message: 'The model load was cancelled.' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The child would have written its pid on its first tick had it been started.
+    await expect(readFile(pidFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a starting child at once when the user cancels, even one that ignores SIGTERM',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'atomic-process-cancel-'))
+      const pidFile = join(dir, 'pid')
+      const controller = new AbortController()
+      const pending = spawnAndAwaitReady(
+        node(
+          `process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(()=>{},1000)`
+        ),
+        // A shutdown-style abort would give this child a 1 s grace; a cancel gives it none.
+        { timeoutMs: 30_000, cancelSignal: controller.signal, classifyExit: classify }
+      )
+      let pid = 0
+      const deadline = Date.now() + 2000
+      while (!pid && Date.now() < deadline) {
+        pid = Number(await readFile(pidFile, 'utf8').catch(() => '0'))
+        if (!pid) await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(pid).toBeGreaterThan(0)
+      const cancelledAt = Date.now()
+      controller.abort()
+      await expect(pending).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+      // The error is raised only after the exit is confirmed, and well inside any grace period.
+      expect(Date.now() - cancelledAt).toBeLessThan(900)
+      expect(isProcessAlive(pid)).toBe(false)
+      await rm(dir, { recursive: true, force: true })
+    }
+  )
+
+  it('keeps the owner-shutdown error when both signals are present and shutdown fires', async () => {
+    const shutdown = new AbortController()
+    const cancel = new AbortController()
+    const pending = spawnAndAwaitReady(node('setInterval(()=>{},1000)'), {
+      timeoutMs: 5000,
+      signal: shutdown.signal,
+      cancelSignal: cancel.signal,
+      classifyExit: classify,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    shutdown.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'CORE_NOT_RUNNING' })
+  })
+
   it('spawnManaged collects output and resolves exited', async () => {
     const p = spawnManaged(
       node('process.stdout.write("a\\nb\\n"); process.stderr.write("c\\n"); process.exit(3)')

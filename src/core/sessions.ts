@@ -1,7 +1,7 @@
 /**
  * Local model sessions as `AtomicCore` owns them: the cross-process model claim taken before a load,
- * per-model serialization of load/unload, and how the public server finds a session — one this
- * core runs or one the desktop app registered as external.
+ * per-model serialization of load/unload, cancelling a load that has not answered yet, and how the
+ * public server finds a session — one this core runs or one the desktop app registered as external.
  */
 
 import { AtomicCoreError } from '../contracts/index.js'
@@ -9,7 +9,14 @@ import type { LocalProviderId, SessionInfo, UnloadResult } from '../contracts/in
 import type { DataLayout } from '../config/index.js'
 import { assertNotLoadedByLegacy, acquireModelClaim } from '../lock/index.js'
 import type { ModelClaimHandle } from '../lock/index.js'
-import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
+import { LoadCancelRegistry, loadCancelledError, throwIfLoadCancelled } from '../runtime/index.js'
+import type {
+  CtxIncreaseResult,
+  ExternalSessions,
+  LoadCancelHandle,
+  LocalRuntime,
+  RecreateResult,
+} from '../runtime/index.js'
 import type { CtxIncreaseOutcome, LocalTarget, SessionSummary } from '../server/index.js'
 import { LOCAL_SEARCH_ORDER, modelIdsMatch } from '../router/index.js'
 import type { LocalProvider } from '../router/index.js'
@@ -33,6 +40,8 @@ export class LocalSessions {
   private readonly modelClaims = new Map<string, ModelClaimHandle>()
   private readonly claimingModels = new Map<string, Promise<ModelClaimHandle>>()
   private readonly modelTransitions = new Map<string, Promise<void>>()
+  /** One entry per model for every acquire still pending, so a cancel reaches the one that is loading. */
+  private readonly loadCancels = new LoadCancelRegistry()
 
   constructor(private readonly deps: LocalSessionsDeps) {}
 
@@ -43,15 +52,32 @@ export class LocalSessions {
     options: CoreLoadOptions
   ): Promise<{ session: SessionInfo; created: boolean }> {
     const key = `${provider}\0${modelId}`
-    return this.withModelTransition(key, () => this.acquireNow(provider, modelId, options))
+    // Registered before the transition queue, not inside it: an acquire waiting its turn behind
+    // another one of the same model has to be reachable by a cancel as well.
+    const cancel = this.loadCancels.register(key)
+    return this.withModelTransition(key, () => this.acquireNow(provider, modelId, options, cancel)).finally(
+      () => cancel.release()
+    )
+  }
+
+  /**
+   * Cancel the load in flight for a model. Deliberately outside `withModelTransition`: queued there
+   * it would wait for the very load it is meant to stop. `false` means nothing is pending — the load
+   * has not reached the core yet or has already answered, and the caller unloads instead.
+   */
+  cancelLoad(provider: LocalProviderId, modelId: string): boolean {
+    this.deps.runtime(provider)
+    return this.loadCancels.cancel(`${provider}\0${modelId}`)
   }
 
   private async acquireNow(
     provider: LocalProviderId,
     modelId: string,
-    options: CoreLoadOptions
+    options: CoreLoadOptions,
+    cancel: LoadCancelHandle
   ): Promise<{ session: SessionInfo; created: boolean }> {
     this.deps.assertRunning()
+    throwIfLoadCancelled(cancel.signal)
     // The desktop app can still own this data folder until it becomes a core client. A second copy
     // of a model it already holds would double the VRAM and race for the GPU, so refuse before
     // anything is spawned, and say where the app is already serving it.
@@ -73,12 +99,23 @@ export class LocalSessions {
     }
     const created = !runtime.findSession(modelId) && !runtime.isLoading(modelId)
     try {
+      throwIfLoadCancelled(cancel.signal)
       await assertNotLoadedByLegacy(this.deps.layout, modelId)
-      const session = await runtime.load(modelId, options)
+      // `options` came off the wire; the signal is the core's own and overrides whatever it carried.
+      const session = await runtime.load(modelId, { ...options, signal: cancel.signal })
       await claim.update('ready')
+      if (created && cancel.signal.aborted) {
+        // A cancel that raced readiness still wins while the answer is undecided. Unload through the
+        // runtime: `this.unload` would queue behind this very transition.
+        await runtime.unload(modelId)
+        throw loadCancelledError()
+      }
+      // The answer is decided: from here a cancel finds nothing pending and the caller unloads.
+      cancel.release()
       return { session, created }
     } catch (e) {
-      if (created) {
+      // Never release the claim over a live process: a joined reload, or an unload that failed.
+      if (created && !runtime.findSession(modelId)) {
         await claim.release().catch(() => {})
         this.modelClaims.delete(key)
       }

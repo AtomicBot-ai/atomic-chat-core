@@ -113,6 +113,30 @@ describe('FoundationModelsRuntime', () => {
     })
   })
 
+  it('kills a server that is still coming up when the user cancels', async () => {
+    const argvFile = join(data.root, 'argv.jsonl')
+    const r = runtime({ mode: 'hang', argvFile })
+    const cancel = new AbortController()
+    const load = r.load(APPLE_MODEL_ID, { signal: cancel.signal })
+    // The fake records its argv on startup: the file appearing means the child is running.
+    while ((await readFile(argvFile, 'utf8').catch(() => '')) === '')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+    cancel.abort()
+    await expect(load).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+      message: 'The model load was cancelled.',
+    })
+    expect(r.list()).toEqual([])
+    expect(r.isLoading(APPLE_MODEL_ID)).toBe(false)
+    expect(journal.list()).toEqual([])
+    expect(events).toEqual([])
+    // A cancel is aimed at one load: the next one starts clean.
+    await expect(r.load(APPLE_MODEL_ID, { signal: AbortSignal.abort() })).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+    })
+  })
+
   it('drops a session whose server died and says so', async () => {
     const r = runtime()
     const session = await r.load(APPLE_MODEL_ID)

@@ -10,7 +10,9 @@
  *    trail the next owner can clean up (PLAN.md §3.4);
  *  - the two post-failure retries of `performLoad` (drop mmproj, drop MTP) happen here, once each;
  *  - stderr is fed to the device accumulator while loading, which is the only place llama.cpp says
- *    which device it actually used.
+ *    which device it actually used;
+ *  - a load the user cancels stops wherever it is — queued, planning, spawning or just ready — kills
+ *    what it started at once, and never falls into a retry.
  */
 
 import type { WriteStream } from 'node:fs'
@@ -44,6 +46,9 @@ import {
   LLAMA_READY_MARKERS,
   closeLogStream,
   openLogStream,
+  isLoadCancelled,
+  raceLoadCancel,
+  throwIfLoadCancelled,
 } from '../shared/index.js'
 import type {
   ManagedProcess,
@@ -93,6 +98,8 @@ export interface LoadOptions {
   port?: number
   /** Skip the auto-unload of other text models. */
   bypassAutoUnload?: boolean
+  /** Aborted when the user cancels this load; the load rejects with `MODEL_LOAD_CANCELLED`. */
+  signal?: AbortSignal
 }
 
 export interface LlamacppRuntimeOptions {
@@ -188,8 +195,8 @@ export class LlamacppRuntime implements LocalRuntime {
     const existing = this.sessions.get(modelId)
     if (existing) return { ...existing.info }
     const inFlight = this.loading.get(modelId)
-    if (inFlight) return inFlight
-    const started = this.enqueueLoad(() => this.loadOnce(modelId, opts)).finally(() =>
+    if (inFlight) return raceLoadCancel(inFlight, opts.signal)
+    const started = this.enqueueLoad(() => this.loadOnce(modelId, opts), opts.signal).finally(() =>
       this.loading.delete(modelId)
     )
     this.loading.set(modelId, started)
@@ -198,7 +205,9 @@ export class LlamacppRuntime implements LocalRuntime {
 
   private async loadOnce(modelId: string, opts: LoadOptions): Promise<SessionInfo> {
     this.assertRunning()
+    throwIfLoadCancelled(opts.signal)
     const settings = await this.options.readSettings()
+    throwIfLoadCancelled(opts.signal)
     const config: LlamacppConfigInput = { ...settings.config }
     if (opts.exePath) config.version_backend = opts.versionBackend ?? 'cli/llama-server'
     else {
@@ -225,6 +234,7 @@ export class LlamacppRuntime implements LocalRuntime {
         : {}),
     })
     for (const target of targets) {
+      throwIfLoadCancelled(opts.signal)
       const result = await this.unloadSession(target)
       if (!result.success) {
         throw new AtomicCoreError(
@@ -235,35 +245,42 @@ export class LlamacppRuntime implements LocalRuntime {
       }
     }
     this.assertRunning()
+    throwIfLoadCancelled(opts.signal)
     if (opts.timeoutSecs !== undefined && (!Number.isFinite(opts.timeoutSecs) || opts.timeoutSecs <= 0)) {
       throw new AtomicCoreError('INVALID_ARGUMENT', 'Load timeout must be a positive number of seconds.')
     }
-    let plan = await planLlamaLoad(
-      {
-        provider: this.provider,
-        modelId,
-        config,
-        engine: settings.engine,
-        overrides: opts.overrides as Partial<LlamacppConfigInput> | undefined,
-        ...(opts.modelPath !== undefined ? { modelPath: opts.modelPath } : {}),
-        ...(opts.mmprojPath !== undefined ? { mmprojPath: opts.mmprojPath } : {}),
-        ...(opts.timeoutSecs !== undefined ? { timeoutSecs: opts.timeoutSecs } : {}),
-        isEmbedding,
-        dataFolder: this.options.layout.root,
-        ...(this.options.transcriptionModelId !== undefined
-          ? { transcriptionModelId: this.options.transcriptionModelId }
-          : {}),
-      },
-      this.planDeps(opts)
+    // Planning can wait on a backend install or a draft download; a cancel does not wait for them.
+    let plan = await raceLoadCancel(
+      planLlamaLoad(
+        {
+          provider: this.provider,
+          modelId,
+          config,
+          engine: settings.engine,
+          overrides: opts.overrides as Partial<LlamacppConfigInput> | undefined,
+          ...(opts.modelPath !== undefined ? { modelPath: opts.modelPath } : {}),
+          ...(opts.mmprojPath !== undefined ? { mmprojPath: opts.mmprojPath } : {}),
+          ...(opts.timeoutSecs !== undefined ? { timeoutSecs: opts.timeoutSecs } : {}),
+          isEmbedding,
+          dataFolder: this.options.layout.root,
+          ...(this.options.transcriptionModelId !== undefined
+            ? { transcriptionModelId: this.options.transcriptionModelId }
+            : {}),
+        },
+        this.planDeps(opts)
+      ),
+      opts.signal
     )
     if (opts.port !== undefined) plan = { ...plan, port: opts.port }
 
     for (let attempt = 0; attempt < 3; attempt++) {
       this.assertRunning()
+      throwIfLoadCancelled(opts.signal)
       try {
         return await this.spawnSession(plan, opts)
       } catch (error) {
-        if (this.closing) throw error
+        // A cancelled load is a user stop, never a reason to try again without the projector or MTP.
+        if (this.closing || isLoadCancelled(opts.signal)) throw error
         const retry = nextRetry(error, plan, this.options.transcriptionModelId)
         if (!retry) throw error
         if (retry.kind === 'text-only') {
@@ -283,12 +300,18 @@ export class LlamacppRuntime implements LocalRuntime {
     )
   }
 
-  private enqueueLoad<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.loadTail.then(operation)
-    this.loadTail = result.then(
-      () => {},
-      () => {}
-    )
+  private enqueueLoad<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const turn = this.loadTail
+    const result = raceLoadCancel(turn, signal).then(operation)
+    // The queue waits for the turn as well as the result: a load cancelled while queued settles
+    // early, and the one behind it must still not start before the load ahead has finished.
+    this.loadTail = Promise.all([
+      turn,
+      result.then(
+        () => {},
+        () => {}
+      ),
+    ]).then(() => {})
     return result
   }
 
@@ -363,6 +386,7 @@ export class LlamacppRuntime implements LocalRuntime {
     const devices = new RuntimeDeviceAccumulator()
     const spawn = this.options.spawn ?? spawnAndAwaitReady
     const apiKey = plan.apiKey
+    throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath) : undefined
 
     let proc: ManagedProcess
@@ -372,6 +396,7 @@ export class LlamacppRuntime implements LocalRuntime {
         {
           timeoutMs: plan.timeoutSecs * 1000,
           signal: this.shutdownController.signal,
+          ...(opts.signal ? { cancelSignal: opts.signal } : {}),
           readyMarkers: LLAMA_READY_MARKERS,
           healthCheck: () => this.healthy(plan.port, apiKey),
           onLine: (stream, line) => {
@@ -412,12 +437,15 @@ export class LlamacppRuntime implements LocalRuntime {
       ...(logStream ? { logStream } : {}),
     }
     try {
+      // A cancel that raced the ready signal still wins: no session is published for it.
+      throwIfLoadCancelled(opts.signal)
       await this.journalSpawn(session)
       this.assertRunning()
+      throwIfLoadCancelled(opts.signal)
       this.sessions.set(plan.modelId, session)
       this.watchExit(session)
     } catch (error) {
-      await proc.terminate().catch(() => {})
+      await proc.terminate(isLoadCancelled(opts.signal) ? 0 : undefined).catch(() => {})
       if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
       await closeLogStream(session.logStream)
       throw error

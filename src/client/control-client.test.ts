@@ -126,6 +126,7 @@ beforeEach(async () => {
       sessions.push(session)
       return session
     },
+    cancelModelLoad: (_provider, modelId) => modelId === 'Owner/Loading-GGUF',
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -328,6 +329,13 @@ describe('inspector gate', () => {
     expect(inspecting).toBe(true)
     await client.setInspecting(false)
     expect(inspecting).toBe(false)
+  })
+})
+
+describe('load cancellation', () => {
+  it('reports whether a load was pending, for a model id with slashes', async () => {
+    expect(await client.cancelModelLoad('llamacpp-upstream', 'Owner/Loading-GGUF')).toBe(true)
+    expect(await client.cancelModelLoad('llamacpp-upstream', 'Owner/Idle-GGUF')).toBe(false)
   })
 })
 

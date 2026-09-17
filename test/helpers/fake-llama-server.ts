@@ -27,6 +27,8 @@ export interface FakeLlamaOptions {
   minCtx?: number
   /** Path of a marker file: the first chat request creates it and fails with "Compute error". */
   computeErrorMarker?: string
+  /** Every started fake appends its pid here, one per line: children that never became sessions. */
+  pidFile?: string
 }
 
 function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
@@ -37,6 +39,7 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
   if (options.reply) env['FAKE_LLAMA_REPLY'] = options.reply
   if (options.minCtx) env['FAKE_LLAMA_MIN_CTX'] = String(options.minCtx)
   if (options.computeErrorMarker) env['FAKE_LLAMA_COMPUTE_ERROR_MARKER'] = options.computeErrorMarker
+  if (options.pidFile) env['FAKE_LLAMA_PID_FILE'] = options.pidFile
   return env
 }
 

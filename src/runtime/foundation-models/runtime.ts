@@ -34,6 +34,7 @@ import {
   randomFreePort,
   SidecarTable,
   spawnAndAwaitReady,
+  throwIfLoadCancelled,
 } from '../shared/index.js'
 import {
   FOUNDATION_MODELS_ERROR_PREFIX,
@@ -144,10 +145,11 @@ export class FoundationModelsRuntime implements LocalRuntime {
         'MODEL_NOT_FOUND',
         `Foundation Models extension only supports model '${APPLE_MODEL_ID}', got '${modelId}'`
       )
-    return this.table.load(modelId, () => this.start(modelId, opts))
+    return this.table.load(modelId, () => this.start(modelId, opts), opts.signal)
   }
 
   private async start(modelId: string, opts: LocalLoadOptions): Promise<SessionInfo> {
+    throwIfLoadCancelled(opts.signal)
     const exe = opts.exePath ?? this.binaryPath()
     if (!exe || !this.exists(exe))
       throw foundationModelsBinaryMissing(exe ?? join('<resources-dir>', FOUNDATION_MODELS_BINARY))
@@ -157,6 +159,7 @@ export class FoundationModelsRuntime implements LocalRuntime {
     const port = opts.port ?? (await randomFreePort(this.table.usedPorts()))
     const apiKey = generateApiKey(modelId, port, FOUNDATION_MODELS_API_SECRET)
     const args = ['--port', String(port), '--api-key', apiKey]
+    throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'Foundation Models') : undefined
     const env = Object.fromEntries(
       Object.entries(this.options.baseEnv ?? process.env).filter(
@@ -170,6 +173,7 @@ export class FoundationModelsRuntime implements LocalRuntime {
         {
           timeoutMs: timeoutSecs * 1000,
           signal: this.table.signal,
+          ...(opts.signal ? { cancelSignal: opts.signal } : {}),
           // stdout only, as in the plugin: Hummingbird's own stderr log says "listening on" too.
           streamReadyMarkers: { stdout: FOUNDATION_MODELS_READY_MARKERS, stderr: [] },
           timeoutGraceMs: 5000,
@@ -190,20 +194,23 @@ export class FoundationModelsRuntime implements LocalRuntime {
       await closeLogStream(logStream)
       throw error
     }
-    return this.table.adopt({
-      info: {
-        pid: started.process.pid,
-        port,
-        model_id: modelId,
-        model_path: '',
-        is_embedding: false,
-        api_key: apiKey,
+    return this.table.adopt(
+      {
+        info: {
+          pid: started.process.pid,
+          port,
+          model_id: modelId,
+          model_path: '',
+          is_embedding: false,
+          api_key: apiKey,
+        },
+        process: started.process,
+        exe,
+        extra: undefined,
+        logStream,
       },
-      process: started.process,
-      exe,
-      extra: undefined,
-      logStream,
-    })
+      opts.signal
+    )
   }
 
   unload(modelId: string): Promise<UnloadResult> {

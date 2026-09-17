@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-17** — [Cancel a model load through a shared per-model registry outside the transition queue](2026-09-17-cancel-a-model-load-through-a-shared-registry.md)
 - **2026-09-17** — [Validate downloaded macOS backends and repair installed upstream CUDA packs](2026-09-17-validate-downloaded-macos-backends-and-repair-upstream-cuda.md)
 - **2026-09-17** — [Serialize sidecar load and unload before releasing a model claim](2026-09-17-serialize-sidecar-load-and-unload.md)
 - **2026-09-17** — [Bind cloud keys to destinations and lease CLI operations](2026-09-17-bind-cloud-keys-and-lease-cli-operations.md)

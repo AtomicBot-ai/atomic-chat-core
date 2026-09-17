@@ -44,6 +44,7 @@ export async function installFakeBackend(
     options.computeErrorMarker
       ? `FAKE_LLAMA_COMPUTE_ERROR_MARKER=${JSON.stringify(options.computeErrorMarker)}`
       : '',
+    options.pidFile ? `FAKE_LLAMA_PID_FILE=${JSON.stringify(options.pidFile)}` : '',
   ]
     .filter(Boolean)
     .join(' ')

@@ -247,6 +247,8 @@ export async function createAtomicCore(
         sessions: () => sessionsOf(runtimes),
         loadModel: (provider: string, modelId: string, body: Record<string, unknown>) =>
           (core as AtomicCore).acquire(provider as LocalProviderId, modelId, body as CoreLoadOptions),
+        cancelModelLoad: (provider: string, modelId: string) =>
+          (core as AtomicCore).cancelLoad(provider as LocalProviderId, modelId),
         unloadModel: (provider: string, modelId: string) =>
           (core as AtomicCore).unload(provider as LocalProviderId, modelId),
         increaseCtx: (provider: string, modelId: string, reason?: string) =>

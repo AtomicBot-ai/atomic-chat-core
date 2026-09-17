@@ -12,6 +12,8 @@ export type RuntimeErrorCode =
   | 'MODEL_LOAD_FAILED'
   | 'MODEL_FILE_NOT_FOUND'
   | 'MODEL_LOAD_TIMED_OUT'
+  /** The user stopped a load before the engine reported ready (the plugins' `ModelLoadCancelled`). */
+  | 'MODEL_LOAD_CANCELLED'
   | 'INVALID_ARGUMENT'
   | 'IO_ERROR'
   | 'INTERNAL_ERROR'

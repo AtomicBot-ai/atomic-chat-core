@@ -157,6 +157,17 @@ export class CoreClient {
     })
   }
 
+  /**
+   * Cancel a load that has not answered yet. `false` means nothing was pending for the model: the
+   * load request has not arrived, or it has already answered and the model is to be unloaded.
+   */
+  async cancelModelLoad(provider: string, modelId: string): Promise<boolean> {
+    const result = await this.call<{ cancelled: boolean }>(`/models/${provider}/${modelId}/load/cancel`, {
+      method: 'POST',
+    })
+    return result.cancelled === true
+  }
+
   /** Restart a poisoned engine at the context it already has. */
   recreateSession(provider: string, modelId: string): Promise<{ ok: boolean; reason?: string }> {
     return this.call(`/models/${provider}/${modelId}/recreate`, { method: 'POST' })

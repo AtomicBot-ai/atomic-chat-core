@@ -6,6 +6,11 @@
  * Readiness = a stdout/stderr line whose lowercase form contains one of `readyMarkers`, OR the
  * injected `healthCheck` reporting success (polled every 200 ms). An early exit is classified by the
  * caller-provided `classifyExit`; a timeout kills the child and raises `MODEL_LOAD_TIMED_OUT`.
+ *
+ * Two signals can stop a start, and they mean different things. `signal` is the owner shutting
+ * down: the child gets a grace period and the caller sees `CORE_NOT_RUNNING`. `cancelSignal` is the
+ * user cancelling this load: the child is killed at once, so its memory is back before the error
+ * reaches anyone, and the caller sees `MODEL_LOAD_CANCELLED`.
  */
 
 import { spawn } from 'node:child_process'
@@ -13,6 +18,7 @@ import type { ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ExitInfo } from '../llamacpp/index.js'
+import { loadCancelledError } from './load-cancel.js'
 
 /** Substrings (lowercase) that mean llama-server's HTTP server is up; stable across upstream rewordings. */
 export const LLAMA_READY_MARKERS = [
@@ -37,6 +43,8 @@ export interface ReadyOptions {
   timeoutMs: number
   /** Cancel process startup (owner shutdown); the child is terminated before rejection. */
   signal?: AbortSignal
+  /** The user cancelled this load: kill the child immediately and raise `MODEL_LOAD_CANCELLED`. */
+  cancelSignal?: AbortSignal
   readyMarkers?: readonly string[]
   /** Poll for readiness (e.g. `GET /health` → 2xx); omitted for backends without a health route. */
   healthCheck?: () => Promise<boolean>
@@ -148,6 +156,7 @@ export interface SpawnReadyResult {
 export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): Promise<SpawnReadyResult> {
   if (opts.signal?.aborted)
     throw new AtomicCoreError('CORE_NOT_RUNNING', 'The runtime stopped before the process could start.')
+  if (opts.cancelSignal?.aborted) throw loadCancelledError()
   const markers = opts.readyMarkers ?? LLAMA_READY_MARKERS
   let resolveReady: ((via: 'log' | 'health') => void) | undefined
   const ready = new Promise<'log' | 'health'>((r) => (resolveReady = r))
@@ -191,6 +200,11 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
     resolveAbort = () => resolve('aborted')
     opts.signal?.addEventListener('abort', resolveAbort, { once: true })
   })
+  let resolveCancel: (() => void) | undefined
+  const cancelled = new Promise<'cancelled'>((resolve) => {
+    resolveCancel = () => resolve('cancelled')
+    opts.cancelSignal?.addEventListener('abort', resolveCancel, { once: true })
+  })
 
   try {
     const outcome = await Promise.race([
@@ -198,6 +212,7 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
       proc.exited.then((exit) => ({ kind: 'exit' as const, exit })),
       timeout.then(() => ({ kind: 'timeout' as const })),
       aborted.then(() => ({ kind: 'aborted' as const })),
+      cancelled.then(() => ({ kind: 'cancelled' as const })),
       failed.then((error) => ({ kind: 'failed' as const, error })),
     ])
     if (outcome.kind === 'ready') return { process: proc, readyVia: outcome.via }
@@ -214,7 +229,11 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
       }
       throw opts.classifyExit(outcome.exit, stderr, stdout)
     }
-    await proc.terminate(outcome.kind === 'timeout' ? (opts.timeoutGraceMs ?? 1000) : 1000)
+    // A cancel frees the memory now: no grace, and the error is raised only once the child is gone.
+    const graceMs =
+      outcome.kind === 'cancelled' ? 0 : outcome.kind === 'timeout' ? (opts.timeoutGraceMs ?? 1000) : 1000
+    await proc.terminate(graceMs)
+    if (outcome.kind === 'cancelled') throw loadCancelledError()
     if (outcome.kind === 'failed') throw outcome.error
     if (outcome.kind === 'aborted') {
       throw new AtomicCoreError('CORE_NOT_RUNNING', 'The runtime stopped while the process was starting.')
@@ -229,6 +248,7 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
   } finally {
     stopHealth()
     if (resolveAbort) opts.signal?.removeEventListener('abort', resolveAbort)
+    if (resolveCancel) opts.cancelSignal?.removeEventListener('abort', resolveCancel)
   }
 }
 
