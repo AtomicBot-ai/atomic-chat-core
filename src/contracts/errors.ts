@@ -71,7 +71,37 @@ export type CoreErrorCode =
   /** A previous tunnel could not be confirmed dead; only Stop is offered until it is. */
   | 'REMOTE_ACCESS_STOP_FAILED'
 
-export type ErrorCode = RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode
+/**
+ * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the
+ * web app). `lib/diffusion/errors.ts` matches on them. Three are spelled like codes above and are
+ * shared with them: `MODEL_LOAD_FAILED`, `MODEL_NOT_LOADED`, `OUT_OF_MEMORY`.
+ */
+export const DIFFUSION_ERROR_CODES = [
+  'ENGINE_MISSING',
+  'ENGINE_INSTALL_FAILED',
+  'ENGINE_CRASHED',
+  'MODEL_MISSING',
+  'SIDE_FILE_MISSING',
+  'MODEL_LOAD_FAILED',
+  'MODEL_INCOMPATIBLE',
+  'MODEL_NOT_LOADED',
+  'OUT_OF_MEMORY',
+  'UNSUPPORTED_BACKEND',
+  'UNSUPPORTED_WORKFLOW',
+  'INVALID_DIMENSIONS',
+  'INVALID_REQUEST',
+  'JOB_BUSY',
+  'JOB_NOT_FOUND',
+  'QUEUE_FULL',
+  'CANCELLED',
+  'DISK_FULL',
+  'BACKEND_IN_USE',
+  'NOT_CONFIGURED',
+  'INTERNAL',
+] as const
+export type DiffusionErrorCode = (typeof DIFFUSION_ERROR_CODES)[number]
+
+export type ErrorCode = RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode | DiffusionErrorCode
 
 /**
  * Disk-failure tags. Rendered into the error message as `Error: [<tag>] <detail>`; the app's

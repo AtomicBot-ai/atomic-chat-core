@@ -4,6 +4,12 @@
  * Adding an event = add it here + add the relay mapping in the app, in the same PR pair.
  */
 
+import type {
+  DiffusionErrorEvent,
+  DiffusionJobEvent,
+  DiffusionProgressEvent,
+  DiffusionStateEvent,
+} from './diffusion.js'
 import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.js'
 
@@ -105,6 +111,16 @@ export interface CoreEvents {
    * on: the URL arrives seconds after the request that asked for it has answered.
    */
   'remote-access:status': RemoteAccessStatus
+
+  /**
+   * Image generation, camelCase like the rest of that surface (the plugin's `atomic-diffusion://*`).
+   * `state` on every change of the engine install, the model or the output folder; `progress` per
+   * sampling step; `job` on every job transition; `error` for a failure nobody is awaiting.
+   */
+  'diffusion:state': DiffusionStateEvent
+  'diffusion:progress': DiffusionProgressEvent
+  'diffusion:job': DiffusionJobEvent
+  'diffusion:error': DiffusionErrorEvent
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

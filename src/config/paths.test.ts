@@ -27,6 +27,16 @@ describe('dataLayout', () => {
     expect(layout.serverStateFile).toBe('/data/local-api-server.json')
     expect(layout.chatgptAuthFile).toBe('/data/atomic-chatgpt-auth.json')
   })
+  it("keeps image generation where the app's plugin put it", () => {
+    // `state.rs` at 767ff6350: `<data>/diffusion/{backends,models,scratch}`, gallery in `<data>/images`.
+    expect(layout.diffusion).toEqual({
+      root: '/data/diffusion',
+      backendsDir: '/data/diffusion/backends',
+      modelsDir: '/data/diffusion/models',
+      scratchDir: '/data/diffusion/scratch',
+      defaultOutputDir: '/data/images',
+    })
+  })
 })
 
 describe('path helpers', () => {

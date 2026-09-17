@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
+import type { ErrorCode } from '../contracts/index.js'
 import {
   hostHeaderIsLoopback,
   isLoopbackAddress,
@@ -81,6 +82,32 @@ describe('error envelope', () => {
     expect(statusForCode('SERVER_START_TIMED_OUT')).toBe(504)
     expect(statusForCode('FOUNDATION_MODELS_UNAVAILABLE')).toBe(503)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
+  })
+
+  it('maps the image-generation codes: the caller can fix 4xx, and nothing acts on the status', () => {
+    const table: Array<[ErrorCode, number]> = [
+      ['INVALID_REQUEST', 400],
+      ['INVALID_DIMENSIONS', 400],
+      ['UNSUPPORTED_WORKFLOW', 400],
+      ['UNSUPPORTED_BACKEND', 400],
+      ['JOB_NOT_FOUND', 404],
+      ['ENGINE_MISSING', 404],
+      ['MODEL_MISSING', 404],
+      ['SIDE_FILE_MISSING', 404],
+      ['MODEL_NOT_LOADED', 404],
+      ['JOB_BUSY', 409],
+      ['BACKEND_IN_USE', 409],
+      ['NOT_CONFIGURED', 409],
+      ['CANCELLED', 409],
+      ['QUEUE_FULL', 429],
+      ['DISK_FULL', 507],
+      ['ENGINE_INSTALL_FAILED', 500],
+      ['ENGINE_CRASHED', 500],
+      ['MODEL_LOAD_FAILED', 500],
+      ['MODEL_INCOMPATIBLE', 500],
+      ['INTERNAL', 500],
+    ]
+    for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)
   })
 })
 

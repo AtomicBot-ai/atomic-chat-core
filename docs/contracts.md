@@ -31,6 +31,8 @@ without a demonstrated consumer. See PLAN.md §5.1 for comparison rules and §8 
 | `cloudflared` command line (`tunnel [--config <empty>] --url <origin> --no-autoupdate [--protocol http2]`, no `TUNNEL_*` variables) and output (`https://<words>.trycloudflare.com`, never `api.`; `Registered tunnel connection`) | `src/remote-access/cloudflared-{args,output}.ts` | `remote_access/process.rs` | ported parser and argv tables; a real child in `process.test.ts` |
 | Tunnel probe: `GET <url>/openapi.json`, `info.title` = `Atomic Chat API Server Endpoints` | `src/remote-access/probe.ts`, served by `src/server/public/static.ts` | `remote_access/probe.rs` | `probe.test.ts` asserts the marker against the document the public server really serves |
 | LAN addresses `GET /atomic/v1/lan-addresses` → `{addresses}` (IPv4, default route first, virtual adapters hidden, CGNAT kept) | `src/remote-access/{lan,lan-probe}.ts`, `src/server/control/routes/remote-access.ts` | image-generation line `remote_access/lan.rs` (`get_lan_addresses`) | ported `lan.rs` tables |
+| Image generation wire types (camelCase; absent vs `null` as the plugin's serde produced), the 21 `DiffusionErrorCode`s (statuses informational: 400/404/409/429/507/500), events `diffusion:{state,progress,job,error}` | `src/contracts/{diffusion,errors,events}.ts`, `src/diffusion/{parse,errors}.ts`, `src/server/http.ts` | image-generation line `web-app/src/services/diffusion/types.ts`, plugin `tauri-plugin-atomic-diffusion/src/{state,error,events}.rs` at `767ff6350` | `contracts/errors.test.ts` (code list), `diffusion/parse.test.ts`, `server/http.test.ts` |
+| `sd-server` argv and `POST /sdcpp/v1/img_gen` body; output parsing (records, step lines, tile passes, diagnostic tail, exit classification); progress tracking; request validation | `src/diffusion/{args,progress,tracker,validate,workflow}.ts` | plugin `{args,progress,jobs,session}.rs` | the Rust `#[test]` tables ported by hand into the sibling tests; `test/fixtures/sdcpp/required-flags.txt` |
 | Responses↔Chat shims | `src/server/shims/{responses,chat-to-responses}.ts` | `responses_shim.rs`, `chat_to_responses_shim.rs` | `test/fixtures/app/{responses-shim,chat-to-responses-shim}/*.json`, replayed by `test/contract/shims.test.ts` |
 | Anthropic `/messages` ↔ Chat shim | `src/server/shims/anthropic.ts` | `proxy.rs` (`transform_anthropic_to_openai`, `transform_openai_response_to_anthropic`, `transform_and_forward_stream`) | `test/fixtures/app/anthropic-shim/*.json`, replayed by `test/contract/shims.test.ts`; one recorded case is a known divergence (split `data:` line) |
 | Request inspector: prompt preview, stream telemetry, `include_usage` injection | `src/server/public/telemetry.ts` | `src-tauri/src/core/server/request_inspector.rs` | `test/fixtures/app/inspector-telemetry/*.json`, replayed by `test/contract/inspector-telemetry.test.ts` |
@@ -52,7 +54,8 @@ has not landed yet is validated for shape only, and `docs/testing-critical-flows
 
 New data paths: only `<data>/atomic-core/` (settings.json, credentials.json, optimal-backend.json,
 instance.lock, control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml).
-Anything else needs an ADR in both repos.
+Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
+`<data>/diffusion/{backends,models,scratch}` and `<data>/images`. Anything else needs an ADR in both repos.
 
 ## Target control and ownership contract
 

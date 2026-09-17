@@ -131,6 +131,10 @@ export function statusForCode(code: ErrorCode): number {
     case 'PROVIDER_NOT_FOUND':
     case 'MODEL_NOT_LOADED':
     case 'NO_MODEL_LOADED':
+    case 'JOB_NOT_FOUND':
+    case 'ENGINE_MISSING':
+    case 'MODEL_MISSING':
+    case 'SIDE_FILE_MISSING':
       return 404
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
@@ -138,11 +142,23 @@ export function statusForCode(code: ErrorCode): number {
     case 'REMOTE_ACCESS_SERVER_STOPPED':
     case 'REMOTE_ACCESS_OPERATION_IN_PROGRESS':
     case 'REMOTE_ACCESS_STOP_FAILED':
+    case 'JOB_BUSY':
+    case 'BACKEND_IN_USE':
+    case 'NOT_CONFIGURED':
+    case 'CANCELLED':
       return 409
+    case 'QUEUE_FULL':
+      return 429
+    case 'DISK_FULL':
+      return 507
     case 'AUTH_FAILED':
     case 'UPSTREAM_ERROR':
       return 502
     case 'INVALID_ARGUMENT':
+    case 'INVALID_REQUEST':
+    case 'INVALID_DIMENSIONS':
+    case 'UNSUPPORTED_WORKFLOW':
+    case 'UNSUPPORTED_BACKEND':
       return 400
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':

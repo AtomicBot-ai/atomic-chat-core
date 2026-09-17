@@ -86,25 +86,53 @@ function exitInfo(code: number | null, signal: NodeJS.Signals | null): ExitInfo 
   return { code, signal }
 }
 
+/**
+ * What a caller that reads the output itself asks for
+ * (ADR 2026-09-17-spawnmanaged-reports-raw-chunks-and-can-skip-capturing-output).
+ */
+export interface SpawnHooks {
+  /**
+   * Raw bytes as they arrive, before any line splitting. For a process that redraws a line in place
+   * (`\r…ESC[K`): a reader keyed on line ends sees every redraw one step late.
+   */
+  onData?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void
+  /** `false` keeps nothing: `output()` stays empty. For a verbose process that runs for hours. */
+  captureOutput?: boolean
+}
+
 /** Spawn without waiting; used by `spawnAndAwaitReady` and by probes that just want output. */
-export function spawnManaged(spec: SpawnSpec, onLine?: ReadyOptions['onLine']): ManagedProcess {
+export function spawnManaged(
+  spec: SpawnSpec,
+  onLine?: ReadyOptions['onLine'],
+  hooks: SpawnHooks = {}
+): ManagedProcess {
   const child = spawn(spec.exe, spec.args, {
     env: spec.env,
     cwd: spec.cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
+  const capture = hooks.captureOutput !== false
   let stdoutBuf = ''
   let stderrBuf = ''
   const wire = (stream: 'stdout' | 'stderr') => {
     const src = stream === 'stdout' ? child.stdout : child.stderr
     if (!src) return
+    const { onData } = hooks
+    if (onData) src.on('data', (chunk: Buffer) => onData(stream, chunk))
+    // Nobody wants lines: leave the pipe to `onData`, or drain it so the child never blocks on a full one.
+    if (!capture && !onLine) {
+      if (!onData) src.resume()
+      return
+    }
     const rl = createInterface({ input: src, crlfDelay: Infinity })
     rl.on('line', (raw) => {
       const line = raw.replace(/\s+$/, '')
       if (line === '') return
-      if (stream === 'stdout') stdoutBuf += line + '\n'
-      else stderrBuf += line + '\n'
+      if (capture) {
+        if (stream === 'stdout') stdoutBuf += line + '\n'
+        else stderrBuf += line + '\n'
+      }
       onLine?.(stream, line)
     })
   }

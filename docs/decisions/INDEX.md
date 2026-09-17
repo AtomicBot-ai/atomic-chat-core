@@ -11,6 +11,10 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-17** — [Image generation is its own module, not a local runtime](2026-09-17-image-generation-is-its-own-module-not-a-local-runtime.md)
+- **2026-09-17** — [The diffusion surface speaks the app's camelCase and error codes verbatim](2026-09-17-diffusion-speaks-the-apps-camelcase-and-error-codes-verbatim.md)
+- **2026-09-17** — [spawnManaged reports raw chunks and can skip capturing output](2026-09-17-spawnmanaged-reports-raw-chunks-and-can-skip-capturing-output.md)
+- **2026-09-17** — [Pin the diffusion port with hand-ported test tables and a live test](2026-09-17-pin-the-diffusion-port-with-hand-ported-tables-and-a-live-test.md)
 - **2026-09-17** — [The core owns the Cloudflare quick tunnel next to the public listener](2026-09-17-the-core-owns-the-cloudflare-quick-tunnel.md)
 - **2026-09-17** — [Probe the tunnel through the raw-socket client with an address pin](2026-09-17-probe-the-tunnel-through-the-raw-socket-client-with-an-address-pin.md)
 - **2026-09-17** — [Trust the live tunnel name and the accepted socket's address as a per-request group](2026-09-17-trust-the-tunnel-name-and-the-accepted-socket-address-per-request.md)

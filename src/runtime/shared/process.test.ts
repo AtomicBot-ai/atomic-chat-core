@@ -245,3 +245,66 @@ describe('spawnAndAwaitReady', () => {
     expect(p.output()).toEqual({ stdout: 'a\nb\n', stderr: 'c\n' })
   })
 })
+
+describe('spawnManaged hooks', () => {
+  // sd.cpp redraws its step bar in place: `\r<bar> 1/4 - 2.0s/it ESC[K`, a newline only after the last step.
+  const redraws =
+    'process.stdout.write("\\r|=>  | 1/4 - 2.0s/it\\x1b[K");' +
+    'setTimeout(() => { process.stdout.write("\\r|==> | 2/4 - 2.0s/it\\x1b[K"); process.stderr.write("warn\\n") }, 150);' +
+    'setTimeout(() => process.exit(0), 300)'
+
+  it('hands over raw chunks as they arrive, so a redraw without a line end is seen at once', async () => {
+    const seen: Array<{ stream: string; text: string; at: number }> = []
+    const started = Date.now()
+    const p = spawnManaged(node(redraws), undefined, {
+      onData: (stream, chunk) =>
+        seen.push({ stream, text: chunk.toString('utf8'), at: Date.now() - started }),
+    })
+    await p.exited
+    await new Promise((r) => setTimeout(r, 20))
+    const stdout = seen.filter((c) => c.stream === 'stdout')
+    expect(stdout.map((c) => c.text).join('')).toBe(
+      '\r|=>  | 1/4 - 2.0s/it\x1b[K\r|==> | 2/4 - 2.0s/it\x1b[K'
+    )
+    // The first redraw arrived on its own, before the second one was written.
+    expect(stdout[0]?.text).toBe('\r|=>  | 1/4 - 2.0s/it\x1b[K')
+    expect(seen.filter((c) => c.stream === 'stderr').map((c) => c.text)).toEqual(['warn\n'])
+  })
+
+  it('keeps line delivery and capture working next to the raw hook', async () => {
+    const lines: string[] = []
+    let bytes = 0
+    const p = spawnManaged(
+      node('process.stdout.write("a\\nb\\n"); process.exit(0)'),
+      (_stream, line) => lines.push(line),
+      { onData: (_stream, chunk) => (bytes += chunk.length) }
+    )
+    await p.exited
+    await new Promise((r) => setTimeout(r, 20))
+    expect(lines).toEqual(['a', 'b'])
+    expect(bytes).toBe(4)
+    expect(p.output().stdout).toBe('a\nb\n')
+  })
+
+  it('keeps nothing when capture is off, with or without a line reader', async () => {
+    const lines: string[] = []
+    const withLines = spawnManaged(
+      node('process.stdout.write("a\\n"); process.stderr.write("b\\n"); process.exit(0)'),
+      (_stream, line) => lines.push(line),
+      { captureOutput: false }
+    )
+    await withLines.exited
+    await new Promise((r) => setTimeout(r, 20))
+    expect(lines.sort()).toEqual(['a', 'b'])
+    expect(withLines.output()).toEqual({ stdout: '', stderr: '' })
+
+    // No reader at all: the pipes are still drained, so a chatty child is never blocked on a full one.
+    const silent = spawnManaged(
+      node('process.stdout.write("x".repeat(1 << 20), () => process.exit(7))'),
+      undefined,
+      { captureOutput: false }
+    )
+    expect((await silent.exited).code).toBe(7)
+    expect(silent.output()).toEqual({ stdout: '', stderr: '' })
+  })
+})

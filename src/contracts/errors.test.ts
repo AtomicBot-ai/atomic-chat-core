@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AtomicCoreError, DISK_ERROR_TAGS } from './errors.js'
+import { AtomicCoreError, DIFFUSION_ERROR_CODES, DISK_ERROR_TAGS } from './errors.js'
 
 describe('AtomicCoreError', () => {
   it('serialises to the {code, message, details?} wire shape and omits details when absent', () => {
@@ -29,6 +29,33 @@ describe('AtomicCoreError', () => {
       'disk_path_too_long',
       'disk_device_lost',
       'disk_io',
+    ])
+  })
+
+  it("keeps the image-generation codes the web app's errors.ts matches on", () => {
+    // `NativeDiffusionErrorCode` in web-app/src/services/diffusion/types.ts, `error.rs` at 767ff6350.
+    expect([...DIFFUSION_ERROR_CODES]).toEqual([
+      'ENGINE_MISSING',
+      'ENGINE_INSTALL_FAILED',
+      'ENGINE_CRASHED',
+      'MODEL_MISSING',
+      'SIDE_FILE_MISSING',
+      'MODEL_LOAD_FAILED',
+      'MODEL_INCOMPATIBLE',
+      'MODEL_NOT_LOADED',
+      'OUT_OF_MEMORY',
+      'UNSUPPORTED_BACKEND',
+      'UNSUPPORTED_WORKFLOW',
+      'INVALID_DIMENSIONS',
+      'INVALID_REQUEST',
+      'JOB_BUSY',
+      'JOB_NOT_FOUND',
+      'QUEUE_FULL',
+      'CANCELLED',
+      'DISK_FULL',
+      'BACKEND_IN_USE',
+      'NOT_CONFIGURED',
+      'INTERNAL',
     ])
   })
 })
