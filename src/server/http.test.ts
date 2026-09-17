@@ -78,6 +78,8 @@ describe('error envelope', () => {
     expect(statusForCode('INVALID_ARGUMENT')).toBe(400)
     expect(statusForCode('CORE_NOT_RUNNING')).toBe(503)
     expect(statusForCode('MODEL_LOAD_TIMED_OUT')).toBe(504)
+    expect(statusForCode('SERVER_START_TIMED_OUT')).toBe(504)
+    expect(statusForCode('FOUNDATION_MODELS_UNAVAILABLE')).toBe(503)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
   })
 })

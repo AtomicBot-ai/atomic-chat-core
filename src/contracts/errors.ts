@@ -22,6 +22,13 @@ export type RuntimeErrorCode =
   | 'MULTIMODAL_PROJECTOR_LOAD_FAILED'
   | 'MODEL_FILE_CORRUPT'
   | 'LLAMA_CPP_PROCESS_ERROR'
+  /** MLX plugin (`tauri-plugin-mlx/src/error.rs`): an mlx-server failure no pattern explained. */
+  | 'MLX_PROCESS_ERROR'
+  /** Foundation Models plugin (`tauri-plugin-foundation-models/src/error.rs`). */
+  | 'FOUNDATION_MODELS_UNAVAILABLE'
+  | 'SERVER_START_FAILED'
+  | 'SERVER_START_TIMED_OUT'
+  | 'PROCESS_ERROR'
 
 /**
  * Codes raised by the TypeScript extension layer of the app (coded `Error.code` own-properties);

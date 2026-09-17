@@ -97,6 +97,43 @@ describe('spawnAndAwaitReady', () => {
     expect(err.details).toContain('still loading')
   })
 
+  it('fails at a line that already means failure, before the process exits', async () => {
+    const started = Date.now()
+    await expect(
+      spawnAndAwaitReady(node(`console.error('[x] ERROR: nope'); setTimeout(() => process.exit(1), 5000)`), {
+        timeoutMs: 10_000,
+        classifyExit: classify,
+        failOnLine: (stream, line) =>
+          stream === 'stderr' && line.includes('ERROR:')
+            ? new AtomicCoreError('PROCESS_ERROR', line)
+            : undefined,
+      })
+    ).rejects.toMatchObject({ code: 'PROCESS_ERROR', message: '[x] ERROR: nope' })
+    expect(Date.now() - started).toBeLessThan(4000)
+  })
+
+  it('reads readiness per stream when a backend says ready differently on each', async () => {
+    const markers = { stdout: ['server started'], stderr: ['uvicorn running on'] }
+    // "uvicorn running on" on stdout is not a stdout marker, so only the stderr line counts.
+    const { process: proc } = await spawnAndAwaitReady(
+      node(
+        `console.log('uvicorn running on 1'); setTimeout(() => console.error('Uvicorn running on 2'), 100); setInterval(() => {}, 1000)`
+      ),
+      { timeoutMs: 5000, classifyExit: classify, streamReadyMarkers: markers }
+    )
+    expect(proc.output().stderr).toContain('Uvicorn running on 2')
+    await proc.terminate(0)
+    await expect(
+      spawnAndAwaitReady(node(`console.log('Uvicorn running on 1'); setInterval(() => {}, 1000)`), {
+        timeoutMs: 300,
+        classifyExit: classify,
+        streamReadyMarkers: markers,
+        timeoutGraceMs: 0,
+        timeoutError: (stderr) => new AtomicCoreError('SERVER_START_TIMED_OUT', 'custom timeout', stderr),
+      })
+    ).rejects.toMatchObject({ code: 'SERVER_START_TIMED_OUT', message: 'custom timeout' })
+  })
+
   it('surfaces a missing executable as IO_ERROR', async () => {
     await expect(
       spawnAndAwaitReady(

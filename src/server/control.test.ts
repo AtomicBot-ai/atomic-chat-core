@@ -714,6 +714,22 @@ describe('backend routes', () => {
     expect(seen).toEqual({ url: 'http://proxy:8080' })
   })
 
+  it('passes the TurboQuant asset name through, and ignores an empty one', async () => {
+    const seen: unknown[] = []
+    h.backends.install = async (_provider, version, backend, options) => {
+      seen.push(options.assetName)
+      return { version, backend, installed: true, path: '/pack' }
+    }
+    for (const asset_name of ['llama-turboquant-macos-arm64.tar.gz', '']) {
+      await h.get('/atomic/v1/backends/llamacpp/install', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: 'b10018-1.3.0', backend: 'macos-arm64', task_id: 't', asset_name }),
+      })
+    }
+    expect(seen).toEqual(['llama-turboquant-macos-arm64.tar.gz', undefined])
+  })
+
   it('cancels the task id that owns the UI row', async () => {
     let seen = ''
     h.backends.cancel = (taskId) => {
@@ -809,6 +825,30 @@ describe('model capability routes', () => {
     await h.get('/atomic/v1/hardware/devices?provider=llamacpp')
 
     expect(asked).toEqual(['llamacpp-upstream', 'llamacpp'])
+  })
+})
+
+describe('foundation models availability', () => {
+  it('answers the runtime token, forwarding force', async () => {
+    const asked: boolean[] = []
+    h.server.close()
+    h = await start({
+      foundationModelsAvailability: async (force) => {
+        asked.push(force)
+        return 'appleIntelligenceNotEnabled'
+      },
+    })
+    expect(await (await h.get('/atomic/v1/runtimes/foundation-models/availability')).json()).toEqual({
+      status: 'appleIntelligenceNotEnabled',
+    })
+    await h.get('/atomic/v1/runtimes/foundation-models/availability?force=1')
+    expect(asked).toEqual([false, true])
+  })
+
+  it('says unavailable where the runtime does not exist', async () => {
+    expect(await (await h.get('/atomic/v1/runtimes/foundation-models/availability')).json()).toEqual({
+      status: 'unavailable',
+    })
   })
 })
 

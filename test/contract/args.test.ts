@@ -14,35 +14,37 @@ interface ArgsInput {
 }
 type ArgsExpected = { argv: string[] } | { error: string }
 
-const { index, cases } = loadFixtureSet<ArgsInput, ArgsExpected>('args')
+for (const set of ['args', 'args-llamacpp']) {
+  const { index, cases } = loadFixtureSet<ArgsInput, ArgsExpected>(set)
 
-describe(`contract: args (${index.source.file} @ ${index.source.commit.slice(0, 7)}, ${index.comparator})`, () => {
-  it('has every indexed case', () => {
-    expect(cases.map((c) => c.name).sort()).toEqual([...index.cases].sort())
-  })
+  describe(`contract: ${set} (${index.source.file} @ ${index.source.commit.slice(0, 7)}, ${index.comparator})`, () => {
+    it('has every indexed case', () => {
+      expect(cases.map((c) => c.name).sort()).toEqual([...index.cases].sort())
+    })
 
-  it.each(cases.map((c) => [c.name, c] as const))('%s', (_name, c) => {
-    const provider = (c.source.provider ?? 'llamacpp-upstream') as 'llamacpp-upstream' | 'llamacpp'
-    const run = () =>
-      buildLlamaArgs(c.input.config, {
-        provider,
-        isEmbedding: c.input.is_embedding,
-        modelId: c.input.model_id,
-        modelPath: c.input.model_path,
-        port: c.input.port,
-        mmprojPath: c.input.mmproj_path,
-      })
-    if ('error' in c.expected) {
-      try {
-        run()
-        expect.unreachable('expected an error')
-      } catch (e) {
-        expect(e).toBeInstanceOf(AtomicCoreError)
-        expect((e as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
-        expect((e as AtomicCoreError).details).toBe(c.expected.error)
+    it.each(cases.map((c) => [c.name, c] as const))('%s', (_name, c) => {
+      const provider = (c.source.provider ?? 'llamacpp-upstream') as 'llamacpp-upstream' | 'llamacpp'
+      const run = () =>
+        buildLlamaArgs(c.input.config, {
+          provider,
+          isEmbedding: c.input.is_embedding,
+          modelId: c.input.model_id,
+          modelPath: c.input.model_path,
+          port: c.input.port,
+          mmprojPath: c.input.mmproj_path,
+        })
+      if ('error' in c.expected) {
+        try {
+          run()
+          expect.unreachable('expected an error')
+        } catch (e) {
+          expect(e).toBeInstanceOf(AtomicCoreError)
+          expect((e as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+          expect((e as AtomicCoreError).details).toBe(c.expected.error)
+        }
+      } else {
+        expect(run()).toEqual(c.expected.argv)
       }
-    } else {
-      expect(run()).toEqual(c.expected.argv)
-    }
+    })
   })
-})
+}

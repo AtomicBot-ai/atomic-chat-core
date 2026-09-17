@@ -14,7 +14,11 @@ if (args.length === 1 && args[0] === '--version') {
   if (command !== 'daemon') throw new Error('The app core only accepts the daemon command.')
   const { values } = parseArgs({
     args,
-    options: { 'data-folder': { type: 'string' }, 'control-port': { type: 'string' } },
+    options: {
+      'data-folder': { type: 'string' },
+      'control-port': { type: 'string' },
+      'resources-dir': { type: 'string' },
+    },
     strict: true,
   })
   if (!values['data-folder']) throw new Error('The app must supply its data folder.')
@@ -22,6 +26,7 @@ if (args.length === 1 && args[0] === '--version') {
     ownerScope: 'app',
     dataFolder: values['data-folder'],
     controlPort: Number(values['control-port'] ?? 0),
+    ...(values['resources-dir'] ? { resourcesDir: values['resources-dir'] } : {}),
     env: io.env,
     logger: (level, message) => io.stderr(`[${level}] ${message}\n`),
   })

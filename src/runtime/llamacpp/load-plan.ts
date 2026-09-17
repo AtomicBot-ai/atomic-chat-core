@@ -219,6 +219,13 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     }
   }
 
+  // TurboQuant has no speculative decoding: a value imported from an upstream copy of the settings
+  // must not make its load look for, or download, a draft model.
+  if (input.provider === 'llamacpp') {
+    cfg.mtp = false
+    cfg.dflash = false
+  }
+
   // 13. Gemma MTP draft head
   let mtpDraftRel = modelConfig.mtp_draft_path
   if (cfg.mtp && !mtpDraftRel && deps.checkGemmaMtpSupport(modelId)) {

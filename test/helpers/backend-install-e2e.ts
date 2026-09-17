@@ -123,7 +123,7 @@ async function createTar(folder: string, exe: string): Promise<Buffer> {
 }
 
 /** Minimal stored zip: one file, enough to exercise the Windows extraction path. */
-function storedZip(filename: string, content: Buffer): Buffer {
+export function storedZip(filename: string, content: Buffer): Buffer {
   const name = Buffer.from(filename)
   const table = Array.from({ length: 256 }, (_, n) => {
     let c = n

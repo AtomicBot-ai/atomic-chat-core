@@ -10,8 +10,14 @@
 
 import { parseArgs } from 'node:util'
 import { basename, extname, isAbsolute, join, resolve } from 'node:path'
-import type { AtomicCoreError } from '../contracts/index.js'
-import type { LocalApiServerState } from '../contracts/index.js'
+import { AtomicCoreError } from '../contracts/index.js'
+import type { LocalApiServerState, LocalProviderId } from '../contracts/index.js'
+import {
+  APPLE_MODEL_ID,
+  FOUNDATION_MODELS_BINARY,
+  FOUNDATION_MODELS_STARTUP_TIMEOUT_SECS,
+} from '../runtime/foundation-models/index.js'
+import { MLX_DEFAULT_TIMEOUT_SECS, MLX_SERVER_BINARY } from '../runtime/mlx/index.js'
 import type { CoreClient } from '../client/index.js'
 import { assertCliDataFolder, dataLayout, nodeDataFolderEnv, resolveCliDataFolder } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
@@ -113,15 +119,18 @@ export async function daemonCommand(argv: string[], io: CliIo): Promise<number> 
       'public-port': { type: 'string' },
       'public-host': { type: 'string' },
       'api-key': { type: 'string' },
+      'resources-dir': { type: 'string' },
       'verbose': { type: 'boolean', short: 'v' },
     },
     strict: true,
     allowPositionals: false,
   })
   const layout = layoutFor(values, io)
+  const resourcesDir = pathValue(values['resources-dir'], io.cwd)
   const core = await AtomicCore.create({
     dataFolder: layout.root,
     ownerScope: 'cli',
+    ...(resourcesDir ? { resourcesDir } : {}),
     controlPort: values['control-port'] !== undefined ? Number(values['control-port']) : 0,
     ...(values['control-host'] ? { controlHost: values['control-host'] } : {}),
     env: io.env,
@@ -171,11 +180,16 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
       'log': { type: 'string' },
       'verbose': { type: 'boolean', short: 'v' },
       'select': { type: 'boolean' },
+      'provider': { type: 'string' },
+      'resources-dir': { type: 'string' },
     },
     allowPositionals: true,
     strict: true,
   })
   const layout = layoutFor(values, io)
+  const provider = serveProvider(values.provider)
+  if (provider === 'mlx' || provider === 'foundation-models')
+    return serveSidecar(provider, values, positionals, layout, io)
   const registry = new ModelRegistry(layout, LOCAL_PROVIDER)
   const modelPath = pathValue(values['model-path'], io.cwd)
   const mmprojPath = pathValue(values.mmproj, io.cwd)
@@ -237,63 +251,150 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
       ? join(layout.core.logsDir, 'serve.log')
       : undefined
 
-  return withAttachedOwner(
-    {
-      layout,
-      clientName: 'atomic-chat-core serve',
-      launch: true,
-      log: (message) => io.stderr(`${message}\n`),
-    },
-    async ({ client }) => {
-      const overrides: Record<string, unknown> = {
-        ctx_size: ctxSize,
-        n_gpu_layers: gpuLayers,
-        fit: values.fit === true,
-        threads,
-        timeout: timeoutSecs,
-      }
-
-      const verbose = values.verbose === true
-      const eventAbort = new AbortController()
-      const eventReady = verbose ? subscribeToLogs(client, io, eventAbort.signal) : undefined
-      if (eventReady) await eventReady
-
-      let session
-      let state
-      try {
-        // Claim/validate the public configuration before auto-unload can mutate sessions. An
-        // incompatible running listener must reject this command while its current model stays live.
-        state = await client.startServer({
-          port,
-          ...(values.host ? { host: values.host } : {}),
-          ...(values['api-key'] ? { api_key: values['api-key'] } : {}),
-        })
-        session = await client.loadModel(LOCAL_PROVIDER, modelId, {
-          isEmbedding: values.embedding === true,
-          ...(exePath
-            ? { exePath, versionBackend: versionBackendFromBinPath(exePath) ?? 'cli/llama-server' }
-            : {}),
-          ...(modelPath ? { modelPath } : {}),
-          ...(mmprojPath ? { mmprojPath } : {}),
-          timeoutSecs,
-          ...(logPath ? { logPath } : {}),
-          verbose,
-          overrides,
-        })
-      } finally {
-        eventAbort.abort()
-      }
-      if (values.json) {
-        io.stdout(`${JSON.stringify({ session, server: state }, null, 2)}\n`)
-      } else {
-        io.stdout(`\n  ${modelId} is serving at ${apiUrl(state)}\n`)
-        io.stdout(`  model process pid ${session.pid}, port ${session.port}\n`)
-        if (state.requires_api_key) io.stdout('  clients must send the API key you configured\n')
-        io.stdout('\n  The core keeps running after this command exits; stop it with `shutdown`.\n\n')
-      }
-      return 0
+  return withAttachedOwner(serveAttachOptions(layout, io), async ({ client }) => {
+    const overrides: Record<string, unknown> = {
+      ctx_size: ctxSize,
+      n_gpu_layers: gpuLayers,
+      fit: values.fit === true,
+      threads,
+      timeout: timeoutSecs,
     }
+
+    const verbose = values.verbose === true
+    const eventAbort = new AbortController()
+    const eventReady = verbose ? subscribeToLogs(client, io, eventAbort.signal) : undefined
+    if (eventReady) await eventReady
+
+    let session
+    let state
+    try {
+      // Claim/validate the public configuration before auto-unload can mutate sessions. An
+      // incompatible running listener must reject this command while its current model stays live.
+      state = await client.startServer({
+        port,
+        ...(values.host ? { host: values.host } : {}),
+        ...(values['api-key'] ? { api_key: values['api-key'] } : {}),
+      })
+      session = await client.loadModel(LOCAL_PROVIDER, modelId, {
+        isEmbedding: values.embedding === true,
+        ...(exePath
+          ? { exePath, versionBackend: versionBackendFromBinPath(exePath) ?? 'cli/llama-server' }
+          : {}),
+        ...(modelPath ? { modelPath } : {}),
+        ...(mmprojPath ? { mmprojPath } : {}),
+        timeoutSecs,
+        ...(logPath ? { logPath } : {}),
+        verbose,
+        overrides,
+      })
+    } finally {
+      eventAbort.abort()
+    }
+    if (values.json) {
+      io.stdout(`${JSON.stringify({ session, server: state }, null, 2)}\n`)
+    } else {
+      io.stdout(`\n  ${modelId} is serving at ${apiUrl(state)}\n`)
+      io.stdout(`  model process pid ${session.pid}, port ${session.port}\n`)
+      if (state.requires_api_key) io.stdout('  clients must send the API key you configured\n')
+      io.stdout('\n  The core keeps running after this command exits; stop it with `shutdown`.\n\n')
+    }
+    return 0
+  })
+}
+
+const SERVE_PROVIDERS: readonly LocalProviderId[] = ['llamacpp-upstream', 'mlx', 'foundation-models']
+
+function serveProvider(value: unknown): LocalProviderId {
+  if (value === undefined) return LOCAL_PROVIDER
+  if (SERVE_PROVIDERS.includes(value as LocalProviderId)) return value as LocalProviderId
+  throw new AtomicCoreError(
+    'INVALID_ARGUMENT',
+    `--provider must be one of: ${SERVE_PROVIDERS.join(', ')}.`,
+    String(value)
   )
+}
+
+const SIDECARS = {
+  'mlx': { binary: MLX_SERVER_BINARY, name: 'MLX', timeoutSecs: MLX_DEFAULT_TIMEOUT_SECS },
+  'foundation-models': {
+    binary: FOUNDATION_MODELS_BINARY,
+    name: 'Foundation Models',
+    timeoutSecs: FOUNDATION_MODELS_STARTUP_TIMEOUT_SECS,
+  },
+} as const
+
+/**
+ * `serve --provider mlx|foundation-models`. Both servers ship with the desktop app, not with the
+ * CLI, so a standalone CLI must be told where they are. MLX models are the ones the app installed
+ * under `mlx/models`; Foundation Models has the one on-device model.
+ */
+async function serveSidecar(
+  provider: 'mlx' | 'foundation-models',
+  values: Record<string, unknown>,
+  positionals: string[],
+  layout: DataLayout,
+  io: CliIo
+): Promise<number> {
+  const sidecar = SIDECARS[provider]
+  const modelId =
+    provider === 'foundation-models'
+      ? positionals[0]?.trim() || APPLE_MODEL_ID
+      : await resolveServeModelId(positionals[0], undefined, new ModelRegistry(layout, 'mlx'), io)
+  const resourcesDir = pathValue(values['resources-dir'], io.cwd)
+  const exePath =
+    pathValue(values['bin'], io.cwd) ?? (resourcesDir ? join(resourcesDir, sidecar.binary) : undefined)
+  if (!exePath)
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `${sidecar.name} needs --resources-dir <folder with ${sidecar.binary}> or --bin <server>.`
+    )
+  const port = integerOption(values['port'], DEFAULT_SERVE_PORT, '--port', 0, 65_535)
+  const timeoutSecs = integerOption(
+    values['timeout'],
+    sidecar.timeoutSecs,
+    '--timeout',
+    1,
+    Number.MAX_SAFE_INTEGER
+  )
+  const ctxSize =
+    values['ctx-size'] !== undefined
+      ? integerOption(values['ctx-size'], 0, '--ctx-size', 1, Number.MAX_SAFE_INTEGER)
+      : undefined
+  const logPath = values['log'] ? pathValue(values['log'], io.cwd) : undefined
+  return withAttachedOwner(serveAttachOptions(layout, io), async ({ client }) => {
+    const state = await client.startServer({
+      port,
+      ...(typeof values['host'] === 'string' ? { host: values['host'] } : {}),
+      ...(typeof values['api-key'] === 'string' ? { api_key: values['api-key'] } : {}),
+    })
+    const session = await client.loadModel(provider, modelId, {
+      exePath,
+      timeoutSecs,
+      isEmbedding: values['embedding'] === true,
+      ...(ctxSize !== undefined ? { overrides: { ctx_size: ctxSize } } : {}),
+      ...(logPath ? { logPath } : {}),
+      verbose: values['verbose'] === true,
+    })
+    if (values['json']) io.stdout(`${JSON.stringify({ session, server: state }, null, 2)}\n`)
+    else if (provider === 'mlx') {
+      io.stdout(`\n  ${modelId} is serving at ${apiUrl(state)}\n`)
+      io.stdout(`  model process pid ${session.pid}, port ${session.port}\n\n`)
+    } else {
+      io.stdout(`\n  ${modelId} is running on port ${session.port} (pid ${session.pid})\n`)
+      io.stdout('  The public API does not route to Foundation Models; talk to that port directly.\n\n')
+    }
+    return 0
+  })
+}
+
+/** How `serve` reaches its owner: start one when none runs, and say on stderr what went wrong. */
+export function serveAttachOptions(layout: DataLayout, io: CliIo) {
+  return {
+    layout,
+    clientName: 'atomic-chat-core serve',
+    launch: true,
+    log: (message: string) => io.stderr(`${message}\n`),
+  }
 }
 
 async function resolveServeModelId(

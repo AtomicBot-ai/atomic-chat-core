@@ -210,6 +210,29 @@ describe('planLlamaLoad', () => {
     expect(both.config.dflash_draft_path).toBe('/data/drafts/dflash.gguf')
   })
 
+  it('never looks for drafts on the TurboQuant provider, whatever the settings say', async () => {
+    const ensureGemmaMtpDraft = vi.fn(async () => {})
+    const ensureDflashDraft = vi.fn(async () => {})
+    const plan = await planLlamaLoad(
+      { ...input({ mtp: true, dflash: true }), provider: 'llamacpp' },
+      deps({
+        checkGemmaMtpSupport: () => true,
+        checkDflashSupport: () => true,
+        backendSupportsDflashSpec: async () => true,
+        ensureGemmaMtpDraft,
+        ensureDflashDraft,
+      })
+    )
+    expect(plan.config).toMatchObject({
+      mtp: false,
+      dflash: false,
+      mtp_draft_path: '',
+      dflash_draft_path: '',
+    })
+    expect(ensureGemmaMtpDraft).not.toHaveBeenCalled()
+    expect(ensureDflashDraft).not.toHaveBeenCalled()
+  })
+
   it('drops DFlash when the binary lacks it or no draft resolves', async () => {
     const noBin = await planLlamaLoad(
       input({ dflash: true }),

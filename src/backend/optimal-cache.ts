@@ -43,7 +43,10 @@ export type CompletedDetection = Exclude<IdealBackendResult, { kind: 'detection-
  * `detectedAt`, missing strings, a `gpu` record whose `recommendedBackend` is not a concrete
  * `<tag>/<idealBackendId>`, or a `cpu-optimal` record carrying GPU fields is `null` (ignored).
  */
-export function parseOptimalBackendCache(raw: string | null | undefined): OptimalBackendCacheRecord | null {
+export function parseOptimalBackendCache(
+  raw: string | null | undefined,
+  provider: 'llamacpp-upstream' | 'llamacpp' = OPTIMAL_BACKEND_PROVIDER
+): OptimalBackendCacheRecord | null {
   if (!raw) return null
   try {
     const value = JSON.parse(raw) as Record<string, unknown>
@@ -51,7 +54,7 @@ export function parseOptimalBackendCache(raw: string | null | undefined): Optima
       value === null ||
       typeof value !== 'object' ||
       value.schemaVersion !== 1 ||
-      value.provider !== OPTIMAL_BACKEND_PROVIDER ||
+      value.provider !== provider ||
       !Number.isFinite(value.detectedAt) ||
       (value.detectedAt as number) < 0 ||
       typeof value.currentBackend !== 'string' ||
@@ -70,7 +73,11 @@ export function parseOptimalBackendCache(raw: string | null | undefined): Optima
         !value.idealBackendId ||
         (value.recommendedBackend !== undefined &&
           (typeof value.recommendedBackend !== 'string' ||
-            !isConcreteVersionBackend(value.recommendedBackend) ||
+            // TurboQuant's validator (`llamacpp-extension` index.ts) only asks for `<tag>/<id>`: the
+            // fork has no `latest/` sentinel to exclude.
+            (provider === 'llamacpp'
+              ? stripBom(value.recommendedBackend).split('/').length !== 2
+              : !isConcreteVersionBackend(value.recommendedBackend)) ||
             recommendedType !== stripBom(value.idealBackendId)))
       ) {
         return null

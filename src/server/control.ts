@@ -113,7 +113,7 @@ export interface BackendControl {
     provider: string,
     version: string,
     backend: string,
-    options: { taskId: string; force?: boolean; proxy?: ProxyConfig | null }
+    options: { taskId: string; force?: boolean; proxy?: ProxyConfig | null; assetName?: string }
   ) => Promise<InstallBackendResult>
   remove: (provider: string, version: string, backend: string) => Promise<boolean>
   cancel: (taskId: string) => boolean
@@ -206,6 +206,12 @@ export interface ControlServerDeps {
   backends: BackendControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
+  /**
+   * Whether Apple's on-device model can run here: the server's own `--check` token (`available`,
+   * `notEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, `unavailable`, `binaryNotFound`).
+   * Answers `unavailable` on a platform without the runtime.
+   */
+  foundationModelsAvailability?: (force: boolean) => Promise<string>
   cloud: CloudControl
   chatgpt: ChatGptControl
   externalSessions: ExternalSessionControl
@@ -501,6 +507,14 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
     sendJson(res, 200, await deps.models.validateGguf(body.path))
   })
 
+  router.get(p('/runtimes/foundation-models/availability'), async (req, res) => {
+    const force = queryOf(req).get('force') === '1'
+    const status = deps.foundationModelsAvailability
+      ? await deps.foundationModelsAvailability(force)
+      : 'unavailable'
+    sendJson(res, 200, { status })
+  })
+
   router.get(p('/hardware/devices'), async (req, res) => {
     const provider = queryOf(req).get('provider') ?? 'llamacpp-upstream'
     sendJson(res, 200, { devices: await deps.models.devices(provider) })
@@ -522,6 +536,8 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
       task_id?: string
       force?: boolean
       proxy?: ProxyConfig | null
+      /** TurboQuant: the asset name the release index gives this pair. */
+      asset_name?: string
     }>(req)
     if (!body.version || !body.backend || !body.task_id)
       return sendError(
@@ -535,6 +551,7 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
         taskId: body.task_id,
         ...(body.force !== undefined ? { force: body.force } : {}),
         ...(body.proxy !== undefined ? { proxy: body.proxy } : {}),
+        ...(typeof body.asset_name === 'string' && body.asset_name ? { assetName: body.asset_name } : {}),
       })
     )
   })

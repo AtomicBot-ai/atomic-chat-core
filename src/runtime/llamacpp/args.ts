@@ -198,7 +198,14 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
     cfg.cont_batching = true
     cfg.expose_metrics = true
   }
-  if (backend.includes('vulkan') && cfg.flash_attn === 'auto') {
+  // The TurboQuant plugin has neither the Vulkan override nor speculative decoding. The override
+  // matters beyond flash attention: `--cache-type-v` is only emitted with flash attention on, so
+  // forcing `auto` off on a TurboQuant Vulkan build would silently drop its default turbo3 V cache.
+  if (input.provider === 'llamacpp') {
+    cfg.mtp = false
+    cfg.dflash = false
+  }
+  if (input.provider !== 'llamacpp' && backend.includes('vulkan') && cfg.flash_attn === 'auto') {
     warnings.push(`Vulkan backend (${backend}): overriding flash_attn auto→off for stability (ATO-244)`)
     cfg.flash_attn = 'off'
   }

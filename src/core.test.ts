@@ -1,12 +1,13 @@
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { chmod, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../test/helpers/fake-backend-pack.js'
 import { makeTmpDataFolder } from '../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../test/helpers/tmp-data-folder.js'
 import { CoreClient } from './client/index.js'
+import { writeFakeSidecarBinary } from '../test/helpers/fake-sidecar-server.js'
 import { AtomicCore, CORE_VERSION } from './core.js'
 import { inspectLock, ProcessJournal, readControlToken } from './lock/index.js'
 
@@ -111,9 +112,38 @@ describe('taking ownership', () => {
   })
 
   it('rejects an unknown provider by name', async () => {
-    const core = await createCore()
+    const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, platform: 'linux' })
+    cores.push(core)
     expect(() => core.runtime('mlx')).toThrow(/Unknown provider/)
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
+    expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
+    expect(() => core.runtime('ollama' as never)).toThrow(
+      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp' })
+    )
+  })
+
+  it('offers MLX and Foundation Models on macOS only, and answers FM availability over control', async () => {
+    const linux = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, platform: 'linux' })
+    expect(() => linux.runtime('foundation-models')).toThrow(/Unknown provider/)
+    const call = (core: AtomicCore) =>
+      fetch(`${core.control.url}/atomic/v1/runtimes/foundation-models/availability`, {
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      }).then((r) => r.json())
+    expect(await call(linux)).toEqual({ status: 'unavailable' })
+    await linux.shutdown()
+
+    const mac = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'darwin',
+      resourcesDir: join(data.root, 'no-resources'),
+    })
+    cores.push(mac)
+    expect(mac.runtime('foundation-models')).toBeDefined()
+    expect(mac.runtime('mlx')).toBeDefined()
+    expect(mac.registry('mlx').modelsDir).toBe(join(data.root, 'mlx', 'models'))
+    expect(() => mac.llamacpp('foundation-models' as never)).toThrow(/Unknown provider/)
+    expect(await call(mac)).toEqual({ status: 'binaryNotFound' })
   })
 
   it('wires settings, context and public-server control routes to the facade', async () => {
@@ -458,8 +488,87 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     expect(answer.status).toBe(200)
     const [after] = core.sessions()
     expect(after?.pid).not.toBe(before.pid)
-    expect(core.runtime('llamacpp-upstream').getCtxSize('demo')).toBeGreaterThanOrEqual(8192)
+    expect(core.llamacpp().getCtxSize('demo')).toBeGreaterThanOrEqual(8192)
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'serves an MLX model through the public API and grows its context when mlx-vlm overflows',
+    async () => {
+      const resources = join(data.root, 'resources')
+      await writeFakeSidecarBinary(resources, 'mlx-server', { kind: 'mlx', minCtx: 30000 })
+      const modelDir = join(data.root, 'mlx', 'models', 'qwen-mlx')
+      await mkdir(modelDir, { recursive: true })
+      await writeFile(join(modelDir, 'model.safetensors'), 'w')
+      await writeFile(join(modelDir, 'config.json'), JSON.stringify({ max_position_embeddings: 32768 }))
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        platform: 'darwin',
+        resourcesDir: resources,
+      })
+      cores.push(core)
+      await core.registry('mlx').write('qwen-mlx', {
+        model_path: 'mlx/models/qwen-mlx/model.safetensors',
+        name: 'qwen-mlx',
+        size_bytes: 1,
+      })
+      const before = await core.load('mlx', 'qwen-mlx')
+      const { port } = await core.startPublicServer({ port: 0 })
+
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'qwen-mlx', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+
+      expect(answer.status).toBe(200)
+      expect(
+        ((await answer.json()) as { choices: Array<{ message: { content: string } }> }).choices[0]?.message
+          .content
+      ).toBe('fake mlx reply')
+      const [after] = core.sessions()
+      expect(after).toMatchObject({ provider: 'mlx', model_id: 'qwen-mlx', api_key: '' })
+      expect(after?.pid).not.toBe(before.pid)
+      const models = (await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json()) as {
+        data: Array<{ id: string }>
+      }
+      expect(models.data.map((m) => m.id)).toContain('qwen-mlx')
+    }
+  )
+
+  it.skipIf(!CAN_INSTALL_FAKE_BACKEND)(
+    'loads a TurboQuant model on a fork build it selects itself, and serves it',
+    async () => {
+      const core = await createCore()
+      await data.writeModel('demo')
+      const hostBackend =
+        process.platform === 'darwin'
+          ? `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
+          : 'linux-x64-vulkan'
+      await installFakeBackend(data.layout, {
+        provider: 'llamacpp',
+        version: 'b10018-1.3.0',
+        backend: hostBackend,
+      })
+      // No backend chosen yet: the core picks the installed fork build with the TurboQuant matrix.
+      await core.settings.update('llamacpp', { version_backend: '', fit: false })
+      const events: string[] = []
+      core.events.on('session:started', (payload) => events.push(payload.provider))
+
+      const session = await core.load('llamacpp', 'demo')
+
+      expect(core.sessions()).toMatchObject([{ provider: 'llamacpp', model_id: 'demo', pid: session.pid }])
+      expect(events).toEqual(['llamacpp'])
+      const { port } = await core.startPublicServer({ port: 0 })
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(answer.status).toBe(200)
+      await expect(core.unload('llamacpp', 'demo')).resolves.toEqual({ success: true })
+    }
+  )
 
   it('restarts a poisoned engine at the same context and tells the client not to retry', async () => {
     const core = await createCore()
@@ -467,7 +576,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     const marker = join(data.root, 'compute-error-once')
     await installFakeBackend(data.layout, { computeErrorMarker: marker })
     const before = await core.load('llamacpp-upstream', 'demo')
-    const ctxBefore = core.runtime('llamacpp-upstream').getCtxSize('demo')
+    const ctxBefore = core.llamacpp().getCtxSize('demo')
     const { port } = await core.startPublicServer({ port: 0 })
     const chat = () =>
       fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
@@ -481,7 +590,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     expect(failed.status).toBe(400)
     expect(((await failed.json()) as { error: { code: string } }).error.code).toBe('insufficient_memory')
     expect(core.sessions()[0]?.pid).not.toBe(before.pid)
-    expect(core.runtime('llamacpp-upstream').getCtxSize('demo')).toBe(ctxBefore)
+    expect(core.llamacpp().getCtxSize('demo')).toBe(ctxBefore)
     expect((await chat()).status).toBe(200)
   })
 

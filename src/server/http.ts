@@ -141,8 +141,10 @@ export function statusForCode(code: ErrorCode): number {
     case 'INVALID_ARGUMENT':
       return 400
     case 'CORE_NOT_RUNNING':
+    case 'FOUNDATION_MODELS_UNAVAILABLE':
       return 503
     case 'MODEL_LOAD_TIMED_OUT':
+    case 'SERVER_START_TIMED_OUT':
       return 504
     default:
       return 500

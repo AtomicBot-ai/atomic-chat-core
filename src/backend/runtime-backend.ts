@@ -16,6 +16,14 @@ import {
   resolveBackendExe,
   scanInstalledBackends,
 } from './index.js'
+import {
+  determineBestTurboquantBackend,
+  determineTurboquantSupportedBackends,
+  filterTurboquantBackendsBySupport,
+  getTurboquantSupportedFeatures,
+  probeLinuxRocmHost,
+} from './turboquant.js'
+import type { RocmHostProbe } from './turboquant.js'
 
 /** Provider settings plus the engine-level keys the load plan reads. */
 export async function readRuntimeSettings(
@@ -42,20 +50,30 @@ export async function readRuntimeSettings(
   }
 }
 
-/** Stage 3b executes an installed backend; installation remains in stage 3c. */
+/**
+ * The installed backend a load runs on: the configured pack when it is on disk, otherwise the best
+ * compatible installed one. `repair` runs on the pack that will be used before it is returned — the
+ * TurboQuant provider puts a missing CUDA runtime back there, as its extension did before every load.
+ */
 export async function ensureBackend(
   layout: DataLayout,
   provider: LocalProviderId,
   backend: string,
   version: string,
   hardware: HardwareOverrideStore,
-  hostArch = process.arch
+  hostArch = process.arch,
+  repair?: (backend: string, version: string) => Promise<void>
 ): Promise<{ version: string; backend: string; exePath: string }> {
   const exact = await resolveBackendExe(layout, provider, version, backend)
-  if (exact) return { version, backend, exePath: exact }
+  if (exact) {
+    await repair?.(backend, version)
+    return { version, backend, exePath: exact }
+  }
   const discovered = await selectInstalledBackend(layout, provider, hardware, hostArch)
-  if (discovered)
+  if (discovered) {
+    await repair?.(discovered.backend, discovered.version)
     return { version: discovered.version, backend: discovered.backend, exePath: discovered.path }
+  }
   throw new AtomicCoreError(
     'BINARY_NOT_FOUND',
     'No llama.cpp backend is installed in this data folder.',
@@ -68,7 +86,8 @@ export async function selectInstalledBackend(
   layout: DataLayout,
   provider: LocalProviderId,
   hardware: HardwareOverrideStore,
-  hostArch = process.arch
+  hostArch = process.arch,
+  probeRocm: () => Promise<RocmHostProbe> = probeLinuxRocmHost
 ) {
   const installed = await scanInstalledBackends(layout, provider)
   if (installed.length === 0) return discoverBackendBinary(layout, provider)
@@ -76,11 +95,22 @@ export async function selectInstalledBackend(
   const osType = override?.os_type ?? platformOsType(process.platform)
   const arch = platformArch(hostArch)
   const gpus = hardware.gpus([])
-  const features = getSupportedFeatures(osType, hardware.cpuExtensions([]), gpus)
-  const supported = determineSupportedBackends(osType, arch, features)
-  const compatible = filterBackendsBySupport(installed, supported, osType)
-  if (compatible.length === 0) return undefined
-  const selected = determineBestBackend(compatible, gpus)
+  let selected: string
+  if (provider === 'llamacpp') {
+    // The fork's own matrix, ids and priorities: the upstream ones filter every TurboQuant pack out.
+    const rocm = osType === 'linux' ? await probeRocm() : undefined
+    const features = getTurboquantSupportedFeatures(osType, hardware.cpuExtensions([]), gpus, rocm)
+    const supported = determineTurboquantSupportedBackends(osType, arch, features)
+    const compatible = filterTurboquantBackendsBySupport(installed, supported)
+    if (compatible.length === 0) return undefined
+    selected = determineBestTurboquantBackend(compatible, gpus)
+  } else {
+    const features = getSupportedFeatures(osType, hardware.cpuExtensions([]), gpus)
+    const supported = determineSupportedBackends(osType, arch, features)
+    const compatible = filterBackendsBySupport(installed, supported, osType)
+    if (compatible.length === 0) return undefined
+    selected = determineBestBackend(compatible, gpus)
+  }
   const [version, backend] = selected.split('/')
   if (!version || !backend) return undefined
   const path = await resolveBackendExe(layout, provider, version, backend)

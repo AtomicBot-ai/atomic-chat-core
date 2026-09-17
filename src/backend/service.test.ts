@@ -1,6 +1,7 @@
 import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { storedZip } from '../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { BackendService } from './service.js'
@@ -202,6 +203,97 @@ async function expectNoPackOrStaging(version = 'b6325'): Promise<void> {
   expect(await service(fakeDownloader()).listInstalled()).toEqual([])
 }
 
+describe('install on the TurboQuant provider', () => {
+  const tq = (downloader: ReturnType<typeof fakeDownloader>, platform: NodeJS.Platform = 'darwin') =>
+    new BackendService({
+      layout: data.layout,
+      provider: 'llamacpp',
+      downloader: downloader as never,
+      readManifest: async () => {
+        throw new Error('the upstream manifest is not read for TurboQuant')
+      },
+      platform,
+      now: () => 1,
+    })
+
+  it('downloads the fork asset the caller names, without a checksum, into the llamacpp tree', async () => {
+    const downloader = fakeDownloader({ fail: true })
+    await expect(
+      tq(downloader).install('b10018-1.3.0', 'macos-arm64', {
+        taskId: 'llamacpp-backend-b10018-1_3_0/macos-arm64',
+        assetName: 'llama-turboquant-macos-arm64.tar.gz',
+      })
+    ).rejects.toThrow(/network went away/)
+    const [call] = downloader.download.mock.calls
+    expect(call?.[1]).toEqual([
+      {
+        url: 'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/download/b10018-1.3.0/llama-turboquant-macos-arm64.tar.gz',
+        save_path: join(
+          data.layout.provider('llamacpp').backendsDir,
+          'b10018-1.3.0',
+          'macos-arm64.incoming-1',
+          'llama-turboquant-macos-arm64.tar.gz'
+        ),
+      },
+    ])
+  })
+
+  it('falls back to the cached release index, then to the naming convention, for the asset', async () => {
+    const downloader = fakeDownloader({ fail: true })
+    await expect(
+      tq(downloader).install('b1-1.0.0', 'linux-x64-rocm', {
+        taskId: 't',
+        proxy: { url: 'http://proxy:8080' },
+      })
+    ).rejects.toThrow()
+    expect(downloader.download.mock.calls[0]?.[1]).toEqual([
+      expect.objectContaining({
+        url: expect.stringMatching(/\/b1-1\.0\.0\/llama-turboquant-linux-x64-rocm\.tar\.gz$/),
+        proxy: { url: 'http://proxy:8080' },
+      }),
+    ])
+    await mkdir(join(data.root, 'llamacpp'), { recursive: true })
+    await writeFile(
+      join(data.root, 'llamacpp', 'release-index.cache.json'),
+      JSON.stringify({
+        catalog: {
+          releases: [{ tag: 'b1-1.0.0', variants: [{ id: 'linux-x64-rocm', asset: 'rocm.tar.gz' }] }],
+        },
+      })
+    )
+    await expect(tq(downloader).install('b1-1.0.0', 'linux-x64-rocm', { taskId: 't' })).rejects.toThrow()
+    expect(downloader.download.mock.calls[1]?.[1]).toEqual([
+      expect.objectContaining({ url: expect.stringMatching(/\/rocm\.tar\.gz$/) }),
+    ])
+  })
+
+  it('installs a pack and warns instead of failing when the CUDA runtime cannot be repaired', async () => {
+    const bytes = storedZip('build/bin/llama-server.exe', Buffer.from('exe'))
+    const warnings: string[] = []
+    const downloader = {
+      download: vi.fn(async (_task: string, items: Array<{ url: string; save_path: string }>) => {
+        if (items[0]?.url.includes('cudart')) throw new Error('offline')
+        await writeFile(items[0]?.save_path as string, bytes)
+      }),
+    }
+    const service = new BackendService({
+      layout: data.layout,
+      provider: 'llamacpp',
+      downloader: downloader as never,
+      readManifest: async () => null,
+      platform: 'win32',
+      now: () => 1,
+      log: (message) => warnings.push(message),
+    })
+    const result = await service.install('b1-1.0.0', 'windows-x64-cuda-12.4', { taskId: 't' })
+    expect(result).toMatchObject({ installed: true })
+    expect(downloader.download).toHaveBeenCalledTimes(2)
+    expect(warnings).toEqual([
+      expect.stringContaining('cudart repair for b1-1.0.0/windows-x64-cuda-12.4 failed'),
+    ])
+  })
+})
+
 describe('remove', () => {
   it('deletes a pack and says whether there was one', async () => {
     await data.writeBackend('llamacpp-upstream', 'b6325', 'macos-arm64')
@@ -284,6 +376,32 @@ describe('the optimal-backend record', () => {
     await s.setOptimalCache(null, 1)
 
     expect(await s.getOptimalCache()).toEqual({ revision: 2, optimal: null })
+  })
+
+  it('accepts a TurboQuant record only for the TurboQuant provider', async () => {
+    const turboquant = {
+      schemaVersion: 1,
+      provider: 'llamacpp',
+      detectedAt: 1,
+      detectionKind: 'gpu',
+      currentBackend: 'b1-1.0.0/linux-x64-cpu',
+      idealBackendId: 'linux-x64-cuda-13.3',
+      recommendedBackend: 'b1-1.0.0/linux-x64-cuda-13.3',
+      recommendedCategory: 'CUDA 13',
+    } as never
+    await expect((await optimalService()).setOptimalCache(turboquant, 0)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    const s = await optimalService('llamacpp')
+    await expect(
+      s.setOptimalCache({ ...(turboquant as object), recommendedBackend: 'a/b/c' } as never, 0)
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    expect((await s.setOptimalCache(turboquant, 0)).status).toBe('updated')
+    expect((await (await optimalService('llamacpp')).getOptimalCache()).optimal).toMatchObject({
+      provider: 'llamacpp',
+    })
   })
 
   it('keeps one provider’s record out of another’s', async () => {

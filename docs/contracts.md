@@ -13,6 +13,9 @@ without a demonstrated consumer. See PLAN.md §5.1 for comparison rules and §8 
 | `SessionInfo`, `RuntimeDeviceInfo`, `UnloadResult`, `DeviceInfo` | `src/contracts/session.ts` | `guest-js/types.ts:122-132`, `state.rs:9-23`, `runtime_device.rs` | `test/fixtures/app/runtime-device/*.json` (runtime-device), `test/fixtures/app/session/*.json` (planned) |
 | `model.yml` schema + values + unknown-field preservation | `src/contracts/model-yml.ts`, `src/models/` | `guest-js/types.ts:142-171`, `src-tauri/src/core/cli/mod.rs:46-58` | `test/fixtures/app/model-yml/*.yml` |
 | `llama-server` argv | `src/runtime/llamacpp/args.ts` | `args.rs` | `test/fixtures/app/args/*.json` |
+| `llama-server` argv, TurboQuant provider (turbo caches, no Vulkan override, no MTP/DFlash) | `src/runtime/llamacpp/args.ts` | `tauri-plugin-llamacpp/src/args.rs` | `test/fixtures/app/args-llamacpp/*.json` |
+| `mlx-server` argv and stderr classification | `src/runtime/mlx/{args,errors}.ts` | `tauri-plugin-mlx/src/{commands,error}.rs` | `test/fixtures/app/mlx-args/*.json`, `test/fixtures/app/mlx-errors/*.json` |
+| Foundation Models startup errors | `src/runtime/foundation-models/errors.ts` | `tauri-plugin-foundation-models/src/error.rs` | `test/fixtures/app/foundation-models-errors/*.json` (one case corrected on purpose, asserted in the test) |
 | Readiness lines | `src/runtime/process.ts` | `commands.rs:58-63`, `tauri-plugin-mlx/src/commands.rs:284-330`, `tauri-plugin-foundation-models/src/commands.rs:125` | `test/fixtures/app/readiness/*.txt` |
 | `--list-devices` parsing | `src/runtime/llamacpp/devices.ts` | `device.rs` | `test/fixtures/app/devices/*.json` |
 | Provider settings keys | `src/settings/schema/*.json` | `extensions/*/settings.json` | copied verbatim |

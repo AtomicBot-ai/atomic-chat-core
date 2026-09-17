@@ -112,6 +112,6 @@ export class OptimalBackendStore {
 
 function parseRecord(value: unknown, provider: string): OptimalBackendCacheRecord | null {
   if (!value || typeof value !== 'object') return null
-  const parsed = parseOptimalBackendCache(JSON.stringify(value))
-  return parsed?.provider === provider ? parsed : null
+  if (provider !== 'llamacpp-upstream' && provider !== 'llamacpp') return null
+  return parseOptimalBackendCache(JSON.stringify(value), provider)
 }

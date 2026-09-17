@@ -215,3 +215,26 @@ describe('planLlamaArgs', () => {
     expect(cfg.ctx_size).toBe(2048)
   })
 })
+
+describe('TurboQuant provider', () => {
+  const input = (provider: 'llamacpp' | 'llamacpp-upstream') => ({
+    provider,
+    isEmbedding: false,
+    modelId: 'm',
+    modelPath: '/m.gguf',
+    port: 3000,
+  })
+
+  it('never emits speculative flags: the TurboQuant plugin has no MTP or DFlash', () => {
+    const cfg = {
+      ...base(),
+      version_backend: 'b10018-1.3.0/macos-arm64',
+      mtp: true,
+      dflash: true,
+      dflash_spec_supported: true,
+      dflash_draft_path: '/d.gguf',
+    }
+    expect(buildLlamaArgs(cfg, input('llamacpp')).join(' ')).not.toContain('--spec-type')
+    expect(buildLlamaArgs(cfg, input('llamacpp-upstream')).join(' ')).toContain('--spec-type')
+  })
+})

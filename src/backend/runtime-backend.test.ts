@@ -48,6 +48,74 @@ describe('runtime backend selection', () => {
     }
   })
 
+  it('chooses among TurboQuant packs with the fork matrix, and repairs the pack it returns', async () => {
+    const data = await makeTmpDataFolder('atomic-runtime-backend-')
+    try {
+      for (const backend of ['windows-x64-cpu', 'windows-x64-cuda-12.4', 'win-cuda-13.3-x64'])
+        await installFakeBackend(data.layout, { provider: 'llamacpp', version: 'b10018-1.3.0', backend })
+      const hardware = new HardwareOverrideStore()
+      hardware.set({
+        os_type: 'windows',
+        cpu_extensions: [],
+        gpus: [
+          {
+            vendor: 'NVIDIA',
+            driver_version: '528.0',
+            total_memory: 8192,
+            nvidia_info: { compute_capability: '8.6' },
+          },
+        ],
+      })
+      // 528 passes the fork's CUDA 12 floor (527.41) but not upstream's (551.61); the upstream id is
+      // not a TurboQuant build and maps onto CPU here.
+      await expect(selectInstalledBackend(data.layout, 'llamacpp', hardware, 'x64')).resolves.toMatchObject({
+        version_backend: 'b10018-1.3.0/windows-x64-cuda-12.4',
+      })
+      const repaired: string[] = []
+      await expect(
+        ensureBackend(data.layout, 'llamacpp', 'missing', 'b0', hardware, 'x64', async (backend, version) => {
+          repaired.push(`${version}/${backend}`)
+        })
+      ).resolves.toMatchObject({ backend: 'windows-x64-cuda-12.4' })
+      await ensureBackend(
+        data.layout,
+        'llamacpp',
+        'windows-x64-cpu',
+        'b10018-1.3.0',
+        hardware,
+        'x64',
+        async (backend, version) => {
+          repaired.push(`${version}/${backend}`)
+        }
+      )
+      expect(repaired).toEqual(['b10018-1.3.0/windows-x64-cuda-12.4', 'b10018-1.3.0/windows-x64-cpu'])
+
+      const linux = new HardwareOverrideStore()
+      linux.set({ os_type: 'linux', cpu_extensions: [], gpus: [] })
+      await installFakeBackend(data.layout, {
+        provider: 'llamacpp',
+        version: 'b10018-1.3.0',
+        backend: 'linux-x64-rocm',
+      })
+      await installFakeBackend(data.layout, {
+        provider: 'llamacpp',
+        version: 'b10018-1.3.0',
+        backend: 'linux-x64-vulkan',
+      })
+      await expect(
+        selectInstalledBackend(data.layout, 'llamacpp', linux, 'x64', async () => ({
+          gfxTargetVersions: [110000],
+          hasRuntime: true,
+        }))
+      ).resolves.toMatchObject({ backend: 'linux-x64-vulkan' })
+      const none = new HardwareOverrideStore()
+      none.set({ os_type: 'linux', cpu_extensions: [], gpus: [] })
+      await expect(selectInstalledBackend(data.layout, 'llamacpp', none, 'arm64')).resolves.toBeUndefined()
+    } finally {
+      await data.cleanup()
+    }
+  })
+
   it('keeps an exact configured executable authoritative', async () => {
     const data = await makeTmpDataFolder('atomic-runtime-backend-')
     try {

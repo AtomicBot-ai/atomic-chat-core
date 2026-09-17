@@ -142,7 +142,7 @@ export type IdealBackendResult =
 
 interface OptimalBackendCacheBase {
   schemaVersion: 1
-  provider: 'llamacpp-upstream'
+  provider: 'llamacpp-upstream' | 'llamacpp'
   detectedAt: number
   currentBackend: string
   recommendedCategory: string

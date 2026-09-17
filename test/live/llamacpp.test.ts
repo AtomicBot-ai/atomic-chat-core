@@ -83,7 +83,7 @@ describe.skipIf(!ENABLED)('a real llama.cpp backend', () => {
     const body = (await answer.json()) as { choices: Array<{ message: { content: string } }> }
     expect(typeof body.choices[0]?.message.content).toBe('string')
 
-    const device = core.runtime().getRuntimeDeviceInfo('live')
+    const device = core.llamacpp().getRuntimeDeviceInfo('live')
     expect(device, 'the device log lines must parse against a real backend').toBeDefined()
 
     expect(await core.unload('llamacpp-upstream', 'live')).toEqual({ success: true })
@@ -98,7 +98,7 @@ describe.skipIf(!ENABLED)('a real llama.cpp backend', () => {
       'bin',
       llamaServerExeName(process.platform)
     )
-    const devices = await core.runtime().getDevices(exe)
+    const devices = await core.llamacpp().getDevices(exe)
     expect(Array.isArray(devices)).toBe(true)
     for (const device of devices) {
       expect(device.id.length).toBeGreaterThan(0)

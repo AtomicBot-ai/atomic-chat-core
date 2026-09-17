@@ -15,6 +15,7 @@ import type { ReadyLine } from './contracts/index.js'
 import type { LocalApiServerState, LocalProviderId, SessionInfo, UnloadResult } from './contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from './config/index.js'
 import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { DataLayout } from './config/index.js'
 import { CoreEmitter } from './events/index.js'
 import {
@@ -31,8 +32,11 @@ import type { ModelClaimHandle } from './lock/index.js'
 import { EmbedService, ModelCapabilityService, ModelRegistry } from './models/index.js'
 import { ensureBackend, readRuntimeSettings } from './backend/runtime-backend.js'
 import { LlamacppRuntime } from './runtime/llamacpp/index.js'
-import { ExternalSessions } from './runtime/index.js'
 import type { LoadOptions } from './runtime/llamacpp/index.js'
+import { ExternalSessions } from './runtime/index.js'
+import type { CtxIncreaseResult, LocalLoadOptions, LocalRuntime, RecreateResult } from './runtime/index.js'
+import { FoundationModelsRuntime } from './runtime/foundation-models/index.js'
+import { MlxRuntime } from './runtime/mlx/index.js'
 import { SettingsStore } from './settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from './credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from './cloud/index.js'
@@ -41,6 +45,7 @@ import type { SettingsScope } from './settings/index.js'
 import { HardwareOverrideStore } from './hardware/index.js'
 import {
   BackendService,
+  ensureTurboquantCudart,
   ManifestSessionCache,
   OptimalBackendStore,
   fetchLiveManifest,
@@ -48,7 +53,6 @@ import {
   selectInstalledBackend,
 } from './backend/index.js'
 import { Downloader, createPolicyFetch } from './downloads/index.js'
-import type { CtxIncreaseResult } from './runtime/llamacpp/runtime.js'
 import {
   ClientRegistry,
   CLIENT_EXPIRY_MS,
@@ -79,6 +83,8 @@ export interface AtomicCoreOptions {
   dataFolder?: string
   /** Where the app's bundled sidecar binaries live (`resources/bin`); needed for MLX and Foundation Models. */
   resourcesDir?: string
+  /** The platform runtimes are offered for (macOS-only engines are not registered elsewhere). Test seam. */
+  platform?: NodeJS.Platform
   fetch?: typeof fetch
   env?: NodeJS.ProcessEnv
   /** 'owner' takes the instance lock; 'auto' is the same today — attaching is the CLI's job. */
@@ -121,6 +127,9 @@ interface NormalizedPublicServerOptions {
 
 export const LOCAL_PROVIDER: LocalProviderId = 'llamacpp-upstream'
 
+/** Load options as the control API carries them: the shared ones plus llama.cpp's explicit paths. */
+export type CoreLoadOptions = LocalLoadOptions & Omit<LoadOptions, 'overrides'>
+
 export class AtomicCore {
   readonly version = CORE_VERSION
   private publicServer: PublicServer | undefined
@@ -135,6 +144,7 @@ export class AtomicCore {
   inspecting = false
   private readonly modelClaims = new Map<string, ModelClaimHandle>()
   private readonly claimingModels = new Map<string, Promise<ModelClaimHandle>>()
+  private readonly modelTransitions = new Map<string, Promise<void>>()
   private resolveStopped: (() => void) | undefined
   /** Resolves once this core has stopped, however that was triggered (API, signal, or in-process). */
   readonly stopped: Promise<void> = new Promise<void>((resolve) => {
@@ -148,7 +158,7 @@ export class AtomicCore {
     readonly clients: ClientRegistry,
     private readonly lock: InstanceLock,
     private readonly journal: ProcessJournal,
-    private readonly runtimes: Map<LocalProviderId, LlamacppRuntime>,
+    private readonly runtimes: Map<LocalProviderId, LocalRuntime>,
     private readonly registries: Map<LocalProviderId, ModelRegistry>,
     readonly control: ControlServer,
     private readonly log: CoreLogger,
@@ -224,32 +234,6 @@ export class AtomicCore {
       // than rejecting the endpoint, because it tells the app a hardware handover succeeded.
       const hardware = new HardwareOverrideStore()
 
-      const registries = new Map<LocalProviderId, ModelRegistry>([
-        [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
-      ])
-      const runtimes = new Map<LocalProviderId, LlamacppRuntime>([
-        [
-          LOCAL_PROVIDER,
-          new LlamacppRuntime({
-            layout,
-            registry: registries.get(LOCAL_PROVIDER) as ModelRegistry,
-            instanceId: lock.instanceId,
-            provider: LOCAL_PROVIDER,
-            journal,
-            emit: (name, payload) => emitter.emit(name, payload),
-            readSettings: () => readRuntimeSettings(settings, LOCAL_PROVIDER, layout, hardware),
-            ensureBackendReady: (backend, version) =>
-              ensureBackend(layout, LOCAL_PROVIDER, backend, version, hardware),
-            cpuInfo: async () => {
-              const injected = hardware.get()
-              if (!injected?.cpu_extensions) return undefined
-              return { arch: process.arch, extensions: hardware.cpuExtensions([]) }
-            },
-            ...(options.fetch ? { fetch: options.fetch } : {}),
-          }),
-        ],
-      ])
-
       // One downloader per core process: it owns the active-task table that `cancel` works from, so
       // two of them would each know only half of what is running.
       const downloader = new Downloader({
@@ -258,6 +242,85 @@ export class AtomicCore {
         fetch: options.fetch ?? fetch,
         emit: (name, payload) => emitter.emit(name, payload),
       })
+      const registries = new Map<LocalProviderId, ModelRegistry>([
+        [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
+        ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
+      ])
+      const platform = options.platform ?? process.platform
+      // Both llama.cpp providers run through one runtime class; what differs — backend ids, the
+      // argument rules, TurboQuant's CUDA runtime repair — is decided by the provider it is given.
+      const llamacppRuntime = (provider: 'llamacpp' | 'llamacpp-upstream') =>
+        new LlamacppRuntime({
+          layout,
+          registry: registries.get(provider) as ModelRegistry,
+          instanceId: lock.instanceId,
+          provider,
+          journal,
+          emit: (name, payload) => emitter.emit(name, payload),
+          readSettings: () => readRuntimeSettings(settings, provider, layout, hardware),
+          ensureBackendReady: (backend, version) =>
+            ensureBackend(
+              layout,
+              provider,
+              backend,
+              version,
+              hardware,
+              process.arch,
+              provider === 'llamacpp'
+                ? (repairBackend, repairVersion) =>
+                    ensureTurboquantCudart(
+                      repairBackend,
+                      join(layout.provider('llamacpp').backendsDir, repairVersion, repairBackend),
+                      `llamacpp-cudart-${repairVersion}/${repairBackend}`.replace(/[^A-Za-z0-9_/:-]/g, '_'),
+                      { layout, downloader, log: (message) => log('warn', message) }
+                    ).then(
+                      () => {},
+                      (e: unknown) =>
+                        log(
+                          'warn',
+                          `cudart pre-flight for ${repairVersion}/${repairBackend} failed: ${String(e)}`
+                        )
+                    )
+                : undefined
+            ),
+          cpuInfo: async () => {
+            const injected = hardware.get()
+            if (!injected?.cpu_extensions) return undefined
+            return { arch: process.arch, extensions: hardware.cpuExtensions([]) }
+          },
+          ...(options.fetch ? { fetch: options.fetch } : {}),
+        })
+      const runtimes = new Map<LocalProviderId, LocalRuntime>([
+        [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
+        ['llamacpp', llamacppRuntime('llamacpp')],
+      ])
+
+      if (platform === 'darwin') {
+        const mlxRegistry = new ModelRegistry(layout, 'mlx')
+        registries.set('mlx', mlxRegistry)
+        runtimes.set(
+          'mlx',
+          new MlxRuntime({
+            layout,
+            registry: mlxRegistry,
+            instanceId: lock.instanceId,
+            resourcesDir: options.resourcesDir,
+            readSettings: async () => settings.get('mlx'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+          })
+        )
+        runtimes.set(
+          'foundation-models',
+          new FoundationModelsRuntime({
+            instanceId: lock.instanceId,
+            resourcesDir: options.resourcesDir,
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+          })
+        )
+      }
+
       const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
         emitter.emit('backend:optimal-changed', { provider, ...state })
       })
@@ -313,7 +376,7 @@ export class AtomicCore {
           clients,
           sessions: () => sessionsOf(runtimes),
           loadModel: (provider: string, modelId: string, body: Record<string, unknown>) =>
-            (core as AtomicCore).acquire(provider as LocalProviderId, modelId, body as LoadOptions),
+            (core as AtomicCore).acquire(provider as LocalProviderId, modelId, body as CoreLoadOptions),
           unloadModel: (provider: string, modelId: string) =>
             (core as AtomicCore).unload(provider as LocalProviderId, modelId),
           increaseCtx: (provider: string, modelId: string, reason?: string) =>
@@ -321,6 +384,12 @@ export class AtomicCore {
           recreateSession: (provider: string, modelId: string) =>
             (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
           hardware,
+          foundationModelsAvailability: (force: boolean) => {
+            const runtime = runtimes.get('foundation-models')
+            return runtime instanceof FoundationModelsRuntime
+              ? runtime.checkAvailability(force)
+              : Promise.resolve('unavailable')
+          },
           models: {
             capabilities: (provider, modelId) =>
               capabilities.capabilities(provider as LocalProviderId, modelId),
@@ -334,7 +403,8 @@ export class AtomicCore {
                 hardware
               ).catch(() => undefined)
               if (!resolved) return []
-              return (core as AtomicCore).runtime(provider as LocalProviderId).getDevices(resolved.path)
+              const runtime = (core as AtomicCore).runtime(provider as LocalProviderId)
+              return runtime instanceof LlamacppRuntime ? runtime.getDevices(resolved.path) : []
             },
             embed: (provider, modelId, input, ubatchSize) =>
               embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
@@ -454,13 +524,20 @@ export class AtomicCore {
 
   registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry {
     const registry = this.registries.get(provider)
-    if (!registry) throw unknownProvider(provider)
+    if (!registry) throw unknownProvider(provider, this.registries.keys())
     return registry
   }
 
-  runtime(provider: LocalProviderId = LOCAL_PROVIDER): LlamacppRuntime {
+  runtime(provider: LocalProviderId = LOCAL_PROVIDER): LocalRuntime {
     const runtime = this.runtimes.get(provider)
-    if (!runtime) throw unknownProvider(provider)
+    if (!runtime) throw unknownProvider(provider, this.runtimes.keys())
+    return runtime
+  }
+
+  /** A llama.cpp runtime, for what only llama.cpp has (devices, runtime device info, context size). */
+  llamacpp(provider: 'llamacpp' | 'llamacpp-upstream' = 'llamacpp-upstream'): LlamacppRuntime {
+    const runtime = this.runtime(provider)
+    if (!(runtime instanceof LlamacppRuntime)) throw unknownProvider(provider, this.runtimes.keys())
     return runtime
   }
 
@@ -468,7 +545,11 @@ export class AtomicCore {
     return sessionsOf(this.runtimes)
   }
 
-  async load(provider: LocalProviderId, modelId: string, options: LoadOptions = {}): Promise<SessionInfo> {
+  async load(
+    provider: LocalProviderId,
+    modelId: string,
+    options: CoreLoadOptions = {}
+  ): Promise<SessionInfo> {
     return (await this.acquire(provider, modelId, options)).session
   }
 
@@ -476,7 +557,17 @@ export class AtomicCore {
   async acquire(
     provider: LocalProviderId,
     modelId: string,
-    options: LoadOptions = {}
+    options: CoreLoadOptions = {}
+  ): Promise<{ session: SessionInfo; created: boolean }> {
+    this.assertRunning()
+    const key = `${provider}\0${modelId}`
+    return this.withModelTransition(key, () => this.acquireNow(provider, modelId, options))
+  }
+
+  private async acquireNow(
+    provider: LocalProviderId,
+    modelId: string,
+    options: CoreLoadOptions
   ): Promise<{ session: SessionInfo; created: boolean }> {
     this.assertRunning()
     // The desktop app can still own this data folder until it becomes a core client. A second copy
@@ -561,10 +652,7 @@ export class AtomicCore {
   }
 
   /** Restart a poisoned engine at its current context; guarded like `load`. */
-  async recreateSession(
-    provider: LocalProviderId,
-    modelId: string
-  ): Promise<{ ok: true; session: SessionInfo } | { ok: false; reason: 'not-loaded' }> {
+  async recreateSession(provider: LocalProviderId, modelId: string): Promise<RecreateResult> {
     this.assertRunning()
     await assertNotLoadedByLegacy(this.layout, modelId)
     return this.runtime(provider).recreateSession(modelId)
@@ -572,14 +660,19 @@ export class AtomicCore {
 
   async unload(provider: LocalProviderId, modelId: string): Promise<UnloadResult> {
     this.assertRunning()
-    const result = await this.runtime(provider).unload(modelId)
     const key = `${provider}\0${modelId}`
-    await this.modelClaims
-      .get(key)
-      ?.release()
-      .catch(() => {})
-    this.modelClaims.delete(key)
-    return result
+    return this.withModelTransition(key, async () => {
+      this.assertRunning()
+      const result = await this.runtime(provider).unload(modelId)
+      if (result.success) {
+        await this.modelClaims
+          .get(key)
+          ?.release()
+          .catch(() => {})
+        this.modelClaims.delete(key)
+      }
+      return result
+    })
   }
 
   publicState(): LocalApiServerState {
@@ -704,6 +797,7 @@ export class AtomicCore {
     this.shutdownPromise = (async () => {
       await this.withPublicTransition(() => this.stopPublicServerNow())
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
+      await Promise.all([...this.modelTransitions.values()])
       await Promise.all([...this.modelClaims.values()].map((claim) => claim.release().catch(() => {})))
       this.modelClaims.clear()
       await this.control.close()
@@ -732,6 +826,20 @@ export class AtomicCore {
       () => {},
       () => {}
     )
+    return result
+  }
+
+  private withModelTransition<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.modelTransitions.get(key) ?? Promise.resolve()
+    const result = previous.then(operation)
+    const settled = result.then(
+      () => {},
+      () => {}
+    )
+    this.modelTransitions.set(key, settled)
+    void settled.then(() => {
+      if (this.modelTransitions.get(key) === settled) this.modelTransitions.delete(key)
+    })
     return result
   }
 }
@@ -782,18 +890,18 @@ function toLocalTarget(
   }
 }
 
-function sessionsOf(runtimes: Map<LocalProviderId, LlamacppRuntime>): SessionSummary[] {
+function sessionsOf(runtimes: Map<LocalProviderId, LocalRuntime>): SessionSummary[] {
   const out: SessionSummary[] = []
   for (const [provider, runtime] of runtimes)
     for (const info of runtime.list()) out.push({ ...info, provider })
   return out
 }
 
-function unknownProvider(provider: string): AtomicCoreError {
+function unknownProvider(provider: string, available: Iterable<string>): AtomicCoreError {
   return new AtomicCoreError(
     'PROVIDER_NOT_FOUND',
     `Unknown provider "${provider}".`,
-    'llamacpp-upstream is available'
+    `available: ${[...available].join(', ')}`
   )
 }
 

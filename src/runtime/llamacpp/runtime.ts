@@ -13,9 +13,7 @@
  *    which device it actually used.
  */
 
-import { createWriteStream } from 'node:fs'
 import type { WriteStream } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
@@ -38,7 +36,9 @@ import { checkGemmaMtpSupport } from '../../speculative/gemma-mtp-registry.js'
 import { buildProcessEnv, discoverCudaPaths, nodeCudaProbeEnv, textMentionsCudaRuntime } from '../env.js'
 import { randomFreePort } from '../ports.js'
 import { spawnAndAwaitReady, spawnManaged, LLAMA_READY_MARKERS } from '../process.js'
+import { closeLogStream, openLogStream } from '../log-stream.js'
 import type { ManagedProcess, SpawnSpec } from '../process.js'
+import type { CtxIncreaseResult, LocalRuntime, RecreateResult } from '../local-runtime.js'
 import { planLlamaArgs } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
 import { parseDeviceOutput } from './devices.js'
@@ -57,15 +57,7 @@ export interface RuntimeSettings {
   engine: LlamacppEngineSettings
 }
 
-/** What `autoIncreaseCtx` did, or why it declined to do anything. */
-export type CtxIncreaseResult =
-  | { ok: true; new_ctx_len: number; session: SessionInfo }
-  | {
-      ok: false
-      reason: 'fit' | 'at_max' | 'not-loaded'
-      current_ctx_len?: number
-      max_ctx_len?: number
-    }
+export type { CtxIncreaseResult } from '../local-runtime.js'
 
 export interface LoadOptions {
   /** Per-model overrides, canonical keys (the `settings` argument of the extension's `load()`). */
@@ -133,7 +125,7 @@ interface Session {
 
 export const DEVICE_PROBE_TIMEOUT_MS = 10_000
 
-export class LlamacppRuntime {
+export class LlamacppRuntime implements LocalRuntime {
   private readonly sessions = new Map<string, Session>()
   private readonly loading = new Map<string, Promise<SessionInfo>>()
   private loadTail: Promise<void> = Promise.resolve()
@@ -560,9 +552,7 @@ export class LlamacppRuntime {
    * an out-of-memory failure more likely. As with `autoIncreaseCtx`, a failed unload does not stop
    * the reload.
    */
-  async recreateSession(
-    modelId: string
-  ): Promise<{ ok: true; session: SessionInfo } | { ok: false; reason: 'not-loaded' }> {
+  async recreateSession(modelId: string): Promise<RecreateResult> {
     this.assertRunning()
     if (!this.sessions.has(modelId)) return { ok: false, reason: 'not-loaded' }
     const ctxLen = this.getCtxSize(modelId)
@@ -676,30 +666,4 @@ function draftDownloadUnavailable(): Promise<void> {
       'pass ensureGemmaMtpDraft / ensureDflashDraft to LlamacppRuntime'
     )
   )
-}
-
-async function openLogStream(path: string): Promise<WriteStream> {
-  try {
-    await mkdir(dirname(path), { recursive: true })
-    const stream = createWriteStream(path, { flags: 'a' })
-    await new Promise<void>((resolve, reject) => {
-      stream.once('open', () => resolve())
-      stream.once('error', reject)
-    })
-    // A later disk error cannot retroactively fail a running model, but it must not become an
-    // unhandled EventEmitter error either.
-    stream.on('error', () => {})
-    return stream
-  } catch (error) {
-    throw new AtomicCoreError(
-      'IO_ERROR',
-      `Cannot open llama.cpp log file "${path}".`,
-      (error as Error).message
-    )
-  }
-}
-
-function closeLogStream(stream: WriteStream | undefined): Promise<void> {
-  if (!stream || stream.closed) return Promise.resolve()
-  return new Promise((resolve) => stream.end(resolve))
 }

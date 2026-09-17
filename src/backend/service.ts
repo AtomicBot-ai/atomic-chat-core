@@ -24,7 +24,7 @@ import { join } from 'node:path'
 import type { LocalProviderId } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import { validateProxyConfig } from '../downloads/index.js'
-import type { Downloader, ProxyConfig } from '../downloads/index.js'
+import type { DownloadItem, Downloader, ProxyConfig } from '../downloads/index.js'
 import { extractArchive, normalizeBackendLayout } from '../downloads/index.js'
 import {
   getBackendArchiveName,
@@ -37,6 +37,7 @@ import { scanInstalledBackends } from './scan.js'
 import { llamaServerExeName } from '../config/index.js'
 import type { InstalledBackendPack, UpstreamManifest } from './types.js'
 import type { OptimalBackendStore, OptimalState, OptimalUpdate } from './optimal-store.js'
+import { ensureTurboquantCudart, readTurboquantIndexedAsset, turboquantArchiveUrl } from './turboquant.js'
 
 /** The server executable inside a pack; the only name `normalizeBackendLayout` looks for. */
 export function backendExeName(osType: string): string {
@@ -54,6 +55,7 @@ export interface BackendServiceDeps {
   platform?: NodeJS.Platform
   /** Test seam for the staging directory's name. */
   now?: () => number
+  log?: (message: string) => void
 }
 
 export interface InstallBackendOptions {
@@ -63,6 +65,11 @@ export interface InstallBackendOptions {
   force?: boolean
   /** Current app proxy policy; never persisted. */
   proxy?: ProxyConfig | null
+  /**
+   * TurboQuant only: the asset the release index names for this pair. Without it the index cache on
+   * disk is read, then the fork's naming convention is used.
+   */
+  assetName?: string
 }
 
 export interface InstallBackendResult {
@@ -117,48 +124,22 @@ export class BackendService {
       return { version, backend, installed: false, path: target }
     }
 
-    // A tag the mirror never published still has a URL: `resolveBackendArchiveSource` falls back to
-    // the ggml-org CDN, without a checksum. That is the app's existing behaviour and the reason a
-    // backend can be installed for a build the mirror has not caught up with; the cost is that a
-    // wrong tag fails as a 404 during the download rather than as a refusal here.
-    const manifest = await this.deps.readManifest(options.proxy)
-    const source = resolveBackendArchiveSource(version, backend, manifest ?? undefined)
-
     // Staging directory beside the target, so the move at the end is a rename on the same volume
     // rather than a copy across one.
     const staging = `${target}.incoming-${this.deps.now?.() ?? Date.now()}`
-    const archivePath = join(staging, getBackendArchiveName(version, backend))
-    const cudartName = getCudartArchiveName(backend)
-    const cudartUrl = getCudartDownloadUrl(version, backend)
+    const plan =
+      this.deps.provider === 'llamacpp'
+        ? await this.turboquantDownloads(version, backend, staging, options)
+        : await this.upstreamDownloads(version, backend, staging, options)
 
     await rm(staging, { recursive: true, force: true })
     await mkdir(staging, { recursive: true })
     try {
-      await this.deps.downloader.download(options.taskId, [
-        {
-          url: source.url,
-          save_path: archivePath,
-          ...(source.sha256 ? { sha256: source.sha256 } : {}),
-          ...(source.size ? { size: source.size } : {}),
-          ...(options.proxy ? { proxy: options.proxy } : {}),
-        },
-        // Some Windows CUDA backends ship without the CUDA runtime; it is downloaded beside them
-        // under the same task, because to the user this is one install with one progress bar.
-        ...(cudartName && cudartUrl
-          ? [
-              {
-                url: cudartUrl,
-                save_path: join(staging, cudartName),
-                ...(options.proxy ? { proxy: options.proxy } : {}),
-              },
-            ]
-          : []),
-      ])
-
-      await extractArchive(archivePath, staging)
-      if (cudartName) await extractArchive(join(staging, cudartName), staging)
-      await rm(archivePath, { force: true })
-      if (cudartName) await rm(join(staging, cudartName), { force: true })
+      await this.deps.downloader.download(options.taskId, plan.items)
+      for (const archive of plan.archives) {
+        await extractArchive(archive, staging)
+        await rm(archive, { force: true })
+      }
       await normalizeBackendLayout(staging, llamaServerExeName(this.deps.platform ?? process.platform))
 
       await rm(target, { recursive: true, force: true })
@@ -171,7 +152,77 @@ export class BackendService {
       throw e
     }
 
+    if (this.deps.provider === 'llamacpp') {
+      // Some fork zips ship without the CUDA runtime. The extension repaired it after installing and
+      // only warned on failure: the pack may still run on a host with a CUDA toolkit.
+      await ensureTurboquantCudart(backend, target, options.taskId, {
+        layout: this.deps.layout,
+        downloader: this.deps.downloader,
+        ...(this.deps.platform ? { platform: this.deps.platform } : {}),
+        ...(options.proxy ? { proxy: options.proxy } : {}),
+        ...(this.deps.log ? { log: this.deps.log } : {}),
+      }).catch((e: unknown) =>
+        this.deps.log?.(`cudart repair for ${version}/${backend} failed: ${String(e)}`)
+      )
+    }
+
     return { version, backend, installed: true, path: target }
+  }
+
+  /**
+   * An upstream pack: from the signed mirror when the manifest lists this exact asset, otherwise the
+   * ggml-org CDN without a checksum — the app's behaviour, and the reason a build the mirror has not
+   * caught up with still installs; a wrong tag then fails as a 404 during the download. Some Windows
+   * CUDA backends ship without the CUDA runtime, which is fetched beside them under the same task,
+   * because to the user this is one install with one progress bar.
+   */
+  private async upstreamDownloads(
+    version: string,
+    backend: string,
+    staging: string,
+    options: InstallBackendOptions
+  ): Promise<{ items: DownloadItem[]; archives: string[] }> {
+    const manifest = await this.deps.readManifest(options.proxy)
+    const source = resolveBackendArchiveSource(version, backend, manifest ?? undefined)
+    const archivePath = join(staging, getBackendArchiveName(version, backend))
+    const cudartName = getCudartArchiveName(backend)
+    const cudartUrl = getCudartDownloadUrl(version, backend)
+    const proxy = options.proxy ? { proxy: options.proxy } : {}
+    const items: DownloadItem[] = [
+      {
+        url: source.url,
+        save_path: archivePath,
+        ...(source.sha256 ? { sha256: source.sha256 } : {}),
+        ...(source.size ? { size: source.size } : {}),
+        ...proxy,
+      },
+    ]
+    const archives = [archivePath]
+    if (cudartName && cudartUrl) {
+      items.push({ url: cudartUrl, save_path: join(staging, cudartName), ...proxy })
+      archives.push(join(staging, cudartName))
+    }
+    return { items, archives }
+  }
+
+  /**
+   * A TurboQuant pack from the fork's release CDN, under the asset name its release index gives.
+   * The index carries sizes and hashes, but the extension never checked them; neither does this, so
+   * a republished asset installs the same way it did.
+   */
+  private async turboquantDownloads(
+    version: string,
+    backend: string,
+    staging: string,
+    options: InstallBackendOptions
+  ): Promise<{ items: DownloadItem[]; archives: string[] }> {
+    const asset = options.assetName ?? (await readTurboquantIndexedAsset(this.deps.layout, version, backend))
+    const url = turboquantArchiveUrl(version, backend, asset, this.deps.platform)
+    const archivePath = join(staging, url.slice(url.lastIndexOf('/') + 1))
+    return {
+      items: [{ url, save_path: archivePath, ...(options.proxy ? { proxy: options.proxy } : {}) }],
+      archives: [archivePath],
+    }
   }
 
   /**

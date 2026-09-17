@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
-import { writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { AtomicCore } from '../core.js'
@@ -10,6 +11,7 @@ import {
   daemonCommand,
   formatBytes,
   modelsCommand,
+  serveAttachOptions,
   serveCommand,
   serverCommand,
   shutdownCommand,
@@ -276,6 +278,106 @@ describe('daemon and serve compatibility', () => {
     ).rejects.toMatchObject({ code: 'IO_ERROR' })
     await expect(serveCommand(['a', '--timeout', '0', ...folder()], io())).rejects.toThrow(/--timeout/)
     await expect(serveCommand(['a', '--port', '70000', ...folder()], io())).rejects.toThrow(/--port/)
+  })
+})
+
+describe('serve --provider mlx|foundation-models', () => {
+  it('refuses an unknown provider and a Foundation Models serve without its server', async () => {
+    await expect(serveCommand(['--provider', 'ollama', ...folder()], io())).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: '--provider must be one of: llamacpp-upstream, mlx, foundation-models.',
+    })
+    await expect(serveCommand(['--provider', 'foundation-models', ...folder()], io())).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: expect.stringContaining('--resources-dir'),
+    })
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'serves an installed MLX model from the resources folder with a pinned context',
+    async () => {
+      const resources = `${data.root}/resources`
+      await writeFakeSidecarBinary(resources, 'mlx-server', { kind: 'mlx' })
+      await mkdir(`${data.root}/mlx/models/qwen`, { recursive: true })
+      await writeFile(`${data.root}/mlx/models/qwen/model.safetensors`, 'w')
+      const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, platform: 'darwin' })
+      cores.push(core)
+      await core
+        .registry('mlx')
+        .write('qwen', { model_path: 'mlx/models/qwen/model.safetensors', name: 'qwen', size_bytes: 1 })
+      await expect(serveCommand(['--provider', 'mlx', ...folder()], io())).rejects.toMatchObject({
+        message: expect.stringContaining('MLX needs --resources-dir'),
+      })
+      const out = io()
+      expect(
+        await serveCommand(
+          [
+            '--provider',
+            'mlx',
+            '--resources-dir',
+            resources,
+            '--ctx-size',
+            '2048',
+            '--port',
+            '0',
+            ...folder(),
+          ],
+          out
+        )
+      ).toBe(0)
+      expect(out.err.join('')).toContain('Using model qwen')
+      expect(out.out.join('')).toContain('qwen is serving at http://127.0.0.1:')
+      expect(
+        (core.runtime('mlx') as unknown as { getCtxSize: (id: string) => number }).getCtxSize('qwen')
+      ).toBe(2048)
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'starts the on-device model from the resources folder and prints where it runs',
+    async () => {
+      const resources = `${data.root}/resources`
+      await writeFakeSidecarBinary(resources, 'foundation-models-server', { kind: 'fm' })
+      const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, platform: 'darwin' })
+      cores.push(core)
+      const out = io()
+      expect(
+        await serveCommand(
+          [
+            '--provider',
+            'foundation-models',
+            '--resources-dir',
+            resources,
+            '--port',
+            '0',
+            '--json',
+            ...folder(),
+          ],
+          out
+        )
+      ).toBe(0)
+      const printed = JSON.parse(out.out.join('')) as { session: { model_id: string; port: number } }
+      expect(printed.session.model_id).toBe('apple/on-device')
+      expect(core.sessions()).toMatchObject([{ provider: 'foundation-models', model_id: 'apple/on-device' }])
+      const text = io()
+      expect(
+        await serveCommand(
+          ['--provider', 'foundation-models', '--resources-dir', resources, '--port', '0', ...folder()],
+          text
+        )
+      ).toBe(0)
+      expect(text.out.join('')).toContain(`apple/on-device is running on port ${printed.session.port}`)
+    }
+  )
+})
+
+describe('serve attach options', () => {
+  it('launches an owner when none runs and reports owner trouble on stderr', () => {
+    const out = io()
+    const options = serveAttachOptions(data.layout, out)
+    expect(options).toMatchObject({ layout: data.layout, clientName: 'atomic-chat-core serve', launch: true })
+    options.log('client heartbeat failed')
+    expect(out.err).toEqual(['client heartbeat failed\n'])
   })
 })
 

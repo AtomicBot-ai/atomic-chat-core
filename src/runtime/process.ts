@@ -46,6 +46,17 @@ export interface ReadyOptions {
   classifyExit: (exit: ExitInfo, stderr: string, stdout: string) => AtomicCoreError
   /** Details for the timeout error (`Timeout: Ns\n\nStderr:\n…` in the app). */
   timeoutMessage?: string
+  /** Build the timeout error yourself, for backends whose timeout has its own code (MLX, Foundation Models). */
+  timeoutError?: (stderr: string) => AtomicCoreError
+  /** Grace before SIGKILL when the startup times out; 0 kills at once, as the MLX plugin does. */
+  timeoutGraceMs?: number
+  /**
+   * A line that means the startup has already failed, before the process exits — Foundation Models
+   * writes its reason and only then exits. The child is terminated and this error is raised.
+   */
+  failOnLine?: (stream: 'stdout' | 'stderr', line: string) => AtomicCoreError | undefined
+  /** Separate readiness markers per stream, when a backend says "ready" differently on each (MLX). */
+  streamReadyMarkers?: { stdout: readonly string[]; stderr: readonly string[] }
 }
 
 export interface ManagedProcess {
@@ -105,6 +116,10 @@ export function spawnManaged(spec: SpawnSpec, onLine?: ReadyOptions['onLine']): 
       child.kill()
       return exited
     }
+    if (graceMs <= 0) {
+      child.kill('SIGKILL')
+      return exited
+    }
     child.kill('SIGTERM')
     const timer = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), graceMs).unref())
     const outcome = await Promise.race([exited, timer])
@@ -136,10 +151,15 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
   const markers = opts.readyMarkers ?? LLAMA_READY_MARKERS
   let resolveReady: ((via: 'log' | 'health') => void) | undefined
   const ready = new Promise<'log' | 'health'>((r) => (resolveReady = r))
+  let resolveFailed: ((error: AtomicCoreError) => void) | undefined
+  const failed = new Promise<AtomicCoreError>((r) => (resolveFailed = r))
 
   const proc = spawnManaged(spec, (stream, line) => {
     opts.onLine?.(stream, line)
-    if (isReadyLogLine(line.toLowerCase(), markers)) resolveReady?.('log')
+    const failure = opts.failOnLine?.(stream, line)
+    if (failure) resolveFailed?.(failure)
+    const streamMarkers = opts.streamReadyMarkers ? opts.streamReadyMarkers[stream] : markers
+    if (isReadyLogLine(line.toLowerCase(), streamMarkers)) resolveReady?.('log')
   })
 
   let healthTimer: NodeJS.Timeout | undefined
@@ -178,6 +198,7 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
       proc.exited.then((exit) => ({ kind: 'exit' as const, exit })),
       timeout.then(() => ({ kind: 'timeout' as const })),
       aborted.then(() => ({ kind: 'aborted' as const })),
+      failed.then((error) => ({ kind: 'failed' as const, error })),
     ])
     if (outcome.kind === 'ready') return { process: proc, readyVia: outcome.via }
     if (outcome.kind === 'exit') {
@@ -193,11 +214,13 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
       }
       throw opts.classifyExit(outcome.exit, stderr, stdout)
     }
-    await proc.terminate(1000)
+    await proc.terminate(outcome.kind === 'timeout' ? (opts.timeoutGraceMs ?? 1000) : 1000)
+    if (outcome.kind === 'failed') throw outcome.error
     if (outcome.kind === 'aborted') {
       throw new AtomicCoreError('CORE_NOT_RUNNING', 'The runtime stopped while the process was starting.')
     }
     const { stderr } = proc.output()
+    if (opts.timeoutError) throw opts.timeoutError(stderr)
     throw new AtomicCoreError(
       'MODEL_LOAD_TIMED_OUT',
       opts.timeoutMessage ?? 'The model took too long to load and timed out.',

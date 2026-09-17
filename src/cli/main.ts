@@ -34,7 +34,9 @@ Common options:
 
 Serve compatibility options:
   --model-path <gguf>    Serve a GGUF directly; model id defaults to its filename
-  --bin <path>           Use this llama-server executable
+  --provider <id>        llamacpp-upstream (default), mlx or foundation-models
+  --resources-dir <dir>  Folder with the desktop app's sidecar servers (mlx-server, foundation-models-server)
+  --bin <path>           Use this llama-server (or sidecar server) executable
   --port <port>          Public OpenAI API port (default: 6767; 0 = random)
   --mmproj <path>        Vision projector path
   --embedding            Start in embedding mode
