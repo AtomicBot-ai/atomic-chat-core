@@ -251,11 +251,29 @@
     "functions": 100,
     "lines": 100
   },
+  "src/diffusion/containment.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/diffusion/errors.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
     "lines": 100
+  },
+  "src/diffusion/gallery.ts": {
+    "statements": 99,
+    "branches": 92,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/diffusion/install.ts": {
+    "statements": 98,
+    "branches": 94,
+    "functions": 100,
+    "lines": 98
   },
   "src/diffusion/mutex.ts": {
     "statements": 100,
@@ -269,7 +287,19 @@
     "functions": 100,
     "lines": 100
   },
+  "src/diffusion/png.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
   "src/diffusion/progress.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/recipe.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,

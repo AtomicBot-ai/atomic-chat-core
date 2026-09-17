@@ -6,10 +6,15 @@
  * Ported from: src-tauri/plugins/tauri-plugin-atomic-diffusion/src/ at app commit `767ff6350`.
  */
 export * from './args.js'
+export * from './containment.js'
 export * from './errors.js'
+export * from './gallery.js'
+export * from './install.js'
 export * from './mutex.js'
 export * from './parse.js'
+export * from './png.js'
 export * from './progress.js'
+export * from './recipe.js'
 export * from './tracker.js'
 export * from './types.js'
 export * from './validate.js'

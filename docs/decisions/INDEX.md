@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-17** — [A minimal PNG codec on node:zlib for recipes and thumbnails](2026-09-17-a-minimal-png-codec-on-node-zlib-for-recipes-and-thumbnails.md)
 - **2026-09-17** — [Image generation is its own module, not a local runtime](2026-09-17-image-generation-is-its-own-module-not-a-local-runtime.md)
 - **2026-09-17** — [The diffusion surface speaks the app's camelCase and error codes verbatim](2026-09-17-diffusion-speaks-the-apps-camelcase-and-error-codes-verbatim.md)
 - **2026-09-17** — [spawnManaged reports raw chunks and can skip capturing output](2026-09-17-spawnmanaged-reports-raw-chunks-and-can-skip-capturing-output.md)
