@@ -81,19 +81,105 @@ export interface CoreEvents {
   'server:stopped': Record<string, never>
   'server:bind-failed': { port: number; error: string }
 
-  'api:request': {
-    id: string
-    phase: 'started' | 'finished'
-    endpoint: string
-    model: string
-    backend: string
-    status?: number
-    ttft_ms?: number
-    duration_ms?: number
+  /**
+   * One request to the Local API Server, for the app's analytics window and its API screen
+   * (PLAN.md §2 decision 15). `started` and `progress` are sent only while the app's inspector is
+   * watching, because they carry the prompt preview; `finished` carries the analytics observation
+   * for every request that is product traffic, and the inspector's finish fields when it announced.
+   */
+  'api:request': ApiRequestEvent
+
+  /** A process that owns engines the core does not published, refreshed or lost its registration. */
+  'external-sessions:changed': {
+    owner: string
+    sessions: number
+    reason: 'published' | 'expired' | 'unregistered'
+  }
+  /**
+   * The core needs a registered session's context grown and asks its owner. The owner answers on
+   * `POST /external-sessions/:owner/ctx/:request_id`; no answer within 60 s counts as declined.
+   */
+  'external-sessions:ctx-requested': {
+    request_id: string
+    owner: string
+    provider: string
+    model_id: string
+    trigger: string
   }
 
   'core:log': { level: 'debug' | 'info' | 'warn' | 'error'; msg: string }
 }
+
+/** What the app's `api_request_analytics.rs` aggregates (never content, only shape and outcome). */
+export interface ApiRequestObservation {
+  endpoint: string
+  method: string
+  model_id: string | null
+  /** `llamacpp`, `llamacpp-upstream`, `mlx`, `remote`, or `unknown` before a backend was chosen. */
+  backend: string
+  provider: string | null
+  stream: boolean
+  status: number
+  /** Time to response headers. */
+  latency_ms: number
+  is_anthropic_fallback: boolean
+  error_kind: string | null
+  upstream_status: number | null
+  oom_detected: boolean
+  ctx_overflow_detected: boolean
+}
+
+/** The inspector's `request-started` fields. PRIVACY: `prompt_preview` is user content. */
+export interface ApiRequestStartedFields {
+  endpoint: string
+  method: string
+  model_id: string | null
+  stream: boolean
+  message_count: number | null
+  prompt_preview: string | null
+  prompt_chars: number | null
+  has_non_text_parts: boolean
+  client_max_tokens: number | null
+}
+
+/** The inspector's `request-finished` fields. PRIVACY: `reply_preview` is model output. */
+export interface ApiRequestFinishFields {
+  status: number | null
+  error_kind: string | null
+  aborted: boolean
+  headers_ms: number | null
+  ttft_ms: number | null
+  duration_ms: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  total_tokens: number | null
+  tokens_estimated: boolean
+  prompt_per_second: number | null
+  predicted_per_second: number | null
+  finish_reason: string | null
+  reply_preview: string | null
+  reply_chars: number | null
+}
+
+export type ApiRequestEvent =
+  | ({ phase: 'started'; id: string; seq: number; started_at_ms: number } & ApiRequestStartedFields)
+  | {
+      phase: 'progress'
+      id: string
+      seq: number
+      ttft_ms: number | null
+      completion_tokens: number | null
+      reply_chars: number
+      elapsed_ms: number
+    }
+  | {
+      phase: 'finished'
+      id: string
+      seq: number
+      finished_at_ms: number
+      observation: ApiRequestObservation | null
+      finish: ApiRequestFinishFields | null
+    }
 
 export type CoreEventName = keyof CoreEvents
 

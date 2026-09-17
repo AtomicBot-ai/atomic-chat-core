@@ -17,17 +17,26 @@ without a demonstrated consumer. See PLAN.md §5.1 for comparison rules and §8 
 | `--list-devices` parsing | `src/runtime/llamacpp/devices.ts` | `device.rs` | `test/fixtures/app/devices/*.json` |
 | Provider settings keys | `src/settings/schema/*.json` | `extensions/*/settings.json` | copied verbatim |
 | `<data>` layout | `src/config/` | PLAN.md §8.1 | `test/helpers/tmp-data-folder.ts` |
-| `<data>/local-api-server.json` | `src/contracts/control-api.ts`, `src/server/state-file.ts` | `src-tauri/src/core/server/state_file.rs` | `test/fixtures/app/state-file/*.json` (emitted in phase 0, replayed in phase 4) |
-| `<data>/atomic-chatgpt-auth.json` v1 | `src/credentials/` | `src-tauri/src/core/auth/store.rs` | `test/fixtures/app/chatgpt-auth/*.json` |
-| `/v1/*` routes, gates, CORS allowlist | `src/server/` | `src-tauri/src/core/server/proxy.rs` | `test/fixtures/app/proxy/*.json`, `/openapi.json` |
-| Responses↔Chat shims | `src/server/shims/` | `responses_shim.rs`, `chat_to_responses_shim.rs` | `test/fixtures/app/{responses-shim,chat-to-responses-shim}/*.json` (emitted in phase 0, replayed in phase 4) |
+| `<data>/local-api-server.json` | `src/contracts/control-api.ts`, `src/server/state-file.ts` | `src-tauri/src/core/server/state_file.rs` | `test/fixtures/app/state-file/*.json`, replayed by `test/contract/state-file.test.ts`; one writer at a time: the app's proxy while it serves, the core when started with `state_file: true` (the app's handover) |
+| `<data>/atomic-chatgpt-auth.json` v1, ChatGPT OAuth (PKCE, authorize URL, callback, JWT claims, token response) | `src/credentials/chatgpt-{store,oauth,auth}.ts` | `src-tauri/src/core/auth/{store,chatgpt}.rs` | `test/fixtures/app/chatgpt-auth/*.json`, replayed by `test/contract/chatgpt.test.ts` (Node and Bun) |
+| ChatGPT subscription route (upstream request, model list normalisation) | `src/cloud/chatgpt.ts`, `src/server/public/subscription.ts` | `src-tauri/src/core/server/chatgpt_route.rs` | `test/fixtures/app/chatgpt-route/*.json`, replayed by `test/contract/chatgpt.test.ts` |
+| `<data>/atomic-core/credentials.json` (0600), cloud provider list in `settings.json` `cloud.providers` | `src/credentials/api-keys.ts`, `src/cloud/registry.ts` | `remote_provider_commands.rs` (in-memory map; the app mirrors registrations to `PUT /cloud/providers/:id`) | unit + e2e (`test/e2e/cloud.test.ts`) |
+| `/v1/*` routes, gates, CORS, ctx retry, `/messages` fallback, `/responses`, docs | `src/server/public/`, `src/router/` | `src-tauri/src/core/server/proxy.rs` | `test/fixtures/app/proxy-http/*.json` (78 raw HTTP exchanges against a stub upstream), replayed by `test/contract/proxy-http.test.ts` on Node and on Bun (`npm run test:contract:bun`); known divergence: a remote provider's custom headers are sent |
+| Responses↔Chat shims | `src/server/shims/{responses,chat-to-responses}.ts` | `responses_shim.rs`, `chat_to_responses_shim.rs` | `test/fixtures/app/{responses-shim,chat-to-responses-shim}/*.json`, replayed by `test/contract/shims.test.ts` |
+| Anthropic `/messages` ↔ Chat shim | `src/server/shims/anthropic.ts` | `proxy.rs` (`transform_anthropic_to_openai`, `transform_openai_response_to_anthropic`, `transform_and_forward_stream`) | `test/fixtures/app/anthropic-shim/*.json`, replayed by `test/contract/shims.test.ts`; one recorded case is a known divergence (split `data:` line) |
+| Request inspector: prompt preview, stream telemetry, `include_usage` injection | `src/server/public/telemetry.ts` | `src-tauri/src/core/server/request_inspector.rs` | `test/fixtures/app/inspector-telemetry/*.json`, replayed by `test/contract/inspector-telemetry.test.ts` |
+| `api:request` event (core → app analytics and API screen) | `src/contracts/events.ts` `ApiRequestEvent`, `src/server/public/trace.ts` | consumers `api_request_analytics.rs` (`observation_from_core`), `request_inspector.rs` (`ingest_core_event`) | app Rust tests with the core's event shapes; `test/e2e/api-events.test.ts` |
+| External sessions `PUT/DELETE /external-sessions/:owner`, heartbeat, ctx request/answer | `src/runtime/external-sessions.ts` | `src-tauri/src/core/atomic_core/external.rs` (publisher, `external-sessions:ctx-requested` handler) | unit + `test/e2e/api-events.test.ts` |
 | Download progress event `download-<taskId>` `{transferred,total}` | `src/downloads/` | `src-tauri/src/core/downloads/models.rs:66-70` | `test/fixtures/app/downloads/events-*.json` |
 | Legacy event names (17) | `src/contracts/events.ts` → app `CoreEventBridge` | `extensions/llamacpp-upstream-extension/src/index.ts` (`events.emit`) | relay mapping test in the app |
 
 Fixture sets and their comparators (`index.json` names the comparator; `CHECKSUM` is identical in both repos and
 checked by `tests/core-contracts.test.mjs` in the app): `args` → `argv-exact`, `errors` → `error-exact`,
 `runtime-device` → `runtime-device-exact`, `devices` → `devices-exact`, `responses-shim` /
-`chat-to-responses-shim` → `json-exact` and `sse-sequence`, `state-file` → `state-file-schema`. A set whose port
+`chat-to-responses-shim` / `anthropic-shim` → `json-exact` and `sse-sequence`, `state-file` → `state-file-schema`,
+`proxy-http` → `http-exchange`, `chatgpt-auth` / `chatgpt-route` / `inspector-telemetry` → `json-exact`.
+A case the port deliberately does not reproduce is listed under `comparator_notes.known_divergence` in its set's
+`index.json` and asserted as the corrected behaviour, never skipped. A set whose port
 has not landed yet is validated for shape only, and `docs/testing-critical-flows.md` lists it as not replayed.
 
 New data paths: only `<data>/atomic-core/` (settings.json, credentials.json, optimal-backend.json,
@@ -67,7 +76,7 @@ CLI surface kept compatible with the Rust `jan-cli`: `serve` accepts `--model-pa
 `--mmproj`, `--embedding`, `--timeout`, `--n-gpu-layers`, `--ctx-size`, `--fit`, `--threads`,
 `--api-key`, `--detach/-d`, `--log`, `--verbose/-v`, `--select`, `--data-folder`, and `--json`.
 Its defaults are port 6767, timeout 120 seconds, GPU layers -1, context 32768, fit off and threads 0;
-fit forces context 0. `owner/repository` downloads a GGUF into the shared model tree, preferring
+fit forces context 0. `owner/repository` downloads a GGUF into the CLI scope's model tree, preferring
 `Q4_K_XL` and validating size/sha256 before writing `model.yml`. `models list`
 hides embedding models and prints `{id,name,model_path,size_bytes,capabilities,mmproj_path}` under
 `--json`, `server status` exits 1 when nothing answers and reads `ATOMIC_API_KEY`. The deliberate

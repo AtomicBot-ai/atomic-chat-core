@@ -13,7 +13,7 @@ import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import type { AtomicCoreError } from '../contracts/index.js'
 import type { LocalApiServerState } from '../contracts/index.js'
 import type { CoreClient } from '../client/index.js'
-import { dataLayout, nodeDataFolderEnv, resolveDataFolder } from '../config/index.js'
+import { assertCliDataFolder, dataLayout, nodeDataFolderEnv, resolveCliDataFolder } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
 import { AtomicCore, LOCAL_PROVIDER } from '../core.js'
 import { versionBackendFromBinPath } from '../backend/index.js'
@@ -26,7 +26,7 @@ import {
   ModelRegistry,
 } from '../models/index.js'
 import type { ModelEntry } from '../models/index.js'
-import { attachToOwner } from './owner.js'
+import { withAttachedOwner } from './owner.js'
 import type { CliIo } from './io.js'
 
 export const DEFAULT_SERVE_PORT = 6767
@@ -36,7 +36,10 @@ export const DEFAULT_SERVE_CTX_SIZE = 32_768
 
 export function layoutFor(values: Record<string, unknown>, io: CliIo): DataLayout {
   const explicit = typeof values['data-folder'] === 'string' ? (values['data-folder'] as string) : undefined
-  return dataLayout(explicit ?? resolveDataFolder(nodeDataFolderEnv(io.env)))
+  const env = nodeDataFolderEnv(io.env)
+  const root = explicit ?? resolveCliDataFolder(env)
+  assertCliDataFolder(root, env)
+  return dataLayout(root)
 }
 
 /** `models list` reads the folder directly, exactly as the Rust CLI does — no core needed. */
@@ -118,6 +121,7 @@ export async function daemonCommand(argv: string[], io: CliIo): Promise<number> 
   const layout = layoutFor(values, io)
   const core = await AtomicCore.create({
     dataFolder: layout.root,
+    ownerScope: 'cli',
     controlPort: values['control-port'] !== undefined ? Number(values['control-port']) : 0,
     ...(values['control-host'] ? { controlHost: values['control-host'] } : {}),
     env: io.env,
@@ -233,59 +237,63 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
       ? join(layout.core.logsDir, 'serve.log')
       : undefined
 
-  const { client } = await attachToOwner({
-    layout,
-    clientName: 'atomic-chat-core serve',
-    launch: true,
-    log: (message) => io.stderr(`${message}\n`),
-  })
-  const overrides: Record<string, unknown> = {
-    ctx_size: ctxSize,
-    n_gpu_layers: gpuLayers,
-    fit: values.fit === true,
-    threads,
-    timeout: timeoutSecs,
-  }
+  return withAttachedOwner(
+    {
+      layout,
+      clientName: 'atomic-chat-core serve',
+      launch: true,
+      log: (message) => io.stderr(`${message}\n`),
+    },
+    async ({ client }) => {
+      const overrides: Record<string, unknown> = {
+        ctx_size: ctxSize,
+        n_gpu_layers: gpuLayers,
+        fit: values.fit === true,
+        threads,
+        timeout: timeoutSecs,
+      }
 
-  const verbose = values.verbose === true
-  const eventAbort = new AbortController()
-  const eventReady = verbose ? subscribeToLogs(client, io, eventAbort.signal) : undefined
-  if (eventReady) await eventReady
+      const verbose = values.verbose === true
+      const eventAbort = new AbortController()
+      const eventReady = verbose ? subscribeToLogs(client, io, eventAbort.signal) : undefined
+      if (eventReady) await eventReady
 
-  let session
-  let state
-  try {
-    // Claim/validate the public configuration before auto-unload can mutate sessions. An
-    // incompatible running listener must reject this command while its current model stays live.
-    state = await client.startServer({
-      port,
-      ...(values.host ? { host: values.host } : {}),
-      ...(values['api-key'] ? { api_key: values['api-key'] } : {}),
-    })
-    session = await client.loadModel(LOCAL_PROVIDER, modelId, {
-      isEmbedding: values.embedding === true,
-      ...(exePath
-        ? { exePath, versionBackend: versionBackendFromBinPath(exePath) ?? 'cli/llama-server' }
-        : {}),
-      ...(modelPath ? { modelPath } : {}),
-      ...(mmprojPath ? { mmprojPath } : {}),
-      timeoutSecs,
-      ...(logPath ? { logPath } : {}),
-      verbose,
-      overrides,
-    })
-  } finally {
-    eventAbort.abort()
-  }
-  if (values.json) {
-    io.stdout(`${JSON.stringify({ session, server: state }, null, 2)}\n`)
-  } else {
-    io.stdout(`\n  ${modelId} is serving at ${apiUrl(state)}\n`)
-    io.stdout(`  model process pid ${session.pid}, port ${session.port}\n`)
-    if (state.requires_api_key) io.stdout('  clients must send the API key you configured\n')
-    io.stdout('\n  The core keeps running after this command exits; stop it with `shutdown`.\n\n')
-  }
-  return 0
+      let session
+      let state
+      try {
+        // Claim/validate the public configuration before auto-unload can mutate sessions. An
+        // incompatible running listener must reject this command while its current model stays live.
+        state = await client.startServer({
+          port,
+          ...(values.host ? { host: values.host } : {}),
+          ...(values['api-key'] ? { api_key: values['api-key'] } : {}),
+        })
+        session = await client.loadModel(LOCAL_PROVIDER, modelId, {
+          isEmbedding: values.embedding === true,
+          ...(exePath
+            ? { exePath, versionBackend: versionBackendFromBinPath(exePath) ?? 'cli/llama-server' }
+            : {}),
+          ...(modelPath ? { modelPath } : {}),
+          ...(mmprojPath ? { mmprojPath } : {}),
+          timeoutSecs,
+          ...(logPath ? { logPath } : {}),
+          verbose,
+          overrides,
+        })
+      } finally {
+        eventAbort.abort()
+      }
+      if (values.json) {
+        io.stdout(`${JSON.stringify({ session, server: state }, null, 2)}\n`)
+      } else {
+        io.stdout(`\n  ${modelId} is serving at ${apiUrl(state)}\n`)
+        io.stdout(`  model process pid ${session.pid}, port ${session.port}\n`)
+        if (state.requires_api_key) io.stdout('  clients must send the API key you configured\n')
+        io.stdout('\n  The core keeps running after this command exits; stop it with `shutdown`.\n\n')
+      }
+      return 0
+    }
+  )
 }
 
 async function resolveServeModelId(
@@ -411,9 +419,15 @@ export async function shutdownCommand(argv: string[], io: CliIo): Promise<number
     allowPositionals: false,
   })
   const layout = layoutFor(values, io)
-  let owner
+  let stopped = false
   try {
-    owner = await attachToOwner({ layout, clientName: 'atomic-chat-core shutdown' })
+    await withAttachedOwner(
+      { layout, clientName: 'atomic-chat-core shutdown' },
+      async ({ client }, clientId) => {
+        await client.shutdown({ force: values.force === true, client_id: clientId })
+        stopped = true
+      }
+    )
   } catch (e) {
     if ((e as AtomicCoreError).code === 'CORE_NOT_RUNNING') {
       io.stdout('No core is running for this data folder.\n')
@@ -421,8 +435,7 @@ export async function shutdownCommand(argv: string[], io: CliIo): Promise<number
     }
     throw e
   }
-  await owner.client.shutdown({ force: values.force === true })
-  io.stdout('Core is stopping.\n')
+  if (stopped) io.stdout('Core is stopping.\n')
   return 0
 }
 
@@ -441,8 +454,9 @@ async function readServerState(
     pid: null,
   }
   try {
-    const owner = await attachToOwner({ layout, clientName: 'atomic-chat-core server status' })
-    state = await owner.client.serverStatus()
+    state = await withAttachedOwner({ layout, clientName: 'atomic-chat-core server status' }, ({ client }) =>
+      client.serverStatus()
+    )
   } catch {
     // A crashed core can leave a stale discovery file beside a live legacy app state. Parse both
     // and prefer the first endpoint that actually answers instead of letting file age decide.

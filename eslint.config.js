@@ -27,7 +27,7 @@ const NODE_BUILTINS = [
 ]
 
 export default tseslint.config(
-  { ignores: ['dist', 'coverage', 'node_modules', 'scripts/dist'] },
+  { ignores: ['dist', 'coverage', 'node_modules', 'scripts/dist', '**/*.generated.ts'] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.ts', '**/*.mjs', '**/*.js'],

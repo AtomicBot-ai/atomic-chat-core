@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { join } from 'node:path'
 import type { DataFolderEnv } from './data-folder.js'
 import {
   configDir,
@@ -8,6 +9,8 @@ import {
   parseAppConfiguration,
   resolveConfigFilePath,
   resolveDataFolder,
+  resolveCliDataFolder,
+  assertCliDataFolder,
 } from './data-folder.js'
 
 const env = (
@@ -31,6 +34,7 @@ describe('dataDir / configDir', () => {
       'C:\\Users\\u\\AppData\\Roaming'
     )
     expect(dataDir(env('win32'))).toContain('AppData')
+    expect(configDir(env('win32'))).toContain('AppData')
   })
   it('Linux honours XDG and falls back to ~/.local/share and ~/.config', () => {
     expect(dataDir(env('linux'))).toBe('/home/u/.local/share')
@@ -56,6 +60,47 @@ describe('resolveConfigFilePath', () => {
 })
 
 describe('defaultDataFolder / resolveDataFolder', () => {
+  it('keeps CLI data separate on every platform and rejects an explicit app alias', () => {
+    for (const platform of ['darwin', 'linux', 'win32'] as const) {
+      const e = env(platform)
+      expect(resolveCliDataFolder(e)).not.toBe(resolveDataFolder(e))
+      expect(resolveCliDataFolder(e)).toContain('atomic-chat-cli')
+      expect(() => assertCliDataFolder(resolveDataFolder(e), e)).toThrow(/application data folder/)
+    }
+  })
+  it('normalizes Windows case and separators even for a future app folder', () => {
+    const e = env('win32', { env: { ATOMIC_CORE_DATA_FOLDER: 'C:\\Users\\u\\Atomic Chat\\data' } })
+    expect(() => assertCliDataFolder('c:/users/U/ATOMIC CHAT/./data', e)).toThrow(/application data folder/)
+  })
+  it('rejects the configured app folder even when the CLI has another environment override', () => {
+    for (const platform of ['darwin', 'linux', 'win32'] as const) {
+      const base = env(platform, {
+        env: { ATOMIC_CORE_DATA_FOLDER: platform === 'win32' ? 'C:\\cli' : '/cli' },
+      })
+      const configFile = resolveConfigFilePath(base)
+      const appPath = platform === 'win32' ? 'C:\\app-data' : '/app-data'
+      const e = env(platform, {
+        env: base.env,
+        files: { [configFile]: JSON.stringify({ data_folder: appPath }) },
+      })
+      expect(() => assertCliDataFolder(appPath, e)).toThrow(/application data folder/)
+      expect(() => assertCliDataFolder(platform === 'win32' ? 'C:\\other' : '/other', e)).not.toThrow()
+    }
+  })
+  it('resolves a symlink ancestor even when multiple path components do not exist', async () => {
+    if (process.platform === 'win32') return
+    const { mkdir, mkdtemp, rm, symlink } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const root = await mkdtemp(join(tmpdir(), 'atomic-scope-path-'))
+    try {
+      await mkdir(join(root, 'real'))
+      await symlink(join(root, 'real'), join(root, 'alias'))
+      const e = env(process.platform, { env: { ATOMIC_CORE_DATA_FOLDER: join(root, 'real/new/data') } })
+      expect(() => assertCliDataFolder(join(root, 'alias/new/data'), e)).toThrow(/application data folder/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
   it('builds <data_dir>/<APP_NAME|Atomic Chat>/data and strips a trailing .ai.app', () => {
     expect(defaultDataFolder(env('darwin'))).toBe('/home/u/Library/Application Support/Atomic Chat/data')
     expect(defaultDataFolder(env('linux', { env: { APP_NAME: 'Jan' } }))).toBe(

@@ -48,6 +48,13 @@ export type CoreErrorCode =
   | 'PROVIDER_NOT_FOUND'
   | 'UNAUTHORIZED'
   | 'FORBIDDEN_HOST'
+  /** No ChatGPT subscription is connected, or its sign-in expired and needs doing again. */
+  | 'AUTH_REQUIRED'
+  /** A sign-in did not complete: the browser reported an error, `state` did not match, or the code exchange failed. */
+  | 'AUTH_FAILED'
+  | 'AUTH_CANCELLED'
+  /** An external service (a token endpoint, the subscription API) could not be reached or refused. */
+  | 'UPSTREAM_ERROR'
 
 export type ErrorCode = RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode
 

@@ -10,6 +10,7 @@ import { join } from 'node:path'
 
 const ROOT = new URL('..', import.meta.url).pathname
 const ENTRY = join(ROOT, 'src/cli/bin.ts')
+const APP_ENTRY = join(ROOT, 'src/app-daemon.ts')
 const OUT_DIR = join(ROOT, 'dist/bin')
 
 // Bun target → Tauri externalBin triple used by the app (scripts/download-bin.mjs).
@@ -34,22 +35,27 @@ mkdirSync(OUT_DIR, { recursive: true })
 
 for (const target of targets) {
   const triple = TARGETS[target]
-  const outfile = join(OUT_DIR, `atomic-chat-core-${triple}${target.includes('windows') ? '.exe' : ''}`)
-  const args = [
-    'build',
-    '--compile',
-    `--target=${target}`,
-    '--minify',
-    '--sourcemap',
-    ENTRY,
-    '--outfile',
-    outfile,
-  ]
-  console.log(`bun ${args.join(' ')}`)
-  const res = spawnSync('bun', args, { stdio: 'inherit', cwd: ROOT })
-  if (res.status !== 0) {
-    console.error(`build failed for ${target}`)
-    process.exit(res.status ?? 1)
+  for (const [name, entry] of [
+    ['atomic-chat-core', ENTRY],
+    ['atomic-chat-app-core', APP_ENTRY],
+  ]) {
+    const outfile = join(OUT_DIR, `${name}-${triple}${target.includes('windows') ? '.exe' : ''}`)
+    const args = [
+      'build',
+      '--compile',
+      `--target=${target}`,
+      '--minify',
+      '--sourcemap',
+      entry,
+      '--outfile',
+      outfile,
+    ]
+    console.log(`bun ${args.join(' ')}`)
+    const res = spawnSync('bun', args, { stdio: 'inherit', cwd: ROOT })
+    if (res.status !== 0) {
+      console.error(`build failed for ${target}: ${name}`)
+      process.exit(res.status ?? 1)
+    }
   }
 }
-console.log(`built ${targets.length} binar${targets.length === 1 ? 'y' : 'ies'} into dist/bin`)
+console.log(`built ${targets.length * 2} binaries into dist/bin`)

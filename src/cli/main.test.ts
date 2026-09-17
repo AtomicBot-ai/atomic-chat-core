@@ -43,6 +43,13 @@ describe('runCli', () => {
     expect(result.stderr).toContain('Usage:')
   })
 
+  it('dispatches providers and auth, which explain themselves when called without an action', async () => {
+    expect((await run(['providers'])).exitCode).toBe(2)
+    const auth = await run(['auth', 'nothing'])
+    expect(auth.exitCode).toBe(2)
+    expect(auth.stderr).toContain('auth chatgpt status | login | logout | models')
+  })
+
   it('turns a core error into one readable line with its code', async () => {
     const result = await run(['shutdown', '--data-folder', '/definitely/not/a/folder'])
     expect(result.exitCode).toBe(0) // no core there is not a failure

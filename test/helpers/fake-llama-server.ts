@@ -23,6 +23,10 @@ export interface FakeLlamaOptions {
   /** Advertise `draft-dflash` in `-h` output. */
   specTypes?: string
   reply?: string
+  /** Chat overflows the context while `--ctx-size` is below this. */
+  minCtx?: number
+  /** Path of a marker file: the first chat request creates it and fails with "Compute error". */
+  computeErrorMarker?: string
 }
 
 function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
@@ -31,6 +35,8 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
   if (options.delayMs) env['FAKE_LLAMA_DELAY'] = String(options.delayMs)
   if (options.specTypes) env['FAKE_LLAMA_SPEC_TYPES'] = options.specTypes
   if (options.reply) env['FAKE_LLAMA_REPLY'] = options.reply
+  if (options.minCtx) env['FAKE_LLAMA_MIN_CTX'] = String(options.minCtx)
+  if (options.computeErrorMarker) env['FAKE_LLAMA_COMPUTE_ERROR_MARKER'] = options.computeErrorMarker
   return env
 }
 

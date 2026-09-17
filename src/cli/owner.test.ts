@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { AtomicCore } from '../core.js'
-import { attachToOwner, selfCommand } from './owner.js'
+import { attachToOwner, selfCommand, withAttachedOwner } from './owner.js'
 
 let data: TmpDataFolder
 const cores: AtomicCore[] = []
@@ -23,6 +23,128 @@ async function runningCore(): Promise<AtomicCore> {
 }
 
 describe('attachToOwner', () => {
+  it('refuses an app-scoped owner even when an explicit CLI path points at its folder', async () => {
+    const core = await AtomicCore.create({ dataFolder: data.root, ownerScope: 'app' })
+    cores.push(core)
+    await expect(
+      attachToOwner({ layout: data.layout, clientName: 'cli', launch: true })
+    ).rejects.toMatchObject({ code: 'CORE_PROTOCOL_MISMATCH' })
+    expect(core.instanceId).toBeTruthy()
+  })
+
+  it('does not interrupt active clients of an older daemon', async () => {
+    const core = await runningCore()
+    const client = await attachToOwner({ layout: data.layout, clientName: 'active-cli' })
+    const registration = await client.client.register()
+    const old = JSON.parse(await readFile(data.layout.core.instanceLock, 'utf8')) as Record<string, unknown>
+    await writeFile(data.layout.core.instanceLock, JSON.stringify({ ...old, version: '0.1.0' }))
+    await expect(
+      attachToOwner({ layout: data.layout, clientName: 'upgrading-cli', launch: true })
+    ).rejects.toMatchObject({ code: 'CORE_ALREADY_RUNNING' })
+    expect(await client.client.health()).toMatchObject({ instance_id: core.instanceId })
+    await client.client.unregister(registration.client.id)
+  })
+
+  it('holds a registration throughout a real CLI operation and releases it afterward', async () => {
+    const core = await runningCore()
+    let release!: () => void
+    let entered!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const command = withAttachedOwner(
+      { layout: data.layout, clientName: 'long serve' },
+      async (_owner, id) => {
+        entered()
+        await pending
+        return id
+      }
+    )
+    await started
+    expect(core.clients.list().map((client) => client.name)).toContain('long serve')
+    const old = JSON.parse(await readFile(data.layout.core.instanceLock, 'utf8')) as Record<string, unknown>
+    await writeFile(data.layout.core.instanceLock, JSON.stringify({ ...old, version: '0.1.0' }))
+    await expect(
+      attachToOwner({ layout: data.layout, clientName: 'upgrade', launch: true })
+    ).rejects.toMatchObject({ code: 'CORE_ALREADY_RUNNING' })
+    release()
+    await command
+    expect(core.clients.list()).toEqual([])
+  })
+
+  it('heartbeats during a long command and tolerates a daemon that dies before unregister', async () => {
+    const core = await runningCore()
+    const messages: string[] = []
+    await withAttachedOwner(
+      {
+        layout: data.layout,
+        clientName: 'long-running-cli',
+        heartbeatIntervalMs: 5,
+        log: (message) => messages.push(message),
+      },
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        expect(core.clients.list()[0]?.last_seen).toBeGreaterThan(core.clients.list()[0]?.registered_at ?? 0)
+        await core.shutdown()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+    )
+    expect(messages.some((message) => message.includes('heartbeat failed'))).toBe(true)
+  })
+
+  it('times out when an old daemon acknowledges shutdown but never releases its lock', async () => {
+    const core = await runningCore()
+    const old = JSON.parse(await readFile(data.layout.core.instanceLock, 'utf8')) as Record<string, unknown>
+    await writeFile(data.layout.core.instanceLock, JSON.stringify({ ...old, version: '0.1.0' }))
+    const { CoreClient } = await import('../client/index.js')
+    const shutdown = vi.spyOn(CoreClient.prototype, 'shutdown').mockResolvedValue({ ok: true })
+    try {
+      await expect(
+        attachToOwner({ layout: data.layout, clientName: 'upgrade', launch: true, timeoutMs: 150 })
+      ).rejects.toMatchObject({ code: 'CORE_ALREADY_RUNNING' })
+      expect(core.instanceId).toBe(old.instance_id)
+    } finally {
+      shutdown.mockRestore()
+    }
+  })
+
+  it('requires an explicit upgrade command and refuses an old lock that names another instance', async () => {
+    const core = await runningCore()
+    const old = JSON.parse(await readFile(data.layout.core.instanceLock, 'utf8')) as Record<string, unknown>
+    await writeFile(data.layout.core.instanceLock, JSON.stringify({ ...old, version: '0.1.0' }))
+    await expect(attachToOwner({ layout: data.layout, clientName: 'read-only' })).rejects.toMatchObject({
+      code: 'CORE_PROTOCOL_MISMATCH',
+    })
+    await writeFile(
+      data.layout.core.instanceLock,
+      JSON.stringify({ ...old, version: '0.1.0', instance_id: 'other' })
+    )
+    await expect(
+      attachToOwner({ layout: data.layout, clientName: 'upgrade', launch: true })
+    ).rejects.toMatchObject({ code: 'CORE_PROTOCOL_MISMATCH' })
+    expect(core.instanceId).toBe(old.instance_id)
+  })
+
+  it('shuts down an idle old daemon before attempting to launch the pinned binary', async () => {
+    const core = await runningCore()
+    const old = JSON.parse(await readFile(data.layout.core.instanceLock, 'utf8')) as Record<string, unknown>
+    await writeFile(data.layout.core.instanceLock, JSON.stringify({ ...old, version: '0.1.0' }))
+    await expect(
+      attachToOwner({
+        layout: data.layout,
+        clientName: 'upgrade',
+        launch: true,
+        selfCommand: ['/definitely/missing/atomic-chat-core'],
+        timeoutMs: 2000,
+      })
+    ).rejects.toMatchObject({ code: 'CORE_START_FAILED' })
+    await core.stopped
+    expect(await readFile(data.layout.core.instanceLock, 'utf8').catch(() => undefined)).toBeUndefined()
+  })
+
   it('attaches to a core that already owns the folder', async () => {
     const core = await runningCore()
     const owner = await attachToOwner({ layout: data.layout, clientName: 'test' })
@@ -121,6 +243,24 @@ describe('attachToOwner', () => {
     })
     expect(owner.record.instance_id).toBe(core.instanceId)
     expect(owner.launched).toBe(false)
+  })
+
+  it('finishes a successful launcher handshake and detaches its output streams', async () => {
+    const core = await runningCore()
+    const ready = await readFile(data.layout.core.instanceLock, 'utf8')
+    await rm(data.layout.core.instanceLock)
+    const script = `require('node:fs').writeFileSync(${JSON.stringify(
+      data.layout.core.instanceLock
+    )}, ${JSON.stringify(ready)}); setTimeout(() => {}, 3000)`
+    const owner = await attachToOwner({
+      layout: data.layout,
+      clientName: 'launched-client',
+      launch: true,
+      selfCommand: [process.execPath, '-e', script],
+      timeoutMs: 2000,
+    })
+    expect(owner.launched).toBe(false)
+    expect(owner.record.instance_id).toBe(core.instanceId)
   })
 
   it('gives up when the launched process never publishes anything', async () => {

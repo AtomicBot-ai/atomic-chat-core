@@ -10,6 +10,7 @@ import { AtomicCoreError } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import { daemonCommand, modelsCommand, serveCommand, serverCommand, shutdownCommand } from './commands.js'
 import { launchCommand } from './launch.js'
+import { authCommand, providersCommand } from './cloud.js'
 import type { CliIo } from './io.js'
 
 export const USAGE = `atomic-chat-core ${CORE_VERSION}
@@ -18,14 +19,16 @@ Usage: atomic-chat-core <command> [options]
 
 Commands:
   serve <model>   Load a model in the core and expose it over an OpenAI-compatible API
-  models list     List the chat models installed in the Atomic Chat data folder
+  models list     List the chat models installed in the CLI data folder
   server status   Report whether a local API server is reachable
   daemon          Run the core that owns this data folder (started for you by other commands)
   shutdown        Stop the core that owns this data folder
   launch <agent>  Start a model and launch a coding agent already wired to it
+  providers       List, register or remove cloud providers the API server routes to
+  auth chatgpt    Connect, inspect or disconnect a ChatGPT subscription
 
 Common options:
-  --data-folder <path>   Data folder to work with (default: the app's)
+  --data-folder <path>   Data folder to work with (default: <system data>/atomic-chat-cli/data)
   -h, --help             Show this help
   -v, --version          Print the version
 
@@ -81,6 +84,10 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await launchCommand(rest, io)
       case 'shutdown':
         return await shutdownCommand(rest, io)
+      case 'providers':
+        return await providersCommand(rest, io)
+      case 'auth':
+        return await authCommand(rest, io)
       default:
         io.stderr(`Unknown command: ${command}\n\n${USAGE}`)
         return 2

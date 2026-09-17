@@ -122,6 +122,7 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
 export function statusForCode(code: ErrorCode): number {
   switch (code) {
     case 'UNAUTHORIZED':
+    case 'AUTH_REQUIRED':
       return 401
     case 'FORBIDDEN_HOST':
       return 403
@@ -132,7 +133,11 @@ export function statusForCode(code: ErrorCode): number {
     case 'NO_MODEL_LOADED':
       return 404
     case 'CORE_ALREADY_RUNNING':
+    case 'AUTH_CANCELLED':
       return 409
+    case 'AUTH_FAILED':
+    case 'UPSTREAM_ERROR':
+      return 502
     case 'INVALID_ARGUMENT':
       return 400
     case 'CORE_NOT_RUNNING':

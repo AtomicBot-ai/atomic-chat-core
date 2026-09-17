@@ -11,6 +11,7 @@ import { ControlServer } from '../server/control.js'
 import { CoreClient } from './control-client.js'
 import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
 import { HardwareOverrideStore } from '../hardware/index.js'
+import { CORE_VERSION } from '../version.js'
 
 const TOKEN = 'client-test-token'
 
@@ -22,6 +23,7 @@ let sessions: Array<SessionInfo & { provider: 'llamacpp-upstream' }>
 let serverState: LocalApiServerState
 let shutdowns: number
 let loadFailure: Error | undefined
+let inspecting = false
 
 beforeEach(async () => {
   emitter = new CoreEmitter({ instanceId: 'client-test-instance' })
@@ -40,11 +42,39 @@ beforeEach(async () => {
   server = await ControlServer.start({
     token: TOKEN,
     instanceId: 'client-test-instance',
-    version: '1.2.3',
+    version: CORE_VERSION,
     dataFolder: '/tmp/data',
     emitter,
     clients,
+    recreateSession: async (_provider: string, modelId: string) =>
+      modelId === 'gone' ? { ok: false, reason: 'not-loaded' } : { ok: true },
     increaseCtx: async () => ({ ok: false, reason: 'not-loaded' as const }),
+    externalSessions: {
+      publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),
+      heartbeat: () => ({ alive: true }),
+      unregister: () => true,
+      list: () => [],
+      answerCtx: () => false,
+    },
+    cloud: {
+      list: () => [],
+      upsert: async (input) => ({
+        provider: input.provider,
+        base_url: input.base_url ?? null,
+        custom_headers: input.custom_headers ?? [],
+        models: input.models ?? [],
+        has_api_key: typeof input.api_key === 'string' && input.api_key !== '',
+      }),
+      remove: async () => {},
+    },
+    chatgpt: {
+      status: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
+      startLogin: async () => ({ authorize_url: 'https://auth.example/authorize' }),
+      waitLogin: async () => ({ connected: true, email: 'u@example.test', plan_type: 'plus', expires_at: 1 }),
+      cancelLogin: () => {},
+      logout: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
+      models: async () => [],
+    },
     backends: {
       list: async () => [],
       install: async (_p: string, version: string, backend: string) => ({
@@ -101,6 +131,9 @@ beforeEach(async () => {
       return { success: true }
     },
     publicServer: {
+      setInspecting: (enabled: boolean) => {
+        inspecting = enabled
+      },
       status: () => ({ ...serverState }),
       start: async (options) => {
         Object.assign(serverState, { running: true, ...options, pid: process.pid })
@@ -121,7 +154,7 @@ afterEach(() => server.close())
 
 describe('handshake and registration', () => {
   it('reads health, snapshot and registers with a heartbeat interval', async () => {
-    expect(await client.health()).toMatchObject({ ok: true, version: '1.2.3', protocol: 1 })
+    expect(await client.health()).toMatchObject({ ok: true, version: CORE_VERSION, protocol: 1 })
     const snapshot = await client.handshake()
     expect(snapshot.instance_id).toBe('client-test-instance')
     expect(snapshot.cursor).toBe('client-test-instance:0')
@@ -146,6 +179,23 @@ describe('handshake and registration', () => {
     } finally {
       CoreClient.prototype.snapshot = original
     }
+  })
+
+  it('rejects an incompatible version or ownership scope even with the same wire protocol', async () => {
+    const original = CoreClient.prototype.snapshot
+    CoreClient.prototype.snapshot = async () => ({ ...(await original.call(client)), version: '0.1.0' })
+    try {
+      await expect(client.handshake('cli')).rejects.toMatchObject({
+        code: 'CORE_PROTOCOL_MISMATCH',
+        details: expect.stringContaining('0.1.0') as unknown as string,
+      })
+    } finally {
+      CoreClient.prototype.snapshot = original
+    }
+    await expect(client.handshake('app')).rejects.toMatchObject({
+      code: 'CORE_PROTOCOL_MISMATCH',
+      details: expect.stringContaining('expected') as unknown as string,
+    })
   })
 })
 
@@ -242,3 +292,51 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
     await new Promise((r) => setTimeout(r, 20))
   }
 }
+
+describe('cloud providers and the ChatGPT subscription', () => {
+  it('registers, lists and removes a cloud provider without ever reading a key back', async () => {
+    expect(
+      await client.setCloudProvider('openai', {
+        api_key: 'sk',
+        base_url: 'https://api.openai.com/v1',
+        models: ['gpt-4o'],
+      })
+    ).toEqual({
+      provider: 'openai',
+      base_url: 'https://api.openai.com/v1',
+      custom_headers: [],
+      models: ['gpt-4o'],
+      has_api_key: true,
+    })
+    expect(await client.cloudProviders()).toEqual({ providers: [] })
+    expect(await client.removeCloudProvider('open/ai')).toEqual({ removed: true })
+  })
+
+  it('walks a sign-in through start, wait and cancel, and reads status, models and logout', async () => {
+    expect(await client.chatgptStatus()).toMatchObject({ connected: false })
+    expect(await client.chatgptStartLogin()).toEqual({ authorize_url: 'https://auth.example/authorize' })
+    expect(await client.chatgptWaitLogin()).toMatchObject({ connected: true, email: 'u@example.test' })
+    expect(await client.chatgptCancelLogin()).toEqual({ cancelled: true })
+    expect(await client.chatgptModels()).toEqual({ models: [] })
+    expect(await client.chatgptLogout()).toMatchObject({ connected: false })
+  })
+})
+
+describe('inspector gate', () => {
+  it('tells the core when the API screen starts and stops watching', async () => {
+    expect(await client.setInspecting(true)).toEqual({ enabled: true })
+    expect(inspecting).toBe(true)
+    await client.setInspecting(false)
+    expect(inspecting).toBe(false)
+  })
+})
+
+describe('recreate', () => {
+  it('asks the core to restart a poisoned engine and reports a model it does not hold', async () => {
+    expect(await client.recreateSession('llamacpp-upstream', 'Owner/Repo-GGUF')).toEqual({ ok: true })
+    expect(await client.recreateSession('llamacpp-upstream', 'gone')).toEqual({
+      ok: false,
+      reason: 'not-loaded',
+    })
+  })
+})

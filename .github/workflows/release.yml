@@ -1,8 +1,7 @@
 name: release
 
 # Publishes the binaries the desktop app downloads (`scripts/download-core.mjs` there pins a version
-# and verifies the checksums). Assets are named `atomic-chat-core-<version>-<triple>` so the app can
-# build the URL from `atomicCore.version` alone, plus a `SHA256SUMS` covering all of them.
+# and verifies the checksums). Both CLI and app-core variants are published at the same version.
 on:
   push:
     tags: ['v*']
@@ -52,8 +51,13 @@ jobs:
             triple="${name#atomic-chat-core-}"
             cp "$path" "release/atomic-chat-core-$version-$triple"
           done
+          for path in dist/bin/atomic-chat-app-core-*; do
+            name="$(basename "$path")"
+            triple="${name#atomic-chat-app-core-}"
+            cp "$path" "release/atomic-chat-app-core-$version-$triple"
+          done
           cd release
-          sha256sum atomic-chat-core-* > SHA256SUMS
+          sha256sum atomic-chat-core-* atomic-chat-app-core-* > SHA256SUMS
           cat SHA256SUMS
 
       - uses: actions/upload-artifact@v4

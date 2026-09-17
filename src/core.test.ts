@@ -1,3 +1,5 @@
+import { createServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { chmod, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -38,6 +40,28 @@ async function putHardwareOverride(core: AtomicCore, body: Record<string, unknow
 }
 
 describe('taking ownership', () => {
+  it('expires an app owner after its registration vanishes, without changing CLI lifetime', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    try {
+      const app = await AtomicCore.create({ dataFolder: data.root, ownerScope: 'app' })
+      cores.push(app)
+      const client = new CoreClient({ baseUrl: app.control.url, token: app.controlToken })
+      const registration = await client.register()
+      expect((await client.handshake('app')).owner_scope).toBe('app')
+      await vi.advanceTimersByTimeAsync(5_000)
+      await client.unregister(registration.client.id)
+      await vi.advanceTimersByTimeAsync(5_000)
+      await app.stopped
+      expect((await inspectLock(data.layout)).kind).toBe('free')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('disposes a CLI owner explicitly without an application lease', async () => {
+    const core = await createCore()
+    await core.dispose()
+    expect((await inspectLock(data.layout)).kind).toBe('free')
+  })
   it('locks the folder, mints a token, starts control and publishes where it listens', async () => {
     const core = await createCore()
     expect(core.version).toBe(CORE_VERSION)
@@ -416,6 +440,51 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     expect(session).toMatchObject({ model_id: 'outside-registry', model_path: modelPath })
   })
 
+  it('grows the context of a local model whose request overflowed it, and replays the request', async () => {
+    const core = await createCore()
+    await data.writeModel('demo')
+    await installFakeBackend(data.layout, { minCtx: 8192 })
+    // With fit on (the default) llama.cpp sizes the window itself and the core declines to grow it.
+    await core.settings.update('llamacpp-upstream', { fit: false })
+    const before = await core.load('llamacpp-upstream', 'demo')
+    const { port } = await core.startPublicServer({ port: 0 })
+
+    const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] }),
+    })
+
+    expect(answer.status).toBe(200)
+    const [after] = core.sessions()
+    expect(after?.pid).not.toBe(before.pid)
+    expect(core.runtime('llamacpp-upstream').getCtxSize('demo')).toBeGreaterThanOrEqual(8192)
+  })
+
+  it('restarts a poisoned engine at the same context and tells the client not to retry', async () => {
+    const core = await createCore()
+    await data.writeModel('demo')
+    const marker = join(data.root, 'compute-error-once')
+    await installFakeBackend(data.layout, { computeErrorMarker: marker })
+    const before = await core.load('llamacpp-upstream', 'demo')
+    const ctxBefore = core.runtime('llamacpp-upstream').getCtxSize('demo')
+    const { port } = await core.startPublicServer({ port: 0 })
+    const chat = () =>
+      fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+
+    const failed = await chat()
+
+    expect(failed.status).toBe(400)
+    expect(((await failed.json()) as { error: { code: string } }).error.code).toBe('insufficient_memory')
+    expect(core.sessions()[0]?.pid).not.toBe(before.pid)
+    expect(core.runtime('llamacpp-upstream').getCtxSize('demo')).toBe(ctxBefore)
+    expect((await chat()).status).toBe(200)
+  })
+
   it('stops every session when the core shuts down', async () => {
     const core = await createCore()
     await data.writeModel('demo')
@@ -426,6 +495,173 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     const deadline = Date.now() + 5000
     while (isProcessAlive(session.pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
     expect(isProcessAlive(session.pid)).toBe(false)
+  })
+})
+
+describe('cloud routing through the core', () => {
+  it('routes a registered cloud model with the stored key, and still does after the core restarts', async () => {
+    const { startStub, json } = await import('../test/helpers/chatgpt-stub.js')
+    const upstream = await startStub((_req, res) => json(res, 200, { ok: true }))
+    try {
+      const first = await createCore()
+      await first.cloud.upsert({
+        provider: 'cloudprov',
+        api_key: 'sk-stored',
+        base_url: `${upstream.url}/v1`,
+        custom_headers: [{ header: 'X-Org', value: 'org-1' }],
+        models: ['cloud-model'],
+      })
+      await first.shutdown()
+      cores.splice(cores.indexOf(first), 1)
+
+      const core = await createCore()
+      const { port } = await core.startPublicServer({ port: 0 })
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'cloud-model', messages: [] }),
+      })
+
+      expect(answer.status).toBe(200)
+      expect(upstream.requests[0]).toMatchObject({ path: '/v1/chat/completions' })
+      expect(upstream.requests[0]?.headers).toMatchObject({
+        'authorization': 'Bearer sk-stored',
+        'x-org': 'org-1',
+      })
+      const listed = (await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json()) as {
+        data: Array<{ id: string }>
+      }
+      expect(listed.data.map((m) => m.id)).toEqual(['cloud-model'])
+    } finally {
+      await upstream.close()
+    }
+  })
+
+  it('serves the ChatGPT subscription from the shared token file', async () => {
+    const { startStub, responsesStream } = await import('../test/helpers/chatgpt-stub.js')
+    const { saveTokens } = await import('./credentials/index.js')
+    const subscription = await startStub((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(responsesStream('subscribed'))
+    })
+    try {
+      await saveTokens(data.layout.chatgptAuthFile, {
+        version: 1,
+        access_token: 'app-token',
+        refresh_token: 'r',
+        id_token: null,
+        account_id: 'acct_app',
+        plan_type: 'plus',
+        email: 'app@example.test',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      })
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        env: { ...process.env, ATOMIC_CHATGPT_BASE_URL: subscription.url },
+      })
+      cores.push(core)
+      expect(await core.chatgpt.status()).toMatchObject({ connected: true, email: 'app@example.test' })
+      await core.cloud.upsert({ provider: 'chatgpt', models: ['gpt-5'] })
+      const { port } = await core.startPublicServer({ port: 0 })
+
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-5', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+
+      expect(await answer.json()).toMatchObject({ choices: [{ message: { content: 'subscribed' } }] })
+      expect(subscription.requests[0]?.headers).toMatchObject({
+        'authorization': 'Bearer app-token',
+        'chatgpt-account-id': 'acct_app',
+      })
+    } finally {
+      await subscription.close()
+    }
+  })
+})
+
+describe('sessions the app still owns', () => {
+  it('routes to a registered external session and asks its owner to grow the context', async () => {
+    const { startStub, json } = await import('../test/helpers/chatgpt-stub.js')
+    let calls = 0
+    const engine = await startStub((_req, res) => {
+      calls++
+      if (calls === 1)
+        return json(res, 500, { error: { message: 'the request exceeds the available context size' } })
+      json(res, 200, { choices: [{ message: { content: 'from the app engine' } }] })
+    })
+    try {
+      const core = await createCore()
+      const control = (path: string, init: RequestInit) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          ...init,
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        })
+      core.events.on('external-sessions:ctx-requested', (asked) => {
+        // The owner reloads, publishes where the model now is, then answers.
+        void control(`/external-sessions/app/ctx/${asked.request_id}`, {
+          method: 'POST',
+          body: JSON.stringify({ ok: true, new_ctx_len: 32768 }),
+        })
+      })
+      const published = await control('/external-sessions/app', {
+        method: 'PUT',
+        body: JSON.stringify({
+          generation: 1,
+          sessions: [
+            { provider: 'mlx', model_id: 'Qwen3.5-MLX', port: engine.port, api_key: '', is_embedding: false },
+          ],
+        }),
+      })
+      expect(await published.json()).toEqual({ generation: 1, sessions: 1 })
+      const recreate = await control('/models/llamacpp-upstream/not-loaded/recreate', { method: 'POST' })
+      expect(await recreate.json()).toEqual({ ok: false, reason: 'not-loaded' })
+      expect(core.inspecting).toBe(false)
+      await control('/server/inspector', { method: 'PUT', body: '{"enabled":true}' })
+      expect(core.inspecting).toBe(true)
+      const listed = (await (await control('/external-sessions', { method: 'GET' })).json()) as {
+        sessions: object[]
+      }
+      expect(listed.sessions).toEqual([
+        {
+          owner: 'app',
+          provider: 'mlx',
+          model_id: 'Qwen3.5-MLX',
+          port: engine.port,
+          is_embedding: false,
+          pid: null,
+        },
+      ])
+      const { port } = await core.startPublicServer({ port: 0 })
+
+      const models = (await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json()) as {
+        data: Array<{ id: string; owned_by: string }>
+      }
+      expect(models.data).toEqual([expect.objectContaining({ id: 'Qwen3.5-MLX', owned_by: 'mlx' })])
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'Qwen3_5-MLX', messages: [] }),
+      })
+
+      expect(await answer.json()).toEqual({ choices: [{ message: { content: 'from the app engine' } }] })
+      expect(calls).toBe(2)
+      expect(
+        (await control('/external-sessions/app/heartbeat', { method: 'POST', body: '{"generation":1}' }))
+          .status
+      ).toBe(200)
+      await control('/external-sessions/app', { method: 'DELETE' })
+      const gone = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'Qwen3.5-MLX', messages: [] }),
+      })
+      expect(gone.status).toBe(503)
+    } finally {
+      await engine.close()
+    }
   })
 })
 
@@ -445,6 +681,47 @@ describe('the public listener is independent', () => {
 
     const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
     expect(await client.health(), 'control must survive the public listener').toMatchObject({ ok: true })
+  })
+
+  it('falls back to a free port when asked, and treats a repeat of that request as the same server', async () => {
+    const blocker = createServer()
+    await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve))
+    const taken = (blocker.address() as AddressInfo).port
+    try {
+      const core = await createCore()
+      const first = await core.startPublicServer({ port: taken, fallbackPort: true })
+      expect(first.port).not.toBe(taken)
+      expect(await core.startPublicServer({ port: taken, fallbackPort: true })).toEqual(first)
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()))
+    }
+  })
+
+  it('writes the app state file only when handed the server, and marks it stopped afterwards', async () => {
+    const core = await createCore()
+    const alone = await core.startPublicServer({ port: 0 })
+    await expect(readFile(data.layout.serverStateFile, 'utf8')).rejects.toThrow()
+    await core.stopPublicServer()
+
+    const handed = await core.startPublicServer({ port: 0, apiKey: 'k', writeStateFile: true })
+    expect(JSON.parse(await readFile(data.layout.serverStateFile, 'utf8'))).toEqual({
+      running: true,
+      host: '127.0.0.1',
+      port: handed.port,
+      prefix: '/v1',
+      requires_api_key: true,
+      pid: process.pid,
+    })
+    await expect(core.startPublicServer({ port: handed.port, apiKey: 'k' })).rejects.toMatchObject({
+      code: 'CORE_ALREADY_RUNNING',
+    })
+    await core.stopPublicServer()
+    expect(JSON.parse(await readFile(data.layout.serverStateFile, 'utf8'))).toMatchObject({
+      running: false,
+      port: handed.port,
+      pid: 0,
+    })
+    expect(alone.port).toBeGreaterThan(0)
   })
 
   it('makes identical starts idempotent and rejects incompatible starts without dropping traffic', async () => {

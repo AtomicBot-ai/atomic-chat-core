@@ -1,7 +1,7 @@
 /**
- * Model id → target resolution (4 rules) and auto-increase-ctx.
+ * Model id → backend resolution (PLAN.md §3.2).
  *
- * Ported from: server/proxy.rs:2497-2655, server/context_expansion.rs
+ * Ported from: server/proxy.rs (provider lookup), core/sessions/resolver.rs.
  * See PLAN.md §3.2. Public API of this module is exported from this file only.
  */
-export {}
+export * from './resolve.js'

@@ -5,4 +5,5 @@
 export * from './http.js'
 export * from './clients.js'
 export * from './control.js'
-export * from './public.js'
+export * from './public/index.js'
+export * from './state-file.js'

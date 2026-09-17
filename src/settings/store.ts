@@ -64,6 +64,7 @@ export interface CloudSettings {
 
 export interface SettingsDocument {
   version: number
+  owner_scope?: 'app' | 'cli'
   revision: number
   /** ISO-8601 of the last write, from the injected clock. */
   updated_at: string
@@ -115,6 +116,7 @@ export interface SettingsFs {
 }
 
 export interface SettingsStoreOptions {
+  ownerScope?: 'app' | 'cli'
   fs?: SettingsFs
   /** Milliseconds since epoch; defaults to `Date.now`. */
   now?: () => number
@@ -241,7 +243,12 @@ export class SettingsStore {
     }
 
     if (!exists) {
-      const store = new SettingsStore(path, normalizeSettingsDocument({}, now()), fs, now)
+      const store = new SettingsStore(
+        path,
+        normalizeSettingsDocument(options.ownerScope ? { owner_scope: options.ownerScope } : {}, now()),
+        fs,
+        now
+      )
       await store.persist()
       return store
     }
@@ -259,7 +266,19 @@ export class SettingsStore {
       throw new AtomicCoreError('IO_ERROR', `${path} is not valid JSON: ${(e as Error).message}`)
     }
     if (!isRecord(raw)) throw new AtomicCoreError('IO_ERROR', `${path} is not a JSON object`)
-    return new SettingsStore(path, normalizeSettingsDocument(raw, now()), fs, now)
+    if (options.ownerScope && raw['owner_scope'] && raw['owner_scope'] !== options.ownerScope)
+      throw new AtomicCoreError('CORE_ALREADY_RUNNING', 'This data folder belongs to another core scope.')
+    const store = new SettingsStore(
+      path,
+      normalizeSettingsDocument(
+        options.ownerScope ? { ...raw, owner_scope: options.ownerScope } : raw,
+        now()
+      ),
+      fs,
+      now
+    )
+    if (options.ownerScope && !raw['owner_scope']) await store.persist()
+    return store
   }
 
   get revision(): number {
@@ -304,6 +323,21 @@ export class SettingsStore {
     return this.mutate(options, (doc) =>
       applyPatch(doc.server, patch, (key, value) => ({ scope: 'server', key, value }))
     )
+  }
+
+  /**
+   * Replace the cloud provider list (non-secret parts only; keys live in credentials.json). One
+   * change is reported for the whole list when anything in it differs.
+   */
+  async setCloudProviders(
+    providers: Record<string, unknown>[],
+    options: UpdateOptions = {}
+  ): Promise<UpdateResult> {
+    return this.mutate(options, (doc) => {
+      if (JSON.stringify(doc.cloud.providers) === JSON.stringify(providers)) return []
+      doc.cloud.providers = structuredClone(providers)
+      return [{ scope: 'cloud', key: 'providers', value: providers.map((p) => p['provider']) }]
+    })
   }
 
   async updateState(

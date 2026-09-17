@@ -116,6 +116,34 @@ async function start(over: Partial<ControlServerDeps> = {}): Promise<Harness> {
     hardware: harness.hardware,
     backends: harness.backends,
     models: harness.models,
+    externalSessions: {
+      publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),
+      heartbeat: () => ({ alive: true }),
+      unregister: () => true,
+      list: () => [],
+      answerCtx: () => false,
+    },
+    cloud: {
+      list: () => [],
+      upsert: async (input) => ({
+        provider: input.provider,
+        base_url: input.base_url ?? null,
+        custom_headers: input.custom_headers ?? [],
+        models: input.models ?? [],
+        has_api_key: typeof input.api_key === 'string' && input.api_key !== '',
+      }),
+      remove: async () => {},
+    },
+    chatgpt: {
+      status: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
+      startLogin: async () => ({ authorize_url: 'https://auth.example/authorize' }),
+      waitLogin: async () => ({ connected: true, email: 'u@example.test', plan_type: 'plus', expires_at: 1 }),
+      cancelLogin: () => {},
+      logout: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
+      models: async () => [],
+    },
+    recreateSession: async (_provider: string, modelId: string) =>
+      modelId === 'gone' ? { ok: false, reason: 'not-loaded' } : { ok: true },
     increaseCtx: async (provider, modelId, reason) => {
       calls.push(`increaseCtx ${provider} ${modelId} ${reason ?? '-'}`)
       return harness.ctxIncrease
@@ -130,6 +158,9 @@ async function start(over: Partial<ControlServerDeps> = {}): Promise<Harness> {
       return harness.unloadResult()
     },
     publicServer: {
+      setInspecting: (enabled: boolean) => {
+        calls.push(`inspector ${enabled}`)
+      },
       status: () => ({ ...serverState }),
       start: async (options) => {
         calls.push(`server start ${JSON.stringify(options)}`)
@@ -296,10 +327,19 @@ describe('models and public server', () => {
   it('starts and stops the public listener without touching control', async () => {
     const started = await h.get('/atomic/v1/server/start', {
       method: 'POST',
-      body: JSON.stringify({ host: '127.0.0.1', port: 8080, prefix: '/v1', api_key: 'k' }),
+      body: JSON.stringify({
+        host: '127.0.0.1',
+        port: 8080,
+        prefix: '/v1',
+        api_key: 'k',
+        trusted_hosts: ['lan.example'],
+        proxy_timeout_secs: 30,
+      }),
     })
     expect((await started.json()) as object).toMatchObject({ running: true, port: 8080 })
-    expect(h.calls[0]).toContain('server start')
+    expect(h.calls[0]).toBe(
+      'server start {"host":"127.0.0.1","port":8080,"prefix":"/v1","apiKey":"k","trustedHosts":["lan.example"],"proxyTimeoutSecs":30}'
+    )
     expect((await (await h.get('/atomic/v1/server')).json()) as object).toMatchObject({ running: true })
 
     const defaults = await h.get('/atomic/v1/server/start', { method: 'POST', body: '{}' })
@@ -814,5 +854,57 @@ describe('settings status', () => {
     }
 
     expect(body.scopes['llamacpp-upstream']).toMatchObject({ migrated: true, in_sync: false })
+  })
+})
+
+describe('cloud and auth routes', () => {
+  it('maps a missing subscription to 401 and a failed sign-in to 502 with the error envelope', async () => {
+    const { AtomicCoreError } = await import('../contracts/index.js')
+    const server = await start({
+      chatgpt: {
+        status: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
+        startLogin: async () => {
+          throw new AtomicCoreError('IO_ERROR', 'cannot listen on 127.0.0.1:1455 for the sign-in callback')
+        },
+        waitLogin: async () => {
+          throw new AtomicCoreError('AUTH_FAILED', 'callback state did not match this sign-in')
+        },
+        cancelLogin: () => {},
+        logout: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
+        models: async () => {
+          throw new AtomicCoreError('AUTH_REQUIRED', 'no ChatGPT subscription is connected')
+        },
+      },
+    })
+    try {
+      const models = await server.get('/atomic/v1/auth/chatgpt/models')
+      expect(models.status).toBe(401)
+      expect(await models.json()).toEqual({
+        error: { code: 'AUTH_REQUIRED', message: 'no ChatGPT subscription is connected' },
+      })
+      expect((await server.get('/atomic/v1/auth/chatgpt/login/wait', { method: 'POST' })).status).toBe(502)
+      expect((await server.get('/atomic/v1/auth/chatgpt/login', { method: 'POST' })).status).toBe(500)
+      expect(
+        (await server.get('/atomic/v1/cloud/providers', { headers: { authorization: 'Bearer nope' } })).status
+      ).toBe(401)
+    } finally {
+      await server.server.close()
+    }
+  })
+})
+
+describe('inspector route', () => {
+  it('accepts only a boolean', async () => {
+    const ok = await h.get('/atomic/v1/server/inspector', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: true }),
+    })
+    expect(await ok.json()).toEqual({ enabled: true })
+    expect(h.calls).toContain('inspector true')
+    const bad = await h.get('/atomic/v1/server/inspector', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: 'yes' }),
+    })
+    expect(bad.status).toBe(400)
   })
 })

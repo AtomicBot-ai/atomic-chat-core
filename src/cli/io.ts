@@ -4,6 +4,7 @@
  * recording implementation instead of spawning a process for every assertion.
  */
 
+import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline/promises'
 
@@ -21,6 +22,8 @@ export interface CliIo {
    * a test hands back a promise it resolves itself.
    */
   waitForShutdown: (onStop: () => Promise<void>) => Promise<void>
+  /** Open a URL in the user's browser; best effort, the URL is always printed as well. */
+  openUrl: (url: string) => Promise<void>
 }
 
 export interface SelectTerminal {
@@ -67,6 +70,7 @@ export function nodeCliIo(): CliIo {
         },
       }).finally(() => readline?.close())
     },
+    openUrl: openInBrowser,
     waitForShutdown: (onStop) =>
       new Promise<void>((resolve) => {
         const stop = () => {
@@ -100,9 +104,39 @@ export function recordingIo(over: Partial<CliIo> = {}): CliIo & { out: string[];
         () => undefined
       ),
     select: async () => 0,
+    openUrl: async () => {},
     waitForShutdown: async (onStop) => {
       await onStop()
     },
     ...over,
   }
+}
+
+/** How each platform opens a URL in the default browser. */
+export function browserCommand(platform: NodeJS.Platform, url: string): [string, string[]] {
+  if (platform === 'darwin') return ['open', [url]]
+  // `start` treats the first quoted argument as a window title, hence the empty one.
+  if (platform === 'win32') return ['cmd', ['/c', 'start', '""', url]]
+  return ['xdg-open', [url]]
+}
+
+export function openInBrowser(
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+  spawner: (command: string, args: string[]) => Promise<void> = spawnDetached
+): Promise<void> {
+  const [command, args] = browserCommand(platform, url)
+  return spawner(command, args)
+}
+
+/** Start a program and let it go; a missing program is not an error, the URL was printed anyway. */
+export function spawnDetached(command: string, args: string[]): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const child = spawn(command, args, { stdio: 'ignore', detached: true })
+    child.once('error', () => resolve())
+    child.once('spawn', () => {
+      child.unref()
+      resolve()
+    })
+  })
 }

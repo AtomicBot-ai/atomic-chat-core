@@ -4,3 +4,4 @@ node_modules/
 bun.lock
 test/fixtures/
 *.md
+*.generated.ts

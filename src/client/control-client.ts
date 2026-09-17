@@ -7,7 +7,10 @@
  * the same strings whether the core is in-process or across a socket.
  */
 
+import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../cloud/index.js'
+import type { ChatGptStatus } from '../credentials/index.js'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
+import { CORE_VERSION } from '../version.js'
 import type {
   CoreEventName,
   ErrorCode,
@@ -32,6 +35,7 @@ export interface ClientRegistration {
 
 export interface CoreSnapshot {
   instance_id: string
+  owner_scope?: 'app' | 'cli'
   protocol: number
   version: string
   pid: number
@@ -95,8 +99,8 @@ export class CoreClient {
     return this.call('/snapshot')
   }
 
-  /** Refuse an owner we cannot speak to, instead of failing later on a route it does not have. */
-  async handshake(): Promise<CoreSnapshot> {
+  /** Refuse a binary or ownership scope we cannot safely share. */
+  async handshake(expectedScope?: 'app' | 'cli'): Promise<CoreSnapshot> {
     const snapshot = await this.snapshot()
     if (snapshot.protocol !== CONTROL_PROTOCOL_VERSION) {
       throw new AtomicCoreError(
@@ -105,6 +109,12 @@ export class CoreClient {
         `core protocol ${snapshot.protocol} (version ${snapshot.version}), this build expects ${CONTROL_PROTOCOL_VERSION}`
       )
     }
+    if (snapshot.version !== CORE_VERSION || (expectedScope && snapshot.owner_scope !== expectedScope))
+      throw new AtomicCoreError(
+        'CORE_PROTOCOL_MISMATCH',
+        'The running Atomic Chat core has a different version or ownership scope.',
+        `running ${snapshot.version}/${snapshot.owner_scope ?? 'legacy'}, expected ${CORE_VERSION}/${expectedScope ?? 'any'}`
+      )
     return snapshot
   }
 
@@ -147,8 +157,55 @@ export class CoreClient {
     })
   }
 
+  /** Restart a poisoned engine at the context it already has. */
+  recreateSession(provider: string, modelId: string): Promise<{ ok: boolean; reason?: string }> {
+    return this.call(`/models/${provider}/${modelId}/recreate`, { method: 'POST' })
+  }
+
   unloadModel(provider: string, modelId: string): Promise<UnloadResult> {
     return this.call(`/models/${provider}/${modelId}/unload`, { method: 'POST' })
+  }
+
+  cloudProviders(): Promise<{ providers: CloudProviderView[] }> {
+    return this.call('/cloud/providers')
+  }
+
+  setCloudProvider(
+    provider: string,
+    input: Omit<CloudProviderInput, 'provider'>
+  ): Promise<CloudProviderView> {
+    return this.call(`/cloud/providers/${encodeURIComponent(provider)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    })
+  }
+
+  removeCloudProvider(provider: string): Promise<{ removed: true }> {
+    return this.call(`/cloud/providers/${encodeURIComponent(provider)}`, { method: 'DELETE' })
+  }
+
+  chatgptStatus(): Promise<ChatGptStatus> {
+    return this.call('/auth/chatgpt')
+  }
+
+  chatgptStartLogin(): Promise<{ authorize_url: string }> {
+    return this.call('/auth/chatgpt/login', { method: 'POST' })
+  }
+
+  chatgptWaitLogin(): Promise<ChatGptStatus> {
+    return this.call('/auth/chatgpt/login/wait', { method: 'POST' })
+  }
+
+  chatgptCancelLogin(): Promise<{ cancelled: true }> {
+    return this.call('/auth/chatgpt/login/cancel', { method: 'POST' })
+  }
+
+  chatgptLogout(): Promise<ChatGptStatus> {
+    return this.call('/auth/chatgpt/logout', { method: 'POST' })
+  }
+
+  chatgptModels(): Promise<{ models: SubscriptionModel[] }> {
+    return this.call('/auth/chatgpt/models')
   }
 
   serverStatus(): Promise<LocalApiServerState> {
@@ -160,8 +217,17 @@ export class CoreClient {
     port?: number
     prefix?: string
     api_key?: string
+    trusted_hosts?: string[]
+    proxy_timeout_secs?: number
+    state_file?: boolean
+    fallback_port?: boolean
   }): Promise<LocalApiServerState> {
     return this.call('/server/start', { method: 'POST', body: JSON.stringify(options) })
+  }
+
+  /** Tell the core whether the app's API screen is watching, which gates prompt previews. */
+  setInspecting(enabled: boolean): Promise<{ enabled: boolean }> {
+    return this.call('/server/inspector', { method: 'PUT', body: JSON.stringify({ enabled }) })
   }
 
   stopServer(): Promise<LocalApiServerState> {

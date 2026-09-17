@@ -39,6 +39,8 @@ jobs:
       - run: npm run test:coverage
       - run: npm run test:runtime-compat
       - run: bun test test/runtime-compat
+      # The release binary runs on Bun: the wire contracts are replayed there too, not only on Node.
+      - run: npm run test:contract:bun
       - run: npm run build
       - run: npm run build:bin
       - run: npm run test:e2e

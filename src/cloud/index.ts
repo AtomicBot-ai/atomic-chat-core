@@ -1,7 +1,8 @@
 /**
- * Cloud provider registry, keyless/subscription rules, raw forwarding with key injection, ChatGPT route.
+ * Cloud providers the Local API Server routes to, and the ChatGPT subscription route.
  *
- * Ported from: web-app/src/services/provider-registry.ts, constants/providers.ts, server/{remote_provider_commands,chatgpt_route,chat_to_responses_shim}.rs
+ * Ported from: src-tauri/src/core/server/{remote_provider_commands,chatgpt_route}.rs.
  * See PLAN.md §3.2. Public API of this module is exported from this file only.
  */
-export {}
+export * from './registry.js'
+export * from './chatgpt.js'

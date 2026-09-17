@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { AtomicCoreError } from '../contracts/index.js'
 
 export const CLIENT_HEARTBEAT_INTERVAL_MS = 15_000
 /** Three missed heartbeats: a client that stops reporting is gone, not merely busy. */
@@ -28,6 +29,7 @@ export interface RegisterClientInput {
 
 export class ClientRegistry {
   private readonly clients = new Map<string, ClientRecord>()
+  private stopping = false
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -35,6 +37,8 @@ export class ClientRegistry {
   ) {}
 
   register(input: RegisterClientInput = {}): ClientRecord {
+    if (this.stopping)
+      throw new AtomicCoreError('CORE_NOT_RUNNING', 'This core is stopping; new clients cannot attach.')
     const ts = this.now()
     const record: ClientRecord = {
       id: randomUUID(),
@@ -72,6 +76,13 @@ export class ClientRegistry {
   /** Everyone but the caller — what `shutdown` checks before stopping a core someone else is using. */
   others(exceptId: string | undefined): ClientRecord[] {
     return this.list().filter((c) => c.id !== exceptId)
+  }
+
+  /** Check leases and close admission in one synchronous step. */
+  acceptShutdown(exceptId: string | undefined, force: boolean): ClientRecord[] {
+    const others = this.others(exceptId)
+    if (others.length === 0 || force) this.stopping = true
+    return others
   }
 
   private sweep(): void {

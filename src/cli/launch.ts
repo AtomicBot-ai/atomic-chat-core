@@ -11,6 +11,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { parseArgs } from 'node:util'
 import { AtomicCoreError } from '../contracts/index.js'
+import type { CoreClient } from '../client/index.js'
 import { LOCAL_PROVIDER } from '../core.js'
 import { configureAgent } from '../integrations/configure/index.js'
 import {
@@ -26,7 +27,7 @@ import type { Agent, AgentDetection } from '../integrations/index.js'
 import { ModelRegistry } from '../models/index.js'
 import { layoutFor } from './commands.js'
 import type { CliIo } from './io.js'
-import { attachToOwner } from './owner.js'
+import { withAttachedOwner } from './owner.js'
 
 export const DEFAULT_LAUNCH_PORT = 6767
 export const DEFAULT_LAUNCH_CTX_SIZE = 32_768
@@ -127,97 +128,98 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
         await import('../core.js')
       ).AtomicCore.create({ dataFolder: layout.root, controlPort: 0, env: io.env })
     : undefined
-  const client = standaloneCore
-    ? undefined
-    : (
-        await attachToOwner({
-          layout,
-          clientName: `atomic-chat-core launch ${agent.id}`,
-          launch: true,
-          log: (message) => io.stderr(`${message}\n`),
-        })
-      ).client
-
-  let created = false
-  try {
-    // Validate/claim the public listener before a model load can auto-unload another session.
-    const server = standaloneCore
-      ? await standaloneCore.startPublicServer({
-          port: values.port !== undefined ? Number(values.port) : DEFAULT_LAUNCH_PORT,
-          ...(values.host ? { host: values.host } : {}),
-          apiKey,
-        })
-      : await client!.startServer({
-          port: values.port !== undefined ? Number(values.port) : DEFAULT_LAUNCH_PORT,
-          ...(values.host ? { host: values.host } : {}),
-          api_key: apiKey,
-        })
-
-    const acquired = standaloneCore
-      ? await standaloneCore.acquire(LOCAL_PROVIDER, modelId, {
-          overrides,
-          ...(values.bin ? { exePath: values.bin } : {}),
-        })
-      : await client!.acquireModel(LOCAL_PROVIDER, modelId, {
-          overrides,
-          ...(values.bin ? { exePath: values.bin } : {}),
-        })
-    const session = acquired.session
-    created = acquired.created
-
-    const baseUrl = `http://${server.host === '0.0.0.0' ? '127.0.0.1' : server.host}:${server.port}`
-    const apiUrl = apiUrlFor(agent, baseUrl, server.prefix)
-
-    const configure =
-      deps.configure ??
-      ((a, u, m, k) =>
-        configureAgent(a, u, m, k, {
-          env: io.env,
-          spawn: runCommand,
-        }))
+  const execute = async (client?: CoreClient): Promise<number> => {
+    let created = false
     try {
-      await configure(agent, apiUrl, modelId, apiKey)
-    } catch (e) {
-      throw new AtomicCoreError(
-        'IO_ERROR',
-        `Could not configure ${agent.name}.`,
-        e instanceof Error ? e.message : String(e)
-      )
-    }
+      // Validate/claim the public listener before a model load can auto-unload another session.
+      const server = standaloneCore
+        ? await standaloneCore.startPublicServer({
+            port: values.port !== undefined ? Number(values.port) : DEFAULT_LAUNCH_PORT,
+            ...(values.host ? { host: values.host } : {}),
+            apiKey,
+          })
+        : await client!.startServer({
+            port: values.port !== undefined ? Number(values.port) : DEFAULT_LAUNCH_PORT,
+            ...(values.host ? { host: values.host } : {}),
+            api_key: apiKey,
+          })
 
-    io.stderr(`\n  Agent     ${agent.name}\n`)
-    io.stderr(`  Endpoint  ${apiUrl}\n`)
-    io.stderr(`  Model     ${modelId}\n`)
-    io.stderr(`  Session   pid ${session.pid}, port ${session.port}\n\n`)
+      const acquired = standaloneCore
+        ? await standaloneCore.acquire(LOCAL_PROVIDER, modelId, {
+            overrides,
+            ...(values.bin ? { exePath: values.bin } : {}),
+          })
+        : await client!.acquireModel(LOCAL_PROVIDER, modelId, {
+            overrides,
+            ...(values.bin ? { exePath: values.bin } : {}),
+          })
+      const session = acquired.session
+      created = acquired.created
 
-    const args = [...agent.runArgs, ...agentArgs]
-    const env = agentEnvironment(io.env, agent, apiUrl, modelId, apiKey)
-    const run = deps.run ?? runAgent
+      const baseUrl = `http://${server.host === '0.0.0.0' ? '127.0.0.1' : server.host}:${server.port}`
+      const apiUrl = apiUrlFor(agent, baseUrl, server.prefix)
 
-    if (agent.runMode === 'gui') {
-      await run({ program: detection.program, args, env, detached: true })
-      io.stderr(`  ${agent.name} opened. The model stays loaded until you press Ctrl+C.\n\n`)
-      await io.waitForShutdown(async () => {})
-      return 0
-    }
-
-    io.stderr(`  → Launching: ${[detection.program, ...args].join(' ')}\n\n`)
-    return await run({ program: detection.program, args, env, detached: false })
-  } catch (e) {
-    throw e instanceof AtomicCoreError
-      ? e
-      : new AtomicCoreError(
+      const configure =
+        deps.configure ??
+        ((a, u, m, k) =>
+          configureAgent(a, u, m, k, {
+            env: io.env,
+            spawn: runCommand,
+          }))
+      try {
+        await configure(agent, apiUrl, modelId, apiKey)
+      } catch (e) {
+        throw new AtomicCoreError(
           'IO_ERROR',
-          `Could not launch ${agent.name}.`,
+          `Could not configure ${agent.name}.`,
           e instanceof Error ? e.message : String(e)
         )
-  } finally {
-    if (created) {
-      if (standaloneCore) await standaloneCore.unload(LOCAL_PROVIDER, modelId).catch(() => {})
-      else await client?.unloadModel(LOCAL_PROVIDER, modelId).catch(() => {})
+      }
+
+      io.stderr(`\n  Agent     ${agent.name}\n`)
+      io.stderr(`  Endpoint  ${apiUrl}\n`)
+      io.stderr(`  Model     ${modelId}\n`)
+      io.stderr(`  Session   pid ${session.pid}, port ${session.port}\n\n`)
+
+      const args = [...agent.runArgs, ...agentArgs]
+      const env = agentEnvironment(io.env, agent, apiUrl, modelId, apiKey)
+      const run = deps.run ?? runAgent
+
+      if (agent.runMode === 'gui') {
+        await run({ program: detection.program, args, env, detached: true })
+        io.stderr(`  ${agent.name} opened. The model stays loaded until you press Ctrl+C.\n\n`)
+        await io.waitForShutdown(async () => {})
+        return 0
+      }
+
+      io.stderr(`  → Launching: ${[detection.program, ...args].join(' ')}\n\n`)
+      return await run({ program: detection.program, args, env, detached: false })
+    } catch (e) {
+      throw e instanceof AtomicCoreError
+        ? e
+        : new AtomicCoreError(
+            'IO_ERROR',
+            `Could not launch ${agent.name}.`,
+            e instanceof Error ? e.message : String(e)
+          )
+    } finally {
+      if (created) {
+        if (standaloneCore) await standaloneCore.unload(LOCAL_PROVIDER, modelId).catch(() => {})
+        else await client?.unloadModel(LOCAL_PROVIDER, modelId).catch(() => {})
+      }
+      await standaloneCore?.shutdown().catch(() => {})
     }
-    await standaloneCore?.shutdown().catch(() => {})
   }
+  if (standaloneCore) return execute()
+  return withAttachedOwner(
+    {
+      layout,
+      clientName: `atomic-chat-core launch ${agent.id}`,
+      launch: true,
+      log: (message) => io.stderr(`${message}\n`),
+    },
+    ({ client }) => execute(client)
+  )
 }
 
 /**

@@ -474,6 +474,49 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void
   }
 }
 
+describe('recreateSession', () => {
+  it('restarts a poisoned engine at the context it already had', async () => {
+    await data.writeModel('demo')
+    const runtime = await makeRuntime()
+    const before = await runtime.load('demo')
+
+    const result = await runtime.recreateSession('demo')
+
+    expect(result.ok && result.session.pid).not.toBe(before.pid)
+    expect(runtime.getCtxSize('demo')).toBe(2048)
+    // Recovery is not a context change; the UI must not be told the window grew.
+    expect(payloads('session:ctx-increased')).toEqual([])
+  })
+
+  it('declines for a model that is not loaded', async () => {
+    const runtime = await makeRuntime()
+
+    expect(await runtime.recreateSession('nothing')).toEqual({ ok: false, reason: 'not-loaded' })
+  })
+
+  it('logs an unload that fails and does not let it stop the recovery', async () => {
+    await data.writeModel('stubborn')
+    const baseSpawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        const result = await baseSpawn(spec, opts)
+        const terminate = result.process.terminate
+        let refusals = 1
+        result.process.terminate = (graceMs) =>
+          refusals-- > 0 ? Promise.reject(new Error('process would not stop')) : terminate(graceMs)
+        return result
+      },
+    })
+    await runtime.load('stubborn')
+
+    expect(await runtime.recreateSession('stubborn')).toMatchObject({ ok: true })
+    expect(payloads('core:log')).toContainEqual({
+      level: 'warn',
+      msg: 'compute_error_recovery: unload of stubborn failed, reloading anyway: process would not stop',
+    })
+  })
+})
+
 describe('autoIncreaseCtx', () => {
   it('reloads the model one step up the ladder and reports the move', async () => {
     await data.writeModel('demo')

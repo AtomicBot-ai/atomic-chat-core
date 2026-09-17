@@ -8,6 +8,8 @@
  * manageable while its `/v1` surface is down.
  */
 
+import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../cloud/index.js'
+import type { ChatGptStatus } from '../credentials/index.js'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
@@ -66,8 +68,17 @@ export interface PublicServerControl {
     port?: number
     prefix?: string
     apiKey?: string
+    trustedHosts?: string[]
+    proxyTimeoutSecs?: number
+    writeStateFile?: boolean
+    fallbackPort?: boolean
   }) => Promise<LocalApiServerState>
   stop: () => Promise<LocalApiServerState>
+  /**
+   * Whether the app's API screen is watching the public server. Previews of prompts and replies are
+   * collected only while it is (ATO-113). Survives a server restart, like the app's own inspector.
+   */
+  setInspecting: (enabled: boolean) => void
 }
 
 /**
@@ -132,10 +143,38 @@ export interface ModelControl {
   ) => Promise<EmbeddingResponse>
 }
 
+/** Engines another process owns, registered so the public server can route to them (stage 4d). */
+export interface ExternalSessionControl {
+  publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
+  heartbeat: (owner: string, generation: number) => { alive: boolean }
+  unregister: (owner: string, generation?: number) => boolean
+  list: () => unknown[]
+  answerCtx: (owner: string, requestId: string, outcome: unknown) => boolean
+}
+
+/** Cloud providers the public server routes to (PLAN.md §4, stage 4c). Keys are never read back. */
+export interface CloudControl {
+  list: () => CloudProviderView[]
+  upsert: (input: CloudProviderInput) => Promise<CloudProviderView>
+  remove: (provider: string) => Promise<void>
+}
+
+/** The ChatGPT subscription session. Nothing here ever returns a token. */
+export interface ChatGptControl {
+  status: () => Promise<ChatGptStatus>
+  reload?: () => Promise<ChatGptStatus>
+  startLogin: () => Promise<{ authorize_url: string }>
+  waitLogin: () => Promise<ChatGptStatus>
+  cancelLogin: () => void
+  logout: () => Promise<ChatGptStatus>
+  models: () => Promise<SubscriptionModel[]>
+}
+
 export interface ControlServerDeps {
   token: string
   instanceId: string
   version: string
+  ownerScope?: 'app' | 'cli'
   dataFolder: string
   emitter: CoreEmitter
   clients: ClientRegistry
@@ -152,6 +191,12 @@ export interface ControlServerDeps {
    * error, and the proxy has to tell it apart from a failed reload.
    */
   increaseCtx: (provider: string, modelId: string, reason?: string) => Promise<CtxIncreaseResult>
+  /**
+   * Restart a model at the context it already has, because its engine is poisoned (a compute
+   * failure). The app's extension asks for this when the core owns the runtime but the app's own
+   * proxy saw the failure.
+   */
+  recreateSession: (provider: string, modelId: string) => Promise<{ ok: boolean; reason?: string }>
   publicServer: PublicServerControl
   /** The settings store, for the routes that read and migrate provider settings (PLAN.md §3.4). */
   settings: SettingsControl
@@ -161,6 +206,9 @@ export interface ControlServerDeps {
   backends: BackendControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
+  cloud: CloudControl
+  chatgpt: ChatGptControl
+  externalSessions: ExternalSessionControl
   /** Stop the whole core. The server has already answered by the time this runs. */
   shutdown: (options: { force: boolean; requestedBy?: string | undefined }) => Promise<void>
   startedAt?: number
@@ -169,6 +217,7 @@ export interface ControlServerDeps {
 
 export interface ControlSnapshot {
   instance_id: string
+  owner_scope?: 'app' | 'cli' | undefined
   protocol: number
   version: string
   pid: number
@@ -308,6 +357,7 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
   const p = (suffix: string) => `${CONTROL_API_PREFIX}${suffix}`
   const snapshot = (): ControlSnapshot => ({
     instance_id: deps.instanceId,
+    owner_scope: deps.ownerScope,
     protocol: CONTROL_PROTOCOL_VERSION,
     version: deps.version,
     pid: process.pid,
@@ -329,6 +379,7 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
       ok: true,
       pid: process.pid,
       version: deps.version,
+      owner_scope: deps.ownerScope,
       instance_id: deps.instanceId,
       protocol: CONTROL_PROTOCOL_VERSION,
       dataFolder: deps.dataFolder,
@@ -404,6 +455,10 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
   router.post(p('/models/:provider/*modelId/unload'), async (_req, res, { params }) => {
     const result = await deps.unloadModel(params['provider'] as string, params['modelId'] as string)
     sendJson(res, 200, result)
+  })
+
+  router.post(p('/models/:provider/*modelId/recreate'), async (_req, res, { params }) => {
+    sendJson(res, 200, await deps.recreateSession(params['provider'] as string, params['modelId'] as string))
   })
 
   router.post(p('/models/:provider/*modelId/ctx/increase'), async (req, res, { params }) => {
@@ -605,24 +660,125 @@ function buildRouter(deps: ControlServerDeps, self: () => ControlServer | undefi
     sendJson(res, 200, await deps.settings.acknowledge(params['scope'] as string, body.revision))
   })
 
+  router.get(p('/external-sessions'), (_req, res) =>
+    sendJson(res, 200, { sessions: deps.externalSessions.list() })
+  )
+
+  router.put(p('/external-sessions/:owner'), async (req, res, { params }) => {
+    const body = await readJsonBody<{ generation?: number; sessions?: unknown }>(req)
+    sendJson(
+      res,
+      200,
+      deps.externalSessions.publish(params['owner'] as string, body.generation as number, body.sessions)
+    )
+  })
+
+  router.post(p('/external-sessions/:owner/heartbeat'), async (req, res, { params }) => {
+    const body = await readJsonBody<{ generation?: number }>(req)
+    sendJson(res, 200, deps.externalSessions.heartbeat(params['owner'] as string, Number(body.generation)))
+  })
+
+  router.delete(p('/external-sessions/:owner'), async (req, res, { params }) => {
+    const body = await readJsonBody<{ generation?: number }>(req)
+    sendJson(res, 200, {
+      unregistered: deps.externalSessions.unregister(params['owner'] as string, body.generation),
+    })
+  })
+
+  router.post(p('/external-sessions/:owner/ctx/:requestId'), async (req, res, { params }) => {
+    const body = await readJsonBody<unknown>(req)
+    sendJson(res, 200, {
+      accepted: deps.externalSessions.answerCtx(
+        params['owner'] as string,
+        params['requestId'] as string,
+        body
+      ),
+    })
+  })
+
+  router.get(p('/cloud/providers'), (_req, res) => sendJson(res, 200, { providers: deps.cloud.list() }))
+
+  router.put(p('/cloud/providers/:provider'), async (req, res, { params }) => {
+    const body = await readJsonBody<Omit<CloudProviderInput, 'provider'>>(req)
+    sendJson(res, 200, await deps.cloud.upsert({ ...body, provider: params['provider'] as string }))
+  })
+
+  router.delete(p('/cloud/providers/:provider'), async (_req, res, { params }) => {
+    await deps.cloud.remove(params['provider'] as string)
+    sendJson(res, 200, { removed: true })
+  })
+
+  router.get(p('/auth/chatgpt'), async (_req, res) => sendJson(res, 200, await deps.chatgpt.status()))
+
+  router.post(p('/auth/chatgpt/reload'), async (_req, res) => {
+    if (!deps.chatgpt.reload)
+      return sendError(res, new AtomicCoreError('INVALID_ARGUMENT', 'reload is unavailable'))
+    sendJson(res, 200, await deps.chatgpt.reload())
+  })
+
+  // Sign-in is two calls because the core cannot open a browser: this one binds the callback
+  // listener on :1455 and says where to send the user, `/login/wait` resolves when they are back.
+  router.post(p('/auth/chatgpt/login'), async (_req, res) =>
+    sendJson(res, 200, await deps.chatgpt.startLogin())
+  )
+
+  router.post(p('/auth/chatgpt/login/wait'), async (_req, res) =>
+    sendJson(res, 200, await deps.chatgpt.waitLogin())
+  )
+
+  router.post(p('/auth/chatgpt/login/cancel'), (_req, res) => {
+    deps.chatgpt.cancelLogin()
+    sendJson(res, 200, { cancelled: true })
+  })
+
+  router.post(p('/auth/chatgpt/logout'), async (_req, res) => sendJson(res, 200, await deps.chatgpt.logout()))
+
+  router.get(p('/auth/chatgpt/models'), async (_req, res) =>
+    sendJson(res, 200, { models: await deps.chatgpt.models() })
+  )
+
   router.get(p('/server'), (_req, res) => sendJson(res, 200, deps.publicServer.status()))
 
   router.post(p('/server/start'), async (req, res) => {
-    const body = await readJsonBody<{ host?: string; port?: number; prefix?: string; api_key?: string }>(req)
+    const body = await readJsonBody<{
+      host?: string
+      port?: number
+      prefix?: string
+      api_key?: string
+      trusted_hosts?: string[]
+      proxy_timeout_secs?: number
+      state_file?: boolean
+      fallback_port?: boolean
+    }>(req)
     const state = await deps.publicServer.start({
       ...(body.host !== undefined ? { host: body.host } : {}),
       ...(body.port !== undefined ? { port: body.port } : {}),
       ...(body.prefix !== undefined ? { prefix: body.prefix } : {}),
       ...(body.api_key !== undefined ? { apiKey: body.api_key } : {}),
+      ...(body.trusted_hosts !== undefined ? { trustedHosts: body.trusted_hosts } : {}),
+      ...(body.proxy_timeout_secs !== undefined ? { proxyTimeoutSecs: body.proxy_timeout_secs } : {}),
+      ...(body.state_file !== undefined ? { writeStateFile: body.state_file === true } : {}),
+      ...(body.fallback_port !== undefined ? { fallbackPort: body.fallback_port === true } : {}),
     })
     sendJson(res, 200, state)
   })
 
   router.post(p('/server/stop'), async (_req, res) => sendJson(res, 200, await deps.publicServer.stop()))
 
+  router.put(p('/server/inspector'), async (req, res) => {
+    const body = await readJsonBody<{ enabled?: unknown }>(req)
+    if (typeof body.enabled !== 'boolean')
+      return sendError(
+        res,
+        new AtomicCoreError('INVALID_ARGUMENT', 'inspector needs {"enabled": true|false}')
+      )
+    deps.publicServer.setInspecting(body.enabled)
+    sendJson(res, 200, { enabled: body.enabled })
+  })
+
   router.post(p('/shutdown'), async (req, res) => {
     const body = await readJsonBody<{ force?: boolean; client_id?: string }>(req)
-    const others = deps.clients.others(body.client_id)
+    const others = deps.clients.acceptShutdown(body.client_id, body.force === true)
     if (others.length > 0 && body.force !== true) {
       return sendError(
         res,

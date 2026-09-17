@@ -28,6 +28,7 @@ import type { IdentityDeps, IdentityVerdict } from './process-identity.js'
 
 export interface LockRecord {
   instance_id: string
+  owner_scope?: 'app' | 'cli' | undefined
   pid: number
   process_start_id: string | null
   owner_started_at?: string | null
@@ -55,6 +56,7 @@ export const TAKEOVER_ATTEMPTS = 20
 export const TAKEOVER_RETRY_MS = 50
 
 export interface LockDeps extends IdentityDeps {
+  ownerScope?: 'app' | 'cli'
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   /** Own start identity; injected in tests. */
@@ -108,6 +110,7 @@ export function parseLockRecord(text: string): LockRecord | undefined {
   if (typeof r['instance_id'] !== 'string' || typeof r['pid'] !== 'number') return undefined
   return {
     instance_id: r['instance_id'],
+    owner_scope: r['owner_scope'] === 'app' || r['owner_scope'] === 'cli' ? r['owner_scope'] : undefined,
     pid: r['pid'],
     process_start_id: typeof r['process_start_id'] === 'string' ? r['process_start_id'] : null,
     owner_started_at: typeof r['owner_started_at'] === 'string' ? r['owner_started_at'] : null,
@@ -171,6 +174,7 @@ export class InstanceLock {
       if (handle) {
         const record: LockRecord = {
           instance_id: randomUUID(),
+          owner_scope: deps.ownerScope ?? 'cli',
           pid: process.pid,
           process_start_id: selfId ?? null,
           owner_started_at: ownerStartedAt ?? null,

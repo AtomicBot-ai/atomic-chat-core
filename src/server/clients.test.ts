@@ -49,6 +49,17 @@ describe('ClientRegistry', () => {
     expect(registry.others(cli.id)).toEqual([])
   })
 
+  it('closes admission atomically once shutdown is accepted', () => {
+    const { registry } = clockRegistry()
+    const active = registry.register({ name: 'serve' })
+    expect(registry.acceptShutdown(undefined, false)).toHaveLength(1)
+    expect(registry.register({ name: 'another' }).name).toBe('another')
+    registry.unregister(active.id)
+    expect(registry.acceptShutdown(undefined, false)).toHaveLength(1)
+    expect(registry.acceptShutdown(undefined, true)).toHaveLength(1)
+    expect(() => registry.register({ name: 'late' })).toThrow(/stopping/)
+  })
+
   it('truncates an absurd client name instead of storing it', () => {
     const { registry } = clockRegistry()
     expect(registry.register({ name: 'x'.repeat(5000) }).name).toHaveLength(200)

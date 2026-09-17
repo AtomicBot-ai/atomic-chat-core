@@ -553,6 +553,32 @@ export class LlamacppRuntime {
     return { ok: true, new_ctx_len: newCtxLen, session: info }
   }
 
+  /**
+   * Reload a model at the context it already has, because its engine is unusable: a fatal compute
+   * failure (a Metal OOM during prompt processing) leaves the ggml backend in an error state that
+   * only a new process clears. The window is deliberately not grown — more context would only make
+   * an out-of-memory failure more likely. As with `autoIncreaseCtx`, a failed unload does not stop
+   * the reload.
+   */
+  async recreateSession(
+    modelId: string
+  ): Promise<{ ok: true; session: SessionInfo } | { ok: false; reason: 'not-loaded' }> {
+    this.assertRunning()
+    if (!this.sessions.has(modelId)) return { ok: false, reason: 'not-loaded' }
+    const ctxLen = this.getCtxSize(modelId)
+    const unloaded = await this.unloadSession(modelId)
+    if (!unloaded.success)
+      this.emit('core:log', {
+        level: 'warn',
+        msg: `compute_error_recovery: unload of ${modelId} failed, reloading anyway: ${unloaded.error}`,
+      })
+    const info = await this.load(modelId, {
+      ...(ctxLen !== undefined ? { overrides: { ctx_size: ctxLen } } : {}),
+      bypassAutoUnload: true,
+    })
+    return { ok: true, session: info }
+  }
+
   private async unloadSession(modelId: string): Promise<UnloadResult> {
     const session = this.sessions.get(modelId)
     if (!session) return { success: true }

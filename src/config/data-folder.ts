@@ -13,7 +13,8 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
+import { realpathSync } from 'node:fs'
 
 export const CONFIGURATION_FILE_NAME = 'settings.json'
 export const DEFAULT_APP_NAME = 'Atomic Chat'
@@ -115,4 +116,49 @@ export function resolveDataFolder(e: DataFolderEnv): string {
   const text = e.readFile(resolveConfigFilePath(e))
   const config = text === undefined ? undefined : parseAppConfiguration(text)
   return config?.data_folder ?? defaultDataFolder(e)
+}
+
+/** The CLI deliberately does not inherit the desktop application's configured data folder. */
+export function resolveCliDataFolder(e: DataFolderEnv): string {
+  return join(dataDir(e), 'atomic-chat-cli', 'data')
+}
+
+/** Reject aliases of the app's folder, including symlinks through existing parent directories. */
+export function assertCliDataFolder(folder: string, e: DataFolderEnv): void {
+  const paths = e.platform === 'win32' ? win32 : posix
+  const canonical = (input: string): string => {
+    let ancestor = paths.resolve(input)
+    const missing: string[] = []
+    // The destination may not exist. Resolve the nearest existing ancestor,
+    // including a symlink several levels up, then append the missing suffix.
+    // Tests model other platforms' lexical rules without probing this host's FS.
+    if (e.platform === process.platform) {
+      for (;;) {
+        try {
+          ancestor = realpathSync.native(ancestor)
+          break
+        } catch {
+          const parent = paths.dirname(ancestor)
+          if (parent === ancestor) break
+          missing.unshift(paths.basename(ancestor))
+          ancestor = parent
+        }
+      }
+    }
+    const path = paths.join(ancestor, ...missing)
+    // Windows aliases are case-insensitive even if their final components do
+    // not exist yet and realpath could not supply filesystem casing.
+    return e.platform === 'win32' ? path.toLowerCase() : path
+  }
+  // The CLI's environment override is not the application's configured folder.
+  // In particular, --data-folder=A sets this override to A while the app may
+  // still own a different folder B from settings.json. Guard both candidates.
+  const text = e.readFile(resolveConfigFilePath(e))
+  const configured = text === undefined ? undefined : parseAppConfiguration(text)
+  const appFolder = configured?.data_folder ?? defaultDataFolder(e)
+  if ([appFolder, e.env[DATA_FOLDER_ENV]].some((path) => path && canonical(folder) === canonical(path))) {
+    throw new Error(
+      'The CLI cannot use the Atomic Chat application data folder; choose a separate --data-folder.'
+    )
+  }
 }

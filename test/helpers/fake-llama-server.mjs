@@ -8,8 +8,12 @@
  *   FAKE_LLAMA_MODE   ready | no-ready | hang | oom | segv | exit-<code> | projector-fail | mtp-fail
  *   FAKE_LLAMA_GPU    1 → print CUDA backend/offload/buffer lines
  *   FAKE_LLAMA_DELAY  milliseconds before the ready line
+ *   FAKE_LLAMA_MIN_CTX  chat answers llama.cpp's context-overflow 400 while `--ctx-size` is below this
+ *   FAKE_LLAMA_COMPUTE_ERROR_MARKER  path; the first chat request anywhere creates it and answers
+ *                     llama.cpp's poisoned-backend 500 ("Compute error"), later ones succeed
  *   LLAMA_API_KEY     when set, every route but `/health` demands `Authorization: Bearer <key>`
  */
+import { existsSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 
 const argv = process.argv.slice(2)
@@ -99,6 +103,11 @@ function startServer() {
       })
     if (url.pathname === '/v1/models')
       return json(200, { object: 'list', data: [{ id: modelAlias, object: 'model', owned_by: 'llamacpp' }] })
+    // Real llama-server serves Prometheus metrics at its root (with `--metrics`), behind the key.
+    if (url.pathname === '/metrics') {
+      res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' })
+      return res.end(`llamacpp:prompt_tokens_total 3\nllamacpp:requests_processing 0\n`)
+    }
     if (url.pathname === '/tokenize') return readBody(req).then((b) => json(200, { tokens: tokenize(b) }))
     if (url.pathname === '/apply-template')
       return readBody(req).then((b) => json(200, { prompt: JSON.stringify(b?.messages ?? []) }))
@@ -160,6 +169,25 @@ const tokenize = (body) => {
 
 function completions(body, res) {
   const content = process.env.FAKE_LLAMA_REPLY ?? 'hello from the fake backend'
+  const minCtx = Number(process.env.FAKE_LLAMA_MIN_CTX ?? '0')
+  if (minCtx > 0 && Number(flag('--ctx-size', flag('-c', '0'))) < minCtx) {
+    res.writeHead(400, { 'content-type': 'application/json' })
+    return res.end(
+      JSON.stringify({
+        error: {
+          code: 400,
+          message: 'the request exceeds the available context size, try increasing it',
+          type: 'exceed_context_size_error',
+        },
+      })
+    )
+  }
+  const marker = process.env.FAKE_LLAMA_COMPUTE_ERROR_MARKER
+  if (marker && !existsSync(marker)) {
+    writeFileSync(marker, String(process.pid))
+    res.writeHead(500, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ error: { code: 500, message: 'Compute error.', type: 'server_error' } }))
+  }
   if (!body?.stream) {
     res.writeHead(200, { 'content-type': 'application/json' })
     return res.end(

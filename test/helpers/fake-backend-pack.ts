@@ -40,6 +40,10 @@ export async function installFakeBackend(
     options.gpu ? 'FAKE_LLAMA_GPU=1' : '',
     options.delayMs ? `FAKE_LLAMA_DELAY=${options.delayMs}` : '',
     options.reply ? `FAKE_LLAMA_REPLY=${JSON.stringify(options.reply)}` : '',
+    options.minCtx ? `FAKE_LLAMA_MIN_CTX=${options.minCtx}` : '',
+    options.computeErrorMarker
+      ? `FAKE_LLAMA_COMPUTE_ERROR_MARKER=${JSON.stringify(options.computeErrorMarker)}`
+      : '',
   ]
     .filter(Boolean)
     .join(' ')

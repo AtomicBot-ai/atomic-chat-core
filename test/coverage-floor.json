@@ -71,6 +71,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/cli/cloud.ts": {
+    "statements": 97,
+    "branches": 87,
+    "functions": 85,
+    "lines": 97
+  },
   "src/cli/commands.ts": {
     "statements": 98,
     "branches": 81,
@@ -107,6 +113,18 @@
     "functions": 100,
     "lines": 96
   },
+  "src/cloud/chatgpt.ts": {
+    "statements": 98,
+    "branches": 86,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/cloud/registry.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
   "src/config/data-folder.ts": {
     "statements": 100,
     "branches": 95,
@@ -124,6 +142,30 @@
     "branches": 83,
     "functions": 95,
     "lines": 92
+  },
+  "src/credentials/api-keys.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/credentials/chatgpt-auth.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/credentials/chatgpt-oauth.ts": {
+    "statements": 98,
+    "branches": 90,
+    "functions": 95,
+    "lines": 98
+  },
+  "src/credentials/chatgpt-store.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/downloads/archive.ts": {
     "statements": 98,
@@ -413,11 +455,23 @@
     "functions": 100,
     "lines": 100
   },
+  "src/router/resolve.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/env.ts": {
     "statements": 97,
     "branches": 94,
     "functions": 90,
     "lines": 97
+  },
+  "src/runtime/external-sessions.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
   },
   "src/runtime/llamacpp/args.ts": {
     "statements": 100,
@@ -503,11 +557,113 @@
     "functions": 100,
     "lines": 100
   },
-  "src/server/public.ts": {
-    "statements": 96,
-    "branches": 87,
+  "src/server/public/ctx.ts": {
+    "statements": 100,
+    "branches": 91,
     "functions": 100,
-    "lines": 96
+    "lines": 100
+  },
+  "src/server/public/errors.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/exchange.ts": {
+    "statements": 100,
+    "branches": 82,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/forward.ts": {
+    "statements": 92,
+    "branches": 88,
+    "functions": 100,
+    "lines": 92
+  },
+  "src/server/public/gates.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/listing.ts": {
+    "statements": 98,
+    "branches": 84,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/server/public/responses.ts": {
+    "statements": 94,
+    "branches": 80,
+    "functions": 100,
+    "lines": 94
+  },
+  "src/server/public/sse.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/static.ts": {
+    "statements": 94,
+    "branches": 77,
+    "functions": 100,
+    "lines": 94
+  },
+  "src/server/public/subscription.ts": {
+    "statements": 92,
+    "branches": 85,
+    "functions": 100,
+    "lines": 92
+  },
+  "src/server/public/telemetry.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/trace.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/wire.ts": {
+    "statements": 97,
+    "branches": 90,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/server/shims/anthropic.ts": {
+    "statements": 97,
+    "branches": 88,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/server/shims/chat-to-responses.ts": {
+    "statements": 99,
+    "branches": 96,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/server/shims/json.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/shims/responses.ts": {
+    "statements": 99,
+    "branches": 95,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/server/state-file.ts": {
+    "statements": 99,
+    "branches": 100,
+    "functions": 100,
+    "lines": 99
   },
   "src/settings/schema.ts": {
     "statements": 98,

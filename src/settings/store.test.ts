@@ -64,6 +64,16 @@ function onDisk(fs: FakeFs) {
 }
 
 describe('SettingsStore.open', () => {
+  it('stamps an owner scope on legacy settings and rejects reuse by the other owner', async () => {
+    const fs = new FakeFs()
+    const first = await SettingsStore.open(PATH, { fs })
+    expect(first.snapshot().owner_scope).toBeUndefined()
+    const app = await SettingsStore.open(PATH, { fs, ownerScope: 'app' })
+    expect(app.snapshot().owner_scope).toBe('app')
+    await expect(SettingsStore.open(PATH, { fs, ownerScope: 'cli' })).rejects.toMatchObject({
+      code: 'CORE_ALREADY_RUNNING',
+    })
+  })
   it('creates the file with schema defaults when absent', async () => {
     const { fs, store } = await openFresh()
     expect(fs.dirs.has('/data/atomic-core')).toBe(true)

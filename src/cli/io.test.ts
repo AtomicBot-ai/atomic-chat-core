@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { nodeCliIo, recordingIo, selectOption } from './io.js'
+import { browserCommand, nodeCliIo, openInBrowser, recordingIo, selectOption, spawnDetached } from './io.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -78,5 +78,23 @@ describe('selectOption', () => {
       /interactive/
     )
     await expect(selectOption('Pick', ['a'], terminal('2'))).rejects.toThrow(/Invalid/)
+  })
+})
+
+describe('opening a browser', () => {
+  it("uses each platform's own opener", () => {
+    expect(browserCommand('darwin', 'https://x')).toEqual(['open', ['https://x']])
+    expect(browserCommand('win32', 'https://x')).toEqual(['cmd', ['/c', 'start', '""', 'https://x']])
+    expect(browserCommand('linux', 'https://x')).toEqual(['xdg-open', ['https://x']])
+  })
+
+  it('lets a started opener go, and treats a missing one as nothing to do', async () => {
+    await expect(spawnDetached(process.execPath, ['-e', ''])).resolves.toBeUndefined()
+    await expect(spawnDetached('atomic-definitely-not-a-program', [])).resolves.toBeUndefined()
+    const spawned: Array<[string, string[]]> = []
+    await openInBrowser('https://x', 'linux', async (command, args) => void spawned.push([command, args]))
+    expect(spawned).toEqual([['xdg-open', ['https://x']]])
+    expect(nodeCliIo().openUrl).toBe(openInBrowser)
+    await expect(recordingIo().openUrl('https://x')).resolves.toBeUndefined()
   })
 })

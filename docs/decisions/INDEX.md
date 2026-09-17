@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-17** — [Bind cloud keys to destinations and lease CLI operations](2026-09-17-bind-cloud-keys-and-lease-cli-operations.md)
+- **2026-09-17** — [Isolate app and CLI core owners](2026-09-17-isolate-app-and-cli-owners.md)
 - **2026-09-16** — [Acknowledge the post-write settings revision](2026-09-16-acknowledge-the-post-write-settings-revision.md)
 - **2026-09-16** — [Test stage 3 through hermetic process boundaries](2026-09-16-test-stage3-through-hermetic-process-boundaries.md)
 - **2026-09-16** — [Revision optimal cache and complete internal backend and embedding routes](2026-09-16-revision-optimal-cache-and-complete-internal-control-routes.md)
