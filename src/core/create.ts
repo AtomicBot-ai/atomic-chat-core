@@ -33,7 +33,7 @@ import {
   readRuntimeSettings,
   selectInstalledBackend,
 } from '../backend/index.js'
-import { Downloader, createPolicyFetch } from '../downloads/index.js'
+import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
@@ -297,6 +297,7 @@ export async function createAtomicCore(
             backendService(provider as LocalProviderId).setOptimalCache(record, expectedRevision),
           optimalSnapshot: () => optimalStore.snapshot(),
         },
+        disk: { available: (path) => availableDiskSpace(layout.root, path) },
         settings: {
           get: (provider) => settings.get(provider),
           revision: () => settings.revision,

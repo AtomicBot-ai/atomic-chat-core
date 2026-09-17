@@ -3,7 +3,9 @@ import {
   classifyDownloadStatus,
   classifyResumeStatus,
   DownloadRequestError,
+  downloadStage,
   expectedDownloadSize,
+  MAX_STREAM_RETRIES,
   isRetryableStatus,
   retryDelayMs,
   shouldBypassProxy,
@@ -19,6 +21,17 @@ describe('sidecarPath / retryDelayMs', () => {
     expect(sidecarPath('/m/noext', 'tmp')).toBe('/m/noext.tmp')
     expect([0, 1, 2, 6, 7, 20].map((n) => retryDelayMs(n))).toEqual([1000, 2000, 4000, 64000, 64000, 64000])
     expect(retryDelayMs(3, 1)).toBe(8)
+  })
+})
+
+describe('downloadStage', () => {
+  it("carries the ladder's limit, in the app's camelCase shape", () => {
+    expect(downloadStage('connecting', 0)).toEqual({ kind: 'connecting', attempt: 0, maxAttempts: 5 })
+    expect(downloadStage('retrying', 3)).toEqual({
+      kind: 'retrying',
+      attempt: 3,
+      maxAttempts: MAX_STREAM_RETRIES,
+    })
   })
 })
 

@@ -441,6 +441,58 @@ describe.skipIf(!existsSync(BIN))('the compiled core as an owner', () => {
     }
   })
 
+  it('says which retry a backend download is on while the mirror is failing, as its own event', async () => {
+    const fixture = await startBackendInstallFixture(dataFolder, { archiveFailures: 2 })
+    fixtures.push(fixture)
+    const { ready } = await startDaemon()
+    const snapshot = (await (await control(ready, '/snapshot')).json()) as { cursor: string }
+    const stream = await control(ready, `/events?cursor=${encodeURIComponent(snapshot.cursor)}`)
+    const reader = stream.body?.getReader() as ReadableStreamDefaultReader<Uint8Array>
+    try {
+      const installing = installBackend(ready, fixture, 'install-with-retries')
+      const stages: Array<{ kind: string; attempt: number; maxAttempts: number }> = []
+      // The ladder really waits 1 s and then 2 s here, so this is the slowest test in the file.
+      while (stages.length < 2) {
+        const frame = await readSseUntil(reader, (value) => value.includes('event: download:stage'))
+        // The event name travels on the `event:` line; `data:` is the payload itself.
+        const data = frame.split('\n').find((line) => line.startsWith('data: ')) ?? ''
+        const payload = JSON.parse(data.slice('data: '.length)) as {
+          taskId: string
+          stage: { kind: string; attempt: number; maxAttempts: number }
+        }
+        expect(payload.taskId).toBe('install-with-retries')
+        stages.push(payload.stage)
+      }
+      // The manifest pins the size, so no HEAD is made and nothing says `connecting`.
+      expect(stages).toEqual([
+        { kind: 'retrying', attempt: 1, maxAttempts: 5 },
+        { kind: 'retrying', attempt: 2, maxAttempts: 5 },
+      ])
+      const installed = await installing
+      expect(installed.status, await installed.clone().text()).toBe(200)
+      expect(fixture.seen.filter((line) => line.startsWith('GET mirror.atomic.invalid'))).toHaveLength(3)
+    } finally {
+      await reader.cancel()
+    }
+  }, 30_000)
+
+  it('answers free disk space inside the data folder and refuses to probe anywhere else', async () => {
+    const { ready } = await startDaemon()
+    const ask = (body: unknown) =>
+      control(ready, '/disk/available', { method: 'POST', body: JSON.stringify(body) })
+
+    const inside = await ask({ path: join(dataFolder, 'diffusion', 'models', 'not-there-yet') })
+    expect(inside.status, await inside.clone().text()).toBe(200)
+    const { bytes } = (await inside.json()) as { bytes: number | null }
+    expect(typeof bytes).toBe('number')
+    expect(bytes as number).toBeGreaterThan(0)
+    expect(((await (await ask({})).json()) as { bytes: number }).bytes).toBeGreaterThan(0)
+
+    const outside = await ask({ path: tmpdir() })
+    expect(outside.status).toBe(400)
+    expect(((await outside.json()) as { error: { code: string } }).error.code).toBe('INVALID_ARGUMENT')
+  })
+
   it('rejects a bad archive hash without publishing an installed pack', async () => {
     const fixture = await startBackendInstallFixture(dataFolder, { badChecksum: true })
     fixtures.push(fixture)

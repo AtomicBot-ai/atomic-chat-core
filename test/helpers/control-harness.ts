@@ -38,6 +38,8 @@ export interface ControlHarness {
   backends: BackendControl
   models: ModelControl
   ctxIncrease: CtxIncreaseResult
+  /** What `POST /disk/available` answers; `null` models a platform that cannot say. */
+  diskBytes: number | null
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
 
@@ -113,6 +115,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       }),
     },
     ctxIncrease: { ok: true, new_ctx_len: 32768, session: session() },
+    diskBytes: 5_000_000_000,
   } as unknown as ControlHarness
   const server = await ControlServer.start({
     token: CONTROL_TOKEN,
@@ -124,6 +127,12 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     settings: harness.settings,
     hardware: harness.hardware,
     backends: harness.backends,
+    disk: {
+      available: async (path) => {
+        calls.push(`disk ${JSON.stringify(path)}`)
+        return harness.diskBytes
+      },
+    },
     models: harness.models,
     externalSessions: {
       publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),

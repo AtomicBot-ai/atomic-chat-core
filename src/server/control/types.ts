@@ -122,6 +122,11 @@ export interface ModelControl {
   ) => Promise<EmbeddingResponse>
 }
 
+/** Room left for a download. Answers for the data folder only; `null` when the platform cannot say. */
+export interface DiskControl {
+  available: (path: unknown) => Promise<number | null>
+}
+
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
 export interface ExternalSessionControl {
   publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
@@ -188,6 +193,8 @@ export interface ControlServerDeps {
   hardware: HardwareOverrideStore
   /** Installing and removing llama.cpp backends (PLAN.md §4, stage 3c). */
   backends: BackendControl
+  /** Free space inside the data folder, which the app asks before a download (stage 7b). */
+  disk: DiskControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /**

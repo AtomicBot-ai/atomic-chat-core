@@ -127,6 +127,7 @@ beforeEach(async () => {
       return session
     },
     cancelModelLoad: (_provider, modelId) => modelId === 'Owner/Loading-GGUF',
+    disk: { available: async (path) => (path === undefined ? 42 : null) },
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -329,6 +330,13 @@ describe('inspector gate', () => {
     expect(inspecting).toBe(true)
     await client.setInspecting(false)
     expect(inspecting).toBe(false)
+  })
+})
+
+describe('disk space', () => {
+  it('asks for the data folder by default, for a path when given one, and passes an unknown through', async () => {
+    expect(await client.availableDiskSpace()).toBe(42)
+    expect(await client.availableDiskSpace('/data/diffusion/models')).toBeNull()
   })
 })
 

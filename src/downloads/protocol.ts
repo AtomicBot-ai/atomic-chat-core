@@ -4,6 +4,8 @@
  * `src-tauri/src/core/downloads/helpers.rs`.
  */
 
+import type { DownloadStage } from '../contracts/index.js'
+
 export const MAX_STREAM_RETRIES = 5
 export const RETRY_BASE_DELAY_MS = 1_000
 /** Fresh progress that resets the retry counter — the limit is per stall, not per file. */
@@ -21,6 +23,14 @@ export function sidecarPath(savePath: string, ext: string): string {
 /** Exponential backoff, capped at 2^6 × base. */
 export function retryDelayMs(retryCount: number, baseMs = RETRY_BASE_DELAY_MS): number {
   return baseMs * 2 ** Math.min(retryCount, 6)
+}
+
+/**
+ * The stage a retry ladder reports. `attempt` counts requests already made — 0 for the first,
+ * then 1…`MAX_STREAM_RETRIES` before each backoff wait — as the app's `StageReporter` does.
+ */
+export function downloadStage(kind: DownloadStage['kind'], attempt: number): DownloadStage {
+  return { kind, attempt, maxAttempts: MAX_STREAM_RETRIES }
 }
 
 export type DownloadRequestErrorKind = 'retryable' | 'restart' | 'fatal'

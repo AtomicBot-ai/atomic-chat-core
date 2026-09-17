@@ -251,6 +251,12 @@
     "functions": 100,
     "lines": 98
   },
+  "src/downloads/disk-space.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/downloads/disk.ts": {
     "statements": 100,
     "branches": 96,
@@ -712,6 +718,12 @@
     "branches": 100,
     "functions": 100,
     "lines": 91
+  },
+  "src/server/control/routes/disk.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/server/control/routes/external-sessions.ts": {
     "statements": 100,

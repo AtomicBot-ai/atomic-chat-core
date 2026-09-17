@@ -9,6 +9,7 @@ import { Router } from '../http.js'
 import { registerBackendRoutes } from './routes/backends.js'
 import { registerClientRoutes } from './routes/clients.js'
 import { registerCloudRoutes } from './routes/cloud.js'
+import { registerDiskRoutes } from './routes/disk.js'
 import { registerExternalSessionRoutes } from './routes/external-sessions.js'
 import { registerHardwareRoutes } from './routes/hardware.js'
 import { registerLifecycleRoutes, registerShutdownRoute } from './routes/lifecycle.js'
@@ -47,6 +48,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerModelRoutes(router, deps, ctx)
   registerBackendRoutes(router, deps, ctx)
   registerHardwareRoutes(router, deps, ctx)
+  registerDiskRoutes(router, deps, ctx)
   registerSettingsRoutes(router, deps, ctx)
   registerExternalSessionRoutes(router, deps, ctx)
   registerCloudRoutes(router, deps, ctx)

@@ -168,6 +168,18 @@ export class CoreClient {
     return result.cancelled === true
   }
 
+  /**
+   * Free bytes where a download would land, or `null` when the platform cannot say. `path` must be
+   * inside the data folder; without one the answer is for the data folder itself.
+   */
+  async availableDiskSpace(path?: string): Promise<number | null> {
+    const result = await this.call<{ bytes: number | null }>('/disk/available', {
+      method: 'POST',
+      body: JSON.stringify(path === undefined ? {} : { path }),
+    })
+    return result.bytes
+  }
+
   /** Restart a poisoned engine at the context it already has. */
   recreateSession(provider: string, modelId: string): Promise<{ ok: boolean; reason?: string }> {
     return this.call(`/models/${provider}/${modelId}/recreate`, { method: 'POST' })

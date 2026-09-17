@@ -8,6 +8,18 @@ import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.
 
 export type DownloadKind = 'model' | 'backend' | 'draft' | 'cudart'
 
+/**
+ * What a download is doing while it has no bytes to report: reaching the server for the first time,
+ * or waiting out a backoff before trying again. The app's `DownloadStage`
+ * (`src-tauri/src/core/downloads/models.rs`), camelCase on the wire.
+ */
+export interface DownloadStage {
+  /** `connecting` for the first attempt, `retrying` for each one after. */
+  kind: 'connecting' | 'retrying'
+  attempt: number
+  maxAttempts: number
+}
+
 export interface CoreEvents {
   'download:started': { taskId: string; modelId?: string; kind: DownloadKind }
   'download:progress': {
@@ -17,6 +29,12 @@ export interface CoreEvents {
     total: number
     percent: number
   }
+  /**
+   * A status change, never progress: it carries no byte counts on purpose, so a retry cannot rewind
+   * a progress bar. Its own event rather than a field of `download:progress`, whose payload the
+   * app's relay pins (ADR 2026-09-17-report-download-stages-as-their-own-event).
+   */
+  'download:stage': { taskId: string; stage: DownloadStage }
   'download:error': { taskId: string; modelId?: string; error: string }
   'download:stopped': { taskId: string; modelId?: string }
   'download:verified': { taskId: string; modelId?: string }

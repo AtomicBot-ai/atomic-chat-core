@@ -6,10 +6,10 @@
 import { stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { CoreEvents } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import { modelDirFromId } from '../config/index.js'
 import { Downloader } from '../downloads/index.js'
+import type { DownloaderEmit } from '../downloads/index.js'
 import type { ModelRegistry } from './registry.js'
 
 export interface HfFileInfo {
@@ -26,7 +26,7 @@ export interface HfDownloadOptions {
   file: HfFileInfo
   fetch?: typeof fetch
   env?: NodeJS.ProcessEnv
-  emit?: <K extends 'download:progress' | 'model:validation-started'>(name: K, payload: CoreEvents[K]) => void
+  emit?: DownloaderEmit
 }
 
 /** Exactly `owner/repo`, with the same conservative character set as the legacy Rust CLI. */
