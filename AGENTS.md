@@ -56,6 +56,7 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
 | `src/runtime/`                      | `shared/` (spawn / readiness / kill, ports, env, sidecar table), `llamacpp/` (provider-parameterised), `mlx/`, `foundation-models/`. |
 | `src/core/`                         | `AtomicCore` facade (`atomic-core.ts`), service wiring (`create.ts`), local sessions, public-server lifecycle.         |
 | `src/cloud/` `src/router/` `src/server/` | Providers + key injection; model→target resolution; HTTP server (`/v1/*` public in `server/public/`, `/atomic/v1/*` control in `server/control/`, one file per route family). |
+| `src/remote-access/`                | Reaching the public listener from outside: the Cloudflare quick tunnel (`manager.ts` state machine, `process.ts`, `probe.ts`, `journal.ts`, pure `cloudflared-{args,output}.ts`, `status.ts`) and the LAN addresses (`lan.ts`, `lan-probe.ts`). The Host gate that lets those callers in is `server/public/dynamic-hosts.ts`. |
 | `src/lock/`                         | One owner per canonical data folder; PID/start identity, attach, child-process journal and legacy-resource guards. |
 | `src/cli/`                          | `main.ts` is the binary entry; one file per subcommand in `commands/`.                                                |
 | `test/`                             | `contract/`, `e2e/`, `app-e2e/`, `runtime-compat/`, `live/`, `fixtures/`, `helpers/`. Unit tests live next to code.  |

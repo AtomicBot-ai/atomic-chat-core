@@ -50,6 +50,10 @@ export interface CoreFiles {
   processes: string
   modelClaims: string
   logsDir: string
+  /** The remote-access tunnel's own crash-recovery record (it has no provider, model or port). */
+  remoteAccessTunnel: string
+  /** An empty `--config` for cloudflared on Windows, which has no `/dev/null` to point at. */
+  cloudflaredEmptyConfig: string
 }
 
 export interface DataLayout {
@@ -77,6 +81,8 @@ export function dataLayout(root: string): DataLayout {
       processes: join(coreDir, 'processes.json'),
       modelClaims: join(coreDir, 'model-claims'),
       logsDir: join(coreDir, 'logs'),
+      remoteAccessTunnel: join(coreDir, 'remote-access-tunnel.json'),
+      cloudflaredEmptyConfig: join(coreDir, 'cloudflared-empty.yml'),
     },
     provider(id) {
       const providerRoot = join(root, id)

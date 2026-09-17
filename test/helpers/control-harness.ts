@@ -4,7 +4,12 @@
  * file starts one harness per test and closes it afterwards.
  */
 
-import type { LocalApiServerState, SessionInfo, UnloadResult } from '../../src/contracts/index.js'
+import type {
+  LocalApiServerState,
+  RemoteAccessStatus,
+  SessionInfo,
+  UnloadResult,
+} from '../../src/contracts/index.js'
 import { CoreEmitter } from '../../src/events/index.js'
 import { HardwareOverrideStore } from '../../src/hardware/index.js'
 import type { CtxIncreaseResult } from '../../src/runtime/llamacpp/runtime.js'
@@ -42,6 +47,10 @@ export interface ControlHarness {
   diskBytes: number | null
   /** What `GET /lan-addresses` answers. */
   lanAddresses: string[]
+  /** The tunnel as the fake sees it; `start` and `stop` move it. */
+  remoteAccess: RemoteAccessStatus
+  /** Set to make `POST /remote-access/start` refuse. */
+  remoteAccessRefusal: Error | undefined
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
 
@@ -119,6 +128,16 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     ctxIncrease: { ok: true, new_ctx_len: 32768, session: session() },
     diskBytes: 5_000_000_000,
     lanAddresses: ['192.168.1.5', '10.0.0.9'],
+    remoteAccess: {
+      state: 'off',
+      url: null,
+      error: null,
+      blockReason: null,
+      canStart: true,
+      canStop: false,
+      serverHasApiKey: false,
+    },
+    remoteAccessRefusal: undefined,
   } as unknown as ControlHarness
   const server = await ControlServer.start({
     token: CONTROL_TOKEN,
@@ -137,7 +156,27 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       },
     },
     models: harness.models,
-    remoteAccess: { lanAddresses: async () => harness.lanAddresses },
+    remoteAccess: {
+      lanAddresses: async () => harness.lanAddresses,
+      status: () => harness.remoteAccess,
+      start: () => {
+        calls.push('remote-access start')
+        if (harness.remoteAccessRefusal) throw harness.remoteAccessRefusal
+        harness.remoteAccess = { ...harness.remoteAccess, state: 'starting', canStart: false, canStop: true }
+        return harness.remoteAccess
+      },
+      stop: async () => {
+        calls.push('remote-access stop')
+        harness.remoteAccess = {
+          ...harness.remoteAccess,
+          state: 'off',
+          url: null,
+          canStart: true,
+          canStop: false,
+        }
+        return harness.remoteAccess
+      },
+    },
     externalSessions: {
       publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),
       heartbeat: () => ({ alive: true }),

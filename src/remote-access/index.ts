@@ -5,3 +5,12 @@
  */
 export * from './lan.js'
 export * from './lan-probe.js'
+export * from './status.js'
+export * from './cloudflared-args.js'
+export * from './cloudflared-output.js'
+export * from './process.js'
+export * from './probe.js'
+export * from './journal.js'
+export * from './spawner.js'
+export * from './manager.js'
+export * from './wiring.js'

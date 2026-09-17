@@ -15,6 +15,7 @@ import type {
   CoreEventName,
   ErrorCode,
   LocalApiServerState,
+  RemoteAccessStatus,
   SessionInfo,
   UnloadResult,
 } from '../contracts/index.js'
@@ -178,6 +179,21 @@ export class CoreClient {
       body: JSON.stringify(path === undefined ? {} : { path }),
     })
     return result.bytes
+  }
+
+  /** The Cloudflare quick tunnel in front of the public server. */
+  remoteAccessStatus(): Promise<RemoteAccessStatus> {
+    return this.call('/remote-access')
+  }
+
+  /** Answers `starting` at once; a refusal carries the app's reason (`server_stopped`, …) in `details`. */
+  startRemoteAccess(): Promise<RemoteAccessStatus> {
+    return this.call('/remote-access/start', { method: 'POST' })
+  }
+
+  /** Answers once the tunnel's process is gone. */
+  stopRemoteAccess(): Promise<RemoteAccessStatus> {
+    return this.call('/remote-access/stop', { method: 'POST' })
   }
 
   /** IPv4 literals a device on the network can dial, default-route address first. Display only. */

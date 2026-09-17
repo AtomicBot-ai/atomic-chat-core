@@ -64,6 +64,12 @@ export type CoreErrorCode =
   | 'AUTH_CANCELLED'
   /** An external service (a token endpoint, the subscription API) could not be reached or refused. */
   | 'UPSTREAM_ERROR'
+  /** A tunnel needs a running public server to point at. */
+  | 'REMOTE_ACCESS_SERVER_STOPPED'
+  /** The tunnel is being stopped; ask again once it is down. */
+  | 'REMOTE_ACCESS_OPERATION_IN_PROGRESS'
+  /** A previous tunnel could not be confirmed dead; only Stop is offered until it is. */
+  | 'REMOTE_ACCESS_STOP_FAILED'
 
 export type ErrorCode = RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode
 

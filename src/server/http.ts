@@ -135,6 +135,9 @@ export function statusForCode(code: ErrorCode): number {
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
     case 'MODEL_LOAD_CANCELLED':
+    case 'REMOTE_ACCESS_SERVER_STOPPED':
+    case 'REMOTE_ACCESS_OPERATION_IN_PROGRESS':
+    case 'REMOTE_ACCESS_STOP_FAILED':
       return 409
     case 'AUTH_FAILED':
     case 'UPSTREAM_ERROR':

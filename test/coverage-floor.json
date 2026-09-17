@@ -539,6 +539,24 @@
     "functions": 100,
     "lines": 100
   },
+  "src/remote-access/cloudflared-args.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/cloudflared-output.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/journal.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
   "src/remote-access/lan-probe.ts": {
     "statements": 98,
     "branches": 88,
@@ -548,6 +566,42 @@
   "src/remote-access/lan.ts": {
     "statements": 100,
     "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/manager.ts": {
+    "statements": 99,
+    "branches": 93,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/remote-access/probe.ts": {
+    "statements": 98,
+    "branches": 96,
+    "functions": 92,
+    "lines": 98
+  },
+  "src/remote-access/process.ts": {
+    "statements": 96,
+    "branches": 90,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/remote-access/spawner.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/status.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/wiring.ts": {
+    "statements": 100,
+    "branches": 100,
     "functions": 100,
     "lines": 100
   },

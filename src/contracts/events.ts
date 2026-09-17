@@ -4,6 +4,7 @@
  * Adding an event = add it here + add the relay mapping in the app, in the same PR pair.
  */
 
+import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.js'
 
 export type DownloadKind = 'model' | 'backend' | 'draft' | 'cudart'
@@ -98,6 +99,12 @@ export interface CoreEvents {
   'server:started': { host: string; port: number }
   'server:stopped': Record<string, never>
   'server:bind-failed': { port: number; error: string }
+
+  /**
+   * Every transition of the remote-access tunnel, and every change of the public server it depends
+   * on: the URL arrives seconds after the request that asked for it has answered.
+   */
+  'remote-access:status': RemoteAccessStatus
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

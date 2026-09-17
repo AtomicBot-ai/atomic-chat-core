@@ -18,6 +18,7 @@ if (args.length === 1 && args[0] === '--version') {
       'data-folder': { type: 'string' },
       'control-port': { type: 'string' },
       'resources-dir': { type: 'string' },
+      'cloudflared-bin': { type: 'string' },
     },
     strict: true,
   })
@@ -27,6 +28,8 @@ if (args.length === 1 && args[0] === '--version') {
     dataFolder: values['data-folder'],
     controlPort: Number(values['control-port'] ?? 0),
     ...(values['resources-dir'] ? { resourcesDir: values['resources-dir'] } : {}),
+    // The app bundles the tunnel binary next to its own executable, not under its resources.
+    ...(values['cloudflared-bin'] ? { cloudflaredPath: values['cloudflared-bin'] } : {}),
     env: io.env,
     logger: (level, message) => io.stderr(`[${level}] ${message}\n`),
   })

@@ -34,7 +34,7 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
-import { lanAddresses } from '../remote-access/index.js'
+import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
@@ -52,6 +52,7 @@ export async function createAtomicCore(
   construct: (parts: AtomicCoreParts) => AtomicCore
 ): Promise<AtomicCore> {
   const log = options.logger ?? (() => {})
+  const warn = (message: string) => log('warn', message)
   const scope = options.ownerScope ?? 'cli'
   const root =
     options.dataFolder ??
@@ -299,7 +300,12 @@ export async function createAtomicCore(
           optimalSnapshot: () => optimalStore.snapshot(),
         },
         disk: { available: (path) => availableDiskSpace(layout.root, path) },
-        remoteAccess: { lanAddresses },
+        remoteAccess: {
+          lanAddresses,
+          status: () => (core as AtomicCore).remoteAccessStatus(),
+          start: () => (core as AtomicCore).startRemoteAccess(),
+          stop: () => (core as AtomicCore).stopRemoteAccess(),
+        },
         settings: {
           get: (provider) => settings.get(provider),
           revision: () => settings.revision,
@@ -377,8 +383,21 @@ export async function createAtomicCore(
       chatgptBackend,
       externalSessions,
       appLeaseTimer,
+      remoteAccess: await wireRemoteAccess({
+        overrides: options.remoteAccess,
+        cloudflaredPath: options.cloudflaredPath,
+        resourcesDir: options.resourcesDir,
+        env,
+        platform,
+        journalPath: layout.core.remoteAccessTunnel,
+        emptyConfigPath: layout.core.cloudflaredEmptyConfig,
+        instanceId: lock.instanceId,
+        warn,
+      }),
     })
     await reapOrphans(journal, lock.instanceId, log)
+    // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
+    await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     await lock.publish(control.host, control.port)
     log('info', `core ${CORE_VERSION} owns ${layout.root} (control ${control.url})`)
     return core

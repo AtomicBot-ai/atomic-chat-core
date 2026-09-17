@@ -3,6 +3,11 @@
  * normalization that makes an identical start idempotent, and the published state files.
  *
  * It is a separate, optional listener whose stop must never take control down with it.
+ *
+ * It also keeps the remote-access tunnel honest about it: a public URL must never point at a port
+ * that has stopped, or at whatever binds that port next. So a stop ends the tunnel *first*, a
+ * genuine start ends any tunnel that survived (it pointed at the previous port), and a repeated
+ * start that changes nothing leaves the tunnel alone.
  */
 
 import { writeFile } from 'node:fs/promises'
@@ -22,6 +27,8 @@ import {
   stoppedState,
 } from '../server/index.js'
 import type { PublicServerDeps } from '../server/index.js'
+import { dialOrigin } from '../remote-access/index.js'
+import type { ServerEndpoint } from '../remote-access/index.js'
 import type { CoreLogger } from './types.js'
 
 export interface PublicServerStartOptions {
@@ -62,6 +69,8 @@ export interface PublicServerLifecycleDeps {
   assertRunning: () => void
   /** What the listener routes to, built for each start. */
   serverDeps: () => PublicServerDeps
+  /** The tunnel in front of this listener: ended before a stop, re-announced after every transition. */
+  remoteAccess?: { stop: () => Promise<unknown>; announce: () => void }
 }
 
 /** Owns the public listener and serializes its start/stop transitions. */
@@ -70,11 +79,25 @@ export class PublicServerLifecycle {
   private lastPublicState: LocalApiServerState = stoppedState()
   private publicConfig: NormalizedPublicServerOptions | undefined
   private publicTransition: Promise<void> = Promise.resolve()
+  private stopping = false
 
   constructor(private readonly deps: PublicServerLifecycleDeps) {}
 
   state(): LocalApiServerState {
     return this.publicServer ? this.publicServer.state() : { ...this.lastPublicState }
+  }
+
+  /**
+   * Where a tunnel would point: the *bound* port (a fallback can change it) and a host that really
+   * listens. `undefined` while there is no listener — and already while one is stopping, so nothing
+   * new is pointed at a port that is about to go.
+   */
+  endpoint(): ServerEndpoint | undefined {
+    if (!this.publicServer || !this.publicConfig || this.stopping) return undefined
+    return {
+      origin: dialOrigin(this.publicServer.host, this.publicServer.port),
+      hasApiKey: this.publicConfig.apiKey !== '',
+    }
   }
 
   /** Start the public listener; an identical start is idempotent, an incompatible one is a conflict. */
@@ -96,6 +119,8 @@ export class PublicServerLifecycle {
         this.deps.events.emit('server:bind-failed', { port: options.port ?? 0, error: error.message })
         throw error
       })
+      // A tunnel that survived until here pointed at the previous listener's port.
+      await this.deps.remoteAccess?.stop().catch(() => {})
       this.publicServer = server
       this.publicConfig = { ...requested, port: server.port, requestedPort: requested.port }
       this.lastPublicState = server.state()
@@ -114,6 +139,7 @@ export class PublicServerLifecycle {
       }
       this.deps.events.emit('server:started', { host: server.host, port: server.port })
       this.deps.log('info', `public API on ${server.url}`)
+      this.deps.remoteAccess?.announce()
       return server.state()
     })
   }
@@ -126,14 +152,22 @@ export class PublicServerLifecycle {
   private async stopPublicServerNow(): Promise<LocalApiServerState> {
     if (!this.publicServer) return this.state()
     const wroteStateFile = this.publicConfig?.writeStateFile === true
-    this.lastPublicState = stoppedState(this.publicServer.state())
-    await this.publicServer.close()
+    // The tunnel first: otherwise its public URL points at a dead port, or at whatever binds it next.
+    this.stopping = true
+    try {
+      await this.deps.remoteAccess?.stop().catch(() => {})
+      this.lastPublicState = stoppedState(this.publicServer.state())
+      await this.publicServer.close()
+    } finally {
+      this.stopping = false
+    }
     this.publicServer = undefined
     this.publicConfig = undefined
     await this.publishServerState(this.lastPublicState)
     if (wroteStateFile)
       await markServerStopped(this.deps.layout.serverStateFile, (message) => this.deps.log('warn', message))
     this.deps.events.emit('server:stopped', {})
+    this.deps.remoteAccess?.announce()
     return { ...this.lastPublicState }
   }
 

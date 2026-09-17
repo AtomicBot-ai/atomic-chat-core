@@ -1,6 +1,7 @@
 import type { LocalProviderId } from '../contracts/index.js'
 import type { LoadOptions } from '../runtime/llamacpp/index.js'
 import type { LocalLoadOptions } from '../runtime/index.js'
+import type { Prober, TunnelSpawner, TunnelTimings } from '../remote-access/index.js'
 
 export type CoreLogger = (level: 'info' | 'warn' | 'error', message: string) => void
 
@@ -10,6 +11,14 @@ export interface AtomicCoreOptions {
   dataFolder?: string
   /** Where the app's bundled sidecar binaries live (`resources/bin`); needed for MLX and Foundation Models. */
   resourcesDir?: string
+  /**
+   * The `cloudflared` binary for remote access (`--cloudflared-bin`). The app bundles it next to its
+   * own executable and says where; without it `ATOMIC_CLOUDFLARED_BIN` and the resources folder are
+   * tried, and with none of them remote access reports `cloudflared_unavailable`.
+   */
+  cloudflaredPath?: string
+  /** Test seams for the remote-access tunnel: a scripted process, a scripted probe, short timings. */
+  remoteAccess?: { spawner?: TunnelSpawner; prober?: Prober; timings?: Partial<TunnelTimings> }
   /** The platform runtimes are offered for (macOS-only engines are not registered elsewhere). Test seam. */
   platform?: NodeJS.Platform
   fetch?: typeof fetch

@@ -4,7 +4,8 @@
  * file imports the server (and through it `node:http`), which never ships to a browser.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { LocalApiServerState, SessionInfo } from '../contracts/index.js'
+import { AtomicCoreError } from '../contracts/index.js'
+import type { LocalApiServerState, RemoteAccessStatus, SessionInfo } from '../contracts/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { ClientRegistry } from '../server/clients.js'
 import { ControlServer } from '../server/control/index.js'
@@ -24,6 +25,7 @@ let serverState: LocalApiServerState
 let shutdowns: number
 let loadFailure: Error | undefined
 let inspecting = false
+let tunnel: RemoteAccessStatus
 
 beforeEach(async () => {
   emitter = new CoreEmitter({ instanceId: 'client-test-instance' })
@@ -31,6 +33,15 @@ beforeEach(async () => {
   sessions = []
   shutdowns = 0
   loadFailure = undefined
+  tunnel = {
+    state: 'off',
+    url: null,
+    error: null,
+    blockReason: null,
+    canStart: true,
+    canStop: false,
+    serverHasApiKey: false,
+  }
   serverState = {
     running: false,
     host: '127.0.0.1',
@@ -128,7 +139,24 @@ beforeEach(async () => {
     },
     cancelModelLoad: (_provider, modelId) => modelId === 'Owner/Loading-GGUF',
     disk: { available: async (path) => (path === undefined ? 42 : null) },
-    remoteAccess: { lanAddresses: async () => ['192.168.1.5'] },
+    remoteAccess: {
+      lanAddresses: async () => ['192.168.1.5'],
+      status: () => tunnel,
+      start: () => {
+        if (!serverState.running)
+          throw new AtomicCoreError(
+            'REMOTE_ACCESS_SERVER_STOPPED',
+            'Start the Local API Server first.',
+            'server_stopped'
+          )
+        tunnel = { ...tunnel, state: 'starting', canStart: false, canStop: true }
+        return tunnel
+      },
+      stop: async () => {
+        tunnel = { ...tunnel, state: 'off', canStart: true, canStop: false }
+        return tunnel
+      },
+    },
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -338,6 +366,19 @@ describe('disk space', () => {
   it('asks for the data folder by default, for a path when given one, and passes an unknown through', async () => {
     expect(await client.availableDiskSpace()).toBe(42)
     expect(await client.availableDiskSpace('/data/diffusion/models')).toBeNull()
+  })
+})
+
+describe('remote access', () => {
+  it('refuses without a server with the reason the app parses, then starts, reads and stops the tunnel', async () => {
+    await expect(client.startRemoteAccess()).rejects.toMatchObject({
+      code: 'REMOTE_ACCESS_SERVER_STOPPED',
+      details: 'server_stopped',
+    })
+    await client.startServer({ port: 0 })
+    expect(await client.startRemoteAccess()).toMatchObject({ state: 'starting', canStop: true })
+    expect((await client.remoteAccessStatus()).state).toBe('starting')
+    expect(await client.stopRemoteAccess()).toMatchObject({ state: 'off', canStart: true })
   })
 })
 

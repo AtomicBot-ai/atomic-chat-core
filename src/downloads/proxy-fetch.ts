@@ -8,7 +8,8 @@
  * Scope: what the downloader needs. GET/HEAD, status + headers, `Content-Length`/chunked/
  * close-delimited bodies as a `ReadableStream` with backpressure, `AbortSignal`, fetch-shaped
  * redirects (each hop re-evaluates `no_proxy` and opens a fresh tunnel). One connection per request,
- * no content encoding. Items without a proxy never come here.
+ * no content encoding. Downloads without a proxy never come here; the remote-access probe does, for
+ * `connectTo` and because it must behave the same under Node, Bun and the compiled binary.
  */
 
 import { connect as netConnect, isIP } from 'node:net'
@@ -24,6 +25,13 @@ export interface ProxyPolicy {
   ignore_ssl?: boolean | null | undefined
   /** Extra trusted CA certificates, PEM. Not exposed by the app today; kept for tests and future policy. */
   ca?: string | Buffer | Array<string | Buffer> | undefined
+  /**
+   * Dial this address instead of resolving the URL's host, while the TLS server name, certificate
+   * verification and `Host` stay the URL's — reqwest's `resolve`. It is how the remote-access probe
+   * reaches a new tunnel through Cloudflare's edge before its name resolves anywhere. Ignored when a
+   * proxy carries the request: the proxy does the dialling then.
+   */
+  connectTo?: { host: string; port?: number | undefined } | undefined
 }
 
 export const MAX_REDIRECTS = 10
@@ -71,7 +79,7 @@ export function createPolicyFetch(policy: ProxyPolicy): typeof fetch {
     } else {
       socket = useProxy
         ? await tunnel(proxy, url.hostname, port, policy, signal)
-        : await connectTcp(url.hostname, port, signal)
+        : await connectTcp(policy.connectTo?.host ?? url.hostname, policy.connectTo?.port ?? port, signal)
       if (isHttps) socket = await upgradeTls(socket, url.hostname, policy, signal)
     }
 

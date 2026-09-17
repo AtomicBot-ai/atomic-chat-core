@@ -12,12 +12,20 @@
 
 import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import type { ReadyLine } from '../contracts/index.js'
-import type { LocalApiServerState, LocalProviderId, SessionInfo, UnloadResult } from '../contracts/index.js'
+import type {
+  LocalApiServerState,
+  LocalProviderId,
+  RemoteAccessStatus,
+  SessionInfo,
+  UnloadResult,
+} from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
 import type { InstanceLock } from '../lock/index.js'
 import type { ModelRegistry } from '../models/index.js'
+import { RemoteAccessManager } from '../remote-access/index.js'
+import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
@@ -52,6 +60,8 @@ export interface AtomicCoreParts {
   externalSessions: ExternalSessions
   /** Set for an app owner: the timer that shuts the core down once the app's registration lapses. */
   appLeaseTimer: NodeJS.Timeout | undefined
+  /** How the remote-access tunnel is started, proven and journalled; the facade supplies the rest. */
+  remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
 }
 
 export class AtomicCore {
@@ -90,6 +100,8 @@ export class AtomicCore {
   private readonly publicServer: PublicServerLifecycle
   /** What the public listener trusts beyond its configuration: the tunnel name, the socket's address. */
   private readonly trustedHosts = new DynamicTrustedHosts()
+  /** The Cloudflare quick tunnel in front of the public listener. */
+  private readonly remoteAccess: RemoteAccessManager
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -117,11 +129,19 @@ export class AtomicCore {
       increaseCtx: (provider, modelId, reason) => this.increaseCtx(provider, modelId, reason),
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
     })
+    this.remoteAccess = new RemoteAccessManager({
+      ...parts.remoteAccess,
+      server: () => this.publicServer.endpoint(),
+      hosts: this.trustedHosts,
+      emit: (status) => this.events.emit('remote-access:status', status),
+      log: parts.log,
+    })
     this.publicServer = new PublicServerLifecycle({
       layout: parts.layout,
       events: parts.events,
       log: parts.log,
       assertRunning: () => this.assertRunning(),
+      remoteAccess: this.remoteAccess,
       serverDeps: () => ({
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
@@ -244,9 +264,27 @@ export class AtomicCore {
     return this.publicServer.stop()
   }
 
+  remoteAccessStatus(): RemoteAccessStatus {
+    return this.remoteAccess.status()
+  }
+
+  /** Open the tunnel; answers `starting` at once, the rest arrives as `remote-access:status`. */
+  startRemoteAccess(): RemoteAccessStatus {
+    this.assertRunning()
+    return this.remoteAccess.start()
+  }
+
+  /** Close the tunnel; answers once its process is gone. */
+  async stopRemoteAccess(): Promise<RemoteAccessStatus> {
+    this.assertRunning()
+    return this.remoteAccess.stop()
+  }
+
   /** Stop everything this core owns and release the lock last. */
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise
+    // Before anything that can wait: a public URL must not outlive the core that answers behind it.
+    this.remoteAccess.killNow()
     this.lifecycle = 'stopping'
     if (this.appLeaseTimer) clearInterval(this.appLeaseTimer)
     this.shutdownPromise = (async () => {

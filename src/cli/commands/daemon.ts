@@ -17,6 +17,7 @@ export async function daemonCommand(argv: string[], io: CliIo): Promise<number> 
       'public-host': { type: 'string' },
       'api-key': { type: 'string' },
       'resources-dir': { type: 'string' },
+      'cloudflared-bin': { type: 'string' },
       'verbose': { type: 'boolean', short: 'v' },
     },
     strict: true,
@@ -24,10 +25,12 @@ export async function daemonCommand(argv: string[], io: CliIo): Promise<number> 
   })
   const layout = layoutFor(values, io)
   const resourcesDir = pathValue(values['resources-dir'], io.cwd)
+  const cloudflaredPath = pathValue(values['cloudflared-bin'], io.cwd)
   const core = await AtomicCore.create({
     dataFolder: layout.root,
     ownerScope: 'cli',
     ...(resourcesDir ? { resourcesDir } : {}),
+    ...(cloudflaredPath ? { cloudflaredPath } : {}),
     controlPort: values['control-port'] !== undefined ? Number(values['control-port']) : 0,
     ...(values['control-host'] ? { controlHost: values['control-host'] } : {}),
     env: io.env,

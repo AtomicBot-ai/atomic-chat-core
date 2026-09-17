@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createServer } from 'node:net'
-import type { Socket } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
+import type { TLSSocket } from 'node:tls'
 import {
   BIG_SIZE,
   PROXY_PASS,
@@ -115,6 +116,68 @@ describe('no_proxy and TLS policy', () => {
     const relaxed = createPolicyFetch({ proxy: { url: s.socks5, ignore_ssl: true } })
     expect((await relaxed(`${s.selfSignedOrigin}/echo`)).status).toBe(200)
     expect(kinds()).toEqual(['socks5-connect', 'socks5-connect'])
+  })
+})
+
+describe('connectTo: dialling an address while the URL keeps its name', () => {
+  const TUNNEL = 'calm-river-demo.trycloudflare.com'
+  const tunnelCa = tlsFixture('tunnel.pem')
+
+  /** A TLS server presenting the tunnel-name certificate, standing in for Cloudflare's edge. */
+  async function startEdge() {
+    const { createServer: createTlsServer } = await import('node:https')
+    const seen: Array<{ servername: string | false | null | undefined; host: string | undefined }> = []
+    const server = createTlsServer({ key: tlsFixture('tunnel.key'), cert: tunnelCa }, (req, res) => {
+      const socket = req.socket as TLSSocket
+      seen.push({ servername: socket.servername, host: req.headers.host })
+      res.writeHead(200, { 'content-type': 'text/plain' }).end('through the edge')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    return { port, seen, close: () => new Promise<void>((resolve) => server.close(() => resolve())) }
+  }
+
+  it('reaches a name that resolves nowhere, with SNI, the certificate check and Host all on that name', async () => {
+    const edge = await startEdge()
+    try {
+      const pinned = createPolicyFetch({ ca: tunnelCa, connectTo: { host: '127.0.0.1', port: edge.port } })
+      const res = await pinned(`https://${TUNNEL}/openapi.json`)
+      expect(res.status).toBe(200)
+      expect(await res.text()).toBe('through the edge')
+      expect(edge.seen).toEqual([{ servername: TUNNEL, host: TUNNEL }])
+    } finally {
+      await edge.close()
+    }
+  })
+
+  it('still verifies the certificate against the URL, not against the address it dialled', async () => {
+    const edge = await startEdge()
+    try {
+      const pinned = createPolicyFetch({ ca: tunnelCa, connectTo: { host: '127.0.0.1', port: edge.port } })
+      // Same server, another tunnel's name: its certificate does not cover it.
+      await expect(pinned('https://other-name.trycloudflare.com/openapi.json')).rejects.toThrow(
+        /altnames|certificate|hostname/i
+      )
+      // And without the test CA the stand-in is simply untrusted.
+      const untrusted = createPolicyFetch({ connectTo: { host: '127.0.0.1', port: edge.port } })
+      await expect(untrusted(`https://${TUNNEL}/openapi.json`)).rejects.toThrow(/self[- ]signed|certificate/i)
+    } finally {
+      await edge.close()
+    }
+  })
+
+  it('keeps the port of the URL when only a host is pinned, and leaves the dialling to a proxy when there is one', async () => {
+    const plain = createPolicyFetch({ connectTo: { host: '127.0.0.1' } })
+    const origin = new URL(s.httpOrigin)
+    const res = await plain(`http://name-that-resolves-nowhere.invalid:${origin.port}/echo`)
+    expect(res.status).toBe(200)
+
+    const viaProxy = createPolicyFetch({
+      proxy: { url: s.httpProxy },
+      connectTo: { host: '203.0.113.1', port: 9 },
+    })
+    expect((await viaProxy(`${s.httpOrigin}/echo`)).status).toBe(200)
+    expect(kinds()).toEqual(['http-forward'])
   })
 })
 

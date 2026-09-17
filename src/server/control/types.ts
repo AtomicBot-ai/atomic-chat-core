@@ -9,6 +9,7 @@ import type {
   DeviceInfo,
   LocalApiServerState,
   LocalProviderId,
+  RemoteAccessStatus,
   SessionInfo,
   UnloadResult,
 } from '../../contracts/index.js'
@@ -131,6 +132,11 @@ export interface DiskControl {
 export interface RemoteAccessControl {
   /** IPv4 literals a device on the network can dial, default-route address first. Display only. */
   lanAddresses: () => Promise<string[]>
+  status: () => RemoteAccessStatus
+  /** Answers `starting` at once; throws a `REMOTE_ACCESS_*` refusal with the app's reason in `details`. */
+  start: () => RemoteAccessStatus
+  /** Answers once the tunnel's process is gone. */
+  stop: () => Promise<RemoteAccessStatus>
 }
 
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
