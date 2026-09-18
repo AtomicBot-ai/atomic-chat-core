@@ -4,7 +4,8 @@
  */
 import type { ImageGenerateRequest, ImageRecipe } from '../../src/contracts/index.js'
 import { encodePng } from '../../src/diffusion/png.js'
-import type { ServerSpec } from '../../src/diffusion/index.js'
+import type { ServerHandle, ServerSpec } from '../../src/diffusion/index.js'
+import type { ExitInfo } from '../../src/runtime/llamacpp/index.js'
 
 /** `format!("{:032x}", n)`: a job id as the plugin's tests made them. */
 export const jobId = (n: number): string => n.toString(16).padStart(32, '0')
@@ -81,4 +82,56 @@ export function paintedPng(width: number, height: number): Promise<Buffer> {
   for (let y = 0; y < height; y++)
     for (let x = 0; x < width; x++) data.set([x % 256, y % 256, 128], (y * width + x) * 3)
   return encodePng({ width, height, channels: 3, data })
+}
+
+/** A `ServerHandle` without a process: the test decides when it "exits" and what it "prints". */
+export interface FakeServer {
+  handle: ServerHandle
+  /** Lines the job runner is listening for, as the real handle would deliver them. */
+  say(...lines: string[]): void
+  /** The process is gone with this status. */
+  exit(info: ExitInfo): void
+  terminated: number[]
+}
+
+export function fakeServer(
+  options: { port?: number; pid?: number; cancelGenerating?: boolean } = {}
+): FakeServer {
+  const tail: string[] = []
+  let listener: ((line: string) => void) | undefined
+  let exitInfo: ExitInfo | undefined
+  let resolveExit!: (info: ExitInfo) => void
+  const exited = new Promise<ExitInfo>((resolve) => (resolveExit = resolve))
+  const terminated: number[] = []
+  const exit = (info: ExitInfo) => {
+    if (exitInfo) return
+    exitInfo = info
+    resolveExit(info)
+  }
+  const handle: ServerHandle = {
+    pid: options.pid ?? 4242,
+    port: options.port ?? 1,
+    exe: '/engine/sd-server',
+    capabilities: { cancelGenerating: options.cancelGenerating ?? false },
+    tail: () => [...tail],
+    setLineListener: (next) => (listener = next),
+    exitStatus: () => exitInfo,
+    exited,
+    terminate: async (graceMs = 5_000) => {
+      terminated.push(graceMs)
+      exit({ code: null, signal: 'SIGTERM' })
+      return exited
+    },
+  }
+  return {
+    handle,
+    say: (...lines) => {
+      for (const line of lines) {
+        tail.push(line)
+        listener?.(line)
+      }
+    },
+    exit,
+    terminated,
+  }
 }

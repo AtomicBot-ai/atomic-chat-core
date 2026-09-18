@@ -48,3 +48,22 @@ describe('AsyncMutex', () => {
     await expect(mutex.run(async () => 1)).resolves.toBe(1)
   })
 })
+
+describe('tryAcquire', () => {
+  it('takes a free lock at once and refuses a held one', async () => {
+    const mutex = new AsyncMutex()
+    expect(mutex.locked).toBe(false)
+    const release = mutex.tryAcquire()
+    expect(release).toBeDefined()
+    expect(mutex.locked).toBe(true)
+    expect(mutex.tryAcquire()).toBeUndefined()
+    // A waiter queued behind it is served on release, and the lock stays held for it.
+    const waiting = mutex.acquire()
+    release?.()
+    expect(mutex.locked).toBe(true)
+    const second = await waiting
+    expect(mutex.tryAcquire()).toBeUndefined()
+    second()
+    expect(mutex.locked).toBe(false)
+  })
+})

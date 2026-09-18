@@ -269,9 +269,27 @@
     "functions": 100,
     "lines": 99
   },
+  "src/diffusion/http.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/idle.ts": {
+    "statements": 100,
+    "branches": 80,
+    "functions": 100,
+    "lines": 100
+  },
   "src/diffusion/install.ts": {
     "statements": 98,
     "branches": 94,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/diffusion/jobs.ts": {
+    "statements": 98,
+    "branches": 87,
     "functions": 100,
     "lines": 98
   },
@@ -300,6 +318,30 @@
     "lines": 100
   },
   "src/diffusion/recipe.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/server-process.ts": {
+    "statements": 96,
+    "branches": 93,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/diffusion/service.ts": {
+    "statements": 99,
+    "branches": 92,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/diffusion/session.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/state.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
