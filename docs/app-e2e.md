@@ -172,6 +172,9 @@ What it proves of the scenarios above:
 - **Tools over a core session:** an MCP tool called by the chat model, with and without the user's approval;
   and the app's agent loop, which borrows the chat model's session and drives the backend's raw `/completion`
   (`completionSteps` in `test/helpers/fake-llama-server.ts` scripts the model's steps).
+- **4e, recovery of the public server:** the core is killed under a running public server; the app has the
+  next generation listen on the same port with the same key and loads the served model again, and an outside
+  client's streamed completion is answered.
 - An opt-in scenario (`make test-app-e2e-live`) runs the same chat against a real `llama-server` b10809 and
   Qwen3-0.6B: the core's argv starts it, readiness is recognised, a reply comes back, and a forced shutdown
   stops the child. With that binary `runtime_device` comes back empty — it prints no log lines by default,
