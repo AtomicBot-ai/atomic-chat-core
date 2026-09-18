@@ -12,6 +12,11 @@
  *   FAKE_LLAMA_TOOL_CALL  JSON `{"name": ..., "arguments": {...}}`; a chat request that offers a tool of that
  *                         name and carries no tool result yet is answered with that call, and the
  *                         request that brings the result back gets the reply followed by the result
+ *   FAKE_LLAMA_COMPLETION_STEPS  JSON array of strings; the Nth `POST /completion` of this process is
+ *                         answered with the Nth string (the last one from then on), streamed or not.
+ *                         `{{seen:TEXT}}` in a step becomes `yes` or `no`: whether TEXT was in that
+ *                         request's prompt. For clients that drive the raw completion endpoint with
+ *                         a grammar and expect scripted output, such as an agent loop.
  *   FAKE_LLAMA_COMPUTE_ERROR_MARKER  path; the first chat request anywhere creates it and answers
  *                     llama.cpp's poisoned-backend 500 ("Compute error"), later ones succeed
  *   LLAMA_API_KEY     when set, every route but `/health` demands `Authorization: Bearer <key>`
@@ -127,6 +132,8 @@ function startServer() {
         })
       })
     // Real llama-server answers both the prefixed and unprefixed forms.
+    if (url.pathname === '/completion' || url.pathname === '/completions')
+      return readBody(req).then((b) => rawCompletion(b, res))
     if (url.pathname === '/v1/chat/completions' || url.pathname === '/chat/completions')
       return readBody(req).then((b) => completions(b, res))
     return json(404, { error: { message: `no route ${url.pathname}`, type: 'not_found' } })
@@ -205,6 +212,41 @@ function completions(body, res) {
     )
   }
   return answerWithText(body, res, content)
+}
+
+let completionsServed = 0
+
+/** llama.cpp's raw `/completion`: one flat prompt in, `content` out, `stop: true` on the last event. */
+function rawCompletion(body, res) {
+  const steps = JSON.parse(process.env.FAKE_LLAMA_COMPLETION_STEPS ?? '[]')
+  const step = steps[Math.min(completionsServed, steps.length - 1)] ?? ''
+  completionsServed++
+  const prompt = typeof body?.prompt === 'string' ? body.prompt : JSON.stringify(body?.prompt ?? '')
+  const content = step.replace(/\{\{seen:([^}]*)\}\}/g, (_, text) => (prompt.includes(text) ? 'yes' : 'no'))
+  const tail = {
+    stop: true,
+    truncated: false,
+    tokens_evaluated: 3,
+    tokens_predicted: content.length,
+    tokens_cached: 0,
+    id_slot: body?.id_slot ?? 0,
+    model: modelAlias,
+    timings: { prompt_n: 3, predicted_n: content.length, prompt_per_second: 100, predicted_per_second: 100 },
+  }
+  if (!body?.stream) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ content, ...tail }))
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    'connection': 'keep-alive',
+  })
+  for (let at = 0; at < content.length; at += 24) {
+    res.write(`data: ${JSON.stringify({ content: content.slice(at, at + 24), stop: false })}\n\n`)
+  }
+  res.write(`data: ${JSON.stringify({ content: '', ...tail })}\n\n`)
+  res.end()
 }
 
 function scriptedToolCall(body) {

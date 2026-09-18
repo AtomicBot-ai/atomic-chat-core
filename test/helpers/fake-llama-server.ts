@@ -27,6 +27,8 @@ export interface FakeLlamaOptions {
   minCtx?: number
   /** Path of a marker file: the first chat request creates it and fails with "Compute error". */
   computeErrorMarker?: string
+  /** Scripted answers of the raw `/completion` endpoint, in order; `{{seen:TEXT}}` reports whether the prompt held TEXT. */
+  completionSteps?: string[]
   /** One scripted tool turn: call this tool when it is offered, then repeat its result after the reply. */
   toolCall?: { name: string; arguments?: Record<string, unknown> }
 }
@@ -40,6 +42,7 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
   if (options.minCtx) env['FAKE_LLAMA_MIN_CTX'] = String(options.minCtx)
   if (options.computeErrorMarker) env['FAKE_LLAMA_COMPUTE_ERROR_MARKER'] = options.computeErrorMarker
   if (options.toolCall) env['FAKE_LLAMA_TOOL_CALL'] = JSON.stringify(options.toolCall)
+  if (options.completionSteps) env['FAKE_LLAMA_COMPLETION_STEPS'] = JSON.stringify(options.completionSteps)
   return env
 }
 
