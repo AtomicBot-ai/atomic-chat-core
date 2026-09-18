@@ -25,6 +25,7 @@ import type {
   LoadedDiffusionModel,
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
+import type { ImagesBackend } from '../server/index.js'
 import { samePath } from './containment.js'
 import { diffusionError, ioError } from './errors.js'
 import { Gallery } from './gallery.js'
@@ -335,6 +336,20 @@ export class DiffusionService {
   /** Run one job to completion; the OpenAI facade's path. */
   runImageJob(request: ImageGenerateRequest): Promise<JobOutcome> {
     return runImageJob(this.deps, request)
+  }
+
+  /** What `POST /v1/images/generations` needs: the resident model, and a job it can await or abandon. */
+  imagesBackend(): ImagesBackend {
+    return {
+      loaded: () => {
+        const spec = this.state.spec
+        return spec
+          ? { modelId: spec.modelId, displayName: spec.displayName, defaults: { ...spec.defaults } }
+          : undefined
+      },
+      start: (request) => startImageJob(this.deps, request),
+      cancel: (jobId) => cancelJob(this.deps, jobId),
+    }
   }
 
   getJob(jobId: string): ImageJob | null {

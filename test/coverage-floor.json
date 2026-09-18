@@ -1019,6 +1019,18 @@
     "functions": 100,
     "lines": 100
   },
+  "src/server/public/images-params.ts": {
+    "statements": 100,
+    "branches": 99,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/images.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/public/listing.ts": {
     "statements": 98,
     "branches": 84,

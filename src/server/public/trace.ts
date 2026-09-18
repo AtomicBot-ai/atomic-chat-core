@@ -45,6 +45,8 @@ export function endpointFromPath(path: string): string {
       return 'embeddings'
     case '/messages/count_tokens':
       return 'messages/count_tokens'
+    case '/images/generations':
+      return 'images/generations'
     case '/models':
       return 'models'
     case '/muse-code/models':

@@ -421,3 +421,39 @@ describe('without an engine', () => {
     ])
   })
 })
+
+describe('the images backend', () => {
+  it('describes the resident model for the OpenAI facade, and nothing when there is none', async () => {
+    const { service } = harness()
+    const backend = service.imagesBackend()
+    expect(backend.loaded()).toBeUndefined()
+    service.state.spec = {
+      binaryDir: '/e',
+      engine: 'sd-cpp',
+      backend: 'cpu',
+      backendId: 'cpu',
+      tag: 't',
+      modelId: 'z-image:q4_k_m',
+      family: 'z-image',
+      modality: 'image',
+      displayName: 'Z-Image Turbo',
+      files: { diffusionModel: '/m.gguf' },
+      defaults: { steps: 4, cfgScale: 1, width: 512, height: 512 },
+      ranges: { steps: [1, 50], dims: [256, 2048], dimMultiple: 16 },
+      offload: 'none',
+      extraArgs: [],
+      startupTimeoutMs: 1000,
+      cpuFallback: false,
+    }
+    expect(backend.loaded()).toEqual({
+      modelId: 'z-image:q4_k_m',
+      displayName: 'Z-Image Turbo',
+      defaults: { steps: 4, cfgScale: 1, width: 512, height: 512 },
+    })
+    // The defaults are a copy.
+    expect(backend.loaded()?.defaults).not.toBe(service.state.spec.defaults)
+    await expect(backend.cancel('nope')).rejects.toMatchObject({ code: 'JOB_NOT_FOUND' })
+    service.state.spec = undefined
+    await expect(backend.start(sampleRequest())).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })
+  })
+})

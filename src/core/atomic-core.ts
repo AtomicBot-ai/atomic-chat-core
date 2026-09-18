@@ -158,6 +158,7 @@ export class AtomicCore {
         emit: (name, payload) => this.events.emit(name, payload),
         inspecting: () => this.inspecting,
         dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
+        images: this.diffusion.imagesBackend(),
       }),
     })
   }

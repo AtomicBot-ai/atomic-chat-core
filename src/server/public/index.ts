@@ -21,6 +21,7 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { LocalApiServerState } from '../../contracts/index.js'
 import { answer, newExchange } from './exchange.js'
 import { serveForward } from './forward.js'
+import { serveImagesGenerations } from './images.js'
 import { serveSubscriptionIfOwned } from './subscription.js'
 import { gate, preflight, removePrefix } from './gates.js'
 import { serveMetrics, serveModels, serveMuseCatalog } from './listing.js'
@@ -30,7 +31,13 @@ import { RequestTrace, endpointFromPath } from './trace.js'
 import type { PublicServerConfig, PublicServerDeps } from './types.js'
 import { sendWhole } from './wire.js'
 
-export type { CtxIncreaseOutcome, LocalTarget, PublicServerConfig, PublicServerDeps } from './types.js'
+export type {
+  CtxIncreaseOutcome,
+  ImagesBackend,
+  LocalTarget,
+  PublicServerConfig,
+  PublicServerDeps,
+} from './types.js'
 export { isValidHost, removePrefix } from './gates.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
 
@@ -72,6 +79,7 @@ const ALLOWED_METHODS: Record<string, string> = {
   '/completions': 'POST',
   '/embeddings': 'POST',
   '/messages/count_tokens': 'POST',
+  '/images/generations': 'POST',
 }
 
 const FORWARDED = new Set([
@@ -148,6 +156,11 @@ export async function handlePublicRequest(
     if (path === '/chat/completions' && deps.chatgpt && (await serveSubscriptionIfOwned(ex, deps.chatgpt)))
       return
     if (FORWARDED.has(path)) return serveForward(ex)
+    // Served here, never forwarded: the image model is the core's own, and it is not in `/models`.
+    if (path === '/images/generations') {
+      trace.endpoint = endpointFromPath(path)
+      return serveImagesGenerations(ex)
+    }
   }
   if (ex.method === 'GET') {
     // Model polling, metrics scraping and the docs are client bookkeeping: never reported.

@@ -366,6 +366,45 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
     }
     const page = await client.listGallery({ offset: 0, limit: 10 })
     expect(page.total).toBe(1)
+
+    // The OpenAI facade on the public listener runs the same jobs, and the image model is not a chat model.
+    const served = await core.startPublicServer({ port: 0 })
+    const base = `http://127.0.0.1:${served.port}/v1`
+    const generated = await fetch(`${base}/images/generations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a cat', size: '256x256', n: 1, seed: 5 }),
+    })
+    expect(generated.status).toBe(200)
+    const answer = (await generated.json()) as {
+      data: Array<{ b64_json: string }>
+      atomic: { seed: number; paths: string[] }
+    }
+    expect(Buffer.from(answer.data[0]?.b64_json ?? '', 'base64').subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    )
+    expect(answer.atomic.seed).toBe(5)
+    expect((await client.listGallery({ offset: 0, limit: 10 })).total).toBe(2)
+    const models = (await (await fetch(`${base}/models`)).json()) as { data: Array<{ id: string }> }
+    expect(models.data.map((m) => m.id)).not.toContain('z-image:q4_k_m')
+    // A client that leaves cancels its job.
+    const controller = new AbortController()
+    const abandoned = fetch(`${base}/images/generations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a cat', size: '256x256', n: 4 }),
+      signal: controller.signal,
+    })
+    while ((await client.diffusionStatus()).activeJob === null)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    const activeId = (await client.diffusionStatus()).activeJob?.id as string
+    controller.abort()
+    await expect(abandoned).rejects.toThrow()
+    const cancelDeadline = Date.now() + 10_000
+    while ((await client.diffusionJob(activeId))?.state !== 'cancelled') {
+      if (Date.now() > cancelDeadline) throw new Error('the abandoned job was not cancelled')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
     expect(page.items[0]?.path.startsWith(join(data.root, 'images'))).toBe(true)
     expect(events).toContain('diffusion:state')
     expect(events).toContain('diffusion:job')
