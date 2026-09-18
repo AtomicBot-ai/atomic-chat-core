@@ -114,8 +114,16 @@ const isObject = (value: unknown): value is Fields =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
 const isWhole = (value: unknown): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= 0
-const isInteger = (value: unknown): value is number =>
-  typeof value === 'number' && Number.isSafeInteger(value)
+/**
+ * Seeds. The plugin stored them as `i64`, and 2.0.40's `/v1/images/generations` took any `i64`, so a
+ * gallery PNG can hold one above 2^53. `JSON.parse` has already rounded it to the nearest double, and
+ * that is what the listing carries. Refusing it would make the image foreign: never listed, never
+ * deleted. The bound is `i64`'s as a double sees it (`i64::MAX` rounds up to 2^63). The core itself
+ * never writes one: `validateRequest` keeps `seed + batchSize - 1` within 2^53 - 1, so every
+ * recorded `batchSeed + index` is exact. Sending such a rounded seed back is refused there.
+ */
+const isI64 = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && Math.abs(value) <= 2 ** 63
 const isNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 const isString = (value: unknown): value is string => typeof value === 'string'
 const among = <T extends string>(value: unknown, allowed: readonly T[]): value is T =>
@@ -154,8 +162,8 @@ export function parseRecipe(text: string): ImageRecipe | undefined {
     isWhole(raw['height']) &&
     isWhole(raw['steps']) &&
     isNumber(raw['cfgScale']) &&
-    isInteger(raw['seed']) &&
-    isInteger(raw['batchSeed']) &&
+    isI64(raw['seed']) &&
+    isI64(raw['batchSeed']) &&
     isWhole(raw['batchSize']) &&
     among<ImageWorkflowId>(raw['workflow'], IMAGE_WORKFLOWS) &&
     isString(model['modelId']) &&

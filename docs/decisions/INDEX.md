@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-18** — [Reap the tunnel Atomic Chat 2.0.40 journalled at the data root](2026-09-18-reap-the-tunnel-atomic-chat-2-0-40-journalled-at-the-data-root.md)
 - **2026-09-18** — [Serve /v1/images/generations locally from the job runner](2026-09-18-serve-images-generations-locally-from-the-job-runner.md)
 - **2026-09-17** — [A minimal PNG codec on node:zlib for recipes and thumbnails](2026-09-17-a-minimal-png-codec-on-node-zlib-for-recipes-and-thumbnails.md)
 - **2026-09-17** — [Image generation is its own module, not a local runtime](2026-09-17-image-generation-is-its-own-module-not-a-local-runtime.md)

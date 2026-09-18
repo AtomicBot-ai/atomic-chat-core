@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { TUNNEL_JOURNAL_FILE, TunnelJournal, isTunnelName, reapTunnelOrphan } from './journal.js'
+import type { ReapDeps } from './journal.js'
 
 let dir: string
 let path: string
@@ -247,4 +248,65 @@ describe('reapTunnelOrphan', () => {
       }
     }
   )
+})
+
+// Atomic Chat 2.0.40's `journal.rs` (tag `v2.0.40`) wrote `<data>/remote-access-tunnel.json` as serde's
+// compact `{pid, started_at_secs}`; startup reaps it with the same checks as the core's own journal.
+describe('reapTunnelOrphan on the journal of Atomic Chat 2.0.40', () => {
+  const legacy = '{"pid":4242,"started_at_secs":1000}'
+  const tunnel = {
+    alive: () => true,
+    name: async () => 'cloudflared.exe',
+    // The entry carries no start identity: only the start time may decide.
+    verifyIdentity: async (): Promise<'match'> => {
+      throw new Error('a 2.0.40 entry has no start identity to verify')
+    },
+  }
+
+  it('ends the tunnel it describes and removes the file', async () => {
+    await writeFile(path, legacy)
+    const killed: number[] = []
+    expect(
+      await reapTunnelOrphan(path, {
+        ...tunnel,
+        startEpoch: async () => 'epoch:998',
+        kill: (pid) => killed.push(pid),
+      })
+    ).toBe('killed')
+    expect(killed).toEqual([4242])
+    expect(await exists()).toBe(false)
+  })
+
+  it('leaves alone a process it cannot prove is that tunnel, and still removes the file', async () => {
+    const killed: number[] = []
+    const kill = (pid: number) => void killed.push(pid)
+    const cases: Array<[string, ReapDeps]> = [
+      // The user's own cloudflared under a reused pid, started an hour later.
+      [legacy, { startEpoch: async () => 'epoch:4600' }],
+      // The recorded start time, but another program.
+      [legacy, { name: async () => 'postgres', startEpoch: async () => 'epoch:1000' }],
+      // No start time to compare with.
+      [legacy, { startEpoch: async () => undefined }],
+      // An entry without its start time.
+      ['{"pid":4242}', { startEpoch: async () => 'epoch:1000' }],
+    ]
+    for (const [text, deps] of cases) {
+      await writeFile(path, text)
+      expect(await reapTunnelOrphan(path, { ...tunnel, ...deps, kill })).toBe('spared')
+      expect(await exists()).toBe(false)
+    }
+    expect(killed).toEqual([])
+  })
+
+  it('ignores an absent or unreadable file, and removes the unreadable one', async () => {
+    const killed: number[] = []
+    const kill = (pid: number) => void killed.push(pid)
+    expect(await reapTunnelOrphan(path, { ...tunnel, kill })).toBe('none')
+    for (const broken of ['', '{ not json', '{"pid":4242,"started_at', '{"pid":0,"started_at_secs":1000}']) {
+      await writeFile(path, broken)
+      expect(await reapTunnelOrphan(path, { ...tunnel, kill })).toBe('none')
+      expect(await exists()).toBe(false)
+    }
+    expect(killed).toEqual([])
+  })
 })

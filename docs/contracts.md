@@ -60,7 +60,9 @@ has not landed yet is validated for shape only, and `docs/testing-critical-flows
 New data paths: only `<data>/atomic-core/` (settings.json, credentials.json, optimal-backend.json,
 instance.lock, control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml).
 Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
-`<data>/diffusion/{backends,models,scratch}` and `<data>/images`. Anything else needs an ADR in both repos.
+`<data>/diffusion/{backends,models,scratch}` and `<data>/images`. Read once and removed, never written
+(ADR 2026-09-18-reap-the-tunnel-atomic-chat-2-0-40-journalled-at-the-data-root): `<data>/remote-access-tunnel.json`,
+the tunnel journal of app 2.0.40. Anything else needs an ADR in both repos.
 
 ## Target control and ownership contract
 

@@ -86,6 +86,16 @@ describe('validateRequest', () => {
       details: 'batchSize=5',
     })
     expect((await refusal(request({ batchSize: 0 }))).code).toBe('INVALID_REQUEST')
+    // The last image of the batch records seed + 3: it must still be exact as a double.
+    await expect(
+      validateRequest(request({ batchSize: 4, seed: Number.MAX_SAFE_INTEGER - 3 }), spec(), deps)
+    ).resolves.toBeUndefined()
+    expect((await refusal(request({ batchSize: 4, seed: Number.MAX_SAFE_INTEGER - 2 }))).toJSON()).toEqual({
+      code: 'INVALID_REQUEST',
+      message: `The seed must be at most ${Number.MAX_SAFE_INTEGER - 3} for a batch of 4.`,
+      details: `seed=${Number.MAX_SAFE_INTEGER - 2}`,
+    })
+    await expect(validateRequest(request({ batchSize: 4, seed: -1 }), spec(), deps)).resolves.toBeUndefined()
     expect((await refusal(request({ cfgScale: -1 }))).message).toBe(
       'CFG scale must be a non-negative number.'
     )

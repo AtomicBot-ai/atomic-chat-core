@@ -9,6 +9,7 @@
  *   <data>/mlx/models/<id>/{model.yml, config.json, *.safetensors}
  *   <data>/diffusion/{backends/<tag>/<backend>/, models/, scratch/}, <data>/images/  (image generation; the app's paths since v2.0.38)
  *   <data>/local-api-server.json, <data>/atomic-chatgpt-auth.json
+ *   <data>/remote-access-tunnel.json  (the app's 2.0.40 tunnel journal: reaped once at startup, never written)
  *   <data>/atomic-core/  — the only new folder (settings, credentials, lock, journal, logs)
  */
 
@@ -74,6 +75,11 @@ export interface DataLayout {
   root: string
   serverStateFile: string
   chatgptAuthFile: string
+  /**
+   * The tunnel journal Atomic Chat 2.0.40's Rust wrote (`{pid, started_at_secs}`) and reaped at its own
+   * startup. The app no longer reads it, so the core reaps it once and removes it; nothing writes it.
+   */
+  legacyRemoteAccessTunnel: string
   core: CoreFiles
   diffusion: DiffusionPaths
   provider(id: LocalProviderId): ProviderPaths
@@ -86,6 +92,7 @@ export function dataLayout(root: string): DataLayout {
     root,
     serverStateFile: join(root, LOCAL_API_SERVER_STATE_FILE),
     chatgptAuthFile: join(root, CHATGPT_AUTH_FILE),
+    legacyRemoteAccessTunnel: join(root, 'remote-access-tunnel.json'),
     core: {
       dir: coreDir,
       publicServerState: join(coreDir, LOCAL_API_SERVER_STATE_FILE),

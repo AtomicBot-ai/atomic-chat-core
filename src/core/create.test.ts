@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
@@ -66,6 +67,33 @@ describe('taking ownership', () => {
       code: 'CORE_ALREADY_RUNNING',
     })
   })
+
+  it("consumes the tunnel journal the app's 2.0.40 left at the root, sparing what is not a tunnel", async () => {
+    // A live process with the recorded start time, as under a reused pid: only the name gives it away.
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+    try {
+      await new Promise((resolve) => child.once('spawn', resolve))
+      const pid = child.pid as number
+      const startedAt = Math.floor(Date.now() / 1000)
+      await writeFile(
+        data.layout.legacyRemoteAccessTunnel,
+        JSON.stringify({ pid, started_at_secs: startedAt })
+      )
+      const warnings: string[] = []
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        logger: (level, message) => void (level === 'warn' && warnings.push(message)),
+      })
+      cores.push(core)
+      expect(warnings.filter((m) => m.startsWith(`pid ${pid} is no longer our tunnel`))).toHaveLength(1)
+      expect(child.exitCode).toBeNull()
+      expect(child.signalCode).toBeNull()
+      await expect(readFile(data.layout.legacyRemoteAccessTunnel)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      child.kill('SIGKILL')
+    }
+  }, 20_000)
 
   it('creates the settings file and reads models from the shared folder', async () => {
     const core = await createCore()

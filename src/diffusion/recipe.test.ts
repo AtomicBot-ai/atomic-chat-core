@@ -134,6 +134,34 @@ describe('the embedded JSON', () => {
     )
   })
 
+  it("reads a seed above 2^53, which the plugin's i64 allowed, as the nearest double", () => {
+    // 2.0.40's `/v1/images/generations` took any i64 seed and wrote it into the recipe verbatim.
+    const text = serializeRecipe(recipe())
+      .replace('"seed":100', '"seed":9223372036854775807')
+      .replace('"batchSeed":100', '"batchSeed":9223372036854775807')
+    expect(text).toContain('"seed":9223372036854775807,"batchSeed":9223372036854775807')
+    expect(parseRecipe(text)).toEqual(recipe({ seed: 2 ** 63, batchSeed: 2 ** 63 }))
+    const unsafe = serializeRecipe(recipe()).replace('"seed":100', '"seed":9007199254740993')
+    expect(parseRecipe(unsafe)?.seed).toBe(2 ** 53)
+    expect(
+      parseRecipe(serializeRecipe(recipe()).replace('"seed":100', '"seed":-9223372036854775808'))?.seed
+    ).toBe(-(2 ** 63))
+    // Still whole numbers in i64's range only, as serde read them; a JSON number too large for a
+    // double is not one either.
+    expect(parseRecipe(serializeRecipe(recipe()).replace('"seed":100', '"seed":100.5'))).toBeUndefined()
+    expect(parseRecipe(serializeRecipe(recipe()).replace('"seed":100', '"seed":1e19'))).toBeUndefined()
+    expect(
+      parseRecipe(serializeRecipe(recipe()).replace('"batchSeed":100', '"batchSeed":1e400'))
+    ).toBeUndefined()
+  })
+
+  it('reads back any seed past 2^53 as the double it serialized', () => {
+    const past = recipe({ index: 3, seed: 2 ** 53 + 2, batchSeed: Number.MAX_SAFE_INTEGER, batchSize: 4 })
+    const text = serializeRecipe(past)
+    expect(text).toContain('"seed":9007199254740994,"batchSeed":9007199254740991')
+    expect(parseRecipe(text)).toEqual(past)
+  })
+
   it('does not take anything else for a recipe', () => {
     const broken = (change: (r: Record<string, unknown>) => void): string => {
       const raw = JSON.parse(serializeRecipe(recipe())) as Record<string, unknown>

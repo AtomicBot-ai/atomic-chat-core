@@ -114,6 +114,10 @@ export class TunnelJournal {
   }
 }
 
+/**
+ * Also reads the entry Atomic Chat 2.0.40 wrote at the data root, `{pid, started_at_secs}`: it has no
+ * start identity, so the start-time fallback decides.
+ */
 function parseEntry(text: string): TunnelJournalEntry | undefined {
   try {
     const value = JSON.parse(text) as Partial<TunnelJournalEntry> | null

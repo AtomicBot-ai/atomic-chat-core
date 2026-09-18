@@ -93,6 +93,17 @@ export async function validateRequest(
       `Batch size must be between 1 and ${MAX_BATCH}.`,
       `batchSize=${request.batchSize}`
     )
+  // Each image records `seed + index` as a double; past 2^53 that sum is rounded, and the recorded seed
+  // would no longer reproduce what sd.cpp (64-bit) generated. A negative seed asks for a random one.
+  if (request.seed !== undefined && request.seed >= 0) {
+    const highest = Number.MAX_SAFE_INTEGER - (request.batchSize - 1)
+    if (request.seed > highest)
+      throw diffusionError(
+        'INVALID_REQUEST',
+        `The seed must be at most ${highest} for a batch of ${request.batchSize}.`,
+        `seed=${request.seed}`
+      )
+  }
   if (!Number.isFinite(request.cfgScale) || request.cfgScale < 0)
     throw diffusionError('INVALID_REQUEST', 'CFG scale must be a non-negative number.')
   if (request.strength !== undefined && !(request.strength >= 0 && request.strength <= 1))

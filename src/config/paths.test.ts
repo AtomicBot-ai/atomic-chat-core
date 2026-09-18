@@ -26,6 +26,9 @@ describe('dataLayout', () => {
     expect(layout.core.instanceLock).toBe('/data/atomic-core/instance.lock')
     expect(layout.serverStateFile).toBe('/data/local-api-server.json')
     expect(layout.chatgptAuthFile).toBe('/data/atomic-chatgpt-auth.json')
+    // The app's 2.0.40 tunnel journal; the core's own one lives under atomic-core/.
+    expect(layout.legacyRemoteAccessTunnel).toBe('/data/remote-access-tunnel.json')
+    expect(layout.core.remoteAccessTunnel).toBe('/data/atomic-core/remote-access-tunnel.json')
   })
   it("keeps image generation where the app's plugin put it", () => {
     // `state.rs` at 767ff6350: `<data>/diffusion/{backends,models,scratch}`, gallery in `<data>/images`.

@@ -412,6 +412,10 @@ export async function createAtomicCore(
     await reapOrphans(journal, lock.instanceId, log)
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
+    // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the
+    // app that replaced it does not. Same checks, and the file is consumed. Only the app owner's folder
+    // can hold it: a CLI owner refuses the app's folder, and one app instance runs at a time.
+    await reapTunnelOrphan(layout.legacyRemoteAccessTunnel, { log: warn })
     await lock.publish(control.host, control.port)
     log('info', `core ${CORE_VERSION} owns ${layout.root} (control ${control.url})`)
     return core
