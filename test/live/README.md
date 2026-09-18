@@ -15,3 +15,9 @@ Stage 5 providers, each opt-in on its own:
 - Foundation Models (`test/live/foundation-models.test.ts`, macOS 26): `ATOMIC_LIVE_FM_RESOURCES` (folder with
   `foundation-models-server`, e.g. `swift build -c release` in the app's `foundation-models-server`). Without Apple
   Intelligence it asserts the classified refusal; with it, a real answer.
+- stable-diffusion.cpp (`test/live/diffusion.test.ts`, POSIX): `ATOMIC_LIVE_SD_ENGINE` (folder with `sd-server`, `sd-cli` and
+  their libraries; copied into the temporary data folder), `ATOMIC_LIVE_SD_MODEL` (the transformer GGUF), optional
+  `ATOMIC_LIVE_SD_VAE`, `ATOMIC_LIVE_SD_VAE_FORMAT` (`flux2` for FLUX.2), `ATOMIC_LIVE_SD_LLM` (the family's text encoder),
+  `ATOMIC_LIVE_SD_FAMILY` (default `flux.2-klein`). Holds `sd-server --help` to `test/fixtures/sdcpp/required-flags.txt`,
+  then finalize → load → a 256² generation with parsed step progress, PNG, thumbnail and recipe → the OpenAI facade → a hard
+  cancel of a long job → respawn → unload. About five minutes with FLUX.2 Klein Q4_K_M on an M-series Mac.
