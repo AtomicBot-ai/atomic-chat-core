@@ -159,6 +159,16 @@ What it proves of the scenarios above:
   the UI as well: a release published on the test machine behind a loopback CONNECT proxy (the shape of
   `test/helpers/backend-install-e2e.ts`), found through the app's proxy setting, installed by
   `POST /backends/llamacpp-upstream/install` with that proxy, and started on the next load.
+- **4d, the request inspector:** an outside client's streamed completion through the public server shows up
+  on the app's open API page without a reload — `api:request` started/finished relayed to the webview — with
+  its prompt and reply previews; a request without the key is counted as an error.
+- **5, a second local provider:** with TurboQuant turned on in the app, one model is run under `llamacpp`
+  and then under `llamacpp-upstream`, each from its own backend directory; `/sessions` names the provider
+  and the previous process is gone. Scripted backends on both sides.
+- **3d, embeddings:** a document attached in the app is embedded through `POST /models/…/embed` by an
+  embedding session the core starts for it (`--embedding --pooling mean`), and a `retrieve` tool call made by
+  the chat model embeds the query the same way and brings the document's words back. Scripted backends; the
+  chat model's tool turn comes from `toolCall` in `test/helpers/fake-llama-server.ts`.
 - An opt-in scenario (`make test-app-e2e-live`) runs the same chat against a real `llama-server` b10809 and
   Qwen3-0.6B: the core's argv starts it, readiness is recognised, a reply comes back, and a forced shutdown
   stops the child. With that binary `runtime_device` comes back empty — it prints no log lines by default,
