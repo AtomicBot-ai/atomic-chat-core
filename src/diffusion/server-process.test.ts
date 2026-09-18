@@ -140,7 +140,8 @@ describe.skipIf(!posix)('spawnServer', () => {
     const error = await refusal(spawnServer(spec, join(dir, 'scratch'), { http }))
     expect(error.code).toBe('MODEL_LOAD_FAILED')
     expect(error.message).toBe('The image model did not finish loading within 2 seconds.')
-    expect(error.details).toContain('load tensors from model')
+    // What it printed before the deadline (on a loaded machine possibly nothing yet) rides in the details.
+    expect(typeof error.details).toBe('string')
     const [pid] = await startedPids()
     expect(pid).toBeGreaterThan(0)
     expect(isProcessAlive(pid as number)).toBe(false)

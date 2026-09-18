@@ -20,6 +20,7 @@ import type {
   UnloadResult,
 } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
+import type { DiffusionService } from '../diffusion/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
 import type { InstanceLock } from '../lock/index.js'
@@ -62,6 +63,8 @@ export interface AtomicCoreParts {
   appLeaseTimer: NodeJS.Timeout | undefined
   /** How the remote-access tunnel is started, proven and journalled; the facade supplies the rest. */
   remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
+  /** Image generation (stage 7): its own module, not a runtime. */
+  diffusion: DiffusionService
 }
 
 export class AtomicCore {
@@ -102,6 +105,8 @@ export class AtomicCore {
   private readonly trustedHosts = new DynamicTrustedHosts()
   /** The Cloudflare quick tunnel in front of the public listener. */
   private readonly remoteAccess: RemoteAccessManager
+  /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
+  readonly diffusion: DiffusionService
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -119,6 +124,7 @@ export class AtomicCore {
     this.registries = parts.registries
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
+    this.diffusion = parts.diffusion
     this.localSessions = new LocalSessions({
       layout: parts.layout,
       instanceId: parts.lock.instanceId,
@@ -289,6 +295,8 @@ export class AtomicCore {
     if (this.appLeaseTimer) clearInterval(this.appLeaseTimer)
     this.shutdownPromise = (async () => {
       await this.publicServer.stop()
+      // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
+      await this.diffusion.shutdown()
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
       await this.localSessions.releaseAll()
       await this.control.close()

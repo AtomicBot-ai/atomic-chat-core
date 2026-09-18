@@ -13,7 +13,22 @@ import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '.
 import { CORE_VERSION } from '../version.js'
 import type {
   CoreEventName,
+  DiffusionBackendInstallRecord,
+  DiffusionCancelResult,
+  DiffusionConfig,
+  DiffusionModelFile,
+  DiffusionStatus,
   ErrorCode,
+  FinalizeBackendInstallArgs,
+  GalleryFlags,
+  GalleryImageItem,
+  GalleryListOptions,
+  GalleryPage,
+  ImageCapabilities,
+  ImageGenerateRequest,
+  ImageJob,
+  LoadDiffusionModelRequest,
+  LoadedDiffusionModel,
   LocalApiServerState,
   RemoteAccessStatus,
   SessionInfo,
@@ -199,6 +214,104 @@ export class CoreClient {
   /** IPv4 literals a device on the network can dial, default-route address first. Display only. */
   async lanAddresses(): Promise<string[]> {
     return (await this.call<{ addresses: string[] }>('/lan-addresses')).addresses
+  }
+
+  // --- image generation (stage 7h): the app's `DiffusionService`, one method each -------------
+
+  /** Once per core generation, before anything else; `dataFolder` must be the core's own. */
+  configureDiffusion(config: DiffusionConfig): Promise<DiffusionStatus> {
+    return this.call('/diffusion/config', { method: 'PUT', body: JSON.stringify(config) })
+  }
+
+  diffusionStatus(): Promise<DiffusionStatus> {
+    return this.call('/diffusion/status')
+  }
+
+  /** An empty path restores `<data>/images`. */
+  setDiffusionOutputDir(path: string): Promise<DiffusionStatus> {
+    return this.call('/diffusion/output-dir', { method: 'PUT', body: JSON.stringify({ path }) })
+  }
+
+  finalizeDiffusionBackend(args: FinalizeBackendInstallArgs): Promise<DiffusionBackendInstallRecord> {
+    return this.call('/diffusion/backends/finalize', { method: 'POST', body: JSON.stringify(args) })
+  }
+
+  async listDiffusionBackends(): Promise<DiffusionBackendInstallRecord[]> {
+    return (await this.call<{ backends: DiffusionBackendInstallRecord[] }>('/diffusion/backends')).backends
+  }
+
+  /** Refuses (`BACKEND_IN_USE`) while a model runs from that tree. */
+  async removeDiffusionBackend(dir: string): Promise<void> {
+    await this.call('/diffusion/backends/remove', { method: 'POST', body: JSON.stringify({ dir }) })
+  }
+
+  async listDiffusionModelFiles(): Promise<DiffusionModelFile[]> {
+    return (await this.call<{ files: DiffusionModelFile[] }>('/diffusion/model-files')).files
+  }
+
+  async deleteDiffusionModelFile(path: string): Promise<void> {
+    await this.call('/diffusion/model-files/delete', { method: 'POST', body: JSON.stringify({ path }) })
+  }
+
+  /** Answers once the server serves the model: minutes for a large one. */
+  loadDiffusionModel(request: LoadDiffusionModelRequest): Promise<LoadedDiffusionModel> {
+    return this.call('/diffusion/model/load', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  async unloadDiffusionModel(): Promise<void> {
+    await this.call('/diffusion/model/unload', { method: 'POST' })
+  }
+
+  diffusionCapabilities(): Promise<ImageCapabilities> {
+    return this.call('/diffusion/capabilities')
+  }
+
+  /** Reset the idle-unload deadline without generating. */
+  async touchDiffusionIdle(): Promise<void> {
+    await this.call('/diffusion/idle/touch', { method: 'POST' })
+  }
+
+  /** Answers with the job id at once; progress and the outcome arrive as `diffusion:*` events. */
+  generateImage(request: ImageGenerateRequest): Promise<{ jobId: string }> {
+    return this.call('/diffusion/jobs', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  async diffusionJob(jobId: string): Promise<ImageJob | null> {
+    return (await this.call<{ job: ImageJob | null }>(`/diffusion/jobs/${encodeURIComponent(jobId)}`)).job
+  }
+
+  cancelImageJob(jobId: string): Promise<DiffusionCancelResult> {
+    return this.call(`/diffusion/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+  }
+
+  listGallery(options: GalleryListOptions): Promise<GalleryPage> {
+    const query = new URLSearchParams({ offset: String(options.offset), limit: String(options.limit) })
+    if (options.includeArchived !== undefined) query.set('includeArchived', String(options.includeArchived))
+    return this.call(`/diffusion/gallery?${query.toString()}`)
+  }
+
+  async galleryItem(id: string): Promise<GalleryImageItem | null> {
+    return (
+      await this.call<{ item: GalleryImageItem | null }>(`/diffusion/gallery/${encodeURIComponent(id)}`)
+    ).item
+  }
+
+  async deleteGalleryItems(ids: string[]): Promise<void> {
+    await this.call('/diffusion/gallery/delete', { method: 'POST', body: JSON.stringify({ ids }) })
+  }
+
+  setGalleryFlags(id: string, flags: GalleryFlags): Promise<GalleryImageItem> {
+    return this.call(`/diffusion/gallery/${encodeURIComponent(id)}/flags`, {
+      method: 'PATCH',
+      body: JSON.stringify(flags),
+    })
+  }
+
+  async exportGalleryItem(id: string, targetPath: string): Promise<void> {
+    await this.call(`/diffusion/gallery/${encodeURIComponent(id)}/export`, {
+      method: 'POST',
+      body: JSON.stringify({ targetPath }),
+    })
   }
 
   /** Restart a poisoned engine at the context it already has. */

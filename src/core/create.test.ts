@@ -290,3 +290,105 @@ describe('taking ownership', () => {
     expect(warnings.some((message) => message.includes('Backend manifest returned 404'))).toBe(true)
   })
 })
+
+describe.skipIf(process.platform === 'win32')('image generation through the owner', () => {
+  it('wires the diffusion service to the control API, the journal, the events and the shutdown order', async () => {
+    const { dataLayout } = await import('../config/index.js')
+    const { writeFakeSdLaunchers, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
+    const { isProcessAlive } = await import('../runtime/shared/index.js')
+    const layout = dataLayout(data.root)
+    const logs: string[] = []
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      logger: (level, message) => logs.push(`${level}: ${message}`),
+      diffusion: { timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 } },
+    })
+    cores.push(core)
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const events: string[] = []
+    for (const name of ['diffusion:state', 'diffusion:job', 'diffusion:progress', 'diffusion:error'] as const)
+      core.events.on(name, () => events.push(name))
+
+    // The data folder must be the owner's own.
+    await expect(client.configureDiffusion({ dataFolder: join(data.root, '..') })).rejects.toMatchObject({
+      code: 'NOT_CONFIGURED',
+    })
+    expect((await client.configureDiffusion({ dataFolder: data.root })).configured).toBe(true)
+
+    const dir = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'fake-cpu')
+    await writeFakeSdLaunchers(dir, { stepMs: 5 })
+    const record = await client.finalizeDiffusionBackend({
+      dir,
+      tag: 'master-849-d04e895',
+      backendId: 'fake-cpu',
+      backend: 'cpu',
+      engine: 'sd-cpp',
+    })
+    expect(record.dir).toBe(dir)
+    expect(logs.some((line) => line.startsWith('info: engine probe passed'))).toBe(true)
+
+    const diffusionModel = await writeFakeSdModel(layout)
+    const loaded = await client.loadDiffusionModel({
+      modelId: 'z-image:q4_k_m',
+      family: 'z-image',
+      modality: 'image',
+      displayName: 'Z-Image Turbo',
+      files: { diffusionModel },
+      defaults: { steps: 2, cfgScale: 1, width: 512, height: 512 },
+      ranges: { steps: [1, 50], dims: [16, 2048], dimMultiple: 16 },
+      offload: 'none',
+    })
+    expect(isProcessAlive(loaded.pid)).toBe(true)
+    // Journalled under its own provider, and not a chat session.
+    const journal = JSON.parse(await readFile(layout.core.processes, 'utf8')) as {
+      processes: Array<{ pid: number; provider: string; model_id: string }>
+    }
+    expect(journal.processes).toEqual([
+      expect.objectContaining({ pid: loaded.pid, provider: 'diffusion', model_id: 'z-image:q4_k_m' }),
+    ])
+    expect(core.sessions()).toEqual([])
+    // The server's own output is not the core's log.
+    expect(logs.some((line) => line.includes('[sd-server'))).toBe(false)
+
+    const { jobId } = await client.generateImage({
+      prompt: 'a cat',
+      width: 32,
+      height: 32,
+      steps: 2,
+      cfgScale: 1,
+      batchSize: 1,
+    })
+    const deadline = Date.now() + 10_000
+    while ((await client.diffusionJob(jobId))?.state !== 'completed') {
+      if (Date.now() > deadline) throw new Error('the job did not complete')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    const page = await client.listGallery({ offset: 0, limit: 10 })
+    expect(page.total).toBe(1)
+    expect(page.items[0]?.path.startsWith(join(data.root, 'images'))).toBe(true)
+    expect(events).toContain('diffusion:state')
+    expect(events).toContain('diffusion:job')
+    expect(events).toContain('diffusion:progress')
+    expect(events).not.toContain('diffusion:error')
+
+    // A failed engine probe is logged as a warning through the owner's logger.
+    const bad = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'bad')
+    await writeFakeSdLaunchers(bad)
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(join(bad, 'sd-cli'), "#!/bin/sh\necho 'llama-server usage'\n")
+    await expect(
+      client.finalizeDiffusionBackend({
+        dir: bad,
+        tag: 'master-849-d04e895',
+        backendId: 'bad',
+        backend: 'cpu',
+        engine: 'sd-cpp',
+      })
+    ).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED' })
+    expect(logs.some((line) => line.startsWith('warn: engine probe failed'))).toBe(true)
+
+    await core.shutdown()
+    expect(isProcessAlive(loaded.pid)).toBe(false)
+  })
+})

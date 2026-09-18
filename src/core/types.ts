@@ -1,6 +1,7 @@
 import type { LocalProviderId } from '../contracts/index.js'
 import type { LoadOptions } from '../runtime/llamacpp/index.js'
 import type { LocalLoadOptions } from '../runtime/index.js'
+import type { WireDiffusionOptions } from '../diffusion/index.js'
 import type { Prober, TunnelSpawner, TunnelTimings } from '../remote-access/index.js'
 
 export type CoreLogger = (level: 'info' | 'warn' | 'error', message: string) => void
@@ -19,6 +20,8 @@ export interface AtomicCoreOptions {
   cloudflaredPath?: string
   /** Test seams for the remote-access tunnel: a scripted process, a scripted probe, short timings. */
   remoteAccess?: { spawner?: TunnelSpawner; prober?: Prober; timings?: Partial<TunnelTimings> }
+  /** Test seams of the image-generation service (a fake engine, short timings). */
+  diffusion?: WireDiffusionOptions['overrides']
   /** The platform runtimes are offered for (macOS-only engines are not registered elsewhere). Test seam. */
   platform?: NodeJS.Platform
   fetch?: typeof fetch

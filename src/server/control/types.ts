@@ -7,6 +7,21 @@ import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '.
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
   DeviceInfo,
+  DiffusionBackendInstallRecord,
+  DiffusionCancelResult,
+  DiffusionConfig,
+  DiffusionModelFile,
+  DiffusionStatus,
+  FinalizeBackendInstallArgs,
+  GalleryFlags,
+  GalleryImageItem,
+  GalleryListOptions,
+  GalleryPage,
+  ImageCapabilities,
+  ImageGenerateRequest,
+  ImageJob,
+  LoadDiffusionModelRequest,
+  LoadedDiffusionModel,
   LocalApiServerState,
   LocalProviderId,
   RemoteAccessStatus,
@@ -139,6 +154,34 @@ export interface RemoteAccessControl {
   stop: () => Promise<RemoteAccessStatus>
 }
 
+/**
+ * Image generation (stage 7h): the app's twenty `DiffusionService` operations, one route each. The
+ * routes parse and validate the bodies; what arrives here is already typed.
+ */
+export interface DiffusionControl {
+  configure: (config: DiffusionConfig) => Promise<DiffusionStatus>
+  getStatus: () => Promise<DiffusionStatus>
+  setOutputDir: (path: string) => Promise<DiffusionStatus>
+  finalizeBackendInstall: (args: FinalizeBackendInstallArgs) => Promise<DiffusionBackendInstallRecord>
+  listInstalledBackends: () => Promise<DiffusionBackendInstallRecord[]>
+  removeBackend: (dir: string) => Promise<void>
+  listModelFiles: () => Promise<DiffusionModelFile[]>
+  deleteModelFile: (path: string) => Promise<void>
+  /** Answers once the server serves the model, which can take minutes. */
+  loadModel: (request: LoadDiffusionModelRequest) => Promise<LoadedDiffusionModel>
+  unloadModel: () => Promise<void>
+  getCapabilities: () => ImageCapabilities
+  touchIdle: () => void
+  generate: (request: ImageGenerateRequest) => Promise<{ jobId: string }>
+  getJob: (jobId: string) => ImageJob | null
+  cancelJob: (jobId: string) => Promise<DiffusionCancelResult>
+  listGallery: (options: GalleryListOptions) => Promise<GalleryPage>
+  getGalleryItem: (id: string) => Promise<GalleryImageItem | null>
+  deleteGalleryItems: (ids: string[]) => Promise<void>
+  setGalleryFlags: (id: string, flags: GalleryFlags) => Promise<GalleryImageItem>
+  exportGalleryItem: (id: string, targetPath: string) => Promise<void>
+}
+
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
 export interface ExternalSessionControl {
   publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
@@ -208,6 +251,7 @@ export interface ControlServerDeps {
   /** Free space inside the data folder, which the app asks before a download (stage 7b). */
   disk: DiskControl
   remoteAccess: RemoteAccessControl
+  diffusion: DiffusionControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /**

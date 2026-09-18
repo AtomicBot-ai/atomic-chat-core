@@ -21,6 +21,8 @@ import type {
   ModelControl,
   SessionSummary,
 } from '../../src/server/control/index.js'
+import { fakeDiffusionControl } from './fake-diffusion-control.js'
+import type { FakeDiffusionControl } from './fake-diffusion-control.js'
 import { fakeSettingsControl } from './fake-settings-control.js'
 import type { FakeSettingsControl } from './fake-settings-control.js'
 
@@ -51,6 +53,7 @@ export interface ControlHarness {
   remoteAccess: RemoteAccessStatus
   /** Set to make `POST /remote-access/start` refuse. */
   remoteAccessRefusal: Error | undefined
+  diffusion: FakeDiffusionControl
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
 
@@ -138,6 +141,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       serverHasApiKey: false,
     },
     remoteAccessRefusal: undefined,
+    diffusion: fakeDiffusionControl(calls),
   } as unknown as ControlHarness
   const server = await ControlServer.start({
     token: CONTROL_TOKEN,
@@ -177,6 +181,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
         return harness.remoteAccess
       },
     },
+    diffusion: harness.diffusion,
     externalSessions: {
       publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),
       heartbeat: () => ({ alive: true }),

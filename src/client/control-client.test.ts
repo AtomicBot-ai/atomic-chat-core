@@ -10,6 +10,7 @@ import { CoreEmitter } from '../events/index.js'
 import { ClientRegistry } from '../server/clients.js'
 import { ControlServer } from '../server/control/index.js'
 import { CoreClient } from './control-client.js'
+import { fakeDiffusionControl } from '../../test/helpers/fake-diffusion-control.js'
 import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
 import { HardwareOverrideStore } from '../hardware/index.js'
 import { CORE_VERSION } from '../version.js'
@@ -26,6 +27,7 @@ let shutdowns: number
 let loadFailure: Error | undefined
 let inspecting = false
 let tunnel: RemoteAccessStatus
+const diffusionCalls: string[] = []
 
 beforeEach(async () => {
   emitter = new CoreEmitter({ instanceId: 'client-test-instance' })
@@ -157,6 +159,7 @@ beforeEach(async () => {
         return tunnel
       },
     },
+    diffusion: fakeDiffusionControl(diffusionCalls),
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -401,6 +404,89 @@ describe('recreate', () => {
     expect(await client.recreateSession('llamacpp-upstream', 'gone')).toEqual({
       ok: false,
       reason: 'not-loaded',
+    })
+  })
+})
+
+describe('image generation', () => {
+  it('drives the twenty operations, unwrapping the lists and the lookups', async () => {
+    diffusionCalls.length = 0
+    expect((await client.configureDiffusion({ dataFolder: '/tmp/data', idleUnloadSecs: 0 })).configured).toBe(
+      true
+    )
+    expect((await client.diffusionStatus()).outputDir).toBe('/tmp/data/images')
+    expect((await client.setDiffusionOutputDir('/pics')).outputDir).toBe('/pics')
+    const record = await client.finalizeDiffusionBackend({
+      dir: '/d',
+      tag: 't',
+      backendId: 'cpu',
+      backend: 'cpu',
+      engine: 'sd-cpp',
+    })
+    expect(record.dir).toBe('/d')
+    expect(record.sha256).toBeNull()
+    expect((await client.listDiffusionBackends()).map((b) => b.backendId)).toEqual(['macos-arm64'])
+    await client.removeDiffusionBackend('/d')
+    expect((await client.listDiffusionModelFiles()).map((f) => f.relativePath)).toEqual(['z-image/z.gguf'])
+    await client.deleteDiffusionModelFile('/m/z.gguf')
+    const loaded = await client.loadDiffusionModel({
+      modelId: 'z-image:q4_k_m',
+      family: 'z-image',
+      modality: 'image',
+      displayName: 'Z-Image Turbo',
+      files: { diffusionModel: '/m/z.gguf' },
+      defaults: { steps: 8, cfgScale: 1, width: 1024, height: 1024 },
+      ranges: { steps: [1, 50], dims: [256, 2048], dimMultiple: 16 },
+      offload: 'none',
+    })
+    expect(loaded.pid).toBe(777)
+    expect((await client.diffusionCapabilities()).maxBatch).toBe(4)
+    await client.touchDiffusionIdle()
+    const { jobId } = await client.generateImage({
+      prompt: 'a cat',
+      width: 512,
+      height: 512,
+      steps: 8,
+      cfgScale: 1,
+      batchSize: 1,
+    })
+    expect(jobId).toBe('job-1')
+    expect((await client.diffusionJob(jobId))?.state).toBe('queued')
+    expect(await client.diffusionJob('gone/with/slashes')).toBeNull()
+    expect(await client.cancelImageJob(jobId)).toEqual({ cancelled: true, serverStopped: false })
+    const page = await client.listGallery({ offset: 0, limit: 40 })
+    expect(page.total).toBe(1)
+    await client.listGallery({ offset: 40, limit: 40, includeArchived: true })
+    const item = page.items[0]
+    expect((await client.galleryItem(item?.id as string))?.recipe.prompt).toBe('a cat')
+    expect(await client.galleryItem('nope')).toBeNull()
+    expect((await client.setGalleryFlags(item?.id as string, { archived: true })).archived).toBe(true)
+    await client.exportGalleryItem(item?.id as string, '/out/a.png')
+    await client.deleteGalleryItems([item?.id as string])
+    await client.unloadDiffusionModel()
+    expect(diffusionCalls).toEqual([
+      'diffusion configure {"dataFolder":"/tmp/data","idleUnloadSecs":0}',
+      'diffusion setOutputDir /pics',
+      'diffusion finalize {"dir":"/d","tag":"t","backendId":"cpu","backend":"cpu","engine":"sd-cpp"}',
+      'diffusion removeBackend /d',
+      'diffusion deleteModelFile /m/z.gguf',
+      'diffusion loadModel z-image:q4_k_m',
+      'diffusion touchIdle',
+      'diffusion generate a cat 512x512',
+      'diffusion cancelJob job-1',
+      'diffusion listGallery {"offset":0,"limit":40}',
+      'diffusion listGallery {"offset":40,"limit":40,"includeArchived":true}',
+      `diffusion setGalleryFlags ${item?.id} {"archived":true}`,
+      `diffusion exportGalleryItem ${item?.id} /out/a.png`,
+      `diffusion deleteGalleryItems ${item?.id}`,
+      'diffusion unloadModel',
+    ])
+  })
+
+  it('surfaces a refusal with the diffusion code', async () => {
+    await expect(client.setDiffusionOutputDir(7 as unknown as string)).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      details: 'path: expected a string',
     })
   })
 })

@@ -33,6 +33,7 @@ import {
   readRuntimeSettings,
   selectInstalledBackend,
 } from '../backend/index.js'
+import { wireDiffusion } from '../diffusion/index.js'
 import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
@@ -237,6 +238,17 @@ export async function createAtomicCore(
       return created
     }
 
+    const diffusion = wireDiffusion({
+      layout,
+      journal,
+      instanceId: lock.instanceId,
+      emit: (name, payload) => emitter.emit(name, payload),
+      log: (level, msg) => (level === 'debug' ? undefined : log(level, msg)),
+      platform,
+      env,
+      ...(options.diffusion ? { overrides: options.diffusion } : {}),
+    })
+
     const control = await ControlServer.start(
       {
         token,
@@ -306,6 +318,7 @@ export async function createAtomicCore(
           start: () => (core as AtomicCore).startRemoteAccess(),
           stop: () => (core as AtomicCore).stopRemoteAccess(),
         },
+        diffusion,
         settings: {
           get: (provider) => settings.get(provider),
           revision: () => settings.revision,
@@ -383,6 +396,7 @@ export async function createAtomicCore(
       chatgptBackend,
       externalSessions,
       appLeaseTimer,
+      diffusion,
       remoteAccess: await wireRemoteAccess({
         overrides: options.remoteAccess,
         cloudflaredPath: options.cloudflaredPath,

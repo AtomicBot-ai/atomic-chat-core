@@ -365,6 +365,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/diffusion/wiring.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/diffusion/workflow.ts": {
     "statements": 100,
     "branches": 100,
@@ -910,6 +916,12 @@
     "branches": 100,
     "functions": 100,
     "lines": 91
+  },
+  "src/server/control/routes/diffusion.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/server/control/routes/disk.ts": {
     "statements": 100,
