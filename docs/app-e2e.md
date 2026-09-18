@@ -136,6 +136,10 @@ What it proves of the scenarios above:
 - **12. Settings**, UI → core direction — a provider setting (`fit`) switched in the app's UI reaches
   `atomic-core/settings.json` and the argv of the next backend, both sides still agree after a full restart,
   and switching it back raises the revision. Conflicts, downgrade and the CLI scope are not covered.
+- **Cloud through the core** — a custom OpenAI-compatible provider created in the app's UI is mirrored to
+  `GET /cloud/providers` without its key; a chat in the app reaches it through the public server, which that
+  chat starts; an outside client of the public server naming the cloud model gets the reply while the provider
+  receives its own key, which that client never had.
 - An opt-in scenario (`make test-app-e2e-live`) runs the same chat against a real `llama-server` b10809 and
   Qwen3-0.6B: the core's argv starts it, readiness is recognised, a reply comes back, and a forced shutdown
   stops the child. With that binary `runtime_device` comes back empty — it prints no log lines by default,
