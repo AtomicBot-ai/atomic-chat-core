@@ -140,6 +140,25 @@ What it proves of the scenarios above:
   `GET /cloud/providers` without its key; a chat in the app reaches it through the public server, which that
   chat starts; an outside client of the public server naming the cloud model gets the reply while the provider
   receives its own key, which that client never had.
+- **7. External clients**, configuration only — "Run" for Codex on the app's Integrations page starts the
+  public server and writes `~/.codex/config.toml` (in a stand-in home) naming it and the running model,
+  keeping the user's own settings. No real agent is run against `:1337`.
+- A model stopped by hand from the provider's settings is unloaded in the core, stays down although it is
+  still selected, and comes back with the next message.
+- Relocating the app's data folder from Settings: the app restarts itself on the new folder and the thread,
+  the model and the backend are found there. The app stops its core before copying the folder and leaves the core's
+  runtime state behind (`instance.lock`, `control-token`, `processes.json`, `model-claims/`), so the core
+  is serving the new folder within seconds. Until 2026-09-18 the lock was copied with a live pid — which
+  this core never judges stale — and the new folder went unserved for about 40 s, until the previous core's
+  registration of the vanished app lapsed.
+- A model installed from the Hub (catalog, picks and file served by a local fixture) downloads through the
+  app's own downloader, not the core's, and is then served by the core under the downloaded id. A
+  cancelled download registers nothing.
+- A backend installed from a release archive in the app's settings is what the core starts on the model's
+  next load; a model already running keeps its backend. The core's download-and-verify install is reached from
+  the UI as well: a release published on the test machine behind a loopback CONNECT proxy (the shape of
+  `test/helpers/backend-install-e2e.ts`), found through the app's proxy setting, installed by
+  `POST /backends/llamacpp-upstream/install` with that proxy, and started on the next load.
 - An opt-in scenario (`make test-app-e2e-live`) runs the same chat against a real `llama-server` b10809 and
   Qwen3-0.6B: the core's argv starts it, readiness is recognised, a reply comes back, and a forced shutdown
   stops the child. With that binary `runtime_device` comes back empty — it prints no log lines by default,
