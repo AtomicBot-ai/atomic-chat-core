@@ -177,6 +177,8 @@ What it proves of the scenarios above:
   client's streamed completion is answered.
 - **5, MLX:** a model under the app's MLX provider is started by the core as an `mlx-server` session and
   answers a streamed chat; the server is `test/helpers/fake-sidecar-server.mjs`, which now streams.
+- **5, Foundation Models:** offered by the app when `foundation-models-server --check` answers `available`,
+  run by the core as a `foundation-models` session for a chat, and hidden when the answer is `notEligible`.
 - An opt-in scenario (`make test-app-e2e-live`) runs the same chat against a real `llama-server` b10809 and
   Qwen3-0.6B: the core's argv starts it, readiness is recognised, a reply comes back, and a forced shutdown
   stops the child. With that binary `runtime_device` comes back empty — it prints no log lines by default,
