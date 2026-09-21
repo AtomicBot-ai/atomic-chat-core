@@ -136,7 +136,9 @@ export class ProgressTracker {
         return 0.02
       case 'sampling':
         return Math.min(Math.max(done / total, 0.0), 0.97)
+      // `postprocessing` is never set here; the app's union has it for a pass after decoding.
       case 'decoding':
+      case 'postprocessing':
         return 0.98
       case 'saving':
         return 0.99

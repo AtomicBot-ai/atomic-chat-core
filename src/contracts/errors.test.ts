@@ -33,9 +33,10 @@ describe('AtomicCoreError', () => {
   })
 
   it("keeps the image-generation codes the web app's errors.ts matches on", () => {
-    // `NativeDiffusionErrorCode` in web-app/src/services/diffusion/types.ts, `error.rs` at 767ff6350.
+    // `NativeDiffusionErrorCode` in web-app/src/services/diffusion/types.ts, `error.rs` at ec1fd3ea7.
     expect([...DIFFUSION_ERROR_CODES]).toEqual([
       'ENGINE_MISSING',
+      'ENGINE_UPDATE_REQUIRED',
       'ENGINE_INSTALL_FAILED',
       'ENGINE_CRASHED',
       'MODEL_MISSING',
@@ -48,6 +49,7 @@ describe('AtomicCoreError', () => {
       'UNSUPPORTED_WORKFLOW',
       'INVALID_DIMENSIONS',
       'INVALID_REQUEST',
+      'INVALID_OUTPUT',
       'JOB_BUSY',
       'JOB_NOT_FOUND',
       'QUEUE_FULL',

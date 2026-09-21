@@ -41,7 +41,14 @@ describe('parseLoadModelRequest', () => {
     expect(parseLoadModelRequest(load())).toEqual(load())
     const full = {
       ...load(),
-      files: { ...load().files, vaeFormat: 'flux2', clipL: '/c', t5xxl: '/t', qwen2vl: '/q' },
+      files: {
+        ...load().files,
+        vaeFormat: 'flux2',
+        clipL: '/c',
+        t5xxl: '/t',
+        llmVision: '/v',
+        qwen2vl: '/q',
+      },
       defaults: { ...load().defaults, guidance: 3.5, samplingMethod: 'euler', flowShift: 3 },
       engine: 'sd-cpp',
       threads: 6,

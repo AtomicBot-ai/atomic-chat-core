@@ -3,9 +3,10 @@
  * `/sdcpp/v1/*` API, step progress read from its output, and the gallery on disk. A module of its
  * own, not a local runtime (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime).
  *
- * Ported from: src-tauri/plugins/tauri-plugin-atomic-diffusion/src/ at app commit `767ff6350`.
+ * Ported from: src-tauri/plugins/tauri-plugin-atomic-diffusion/src/ at app commit `ec1fd3ea7`.
  */
 export * from './args.js'
+export * from './compat.js'
 export * from './containment.js'
 export * from './errors.js'
 export * from './gallery.js'

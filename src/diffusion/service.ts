@@ -26,8 +26,9 @@ import type {
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
 import type { ImagesBackend } from '../server/index.js'
+import { selectModelInstall } from './compat.js'
 import { samePath } from './containment.js'
-import { diffusionError, ioError } from './errors.js'
+import { diffusionError, errorBody, ioError } from './errors.js'
 import { Gallery } from './gallery.js'
 import { createSdHttpClient } from './http.js'
 import type { SdHttpClient } from './http.js'
@@ -239,6 +240,7 @@ export class DiffusionService {
         files.clipL,
         files.t5xxl,
         files.llm,
+        files.llmVision,
         files.qwen2vl,
       ])
         if (used !== undefined && (await samePath(used, path, this.platform)))
@@ -270,8 +272,14 @@ export class DiffusionService {
           'Only the stable-diffusion.cpp engine is available in this build.',
           engine
         )
-      const record = (await listInstalledBackends(root, this.platform)).find((r) => r.engine === engine)
-      if (!record) throw diffusionError('ENGINE_MISSING', 'Install the image engine first.')
+      let record: DiffusionBackendInstallRecord
+      try {
+        record = selectModelInstall(await listInstalledBackends(root, this.platform), engine, request.family)
+      } catch (error) {
+        state.setModelState('failed', errorBody(error))
+        await emitState(this.deps, 'load-blocked')
+        throw error
+      }
 
       const spec: ServerSpec = {
         binaryDir: record.dir,
@@ -419,6 +427,7 @@ async function checkFiles(files: LoadDiffusionModelRequest['files']): Promise<vo
     ['clipL', files.clipL],
     ['t5xxl', files.t5xxl],
     ['llm', files.llm],
+    ['llmVision', files.llmVision],
     ['qwen2vl', files.qwen2vl],
   ]
   for (const [label, path] of entries) {

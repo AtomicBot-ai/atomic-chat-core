@@ -172,6 +172,11 @@ describe.skipIf(!posix)('the engine and the model', () => {
       code: 'ENGINE_MISSING',
       message: 'Install the image engine first.',
     })
+    // A load refused for its engine leaves the model failed with that error (`load-blocked`).
+    expect((await h.service.getStatus()).model).toMatchObject({
+      state: 'failed',
+      error: { code: 'ENGINE_MISSING' },
+    })
     const record = await h.service.finalizeBackendInstall({
       dir,
       tag: 'master-849-d04e895',
@@ -180,7 +185,7 @@ describe.skipIf(!posix)('the engine and the model', () => {
       engine: 'sd-cpp',
     })
     expect(record.dir).toBe(dir)
-    expect(h.reasons()).toEqual(['install'])
+    expect(h.reasons()).toEqual(['load-blocked', 'install'])
     expect(await h.service.listInstalledBackends()).toEqual([record])
     expect((await h.service.getStatus()).install).toMatchObject({
       state: 'installed',
@@ -218,7 +223,7 @@ describe.skipIf(!posix)('the engine and the model', () => {
     })
     expect(isProcessAlive(loaded.pid)).toBe(true)
     expect(h.journal).toEqual([{ op: 'add', pid: loaded.pid, modelId: 'z-image:q4_k_m' }])
-    expect(h.reasons()).toEqual(['install', 'load', 'loaded'])
+    expect(h.reasons()).toEqual(['load-blocked', 'install', 'load', 'loaded'])
     const status = await h.service.getStatus()
     expect(status.model).toEqual({ state: 'loaded', loaded })
     expect(status.install).toMatchObject({ dir })
@@ -249,6 +254,72 @@ describe.skipIf(!posix)('the engine and the model', () => {
     expect(await exists(dir)).toBe(false)
     expect(h.reasons().at(-1)).toBe('uninstall')
     // Unloading nothing is fine.
+    await h.service.unloadModel()
+  })
+
+  // `load_model` with `select_model_install` (`commands.rs`, app commit ec1fd3ea7).
+  it('blocks a modern family on an old engine, then loads it on a compatible tree of that backend', async () => {
+    const h = harness()
+    await h.service.configure({ dataFolder })
+    const install = async (tag: string) => {
+      const dir = join(layout.diffusion.backendsDir, tag, 'fake-cpu')
+      await writeFakeSdLaunchers(dir)
+      return h.service.finalizeBackendInstall({
+        dir,
+        tag,
+        backendId: 'fake-cpu',
+        backend: 'cpu',
+        engine: 'sd-cpp',
+      })
+    }
+    await install('master-849-d04e895')
+    const request = { ...(await loadRequest()), modelId: 'qwen-image-2.1:q4_k', family: 'qwen-image-2.1' }
+    await expect(h.service.loadModel(request)).rejects.toMatchObject({
+      code: 'ENGINE_UPDATE_REQUIRED',
+      details: 'installed=master-849-d04e895; required=master-883-137f740 or newer',
+    })
+    expect((await h.service.getStatus()).model).toMatchObject({
+      state: 'failed',
+      error: { code: 'ENGINE_UPDATE_REQUIRED' },
+    })
+    expect(h.reasons().at(-1)).toBe('load-blocked')
+    // A blocked load is told through the state, not as a separate error event.
+    expect(h.events.filter((e) => e.name === 'diffusion:error')).toEqual([])
+
+    const current = await install('master-883-137f740')
+    const loaded = await h.service.loadModel(request)
+    expect(loaded.family).toBe('qwen-image-2.1')
+    expect((await h.service.getStatus()).install).toMatchObject({
+      tag: 'master-883-137f740',
+      dir: current.dir,
+    })
+    await h.service.unloadModel()
+  })
+
+  it('checks and protects the vision projector like any other side file', async () => {
+    const h = harness()
+    await h.service.configure({ dataFolder })
+    const dir = join(layout.diffusion.backendsDir, 'master-883-137f740', 'fake-cpu')
+    await writeFakeSdLaunchers(dir)
+    await h.service.finalizeBackendInstall({
+      dir,
+      tag: 'master-883-137f740',
+      backendId: 'fake-cpu',
+      backend: 'cpu',
+      engine: 'sd-cpp',
+    })
+    const request = await loadRequest()
+    const missing = join(dataFolder, 'nope', 'mmproj.gguf')
+    await expect(
+      h.service.loadModel({ ...request, files: { ...request.files, llmVision: missing } })
+    ).rejects.toMatchObject({
+      code: 'SIDE_FILE_MISSING',
+      message: 'mmproj.gguf is missing. Download the model again.',
+      details: `llmVision: ${missing}`,
+    })
+    const projector = await writeFakeSdModel(layout, 'qwen-image-2.1/mmproj.gguf')
+    await h.service.loadModel({ ...request, files: { ...request.files, llmVision: projector } })
+    await expect(h.service.deleteModelFile(projector)).rejects.toMatchObject({ code: 'BACKEND_IN_USE' })
     await h.service.unloadModel()
   })
 

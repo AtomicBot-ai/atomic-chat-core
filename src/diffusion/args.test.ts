@@ -72,6 +72,7 @@ describe('buildServerArgs', () => {
       clipL: '/m/clip_l.safetensors',
       t5xxl: '/m/t5xxl.gguf',
       llm: '/m/qwen3.gguf',
+      llmVision: '/m/qwen3-mmproj.gguf',
       qwen2vl: '/m/qwen2vl.gguf',
     }
     const args = buildServerArgs(spec(files, 'none'), 4242, '/s', MAC)
@@ -80,7 +81,9 @@ describe('buildServerArgs', () => {
     expect(idx('--vae')).toBeLessThan(idx('--clip_l'))
     expect(idx('--clip_l')).toBeLessThan(idx('--t5xxl'))
     expect(idx('--t5xxl')).toBeLessThan(idx('--llm'))
-    expect(idx('--llm')).toBeLessThan(idx('--qwen2vl'))
+    expect(idx('--llm')).toBeLessThan(idx('--llm_vision'))
+    expect(idx('--llm_vision')).toBeLessThan(idx('--qwen2vl'))
+    expect(valueAfter(args, '--llm_vision')).toBe('/m/qwen3-mmproj.gguf')
     expect(valueAfter(args, '--vae-format')).toBe('flux2')
     expect(idx('--vae-format')).toBeLessThan(idx('--listen-ip'))
     expect(valueAfter(args, '--listen-ip')).toBe('127.0.0.1')
@@ -92,7 +95,7 @@ describe('buildServerArgs', () => {
 
   it('omits optional files and the VAE format when they are absent or empty', () => {
     const args = buildServerArgs(spec(zImageFiles(), 'none'), 1, '/s', MAC)
-    for (const flag of ['--clip_l', '--t5xxl', '--qwen2vl', '--vae-format', '--threads'])
+    for (const flag of ['--clip_l', '--t5xxl', '--llm_vision', '--qwen2vl', '--vae-format', '--threads'])
       expect(args, flag).not.toContain(flag)
     expect(valueAfter(args, '--llm')).toBe('/models/shared/Qwen3-4B-Q8_0.gguf')
 
@@ -184,6 +187,7 @@ describe('buildServerArgs', () => {
       clipL: '/m/c',
       t5xxl: '/m/d',
       llm: '/m/e',
+      llmVision: '/m/g',
       qwen2vl: '/m/f',
     }
     const emitted = new Set<string>()

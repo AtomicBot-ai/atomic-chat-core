@@ -12,13 +12,14 @@ import type {
   ImageCapabilities,
   LoadedDiffusionModel,
 } from '../contracts/index.js'
+import { checkEngineCompatibility } from './compat.js'
 import { samePath } from './containment.js'
 import { errorBody, modelNotLoadedError, toDiffusionError } from './errors.js'
 import { listInstalledBackends } from './install.js'
 import type { DiffusionState, ServerHandle } from './state.js'
 import { MAX_BATCH } from './types.js'
 import type { ServerSpec } from './types.js'
-import { workflowsForFamily } from './workflow.js'
+import { workflowsForSpec } from './workflow.js'
 
 /** CUDA and ROCm need a moment after the chat model's process dies before the driver reports the VRAM as free. */
 export const GPU_SETTLE_MS = 500
@@ -104,7 +105,7 @@ export function capabilities(state: DiffusionState): ImageCapabilities {
   const spec = state.spec
   if (!spec) throw modelNotLoadedError()
   return {
-    workflows: workflowsForFamily(spec.family),
+    workflows: workflowsForSpec(spec),
     minDim: spec.ranges.dims[0],
     maxDim: spec.ranges.dims[1],
     dimMultiple: spec.ranges.dimMultiple,
@@ -138,6 +139,8 @@ export async function loadFromSpec(
 
   let server: ServerHandle
   try {
+    // A retained spec can name an engine build that an update has since made too old for it.
+    checkEngineCompatibility(spec.family, spec.tag)
     server = await deps.spawn(spec, state.paths.scratchDir, signal)
   } catch (raw) {
     const error = toDiffusionError(raw)

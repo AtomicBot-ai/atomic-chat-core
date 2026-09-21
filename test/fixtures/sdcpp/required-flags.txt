@@ -7,6 +7,7 @@
 --clip_l
 --t5xxl
 --llm
+--llm_vision
 --qwen2vl
 --clip-on-cpu
 --vae-on-cpu

@@ -78,6 +78,8 @@ export type CoreErrorCode =
  */
 export const DIFFUSION_ERROR_CODES = [
   'ENGINE_MISSING',
+  /** The installed engine build is too old for the family being loaded (Qwen Image 2.1, Krea 2 Turbo). */
+  'ENGINE_UPDATE_REQUIRED',
   'ENGINE_INSTALL_FAILED',
   'ENGINE_CRASHED',
   'MODEL_MISSING',
@@ -90,6 +92,8 @@ export const DIFFUSION_ERROR_CODES = [
   'UNSUPPORTED_WORKFLOW',
   'INVALID_DIMENSIONS',
   'INVALID_REQUEST',
+  /** sd.cpp returned an image that is not one: unreadable, or a blank all-black/all-white frame. */
+  'INVALID_OUTPUT',
   'JOB_BUSY',
   'JOB_NOT_FOUND',
   'QUEUE_FULL',

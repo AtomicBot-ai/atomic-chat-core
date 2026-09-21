@@ -1,7 +1,7 @@
 /**
  * What a generation request must satisfy before anything is spawned or evicted for it.
  * `validate_request`, `check_source` and `strip_data_url` in `jobs.rs` of
- * `tauri-plugin-atomic-diffusion` (app commit `767ff6350`); messages verbatim, checks in the same
+ * `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`); messages verbatim, checks in the same
  * order, because the first failing one is what the user is shown.
  */
 
@@ -9,7 +9,7 @@ import type { ImageGenerateRequest, ImageSource } from '../contracts/index.js'
 import { diffusionError } from './errors.js'
 import { MAX_BATCH } from './types.js'
 import type { ServerSpec } from './types.js'
-import { usesMask, workflowOf, workflowsForFamily } from './workflow.js'
+import { usesMask, usesReferences, workflowOf, workflowsForSpec } from './workflow.js'
 
 export interface ValidateDeps {
   /** Whether `path` is an existing regular file. */
@@ -80,6 +80,17 @@ export async function validateRequest(
         `${label}=${value}`
       )
   }
+  // Qwen-Image past one megapixel faults the GPU on Metal instead of failing cleanly.
+  if (
+    spec.backend === 'metal' &&
+    spec.family === 'qwen-image' &&
+    request.width * request.height > 1024 * 1024
+  )
+    throw diffusionError(
+      'INVALID_DIMENSIONS',
+      'Qwen-Image is limited to about one megapixel on Apple GPUs. Choose a smaller resolution.',
+      `${request.width}x${request.height} exceeds the Metal-safe pixel budget`
+    )
   const [minSteps, maxSteps] = spec.ranges.steps
   if (request.steps < minSteps || request.steps > maxSteps)
     throw diffusionError(
@@ -111,7 +122,13 @@ export async function validateRequest(
 
   const workflow = workflowOf(request)
   if (workflow === 'create') return
-  if (!workflowsForFamily(spec.family).includes(workflow))
+  if (spec.family === 'qwen-image-2.1' && usesReferences(workflow) && spec.files.llmVision === undefined)
+    throw diffusionError(
+      'SIDE_FILE_MISSING',
+      'Qwen Image 2.1 editing needs its Qwen3-VL vision projector.',
+      'Load the model with llmVision so sd.cpp receives --llm_vision.'
+    )
+  if (!workflowsForSpec(spec).includes(workflow))
     throw diffusionError(
       'UNSUPPORTED_WORKFLOW',
       `This model cannot run the ${workflow} workflow.`,

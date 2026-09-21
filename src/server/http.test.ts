@@ -99,12 +99,14 @@ describe('error envelope', () => {
       ['BACKEND_IN_USE', 409],
       ['NOT_CONFIGURED', 409],
       ['CANCELLED', 409],
+      ['ENGINE_UPDATE_REQUIRED', 409],
       ['QUEUE_FULL', 429],
       ['DISK_FULL', 507],
       ['ENGINE_INSTALL_FAILED', 500],
       ['ENGINE_CRASHED', 500],
       ['MODEL_LOAD_FAILED', 500],
       ['MODEL_INCOMPATIBLE', 500],
+      ['INVALID_OUTPUT', 500],
       ['INTERNAL', 500],
     ]
     for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)

@@ -27,7 +27,8 @@ export type ImageWorkflowId = 'create' | 'transform' | 'inpaint' | 'extend' | 'u
 
 export type ImageJobState = 'queued' | 'generating' | 'completed' | 'failed' | 'cancelled'
 
-export type ImageJobPhase = 'queued' | 'encoding' | 'sampling' | 'decoding' | 'saving'
+/** `postprocessing` is in the app's union; nothing emits it yet. */
+export type ImageJobPhase = 'queued' | 'encoding' | 'sampling' | 'decoding' | 'postprocessing' | 'saving'
 
 /** Absolute paths of one checkpoint's files. Only `diffusionModel` is required. */
 export interface DiffusionModelFiles {
@@ -38,6 +39,8 @@ export interface DiffusionModelFiles {
   clipL?: string
   t5xxl?: string
   llm?: string
+  /** A VLM vision projector (Qwen Image 2.1's Qwen3-VL), passed to sd.cpp as `--llm_vision`. */
+  llmVision?: string
   qwen2vl?: string
 }
 

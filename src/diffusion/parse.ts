@@ -106,7 +106,7 @@ function parseFiles(value: unknown): DiffusionModelFiles {
   const files: DiffusionModelFiles = {
     diffusionModel: string(source['diffusionModel'], 'files.diffusionModel'),
   }
-  for (const key of ['vae', 'vaeFormat', 'clipL', 't5xxl', 'llm', 'qwen2vl'] as const)
+  for (const key of ['vae', 'vaeFormat', 'clipL', 't5xxl', 'llm', 'llmVision', 'qwen2vl'] as const)
     copyOptional(files, key, source, `files.${key}`, string)
   return files
 }

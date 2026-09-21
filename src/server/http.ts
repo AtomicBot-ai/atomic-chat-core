@@ -146,6 +146,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'BACKEND_IN_USE':
     case 'NOT_CONFIGURED':
     case 'CANCELLED':
+    case 'ENGINE_UPDATE_REQUIRED':
       return 409
     case 'QUEUE_FULL':
       return 429

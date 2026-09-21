@@ -201,6 +201,14 @@ describe('capabilities', () => {
       supportsGuidance: false,
       workflows: ['create', 'transform', 'inpaint', 'extend', 'upscale'],
     })
+    // What the loaded files allow: Qwen Image 2.1 references only with its vision projector.
+    h.state.spec = sampleSpec({ family: 'qwen-image-2.1' })
+    expect(capabilities(h.state).workflows).toEqual(['create'])
+    h.state.spec = sampleSpec({
+      family: 'qwen-image-2.1',
+      files: { diffusionModel: '/m/q.gguf', llmVision: '/m/mmproj.gguf' },
+    })
+    expect(capabilities(h.state).workflows).toEqual(['create', 'reference', 'edit'])
   })
 })
 
@@ -262,6 +270,26 @@ describe('loading', () => {
       code: 'INTERNAL',
       message: 'spawn EPERM',
     })
+  })
+
+  // Port of `incompatible_retained_spec_is_rejected_before_any_spawn_or_file_access`
+  // (`session.rs`, app commit ec1fd3ea7): a spec kept across an engine update can name a build that
+  // is now too old for it.
+  it('refuses a spec whose engine is too old for its family before anything is spawned', async () => {
+    const h = harness()
+    const spec = sampleSpec({ family: 'qwen-image-2.1', tag: 'master-849-d04e895' })
+    await expect(loadFromSpec(h.deps, spec, 'respawn')).rejects.toMatchObject({
+      code: 'ENGINE_UPDATE_REQUIRED',
+    })
+    expect(h.servers).toHaveLength(0)
+    expect(h.state.modelState).toBe('failed')
+    expect(h.state.modelError?.code).toBe('ENGINE_UPDATE_REQUIRED')
+    expect(h.reasons()).toEqual(['respawn', 'load-failed'])
+    await expect(loadFromSpec(h.deps, { ...spec, tag: 'master-883-137f740' }, 'load')).resolves.toMatchObject(
+      {
+        family: 'qwen-image-2.1',
+      }
+    )
   })
 })
 

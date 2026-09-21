@@ -113,6 +113,7 @@ export function buildServerArgs(
     ['--clip_l', files.clipL],
     ['--t5xxl', files.t5xxl],
     ['--llm', files.llm],
+    ['--llm_vision', files.llmVision],
     ['--qwen2vl', files.qwen2vl],
   ]
   for (const [flag, value] of optional) if (value) args.push(flag, value)

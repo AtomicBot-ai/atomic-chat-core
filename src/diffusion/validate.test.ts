@@ -1,7 +1,7 @@
 /**
  * Hand-ported from `validation_covers_every_range` and
  * `every_workflow_checks_its_inputs_and_the_family` in `jobs.rs` of `tauri-plugin-atomic-diffusion`
- * (app commit `767ff6350`).
+ * (app commit `ec1fd3ea7`).
  */
 import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
@@ -179,12 +179,51 @@ describe('validateRequest', () => {
       const r = withWorkflow(workflow, { initImage: path })
       expect((await refusal(r)).code, `${workflow} on z-image`).toBe('UNSUPPORTED_WORKFLOW')
       await expect(validateRequest(r, klein, deps), `${workflow} on klein`).resolves.toBeUndefined()
+      const qwen21 = spec({ family: 'qwen-image-2.1' })
+      expect(
+        (await refusal(r, qwen21)).toJSON(),
+        `${workflow} on Qwen Image 2.1 without --llm_vision`
+      ).toEqual({
+        code: 'SIDE_FILE_MISSING',
+        message: 'Qwen Image 2.1 editing needs its Qwen3-VL vision projector.',
+        details: 'Load the model with llmVision so sd.cpp receives --llm_vision.',
+      })
+      const withVision = spec({
+        family: 'qwen-image-2.1',
+        files: { ...qwen21.files, llmVision: '/models/mmproj.gguf' },
+      })
+      await expect(
+        validateRequest(r, withVision, deps),
+        `${workflow} on Qwen Image 2.1 with --llm_vision`
+      ).resolves.toBeUndefined()
       const badRef = await refusal({ ...r, referenceImages: [{ path: '/nonexistent/ref.png' }] }, klein)
       expect(badRef.code).toBe('INVALID_REQUEST')
       await expect(
         validateRequest({ ...r, referenceImages: [png, path] }, klein, deps)
       ).resolves.toBeUndefined()
     }
+  })
+
+  it('holds Qwen-Image on Metal to one megapixel, after the ranges and before the steps', async () => {
+    const qwen = spec({
+      family: 'qwen-image',
+      backend: 'metal',
+      ranges: { steps: [1, 50], dims: [256, 2048], dimMultiple: 16 },
+    })
+    await expect(validateRequest(request({ width: 1024, height: 1024 }), qwen, deps)).resolves.toBeUndefined()
+    expect((await refusal(request({ width: 1024, height: 1040, steps: 999 }), qwen)).toJSON()).toEqual({
+      code: 'INVALID_DIMENSIONS',
+      message: 'Qwen-Image is limited to about one megapixel on Apple GPUs. Choose a smaller resolution.',
+      details: '1024x1040 exceeds the Metal-safe pixel budget',
+    })
+    // Another backend, or Qwen Image 2.1, is not held to it.
+    for (const other of [
+      spec({ family: 'qwen-image', backend: 'cuda' }),
+      spec({ family: 'qwen-image-2.1', backend: 'metal' }),
+    ])
+      await expect(
+        validateRequest(request({ width: 2048, height: 2048 }), other, deps)
+      ).resolves.toBeUndefined()
   })
 
   it('refuses an inline image that is empty once its data-URL prefix is gone', async () => {
