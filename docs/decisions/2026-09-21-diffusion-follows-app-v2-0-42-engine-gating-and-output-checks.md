@@ -1,0 +1,16 @@
+---
+date: 2026-09-21
+title: "Image generation follows app v2.0.42: engine gating, output checks, finalize under the load lock"
+---
+
+# 2026-09-21 — Image generation follows app v2.0.42: engine gating, output checks, finalize under the load lock
+
+- **Context:** The app's image-generation line moved from v2.0.40 (`767ff6350`, the source of stages 7e–7j) to v2.0.42 (`ec1fd3ea7`). Its diffusion plugin gained Qwen Image 2.1 (with a Qwen3-VL vision projector passed as `--llm_vision`), Krea 2 Turbo and the `flux.1-*` variants; those need sd.cpp build 883, which the app now ships. It also started refusing all-black/all-white frames sd.cpp returns after a numerical overflow, retiring a server whose Metal backend faulted, switching off ggml's Metal Tensor API on Apple M5, and finalizing an engine install under the load lock so no idle or crashed spec respawns the old binary. On the core-migration line the plugin no longer exists; the core is the only implementation.
+- **Decision:** Port all of it into `src/diffusion/` with the plugin's codes and messages verbatim (`ENGINE_UPDATE_REQUIRED`, `INVALID_OUTPUT`), keeping three deliberate differences:
+  - **GPU faults are read from the attempt's own lines**, latched as they arrive (`GpuFaultWatch`), not from the server's tail by index. The plugin recorded the tail length at submit as a start index into a ring capped at 200 lines; once the ring was full the "recent" slice was always empty, so the check could not fire after a verbose load.
+  - **Gallery blank-frame verdicts are kept per file** (size and mtime) in the `Gallery` instance, so a listing decodes each small thumbnail once rather than on every scan (the plugin decoded natively on every listing; the core's decoder is JavaScript).
+  - **A well-formed PNG the core's codec does not decode is not called blank** (16-bit, grey, palette, interlaced; sd.cpp writes none of them), while bytes that are not a readable PNG are `INVALID_OUTPUT` as in the plugin.
+  - Engine selection keeps the plugin's rule: the newest install of the engine picks the backend, the first install of that backend compatible with the family wins, the backend is never switched; a refusal (`ENGINE_MISSING` included) leaves the model `failed` with reason `load-blocked` and no separate error event. The compatibility check runs again before every spawn.
+- **Consequences:** An engine update from the Images page (unload → install → finalize) cannot leave a stale spec behind. `ENGINE_UPDATE_REQUIRED` is 409 on the control API (the app routes on the code, not the status). Qwen Image 2.1 and Krea 2 Turbo are covered by the ported tables and the fake engine only: their weights are not on the test machine; the live test moved to build 883 with FLUX.2 Klein. The `postprocessing` job phase exists in the wire type because the app's union has it; the core never emits it.
+- **Owner:** team.
+- **Links:** `src/diffusion/{compat,workflow,validate,args,server-process,session,service,jobs,gallery,png,progress}.ts`; app `src-tauri/plugins/tauri-plugin-atomic-diffusion/src/{session,jobs,gallery,process,commands,args,state,error}.rs` at `ec1fd3ea7` (commits `5dbab67c8`, `2f021ad03`, `f9bf68ae8`, `d8cdf0ac4`, `0caebab8e`).

@@ -11,6 +11,7 @@
  *   ATOMIC_LIVE_SD_VAE=/path/to/vae.safetensors   (optional; FLUX.2 also needs ATOMIC_LIVE_SD_VAE_FORMAT=flux2)
  *   ATOMIC_LIVE_SD_LLM=/path/to/text-encoder      (optional; the family's LLM text encoder)
  *   ATOMIC_LIVE_SD_FAMILY=flux.2-klein            (optional; default flux.2-klein, 4 steps, cfg 1)
+ *   ATOMIC_LIVE_SD_TAG=master-883-137f740         (optional; the engine's release tag, as the app records it)
  *
  * The engine tree is copied into the temporary data folder (finalize refuses trees outside it); the
  * model files are read where they are. Nothing is written outside the temporary folder.
@@ -35,7 +36,8 @@ const LLM = process.env['ATOMIC_LIVE_SD_LLM'] ?? ''
 const FAMILY = process.env['ATOMIC_LIVE_SD_FAMILY'] ?? 'flux.2-klein'
 const ENABLED =
   process.env['ATOMIC_LIVE'] === '1' && ENGINE !== '' && MODEL !== '' && process.platform !== 'win32'
-const TAG = 'master-849-d04e895'
+/** The build app v2.0.42 ships, and the oldest that runs Qwen Image 2.1 and Krea 2 Turbo. */
+const TAG = process.env['ATOMIC_LIVE_SD_TAG'] ?? 'master-883-137f740'
 
 let data: TmpDataFolder
 let core: AtomicCore
