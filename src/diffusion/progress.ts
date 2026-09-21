@@ -207,3 +207,26 @@ export function classifyExit(tail: string, code: number | undefined): 'OUT_OF_ME
     lower.includes('insufficient memory')
   return outOfMemory ? 'OUT_OF_MEMORY' : 'ENGINE_CRASHED'
 }
+
+/**
+ * GPU faults sd.cpp can outlive while its Metal backend stays broken: an address fault, a backend
+ * left in its error state, or a command buffer that page-faulted. Fed the lines of one attempt;
+ * the two halves of the last kind may arrive on different lines. `fatal_gpu_error_since` in
+ * `jobs.rs` (app commit `ec1fd3ea7`), which reads the same markers from the server's tail.
+ */
+export class GpuFaultWatch {
+  private fault = false
+  private commandBuffer = false
+  private pagefault = false
+
+  onLine(line: string): void {
+    const lower = line.toLowerCase()
+    if (lower.includes('gpu address fault') || lower.includes('backend is in error state')) this.fault = true
+    if (lower.includes('command buffer')) this.commandBuffer = true
+    if (lower.includes('pagefault')) this.pagefault = true
+  }
+
+  get tripped(): boolean {
+    return this.fault || (this.commandBuffer && this.pagefault)
+  }
+}

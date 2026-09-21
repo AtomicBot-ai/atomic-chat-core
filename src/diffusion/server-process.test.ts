@@ -110,6 +110,37 @@ describe.skipIf(!posix)('spawnServer', () => {
     expect(await handle.exited).toEqual(exit)
   })
 
+  // `disable_metal_tensor_api_for_host` (`process.rs`, app commit ec1fd3ea7).
+  it('switches the Metal Tensor API off for an M5 on the Metal backend, and only there', async () => {
+    const envFile = join(dir, 'env.json')
+    const started = async (brand: string, backend: 'metal' | 'cpu', platform: NodeJS.Platform = 'darwin') => {
+      const spec = { ...(await engine({ envFile })), backend }
+      const log: string[] = []
+      const handle = await spawnServer(spec, join(dir, 'scratch'), {
+        http,
+        platform,
+        cpuBrand: () => brand,
+        log: (level, msg) => log.push(`${level}: ${msg}`),
+      })
+      await handle.terminate(0)
+      return { env: JSON.parse(await readFile(envFile, 'utf8')) as Record<string, unknown>, log }
+    }
+    const m5 = await started('Apple M5 Max', 'metal')
+    expect(m5.env).toEqual({ GGML_METAL_TENSOR_DISABLE: '1' })
+    expect(m5.log).toContain('info: disabled the Metal Tensor API on Apple M5 Max')
+    expect(
+      m5.log.some((line) => line.startsWith('debug: launch tag=test-tag backend=test-cpu binary='))
+    ).toBe(true)
+    for (const [brand, backend, platform] of [
+      ['Apple M4 Max', 'metal', 'darwin'],
+      ['Apple M5', 'cpu', 'darwin'],
+      ['Apple M5', 'metal', 'linux'],
+    ] as const)
+      expect((await started(brand, backend, platform)).env, `${brand} ${backend} ${platform}`).toEqual({
+        GGML_METAL_TENSOR_DISABLE: null,
+      })
+  })
+
   it('reports an early exit with the marker lines first', async () => {
     const spec = await engine({ mode: 'exit-early' })
     const log: string[] = []

@@ -12,6 +12,7 @@ import {
   fitWithin,
   HEADER_READ_LIMIT,
   insertAfterHeader,
+  isBlankRaster,
   isPng,
   makeChunk,
   parseHeader,
@@ -20,6 +21,7 @@ import {
   readPngHeader,
   textChunk,
   thumbnailPng,
+  UnsupportedPngError,
 } from './png.js'
 import type { RasterImage } from './png.js'
 
@@ -166,6 +168,7 @@ describe('decodePng', () => {
     'refuses %s rather than guessing',
     async (name) => {
       await expect(decodePng(await fixture(name))).rejects.toThrow(/unsupported PNG flavour/)
+      await expect(decodePng(await fixture(name))).rejects.toBeInstanceOf(UnsupportedPngError)
     }
   )
 
@@ -264,5 +267,33 @@ describe('thumbnails', () => {
     const thumb = await decodePng(await thumbnailPng(big, 256))
     expect([thumb.width, thumb.height, thumb.channels]).toEqual([256, 128, 3])
     await expect(thumbnailPng(await fixture('palette.png'), 256)).rejects.toThrow(/unsupported/)
+  })
+})
+
+describe('isBlankRaster', () => {
+  const flat = (value: number, channels: 3 | 4, alpha = 255): RasterImage => {
+    const data = Buffer.alloc(16 * 16 * channels, value)
+    if (channels === 4) for (let at = 3; at < data.length; at += 4) data[at] = alpha
+    return { width: 16, height: 16, channels, data }
+  }
+
+  // `detects_only_uniform_black_or_white_failure_frames` (`gallery.rs`, app commit ec1fd3ea7).
+  it('is true only for a near-uniform frame at one of the two extremes', () => {
+    for (const channels of [3, 4] as const) {
+      expect(isBlankRaster(flat(255, channels)), `white ${channels}`).toBe(true)
+      expect(isBlankRaster(flat(0, channels)), `black ${channels}`).toBe(true)
+      expect(isBlankRaster(flat(253, channels)), `near white ${channels}`).toBe(true)
+      expect(isBlankRaster(flat(2, channels)), `near black ${channels}`).toBe(true)
+      expect(isBlankRaster(flat(128, channels)), `grey ${channels}`).toBe(false)
+      expect(isBlankRaster(flat(3, channels)), `dark grey ${channels}`).toBe(false)
+      expect(isBlankRaster(painted(31, 17, channels)), `painted ${channels}`).toBe(false)
+    }
+  })
+
+  it('ignores alpha, and a single pixel off by more than 2 makes it an image', () => {
+    expect(isBlankRaster(flat(255, 4, 0))).toBe(true)
+    const speck = flat(255, 3)
+    speck.data[100] = 252
+    expect(isBlankRaster(speck)).toBe(false)
   })
 })

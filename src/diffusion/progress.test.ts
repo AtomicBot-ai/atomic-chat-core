@@ -12,6 +12,7 @@ import {
   parseTileAnnouncement,
   splitRecords,
   stripAnsi,
+  GpuFaultWatch,
 } from './progress.js'
 
 describe('splitRecords', () => {
@@ -152,5 +153,29 @@ describe('classifyExit', () => {
     ).toBe('OUT_OF_MEMORY')
     expect(classifyExit("unsupported op 'RMS_NORM'\nGGML_ABORT", -6)).toBe('ENGINE_CRASHED')
     expect(classifyExit('', undefined)).toBe('ENGINE_CRASHED')
+  })
+})
+
+describe('GpuFaultWatch', () => {
+  // The markers of `fatal_gpu_error_since` (`jobs.rs`, app commit ec1fd3ea7).
+  it('trips on an address fault or an error-state backend, in any case', () => {
+    for (const line of ['error: GPU Address Fault', 'ggml_metal: BACKEND IS IN ERROR STATE']) {
+      const watch = new GpuFaultWatch()
+      expect(watch.tripped).toBe(false)
+      watch.onLine(line)
+      expect(watch.tripped, line).toBe(true)
+    }
+  })
+
+  it('trips on a command buffer and a pagefault only together, even on separate lines', () => {
+    const watch = new GpuFaultWatch()
+    watch.onLine('ggml_metal: command buffer 3 failed with status 5')
+    expect(watch.tripped).toBe(false)
+    watch.onLine('IOGPUMetalError: pagefault')
+    expect(watch.tripped).toBe(true)
+    const pagefaultOnly = new GpuFaultWatch()
+    pagefaultOnly.onLine('pagefault')
+    pagefaultOnly.onLine('|=====> | 3/4 - 1.2s/it')
+    expect(pagefaultOnly.tripped).toBe(false)
   })
 })

@@ -1,9 +1,9 @@
 /**
  * Hand-ported from the runner tests of `jobs.rs` in `tauri-plugin-atomic-diffusion` (app commit
- * `767ff6350`): an HTTP stub speaks `/sdcpp/v1/*`, a fake server handle stands in for the process.
+ * `ec1fd3ea7`): an HTTP stub speaks `/sdcpp/v1/*`, a fake server handle stands in for the process.
  */
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -12,6 +12,7 @@ import type { CoreEvents, ImageGenerateRequest } from '../contracts/index.js'
 import { fakeServer, paintedPng, sampleRequest, sampleSpec } from '../../test/helpers/diffusion-fixtures.js'
 import type { FakeServer } from '../../test/helpers/diffusion-fixtures.js'
 import { Gallery } from './gallery.js'
+import { encodePng } from './png.js'
 import { createSdHttpClient } from './http.js'
 import {
   cancelJob,
@@ -301,6 +302,115 @@ describe('a completed job', () => {
     expect(outcome.job.outputs[0]?.recipe.seed).toBe(777)
     expect(outcome.job.outputs[0]?.recipe.strength).toBe(0.6)
     expect(outcome.job.outputs[0]?.recipe.workflow).toBe('inpaint')
+  })
+})
+
+/** A stub whose one job generates until `finish()` (at once when `finished`), then ends as `end`. */
+async function oneJob(
+  end: Record<string, unknown>,
+  finished = true
+): Promise<{ port: number; finish: () => void }> {
+  let done = finished
+  const port = await stub((method, path) => {
+    if (method === 'POST' && path === '/sdcpp/v1/img_gen') return json(202, { id: 'job_g', status: 'queued' })
+    if (method === 'GET' && path === '/sdcpp/v1/jobs/job_g')
+      return done ? json(200, { id: 'job_g', ...end }) : json(200, { id: 'job_g', status: 'generating' })
+    return json(404, {})
+  })
+  return { port, finish: () => (done = true) }
+}
+
+const listImages = () =>
+  readdir(join(dataFolder, 'images')).then(
+    (names) => names,
+    () => [] as string[]
+  )
+
+describe('a blank frame', () => {
+  // `save_outputs` (`jobs.rs`, app commit ec1fd3ea7).
+  it('fails the job before anything of the batch is saved, and leaves the server be', async () => {
+    const white = await encodePng({
+      width: 16,
+      height: 16,
+      channels: 3,
+      data: Buffer.alloc(16 * 16 * 3, 255),
+    })
+    const { port } = await oneJob({
+      status: 'completed',
+      result: {
+        images: [
+          { index: 0, b64_json: pngB64 },
+          { index: 1, b64_json: white.toString('base64') },
+        ],
+      },
+    })
+    const h = harness(port)
+    const error = failure(await (await startImageJob(h.deps, sampleRequest())).done)
+    expect(error).toEqual({
+      code: 'INVALID_OUTPUT',
+      message: 'The image engine produced a blank frame. Nothing was saved.',
+    })
+    expect(await listImages()).toEqual([])
+    expect(h.state.session).toBeDefined()
+    expect(h.state.modelState).toBe('loaded')
+  })
+})
+
+describe('a GPU fault', () => {
+  // `fatal_gpu_error_since` (`jobs.rs`, app commit ec1fd3ea7), read from this attempt's own lines.
+  it('in a completed job retires the server, keeps the spec and saves nothing', async () => {
+    const { port, finish } = await oneJob(
+      { status: 'completed', result: { images: [{ index: 0, b64_json: pngB64 }] } },
+      false
+    )
+    const h = harness(port)
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
+    await sleep(30)
+    h.server.say(
+      'ggml_metal_graph_compute: command buffer 0 failed with status 5',
+      'error: GPU Address Fault'
+    )
+    finish()
+    const error = failure(await done)
+    expect(error.code).toBe('ENGINE_CRASHED')
+    expect(error.message).toBe(
+      'The GPU stopped this render. The image engine was restarted; try again at a smaller resolution.'
+    )
+    expect(error.details).toContain('GPU Address Fault')
+    expect(h.state.session).toBeUndefined()
+    expect(h.state.spec).toBeDefined()
+    expect(h.state.modelState).toBe('failed')
+    expect(h.reasons()).toContain('gpu-fault')
+    expect(await listImages()).toEqual([])
+  })
+
+  it('in a failed job wins over the generic failure; its two halves may come on two lines', async () => {
+    const { port, finish } = await oneJob(
+      {
+        status: 'failed',
+        error: { code: 'generation_failed', message: 'generate_image returned empty results' },
+      },
+      false
+    )
+    const h = harness(port)
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
+    await sleep(30)
+    h.server.say('ggml_metal: command buffer 3 failed', 'IOGPUMetal: pagefault at 0x1000')
+    finish()
+    expect(failure(await done).code).toBe('ENGINE_CRASHED')
+    expect(h.reasons()).toContain('gpu-fault')
+  })
+
+  it('printed before this job does not count against it', async () => {
+    const { port } = await oneJob({
+      status: 'completed',
+      result: { images: [{ index: 0, b64_json: pngB64 }] },
+    })
+    const h = harness(port)
+    h.server.say('ggml_metal: backend is in error state')
+    const result = await (await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))).done
+    expect(result.ok).toBe(true)
+    expect(h.state.session).toBeDefined()
   })
 })
 
@@ -722,6 +832,24 @@ describe('the server dying', () => {
     unloaded.state.spec = undefined
     release()
     expect(failure(await started.done).code).toBe('MODEL_NOT_LOADED')
+  })
+
+  // `an_update_invalidating_a_spec_prevents_a_waiting_job_from_respawning_it` (`jobs.rs`): the spec is
+  // read once the load lock is held, so an engine update or a new load in between is what respawns.
+  it('respawns the spec that holds when it gets the load lock, not the one it saw before', async () => {
+    const { port } = await oneJob({
+      status: 'completed',
+      result: { images: [{ index: 0, b64_json: pngB64 }] },
+    })
+    const h = harness(port)
+    h.server.exit({ code: 1, signal: null })
+    const release = await h.deps.loadLock.acquire()
+    const started = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
+    await sleep(20)
+    h.state.spec = sampleSpec({ tag: 'master-883-137f740' })
+    release()
+    expect((await started.done).ok).toBe(true)
+    expect(h.spawned.map((spec) => spec.tag)).toEqual(['master-883-137f740'])
   })
 
   it('stops a generation that runs past the ceiling', async () => {

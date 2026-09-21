@@ -426,6 +426,30 @@ describe.skipIf(!posix)('generating', () => {
     expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(2)
   })
 
+  // `finalize_backend_install` + `activate_install` (`commands.rs`/`session.rs`, app commit ec1fd3ea7).
+  it('finalizes a new engine under the load lock: the running job is cancelled, the old server unloaded', async () => {
+    const h = await loadedService({ stepMs: 400 })
+    const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    await waitFor(() => h.service.getJob(jobId)?.state === 'generating')
+    const dir = join(layout.diffusion.backendsDir, 'master-900-abcdef0', 'fake-cpu')
+    await writeFakeSdLaunchers(dir)
+    const record = await h.service.finalizeBackendInstall({
+      dir,
+      tag: 'master-900-abcdef0',
+      backendId: 'fake-cpu',
+      backend: 'cpu',
+      engine: 'sd-cpp',
+    })
+    expect(h.service.getJob(jobId)?.state).toBe('cancelled')
+    expect(isProcessAlive(h.loaded.pid)).toBe(false)
+    const status = await h.service.getStatus()
+    expect(status.model.state).toBe('unloaded')
+    expect(status.install).toMatchObject({ tag: 'master-900-abcdef0', dir: record.dir })
+    expect(h.reasons().slice(-2)).toEqual(['engine-updated', 'install'])
+    // Nothing is left to respawn the old binary from.
+    await expect(h.service.generate(sampleRequest())).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })
+  })
+
   it('cancels the active job before loading another model, and unloads on idle', async () => {
     const h = await loadedService({ stepMs: 400 })
     const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))

@@ -17,7 +17,9 @@ import {
   buildServerArgs,
   commandSummaryForLog,
   cpuBackendExtraArgs,
+  hostEnv,
   isGgmlUnsupportedOpAbort,
+  isM5Brand,
   METAL_TE_GPU_ENV,
   metalTextEncoderFlags,
   offloadFlags,
@@ -417,5 +419,23 @@ describe('commandSummaryForLog', () => {
       `model=${'x'.repeat(45)}... backend=cpu`
     )
     expect(commandSummaryForLog(['--diffusion-model'])).toBe('')
+  })
+})
+
+describe('the host switches', () => {
+  // `recognizes_only_apple_m5_cpu_brands` (`process.rs`, app commit ec1fd3ea7).
+  it('recognizes only Apple M5 CPU brands', () => {
+    expect(isM5Brand('Apple M5')).toBe(true)
+    expect(isM5Brand('Apple M5 Max')).toBe(true)
+    expect(isM5Brand('Apple M4 Max')).toBe(false)
+    expect(isM5Brand('Intel(R) Core(TM) i9')).toBe(false)
+  })
+
+  it('disables the Metal Tensor API only for the Metal backend on an M5 Mac', () => {
+    expect(hostEnv('darwin', 'metal', 'Apple M5 Pro')).toEqual({ GGML_METAL_TENSOR_DISABLE: '1' })
+    expect(hostEnv('darwin', 'metal', 'Apple M4')).toEqual({})
+    expect(hostEnv('darwin', 'metal', undefined)).toEqual({})
+    expect(hostEnv('darwin', 'cpu', 'Apple M5')).toEqual({})
+    expect(hostEnv('linux', 'metal', 'Apple M5')).toEqual({})
   })
 })

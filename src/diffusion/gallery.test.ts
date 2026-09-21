@@ -9,8 +9,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
 import { jobId, paintedPng, sampleRecipe } from '../../test/helpers/diffusion-fixtures.js'
 import {
+  BLANK_SCAN_LIMIT,
   FLAGS_FILE,
   Gallery,
+  isBlankOutput,
   isValidId,
   makeId,
   pngPath,
@@ -20,7 +22,7 @@ import {
   writeFlags,
   writeThumbnail,
 } from './gallery.js'
-import { decodePng, readPngHeader } from './png.js'
+import { decodePng, encodePng, readPngHeader } from './png.js'
 import { a1111Parameters, parseRecipe } from './recipe.js'
 
 let dir: string
@@ -136,6 +138,68 @@ describe('Gallery.save', () => {
       new Gallery().save(join(dir, 'blocker', 'images'), sampleRecipe(), await paintedPng(8, 8))
     )
     expect(error.message).toBe('Could not create the images folder.')
+  })
+})
+
+const flatPng = (value: number, edge = 16) =>
+  encodePng({ width: edge, height: edge, channels: 3, data: Buffer.alloc(edge * edge * 3, value) })
+
+describe('blank frames', () => {
+  // `detects_only_uniform_black_or_white_failure_frames` (`gallery.rs`, app commit ec1fd3ea7).
+  it('are all-white or all-black PNGs; anything unreadable is INVALID_OUTPUT', async () => {
+    expect(await isBlankOutput(await flatPng(255))).toBe(true)
+    expect(await isBlankOutput(await flatPng(0))).toBe(true)
+    expect(await isBlankOutput(await flatPng(128))).toBe(false)
+    expect(await isBlankOutput(await paintedPng(16, 16))).toBe(false)
+    // A well-formed flavour this module does not decode is not called blank.
+    const palette = await readFile(new URL('../../test/fixtures/png/palette.png', import.meta.url))
+    expect(await isBlankOutput(palette)).toBe(false)
+    const unreadable = await refusal(isBlankOutput(Buffer.from('not a png')))
+    expect(unreadable.toJSON()).toEqual({
+      code: 'INVALID_OUTPUT',
+      message: 'The image engine returned an unreadable image.',
+      details: 'not a PNG',
+    })
+  })
+
+  // `item_from_path` (`gallery.rs`): an older build could save one; the listing hides it.
+  it('an older build saved are hidden from the listing and from lookups, judged on the thumbnail', async () => {
+    const warnings: string[] = []
+    const gallery = new Gallery((_level, msg) => warnings.push(msg))
+    const { item: blank } = await gallery.save(dir, sampleRecipe({ jobId: jobId(1) }), await flatPng(255, 64))
+    const { item: real } = await gallery.save(
+      dir,
+      sampleRecipe({ jobId: jobId(2) }),
+      await paintedPng(64, 64)
+    )
+    const page = await gallery.list(dir, { offset: 0, limit: 10, includeArchived: true })
+    expect(page.items.map((item) => item.id)).toEqual([real.id])
+    expect(await gallery.get(dir, blank.id)).toBeNull()
+    expect((await refusal(gallery.setFlags(dir, blank.id, { pinned: true }))).code).toBe('JOB_NOT_FOUND')
+    expect(warnings.filter((w) => w === `hiding blank gallery output ${blank.id}`)).toHaveLength(1)
+    // The verdict is kept per file: a second listing does not decode or warn again.
+    await gallery.list(dir, { offset: 0, limit: 10 })
+    expect(warnings.filter((w) => w.startsWith('hiding'))).toHaveLength(1)
+
+    // Without a thumbnail the PNG itself is judged; a rewritten file is judged again.
+    await rm(thumbPath(dir, real.id))
+    expect(await gallery.get(dir, real.id)).not.toBeNull()
+    await rm(thumbPath(dir, blank.id))
+    expect(await gallery.get(dir, blank.id)).toBeNull()
+
+    // Deleting still works on a hidden item.
+    await gallery.delete(dir, [blank.id])
+    expect(await exists(blank.path)).toBe(false)
+  })
+
+  it('are not looked for in files too large to be one', async () => {
+    const gallery = new Gallery()
+    const { item } = await gallery.save(dir, sampleRecipe({ jobId: jobId(3) }), await flatPng(0, 16))
+    await rm(thumbPath(dir, item.id))
+    // Pad the PNG past the limit with a trailing chunk-free tail a reader ignores after IEND.
+    const bytes = await readFile(item.path)
+    await writeFile(item.path, Buffer.concat([bytes, Buffer.alloc(BLANK_SCAN_LIMIT)]))
+    expect(await gallery.get(dir, item.id)).not.toBeNull()
   })
 })
 

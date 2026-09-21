@@ -1,13 +1,14 @@
 /**
  * Pure argv and request builders for `sd-server`: no I/O and no process, so every flag decision is
  * tested without a binary or a model file. Port of `args.rs` in `tauri-plugin-atomic-diffusion` (app
- * commit `767ff6350`), itself a port of Studio's `sd_cpp_args.py`.
+ * commit `ec1fd3ea7`, and the host switch of `process.rs`), itself a port of Studio's `sd_cpp_args.py`.
  *
  * Every flag emitted here is listed in `test/fixtures/sdcpp/required-flags.txt`, which the live test
  * holds against the pinned binary's `--help`.
  */
 
 import type {
+  DiffusionBackend,
   DiffusionFamilyDefaults,
   DiffusionOffloadPolicy,
   ImageGenerateRequest,
@@ -54,6 +55,27 @@ export function metalTextEncoderFlags(isMacos: boolean, envOverride: string | un
   if (!isMacos) return []
   const keepOnGpu = ['1', 'true', 'yes', 'on'].includes((envOverride ?? '').trim().toLowerCase())
   return keepOnGpu ? [] : ['--clip-on-cpu']
+}
+
+/** An Apple M5 CPU brand string: `Apple M5`, `Apple M5 Max`. */
+export function isM5Brand(brand: string): boolean {
+  return brand.split(/\s+/).some((part) => part.startsWith('M5'))
+}
+
+/**
+ * The environment `sd-server` gets for this host. ggml's Metal Tensor API is unstable on some M5 and
+ * macOS combinations: it can fail command buffers, or return NaN latents that come out as white
+ * images. On an M5 with the Metal backend it is switched off, which keeps Metal on its mature
+ * SIMD-group path; the argv is left alone, because older engine builds reject newer scaling flags.
+ */
+export function hostEnv(
+  platform: NodeJS.Platform,
+  backend: DiffusionBackend,
+  cpuBrand: string | undefined
+): Record<string, string> {
+  if (platform === 'darwin' && backend === 'metal' && isM5Brand(cpuBrand ?? ''))
+    return { GGML_METAL_TENSOR_DISABLE: '1' }
+  return {}
 }
 
 /**

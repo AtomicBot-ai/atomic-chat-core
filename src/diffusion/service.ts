@@ -1,7 +1,7 @@
 /**
  * The image-generation service: the twenty operations of the app's `DiffusionService`, one method
  * each, over the module's state. The command surface of `commands.rs` in
- * `tauri-plugin-atomic-diffusion` (app commit `767ff6350`), with the plugin's setup and exit hooks
+ * `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`), with the plugin's setup and exit hooks
  * (`lib.rs`) as `start`/`shutdown`.
  */
 
@@ -53,6 +53,7 @@ import type { JobDeps, JobOutcome, JobTimings } from './jobs.js'
 import { AsyncMutex } from './mutex.js'
 import { spawnServer } from './server-process.js'
 import {
+  activateInstall,
   buildStatus,
   capabilities,
   emitState,
@@ -201,14 +202,23 @@ export class DiffusionService {
 
   // --- engine binary -------------------------------------------------------------------------------
 
-  async finalizeBackendInstall(args: FinalizeBackendInstallArgs): Promise<DiffusionBackendInstallRecord> {
-    const record = await finalizeBackendInstall(this.state.paths.backendsDir, args, {
-      platform: this.platform,
-      log: this.deps.log,
-      now: this.deps.now,
+  /**
+   * Under the load lock, so no load or respawn runs across it: finalize, cancel a running job, and
+   * unload a model whose tree the new install replaces.
+   */
+  finalizeBackendInstall(args: FinalizeBackendInstallArgs): Promise<DiffusionBackendInstallRecord> {
+    return this.deps.loadLock.run(async () => {
+      const record = await finalizeBackendInstall(this.state.paths.backendsDir, args, {
+        platform: this.platform,
+        log: this.deps.log,
+        now: this.deps.now,
+      })
+      if (this.state.activeJobId !== undefined)
+        await cancelJob(this.deps, this.state.activeJobId).catch(() => undefined)
+      await activateInstall(this.deps, record)
+      await emitState(this.deps, 'install')
+      return record
     })
-    await emitState(this.deps, 'install')
-    return record
   }
 
   listInstalledBackends(): Promise<DiffusionBackendInstallRecord[]> {

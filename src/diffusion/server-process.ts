@@ -1,6 +1,6 @@
 /**
  * Spawning and supervising the `sd-server` process. Port of `process.rs` in
- * `tauri-plugin-atomic-diffusion` (app commit `767ff6350`).
+ * `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`).
  *
  * Readiness is real: upstream loads the model *before* it binds the port, so a 200 from
  * `GET /v1/models` means the model is loaded, and a load failure exits the process before it
@@ -8,7 +8,7 @@
  * `/sdcpp/v1/capabilities` is probed afterwards: a 404 there means the port belongs to someone else.
  */
 
-import { constants } from 'node:os'
+import { constants, cpus } from 'node:os'
 import { mkdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
@@ -20,7 +20,7 @@ import {
   spawnManaged,
 } from '../runtime/shared/index.js'
 import type { ManagedProcess } from '../runtime/shared/index.js'
-import { buildServerArgs, commandSummaryForLog } from './args.js'
+import { buildServerArgs, commandSummaryForLog, hostEnv } from './args.js'
 import { diffusionError, ioError } from './errors.js'
 import type { SdHttpClient } from './http.js'
 import { serverBinaryName } from './install.js'
@@ -50,6 +50,8 @@ export interface SpawnServerDeps {
   /** Stops a load that is still waiting for the port (an unload or a shutdown); the child is killed. */
   signal?: AbortSignal
   freePort?: () => Promise<number>
+  /** The CPU brand (`Apple M5 Max`); `os.cpus()` by default, which reads `machdep.cpu.brand_string` on macOS. */
+  cpuBrand?: () => string | undefined
   readyPollIntervalMs?: number
   sleep?: (ms: number) => Promise<void>
 }
@@ -133,13 +135,17 @@ export async function spawnServer(
   })
   const args = buildServerArgs(spec, port, scratchDir, { platform, env: baseEnv })
   log('info', `starting sd-server: ${commandSummaryForLog(args)}`)
+  log('debug', `launch tag=${spec.tag} backend=${spec.backendId} binary=${exe}`)
+  const brand = (deps.cpuBrand ?? (() => cpus()[0]?.model))()
+  const userEnv = hostEnv(platform, spec.backend, brand)
+  if (userEnv['GGML_METAL_TENSOR_DISABLE']) log('info', `disabled the Metal Tensor API on ${brand}`)
 
   const { env, cwd } = buildProcessEnv({
     platform,
     baseEnv,
     exeDir: spec.binaryDir,
     cuda: discoverCudaPaths(nodeCudaProbeEnv(platform, baseEnv)),
-    userEnv: {},
+    userEnv,
   })
 
   const tail: string[] = []

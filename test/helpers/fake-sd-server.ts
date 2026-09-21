@@ -30,6 +30,8 @@ export interface FakeSdOptions {
   stderr?: string
   pidFile?: string
   argvFile?: string
+  /** Where the fake writes the host switches it was started with. */
+  envFile?: string
   ignoreSigterm?: boolean
 }
 
@@ -43,6 +45,7 @@ export function fakeSdEnv(options: FakeSdOptions): Record<string, string> {
   if (options.stderr !== undefined) env['FAKE_SD_STDERR'] = options.stderr
   if (options.pidFile) env['FAKE_SD_PID_FILE'] = options.pidFile
   if (options.argvFile) env['FAKE_SD_ARGV_FILE'] = options.argvFile
+  if (options.envFile) env['FAKE_SD_ENV_FILE'] = options.envFile
   if (options.ignoreSigterm) env['FAKE_SD_IGNORE_SIGTERM'] = '1'
   return env
 }

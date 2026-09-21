@@ -1,7 +1,7 @@
 /**
  * Image jobs: validate, submit to `sd-server`, poll, save, and the cancel path. Shared by the
  * control route and the OpenAI facade, so both get the same validation, events, gallery and idle
- * timer. Port of `jobs.rs` in `tauri-plugin-atomic-diffusion` (app commit `767ff6350`).
+ * timer. Port of `jobs.rs` in `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`).
  *
  * One deliberate change: a respawn re-checks, once it holds the load lock, that nobody cancelled
  * the job or unloaded the model while it waited. The plugin took the lock and spawned regardless.
@@ -23,10 +23,11 @@ import type {
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import { buildImgGenRequest, cpuBackendExtraArgs, isGgmlUnsupportedOpAbort } from './args.js'
 import { cancelledError, diffusionError, errorBody, internalError, modelNotLoadedError } from './errors.js'
+import { isBlankOutput } from './gallery.js'
 import type { Gallery } from './gallery.js'
 import type { SdHttpClient } from './http.js'
 import type { AsyncMutex } from './mutex.js'
-import { classifyExit, diagnosticTail } from './progress.js'
+import { classifyExit, diagnosticTail, GpuFaultWatch } from './progress.js'
 import { describeExit, exitCodeOf } from './server-process.js'
 import { loadFromSpec, stopKeepingSpec, takeDownSession } from './session.js'
 import type { SessionDeps } from './session.js'
@@ -265,21 +266,23 @@ interface SessionView {
 }
 
 /**
- * Replace the resident server with one for `spec`, under the load lock. Once the lock is held the
- * job may already be cancelled or the model unloaded: then nothing is spawned.
+ * Replace the resident server with one for `next(spec)`, under the load lock. Once the lock is held
+ * the job may already be cancelled, the model unloaded, or the spec replaced by a load or an engine
+ * update: the spec is read only then, and without one nothing is spawned.
  */
 async function replaceSession(
   deps: JobDeps,
-  spec: ServerSpec,
+  next: (current: ServerSpec) => ServerSpec,
   reason: string,
   cancel: CancelFlag
 ): Promise<void> {
   await deps.loadLock.run(async () => {
     if (cancel.requested) throw cancelledError()
     if (deps.state.closing) throw diffusionError('ENGINE_CRASHED', 'sd-server was stopped.')
-    if (!deps.state.spec) throw modelNotLoadedError()
+    const current = deps.state.spec
+    if (!current) throw modelNotLoadedError()
     await takeDownSession(deps)
-    await loadFromSpec(deps, spec, reason)
+    await loadFromSpec(deps, next(current), reason)
   })
 }
 
@@ -289,9 +292,7 @@ async function ensureSession(deps: JobDeps, cancel: CancelFlag): Promise<Session
   const alive = state.session
   if (alive && alive.server.exitStatus() === undefined) return { baseUrl: alive.baseUrl, spec: alive.spec }
   if (cancel.requested) throw cancelledError()
-  const spec = state.spec
-  if (!spec) throw modelNotLoadedError()
-  await replaceSession(deps, spec, 'respawn', cancel)
+  await replaceSession(deps, (current) => current, 'respawn', cancel)
   const session = state.session
   if (!session) throw diffusionError('ENGINE_CRASHED', 'sd-server went away right after starting.')
   return { baseUrl: session.baseUrl, spec: session.spec }
@@ -330,7 +331,7 @@ async function execute(
       extraArgs: cpuBackendExtraArgs(view.spec.extraArgs),
       cpuFallback: true,
     }
-    await replaceSession(deps, spec, 'cpu-fallback', cancel)
+    await replaceSession(deps, () => spec, 'cpu-fallback', cancel)
   }
 }
 
@@ -414,8 +415,25 @@ async function pollJob(
   const tracker = new ProgressTracker(sampledSteps(request), request.batchSize, deps.now)
   const jobUrl = `${view.baseUrl}${JOBS_PATH}/${serverJobId}`
   const deadline = started + timings.generationCeilingMs
+  const gpu = new GpuFaultWatch()
   const drain = () => {
-    for (const line of lines.splice(0)) tracker.onLine(line)
+    for (const line of lines.splice(0)) {
+      tracker.onLine(line)
+      gpu.onLine(line)
+    }
+  }
+  // Metal stays in its error state after an address fault, so every retry on this process would
+  // fail at once: retire it, keep the spec, and the next job respawns a clean server.
+  const retireAfterGpuFault = async (): Promise<void> => {
+    drain()
+    if (!gpu.tripped) return
+    const error = diffusionError(
+      'ENGINE_CRASHED',
+      'The GPU stopped this render. The image engine was restarted; try again at a smaller resolution.',
+      diagnosticTail(tracker.logLines(), 20, 1500)
+    )
+    await stopKeepingSpec(deps, 'gpu-fault', errorBody(error))
+    throw error
   }
 
   for (;;) {
@@ -488,6 +506,7 @@ async function pollJob(
         setJobState(deps, id, 'generating')
         tracker.setPhase('saving')
         setProgress(deps, id, tracker)
+        await retireAfterGpuFault()
         const pngs = decodeImages(job)
         const { items, images } = await saveOutputs(deps, id, request, view, batchSeed, started, pngs)
         const record = state.job(id)
@@ -495,6 +514,7 @@ async function pollJob(
         return { kind: 'done', outcome: { job: { ...record, outputs: items }, images } }
       }
       case 'failed': {
+        await retireAfterGpuFault()
         const failure = (job['error'] ?? {}) as Record<string, unknown>
         const code = typeof failure['code'] === 'string' ? failure['code'] : 'error'
         const message = typeof failure['message'] === 'string' ? failure['message'] : ''
@@ -554,6 +574,10 @@ async function saveOutputs(
   started: number,
   pngs: Buffer[]
 ): Promise<{ items: GalleryImageItem[]; images: Buffer[] }> {
+  // A frame sd.cpp returned after a numerical overflow is not an image; nothing of the batch is kept.
+  for (const png of pngs)
+    if (await isBlankOutput(png))
+      throw diffusionError('INVALID_OUTPUT', 'The image engine produced a blank frame. Nothing was saved.')
   const outputDir = deps.state.outputDir()
   const { spec } = view
   const workflow = workflowOf(request)

@@ -1,11 +1,12 @@
 /**
  * Session lifecycle: bringing `sd-server` up from a `ServerSpec`, tearing it down, and describing
  * the result as the status and capabilities the app reads. Every state change here emits
- * `diffusion:state`. Port of `session.rs` in `tauri-plugin-atomic-diffusion` (app commit `767ff6350`).
+ * `diffusion:state`. Port of `session.rs` in `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`).
  */
 
 import type {
   CoreEvents,
+  DiffusionBackendInstallRecord,
   DiffusionEngineInstall,
   DiffusionErrorBody,
   DiffusionStatus,
@@ -199,6 +200,21 @@ export async function unload(deps: SessionDeps, reason: string): Promise<void> {
   state.clearIdle()
   state.setModelState('unloaded')
   await emitState(deps, reason)
+}
+
+/**
+ * A finished engine install that replaces the tree the spec runs from invalidates both a resident
+ * server and a spec kept after an idle unload or a crash: unload, so no job respawns the old binary.
+ * The caller holds the load lock and has cancelled any running job.
+ */
+export async function activateInstall(
+  deps: SessionDeps,
+  record: DiffusionBackendInstallRecord
+): Promise<void> {
+  const spec = deps.state.spec
+  if (!spec || spec.engine !== record.engine) return
+  if (spec.tag === record.tag && (await samePath(spec.binaryDir, record.dir, deps.platform))) return
+  await unload(deps, 'engine-updated')
 }
 
 /** The server was stopped but the spec stays: the next job respawns it. */

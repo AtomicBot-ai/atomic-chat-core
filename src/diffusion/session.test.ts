@@ -1,5 +1,5 @@
 /**
- * `session.rs` of `tauri-plugin-atomic-diffusion` (app commit `767ff6350`), against a fake server
+ * `session.rs` of `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`), against a fake server
  * handle: what the status says, what the events carry, what a load and an unload leave behind.
  */
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -13,6 +13,7 @@ import type { FakeServer } from '../../test/helpers/diffusion-fixtures.js'
 import { diffusionError } from './errors.js'
 import { INSTALL_RECORD, OWNER_MARKER } from './install.js'
 import {
+  activateInstall,
   buildStatus,
   capabilities,
   currentInstall,
@@ -331,6 +332,58 @@ describe('tearing down', () => {
     h.events.length = 0
     await unload(h.deps, 'idle')
     expect(h.reasons()).toEqual(['idle'])
+  })
+
+  describe('after an engine install', () => {
+    const record = (tag: string, dir: string) => ({
+      tag,
+      backendId: 'test-cpu',
+      backend: 'cpu' as const,
+      engine: 'sd-cpp' as const,
+      sha256: null,
+      installedAtMs: 1,
+      dir,
+    })
+
+    // `activating_an_update_forgets_idle_or_failed_specs` (`session.rs`, app commit ec1fd3ea7).
+    it('forgets an idle or failed spec that ran from another build', async () => {
+      for (const modelState of ['unloaded', 'failed'] as const) {
+        const h = harness()
+        h.state.spec = sampleSpec({ tag: 'master-849-d04e895', binaryDir: '/engines/849' })
+        h.state.setModelState(modelState)
+        await activateInstall(h.deps, record('master-883-137f740', '/engines/883'))
+        expect(h.state.spec, modelState).toBeUndefined()
+        expect(h.state.modelState).toBe('unloaded')
+        expect(h.reasons().at(-1)).toBe('engine-updated')
+      }
+    })
+
+    // `activating_an_update_terminates_the_resident_old_server` (`session.rs`).
+    it('unloads a resident server of another build', async () => {
+      const h = harness()
+      await loadFromSpec(h.deps, sampleSpec({ tag: 'master-849-d04e895', binaryDir: '/engines/849' }), 'load')
+      const server = h.servers[0] as FakeServer
+      await activateInstall(h.deps, record('master-883-137f740', '/engines/883'))
+      expect(server.terminated).toHaveLength(1)
+      expect(h.state.session).toBeUndefined()
+      expect(h.state.spec).toBeUndefined()
+      expect(h.state.modelState).toBe('unloaded')
+    })
+
+    it('leaves a spec on the same tag and tree alone, and one of another engine', async () => {
+      const h = harness()
+      const dir = join(dataFolder, 'engine')
+      await mkdir(dir, { recursive: true })
+      await loadFromSpec(h.deps, sampleSpec({ tag: 'master-883-137f740', binaryDir: dir }), 'load')
+      h.events.length = 0
+      await activateInstall(h.deps, record('master-883-137f740', dir))
+      await activateInstall(h.deps, { ...record('master-900-abc', '/elsewhere'), engine: 'diffusers' })
+      expect(h.state.session).toBeDefined()
+      expect(h.events).toEqual([])
+      // The same tag in another tree is another build.
+      await activateInstall(h.deps, record('master-883-137f740', join(dataFolder, 'other')))
+      expect(h.state.spec).toBeUndefined()
+    })
   })
 
   it('stops keeping the spec, as failed or as unloaded', async () => {

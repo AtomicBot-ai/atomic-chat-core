@@ -16,6 +16,7 @@
  *   FAKE_SD_STDERR      text printed to stderr before an early exit (default: a ggml abort)
  *   FAKE_SD_PID_FILE    path; the pid is appended there on startup
  *   FAKE_SD_ARGV_FILE   path; the argv is written there as JSON on startup
+ *   FAKE_SD_ENV_FILE    path; the host switches the core sets (GGML_METAL_TENSOR_DISABLE) as JSON
  *   FAKE_SD_IGNORE_SIGTERM  1 → SIGTERM is ignored (only SIGKILL stops it)
  */
 import { appendFileSync, writeFileSync } from 'node:fs'
@@ -42,6 +43,11 @@ if (argv.includes('-h') || argv.includes('--help')) {
 }
 if (env.FAKE_SD_PID_FILE) appendFileSync(env.FAKE_SD_PID_FILE, `${process.pid}\n`)
 if (env.FAKE_SD_ARGV_FILE) writeFileSync(env.FAKE_SD_ARGV_FILE, JSON.stringify(argv))
+if (env.FAKE_SD_ENV_FILE)
+  writeFileSync(
+    env.FAKE_SD_ENV_FILE,
+    JSON.stringify({ GGML_METAL_TENSOR_DISABLE: env.GGML_METAL_TENSOR_DISABLE ?? null })
+  )
 if (env.FAKE_SD_IGNORE_SIGTERM === '1') process.on('SIGTERM', () => {})
 
 const onCpu = argv.includes('--backend') && argv[argv.indexOf('--backend') + 1] === 'cpu'

@@ -1,7 +1,7 @@
 /**
  * The gallery on disk: `<outputDir>/<jobId>-<index:02>.png` with the recipe inside the PNG, a small
  * thumbnail beside it, and a `.flags.json` for pin and archive. Port of `gallery.rs` in
- * `tauri-plugin-atomic-diffusion` (app commit `767ff6350`).
+ * `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`).
  *
  * A PNG without a valid `atomic` chunk is somebody else's: it is never listed and never deleted,
  * even when it sits in the output folder under a name that looks like ours.
@@ -19,7 +19,8 @@ import type {
 import { isWithin } from './containment.js'
 import { diffusionError, ioError } from './errors.js'
 import { AsyncMutex } from './mutex.js'
-import { readPngHeader, thumbnailPng } from './png.js'
+import { decodePng, isBlankRaster, readPngHeader, thumbnailPng, UnsupportedPngError } from './png.js'
+import type { RasterImage } from './png.js'
 import { parseRecipe, RECIPE_KEYWORD, spliceRecipe } from './recipe.js'
 
 export const FLAGS_FILE = '.flags.json'
@@ -27,6 +28,31 @@ export const THUMB_EDGE = 256
 const THUMB_SUFFIX = '.thumb.png'
 /** How many image headers a listing reads at once. */
 const SCAN_CONCURRENCY = 16
+/** A listing checks for blank frames only in files this small; real outputs are far larger. */
+export const BLANK_SCAN_LIMIT = 128 * 1024
+
+/**
+ * sd.cpp can finish a job after a numerical overflow and return a frame whose every pixel is pure
+ * white or pure black: not a generated image. Bytes that are not a readable PNG are
+ * `INVALID_OUTPUT`; a well-formed PNG of a kind this module does not decode is not called blank.
+ */
+export async function isBlankOutput(png: Buffer): Promise<boolean> {
+  let image: RasterImage
+  try {
+    image = await decodePng(png)
+  } catch (error) {
+    if (error instanceof UnsupportedPngError) return false
+    throw diffusionError(
+      'INVALID_OUTPUT',
+      'The image engine returned an unreadable image.',
+      error instanceof Error ? error.message : String(error)
+    )
+  }
+  return isBlankRaster(image)
+}
+
+/** Whether the gallery item `id` is a blank frame, judged the way `Gallery` does it. */
+type BlankCheck = (dir: string, id: string, path: string) => Promise<boolean>
 
 export interface FlagEntry {
   pinned: boolean
@@ -117,8 +143,10 @@ async function itemFromPath(
   dir: string,
   id: string,
   path: string,
-  flags: FlagMap
+  flags: FlagMap,
+  isBlank: BlankCheck
 ): Promise<GalleryImageItem | undefined> {
+  if (await isBlank(dir, id, path)) return undefined
   const header = await readPngHeader(path)
   const text = header?.texts.get(RECIPE_KEYWORD)
   const recipe = text === undefined ? undefined : parseRecipe(text)
@@ -142,7 +170,7 @@ async function itemFromPath(
 }
 
 /** Every owned image, newest first. */
-async function scan(dir: string, flags: FlagMap): Promise<GalleryImageItem[]> {
+async function scan(dir: string, flags: FlagMap, isBlank: BlankCheck): Promise<GalleryImageItem[]> {
   const names = await readdir(dir).catch(() => [] as string[])
   const ids = names
     .filter((name) => name.endsWith('.png'))
@@ -151,7 +179,9 @@ async function scan(dir: string, flags: FlagMap): Promise<GalleryImageItem[]> {
   const items: GalleryImageItem[] = []
   for (let at = 0; at < ids.length; at += SCAN_CONCURRENCY) {
     const batch = ids.slice(at, at + SCAN_CONCURRENCY)
-    const found = await Promise.all(batch.map((id) => itemFromPath(dir, id, pngPath(dir, id), flags)))
+    const found = await Promise.all(
+      batch.map((id) => itemFromPath(dir, id, pngPath(dir, id), flags, isBlank))
+    )
     for (const item of found) if (item) items.push(item)
   }
   return items.sort((a, b) => b.createdAtMs - a.createdAtMs || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
@@ -167,8 +197,31 @@ export interface GalleryLogger {
  */
 export class Gallery {
   private readonly flagsLock = new AsyncMutex()
+  /** The last verdict per small file, so a listing decodes each thumbnail once rather than every time. */
+  private readonly blankFiles = new Map<string, { size: number; mtimeMs: number; blank: boolean }>()
+  private readonly isBlank: BlankCheck = (dir, id, path) => this.isBlankItem(dir, id, path)
 
   constructor(private readonly log: GalleryLogger = () => {}) {}
+
+  /**
+   * A blank frame an older engine build saved is hidden from the listing and from lookups: judged on
+   * the thumbnail (the PNG when there is none) when that file is small enough to be one. A file
+   * that cannot be read or decoded is not blank.
+   */
+  private async isBlankItem(dir: string, id: string, path: string): Promise<boolean> {
+    const thumb = thumbPath(dir, id)
+    const file = (await isFile(thumb)) ? thumb : path
+    const meta = await stat(file).catch(() => undefined)
+    if (!meta || meta.size > BLANK_SCAN_LIMIT) return false
+    const known = this.blankFiles.get(file)
+    if (known && known.size === meta.size && known.mtimeMs === meta.mtimeMs) return known.blank
+    const blank = await readFile(file)
+      .then(isBlankOutput, () => false)
+      .catch(() => false)
+    this.blankFiles.set(file, { size: meta.size, mtimeMs: meta.mtimeMs, blank })
+    if (blank) this.log('warn', `hiding blank gallery output ${id}`)
+    return blank
+  }
 
   /**
    * Splice the recipe in, write `<id>.png`, write the thumbnail, and return the item with the final
@@ -222,12 +275,14 @@ export class Gallery {
     const path = checkedPngPath(dir, id)
     if (!(await isFile(path))) return null
     const flags = await this.flagsLock.run(() => readFlags(dir))
-    return (await itemFromPath(dir, id, path, flags)) ?? null
+    return (await itemFromPath(dir, id, path, flags, this.isBlank)) ?? null
   }
 
   async list(dir: string, options: GalleryListOptions): Promise<GalleryPage> {
     const flags = await this.flagsLock.run(() => readFlags(dir))
-    const all = (await scan(dir, flags)).filter((item) => options.includeArchived === true || !item.archived)
+    const all = (await scan(dir, flags, this.isBlank)).filter(
+      (item) => options.includeArchived === true || !item.archived
+    )
     const items = all.slice(options.offset, options.offset + Math.max(options.limit, 1))
     return { items, hasMore: options.offset + items.length < all.length, total: all.length }
   }
@@ -250,6 +305,8 @@ export class Gallery {
           })
         }
         await rm(thumbPath(dir, id), { force: true }).catch(() => {})
+        this.blankFiles.delete(path)
+        this.blankFiles.delete(thumbPath(dir, id))
         if (flags.delete(id)) changed = true
       }
       if (changed) await writeFlags(dir, flags)
@@ -269,7 +326,7 @@ export class Gallery {
       if (entry.pinned || entry.archived) flags.set(id, entry)
       else flags.delete(id)
       await writeFlags(dir, flags)
-      const item = await itemFromPath(dir, id, path, flags)
+      const item = await itemFromPath(dir, id, path, flags, this.isBlank)
       if (!item) throw diffusionError('JOB_NOT_FOUND', 'That image is not an Atomic Chat gallery image.')
       return item
     })

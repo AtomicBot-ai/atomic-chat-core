@@ -153,6 +153,9 @@ export interface RasterImage {
   data: Buffer
 }
 
+/** A well-formed PNG this decoder does not read (16-bit, grey, palette, interlaced). */
+export class UnsupportedPngError extends Error {}
+
 /** Refuse a header that claims more than this before allocating for it (2048² is the largest output). */
 export const MAX_PIXELS = 8192 * 8192
 const ROWS_PER_SLICE = 128
@@ -193,7 +196,7 @@ export async function decodePng(png: Buffer): Promise<RasterImage> {
         filter !== 0 ||
         interlace !== 0
       )
-        throw new Error(
+        throw new UnsupportedPngError(
           `unsupported PNG flavour (depth ${bitDepth}, colour ${colorType}, interlace ${interlace})`
         )
       channels = colorType === 2 ? 3 : 4
@@ -244,6 +247,24 @@ export async function decodePng(png: Buffer): Promise<RasterImage> {
     if (y % ROWS_PER_SLICE === ROWS_PER_SLICE - 1) await yieldToEventLoop()
   }
   return { width, height, channels, data }
+}
+
+/**
+ * Whether every colour channel sits within 2 of every other and all of them at one extreme: a pure
+ * black or pure white frame. Alpha is not looked at. Deliberately flat coloured artwork is not blank.
+ */
+export function isBlankRaster(image: RasterImage): boolean {
+  const { data, channels } = image
+  let min = 255
+  let max = 0
+  for (let at = 0; at < data.length; at += channels)
+    for (let c = 0; c < 3; c++) {
+      const value = data[at + c] as number
+      if (value < min) min = value
+      if (value > max) max = value
+      if (max - min > 2) return false
+    }
+  return max <= 2 || min >= 253
 }
 
 /** The size `width`×`height` takes when its longest side is brought down to `maxEdge`; never larger than it was. */
