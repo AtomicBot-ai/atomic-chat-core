@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   backendExeCandidates,
@@ -33,11 +33,11 @@ describe('dataLayout', () => {
   it("keeps image generation where the app's plugin put it", () => {
     // `state.rs` at 767ff6350: `<data>/diffusion/{backends,models,scratch}`, gallery in `<data>/images`.
     expect(layout.diffusion).toEqual({
-      root: '/data/diffusion',
-      backendsDir: '/data/diffusion/backends',
-      modelsDir: '/data/diffusion/models',
-      scratchDir: '/data/diffusion/scratch',
-      defaultOutputDir: '/data/images',
+      root: join('/data', 'diffusion'),
+      backendsDir: join('/data', 'diffusion', 'backends'),
+      modelsDir: join('/data', 'diffusion', 'models'),
+      scratchDir: join('/data', 'diffusion', 'scratch'),
+      defaultOutputDir: join('/data', 'images'),
     })
   })
 })

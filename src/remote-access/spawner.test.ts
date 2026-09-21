@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -23,7 +23,10 @@ describe('emptyConfigFor', () => {
   })
 
   it('does without it when the document cannot be written', async () => {
-    expect(await emptyConfigFor('win32', join('/dev/null', 'nested', 'empty.yml'))).toBeUndefined()
+    // A file where its folder should be: no folder can be made there on any OS.
+    const blocker = join(dir, 'blocker')
+    await writeFile(blocker, '')
+    expect(await emptyConfigFor('win32', join(blocker, 'nested', 'empty.yml'))).toBeUndefined()
   })
 })
 

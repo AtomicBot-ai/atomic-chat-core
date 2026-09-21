@@ -24,11 +24,11 @@ describe('DiffusionState', () => {
   it('starts unconfigured, with the default output folder and idle interval', () => {
     const state = new DiffusionState(paths)
     expect(state.configured).toBe(false)
-    expect(state.outputDir()).toBe('/data/images')
+    expect(state.outputDir()).toBe(paths.defaultOutputDir)
     expect(state.idleUnloadSecs()).toBe(600)
     state.config = { dataFolder: '/data', outputDir: '  ', idleUnloadSecs: 0 }
     expect(state.configured).toBe(true)
-    expect(state.outputDir()).toBe('/data/images')
+    expect(state.outputDir()).toBe(paths.defaultOutputDir)
     expect(state.idleUnloadSecs()).toBe(0)
     state.config = { dataFolder: '/data', outputDir: '/pics' }
     expect(state.outputDir()).toBe('/pics')
