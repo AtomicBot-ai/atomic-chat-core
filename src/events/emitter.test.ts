@@ -38,6 +38,36 @@ describe('CoreEmitter', () => {
     expect(second).not.toHaveBeenCalled()
   })
 
+  it('tells its owner about a throwing listener, and survives an owner that throws too', () => {
+    const failures: Array<[string, unknown]> = []
+    const e = new CoreEmitter({
+      instanceId: 'i',
+      onListenerError: (name, error) => failures.push([name, error]),
+    })
+    const boom = new Error('boom')
+    e.on('server:stopped', () => {
+      throw boom
+    })
+    e.onAny(() => {
+      throw boom
+    })
+    e.emit('server:stopped', {})
+    expect(failures).toEqual([
+      ['server:stopped', boom],
+      ['server:stopped', boom],
+    ])
+    const loud = new CoreEmitter({
+      instanceId: 'i',
+      onListenerError: () => {
+        throw new Error('reporter down')
+      },
+    })
+    loud.onAny(() => {
+      throw boom
+    })
+    expect(() => loud.emit('server:stopped', {})).not.toThrow()
+  })
+
   it('replays after a cursor and demands resync once the ring overflowed', () => {
     const e = make(3)
     for (let i = 0; i < 5; i++) e.emit('core:log', { level: 'info', msg: String(i) })

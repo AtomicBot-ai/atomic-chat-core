@@ -3,6 +3,7 @@ import type { LoadOptions } from '../runtime/llamacpp/index.js'
 import type { LocalLoadOptions } from '../runtime/index.js'
 import type { WireDiffusionOptions } from '../diffusion/index.js'
 import type { Prober, TunnelSpawner, TunnelTimings } from '../remote-access/index.js'
+import type { TelemetryControl } from '../telemetry/index.js'
 
 export type CoreLogger = (level: 'info' | 'warn' | 'error', message: string) => void
 
@@ -32,6 +33,11 @@ export interface AtomicCoreOptions {
   /** 0 (the default) picks a free port and publishes it in the lock. */
   controlPort?: number
   logger?: CoreLogger
+  /**
+   * Where failures worth an issue go (the app's daemon passes its Sentry reporter), and what
+   * `/atomic/v1/telemetry` drives. Without it nothing is reported and that route answers 404.
+   */
+  errorReporter?: TelemetryControl
 }
 
 export const LOCAL_PROVIDER: LocalProviderId = 'llamacpp-upstream'

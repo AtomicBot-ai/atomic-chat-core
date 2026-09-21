@@ -34,6 +34,7 @@ import type { GgufValidation, ModelCapabilities } from '../../models/index.js'
 import type { EmbeddingResponse } from '../../models/index.js'
 import type { ProxyConfig } from '../../downloads/index.js'
 import type { HardwareOverrideStore } from '../../hardware/index.js'
+import type { TelemetryControl } from '../../telemetry/index.js'
 import type {
   InstallBackendResult,
   InstalledBackendPack,
@@ -265,6 +266,11 @@ export interface ControlServerDeps {
   externalSessions: ExternalSessionControl
   /** Stop the whole core. The server has already answered by the time this runs. */
   shutdown: (options: { force: boolean; requestedBy?: string | undefined }) => Promise<void>
+  /**
+   * Error reporting: where a route that failed on our side is reported, and the app's consent,
+   * user and tags behind `/telemetry`. Absent in a CLI owner, which reports nothing.
+   */
+  telemetry?: TelemetryControl
   startedAt?: number
   now?: () => number
 }

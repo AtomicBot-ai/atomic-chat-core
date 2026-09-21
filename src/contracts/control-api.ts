@@ -45,3 +45,22 @@ export interface LocalApiServerState {
 }
 
 export const LOCAL_API_SERVER_STATE_FILE = 'local-api-server.json'
+
+/** `GET /atomic/v1/telemetry`: the app's error-reporting consent as the core holds it. Never the DSN. */
+export interface TelemetryState {
+  enabled: boolean
+  /** Consent is given and this build has a project to report to. */
+  reporting: boolean
+  has_user: boolean
+  tags: Record<string, string>
+}
+
+/**
+ * `PUT /atomic/v1/telemetry`: what the app's `set_telemetry_*` commands learned. An omitted field
+ * keeps its value; `user_id: null` forgets the user; `tags` replaces the whole set (allow-listed).
+ */
+export interface TelemetryUpdateRequest {
+  enabled?: boolean
+  user_id?: string | null
+  tags?: Record<string, string>
+}

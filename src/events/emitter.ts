@@ -15,6 +15,8 @@ export interface CoreEmitterOptions {
   instanceId: string
   now?: () => number
   ringSize?: number
+  /** A listener threw: delivery goes on, but the throw is a defect worth reporting. */
+  onListenerError?: (event: CoreEventName, error: unknown) => void
 }
 
 export class CoreEmitter {
@@ -24,12 +26,14 @@ export class CoreEmitter {
   private readonly ring: CoreEventRecord[] = []
   private readonly ringSize: number
   private readonly now: () => number
+  private readonly onListenerError: ((event: CoreEventName, error: unknown) => void) | undefined
   private seq = 0
 
   constructor(options: CoreEmitterOptions) {
     this.instanceId = options.instanceId
     this.now = options.now ?? Date.now
     this.ringSize = options.ringSize ?? REPLAY_RING_SIZE
+    this.onListenerError = options.onListenerError
     this.inner.setMaxListeners(0)
   }
 
@@ -64,14 +68,16 @@ export class CoreEmitter {
     if (this.ring.length > this.ringSize) this.ring.splice(0, this.ring.length - this.ringSize)
     try {
       this.inner.emit(name, payload)
-    } catch {
+    } catch (error) {
       // A listener threw; the event is still recorded and delivered to the others.
+      this.listenerFailed(name, error)
     }
     for (const l of this.anyListeners) {
       try {
         l(record)
-      } catch {
+      } catch (error) {
         // same: never let a bridge failure poison the emitter
+        this.listenerFailed(name, error)
       }
     }
     return record
@@ -88,6 +94,14 @@ export class CoreEmitter {
     if (oldest === undefined) return afterSeq === 0 ? [] : undefined
     if (afterSeq < oldest.seq - 1) return undefined
     return this.ring.filter((r) => r.seq > afterSeq)
+  }
+
+  private listenerFailed(name: CoreEventName, error: unknown): void {
+    try {
+      this.onListenerError?.(name, error)
+    } catch {
+      // reporting a listener failure must not become one
+    }
   }
 
   /** Cursor string a client hands back on reconnect. */

@@ -6,6 +6,7 @@ import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
+import type { ErrorReport } from '../telemetry/index.js'
 
 useCoreHarness()
 
@@ -457,5 +458,58 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
 
     await core.shutdown()
     expect(isProcessAlive(loaded.pid)).toBe(false)
+  })
+})
+
+describe('error reporting', () => {
+  it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
+    const captured: ErrorReport[] = []
+    const telemetry = {
+      capture: (report: ErrorReport) => captured.push(report),
+      state: () => ({ enabled: true, reporting: true, has_user: true, tags: { os: 'macOS' } }),
+      update: () => {},
+    }
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      errorReporter: telemetry,
+      platform: 'linux',
+    })
+    cores.push(core)
+    core.events.on('server:stopped', () => {
+      throw new TypeError('listener bug')
+    })
+    core.events.emit('server:stopped', {})
+    core.events.emit('session:died', {
+      provider: 'llamacpp-upstream',
+      pid: 1,
+      model_id: 'm',
+      exit_code: null,
+      signal: 'SIGSEGV',
+      message: 'crashed',
+    })
+    expect(captured.map((r) => [r.source, r.tags?.['event'] ?? r.fingerprint?.[2]])).toEqual([
+      ['event_listener', 'server:stopped'],
+      ['backend_crash', 'sigsegv'],
+    ])
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const state = await fetch(`${core.control.url}/atomic/v1/telemetry`, {
+      headers: { authorization: `Bearer ${core.controlToken}` },
+    })
+    expect(await state.json()).toEqual({
+      enabled: true,
+      reporting: true,
+      has_user: true,
+      tags: { os: 'macOS' },
+    })
+    expect((await client.health()).ok).toBe(true)
+  })
+
+  it('reports nothing without a reporter, even when a listener throws', async () => {
+    const core = await createCore()
+    core.events.on('server:stopped', () => {
+      throw new TypeError('listener bug')
+    })
+    expect(() => core.events.emit('server:stopped', {})).not.toThrow()
   })
 })

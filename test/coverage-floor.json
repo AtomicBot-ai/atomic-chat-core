@@ -983,6 +983,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/server/control/routes/telemetry.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/control/server.ts": {
     "statements": 91,
     "branches": 89,
@@ -1170,6 +1176,66 @@
     "lines": 100
   },
   "src/speculative/transcription-registry.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/config.ts": {
+    "statements": 95,
+    "branches": 82,
+    "functions": 100,
+    "lines": 95
+  },
+  "src/telemetry/daemon.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/dsn.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/envelope.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/policy.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/reporter.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/reports.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/scrub.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/stack.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/subscribe.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,

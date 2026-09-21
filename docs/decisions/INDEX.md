@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-21** — [Report core errors to its own Sentry project](2026-09-21-report-core-errors-to-its-own-sentry-project.md)
 - **2026-09-21** — [Image generation follows app v2.0.42: engine gating, output checks, finalize under the load lock](2026-09-21-diffusion-follows-app-v2-0-42-engine-gating-and-output-checks.md)
 - **2026-09-21** — [Configure ZCode for launch through its provider file, pinned by ported tests instead of golden fixtures](2026-09-21-configure-zcode-for-launch-without-golden-fixtures.md)
 - **2026-09-21** — [Classify llama.cpp failures per provider](2026-09-21-classify-llama-cpp-failures-per-provider.md)

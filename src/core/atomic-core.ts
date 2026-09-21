@@ -30,6 +30,8 @@ import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
+import { captureReport, loadFailureReport } from '../telemetry/index.js'
+import type { ErrorSink } from '../telemetry/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
 import { DynamicTrustedHosts } from '../server/index.js'
@@ -65,6 +67,8 @@ export interface AtomicCoreParts {
   remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
   /** Image generation (stage 7): its own module, not a runtime. */
   diffusion: DiffusionService
+  /** Where a failed load and the public server's failures are reported; absent, nothing is. */
+  errors?: ErrorSink | undefined
 }
 
 export class AtomicCore {
@@ -97,6 +101,7 @@ export class AtomicCore {
   private readonly registries: Map<LocalProviderId, ModelRegistry>
   private readonly log: CoreLogger
   private readonly appLeaseTimer: NodeJS.Timeout | undefined
+  private readonly errors: ErrorSink | undefined
   /** Model claims and per-model load/unload transitions. */
   private readonly localSessions: LocalSessions
   /** The public `/v1` listener and its serialized start/stop. */
@@ -125,6 +130,7 @@ export class AtomicCore {
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
+    this.errors = parts.errors
     this.localSessions = new LocalSessions({
       layout: parts.layout,
       instanceId: parts.lock.instanceId,
@@ -159,6 +165,7 @@ export class AtomicCore {
         inspecting: () => this.inspecting,
         dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
         images: this.diffusion.imagesBackend(),
+        errors: parts.errors,
       }),
     })
   }
@@ -222,7 +229,9 @@ export class AtomicCore {
     options: CoreLoadOptions = {}
   ): Promise<{ session: SessionInfo; created: boolean }> {
     this.assertRunning()
-    return this.localSessions.acquire(provider, modelId, options)
+    return this.reportingLoad(provider, modelId, options, () =>
+      this.localSessions.acquire(provider, modelId, options)
+    )
   }
 
   /**
@@ -232,14 +241,16 @@ export class AtomicCore {
   async increaseCtx(provider: LocalProviderId, modelId: string, reason?: string): Promise<CtxIncreaseResult> {
     this.assertRunning()
     await assertNotLoadedByLegacy(this.layout, modelId)
-    return this.runtime(provider).autoIncreaseCtx(modelId, reason)
+    return this.reportingLoad(provider, modelId, {}, () =>
+      this.runtime(provider).autoIncreaseCtx(modelId, reason)
+    )
   }
 
   /** Restart a poisoned engine at its current context; guarded like `load`. */
   async recreateSession(provider: LocalProviderId, modelId: string): Promise<RecreateResult> {
     this.assertRunning()
     await assertNotLoadedByLegacy(this.layout, modelId)
-    return this.runtime(provider).recreateSession(modelId)
+    return this.reportingLoad(provider, modelId, {}, () => this.runtime(provider).recreateSession(modelId))
   }
 
   /**
@@ -312,6 +323,42 @@ export class AtomicCore {
   /** Alias so the facade reads the same as the library docs. */
   dispose(): Promise<void> {
     return this.shutdown()
+  }
+
+  /**
+   * Run a load (or a reload at another context) and report it when it fails, from whichever caller:
+   * the app, the public API, a remote client or the CLI. The error still reaches the caller.
+   */
+  private async reportingLoad<T>(
+    provider: LocalProviderId,
+    modelId: string,
+    options: CoreLoadOptions,
+    load: () => Promise<T>
+  ): Promise<T> {
+    try {
+      return await load()
+    } catch (error) {
+      if (this.errors) {
+        // The settings the runtime loads with, so the report names the backend and context it used.
+        let settings: Record<string, unknown> = {}
+        try {
+          settings = this.settings.get(provider)
+        } catch {
+          // an unknown provider: the error being reported already says so
+        }
+        captureReport(
+          this.errors,
+          loadFailureReport({
+            provider,
+            modelId,
+            error,
+            overrides: { ...settings, ...options.overrides },
+            isEmbedding: options.isEmbedding,
+          })
+        )
+      }
+      throw error
+    }
   }
 
   private assertRunning(): void {

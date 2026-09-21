@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: latest }
+        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: bun install --frozen-lockfile
@@ -39,6 +39,11 @@ jobs:
 
       # Bun cross-compiles every target from one host; the app signs the macOS ones itself.
       - run: npm run build:bin -- --all
+        env:
+          # Baked into the app's binary only (docs/decisions/2026-09-21-report-core-errors-to-its-own-sentry-project.md).
+          ATOMIC_CORE_SENTRY_DSN: ${{ secrets.ATOMIC_CORE_SENTRY_DSN }}
+          ATOMIC_CORE_SENTRY_ENVIRONMENT: production
+          ATOMIC_CORE_GIT_SHA: ${{ github.sha }}
 
       - name: Name the assets and checksum them
         id: package

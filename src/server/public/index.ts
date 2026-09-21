@@ -19,6 +19,7 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { LocalApiServerState } from '../../contracts/index.js'
+import { captureReport, internalErrorReport } from '../../telemetry/index.js'
 import { answer, newExchange } from './exchange.js'
 import { serveForward } from './forward.js'
 import { serveImagesGenerations } from './images.js'
@@ -211,6 +212,7 @@ export class PublicServer {
     // the proxy's own 400 instead of Node's bare one.
     const server = createServer({ requireHostHeader: false }, (req, res) => {
       handlePublicRequest(req, res, config, deps).catch((e: unknown) => {
+        captureReport(deps.errors, internalErrorReport({ source: 'public_server', error: e, status: 500 }))
         if (res.headersSent) res.destroy(e as Error)
         else sendWhole(res, 500, [], 'Internal server error')
       })

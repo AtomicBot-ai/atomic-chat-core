@@ -37,6 +37,7 @@ import { wireDiffusion } from '../diffusion/index.js'
 import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
+import { captureReport, processFailureReport, reportCoreEvents } from '../telemetry/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { reapOrphans } from './reap-orphans.js'
@@ -65,7 +66,13 @@ export async function createAtomicCore(
   let core: AtomicCore | undefined
   try {
     const token = await writeControlToken(layout)
-    const emitter = new CoreEmitter({ instanceId: lock.instanceId })
+    const reporter = options.errorReporter
+    const emitter = new CoreEmitter({
+      instanceId: lock.instanceId,
+      onListenerError: (event, error) =>
+        captureReport(reporter, processFailureReport('event_listener', error, { event })),
+    })
+    if (reporter) reportCoreEvents(emitter, reporter, options.platform ?? process.platform)
     const settings = await SettingsStore.open(layout.core.settings, { ownerScope: scope })
     // Settings written through the CLI/control API must reach the attached app immediately so it
     // can refresh the legacy rollback copy before acknowledging the revision. Migration
@@ -360,6 +367,7 @@ export async function createAtomicCore(
         shutdown: async () => {
           await (core as AtomicCore).shutdown()
         },
+        ...(reporter ? { telemetry: reporter } : {}),
       },
       {
         host: options.controlHost ?? '127.0.0.1',
@@ -397,6 +405,7 @@ export async function createAtomicCore(
       externalSessions,
       appLeaseTimer,
       diffusion,
+      errors: reporter,
       remoteAccess: await wireRemoteAccess({
         overrides: options.remoteAccess,
         cloudflaredPath: options.cloudflaredPath,

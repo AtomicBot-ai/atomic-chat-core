@@ -15,6 +15,7 @@ import type {
 } from '../../contracts/index.js'
 import type { LocalProvider, RemoteProvider } from '../../router/index.js'
 import type { ChatGptBackend } from '../../cloud/index.js'
+import type { ErrorSink } from '../../telemetry/index.js'
 
 /** A model a local engine is serving right now. */
 export interface LocalTarget {
@@ -77,6 +78,8 @@ export interface PublicServerDeps {
   fetch?: typeof fetch
   /** Image generation on the resident image model; without it the route answers 503. */
   images?: ImagesBackend
+  /** Where a request that failed on our side, or a failing local engine, is reported. */
+  errors?: ErrorSink | undefined
 }
 
 export interface PublicServerConfig {

@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { ErrorReport } from '../../telemetry/index.js'
 import { sseEvent } from './forward.js'
 import {
   closeAll,
@@ -117,5 +118,31 @@ describe('sseEvent', () => {
   it('names the frame after the event type, or `message` without one', () => {
     expect(sseEvent({ type: 'ping', b: 1, a: 2 })).toBe('event: ping\ndata: {"a":2,"b":1,"type":"ping"}\n\n')
     expect(sseEvent([1])).toBe('event: message\ndata: [1]\n\n')
+  })
+})
+
+describe('error reports', () => {
+  it('reports a failing local engine: compute failures as warnings, other 5xx as errors, 4xx never', async () => {
+    const replies = [
+      [500, { error: { message: 'Compute error: out of memory' } }],
+      [503, { error: { message: 'Loading model' } }],
+      [400, { error: { message: 'the request exceeds the available context size' } }],
+    ] as const
+    let next = 0
+    const { port } = await startUpstream((_req, _body, res) => {
+      const [status, body] = replies[next++]!
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(body))
+    })
+    const captured: ErrorReport[] = []
+    const server = await startPublic({
+      sessions: [localSession(port, { provider: 'mlx' })],
+      errors: { capture: (report) => captured.push(report) },
+    })
+    for (let i = 0; i < replies.length; i++) await postJson(server, '/chat/completions', { model: 'demo' })
+    expect(captured.map((r) => [r.level, r.fingerprint])).toEqual([
+      ['warning', ['inference-failure', 'mlx', 'oom']],
+      ['error', ['inference-failure', 'mlx', '503']],
+    ])
   })
 })
