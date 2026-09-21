@@ -17,6 +17,8 @@ export interface FakeSidecarOptions {
   reason?: string
   check?: string
   minCtx?: number
+  /** What a chat completion says; streamed word by word when the request asks for a stream. */
+  reply?: string
 }
 
 export function fakeSidecarEnv(options: FakeSidecarOptions): Record<string, string> {
@@ -29,6 +31,7 @@ export function fakeSidecarEnv(options: FakeSidecarOptions): Record<string, stri
   if (options.reason) env['FAKE_SIDECAR_REASON'] = options.reason
   if (options.check) env['FAKE_FM_CHECK'] = options.check
   if (options.minCtx) env['FAKE_MLX_MIN_CTX'] = String(options.minCtx)
+  if (options.reply) env['FAKE_SIDECAR_REPLY'] = options.reply
   return env
 }
 
