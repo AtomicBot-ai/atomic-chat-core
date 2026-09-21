@@ -409,7 +409,8 @@ export class LlamacppRuntime implements LocalRuntime {
                 msg: `[${plan.provider}/${plan.modelId}][${stream}] ${line}`,
               })
           },
-          classifyExit: (exit, stderr, stdout) => classifyProcessOutput(exit, stderr, stdout, this.platform),
+          classifyExit: (exit, stderr, stdout) =>
+            classifyProcessOutput(exit, stderr, stdout, this.platform, plan.provider),
           timeoutMessage: `Timeout: ${plan.timeoutSecs}s`,
         }
       ))
@@ -481,7 +482,7 @@ export class LlamacppRuntime implements LocalRuntime {
       if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
       await closeLogStream(session.logStream)
       const { stderr, stdout } = session.process.output()
-      const error = classifyProcessOutput(exit, stderr, stdout, this.platform)
+      const error = classifyProcessOutput(exit, stderr, stdout, this.platform, session.plan.provider)
       this.emit('session:died', {
         provider: session.plan.provider,
         pid: session.info.pid,

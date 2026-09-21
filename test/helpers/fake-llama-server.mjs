@@ -5,7 +5,8 @@
  * can fail the way a real backend fails (out of memory, SIGSEGV, silence).
  *
  * Driven by argv (the same flags `args.ts` emits) plus env:
- *   FAKE_LLAMA_MODE   ready | no-ready | hang | oom | segv | exit-<code> | projector-fail | mtp-fail
+ *   FAKE_LLAMA_MODE   ready | no-ready | hang | oom | segv | exit-<code> | projector-fail | mtp-fail |
+ *                     tensor-count
  *   FAKE_LLAMA_GPU    1 → print CUDA backend/offload/buffer lines
  *   FAKE_LLAMA_DELAY  milliseconds before the ready line
  *   FAKE_LLAMA_MIN_CTX  chat answers llama.cpp's context-overflow 400 while `--ctx-size` is below this
@@ -68,6 +69,12 @@ if (mode === 'hang') {
 } else if (mode === 'projector-fail') {
   err('clip_model_load: unknown projector type: fake-projector')
   err('mtmd_init_from_file: failed to load CLIP model')
+  process.exit(1)
+} else if (mode === 'tensor-count') {
+  // Printed on stdout, as the loader does it.
+  process.stdout.write(
+    'llama_model_load: done_getting_tensors: wrong number of tensors; expected 417, got 408\n'
+  )
   process.exit(1)
 } else if (mode === 'mtp-fail') {
   err("main: the draft model doesn't contain MTP layers")

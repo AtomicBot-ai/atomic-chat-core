@@ -142,6 +142,20 @@ export const AGENTS: readonly Agent[] = [
     runMode: 'gui',
   },
   {
+    id: 'zcode',
+    name: 'ZCode',
+    // The desktop app's executable: `/usr/bin/zcode` on Linux, found off PATH elsewhere
+    // (see `offPathCandidates`).
+    detectBin: 'zcode',
+    aliases: [],
+    requiresModel: true,
+    endpointWithPrefix: true,
+    docsUrl: 'https://zcode.z.ai/en/docs/configuration',
+    runArgs: [],
+    // A desktop app that reads the provider file we write; it returns at once.
+    runMode: 'gui',
+  },
+  {
     id: 'mimo',
     name: 'MiMo Code',
     detectBin: 'mimo',
@@ -341,9 +355,11 @@ export function poolsideStandaloneBaseUrl(apiUrl: string): string {
 }
 
 /**
- * Launchers that installers drop outside PATH. Only OpenClaw does this today: its installer writes
- * into `~/.openclaw/bin` or `~/.local/bin` (or `$OPENCLAW_PREFIX`), which a login shell may not have
- * on PATH yet.
+ * Launchers that installers drop outside PATH. OpenClaw's installer writes into `~/.openclaw/bin`
+ * or `~/.local/bin` (or `$OPENCLAW_PREFIX`), which a login shell may not have on PATH yet. ZCode is a
+ * desktop app that puts nothing on PATH outside Linux, so its candidates are the executables its
+ * installers write. Every other agent installs onto PATH, and guessing would only produce false
+ * positives.
  */
 export function offPathCandidates(
   bin: string,
@@ -351,9 +367,10 @@ export function offPathCandidates(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform
 ): string[] {
-  if (bin !== 'openclaw' || !home) return []
   const separator = platform === 'win32' ? '\\' : '/'
   const join = (...parts: string[]) => parts.map((p) => p.replace(/[\\/]+$/, '')).join(separator)
+  if (bin === 'zcode') return zcodeAppCandidates(home, env, platform, join)
+  if (bin !== 'openclaw' || !home) return []
   const roots: string[] = []
   const prefix = env['OPENCLAW_PREFIX']
   if (prefix && prefix.trim() !== '') roots.push(prefix)
@@ -363,6 +380,37 @@ export function offPathCandidates(
   const out: string[] = []
   for (const root of roots) for (const name of names) out.push(join(root, 'bin', name))
   return out
+}
+
+/**
+ * Where each ZCode installer puts the desktop app's executable (`zcode_app_candidates` in the app's
+ * `core/system/commands.rs`, commit `ec1fd3ea7`). The Linux deb/rpm packages also link
+ * `/usr/bin/zcode`, which the PATH probe finds first.
+ */
+function zcodeAppCandidates(
+  home: string | undefined,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  join: (...parts: string[]) => string
+): string[] {
+  if (platform === 'darwin') {
+    const out = ['/Applications/ZCode.app/Contents/MacOS/ZCode']
+    if (home) out.push(join(home, 'Applications/ZCode.app/Contents/MacOS/ZCode'))
+    return out
+  }
+  if (platform === 'win32') {
+    // NSIS installs per user under `%LOCALAPPDATA%\Programs` and for all users under `%ProgramFiles%`.
+    const out: string[] = []
+    for (const [variable, sub] of [
+      ['LOCALAPPDATA', 'Programs\\ZCode'],
+      ['ProgramFiles', 'ZCode'],
+    ] as const) {
+      const root = env[variable]
+      if (root) out.push(join(root, sub, 'ZCode.exe'))
+    }
+    return out
+  }
+  return ['/opt/ZCode/zcode']
 }
 
 /**

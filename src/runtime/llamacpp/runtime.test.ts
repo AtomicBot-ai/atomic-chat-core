@@ -235,6 +235,19 @@ describe('failure paths', () => {
     expect(journal.list()).toEqual([])
   })
 
+  // TurboQuant's `error.rs` (app commit ec1fd3ea7): the fork reads a tensor-count mismatch as an
+  // unsupported layout, upstream as a damaged file; the runtime classifies with its own provider.
+  it('classifies a tensor-count mismatch by the provider that loaded it', async () => {
+    await data.writeModel('layout')
+    const upstream = await makeRuntime({ spawn: fakeLlamaSpawn({ mode: 'tensor-count' }) })
+    await expect(upstream.load('layout')).rejects.toMatchObject({ code: 'MODEL_FILE_CORRUPT' })
+    const turboquant = await makeRuntime({
+      provider: 'llamacpp',
+      spawn: fakeLlamaSpawn({ mode: 'tensor-count' }),
+    })
+    await expect(turboquant.load('layout')).rejects.toMatchObject({ code: 'MODEL_ARCH_NOT_SUPPORTED' })
+  })
+
   it('times out when the backend never becomes ready', async () => {
     await data.writeModel('stuck')
     // The production readiness floor is 30 minutes (`modelLoadReadyTimeoutSecs`), so the wait itself

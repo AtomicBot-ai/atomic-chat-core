@@ -12,7 +12,15 @@ import type { ManagedProcess, ReadyOptions, SpawnSpec } from '../../src/runtime/
 export const FAKE_LLAMA_SCRIPT = fileURLToPath(new URL('./fake-llama-server.mjs', import.meta.url))
 
 export type FakeLlamaMode =
-  'ready' | 'no-ready' | 'hang' | 'oom' | 'segv' | 'projector-fail' | 'mtp-fail' | `exit-${number}`
+  | 'ready'
+  | 'no-ready'
+  | 'hang'
+  | 'oom'
+  | 'segv'
+  | 'projector-fail'
+  | 'mtp-fail'
+  | 'tensor-count'
+  | `exit-${number}`
 
 export interface FakeLlamaOptions {
   mode?: FakeLlamaMode

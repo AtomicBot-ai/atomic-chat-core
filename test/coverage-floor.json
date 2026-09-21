@@ -575,6 +575,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/integrations/configure/zcode.ts": {
+    "statements": 98,
+    "branches": 93,
+    "functions": 100,
+    "lines": 98
+  },
   "src/integrations/configure/zed.ts": {
     "statements": 100,
     "branches": 100,
