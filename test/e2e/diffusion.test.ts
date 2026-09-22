@@ -314,8 +314,16 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       const { ready, pid } = await sd.loadedOwner(ctx, { config: { idleUnloadSecs: 1 } })
       expect((await sd.sdStatus(ctx, ready)).idleUnloadSecs).toBe(1)
       const events = await sd.collectEvents(ctx, ready)
-      // The idle task looks every 30 s; a one-second allowance has expired by then.
-      await waitFor(() => sd.stateReasons(events).includes('idle'), 'the idle unload', 45_000)
+      // The idle task looks every 30 s; a one-second allowance has expired by then. `unloading`
+      // carries the same reason but comes before the server is stopped: wait for `unloaded`.
+      const idleUnloaded = () =>
+        events.some(
+          (e) =>
+            e.event === 'diffusion:state' &&
+            e.data['reason'] === 'idle' &&
+            (e.data['status'] as { model?: { state?: string } } | undefined)?.model?.state === 'unloaded'
+        )
+      await waitFor(idleUnloaded, 'the idle unload', 45_000)
       expect(alive(pid)).toBe(false)
       expect(journalled(ctx)).toEqual([])
       const status = await sd.sdStatus(ctx, ready)
