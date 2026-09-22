@@ -14,6 +14,8 @@
  */
 export * from './canonical-json.js'
 export * from './descriptor.js'
+export * from './host-exec.js'
+export * from './inventory.js'
 export * from './linux-probe.js'
 export * from './recovery.js'
 export * from './service.js'
