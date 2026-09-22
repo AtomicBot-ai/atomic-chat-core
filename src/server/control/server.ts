@@ -8,7 +8,15 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { CoreEventRecord } from '../../contracts/index.js'
 import { bearerToken, controlTokenMatches } from '../../lock/index.js'
-import { hostHeaderIsLoopback, isLoopbackAddress, pathOf, sendError } from '../http.js'
+import { captureReport, internalErrorReport } from '../../telemetry/index.js'
+import {
+  hostHeaderIsLoopback,
+  isLoopbackAddress,
+  pathOf,
+  sendError,
+  statusForCode,
+  toCoreError,
+} from '../http.js'
 import type { Router } from '../http.js'
 import { buildRouter } from './router.js'
 import { sseFrame } from './routes/lifecycle.js'
@@ -127,5 +135,13 @@ async function handle(
       405
     )
   }
-  await found.route.handler(req, res, found.match)
+  try {
+    await found.route.handler(req, res, found.match)
+  } catch (error) {
+    // Reported here, where the route's pattern is known; the path itself may name a model or a file.
+    const status = statusForCode(toCoreError(error).code)
+    const route = `${found.route.method} ${found.route.pattern}`
+    captureReport(deps.telemetry, internalErrorReport({ source: 'control_route', error, status, route }))
+    throw error
+  }
 }

@@ -1,10 +1,12 @@
 import { createServer } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
+import type { ErrorCode } from '../contracts/index.js'
 import {
   hostHeaderIsLoopback,
   isLoopbackAddress,
   MAX_JSON_BODY_BYTES,
+  OVERSIZE_DRAIN_FACTOR,
   pathOf,
   queryOf,
   readJsonBody,
@@ -82,6 +84,34 @@ describe('error envelope', () => {
     expect(statusForCode('FOUNDATION_MODELS_UNAVAILABLE')).toBe(503)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
   })
+
+  it('maps the image-generation codes: the caller can fix 4xx, and nothing acts on the status', () => {
+    const table: Array<[ErrorCode, number]> = [
+      ['INVALID_REQUEST', 400],
+      ['INVALID_DIMENSIONS', 400],
+      ['UNSUPPORTED_WORKFLOW', 400],
+      ['UNSUPPORTED_BACKEND', 400],
+      ['JOB_NOT_FOUND', 404],
+      ['ENGINE_MISSING', 404],
+      ['MODEL_MISSING', 404],
+      ['SIDE_FILE_MISSING', 404],
+      ['MODEL_NOT_LOADED', 404],
+      ['JOB_BUSY', 409],
+      ['BACKEND_IN_USE', 409],
+      ['NOT_CONFIGURED', 409],
+      ['CANCELLED', 409],
+      ['ENGINE_UPDATE_REQUIRED', 409],
+      ['QUEUE_FULL', 429],
+      ['DISK_FULL', 507],
+      ['ENGINE_INSTALL_FAILED', 500],
+      ['ENGINE_CRASHED', 500],
+      ['MODEL_LOAD_FAILED', 500],
+      ['MODEL_INCOMPATIBLE', 500],
+      ['INVALID_OUTPUT', 500],
+      ['INTERNAL', 500],
+    ]
+    for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)
+  })
 })
 
 describe('request helpers over a real socket', () => {
@@ -129,6 +159,18 @@ describe('request helpers over a real socket', () => {
     expect((await tooBig.json()) as object).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
     const invalid = await fetch(`${base}/echo`, { method: 'POST', body: '{oops' })
     expect(invalid.status).toBe(400)
+  })
+
+  it('reads an oversized body to its end before refusing it, and drops one past the drain ceiling', async () => {
+    expect(OVERSIZE_DRAIN_FACTOR).toBe(8)
+    // Within eight times the cap: read, discarded, refused with the envelope.
+    const drained = await fetch(`${base}/echo`, { method: 'POST', body: 'x'.repeat(32 * 8) })
+    expect(drained.status).toBe(400)
+    expect((await drained.json()) as object).toMatchObject({
+      error: { code: 'INVALID_ARGUMENT', message: 'Request body is too large.', details: '> 32 bytes' },
+    })
+    // Past it: the connection goes instead of the rest of the body.
+    await expect(fetch(`${base}/echo`, { method: 'POST', body: 'x'.repeat(32 * 8 + 1) })).rejects.toThrow()
   })
 
   it('sends the shared error envelope with the code the app matches on', async () => {

@@ -44,7 +44,9 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
         version_backend: 'b7000/win-cpu-x64',
       })
 
-      await putHardwareOverride(core, { gpus: [], cpu_extensions: [], os_type: 'windows' })
+      // A CPU that reports its flags and none of them is AVX. An empty list means "unknown" and
+      // never blocks (policy.ts, isUnsupportedNoAvxCpu).
+      await putHardwareOverride(core, { gpus: [], cpu_extensions: ['sse2'], os_type: 'windows' })
       await expect(core.load('llamacpp-upstream', 'cpu-model')).rejects.toMatchObject({
         code: 'CPU_NO_AVX',
       })

@@ -4,6 +4,7 @@
  * previous owner left running and only then publish the endpoint.
  */
 
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LocalProviderId } from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
@@ -29,12 +30,21 @@ import {
   ManifestSessionCache,
   OptimalBackendStore,
   fetchLiveManifest,
+  platformArch,
   manifestTransportFromFetch,
   readRuntimeSettings,
   selectInstalledBackend,
 } from '../backend/index.js'
-import { Downloader, createPolicyFetch } from '../downloads/index.js'
+import { wireDiffusion } from '../diffusion/index.js'
+import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
+import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
+import {
+  captureReport,
+  createCoreReporter,
+  processFailureReport,
+  reportCoreEvents,
+} from '../telemetry/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { reapOrphans } from './reap-orphans.js'
@@ -51,6 +61,7 @@ export async function createAtomicCore(
   construct: (parts: AtomicCoreParts) => AtomicCore
 ): Promise<AtomicCore> {
   const log = options.logger ?? (() => {})
+  const warn = (message: string) => log('warn', message)
   const scope = options.ownerScope ?? 'cli'
   const root =
     options.dataFolder ??
@@ -62,7 +73,31 @@ export async function createAtomicCore(
   let core: AtomicCore | undefined
   try {
     const token = await writeControlToken(layout)
-    const emitter = new CoreEmitter({ instanceId: lock.instanceId })
+    const reporter =
+      options.errorReporter ??
+      (options.telemetry === false
+        ? undefined
+        : await createCoreReporter({
+            host: options.telemetry?.host ?? 'library',
+            hostVersion: options.telemetry?.hostVersion,
+            enabled: options.telemetry?.enabled,
+            ownerScope: scope,
+            dataFolder: layout.root,
+            telemetryFile: layout.core.telemetry,
+            homeDir: homedir(),
+            env: options.env ?? process.env,
+            platform: options.platform ?? process.platform,
+            arch: process.arch,
+            version: CORE_VERSION,
+            warn,
+            fetch: options.fetch,
+          }))
+    const emitter = new CoreEmitter({
+      instanceId: lock.instanceId,
+      onListenerError: (event, error) =>
+        captureReport(reporter, processFailureReport('event_listener', error, { event })),
+    })
+    if (reporter) reportCoreEvents(emitter, reporter, options.platform ?? process.platform)
     const settings = await SettingsStore.open(layout.core.settings, { ownerScope: scope })
     // Settings written through the CLI/control API must reach the attached app immediately so it
     // can refresh the legacy rollback copy before acknowledging the revision. Migration
@@ -158,7 +193,8 @@ export async function createAtomicCore(
         cpuInfo: async () => {
           const injected = hardware.get()
           if (!injected?.cpu_extensions) return undefined
-          return { arch: process.arch, extensions: hardware.cpuExtensions([]) }
+          // The no-AVX policy knows `x86_64`, not Node's `x64`: pass the raw name and it never fires.
+          return { arch: platformArch(process.arch), extensions: hardware.cpuExtensions([]) }
         },
         ...(options.fetch ? { fetch: options.fetch } : {}),
       })
@@ -235,6 +271,17 @@ export async function createAtomicCore(
       return created
     }
 
+    const diffusion = wireDiffusion({
+      layout,
+      journal,
+      instanceId: lock.instanceId,
+      emit: (name, payload) => emitter.emit(name, payload),
+      log: (level, msg) => (level === 'debug' ? undefined : log(level, msg)),
+      platform,
+      env,
+      ...(options.diffusion ? { overrides: options.diffusion } : {}),
+    })
+
     const control = await ControlServer.start(
       {
         token,
@@ -247,6 +294,8 @@ export async function createAtomicCore(
         sessions: () => sessionsOf(runtimes),
         loadModel: (provider: string, modelId: string, body: Record<string, unknown>) =>
           (core as AtomicCore).acquire(provider as LocalProviderId, modelId, body as CoreLoadOptions),
+        cancelModelLoad: (provider: string, modelId: string) =>
+          (core as AtomicCore).cancelLoad(provider as LocalProviderId, modelId),
         unloadModel: (provider: string, modelId: string) =>
           (core as AtomicCore).unload(provider as LocalProviderId, modelId),
         increaseCtx: (provider: string, modelId: string, reason?: string) =>
@@ -295,6 +344,14 @@ export async function createAtomicCore(
             backendService(provider as LocalProviderId).setOptimalCache(record, expectedRevision),
           optimalSnapshot: () => optimalStore.snapshot(),
         },
+        disk: { available: (path) => availableDiskSpace(layout.root, path) },
+        remoteAccess: {
+          lanAddresses,
+          status: () => (core as AtomicCore).remoteAccessStatus(),
+          start: () => (core as AtomicCore).startRemoteAccess(),
+          stop: () => (core as AtomicCore).stopRemoteAccess(),
+        },
+        diffusion,
         settings: {
           get: (provider) => settings.get(provider),
           revision: () => settings.revision,
@@ -336,6 +393,7 @@ export async function createAtomicCore(
         shutdown: async () => {
           await (core as AtomicCore).shutdown()
         },
+        ...(reporter ? { telemetry: reporter } : {}),
       },
       {
         host: options.controlHost ?? '127.0.0.1',
@@ -372,8 +430,28 @@ export async function createAtomicCore(
       chatgptBackend,
       externalSessions,
       appLeaseTimer,
+      diffusion,
+      errors: reporter,
+      telemetry: reporter,
+      remoteAccess: await wireRemoteAccess({
+        overrides: options.remoteAccess,
+        cloudflaredPath: options.cloudflaredPath,
+        resourcesDir: options.resourcesDir,
+        env,
+        platform,
+        journalPath: layout.core.remoteAccessTunnel,
+        emptyConfigPath: layout.core.cloudflaredEmptyConfig,
+        instanceId: lock.instanceId,
+        warn,
+      }),
     })
     await reapOrphans(journal, lock.instanceId, log)
+    // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
+    await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
+    // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the
+    // app that replaced it does not. Same checks, and the file is consumed. Only the app owner's folder
+    // can hold it: a CLI owner refuses the app's folder, and one app instance runs at a time.
+    await reapTunnelOrphan(layout.legacyRemoteAccessTunnel, { log: warn })
     await lock.publish(control.host, control.port)
     log('info', `core ${CORE_VERSION} owns ${layout.root} (control ${control.url})`)
     return core

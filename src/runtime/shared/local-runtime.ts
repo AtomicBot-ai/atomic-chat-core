@@ -44,6 +44,11 @@ export interface LocalLoadOptions {
   port?: number
   /** Skip the auto-unload of other models of this provider. */
   bypassAutoUnload?: boolean
+  /**
+   * Aborted when the user cancels this load: the runtime kills what it started and rejects with
+   * `MODEL_LOAD_CANCELLED`. Owner shutdown has its own signal and keeps its own error.
+   */
+  signal?: AbortSignal
 }
 
 export interface LocalRuntime {

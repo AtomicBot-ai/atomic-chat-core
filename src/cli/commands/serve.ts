@@ -26,6 +26,7 @@ import type { ModelEntry } from '../../models/index.js'
 import { withAttachedOwner } from '../owner.js'
 import type { CliIo } from '../io.js'
 import { apiUrl, formatBytes, layoutFor, pathValue } from './shared.js'
+import { printFirstRunNotice } from './telemetry.js'
 
 export const DEFAULT_SERVE_PORT = 6767
 export const DEFAULT_SERVE_TIMEOUT_SECS = 120
@@ -62,6 +63,7 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
     strict: true,
   })
   const layout = layoutFor(values, io)
+  await printFirstRunNotice(io, layout.core.telemetry)
   const provider = serveProvider(values.provider)
   if (provider === 'mlx' || provider === 'foundation-models')
     return serveSidecar(provider, values, positionals, layout, io)

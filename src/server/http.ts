@@ -131,14 +131,35 @@ export function statusForCode(code: ErrorCode): number {
     case 'PROVIDER_NOT_FOUND':
     case 'MODEL_NOT_LOADED':
     case 'NO_MODEL_LOADED':
+    case 'JOB_NOT_FOUND':
+    case 'ENGINE_MISSING':
+    case 'MODEL_MISSING':
+    case 'SIDE_FILE_MISSING':
       return 404
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
+    case 'MODEL_LOAD_CANCELLED':
+    case 'REMOTE_ACCESS_SERVER_STOPPED':
+    case 'REMOTE_ACCESS_OPERATION_IN_PROGRESS':
+    case 'REMOTE_ACCESS_STOP_FAILED':
+    case 'JOB_BUSY':
+    case 'BACKEND_IN_USE':
+    case 'NOT_CONFIGURED':
+    case 'CANCELLED':
+    case 'ENGINE_UPDATE_REQUIRED':
       return 409
+    case 'QUEUE_FULL':
+      return 429
+    case 'DISK_FULL':
+      return 507
     case 'AUTH_FAILED':
     case 'UPSTREAM_ERROR':
       return 502
     case 'INVALID_ARGUMENT':
+    case 'INVALID_REQUEST':
+    case 'INVALID_DIMENSIONS':
+    case 'UNSUPPORTED_WORKFLOW':
+    case 'UNSUPPORTED_BACKEND':
       return 400
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':
@@ -163,6 +184,15 @@ export function sendError(res: ServerResponse, error: unknown, status?: number):
   sendJson(res, status ?? statusForCode(coreError.code), { error: coreError.toJSON() })
 }
 
+/**
+ * Past the limit the rest of the body is read and discarded, up to this many times the limit, before
+ * the refusal is written: Bun's `node:http` (1.3.10) delivers an answer written while the request
+ * body is still arriving as an empty 200, Node delivers the refusal either way (ADR
+ * 2026-09-22-detect-a-client-that-hangs-up-before-the-answer-under-bun). Beyond the ceiling the
+ * connection is dropped instead of read on.
+ */
+export const OVERSIZE_DRAIN_FACTOR = 8
+
 export async function readJsonBody<T = unknown>(
   req: IncomingMessage,
   limit = MAX_JSON_BODY_BYTES
@@ -172,10 +202,18 @@ export async function readJsonBody<T = unknown>(
   for await (const chunk of req) {
     const buf = chunk as Buffer
     size += buf.length
-    if (size > limit)
-      throw new AtomicCoreError('INVALID_ARGUMENT', 'Request body is too large.', `> ${limit} bytes`)
+    if (size > limit) {
+      if (size > limit * OVERSIZE_DRAIN_FACTOR) {
+        req.destroy()
+        break
+      }
+      chunks.length = 0
+      continue
+    }
     chunks.push(buf)
   }
+  if (size > limit)
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'Request body is too large.', `> ${limit} bytes`)
   if (size === 0) return {} as T
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T

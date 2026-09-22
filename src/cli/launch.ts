@@ -25,7 +25,7 @@ import {
 } from '../integrations/index.js'
 import type { Agent, AgentDetection } from '../integrations/index.js'
 import { ModelRegistry } from '../models/index.js'
-import { layoutFor } from './commands/index.js'
+import { layoutFor, printFirstRunNotice } from './commands/index.js'
 import type { CliIo } from './io.js'
 import { withAttachedOwner } from './owner.js'
 
@@ -103,6 +103,7 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
   }
 
   const layout = layoutFor(values, io)
+  await printFirstRunNotice(io, layout.core.telemetry)
   if (values.standalone && values['data-folder'] === undefined) {
     throw new AtomicCoreError(
       'INVALID_ARGUMENT',
@@ -126,7 +127,12 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
   const standaloneCore = values.standalone
     ? await (
         await import('../core/index.js')
-      ).AtomicCore.create({ dataFolder: layout.root, controlPort: 0, env: io.env })
+      ).AtomicCore.create({
+        dataFolder: layout.root,
+        controlPort: 0,
+        env: io.env,
+        telemetry: { host: 'cli' },
+      })
     : undefined
   const execute = async (client?: CoreClient): Promise<number> => {
     let created = false

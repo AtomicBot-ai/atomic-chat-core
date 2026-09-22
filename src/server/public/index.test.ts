@@ -1,5 +1,6 @@
 import { request as httpRequest } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { ErrorReport } from '../../telemetry/index.js'
 import { stoppedState } from './index.js'
 import { closeAll, startPublic } from '../../../test/helpers/public-server.js'
 
@@ -55,5 +56,19 @@ describe('lifecycle', () => {
       code: 'IO_ERROR',
       message: `Cannot listen on 203.0.113.1:${first.port}, nor on any free port there.`,
     })
+  })
+})
+
+describe('error reports', () => {
+  it('reports a request that failed on our side and still answers 500', async () => {
+    const captured: ErrorReport[] = []
+    const server = await startPublic({
+      listLocal: () => {
+        throw new TypeError('listing bug')
+      },
+      errors: { capture: (report) => captured.push(report) },
+    })
+    expect((await fetch(`http://127.0.0.1:${server.port}/v1/models`)).status).toBe(500)
+    expect(captured).toEqual([expect.objectContaining({ source: 'public_server', level: 'error' })])
   })
 })

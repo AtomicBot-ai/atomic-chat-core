@@ -5,7 +5,8 @@
  * can fail the way a real backend fails (out of memory, SIGSEGV, silence).
  *
  * Driven by argv (the same flags `args.ts` emits) plus env:
- *   FAKE_LLAMA_MODE   ready | no-ready | hang | oom | segv | exit-<code> | projector-fail | mtp-fail
+ *   FAKE_LLAMA_MODE   ready | no-ready | hang | oom | segv | exit-<code> | projector-fail | mtp-fail |
+ *                     tensor-count
  *   FAKE_LLAMA_GPU    1 → print CUDA backend/offload/buffer lines
  *   FAKE_LLAMA_DELAY  milliseconds before the ready line
  *   FAKE_LLAMA_MIN_CTX  chat answers llama.cpp's context-overflow 400 while `--ctx-size` is below this
@@ -19,9 +20,11 @@
  *                         a grammar and expect scripted output, such as an agent loop.
  *   FAKE_LLAMA_COMPUTE_ERROR_MARKER  path; the first chat request anywhere creates it and answers
  *                     llama.cpp's poisoned-backend 500 ("Compute error"), later ones succeed
+ *   FAKE_LLAMA_PID_FILE  path; the pid is appended there on startup, one per line, so a test can
+ *                     find (and count) children that never became sessions
  *   LLAMA_API_KEY     when set, every route but `/health` demands `Authorization: Bearer <key>`
  */
-import { existsSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 
 const argv = process.argv.slice(2)
@@ -50,6 +53,8 @@ if (argv.includes('-h') || argv.includes('--help')) {
   process.exit(0)
 }
 
+if (process.env.FAKE_LLAMA_PID_FILE) appendFileSync(process.env.FAKE_LLAMA_PID_FILE, `${process.pid}\n`)
+
 // ── startup log, as llama.cpp prints it ───────────────────────────────────────
 err(`build: 6325 (fake) with cc (GCC) 13.2.0 for x86_64-linux-gnu`)
 if (process.env.FAKE_LLAMA_GPU === '1') {
@@ -72,6 +77,12 @@ if (mode === 'hang') {
 } else if (mode === 'projector-fail') {
   err('clip_model_load: unknown projector type: fake-projector')
   err('mtmd_init_from_file: failed to load CLIP model')
+  process.exit(1)
+} else if (mode === 'tensor-count') {
+  // Printed on stdout, as the loader does it.
+  process.stdout.write(
+    'llama_model_load: done_getting_tensors: wrong number of tensors; expected 417, got 408\n'
+  )
   process.exit(1)
 } else if (mode === 'mtp-fail') {
   err("main: the draft model doesn't contain MTP layers")

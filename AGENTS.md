@@ -56,6 +56,9 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
 | `src/runtime/`                      | `shared/` (spawn / readiness / kill, ports, env, sidecar table), `llamacpp/` (provider-parameterised), `mlx/`, `foundation-models/`. |
 | `src/core/`                         | `AtomicCore` facade (`atomic-core.ts`), service wiring (`create.ts`), local sessions, public-server lifecycle.         |
 | `src/cloud/` `src/router/` `src/server/` | Providers + key injection; model→target resolution; HTTP server (`/v1/*` public in `server/public/`, `/atomic/v1/*` control in `server/control/`, one file per route family). |
+| `src/remote-access/`                | Reaching the public listener from outside: the Cloudflare quick tunnel (`manager.ts` state machine, `process.ts`, `probe.ts`, `journal.ts`, pure `cloudflared-{args,output}.ts`, `status.ts`) and the LAN addresses (`lan.ts`, `lan-probe.ts`). The Host gate that lets those callers in is `server/public/dynamic-hosts.ts`. |
+| `src/diffusion/`                    | Image generation on stable-diffusion.cpp, a module of its own (not a `LocalRuntime`). `service.ts` is the surface (the app's twenty `DiffusionService` operations); `server-process.ts` spawns and supervises `sd-server`, `session.ts` the resident model, `jobs.ts` the runner and the cancel ladder, `idle.ts` the idle unload, `gallery.ts` + `png.ts` + `recipe.ts` the images on disk, `install.ts` the engine trees; pure `args.ts`, `progress.ts`, `tracker.ts`, `parse.ts`, `validate.ts`, `workflow.ts`. Wire types in `src/contracts/diffusion.ts`. |
+| `src/telemetry/`                    | Error reports to the core's own Sentry project from every host (app daemon, CLI, library): pure `reports.ts` (what each failure becomes, or nothing), `consent.ts` (who decides), `scrub.ts`, `stack.ts`, `envelope.ts`; `reporter.ts` sends (dedup, caps), `core-reporter.ts` builds it, `store.ts` is `telemetry.json`, `daemon.ts` the process handlers, `subscribe.ts` the engine events. |
 | `src/lock/`                         | One owner per canonical data folder; PID/start identity, attach, child-process journal and legacy-resource guards. |
 | `src/cli/`                          | `main.ts` is the binary entry; one file per subcommand in `commands/`.                                                |
 | `test/`                             | `contract/`, `e2e/`, `app-e2e/`, `runtime-compat/`, `live/`, `fixtures/`, `helpers/`. Unit tests live next to code.  |
@@ -124,7 +127,8 @@ Bun is the packager and the e2e runtime. Node 22 is the development runtime. Cod
 - **Every user-visible flow has an e2e test against the compiled binary** (`test/e2e/`, using
   `test/helpers/fake-llama-server.ts`) **and an app-e2e scenario** proving the Tauri app sees the same
   thing (`test/app-e2e/`, `docs/app-e2e.md`).
-- **Coverage floors** (`test/coverage-floor.json`) only go up. Windows CI is mandatory for anything
+- **Coverage floors** (`test/coverage-floor.json`) only go up. They are recorded and checked on macOS;
+  Linux and Windows CI run the same suites without them. Windows CI is mandatory for anything
   touching `src/runtime/`.
 - **Grade every critical flow** in `docs/testing-critical-flows.md` (Strong / Partial / Smoke / Missing).
   A PR may not lower a grade. Line coverage alone never raises one.

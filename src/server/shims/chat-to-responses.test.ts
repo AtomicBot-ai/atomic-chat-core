@@ -74,10 +74,10 @@ describe('chatRequestToResponses', () => {
     expect(out['tool_choice']).toBe('auto')
   })
 
-  it('forwards reasoning effort with an automatic summary, and only a non-empty string', () => {
+  it('forwards reasoning effort with a detailed summary, and only a non-empty string', () => {
     expect(obj(chatRequestToResponses({ reasoning_effort: 'high' }, 'k'))['reasoning']).toEqual({
       effort: 'high',
-      summary: 'auto',
+      summary: 'detailed',
     })
     expect(obj(chatRequestToResponses({ reasoning_effort: '' }, 'k'))).not.toHaveProperty('reasoning')
     expect(obj(chatRequestToResponses({ reasoning_effort: 3 }, 'k'))).not.toHaveProperty('reasoning')

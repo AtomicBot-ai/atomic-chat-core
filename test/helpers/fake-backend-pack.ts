@@ -44,6 +44,7 @@ export async function installFakeBackend(
     options.computeErrorMarker
       ? `FAKE_LLAMA_COMPUTE_ERROR_MARKER=${JSON.stringify(options.computeErrorMarker)}`
       : '',
+    options.pidFile ? `FAKE_LLAMA_PID_FILE=${JSON.stringify(options.pidFile)}` : '',
     // Single-quoted for sh: the value is JSON, full of the double quotes the other values avoid.
     options.completionSteps
       ? `FAKE_LLAMA_COMPLETION_STEPS='${JSON.stringify(options.completionSteps).replace(/'/g, `'\\''`)}'`

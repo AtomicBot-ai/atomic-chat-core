@@ -132,6 +132,36 @@ export async function processStartEpoch(pid: number, deps: IdentityDeps = {}): P
   return undefined
 }
 
+/**
+ * The executable name of a live process, without its directory (and without `.exe`), or `undefined`
+ * when it cannot be read. A second, independent check next to the start identity for a process that
+ * is only ever ended by name *and* identity — the remote-access tunnel, because people who want that
+ * feature often run a `cloudflared` of their own that must never be touched.
+ */
+export async function processName(pid: number, deps: IdentityDeps = {}): Promise<string | undefined> {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  const platform = deps.platform ?? process.platform
+  const readText = deps.readText ?? readUtf8
+  const run = deps.run ?? runProbe
+  try {
+    let raw: string
+    if (platform === 'linux') raw = await readText(`/proc/${pid}/comm`)
+    else if (platform === 'darwin') raw = await run('/bin/ps', ['-o', 'comm=', '-p', String(pid)])
+    else if (platform === 'win32')
+      raw = await run('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction Stop).ProcessName`,
+      ])
+    else return undefined
+    const name = (raw.trim().split(/[\\/]/).pop() ?? '').replace(/\.exe$/i, '')
+    return name === '' ? undefined : name
+  } catch {
+    return undefined // process gone, probe missing or refused
+  }
+}
+
 /** Compare a recorded identity with the live process. `unknown` means "cannot prove"; treat as live. */
 export async function verifyProcessIdentity(
   pid: number,

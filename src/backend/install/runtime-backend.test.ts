@@ -1,10 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { installFakeBackend } from '../../../test/helpers/fake-backend-pack.js'
+import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../../test/helpers/fake-backend-pack.js'
 import { HardwareOverrideStore } from '../../hardware/index.js'
-import { ensureBackend, selectInstalledBackend } from './runtime-backend.js'
+import { ensureBackend, platformArch, selectInstalledBackend } from './runtime-backend.js'
 
-describe('runtime backend selection', () => {
+describe('platformArch', () => {
+  it.each([
+    ['x64', 'x86_64'],
+    ['ia32', 'x86'],
+    ['arm64', 'arm64'],
+  ])('maps %s to %s', (node, rust) => {
+    expect(platformArch(node)).toBe(rust)
+  })
+})
+
+// The scanner looks for `llama-server.exe` on Windows, and the fake pack is a shell script.
+describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
   it('uses injected GPU facts instead of installed-directory order', async () => {
     const data = await makeTmpDataFolder('atomic-runtime-backend-')
     try {

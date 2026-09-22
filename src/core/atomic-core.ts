@@ -12,17 +12,29 @@
 
 import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import type { ReadyLine } from '../contracts/index.js'
-import type { LocalApiServerState, LocalProviderId, SessionInfo, UnloadResult } from '../contracts/index.js'
+import type {
+  LocalApiServerState,
+  LocalProviderId,
+  RemoteAccessStatus,
+  SessionInfo,
+  UnloadResult,
+} from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
+import type { DiffusionService } from '../diffusion/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
 import type { InstanceLock } from '../lock/index.js'
 import type { ModelRegistry } from '../models/index.js'
+import { RemoteAccessManager } from '../remote-access/index.js'
+import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
+import { captureReport, loadFailureReport } from '../telemetry/index.js'
+import type { ErrorSink, TelemetryControl } from '../telemetry/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
+import { DynamicTrustedHosts } from '../server/index.js'
 import type { ClientRegistry, ControlServer, SessionSummary } from '../server/index.js'
 import { CORE_VERSION } from '../version.js'
 import { createAtomicCore } from './create.js'
@@ -51,6 +63,14 @@ export interface AtomicCoreParts {
   externalSessions: ExternalSessions
   /** Set for an app owner: the timer that shuts the core down once the app's registration lapses. */
   appLeaseTimer: NodeJS.Timeout | undefined
+  /** How the remote-access tunnel is started, proven and journalled; the facade supplies the rest. */
+  remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
+  /** Image generation (stage 7): its own module, not a runtime. */
+  diffusion: DiffusionService
+  /** Where a failed load and the public server's failures are reported; absent, nothing is. */
+  errors?: ErrorSink | undefined
+  /** The same reporter, for a host that changes consent, user or tags at run time. */
+  telemetry?: TelemetryControl | undefined
 }
 
 export class AtomicCore {
@@ -83,10 +103,23 @@ export class AtomicCore {
   private readonly registries: Map<LocalProviderId, ModelRegistry>
   private readonly log: CoreLogger
   private readonly appLeaseTimer: NodeJS.Timeout | undefined
+  private readonly errors: ErrorSink | undefined
+  /**
+   * This core's error reporting, for an embedding program: `state()` says whether it reports and
+   * why, `update({ enabled, user_id, tags })` is what `PUT /atomic/v1/telemetry` does. Undefined
+   * when the host turned reporting off with `telemetry: false`.
+   */
+  readonly telemetry: TelemetryControl | undefined
   /** Model claims and per-model load/unload transitions. */
   private readonly localSessions: LocalSessions
   /** The public `/v1` listener and its serialized start/stop. */
   private readonly publicServer: PublicServerLifecycle
+  /** What the public listener trusts beyond its configuration: the tunnel name, the socket's address. */
+  private readonly trustedHosts = new DynamicTrustedHosts()
+  /** The Cloudflare quick tunnel in front of the public listener. */
+  private readonly remoteAccess: RemoteAccessManager
+  /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
+  readonly diffusion: DiffusionService
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -104,6 +137,9 @@ export class AtomicCore {
     this.registries = parts.registries
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
+    this.diffusion = parts.diffusion
+    this.errors = parts.errors
+    this.telemetry = parts.telemetry
     this.localSessions = new LocalSessions({
       layout: parts.layout,
       instanceId: parts.lock.instanceId,
@@ -114,11 +150,19 @@ export class AtomicCore {
       increaseCtx: (provider, modelId, reason) => this.increaseCtx(provider, modelId, reason),
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
     })
+    this.remoteAccess = new RemoteAccessManager({
+      ...parts.remoteAccess,
+      server: () => this.publicServer.endpoint(),
+      hosts: this.trustedHosts,
+      emit: (status) => this.events.emit('remote-access:status', status),
+      log: parts.log,
+    })
     this.publicServer = new PublicServerLifecycle({
       layout: parts.layout,
       events: parts.events,
       log: parts.log,
       assertRunning: () => this.assertRunning(),
+      remoteAccess: this.remoteAccess,
       serverDeps: () => ({
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
@@ -128,6 +172,9 @@ export class AtomicCore {
           this.localSessions.serverCtxRequest(provider, modelId, trigger),
         emit: (name, payload) => this.events.emit(name, payload),
         inspecting: () => this.inspecting,
+        dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
+        images: this.diffusion.imagesBackend(),
+        errors: parts.errors,
       }),
     })
   }
@@ -191,7 +238,9 @@ export class AtomicCore {
     options: CoreLoadOptions = {}
   ): Promise<{ session: SessionInfo; created: boolean }> {
     this.assertRunning()
-    return this.localSessions.acquire(provider, modelId, options)
+    return this.reportingLoad(provider, modelId, options, () =>
+      this.localSessions.acquire(provider, modelId, options)
+    )
   }
 
   /**
@@ -201,14 +250,25 @@ export class AtomicCore {
   async increaseCtx(provider: LocalProviderId, modelId: string, reason?: string): Promise<CtxIncreaseResult> {
     this.assertRunning()
     await assertNotLoadedByLegacy(this.layout, modelId)
-    return this.runtime(provider).autoIncreaseCtx(modelId, reason)
+    return this.reportingLoad(provider, modelId, {}, () =>
+      this.runtime(provider).autoIncreaseCtx(modelId, reason)
+    )
   }
 
   /** Restart a poisoned engine at its current context; guarded like `load`. */
   async recreateSession(provider: LocalProviderId, modelId: string): Promise<RecreateResult> {
     this.assertRunning()
     await assertNotLoadedByLegacy(this.layout, modelId)
-    return this.runtime(provider).recreateSession(modelId)
+    return this.reportingLoad(provider, modelId, {}, () => this.runtime(provider).recreateSession(modelId))
+  }
+
+  /**
+   * Cancel a load that has not answered yet. `false` when nothing is pending for the model — it has
+   * already loaded (unload it instead) or the load has not arrived.
+   */
+  cancelLoad(provider: LocalProviderId, modelId: string): boolean {
+    this.assertRunning()
+    return this.localSessions.cancelLoad(provider, modelId)
   }
 
   async unload(provider: LocalProviderId, modelId: string): Promise<UnloadResult> {
@@ -231,13 +291,33 @@ export class AtomicCore {
     return this.publicServer.stop()
   }
 
+  remoteAccessStatus(): RemoteAccessStatus {
+    return this.remoteAccess.status()
+  }
+
+  /** Open the tunnel; answers `starting` at once, the rest arrives as `remote-access:status`. */
+  startRemoteAccess(): RemoteAccessStatus {
+    this.assertRunning()
+    return this.remoteAccess.start()
+  }
+
+  /** Close the tunnel; answers once its process is gone. */
+  async stopRemoteAccess(): Promise<RemoteAccessStatus> {
+    this.assertRunning()
+    return this.remoteAccess.stop()
+  }
+
   /** Stop everything this core owns and release the lock last. */
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise
+    // Before anything that can wait: a public URL must not outlive the core that answers behind it.
+    this.remoteAccess.killNow()
     this.lifecycle = 'stopping'
     if (this.appLeaseTimer) clearInterval(this.appLeaseTimer)
     this.shutdownPromise = (async () => {
       await this.publicServer.stop()
+      // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
+      await this.diffusion.shutdown()
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
       await this.localSessions.releaseAll()
       await this.control.close()
@@ -252,6 +332,42 @@ export class AtomicCore {
   /** Alias so the facade reads the same as the library docs. */
   dispose(): Promise<void> {
     return this.shutdown()
+  }
+
+  /**
+   * Run a load (or a reload at another context) and report it when it fails, from whichever caller:
+   * the app, the public API, a remote client or the CLI. The error still reaches the caller.
+   */
+  private async reportingLoad<T>(
+    provider: LocalProviderId,
+    modelId: string,
+    options: CoreLoadOptions,
+    load: () => Promise<T>
+  ): Promise<T> {
+    try {
+      return await load()
+    } catch (error) {
+      if (this.errors) {
+        // The settings the runtime loads with, so the report names the backend and context it used.
+        let settings: Record<string, unknown> = {}
+        try {
+          settings = this.settings.get(provider)
+        } catch {
+          // an unknown provider: the error being reported already says so
+        }
+        captureReport(
+          this.errors,
+          loadFailureReport({
+            provider,
+            modelId,
+            error,
+            overrides: { ...settings, ...options.overrides },
+            isEmbedding: options.isEmbedding,
+          })
+        )
+      }
+      throw error
+    }
   }
 
   private assertRunning(): void {

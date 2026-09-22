@@ -7,6 +7,8 @@
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline/promises'
+import { processHandlersFor } from '../telemetry/index.js'
+import type { FatalDeps } from '../telemetry/index.js'
 
 export interface CliIo {
   stdout: (text: string) => void
@@ -24,6 +26,11 @@ export interface CliIo {
   waitForShutdown: (onStop: () => Promise<void>) => Promise<void>
   /** Open a URL in the user's browser; best effort, the URL is always printed as well. */
   openUrl: (url: string) => Promise<void>
+  /**
+   * Report what nothing caught, then exit 1 — for a command that owns this process (`daemon`). Only
+   * the real process has it: a test runs commands inside its own.
+   */
+  installProcessHandlers?: (deps: Omit<FatalDeps, 'writeStderr' | 'exit'>) => void
 }
 
 export interface SelectTerminal {
@@ -71,6 +78,11 @@ export function nodeCliIo(): CliIo {
       }).finally(() => readline?.close())
     },
     openUrl: openInBrowser,
+    installProcessHandlers: processHandlersFor(
+      process,
+      process.stderr.write.bind(process.stderr),
+      process.exit.bind(process)
+    ),
     waitForShutdown: (onStop) =>
       new Promise<void>((resolve) => {
         const stop = () => {

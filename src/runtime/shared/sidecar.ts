@@ -9,7 +9,10 @@
  *    trail the next owner can clean up and the app's reaper spares it;
  *  - a session exists only while its process does. Neither plugin watched its process: a crashed
  *    server stayed in the table until a chat request found the dead port. The table removes it on
- *    exit and emits `session:died`, which the app already listens for per provider.
+ *    exit and emits `session:died`, which the app already listens for per provider;
+ *  - a load the user cancels stops wherever it is — waiting for its turn, waiting on an unload,
+ *    joined to another load, or about to be published — and never lets the load behind it start
+ *    while the one ahead is still running.
  */
 
 import type { WriteStream } from 'node:fs'
@@ -18,6 +21,7 @@ import type { CoreEvents, LocalProviderId, SessionInfo, UnloadResult } from '../
 import type { ChildProcessRecord, ProcessJournal } from '../../lock/index.js'
 import { processStartId } from '../../lock/index.js'
 import type { ExitInfo } from '../llamacpp/index.js'
+import { isLoadCancelled, raceLoadCancel, throwIfLoadCancelled } from './load-cancel.js'
 import { closeLogStream } from './log-stream.js'
 import type { ManagedProcess } from './process.js'
 
@@ -100,40 +104,56 @@ export class SidecarTable<Extra = unknown> {
 
   /**
    * Load through the provider's single queue, or join the load already in flight for this model.
-   * An already-loaded model answers with its session without queueing.
+   * An already-loaded model answers with its session without queueing. `signal` is the user's
+   * cancel: it ends the wait at once, wherever the load is waiting.
    */
-  load(modelId: string, operation: () => Promise<SessionInfo>): Promise<SessionInfo> {
+  load(modelId: string, operation: () => Promise<SessionInfo>, signal?: AbortSignal): Promise<SessionInfo> {
     this.assertRunning()
     const unloading = this.unloading.get(modelId)
-    if (unloading) return unloading.then(() => this.load(modelId, operation))
+    if (unloading) return raceLoadCancel(unloading, signal).then(() => this.load(modelId, operation, signal))
     const existing = this.sessions.get(modelId)
     if (existing) return Promise.resolve({ ...existing.info })
     const inFlight = this.loading.get(modelId)
-    if (inFlight) return inFlight
-    const run = this.loadTail.then(async () => {
+    if (inFlight) return raceLoadCancel(inFlight, signal)
+    const turn = this.loadTail
+    const run = raceLoadCancel(turn, signal).then(async () => {
       this.assertRunning()
       const loaded = this.sessions.get(modelId)
       return loaded ? { ...loaded.info } : operation()
     })
-    this.loadTail = run.then(
-      () => {},
-      () => {}
-    )
+    // The queue waits for the turn as well as the result: a load cancelled while queued settles
+    // early, and the one behind it must still not start before the load ahead has finished.
+    this.loadTail = Promise.all([
+      turn,
+      run.then(
+        () => {},
+        () => {}
+      ),
+    ]).then(() => {})
     const tracked = run.finally(() => this.loading.delete(modelId))
     this.loading.set(modelId, tracked)
     return tracked
   }
 
-  /** Record a process that reported ready, and start watching it. Terminates it if that fails. */
-  async adopt(session: Omit<SidecarSession<Extra>, 'journalled'>): Promise<SessionInfo> {
+  /**
+   * Record a process that reported ready, and start watching it. Terminates it if that fails — or
+   * if the user cancelled while it was coming up: a cancel that raced the ready signal still wins,
+   * so no session is published for it.
+   */
+  async adopt(
+    session: Omit<SidecarSession<Extra>, 'journalled'>,
+    signal?: AbortSignal
+  ): Promise<SessionInfo> {
     const entry: SidecarSession<Extra> = { ...session, journalled: false }
     try {
+      throwIfLoadCancelled(signal)
       await this.journal(entry)
       this.assertRunning()
+      throwIfLoadCancelled(signal)
       this.sessions.set(entry.info.model_id, entry)
       this.watchExit(entry)
     } catch (error) {
-      await entry.process.terminate(this.options.unloadGraceMs).catch(() => {})
+      await entry.process.terminate(isLoadCancelled(signal) ? 0 : this.options.unloadGraceMs).catch(() => {})
       if (entry.journalled) await this.options.journal?.remove(entry.info.pid).catch(() => {})
       await closeLogStream(entry.logStream)
       throw error

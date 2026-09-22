@@ -16,3 +16,28 @@ describe('documentation routes', () => {
     expect(res.headers.get('access-control-allow-origin')).toBeNull()
   })
 })
+
+describe('the OpenAPI document', () => {
+  // `openapi_publishes_the_image_generation_contract` (`images_route.rs`, app commit ec1fd3ea7).
+  it('publishes the image-generation contract the route serves', async () => {
+    const server = await startPublic({})
+    const spec = (await (await fetch(`http://127.0.0.1:${server.port}/openapi.json`)).json()) as {
+      paths: Record<string, Record<string, any>> // eslint-disable-line @typescript-eslint/no-explicit-any
+      components: { schemas: Record<string, any> } // eslint-disable-line @typescript-eslint/no-explicit-any
+    }
+    const operation = spec.paths['/images/generations']?.['post']
+    expect(operation?.operationId).toBe('createImageGeneration')
+    expect(operation?.tags[0]).toBe('Images')
+    expect(operation?.requestBody.content['application/json'].schema.$ref).toBe(
+      '#/components/schemas/CreateImageGenerationDto'
+    )
+    const request = spec.components.schemas['CreateImageGenerationDto']
+    expect(request.required[0]).toBe('prompt')
+    expect(request.properties.response_format.enum[0]).toBe('b64_json')
+    expect(spec.components.schemas['ImageGenerationResponseDto'].properties.data.items.$ref).toBe(
+      '#/components/schemas/ImageGenerationDataDto'
+    )
+    expect(operation?.responses['503']).toBeTypeOf('object')
+    expect(operation?.responses['504']).toBeTypeOf('object')
+  })
+})

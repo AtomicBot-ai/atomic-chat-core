@@ -17,7 +17,7 @@ const agent = (id: string) => {
 }
 
 describe('the catalog', () => {
-  it('lists the 19 agents the Launch page configures, in order', () => {
+  it('lists the 20 agents the Launch page configures, in order', () => {
     expect(AGENTS.map((a) => a.id)).toEqual([
       'kilo',
       'claude-code',
@@ -28,6 +28,7 @@ describe('the catalog', () => {
       'cline',
       'dsh',
       'zed',
+      'zcode',
       'mimo',
       'droid',
       'copilot',
@@ -60,6 +61,7 @@ describe('the catalog', () => {
     expect(agent('openhands').runArgs).toEqual(['--override-with-envs'])
     expect(agent('openclaw').runArgs).toEqual(['chat'])
     expect(agent('zed').runMode).toBe('gui')
+    expect(agent('zcode').runMode).toBe('gui')
     expect(agent('codex').runMode).toBe('terminal')
     expect(HERMES_CONTEXT_LENGTH).toBe(65_536)
   })
@@ -140,7 +142,7 @@ describe('poolsideStandaloneBaseUrl', () => {
 })
 
 describe('offPathCandidates', () => {
-  it('knows where the OpenClaw installer puts its launcher, and nothing else', () => {
+  it('knows where the OpenClaw installer puts its launcher', () => {
     expect(offPathCandidates('openclaw', '/home/u', {}, 'linux')).toEqual([
       '/home/u/.openclaw/bin/openclaw',
       '/home/u/.local/bin/openclaw',
@@ -161,5 +163,34 @@ describe('offPathCandidates', () => {
     expect(offPathCandidates('codex', '/home/u', {}, 'linux')).toEqual([])
     expect(offPathCandidates('openclaw', undefined, {}, 'linux')).toEqual([])
     expect(offPathCandidates('openclaw', '/home/u', { OPENCLAW_PREFIX: '   ' }, 'linux')).toHaveLength(2)
+  })
+
+  // `zcode_app_candidates` (`core/system/commands.rs`, app commit ec1fd3ea7).
+  it("knows where ZCode's installers put the desktop app", () => {
+    expect(offPathCandidates('zcode', '/Users/u', {}, 'darwin')).toEqual([
+      '/Applications/ZCode.app/Contents/MacOS/ZCode',
+      '/Users/u/Applications/ZCode.app/Contents/MacOS/ZCode',
+    ])
+    expect(offPathCandidates('zcode', undefined, {}, 'darwin')).toEqual([
+      '/Applications/ZCode.app/Contents/MacOS/ZCode',
+    ])
+    expect(
+      offPathCandidates(
+        'zcode',
+        'C:\\Users\\u',
+        { LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local', ProgramFiles: 'C:\\Program Files' },
+        'win32'
+      )
+    ).toEqual([
+      'C:\\Users\\u\\AppData\\Local\\Programs\\ZCode\\ZCode.exe',
+      'C:\\Program Files\\ZCode\\ZCode.exe',
+    ])
+    expect(offPathCandidates('zcode', 'C:\\Users\\u', {}, 'win32')).toEqual([])
+    expect(offPathCandidates('zcode', '/home/u', {}, 'linux')).toEqual(['/opt/ZCode/zcode'])
+  })
+
+  it('guesses nothing for the agents that install onto PATH', () => {
+    for (const bin of ['codex', 'claude', 'zed'])
+      expect(offPathCandidates(bin, '/home/u', {}, 'linux')).toEqual([])
   })
 })

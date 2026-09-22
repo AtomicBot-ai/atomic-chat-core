@@ -156,7 +156,7 @@ async function sseFrames(res: Response): Promise<Array<{ event: string | undefin
 }
 
 describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API', () => {
-  it('serves the documentation embedded in the binary, byte for byte', async () => {
+  it('serves the documentation embedded in the binary, byte for byte, with the image endpoint in the OpenAPI document', async () => {
     const { ready } = await core.startDaemon(dataFolder, daemons)
     const port = await startServer(ready, { prefix: '/api' })
     const base = `http://127.0.0.1:${port}`
@@ -165,9 +165,17 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
     expect(page.headers.get('content-type')).toBe('text/html')
     expect(await page.text()).toContain('SwaggerUIBundle')
 
-    const spec = (await (await fetch(`${base}/openapi.json`)).json()) as { servers: Array<{ url: string }> }
+    const spec = (await (await fetch(`${base}/openapi.json`)).json()) as {
+      servers: Array<{ url: string }>
+      paths: Record<string, { post?: { operationId?: string; tags?: string[] } }>
+    }
     expect(spec.servers.length).toBeGreaterThan(0)
     expect(spec.servers.every((s) => s.url === `http://127.0.0.1:${port}/api`)).toBe(true)
+    // Stage 7m: the app's document knows the local image endpoint, and the binary embeds that version.
+    expect(spec.paths['/images/generations']?.post).toMatchObject({
+      operationId: 'createImageGeneration',
+      tags: ['Images'],
+    })
 
     for (const [path, fixture] of [
       ['/docs/swagger-ui.css', 'docs_css_served'],

@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest'
 import {
   identityPermitsTakeover,
   isProcessAlive,
-  processStartId,
+  processName,
   processStartEpoch,
+  processStartId,
   runProbe,
   verifyProcessIdentity,
 } from './process-identity.js'
@@ -100,6 +101,54 @@ describe('processStartEpoch', () => {
         readText: async (path) => (path === '/proc/stat' ? 'no btime' : 'bad stat'),
       })
     ).toBeUndefined()
+  })
+})
+
+describe('processName', () => {
+  it('reads the bare executable name on every platform, whatever the probe wraps it in', async () => {
+    expect(await processName(7, { platform: 'linux', readText: async () => 'cloudflared\n' })).toBe(
+      'cloudflared'
+    )
+    expect(
+      await processName(7, {
+        platform: 'darwin',
+        run: async () => '/Applications/Atomic Chat.app/Contents/MacOS/cloudflared\n',
+      })
+    ).toBe('cloudflared')
+    expect(await processName(7, { platform: 'win32', run: async () => 'cloudflared\r\n' })).toBe(
+      'cloudflared'
+    )
+    expect(
+      await processName(7, { platform: 'win32', run: async () => 'C:\\Tools\\Cloudflared.EXE\r\n' })
+    ).toBe('Cloudflared')
+  })
+
+  it('answers nothing for an impossible pid, a failing or empty probe and an unsupported platform', async () => {
+    expect(await processName(0)).toBeUndefined()
+    expect(await processName(-1)).toBeUndefined()
+    expect(
+      await processName(7, {
+        platform: 'linux',
+        readText: async () => {
+          throw new Error('ENOENT')
+        },
+      })
+    ).toBeUndefined()
+    expect(await processName(7, { platform: 'darwin', run: async () => '  \n' })).toBeUndefined()
+    expect(await processName(7, { platform: 'freebsd' })).toBeUndefined()
+  })
+
+  it('names a real child process on this machine', async () => {
+    const { spawn } = await import('node:child_process')
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    try {
+      await new Promise((resolve) => child.once('spawn', resolve))
+      const name = await processName(child.pid as number)
+      // `node` under vitest, `bun` under the Bun runner; never a path, never empty.
+      expect(name).toMatch(/^[\w.-]+$/)
+    } finally {
+      child.kill('SIGKILL')
+    }
   })
 })
 

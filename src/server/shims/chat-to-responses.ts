@@ -151,8 +151,10 @@ export function chatRequestToResponses(body: JsonValue, promptCacheKey: string):
   // token cap the public Responses API accepts, and the sampling knobs are not part of its contract;
   // forwarding any of them fails the request outright.
 
+  // Subscription responses expose summaries, not the hidden reasoning itself: ask for the richest one,
+  // so the UI does not collapse a long reasoning pass into one or two labels (app commit `ec1fd3ea7`).
   const effort = asStr(get(body, 'reasoning_effort'))
-  if (effort !== undefined && effort !== '') out['reasoning'] = { effort, summary: 'auto' }
+  if (effort !== undefined && effort !== '') out['reasoning'] = { effort, summary: 'detailed' }
 
   const tools = asArray(get(body, 'tools'))
   if (tools !== undefined) {

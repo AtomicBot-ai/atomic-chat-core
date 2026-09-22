@@ -21,7 +21,8 @@ export interface ChildProcessRecord {
   pid: number
   process_start_id: string | null
   exe: string
-  provider: LocalProviderId
+  /** `diffusion` for the image engine, which is not a provider (its `sd-server` is reaped all the same). */
+  provider: LocalProviderId | 'diffusion'
   model_id: string
   port: number
   started_at: string

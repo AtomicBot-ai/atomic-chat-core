@@ -20,13 +20,14 @@
 import { createWriteStream } from 'node:fs'
 import { mkdir, readFile, realpath, rename, rm, rmdir, stat, statfs, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import type { CoreEvents } from '../contracts/index.js'
+import type { CoreEvents, DownloadStage } from '../contracts/index.js'
 import { checkFreeSpace, checkPathWithinLimit, diskErrToString, remainingBytes } from './disk.js'
 import type { ProxyConfig } from './protocol.js'
 import {
   classifyDownloadStatus,
   classifyResumeStatus,
   DownloadRequestError,
+  downloadStage,
   expectedDownloadSize,
   HEAD_TIMEOUT_MS,
   MAX_STREAM_RETRIES,
@@ -70,9 +71,16 @@ export interface DownloaderDeps {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
   retryBaseMs?: number
   verify?: VerifyDeps
-  emit: <K extends 'download:progress' | 'model:validation-started'>(name: K, payload: CoreEvents[K]) => void
+  emit: DownloaderEmit
   log?: (level: 'info' | 'warn', msg: string) => void
 }
+
+/** The events a download raises; narrow on purpose, so a caller cannot be handed anything else. */
+export type DownloaderEventName = 'download:progress' | 'download:stage' | 'model:validation-started'
+export type DownloaderEmit = <K extends DownloaderEventName>(name: K, payload: CoreEvents[K]) => void
+
+/** Tell whoever is watching what a retry ladder is waiting on; see `downloadStage`. */
+type StageReport = (kind: DownloadStage['kind'], attempt: number) => void
 
 interface Task {
   controller: AbortController
@@ -186,6 +194,10 @@ export class Downloader {
     const { dataFolder, platform, log } = this.deps
     const resume = options.resume ?? false
     const headers = options.headers ?? {}
+    // Built before the preflight on purpose: that loop is where a download against an unreachable
+    // host spends its first silent minute.
+    const reportStage: StageReport = (kind, attempt) =>
+      this.deps.emit('download:stage', { taskId, stage: downloadStage(kind, attempt) })
     for (const item of items) {
       if (item.proxy) {
         const problem = validateProxyConfig(item.proxy)
@@ -195,7 +207,8 @@ export class Downloader {
 
     // Preflight sizes (catalog size or HEAD; HEAD failures degrade to unknown).
     const sizes = new Map<string, number>()
-    for (const item of items) sizes.set(item.url, await this.preflightSize(item, headers, signal))
+    for (const item of items)
+      sizes.set(item.url, await this.preflightSize(item, headers, signal, reportStage))
     const totalSize = [...sizes.values()].reduce((a, b) => a + b, 0)
 
     // Preflight paths: containment, Windows limit, free space.
@@ -239,6 +252,7 @@ export class Downloader {
           signal,
           progress,
           emitProgress,
+          reportStage,
         })
       )
     )
@@ -267,11 +281,18 @@ export class Downloader {
     emitProgress()
   }
 
-  private async preflightSize(item: DownloadItem, headers: Record<string, string>, signal: AbortSignal) {
+  private async preflightSize(
+    item: DownloadItem,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+    reportStage: StageReport
+  ) {
     if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
     if (item.size != null && item.size > 0) return item.size
     const fetchImpl = this.deps.fetchFor(item, this.deps.fetch)
     let retry = 0
+    // Only when a HEAD is actually made: a size from the catalog means no connection yet.
+    reportStage('connecting', 0)
     for (;;) {
       try {
         const res = await fetchImpl(item.url, {
@@ -289,6 +310,7 @@ export class Downloader {
         if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
         const retryable = !(e instanceof DownloadRequestError) || e.kind === 'retryable'
         if (retryable && retry < MAX_STREAM_RETRIES) {
+          reportStage('retrying', retry + 1)
           await this.deps.sleep(retryDelayMs(retry, this.deps.retryBaseMs), signal)
           retry++
           continue
@@ -341,7 +363,8 @@ export class Downloader {
     headers: Record<string, string>,
     startBytes: number,
     expectedSize: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    reportStage: StageReport
   ): Promise<Response> {
     let retry = 0
     for (;;) {
@@ -354,6 +377,7 @@ export class Downloader {
             'warn',
             `Download request for '${item.url}' failed: ${e.message}. Retry ${retry + 1}/${MAX_STREAM_RETRIES}`
           )
+          reportStage('retrying', retry + 1)
           await this.deps.sleep(retryDelayMs(retry, this.deps.retryBaseMs), signal)
           retry++
           continue
@@ -374,9 +398,10 @@ export class Downloader {
       signal: AbortSignal
       progress: Map<string, number>
       emitProgress: () => void
+      reportStage: StageReport
     }
   ): Promise<string> {
-    const { signal, headers, progress, emitProgress } = ctx
+    const { signal, headers, progress, emitProgress, reportStage } = ctx
     const disk = (e: unknown) => new Error(diskErrToString(e))
     const fetchImpl = this.deps.fetchFor(item, this.deps.fetch)
     if (item.proxy && shouldBypassProxy(item.url, item.proxy.no_proxy ?? []))
@@ -427,12 +452,26 @@ export class Downloader {
           `Partial file for '${item.url}' is larger than expected (${downloaded} > ${expectedSize}); restarting`
         )
         shouldResume = false
-        res = await this.requestWithRetry(fetchImpl, item, headers, 0, expectedSize, signal).catch(
-          rethrowAsString
-        )
+        res = await this.requestWithRetry(
+          fetchImpl,
+          item,
+          headers,
+          0,
+          expectedSize,
+          signal,
+          reportStage
+        ).catch(rethrowAsString)
       } else {
         try {
-          res = await this.requestWithRetry(fetchImpl, item, headers, downloaded, expectedSize, signal)
+          res = await this.requestWithRetry(
+            fetchImpl,
+            item,
+            headers,
+            downloaded,
+            expectedSize,
+            signal,
+            reportStage
+          )
           totalTransferred = downloaded
           progress.set(fileId, downloaded)
           emitProgress()
@@ -440,14 +479,20 @@ export class Downloader {
           if (e instanceof DownloadRequestError && e.kind === 'restart') {
             this.deps.log('warn', `Resume is unavailable for '${item.url}': ${e.message}`)
             shouldResume = false
-            res = await this.requestWithRetry(fetchImpl, item, headers, 0, expectedSize, signal).catch(
-              rethrowAsString
-            )
+            res = await this.requestWithRetry(
+              fetchImpl,
+              item,
+              headers,
+              0,
+              expectedSize,
+              signal,
+              reportStage
+            ).catch(rethrowAsString)
           } else throw rethrowAsString(e)
         }
       }
     } else {
-      res = await this.requestWithRetry(fetchImpl, item, headers, 0, expectedSize, signal).catch(
+      res = await this.requestWithRetry(fetchImpl, item, headers, 0, expectedSize, signal, reportStage).catch(
         rethrowAsString
       )
     }

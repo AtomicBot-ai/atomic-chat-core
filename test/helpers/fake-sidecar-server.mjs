@@ -9,6 +9,8 @@
  *   FAKE_SIDECAR_MODE   ready | hang | error-line | exit-<code> | exit-clean | oom
  *   FAKE_SIDECAR_DELAY  milliseconds before the ready line
  *   FAKE_SIDECAR_ARGV   path; the argv is written there as JSON (appended as one line per start)
+ *   FAKE_SIDECAR_PID_FILE  path; the pid is appended there on startup, for a test that must end a
+ *                       process the core has not journalled yet
  *   FAKE_SIDECAR_REASON the reason in the `[foundation-models] ERROR:` line (error-line mode)
  *   FAKE_FM_CHECK       what `--check` prints (fm)
  *   FAKE_SIDECAR_REPLY  what a chat completion says (`fake <kind> reply` by default); a request with
@@ -31,6 +33,7 @@ const out = (line) => process.stdout.write(`${line}\n`)
 const err = (line) => process.stderr.write(`${line}\n`)
 
 if (process.env.FAKE_SIDECAR_ARGV) appendFileSync(process.env.FAKE_SIDECAR_ARGV, `${JSON.stringify(argv)}\n`)
+if (process.env.FAKE_SIDECAR_PID_FILE) appendFileSync(process.env.FAKE_SIDECAR_PID_FILE, `${process.pid}\n`)
 
 if (kind === 'fm' && argv.includes('--check')) {
   out(process.env.FAKE_FM_CHECK ?? 'available')

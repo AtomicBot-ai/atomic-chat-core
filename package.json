@@ -1,6 +1,6 @@
 {
   "name": "atomic-chat-core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Inference core of Atomic Chat: local llama.cpp/MLX/Foundation Models runtime, cloud providers, model router and the OpenAI-compatible server on :1337.",
   "license": "MIT",
   "private": true,
@@ -40,12 +40,13 @@
     "test": "vitest run --project unit --project contract",
     "test:watch": "vitest --project unit --project contract",
     "test:e2e": "vitest run --project e2e",
-    "test:contract:bun": "bun test ./test/contract/proxy-http.test.ts ./test/contract/state-file.test.ts ./test/contract/shims.test.ts ./test/contract/chatgpt.test.ts ./test/contract/inspector-telemetry.test.ts",
+    "test:contract:bun": "bun test ./test/contract/proxy-http.test.ts ./test/contract/state-file.test.ts ./test/contract/shims.test.ts ./test/contract/chatgpt.test.ts ./test/contract/inspector-telemetry.test.ts ./test/contract/dynamic-hosts.test.ts",
     "test:app-e2e": "vitest run --project app-e2e",
     "test:runtime-compat": "vitest run --project runtime-compat",
     "test:live": "ATOMIC_LIVE=1 vitest run --project live",
     "test:coverage": "vitest run --project unit --project contract --coverage && node scripts/check-coverage-floor.mjs",
     "fixtures:import": "node scripts/import-app-fixtures.mjs",
+    "release": "node scripts/release.mjs",
     "verify": "npm run lint && npm run typecheck && npm run format:check && npm run test:coverage && npm run build && npm run build:bin && npm run test:contract:bun && npm run test:e2e"
   },
   "dependencies": {

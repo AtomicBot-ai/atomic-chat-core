@@ -19,6 +19,8 @@ export interface FakeSidecarOptions {
   minCtx?: number
   /** What a chat completion says; streamed word by word when the request asks for a stream. */
   reply?: string
+  /** The pid is appended here on startup, for a test that must end a process the core has not journalled yet. */
+  pidFile?: string
 }
 
 export function fakeSidecarEnv(options: FakeSidecarOptions): Record<string, string> {
@@ -28,6 +30,7 @@ export function fakeSidecarEnv(options: FakeSidecarOptions): Record<string, stri
   }
   if (options.delayMs) env['FAKE_SIDECAR_DELAY'] = String(options.delayMs)
   if (options.argvFile) env['FAKE_SIDECAR_ARGV'] = options.argvFile
+  if (options.pidFile) env['FAKE_SIDECAR_PID_FILE'] = options.pidFile
   if (options.reason) env['FAKE_SIDECAR_REASON'] = options.reason
   if (options.check) env['FAKE_FM_CHECK'] = options.check
   if (options.minCtx) env['FAKE_MLX_MIN_CTX'] = String(options.minCtx)

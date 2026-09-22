@@ -17,7 +17,7 @@
  */
 
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import type { DataLayout } from '../config/index.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { Downloader, ProxyConfig } from '../downloads/index.js'
@@ -190,13 +190,13 @@ const nodeProbeFs: RocmProbeFs = {
 /**
  * The Linux host facts, read the way the plugin reads them: `gfx_target_version` from
  * `/sys/class/kfd/kfd/topology/nodes/<n>/properties` (zeros are CPU nodes), and `libamdhip64.so`
- * in a ROCm prefix or on the default library path.
+ * in a ROCm prefix or on the default library path. Linux paths, so joined as POSIX whatever the host.
  */
 export async function probeLinuxRocmHost(fs: RocmProbeFs = nodeProbeFs): Promise<RocmHostProbe> {
   const nodesDir = '/sys/class/kfd/kfd/topology/nodes'
   const gfxTargetVersions: number[] = []
   for (const node of await fs.readdir(nodesDir).catch(() => [] as string[])) {
-    const properties = await fs.readFile(join(nodesDir, node, 'properties')).catch(() => undefined)
+    const properties = await fs.readFile(posix.join(nodesDir, node, 'properties')).catch(() => undefined)
     for (const line of properties?.split('\n') ?? []) {
       if (!line.startsWith('gfx_target_version ')) continue
       const value = line.slice('gfx_target_version '.length).trim()
@@ -211,13 +211,13 @@ export async function probeLinuxRocmHost(fs: RocmProbeFs = nodeProbeFs): Promise
     '/usr/lib',
   ]
   let hasRuntime = false
-  for (const dir of libraryDirs) if (await fs.exists(join(dir, 'libamdhip64.so'))) hasRuntime = true
+  for (const dir of libraryDirs) if (await fs.exists(posix.join(dir, 'libamdhip64.so'))) hasRuntime = true
   if (!hasRuntime) {
     for (const entry of await fs.readdir('/opt').catch(() => [] as string[])) {
       if (!entry.startsWith('rocm-')) continue
       if (
-        (await fs.exists(join('/opt', entry, 'lib', 'libamdhip64.so'))) ||
-        (await fs.exists(join('/opt', entry, 'lib64', 'libamdhip64.so')))
+        (await fs.exists(posix.join('/opt', entry, 'lib', 'libamdhip64.so'))) ||
+        (await fs.exists(posix.join('/opt', entry, 'lib64', 'libamdhip64.so')))
       )
         hasRuntime = true
     }

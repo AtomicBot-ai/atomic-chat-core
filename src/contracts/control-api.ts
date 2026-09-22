@@ -45,3 +45,26 @@ export interface LocalApiServerState {
 }
 
 export const LOCAL_API_SERVER_STATE_FILE = 'local-api-server.json'
+
+/** `GET /atomic/v1/telemetry`: whether the core reports its errors, and why. Never the DSN. */
+export interface TelemetryState {
+  enabled: boolean
+  /** Enabled, and this build has a project to report to. */
+  reporting: boolean
+  has_user: boolean
+  tags: Record<string, string>
+  /** Who decided: the environment (`DO_NOT_TRACK`), the host, the user's stored choice, or the default (on). */
+  source: 'env' | 'host' | 'stored' | 'default'
+  /** Who embeds the core: `atomic-chat`, `cli`, `library`, or a host's own name. */
+  host: string
+}
+
+/**
+ * `PUT /atomic/v1/telemetry`: what the app's `set_telemetry_*` commands learned. An omitted field
+ * keeps its value; `user_id: null` forgets the user; `tags` replaces the whole set (allow-listed).
+ */
+export interface TelemetryUpdateRequest {
+  enabled?: boolean
+  user_id?: string | null
+  tags?: Record<string, string>
+}

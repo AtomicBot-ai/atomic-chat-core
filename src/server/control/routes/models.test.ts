@@ -39,6 +39,51 @@ describe('models and public server', () => {
   })
 })
 
+describe('load cancellation route', () => {
+  it('answers whether a load was pending and never reaches the load route', async () => {
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/Owner/Repo-GGUF/load/cancel', {
+      method: 'POST',
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ cancelled: true })
+    // The model id keeps its slashes and loses the `/load` that belongs to the route.
+    expect(h.calls).toEqual(['cancel-load llamacpp-upstream Owner/Repo-GGUF'])
+  })
+
+  it('answers false, not an error, when nothing is pending', async () => {
+    h.cancelLoadResult = false
+    const res = await h.get('/atomic/v1/models/mlx/m/load/cancel', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ cancelled: false })
+  })
+
+  it('reports a cancelled load to the caller that asked for it as a 409 with the app code', async () => {
+    const cancelling = await start({
+      loadModel: async () => {
+        throw Object.assign(new Error('The model load was cancelled.'), { code: 'MODEL_LOAD_CANCELLED' })
+      },
+    })
+    const res = await cancelling.get('/atomic/v1/models/llamacpp-upstream/x/load', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({
+      error: { code: 'MODEL_LOAD_CANCELLED', message: 'The model load was cancelled.' },
+    })
+    await cancelling.server.close()
+  })
+
+  it('refuses an unknown provider with the code the facade raises', async () => {
+    const unknown = await start({
+      cancelModelLoad: () => {
+        throw Object.assign(new Error('Unknown provider "nope".'), { code: 'PROVIDER_NOT_FOUND' })
+      },
+    })
+    const res = await unknown.get('/atomic/v1/models/nope/m/load/cancel', { method: 'POST' })
+    expect(res.status).toBe(404)
+    expect((await res.json()) as object).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+    await unknown.server.close()
+  })
+})
+
 describe('context increase route', () => {
   it('reloads a model one step up and returns the new session', async () => {
     const res = await h.get('/atomic/v1/models/llamacpp-upstream/vendor/model-7b/ctx/increase', {

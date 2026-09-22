@@ -35,6 +35,12 @@ interface AgentConfigExpectation {
 
 const { index, cases } = loadFixtureSet<AgentConfigInput, AgentConfigExpectation>('agent-config')
 
+/**
+ * Writers ported after the app's fixture emitter (`cli/fixture_dump.rs`) was removed with its Rust
+ * CLI, so no golden files exist for them; their own tests pin them (`configure/zcode.test.ts`).
+ */
+const PORTED_WITHOUT_FIXTURES = new Set(['zcode'])
+
 /** Agents whose writer has not landed yet. Shrinks to empty as the port proceeds. */
 const PENDING_AGENTS = new Set(
   [...new Set(cases.map((c) => c.input.agent))].filter((id) => writerFor(id) === undefined)
@@ -82,7 +88,7 @@ describe('agent-config fixtures', () => {
   })
 
   it('reports which agents still have no port', () => {
-    const ported = registeredAgents()
+    const ported = registeredAgents().filter((id) => !PORTED_WITHOUT_FIXTURES.has(id))
     const total = new Set(cases.map((c) => c.input.agent)).size
     expect(ported.length + PENDING_AGENTS.size, 'every agent is either ported or pending').toBe(total)
     // Visible progress: this message is the phase-2 checklist.
@@ -104,7 +110,9 @@ describe.skipIf(replayable.length === 0)('replaying the ported writers', () => {
     const options = {
       fs: nodeConfigFs(home),
       home,
-      platform: process.platform,
+      // The app's Rust tests recorded every fixture on macOS: `.bash_profile`, not `.bashrc`, and
+      // shell rc files, not `setx`. Replaying them as another host would test that host's writer.
+      platform: 'darwin' as const,
       shell: fixture.input.shell,
       env: { HOME: home, SHELL: fixture.input.shell ?? '/bin/zsh' } as NodeJS.ProcessEnv,
       // The emitter expressed the subprocess environment only through the outcome it recorded: a

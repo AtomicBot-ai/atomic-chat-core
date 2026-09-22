@@ -137,6 +137,12 @@
     "functions": 100,
     "lines": 93
   },
+  "src/cli/commands/telemetry.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/cli/io.ts": {
     "statements": 86,
     "branches": 100,
@@ -245,11 +251,155 @@
     "functions": 100,
     "lines": 100
   },
+  "src/diffusion/args.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/compat.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/containment.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/errors.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/gallery.ts": {
+    "statements": 99,
+    "branches": 92,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/diffusion/http.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/idle.ts": {
+    "statements": 100,
+    "branches": 80,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/install.ts": {
+    "statements": 98,
+    "branches": 94,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/diffusion/jobs.ts": {
+    "statements": 98,
+    "branches": 87,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/diffusion/mutex.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/parse.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/png.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/progress.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/recipe.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/server-process.ts": {
+    "statements": 96,
+    "branches": 93,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/diffusion/service.ts": {
+    "statements": 99,
+    "branches": 92,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/diffusion/session.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/state.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/tracker.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/types.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/validate.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/wiring.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/workflow.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/downloads/archive.ts": {
     "statements": 98,
     "branches": 82,
     "functions": 100,
     "lines": 98
+  },
+  "src/downloads/disk-space.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/downloads/disk.ts": {
     "statements": 100,
@@ -431,6 +581,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/integrations/configure/zcode.ts": {
+    "statements": 98,
+    "branches": 93,
+    "functions": 100,
+    "lines": 98
+  },
   "src/integrations/configure/zed.ts": {
     "statements": 100,
     "branches": 100,
@@ -528,6 +684,72 @@
     "lines": 100
   },
   "src/models/shards.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/cloudflared-args.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/cloudflared-output.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/journal.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/lan-probe.ts": {
+    "statements": 98,
+    "branches": 88,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/remote-access/lan.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/manager.ts": {
+    "statements": 99,
+    "branches": 93,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/remote-access/probe.ts": {
+    "statements": 98,
+    "branches": 96,
+    "functions": 92,
+    "lines": 98
+  },
+  "src/remote-access/process.ts": {
+    "statements": 96,
+    "branches": 90,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/remote-access/spawner.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/status.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/remote-access/wiring.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
@@ -647,6 +869,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/shared/load-cancel.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/shared/log-stream.ts": {
     "statements": 100,
     "branches": 100,
@@ -707,6 +935,18 @@
     "functions": 100,
     "lines": 91
   },
+  "src/server/control/routes/diffusion.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/disk.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/control/routes/external-sessions.ts": {
     "statements": 100,
     "branches": 100,
@@ -737,7 +977,19 @@
     "functions": 100,
     "lines": 100
   },
+  "src/server/control/routes/remote-access.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/control/routes/settings.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/telemetry.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
@@ -758,6 +1010,12 @@
   "src/server/public/ctx.ts": {
     "statements": 100,
     "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/dynamic-hosts.ts": {
+    "statements": 100,
+    "branches": 87,
     "functions": 100,
     "lines": 100
   },
@@ -782,6 +1040,18 @@
   "src/server/public/gates.ts": {
     "statements": 100,
     "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/images-params.ts": {
+    "statements": 100,
+    "branches": 99,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/images.ts": {
+    "statements": 100,
+    "branches": 93,
     "functions": 100,
     "lines": 100
   },
@@ -912,6 +1182,84 @@
     "lines": 100
   },
   "src/speculative/transcription-registry.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/config.ts": {
+    "statements": 96,
+    "branches": 87,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/telemetry/consent.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/core-reporter.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/daemon.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/dsn.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/envelope.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/policy.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/reporter.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/reports.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/scrub.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/stack.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/store.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/telemetry/subscribe.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,

@@ -12,6 +12,8 @@ export type RuntimeErrorCode =
   | 'MODEL_LOAD_FAILED'
   | 'MODEL_FILE_NOT_FOUND'
   | 'MODEL_LOAD_TIMED_OUT'
+  /** The user stopped a load before the engine reported ready (the plugins' `ModelLoadCancelled`). */
+  | 'MODEL_LOAD_CANCELLED'
   | 'INVALID_ARGUMENT'
   | 'IO_ERROR'
   | 'INTERNAL_ERROR'
@@ -62,8 +64,48 @@ export type CoreErrorCode =
   | 'AUTH_CANCELLED'
   /** An external service (a token endpoint, the subscription API) could not be reached or refused. */
   | 'UPSTREAM_ERROR'
+  /** A tunnel needs a running public server to point at. */
+  | 'REMOTE_ACCESS_SERVER_STOPPED'
+  /** The tunnel is being stopped; ask again once it is down. */
+  | 'REMOTE_ACCESS_OPERATION_IN_PROGRESS'
+  /** A previous tunnel could not be confirmed dead; only Stop is offered until it is. */
+  | 'REMOTE_ACCESS_STOP_FAILED'
 
-export type ErrorCode = RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode
+/**
+ * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the
+ * web app). `lib/diffusion/errors.ts` matches on them. Three are spelled like codes above and are
+ * shared with them: `MODEL_LOAD_FAILED`, `MODEL_NOT_LOADED`, `OUT_OF_MEMORY`.
+ */
+export const DIFFUSION_ERROR_CODES = [
+  'ENGINE_MISSING',
+  /** The installed engine build is too old for the family being loaded (Qwen Image 2.1, Krea 2 Turbo). */
+  'ENGINE_UPDATE_REQUIRED',
+  'ENGINE_INSTALL_FAILED',
+  'ENGINE_CRASHED',
+  'MODEL_MISSING',
+  'SIDE_FILE_MISSING',
+  'MODEL_LOAD_FAILED',
+  'MODEL_INCOMPATIBLE',
+  'MODEL_NOT_LOADED',
+  'OUT_OF_MEMORY',
+  'UNSUPPORTED_BACKEND',
+  'UNSUPPORTED_WORKFLOW',
+  'INVALID_DIMENSIONS',
+  'INVALID_REQUEST',
+  /** sd.cpp returned an image that is not one: unreadable, or a blank all-black/all-white frame. */
+  'INVALID_OUTPUT',
+  'JOB_BUSY',
+  'JOB_NOT_FOUND',
+  'QUEUE_FULL',
+  'CANCELLED',
+  'DISK_FULL',
+  'BACKEND_IN_USE',
+  'NOT_CONFIGURED',
+  'INTERNAL',
+] as const
+export type DiffusionErrorCode = (typeof DIFFUSION_ERROR_CODES)[number]
+
+export type ErrorCode = RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode | DiffusionErrorCode
 
 /**
  * Disk-failure tags. Rendered into the error message as `Error: [<tag>] <detail>`; the app's

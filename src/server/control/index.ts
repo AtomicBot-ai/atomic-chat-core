@@ -16,9 +16,12 @@ export type {
   CloudControl,
   ControlServerDeps,
   ControlSnapshot,
+  DiffusionControl,
+  DiskControl,
   ExternalSessionControl,
   ModelControl,
   PublicServerControl,
+  RemoteAccessControl,
   SessionSummary,
   SettingsControl,
 } from './types.js'

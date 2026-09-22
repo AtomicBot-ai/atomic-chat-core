@@ -109,35 +109,40 @@ describe('load', () => {
     expect(noEmitter.list()).toEqual([])
   })
 
-  it('starts a process, reports a usable session and journals it for the next owner', async () => {
-    await data.writeModel('demo')
-    const runtime = await makeRuntime()
-    const info = await runtime.load('demo')
+  // The file's first real spawn pays the cold start: 3.5-5 s on the Windows runner under coverage.
+  it(
+    'starts a process, reports a usable session and journals it for the next owner',
+    { timeout: 15_000 },
+    async () => {
+      await data.writeModel('demo')
+      const runtime = await makeRuntime()
+      const info = await runtime.load('demo')
 
-    expect(info.model_id).toBe('demo')
-    expect(info.pid).toBeGreaterThan(0)
-    expect(info.port).toBeGreaterThanOrEqual(3000)
-    expect(info.api_key).toMatch(/.+/)
-    expect(info.is_embedding).toBe(false)
+      expect(info.model_id).toBe('demo')
+      expect(info.pid).toBeGreaterThan(0)
+      expect(info.port).toBeGreaterThanOrEqual(3000)
+      expect(info.api_key).toMatch(/.+/)
+      expect(info.is_embedding).toBe(false)
 
-    const health = await fetch(`http://127.0.0.1:${info.port}/health`)
-    expect(health.status).toBe(200)
-    const models = await fetch(`http://127.0.0.1:${info.port}/v1/models`, {
-      headers: { Authorization: `Bearer ${info.api_key}` },
-    })
-    expect(models.status).toBe(200)
-    const unauthorized = await fetch(`http://127.0.0.1:${info.port}/v1/models`)
-    expect(unauthorized.status).toBe(401)
+      const health = await fetch(`http://127.0.0.1:${info.port}/health`)
+      expect(health.status).toBe(200)
+      const models = await fetch(`http://127.0.0.1:${info.port}/v1/models`, {
+        headers: { Authorization: `Bearer ${info.api_key}` },
+      })
+      expect(models.status).toBe(200)
+      const unauthorized = await fetch(`http://127.0.0.1:${info.port}/v1/models`)
+      expect(unauthorized.status).toBe(401)
 
-    expect(runtime.getLoadedModels()).toEqual(['demo'])
-    expect(runtime.findSession('demo')).toMatchObject({ pid: info.pid })
-    expect(runtime.list()).toHaveLength(1)
-    expect(journal.list()).toMatchObject([
-      { instance_id: 'owner-under-test', pid: info.pid, model_id: 'demo', port: info.port },
-    ])
-    expect(journal.list()[0]?.process_start_id, 'identity is what makes cleanup safe').toBeTruthy()
-    expect(payloads('session:started')).toMatchObject([{ model_id: 'demo', provider: 'llamacpp-upstream' }])
-  })
+      expect(runtime.getLoadedModels()).toEqual(['demo'])
+      expect(runtime.findSession('demo')).toMatchObject({ pid: info.pid })
+      expect(runtime.list()).toHaveLength(1)
+      expect(journal.list()).toMatchObject([
+        { instance_id: 'owner-under-test', pid: info.pid, model_id: 'demo', port: info.port },
+      ])
+      expect(journal.list()[0]?.process_start_id, 'identity is what makes cleanup safe').toBeTruthy()
+      expect(payloads('session:started')).toMatchObject([{ model_id: 'demo', provider: 'llamacpp-upstream' }])
+    }
+  )
 
   it('records which device the backend actually used', async () => {
     await data.writeModel('gpu-model')
@@ -233,6 +238,19 @@ describe('failure paths', () => {
     await expect(runtime.load('oom')).rejects.toMatchObject({ code: 'OUT_OF_MEMORY' })
     expect(runtime.list()).toEqual([])
     expect(journal.list()).toEqual([])
+  })
+
+  // TurboQuant's `error.rs` (app commit ec1fd3ea7): the fork reads a tensor-count mismatch as an
+  // unsupported layout, upstream as a damaged file; the runtime classifies with its own provider.
+  it('classifies a tensor-count mismatch by the provider that loaded it', async () => {
+    await data.writeModel('layout')
+    const upstream = await makeRuntime({ spawn: fakeLlamaSpawn({ mode: 'tensor-count' }) })
+    await expect(upstream.load('layout')).rejects.toMatchObject({ code: 'MODEL_FILE_CORRUPT' })
+    const turboquant = await makeRuntime({
+      provider: 'llamacpp',
+      spawn: fakeLlamaSpawn({ mode: 'tensor-count' }),
+    })
+    await expect(turboquant.load('layout')).rejects.toMatchObject({ code: 'MODEL_ARCH_NOT_SUPPORTED' })
   })
 
   it('times out when the backend never becomes ready', async () => {
@@ -400,6 +418,150 @@ describe('unload', () => {
 
     rejectTerminate = false
     await expect(runtime.unload('stubborn')).resolves.toEqual({ success: true })
+  })
+})
+
+describe('cancelling a load', () => {
+  const pidsIn = (file: string): number[] => {
+    try {
+      return readFileSync(file, 'utf8').split('\n').filter(Boolean).map(Number)
+    } catch {
+      return []
+    }
+  }
+
+  it('kills the child that is starting, leaves nothing behind and never retries', async () => {
+    await data.writeModel('huge', { mmproj_path: 'llamacpp/models/huge/model.gguf' })
+    const pidFile = join(data.root, 'pids')
+    let attempts = 0
+    const runtime = await makeRuntime({
+      spawn: (spec, opts) => {
+        attempts++
+        return fakeLlamaSpawn({ mode: 'hang', pidFile })(spec, opts)
+      },
+    })
+    const cancel = new AbortController()
+    const load = runtime.load('huge', { signal: cancel.signal })
+    await waitFor(() => pidsIn(pidFile).length === 1)
+    const [pid] = pidsIn(pidFile) as [number]
+    expect(runtime.isLoading('huge')).toBe(true)
+
+    cancel.abort()
+    await expect(load).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+      message: 'The model load was cancelled.',
+    })
+    // The error is raised only once the child is gone, so there is nothing to wait for here.
+    expect(isAlive(pid)).toBe(false)
+    expect(runtime.list()).toEqual([])
+    expect(runtime.isLoading('huge')).toBe(false)
+    expect(journal.list()).toEqual([])
+    expect(payloads('session:started')).toEqual([])
+    // A projector was configured, and a failed spawn normally retries without it. Not a cancel.
+    expect(attempts).toBe(1)
+  })
+
+  it('never spawns for a load cancelled while it waits its turn, and keeps loads one at a time', async () => {
+    await data.writeModel('first')
+    await data.writeModel('queued')
+    await data.writeModel('third')
+    const pidFile = join(data.root, 'pids')
+    const started: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => (releaseFirst = resolve))
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        const alias = spec.args[spec.args.indexOf('-a') + 1] ?? spec.args.join(' ')
+        started.push(alias)
+        if (started.length === 1) await firstGate
+        return fakeLlamaSpawn({ pidFile })(spec, opts)
+      },
+    })
+    const first = runtime.load('first')
+    const cancel = new AbortController()
+    const queued = runtime.load('queued', { signal: cancel.signal })
+    const third = runtime.load('third')
+    await waitFor(() => started.length === 1)
+
+    cancel.abort()
+    await expect(queued).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    expect(runtime.isLoading('queued')).toBe(false)
+    // The cancelled load settled early; the one behind it must still wait for the load ahead.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(started).toHaveLength(1)
+
+    releaseFirst()
+    await first
+    await third
+    expect(started).toHaveLength(2)
+    expect(runtime.getLoadedModels().sort()).toEqual(['first', 'third'])
+    expect(pidsIn(pidFile)).toHaveLength(2)
+  })
+
+  it('lets a cancel that raced the ready signal win: the process is killed and no session is published', async () => {
+    await data.writeModel('raced')
+    const cancel = new AbortController()
+    let spawnedPid = 0
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        const ready = await fakeLlamaSpawn()(spec, opts)
+        spawnedPid = ready.process.pid
+        // The server is up; the cancel lands before the runtime has published anything.
+        cancel.abort()
+        return ready
+      },
+    })
+    await expect(runtime.load('raced', { signal: cancel.signal })).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+    })
+    expect(spawnedPid).toBeGreaterThan(0)
+    await waitFor(() => !isAlive(spawnedPid))
+    expect(runtime.list()).toEqual([])
+    expect(journal.list()).toEqual([])
+    expect(payloads('session:started')).toEqual([])
+  })
+
+  it('does not wait for a backend install or a draft download the plan is blocked on', async () => {
+    await data.writeModel('waiting')
+    const runtime = await makeRuntime({ ensureBackendReady: () => new Promise(() => {}) })
+    const cancel = new AbortController()
+    const load = runtime.load('waiting', { signal: cancel.signal })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    cancel.abort()
+    await expect(load).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    expect(runtime.isLoading('waiting')).toBe(false)
+  })
+
+  it('rejects a caller that joined a load when it cancels, while the load it joined finishes', async () => {
+    await data.writeModel('shared')
+    const runtime = await makeRuntime({ spawn: fakeLlamaSpawn({ delayMs: 150 }) })
+    const owner = runtime.load('shared')
+    const cancel = new AbortController()
+    const joiner = runtime.load('shared', { signal: cancel.signal })
+    cancel.abort()
+    await expect(joiner).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    expect((await owner).model_id).toBe('shared')
+    expect(runtime.getLoadedModels()).toEqual(['shared'])
+  })
+
+  it('refuses an already cancelled load before it reads settings or touches another model', async () => {
+    await data.writeModel('resident')
+    await data.writeModel('never')
+    let settingsReads = 0
+    const runtime = await makeRuntime({
+      readSettings: async () => {
+        settingsReads++
+        return { ...settings(), config: { ...settings().config, auto_unload: true } }
+      },
+    })
+    await runtime.load('resident')
+    const readsAfterFirst = settingsReads
+    await expect(runtime.load('never', { signal: AbortSignal.abort() })).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+    })
+    expect(settingsReads).toBe(readsAfterFirst)
+    // Auto-unload is on; a cancelled load must not have evicted the model that was there.
+    expect(runtime.getLoadedModels()).toEqual(['resident'])
   })
 })
 

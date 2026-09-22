@@ -13,6 +13,7 @@ import {
   DOWNLOAD_CANCELLED,
   Downloader,
 } from './downloader.js'
+import type { DownloaderEventName } from './downloader.js'
 
 const server = new FixtureHttpServer()
 const body = Buffer.alloc(3 * 1024 * 1024)
@@ -30,8 +31,7 @@ async function make(opts: { space?: number; platform?: NodeJS.Platform } = {}) {
     fetch,
     availableSpace: async () => opts.space,
     sleep: async () => {},
-    emit: <K extends 'download:progress' | 'model:validation-started'>(name: K, payload: CoreEvents[K]) =>
-      events.push({ name, payload }),
+    emit: <K extends DownloaderEventName>(name: K, payload: CoreEvents[K]) => events.push({ name, payload }),
   })
   return { dl, dataFolder, events }
 }
@@ -269,6 +269,75 @@ describe('the progress cadence the app draws its bar from', () => {
     // Monotonic: a bar that goes backwards is a bar the user stops believing.
     const transferred = progress.map((p) => p.transferred)
     expect([...transferred].sort((a, b) => a - b)).toEqual(transferred)
+  })
+
+  const stagesOf = (events: Emitted[]) =>
+    events
+      .filter((e) => e.name === 'download:stage')
+      .map(
+        (e) => e.payload as { taskId: string; stage: { kind: string; attempt: number; maxAttempts: number } }
+      )
+
+  it('says it is connecting, then which retry it is on, while the preflight cannot reach the server', async () => {
+    // No catalog size, so a HEAD is made; the first two answers are 503.
+    server.files.set('/head-flaky.bin', { body: body.subarray(0, 10), failStatus: 503, failTimes: 2 })
+    const { dl, events } = await make()
+    await dl.download('stage-1', [{ url: server.url('/head-flaky.bin'), save_path: 's/a.bin' }])
+
+    expect(stagesOf(events)).toEqual([
+      { taskId: 'stage-1', stage: { kind: 'connecting', attempt: 0, maxAttempts: 5 } },
+      { taskId: 'stage-1', stage: { kind: 'retrying', attempt: 1, maxAttempts: 5 } },
+      { taskId: 'stage-1', stage: { kind: 'retrying', attempt: 2, maxAttempts: 5 } },
+    ])
+    // A stage is a status change: it never travels as a progress frame, which would rewind the bar.
+    for (const e of events.filter((e) => e.name === 'download:progress'))
+      expect(Object.keys(e.payload as object).sort()).toEqual(['percent', 'taskId', 'total', 'transferred'])
+    const stageIndex = events.findIndex((e) => e.name === 'download:stage')
+    const progressIndex = events.findIndex((e) => e.name === 'download:progress')
+    expect(stageIndex).toBeLessThan(progressIndex)
+  })
+
+  it('reports the retries of the first request too, and nothing when the server simply answers', async () => {
+    // A catalog size means no HEAD, so no `connecting`; the GET ladder still reports its waits.
+    server.files.set('/get-flaky.bin', { body: body.subarray(0, 10), failStatus: 503, failTimes: 3 })
+    const flaky = await make()
+    await flaky.dl.download('stage-2', [
+      { url: server.url('/get-flaky.bin'), save_path: 's/b.bin', size: 10 },
+    ])
+    expect(stagesOf(flaky.events).map((s) => [s.stage.kind, s.stage.attempt])).toEqual([
+      ['retrying', 1],
+      ['retrying', 2],
+      ['retrying', 3],
+    ])
+
+    server.files.set('/fine.bin', { body: body.subarray(0, 10) })
+    const fine = await make()
+    await fine.dl.download('stage-3', [{ url: server.url('/fine.bin'), save_path: 's/c.bin', size: 10 }])
+    expect(stagesOf(fine.events)).toEqual([])
+  })
+
+  it('counts the whole ladder up to the limit and then degrades to an unknown size, as before', async () => {
+    // Six failing HEADs exhaust the five retries; the download itself then succeeds.
+    server.files.set('/head-down.bin', { body: body.subarray(0, 10), failStatus: 503, failTimes: 6 })
+    const { dl, events } = await make()
+    await dl.download('stage-4', [{ url: server.url('/head-down.bin'), save_path: 's/d.bin' }])
+    expect(stagesOf(events).map((s) => [s.stage.kind, s.stage.attempt])).toEqual([
+      ['connecting', 0],
+      ['retrying', 1],
+      ['retrying', 2],
+      ['retrying', 3],
+      ['retrying', 4],
+      ['retrying', 5],
+    ])
+  })
+
+  it('stays silent while it reconnects in the middle of a transfer, as the app does', async () => {
+    server.files.set('/mid-drop.bin', { body, dropAfterBytes: 1024, dropTimes: 1 })
+    const { dl, events } = await make()
+    await dl.download('stage-5', [
+      { url: server.url('/mid-drop.bin'), save_path: 's/e.bin', size: body.length },
+    ])
+    expect(stagesOf(events)).toEqual([])
   })
 
   it('names every event after the task the caller gave, which is what the listener keys on', async () => {

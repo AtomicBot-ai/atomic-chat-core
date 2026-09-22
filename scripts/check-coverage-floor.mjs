@@ -3,8 +3,10 @@
 // Floors in test/coverage-floor.json only go up. Run after `vitest --coverage` (json-summary reporter).
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = new URL('..', import.meta.url).pathname
+// Not `.pathname`: on Windows that is `/D:/…`, which `readFileSync` does not accept.
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const floorsPath = join(ROOT, 'test/coverage-floor.json')
 const summaryPath = join(ROOT, 'coverage/coverage-summary.json')
 
@@ -19,7 +21,9 @@ if (!existsSync(summaryPath)) {
   process.exit(1)
 }
 const summary = JSON.parse(readFileSync(summaryPath, 'utf8'))
-const byFile = new Map(Object.entries(summary).map(([k, v]) => [k.replace(ROOT, '').replace(/^\//, ''), v]))
+// Summary keys are absolute host paths; floors are repo-relative with forward slashes.
+const repoRelative = (path) => path.replace(ROOT, '').replaceAll('\\', '/').replace(/^\//, '')
+const byFile = new Map(Object.entries(summary).map(([k, v]) => [repoRelative(k), v]))
 
 const METRICS = ['statements', 'branches', 'functions', 'lines']
 const failures = []

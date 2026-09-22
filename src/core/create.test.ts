@@ -1,10 +1,12 @@
-import { readFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
+import type { ErrorReport } from '../telemetry/index.js'
 
 useCoreHarness()
 
@@ -66,6 +68,33 @@ describe('taking ownership', () => {
       code: 'CORE_ALREADY_RUNNING',
     })
   })
+
+  it("consumes the tunnel journal the app's 2.0.40 left at the root, sparing what is not a tunnel", async () => {
+    // A live process with the recorded start time, as under a reused pid: only the name gives it away.
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+    try {
+      await new Promise((resolve) => child.once('spawn', resolve))
+      const pid = child.pid as number
+      const startedAt = Math.floor(Date.now() / 1000)
+      await writeFile(
+        data.layout.legacyRemoteAccessTunnel,
+        JSON.stringify({ pid, started_at_secs: startedAt })
+      )
+      const warnings: string[] = []
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        logger: (level, message) => void (level === 'warn' && warnings.push(message)),
+      })
+      cores.push(core)
+      expect(warnings.filter((m) => m.startsWith(`pid ${pid} is no longer our tunnel`))).toHaveLength(1)
+      expect(child.exitCode).toBeNull()
+      expect(child.signalCode).toBeNull()
+      await expect(readFile(data.layout.legacyRemoteAccessTunnel)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      child.kill('SIGKILL')
+    }
+  }, 20_000)
 
   it('creates the settings file and reads models from the shared folder', async () => {
     const core = await createCore()
@@ -163,6 +192,22 @@ describe('taking ownership', () => {
     const stopped = await call('/server/stop', 'POST', {})
     expect(stopped.status).toBe(200)
     expect(await stopped.json()).toMatchObject({ running: false })
+  })
+
+  it('wires free disk space to its own data folder and the LAN addresses to this machine', async () => {
+    const core = await createCore()
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+
+    expect(await client.availableDiskSpace()).toBeGreaterThan(0)
+    expect(await client.availableDiskSpace(join(data.root, 'diffusion', 'models'))).toBeGreaterThan(0)
+    // The data folder is the owner's own: another folder is refused, however real it is.
+    await expect(client.availableDiskSpace(join(data.root, '..'))).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+
+    const addresses = await client.lanAddresses()
+    expect(Array.isArray(addresses)).toBe(true)
+    for (const address of addresses) expect(address).toMatch(/^\d{1,3}(\.\d{1,3}){3}$/)
   })
 
   it('wires revisioned optimal state, snapshots and backend controls to the owner', async () => {
@@ -272,5 +317,231 @@ describe('taking ownership', () => {
       'https://github.com/ggml-org/llama.cpp/releases/download/b1/llama-b1-bin-macos-arm64.tar.gz'
     )
     expect(warnings.some((message) => message.includes('Backend manifest returned 404'))).toBe(true)
+  })
+})
+
+describe.skipIf(process.platform === 'win32')('image generation through the owner', () => {
+  it('wires the diffusion service to the control API, the journal, the events and the shutdown order', async () => {
+    const { dataLayout } = await import('../config/index.js')
+    const { writeFakeSdLaunchers, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
+    const { isProcessAlive } = await import('../runtime/shared/index.js')
+    const layout = dataLayout(data.root)
+    const logs: string[] = []
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      logger: (level, message) => logs.push(`${level}: ${message}`),
+      diffusion: { timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 } },
+    })
+    cores.push(core)
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const events: string[] = []
+    for (const name of ['diffusion:state', 'diffusion:job', 'diffusion:progress', 'diffusion:error'] as const)
+      core.events.on(name, () => events.push(name))
+
+    // The data folder must be the owner's own.
+    await expect(client.configureDiffusion({ dataFolder: join(data.root, '..') })).rejects.toMatchObject({
+      code: 'NOT_CONFIGURED',
+    })
+    expect((await client.configureDiffusion({ dataFolder: data.root })).configured).toBe(true)
+
+    const dir = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'fake-cpu')
+    await writeFakeSdLaunchers(dir, { stepMs: 5 })
+    const record = await client.finalizeDiffusionBackend({
+      dir,
+      tag: 'master-849-d04e895',
+      backendId: 'fake-cpu',
+      backend: 'cpu',
+      engine: 'sd-cpp',
+    })
+    expect(record.dir).toBe(dir)
+    expect(logs.some((line) => line.startsWith('info: engine probe passed'))).toBe(true)
+
+    const diffusionModel = await writeFakeSdModel(layout)
+    const loaded = await client.loadDiffusionModel({
+      modelId: 'z-image:q4_k_m',
+      family: 'z-image',
+      modality: 'image',
+      displayName: 'Z-Image Turbo',
+      files: { diffusionModel },
+      defaults: { steps: 2, cfgScale: 1, width: 512, height: 512 },
+      ranges: { steps: [1, 50], dims: [16, 2048], dimMultiple: 16 },
+      offload: 'none',
+    })
+    expect(isProcessAlive(loaded.pid)).toBe(true)
+    // Journalled under its own provider, and not a chat session.
+    const journal = JSON.parse(await readFile(layout.core.processes, 'utf8')) as {
+      processes: Array<{ pid: number; provider: string; model_id: string }>
+    }
+    expect(journal.processes).toEqual([
+      expect.objectContaining({ pid: loaded.pid, provider: 'diffusion', model_id: 'z-image:q4_k_m' }),
+    ])
+    expect(core.sessions()).toEqual([])
+    // The server's own output is not the core's log.
+    expect(logs.some((line) => line.includes('[sd-server'))).toBe(false)
+
+    const { jobId } = await client.generateImage({
+      prompt: 'a cat',
+      width: 32,
+      height: 32,
+      steps: 2,
+      cfgScale: 1,
+      batchSize: 1,
+    })
+    const deadline = Date.now() + 10_000
+    while ((await client.diffusionJob(jobId))?.state !== 'completed') {
+      if (Date.now() > deadline) throw new Error('the job did not complete')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    const page = await client.listGallery({ offset: 0, limit: 10 })
+    expect(page.total).toBe(1)
+
+    // The OpenAI facade on the public listener runs the same jobs, and the image model is not a chat model.
+    const served = await core.startPublicServer({ port: 0 })
+    const base = `http://127.0.0.1:${served.port}/v1`
+    const generated = await fetch(`${base}/images/generations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a cat', size: '256x256', n: 1, seed: 5 }),
+    })
+    expect(generated.status).toBe(200)
+    const answer = (await generated.json()) as {
+      data: Array<{ b64_json: string }>
+      atomic: { seed: number; paths: string[] }
+    }
+    expect(Buffer.from(answer.data[0]?.b64_json ?? '', 'base64').subarray(0, 4)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    )
+    expect(answer.atomic.seed).toBe(5)
+    expect((await client.listGallery({ offset: 0, limit: 10 })).total).toBe(2)
+    const models = (await (await fetch(`${base}/models`)).json()) as { data: Array<{ id: string }> }
+    expect(models.data.map((m) => m.id)).not.toContain('z-image:q4_k_m')
+    // A client that leaves cancels its job.
+    const controller = new AbortController()
+    const abandoned = fetch(`${base}/images/generations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a cat', size: '256x256', n: 4 }),
+      signal: controller.signal,
+    })
+    while ((await client.diffusionStatus()).activeJob === null)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    const activeId = (await client.diffusionStatus()).activeJob?.id as string
+    controller.abort()
+    await expect(abandoned).rejects.toThrow()
+    const cancelDeadline = Date.now() + 10_000
+    while ((await client.diffusionJob(activeId))?.state !== 'cancelled') {
+      if (Date.now() > cancelDeadline) throw new Error('the abandoned job was not cancelled')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    expect(page.items[0]?.path.startsWith(join(data.root, 'images'))).toBe(true)
+    expect(events).toContain('diffusion:state')
+    expect(events).toContain('diffusion:job')
+    expect(events).toContain('diffusion:progress')
+    expect(events).not.toContain('diffusion:error')
+
+    // A failed engine probe is logged as a warning through the owner's logger.
+    const bad = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'bad')
+    await writeFakeSdLaunchers(bad)
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(join(bad, 'sd-cli'), "#!/bin/sh\necho 'llama-server usage'\n")
+    await expect(
+      client.finalizeDiffusionBackend({
+        dir: bad,
+        tag: 'master-849-d04e895',
+        backendId: 'bad',
+        backend: 'cpu',
+        engine: 'sd-cpp',
+      })
+    ).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED' })
+    expect(logs.some((line) => line.startsWith('warn: engine probe failed'))).toBe(true)
+
+    await core.shutdown()
+    expect(isProcessAlive(loaded.pid)).toBe(false)
+  })
+})
+
+describe('error reporting', () => {
+  it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
+    const captured: ErrorReport[] = []
+    const telemetry = {
+      capture: (report: ErrorReport) => captured.push(report),
+      state: () => ({
+        enabled: true,
+        reporting: true,
+        has_user: true,
+        tags: { os: 'macOS' },
+        source: 'host' as const,
+        host: 'test',
+      }),
+      update: () => {},
+    }
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      errorReporter: telemetry,
+      platform: 'linux',
+    })
+    cores.push(core)
+    core.events.on('server:stopped', () => {
+      throw new TypeError('listener bug')
+    })
+    core.events.emit('server:stopped', {})
+    core.events.emit('session:died', {
+      provider: 'llamacpp-upstream',
+      pid: 1,
+      model_id: 'm',
+      exit_code: null,
+      signal: 'SIGSEGV',
+      message: 'crashed',
+    })
+    expect(captured.map((r) => [r.source, r.tags?.['event'] ?? r.fingerprint?.[2]])).toEqual([
+      ['event_listener', 'server:stopped'],
+      ['backend_crash', 'sigsegv'],
+    ])
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const state = await fetch(`${core.control.url}/atomic/v1/telemetry`, {
+      headers: { authorization: `Bearer ${core.controlToken}` },
+    })
+    expect(await state.json()).toEqual({
+      enabled: true,
+      reporting: true,
+      has_user: true,
+      tags: { os: 'macOS' },
+      source: 'host',
+      host: 'test',
+    })
+    expect((await client.health()).ok).toBe(true)
+    expect(core.telemetry).toBe(telemetry)
+  })
+
+  it("builds its own reporter when the host brings none, as the host it names, or as 'library'", async () => {
+    const library = await createCore()
+    expect(library.telemetry?.state()).toEqual({
+      enabled: true,
+      reporting: false,
+      has_user: false,
+      tags: {},
+      source: 'default',
+      host: 'library',
+    })
+    await library.shutdown()
+    const named = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      telemetry: { host: 'my-host', enabled: false },
+    })
+    cores.push(named)
+    expect(named.telemetry?.state()).toMatchObject({ enabled: false, source: 'host', host: 'my-host' })
+  })
+
+  it('reports nothing when the host says telemetry: false, even when a listener throws', async () => {
+    const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, telemetry: false })
+    cores.push(core)
+    expect(core.telemetry).toBeUndefined()
+    core.events.on('server:stopped', () => {
+      throw new TypeError('listener bug')
+    })
+    expect(() => core.events.emit('server:stopped', {})).not.toThrow()
   })
 })

@@ -4,9 +4,28 @@
  * Adding an event = add it here + add the relay mapping in the app, in the same PR pair.
  */
 
+import type {
+  DiffusionErrorEvent,
+  DiffusionJobEvent,
+  DiffusionProgressEvent,
+  DiffusionStateEvent,
+} from './diffusion.js'
+import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.js'
 
 export type DownloadKind = 'model' | 'backend' | 'draft' | 'cudart'
+
+/**
+ * What a download is doing while it has no bytes to report: reaching the server for the first time,
+ * or waiting out a backoff before trying again. The app's `DownloadStage`
+ * (`src-tauri/src/core/downloads/models.rs`), camelCase on the wire.
+ */
+export interface DownloadStage {
+  /** `connecting` for the first attempt, `retrying` for each one after. */
+  kind: 'connecting' | 'retrying'
+  attempt: number
+  maxAttempts: number
+}
 
 export interface CoreEvents {
   'download:started': { taskId: string; modelId?: string; kind: DownloadKind }
@@ -17,6 +36,12 @@ export interface CoreEvents {
     total: number
     percent: number
   }
+  /**
+   * A status change, never progress: it carries no byte counts on purpose, so a retry cannot rewind
+   * a progress bar. Its own event rather than a field of `download:progress`, whose payload the
+   * app's relay pins (ADR 2026-09-17-report-download-stages-as-their-own-event).
+   */
+  'download:stage': { taskId: string; stage: DownloadStage }
   'download:error': { taskId: string; modelId?: string; error: string }
   'download:stopped': { taskId: string; modelId?: string }
   'download:verified': { taskId: string; modelId?: string }
@@ -80,6 +105,22 @@ export interface CoreEvents {
   'server:started': { host: string; port: number }
   'server:stopped': Record<string, never>
   'server:bind-failed': { port: number; error: string }
+
+  /**
+   * Every transition of the remote-access tunnel, and every change of the public server it depends
+   * on: the URL arrives seconds after the request that asked for it has answered.
+   */
+  'remote-access:status': RemoteAccessStatus
+
+  /**
+   * Image generation, camelCase like the rest of that surface (the plugin's `atomic-diffusion://*`).
+   * `state` on every change of the engine install, the model or the output folder; `progress` per
+   * sampling step; `job` on every job transition; `error` for a failure nobody is awaiting.
+   */
+  'diffusion:state': DiffusionStateEvent
+  'diffusion:progress': DiffusionProgressEvent
+  'diffusion:job': DiffusionJobEvent
+  'diffusion:error': DiffusionErrorEvent
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

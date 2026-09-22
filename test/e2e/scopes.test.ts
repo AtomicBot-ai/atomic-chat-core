@@ -112,7 +112,7 @@ describe.skipIf(!existsSync(APP_BIN) || !existsSync(BIN))('separate app and CLI 
     expect(upgraded.status, upgraded.stderr).toBe(0)
     const next = JSON.parse(readFileSync(lockPath, 'utf8')) as typeof daemon.ready
     expect(next.pid).not.toBe(daemon.ready.pid)
-    expect(next.version).toBe('0.2.0')
+    expect(next.version).toBe('0.3.0')
     expect((await control(cliDir, next, '/health')).status).toBe(200)
     expect((await control(cliDir, next, '/shutdown', { method: 'POST' })).status).toBe(200)
   })

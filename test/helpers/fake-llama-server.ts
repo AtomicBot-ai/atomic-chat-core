@@ -12,7 +12,15 @@ import type { ManagedProcess, ReadyOptions, SpawnSpec } from '../../src/runtime/
 export const FAKE_LLAMA_SCRIPT = fileURLToPath(new URL('./fake-llama-server.mjs', import.meta.url))
 
 export type FakeLlamaMode =
-  'ready' | 'no-ready' | 'hang' | 'oom' | 'segv' | 'projector-fail' | 'mtp-fail' | `exit-${number}`
+  | 'ready'
+  | 'no-ready'
+  | 'hang'
+  | 'oom'
+  | 'segv'
+  | 'projector-fail'
+  | 'mtp-fail'
+  | 'tensor-count'
+  | `exit-${number}`
 
 export interface FakeLlamaOptions {
   mode?: FakeLlamaMode
@@ -27,6 +35,8 @@ export interface FakeLlamaOptions {
   minCtx?: number
   /** Path of a marker file: the first chat request creates it and fails with "Compute error". */
   computeErrorMarker?: string
+  /** Every started fake appends its pid here, one per line: children that never became sessions. */
+  pidFile?: string
   /** Scripted answers of the raw `/completion` endpoint, in order; `{{seen:TEXT}}` reports whether the prompt held TEXT. */
   completionSteps?: string[]
   /** One scripted tool turn: call this tool when it is offered, then repeat its result after the reply. */
@@ -41,6 +51,7 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
   if (options.reply) env['FAKE_LLAMA_REPLY'] = options.reply
   if (options.minCtx) env['FAKE_LLAMA_MIN_CTX'] = String(options.minCtx)
   if (options.computeErrorMarker) env['FAKE_LLAMA_COMPUTE_ERROR_MARKER'] = options.computeErrorMarker
+  if (options.pidFile) env['FAKE_LLAMA_PID_FILE'] = options.pidFile
   if (options.toolCall) env['FAKE_LLAMA_TOOL_CALL'] = JSON.stringify(options.toolCall)
   if (options.completionSteps) env['FAKE_LLAMA_COMPLETION_STEPS'] = JSON.stringify(options.completionSteps)
   return env

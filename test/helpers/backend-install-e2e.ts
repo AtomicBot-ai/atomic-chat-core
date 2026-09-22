@@ -20,7 +20,13 @@ export interface InstallFixture {
 
 export async function startBackendInstallFixture(
   folder: string,
-  options: { badChecksum?: boolean; holdArchive?: boolean; cuda?: boolean } = {}
+  options: {
+    badChecksum?: boolean
+    holdArchive?: boolean
+    cuda?: boolean
+    /** Answer the first N requests for the archive with 503, to walk the retry ladder. */
+    archiveFailures?: number
+  } = {}
 ): Promise<InstallFixture> {
   const tag = 'b99999'
   const backend =
@@ -50,6 +56,7 @@ export async function startBackendInstallFixture(
     })
   )
   const seen: string[] = []
+  let archiveFailuresLeft = options.archiveFailures ?? 0
   let requested!: () => void
   const archiveRequested = new Promise<void>((resolve) => {
     requested = resolve
@@ -63,6 +70,11 @@ export async function startBackendInstallFixture(
       const content = isManifest ? manifest : isCompanion ? companion : archive
       if (!isManifest && !isCompanion && !req.url?.endsWith(`/${tag}/${archiveName}`)) {
         res.writeHead(404).end()
+        return
+      }
+      if (!isManifest && !isCompanion && archiveFailuresLeft > 0) {
+        archiveFailuresLeft--
+        res.writeHead(503).end('scripted failure')
         return
       }
       res.writeHead(200, {

@@ -13,6 +13,12 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
 
   router.get(p('/sessions'), (_req, res) => sendJson(res, 200, { sessions: deps.sessions() }))
 
+  // Registered ahead of `load`: a cancel is never queued behind the load it stops.
+  router.post(p('/models/:provider/*modelId/load/cancel'), (_req, res, { params }) => {
+    const cancelled = deps.cancelModelLoad(params['provider'] as string, params['modelId'] as string)
+    sendJson(res, 200, { cancelled })
+  })
+
   router.post(p('/models/:provider/*modelId/load'), async (req, res, { params }) => {
     const body = await readJsonBody<Record<string, unknown>>(req)
     const result = await deps.loadModel(params['provider'] as string, params['modelId'] as string, body)

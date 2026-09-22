@@ -20,6 +20,7 @@ import './opencode.js'
 import './openhands.js'
 import './pi.js'
 import './poolside.js'
+import './zcode.js'
 import './zed.js'
 
 export * from './registry.js'

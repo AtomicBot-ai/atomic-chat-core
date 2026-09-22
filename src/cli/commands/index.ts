@@ -21,3 +21,4 @@ export {
 } from './serve.js'
 export { serverCommand } from './server.js'
 export { shutdownCommand } from './shutdown.js'
+export { printFirstRunNotice, telemetryCommand } from './telemetry.js'

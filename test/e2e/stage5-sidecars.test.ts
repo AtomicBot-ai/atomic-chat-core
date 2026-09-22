@@ -1,4 +1,7 @@
-/** Stage 5: a compiled app owner must not acknowledge unload before a sidecar finishes loading. */
+/**
+ * Stage 5: a compiled app owner must not acknowledge unload before a sidecar finishes loading.
+ * Stage 7a: a sidecar load that hangs is cancelled through the same route as llama.cpp's.
+ */
 import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
@@ -25,17 +28,18 @@ afterEach(async () => {
   await Promise.all(folders.splice(0).map((folder) => rm(folder, { recursive: true, force: true })))
 })
 
-async function fixture(kind: 'fm' | 'mlx') {
+async function fixture(kind: 'fm' | 'mlx', mode = 'ready') {
   const folder = await mkdtemp(join(tmpdir(), `atomic-stage5-${kind}-`))
   folders.push(folder)
   const resources = join(folder, 'resources')
   await mkdir(resources, { recursive: true })
   const name = kind === 'fm' ? 'foundation-models-server' : 'mlx-server'
   const argvFile = join(folder, 'spawned.jsonl')
+  const pidFile = join(folder, 'spawned.pids')
   const binary = join(resources, name)
   await writeFile(
     binary,
-    `#!/bin/sh\nexport FAKE_SIDECAR_KIND=${kind}\nexport FAKE_SIDECAR_DELAY=350\nexport FAKE_SIDECAR_ARGV=${JSON.stringify(argvFile)}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)} "$@"\n`
+    `#!/bin/sh\nexport FAKE_SIDECAR_KIND=${kind}\nexport FAKE_SIDECAR_MODE=${mode}\nexport FAKE_SIDECAR_DELAY=350\nexport FAKE_SIDECAR_ARGV=${JSON.stringify(argvFile)}\nexport FAKE_SIDECAR_PID_FILE=${JSON.stringify(pidFile)}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)} "$@"\n`
   )
   await chmod(binary, 0o755)
   if (kind === 'mlx') {
@@ -50,7 +54,7 @@ async function fixture(kind: 'fm' | 'mlx') {
   }
   const { ready } = await startDaemon(folder, daemons, ['--resources-dir', resources], {}, APP_BIN)
   owners.push({ folder, ready })
-  return { folder, ready, argvFile }
+  return { folder, ready, argvFile, pidFile }
 }
 
 async function waitForFile(path: string) {
@@ -85,6 +89,53 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(APP_BIN))(
         expect(await readdir(join(folder, 'atomic-core', 'model-claims')).catch(() => [])).toEqual([])
         expect((await readFile(argvFile, 'utf8')).trim()).not.toBe('')
         expect(() => process.kill(session.session.pid, 0)).toThrow()
+      })
+
+      it(`cancels a ${provider} load that is hanging: 409 MODEL_LOAD_CANCELLED, the child gone, the claim released`, async () => {
+        const { folder, ready, argvFile, pidFile } = await fixture(kind, 'hang')
+        const route = `/models/${provider}/${modelId}`
+        const loading = control(folder, ready, `${route}/load`, { method: 'POST', body: '{}' })
+        await waitForFile(argvFile)
+        await waitForFile(pidFile)
+        // The pid the fake wrote: a sidecar is journalled only once it is ready, and this one never is.
+        const pid = Number((await readFile(pidFile, 'utf8')).trim().split('\n')[0])
+        expect(pid).toBeGreaterThan(0)
+        expect(() => process.kill(pid, 0)).not.toThrow()
+        const journal = async () =>
+          (
+            JSON.parse(
+              await readFile(join(folder, 'atomic-core', 'processes.json'), 'utf8').catch(() => '{}')
+            ) as {
+              processes?: Array<{ pid: number; provider: string }>
+            }
+          ).processes ?? []
+
+        const cancel = await control(folder, ready, `${route}/load/cancel`, { method: 'POST' })
+        expect(cancel.status, await cancel.clone().text()).toBe(200)
+        expect(await cancel.json()).toEqual({ cancelled: true })
+        const refused = await loading
+        expect(refused.status).toBe(409)
+        expect(await refused.json()).toMatchObject({
+          error: { code: 'MODEL_LOAD_CANCELLED', message: 'The model load was cancelled.' },
+        })
+        const gone = Date.now() + 10_000
+        while (Date.now() < gone) {
+          try {
+            process.kill(pid, 0)
+            await new Promise((resolve) => setTimeout(resolve, 20))
+          } catch {
+            break
+          }
+        }
+        expect(() => process.kill(pid, 0)).toThrow()
+        expect((await (await control(folder, ready, '/sessions')).json()) as object).toMatchObject({
+          sessions: [],
+        })
+        expect(await journal()).toEqual([])
+        expect(await readdir(join(folder, 'atomic-core', 'model-claims')).catch(() => [])).toEqual([])
+        // Cancelling again, with nothing loading, is a no-op the app can call freely.
+        const again = await control(folder, ready, `${route}/load/cancel`, { method: 'POST' })
+        expect(await again.json()).toEqual({ cancelled: false })
       })
     }
   }

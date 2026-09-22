@@ -7,8 +7,24 @@ import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '.
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
   DeviceInfo,
+  DiffusionBackendInstallRecord,
+  DiffusionCancelResult,
+  DiffusionConfig,
+  DiffusionModelFile,
+  DiffusionStatus,
+  FinalizeBackendInstallArgs,
+  GalleryFlags,
+  GalleryImageItem,
+  GalleryListOptions,
+  GalleryPage,
+  ImageCapabilities,
+  ImageGenerateRequest,
+  ImageJob,
+  LoadDiffusionModelRequest,
+  LoadedDiffusionModel,
   LocalApiServerState,
   LocalProviderId,
+  RemoteAccessStatus,
   SessionInfo,
   UnloadResult,
 } from '../../contracts/index.js'
@@ -18,6 +34,7 @@ import type { GgufValidation, ModelCapabilities } from '../../models/index.js'
 import type { EmbeddingResponse } from '../../models/index.js'
 import type { ProxyConfig } from '../../downloads/index.js'
 import type { HardwareOverrideStore } from '../../hardware/index.js'
+import type { TelemetryControl } from '../../telemetry/index.js'
 import type {
   InstallBackendResult,
   InstalledBackendPack,
@@ -122,6 +139,50 @@ export interface ModelControl {
   ) => Promise<EmbeddingResponse>
 }
 
+/** Room left for a download. Answers for the data folder only; `null` when the platform cannot say. */
+export interface DiskControl {
+  available: (path: unknown) => Promise<number | null>
+}
+
+/** Reaching the public listener from outside this machine (stage 7c–7d). */
+export interface RemoteAccessControl {
+  /** IPv4 literals a device on the network can dial, default-route address first. Display only. */
+  lanAddresses: () => Promise<string[]>
+  status: () => RemoteAccessStatus
+  /** Answers `starting` at once; throws a `REMOTE_ACCESS_*` refusal with the app's reason in `details`. */
+  start: () => RemoteAccessStatus
+  /** Answers once the tunnel's process is gone. */
+  stop: () => Promise<RemoteAccessStatus>
+}
+
+/**
+ * Image generation (stage 7h): the app's twenty `DiffusionService` operations, one route each. The
+ * routes parse and validate the bodies; what arrives here is already typed.
+ */
+export interface DiffusionControl {
+  configure: (config: DiffusionConfig) => Promise<DiffusionStatus>
+  getStatus: () => Promise<DiffusionStatus>
+  setOutputDir: (path: string) => Promise<DiffusionStatus>
+  finalizeBackendInstall: (args: FinalizeBackendInstallArgs) => Promise<DiffusionBackendInstallRecord>
+  listInstalledBackends: () => Promise<DiffusionBackendInstallRecord[]>
+  removeBackend: (dir: string) => Promise<void>
+  listModelFiles: () => Promise<DiffusionModelFile[]>
+  deleteModelFile: (path: string) => Promise<void>
+  /** Answers once the server serves the model, which can take minutes. */
+  loadModel: (request: LoadDiffusionModelRequest) => Promise<LoadedDiffusionModel>
+  unloadModel: () => Promise<void>
+  getCapabilities: () => ImageCapabilities
+  touchIdle: () => void
+  generate: (request: ImageGenerateRequest) => Promise<{ jobId: string }>
+  getJob: (jobId: string) => ImageJob | null
+  cancelJob: (jobId: string) => Promise<DiffusionCancelResult>
+  listGallery: (options: GalleryListOptions) => Promise<GalleryPage>
+  getGalleryItem: (id: string) => Promise<GalleryImageItem | null>
+  deleteGalleryItems: (ids: string[]) => Promise<void>
+  setGalleryFlags: (id: string, flags: GalleryFlags) => Promise<GalleryImageItem>
+  exportGalleryItem: (id: string, targetPath: string) => Promise<void>
+}
+
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
 export interface ExternalSessionControl {
   publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
@@ -163,6 +224,11 @@ export interface ControlServerDeps {
     modelId: string,
     body: Record<string, unknown>
   ) => Promise<SessionInfo | { session: SessionInfo; created: boolean }>
+  /**
+   * Cancel a load that has not answered yet. Answers rather than throws when there is nothing to
+   * cancel: the app retries while its load request is still travelling, and unloads once it lands.
+   */
+  cancelModelLoad: (provider: string, modelId: string) => boolean
   unloadModel: (provider: string, modelId: string) => Promise<UnloadResult>
   /**
    * Reload a model one context step larger because a request overflowed. Answers rather than
@@ -183,6 +249,10 @@ export interface ControlServerDeps {
   hardware: HardwareOverrideStore
   /** Installing and removing llama.cpp backends (PLAN.md §4, stage 3c). */
   backends: BackendControl
+  /** Free space inside the data folder, which the app asks before a download (stage 7b). */
+  disk: DiskControl
+  remoteAccess: RemoteAccessControl
+  diffusion: DiffusionControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /**
@@ -196,6 +266,11 @@ export interface ControlServerDeps {
   externalSessions: ExternalSessionControl
   /** Stop the whole core. The server has already answered by the time this runs. */
   shutdown: (options: { force: boolean; requestedBy?: string | undefined }) => Promise<void>
+  /**
+   * Error reporting: where a route that failed on our side is reported, and the app's consent,
+   * user and tags behind `/telemetry`. Absent in a CLI owner, which reports nothing.
+   */
+  telemetry?: TelemetryControl
   startedAt?: number
   now?: () => number
 }

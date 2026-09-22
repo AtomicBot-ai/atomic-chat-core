@@ -31,6 +31,7 @@ import {
 import type { JsonValue } from '../shims/index.js'
 import { LOCAL_SEARCH_ORDER, resolveRemoteProvider } from '../../router/index.js'
 import type { LocalProvider, RemoteProvider } from '../../router/index.js'
+import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
 import { autoIncreaseCtx } from './ctx.js'
 import { SseLineReader } from './sse.js'
 import { StreamTelemetry, isUsageOnlyChunk, maybeInjectStreamUsage } from './telemetry.js'
@@ -380,11 +381,27 @@ async function upstreamError(
       recordFailure()
       trace.oomDetected = true
       trace.ctxOverflowDetected = false
-      answer(ex, 400, computeErrorEnvelope(bodyIndicatesOom(errorBody)))
+      const oom = bodyIndicatesOom(errorBody)
+      captureReport(
+        ex.deps.errors,
+        inferenceFailureReport({ provider, modelId, status, body: errorBody, compute: true, oom })
+      )
+      answer(ex, 400, computeErrorEnvelope(oom))
       return
     }
 
     recordFailure()
+    captureReport(
+      ex.deps.errors,
+      inferenceFailureReport({
+        provider,
+        modelId,
+        status,
+        body: errorBody,
+        compute: false,
+        oom: trace.oomDetected,
+      })
+    )
     answer(ex, status, structureBackendErrorBody(errorBody, trace.oomDetected, trace.ctxOverflowDetected))
     return
   }

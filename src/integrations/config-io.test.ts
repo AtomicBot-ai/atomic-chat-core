@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   ATOMIC_MANAGED_BEGIN,
@@ -196,7 +196,8 @@ describe('small helpers', () => {
 
   it('expands a leading tilde only', () => {
     expect(expandTilde('~', '/home/u')).toBe('/home/u')
-    expect(expandTilde('~/.dsh', '/home/u')).toBe('/home/u/.dsh')
+    // `resolve`, like the code: on Windows it also puts the current drive in front.
+    expect(expandTilde('~/.dsh', '/home/u')).toBe(resolve('/home/u', '.dsh'))
     expect(expandTilde('/abs/path', '/home/u')).toBe('/abs/path')
     expect(expandTilde('relative/~', '/home/u')).toBe('relative/~')
   })

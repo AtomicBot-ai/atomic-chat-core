@@ -1,0 +1,12 @@
+---
+date: 2026-09-21
+title: "Configure ZCode for launch through its provider file, pinned by ported tests instead of golden fixtures"
+---
+
+# 2026-09-21 — Configure ZCode for `launch` through its provider file, pinned by ported tests instead of golden fixtures
+
+- **Context:** App v2.0.42 added ZCode (Z.ai's desktop coding app) to the Launch page and to the Rust CLI catalog (`cli/integrations.rs`, commit `478dd6c66`). ZCode reads custom providers only from `<dataBase>/.zcode/v2/provider_config.json`, validates it strictly and treats an invalid file as empty, so a bad write silently removes every provider the user has. On the core-migration line the app's `jan-cli` is the core, and the app's `tests/cli-launch-catalog.test.mjs` compares `launch --list --json` with the Launch page's list position by position, so the core's catalog must carry ZCode. Every other writer in `src/integrations/configure/` is pinned by golden fixtures the app's `fixture_dump.rs` emitted; that emitter was removed with the Rust CLI.
+- **Decision:** Port the entry (between `zed` and `mimo`, GUI, needs a model, endpoint with the prefix), the off-PATH candidates of ZCode's installers, and `configure_zcode` as `configure/zcode.ts`: resolve the directory as ZCode does, replace only `providerId: atomic-chat` entries, refuse an unknown or missing `schemaVersion`, a wrongly typed section or unparseable JSON, send the user to ZCode first when only a pre-3.x `config.json` exists, write under ZCode's own `<file>.lock` directory lock with its timings, keep a one-time owner-only backup, and write owner-only through a symlink. The output is key-sorted, which is what the app's `serde_json` wrote. The Rust `zcode_tests` are ported by hand; `test/contract/agent-config.test.ts` counts ZCode as ported without fixtures.
+- **Consequences:** `launch zcode` starts the executable it found (the app's Launch page uses `open -a` on macOS, which also focuses a running instance; the CLI starts the binary like its other GUI agents). If the app's Rust writer changes, nothing fails automatically on this side: a change to `configure_zcode` must be carried over by hand, the same way as the diffusion port. Watch ZCode's `schemaVersion` and lock format when it updates.
+- **Owner:** team.
+- **Links:** `src/integrations/configure/zcode.ts`, `src/integrations/catalog.ts` (`offPathCandidates`); app `src-tauri/src/core/system/commands.rs` (`configure_zcode`, `zcode_tests`), `docs/decisions/2026-09-21-add-zcode-as-a-launch-page-coding-agent.md` at `ec1fd3ea7`.

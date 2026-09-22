@@ -6,9 +6,16 @@
  * context-increase outcome, so none of this may reach for a runtime or a settings file directly.
  */
 
-import type { CoreEvents } from '../../contracts/index.js'
+import type {
+  CoreEvents,
+  DiffusionErrorBody,
+  DiffusionFamilyDefaults,
+  ImageGenerateRequest,
+  ImageJob,
+} from '../../contracts/index.js'
 import type { LocalProvider, RemoteProvider } from '../../router/index.js'
 import type { ChatGptBackend } from '../../cloud/index.js'
+import type { ErrorSink } from '../../telemetry/index.js'
 
 /** A model a local engine is serving right now. */
 export interface LocalTarget {
@@ -25,6 +32,21 @@ export interface CtxIncreaseOutcome {
   ok: boolean
   new_ctx_len?: number
   reason?: string
+}
+
+/** The resident image model as `POST /images/generations` needs it: who it is, and how a job runs. */
+export interface ImagesBackend {
+  /** The loaded model with the family defaults it was loaded with, or `undefined` when there is none. */
+  loaded: () => { modelId: string; displayName: string; defaults: DiffusionFamilyDefaults } | undefined
+  /** Start a job; `done` settles with the outcome and never rejects. */
+  start: (request: ImageGenerateRequest) => Promise<{
+    id: string
+    done: Promise<
+      { ok: true; outcome: { job: ImageJob; images: Buffer[] } } | { ok: false; error: DiffusionErrorBody }
+    >
+  }>
+  /** Give up on a job the client no longer waits for. */
+  cancel: (jobId: string) => Promise<unknown>
 }
 
 export interface PublicServerDeps {
@@ -46,8 +68,18 @@ export interface PublicServerDeps {
   inspecting?: () => boolean
   /** The ChatGPT subscription, for models registered under the `chatgpt` provider. */
   chatgpt?: ChatGptBackend
+  /**
+   * Hosts trusted for this one request besides the configured ones: the live tunnel name, and the
+   * accepted socket's own address when the listener is reachable from the LAN. Asked per request,
+   * not per connection — a keep-alive connection outlives a tunnel (see `dynamic-hosts.ts`).
+   */
+  dynamicTrustedHosts?: (localAddress: string | undefined) => readonly string[]
   emit?: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
   fetch?: typeof fetch
+  /** Image generation on the resident image model; without it the route answers 503. */
+  images?: ImagesBackend
+  /** Where a request that failed on our side, or a failing local engine, is reported. */
+  errors?: ErrorSink | undefined
 }
 
 export interface PublicServerConfig {

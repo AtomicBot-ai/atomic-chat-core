@@ -1,7 +1,7 @@
 import { request as httpRequest } from 'node:http'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { accessTokenFor, json, startStub } from '../../test/helpers/chatgpt-stub.js'
@@ -169,11 +169,14 @@ describe('auth chatgpt', () => {
     })
     let opened = false
     const running = cores[0] as AtomicCore
+    const waiting = vi.spyOn(running.chatgpt, 'waitLogin')
     const login = authCommand(
       ['chatgpt', 'login', '--no-browser', ...folder()],
       recordingIo({ openUrl: async () => void (opened = true) })
     )
-    await new Promise((r) => setTimeout(r, 100))
+    // Cancel once the login is waiting for the browser. A fixed delay loses the race on a slow host:
+    // a cancel before the wait leaves nothing to cancel, and the login waits for a callback forever.
+    await vi.waitFor(() => expect(waiting).toHaveBeenCalled())
     running.chatgpt.cancelLogin()
     await expect(login).rejects.toMatchObject({ code: 'AUTH_CANCELLED' })
     expect(opened).toBe(false)

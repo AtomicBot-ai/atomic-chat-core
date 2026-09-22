@@ -106,17 +106,21 @@ describe('install', () => {
     await expect(readdir(`${target}.incoming-1`)).rejects.toThrow()
   })
 
-  it('launch-checks the real executable and compares its reported build', async () => {
-    const staging = join(data.root, 'launch-check')
-    await mkdir(join(staging, 'build', 'bin'), { recursive: true })
-    const exe = join(staging, 'build', 'bin', 'llama-server')
-    const helper = join(staging, 'build', 'bin', 'helper')
-    await writeFile(exe, '#!/bin/sh\necho "version: 6325 (test)"\n')
-    await writeFile(helper, 'other binary')
-    await expect(verifyMacBackendBinary(staging, 'b6325')).resolves.toBeUndefined()
-    expect((await stat(helper)).mode & 0o111).toBe(0o111)
-    await expect(verifyMacBackendBinary(staging, 'b6326')).rejects.toThrow(/did not report/)
-  })
+  // A `#!/bin/sh` stand-in for the binary and POSIX exec bits; the check only runs for macOS packs.
+  it.skipIf(process.platform === 'win32')(
+    'launch-checks the real executable and compares its reported build',
+    async () => {
+      const staging = join(data.root, 'launch-check')
+      await mkdir(join(staging, 'build', 'bin'), { recursive: true })
+      const exe = join(staging, 'build', 'bin', 'llama-server')
+      const helper = join(staging, 'build', 'bin', 'helper')
+      await writeFile(exe, '#!/bin/sh\necho "version: 6325 (test)"\n')
+      await writeFile(helper, 'other binary')
+      await expect(verifyMacBackendBinary(staging, 'b6325')).resolves.toBeUndefined()
+      expect((await stat(helper)).mode & 0o111).toBe(0o111)
+      await expect(verifyMacBackendBinary(staging, 'b6326')).rejects.toThrow(/did not report/)
+    }
+  )
   it('does not download a pack that is already there', async () => {
     await data.writeBackend('llamacpp-upstream', 'b6325', 'macos-arm64')
     const downloader = fakeDownloader()

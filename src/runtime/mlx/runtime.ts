@@ -40,6 +40,7 @@ import {
   randomFreePort,
   SidecarTable,
   spawnAndAwaitReady,
+  throwIfLoadCancelled,
 } from '../shared/index.js'
 import { buildMlxServerArgs, normalizeMlxModelPath } from './args.js'
 import { asNumber, buildMlxConfig, selectMlxDraftSettings } from './config.js'
@@ -133,10 +134,11 @@ export class MlxRuntime implements LocalRuntime {
 
   async load(modelId: string, opts: LocalLoadOptions = {}): Promise<SessionInfo> {
     this.table.assertRunning()
-    return this.table.load(modelId, () => this.start(modelId, opts))
+    return this.table.load(modelId, () => this.start(modelId, opts), opts.signal)
   }
 
   private async start(modelId: string, opts: LocalLoadOptions): Promise<SessionInfo> {
+    throwIfLoadCancelled(opts.signal)
     const settings = await this.options.readSettings()
     const overrides = { ...(opts.overrides ?? {}) }
     const cfg: MlxExtensionConfigInput & Record<string, unknown> = { ...settings, ...overrides }
@@ -146,9 +148,13 @@ export class MlxRuntime implements LocalRuntime {
       cfg['auto_unload'] === undefined || cfg['auto_unload'] === true || cfg['auto_unload'] === 'true'
     if (autoUnload && !isEmbedding && !(opts.bypassAutoUnload ?? false)) {
       // Loads are queued one at a time, so nothing else is starting: everything loaded goes.
-      for (const loaded of this.table.getLoadedModels()) await this.table.unload(loaded)
+      for (const loaded of this.table.getLoadedModels()) {
+        throwIfLoadCancelled(opts.signal)
+        await this.table.unload(loaded)
+      }
     }
     this.table.assertRunning()
+    throwIfLoadCancelled(opts.signal)
 
     const registry = this.options.registry
     const yml = await repairLegacyShardName(registry, modelId, await registry.read(modelId), (message) =>
@@ -161,6 +167,7 @@ export class MlxRuntime implements LocalRuntime {
 
     const port = opts.port ?? (await randomFreePort(this.table.usedPorts()))
     const maxCtxTrain = await readMlxMaxCtxTrain(modelPath)
+    throwIfLoadCancelled(opts.signal)
     const draft = selectMlxDraftSettings(cfg)
     const anyDrafter = Boolean(cfg.dflash_enabled) || Boolean(cfg.mtp_enabled) || Boolean(cfg.eagle3_enabled)
     if (anyDrafter && !draft.draftPath) {
@@ -186,6 +193,7 @@ export class MlxRuntime implements LocalRuntime {
       if (value !== undefined) env[key] = value
     env['MLX_VLM_SINGLE_MODEL'] = '1'
 
+    throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'MLX') : undefined
     let started
     try {
@@ -194,6 +202,7 @@ export class MlxRuntime implements LocalRuntime {
         {
           timeoutMs: timeoutSecs * 1000,
           signal: this.table.signal,
+          ...(opts.signal ? { cancelSignal: opts.signal } : {}),
           streamReadyMarkers: { stdout: MLX_STDOUT_READY_MARKERS, stderr: MLX_STDERR_READY_MARKERS },
           // The plugin killed a server that did not come up at once, without a grace period.
           timeoutGraceMs: 0,
@@ -210,20 +219,23 @@ export class MlxRuntime implements LocalRuntime {
       await closeLogStream(logStream)
       throw error
     }
-    return this.table.adopt({
-      info: {
-        pid: started.process.pid,
-        port,
-        model_id: modelId,
-        model_path: normalizeMlxModelPath(modelPath),
-        is_embedding: isEmbedding,
-        api_key: '',
+    return this.table.adopt(
+      {
+        info: {
+          pid: started.process.pid,
+          port,
+          model_id: modelId,
+          model_path: normalizeMlxModelPath(modelPath),
+          is_embedding: isEmbedding,
+          api_key: '',
+        },
+        process: started.process,
+        exe,
+        extra: { ctxSize: config.ctx_size, maxCtxTrain, overrides },
+        logStream,
       },
-      process: started.process,
-      exe,
-      extra: { ctxSize: config.ctx_size, maxCtxTrain, overrides },
-      logStream,
-    })
+      opts.signal
+    )
   }
 
   private async localDraft(kind: MlxDraftKind, modelId: string): Promise<string | undefined> {

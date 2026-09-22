@@ -7,7 +7,9 @@
  *   <data>/llamacpp-upstream/backends/<version>/<backend>/build/bin/llama-server
  *   <data>/llamacpp-upstream/tmp/
  *   <data>/mlx/models/<id>/{model.yml, config.json, *.safetensors}
+ *   <data>/diffusion/{backends/<tag>/<backend>/, models/, scratch/}, <data>/images/  (image generation; the app's paths since v2.0.38)
  *   <data>/local-api-server.json, <data>/atomic-chatgpt-auth.json
+ *   <data>/remote-access-tunnel.json  (the app's 2.0.40 tunnel journal: reaped once at startup, never written)
  *   <data>/atomic-core/  — the only new folder (settings, credentials, lock, journal, logs)
  */
 
@@ -50,22 +52,49 @@ export interface CoreFiles {
   processes: string
   modelClaims: string
   logsDir: string
+  /** The remote-access tunnel's own crash-recovery record (it has no provider, model or port). */
+  remoteAccessTunnel: string
+  /** An empty `--config` for cloudflared on Windows, which has no `/dev/null` to point at. */
+  cloudflaredEmptyConfig: string
+  /** The core's own error-reporting state: the user's stored choice, the install id. */
+  telemetry: string
+}
+
+/** Image generation. Paths the app's diffusion plugin chose; the core adopted them as they are. */
+export interface DiffusionPaths {
+  /** `<data>/diffusion` */
+  root: string
+  /** `<root>/backends/<tag>/<backendId>/`, each holding `sd-server`. */
+  backendsDir: string
+  modelsDir: string
+  /** Empty directories `sd-server` insists on being given (LoRA, upscalers, embeddings). */
+  scratchDir: string
+  /** `<data>/images`: the gallery, unless the user chose another folder. */
+  defaultOutputDir: string
 }
 
 export interface DataLayout {
   root: string
   serverStateFile: string
   chatgptAuthFile: string
+  /**
+   * The tunnel journal Atomic Chat 2.0.40's Rust wrote (`{pid, started_at_secs}`) and reaped at its own
+   * startup. The app no longer reads it, so the core reaps it once and removes it; nothing writes it.
+   */
+  legacyRemoteAccessTunnel: string
   core: CoreFiles
+  diffusion: DiffusionPaths
   provider(id: LocalProviderId): ProviderPaths
 }
 
 export function dataLayout(root: string): DataLayout {
   const coreDir = join(root, CORE_DIR)
+  const diffusionDir = join(root, 'diffusion')
   return {
     root,
     serverStateFile: join(root, LOCAL_API_SERVER_STATE_FILE),
     chatgptAuthFile: join(root, CHATGPT_AUTH_FILE),
+    legacyRemoteAccessTunnel: join(root, 'remote-access-tunnel.json'),
     core: {
       dir: coreDir,
       publicServerState: join(coreDir, LOCAL_API_SERVER_STATE_FILE),
@@ -77,6 +106,17 @@ export function dataLayout(root: string): DataLayout {
       processes: join(coreDir, 'processes.json'),
       modelClaims: join(coreDir, 'model-claims'),
       logsDir: join(coreDir, 'logs'),
+      remoteAccessTunnel: join(coreDir, 'remote-access-tunnel.json'),
+      cloudflaredEmptyConfig: join(coreDir, 'cloudflared-empty.yml'),
+      /** The core's own error-reporting state: the user's stored choice, the install id. */
+      telemetry: join(coreDir, 'telemetry.json'),
+    },
+    diffusion: {
+      root: diffusionDir,
+      backendsDir: join(diffusionDir, 'backends'),
+      modelsDir: join(diffusionDir, 'models'),
+      scratchDir: join(diffusionDir, 'scratch'),
+      defaultOutputDir: join(root, 'images'),
     },
     provider(id) {
       const providerRoot = join(root, id)

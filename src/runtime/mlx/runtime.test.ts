@@ -221,13 +221,12 @@ describe('MlxRuntime', () => {
     await expect(runtime({}, {}, { resourcesDir: undefined }).load('m')).rejects.toMatchObject({
       code: 'BINARY_NOT_FOUND',
     })
+    const binary = join('/resources/bin', 'mlx-server')
     await expect(runtime({}, {}, { exists: () => false }).load('m')).rejects.toMatchObject({
       code: 'BINARY_NOT_FOUND',
-      message: 'MLX server binary not found at: /resources/bin/mlx-server',
+      message: `MLX server binary not found at: ${binary}`,
     })
-    await expect(
-      runtime({}, {}, { exists: (path) => path === '/resources/bin/mlx-server' }).load('m')
-    ).rejects.toMatchObject({
+    await expect(runtime({}, {}, { exists: (path) => path === binary }).load('m')).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('Model file not found at: '),
     })
@@ -247,6 +246,55 @@ describe('MlxRuntime', () => {
     })
   })
 
+  it('kills a server that is still coming up when the user cancels, and keeps the models that were loaded', async () => {
+    await writeMlxModel('resident')
+    await writeMlxModel('huge')
+    const r = runtime({ auto_unload: false })
+    await r.load('resident')
+    const hanging = new MlxRuntime({
+      layout: data.layout,
+      registry,
+      instanceId: 'test-instance',
+      resourcesDir: '/resources/bin',
+      readSettings: async () => ({ auto_unload: false }),
+      journal,
+      emit: (name, payload) => events.push({ name, payload: payload as Record<string, unknown> }),
+      exists: (path) => path === '/resources/bin/mlx-server' || !path.startsWith('/resources'),
+      spawn: fakeSidecarSpawn({ kind: 'mlx', mode: 'hang', argvFile }),
+    })
+    runtimes.push(hanging)
+    const before = (await argvs()).length
+    const cancel = new AbortController()
+    const load = hanging.load('huge', { signal: cancel.signal })
+    // The fake records its argv on startup: a new line means the child is running.
+    while ((await argvs()).length === before) await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(hanging.isLoading('huge')).toBe(true)
+
+    cancel.abort()
+    await expect(load).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+      message: 'The model load was cancelled.',
+    })
+    expect(hanging.list()).toEqual([])
+    expect(hanging.isLoading('huge')).toBe(false)
+    expect(journal.list().map((entry) => entry.model_id)).toEqual(['resident'])
+    expect(events.filter((e) => e.name === 'session:started').map((e) => e.payload['model_id'])).toEqual([
+      'resident',
+    ])
+  })
+
+  it('does not unload anything for a load that was cancelled before it started', async () => {
+    await writeMlxModel('resident')
+    await writeMlxModel('never')
+    const r = runtime()
+    await r.load('resident')
+    await expect(r.load('never', { signal: AbortSignal.abort() })).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+    })
+    // Auto-unload is on by default; a cancelled load must not have evicted the resident model.
+    expect(r.getLoadedModels()).toEqual(['resident'])
+  })
+
   it('heals a mis-named first shard before loading', async () => {
     const dir = await writeMlxModel('sharded')
     await writeFile(
@@ -262,16 +310,20 @@ describe('MlxRuntime', () => {
     )
   })
 
-  it('drops a session whose server died, with the external-kill diagnosis', async () => {
-    await writeMlxModel('m')
-    const r = runtime()
-    const session = await r.load('m')
-    process.kill(session.pid, 'SIGKILL')
-    await expect.poll(() => r.list().length).toBe(0)
-    await expect
-      .poll(() => events.find((e) => e.name === 'session:died')?.payload['message'])
-      .toBe('MLX server terminated by signal SIGKILL — an external process killed it.')
-  })
+  // Windows has no signals: a killed process there exits with code 1 and no signal to name.
+  it.skipIf(process.platform === 'win32')(
+    'drops a session whose server died, with the external-kill diagnosis',
+    async () => {
+      await writeMlxModel('m')
+      const r = runtime()
+      const session = await r.load('m')
+      process.kill(session.pid, 'SIGKILL')
+      await expect.poll(() => r.list().length).toBe(0)
+      await expect
+        .poll(() => events.find((e) => e.name === 'session:died')?.payload['message'])
+        .toBe('MLX server terminated by signal SIGKILL — an external process killed it.')
+    }
+  )
 
   it('writes a log file and relays lines when verbose', async () => {
     await writeMlxModel('m')

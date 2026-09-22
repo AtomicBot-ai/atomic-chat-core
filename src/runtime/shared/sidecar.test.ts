@@ -190,6 +190,137 @@ describe('SidecarTable', () => {
     await proc.terminate(0)
   })
 
+  it('ends a queued load the moment it is cancelled, without letting the next one overlap the load ahead', async () => {
+    const { t } = table()
+    const order: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const first = t.load('a', async () => {
+      order.push('a:start')
+      await gate
+      order.push('a:end')
+      return info('a', 1)
+    })
+    const cancel = new AbortController()
+    let secondStarted = false
+    const second = t.load(
+      'b',
+      async () => {
+        secondStarted = true
+        return info('b', 2)
+      },
+      cancel.signal
+    )
+    const third = t.load('c', async () => {
+      order.push('c:start')
+      return info('c', 3)
+    })
+    await new Promise((r) => setTimeout(r, 20))
+    cancel.abort()
+    await expect(second).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    expect(secondStarted).toBe(false)
+    expect(t.isLoading('b')).toBe(false)
+    // The cancelled load settled early; the one behind it still waits for the load ahead.
+    await new Promise((r) => setTimeout(r, 20))
+    expect(order).toEqual(['a:start'])
+    release()
+    await first
+    await third
+    expect(order).toEqual(['a:start', 'a:end', 'c:start'])
+  })
+
+  it('rejects a caller that joined a load when it cancels, and leaves the load running', async () => {
+    const { t } = table()
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const load = t.load('a', async () => {
+      await gate
+      return info('a', 1)
+    })
+    const cancel = new AbortController()
+    const joined = t.load('a', async () => info('a', 99), cancel.signal)
+    cancel.abort()
+    await expect(joined).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    release()
+    expect((await load).pid).toBe(1)
+  })
+
+  it('stops waiting on an unload when the replacement load is cancelled', async () => {
+    const { t } = table()
+    const first = sleeper()
+    await t.adopt({ info: info('m', first.pid), process: first, exe: process.execPath, extra: undefined })
+    let release!: () => void
+    let terminating!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const entered = new Promise<void>((resolve) => (terminating = resolve))
+    ;(t.get('m') as { process: ManagedProcess }).process = {
+      ...first,
+      terminate: async (graceMs) => {
+        terminating()
+        await gate
+        return first.terminate(graceMs)
+      },
+    }
+    const unload = t.unload('m')
+    await entered
+    const cancel = new AbortController()
+    let replacementStarted = false
+    const replacement = t.load(
+      'm',
+      async () => {
+        replacementStarted = true
+        return info('m', 2)
+      },
+      cancel.signal
+    )
+    cancel.abort()
+    await expect(replacement).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    release()
+    expect(await unload).toEqual({ success: true })
+    expect(replacementStarted).toBe(false)
+  })
+
+  it('publishes nothing for a process that came up after its load was cancelled, and kills it at once', async () => {
+    const removed: number[] = []
+    const { t, events } = table({
+      journal: {
+        add: async () => {},
+        remove: async (pid: number) => {
+          removed.push(pid)
+        },
+      } as unknown as ProcessJournal,
+    })
+    // Cancelled before the adopt: never journalled.
+    const early = sleeper()
+    await expect(
+      t.adopt({ info: info('m', early.pid), process: early, exe: 'x', extra: undefined }, AbortSignal.abort())
+    ).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    await early.exited
+    expect(removed).toEqual([])
+
+    // Cancelled while the journal write was in flight: journalled, then un-journalled.
+    const cancel = new AbortController()
+    const late = sleeper()
+    const slow = table({
+      journal: {
+        add: async () => {
+          cancel.abort()
+        },
+        remove: async (pid: number) => {
+          removed.push(pid)
+        },
+      } as unknown as ProcessJournal,
+    })
+    await expect(
+      slow.t.adopt({ info: info('m', late.pid), process: late, exe: 'x', extra: undefined }, cancel.signal)
+    ).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    await late.exited
+    expect(removed).toEqual([late.pid])
+    expect(slow.t.list()).toEqual([])
+    expect(t.list()).toEqual([])
+    expect([...events, ...slow.events]).toEqual([])
+  })
+
   it('refuses loads once closing', async () => {
     const { t } = table()
     await t.shutdown()

@@ -174,6 +174,67 @@ describe('spawnAndAwaitReady', () => {
     await rm(dir, { recursive: true, force: true })
   })
 
+  it('never spawns for a load that was already cancelled', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-process-cancel-'))
+    const pidFile = join(dir, 'pid')
+    await expect(
+      spawnAndAwaitReady(
+        node(
+          `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(()=>{},1000)`
+        ),
+        { timeoutMs: 5000, cancelSignal: AbortSignal.abort(), classifyExit: classify }
+      )
+    ).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED', message: 'The model load was cancelled.' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The child would have written its pid on its first tick had it been started.
+    await expect(readFile(pidFile, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a starting child at once when the user cancels, even one that ignores SIGTERM',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'atomic-process-cancel-'))
+      const pidFile = join(dir, 'pid')
+      const controller = new AbortController()
+      const pending = spawnAndAwaitReady(
+        node(
+          `process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(()=>{},1000)`
+        ),
+        // A shutdown-style abort would give this child a 1 s grace; a cancel gives it none.
+        { timeoutMs: 30_000, cancelSignal: controller.signal, classifyExit: classify }
+      )
+      let pid = 0
+      const deadline = Date.now() + 2000
+      while (!pid && Date.now() < deadline) {
+        pid = Number(await readFile(pidFile, 'utf8').catch(() => '0'))
+        if (!pid) await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(pid).toBeGreaterThan(0)
+      const cancelledAt = Date.now()
+      controller.abort()
+      await expect(pending).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+      // The error is raised only after the exit is confirmed, and well inside any grace period.
+      expect(Date.now() - cancelledAt).toBeLessThan(900)
+      expect(isProcessAlive(pid)).toBe(false)
+      await rm(dir, { recursive: true, force: true })
+    }
+  )
+
+  it('keeps the owner-shutdown error when both signals are present and shutdown fires', async () => {
+    const shutdown = new AbortController()
+    const cancel = new AbortController()
+    const pending = spawnAndAwaitReady(node('setInterval(()=>{},1000)'), {
+      timeoutMs: 5000,
+      signal: shutdown.signal,
+      cancelSignal: cancel.signal,
+      classifyExit: classify,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    shutdown.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'CORE_NOT_RUNNING' })
+  })
+
   it('spawnManaged collects output and resolves exited', async () => {
     const p = spawnManaged(
       node('process.stdout.write("a\\nb\\n"); process.stderr.write("c\\n"); process.exit(3)')
@@ -182,5 +243,68 @@ describe('spawnAndAwaitReady', () => {
     expect(exit.code).toBe(3)
     await new Promise((r) => setTimeout(r, 20))
     expect(p.output()).toEqual({ stdout: 'a\nb\n', stderr: 'c\n' })
+  })
+})
+
+describe('spawnManaged hooks', () => {
+  // sd.cpp redraws its step bar in place: `\r<bar> 1/4 - 2.0s/it ESC[K`, a newline only after the last step.
+  const redraws =
+    'process.stdout.write("\\r|=>  | 1/4 - 2.0s/it\\x1b[K");' +
+    'setTimeout(() => { process.stdout.write("\\r|==> | 2/4 - 2.0s/it\\x1b[K"); process.stderr.write("warn\\n") }, 150);' +
+    'setTimeout(() => process.exit(0), 300)'
+
+  it('hands over raw chunks as they arrive, so a redraw without a line end is seen at once', async () => {
+    const seen: Array<{ stream: string; text: string; at: number }> = []
+    const started = Date.now()
+    const p = spawnManaged(node(redraws), undefined, {
+      onData: (stream, chunk) =>
+        seen.push({ stream, text: chunk.toString('utf8'), at: Date.now() - started }),
+    })
+    await p.exited
+    await new Promise((r) => setTimeout(r, 20))
+    const stdout = seen.filter((c) => c.stream === 'stdout')
+    expect(stdout.map((c) => c.text).join('')).toBe(
+      '\r|=>  | 1/4 - 2.0s/it\x1b[K\r|==> | 2/4 - 2.0s/it\x1b[K'
+    )
+    // The first redraw arrived on its own, before the second one was written.
+    expect(stdout[0]?.text).toBe('\r|=>  | 1/4 - 2.0s/it\x1b[K')
+    expect(seen.filter((c) => c.stream === 'stderr').map((c) => c.text)).toEqual(['warn\n'])
+  })
+
+  it('keeps line delivery and capture working next to the raw hook', async () => {
+    const lines: string[] = []
+    let bytes = 0
+    const p = spawnManaged(
+      node('process.stdout.write("a\\nb\\n"); process.exit(0)'),
+      (_stream, line) => lines.push(line),
+      { onData: (_stream, chunk) => (bytes += chunk.length) }
+    )
+    await p.exited
+    await new Promise((r) => setTimeout(r, 20))
+    expect(lines).toEqual(['a', 'b'])
+    expect(bytes).toBe(4)
+    expect(p.output().stdout).toBe('a\nb\n')
+  })
+
+  it('keeps nothing when capture is off, with or without a line reader', async () => {
+    const lines: string[] = []
+    const withLines = spawnManaged(
+      node('process.stdout.write("a\\n"); process.stderr.write("b\\n"); process.exit(0)'),
+      (_stream, line) => lines.push(line),
+      { captureOutput: false }
+    )
+    await withLines.exited
+    await new Promise((r) => setTimeout(r, 20))
+    expect(lines.sort()).toEqual(['a', 'b'])
+    expect(withLines.output()).toEqual({ stdout: '', stderr: '' })
+
+    // No reader at all: the pipes are still drained, so a chatty child is never blocked on a full one.
+    const silent = spawnManaged(
+      node('process.stdout.write("x".repeat(1 << 20), () => process.exit(7))'),
+      undefined,
+      { captureOutput: false }
+    )
+    expect((await silent.exited).code).toBe(7)
+    expect(silent.output()).toEqual({ stdout: '', stderr: '' })
   })
 })

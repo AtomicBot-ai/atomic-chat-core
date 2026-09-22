@@ -9,12 +9,16 @@ import { Router } from '../http.js'
 import { registerBackendRoutes } from './routes/backends.js'
 import { registerClientRoutes } from './routes/clients.js'
 import { registerCloudRoutes } from './routes/cloud.js'
+import { registerDiffusionRoutes } from './routes/diffusion.js'
+import { registerDiskRoutes } from './routes/disk.js'
 import { registerExternalSessionRoutes } from './routes/external-sessions.js'
 import { registerHardwareRoutes } from './routes/hardware.js'
 import { registerLifecycleRoutes, registerShutdownRoute } from './routes/lifecycle.js'
 import { registerModelRoutes } from './routes/models.js'
 import { registerPublicServerRoutes } from './routes/public-server.js'
+import { registerRemoteAccessRoutes } from './routes/remote-access.js'
 import { registerSettingsRoutes } from './routes/settings.js'
+import { registerTelemetryRoutes } from './routes/telemetry.js'
 import type { ControlServer } from './server.js'
 import type { ControlRouteContext, ControlServerDeps, ControlSnapshot } from './types.js'
 
@@ -47,10 +51,14 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerModelRoutes(router, deps, ctx)
   registerBackendRoutes(router, deps, ctx)
   registerHardwareRoutes(router, deps, ctx)
+  registerDiskRoutes(router, deps, ctx)
   registerSettingsRoutes(router, deps, ctx)
   registerExternalSessionRoutes(router, deps, ctx)
   registerCloudRoutes(router, deps, ctx)
   registerPublicServerRoutes(router, deps, ctx)
+  registerRemoteAccessRoutes(router, deps, ctx)
+  registerDiffusionRoutes(router, deps, ctx)
+  registerTelemetryRoutes(router, deps, ctx)
   registerShutdownRoute(router, deps, ctx)
 
   return router
