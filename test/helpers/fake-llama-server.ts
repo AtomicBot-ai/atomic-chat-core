@@ -37,6 +37,14 @@ export interface FakeLlamaOptions {
   computeErrorMarker?: string
   /** Every started fake appends its pid here, one per line: children that never became sessions. */
   pidFile?: string
+  /**
+   * Every started fake appends one JSON record here — pid, label, argv and the inference-relevant
+   * environment — so a test can read the argv of a process that has already exited, which `ps`
+   * cannot. One file per run holds every start, and `label` tells the providers apart.
+   */
+  argvFile?: string
+  /** Names this pack in its `argvFile` records; the provider and release the launcher came from. */
+  label?: string
   /** Scripted answers of the raw `/completion` endpoint, in order; `{{seen:TEXT}}` reports whether the prompt held TEXT. */
   completionSteps?: string[]
   /** One scripted tool turn: call this tool when it is offered, then repeat its result after the reply. */
@@ -52,6 +60,8 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
   if (options.minCtx) env['FAKE_LLAMA_MIN_CTX'] = String(options.minCtx)
   if (options.computeErrorMarker) env['FAKE_LLAMA_COMPUTE_ERROR_MARKER'] = options.computeErrorMarker
   if (options.pidFile) env['FAKE_LLAMA_PID_FILE'] = options.pidFile
+  if (options.argvFile) env['FAKE_LLAMA_ARGV_FILE'] = options.argvFile
+  if (options.label) env['FAKE_LLAMA_LABEL'] = options.label
   if (options.toolCall) env['FAKE_LLAMA_TOOL_CALL'] = JSON.stringify(options.toolCall)
   if (options.completionSteps) env['FAKE_LLAMA_COMPLETION_STEPS'] = JSON.stringify(options.completionSteps)
   return env
