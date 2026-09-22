@@ -109,35 +109,40 @@ describe('load', () => {
     expect(noEmitter.list()).toEqual([])
   })
 
-  it('starts a process, reports a usable session and journals it for the next owner', async () => {
-    await data.writeModel('demo')
-    const runtime = await makeRuntime()
-    const info = await runtime.load('demo')
+  // The file's first real spawn pays the cold start: 3.5-5 s on the Windows runner under coverage.
+  it(
+    'starts a process, reports a usable session and journals it for the next owner',
+    { timeout: 15_000 },
+    async () => {
+      await data.writeModel('demo')
+      const runtime = await makeRuntime()
+      const info = await runtime.load('demo')
 
-    expect(info.model_id).toBe('demo')
-    expect(info.pid).toBeGreaterThan(0)
-    expect(info.port).toBeGreaterThanOrEqual(3000)
-    expect(info.api_key).toMatch(/.+/)
-    expect(info.is_embedding).toBe(false)
+      expect(info.model_id).toBe('demo')
+      expect(info.pid).toBeGreaterThan(0)
+      expect(info.port).toBeGreaterThanOrEqual(3000)
+      expect(info.api_key).toMatch(/.+/)
+      expect(info.is_embedding).toBe(false)
 
-    const health = await fetch(`http://127.0.0.1:${info.port}/health`)
-    expect(health.status).toBe(200)
-    const models = await fetch(`http://127.0.0.1:${info.port}/v1/models`, {
-      headers: { Authorization: `Bearer ${info.api_key}` },
-    })
-    expect(models.status).toBe(200)
-    const unauthorized = await fetch(`http://127.0.0.1:${info.port}/v1/models`)
-    expect(unauthorized.status).toBe(401)
+      const health = await fetch(`http://127.0.0.1:${info.port}/health`)
+      expect(health.status).toBe(200)
+      const models = await fetch(`http://127.0.0.1:${info.port}/v1/models`, {
+        headers: { Authorization: `Bearer ${info.api_key}` },
+      })
+      expect(models.status).toBe(200)
+      const unauthorized = await fetch(`http://127.0.0.1:${info.port}/v1/models`)
+      expect(unauthorized.status).toBe(401)
 
-    expect(runtime.getLoadedModels()).toEqual(['demo'])
-    expect(runtime.findSession('demo')).toMatchObject({ pid: info.pid })
-    expect(runtime.list()).toHaveLength(1)
-    expect(journal.list()).toMatchObject([
-      { instance_id: 'owner-under-test', pid: info.pid, model_id: 'demo', port: info.port },
-    ])
-    expect(journal.list()[0]?.process_start_id, 'identity is what makes cleanup safe').toBeTruthy()
-    expect(payloads('session:started')).toMatchObject([{ model_id: 'demo', provider: 'llamacpp-upstream' }])
-  })
+      expect(runtime.getLoadedModels()).toEqual(['demo'])
+      expect(runtime.findSession('demo')).toMatchObject({ pid: info.pid })
+      expect(runtime.list()).toHaveLength(1)
+      expect(journal.list()).toMatchObject([
+        { instance_id: 'owner-under-test', pid: info.pid, model_id: 'demo', port: info.port },
+      ])
+      expect(journal.list()[0]?.process_start_id, 'identity is what makes cleanup safe').toBeTruthy()
+      expect(payloads('session:started')).toMatchObject([{ model_id: 'demo', provider: 'llamacpp-upstream' }])
+    }
+  )
 
   it('records which device the backend actually used', async () => {
     await data.writeModel('gpu-model')

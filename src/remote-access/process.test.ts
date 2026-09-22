@@ -61,11 +61,12 @@ describe('spawnTunnel', () => {
 
   it('feeds a line longer than 64 KiB as it stands, so a URL inside it is still found', async () => {
     // cloudflared never prints one; a hostile stand-in might, and the pipe must keep draining.
-    const padded = `${'x'.repeat(70 * 1024)} ${FAKE_TUNNEL_URL} `
+    // The child builds the line: 70 KiB of argv is over Windows' 32 KiB command-line limit.
+    const padded = `'x'.repeat(70 * 1024) + ${JSON.stringify(` ${FAKE_TUNNEL_URL} `)}`
     const tunnel = track(
       spawnTunnel({
         program: process.execPath,
-        args: ['-e', `process.stderr.write(${JSON.stringify(padded)}); setInterval(() => {}, 1000)`],
+        args: ['-e', `process.stderr.write(${padded}); setInterval(() => {}, 1000)`],
         env: process.env as Record<string, string>,
       })
     )
