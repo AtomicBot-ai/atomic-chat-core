@@ -4,12 +4,13 @@
  * the app's shapes, the events arrive over SSE, the PNG and its thumbnail land in the gallery, the
  * OpenAI facade serves the same job, a cancel that the engine ignores stops the process and the next
  * job brings it back, an unload leaves no journal entry, and a crashed core's successor reaps the
- * orphan.
+ * orphan. Then the housekeeping the Images page does: the output folder moved, gallery items and
+ * model files deleted, the 64 MiB body cap, and the idle unload.
  *
  * No imports from `src/`: a packaging change that breaks a route cannot pass by type-checking.
  */
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as sd from '../helpers/compiled-diffusion.js'
@@ -192,6 +193,140 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       expect(journalled(ctx)).toEqual([])
       // A new generation has forgotten the configuration: the app sends it again on `snapshot`.
       expect(await sd.sdStatus(ctx, next)).toMatchObject({ configured: false, model: { state: 'unloaded' } })
+    }, 60_000)
+
+    it('moves the output folder, deletes gallery items, and lists and deletes model files', async () => {
+      const { ready, modelFile } = await sd.loadedOwner(ctx)
+      const events = await sd.collectEvents(ctx, ready)
+      const first = await sd.runJob(ctx, ready)
+      expect(first.outputs[0]?.path.startsWith(join(ctx.dataFolder, 'images'))).toBe(true)
+
+      // The output folder the user picks is created and takes the next picture.
+      const elsewhere = join(ctx.dataFolder, 'Pictures', 'Atomic')
+      const moved = await json<{ outputDir: string }>(
+        await control(ctx, ready, '/diffusion/output-dir', {
+          method: 'PUT',
+          body: JSON.stringify({ path: elsewhere }),
+        })
+      )
+      expect(moved.outputDir).toBe(elsewhere)
+      expect(existsSync(elsewhere)).toBe(true)
+      await waitFor(() => sd.stateReasons(events).includes('output-dir'), 'the output-dir state event')
+      const second = await sd.runJob(ctx, ready)
+      expect(second.outputs[0]?.path.startsWith(elsewhere)).toBe(true)
+      expect(existsSync(second.outputs[0]?.path as string)).toBe(true)
+
+      // Deleting takes the PNG and its thumbnail; a file the app did not write is never listed or touched.
+      const foreign = join(elsewhere, 'holiday.png')
+      await writeFile(foreign, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]))
+      const page = await json<{ total: number; items: Array<{ id: string; path: string }> }>(
+        await control(ctx, ready, '/diffusion/gallery?offset=0&limit=10')
+      )
+      expect(page.total).toBe(1)
+      expect(page.items.map((item) => item.path)).toEqual([second.outputs[0]?.path])
+      await json(
+        await control(ctx, ready, '/diffusion/gallery/delete', {
+          method: 'POST',
+          body: JSON.stringify({ ids: page.items.map((item) => item.id) }),
+        })
+      )
+      expect(existsSync(second.outputs[0]?.path as string)).toBe(false)
+      expect(existsSync(second.outputs[0]?.thumbnailPath as string)).toBe(false)
+      expect(existsSync(foreign)).toBe(true)
+      expect(
+        (await json<{ total: number }>(await control(ctx, ready, '/diffusion/gallery?offset=0&limit=10')))
+          .total
+      ).toBe(0)
+      expect(await readdir(elsewhere)).toEqual(['holiday.png'])
+      // The first picture, in the old folder, is not part of the gallery any more but still on disk.
+      expect(existsSync(first.outputs[0]?.path as string)).toBe(true)
+
+      // Model files: listed with their relative path, protected while loaded, deletable after.
+      const listed = await json<{ files: Array<{ path: string; relativePath: string; bytes: number }> }>(
+        await control(ctx, ready, '/diffusion/model-files')
+      )
+      expect(listed.files).toEqual([
+        { path: modelFile, relativePath: 'z-image/z-image-turbo-Q4_K_M.gguf', bytes: 9 },
+      ])
+      const inUse = await control(ctx, ready, '/diffusion/model-files/delete', {
+        method: 'POST',
+        body: JSON.stringify({ path: modelFile }),
+      })
+      expect(inUse.status).toBe(409)
+      expect(await inUse.json()).toMatchObject({
+        error: {
+          code: 'BACKEND_IN_USE',
+          message: 'That file belongs to the loaded image model. Unload it first.',
+        },
+      })
+      expect(existsSync(modelFile)).toBe(true)
+      await json(await control(ctx, ready, '/diffusion/model/unload', { method: 'POST' }))
+      await json(
+        await control(ctx, ready, '/diffusion/model-files/delete', {
+          method: 'POST',
+          body: JSON.stringify({ path: modelFile }),
+        })
+      )
+      expect(existsSync(modelFile)).toBe(false)
+      // The family folder it left empty is gone too; the models root stays.
+      expect(existsSync(join(modelFile, '..'))).toBe(false)
+      expect(existsSync(join(ctx.dataFolder, 'diffusion', 'models'))).toBe(true)
+      expect(
+        (await json<{ files: unknown[] }>(await control(ctx, ready, '/diffusion/model-files'))).files
+      ).toEqual([])
+    }, 60_000)
+
+    it('refuses a generation body over 64 MiB and takes a large inline source below it', async () => {
+      const { ready } = await sd.loadedOwner(ctx)
+      const mib = 1024 * 1024
+      // A source image sent inline: a PNG header, then padding, as base64.
+      const source = (bytes: number) =>
+        Buffer.concat([
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+          Buffer.alloc(bytes - 8, 0x20),
+        ]).toString('base64')
+      const tooLarge = await control(ctx, ready, '/diffusion/jobs', {
+        method: 'POST',
+        body: JSON.stringify(
+          sd.sdGenerateRequest({ workflow: 'transform', initImage: { base64: source(49 * mib) } })
+        ),
+      })
+      expect(tooLarge.status).toBe(400)
+      expect(await tooLarge.json()).toMatchObject({
+        error: { code: 'INVALID_ARGUMENT', message: 'Request body is too large.' },
+      })
+      expect((await sd.sdStatus(ctx, ready)).activeJob).toBeNull()
+      // Below the cap the body is read whole; the source itself is then judged by the validator.
+      const large = await control(ctx, ready, '/diffusion/jobs', {
+        method: 'POST',
+        body: JSON.stringify(
+          sd.sdGenerateRequest({ workflow: 'transform', initImage: { base64: source(40 * mib) } })
+        ),
+      })
+      expect(large.status).not.toBe(413)
+      const body = (await large.json()) as { jobId?: string; error?: { code: string; message: string } }
+      expect(body.error?.code ?? 'accepted').not.toBe('INVALID_ARGUMENT')
+      if (body.jobId)
+        await json(await control(ctx, ready, `/diffusion/jobs/${body.jobId}/cancel`, { method: 'POST' }))
+    }, 60_000)
+
+    it('unloads an idle model after idleUnloadSecs, on the next tick', async () => {
+      const { ready, pid } = await sd.loadedOwner(ctx, { config: { idleUnloadSecs: 1 } })
+      expect((await sd.sdStatus(ctx, ready)).idleUnloadSecs).toBe(1)
+      const events = await sd.collectEvents(ctx, ready)
+      // The idle task looks every 30 s; a one-second allowance has expired by then.
+      await waitFor(() => sd.stateReasons(events).includes('idle'), 'the idle unload', 45_000)
+      expect(alive(pid)).toBe(false)
+      expect(journalled(ctx)).toEqual([])
+      const status = await sd.sdStatus(ctx, ready)
+      expect(status.model.state).toBe('unloaded')
+      expect(status.model.loaded).toBeNull()
+      // Forgotten with the unload: the next job cannot respawn it, the page loads again.
+      const noModel = await control(ctx, ready, '/diffusion/jobs', {
+        method: 'POST',
+        body: JSON.stringify(sd.sdGenerateRequest()),
+      })
+      expect(noModel.status).toBe(404)
     }, 60_000)
   }
 )

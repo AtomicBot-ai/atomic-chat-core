@@ -6,6 +6,7 @@ import {
   hostHeaderIsLoopback,
   isLoopbackAddress,
   MAX_JSON_BODY_BYTES,
+  OVERSIZE_DRAIN_FACTOR,
   pathOf,
   queryOf,
   readJsonBody,
@@ -158,6 +159,18 @@ describe('request helpers over a real socket', () => {
     expect((await tooBig.json()) as object).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
     const invalid = await fetch(`${base}/echo`, { method: 'POST', body: '{oops' })
     expect(invalid.status).toBe(400)
+  })
+
+  it('reads an oversized body to its end before refusing it, and drops one past the drain ceiling', async () => {
+    expect(OVERSIZE_DRAIN_FACTOR).toBe(8)
+    // Within eight times the cap: read, discarded, refused with the envelope.
+    const drained = await fetch(`${base}/echo`, { method: 'POST', body: 'x'.repeat(32 * 8) })
+    expect(drained.status).toBe(400)
+    expect((await drained.json()) as object).toMatchObject({
+      error: { code: 'INVALID_ARGUMENT', message: 'Request body is too large.', details: '> 32 bytes' },
+    })
+    // Past it: the connection goes instead of the rest of the body.
+    await expect(fetch(`${base}/echo`, { method: 'POST', body: 'x'.repeat(32 * 8 + 1) })).rejects.toThrow()
   })
 
   it('sends the shared error envelope with the code the app matches on', async () => {

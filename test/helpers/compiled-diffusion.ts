@@ -291,6 +291,8 @@ export interface OwnerOptions extends EngineOptions {
   /** Files named by the load beyond the transformer, as relative model paths. */
   files?: Omit<LoadFiles, 'diffusionModel'>
   load?: Record<string, unknown>
+  /** Extra fields of `PUT /diffusion/config` (an `idleUnloadSecs`, an `outputDir`). */
+  config?: Record<string, unknown>
 }
 
 /**
@@ -301,7 +303,7 @@ export async function loadedOwner(ctx: SdContext, options: OwnerOptions = {}) {
   const dir = await writeSdEngine(ctx, options)
   const modelFile = await writeSdFile(ctx)
   const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
-  const configured = await configure(ctx, ready)
+  const configured = await configure(ctx, ready, options.config)
   expect(configured).toMatchObject({ configured: true, install: { state: 'not-installed' } })
   const record = await finalizeEngine(ctx, ready, dir, options)
   expect(record.dir).toBe(dir)

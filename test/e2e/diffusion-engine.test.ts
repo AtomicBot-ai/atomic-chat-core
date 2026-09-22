@@ -2,12 +2,15 @@
  * Which engine may serve which image model, through the compiled binary (app v2.0.42, stages
  * 7k–7l): Qwen Image 2.1 refused on build 849 and served once an 883 tree is finalized; the
  * Qwen3-VL projector handed to `sd-server` as `--llm_vision` and the reference workflows offered
- * only with it; an engine update unloading the resident model and the old tree removable only then.
+ * only with it; an engine update unloading the resident model and the old tree removable only then;
+ * Qwen-Image capped at one megapixel on a Metal engine and the M5 switch absent on other machines;
+ * a missing file named on load; a load that fails, and one stopped by an unload, leaving nothing.
  *
  * No imports from `src/`. POSIX only: the fake engine is a shell launcher.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
+import { cpus } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as sd from '../helpers/compiled-diffusion.js'
@@ -220,6 +223,153 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       })
       expect(outside.status).toBe(400)
       expect(existsSync(join(ctx.dataFolder, 'diffusion', 'models'))).toBe(true)
+    }, 60_000)
+
+    it('refuses Qwen-Image past one megapixel on a Metal engine before anything runs', async () => {
+      const envFile = join(ctx.dataFolder, 'sd-env.json')
+      const { ready, pid } = await sd.loadedOwner(ctx, {
+        backend: 'metal',
+        env: { FAKE_SD_ENV_FILE: envFile },
+        load: { modelId: 'qwen-image:q4_k', family: 'qwen-image', displayName: 'Qwen-Image' },
+      })
+      expect((await sd.sdStatus(ctx, ready)).install).toMatchObject({ backend: 'metal' })
+      const events = await sd.collectEvents(ctx, ready)
+      const tooBig = await control(ctx, ready, '/diffusion/jobs', {
+        method: 'POST',
+        body: JSON.stringify(sd.sdGenerateRequest({ width: 1280, height: 1024 })),
+      })
+      expect(tooBig.status).toBe(400)
+      expect(await tooBig.json()).toMatchObject({
+        error: {
+          code: 'INVALID_DIMENSIONS',
+          message: 'Qwen-Image is limited to about one megapixel on Apple GPUs. Choose a smaller resolution.',
+          details: '1280x1024 exceeds the Metal-safe pixel budget',
+        },
+      })
+      expect((await sd.sdStatus(ctx, ready)).activeJob).toBeNull()
+      expect(events.some((e) => e.event === 'diffusion:job')).toBe(false)
+      const fits = await sd.runJob(ctx, ready, { width: 1024, height: 1024 })
+      expect(fits.state).toBe('completed')
+      expect(fits.outputs[0]).toMatchObject({ width: 1024, height: 1024 })
+      expect((await sd.sdStatus(ctx, ready)).model.loaded?.pid).toBe(pid)
+
+      // The M5 Metal switch reaches the engine's environment only on an M5; this machine decides.
+      const m5 = process.platform === 'darwin' && /\bM5\b/.test(cpus()[0]?.model ?? '')
+      expect(JSON.parse(readFileSync(envFile, 'utf8'))).toEqual({
+        GGML_METAL_TENSOR_DISABLE: m5 ? '1' : null,
+      })
+    }, 60_000)
+
+    it('names the missing file on load: MODEL_MISSING for the transformer, SIDE_FILE_MISSING for a side file', async () => {
+      const dir = await sd.writeSdEngine(ctx)
+      const modelFile = await sd.writeSdFile(ctx)
+      const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
+      await sd.configure(ctx, ready)
+      await sd.finalizeEngine(ctx, ready, dir)
+      const missingModel = join(ctx.dataFolder, 'diffusion', 'models', 'z-image', 'gone.gguf')
+      const transformer = await control(ctx, ready, '/diffusion/model/load', {
+        method: 'POST',
+        body: JSON.stringify(sd.sdLoadRequest({ diffusionModel: missingModel })),
+      })
+      expect(transformer.status).toBe(404)
+      expect(await transformer.json()).toMatchObject({
+        error: {
+          code: 'MODEL_MISSING',
+          message: 'gone.gguf is missing. Download the model again.',
+          details: `diffusionModel: ${missingModel}`,
+        },
+      })
+      const missingVae = join(ctx.dataFolder, 'diffusion', 'models', 'shared', 'ae.safetensors')
+      const side = await control(ctx, ready, '/diffusion/model/load', {
+        method: 'POST',
+        body: JSON.stringify(sd.sdLoadRequest({ diffusionModel: modelFile, vae: missingVae })),
+      })
+      expect(side.status).toBe(404)
+      expect(await side.json()).toMatchObject({
+        error: {
+          code: 'SIDE_FILE_MISSING',
+          message: 'ae.safetensors is missing. Download the model again.',
+          details: `vae: ${missingVae}`,
+        },
+      })
+      // Checked before the engine is started.
+      expect(sd.startedPids(ctx.pidFile)).toEqual([])
+      expect((await sd.sdStatus(ctx, ready)).model.state).toBe('unloaded')
+    }, 60_000)
+
+    it('reports a load that fails: an early exit read as OUT_OF_MEMORY, a listener that is not sd-server as MODEL_LOAD_FAILED, and nothing left running', async () => {
+      const dir = await sd.writeSdEngine(ctx, {
+        env: {
+          FAKE_SD_MODE: 'exit-early',
+          FAKE_SD_STDERR: 'ggml_backend_cuda_buffer_type_alloc_buffer: cudaMalloc failed: out of memory\n',
+        },
+      })
+      const modelFile = await sd.writeSdFile(ctx)
+      const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
+      await sd.configure(ctx, ready)
+      await sd.finalizeEngine(ctx, ready, dir)
+      const events = await sd.collectEvents(ctx, ready)
+      const load = () =>
+        control(ctx, ready, '/diffusion/model/load', {
+          method: 'POST',
+          body: JSON.stringify(sd.sdLoadRequest({ diffusionModel: modelFile })),
+        })
+
+      const oom = await load()
+      expect(oom.status).toBe(500)
+      const oomBody = (await oom.json()) as { error: { code: string; message: string; details: string } }
+      expect(oomBody).toMatchObject({
+        error: { code: 'OUT_OF_MEMORY', message: 'The image model ran out of memory while loading.' },
+      })
+      expect(oomBody.error.details).toContain('out of memory')
+      const failed = await sd.sdStatus(ctx, ready)
+      expect(failed.model.state).toBe('failed')
+      expect(failed.model.error?.code).toBe('OUT_OF_MEMORY')
+
+      // The launcher is read at every spawn: the same tree now answers like a stranger on the port.
+      await sd.writeSdEngine(ctx, { env: { FAKE_SD_MODE: 'foreign' } })
+      const foreign = await load()
+      expect(foreign.status).toBe(500)
+      expect(await foreign.json()).toMatchObject({
+        error: { code: 'MODEL_LOAD_FAILED', message: "Another process answered on sd-server's port." },
+      })
+      await waitFor(
+        () => sd.stateReasons(events).filter((reason) => reason === 'load-failed').length >= 2,
+        'both load-failed state events'
+      )
+      expect(events.filter((e) => e.event === 'diffusion:error').map((e) => e.data['code'])).toEqual([
+        'OUT_OF_MEMORY',
+        'MODEL_LOAD_FAILED',
+      ])
+      const pids = sd.startedPids(ctx.pidFile)
+      expect(pids).toHaveLength(2)
+      await waitFor(() => pids.every((pid) => !alive(pid)), 'every failed engine to be gone')
+      expect(journalled(ctx)).toEqual([])
+      expect((await sd.sdStatus(ctx, ready)).model.state).toBe('failed')
+    }, 60_000)
+
+    it('stops a load when the model is unloaded meanwhile: CANCELLED, the child gone first', async () => {
+      const dir = await sd.writeSdEngine(ctx, { env: { FAKE_SD_LOAD_MS: '20000' } })
+      const modelFile = await sd.writeSdFile(ctx)
+      const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
+      await sd.configure(ctx, ready)
+      await sd.finalizeEngine(ctx, ready, dir)
+      const pending = control(ctx, ready, '/diffusion/model/load', {
+        method: 'POST',
+        body: JSON.stringify(sd.sdLoadRequest({ diffusionModel: modelFile })),
+      })
+      await waitFor(() => sd.startedPids(ctx.pidFile).length === 1, 'the engine to be started')
+      const [pid] = sd.startedPids(ctx.pidFile) as [number]
+      expect((await sd.sdStatus(ctx, ready)).model.state).toBe('loading')
+      await json(await control(ctx, ready, '/diffusion/model/unload', { method: 'POST' }))
+      const cancelled = await pending
+      expect(cancelled.status).toBe(409)
+      expect(await cancelled.json()).toMatchObject({
+        error: { code: 'CANCELLED', message: 'The image model load was stopped.' },
+      })
+      expect(alive(pid)).toBe(false)
+      expect(journalled(ctx)).toEqual([])
+      expect((await sd.sdStatus(ctx, ready)).model.state).toBe('unloaded')
     }, 60_000)
   }
 )
