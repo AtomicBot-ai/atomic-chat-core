@@ -9,6 +9,14 @@
  *   FAKE_LLAMA_GPU    1 → print CUDA backend/offload/buffer lines
  *   FAKE_LLAMA_DELAY  milliseconds before the ready line
  *   FAKE_LLAMA_MIN_CTX  chat answers llama.cpp's context-overflow 400 while `--ctx-size` is below this
+ *   FAKE_LLAMA_TOOL_CALL  JSON `{"name": ..., "arguments": {...}}`; a chat request that offers a tool of that
+ *                         name and carries no tool result yet is answered with that call, and the
+ *                         request that brings the result back gets the reply followed by the result
+ *   FAKE_LLAMA_COMPLETION_STEPS  JSON array of strings; the Nth `POST /completion` of this process is
+ *                         answered with the Nth string (the last one from then on), streamed or not.
+ *                         `{{seen:TEXT}}` in a step becomes `yes` or `no`: whether TEXT was in that
+ *                         request's prompt. For clients that drive the raw completion endpoint with
+ *                         a grammar and expect scripted output, such as an agent loop.
  *   FAKE_LLAMA_COMPUTE_ERROR_MARKER  path; the first chat request anywhere creates it and answers
  *                     llama.cpp's poisoned-backend 500 ("Compute error"), later ones succeed
  *   FAKE_LLAMA_PID_FILE  path; the pid is appended there on startup, one per line, so a test can
@@ -128,6 +136,8 @@ function startServer() {
         })
       })
     // Real llama-server answers both the prefixed and unprefixed forms.
+    if (url.pathname === '/completion' || url.pathname === '/completions')
+      return readBody(req).then((b) => rawCompletion(b, res))
     if (url.pathname === '/v1/chat/completions' || url.pathname === '/chat/completions')
       return readBody(req).then((b) => completions(b, res))
     return json(404, { error: { message: `no route ${url.pathname}`, type: 'not_found' } })
@@ -192,6 +202,119 @@ function completions(body, res) {
     res.writeHead(500, { 'content-type': 'application/json' })
     return res.end(JSON.stringify({ error: { code: 500, message: 'Compute error.', type: 'server_error' } }))
   }
+  // One scripted tool turn: call the tool when it is on offer and has not answered yet; once its
+  // result is in the conversation, say the reply and repeat what the tool said, so a test can see
+  // that the result reached the model.
+  const toolCall = scriptedToolCall(body)
+  if (toolCall) return answerWithToolCall(body, res, toolCall)
+  const toolResult = lastToolResult(body)
+  if (process.env.FAKE_LLAMA_TOOL_CALL && toolResult !== null) {
+    return answerWithText(
+      body,
+      res,
+      `${content} | tool said: ${toolResult.replace(/\s+/g, ' ').slice(0, 400)}`
+    )
+  }
+  return answerWithText(body, res, content)
+}
+
+let completionsServed = 0
+
+/** llama.cpp's raw `/completion`: one flat prompt in, `content` out, `stop: true` on the last event. */
+function rawCompletion(body, res) {
+  const steps = JSON.parse(process.env.FAKE_LLAMA_COMPLETION_STEPS ?? '[]')
+  const step = steps[Math.min(completionsServed, steps.length - 1)] ?? ''
+  completionsServed++
+  const prompt = typeof body?.prompt === 'string' ? body.prompt : JSON.stringify(body?.prompt ?? '')
+  const content = step.replace(/\{\{seen:([^}]*)\}\}/g, (_, text) => (prompt.includes(text) ? 'yes' : 'no'))
+  const tail = {
+    stop: true,
+    truncated: false,
+    tokens_evaluated: 3,
+    tokens_predicted: content.length,
+    tokens_cached: 0,
+    id_slot: body?.id_slot ?? 0,
+    model: modelAlias,
+    timings: { prompt_n: 3, predicted_n: content.length, prompt_per_second: 100, predicted_per_second: 100 },
+  }
+  if (!body?.stream) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ content, ...tail }))
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    'connection': 'keep-alive',
+  })
+  for (let at = 0; at < content.length; at += 24) {
+    res.write(`data: ${JSON.stringify({ content: content.slice(at, at + 24), stop: false })}\n\n`)
+  }
+  res.write(`data: ${JSON.stringify({ content: '', ...tail })}\n\n`)
+  res.end()
+}
+
+function scriptedToolCall(body) {
+  const raw = process.env.FAKE_LLAMA_TOOL_CALL
+  if (!raw || lastToolResult(body) !== null) return null
+  const call = JSON.parse(raw)
+  const offered = (body?.tools ?? []).some((tool) => tool?.function?.name === call.name)
+  return offered ? call : null
+}
+
+function lastToolResult(body) {
+  const message = [...(body?.messages ?? [])].reverse().find((m) => m?.role === 'tool')
+  if (!message) return null
+  return typeof message.content === 'string' ? message.content : JSON.stringify(message.content)
+}
+
+function answerWithToolCall(body, res, call) {
+  const toolCalls = [
+    {
+      index: 0,
+      id: 'call_fake_1',
+      type: 'function',
+      function: { name: call.name, arguments: JSON.stringify(call.arguments ?? {}) },
+    },
+  ]
+  if (!body?.stream) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(
+      JSON.stringify({
+        id: 'chatcmpl-fake',
+        object: 'chat.completion',
+        created: 1_700_000_000,
+        model: modelAlias,
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: null, tool_calls: toolCalls },
+            finish_reason: 'tool_calls',
+          },
+        ],
+        usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+      })
+    )
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    'connection': 'keep-alive',
+  })
+  const chunk = (delta, finish_reason) =>
+    `data: ${JSON.stringify({
+      id: 'chatcmpl-fake',
+      object: 'chat.completion.chunk',
+      created: 1_700_000_000,
+      model: modelAlias,
+      choices: [{ index: 0, delta, finish_reason }],
+    })}\n\n`
+  res.write(chunk({ role: 'assistant', content: null, tool_calls: toolCalls }, null))
+  res.write(chunk({}, 'tool_calls'))
+  res.write('data: [DONE]\n\n')
+  res.end()
+}
+
+function answerWithText(body, res, content) {
   if (!body?.stream) {
     res.writeHead(200, { 'content-type': 'application/json' })
     return res.end(

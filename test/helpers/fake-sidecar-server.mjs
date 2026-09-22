@@ -11,6 +11,8 @@
  *   FAKE_SIDECAR_ARGV   path; the argv is written there as JSON (appended as one line per start)
  *   FAKE_SIDECAR_REASON the reason in the `[foundation-models] ERROR:` line (error-line mode)
  *   FAKE_FM_CHECK       what `--check` prints (fm)
+ *   FAKE_SIDECAR_REPLY  what a chat completion says (`fake <kind> reply` by default); a request with
+ *                       `stream: true` gets it as SSE chunks, one word each, the way the real servers do
  *   FAKE_MLX_MIN_CTX    chat answers mlx-vlm's KV overflow while `--max-kv-size` is below this (mlx)
  */
 import { appendFileSync } from 'node:fs'
@@ -92,17 +94,35 @@ if (mode === 'hang') {
       req.on('end', () => {
         if (kind === 'mlx' && minCtx > 0 && maxKv > 0 && maxKv < minCtx)
           return send(500, { detail: `Generation failed: kv cache exceeded max_kv_size=${maxKv}` })
+        const model = kind === 'fm' ? 'apple/on-device' : flag('--model', '')
+        const content = process.env.FAKE_SIDECAR_REPLY ?? `fake ${kind} reply`
+        let wantsStream = false
+        try {
+          wantsStream = JSON.parse(body || '{}').stream === true
+        } catch {
+          // not JSON: answer as a plain completion
+        }
+        if (wantsStream) {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+          const chunk = (delta, finish_reason) =>
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-fake',
+              object: 'chat.completion.chunk',
+              model,
+              choices: [{ index: 0, delta, finish_reason }],
+            })}\n\n`
+          content.split(' ').forEach((word, i) => {
+            res.write(chunk(i === 0 ? { role: 'assistant', content: word } : { content: ` ${word}` }, null))
+          })
+          res.write(chunk({}, 'stop'))
+          res.write('data: [DONE]\n\n')
+          return res.end()
+        }
         send(200, {
           id: 'chatcmpl-fake',
           object: 'chat.completion',
-          model: kind === 'fm' ? 'apple/on-device' : flag('--model', ''),
-          choices: [
-            {
-              index: 0,
-              message: { role: 'assistant', content: `fake ${kind} reply` },
-              finish_reason: 'stop',
-            },
-          ],
+          model,
+          choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
         })
       })
       return
