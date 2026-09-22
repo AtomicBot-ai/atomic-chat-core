@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // The release command, like the app's scripts/release.sh: bump the core version, commit, tag.
 // Pushing the tag makes .github/workflows/release.yml run the CI gates, build every binary and
-// publish the GitHub release the app downloads.
+// publish the GitHub release the app downloads. `make release` runs it with --push.
 //
 //   npm run release -- patch    # 0.3.0 → 0.3.1
 //   npm run release -- minor    # 0.3.0 → 0.4.0
 //   npm run release -- major    # 0.3.0 → 1.0.0
 //   npm run release -- 1.2.3    # an explicit version; the current one only tags HEAD
-//   git push --follow-tags      # publish it
+//   npm run release -- patch --push   # and push the branch and the tag: publish it
 import { spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -42,7 +42,7 @@ function nextVersion(current, bump) {
   if (bump === 'minor') return `${major}.${minor + 1}.0`
   if (bump === 'major') return `${major + 1}.0.0`
   if (SEMVER.test(bump ?? '')) return bump
-  fail('usage: npm run release -- <patch|minor|major|X.Y.Z>')
+  fail('usage: npm run release -- <patch|minor|major|X.Y.Z> [--push]')
 }
 
 function isBelow(a, b) {
@@ -59,8 +59,13 @@ function replaceOnce(path, pattern, replacement) {
   writeFileSync(path, text.replace(pattern, replacement))
 }
 
+const args = process.argv.slice(2)
+const push = args.includes('--push')
 const current = JSON.parse(readFileSync(PACKAGE_JSON, 'utf8')).version
-const next = nextVersion(current, process.argv[2])
+const next = nextVersion(
+  current,
+  args.find((arg) => arg !== '--push')
+)
 const tag = `v${next}`
 
 if (isBelow(next, current)) fail(`${next} is below the current ${current}`)
@@ -77,6 +82,15 @@ if (next !== current) {
 }
 git('tag', '--annotate', tag, '--message', `atomic-chat-core ${tag}`)
 
-console.log(`Tagged ${tag} on ${git('rev-parse', '--short', 'HEAD')} (${git('branch', '--show-current')}).`)
-console.log('\nPublish it:\n  git push --follow-tags\n')
-console.log('The release workflow then runs the CI gates, builds every binary and publishes the release.')
+const branch = git('branch', '--show-current')
+console.log(`Tagged ${tag} on ${git('rev-parse', '--short', 'HEAD')} (${branch}).`)
+// `origin HEAD`, not a bare push: the branch may have no upstream yet.
+const pushArgs = ['push', '--follow-tags', 'origin', 'HEAD']
+if (!push) {
+  console.log(`\nPublish it:\n  git ${pushArgs.join(' ')}\n`)
+} else if (spawnSync('git', pushArgs, { cwd: ROOT, stdio: 'inherit' }).status !== 0) {
+  fail(`the push failed; ${tag} is tagged here, retry with: git ${pushArgs.join(' ')}`)
+} else {
+  console.log(`\nPushed ${branch} and ${tag}. Follow the release: gh run list --workflow release.yml`)
+}
+console.log('The release workflow runs the CI gates, builds every binary and publishes the release.')
