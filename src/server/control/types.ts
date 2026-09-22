@@ -22,9 +22,16 @@ import type {
   ImageJob,
   LoadDiffusionModelRequest,
   LoadedDiffusionModel,
+  BeginOperation,
+  EnvironmentOperation,
+  EnvironmentSnapshot,
   LocalApiServerState,
   LocalProviderId,
+  ManagedHostReceipt,
+  ProbeEnvironmentInput,
   RemoteAccessStatus,
+  RequirementPlan,
+  ResumeOperation,
   SessionInfo,
   UnloadResult,
 } from '../../contracts/index.js'
@@ -54,6 +61,21 @@ export const SSE_HEARTBEAT_MS = 15_000
 
 export interface SessionSummary extends SessionInfo {
   provider: LocalProviderId
+}
+
+/**
+ * The managed container runtime, as the control API needs it. A narrow view on purpose: the control
+ * layer does not depend on the runtime module's class, and a build with no managed runtime wired
+ * simply leaves it out.
+ */
+export interface ManagedEnvironmentControl {
+  list(): Promise<EnvironmentSnapshot[]>
+  probe(input: ProbeEnvironmentInput): Promise<RequirementPlan>
+  begin(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation>
+  get(operationId: string): Promise<EnvironmentOperation>
+  cancel(operationId: string): Promise<EnvironmentOperation>
+  resume(operationId: string, input: ResumeOperation): Promise<EnvironmentOperation>
+  acceptHostReceipt(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation>
 }
 
 export interface PublicServerControl {
@@ -210,6 +232,8 @@ export interface ChatGptControl {
 }
 
 export interface ControlServerDeps {
+  /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
+  environments?: ManagedEnvironmentControl
   token: string
   instanceId: string
   version: string

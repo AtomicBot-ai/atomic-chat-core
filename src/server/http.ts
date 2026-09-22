@@ -118,7 +118,19 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
   res.end(payload)
 }
 
-/** HTTP status for a core error code. Anything unmapped is a 500: an unknown failure is not the caller's fault. */
+/**
+ * HTTP status for a core error code. Anything unmapped is a 500: an unknown failure is not the
+ * caller's fault.
+ *
+ * The managed runtime's conflicts are all 409: somebody else is changing it, the caller computed
+ * their request from a state it has left, consent is missing or no longer covers the plan, or the
+ * machine is not in a position to continue yet. An engine this build has no adapter for is 422 —
+ * the request was understood and well formed, and the answer is still no.
+ *
+ * `MODEL_INCOMPATIBLE` keeps the status image generation already gave it. The managed runtime
+ * reuses the code, but carries it inside a model resolution's `compatibility` rather than as the
+ * status of a failed request: asking whether a checkpoint can run here is a question that succeeds.
+ */
 export function statusForCode(code: ErrorCode): number {
   switch (code) {
     case 'UNAUTHORIZED':
@@ -135,6 +147,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'ENGINE_MISSING':
     case 'MODEL_MISSING':
     case 'SIDE_FILE_MISSING':
+    case 'MANAGED_OPERATION_NOT_FOUND':
       return 404
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
@@ -146,6 +159,20 @@ export function statusForCode(code: ErrorCode): number {
     case 'BACKEND_IN_USE':
     case 'NOT_CONFIGURED':
     case 'CANCELLED':
+    case 'MANAGED_OPERATION_CONFLICT':
+    case 'MANAGED_REVISION_CONFLICT':
+    case 'MANAGED_CONSENT_REQUIRED':
+    case 'MANAGED_PLAN_CHANGED':
+    case 'MANAGED_RECEIPT_CONFLICT':
+    case 'MANAGED_RESOURCE_IN_USE':
+    case 'MANAGED_IDENTITY_MISMATCH':
+    case 'MANAGED_STOP_UNCONFIRMED':
+    case 'MANAGED_ELEVATION_DECLINED':
+    case 'MANAGED_PREREQUISITE_BLOCKED':
+    case 'MANAGED_RELOGIN_REQUIRED':
+    case 'MANAGED_REBOOT_REQUIRED':
+    case 'GPU_BUSY':
+    case 'SESSION_GENERATION_STALE':
       return 409
     case 'QUEUE_FULL':
       return 429
@@ -159,7 +186,12 @@ export function statusForCode(code: ErrorCode): number {
     case 'INVALID_DIMENSIONS':
     case 'UNSUPPORTED_WORKFLOW':
     case 'UNSUPPORTED_BACKEND':
+    case 'MANAGED_HOST_STEP_INVALID':
+    case 'MANAGED_METADATA_INVALID':
       return 400
+    // Understood, well-formed, and asking for an engine this build has no adapter for.
+    case 'MANAGED_ADAPTER_UNAVAILABLE':
+      return 422
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':
       return 503

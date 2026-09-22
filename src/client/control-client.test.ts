@@ -5,7 +5,15 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { LocalApiServerState, RemoteAccessStatus, SessionInfo } from '../contracts/index.js'
+import type {
+  EnvironmentOperation,
+  EnvironmentSnapshot,
+  LocalApiServerState,
+  RemoteAccessStatus,
+  RequirementPlan,
+  SessionInfo,
+  Sha256Digest,
+} from '../contracts/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { ClientRegistry } from '../server/clients.js'
 import { ControlServer } from '../server/control/index.js'
@@ -16,6 +24,57 @@ import { HardwareOverrideStore } from '../hardware/index.js'
 import { CORE_VERSION } from '../version.js'
 
 const TOKEN = 'client-test-token'
+
+const MANAGED_DIGEST = `sha256:${'a'.repeat(64)}` as Sha256Digest
+const environmentCalls: string[] = []
+
+const environmentSnapshot: EnvironmentSnapshot = {
+  schema_version: 1,
+  environment_id: 'env-1',
+  instance_id: 'client-test-instance',
+  revision: 2,
+  executor: 'linux-docker',
+  availability: 'setup-required',
+  gpus: [],
+  installations: [],
+  active_operation_id: null,
+}
+
+const requirementPlan: RequirementPlan = {
+  plan_digest: MANAGED_DIGEST,
+  environment_id: 'env-1',
+  target: { kind: 'environment' },
+  availability: 'setup-required',
+  recipe_id: 'ubuntu-24.04-docker-ce',
+  recipe_digest: MANAGED_DIGEST,
+  adopts_existing_engine: false,
+  system_changes: ['Install docker-ce'],
+  download_bytes: null,
+  required_disk_bytes: null,
+  requires_elevation: true,
+  may_require_relogin: true,
+  may_require_reboot: false,
+  blockers: [],
+}
+
+const managedOperation: EnvironmentOperation = {
+  schema_version: 1,
+  operation_id: 'op-1',
+  request_id: 'req-1',
+  environment_id: 'env-1',
+  target: { kind: 'environment' },
+  kind: 'setup',
+  instance_id: 'client-test-instance',
+  revision: 4,
+  phase: 'awaiting-consent',
+  plan_digest: MANAGED_DIGEST,
+  approved_plan_digest: null,
+  progress: null,
+  pending_host_step: null,
+  completed_step_ids: [],
+  cancellation_requested: false,
+  error: null,
+}
 
 let server: ControlServer
 let client: CoreClient
@@ -57,6 +116,30 @@ beforeEach(async () => {
     instanceId: 'client-test-instance',
     version: CORE_VERSION,
     dataFolder: '/tmp/data',
+    environments: {
+      list: async () => [environmentSnapshot],
+      probe: async (input) => ({ ...requirementPlan, target: input.target }),
+      begin: async (environmentId, input) => {
+        environmentCalls.push(`begin ${environmentId} ${input.request_id}`)
+        return managedOperation
+      },
+      get: async (operationId) => {
+        environmentCalls.push(`get ${operationId}`)
+        return managedOperation
+      },
+      cancel: async (operationId) => {
+        environmentCalls.push(`cancel ${operationId}`)
+        return { ...managedOperation, cancellation_requested: true }
+      },
+      resume: async (operationId, input) => {
+        environmentCalls.push(`resume ${operationId} @${input.expected_revision}`)
+        return managedOperation
+      },
+      acceptHostReceipt: async (operationId, receipt) => {
+        environmentCalls.push(`receipt ${operationId} ${receipt.outcome}`)
+        return { ...managedOperation, phase: 'preparing-environment' as const }
+      },
+    },
     emitter,
     clients,
     recreateSession: async (_provider: string, modelId: string) =>
@@ -487,6 +570,77 @@ describe('image generation', () => {
     await expect(client.setDiffusionOutputDir(7 as unknown as string)).rejects.toMatchObject({
       code: 'INVALID_REQUEST',
       details: 'path: expected a string',
+    })
+  })
+})
+
+describe('managed runtimes', () => {
+  beforeEach(() => {
+    environmentCalls.length = 0
+  })
+
+  it('reads the environments and what setting one up would involve', async () => {
+    expect(await client.environments()).toEqual([environmentSnapshot])
+    const plan = await client.probeEnvironment({
+      descriptor_id: 'trtllm-1.3.0rc27',
+      target: { kind: 'runtime', installation_id: 'inst-1', engine_id: 'tensorrt-llm' },
+    })
+    // The target travels intact, so the plan describes what the caller actually asked about.
+    expect(plan.target).toEqual({
+      kind: 'runtime',
+      installation_id: 'inst-1',
+      engine_id: 'tensorrt-llm',
+    })
+    expect(plan.system_changes).toEqual(['Install docker-ce'])
+  })
+
+  it('starts an operation, reads it back, cancels it and resumes it', async () => {
+    const started = await client.beginEnvironmentOperation('env-1', {
+      request_id: 'req-1',
+      target: { kind: 'environment' },
+      kind: 'setup',
+      descriptor_id: 'trtllm-1.3.0rc27',
+    })
+    expect(started.operation_id).toBe('op-1')
+    expect((await client.environmentOperation('op-1')).phase).toBe('awaiting-consent')
+    expect((await client.cancelEnvironmentOperation('op-1')).cancellation_requested).toBe(true)
+    await client.resumeEnvironmentOperation('op-1', {
+      expected_revision: 4,
+      approved_plan_digest: MANAGED_DIGEST,
+    })
+    expect(environmentCalls).toEqual(['begin env-1 req-1', 'get op-1', 'cancel op-1', 'resume op-1 @4'])
+  })
+
+  it('reports what the authorization prompt did', async () => {
+    const after = await client.reportHostStep('op-1', {
+      step_id: 'step-1',
+      nonce: 'once-1',
+      expected_operation_revision: 4,
+      recipe_digest: MANAGED_DIGEST,
+      parameters_digest: MANAGED_DIGEST,
+      outcome: 'relogin-required',
+      receipt_id: 'receipt-1',
+    })
+    expect(after.phase).toBe('preparing-environment')
+    expect(environmentCalls).toEqual(['receipt op-1 relogin-required'])
+  })
+
+  it('carries an id that needs escaping through the path without losing it', async () => {
+    await client.environmentOperation('op 1 \u0440\u0443')
+    expect(environmentCalls).toEqual(['get op 1 \u0440\u0443'])
+  })
+
+  it('refuses an id that is a path before it ever reaches the core', async () => {
+    // A slash would make the id read as extra path segments, so the core will not have it.
+    await expect(client.environmentOperation('../../etc/passwd')).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    expect(environmentCalls).toEqual([])
+  })
+
+  it('surfaces a refusal with the managed code the core sent', async () => {
+    await expect(client.resumeEnvironmentOperation('op-1', { expected_revision: -1 })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
     })
   })
 })

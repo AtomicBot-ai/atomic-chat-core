@@ -12,6 +12,7 @@ import type { ChatGptStatus } from '../credentials/index.js'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import type {
+  BeginOperation,
   CoreEventName,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
@@ -29,8 +30,14 @@ import type {
   ImageJob,
   LoadDiffusionModelRequest,
   LoadedDiffusionModel,
+  EnvironmentOperation,
+  EnvironmentSnapshot,
   LocalApiServerState,
+  ManagedHostReceipt,
+  ProbeEnvironmentInput,
   RemoteAccessStatus,
+  RequirementPlan,
+  ResumeOperation,
   SessionInfo,
   UnloadResult,
 } from '../contracts/index.js'
@@ -399,6 +406,63 @@ export class CoreClient {
    * Subscribe to the event stream. Resolves when the stream ends; `onEvent` sees each frame,
    * including the `resync` the core sends when a cursor is too old to replay.
    */
+  // ── Managed container runtimes ───────────────────────────────────────────────────────────────
+
+  /** Every environment this user has, with the engines installed into it. */
+  async environments(): Promise<EnvironmentSnapshot[]> {
+    return (await this.call<{ environments: EnvironmentSnapshot[] }>('/environments')).environments
+  }
+
+  /** What setting this up would involve. Reads the machine; changes nothing on it. */
+  probeEnvironment(input: ProbeEnvironmentInput): Promise<RequirementPlan> {
+    return this.call('/environments/probe', { method: 'POST', body: JSON.stringify(input) })
+  }
+
+  /**
+   * Start a change, or get back the one this request already started. Answers as soon as the
+   * operation is recorded: what it does next outlives the call, and is watched through `get`.
+   */
+  beginEnvironmentOperation(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation> {
+    return this.call(`/environments/${encodeURIComponent(environmentId)}/operations`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  environmentOperation(operationId: string): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}`)
+  }
+
+  /** Ask it to stop. Work that cannot be interrupted safely finishes first. */
+  cancelEnvironmentOperation(operationId: string): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  /**
+   * Approve the plan, or carry on after a sign-out, a restart, a failure or a cancellation. The
+   * revision is what the caller saw: if the operation has moved since, this is refused rather than
+   * applied to a state nobody looked at.
+   */
+  resumeEnvironmentOperation(operationId: string, input: ResumeOperation): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  /**
+   * Report what the system authorization prompt did. The core checks it against the machine before
+   * the step counts, and an identical receipt arriving twice authorizes nothing a second time.
+   */
+  reportHostStep(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}/host-step-result`, {
+      method: 'POST',
+      body: JSON.stringify(receipt),
+    })
+  }
+
   async events(
     onEvent: (message: CoreEventMessage) => void,
     options: { cursor?: string; signal?: AbortSignal; onOpen?: () => void } = {}
