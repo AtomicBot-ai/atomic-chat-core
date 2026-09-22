@@ -167,7 +167,7 @@ describe('attachToOwner', () => {
         instance_id: 'starting-owner',
         pid: process.pid,
         process_start_id: null,
-        protocol: 1,
+        protocol: 2,
         version: '0.1.0',
         data_folder: data.root,
         control_host: '',

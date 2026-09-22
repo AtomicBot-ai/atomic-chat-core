@@ -26,7 +26,7 @@ const write = (record: Partial<LockRecord>) =>
       instance_id: 'other-instance',
       pid: 999_999,
       process_start_id: 'linux:1',
-      protocol: 1,
+      protocol: 2,
       version: '0.0.1',
       data_folder: data.root,
       control_host: '127.0.0.1',
@@ -47,7 +47,7 @@ async function deadPid(): Promise<number> {
 describe('InstanceLock.acquire', () => {
   it('creates a starting record, publishes the endpoint and releases the file', async () => {
     const lock = await InstanceLock.acquire(data.layout)
-    expect(lock.record).toMatchObject({ pid: process.pid, state: 'starting', control_port: 0, protocol: 1 })
+    expect(lock.record).toMatchObject({ pid: process.pid, state: 'starting', control_port: 0, protocol: 2 })
     expect(lock.record.instance_id).toMatch(/^[0-9a-f-]{36}$/)
     expect(lock.record.data_folder).toBe(await canonicalDataFolder(data.root))
     expect((await inspectLock(data.layout)).kind).toBe('owned')

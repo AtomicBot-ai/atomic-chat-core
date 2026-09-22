@@ -91,7 +91,7 @@ describe('taking ownership', () => {
     expect(await client.health()).toMatchObject({ ok: true, instance_id: core.instanceId })
     expect(core.readyLine()).toMatchObject({
       event: 'core:ready',
-      protocol: 1,
+      protocol: 2,
       version: CORE_VERSION,
       control_port: core.control.port,
     })

@@ -17,7 +17,7 @@ describe('health, snapshot and sessions', () => {
       pid: process.pid,
       version: '9.9.9',
       instance_id: 'instance-under-test',
-      protocol: 1,
+      protocol: 2,
       dataFolder: '/tmp/data',
     })
     expect(body['uptime_ms']).toBeGreaterThanOrEqual(0)

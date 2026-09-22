@@ -271,7 +271,9 @@ afterEach(() => server.close())
 
 describe('handshake and registration', () => {
   it('reads health, snapshot and registers with a heartbeat interval', async () => {
-    expect(await client.health()).toMatchObject({ ok: true, version: CORE_VERSION, protocol: 1 })
+    // The number is written out rather than read from the constant: bumping it is a decision
+    // about a wire both repositories implement, and this test is where that decision is stated.
+    expect(await client.health()).toMatchObject({ ok: true, version: CORE_VERSION, protocol: 2 })
     const snapshot = await client.handshake()
     expect(snapshot.instance_id).toBe('client-test-instance')
     expect(snapshot.cursor).toBe('client-test-instance:0')
