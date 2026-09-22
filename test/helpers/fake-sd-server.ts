@@ -75,17 +75,20 @@ export async function writeFakeSdLaunchers(dir: string, options: FakeSdOptions =
 /** An installed, owned engine tree (marker and record included) whose binaries are the fake. */
 export async function installFakeSdEngine(
   layout: DataLayout,
-  options: FakeSdOptions & { tag?: string; backendId?: string } = {}
+  options: FakeSdOptions & { tag?: string; backendId?: string; backend?: string } = {}
 ): Promise<FakeSdEngine> {
   const tag = options.tag ?? 'master-849-d04e895'
   const backendId = options.backendId ?? 'fake-cpu'
+  // What the app shows as the engine's device, and what its own compatibility checks read. A
+  // desktop scenario installs the backend its host would have got, not the placeholder.
+  const backend = options.backend ?? 'cpu'
   const dir = join(layout.diffusion.backendsDir, tag, backendId)
   await writeFakeSdLaunchers(dir, options)
   await writeFile(join(dir, OWNER_MARKER), 'atomic-chat\n')
   await writeFile(
     join(dir, INSTALL_RECORD),
     JSON.stringify(
-      { tag, backendId, backend: 'cpu', engine: 'sd-cpp', sha256: null, installedAtMs: 1 },
+      { tag, backendId, backend, engine: 'sd-cpp', sha256: null, installedAtMs: 1 },
       null,
       2
     )
