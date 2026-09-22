@@ -12,6 +12,7 @@ import {
 import { CoreClient } from '../client/index.js'
 import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { AtomicCore } from './index.js'
+import { hostPid } from '../runtime/shared/index.js'
 
 useCoreHarness()
 
@@ -310,8 +311,9 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     await core.shutdown()
     const { isProcessAlive } = await import('../lock/index.js')
     const deadline = Date.now() + 5000
-    while (isProcessAlive(session.pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
-    expect(isProcessAlive(session.pid)).toBe(false)
+    while (isProcessAlive(hostPid(session)) && Date.now() < deadline)
+      await new Promise((r) => setTimeout(r, 25))
+    expect(isProcessAlive(hostPid(session))).toBe(false)
   })
 })
 

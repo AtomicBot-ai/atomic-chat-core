@@ -18,8 +18,21 @@ export interface RuntimeDeviceInfo {
   device_init_error: string | null
 }
 
+/**
+ * How a session's backend actually runs. A native one is a process on this machine; a managed one
+ * is a container, which has no host process id of its own — the Docker client that started it is
+ * long gone, and the pid inside the container belongs to another kernel's numbering.
+ *
+ * Absent means `native`: every record written before managed runtimes existed is one.
+ */
+export type SessionExecutionKind = 'native' | 'container'
+
 export interface SessionInfo {
-  pid: number
+  /**
+   * The backend's process id on this machine, or null when it has none. Code that kills or probes
+   * a process must go through `hostPid`, which refuses a session that is not a host process.
+   */
+  pid: number | null
   port: number
   model_id: string
   model_path: string
@@ -28,6 +41,13 @@ export interface SessionInfo {
   api_key: string
   mmproj_path?: string | null
   runtime_device?: RuntimeDeviceInfo | null
+  /** Absent on every record a previous release wrote, and on every native one. */
+  execution?: SessionExecutionKind
+  /**
+   * Changes each time this model is loaded again. A caller holding the previous generation is
+   * addressing a session that no longer exists, rather than the one that replaced it.
+   */
+  generation?: string
 }
 
 export interface UnloadResult {

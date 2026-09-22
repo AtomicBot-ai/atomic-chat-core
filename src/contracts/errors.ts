@@ -101,7 +101,50 @@ export const DIFFUSION_ERROR_CODES = [
 ] as const
 export type DiffusionErrorCode = (typeof DIFFUSION_ERROR_CODES)[number]
 
-export type ErrorCode = RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode | DiffusionErrorCode
+/**
+ * Managed text runtimes: the container environment, its durable setup operations and the GPU
+ * residency rule (`src/contracts/environment.ts`). Proposed; nothing raises these yet.
+ *
+ * `MODEL_INCOMPATIBLE` is spelled like the image-generation code above and shared with it — the
+ * meaning is the same, a checkpoint this engine cannot load. `OUT_OF_MEMORY`, `INVALID_ARGUMENT`,
+ * `IO_ERROR`, `UNAUTHORIZED`, `UPSTREAM_ERROR` and `MODEL_LOAD_CANCELLED` are reused from the lists
+ * above rather than restated here.
+ */
+export const MANAGED_ERROR_CODES = [
+  /** Another mutation owns this environment, or the request conflicts with the running operation. */
+  'MANAGED_OPERATION_CONFLICT',
+  'MANAGED_OPERATION_NOT_FOUND',
+  /** The caller's `expected_revision` is not the operation's current one. */
+  'MANAGED_REVISION_CONFLICT',
+  'MANAGED_CONSENT_REQUIRED',
+  /** The host changed under an operation awaiting consent; the old approval no longer applies. */
+  'MANAGED_PLAN_CHANGED',
+  'MANAGED_HOST_STEP_INVALID',
+  'MANAGED_PREREQUISITE_BLOCKED',
+  'MANAGED_ADAPTER_UNAVAILABLE',
+  /** A recorded container, distribution or process is not the one this core owns. */
+  'MANAGED_IDENTITY_MISMATCH',
+  /** A stop could not be confirmed, so the GPU reservation is deliberately still held. */
+  'MANAGED_STOP_UNCONFIRMED',
+  'MANAGED_RESOURCE_IN_USE',
+  'MANAGED_METADATA_INVALID',
+  /** A different receipt arrived for a nonce that was already consumed. */
+  'MANAGED_RECEIPT_CONFLICT',
+  'MANAGED_ELEVATION_DECLINED',
+  /** Linux: the `docker` group membership takes effect at the user's next sign-in. */
+  'MANAGED_RELOGIN_REQUIRED',
+  'MANAGED_REBOOT_REQUIRED',
+  /** Shared with image generation: this engine cannot load that checkpoint. */
+  'MODEL_INCOMPATIBLE',
+  /** Another local model holds the GPU and could not be evicted. Never an eviction by force. */
+  'GPU_BUSY',
+  /** The caller addressed a session generation that has since been replaced. */
+  'SESSION_GENERATION_STALE',
+] as const
+export type ManagedErrorCode = (typeof MANAGED_ERROR_CODES)[number]
+
+export type ErrorCode =
+  RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode | DiffusionErrorCode | ManagedErrorCode
 
 /**
  * Disk-failure tags. Rendered into the error message as `Error: [<tag>] <detail>`; the app's

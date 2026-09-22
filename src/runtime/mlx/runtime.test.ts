@@ -9,6 +9,7 @@ import { ProcessJournal } from '../../lock/index.js'
 import { ModelRegistry } from '../../models/index.js'
 import { MlxRuntime } from './runtime.js'
 import type { MlxRuntimeOptions } from './runtime.js'
+import { hostPid } from '../../runtime/shared/index.js'
 
 let data: TmpDataFolder
 let journal: ProcessJournal
@@ -315,7 +316,7 @@ describe('MlxRuntime', () => {
     await writeMlxModel('m')
     const r = runtime()
     const session = await r.load('m')
-    process.kill(session.pid, 'SIGKILL')
+    process.kill(hostPid(session), 'SIGKILL')
     await expect.poll(() => r.list().length).toBe(0)
     await expect
       .poll(() => events.find((e) => e.name === 'session:died')?.payload['message'])

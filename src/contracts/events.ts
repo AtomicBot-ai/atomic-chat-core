@@ -10,6 +10,7 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.js'
 
@@ -100,7 +101,8 @@ export interface CoreEvents {
     newCtx: number
     reason: string
   }
-  'session:unloaded': { provider: LocalProviderId; model_id: string; pid: number }
+  /** `pid` is null when the session was a container: it never had a host process to report. */
+  'session:unloaded': { provider: LocalProviderId; model_id: string; pid: number | null }
 
   'server:started': { host: string; port: number }
   'server:stopped': Record<string, never>
@@ -121,6 +123,18 @@ export interface CoreEvents {
   'diffusion:progress': DiffusionProgressEvent
   'diffusion:job': DiffusionJobEvent
   'diffusion:error': DiffusionErrorEvent
+
+  /**
+   * Managed text runtimes (ADR 2026-09-22-specify-managed-runtime-coding-contracts in the app
+   * repo). Both carry full state rather than a delta, so a client that reconnects rebuilds from
+   * the snapshot and then applies whatever arrives. Both are proposed: no producer exists yet.
+   *
+   * `changed` is one environment and the engines installed into it. `operation` is one durable
+   * setup, update or removal. Each carries `instance_id` and `revision`: apply only a strictly
+   * newer revision of the current instance, and treat an equal revision as a no-op.
+   */
+  'environment:changed': EnvironmentSnapshot
+  'environment:operation': EnvironmentOperation
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

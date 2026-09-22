@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { AtomicCoreError } from '../../contracts/index.js'
+import type { SessionInfo } from '../../contracts/index.js'
 import type { ExitInfo } from '../llamacpp/index.js'
 import { loadCancelledError } from './load-cancel.js'
 
@@ -281,6 +282,26 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
 }
 
 /** `kill(pid, 0)` liveness probe. */
+/**
+ * The process id this session runs under on this machine.
+ *
+ * A container session has none. The Docker client that started it has already exited, and the pid
+ * inside the container belongs to another kernel's numbering — on Windows, to another kernel
+ * entirely. So asking for one is a mistake to report rather than a null to paper over: the native
+ * journal, the reaper and the liveness probes would all end up addressing whatever else on this
+ * machine happens to hold that number.
+ */
+export function hostPid(session: SessionInfo): number {
+  if (session.execution === 'container' || session.pid === null) {
+    throw new AtomicCoreError(
+      'MANAGED_IDENTITY_MISMATCH',
+      'This session does not run as a process on this machine.',
+      `${session.model_id} (${session.execution ?? 'native'})`
+    )
+  }
+  return session.pid
+}
+
 export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)

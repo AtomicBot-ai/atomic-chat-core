@@ -49,6 +49,7 @@ import {
   isLoadCancelled,
   raceLoadCancel,
   throwIfLoadCancelled,
+  hostPid,
 } from '../shared/index.js'
 import type {
   ManagedProcess,
@@ -446,7 +447,7 @@ export class LlamacppRuntime implements LocalRuntime {
       this.watchExit(session)
     } catch (error) {
       await proc.terminate(isLoadCancelled(opts.signal) ? 0 : undefined).catch(() => {})
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       throw error
     }
@@ -461,8 +462,8 @@ export class LlamacppRuntime implements LocalRuntime {
     if (!journal) return
     const record: ChildProcessRecord = {
       instance_id: this.options.instanceId,
-      pid: session.info.pid,
-      process_start_id: (await processStartId(session.info.pid)) ?? null,
+      pid: hostPid(session.info),
+      process_start_id: (await processStartId(hostPid(session.info))) ?? null,
       exe: session.plan.exePath,
       provider: session.plan.provider,
       model_id: session.plan.modelId,
@@ -478,13 +479,13 @@ export class LlamacppRuntime implements LocalRuntime {
       const current = this.sessions.get(session.plan.modelId)
       if (current !== session) return // already replaced or unloaded
       this.sessions.delete(session.plan.modelId)
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       const { stderr, stdout } = session.process.output()
       const error = classifyProcessOutput(exit, stderr, stdout, this.platform)
       this.emit('session:died', {
         provider: session.plan.provider,
-        pid: session.info.pid,
+        pid: hostPid(session.info),
         model_id: session.plan.modelId,
         exit_code: exit.code,
         signal: exit.signal === null ? null : String(exit.signal),
@@ -616,18 +617,18 @@ export class LlamacppRuntime implements LocalRuntime {
     this.sessions.delete(modelId)
     try {
       await session.process.terminate()
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       this.emit('session:unloaded', {
         provider: session.plan.provider,
         model_id: modelId,
-        pid: session.info.pid,
+        pid: hostPid(session.info),
       })
       return { success: true }
     } catch (e) {
       if (session.process.child.exitCode === null && session.process.child.signalCode === null)
         this.sessions.set(modelId, session)
-      else if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      else if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       return { success: false, error: (e as Error).message }
     }
   }

@@ -9,6 +9,7 @@ import { ProcessJournal } from '../../lock/index.js'
 import { generateApiKey } from '../shared/index.js'
 import { APPLE_MODEL_ID, AVAILABILITY_TTL_MS, FoundationModelsRuntime } from './runtime.js'
 import type { FoundationModelsRuntimeOptions } from './runtime.js'
+import { hostPid } from '../../runtime/shared/index.js'
 
 let data: TmpDataFolder
 let journal: ProcessJournal
@@ -140,7 +141,7 @@ describe('FoundationModelsRuntime', () => {
   it('drops a session whose server died and says so', async () => {
     const r = runtime()
     const session = await r.load(APPLE_MODEL_ID)
-    process.kill(session.pid, 'SIGKILL')
+    process.kill(hostPid(session), 'SIGKILL')
     await expect.poll(() => r.list().length).toBe(0)
     await expect.poll(() => events.some((e) => e.name === 'session:died')).toBe(true)
     expect(events.find((e) => e.name === 'session:died')?.payload).toMatchObject({
@@ -170,7 +171,7 @@ describe('FoundationModelsRuntime', () => {
     const session = await r.load(APPLE_MODEL_ID)
     await r.shutdown()
     expect(r.list()).toEqual([])
-    expect(() => process.kill(session.pid, 0)).toThrow()
+    expect(() => process.kill(hostPid(session), 0)).toThrow()
     await expect(r.load(APPLE_MODEL_ID)).rejects.toMatchObject({ code: 'CORE_NOT_RUNNING' })
   })
 

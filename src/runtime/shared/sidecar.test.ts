@@ -5,6 +5,7 @@ import { spawnManaged } from './process.js'
 import type { ManagedProcess } from './process.js'
 import { SidecarTable } from './sidecar.js'
 import type { SidecarTableOptions } from './sidecar.js'
+import { hostPid } from '../../runtime/shared/index.js'
 
 function table(extra: Partial<SidecarTableOptions> = {}) {
   const events: Array<{ name: string; payload: unknown }> = []
@@ -88,7 +89,7 @@ describe('SidecarTable', () => {
     expect(await unload).toEqual({ success: true })
     expect(t.list()).toEqual([])
     expect(events.map((event) => event.name)).toEqual(['session:started', 'session:unloaded'])
-    expect(() => process.kill(session.pid, 0)).toThrow()
+    expect(() => process.kill(hostPid(session), 0)).toThrow()
   })
 
   it('deduplicates unloads and waits before starting a replacement load', async () => {

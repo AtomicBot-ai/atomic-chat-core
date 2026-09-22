@@ -21,6 +21,7 @@ without a demonstrated consumer. See PLAN.md §5.1 for comparison rules and §8 
 | `--list-devices` parsing | `src/runtime/llamacpp/devices.ts` | `device.rs` | `test/fixtures/app/devices/*.json` |
 | Provider settings keys | `src/settings/schema/*.json` | `extensions/*/settings.json` | copied verbatim |
 | `<data>` layout | `src/config/` | PLAN.md §8.1 | `test/helpers/tmp-data-folder.ts` |
+| Managed runtime layout: shared `<dataDir>/atomic-managed-runtimes/{environment.json, environment.lock, installations/, operations/}` and per-scope `<data>/atomic-core/managed-runtimes/{executions,heartbeats,artifacts,caches}/`; ids are one directory each through percent-encoding; a guest path is never a host path | `src/config/paths.ts` | proposed feature, no app source yet (app ADRs `2026-09-22-share-managed-text-runtime-infrastructure`, `2026-09-22-propose-managed-tensorrt-llm-architecture`) | `src/config/paths.test.ts` |
 | `<data>/local-api-server.json` | `src/contracts/control-api.ts`, `src/server/state-file.ts` | `src-tauri/src/core/server/state_file.rs` | `test/fixtures/app/state-file/*.json`, replayed by `test/contract/state-file.test.ts`; one writer at a time: the app's proxy while it serves, the core when started with `state_file: true` (the app's handover) |
 | `<data>/atomic-chatgpt-auth.json` v1, ChatGPT OAuth (PKCE, authorize URL, callback, JWT claims, token response) | `src/credentials/chatgpt-{store,oauth,auth}.ts` | `src-tauri/src/core/auth/{store,chatgpt}.rs` | `test/fixtures/app/chatgpt-auth/*.json`, replayed by `test/contract/chatgpt.test.ts` (Node and Bun) |
 | ChatGPT subscription route (upstream request, model list normalisation) | `src/cloud/chatgpt.ts`, `src/server/public/subscription.ts` | `src-tauri/src/core/server/chatgpt_route.rs` | `test/fixtures/app/chatgpt-route/*.json`, replayed by `test/contract/chatgpt.test.ts` |
@@ -57,8 +58,13 @@ A case the port deliberately does not reproduce is listed under `comparator_note
 `index.json` and asserted as the corrected behaviour, never skipped. A set whose port
 has not landed yet is validated for shape only, and `docs/testing-critical-flows.md` lists it as not replayed.
 
-New data paths: only `<data>/atomic-core/` (settings.json, credentials.json, optimal-backend.json,
-instance.lock, control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml).
+New data paths: `<data>/atomic-core/` (settings.json, credentials.json, optimal-backend.json,
+instance.lock, control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml)
+and, for the managed text runtimes, `<data>/atomic-core/managed-runtimes/` plus the one root outside
+any data folder: `<dataDir>/atomic-managed-runtimes/`, shared by the app and CLI scopes because the
+container environment belongs to the machine's user account and must survive a data-folder move
+(ADR 2026-09-22-managed-runtimes-split-per-user-environment-from-per-scope-data;
+`ATOMIC_CORE_MANAGED_ROOT` overrides it for tests).
 Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
 `<data>/diffusion/{backends,models,scratch}` and `<data>/images`. Read once and removed, never written
 (ADR 2026-09-18-reap-the-tunnel-atomic-chat-2-0-40-journalled-at-the-data-root): `<data>/remote-access-tunnel.json`,

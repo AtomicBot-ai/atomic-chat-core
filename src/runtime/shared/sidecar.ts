@@ -23,6 +23,7 @@ import { processStartId } from '../../lock/index.js'
 import type { ExitInfo } from '../llamacpp/index.js'
 import { isLoadCancelled, raceLoadCancel, throwIfLoadCancelled } from './load-cancel.js'
 import { closeLogStream } from './log-stream.js'
+import { hostPid } from './process.js'
 import type { ManagedProcess } from './process.js'
 
 export type EmitFn = <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
@@ -154,7 +155,7 @@ export class SidecarTable<Extra = unknown> {
       this.watchExit(entry)
     } catch (error) {
       await entry.process.terminate(isLoadCancelled(signal) ? 0 : this.options.unloadGraceMs).catch(() => {})
-      if (entry.journalled) await this.options.journal?.remove(entry.info.pid).catch(() => {})
+      if (entry.journalled) await this.options.journal?.remove(hostPid(entry.info)).catch(() => {})
       await closeLogStream(entry.logStream)
       throw error
     }
@@ -167,8 +168,8 @@ export class SidecarTable<Extra = unknown> {
     if (!journal) return
     const record: ChildProcessRecord = {
       instance_id: this.options.instanceId,
-      pid: session.info.pid,
-      process_start_id: (await processStartId(session.info.pid)) ?? null,
+      pid: hostPid(session.info),
+      process_start_id: (await processStartId(hostPid(session.info))) ?? null,
       exe: session.exe,
       provider: this.options.provider,
       model_id: session.info.model_id,
@@ -183,12 +184,12 @@ export class SidecarTable<Extra = unknown> {
     void session.process.exited.then(async (exit) => {
       if (this.sessions.get(session.info.model_id) !== session) return // unloaded or replaced
       this.sessions.delete(session.info.model_id)
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       const { stderr, stdout } = session.process.output()
       this.options.emit('session:died', {
         provider: this.options.provider,
-        pid: session.info.pid,
+        pid: hostPid(session.info),
         model_id: session.info.model_id,
         exit_code: exit.code,
         signal: exit.signal === null ? null : String(exit.signal),
@@ -218,18 +219,18 @@ export class SidecarTable<Extra = unknown> {
     this.sessions.delete(modelId)
     try {
       await session.process.terminate(graceMs)
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       this.options.emit('session:unloaded', {
         provider: this.options.provider,
         model_id: modelId,
-        pid: session.info.pid,
+        pid: hostPid(session.info),
       })
       return { success: true }
     } catch (e) {
       if (session.process.child.exitCode === null && session.process.child.signalCode === null)
         this.sessions.set(modelId, session)
-      else if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      else if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       return { success: false, error: (e as Error).message }
     }
   }
