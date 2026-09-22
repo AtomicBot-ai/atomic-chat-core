@@ -3,11 +3,11 @@ name: release
 # Publishes the binaries the desktop app downloads (`scripts/download-core.mjs` there pins a version
 # and verifies the checksums). Both CLI and app-core variants are published at the same version.
 #
-# To release: bump `package.json` and `src/version.ts` together, push, then run this workflow on
-# that branch (Actions → release → Run workflow, or `gh workflow run release.yml --ref <branch>`).
-# It releases v<package.json version> from the branch head, after the same gates as `ci.yml`.
-# Pushing a `v*` tag does the same for the tagged commit. A published version is never replaced:
-# the app pins it and checks its checksums, so a second run for the same version fails.
+# To release: `npm run release -- patch|minor|major|X.Y.Z` (scripts/release.mjs bumps, commits and
+# tags), then `git push --follow-tags`. The pushed `v*` tag runs this workflow for that commit, after
+# the same gates as `ci.yml`. Run workflow (or `gh workflow run release.yml --ref <branch>`) does the
+# same for the package.json version at a branch head and creates the tag. A published version is
+# never replaced: the app pins it and checks its checksums, so a second run for it fails.
 on:
   push:
     tags: ['v*']
@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::$tag is already released. Bump package.json and src/version.ts to release again."
+            echo "::error::$tag is already released. Bump the version first: npm run release -- patch"
             exit 1
           fi
           if [ "$GITHUB_REF_TYPE" != tag ]; then
