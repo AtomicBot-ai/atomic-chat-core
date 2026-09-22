@@ -31,7 +31,7 @@ import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
 import { captureReport, loadFailureReport } from '../telemetry/index.js'
-import type { ErrorSink } from '../telemetry/index.js'
+import type { ErrorSink, TelemetryControl } from '../telemetry/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
 import { DynamicTrustedHosts } from '../server/index.js'
@@ -69,6 +69,8 @@ export interface AtomicCoreParts {
   diffusion: DiffusionService
   /** Where a failed load and the public server's failures are reported; absent, nothing is. */
   errors?: ErrorSink | undefined
+  /** The same reporter, for a host that changes consent, user or tags at run time. */
+  telemetry?: TelemetryControl | undefined
 }
 
 export class AtomicCore {
@@ -102,6 +104,12 @@ export class AtomicCore {
   private readonly log: CoreLogger
   private readonly appLeaseTimer: NodeJS.Timeout | undefined
   private readonly errors: ErrorSink | undefined
+  /**
+   * This core's error reporting, for an embedding program: `state()` says whether it reports and
+   * why, `update({ enabled, user_id, tags })` is what `PUT /atomic/v1/telemetry` does. Undefined
+   * when the host turned reporting off with `telemetry: false`.
+   */
+  readonly telemetry: TelemetryControl | undefined
   /** Model claims and per-model load/unload transitions. */
   private readonly localSessions: LocalSessions
   /** The public `/v1` listener and its serialized start/stop. */
@@ -131,6 +139,7 @@ export class AtomicCore {
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
     this.errors = parts.errors
+    this.telemetry = parts.telemetry
     this.localSessions = new LocalSessions({
       layout: parts.layout,
       instanceId: parts.lock.instanceId,

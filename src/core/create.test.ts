@@ -466,7 +466,14 @@ describe('error reporting', () => {
     const captured: ErrorReport[] = []
     const telemetry = {
       capture: (report: ErrorReport) => captured.push(report),
-      state: () => ({ enabled: true, reporting: true, has_user: true, tags: { os: 'macOS' } }),
+      state: () => ({
+        enabled: true,
+        reporting: true,
+        has_user: true,
+        tags: { os: 'macOS' },
+        source: 'host' as const,
+        host: 'test',
+      }),
       update: () => {},
     }
     const core = await AtomicCore.create({
@@ -501,12 +508,37 @@ describe('error reporting', () => {
       reporting: true,
       has_user: true,
       tags: { os: 'macOS' },
+      source: 'host',
+      host: 'test',
     })
     expect((await client.health()).ok).toBe(true)
+    expect(core.telemetry).toBe(telemetry)
   })
 
-  it('reports nothing without a reporter, even when a listener throws', async () => {
-    const core = await createCore()
+  it("builds its own reporter when the host brings none, as the host it names, or as 'library'", async () => {
+    const library = await createCore()
+    expect(library.telemetry?.state()).toEqual({
+      enabled: true,
+      reporting: false,
+      has_user: false,
+      tags: {},
+      source: 'default',
+      host: 'library',
+    })
+    await library.shutdown()
+    const named = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      telemetry: { host: 'my-host', enabled: false },
+    })
+    cores.push(named)
+    expect(named.telemetry?.state()).toMatchObject({ enabled: false, source: 'host', host: 'my-host' })
+  })
+
+  it('reports nothing when the host says telemetry: false, even when a listener throws', async () => {
+    const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, telemetry: false })
+    cores.push(core)
+    expect(core.telemetry).toBeUndefined()
     core.events.on('server:stopped', () => {
       throw new TypeError('listener bug')
     })

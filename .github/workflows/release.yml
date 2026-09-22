@@ -40,7 +40,8 @@ jobs:
       # Bun cross-compiles every target from one host; the app signs the macOS ones itself.
       - run: npm run build:bin -- --all
         env:
-          # Baked into the app's binary only (docs/decisions/2026-09-21-report-core-errors-to-its-own-sentry-project.md).
+          # Both binaries report as `production` (docs/decisions/2026-09-22-the-core-owns-its-error-reporting.md);
+          # the secret, when set, overrides the DSN in the source.
           ATOMIC_CORE_SENTRY_DSN: ${{ secrets.ATOMIC_CORE_SENTRY_DSN }}
           ATOMIC_CORE_SENTRY_ENVIRONMENT: production
           ATOMIC_CORE_GIT_SHA: ${{ github.sha }}

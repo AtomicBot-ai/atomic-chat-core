@@ -4,6 +4,7 @@
  * previous owner left running and only then publish the endpoint.
  */
 
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LocalProviderId } from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
@@ -37,7 +38,12 @@ import { wireDiffusion } from '../diffusion/index.js'
 import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
-import { captureReport, processFailureReport, reportCoreEvents } from '../telemetry/index.js'
+import {
+  captureReport,
+  createCoreReporter,
+  processFailureReport,
+  reportCoreEvents,
+} from '../telemetry/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { reapOrphans } from './reap-orphans.js'
@@ -66,7 +72,25 @@ export async function createAtomicCore(
   let core: AtomicCore | undefined
   try {
     const token = await writeControlToken(layout)
-    const reporter = options.errorReporter
+    const reporter =
+      options.errorReporter ??
+      (options.telemetry === false
+        ? undefined
+        : await createCoreReporter({
+            host: options.telemetry?.host ?? 'library',
+            hostVersion: options.telemetry?.hostVersion,
+            enabled: options.telemetry?.enabled,
+            ownerScope: scope,
+            dataFolder: layout.root,
+            telemetryFile: layout.core.telemetry,
+            homeDir: homedir(),
+            env: options.env ?? process.env,
+            platform: options.platform ?? process.platform,
+            arch: process.arch,
+            version: CORE_VERSION,
+            warn,
+            fetch: options.fetch,
+          }))
     const emitter = new CoreEmitter({
       instanceId: lock.instanceId,
       onListenerError: (event, error) =>
@@ -406,6 +430,7 @@ export async function createAtomicCore(
       appLeaseTimer,
       diffusion,
       errors: reporter,
+      telemetry: reporter,
       remoteAccess: await wireRemoteAccess({
         overrides: options.remoteAccess,
         cloudflaredPath: options.cloudflaredPath,

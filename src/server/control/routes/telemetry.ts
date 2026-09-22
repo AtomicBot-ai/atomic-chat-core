@@ -6,8 +6,15 @@ import { readJsonBody, sendError, sendJson } from '../../http.js'
 import type { Router } from '../../http.js'
 import type { ControlRouteContext, ControlServerDeps } from '../types.js'
 
-/** What a core without a reporter (a CLI owner) says: nothing is reported, whatever the app asks. */
-const NOT_REPORTING: TelemetryState = { enabled: false, reporting: false, has_user: false, tags: {} }
+/** What a core whose host turned reporting off (`telemetry: false`) says, whatever it is asked. */
+const NOT_REPORTING: TelemetryState = {
+  enabled: false,
+  reporting: false,
+  has_user: false,
+  tags: {},
+  source: 'host',
+  host: 'library',
+}
 
 /** The body of `PUT /telemetry`, or a message saying what is wrong with it. */
 export function parseTelemetryUpdate(body: unknown): TelemetryUpdateRequest | string {

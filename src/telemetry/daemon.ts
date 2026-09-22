@@ -1,56 +1,29 @@
 /**
- * Error reporting for the app-owned daemon (`atomic-chat-app-core`): its reporter, and the
- * process-level handlers that report what nothing else caught. The CLI binary installs none of this.
+ * The process-level side of error reporting for a core that owns its process — the app's daemon
+ * and the CLI's: the `--telemetry` flag, and the handlers that report what nothing else caught.
+ * A program that imports the library keeps its own process and gets none of this.
  */
 
 import { inspect } from 'node:util'
-import { BAKED_TELEMETRY, resolveTelemetryConfig } from './config.js'
-import type { BakedTelemetry } from './config.js'
-import { ErrorReporter } from './reporter.js'
 import { processFailureReport } from './reports.js'
 import type { ProcessFailureSource } from './reports.js'
 import type { ErrorSink } from './types.js'
 
-/** `daemon --telemetry on|off`; absent means off, so an app that says nothing sends nothing. */
-export function parseTelemetryFlag(value: string | undefined): boolean {
-  if (value === undefined || value === 'off') return false
+/**
+ * `daemon --telemetry on|off`: the host's consent. Absent means the host said nothing, and the core
+ * decides for itself (on, unless the environment or the user's stored choice says off).
+ */
+export function parseTelemetryFlag(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined
   if (value === 'on') return true
+  if (value === 'off') return false
   throw new Error(`--telemetry takes "on" or "off", not "${value}".`)
-}
-
-export function createDaemonReporter(input: {
-  enabled: boolean
-  dataFolder: string
-  homeDir: string
-  env: NodeJS.ProcessEnv
-  platform: NodeJS.Platform
-  arch: string
-  version: string
-  warn: (message: string) => void
-  baked?: BakedTelemetry
-  fetch?: typeof fetch
-}): ErrorReporter {
-  return new ErrorReporter({
-    config: resolveTelemetryConfig({
-      baked: input.baked ?? BAKED_TELEMETRY,
-      env: input.env,
-      version: input.version,
-    }),
-    coreVersion: input.version,
-    platform: input.platform,
-    arch: input.arch,
-    ownerScope: 'app',
-    enabled: input.enabled,
-    scrub: { dataFolder: input.dataFolder, homeDir: input.homeDir },
-    fetch: input.fetch,
-    onSendError: input.warn,
-  })
 }
 
 export interface FatalDeps {
   reporter: ErrorSink & { flush(timeoutMs?: number): Promise<void> }
-  writeStderr: (text: string) => void
-  exit: (code: number) => void
+  writeStderr: (text: string) => unknown
+  exit: (code: number) => unknown
   flushTimeoutMs?: number
 }
 
@@ -94,4 +67,24 @@ export function installProcessHandlers(target: ProcessEvents, deps: FatalDeps): 
   }
   target.on('uncaughtException', handle('uncaught_exception'))
   target.on('unhandledRejection', handle('unhandled_rejection'))
+}
+
+/** `installProcessHandlers` for one process, given where its stderr goes and how it exits. */
+export function processHandlersFor(
+  target: ProcessEvents,
+  writeStderr: (text: string) => unknown,
+  exit: (code: number) => unknown
+): (deps: Omit<FatalDeps, 'writeStderr' | 'exit'>) => void {
+  return (deps) => installProcessHandlers(target, { ...deps, writeStderr, exit })
+}
+
+/** A core logger that also leaves its warn and error lines as the breadcrumbs of the next report. */
+export function breadcrumbLogger(
+  reporter: { breadcrumb(level: 'warning' | 'error', message: string): void },
+  write: (level: 'info' | 'warn' | 'error', message: string) => void
+): (level: 'info' | 'warn' | 'error', message: string) => void {
+  return (level, message) => {
+    write(level, message)
+    if (level !== 'info') reporter.breadcrumb(level === 'warn' ? 'warning' : 'error', message)
+  }
 }

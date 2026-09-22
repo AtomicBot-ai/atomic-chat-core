@@ -1,7 +1,13 @@
 import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
-import { createDaemonReporter, failFatally, installProcessHandlers, parseTelemetryFlag } from './daemon.js'
+import {
+  breadcrumbLogger,
+  failFatally,
+  installProcessHandlers,
+  parseTelemetryFlag,
+  processHandlersFor,
+} from './daemon.js'
 import type { FatalDeps } from './daemon.js'
 
 function fatalDeps(): FatalDeps & { captured: unknown[]; stderr: string[]; exits: number[] } {
@@ -20,7 +26,7 @@ function fatalDeps(): FatalDeps & { captured: unknown[]; stderr: string[]; exits
 
 describe('parseTelemetryFlag', () => {
   it.each([
-    [undefined, false],
+    [undefined, undefined],
     ['off', false],
     ['on', true],
   ])('%s → %s', (value, enabled) => {
@@ -29,47 +35,6 @@ describe('parseTelemetryFlag', () => {
 
   it('refuses anything else', () => {
     expect(() => parseTelemetryFlag('yes')).toThrow('--telemetry takes "on" or "off", not "yes".')
-  })
-})
-
-describe('createDaemonReporter', () => {
-  const base = {
-    dataFolder: '/Users/misha/Library/Application Support/Atomic Chat/data',
-    homeDir: '/Users/misha',
-    platform: 'darwin' as const,
-    arch: 'arm64',
-    version: '0.3.0',
-    warn: () => {},
-  }
-
-  it('reports to the baked project with the app consent and scrubs the data folder', async () => {
-    const bodies: string[] = []
-    const reporter = createDaemonReporter({
-      ...base,
-      enabled: true,
-      env: {},
-      baked: { dsn: 'https://k@o1.ingest.us.sentry.io/9', environment: 'production' },
-      fetch: (async (_url: string, init: RequestInit) => {
-        bodies.push(String(init.body))
-        return new Response(null)
-      }) as unknown as typeof fetch,
-    })
-    expect(reporter.state()).toEqual({ enabled: true, reporting: true, has_user: false, tags: {} })
-    reporter.capture({
-      source: 'startup',
-      level: 'fatal',
-      error: new Error(`EACCES ${base.dataFolder}/atomic-core/lock`),
-    })
-    await reporter.flush()
-    const event = JSON.parse(bodies[0]!.split('\n')[2]!)
-    expect(event.exception.values[0].value).toBe('EACCES <data>/atomic-core/lock')
-    expect(event.tags.owner_scope).toBe('app')
-    expect(event.release).toBe('atomic-chat-core@0.3.0')
-  })
-
-  it('has nowhere to report without a baked or configured DSN', () => {
-    const reporter = createDaemonReporter({ ...base, enabled: true, env: {} })
-    expect(reporter.state().reporting).toBe(false)
   })
 })
 
@@ -120,5 +85,39 @@ describe('installProcessHandlers', () => {
     target.emit('uncaughtException', new Error('x'))
     await vi.waitFor(() => expect(deps.exits).toEqual([1]))
     expect(deps.captured[0]).toMatchObject({ source: 'uncaught_exception' })
+  })
+})
+
+describe('processHandlersFor', () => {
+  it('binds the handlers to a process, its stderr and its exit', async () => {
+    const target = new EventEmitter()
+    const stderr: string[] = []
+    const exits: number[] = []
+    const captured: unknown[] = []
+    processHandlersFor(
+      target,
+      (text) => stderr.push(text),
+      (code) => exits.push(code)
+    )({ reporter: { capture: (r) => captured.push(r), flush: async () => {} } })
+    target.emit('uncaughtException', new Error('late'))
+    await vi.waitFor(() => expect(exits).toEqual([1]))
+    expect(stderr[0]).toContain('late')
+    expect(captured).toHaveLength(1)
+  })
+})
+
+describe('breadcrumbLogger', () => {
+  it('writes every line and keeps warnings and errors as breadcrumbs', () => {
+    const written: string[] = []
+    const crumbs: string[] = []
+    const log = breadcrumbLogger(
+      { breadcrumb: (level, message) => crumbs.push(`${level}:${message}`) },
+      (level, message) => written.push(`${level}:${message}`)
+    )
+    log('info', 'a')
+    log('warn', 'b')
+    log('error', 'c')
+    expect(written).toEqual(['info:a', 'warn:b', 'error:c'])
+    expect(crumbs).toEqual(['warning:b', 'error:c'])
   })
 })

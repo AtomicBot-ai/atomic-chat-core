@@ -36,48 +36,67 @@ describe('parseTelemetryUpdate', () => {
 })
 
 describe('/atomic/v1/telemetry', () => {
-  it('applies what the app says and answers the resulting state', async () => {
+  it('applies what the host says and answers the resulting state', async () => {
     const reporter = new ErrorReporter({
       config: null,
       coreVersion: '0.3.0',
       platform: 'darwin',
       arch: 'arm64',
+      host: 'atomic-chat',
     })
     h = await startControlHarness({ telemetry: reporter })
     expect(await (await h.get('/atomic/v1/telemetry')).json()).toEqual({
-      enabled: false,
+      enabled: true,
       reporting: false,
       has_user: false,
       tags: {},
+      source: 'default',
+      host: 'atomic-chat',
     })
     const updated = await put(h, {
-      enabled: true,
+      enabled: false,
       user_id: 'device-1',
       tags: { gpu_model: 'M3', secret: 'x' },
     })
     expect(updated.status).toBe(200)
     expect(await updated.json()).toEqual({
-      enabled: true,
+      enabled: false,
       reporting: false,
       has_user: true,
       tags: { gpu_model: 'M3' },
+      source: 'host',
+      host: 'atomic-chat',
     })
     const refused = await put(h, { enabled: 1 })
     expect(refused.status).toBe(400)
     expect(await refused.json()).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
   })
 
-  it('says nothing is reported by a core without a reporter, whatever it is told', async () => {
+  it('says nothing is reported by a core whose host turned reporting off, whatever it is told', async () => {
     h = await startControlHarness()
     const answer = await put(h, { enabled: true })
-    expect(await answer.json()).toEqual({ enabled: false, reporting: false, has_user: false, tags: {} })
+    expect(await answer.json()).toEqual({
+      enabled: false,
+      reporting: false,
+      has_user: false,
+      tags: {},
+      source: 'host',
+      host: 'library',
+    })
   })
 
   it('reports a route that failed on our side with its pattern, not its path', async () => {
     const captured: ErrorReport[] = []
     const telemetry = {
       capture: (report: ErrorReport) => captured.push(report),
-      state: () => ({ enabled: true, reporting: true, has_user: false, tags: {} }),
+      state: () => ({
+        enabled: true,
+        reporting: true,
+        has_user: false,
+        tags: {},
+        source: 'host' as const,
+        host: 'test',
+      }),
       update: () => {},
     }
     h = await startControlHarness({ telemetry })

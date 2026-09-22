@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BAKED_TELEMETRY, resolveTelemetryConfig } from './config.js'
+import { BAKED_TELEMETRY, CORE_SENTRY_DSN, isTestRun, resolveTelemetryConfig } from './config.js'
 
 const DSN = 'https://key@o1.ingest.us.sentry.io/42'
 
@@ -9,9 +9,32 @@ describe('BAKED_TELEMETRY', () => {
   })
 })
 
+describe('isTestRun', () => {
+  it('knows vitest and a test NODE_ENV', () => {
+    expect(isTestRun({ VITEST: 'true' })).toBe(true)
+    expect(isTestRun({ NODE_ENV: 'test' })).toBe(true)
+    expect(isTestRun({ NODE_ENV: 'production' })).toBe(false)
+  })
+})
+
 describe('resolveTelemetryConfig', () => {
-  it('is off when nothing names a DSN', () => {
-    expect(resolveTelemetryConfig({ baked: {}, env: {}, version: '0.3.0' })).toBeNull()
+  it("reports to the core's own project from any build, as `source` unless the release says otherwise", () => {
+    const config = resolveTelemetryConfig({ baked: {}, env: {}, version: '0.3.0' })
+    expect(config?.dsn.dsn).toBe(CORE_SENTRY_DSN)
+    expect(config?.dsn.projectId).toBe('4512125097476096')
+    expect(config).toMatchObject({ environment: 'source', release: 'atomic-chat-core@0.3.0' })
+  })
+
+  it('never uses the built-in project under a test runner, but honours an explicit DSN there', () => {
+    expect(resolveTelemetryConfig({ baked: {}, env: { VITEST: 'true' }, version: '1' })).toBeNull()
+    expect(resolveTelemetryConfig({ baked: {}, env: { NODE_ENV: 'test' }, version: '1' })).toBeNull()
+    expect(resolveTelemetryConfig({ baked: {}, env: {}, version: '1', testRun: true })).toBeNull()
+    const fake = resolveTelemetryConfig({
+      baked: {},
+      env: { VITEST: 'true', ATOMIC_CORE_SENTRY_DSN: 'http://k@127.0.0.1:9/7' },
+      version: '1',
+    })
+    expect(fake?.dsn.envelopeUrl).toBe('http://127.0.0.1:9/api/7/envelope/')
   })
 
   it('uses the baked DSN, environment and commit', () => {
@@ -39,20 +62,14 @@ describe('resolveTelemetryConfig', () => {
     expect(config).not.toHaveProperty('dist')
   })
 
-  it('defaults to production and is off in development', () => {
-    expect(resolveTelemetryConfig({ baked: { dsn: DSN }, env: {}, version: '1' })?.environment).toBe(
-      'production'
-    )
+  it('is off in development and for a malformed DSN', () => {
     expect(
       resolveTelemetryConfig({
-        baked: { dsn: DSN },
+        baked: {},
         env: { ATOMIC_CORE_SENTRY_ENVIRONMENT: 'development' },
         version: '1',
       })
     ).toBeNull()
-  })
-
-  it('is off for a malformed DSN', () => {
     expect(resolveTelemetryConfig({ baked: { dsn: 'nope' }, env: {}, version: '1' })).toBeNull()
   })
 })

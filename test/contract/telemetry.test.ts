@@ -43,6 +43,8 @@ describe('telemetry', () => {
       reporting: false,
       has_user: c.expected.body.user_id !== null,
       tags: allowed,
+      source: 'host',
+      host: 'library',
     })
   })
 })

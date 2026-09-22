@@ -14,6 +14,7 @@ import {
   serveCommand,
   serverCommand,
   shutdownCommand,
+  telemetryCommand,
 } from './commands/index.js'
 import { launchCommand } from './launch.js'
 import { authCommand, providersCommand } from './cloud.js'
@@ -32,6 +33,7 @@ Commands:
   launch <agent>  Start a model and launch a coding agent already wired to it
   providers       List, register or remove cloud providers the API server routes to
   auth chatgpt    Connect, inspect or disconnect a ChatGPT subscription
+  telemetry       Show, or turn on or off, the core's anonymous crash and error reports
 
 Common options:
   --data-folder <path>   Data folder to work with (default: <system data>/atomic-chat-cli/data)
@@ -96,6 +98,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await providersCommand(rest, io)
       case 'auth':
         return await authCommand(rest, io)
+      case 'telemetry':
+        return await telemetryCommand(rest, io)
       default:
         io.stderr(`Unknown command: ${command}\n\n${USAGE}`)
         return 2

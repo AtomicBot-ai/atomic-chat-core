@@ -46,13 +46,17 @@ export interface LocalApiServerState {
 
 export const LOCAL_API_SERVER_STATE_FILE = 'local-api-server.json'
 
-/** `GET /atomic/v1/telemetry`: the app's error-reporting consent as the core holds it. Never the DSN. */
+/** `GET /atomic/v1/telemetry`: whether the core reports its errors, and why. Never the DSN. */
 export interface TelemetryState {
   enabled: boolean
-  /** Consent is given and this build has a project to report to. */
+  /** Enabled, and this build has a project to report to. */
   reporting: boolean
   has_user: boolean
   tags: Record<string, string>
+  /** Who decided: the environment (`DO_NOT_TRACK`), the host, the user's stored choice, or the default (on). */
+  source: 'env' | 'host' | 'stored' | 'default'
+  /** Who embeds the core: `atomic-chat`, `cli`, `library`, or a host's own name. */
+  host: string
 }
 
 /**

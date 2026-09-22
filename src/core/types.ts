@@ -34,10 +34,17 @@ export interface AtomicCoreOptions {
   controlPort?: number
   logger?: CoreLogger
   /**
-   * Where failures worth an issue go (the app's daemon passes its Sentry reporter), and what
-   * `/atomic/v1/telemetry` drives. Without it nothing is reported and that route answers 404.
+   * Where failures worth an issue go, and what `/atomic/v1/telemetry` drives. A host that owns its
+   * process (the app's daemon, the CLI) builds one with `createCoreReporter` so start-up failures are
+   * reported too; otherwise the core builds its own from `telemetry`.
    */
   errorReporter?: TelemetryControl
+  /**
+   * Error reporting when no `errorReporter` is given: the core reports to its own Sentry project by
+   * itself, as `library` unless a `host` name is given. `enabled` is the host's consent; `false`
+   * turns reporting off for this core altogether. See docs/decisions/*-the-core-owns-its-error-reporting.md.
+   */
+  telemetry?: false | { host?: string; hostVersion?: string; enabled?: boolean }
 }
 
 export const LOCAL_PROVIDER: LocalProviderId = 'llamacpp-upstream'

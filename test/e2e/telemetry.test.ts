@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 
-const { APP_BIN } = core
+const { APP_BIN, BIN } = core
 
 interface SentEvent {
   level: string
@@ -111,6 +111,8 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
       reporting: true,
       has_user: true,
       tags: { gpu_model: 'Apple M3' },
+      source: 'host',
+      host: 'atomic-chat',
     })
     expect((await load(ready, 'Owner/Broken-Q4_K_M')).status).toBeGreaterThanOrEqual(400)
     await eventually(1)
@@ -189,5 +191,61 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     })
     expect(JSON.stringify(events)).not.toContain('my secret prompt')
     expectScrubbed()
+  })
+
+  it('reports from the CLI by itself, says so once, and stops after `telemetry off`', async () => {
+    const notAFolder = join(dataFolder, 'not-a-folder')
+    await writeFile(notAFolder, 'x')
+    const cliDaemon = async (folder: string) => {
+      const child = spawn(BIN, ['daemon', '--data-folder', folder, '--control-port', '0'], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: { ...process.env, ...env() },
+      })
+      daemons.push(child)
+      let stderr = ''
+      child.stderr?.on('data', (chunk: Buffer) => (stderr += chunk.toString()))
+      const code = await new Promise((resolve) => child.once('exit', resolve))
+      return { code, stderr }
+    }
+    const first = await cliDaemon(notAFolder)
+    expect(first.code).toBe(1)
+    expect(first.stderr).toContain('Turn them off with `atomic-chat-core telemetry off` or DO_NOT_TRACK=1.')
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      level: 'fatal',
+      tags: { source: 'startup', host: 'cli', owner_scope: 'cli' },
+    })
+    expect(events[0]?.user.id).toMatch(/^[0-9a-f-]{36}$/)
+    expectScrubbed()
+
+    // A folder the CLI owns: the notice once, then the user's `telemetry off` silences the next crash.
+    await core.writeModel(dataFolder, 'cli-crashy')
+    await core.writeFakeBackend(dataFolder, { FAKE_LLAMA_PID_FILE: pidFile })
+    const noticed = await core.startDaemon(dataFolder, daemons, [], env(), BIN)
+    expect((await control(noticed.ready, '/telemetry')).status).toBe(200)
+    expect(await (await control(noticed.ready, '/telemetry')).json()).toMatchObject({
+      enabled: true,
+      source: 'default',
+      host: 'cli',
+    })
+    expect(JSON.parse(readFileSync(join(dataFolder, 'atomic-core', 'telemetry.json'), 'utf8'))).toMatchObject(
+      {
+        notice_shown: true,
+        install_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      }
+    )
+    noticed.child.kill('SIGKILL')
+    const off = core.runCli(dataFolder, ['telemetry', 'off'])
+    expect(off.stdout).toContain('Error reports: off (your choice)')
+    const { ready } = await core.startDaemon(dataFolder, daemons, [], env(), BIN)
+    expect(await (await control(ready, '/telemetry')).json()).toMatchObject({
+      enabled: false,
+      source: 'stored',
+    })
+    expect((await load(ready, 'cli-crashy')).status).toBe(200)
+    const pid = Number(readFileSync(pidFile, 'utf8').trim().split('\n').at(-1))
+    process.kill(pid, 'SIGSEGV')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(events).toHaveLength(1)
   })
 })

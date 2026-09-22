@@ -13,6 +13,14 @@ export interface Breadcrumb {
   message: string
 }
 
+/** What the core finds out about the machine by itself (`node:os`), host or no host. */
+export interface SystemContext {
+  /** The kernel release (`os.release()`). */
+  osRelease?: string | undefined
+  cpuModel?: string | undefined
+  memoryMb?: number | undefined
+}
+
 /** Everything about the process an event is stamped with. */
 export interface EventContext {
   config: TelemetryConfig
@@ -23,10 +31,14 @@ export interface EventContext {
   arch: string
   coreVersion: string
   ownerScope?: string | undefined
-  /** The app's anonymous device id (the PostHog distinct id), the only user identifier. */
+  /** Who embeds the core (`atomic-chat`, `cli`, `library`, …) and its version when it said. */
+  host?: string | undefined
+  hostVersion?: string | undefined
+  /** The host's anonymous user id, else this data folder's install id: the only user identifier. */
   userId?: string | undefined
-  /** Already sanitised tags from the app. */
+  /** Already sanitised tags from the host. They win over the core's own on the same key. */
   appTags: Record<string, string>
+  system?: SystemContext | undefined
   breadcrumbs: readonly Breadcrumb[]
   scrub: ScrubContext
 }
@@ -49,7 +61,7 @@ export interface SentryEvent {
   environment: string
   sdk: { name: string; version: string }
   user: { id?: string; ip_address: null }
-  contexts: { os: { name: string } }
+  contexts: { os: { name: string; version?: string }; device: { arch: string; memory_size?: number } }
   tags: Record<string, string>
   fingerprint?: string[]
   exception: { values: SentryException[] }
@@ -93,7 +105,15 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
         }
   const frames = 'stack' in thrown ? parseStack(thrown.stack) : []
   const tags = {
-    ...sanitizeTags({ core_version: ctx.coreVersion, arch: ctx.arch, owner_scope: ctx.ownerScope }),
+    ...sanitizeTags({
+      core_version: ctx.coreVersion,
+      arch: ctx.arch,
+      owner_scope: ctx.ownerScope,
+      host: ctx.host,
+      host_version: ctx.hostVersion,
+      cpu_model: ctx.system?.cpuModel,
+      system_ram_mb: ctx.system?.memoryMb,
+    }),
     ...ctx.appTags,
     ...sanitizeTags({ source: report.source, ...report.tags }, { scrub: ctx.scrub }),
   }
@@ -112,7 +132,13 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
     environment: ctx.config.environment,
     sdk: { name: 'atomic-chat-core.telemetry', version: ctx.coreVersion },
     user: { ...(ctx.userId ? { id: ctx.userId } : {}), ip_address: null },
-    contexts: { os: { name: ctx.platform } },
+    contexts: {
+      os: { name: ctx.platform, ...(ctx.system?.osRelease ? { version: ctx.system.osRelease } : {}) },
+      device: {
+        arch: ctx.arch,
+        ...(ctx.system?.memoryMb ? { memory_size: ctx.system.memoryMb * 1024 * 1024 } : {}),
+      },
+    },
     tags,
     ...(report.fingerprint ? { fingerprint: report.fingerprint } : {}),
     exception: {

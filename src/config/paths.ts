@@ -56,6 +56,8 @@ export interface CoreFiles {
   remoteAccessTunnel: string
   /** An empty `--config` for cloudflared on Windows, which has no `/dev/null` to point at. */
   cloudflaredEmptyConfig: string
+  /** The core's own error-reporting state: the user's stored choice, the install id. */
+  telemetry: string
 }
 
 /** Image generation. Paths the app's diffusion plugin chose; the core adopted them as they are. */
@@ -106,6 +108,8 @@ export function dataLayout(root: string): DataLayout {
       logsDir: join(coreDir, 'logs'),
       remoteAccessTunnel: join(coreDir, 'remote-access-tunnel.json'),
       cloudflaredEmptyConfig: join(coreDir, 'cloudflared-empty.yml'),
+      /** The core's own error-reporting state: the user's stored choice, the install id. */
+      telemetry: join(coreDir, 'telemetry.json'),
     },
     diffusion: {
       root: diffusionDir,

@@ -24,6 +24,18 @@ describe('runCli', () => {
     expect(result.stderr).toContain('No chat models are installed')
   })
 
+  it('dispatches telemetry', async () => {
+    const data = await makeTmpDataFolder('atomic-core-cli-main-telemetry-')
+    try {
+      expect(await run(['telemetry', 'status', '--data-folder', data.root])).toMatchObject({
+        exitCode: 0,
+        stdout: expect.stringContaining('Error reports: on'),
+      })
+    } finally {
+      await data.cleanup()
+    }
+  })
+
   it('prints usage: 0 when asked, 2 when given nothing', async () => {
     expect(await run(['--help'])).toMatchObject({ exitCode: 0, stdout: USAGE })
     expect(await run([])).toMatchObject({ exitCode: 2, stdout: USAGE })

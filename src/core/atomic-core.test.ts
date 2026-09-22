@@ -41,7 +41,14 @@ describe('error reporting', () => {
       captured,
       telemetry: {
         capture: (report: ErrorReport) => captured.push(report),
-        state: () => ({ enabled: true, reporting: true, has_user: false, tags: {} }),
+        state: () => ({
+          enabled: true,
+          reporting: true,
+          has_user: false,
+          tags: {},
+          source: 'host' as const,
+          host: 'test',
+        }),
         update: () => {},
       },
     }

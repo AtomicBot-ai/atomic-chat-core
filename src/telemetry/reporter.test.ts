@@ -83,15 +83,36 @@ describe('ErrorReporter', () => {
     expect(h.sent[0]?.event['tags']).not.toHaveProperty('password')
   })
 
-  it('sends nothing without consent, or without a DSN', async () => {
-    const off = harness({ enabled: undefined })
+  it('reports by default, and sends nothing once the host, the user or the environment says off', async () => {
+    const byDefault = harness({ enabled: undefined })
+    byDefault.reporter.capture(report())
+    await byDefault.reporter.flush()
+    expect(byDefault.fetch).toHaveBeenCalledTimes(1)
+    expect(byDefault.reporter.state()).toEqual({
+      enabled: true,
+      reporting: true,
+      has_user: false,
+      tags: {},
+      source: 'default',
+      host: 'library',
+    })
+
+    const off = harness({ enabled: false, host: 'atomic-chat' })
     off.reporter.capture(report())
     expect(off.fetch).not.toHaveBeenCalled()
-    expect(off.reporter.state()).toEqual({ enabled: false, reporting: false, has_user: false, tags: {} })
+    expect(off.reporter.state()).toMatchObject({ enabled: false, source: 'host', host: 'atomic-chat' })
     off.reporter.update({ enabled: true })
     off.reporter.capture(report())
     await off.reporter.flush()
     expect(off.fetch).toHaveBeenCalledTimes(1)
+
+    const stored = harness({ enabled: undefined, storedConsent: false })
+    stored.reporter.capture(report())
+    expect(stored.fetch).not.toHaveBeenCalled()
+    const dnt = harness({ enabled: true, envConsent: false })
+    dnt.reporter.capture(report())
+    expect(dnt.fetch).not.toHaveBeenCalled()
+    expect(dnt.reporter.state()).toMatchObject({ enabled: false, source: 'env' })
 
     const inert = harness({ config: null })
     inert.reporter.breadcrumb('error', 'x')
@@ -108,6 +129,8 @@ describe('ErrorReporter', () => {
       reporting: true,
       has_user: true,
       tags: { os: 'macOS' },
+      source: 'host',
+      host: 'library',
     })
     h.reporter.update({ user_id: null })
     h.reporter.update({ enabled: false })
@@ -116,6 +139,8 @@ describe('ErrorReporter', () => {
       reporting: false,
       has_user: false,
       tags: { os: 'macOS' },
+      source: 'host',
+      host: 'library',
     })
   })
 

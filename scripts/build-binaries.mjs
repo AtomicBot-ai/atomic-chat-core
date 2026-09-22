@@ -29,20 +29,19 @@ function hostTarget() {
   throw new Error(`unsupported host ${platform}/${arch}`)
 }
 
-// Error reporting (docs/decisions/2026-09-21-report-core-errors-to-its-own-sentry-project.md): the
-// release build bakes the Sentry DSN into the app's binary only; the CLI binary never reports.
-// Without the variable (local builds) nothing is baked and the binary reports nowhere.
+// Error reporting (docs/decisions/2026-09-22-the-core-owns-its-error-reporting.md): the core reports
+// to its own Sentry project from any build, as environment `source`. The release build says
+// `production` and names its commit, in both binaries; it may also bake another DSN.
 const SENTRY_DSN = process.env.ATOMIC_CORE_SENTRY_DSN?.trim()
-const SENTRY_ENVIRONMENT = process.env.ATOMIC_CORE_SENTRY_ENVIRONMENT?.trim() || 'production'
+const SENTRY_ENVIRONMENT = process.env.ATOMIC_CORE_SENTRY_ENVIRONMENT?.trim()
 const GIT_SHA = (process.env.ATOMIC_CORE_GIT_SHA ?? process.env.GITHUB_SHA ?? '').trim()
 
 function telemetryDefines() {
-  if (!SENTRY_DSN) return []
   const define = (name, value) => ['--define', `${name}=${JSON.stringify(value)}`]
   return [
-    ...define('__ATOMIC_CORE_SENTRY_DSN__', SENTRY_DSN),
-    ...define('__ATOMIC_CORE_SENTRY_ENVIRONMENT__', SENTRY_ENVIRONMENT),
-    ...(GIT_SHA ? define('__ATOMIC_CORE_GIT_SHA__', GIT_SHA) : []),
+    ...(SENTRY_DSN ? define('__ATOMIC_CORE_SENTRY_DSN__', SENTRY_DSN) : []),
+    ...(SENTRY_ENVIRONMENT ? define('__ATOMIC_CORE_SENTRY_ENVIRONMENT__', SENTRY_ENVIRONMENT) : []),
+    ...(SENTRY_ENVIRONMENT && GIT_SHA ? define('__ATOMIC_CORE_GIT_SHA__', GIT_SHA) : []),
   ]
 }
 
@@ -66,7 +65,6 @@ for (const target of targets) {
     ['atomic-chat-app-core', APP_ENTRY],
   ]) {
     const outfile = join(OUT_DIR, `${name}-${triple}${target.includes('windows') ? '.exe' : ''}`)
-    const reports = name === 'atomic-chat-app-core'
     const args = [
       'build',
       '--compile',
@@ -76,7 +74,7 @@ for (const target of targets) {
       '--minify-syntax',
       '--minify-whitespace',
       '--sourcemap',
-      ...(reports ? telemetryDefines() : []),
+      ...telemetryDefines(),
       entry,
       '--outfile',
       outfile,
@@ -88,7 +86,7 @@ for (const target of targets) {
       console.error(`build failed for ${target}: ${name}`)
       process.exit(res.status ?? 1)
     }
-    if (reports && SENTRY_DSN) assertDsnBaked(outfile)
+    if (SENTRY_DSN) assertDsnBaked(outfile)
   }
 }
 console.log(`built ${targets.length * 2} binaries into dist/bin`)
