@@ -221,13 +221,12 @@ describe('MlxRuntime', () => {
     await expect(runtime({}, {}, { resourcesDir: undefined }).load('m')).rejects.toMatchObject({
       code: 'BINARY_NOT_FOUND',
     })
+    const binary = join('/resources/bin', 'mlx-server')
     await expect(runtime({}, {}, { exists: () => false }).load('m')).rejects.toMatchObject({
       code: 'BINARY_NOT_FOUND',
-      message: 'MLX server binary not found at: /resources/bin/mlx-server',
+      message: `MLX server binary not found at: ${binary}`,
     })
-    await expect(
-      runtime({}, {}, { exists: (path) => path === '/resources/bin/mlx-server' }).load('m')
-    ).rejects.toMatchObject({
+    await expect(runtime({}, {}, { exists: (path) => path === binary }).load('m')).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('Model file not found at: '),
     })
@@ -311,16 +310,20 @@ describe('MlxRuntime', () => {
     )
   })
 
-  it('drops a session whose server died, with the external-kill diagnosis', async () => {
-    await writeMlxModel('m')
-    const r = runtime()
-    const session = await r.load('m')
-    process.kill(session.pid, 'SIGKILL')
-    await expect.poll(() => r.list().length).toBe(0)
-    await expect
-      .poll(() => events.find((e) => e.name === 'session:died')?.payload['message'])
-      .toBe('MLX server terminated by signal SIGKILL — an external process killed it.')
-  })
+  // Windows has no signals: a killed process there exits with code 1 and no signal to name.
+  it.skipIf(process.platform === 'win32')(
+    'drops a session whose server died, with the external-kill diagnosis',
+    async () => {
+      await writeMlxModel('m')
+      const r = runtime()
+      const session = await r.load('m')
+      process.kill(session.pid, 'SIGKILL')
+      await expect.poll(() => r.list().length).toBe(0)
+      await expect
+        .poll(() => events.find((e) => e.name === 'session:died')?.payload['message'])
+        .toBe('MLX server terminated by signal SIGKILL — an external process killed it.')
+    }
+  )
 
   it('writes a log file and relays lines when verbose', async () => {
     await writeMlxModel('m')

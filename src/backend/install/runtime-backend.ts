@@ -121,7 +121,8 @@ function platformOsType(platform: NodeJS.Platform): string {
   return platform
 }
 
-function platformArch(arch: string): string {
+/** Node's `process.arch` in the Rust spelling the backend and CPU policies expect (`x64` → `x86_64`). */
+export function platformArch(arch: string): string {
   if (arch === 'x64') return 'x86_64'
   if (arch === 'ia32') return 'x86'
   return arch

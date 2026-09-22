@@ -86,13 +86,17 @@ describe('attachToOwner', () => {
         log: (message) => messages.push(message),
       },
       async () => {
-        await new Promise((resolve) => setTimeout(resolve, 25))
-        expect(core.clients.list()[0]?.last_seen).toBeGreaterThan(core.clients.list()[0]?.registered_at ?? 0)
+        // Poll, not sleep: a slow host (Windows CI) may land no heartbeat inside a fixed window.
+        await expect
+          .poll(() => {
+            const client = core.clients.list()[0]
+            return (client?.last_seen ?? 0) > (client?.registered_at ?? Infinity)
+          })
+          .toBe(true)
         await core.shutdown()
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        await expect.poll(() => messages.some((message) => message.includes('heartbeat failed'))).toBe(true)
       }
     )
-    expect(messages.some((message) => message.includes('heartbeat failed'))).toBe(true)
   })
 
   it('times out when an old daemon acknowledges shutdown but never releases its lock', async () => {

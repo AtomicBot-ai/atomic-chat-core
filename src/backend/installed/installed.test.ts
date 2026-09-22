@@ -1,3 +1,4 @@
+import { sep } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../../config/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
@@ -18,7 +19,12 @@ import {
 import type { CudaLibFs } from './installed.js'
 
 const paths = dataLayout('/path/to/jan').provider('llamacpp-upstream')
-const existsAmong = (present: string[]) => async (p: string) => present.includes(p)
+/**
+ * The code joins with the host's separator; the literals below are the app's POSIX ones. Comparing
+ * in POSIX form keeps them verbatim and lets the suite run on Windows too.
+ */
+const posixify = (path: string) => path.split(sep).join('/')
+const existsAmong = (present: string[]) => async (p: string) => present.includes(posixify(p))
 
 describe('installedBackendsFromEntries (Rust get_local_installed_backends order semantics)', () => {
   it('keeps only directories with an executable, cleans names and floors the mtime', () => {
@@ -46,15 +52,15 @@ describe('installedBackendsFromEntries (Rust get_local_installed_backends order 
 
 describe('getBackendDir / getBackendExePath / isBackendInstalled (app backend.test.ts)', () => {
   it('uses the specific backend name for the directory path', () => {
-    expect(getBackendDir(paths, 'linux-avx2-x64', 'v1.2.3')).toBe(
+    expect(posixify(getBackendDir(paths, 'linux-avx2-x64', 'v1.2.3'))).toBe(
       '/path/to/jan/llamacpp-upstream/backends/v1.2.3/linux-avx2-x64'
     )
-    expect(getBackendDir(paths, '\uFEFFwin-common_cpus-x64', 'v2.0.0 ')).toBe(
+    expect(posixify(getBackendDir(paths, '\uFEFFwin-common_cpus-x64', 'v2.0.0 '))).toBe(
       '/path/to/jan/llamacpp-upstream/backends/v2.0.0/win-common_cpus-x64'
     )
   })
   it('lists both layouts per platform', () => {
-    expect(backendExePathCandidates(paths, 'win-cpu-x64', 'b1', 'win32')).toEqual([
+    expect(backendExePathCandidates(paths, 'win-cpu-x64', 'b1', 'win32').map(posixify)).toEqual([
       '/path/to/jan/llamacpp-upstream/backends/b1/win-cpu-x64/build/bin/llama-server.exe',
       '/path/to/jan/llamacpp-upstream/backends/b1/win-cpu-x64/llama-server.exe',
     ])
@@ -62,11 +68,13 @@ describe('getBackendDir / getBackendExePath / isBackendInstalled (app backend.te
   it('prefers build/bin when the build directory exists, else the flat layout', async () => {
     const dir = '/path/to/jan/llamacpp-upstream/backends/v1.2.3/linux-avx2-x64'
     expect(
-      await getBackendExePath(paths, 'linux-avx2-x64', 'v1.2.3', 'linux', existsAmong([`${dir}/build`]))
+      posixify(
+        await getBackendExePath(paths, 'linux-avx2-x64', 'v1.2.3', 'linux', existsAmong([`${dir}/build`]))
+      )
     ).toBe(`${dir}/build/bin/llama-server`)
-    expect(await getBackendExePath(paths, 'linux-avx2-x64', 'v1.2.3', 'linux', existsAmong([]))).toBe(
-      `${dir}/llama-server`
-    )
+    expect(
+      posixify(await getBackendExePath(paths, 'linux-avx2-x64', 'v1.2.3', 'linux', existsAmong([])))
+    ).toBe(`${dir}/llama-server`)
   })
   it('is installed when either candidate executable exists', async () => {
     const dir = '/path/to/jan/llamacpp-upstream/backends/v1.0.0/win-avx2-x64'
@@ -100,7 +108,12 @@ describe('installed engine packs (app backend.test.ts)', () => {
     { version: 'b10344', backend: 'win-cpu-x64' },
   ]
   it('resolves each pack path and marks the selected build', () => {
-    expect(listInstalledBackendPacks(paths, installed, 'b10344/win-cpu-x64')).toEqual([
+    expect(
+      listInstalledBackendPacks(paths, installed, 'b10344/win-cpu-x64').map((pack) => ({
+        ...pack,
+        path: posixify(pack.path),
+      }))
+    ).toEqual([
       {
         version: 'b10205',
         backend: 'win-cpu-x64',
@@ -231,15 +244,15 @@ describe('cudaRuntimeLibName / isCudaInstalled (Rust test_is_cuda_installed_*)',
     return {
       renames,
       mkdirs,
-      exists: async (p) => present.has(p),
+      exists: async (p) => present.has(posixify(p)),
       mkdir: async (p) => {
-        mkdirs.push(p)
-        present.add(p)
+        mkdirs.push(posixify(p))
+        present.add(posixify(p))
       },
       rename: async (from, to) => {
-        renames.push([from, to])
-        present.delete(from)
-        present.add(to)
+        renames.push([posixify(from), posixify(to)])
+        present.delete(posixify(from))
+        present.add(posixify(to))
       },
     }
   }
@@ -268,7 +281,8 @@ describe('cudaRuntimeLibName / isCudaInstalled (Rust test_is_cuda_installed_*)',
   })
   it('is false when the move fails and IO_ERROR when the target directory cannot be created', async () => {
     const failingRename: CudaLibFs = {
-      exists: async (p) => p === '/data/llamacpp/lib/libcudart.so.12' || p === '/backend/build/bin',
+      exists: async (p) =>
+        posixify(p) === '/data/llamacpp/lib/libcudart.so.12' || posixify(p) === '/backend/build/bin',
       mkdir: vi.fn(),
       rename: async () => {
         throw new Error('EXDEV')
@@ -278,7 +292,7 @@ describe('cudaRuntimeLibName / isCudaInstalled (Rust test_is_cuda_installed_*)',
       false
     )
     const failingMkdir: CudaLibFs = {
-      exists: async (p) => p === '/data/llamacpp/lib/libcudart.so.12',
+      exists: async (p) => posixify(p) === '/data/llamacpp/lib/libcudart.so.12',
       mkdir: async () => {
         throw new Error('EACCES')
       },

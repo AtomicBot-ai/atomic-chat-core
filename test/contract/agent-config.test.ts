@@ -110,7 +110,9 @@ describe.skipIf(replayable.length === 0)('replaying the ported writers', () => {
     const options = {
       fs: nodeConfigFs(home),
       home,
-      platform: process.platform,
+      // The app's Rust tests recorded every fixture on macOS: `.bash_profile`, not `.bashrc`, and
+      // shell rc files, not `setx`. Replaying them as another host would test that host's writer.
+      platform: 'darwin' as const,
       shell: fixture.input.shell,
       env: { HOME: home, SHELL: fixture.input.shell ?? '/bin/zsh' } as NodeJS.ProcessEnv,
       // The emitter expressed the subprocess environment only through the outcome it recorded: a

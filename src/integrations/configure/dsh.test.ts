@@ -74,7 +74,8 @@ describe('configuring dsh', () => {
     expect(Object.keys(await home.tree())).toEqual(['dev/dsh/.env', 'dev/dsh/settings.yaml'])
   })
 
-  it('restricts the credential file to its owner on unix', async () => {
+  // NTFS has no POSIX modes: chmod there only toggles read-only.
+  it.skipIf(process.platform === 'win32')('restricts the credential file to its owner on unix', async () => {
     home = await makeAgentHome()
     await configureDsh(agentInput(home.fs, { platform: 'linux' }))
     const mode = (await stat(join(home.path, '.dsh', '.env'))).mode & 0o777

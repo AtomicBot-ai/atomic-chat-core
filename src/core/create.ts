@@ -30,6 +30,7 @@ import {
   ManifestSessionCache,
   OptimalBackendStore,
   fetchLiveManifest,
+  platformArch,
   manifestTransportFromFetch,
   readRuntimeSettings,
   selectInstalledBackend,
@@ -192,7 +193,8 @@ export async function createAtomicCore(
         cpuInfo: async () => {
           const injected = hardware.get()
           if (!injected?.cpu_extensions) return undefined
-          return { arch: process.arch, extensions: hardware.cpuExtensions([]) }
+          // The no-AVX policy knows `x86_64`, not Node's `x64`: pass the raw name and it never fires.
+          return { arch: platformArch(process.arch), extensions: hardware.cpuExtensions([]) }
         },
         ...(options.fetch ? { fetch: options.fetch } : {}),
       })

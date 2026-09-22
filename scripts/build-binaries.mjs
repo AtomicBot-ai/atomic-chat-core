@@ -7,8 +7,10 @@
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = new URL('..', import.meta.url).pathname
+// Not `.pathname`: on Windows that is `/D:/…`, which neither `mkdirSync` nor `cwd` accepts.
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const ENTRY = join(ROOT, 'src/cli/bin.ts')
 const APP_ENTRY = join(ROOT, 'src/app-daemon.ts')
 const OUT_DIR = join(ROOT, 'dist/bin')

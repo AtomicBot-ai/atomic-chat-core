@@ -127,7 +127,8 @@ Bun is the packager and the e2e runtime. Node 22 is the development runtime. Cod
 - **Every user-visible flow has an e2e test against the compiled binary** (`test/e2e/`, using
   `test/helpers/fake-llama-server.ts`) **and an app-e2e scenario** proving the Tauri app sees the same
   thing (`test/app-e2e/`, `docs/app-e2e.md`).
-- **Coverage floors** (`test/coverage-floor.json`) only go up. Windows CI is mandatory for anything
+- **Coverage floors** (`test/coverage-floor.json`) only go up. They are recorded and checked on macOS;
+  Linux and Windows CI run the same suites without them. Windows CI is mandatory for anything
   touching `src/runtime/`.
 - **Grade every critical flow** in `docs/testing-critical-flows.md` (Strong / Partial / Smoke / Missing).
   A PR may not lower a grade. Line coverage alone never raises one.
