@@ -38,6 +38,26 @@ export interface ReadyLine {
 export const runCli = (dataFolder: string, args: string[]) =>
   spawnSync(BIN, [...args, '--data-folder', dataFolder], { encoding: 'utf8', timeout: 30_000 })
 
+/**
+ * A CLI command left running (`launch`, `serve`): the child, its output so far, and its exit. The
+ * caller ends it with a signal, the way a user would.
+ */
+export function spawnCli(
+  dataFolder: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = {}
+): { child: ChildProcess; output: () => string; exit: Promise<number | null> } {
+  const child = spawn(BIN, [...args, '--data-folder', dataFolder], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, ...env },
+  })
+  let output = ''
+  child.stdout?.on('data', (chunk: Buffer) => (output += chunk.toString()))
+  child.stderr?.on('data', (chunk: Buffer) => (output += chunk.toString()))
+  const exit = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)))
+  return { child, output: () => output, exit }
+}
+
 export const runCliAsync = (dataFolder: string, args: string[]) =>
   new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(BIN, [...args, '--data-folder', dataFolder], {
@@ -135,14 +155,24 @@ export async function writeModel(dataFolder: string, id: string): Promise<void> 
   )
 }
 
+/** The backend folder name of this machine, as the providers' release matrices spell it. */
+export const HOST_BACKEND =
+  process.platform === 'linux' ? 'linux-cpu-x64' : `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
+
 /**
  * A backend pack whose `llama-server` is the fake one, so the binary can actually load something.
- * `env` is exported to the fake (`FAKE_LLAMA_*`, see `fake-llama-server.mjs`).
+ * `env` is exported to the fake (`FAKE_LLAMA_*`, see `fake-llama-server.mjs`). The upstream
+ * provider by default; `llamacpp` (the TurboQuant fork) with its own version scheme on request.
  */
-export async function writeFakeBackend(dataFolder: string, env: Record<string, string> = {}): Promise<void> {
-  const backend =
-    process.platform === 'linux' ? 'linux-cpu-x64' : `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
-  const dir = join(dataFolder, 'llamacpp-upstream', 'backends', 'b6325', backend, 'build', 'bin')
+export async function writeFakeBackend(
+  dataFolder: string,
+  env: Record<string, string> = {},
+  pack: { provider?: 'llamacpp-upstream' | 'llamacpp'; version?: string; backend?: string } = {}
+): Promise<void> {
+  const provider = pack.provider ?? 'llamacpp-upstream'
+  const version = pack.version ?? (provider === 'llamacpp' ? 'b10018-1.3.0' : 'b6325')
+  const backend = pack.backend ?? HOST_BACKEND
+  const dir = join(dataFolder, provider, 'backends', version, backend, 'build', 'bin')
   await mkdir(dir, { recursive: true })
   const exe = join(dir, process.platform === 'win32' ? 'llama-server.exe' : 'llama-server')
   const exports = Object.entries(env)

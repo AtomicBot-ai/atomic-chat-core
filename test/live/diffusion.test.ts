@@ -10,6 +10,9 @@
  *   ATOMIC_LIVE_SD_MODEL=/path/to/transformer.gguf
  *   ATOMIC_LIVE_SD_VAE=/path/to/vae.safetensors   (optional; FLUX.2 also needs ATOMIC_LIVE_SD_VAE_FORMAT=flux2)
  *   ATOMIC_LIVE_SD_LLM=/path/to/text-encoder      (optional; the family's LLM text encoder)
+ *   ATOMIC_LIVE_SD_LLM_VISION=/path/to/mmproj     (optional; Qwen Image 2.1's Qwen3-VL projector — with
+ *                                                  it and ATOMIC_LIVE_SD_FAMILY=qwen-image-2.1 a reference
+ *                                                  generation from the first output is run as well)
  *   ATOMIC_LIVE_SD_FAMILY=flux.2-klein            (optional; default flux.2-klein, 4 steps, cfg 1)
  *   ATOMIC_LIVE_SD_TAG=master-883-137f740         (optional; the engine's release tag, as the app records it)
  *
@@ -33,6 +36,7 @@ const MODEL = process.env['ATOMIC_LIVE_SD_MODEL'] ?? ''
 const VAE = process.env['ATOMIC_LIVE_SD_VAE'] ?? ''
 const VAE_FORMAT = process.env['ATOMIC_LIVE_SD_VAE_FORMAT'] ?? ''
 const LLM = process.env['ATOMIC_LIVE_SD_LLM'] ?? ''
+const LLM_VISION = process.env['ATOMIC_LIVE_SD_LLM_VISION'] ?? ''
 const FAMILY = process.env['ATOMIC_LIVE_SD_FAMILY'] ?? 'flux.2-klein'
 const ENABLED =
   process.env['ATOMIC_LIVE'] === '1' && ENGINE !== '' && MODEL !== '' && process.platform !== 'win32'
@@ -105,6 +109,7 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
         ...(VAE ? { vae: VAE } : {}),
         ...(VAE_FORMAT ? { vaeFormat: VAE_FORMAT } : {}),
         ...(LLM ? { llm: LLM } : {}),
+        ...(LLM_VISION ? { llmVision: LLM_VISION } : {}),
       }
       const loaded = await client.loadDiffusionModel({
         modelId: `${FAMILY}:live`,
@@ -152,6 +157,27 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
       expect(progress.some((p) => p.phase === 'saving')).toBe(true)
       expect(events.filter((e) => e.name === 'diffusion:error')).toEqual([])
 
+      // With the vision projector, Qwen Image 2.1 also edits: a reference generation from the first output.
+      if (LLM_VISION && FAMILY === 'qwen-image-2.1') {
+        expect(capabilities.workflows).toEqual(expect.arrayContaining(['reference', 'edit']))
+        const referenced = await client.generateImage({
+          prompt: 'the same cube, now blue',
+          width: 256,
+          height: 256,
+          steps: 4,
+          cfgScale: 1.0,
+          batchSize: 1,
+          seed: 9,
+          workflow: 'reference',
+          initImage: { path: output.path },
+        })
+        const edited = await untilJob(referenced.jobId, ['completed', 'failed', 'cancelled'], 15 * 60_000)
+        expect(edited.state, JSON.stringify(edited.error)).toBe('completed')
+        expect(edited.outputs[0]?.recipe.workflow).toBe('reference')
+      } else {
+        expect(capabilities.workflows).not.toContain('edit')
+      }
+
       // The OpenAI facade runs the same job.
       const served = await core.startPublicServer({ port: 0 })
       const answer = await fetch(`http://127.0.0.1:${served.port}/v1/images/generations`, {
@@ -164,7 +190,9 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
       expect(body.atomic.seed).toBe(8)
       const served2 = await decodePng(Buffer.from(body.data[0]?.b64_json ?? '', 'base64'))
       expect([served2.width, served2.height]).toEqual([256, 256])
-      expect((await client.listGallery({ offset: 0, limit: 10 })).total).toBe(2)
+      expect((await client.listGallery({ offset: 0, limit: 10 })).total).toBe(
+        LLM_VISION && FAMILY === 'qwen-image-2.1' ? 3 : 2
+      )
 
       // A hard cancel of a long job stops the server (unless the engine cancels natively), and the next job respawns it.
       const long = await client.generateImage({

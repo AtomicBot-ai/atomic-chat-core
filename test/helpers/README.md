@@ -16,3 +16,6 @@
   switches its header lists. The app's desktop e2e suite imports `installFakeSdEngine` and
   `writeFakeSdLaunchers` by path (`docs/app-e2e.md`), so their signatures are a contract.
 - `fake-cloudflared.ts` / `.mjs` — a stand-in for `cloudflared tunnel`, likewise imported by path from the app.
+- `fake-sidecar-server.ts` / `.mjs` — a stand-in for the app's `mlx-server` and `foundation-models-server`,
+  with the modes and switches its header lists (`FAKE_SIDECAR_PID_FILE` for a process the core has not
+  journalled yet).
