@@ -9,6 +9,42 @@ import { inspectLock, readControlToken } from '../lock/index.js'
 
 useCoreHarness()
 
+describe('the managed container runtime', () => {
+  it('records a setup, answers it over the control API and carries it in the snapshot', async () => {
+    // Pointed at a scratch root: this must never touch the real per-user environment.
+    const managedRoot = join(data.root, 'managed-root')
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      env: { ...process.env, ATOMIC_CORE_MANAGED_ROOT: managedRoot },
+    })
+    cores.push(core)
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+
+    const started = await client.beginEnvironmentOperation('default', {
+      request_id: 'req-1',
+      target: { kind: 'environment' },
+      kind: 'setup',
+      descriptor_id: 'trtllm-1.3.0rc27',
+    })
+    await core.managed.service.idle()
+
+    // No host recipe is qualified anywhere yet, so the answer says so instead of installing.
+    const operation = await client.environmentOperation(started.operation_id)
+    expect(operation.phase).toBe('failed')
+    expect(operation.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+
+    const snapshot = await client.snapshot()
+    expect(snapshot.environment_operations?.map((entry) => entry.operation_id)).toContain(
+      started.operation_id
+    )
+    expect(snapshot.environments).toEqual(await client.environments())
+    for (const environment of snapshot.environments ?? []) {
+      expect(environment.availability).toBe('unsupported')
+    }
+  })
+})
+
 describe('taking ownership', () => {
   it('expires an app owner after its registration vanishes, without changing CLI lifetime', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })

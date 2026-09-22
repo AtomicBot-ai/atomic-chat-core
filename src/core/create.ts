@@ -4,9 +4,11 @@
  * previous owner left running and only then publish the endpoint.
  */
 
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { LocalProviderId } from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
+import { wireManagedRuntimes } from '../runtime/environment/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
 import { EmbedService, ModelCapabilityService, ModelRegistry } from '../models/index.js'
@@ -249,6 +251,14 @@ export async function createAtomicCore(
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
     })
 
+    const managed = wireManagedRuntimes({
+      env: nodeDataFolderEnv(env),
+      instanceId: lock.instanceId,
+      platform,
+      emit: (name, payload) => emitter.emit(name, payload),
+      newId: () => randomUUID(),
+    })
+
     const control = await ControlServer.start(
       {
         token,
@@ -256,6 +266,9 @@ export async function createAtomicCore(
         version: CORE_VERSION,
         ownerScope: scope,
         dataFolder: layout.root,
+        environments: managed.service,
+        environmentsSnapshot: managed.environments,
+        environmentOperations: managed.operations,
         emitter,
         clients,
         sessions: () => sessionsOf(runtimes),
@@ -381,6 +394,7 @@ export async function createAtomicCore(
     }
     core = construct({
       layout,
+      managed,
       events: emitter,
       settings,
       clients,
@@ -410,6 +424,9 @@ export async function createAtomicCore(
       }),
     })
     await reapOrphans(journal, lock.instanceId, log)
+    // A setup the previous core was in the middle of is reconciled against the machine before the
+    // endpoint is published, so the first snapshot a client sees already describes it.
+    await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

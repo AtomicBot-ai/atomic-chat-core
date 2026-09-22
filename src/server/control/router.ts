@@ -41,6 +41,8 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
     clients: deps.clients.list(),
     downloads: [],
     optimal_backends: deps.backends.optimalSnapshot(),
+    environments: deps.environmentsSnapshot?.() ?? [],
+    environment_operations: deps.environmentOperations?.() ?? [],
   })
   const ctx: ControlRouteContext = { p, now, startedAt, snapshot, self }
 

@@ -234,6 +234,9 @@ export interface ChatGptControl {
 export interface ControlServerDeps {
   /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
   environments?: ManagedEnvironmentControl
+  /** The snapshot's view of them, kept in memory so it needs no disk read. */
+  environmentsSnapshot?: () => EnvironmentSnapshot[]
+  environmentOperations?: () => EnvironmentOperation[]
   token: string
   instanceId: string
   version: string
@@ -308,6 +311,9 @@ export interface ControlSnapshot {
   clients: ReturnType<ClientRegistry['list']>
   downloads: unknown[]
   optimal_backends: Record<string, OptimalState>
+  /** The managed container runtimes this user has, and the changes in flight on them. */
+  environments: EnvironmentSnapshot[]
+  environment_operations: EnvironmentOperation[]
 }
 
 /**

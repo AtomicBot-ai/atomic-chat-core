@@ -69,6 +69,12 @@ export interface CoreSnapshot {
   clients: Array<{ id: string; name: string; pid: number | null }>
   downloads: unknown[]
   optimal_backends?: Record<string, { revision: number; optimal: unknown | null }>
+  /**
+   * The managed container runtimes and the changes in flight on them. Optional so a client can
+   * still read a snapshot from a core that predates them.
+   */
+  environments?: EnvironmentSnapshot[]
+  environment_operations?: EnvironmentOperation[]
 }
 
 export interface CoreEventMessage {

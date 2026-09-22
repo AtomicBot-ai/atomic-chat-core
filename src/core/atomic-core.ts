@@ -21,6 +21,7 @@ import type {
 } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
+import type { ManagedRuntimes } from '../runtime/environment/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
 import type { InstanceLock } from '../lock/index.js'
@@ -65,6 +66,8 @@ export interface AtomicCoreParts {
   remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
   /** Image generation (stage 7): its own module, not a runtime. */
   diffusion: DiffusionService
+  /** Managed container runtimes: the durable operations that install and remove them. */
+  managed: ManagedRuntimes
 }
 
 export class AtomicCore {
@@ -107,6 +110,8 @@ export class AtomicCore {
   private readonly remoteAccess: RemoteAccessManager
   /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
   readonly diffusion: DiffusionService
+  /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
+  readonly managed: ManagedRuntimes
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -125,6 +130,7 @@ export class AtomicCore {
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
+    this.managed = parts.managed
     this.localSessions = new LocalSessions({
       layout: parts.layout,
       instanceId: parts.lock.instanceId,
@@ -298,6 +304,8 @@ export class AtomicCore {
       await this.publicServer.stop()
       // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
       await this.diffusion.shutdown()
+      // Stop what a setup has in flight. Its intent stays on disk, so the next core resumes it.
+      await this.managed.shutdown(AbortSignal.timeout(5_000)).catch(() => {})
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
       await this.localSessions.releaseAll()
       await this.control.close()
