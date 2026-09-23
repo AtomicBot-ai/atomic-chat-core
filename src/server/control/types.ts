@@ -22,6 +22,11 @@ import type {
   ImageJob,
   LoadDiffusionModelRequest,
   LoadedDiffusionModel,
+  VideoCapabilities,
+  VideoGalleryPage,
+  VideoGenerateRequest,
+  VideoJob,
+  GalleryVideoItem,
   LocalApiServerState,
   LocalProviderId,
   RemoteAccessStatus,
@@ -181,6 +186,18 @@ export interface DiffusionControl {
   deleteGalleryItems: (ids: string[]) => Promise<void>
   setGalleryFlags: (id: string, flags: GalleryFlags) => Promise<GalleryImageItem>
   exportGalleryItem: (id: string, targetPath: string) => Promise<void>
+  // --- video (stage 9d): the same session, its own jobs, gallery and poster ---
+  getVideoCapabilities: () => VideoCapabilities
+  generateVideo: (request: VideoGenerateRequest) => Promise<{ jobId: string }>
+  getVideoJob: (jobId: string) => VideoJob | null
+  cancelVideoJob: (jobId: string) => Promise<DiffusionCancelResult>
+  listVideoGallery: (options: GalleryListOptions) => Promise<VideoGalleryPage>
+  getVideoGalleryItem: (id: string) => Promise<GalleryVideoItem | null>
+  deleteVideoGalleryItems: (ids: string[]) => Promise<void>
+  setVideoGalleryFlags: (id: string, flags: GalleryFlags) => Promise<GalleryVideoItem>
+  exportVideoGalleryItem: (id: string, targetPath: string) => Promise<void>
+  /** The poster the app rendered from the clip's first frame; the bare base64 of a PNG. */
+  setVideoPoster: (id: string, pngBase64: string) => Promise<GalleryVideoItem>
 }
 
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */

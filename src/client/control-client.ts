@@ -28,6 +28,11 @@ import type {
   ImageGenerateRequest,
   ImageJob,
   LoadDiffusionModelRequest,
+  VideoCapabilities,
+  VideoGalleryPage,
+  VideoGenerateRequest,
+  VideoJob,
+  GalleryVideoItem,
   LoadedDiffusionModel,
   LocalApiServerState,
   RemoteAccessStatus,
@@ -311,6 +316,64 @@ export class CoreClient {
     await this.call(`/diffusion/gallery/${encodeURIComponent(id)}/export`, {
       method: 'POST',
       body: JSON.stringify({ targetPath }),
+    })
+  }
+
+  // --- video generation (stage 9d): the same session, its own jobs and gallery ------------------
+
+  diffusionVideoCapabilities(): Promise<VideoCapabilities> {
+    return this.call('/diffusion/video/capabilities')
+  }
+
+  /** Answers with the job id at once; progress and the outcome arrive as `diffusion:video-*` events. */
+  generateVideo(request: VideoGenerateRequest): Promise<{ jobId: string }> {
+    return this.call('/diffusion/video/jobs', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  async videoJob(jobId: string): Promise<VideoJob | null> {
+    return (await this.call<{ job: VideoJob | null }>(`/diffusion/video/jobs/${encodeURIComponent(jobId)}`))
+      .job
+  }
+
+  cancelVideoJob(jobId: string): Promise<DiffusionCancelResult> {
+    return this.call(`/diffusion/video/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+  }
+
+  listVideoGallery(options: GalleryListOptions): Promise<VideoGalleryPage> {
+    const query = new URLSearchParams({ offset: String(options.offset), limit: String(options.limit) })
+    if (options.includeArchived !== undefined) query.set('includeArchived', String(options.includeArchived))
+    return this.call(`/diffusion/video/gallery?${query.toString()}`)
+  }
+
+  async videoGalleryItem(id: string): Promise<GalleryVideoItem | null> {
+    return (
+      await this.call<{ item: GalleryVideoItem | null }>(`/diffusion/video/gallery/${encodeURIComponent(id)}`)
+    ).item
+  }
+
+  async deleteVideoGalleryItems(ids: string[]): Promise<void> {
+    await this.call('/diffusion/video/gallery/delete', { method: 'POST', body: JSON.stringify({ ids }) })
+  }
+
+  setVideoGalleryFlags(id: string, flags: GalleryFlags): Promise<GalleryVideoItem> {
+    return this.call(`/diffusion/video/gallery/${encodeURIComponent(id)}/flags`, {
+      method: 'PATCH',
+      body: JSON.stringify(flags),
+    })
+  }
+
+  async exportVideoGalleryItem(id: string, targetPath: string): Promise<void> {
+    await this.call(`/diffusion/video/gallery/${encodeURIComponent(id)}/export`, {
+      method: 'POST',
+      body: JSON.stringify({ targetPath }),
+    })
+  }
+
+  /** The poster the app rendered from the clip's first frame, as base64 PNG (a data-URL prefix accepted). */
+  setVideoPoster(id: string, pngBase64: string): Promise<GalleryVideoItem> {
+    return this.call(`/diffusion/video/gallery/${encodeURIComponent(id)}/poster`, {
+      method: 'PUT',
+      body: JSON.stringify({ png: pngBase64 }),
     })
   }
 

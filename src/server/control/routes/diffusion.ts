@@ -15,12 +15,27 @@ import {
   requireString,
   requireStringList,
 } from '../../../diffusion/index.js'
+import type { IncomingMessage } from 'node:http'
 import { queryOf, readJsonBody, sendJson } from '../../http.js'
 import type { Router } from '../../http.js'
+import type { GalleryListOptions } from '../../../contracts/index.js'
 import type { ControlRouteContext, ControlServerDeps } from '../types.js'
 
 /** A generation request may carry a source image, a mask and references inline as base64. */
 export const MAX_GENERATE_BODY_BYTES = 64 * 1024 * 1024
+
+/** `?offset&limit&includeArchived` as the gallery listings (image and video) take them. */
+export function galleryListOptionsFromQuery(req: IncomingMessage): GalleryListOptions {
+  const query = queryOf(req)
+  const includeArchived = query.get('includeArchived')
+  // An absent or empty number is not zero.
+  const number = (value: string | null) => (value === null || value === '' ? Number.NaN : Number(value))
+  return parseGalleryListOptions({
+    offset: number(query.get('offset')),
+    limit: number(query.get('limit')),
+    ...(includeArchived === null ? {} : { includeArchived: includeArchived === 'true' }),
+  })
+}
 
 export function registerDiffusionRoutes(
   router: Router,
@@ -90,18 +105,9 @@ export function registerDiffusionRoutes(
   )
 
   // --- gallery ---------------------------------------------------------------------------------
-  router.get(p('/diffusion/gallery'), async (req, res) => {
-    const query = queryOf(req)
-    const includeArchived = query.get('includeArchived')
-    // An absent or empty number is not zero.
-    const number = (value: string | null) => (value === null || value === '' ? Number.NaN : Number(value))
-    const options = parseGalleryListOptions({
-      offset: number(query.get('offset')),
-      limit: number(query.get('limit')),
-      ...(includeArchived === null ? {} : { includeArchived: includeArchived === 'true' }),
-    })
-    sendJson(res, 200, await diffusion.listGallery(options))
-  })
+  router.get(p('/diffusion/gallery'), async (req, res) =>
+    sendJson(res, 200, await diffusion.listGallery(galleryListOptionsFromQuery(req)))
+  )
   router.get(p('/diffusion/gallery/:id'), async (_req, res, { params }) =>
     sendJson(res, 200, { item: await diffusion.getGalleryItem(params['id'] as string) })
   )

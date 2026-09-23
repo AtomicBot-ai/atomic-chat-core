@@ -10,6 +10,9 @@ import type {
   ImageCapabilities,
   ImageJob,
   LoadedDiffusionModel,
+  VideoCapabilities,
+  VideoJob,
+  GalleryVideoItem,
 } from '../../src/contracts/index.js'
 import type { DiffusionControl } from '../../src/server/control/index.js'
 
@@ -111,6 +114,99 @@ export const FAKE_JOB: ImageJob = {
   outputs: [],
 }
 
+export const FAKE_VIDEO_CAPABILITIES: VideoCapabilities = {
+  workflows: ['create'],
+  minDim: 256,
+  maxDim: 1216,
+  dimMultiple: 32,
+  supportsNegativePrompt: false,
+  supportsGuidance: false,
+  cancelGenerating: false,
+  fps: 24,
+  frames: { min: 9, max: 257, step: 8, offset: 1, default: 121 },
+  resolutionPresets: [
+    [768, 512],
+    [1216, 704],
+  ],
+  outputFormat: 'webm',
+  webmSupported: true,
+  defaults: {
+    steps: 8,
+    cfgScale: 1,
+    width: 768,
+    height: 512,
+    video: {
+      fps: 24,
+      frames: 121,
+      frameStep: 8,
+      frameOffset: 1,
+      resolutionPresets: [
+        [768, 512],
+        [1216, 704],
+      ],
+    },
+  },
+  ranges: { steps: [1, 50], dims: [256, 1216], dimMultiple: 32, frames: [9, 257] },
+}
+
+export const FAKE_VIDEO_ITEM: GalleryVideoItem = {
+  id: '00000000000000000000000000000009',
+  path: '/tmp/data/videos/00000000000000000000000000000009.webm',
+  posterPath: null,
+  width: 768,
+  height: 512,
+  fps: 24,
+  frameCount: 25,
+  durationSecs: 25 / 24,
+  sizeBytes: 691,
+  createdAtMs: 3,
+  pinned: false,
+  archived: false,
+  recipe: {
+    jobId: '00000000000000000000000000000009',
+    prompt: 'a cat walking',
+    negativePrompt: null,
+    width: 768,
+    height: 512,
+    frames: 25,
+    frameCount: 25,
+    fps: 24,
+    steps: 8,
+    cfgScale: 1,
+    guidance: null,
+    seed: 100,
+    samplingMethod: null,
+    flowShift: null,
+    workflow: 'create',
+    outputFormat: 'webm',
+    model: {
+      modelId: 'ltx-2:q4_k_m',
+      family: 'ltx-2',
+      displayName: 'LTX-2.3 Distilled',
+      filename: 'ltx.gguf',
+    },
+    engine: {
+      kind: 'sd-cpp',
+      backend: 'metal',
+      tag: 'master-883-137f740',
+      offload: 'group',
+      cpuFallback: false,
+    },
+    createdAtMs: 3,
+    durationMs: 4,
+  },
+}
+
+export const FAKE_VIDEO_JOB: VideoJob = {
+  id: 'vjob-1',
+  state: 'queued',
+  modelId: 'ltx-2:q4_k_m',
+  request: { prompt: 'a cat walking', width: 768, height: 512, frames: 25, steps: 8, cfgScale: 1 },
+  createdAtMs: 5,
+  progress: null,
+  outputs: [],
+}
+
 export interface FakeDiffusionControl extends DiffusionControl {
   /** `getJob` and `getGalleryItem` answer `null` for any other id. */
   knownJobId: string
@@ -183,6 +279,37 @@ export function fakeDiffusionControl(calls: string[]): FakeDiffusionControl {
     },
     exportGalleryItem: async (id, targetPath) => {
       note(`exportGalleryItem ${id} ${targetPath}`)
+    },
+    getVideoCapabilities: () => FAKE_VIDEO_CAPABILITIES,
+    generateVideo: async (request) => {
+      note(
+        `generateVideo ${request.prompt} ${request.width}x${request.height}x${request.frames ?? 'default'}`
+      )
+      return { jobId: FAKE_VIDEO_JOB.id }
+    },
+    getVideoJob: (jobId) => (jobId === FAKE_VIDEO_JOB.id ? FAKE_VIDEO_JOB : null),
+    cancelVideoJob: async (jobId) => {
+      note(`cancelVideoJob ${jobId}`)
+      return { cancelled: true, serverStopped: false }
+    },
+    listVideoGallery: async (options) => {
+      note(`listVideoGallery ${JSON.stringify(options)}`)
+      return { items: [FAKE_VIDEO_ITEM], hasMore: false, total: 1 }
+    },
+    getVideoGalleryItem: async (id) => (id === FAKE_VIDEO_ITEM.id ? FAKE_VIDEO_ITEM : null),
+    deleteVideoGalleryItems: async (ids) => {
+      note(`deleteVideoGalleryItems ${ids.join(',')}`)
+    },
+    setVideoGalleryFlags: async (id, flags) => {
+      note(`setVideoGalleryFlags ${id} ${JSON.stringify(flags)}`)
+      return { ...FAKE_VIDEO_ITEM, id, pinned: flags.pinned ?? false, archived: flags.archived ?? false }
+    },
+    exportVideoGalleryItem: async (id, targetPath) => {
+      note(`exportVideoGalleryItem ${id} ${targetPath}`)
+    },
+    setVideoPoster: async (id, pngBase64) => {
+      note(`setVideoPoster ${id} ${pngBase64.length}`)
+      return { ...FAKE_VIDEO_ITEM, id, posterPath: `/tmp/data/videos/${id}.thumb.png` }
     },
   }
   return fake
