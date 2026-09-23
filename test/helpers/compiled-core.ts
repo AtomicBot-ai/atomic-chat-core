@@ -13,14 +13,13 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
+const CPU = process.arch === 'arm64' ? 'aarch64' : 'x86_64'
 const TRIPLE =
   process.platform === 'darwin'
-    ? process.arch === 'arm64'
-      ? 'aarch64-apple-darwin'
-      : 'x86_64-apple-darwin'
+    ? `${CPU}-apple-darwin`
     : process.platform === 'win32'
-      ? 'x86_64-pc-windows-msvc.exe'
-      : 'x86_64-unknown-linux-gnu'
+      ? `${CPU}-pc-windows-msvc.exe`
+      : `${CPU}-unknown-linux-gnu`
 export const BIN = join(ROOT, 'dist/bin', `atomic-chat-core-${TRIPLE}`)
 /** The version the binaries were built with (`package.json`, kept in step with `src/version.ts`). */
 export const CORE_VERSION = (
@@ -160,8 +159,7 @@ export async function writeModel(dataFolder: string, id: string): Promise<void> 
 }
 
 /** The backend folder name of this machine, as the providers' release matrices spell it. */
-export const HOST_BACKEND =
-  process.platform === 'linux' ? 'linux-cpu-x64' : `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
+export const HOST_BACKEND = `${process.platform === 'linux' ? 'linux-cpu' : 'macos'}-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
 
 /**
  * A backend pack whose `llama-server` is the fake one, so the binary can actually load something.

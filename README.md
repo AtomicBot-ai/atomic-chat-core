@@ -37,8 +37,9 @@ make release                 # patch; or VERSION=minor, major, or an explicit X.
 It bumps `package.json` and `src/version.ts` together, commits `release: vX.Y.Z`, tags it and pushes
 the branch and the tag (the current version, given explicitly, only tags `HEAD`). Without make:
 `npm run release -- patch --push`, or leave out `--push` to look before pushing. The tag runs the
-`release` workflow: the same gates as CI on macOS, Linux and Windows, both binaries cross-compiled for every
-target, then `vX.Y.Z` published with the binaries and `SHA256SUMS` as the latest release.
+`release` workflow: the same gates as CI on macOS, Linux and Windows (Linux and Windows on x64 and arm64), both
+binaries cross-compiled for every target (macOS arm64 and x64, Windows x64 and arm64, Linux x64 and arm64), then
+`vX.Y.Z` published with the binaries and `SHA256SUMS` as the latest release.
 
 The workflow can also be started by hand for the version already in `package.json` on a branch
 (Actions → release → Run workflow, or `gh workflow run release.yml --ref <branch>`); it creates the

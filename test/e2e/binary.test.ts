@@ -6,14 +6,13 @@ import { describe, expect, it } from 'vitest'
 
 // Drives the compiled binary produced by `npm run build:bin`. Skips when it has not been built.
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
+const CPU = process.arch === 'arm64' ? 'aarch64' : 'x86_64'
 const TRIPLE =
   process.platform === 'darwin'
-    ? process.arch === 'arm64'
-      ? 'aarch64-apple-darwin'
-      : 'x86_64-apple-darwin'
+    ? `${CPU}-apple-darwin`
     : process.platform === 'win32'
-      ? 'x86_64-pc-windows-msvc.exe'
-      : 'x86_64-unknown-linux-gnu'
+      ? `${CPU}-pc-windows-msvc.exe`
+      : `${CPU}-unknown-linux-gnu`
 const BIN = join(ROOT, 'dist/bin', `atomic-chat-core-${TRIPLE}`)
 
 describe.skipIf(!existsSync(BIN))('compiled binary', () => {

@@ -246,7 +246,8 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     }
   )
 
-  it.skipIf(!CAN_INSTALL_FAKE_BACKEND)(
+  // The fork's only Linux arm64 build is CUDA 13, which this host has none of: nothing to select.
+  it.skipIf(!CAN_INSTALL_FAKE_BACKEND || (process.platform === 'linux' && process.arch === 'arm64'))(
     'loads a TurboQuant model on a fork build it selects itself, and serves it',
     async () => {
       const core = await createCore()

@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-23** — [Release arm64 binaries for Windows and Linux, proven on native arm runners](2026-09-23-release-arm64-binaries-for-windows-and-linux.md)
 - **2026-09-23** — [Serve /v1/videos as an asynchronous facade backed by the gallery](2026-09-23-serve-v1-videos-as-an-async-facade-backed-by-the-gallery.md)
 - **2026-09-23** — [Generate video through the resident diffusion session, with its own wire types and files](2026-09-23-generate-video-through-the-resident-diffusion-session.md)
 - **2026-09-22** — [Two things Bun's node:http does not tell the server: a client that hangs up before the answer, and an answer written before the body is read](2026-09-22-detect-a-client-that-hangs-up-before-the-answer-under-bun.md) — qualifies the 2026-09-15 Node-compatible-API decision with two confined work-arounds pinned under both runtimes.
