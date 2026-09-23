@@ -18,11 +18,16 @@ import type {
   GalleryImageItem,
   GalleryListOptions,
   GalleryPage,
+  GalleryVideoItem,
   ImageCapabilities,
   ImageGenerateRequest,
   ImageJob,
   LoadDiffusionModelRequest,
   LoadedDiffusionModel,
+  VideoCapabilities,
+  VideoGalleryPage,
+  VideoGenerateRequest,
+  VideoJob,
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
 import type { ImagesBackend } from '../server/index.js'
@@ -47,7 +52,9 @@ import {
   drawSeed,
   readSourceFile,
   runImageJob,
+  runVideoJob,
   startImageJob,
+  startVideoJob,
 } from './jobs.js'
 import type { JobDeps, JobOutcome, JobTimings } from './jobs.js'
 import { AsyncMutex } from './mutex.js'
@@ -61,11 +68,14 @@ import {
   shutdownSession,
   takeDownSession,
   unload,
+  videoCapabilities,
 } from './session.js'
 import type { DiffusionEmitter, DiffusionLogger } from './session.js'
 import { DiffusionState } from './state.js'
 import { DEFAULT_STARTUP_TIMEOUT_SECS } from './types.js'
 import type { ServerSpec } from './types.js'
+import { stripDataUrl } from './validate.js'
+import { MAX_POSTER_BYTES, VideoGallery } from './video-gallery.js'
 
 export interface DiffusionServiceDeps {
   paths: DiffusionPaths
@@ -100,6 +110,7 @@ export class DiffusionService {
   readonly state: DiffusionState
   private readonly deps: JobDeps
   private readonly gallery: Gallery
+  private readonly videoGallery: VideoGallery
   private readonly platform: NodeJS.Platform
   private readonly dataFolder: string
   private readonly idleTickMs: number | undefined
@@ -117,6 +128,7 @@ export class DiffusionService {
     this.idleTickMs = options.idleTickMs
     this.state = new DiffusionState(options.paths, now)
     this.gallery = new Gallery((level, msg) => log(level, msg))
+    this.videoGallery = new VideoGallery((level, msg) => log(level, msg))
     const journal = options.journal
     const spawn =
       options.spawn ??
@@ -146,6 +158,7 @@ export class DiffusionService {
       ...(journal ? { onServerGone: (pid: number) => journal.remove(pid) } : {}),
       http,
       gallery: this.gallery,
+      videoGallery: this.videoGallery,
       loadLock: new AsyncMutex(),
       timings: { ...DEFAULT_JOB_TIMINGS, ...options.timings },
       drawSeed: options.drawSeed ?? drawSeed,
@@ -312,12 +325,8 @@ export class DiffusionService {
         modality: request.modality,
         displayName: request.displayName,
         files: { ...request.files },
-        defaults: { ...request.defaults },
-        ranges: {
-          steps: [...request.ranges.steps],
-          dims: [...request.ranges.dims],
-          dimMultiple: request.ranges.dimMultiple,
-        },
+        defaults: structuredClone(request.defaults),
+        ranges: structuredClone(request.ranges),
         offload: request.offload,
         ...(request.threads !== undefined ? { threads: request.threads } : {}),
         extraArgs: [],
@@ -347,6 +356,10 @@ export class DiffusionService {
 
   getCapabilities(): ImageCapabilities {
     return capabilities(this.state)
+  }
+
+  getVideoCapabilities(): VideoCapabilities {
+    return videoCapabilities(this.state)
   }
 
   /** Reset the idle-unload deadline without generating. */
@@ -384,8 +397,71 @@ export class DiffusionService {
     return this.state.job(jobId) ?? null
   }
 
+  /** Cancels a job of either kind. */
   cancelJob(jobId: string): Promise<DiffusionCancelResult> {
     return cancelJob(this.deps, jobId)
+  }
+
+  // --- video jobs ----------------------------------------------------------------------------------
+
+  async generateVideo(request: VideoGenerateRequest): Promise<{ jobId: string }> {
+    const { id } = await startVideoJob(this.deps, request)
+    return { jobId: id }
+  }
+
+  /** Run one video job to completion; the `/v1/videos` facade's path. */
+  runVideoJob(request: VideoGenerateRequest): Promise<JobOutcome<VideoJob>> {
+    return runVideoJob(this.deps, request)
+  }
+
+  getVideoJob(jobId: string): VideoJob | null {
+    return this.state.videoJob(jobId) ?? null
+  }
+
+  cancelVideoJob(jobId: string): Promise<DiffusionCancelResult> {
+    if (this.state.record(jobId)?.kind !== 'video')
+      return Promise.reject(diffusionError('JOB_NOT_FOUND', 'That job no longer exists.'))
+    return cancelJob(this.deps, jobId)
+  }
+
+  // --- video gallery -------------------------------------------------------------------------------
+
+  listVideoGallery(options: GalleryListOptions): Promise<VideoGalleryPage> {
+    return this.videoGallery.list(this.requireVideoOutputDir(), options)
+  }
+
+  getVideoGalleryItem(id: string): Promise<GalleryVideoItem | null> {
+    return this.videoGallery.get(this.requireVideoOutputDir(), id)
+  }
+
+  deleteVideoGalleryItems(ids: string[]): Promise<void> {
+    return this.videoGallery.delete(this.requireVideoOutputDir(), ids)
+  }
+
+  setVideoGalleryFlags(id: string, flags: GalleryFlags): Promise<GalleryVideoItem> {
+    return this.videoGallery.setFlags(this.requireVideoOutputDir(), id, flags)
+  }
+
+  exportVideoGalleryItem(id: string, targetPath: string): Promise<void> {
+    return this.videoGallery.export(this.requireVideoOutputDir(), id, targetPath)
+  }
+
+  /** The poster the app rendered from the clip's first frame, as base64 PNG (a data-URL prefix accepted). */
+  setVideoPoster(id: string, pngBase64: string): Promise<GalleryVideoItem> {
+    const dir = this.requireVideoOutputDir()
+    const payload = stripDataUrl(pngBase64)
+    // A base64 payload past the cap is refused before it is decoded.
+    if (payload.length > (MAX_POSTER_BYTES * 4) / 3 + 4)
+      return Promise.reject(
+        diffusionError('INVALID_REQUEST', 'The poster is too large.', `${payload.length} base64 characters`)
+      )
+    return this.videoGallery.setPoster(dir, id, Buffer.from(payload, 'base64'))
+  }
+
+  private requireVideoOutputDir(): string {
+    if (!this.state.configured)
+      throw diffusionError('NOT_CONFIGURED', 'Image generation has not been configured yet.')
+    return this.state.videoOutputDir()
   }
 
   // --- gallery -------------------------------------------------------------------------------------

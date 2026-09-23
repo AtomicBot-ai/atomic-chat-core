@@ -113,6 +113,8 @@ export function emitError(
 export function capabilities(state: DiffusionState): ImageCapabilities {
   const spec = state.spec
   if (!spec) throw modelNotLoadedError()
+  if (spec.modality !== 'image')
+    throw diffusionError('MODEL_INCOMPATIBLE', 'The loaded model generates video, not images.', spec.modelId)
   return {
     workflows: workflowsForSpec(spec),
     minDim: spec.ranges.dims[0],

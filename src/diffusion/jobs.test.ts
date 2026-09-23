@@ -6,15 +6,31 @@ import { createServer } from 'node:http'
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
-import type { CoreEvents } from '../contracts/index.js'
-import { fakeServer, paintedPng, sampleRequest, sampleSpec } from '../../test/helpers/diffusion-fixtures.js'
+import type { CoreEvents, VideoJob } from '../contracts/index.js'
+import {
+  fakeServer,
+  paintedPng,
+  sampleRequest,
+  sampleSpec,
+  sampleVideoRequest,
+  sampleVideoSpec,
+} from '../../test/helpers/diffusion-fixtures.js'
 import type { FakeServer } from '../../test/helpers/diffusion-fixtures.js'
 import { Gallery } from './gallery.js'
+import { VideoGallery } from './video-gallery.js'
 import { encodePng } from './png.js'
 import { createSdHttpClient } from './http.js'
-import { cancelJob, DEFAULT_JOB_TIMINGS, runImageJob, startImageJob } from './jobs.js'
+import {
+  cancelJob,
+  DEFAULT_JOB_TIMINGS,
+  runImageJob,
+  runVideoJob,
+  startImageJob,
+  startVideoJob,
+} from './jobs.js'
 import type { JobDeps, JobResult } from './jobs.js'
 import { AsyncMutex } from './mutex.js'
 import { DiffusionState } from './state.js'
@@ -113,6 +129,7 @@ function harness(port: number, options: { cancelGenerating?: boolean; spawnFails
     },
     http: createSdHttpClient(),
     gallery: new Gallery(),
+    videoGallery: new VideoGallery(),
     loadLock: new AsyncMutex(),
     timings: { ...DEFAULT_JOB_TIMINGS, pollIntervalMs: 20, cancelGraceMs: 400, cancelPollMs: 20 },
     drawSeed: () => 777,
@@ -173,7 +190,7 @@ function harness(port: number, options: { cancelGenerating?: boolean; spawnFails
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-const failure = (result: JobResult) => {
+const failure = (result: JobResult | JobResult<VideoJob>) => {
   if (result.ok) throw new Error('expected a failure')
   return result.error
 }
@@ -568,28 +585,6 @@ describe('a failed job', () => {
 })
 
 describe('cancelling', () => {
-  it('refuses a record whose kind has no runner yet', async () => {
-    const port = await stub(() => json(404, {}))
-    const h = harness(port)
-    h.state.insertJob({
-      kind: 'video',
-      job: {
-        id: 'v',
-        state: 'generating',
-        modelId: 'm',
-        request: { prompt: 'x', width: 768, height: 512, steps: 8, cfgScale: 1 },
-        createdAtMs: 1,
-        progress: null,
-        outputs: [],
-      },
-      cancel: { requested: false },
-    })
-    await expect(cancelJob(h.deps, 'v')).rejects.toMatchObject({
-      code: 'INTERNAL',
-      message: 'No runner for video jobs.',
-    })
-  })
-
   it('past the grace period stops the server and keeps the spec', async () => {
     let cancels = 0
     const port = await stub((method, path) => {
@@ -886,6 +881,189 @@ describe('the server dying', () => {
     expect(cancels).toBe(1)
     expect(h.state.session).toBeUndefined()
     expect(h.reasons()).toContain('timeout')
+  })
+})
+
+/** The harness on a video spec: the same server handle, the loaded model is LTX. */
+function videoHarness(port: number, options: { cancelGenerating?: boolean } = {}): Harness {
+  const h = harness(port, options)
+  const spec = sampleVideoSpec()
+  h.state.spec = spec
+  if (h.state.session) {
+    h.state.session.spec = spec
+    h.state.session.info = {
+      ...h.state.session.info,
+      modelId: spec.modelId,
+      family: spec.family,
+      modality: 'video',
+    }
+    h.state.session.server.capabilities = {
+      cancelGenerating: false,
+      supportedModes: ['vid_gen'],
+      vidGen: { cancelGenerating: options.cancelGenerating ?? false, outputFormats: ['webm', 'webp', 'avi'] },
+    }
+  }
+  return h
+}
+
+const webmFixture = () =>
+  readFile(fileURLToPath(new URL('../../test/fixtures/webm/tiny.webm', import.meta.url)))
+
+describe('a video job', () => {
+  it('goes through vid_gen, reports on its own events, and saves one clip with its sidecar', async () => {
+    const webm = await webmFixture()
+    let polls = 0
+    const port = await stub((method, path, body) => {
+      if (method === 'POST' && path === '/sdcpp/v1/vid_gen') {
+        const sent = JSON.parse(body) as Record<string, unknown>
+        expect(sent['video_frames']).toBe(25)
+        expect(sent['fps']).toBe(24)
+        expect(sent['output_format']).toBe('webm')
+        expect((sent['sample_params'] as Record<string, unknown>)['custom_sigmas']).toHaveLength(8)
+        return json(202, { id: 'job_v', kind: 'vid_gen', status: 'queued', poll_url: '/sdcpp/v1/jobs/job_v' })
+      }
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_v') {
+        polls += 1
+        if (polls < 10)
+          return json(200, { id: 'job_v', kind: 'vid_gen', status: 'generating', result: null, error: null })
+        return json(200, {
+          id: 'job_v',
+          kind: 'vid_gen',
+          status: 'completed',
+          result: {
+            output_format: 'webm',
+            mime_type: 'video/webm',
+            fps: 24,
+            frame_count: 25,
+            b64_json: webm.toString('base64'),
+          },
+          error: null,
+        })
+      }
+      return json(404, {})
+    })
+    const h = videoHarness(port)
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    expect(h.state.activeJobId).toBe(id)
+    expect(h.state.activeVideoJob()?.id).toBe(id)
+    expect(h.state.activeJob(), 'the image status stays empty').toBeNull()
+    // A second submission of either kind is refused while it runs, in the video's words.
+    await expect(startVideoJob(h.deps, sampleVideoRequest())).rejects.toMatchObject({
+      code: 'JOB_BUSY',
+      message: 'A video is already being generated.',
+      details: id,
+    })
+    await expect(startImageJob(h.deps, sampleRequest())).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
+    await sleep(30)
+    h.server.say('|==>     | 3/8 - 1.0s/it')
+
+    const result = await done
+    if (!result.ok) throw new Error(result.error.message)
+    const { outcome } = result
+    expect(outcome.job.state).toBe('completed')
+    expect(outcome.job.outputs).toHaveLength(1)
+    expect(outcome.images).toHaveLength(1)
+    expect(outcome.images[0]?.equals(webm)).toBe(true)
+    const [item] = outcome.job.outputs
+    expect(item?.id).toBe(id)
+    expect(item?.path).toBe(join(dataFolder, 'videos', `${id}.webm`))
+    expect(item?.posterPath).toBeNull()
+    expect([item?.frameCount, item?.fps, item?.recipe.frames, item?.recipe.seed]).toEqual([25, 24, 25, 1234])
+    expect(item?.recipe.model.filename).toBe('ltx-2.3-22b-distilled-Q4_K_M.gguf')
+    expect((await readFile(item?.path as string)).equals(webm)).toBe(true)
+    expect(await stat(join(dataFolder, 'videos', `${id}.json`))).toBeDefined()
+    expect(h.state.videoJob(id)?.state).toBe('completed')
+    expect(h.state.job(id)).toBeUndefined()
+
+    const names = h.events.map((e) => e.name)
+    expect(names.filter((n) => n === 'diffusion:video-job')).toHaveLength(3)
+    expect(names).not.toContain('diffusion:job')
+    expect(names).not.toContain('diffusion:progress')
+    const progress = h.events
+      .filter((e) => e.name === 'diffusion:video-progress')
+      .map((e) => (e.payload as CoreEvents['diffusion:video-progress']).progress)
+    expect(progress.some((p) => p.step === 3 && p.phase === 'sampling' && p.totalSteps === 8)).toBe(true)
+    expect(progress.some((p) => p.phase === 'saving')).toBe(true)
+    expect(progress.every((p) => !('batchIndex' in p))).toBe(true)
+    expect(h.errors()).toEqual([])
+  })
+
+  it('refuses a build without WebM before submitting, and a clip that is not a WebM after', async () => {
+    let submits = 0
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/vid_gen') {
+        submits += 1
+        return json(202, { id: 'job_x', status: 'queued' })
+      }
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_x')
+        return json(200, {
+          id: 'job_x',
+          status: 'completed',
+          result: { output_format: 'webm', b64_json: Buffer.from('not a webm').toString('base64') },
+        })
+      return json(404, {})
+    })
+    const h = videoHarness(port)
+    h.server.handle.capabilities = {
+      cancelGenerating: false,
+      vidGen: { cancelGenerating: false, outputFormats: ['avi'] },
+    }
+    await expect(runVideoJob(h.deps, sampleVideoRequest())).rejects.toMatchObject({
+      code: 'UNSUPPORTED_BACKEND',
+      message: 'This engine build was made without WebM support.',
+    })
+    expect(submits).toBe(0)
+    expect(h.state.session, 'the server is left running').toBeDefined()
+
+    h.server.handle.capabilities = { cancelGenerating: false, vidGen: { cancelGenerating: false } }
+    await expect(runVideoJob(h.deps, sampleVideoRequest())).rejects.toMatchObject({
+      code: 'INVALID_OUTPUT',
+      message: 'The video engine returned something that is not a WebM.',
+    })
+    expect(submits).toBe(1)
+    expect(await readdir(join(dataFolder, 'videos')).catch(() => [])).toEqual([])
+  })
+
+  it('is refused on an image model, and an image job on a video model, before anything runs', async () => {
+    const port = await stub(() => json(404, {}))
+    const image = harness(port)
+    await expect(startVideoJob(image.deps, sampleVideoRequest())).rejects.toMatchObject({
+      code: 'MODEL_INCOMPATIBLE',
+      message: 'The loaded model generates images, not video. Load a video model first.',
+      details: 'z-image:q4_k_m',
+    })
+    const video = videoHarness(port)
+    await expect(startImageJob(video.deps, sampleRequest())).rejects.toMatchObject({
+      code: 'MODEL_INCOMPATIBLE',
+      message: 'The loaded model generates video, not images. Load an image model first.',
+      details: 'ltx-2:q4_k_m',
+    })
+    expect(image.state.activeJobId).toBeUndefined()
+    expect(video.events).toEqual([])
+  })
+
+  it('cancels natively when the engine promised it for vid_gen', async () => {
+    let cancelled = false
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/vid_gen')
+        return json(202, { id: 'job_c', status: 'queued' })
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_c')
+        return cancelled
+          ? json(200, { id: 'job_c', status: 'cancelled' })
+          : json(200, { id: 'job_c', status: 'generating' })
+      if (method === 'POST' && path === '/sdcpp/v1/jobs/job_c/cancel') {
+        cancelled = true
+        return json(200, { id: 'job_c', status: 'cancelled' })
+      }
+      return json(404, {})
+    })
+    const h = videoHarness(port, { cancelGenerating: true })
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    await sleep(80)
+    expect(await cancelJob(h.deps, id)).toEqual({ cancelled: true, serverStopped: false })
+    expect(failure(await done).code).toBe('CANCELLED')
+    expect(h.state.session, 'the server was not stopped').toBeDefined()
+    expect(h.state.videoJob(id)?.state).toBe('cancelled')
   })
 })
 

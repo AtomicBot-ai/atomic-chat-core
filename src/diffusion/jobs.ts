@@ -18,6 +18,7 @@ import type {
   ImageGenerateRequest,
   ImageJob,
   ImageJobState,
+  VideoGenerateRequest,
   VideoJob,
 } from '../contracts/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
@@ -26,6 +27,8 @@ import { cancelledError, diffusionError, errorBody, internalError, modelNotLoade
 import type { Gallery } from './gallery.js'
 import type { SdHttpClient } from './http.js'
 import { IMAGE_JOB_KIND } from './image-job.js'
+import { VIDEO_JOB_KIND } from './video-job.js'
+import type { VideoGallery } from './video-gallery.js'
 import type { AnyJobKind, JobCommon, JobKind } from './job-kind.js'
 import type { AsyncMutex } from './mutex.js'
 import { classifyExit, diagnosticTail, GpuFaultWatch } from './progress.js'
@@ -67,6 +70,7 @@ export const DEFAULT_JOB_TIMINGS: JobTimings = {
 export interface JobDeps extends SessionDeps {
   http: SdHttpClient
   gallery: Gallery
+  videoGallery: VideoGallery
   loadLock: AsyncMutex
   timings: JobTimings
   drawSeed: () => number
@@ -83,11 +87,8 @@ export interface JobOutcome<J = ImageJob> {
 export type JobResult<J = ImageJob> =
   { ok: true; outcome: JobOutcome<J> } | { ok: false; error: DiffusionErrorBody }
 
-/** The runner path a record belongs to. Video registers itself beside the image kind. */
-function kindOf(id: JobKindId): AnyJobKind {
-  if (id === 'image') return IMAGE_JOB_KIND
-  throw internalError(`No runner for ${id} jobs.`)
-}
+/** The runner path a record belongs to. */
+const kindOf = (id: JobKindId): AnyJobKind => (id === 'video' ? VIDEO_JOB_KIND : IMAGE_JOB_KIND)
 
 export function drawSeed(): number {
   return randomInt(0, 0x1_0000_0000)
@@ -225,6 +226,14 @@ export async function runJob<Req, Job extends JobCommon<Item, Progress>, Item, P
 /** Run one image job to completion; the OpenAI facade's path. */
 export const runImageJob = (deps: JobDeps, request: ImageGenerateRequest): Promise<JobOutcome> =>
   runJob(deps, IMAGE_JOB_KIND, request)
+
+/** Validate, register and start a video job. */
+export const startVideoJob = (deps: JobDeps, request: VideoGenerateRequest): Promise<StartedJob<VideoJob>> =>
+  startJob(deps, VIDEO_JOB_KIND, request)
+
+/** Run one video job to completion; `images` holds the one clip. */
+export const runVideoJob = (deps: JobDeps, request: VideoGenerateRequest): Promise<JobOutcome<VideoJob>> =>
+  runJob(deps, VIDEO_JOB_KIND, request)
 
 // ---------------------------------------------------------------------------
 // The runner
