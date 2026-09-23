@@ -14,6 +14,7 @@ import type {
   DiffusionModality,
   DiffusionModelFiles,
   DiffusionOffloadPolicy,
+  DiffusionVideoDefaults,
   FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryListOptions,
@@ -21,9 +22,12 @@ import type {
   ImageSource,
   ImageWorkflowId,
   LoadDiffusionModelRequest,
+  VideoGenerateRequest,
+  VideoWorkflowId,
 } from '../contracts/index.js'
 import { diffusionError } from './errors.js'
-import { IMAGE_WORKFLOWS } from './workflow.js'
+import { isCanonicalBase64, stripDataUrl } from './validate.js'
+import { IMAGE_WORKFLOWS, VIDEO_WORKFLOWS } from './workflow.js'
 
 const U32_MAX = 0xffff_ffff
 
@@ -106,9 +110,46 @@ function parseFiles(value: unknown): DiffusionModelFiles {
   const files: DiffusionModelFiles = {
     diffusionModel: string(source['diffusionModel'], 'files.diffusionModel'),
   }
-  for (const key of ['vae', 'vaeFormat', 'clipL', 't5xxl', 'llm', 'llmVision', 'qwen2vl'] as const)
+  for (const key of [
+    'vae',
+    'vaeFormat',
+    'clipL',
+    't5xxl',
+    'llm',
+    'llmVision',
+    'qwen2vl',
+    'audioVae',
+    'embeddingsConnectors',
+  ] as const)
     copyOptional(files, key, source, `files.${key}`, string)
   return files
+}
+
+function positive(value: unknown, field: string): number {
+  const whole = u32(value, field)
+  if (whole === 0) invalid(field, 'a whole number, one or more')
+  return whole
+}
+
+function parseResolutionPresets(value: unknown, field: string): [number, number][] {
+  if (!Array.isArray(value)) invalid(field, 'a list of [width, height] pairs')
+  return value.map((item, index) => pair(item, `${field}[${index}]`))
+}
+
+function parseVideoDefaults(value: unknown, field: string): DiffusionVideoDefaults {
+  const source = fields(value, field)
+  return {
+    fps: positive(source['fps'], `${field}.fps`),
+    frames: positive(source['frames'], `${field}.frames`),
+    frameStep: positive(source['frameStep'], `${field}.frameStep`),
+    frameOffset: u32(source['frameOffset'], `${field}.frameOffset`),
+    resolutionPresets: parseResolutionPresets(source['resolutionPresets'], `${field}.resolutionPresets`),
+  }
+}
+
+function parseSigmas(value: unknown, field: string): number[] {
+  if (!Array.isArray(value) || value.length === 0) invalid(field, 'a non-empty list of numbers')
+  return value.map((item, index) => number(item, `${field}[${index}]`))
 }
 
 function parseDefaults(value: unknown): DiffusionFamilyDefaults {
@@ -122,16 +163,20 @@ function parseDefaults(value: unknown): DiffusionFamilyDefaults {
   copyOptional(defaults, 'guidance', source, 'defaults.guidance', number)
   copyOptional(defaults, 'samplingMethod', source, 'defaults.samplingMethod', string)
   copyOptional(defaults, 'flowShift', source, 'defaults.flowShift', number)
+  copyOptional(defaults, 'sigmas', source, 'defaults.sigmas', parseSigmas)
+  copyOptional(defaults, 'video', source, 'defaults.video', parseVideoDefaults)
   return defaults
 }
 
 function parseRanges(value: unknown): DiffusionFamilyRanges {
   const source = fields(value, 'ranges')
-  return {
+  const ranges: DiffusionFamilyRanges = {
     steps: pair(source['steps'], 'ranges.steps'),
     dims: pair(source['dims'], 'ranges.dims'),
     dimMultiple: u32(source['dimMultiple'], 'ranges.dimMultiple'),
   }
+  copyOptional(ranges, 'frames', source, 'ranges.frames', pair)
+  return ranges
 }
 
 export function parseLoadModelRequest(body: unknown): LoadDiffusionModelRequest {
@@ -149,6 +194,12 @@ export function parseLoadModelRequest(body: unknown): LoadDiffusionModelRequest 
   copyOptional(request, 'engine', source, 'engine', (value, field) => oneOf(value, ENGINES, field))
   copyOptional(request, 'threads', source, 'threads', u32)
   copyOptional(request, 'startupTimeoutSecs', source, 'startupTimeoutSecs', u64)
+  // A video family must say how it counts frames, or nothing downstream can validate a request.
+  if (request.modality === 'video') {
+    if (request.defaults.video === undefined)
+      invalid('defaults.video', 'the video defaults of a video family')
+    if (request.ranges.frames === undefined) invalid('ranges.frames', 'the frame range of a video family')
+  }
   return request
 }
 
@@ -188,10 +239,42 @@ export function parseImageGenerateRequest(body: unknown): ImageGenerateRequest {
   return request
 }
 
+export function parseVideoGenerateRequest(body: unknown): VideoGenerateRequest {
+  const source = fields(body, 'request')
+  const request: VideoGenerateRequest = {
+    prompt: string(source['prompt'], 'prompt'),
+    width: u32(source['width'], 'width'),
+    height: u32(source['height'], 'height'),
+    steps: u32(source['steps'], 'steps'),
+    cfgScale: number(source['cfgScale'], 'cfgScale'),
+  }
+  copyOptional(request, 'negativePrompt', source, 'negativePrompt', string)
+  copyOptional(request, 'frames', source, 'frames', u32)
+  copyOptional(request, 'fps', source, 'fps', u32)
+  copyOptional(request, 'guidance', source, 'guidance', number)
+  copyOptional(request, 'seed', source, 'seed', signedWholeNumber)
+  copyOptional(request, 'samplingMethod', source, 'samplingMethod', string)
+  copyOptional(request, 'flowShift', source, 'flowShift', number)
+  copyOptional(request, 'workflow', source, 'workflow', (value, field) =>
+    oneOf<VideoWorkflowId>(value, VIDEO_WORKFLOWS, field)
+  )
+  copyOptional(request, 'initImage', source, 'initImage', parseSource)
+  copyOptional(request, 'endImage', source, 'endImage', parseSource)
+  return request
+}
+
+/** `{png}`: the poster the app rendered, as base64 (a data-URL prefix accepted); the bare payload. */
+export function parseVideoPoster(body: unknown): string {
+  const payload = stripDataUrl(string(fields(body, 'body')['png'], 'png'))
+  if (payload === '' || !isCanonicalBase64(payload)) invalid('png', 'a base64 PNG')
+  return payload
+}
+
 export function parseDiffusionConfig(body: unknown): DiffusionConfig {
   const source = fields(body, 'config')
   const config: DiffusionConfig = { dataFolder: string(source['dataFolder'], 'dataFolder') }
   copyOptional(config, 'outputDir', source, 'outputDir', string)
+  copyOptional(config, 'videoOutputDir', source, 'videoOutputDir', string)
   copyOptional(config, 'idleUnloadSecs', source, 'idleUnloadSecs', u64)
   return config
 }

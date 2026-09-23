@@ -4,7 +4,7 @@
  * `ec1fd3ea7`).
  */
 
-import type { ImageGenerateRequest, ImageWorkflowId } from '../contracts/index.js'
+import type { ImageGenerateRequest, ImageWorkflowId, VideoWorkflowId } from '../contracts/index.js'
 import type { ServerSpec } from './types.js'
 
 export const IMAGE_WORKFLOWS: readonly ImageWorkflowId[] = [
@@ -76,4 +76,12 @@ export function workflowsForSpec(spec: Pick<ServerSpec, 'family' | 'files'>): Im
   if (spec.family === 'qwen-image-2.1' && spec.files.llmVision === undefined)
     return workflows.filter((workflow) => !usesReferences(workflow))
   return workflows
+}
+
+/** The video workflows on the wire; `image-to-video` is parsed and recorded but not served yet. */
+export const VIDEO_WORKFLOWS: readonly VideoWorkflowId[] = ['create', 'image-to-video']
+
+/** What a video family can run in this build: text-to-video, whatever the family. */
+export function videoWorkflowsForFamily(_family: string): VideoWorkflowId[] {
+  return ['create']
 }

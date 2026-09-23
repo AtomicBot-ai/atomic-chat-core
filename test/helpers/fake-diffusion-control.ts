@@ -18,7 +18,9 @@ export const FAKE_DIFFUSION_STATUS: DiffusionStatus = {
   install: { state: 'not-installed' },
   model: { state: 'unloaded', loaded: null },
   activeJob: null,
+  activeVideoJob: null,
   outputDir: '/tmp/data/images',
+  videoOutputDir: '/tmp/data/videos',
   idleUnloadSecs: 600,
 }
 

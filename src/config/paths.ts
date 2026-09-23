@@ -8,6 +8,7 @@
  *   <data>/llamacpp-upstream/tmp/
  *   <data>/mlx/models/<id>/{model.yml, config.json, *.safetensors}
  *   <data>/diffusion/{backends/<tag>/<backend>/, models/, scratch/}, <data>/images/  (image generation; the app's paths since v2.0.38)
+ *   <data>/videos/  (video generation; the folder the app's ADR of 2026-09-10 reserved)
  *   <data>/local-api-server.json, <data>/atomic-chatgpt-auth.json
  *   <data>/remote-access-tunnel.json  (the app's 2.0.40 tunnel journal: reaped once at startup, never written)
  *   <data>/atomic-core/  — the only new folder (settings, credentials, lock, journal, logs)
@@ -71,6 +72,8 @@ export interface DiffusionPaths {
   scratchDir: string
   /** `<data>/images`: the gallery, unless the user chose another folder. */
   defaultOutputDir: string
+  /** `<data>/videos`: the video gallery, unless the user chose another folder. */
+  defaultVideoOutputDir: string
 }
 
 export interface DataLayout {
@@ -117,6 +120,7 @@ export function dataLayout(root: string): DataLayout {
       modelsDir: join(diffusionDir, 'models'),
       scratchDir: join(diffusionDir, 'scratch'),
       defaultOutputDir: join(root, 'images'),
+      defaultVideoOutputDir: join(root, 'videos'),
     },
     provider(id) {
       const providerRoot = join(root, id)

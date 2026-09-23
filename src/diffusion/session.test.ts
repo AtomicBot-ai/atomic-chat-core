@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { CoreEvents } from '../contracts/index.js'
-import { fakeServer, sampleSpec } from '../../test/helpers/diffusion-fixtures.js'
+import { fakeServer, sampleSpec, sampleVideoSpec } from '../../test/helpers/diffusion-fixtures.js'
 import type { FakeServer } from '../../test/helpers/diffusion-fixtures.js'
 import { diffusionError } from './errors.js'
 import { INSTALL_RECORD, OWNER_MARKER } from './install.js'
@@ -26,6 +26,7 @@ import {
   stopKeepingSpec,
   takeDownSession,
   unload,
+  videoCapabilities,
 } from './session.js'
 import type { SessionDeps } from './session.js'
 import { DiffusionState } from './state.js'
@@ -132,14 +133,17 @@ describe('the status', () => {
       install: { state: 'not-installed' },
       model: { state: 'unloaded', loaded: null },
       activeJob: null,
+      activeVideoJob: null,
       outputDir: join(dataFolder, 'images'),
+      videoOutputDir: join(dataFolder, 'videos'),
       idleUnloadSecs: 600,
     })
-    h.state.config = { dataFolder, outputDir: '/pics', idleUnloadSecs: 0 }
+    h.state.config = { dataFolder, outputDir: '/pics', videoOutputDir: '/clips', idleUnloadSecs: 0 }
     const info = await loadFromSpec(h.deps, sampleSpec(), 'load')
     const status = await buildStatus(h.deps)
     expect(status.model).toEqual({ state: 'loaded', loaded: info })
     expect(status.outputDir).toBe('/pics')
+    expect(status.videoOutputDir).toBe('/clips')
     expect(status.idleUnloadSecs).toBe(0)
     // The loaded model is a copy: a caller cannot reach into the session.
     expect(status.model.loaded).not.toBe(h.state.session?.info)
@@ -411,5 +415,63 @@ describe('tearing down', () => {
     expect((h.servers[0] as FakeServer).terminated).toEqual([SHUTDOWN_GRACE_MS])
     expect(h.events).toEqual([])
     await shutdownSession(h.deps)
+  })
+})
+
+describe('videoCapabilities', () => {
+  it('come from the video spec and the engine, and refuse an image spec', async () => {
+    const h = harness()
+    expect(() => videoCapabilities(h.state)).toThrow('Load an image model first.')
+    h.state.spec = sampleSpec()
+    expect(() => videoCapabilities(h.state)).toThrow(
+      expect.objectContaining({
+        code: 'MODEL_INCOMPATIBLE',
+        message: 'The loaded model generates images, not video.',
+      })
+    )
+    // Loaded: the engine's own promise about cancelling and about WebM.
+    const spec = sampleVideoSpec()
+    await loadFromSpec(h.deps, spec, 'load')
+    const server = h.servers[0]!.handle
+    server.capabilities = {
+      cancelGenerating: false,
+      supportedModes: ['vid_gen'],
+      vidGen: { cancelGenerating: true, outputFormats: ['webm', 'webp'] },
+    }
+    expect(videoCapabilities(h.state)).toEqual({
+      workflows: ['create'],
+      minDim: 256,
+      maxDim: 1216,
+      dimMultiple: 32,
+      supportsNegativePrompt: false,
+      supportsGuidance: false,
+      cancelGenerating: true,
+      fps: 24,
+      frames: { min: 9, max: 257, step: 8, offset: 1, default: 121 },
+      resolutionPresets: [
+        [768, 512],
+        [1216, 704],
+        [704, 1216],
+        [512, 768],
+      ],
+      outputFormat: 'webm',
+      webmSupported: true,
+      defaults: spec.defaults,
+      ranges: spec.ranges,
+    })
+    server.capabilities = {
+      cancelGenerating: false,
+      vidGen: { cancelGenerating: false, outputFormats: ['avi'] },
+    }
+    expect(videoCapabilities(h.state)).toMatchObject({ cancelGenerating: false, webmSupported: false })
+    // With the server gone the spec still answers; the engine's promises are unknown.
+    await takeDownSession(h.deps)
+    expect(videoCapabilities(h.state)).toMatchObject({ cancelGenerating: false, webmSupported: null })
+    // The answer is a copy: the app cannot edit the spec through it.
+    videoCapabilities(h.state).resolutionPresets[0]![0] = 1
+    expect(h.state.spec!.defaults.video!.resolutionPresets[0]).toEqual([768, 512])
+    // A video spec that lost its frame range is refused rather than guessed.
+    h.state.spec = sampleVideoSpec({ ranges: { steps: [1, 50], dims: [256, 1216], dimMultiple: 32 } })
+    expect(() => videoCapabilities(h.state)).toThrow(expect.objectContaining({ code: 'MODEL_INCOMPATIBLE' }))
   })
 })

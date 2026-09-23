@@ -5,6 +5,8 @@ import {
   usesInitImage,
   usesMask,
   usesReferences,
+  VIDEO_WORKFLOWS,
+  videoWorkflowsForFamily,
   workflowOf,
   workflowsForFamily,
   workflowsForSpec,
@@ -73,5 +75,13 @@ describe('what a workflow sends', () => {
   it('reads an absent workflow as create', () => {
     expect(workflowOf({})).toBe('create')
     expect(workflowOf({ workflow: 'edit' })).toBe('edit')
+  })
+})
+
+describe('videoWorkflowsForFamily', () => {
+  it('serves text-to-video for every family while image-to-video stays on the wire only', () => {
+    expect(VIDEO_WORKFLOWS).toEqual(['create', 'image-to-video'])
+    for (const family of ['ltx-2', 'wan2.2-ti2v-5b', 'unknown'])
+      expect(videoWorkflowsForFamily(family), family).toEqual(['create'])
   })
 })

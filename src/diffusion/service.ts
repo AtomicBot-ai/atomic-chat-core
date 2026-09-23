@@ -178,7 +178,13 @@ export class DiffusionService {
       )
     this.state.config = config
     const { paths } = this.state
-    await ensureDirs([paths.root, paths.backendsDir, paths.modelsDir, this.state.outputDir()])
+    await ensureDirs([
+      paths.root,
+      paths.backendsDir,
+      paths.modelsDir,
+      this.state.outputDir(),
+      this.state.videoOutputDir(),
+    ])
     // Re-arm the idle timer with the (possibly new) interval.
     if (this.state.session && this.state.activeJobId === undefined) this.state.touchIdle()
     return buildStatus(this.deps)
@@ -252,11 +258,15 @@ export class DiffusionService {
         files.llm,
         files.llmVision,
         files.qwen2vl,
+        files.audioVae,
+        files.embeddingsConnectors,
       ])
         if (used !== undefined && (await samePath(used, path, this.platform)))
           throw diffusionError(
             'BACKEND_IN_USE',
-            'That file belongs to the loaded image model. Unload it first.'
+            spec.modality === 'video'
+              ? 'That file belongs to the loaded video model. Unload it first.'
+              : 'That file belongs to the loaded image model. Unload it first.'
           )
     }
     await deleteModelFile(this.state.paths.modelsDir, path, this.platform)
@@ -419,7 +429,14 @@ export class DiffusionService {
 
   /** What the events carry; for tests and the facade. */
   static eventNames(): Array<keyof CoreEvents> {
-    return ['diffusion:state', 'diffusion:progress', 'diffusion:job', 'diffusion:error']
+    return [
+      'diffusion:state',
+      'diffusion:progress',
+      'diffusion:job',
+      'diffusion:error',
+      'diffusion:video-progress',
+      'diffusion:video-job',
+    ]
   }
 }
 
@@ -439,6 +456,8 @@ async function checkFiles(files: LoadDiffusionModelRequest['files']): Promise<vo
     ['llm', files.llm],
     ['llmVision', files.llmVision],
     ['qwen2vl', files.qwen2vl],
+    ['audioVae', files.audioVae],
+    ['embeddingsConnectors', files.embeddingsConnectors],
   ]
   for (const [label, path] of entries) {
     if (path === undefined) continue

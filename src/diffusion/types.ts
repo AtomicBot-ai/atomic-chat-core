@@ -40,11 +40,27 @@ export interface ServerSpec {
   cpuFallback: boolean
 }
 
+/** The engine's generation modes, as `supported_modes` names them. */
+export type SdMode = 'img_gen' | 'vid_gen'
+
 /** What `GET /sdcpp/v1/capabilities` said after the server came up. */
 export interface ServerCapabilities {
+  /** `features_by_mode.img_gen.cancel_generating`. */
   cancelGenerating: boolean
   imgGenDefaults?: unknown
+  /** `supported_modes`; absent on builds that predate the field (image only). */
+  supportedModes?: SdMode[]
+  /** The `vid_gen` sections, present when the build reports that mode. */
+  vidGen?: {
+    cancelGenerating: boolean
+    /** `output_formats_by_mode.vid_gen`; absent when the build does not list formats. */
+    outputFormats?: string[]
+    defaults?: unknown
+  }
 }
+
+/** The mode a model of `modality` is served in. */
+export const modeOf = (modality: DiffusionModality): SdMode => (modality === 'video' ? 'vid_gen' : 'img_gen')
 
 /** A request's images, already base64, so the argument builders stay free of I/O. */
 export interface ResolvedInputs {
@@ -52,6 +68,8 @@ export interface ResolvedInputs {
   mask?: string
   /** For the reference workflows: the source first, then the extras. */
   refs: string[]
+  /** Video: the last frame of an image-to-video request. */
+  end?: string
 }
 
 export const DEFAULT_STARTUP_TIMEOUT_SECS = 600

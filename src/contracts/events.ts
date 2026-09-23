@@ -7,6 +7,8 @@
 import type {
   DiffusionErrorEvent,
   DiffusionJobEvent,
+  DiffusionVideoJobEvent,
+  DiffusionVideoProgressEvent,
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
@@ -121,6 +123,9 @@ export interface CoreEvents {
   'diffusion:progress': DiffusionProgressEvent
   'diffusion:job': DiffusionJobEvent
   'diffusion:error': DiffusionErrorEvent
+  /** Video generation shares `state` and `error`; its jobs have their own two, so image consumers see no new shape. */
+  'diffusion:video-progress': DiffusionVideoProgressEvent
+  'diffusion:video-job': DiffusionVideoJobEvent
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

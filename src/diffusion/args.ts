@@ -10,14 +10,26 @@
 import type {
   DiffusionBackend,
   DiffusionFamilyDefaults,
+  DiffusionModality,
   DiffusionOffloadPolicy,
   ImageGenerateRequest,
+  VideoGenerateRequest,
 } from '../contracts/index.js'
 import type { ResolvedInputs, ServerSpec } from './types.js'
 import { defaultStrength, usesInitImage, usesMask, usesReferences, workflowOf } from './workflow.js'
 
 /** Kill switch for the Metal text-encoder placement: `1`/`true`/`yes`/`on` keeps the encoder on Metal. */
 export const METAL_TE_GPU_ENV = 'ATOMIC_DIFFUSION_METAL_TE_GPU'
+
+/**
+ * Opt-in for `-M vid_gen` on a video load. `sd-server` infers its modes from the model, and the flag
+ * is documented for `sd-cli`; it is emitted only when this is `1`/`true`/`yes`/`on`, until the live
+ * test has shown whether the server wants it.
+ */
+export const VID_GEN_MODE_FLAG_ENV = 'ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG'
+
+const truthy = (value: string | undefined): boolean =>
+  ['1', 'true', 'yes', 'on'].includes((value ?? '').trim().toLowerCase())
 
 /** The host facts the argv depends on, injected so a test can be any platform. */
 export interface ArgsHost {
@@ -53,8 +65,12 @@ export function speedFlags(): string[] {
  */
 export function metalTextEncoderFlags(isMacos: boolean, envOverride: string | undefined): string[] {
   if (!isMacos) return []
-  const keepOnGpu = ['1', 'true', 'yes', 'on'].includes((envOverride ?? '').trim().toLowerCase())
-  return keepOnGpu ? [] : ['--clip-on-cpu']
+  return truthy(envOverride) ? [] : ['--clip-on-cpu']
+}
+
+/** `-M vid_gen` for a video model, only while the environment opts in. */
+export function videoModeFlags(modality: DiffusionModality, envOverride: string | undefined): string[] {
+  return modality === 'video' && truthy(envOverride) ? ['-M', 'vid_gen'] : []
 }
 
 /** An Apple M5 CPU brand string: `Apple M5`, `Apple M5 Max`. */
@@ -132,6 +148,8 @@ export function buildServerArgs(
   const args = ['--diffusion-model', files.diffusionModel]
   const optional: Array<[string, string | undefined]> = [
     ['--vae', files.vae],
+    ['--audio-vae', files.audioVae],
+    ['--embeddings-connectors', files.embeddingsConnectors],
     ['--clip_l', files.clipL],
     ['--t5xxl', files.t5xxl],
     ['--llm', files.llm],
@@ -150,6 +168,7 @@ export function buildServerArgs(
       ...metalTextEncoderFlags(host.platform === 'darwin', host.env[METAL_TE_GPU_ENV]),
     ])
   )
+  args.push(...videoModeFlags(spec.modality, host.env[VID_GEN_MODE_FLAG_ENV]))
   args.push('-v', ...spec.extraArgs)
   return args
 }
@@ -207,6 +226,49 @@ export function buildImgGenRequest(
     if (usesMask(workflow) && inputs.mask !== undefined) body['mask_image'] = inputs.mask
   }
   if (usesReferences(workflow) && inputs.refs.length > 0) body['ref_images'] = inputs.refs
+  if (request.width * request.height > VAE_TILING_AREA) body['vae_tiling_params'] = { enabled: true }
+  return body
+}
+
+/**
+ * The `POST /sdcpp/v1/vid_gen` body: one clip, the frame count and rate resolved against the family,
+ * `custom_sigmas` when the family ships a fixed schedule for exactly this many steps (LTX-2 distilled),
+ * VP8 in WebM (the one container the app plays), and the first and last frames when a later workflow
+ * resolves them. Only set keys are sent, like the image body.
+ */
+export function buildVidGenRequest(
+  request: VideoGenerateRequest,
+  defaults: DiffusionFamilyDefaults,
+  seed: number,
+  inputs: ResolvedInputs
+): Record<string, unknown> {
+  const guidance: Record<string, unknown> = { txt_cfg: request.cfgScale }
+  const distilled = request.guidance ?? defaults.guidance
+  if (distilled !== undefined) guidance['distilled_guidance'] = distilled
+
+  const sampleParams: Record<string, unknown> = { sample_steps: request.steps }
+  const method = request.samplingMethod ?? defaults.samplingMethod
+  if (method) sampleParams['sample_method'] = method
+  const shift = request.flowShift ?? defaults.flowShift
+  if (shift !== undefined) sampleParams['flow_shift'] = shift
+  if (defaults.sigmas !== undefined && defaults.sigmas.length === request.steps)
+    sampleParams['custom_sigmas'] = [...defaults.sigmas]
+  sampleParams['guidance'] = guidance
+
+  const video = defaults.video
+  const body: Record<string, unknown> = {
+    prompt: request.prompt,
+    negative_prompt: request.negativePrompt ?? '',
+    width: request.width,
+    height: request.height,
+    video_frames: request.frames ?? video?.frames ?? 1,
+    fps: request.fps ?? video?.fps ?? 24,
+    output_format: 'webm',
+    seed,
+    sample_params: sampleParams,
+  }
+  if (inputs.init !== undefined) body['init_image'] = inputs.init
+  if (inputs.end !== undefined) body['end_image'] = inputs.end
   if (request.width * request.height > VAE_TILING_AREA) body['vae_tiling_params'] = { enabled: true }
   return body
 }

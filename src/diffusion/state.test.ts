@@ -34,6 +34,17 @@ describe('DiffusionState', () => {
     expect(state.outputDir()).toBe('/pics')
   })
 
+  it('keeps the video folder apart from the image folder', () => {
+    const state = new DiffusionState(paths)
+    expect(state.videoOutputDir()).toBe(paths.defaultVideoOutputDir)
+    expect(state.activeVideoJob()).toBeNull()
+    state.config = { dataFolder: '/data', outputDir: '/pics', videoOutputDir: ' ' }
+    expect(state.videoOutputDir()).toBe(paths.defaultVideoOutputDir)
+    state.config = { dataFolder: '/data', videoOutputDir: '/clips' }
+    expect(state.videoOutputDir()).toBe('/clips')
+    expect(state.outputDir()).toBe(paths.defaultOutputDir)
+  })
+
   it('keeps the idle deadline against an injected clock, and never for zero seconds', () => {
     let clock = 1_000
     const state = new DiffusionState(paths, () => clock)

@@ -106,7 +106,7 @@ describe('error envelope', () => {
       ['ENGINE_INSTALL_FAILED', 500],
       ['ENGINE_CRASHED', 500],
       ['MODEL_LOAD_FAILED', 500],
-      ['MODEL_INCOMPATIBLE', 500],
+      ['MODEL_INCOMPATIBLE', 400],
       ['INVALID_OUTPUT', 500],
       ['INTERNAL', 500],
     ]

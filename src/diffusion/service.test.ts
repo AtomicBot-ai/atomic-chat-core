@@ -130,7 +130,9 @@ describe('configure', () => {
       install: { state: 'not-installed' },
       model: { state: 'unloaded', loaded: null },
       activeJob: null,
+      activeVideoJob: null,
       outputDir: join(dataFolder, 'images'),
+      videoOutputDir: join(dataFolder, 'videos'),
       idleUnloadSecs: 0,
     })
     for (const dir of [
@@ -138,6 +140,7 @@ describe('configure', () => {
       layout.diffusion.backendsDir,
       layout.diffusion.modelsDir,
       join(dataFolder, 'images'),
+      join(dataFolder, 'videos'),
     ])
       expect(await exists(dir), dir).toBe(true)
     // Another spelling of the same folder is fine.
@@ -513,6 +516,8 @@ describe('without an engine', () => {
       'diffusion:progress',
       'diffusion:job',
       'diffusion:error',
+      'diffusion:video-progress',
+      'diffusion:video-job',
     ])
   })
 })

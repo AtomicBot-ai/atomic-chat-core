@@ -11,6 +11,7 @@ import type {
   DiffusionModelState,
   ImageJob,
   LoadedDiffusionModel,
+  VideoJob,
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
@@ -86,6 +87,11 @@ export class DiffusionState {
     return chosen ? chosen : this.paths.defaultOutputDir
   }
 
+  videoOutputDir(): string {
+    const chosen = this.config?.videoOutputDir?.trim()
+    return chosen ? chosen : this.paths.defaultVideoOutputDir
+  }
+
   idleUnloadSecs(): number {
     return this.config?.idleUnloadSecs ?? DEFAULT_IDLE_UNLOAD_SECS
   }
@@ -123,6 +129,11 @@ export class DiffusionState {
     if (this.activeJobId === undefined) return null
     const job = this.job(this.activeJobId)
     return job && (job.state === 'queued' || job.state === 'generating') ? job : null
+  }
+
+  /** The video counterpart of `activeJob`; video records arrive with the job-kind seam. */
+  activeVideoJob(): VideoJob | null {
+    return null
   }
 
   insertJob(record: JobRecord): void {

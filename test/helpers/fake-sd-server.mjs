@@ -24,6 +24,11 @@
  *   FAKE_SD_ARGV_FILE   path; the argv is written there as JSON on startup
  *   FAKE_SD_ENV_FILE    path; the host switches the core sets (GGML_METAL_TENSOR_DISABLE) as JSON
  *   FAKE_SD_IGNORE_SIGTERM  1 → SIGTERM is ignored (only SIGKILL stops it)
+ *   FAKE_SD_MODES       comma-separated `supported_modes` (default `img_gen`; `vid_gen` or
+ *                       `img_gen,vid_gen` for a video model)
+ *   FAKE_SD_VID_FORMATS what `output_formats_by_mode.vid_gen` lists: `all` (default: webm, webp, avi),
+ *                       `no-webm` (a build without libwebm: `vid_gen` then answers 400), or
+ *                       `unreported` (the key is absent, as on builds that predate it)
  */
 import { appendFileSync, closeSync, openSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -68,6 +73,11 @@ if (env.FAKE_SD_ENV_FILE)
   )
 if (env.FAKE_SD_IGNORE_SIGTERM === '1') process.on('SIGTERM', () => {})
 
+const modes = (env.FAKE_SD_MODES ?? 'img_gen')
+  .split(',')
+  .map((m) => m.trim())
+  .filter(Boolean)
+const vidFormats = env.FAKE_SD_VID_FORMATS ?? 'all'
 const onCpu = argv.includes('--backend') && argv[argv.indexOf('--backend') + 1] === 'cpu'
 const effectiveMode = mode === 'ggml-abort' && onCpu ? 'ready' : mode
 
@@ -223,10 +233,21 @@ const server = createServer((req, res) => {
       return json(res, 200, { data: [{ id: 'fake', object: 'model' }] })
     if (req.method === 'GET' && url === '/sdcpp/v1/capabilities') {
       if (effectiveMode === 'foreign') return json(res, 404, { error: 'not found' })
-      return json(res, 200, {
-        features_by_mode: { img_gen: { cancel_generating: env.FAKE_SD_CANCEL === '1', cancel_queued: true } },
+      const features = { cancel_generating: env.FAKE_SD_CANCEL === '1', cancel_queued: true }
+      const body = {
+        supported_modes: modes,
+        features_by_mode: { img_gen: features },
         defaults_by_mode: { img_gen: { width: 512, height: 512 } },
-      })
+      }
+      if (modes.includes('vid_gen')) {
+        body.features_by_mode.vid_gen = features
+        body.defaults_by_mode.vid_gen = { width: 768, height: 512, video_frames: 25, fps: 24 }
+        if (vidFormats !== 'unreported')
+          body.output_formats_by_mode = {
+            vid_gen: vidFormats === 'no-webm' ? ['webp', 'avi'] : ['webm', 'webp', 'avi'],
+          }
+      }
+      return json(res, 200, body)
     }
     if (req.method === 'POST' && url === '/sdcpp/v1/img_gen') {
       if (effectiveMode === 'queue-full') return json(res, 429, { error: 'queue full' })
