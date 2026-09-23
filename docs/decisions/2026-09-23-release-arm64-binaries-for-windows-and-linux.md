@@ -17,8 +17,11 @@ title: "Release arm64 binaries for Windows and Linux, proven on native arm runne
   `windows-11-arm` runners as well, so an arm64 binary is never released without the unit, contract,
   runtime-compat and binary e2e suites having passed on that arch; the nightly `live-backend` job runs there too,
   against the upstream `ubuntu-arm64` / `win-cpu-arm64` `llama-server`.
-- **Consequences:** the app can bundle a Linux arm64 core without a change on its side; Windows arm64 needs its
-  `download-core.mjs` to ask for `aarch64-pc-windows-msvc.exe`. A red or unavailable arm runner now blocks a release.
+- **Consequences:** the arm64 Windows and Linux binaries are for the CLI and library hosts. The app keeps shipping x64
+  only on Windows and Linux and does not take them (owner decision, 2026-09-23): an arm64 app would also need what
+  upstream does not publish today (stable-diffusion.cpp for either OS, cloudflared and sqlite-vec for Windows arm64, a
+  TurboQuant CPU build) and arm64 packs in the atomic-chat-conf mirror. A red or unavailable arm runner now blocks a
+  release.
   This record does not change the llama.cpp backend catalog, which keeps the app's behaviour: on Linux arm64 and
   Windows arm64 it lists no upstream pack (only TurboQuant's `linux-arm64-cuda-13.3`), so local inference there runs
   only on a pack already on disk. Offering the upstream arm64 packs (`win-cpu-arm64`, `ubuntu-arm64`, and their
