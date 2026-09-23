@@ -23,6 +23,8 @@ import { captureReport, internalErrorReport } from '../../telemetry/index.js'
 import { answer, newExchange } from './exchange.js'
 import { serveForward } from './forward.js'
 import { serveImagesGenerations } from './images.js'
+import { serveVideos } from './videos.js'
+import { matchVideoPath } from './videos-params.js'
 import { serveSubscriptionIfOwned } from './subscription.js'
 import { gate, preflight, removePrefix } from './gates.js'
 import { serveMetrics, serveModels, serveMuseCatalog } from './listing.js'
@@ -38,6 +40,7 @@ export type {
   LocalTarget,
   PublicServerConfig,
   PublicServerDeps,
+  VideosBackend,
 } from './types.js'
 export { isValidHost, removePrefix } from './gates.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
@@ -176,6 +179,13 @@ export async function handlePublicRequest(
       trace.skipEmit = true
       return
     }
+  }
+
+  // Served here, never forwarded: the video model is the core's own, and it is not in `/models`.
+  const video = matchVideoPath(path)
+  if (video) {
+    trace.endpoint = endpointFromPath(path)
+    return serveVideos(ex, video)
   }
 
   const allowed = ALLOWED_METHODS[path]

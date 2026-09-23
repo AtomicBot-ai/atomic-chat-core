@@ -174,6 +174,7 @@ export class AtomicCore {
         inspecting: () => this.inspecting,
         dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
         images: this.diffusion.imagesBackend(),
+        videos: this.diffusion.videosBackend(),
         errors: parts.errors,
       }),
     })

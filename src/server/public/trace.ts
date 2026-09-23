@@ -47,6 +47,8 @@ export function endpointFromPath(path: string): string {
       return 'messages/count_tokens'
     case '/images/generations':
       return 'images/generations'
+    case '/videos':
+      return 'videos'
     case '/models':
       return 'models'
     case '/muse-code/models':
@@ -54,7 +56,7 @@ export function endpointFromPath(path: string): string {
     case '/metrics':
       return 'metrics'
     default:
-      return 'other'
+      return path.startsWith('/videos/') ? 'videos' : 'other'
   }
 }
 

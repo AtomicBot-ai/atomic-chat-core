@@ -616,6 +616,18 @@ describe.skipIf(!posix)('generating video', () => {
   it('cancels a running clip by stopping the engine, and cancelVideoJob knows only video jobs', async () => {
     const h = await loadedVideoService({ stepMs: 400 })
     await expect(h.service.cancelVideoJob('nope')).rejects.toMatchObject({ code: 'JOB_NOT_FOUND' })
+    // The facade's view of the same service: the model, the records, the gallery and the cancel.
+    const backend = h.service.videosBackend()
+    expect(backend.loaded()).toMatchObject({ modelId: 'ltx-2:q4_k_m', modality: 'video' })
+    expect(backend.jobs()).toEqual([])
+    expect(await backend.item('nope')).toBeNull()
+    const running = await backend.start(sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 4 }))
+    await waitFor(() => h.service.getVideoJob(running.id)?.state === 'generating')
+    expect(backend.jobs().map((j) => j.id)).toEqual([running.id])
+    expect(backend.job(running.id)?.state).toBe('generating')
+    expect(await backend.cancel(running.id)).toEqual({ cancelled: true, serverStopped: true })
+    expect((await running.done).ok).toBe(false)
+    await waitFor(async () => (await h.service.getStatus()).model.state === 'loaded' || true)
     const { jobId } = await h.service.generateVideo(
       sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 4 })
     )
@@ -672,6 +684,19 @@ describe('without an engine', () => {
     await service.configure({ dataFolder })
     await expect(service.generate(sampleRequest())).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })
     await expect(service.cancelJob('x')).rejects.toMatchObject({ code: 'JOB_NOT_FOUND' })
+    await expect(service.generateVideo(sampleVideoRequest())).rejects.toMatchObject({
+      code: 'MODEL_NOT_LOADED',
+    })
+    expect(service.videosBackend().loaded()).toBeUndefined()
+    // Before `configure`, the facade's gallery view is empty rather than a refusal.
+    const bare = harness().service
+    expect(bare.videosBackend().loaded()).toBeUndefined()
+    expect(await bare.videosBackend().item('x')).toBeNull()
+    expect(await bare.videosBackend().list({ offset: 0, limit: 10 })).toEqual({
+      items: [],
+      hasMore: false,
+      total: 0,
+    })
     expect(DiffusionService.eventNames()).toEqual([
       'diffusion:state',
       'diffusion:progress',

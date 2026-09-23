@@ -12,6 +12,7 @@ import {
   isCanonicalBase64,
   isValidFrameCount,
   largestValidFrames,
+  nearestValidFrames,
   stripDataUrl,
   validateRequest,
   validateVideoRequest,
@@ -318,6 +319,22 @@ describe('the frame lattice', () => {
     expect(largestValidFrames(8, ltx, range)).toBeUndefined()
     expect(largestValidFrames(0, ltx, range)).toBeUndefined()
     expect(largestValidFrames(5, { step: 4, offset: 1 }, [5, 241])).toBe(5)
+  })
+
+  it('snaps a wanted count to the nearest lattice point inside the range', () => {
+    const ltx = { step: 8, offset: 1 }
+    const range: [number, number] = [9, 257]
+    // 2 s at 24 fps is 48 frames: nearer to 49 than to 41.
+    expect(nearestValidFrames(48, ltx, range)).toBe(49)
+    expect(nearestValidFrames(44, ltx, range)).toBe(41)
+    expect(nearestValidFrames(45, ltx, range)).toBe(49)
+    expect(nearestValidFrames(121, ltx, range)).toBe(121)
+    expect(nearestValidFrames(2, ltx, range)).toBe(9)
+    expect(nearestValidFrames(0, ltx, range)).toBe(9)
+    expect(nearestValidFrames(10_000, ltx, range)).toBe(257)
+    // A range whose top is off the lattice snaps to the highest point under it.
+    expect(nearestValidFrames(10_000, ltx, [9, 260])).toBe(257)
+    expect(nearestValidFrames(120, { step: 4, offset: 1 }, [5, 241])).toBe(121)
   })
 })
 

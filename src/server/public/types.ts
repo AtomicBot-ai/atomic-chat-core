@@ -10,8 +10,15 @@ import type {
   CoreEvents,
   DiffusionErrorBody,
   DiffusionFamilyDefaults,
+  DiffusionFamilyRanges,
+  DiffusionModality,
+  GalleryListOptions,
+  GalleryVideoItem,
   ImageGenerateRequest,
   ImageJob,
+  VideoGalleryPage,
+  VideoGenerateRequest,
+  VideoJob,
 } from '../../contracts/index.js'
 import type { LocalProvider, RemoteProvider } from '../../router/index.js'
 import type { ChatGptBackend } from '../../cloud/index.js'
@@ -49,6 +56,36 @@ export interface ImagesBackend {
   cancel: (jobId: string) => Promise<unknown>
 }
 
+/** The resident video model as `/videos` needs it, plus the two places a video lives: the runner and the gallery. */
+export interface VideosBackend {
+  /** The loaded model with the family defaults and ranges it was loaded with, or `undefined` when there is none. */
+  loaded: () =>
+    | {
+        modelId: string
+        displayName: string
+        modality: DiffusionModality
+        defaults: DiffusionFamilyDefaults
+        ranges: DiffusionFamilyRanges
+      }
+    | undefined
+  /** Start a job; `done` settles with the outcome and never rejects. */
+  start: (request: VideoGenerateRequest) => Promise<{
+    id: string
+    done: Promise<
+      { ok: true; outcome: { job: VideoJob; images: Buffer[] } } | { ok: false; error: DiffusionErrorBody }
+    >
+  }>
+  /** The runner's record of a job, while it keeps one. */
+  job: (id: string) => VideoJob | null
+  /** Every video job the runner remembers, newest first. */
+  jobs: () => VideoJob[]
+  /** The gallery's clip, which outlives the job record. */
+  item: (id: string) => Promise<GalleryVideoItem | null>
+  list: (options: GalleryListOptions) => Promise<VideoGalleryPage>
+  cancel: (jobId: string) => Promise<unknown>
+  delete: (id: string) => Promise<void>
+}
+
 export interface PublicServerDeps {
   /** The session `provider` serves for `modelId`, matched with the proxy's `.`/`_` rule. */
   findLocal: (provider: LocalProvider, modelId: string) => LocalTarget | undefined
@@ -78,6 +115,8 @@ export interface PublicServerDeps {
   fetch?: typeof fetch
   /** Image generation on the resident image model; without it the route answers 503. */
   images?: ImagesBackend
+  /** The video counterpart, for `/videos`. */
+  videos?: VideosBackend
   /** Where a request that failed on our side, or a failing local engine, is reported. */
   errors?: ErrorSink | undefined
 }

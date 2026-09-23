@@ -183,6 +183,18 @@ export function largestValidFrames(
   return frames >= min ? frames : undefined
 }
 
+/** The valid frame count nearest to `wanted`, clamped into the range: what a length in seconds becomes. */
+export function nearestValidFrames(wanted: number, rule: FrameRule, range: [number, number]): number {
+  const [min, max] = range
+  const step = Math.max(rule.step, 1)
+  const k = Math.round((wanted - rule.offset) / step)
+  const frames = rule.offset + Math.max(k, 0) * step
+  if (frames < min) return min
+  if (frames <= max) return frames
+  // Past the top: the highest lattice point under it.
+  return Math.max(rule.offset + Math.floor((max - rule.offset) / step) * step, min)
+}
+
 /**
  * A video request against the loaded video family: the image checks that apply, then the frame count
  * on the family's lattice, the fixed frame rate, and the one workflow this build serves.

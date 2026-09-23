@@ -30,7 +30,7 @@ import type {
   VideoJob,
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
-import type { ImagesBackend } from '../server/index.js'
+import type { ImagesBackend, VideosBackend } from '../server/index.js'
 import { selectModelInstall } from './compat.js'
 import { samePath } from './containment.js'
 import { diffusionError, errorBody, ioError } from './errors.js'
@@ -75,7 +75,7 @@ import { DiffusionState } from './state.js'
 import { DEFAULT_STARTUP_TIMEOUT_SECS } from './types.js'
 import type { ServerSpec } from './types.js'
 import { stripDataUrl } from './validate.js'
-import { MAX_POSTER_BYTES, VideoGallery } from './video-gallery.js'
+import { isValidVideoId, MAX_POSTER_BYTES, VideoGallery } from './video-gallery.js'
 
 export interface DiffusionServiceDeps {
   paths: DiffusionPaths
@@ -390,6 +390,36 @@ export class DiffusionService {
       },
       start: (request) => startImageJob(this.deps, request),
       cancel: (jobId) => cancelJob(this.deps, jobId),
+    }
+  }
+
+  /** What `/v1/videos` needs: the resident model, the runner's records and the gallery. */
+  videosBackend(): VideosBackend {
+    return {
+      loaded: () => {
+        const spec = this.state.spec
+        return spec
+          ? {
+              modelId: spec.modelId,
+              displayName: spec.displayName,
+              modality: spec.modality,
+              defaults: structuredClone(spec.defaults),
+              ranges: structuredClone(spec.ranges),
+            }
+          : undefined
+      },
+      start: (request) => startVideoJob(this.deps, request),
+      job: (id) => this.state.videoJob(id) ?? null,
+      jobs: () => this.state.videoJobs(),
+      // Any string can come in from a URL: one that is not an id is simply not a clip.
+      item: (id) =>
+        this.state.configured && isValidVideoId(id) ? this.getVideoGalleryItem(id) : Promise.resolve(null),
+      list: (options) =>
+        this.state.configured
+          ? this.listVideoGallery(options)
+          : Promise.resolve({ items: [], hasMore: false, total: 0 }),
+      cancel: (jobId) => cancelJob(this.deps, jobId),
+      delete: (id) => this.deleteVideoGalleryItems([id]),
     }
   }
 
