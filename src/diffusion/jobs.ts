@@ -1,7 +1,10 @@
 /**
- * Image jobs: validate, submit to `sd-server`, poll, save, and the cancel path. Shared by the
- * control route and the OpenAI facade, so both get the same validation, events, gallery and idle
- * timer. Port of `jobs.rs` in `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`).
+ * Jobs: validate, submit to `sd-server`, poll, save, and the cancel path. Shared by the control
+ * routes and the OpenAI facades, so every caller gets the same validation, events, gallery and idle
+ * timer. Port of `jobs.rs` in `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`), made
+ * generic over a `JobKind` when video arrived: the loop, the crash handling, the CPU fallback and
+ * the cancel ladder are one code path; what a kind sends, decodes and saves lives with the kind
+ * (`image-job.ts`, `video-job.ts`).
  *
  * One deliberate change: a respawn re-checks, once it holds the load lock, that nobody cancelled
  * the job or unloaded the model while it waited. The plugin took the lock and spawned regardless.
@@ -9,37 +12,35 @@
 
 import { randomInt, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { basename } from 'node:path'
 import type {
   DiffusionCancelResult,
   DiffusionErrorBody,
-  GalleryImageItem,
   ImageGenerateRequest,
   ImageJob,
   ImageJobState,
-  ImageRecipe,
-  ImageSource,
+  VideoJob,
 } from '../contracts/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
-import { buildImgGenRequest, cpuBackendExtraArgs, isGgmlUnsupportedOpAbort } from './args.js'
+import { cpuBackendExtraArgs, isGgmlUnsupportedOpAbort } from './args.js'
 import { cancelledError, diffusionError, errorBody, internalError, modelNotLoadedError } from './errors.js'
-import { isBlankOutput } from './gallery.js'
 import type { Gallery } from './gallery.js'
 import type { SdHttpClient } from './http.js'
+import { IMAGE_JOB_KIND } from './image-job.js'
+import type { AnyJobKind, JobCommon, JobKind } from './job-kind.js'
 import type { AsyncMutex } from './mutex.js'
 import { classifyExit, diagnosticTail, GpuFaultWatch } from './progress.js'
 import { describeExit, exitCodeOf } from './server-process.js'
 import { loadFromSpec, stopKeepingSpec, takeDownSession } from './session.js'
 import type { SessionDeps } from './session.js'
-import type { CancelFlag, DiffusionState, JobRecord } from './state.js'
+import type { CancelFlag, DiffusionState, JobKindId, JobRecord } from './state.js'
 import { isTerminalJobState } from './state.js'
-import { ProgressTracker, sampledSteps } from './tracker.js'
-import type { ResolvedInputs, ServerSpec } from './types.js'
-import { validateRequest } from './validate.js'
-import { stripDataUrl } from './validate.js'
-import { defaultStrength, usesInitImage, usesMask, usesReferences, workflowOf } from './workflow.js'
+import { ProgressTracker } from './tracker.js'
+import type { ServerSpec } from './types.js'
+
+export { decodeImages, resolveInputs, withoutSources } from './image-job.js'
 
 export const IMG_GEN_PATH = '/sdcpp/v1/img_gen'
+export const VID_GEN_PATH = '/sdcpp/v1/vid_gen'
 export const JOBS_PATH = '/sdcpp/v1/jobs'
 
 export interface JobTimings {
@@ -73,64 +74,23 @@ export interface JobDeps extends SessionDeps {
   isFile: (path: string) => Promise<boolean>
 }
 
-export interface JobOutcome {
-  job: ImageJob
-  /** The final PNG bytes (recipe included), in batch order. */
+export interface JobOutcome<J = ImageJob> {
+  job: J
+  /** The final bytes: every PNG (recipe included) in batch order, or the one video. */
   images: Buffer[]
 }
 
-export type JobResult = { ok: true; outcome: JobOutcome } | { ok: false; error: DiffusionErrorBody }
+export type JobResult<J = ImageJob> =
+  { ok: true; outcome: JobOutcome<J> } | { ok: false; error: DiffusionErrorBody }
+
+/** The runner path a record belongs to. Video registers itself beside the image kind. */
+function kindOf(id: JobKindId): AnyJobKind {
+  if (id === 'image') return IMAGE_JOB_KIND
+  throw internalError(`No runner for ${id} jobs.`)
+}
 
 export function drawSeed(): number {
   return randomInt(0, 0x1_0000_0000)
-}
-
-// ---------------------------------------------------------------------------
-// Inputs
-// ---------------------------------------------------------------------------
-
-async function resolveSource(source: ImageSource, deps: Pick<JobDeps, 'readSource'>): Promise<string> {
-  if ('base64' in source) return stripDataUrl(source.base64)
-  try {
-    return (await deps.readSource(source.path)).toString('base64')
-  } catch (error) {
-    throw diffusionError(
-      'INVALID_REQUEST',
-      'The source image could not be read.',
-      error instanceof Error ? error.message : String(error)
-    )
-  }
-}
-
-/** The request's images as the base64 `sd-server` takes, once per job (not per retry). Only what the workflow uses is read. */
-export async function resolveInputs(
-  request: ImageGenerateRequest,
-  deps: Pick<JobDeps, 'readSource'>
-): Promise<ResolvedInputs> {
-  const workflow = workflowOf(request)
-  const inputs: ResolvedInputs = { refs: [] }
-  if (workflow === 'create' || request.initImage === undefined) return inputs
-  const source = await resolveSource(request.initImage, deps)
-  if (usesReferences(workflow)) {
-    inputs.refs.push(source)
-    for (const extra of request.referenceImages ?? []) inputs.refs.push(await resolveSource(extra, deps))
-  } else {
-    inputs.init = source
-    if (usesMask(workflow) && request.maskImage !== undefined)
-      inputs.mask = await resolveSource(request.maskImage, deps)
-  }
-  return inputs
-}
-
-/** The request as the job record and every job event carry it: file paths stay, inline bytes are blanked. */
-export function withoutSources(request: ImageGenerateRequest): ImageGenerateRequest {
-  const redact = (source: ImageSource): ImageSource =>
-    'path' in source ? { path: source.path } : { base64: '' }
-  const copy: ImageGenerateRequest = { ...request }
-  if (request.initImage) copy.initImage = redact(request.initImage)
-  if (request.maskImage) copy.maskImage = redact(request.maskImage)
-  if (request.referenceImages) copy.referenceImages = request.referenceImages.map(redact)
-  return copy
 }
 
 // ---------------------------------------------------------------------------
@@ -138,8 +98,8 @@ export function withoutSources(request: ImageGenerateRequest): ImageGenerateRequ
 // ---------------------------------------------------------------------------
 
 function emitJob(deps: JobDeps, id: string): void {
-  const job = deps.state.job(id)
-  if (job) deps.emit('diffusion:job', { job })
+  const record = deps.state.record(id)
+  if (record) kindOf(record.kind).emitJob(deps.emit, structuredClone(record.job))
 }
 
 function setJobState(deps: JobDeps, id: string, next: ImageJobState): void {
@@ -153,17 +113,17 @@ function setJobState(deps: JobDeps, id: string, next: ImageJobState): void {
   if (changed) emitJob(deps, id)
 }
 
-function setProgress(deps: JobDeps, id: string, tracker: ProgressTracker): void {
-  const progress = tracker.snapshot()
-  deps.state.updateJob(id, (record) => (record.job.progress = progress))
-  deps.emit('diffusion:progress', { jobId: id, progress })
+function setProgress(deps: JobDeps, id: string, kind: AnyJobKind, tracker: ProgressTracker): void {
+  const progress: unknown = kind.progress(tracker.snapshot())
+  deps.state.updateJob(id, (record) => ((record.job as JobCommon<unknown, unknown>).progress = progress))
+  kind.emitProgress(deps.emit, id, progress)
 }
 
 /** Move a job to a terminal state exactly once. Whether this call made the transition. */
-export function finishJob(
+export function finishJob<Item>(
   deps: JobDeps,
   id: string,
-  result: { ok: true; outputs: GalleryImageItem[] } | { ok: false; error: DiffusionErrorBody }
+  result: { ok: true; outputs: Item[] } | { ok: false; error: DiffusionErrorBody }
 ): boolean {
   let transitioned = false
   deps.state.updateJob(id, (record) => {
@@ -172,7 +132,7 @@ export function finishJob(
     record.job.finishedAtMs = deps.now()
     if (result.ok) {
       record.job.state = 'completed'
-      record.job.outputs = result.outputs
+      ;(record.job as unknown as JobCommon<Item, unknown>).outputs = result.outputs
       delete record.job.error
     } else {
       record.job.state = result.error.code === 'CANCELLED' ? 'cancelled' : 'failed'
@@ -190,49 +150,47 @@ export function finishJob(
 // Public entry points
 // ---------------------------------------------------------------------------
 
-export interface StartedJob {
+export interface StartedJob<J = ImageJob> {
   id: string
   /** Settles when the job is over; never rejects, so a caller that only wanted the id owes nothing. */
-  done: Promise<JobResult>
+  done: Promise<JobResult<J>>
 }
 
-/** Validate, register and start a job. */
-export async function startImageJob(deps: JobDeps, request: ImageGenerateRequest): Promise<StartedJob> {
+/** Validate, register and start a job of `kind`. */
+export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item, Progress, Decoded>(
+  deps: JobDeps,
+  kind: JobKind<Req, Job, Item, Progress, Decoded>,
+  request: Req
+): Promise<StartedJob<Job>> {
   const { state } = deps
   const spec = state.spec
   if (!spec) throw modelNotLoadedError()
-  await validateRequest(request, spec, { isFile: deps.isFile })
+  if (spec.modality !== kind.modality)
+    throw diffusionError('MODEL_INCOMPATIBLE', kind.messages.wrongModel, spec.modelId)
+  await kind.validate(request, spec, { isFile: deps.isFile })
 
   const id = randomUUID().replaceAll('-', '')
-  if (state.activeJobId !== undefined)
-    throw diffusionError('JOB_BUSY', 'An image is already being generated.', state.activeJobId)
+  if (state.activeJobId !== undefined) throw diffusionError('JOB_BUSY', kind.messages.busy, state.activeJobId)
   state.activeJobId = id
   state.clearIdle()
 
   const record: JobRecord = {
-    job: {
-      id,
-      state: 'queued',
-      modelId: spec.modelId,
-      request: withoutSources(request),
-      createdAtMs: deps.now(),
-      progress: null,
-      outputs: [],
-    },
+    kind: kind.id,
+    job: kind.newJob(id, spec, request, deps.now()) as unknown as ImageJob | VideoJob,
     cancel: { requested: false },
   }
   state.insertJob(record)
   emitJob(deps, id)
 
-  const done = execute(deps, id, request, record.cancel).then(
-    (outcome): JobResult => {
+  const done = execute(deps, kind, id, request, record.cancel).then(
+    (outcome): JobResult<Job> => {
       finishJob(deps, id, { ok: true, outputs: outcome.job.outputs })
       if (state.activeJobId === id) state.activeJobId = undefined
       state.touchIdle()
-      const job = state.job(id) ?? outcome.job
+      const job = (state.anyJob(id) as Job | undefined) ?? outcome.job
       return { ok: true, outcome: { job, images: outcome.images } }
     },
-    (raw: unknown): JobResult => {
+    (raw: unknown): JobResult<Job> => {
       const error = errorBody(raw)
       finishJob(deps, id, { ok: false, error })
       if (state.activeJobId === id) state.activeJobId = undefined
@@ -242,19 +200,31 @@ export async function startImageJob(deps: JobDeps, request: ImageGenerateRequest
         deps.emit('diffusion:error', payload)
       }
       // The record is authoritative: a cancel that raced the runner may already have marked it.
-      return { ok: false, error: state.job(id)?.error ?? error }
+      return { ok: false, error: state.anyJob(id)?.error ?? error }
     }
   )
   return { id, done }
 }
 
-/** Run one job to completion; the OpenAI facade's path. */
-export async function runImageJob(deps: JobDeps, request: ImageGenerateRequest): Promise<JobOutcome> {
-  const { done } = await startImageJob(deps, request)
+/** Validate, register and start an image job. */
+export const startImageJob = (deps: JobDeps, request: ImageGenerateRequest): Promise<StartedJob> =>
+  startJob(deps, IMAGE_JOB_KIND, request)
+
+/** Run one job of `kind` to completion; the facades' path. */
+export async function runJob<Req, Job extends JobCommon<Item, Progress>, Item, Progress, Decoded>(
+  deps: JobDeps,
+  kind: JobKind<Req, Job, Item, Progress, Decoded>,
+  request: Req
+): Promise<JobOutcome<Job>> {
+  const { done } = await startJob(deps, kind, request)
   const result = await done
   if (result.ok) return result.outcome
   throw diffusionError(result.error.code, result.error.message, result.error.details)
 }
+
+/** Run one image job to completion; the OpenAI facade's path. */
+export const runImageJob = (deps: JobDeps, request: ImageGenerateRequest): Promise<JobOutcome> =>
+  runJob(deps, IMAGE_JOB_KIND, request)
 
 // ---------------------------------------------------------------------------
 // The runner
@@ -308,21 +278,29 @@ function liveness(state: DiffusionState): Liveness {
   return { kind: 'exited', exit, tail: session.server.tail() }
 }
 
-type Attempt = { kind: 'done'; outcome: JobOutcome } | { kind: 'retry-on-cpu' }
+type Attempt<J> = { kind: 'done'; outcome: JobOutcome<J> } | { kind: 'retry-on-cpu' }
 
-async function execute(
+/** A request's own seed when it has one, else a drawn one; the record and the recipe carry it. */
+function seedOf(request: unknown, deps: JobDeps): number {
+  const seed = (request as { seed?: number }).seed
+  return seed !== undefined && seed >= 0 ? seed : deps.drawSeed()
+}
+
+async function execute<Req, Job extends JobCommon<Item, Progress>, Item, Progress, Decoded>(
   deps: JobDeps,
+  kind: JobKind<Req, Job, Item, Progress, Decoded>,
   id: string,
-  request: ImageGenerateRequest,
+  request: Req,
   cancel: CancelFlag
-): Promise<JobOutcome> {
-  const batchSeed = request.seed !== undefined && request.seed >= 0 ? request.seed : deps.drawSeed()
-  const inputs = await resolveInputs(request, deps)
+): Promise<JobOutcome<Job>> {
+  const seed = seedOf(request, deps)
+  const inputs = await kind.resolveInputs(request, deps)
   const started = deps.now()
   for (let attempts = 1; ; attempts++) {
     const view = await ensureSession(deps, cancel)
-    const body = buildImgGenRequest(request, view.spec.defaults, batchSeed, inputs)
-    const attempt = await runAttempt(deps, id, request, view, body, batchSeed, cancel, started)
+    kind.preflight?.(deps.state.session?.server.capabilities)
+    const body = kind.buildBody(request, view.spec, seed, inputs)
+    const attempt = await runAttempt(deps, kind, id, request, view, body, seed, cancel, started)
     if (attempt.kind === 'done') return attempt.outcome
     if (attempts > 1) throw diffusionError('ENGINE_CRASHED', 'sd-server crashed again on the CPU backend.')
     deps.log('warn', 'ggml abort on the device backend; restarting sd-server on the CPU backend')
@@ -335,21 +313,22 @@ async function execute(
   }
 }
 
-async function runAttempt(
+async function runAttempt<Req, Job extends JobCommon<Item, Progress>, Item, Progress, Decoded>(
   deps: JobDeps,
+  kind: JobKind<Req, Job, Item, Progress, Decoded>,
   id: string,
-  request: ImageGenerateRequest,
+  request: Req,
   view: SessionView,
   body: Record<string, unknown>,
-  batchSeed: number,
+  seed: number,
   cancel: CancelFlag,
   started: number
-): Promise<Attempt> {
+): Promise<Attempt<Job>> {
   if (cancel.requested) throw cancelledError()
   const lines: string[] = []
   deps.state.session?.server.setLineListener((line) => lines.push(line))
   try {
-    return await pollJob(deps, id, request, view, body, batchSeed, cancel, started, lines)
+    return await pollJob(deps, kind, id, request, view, body, seed, cancel, started, lines)
   } finally {
     deps.state.session?.server.setLineListener(undefined)
   }
@@ -377,20 +356,21 @@ async function afterTransportError(
 
 const clip = (text: string, limit: number): string => [...text].slice(0, limit).join('')
 
-async function pollJob(
+async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progress, Decoded>(
   deps: JobDeps,
+  kind: JobKind<Req, Job, Item, Progress, Decoded>,
   id: string,
-  request: ImageGenerateRequest,
+  request: Req,
   view: SessionView,
   body: Record<string, unknown>,
-  batchSeed: number,
+  seed: number,
   cancel: CancelFlag,
   started: number,
   lines: string[]
-): Promise<Attempt> {
+): Promise<Attempt<Job>> {
   const { http, state, timings } = deps
   const submitted = await http
-    .post(`${view.baseUrl}${IMG_GEN_PATH}`, body, timings.submitTimeoutMs)
+    .post(`${view.baseUrl}${kind.submitPath}`, body, timings.submitTimeoutMs)
     .catch((error: unknown) => afterTransportError(deps, cancel, 'submit', error))
   if (submitted.status === 429)
     throw diffusionError('QUEUE_FULL', "The image server's queue is full. Try again in a moment.")
@@ -412,7 +392,8 @@ async function pollJob(
   if (typeof serverJobId !== 'string') throw internalError('sd-server returned no job id.')
   state.updateJob(id, (record) => (record.serverJobId = serverJobId))
 
-  const tracker = new ProgressTracker(sampledSteps(request), request.batchSize, deps.now)
+  const shape = kind.trackerShape(request)
+  const tracker = new ProgressTracker(shape.steps, shape.batch, deps.now)
   const jobUrl = `${view.baseUrl}${JOBS_PATH}/${serverJobId}`
   const deadline = started + timings.generationCeilingMs
   const gpu = new GpuFaultWatch()
@@ -438,7 +419,7 @@ async function pollJob(
 
   for (;;) {
     drain()
-    if (tracker.takeDirty()) setProgress(deps, id, tracker)
+    if (tracker.takeDirty()) setProgress(deps, id, kind, tracker)
 
     const live = liveness(state)
     if (live.kind === 'gone') {
@@ -505,13 +486,17 @@ async function pollJob(
       case 'completed': {
         setJobState(deps, id, 'generating')
         tracker.setPhase('saving')
-        setProgress(deps, id, tracker)
+        setProgress(deps, id, kind, tracker)
         await retireAfterGpuFault()
-        const pngs = decodeImages(job)
-        const { items, images } = await saveOutputs(deps, id, request, view, batchSeed, started, pngs)
-        const record = state.job(id)
+        const decoded = kind.decode(job)
+        const { items, bytes } = await kind.save(
+          deps,
+          { id, request, spec: view.spec, seed, startedAt: started },
+          decoded
+        )
+        const record = state.anyJob(id) as Job | undefined
         if (!record) throw internalError('job record vanished')
-        return { kind: 'done', outcome: { job: { ...record, outputs: items }, images } }
+        return { kind: 'done', outcome: { job: { ...record, outputs: items }, images: bytes } }
       }
       case 'failed': {
         await retireAfterGpuFault()
@@ -536,96 +521,9 @@ async function pollJob(
       default:
         break
     }
-    if (tracker.takeDirty()) setProgress(deps, id, tracker)
+    if (tracker.takeDirty()) setProgress(deps, id, kind, tracker)
     await deps.sleep(timings.pollIntervalMs)
   }
-}
-
-/** The images of a completed job, in index order. */
-export function decodeImages(job: Record<string, unknown>): Buffer[] {
-  const result = job['result']
-  const list =
-    result !== null && typeof result === 'object' ? (result as Record<string, unknown>)['images'] : undefined
-  const items: Array<{ index: number; b64: string }> = []
-  if (Array.isArray(list))
-    for (const image of list) {
-      if (image === null || typeof image !== 'object') continue
-      const { b64_json: b64, index } = image as Record<string, unknown>
-      if (typeof b64 !== 'string') continue
-      items.push({ index: typeof index === 'number' ? index : 0, b64 })
-    }
-  items.sort((a, b) => a.index - b.index)
-  const out = items.map(({ b64 }) => {
-    const trimmed = b64.trim()
-    const bytes = Buffer.from(trimmed, 'base64')
-    if (bytes.length === 0 && trimmed !== '') throw internalError('sd-server returned an undecodable image.')
-    return bytes
-  })
-  if (out.length === 0) throw internalError('The image server completed the job but returned no images.')
-  return out
-}
-
-async function saveOutputs(
-  deps: JobDeps,
-  id: string,
-  request: ImageGenerateRequest,
-  view: SessionView,
-  batchSeed: number,
-  started: number,
-  pngs: Buffer[]
-): Promise<{ items: GalleryImageItem[]; images: Buffer[] }> {
-  // A frame sd.cpp returned after a numerical overflow is not an image; nothing of the batch is kept.
-  for (const png of pngs)
-    if (await isBlankOutput(png))
-      throw diffusionError('INVALID_OUTPUT', 'The image engine produced a blank frame. Nothing was saved.')
-  const outputDir = deps.state.outputDir()
-  const { spec } = view
-  const workflow = workflowOf(request)
-  const createdAtMs = deps.now()
-  const durationMs = Math.max(createdAtMs - started, 0)
-  const items: GalleryImageItem[] = []
-  const images: Buffer[] = []
-  for (const [index, png] of pngs.entries()) {
-    const recipe: ImageRecipe = {
-      jobId: id,
-      index,
-      prompt: request.prompt,
-      negativePrompt: request.negativePrompt ? request.negativePrompt : null,
-      width: request.width,
-      height: request.height,
-      steps: request.steps,
-      cfgScale: request.cfgScale,
-      guidance: request.guidance ?? spec.defaults.guidance ?? null,
-      seed: batchSeed + index,
-      batchSeed,
-      batchSize: request.batchSize,
-      samplingMethod: request.samplingMethod ?? spec.defaults.samplingMethod ?? null,
-      flowShift: request.flowShift ?? spec.defaults.flowShift ?? null,
-      workflow,
-      // The effective value, so a recipe can be replayed as sent.
-      strength: usesInitImage(workflow) ? (request.strength ?? defaultStrength(workflow)) : null,
-      model: {
-        modelId: spec.modelId,
-        family: spec.family,
-        displayName: spec.displayName,
-        filename: basename(spec.files.diffusionModel),
-      },
-      engine: {
-        kind: spec.engine,
-        backend: spec.backend,
-        tag: spec.tag,
-        offload: spec.offload,
-        cpuFallback: spec.cpuFallback,
-      },
-      createdAtMs,
-      durationMs,
-    }
-    const { item, bytes } = await deps.gallery.save(outputDir, recipe, png)
-    deps.state.updateJob(id, (record) => record.job.outputs.push(item))
-    items.push(item)
-    images.push(bytes)
-  }
-  return { items, images }
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +533,7 @@ async function saveOutputs(
 async function waitTerminal(deps: JobDeps, id: string, graceMs: number): Promise<ImageJobState | undefined> {
   const deadline = deps.now() + graceMs
   for (;;) {
-    const state = deps.state.job(id)?.state
+    const state = deps.state.anyJob(id)?.state
     if (state === undefined) return undefined
     if (isTerminalJobState(state) || deps.now() >= deadline) return state
     await deps.sleep(deps.timings.cancelPollMs)
@@ -665,7 +563,7 @@ export async function cancelJob(
       .post(`${session.baseUrl}${JOBS_PATH}/${record.serverJobId}/cancel`, undefined, 5_000)
       .catch(() => undefined)
 
-  const rounds = session?.server.capabilities.cancelGenerating ? 2 : 1
+  const rounds = session && kindOf(record.kind).cancelGenerating(session.server.capabilities) ? 2 : 1
   for (let round = 0; round < rounds; round++) {
     const final = await waitTerminal(deps, id, graceMs)
     if (final !== undefined && isTerminalJobState(final))

@@ -8,21 +8,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
-import type { CoreEvents, ImageGenerateRequest } from '../contracts/index.js'
+import type { CoreEvents } from '../contracts/index.js'
 import { fakeServer, paintedPng, sampleRequest, sampleSpec } from '../../test/helpers/diffusion-fixtures.js'
 import type { FakeServer } from '../../test/helpers/diffusion-fixtures.js'
 import { Gallery } from './gallery.js'
 import { encodePng } from './png.js'
 import { createSdHttpClient } from './http.js'
-import {
-  cancelJob,
-  decodeImages,
-  DEFAULT_JOB_TIMINGS,
-  resolveInputs,
-  runImageJob,
-  startImageJob,
-  withoutSources,
-} from './jobs.js'
+import { cancelJob, DEFAULT_JOB_TIMINGS, runImageJob, startImageJob } from './jobs.js'
 import type { JobDeps, JobResult } from './jobs.js'
 import { AsyncMutex } from './mutex.js'
 import { DiffusionState } from './state.js'
@@ -576,6 +568,28 @@ describe('a failed job', () => {
 })
 
 describe('cancelling', () => {
+  it('refuses a record whose kind has no runner yet', async () => {
+    const port = await stub(() => json(404, {}))
+    const h = harness(port)
+    h.state.insertJob({
+      kind: 'video',
+      job: {
+        id: 'v',
+        state: 'generating',
+        modelId: 'm',
+        request: { prompt: 'x', width: 768, height: 512, steps: 8, cfgScale: 1 },
+        createdAtMs: 1,
+        progress: null,
+        outputs: [],
+      },
+      cancel: { requested: false },
+    })
+    await expect(cancelJob(h.deps, 'v')).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: 'No runner for video jobs.',
+    })
+  })
+
   it('past the grace period stops the server and keeps the spec', async () => {
     let cancels = 0
     const port = await stub((method, path) => {
@@ -872,58 +886,6 @@ describe('the server dying', () => {
     expect(cancels).toBe(1)
     expect(h.state.session).toBeUndefined()
     expect(h.reasons()).toContain('timeout')
-  })
-})
-
-describe('inputs', () => {
-  it('resolve per workflow, and a snapshot drops inline bytes', async () => {
-    const source = join(dataFolder, 'source.png')
-    await writeFile(source, 'PNG?')
-    const deps = { readSource: (path: string) => readFile(path) }
-    const path = { path: source }
-    const mask = { base64: 'data:image/png;base64,QUJD' }
-    let request: ImageGenerateRequest = sampleRequest({
-      workflow: 'inpaint',
-      initImage: path,
-      maskImage: mask,
-    })
-    expect(await resolveInputs(request, deps)).toEqual({ init: 'UE5HPw==', mask: 'QUJD', refs: [] })
-
-    request = { ...request, workflow: 'reference', referenceImages: [mask] }
-    expect(await resolveInputs(request, deps)).toEqual({ refs: ['UE5HPw==', 'QUJD'] })
-
-    // Create reads nothing, whatever the request carries; nor does a request without a source.
-    expect(await resolveInputs({ ...request, workflow: 'create' }, deps)).toEqual({ refs: [] })
-    delete request.initImage
-    expect(await resolveInputs(request, deps)).toEqual({ refs: [] })
-
-    const snapshot = withoutSources(
-      sampleRequest({ workflow: 'inpaint', initImage: path, maskImage: mask, referenceImages: [mask, path] })
-    )
-    expect(snapshot.initImage).toEqual(path)
-    expect(snapshot.maskImage).toEqual({ base64: '' })
-    expect(snapshot.referenceImages).toEqual([{ base64: '' }, path])
-    expect(snapshot.prompt).toBe('a cat')
-  })
-})
-
-describe('decodeImages', () => {
-  it('orders by index and refuses empty results', () => {
-    const images = decodeImages({
-      result: {
-        images: [
-          { index: 1, b64_json: 'AQ==' },
-          { index: 0, b64_json: pngB64 },
-        ],
-      },
-    })
-    expect(images).toHaveLength(2)
-    expect(images[0]?.subarray(0, 2).equals(Buffer.from([0x89, 0x50]))).toBe(true)
-    expect([...(images[1] as Buffer)]).toEqual([1])
-    expect(() => decodeImages({ result: { images: [] } })).toThrow('returned no images')
-    expect(() => decodeImages({})).toThrow('returned no images')
-    expect(() => decodeImages({ result: { images: [{ b64_json: '!!!!' }] } })).toThrow('undecodable image')
-    expect(decodeImages({ result: { images: [{ b64_json: ' AQ== ' }, 7, { index: 'x' }] } })).toHaveLength(1)
   })
 })
 

@@ -7,6 +7,7 @@ const paths = dataLayout('/data').diffusion
 
 function record(id: string): JobRecord {
   return {
+    kind: 'image',
     job: {
       id,
       state: 'queued',
@@ -91,6 +92,46 @@ describe('DiffusionState', () => {
     expect(state.job('j2')).toBeUndefined()
     expect(state.job('j3')).toBeDefined()
     expect(state.job(`j${JOB_HISTORY + 2}`)).toBeDefined()
+  })
+
+  it('keeps image and video records apart, and lists the video ones newest first', () => {
+    const state = new DiffusionState(paths)
+    const video = (id: string, createdAtMs: number): JobRecord => ({
+      kind: 'video',
+      job: {
+        id,
+        state: 'queued',
+        modelId: 'ltx-2:q4_k_m',
+        request: { prompt: 'x', width: 768, height: 512, steps: 8, cfgScale: 1 },
+        createdAtMs,
+        progress: null,
+        outputs: [],
+      },
+      cancel: { requested: false },
+    })
+    state.insertJob(record('img'))
+    state.insertJob(video('v1', 1))
+    state.insertJob(video('v2', 2))
+    expect(state.job('v1')).toBeUndefined()
+    expect(state.videoJob('img')).toBeUndefined()
+    expect(state.videoJob('v1')?.modelId).toBe('ltx-2:q4_k_m')
+    expect(state.anyJob('img')?.id).toBe('img')
+    expect(state.anyJob('v2')?.id).toBe('v2')
+    expect(state.anyJob('nope')).toBeUndefined()
+    expect(state.videoJobs().map((j) => j.id)).toEqual(['v2', 'v1'])
+    // Copies, both ways.
+    const copy = state.videoJob('v1')
+    if (copy) copy.state = 'failed'
+    expect(state.videoJob('v1')?.state).toBe('queued')
+
+    state.activeJobId = 'v1'
+    expect(state.activeJob()).toBeNull()
+    expect(state.activeVideoJob()?.id).toBe('v1')
+    state.updateJob('v1', (r) => (r.job.state = 'completed'))
+    expect(state.activeVideoJob()).toBeNull()
+    state.activeJobId = 'img'
+    expect(state.activeVideoJob()).toBeNull()
+    expect(state.activeJob()?.id).toBe('img')
   })
 
   it('tracks the model state with its error', () => {
