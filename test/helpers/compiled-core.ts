@@ -22,6 +22,10 @@ const TRIPLE =
       ? 'x86_64-pc-windows-msvc.exe'
       : 'x86_64-unknown-linux-gnu'
 export const BIN = join(ROOT, 'dist/bin', `atomic-chat-core-${TRIPLE}`)
+/** The version the binaries were built with (`package.json`, kept in step with `src/version.ts`). */
+export const CORE_VERSION = (
+  JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string }
+).version
 export const APP_BIN = join(ROOT, 'dist/bin', `atomic-chat-app-core-${TRIPLE}`)
 export const FAKE_LLAMA = join(ROOT, 'test/helpers/fake-llama-server.mjs')
 

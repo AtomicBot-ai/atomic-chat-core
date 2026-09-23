@@ -119,7 +119,7 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     const [event] = events as [SentEvent]
     expect(event).toMatchObject({
       level: 'error',
-      release: 'atomic-chat-core@0.3.0',
+      release: `atomic-chat-core@${core.CORE_VERSION}`,
       environment: 'e2e',
       user: { id: 'device-42', ip_address: null },
       tags: { source: 'model_load', provider: 'llamacpp-upstream', quant: 'Q4_K_M', gpu_model: 'Apple M3' },

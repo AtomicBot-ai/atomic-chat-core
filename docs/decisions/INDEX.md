@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-23** — [Serve /v1/videos as an asynchronous facade backed by the gallery](2026-09-23-serve-v1-videos-as-an-async-facade-backed-by-the-gallery.md)
+- **2026-09-23** — [Generate video through the resident diffusion session, with its own wire types and files](2026-09-23-generate-video-through-the-resident-diffusion-session.md)
 - **2026-09-22** — [Two things Bun's node:http does not tell the server: a client that hangs up before the answer, and an answer written before the body is read](2026-09-22-detect-a-client-that-hangs-up-before-the-answer-under-bun.md) — qualifies the 2026-09-15 Node-compatible-API decision with two confined work-arounds pinned under both runtimes.
 - **2026-09-22** — [The core owns its error reporting](2026-09-22-the-core-owns-its-error-reporting.md) — supersedes the app-only parts of the 2026-09-21 Sentry record.
 - **2026-09-21** — [Report core errors to its own Sentry project](2026-09-21-report-core-errors-to-its-own-sentry-project.md)

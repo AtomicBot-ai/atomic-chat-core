@@ -13,7 +13,8 @@
   app's config → finalize → load sequence, the job poll, the process journal and a structured reader of
   the event stream. No imports from `src/`.
 - `fake-sd-server.ts` / `.mjs` — a stand-in for stable-diffusion.cpp's `sd-server` with the modes and
-  switches its header lists. The app's desktop e2e suite imports `installFakeSdEngine` and
+  switches its header lists, `vid_gen` included (`FAKE_SD_MODES`, `FAKE_SD_VID_FORMATS`; every clip is
+  `test/fixtures/webm/tiny.webm`). The app's desktop e2e suite imports `installFakeSdEngine` and
   `writeFakeSdLaunchers` by path (`docs/app-e2e.md`), so their signatures are a contract.
 - `fake-cloudflared.ts` / `.mjs` — a stand-in for `cloudflared tunnel`, likewise imported by path from the app.
 - `fake-sidecar-server.ts` / `.mjs` — a stand-in for the app's `mlx-server` and `foundation-models-server`,

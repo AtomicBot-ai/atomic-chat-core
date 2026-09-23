@@ -24,3 +24,9 @@ Stage 5 providers, each opt-in on its own:
   `master-883-137f740`, the build app v2.0.42 ships). Holds `sd-server --help` to `test/fixtures/sdcpp/required-flags.txt`,
   then finalize → load → a 256² generation with parsed step progress, PNG, thumbnail and recipe → the OpenAI facade → a hard
   cancel of a long job → respawn → unload. About five minutes with FLUX.2 Klein Q4_K_M on an M-series Mac.
+  The video block of the same file runs when `ATOMIC_LIVE_SD_VIDEO_MODEL` names a video model (LTX-2.3 distilled by
+  default; `ATOMIC_LIVE_SD_VIDEO_VAE`, `ATOMIC_LIVE_SD_AUDIO_VAE`, `ATOMIC_LIVE_SD_VIDEO_LLM`,
+  `ATOMIC_LIVE_SD_EMBEDDINGS_CONNECTORS`; `ATOMIC_LIVE_SD_VIDEO_FAMILY=wan2.2-ti2v-5b` with `ATOMIC_LIVE_SD_VIDEO_T5XXL` for
+  Wan; `ATOMIC_LIVE_SD_VIDEO_MODE_FLAG=1` also passes `-M vid_gen`): load → a nine-frame clip with parsed step progress,
+  the WebM and its sidecar → `/v1/videos` queue, poll and content → a hard cancel → respawn → unload. It prints the
+  engine's capabilities and the clip's numbers, which is the evidence the ADR of 2026-09-23 leaves open.
