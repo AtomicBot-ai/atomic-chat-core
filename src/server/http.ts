@@ -184,6 +184,15 @@ export function sendError(res: ServerResponse, error: unknown, status?: number):
   sendJson(res, status ?? statusForCode(coreError.code), { error: coreError.toJSON() })
 }
 
+/**
+ * Past the limit the rest of the body is read and discarded, up to this many times the limit, before
+ * the refusal is written: Bun's `node:http` (1.3.10) delivers an answer written while the request
+ * body is still arriving as an empty 200, Node delivers the refusal either way (ADR
+ * 2026-09-22-detect-a-client-that-hangs-up-before-the-answer-under-bun). Beyond the ceiling the
+ * connection is dropped instead of read on.
+ */
+export const OVERSIZE_DRAIN_FACTOR = 8
+
 export async function readJsonBody<T = unknown>(
   req: IncomingMessage,
   limit = MAX_JSON_BODY_BYTES
@@ -193,10 +202,18 @@ export async function readJsonBody<T = unknown>(
   for await (const chunk of req) {
     const buf = chunk as Buffer
     size += buf.length
-    if (size > limit)
-      throw new AtomicCoreError('INVALID_ARGUMENT', 'Request body is too large.', `> ${limit} bytes`)
+    if (size > limit) {
+      if (size > limit * OVERSIZE_DRAIN_FACTOR) {
+        req.destroy()
+        break
+      }
+      chunks.length = 0
+      continue
+    }
     chunks.push(buf)
   }
+  if (size > limit)
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'Request body is too large.', `> ${limit} bytes`)
   if (size === 0) return {} as T
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T

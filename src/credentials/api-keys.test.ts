@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -105,10 +105,12 @@ describe('ApiKeyStore', () => {
     expect((await ApiKeyStore.open(path)).get('ok')).toBeUndefined()
   })
 
-  it('reports a folder it cannot read or write', async () => {
-    const blocker = join(dir, 'file')
-    await writeFile(blocker, '')
-    await expect(ApiKeyStore.open(join(blocker, 'credentials.json'))).rejects.toMatchObject({
+  it('reports a credentials path it cannot read', async () => {
+    // A directory where the file should be: EISDIR on every OS. A file standing in for the parent
+    // folder is not portable: Windows answers ENOENT, which reads as "no keys yet".
+    const blocker = join(dir, 'credentials.json')
+    await mkdir(blocker)
+    await expect(ApiKeyStore.open(blocker)).rejects.toMatchObject({
       code: 'IO_ERROR',
     })
   })

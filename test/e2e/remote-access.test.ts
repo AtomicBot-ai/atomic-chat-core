@@ -15,7 +15,7 @@ import { createServer as createTlsServer } from 'node:https'
 import type { Server } from 'node:https'
 import { connect } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -159,9 +159,9 @@ async function startPublic(ready: ReadyLine, body: Record<string, unknown> = {})
 }
 
 /** The status of one `GET /v1/models` sent to the public listener with exactly this `Host`. */
-function hostRequest(port: number, host: string): Promise<number> {
+function hostRequest(port: number, host: string, dial = '127.0.0.1'): Promise<number> {
   return new Promise((resolve, reject) => {
-    const socket = connect(port, '127.0.0.1')
+    const socket = connect(port, dial)
     let raw = ''
     socket.setEncoding('utf8')
     socket.on('data', (chunk: string) => (raw += chunk))
@@ -330,5 +330,86 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('the remot
     expect(shutdown.status).toBe(200)
     await new Promise((resolve) => second.child.once('exit', resolve))
     expect(alive(secondPid)).toBe(false)
+  })
+
+  it('reports a tunnel that exits after coming up, stops trusting its name, and lets the user start again', async () => {
+    let publicPort = 0
+    const edge = await startEdge(() => publicPort)
+    const { ready } = await startDaemon(await writeLauncher('ready-then-exit'), edge.address)
+    publicPort = await startPublic(ready)
+    await control(ready, '/remote-access/start', { method: 'POST' })
+    // The fake leaves on its own right after registering; `online` may be too brief to observe.
+    const failed = await until(ready, 'error')
+    expect(failed).toMatchObject({ error: 'exited', url: null, canStart: true, canStop: false })
+    const pid = launched()[0]?.pid as number
+    expect(alive(pid)).toBe(false)
+    expect(await hostRequest(publicPort, TUNNEL_HOST)).toBe(403)
+    expect(existsSync(join(dataFolder, 'atomic-core', 'remote-access-tunnel.json'))).toBe(false)
+    // The public server it pointed at is untouched.
+    expect(await hostRequest(publicPort, `127.0.0.1:${publicPort}`)).toBe(200)
+  })
+
+  it('kills a tunnel that ignores SIGTERM before stop answers off', async () => {
+    let publicPort = 0
+    const edge = await startEdge(() => publicPort)
+    const { ready } = await startDaemon(await writeLauncher('ignore-sigterm'), edge.address)
+    publicPort = await startPublic(ready)
+    await control(ready, '/remote-access/start', { method: 'POST' })
+    await until(ready, 'online')
+    const pid = launched()[0]?.pid as number
+    const before = Date.now()
+    const stopped = await control(ready, '/remote-access/stop', { method: 'POST' })
+    expect(await stopped.json()).toMatchObject({ state: 'off', url: null, error: null, canStart: true })
+    // SIGTERM was given its 5 s grace before the kill; the answer waited for the process to be gone.
+    expect(Date.now() - before).toBeGreaterThanOrEqual(4_500)
+    expect(alive(pid)).toBe(false)
+    expect(existsSync(join(dataFolder, 'atomic-core', 'remote-access-tunnel.json'))).toBe(false)
+  }, 30_000)
+
+  it('consumes the journal Atomic Chat 2.0.40 left at the data root', async () => {
+    // A pid that is certainly not a running tunnel: our own, which is not named `cloudflared`.
+    const legacy = join(dataFolder, 'remote-access-tunnel.json')
+    await mkdir(dataFolder, { recursive: true })
+    await writeFile(
+      legacy,
+      JSON.stringify({ pid: process.pid, started_at_secs: Math.floor(Date.now() / 1000) })
+    )
+    const edge = await startEdge(() => 0)
+    const { ready } = await startDaemon(await writeLauncher('url-then-registered'), edge.address)
+    // Read once and never again; the process it named was spared, being no tunnel.
+    expect(existsSync(legacy)).toBe(false)
+    expect(alive(process.pid)).toBe(true)
+    expect(await status(ready)).toMatchObject({ state: 'off' })
+  })
+
+  it('lists dialable LAN addresses, and a listener on 0.0.0.0 trusts the address a socket arrived on', async () => {
+    const edge = await startEdge(() => 0)
+    const { ready } = await startDaemon(await writeLauncher('url-then-registered'), edge.address)
+    const { addresses } = (await (await control(ready, '/lan-addresses')).json()) as { addresses: string[] }
+    const mine = Object.values(networkInterfaces())
+      .flat()
+      .filter((entry) => entry?.family === 'IPv4')
+      .map((entry) => (entry as { address: string }).address)
+    for (const address of addresses) {
+      expect(address).toMatch(/^\d+\.\d+\.\d+\.\d+$/)
+      expect(address.startsWith('127.')).toBe(false)
+      expect(mine).toContain(address)
+    }
+    const port = await startPublic(ready, { host: '0.0.0.0' })
+    // The listing is what to show the user; a VPN's shared-space address (kept on purpose, it may be
+    // Tailscale) can belong to a proxy that never reaches this listener. Prove it on one that does.
+    let lan: string | undefined
+    for (const candidate of addresses)
+      if ((await hostRequest(port, `127.0.0.1:${port}`, candidate).catch(() => Number.NaN)) === 200) {
+        lan = candidate
+        break
+      }
+    if (lan === undefined) return // A machine with no network: nothing more to prove here.
+    // Dialled on the LAN address, a request naming that address is trusted without configuration.
+    expect(await hostRequest(port, `${lan}:${port}`, lan)).toBe(200)
+    // A rebinding name arriving on the same socket is not.
+    expect(await hostRequest(port, 'attacker.example', lan)).toBe(403)
+    // The LAN literal presented over loopback is a stranger there.
+    expect(await hostRequest(port, `${lan}:${port}`)).toBe(403)
   })
 })

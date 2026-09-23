@@ -103,7 +103,7 @@ describe('FoundationModelsRuntime', () => {
   it('refuses to start without the binary, and rejects a nonsensical timeout', async () => {
     await expect(runtime({}, { exists: () => false }).load(APPLE_MODEL_ID)).rejects.toMatchObject({
       code: 'BINARY_NOT_FOUND',
-      message: 'foundation-models-server binary not found at: /resources/bin/foundation-models-server',
+      message: `foundation-models-server binary not found at: ${join('/resources/bin', 'foundation-models-server')}`,
     })
     await expect(runtime({}, { resourcesDir: undefined }).load(APPLE_MODEL_ID)).rejects.toMatchObject({
       code: 'BINARY_NOT_FOUND',
@@ -137,7 +137,8 @@ describe('FoundationModelsRuntime', () => {
     })
   })
 
-  it('drops a session whose server died and says so', async () => {
+  // Windows has no signals: a killed process there exits with code 1 and no signal to name.
+  it.skipIf(process.platform === 'win32')('drops a session whose server died and says so', async () => {
     const r = runtime()
     const session = await r.load(APPLE_MODEL_ID)
     process.kill(session.pid, 'SIGKILL')

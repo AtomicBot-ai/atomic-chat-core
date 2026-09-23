@@ -18,6 +18,8 @@ Stage 5 providers, each opt-in on its own:
 - stable-diffusion.cpp (`test/live/diffusion.test.ts`, POSIX): `ATOMIC_LIVE_SD_ENGINE` (folder with `sd-server`, `sd-cli` and
   their libraries; copied into the temporary data folder), `ATOMIC_LIVE_SD_MODEL` (the transformer GGUF), optional
   `ATOMIC_LIVE_SD_VAE`, `ATOMIC_LIVE_SD_VAE_FORMAT` (`flux2` for FLUX.2), `ATOMIC_LIVE_SD_LLM` (the family's text encoder),
+  `ATOMIC_LIVE_SD_LLM_VISION` (Qwen Image 2.1's Qwen3-VL projector; with it and `ATOMIC_LIVE_SD_FAMILY=qwen-image-2.1` a
+  `reference` generation from the first output runs as well),
   `ATOMIC_LIVE_SD_FAMILY` (default `flux.2-klein`), `ATOMIC_LIVE_SD_TAG` (the engine's release tag, default
   `master-883-137f740`, the build app v2.0.42 ships). Holds `sd-server --help` to `test/fixtures/sdcpp/required-flags.txt`,
   then finalize → load → a 256² generation with parsed step progress, PNG, thumbnail and recipe → the OpenAI facade → a hard

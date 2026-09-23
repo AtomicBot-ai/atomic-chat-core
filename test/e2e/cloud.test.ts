@@ -99,7 +99,7 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves cloud providers
     expect(listed.stdout).not.toContain('sk-cli')
   })
 
-  it('signs in to ChatGPT through control, serves the subscription, and refreshes once on a 401', async () => {
+  it('signs in to ChatGPT through control, serves the subscription, asks for a detailed reasoning summary, and refreshes once on a 401', async () => {
     let tokenCalls = 0
     const issuer = await stub((req, res) => {
       tokenCalls++
@@ -113,8 +113,10 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves cloud providers
       })
     })
     let subscriptionCalls = 0
+    const upstreamBodies: string[] = []
     const subscription = await stub((req, res) => {
       subscriptionCalls++
+      upstreamBodies.push(req.body)
       if (subscriptionCalls === 1) return json(res, 401, { detail: 'token expired' })
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.end(
@@ -173,9 +175,19 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves cloud providers
     const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-5', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+      body: JSON.stringify({
+        model: 'gpt-5',
+        stream: true,
+        reasoning_effort: 'high',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
     })
     const body = await answer.text()
+    // Stage 7m: the Responses request carries the effort and asks for the richest summary the
+    // subscription exposes, so the UI has more than a label or two to show for a long reasoning pass.
+    expect(upstreamBodies).toHaveLength(2)
+    for (const upstream of upstreamBodies)
+      expect(JSON.parse(upstream)).toMatchObject({ reasoning: { effort: 'high', summary: 'detailed' } })
 
     expect(answer.headers.get('content-type')).toBe('text/event-stream')
     expect(body).toContain('answered with refreshed token')

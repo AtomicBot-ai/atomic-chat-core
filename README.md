@@ -24,3 +24,22 @@ atomic-chat-core shutdown
 
 `serve` attaches to the one persistent owner for the selected data folder. The command can exit
 without unloading the model; `shutdown` explicitly stops that owner and its sessions.
+
+## Releasing
+
+The desktop app pins a core version (`atomicCore.version` in its `package.json`) and downloads that
+release's binaries, checking them against `SHA256SUMS`.
+
+```bash
+make release                 # patch; or VERSION=minor, major, or an explicit X.Y.Z
+```
+
+It bumps `package.json` and `src/version.ts` together, commits `release: vX.Y.Z`, tags it and pushes
+the branch and the tag (the current version, given explicitly, only tags `HEAD`). Without make:
+`npm run release -- patch --push`, or leave out `--push` to look before pushing. The tag runs the
+`release` workflow: the same gates as CI on macOS, Linux and Windows, both binaries cross-compiled for every
+target, then `vX.Y.Z` published with the binaries and `SHA256SUMS` as the latest release.
+
+The workflow can also be started by hand for the version already in `package.json` on a branch
+(Actions → release → Run workflow, or `gh workflow run release.yml --ref <branch>`); it creates the
+tag itself. A published version is never replaced: a second run for it fails, so bump first.

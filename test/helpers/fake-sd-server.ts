@@ -8,13 +8,22 @@ import { chmod, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { DataLayout } from '../../src/config/index.js'
+import type { DiffusionBackend } from '../../src/contracts/index.js'
 import { INSTALL_RECORD, OWNER_MARKER } from '../../src/diffusion/index.js'
 
 export const FAKE_SD_SCRIPT = fileURLToPath(new URL('./fake-sd-server.mjs', import.meta.url))
 export const CAN_INSTALL_FAKE_SD = process.platform !== 'win32'
 
 export type FakeSdMode =
-  'ready' | 'hang' | 'exit-early' | 'foreign' | 'queue-full' | 'fail-job' | 'die-mid-job' | 'ggml-abort'
+  | 'ready'
+  | 'hang'
+  | 'exit-early'
+  | 'foreign'
+  | 'queue-full'
+  | 'fail-job'
+  | 'die-mid-job'
+  | 'ggml-abort'
+  | 'gpu-fault'
 
 export interface FakeSdOptions {
   mode?: FakeSdMode
@@ -26,6 +35,10 @@ export interface FakeSdOptions {
   cancel?: boolean
   /** Print a tiled-VAE pass of this many tiles before sampling. */
   tiles?: number
+  /** A job with this seed returns all-black frames; other seeds paint. */
+  blankSeed?: number
+  /** The mode applies only to the first process that creates this file; later ones run `ready`. */
+  onceMarker?: string
   exitCode?: number
   stderr?: string
   pidFile?: string
@@ -41,6 +54,8 @@ export function fakeSdEnv(options: FakeSdOptions): Record<string, string> {
   if (options.stepMs !== undefined) env['FAKE_SD_STEP_MS'] = String(options.stepMs)
   if (options.cancel) env['FAKE_SD_CANCEL'] = '1'
   if (options.tiles !== undefined) env['FAKE_SD_TILES'] = String(options.tiles)
+  if (options.blankSeed !== undefined) env['FAKE_SD_BLANK_SEED'] = String(options.blankSeed)
+  if (options.onceMarker) env['FAKE_SD_ONCE_MARKER'] = options.onceMarker
   if (options.exitCode !== undefined) env['FAKE_SD_EXIT_CODE'] = String(options.exitCode)
   if (options.stderr !== undefined) env['FAKE_SD_STDERR'] = options.stderr
   if (options.pidFile) env['FAKE_SD_PID_FILE'] = options.pidFile
@@ -75,23 +90,17 @@ export async function writeFakeSdLaunchers(dir: string, options: FakeSdOptions =
 /** An installed, owned engine tree (marker and record included) whose binaries are the fake. */
 export async function installFakeSdEngine(
   layout: DataLayout,
-  options: FakeSdOptions & { tag?: string; backendId?: string; backend?: string } = {}
+  options: FakeSdOptions & { tag?: string; backendId?: string; backend?: DiffusionBackend } = {}
 ): Promise<FakeSdEngine> {
   const tag = options.tag ?? 'master-849-d04e895'
   const backendId = options.backendId ?? 'fake-cpu'
-  // What the app shows as the engine's device, and what its own compatibility checks read. A
-  // desktop scenario installs the backend its host would have got, not the placeholder.
   const backend = options.backend ?? 'cpu'
   const dir = join(layout.diffusion.backendsDir, tag, backendId)
   await writeFakeSdLaunchers(dir, options)
   await writeFile(join(dir, OWNER_MARKER), 'atomic-chat\n')
   await writeFile(
     join(dir, INSTALL_RECORD),
-    JSON.stringify(
-      { tag, backendId, backend, engine: 'sd-cpp', sha256: null, installedAtMs: 1 },
-      null,
-      2
-    )
+    JSON.stringify({ tag, backendId, backend, engine: 'sd-cpp', sha256: null, installedAtMs: 1 }, null, 2)
   )
   return { dir, tag, backendId }
 }

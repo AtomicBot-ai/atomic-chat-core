@@ -13,7 +13,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, posix, win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { realpathSync } from 'node:fs'
 
 export const CONFIGURATION_FILE_NAME = 'settings.json'
@@ -57,8 +57,12 @@ export interface DataFolderEnv {
   readFile: (path: string) => string | undefined
 }
 
+/** The injected platform's path rules, never the host's: the Windows branches run on a Mac too. */
+const pathsOf = (e: DataFolderEnv) => (e.platform === 'win32' ? win32 : posix)
+
 /** `dirs::data_dir()` — Roaming AppData / Application Support / XDG data. */
 export function dataDir(e: DataFolderEnv): string {
+  const { join } = pathsOf(e)
   if (e.platform === 'win32') return e.env['APPDATA'] ?? join(e.homedir, 'AppData', 'Roaming')
   if (e.platform === 'darwin') return join(e.homedir, 'Library', 'Application Support')
   return e.env['XDG_DATA_HOME'] ?? join(e.homedir, '.local', 'share')
@@ -66,6 +70,7 @@ export function dataDir(e: DataFolderEnv): string {
 
 /** `dirs::config_dir()` — only differs from data_dir on Linux (`~/.config`). */
 export function configDir(e: DataFolderEnv): string {
+  const { join } = pathsOf(e)
   if (e.platform === 'win32') return e.env['APPDATA'] ?? join(e.homedir, 'AppData', 'Roaming')
   if (e.platform === 'darwin') return join(e.homedir, 'Library', 'Application Support')
   return e.env['XDG_CONFIG_HOME'] ?? join(e.homedir, '.config')
@@ -77,6 +82,7 @@ export function configDir(e: DataFolderEnv): string {
  * `config_dir`, elsewhere it sits beside the current one under `data_dir`.
  */
 export function resolveConfigFilePath(e: DataFolderEnv): string {
+  const { join } = pathsOf(e)
   const current = join(dataDir(e), APP_IDENTIFIER)
   const legacy =
     e.platform === 'linux' ? join(configDir(e), LEGACY_PACKAGE_NAME) : join(dataDir(e), LEGACY_PACKAGE_NAME)
@@ -86,7 +92,7 @@ export function resolveConfigFilePath(e: DataFolderEnv): string {
 /** `build_default_data_folder` + the `.ai.app` suffix strip of `default_data_folder_path`. */
 export function defaultDataFolder(e: DataFolderEnv): string {
   const appName = e.env['APP_NAME'] ?? DEFAULT_APP_NAME
-  const path = join(dataDir(e), appName, 'data')
+  const path = pathsOf(e).join(dataDir(e), appName, 'data')
   return path.endsWith('.ai.app') ? path.slice(0, -'.ai.app'.length) : path
 }
 
@@ -120,12 +126,12 @@ export function resolveDataFolder(e: DataFolderEnv): string {
 
 /** The CLI deliberately does not inherit the desktop application's configured data folder. */
 export function resolveCliDataFolder(e: DataFolderEnv): string {
-  return join(dataDir(e), 'atomic-chat-cli', 'data')
+  return pathsOf(e).join(dataDir(e), 'atomic-chat-cli', 'data')
 }
 
 /** Reject aliases of the app's folder, including symlinks through existing parent directories. */
 export function assertCliDataFolder(folder: string, e: DataFolderEnv): void {
-  const paths = e.platform === 'win32' ? win32 : posix
+  const paths = pathsOf(e)
   const canonical = (input: string): string => {
     let ancestor = paths.resolve(input)
     const missing: string[] = []

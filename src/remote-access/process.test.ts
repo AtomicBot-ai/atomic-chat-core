@@ -59,6 +59,22 @@ describe('spawnTunnel', () => {
     expect(await tunnel.terminate(FAST)).toBe(true)
   })
 
+  it('feeds a line longer than 64 KiB as it stands, so a URL inside it is still found', async () => {
+    // cloudflared never prints one; a hostile stand-in might, and the pipe must keep draining.
+    // The child builds the line: 70 KiB of argv is over Windows' 32 KiB command-line limit.
+    const padded = `'x'.repeat(70 * 1024) + ${JSON.stringify(` ${FAKE_TUNNEL_URL} `)}`
+    const tunnel = track(
+      spawnTunnel({
+        program: process.execPath,
+        args: ['-e', `process.stderr.write(${padded}); setInterval(() => {}, 1000)`],
+        env: process.env as Record<string, string>,
+      })
+    )
+    // Never registered, so this waits the whole limit; what matters is that the URL was seen.
+    expect(await tunnel.waitReady(1_500)).toEqual({ kind: 'timed-out', sawUrl: true })
+    expect(await tunnel.terminate(FAST)).toBe(true)
+  })
+
   it('sees an exit after the tunnel was ready', async () => {
     const tunnel = track(spawnFakeCloudflared({ mode: 'ready-then-exit' }))
     expect(await tunnel.waitReady(10_000)).toEqual({ kind: 'url', url: FAKE_TUNNEL_URL })
