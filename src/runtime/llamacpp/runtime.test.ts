@@ -240,6 +240,29 @@ describe('failure paths', () => {
     expect(journal.list()).toEqual([])
   })
 
+  // `ps` only ever shows a process that is still alive, so the argv of a backend that failed to
+  // load is unreadable from outside. The fake records its own, which is what the app's desktop
+  // suite reads to prove a setting reached the process it was meant for.
+  it('records the argv and inference environment of a backend that died', async () => {
+    await data.writeModel('oom')
+    const argvFile = join(data.root, 'spawned-argv.jsonl')
+    const runtime = await makeRuntime({
+      spawn: fakeLlamaSpawn({ mode: 'oom', argvFile, label: 'llamacpp-upstream:b6325/macos-arm64' }),
+    })
+
+    await expect(runtime.load('oom')).rejects.toMatchObject({ code: 'OUT_OF_MEMORY' })
+
+    const records = readFileSync(argvFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { label: string; argv: string[]; env: Record<string, string> })
+    expect(records).toHaveLength(1)
+    const [record] = records as [(typeof records)[number]]
+    expect(record.label).toBe('llamacpp-upstream:b6325/macos-arm64')
+    expect(record.argv).toContain('-m')
+    expect(record.env['LLAMA_API_KEY']).toMatch(/\S/)
+  })
+
   // TurboQuant's `error.rs` (app commit ec1fd3ea7): the fork reads a tensor-count mismatch as an
   // unsupported layout, upstream as a damaged file; the runtime classifies with its own provider.
   it('classifies a tensor-count mismatch by the provider that loaded it', async () => {

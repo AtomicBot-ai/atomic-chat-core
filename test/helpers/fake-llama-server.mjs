@@ -22,6 +22,11 @@
  *                     llama.cpp's poisoned-backend 500 ("Compute error"), later ones succeed
  *   FAKE_LLAMA_PID_FILE  path; the pid is appended there on startup, one per line, so a test can
  *                     find (and count) children that never became sessions
+ *   FAKE_LLAMA_ARGV_FILE  path; one JSON record per start is appended there — pid, label, argv and
+ *                     the inference-relevant environment. It is what a test reads instead of `ps`,
+ *                     which only ever shows a process that is still alive. Written after the
+ *                     `--list-devices` and `-h` probes, so the file holds starts, not probes.
+ *   FAKE_LLAMA_LABEL  free-form name of the pack that launched this fake; recorded verbatim
  *   LLAMA_API_KEY     when set, every route but `/health` demands `Authorization: Bearer <key>`
  */
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
@@ -54,6 +59,25 @@ if (argv.includes('-h') || argv.includes('--help')) {
 }
 
 if (process.env.FAKE_LLAMA_PID_FILE) appendFileSync(process.env.FAKE_LLAMA_PID_FILE, `${process.pid}\n`)
+if (process.env.FAKE_LLAMA_ARGV_FILE) {
+  // Only the variables that decide how a model loads. `PATH` is deliberately left out: it is long,
+  // it is noise, and a record past the pipe buffer would interleave with the record of a fake that
+  // started at the same moment — which happens whenever a model switch overlaps an embedding load.
+  const kept = /^(LLAMA_|GGML_|CUDA_|HIP_|ROCR_|HSA_)|_LIBRARY_PATH$/
+  const env = {}
+  for (const [key, value] of Object.entries(process.env)) if (kept.test(key)) env[key] = value
+  appendFileSync(
+    process.env.FAKE_LLAMA_ARGV_FILE,
+    `${JSON.stringify({
+      pid: process.pid,
+      atMs: Date.now(),
+      label: process.env.FAKE_LLAMA_LABEL ?? '',
+      exe: process.argv[1],
+      argv,
+      env,
+    })}\n`
+  )
+}
 
 // ── startup log, as llama.cpp prints it ───────────────────────────────────────
 err(`build: 6325 (fake) with cc (GCC) 13.2.0 for x86_64-linux-gnu`)
