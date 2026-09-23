@@ -42,6 +42,23 @@ export interface DiffusionModelFiles {
   /** A VLM vision projector (Qwen Image 2.1's Qwen3-VL), passed to sd.cpp as `--llm_vision`. */
   llmVision?: string
   qwen2vl?: string
+  /** LTX-2: the audio VAE, passed to sd.cpp as `--audio-vae`. */
+  audioVae?: string
+  /** LTX-2.3: the text-embedding connectors, passed to sd.cpp as `--embeddings-connectors`. */
+  embeddingsConnectors?: string
+}
+
+/** What a video family generates by default; present on every video load, absent on image loads. */
+export interface DiffusionVideoDefaults {
+  /** Frames per second the model was trained at; a request naming another rate is refused. */
+  fps: number
+  /** Default frame count; must itself satisfy `k * frameStep + frameOffset`. */
+  frames: number
+  /** Valid frame counts are `k * frameStep + frameOffset` (LTX-2: 8k+1, Wan: 4k+1). */
+  frameStep: number
+  frameOffset: number
+  /** The sizes the family was trained for; the app's Resolution picker, never a hard limit. */
+  resolutionPresets: [number, number][]
 }
 
 /** Per-family defaults, handed over at load time so validation and the OpenAI facade need no catalog. */
@@ -53,6 +70,9 @@ export interface DiffusionFamilyDefaults {
   flowShift?: number
   width: number
   height: number
+  /** A distilled model's fixed sigma schedule, sent as `custom_sigmas` when `steps` equals its length. */
+  sigmas?: number[]
+  video?: DiffusionVideoDefaults
 }
 
 export interface DiffusionFamilyRanges {
@@ -60,6 +80,8 @@ export interface DiffusionFamilyRanges {
   /** Inclusive min/max for both width and height. */
   dims: [number, number]
   dimMultiple: number
+  /** Video only: inclusive min/max frame count. */
+  frames?: [number, number]
 }
 
 export interface LoadDiffusionModelRequest {
@@ -124,9 +146,12 @@ export interface DiffusionStatus {
     loaded: LoadedDiffusionModel | null
     error?: DiffusionErrorBody
   }
-  /** A queued or generating job, so a reload can adopt it. */
+  /** A queued or generating image job, so a reload can adopt it. */
   activeJob: ImageJob | null
+  /** The video counterpart; at most one of the two is set. */
+  activeVideoJob: VideoJob | null
   outputDir: string
+  videoOutputDir: string
   /** Idle-unload timer in seconds; 0 = never. */
   idleUnloadSecs: number
 }
@@ -306,6 +331,8 @@ export interface DiffusionConfig {
   dataFolder: string
   /** Override for the gallery folder; absent for `<data>/images`. */
   outputDir?: string
+  /** Override for the video folder; absent for `<data>/videos`. */
+  videoOutputDir?: string
   /** 0 = never unload on idle. */
   idleUnloadSecs?: number
 }
@@ -314,6 +341,161 @@ export interface DiffusionCancelResult {
   cancelled: boolean
   /** True when the server had to be stopped to interrupt the generation. */
   serverStopped: boolean
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Video generation. The same engine and session; its own request, job, recipe and gallery item, so the
+// image types above keep the plugin's shape byte for byte. The app mirrors these in the same file.
+// ---------------------------------------------------------------------------------------------------
+
+/** `image-to-video` is reserved: parsed, recorded, and refused until the workflow lands. */
+export type VideoWorkflowId = 'create' | 'image-to-video'
+
+export type VideoJobState = ImageJobState
+export type VideoJobPhase = ImageJobPhase
+
+/** The one container sd.cpp writes that the app can play: VP8 in WebM. */
+export type VideoOutputFormat = 'webm'
+
+/** What the loaded video model can do; the app gates its form on this. */
+export interface VideoCapabilities {
+  workflows: VideoWorkflowId[]
+  minDim: number
+  maxDim: number
+  dimMultiple: number
+  supportsNegativePrompt: boolean
+  supportsGuidance: boolean
+  /** Whether a running generation can be cancelled without stopping the server. */
+  cancelGenerating: boolean
+  fps: number
+  frames: { min: number; max: number; step: number; offset: number; default: number }
+  resolutionPresets: [number, number][]
+  outputFormat: VideoOutputFormat
+  /** From the engine's `output_formats_by_mode.vid_gen`; null when the build did not report formats. */
+  webmSupported: boolean | null
+  defaults: DiffusionFamilyDefaults
+  ranges: DiffusionFamilyRanges
+}
+
+export interface VideoGenerateRequest {
+  prompt: string
+  negativePrompt?: string
+  width: number
+  height: number
+  /** Absent: the family default. Must be `k * frameStep + frameOffset` within `ranges.frames`. */
+  frames?: number
+  /** Absent: the family rate. Any other value is refused. */
+  fps?: number
+  steps: number
+  cfgScale: number
+  guidance?: number
+  /** Absent or negative: the core draws one; the recipe records the seed used. */
+  seed?: number
+  samplingMethod?: string
+  flowShift?: number
+  workflow?: VideoWorkflowId
+  /** Reserved for `image-to-video`: the first frame. */
+  initImage?: ImageSource
+  /** Reserved for `image-to-video`: the last frame. */
+  endImage?: ImageSource
+}
+
+/** One clip per job, so no batch fields. */
+export interface VideoJobProgress {
+  phase: VideoJobPhase
+  step: number
+  totalSteps: number
+  /** 0..1 estimate for the whole job. */
+  fraction: number
+  etaSeconds: number | null
+  elapsedMs: number
+}
+
+export interface VideoJob {
+  id: string
+  state: VideoJobState
+  modelId: string
+  /** The request with inline image bytes blanked; file paths stay. */
+  request: VideoGenerateRequest
+  createdAtMs: number
+  startedAtMs?: number
+  finishedAtMs?: number
+  progress: VideoJobProgress | null
+  /** Zero or one item. */
+  outputs: GalleryVideoItem[]
+  error?: DiffusionErrorBody
+}
+
+/** Written as `<jobId>.json` beside the video (WebM has no text chunk). Enough to reproduce the clip. */
+export interface VideoRecipe {
+  jobId: string
+  prompt: string
+  negativePrompt: string | null
+  width: number
+  height: number
+  /** The frame count that was requested and validated. */
+  frames: number
+  /** The frame count the engine reported for the file it wrote, after its own normalisation. */
+  frameCount: number
+  fps: number
+  steps: number
+  cfgScale: number
+  guidance: number | null
+  seed: number
+  samplingMethod: string | null
+  flowShift: number | null
+  workflow: VideoWorkflowId
+  outputFormat: VideoOutputFormat
+  model: {
+    modelId: string
+    family: string
+    displayName: string
+    /** Basename of the transformer file. */
+    filename: string
+  }
+  engine: {
+    kind: DiffusionEngineId
+    backend: DiffusionBackend
+    tag: string
+    offload: DiffusionOffloadPolicy
+    cpuFallback: boolean
+  }
+  createdAtMs: number
+  durationMs: number
+}
+
+export interface GalleryVideoItem {
+  /** The job id (32 hex characters); also the file stem. */
+  id: string
+  path: string
+  /** `<id>.thumb.png`, once the app uploaded a poster; null until then. */
+  posterPath: string | null
+  width: number
+  height: number
+  fps: number
+  frameCount: number
+  /** `frameCount / fps`. */
+  durationSecs: number
+  sizeBytes: number
+  createdAtMs: number
+  pinned: boolean
+  archived: boolean
+  recipe: VideoRecipe
+}
+
+export interface VideoGalleryPage {
+  items: GalleryVideoItem[]
+  hasMore: boolean
+  total: number
+}
+
+export interface DiffusionVideoProgressEvent {
+  jobId: string
+  progress: VideoJobProgress
+}
+
+export interface DiffusionVideoJobEvent {
+  job: VideoJob
 }
 
 /** Payloads of the four `diffusion:*` events (`events.rs` in the plugin). */

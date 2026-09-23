@@ -40,6 +40,7 @@ describe('dataLayout', () => {
       modelsDir: join('/data', 'diffusion', 'models'),
       scratchDir: join('/data', 'diffusion', 'scratch'),
       defaultOutputDir: join('/data', 'images'),
+      defaultVideoOutputDir: join('/data', 'videos'),
     })
   })
 })

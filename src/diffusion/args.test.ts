@@ -11,10 +11,15 @@ import type {
   DiffusionOffloadPolicy,
   ImageGenerateRequest,
   ImageWorkflowId,
+  VideoGenerateRequest,
 } from '../contracts/index.js'
+import { sampleVideoRequest, sampleVideoSpec } from '../../test/helpers/diffusion-fixtures.js'
 import {
   buildImgGenRequest,
   buildServerArgs,
+  buildVidGenRequest,
+  VID_GEN_MODE_FLAG_ENV,
+  videoModeFlags,
   commandSummaryForLog,
   cpuBackendExtraArgs,
   hostEnv,
@@ -25,6 +30,7 @@ import {
   offloadFlags,
   speedFlags,
   VAE_TILING_AREA,
+  VIDEO_VAE_TILING_PIXEL_FRAMES,
   withoutDeviceBackendFlags,
 } from './args.js'
 import type { ArgsHost } from './args.js'
@@ -191,6 +197,8 @@ describe('buildServerArgs', () => {
       llm: '/m/e',
       llmVision: '/m/g',
       qwen2vl: '/m/f',
+      audioVae: '/m/h',
+      embeddingsConnectors: '/m/i',
     }
     const emitted = new Set<string>()
     for (const offload of ['none', 'group', 'model'] as const) {
@@ -198,6 +206,9 @@ describe('buildServerArgs', () => {
       for (const arg of buildServerArgs(full, 1, '/s', MAC)) if (arg.startsWith('-')) emitted.add(arg)
     }
     expect([...emitted].filter((flag) => !required.has(flag))).toEqual([])
+    // The video flags are in the list too; the mode flag is not, because it is off until proven.
+    expect(required.has('--audio-vae') && required.has('--embeddings-connectors')).toBe(true)
+    expect(required.has('-M')).toBe(false)
     // And the list names nothing this module stopped emitting.
     required.delete('--verbose')
     expect([...required].filter((flag) => !emitted.has(flag))).toEqual([])
@@ -437,5 +448,137 @@ describe('the host switches', () => {
     expect(hostEnv('darwin', 'metal', undefined)).toEqual({})
     expect(hostEnv('darwin', 'cpu', 'Apple M5')).toEqual({})
     expect(hostEnv('linux', 'metal', 'Apple M5')).toEqual({})
+  })
+})
+
+describe('the video argv', () => {
+  it('passes the audio VAE and the connectors right after the video VAE', () => {
+    const args = buildServerArgs(sampleVideoSpec(), 4242, '/s', MAC)
+    const idx = (flag: string) => args.indexOf(flag)
+    expect(valueAfter(args, '--vae')).toBe('/models/shared/ltx-2.3-22b-distilled_video_vae.safetensors')
+    expect(valueAfter(args, '--audio-vae')).toBe('/models/shared/ltx-2.3-22b-distilled_audio_vae.safetensors')
+    expect(valueAfter(args, '--embeddings-connectors')).toBe(
+      '/models/shared/ltx-2.3-22b-distilled_embeddings_connectors.safetensors'
+    )
+    expect(idx('--vae')).toBeLessThan(idx('--audio-vae'))
+    expect(idx('--audio-vae')).toBeLessThan(idx('--embeddings-connectors'))
+    expect(idx('--embeddings-connectors')).toBeLessThan(idx('--llm'))
+    expect(args).not.toContain('-M')
+    // An image spec never sees them.
+    expect(buildServerArgs(spec(zImageFiles(), 'none'), 1, '/s', MAC)).not.toContain('--audio-vae')
+  })
+
+  it('emits -M vid_gen only for a video model and only when the environment opts in', () => {
+    expect(videoModeFlags('video', undefined)).toEqual([])
+    expect(videoModeFlags('video', '0')).toEqual([])
+    expect(videoModeFlags('image', '1')).toEqual([])
+    for (const on of ['1', 'true', 'YES', ' on '])
+      expect(videoModeFlags('video', on), on).toEqual(['-M', 'vid_gen'])
+    const host: ArgsHost = { platform: 'linux', env: { [VID_GEN_MODE_FLAG_ENV]: '1' } }
+    const args = buildServerArgs({ ...sampleVideoSpec(), extraArgs: ['--x'] }, 1, '/s', host)
+    const at = args.indexOf('-M')
+    expect(args[at + 1]).toBe('vid_gen')
+    // Before -v and the caller's extras, after the hardware flags.
+    expect(at).toBeLessThan(args.indexOf('-v'))
+    expect(at).toBeGreaterThan(args.indexOf('--diffusion-fa'))
+    expect(args.slice(-1)).toEqual(['--x'])
+  })
+})
+
+/** A request without the named optionals, for `exactOptionalPropertyTypes`. */
+function without<K extends keyof VideoGenerateRequest>(
+  request: VideoGenerateRequest,
+  ...keys: K[]
+): VideoGenerateRequest {
+  const copy = { ...request }
+  for (const key of keys) delete copy[key]
+  return copy
+}
+
+describe('buildVidGenRequest', () => {
+  const NO_VIDEO_INPUTS: ResolvedInputs = { refs: [] }
+
+  it('matches the sd.cpp vid_gen schema, with the distilled sigmas at exactly their step count', () => {
+    const spec = sampleVideoSpec()
+    expect(buildVidGenRequest(sampleVideoRequest(), spec.defaults, 42, NO_VIDEO_INPUTS)).toEqual({
+      prompt: 'a cat walking through a rainy alley',
+      negative_prompt: '',
+      width: 768,
+      height: 512,
+      video_frames: 25,
+      fps: 24,
+      output_format: 'webm',
+      seed: 42,
+      // 768 × 512 × 49 frames is 19 megapixel-frames: the VAE decodes in tiles.
+      vae_tiling_params: { enabled: true },
+      sample_params: {
+        sample_steps: 8,
+        sample_method: 'euler',
+        custom_sigmas: [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875],
+        guidance: { txt_cfg: 1.0 },
+      },
+    })
+    // Another step count runs the engine's own schedule.
+    const nine = buildVidGenRequest(sampleVideoRequest({ steps: 9 }), spec.defaults, 1, NO_VIDEO_INPUTS)
+    expect(nine['sample_params']).not.toHaveProperty('custom_sigmas')
+  })
+
+  it('fills the frame count and rate from the family, and passes the request knobs through', () => {
+    const spec = sampleVideoSpec()
+    const body = buildVidGenRequest(
+      without(
+        sampleVideoRequest({
+          negativePrompt: 'blurry',
+          guidance: 3.5,
+          flowShift: 3,
+          samplingMethod: 'euler_a',
+        }),
+        'frames',
+        'fps'
+      ),
+      spec.defaults,
+      7,
+      NO_VIDEO_INPUTS
+    )
+    expect(body['video_frames']).toBe(121)
+    expect(body['fps']).toBe(24)
+    expect(body['negative_prompt']).toBe('blurry')
+    expect(body['sample_params']).toMatchObject({
+      sample_method: 'euler_a',
+      flow_shift: 3,
+      guidance: { txt_cfg: 1.0, distilled_guidance: 3.5 },
+    })
+    // A spec without a video block (never loaded as video) still produces a well-formed body.
+    const bare = buildVidGenRequest(without(sampleVideoRequest(), 'frames', 'fps'), PLAIN, 1, NO_VIDEO_INPUTS)
+    expect(bare['video_frames']).toBe(1)
+    expect(bare['fps']).toBe(24)
+  })
+
+  it('sends the resolved first and last frames, and tiles the VAE past eight megapixel-frames', () => {
+    const spec = sampleVideoSpec()
+    const body = buildVidGenRequest(sampleVideoRequest({ frames: 9 }), spec.defaults, 1, {
+      refs: [],
+      init: 'FIRST',
+      end: 'LAST',
+    })
+    expect(body['init_image']).toBe('FIRST')
+    expect(body['end_image']).toBe('LAST')
+    // 768 × 512 × 9 is 3.5 megapixel-frames: one graph.
+    expect(body).not.toHaveProperty('vae_tiling_params')
+    // The frame count counts as much as the frame size: 49 frames of the same size tile …
+    expect(
+      buildVidGenRequest(sampleVideoRequest({ frames: 49 }), spec.defaults, 1, NO_VIDEO_INPUTS)[
+        'vae_tiling_params'
+      ]
+    ).toEqual({ enabled: true })
+    // … and so do 9 frames of 1216².
+    const big = buildVidGenRequest(
+      sampleVideoRequest({ width: 1216, height: 1216, frames: 9 }),
+      spec.defaults,
+      1,
+      NO_VIDEO_INPUTS
+    )
+    expect(big['vae_tiling_params']).toEqual({ enabled: true })
+    expect(VIDEO_VAE_TILING_PIXEL_FRAMES).toBe(8 * 1_048_576)
   })
 })

@@ -112,20 +112,34 @@ export async function readFlags(dir: string): Promise<FlagMap> {
   return flags
 }
 
+/** What a failed write is called; the video gallery names its own folder. */
+export interface WriteMessages {
+  write: string
+  finish: string
+}
+const IMAGE_WRITE_MESSAGES: WriteMessages = {
+  write: 'Could not write to the images folder.',
+  finish: 'Could not finish writing the image.',
+}
+
 /** Write a file through a hidden temporary sibling, so a reader never sees half of it. */
-async function writeAtomic(target: string, bytes: Buffer | string): Promise<void> {
+export async function writeAtomic(
+  target: string,
+  bytes: Buffer | string,
+  messages: WriteMessages = IMAGE_WRITE_MESSAGES
+): Promise<void> {
   const tmp = join(dirname(target), `.${basename(target)}.tmp`)
   try {
     await writeFile(tmp, bytes)
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => {})
-    throw ioError('Could not write to the images folder.', error)
+    throw ioError(messages.write, error)
   }
   try {
     await rename(tmp, target)
   } catch (error) {
     await rm(tmp, { force: true }).catch(() => {})
-    throw ioError('Could not finish writing the image.', error)
+    throw ioError(messages.finish, error)
   }
 }
 

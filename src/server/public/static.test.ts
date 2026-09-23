@@ -40,4 +40,40 @@ describe('the OpenAPI document', () => {
     expect(operation?.responses['503']).toBeTypeOf('object')
     expect(operation?.responses['504']).toBeTypeOf('object')
   })
+
+  // Stage 9g: the app's document describes the video facade the core serves (`videos.ts`).
+  it('publishes the video contract the facade serves', async () => {
+    const server = await startPublic({})
+    const spec = (await (await fetch(`http://127.0.0.1:${server.port}/openapi.json`)).json()) as {
+      tags: Array<{ name: string }>
+      paths: Record<string, Record<string, any>> // eslint-disable-line @typescript-eslint/no-explicit-any
+      components: { schemas: Record<string, any>; responses: Record<string, unknown> } // eslint-disable-line @typescript-eslint/no-explicit-any
+    }
+    expect(spec.tags.map((tag) => tag.name)).toContain('Videos')
+    const create = spec.paths['/videos']?.['post']
+    expect(create?.operationId).toBe('createVideo')
+    expect(create?.tags).toEqual(['Videos'])
+    expect(create?.requestBody.content['application/json'].schema.$ref).toBe(
+      '#/components/schemas/CreateVideoDto'
+    )
+    expect(create?.responses['200'].content['application/json'].schema.$ref).toBe(
+      '#/components/schemas/VideoDto'
+    )
+    expect(spec.paths['/videos']?.['get']?.operationId).toBe('listVideos')
+    expect(spec.paths['/videos/{video_id}']?.['get']?.operationId).toBe('retrieveVideo')
+    expect(spec.paths['/videos/{video_id}']?.['delete']?.operationId).toBe('deleteVideo')
+    const content = spec.paths['/videos/{video_id}/content']?.['get']
+    expect(content?.operationId).toBe('downloadVideoContent')
+    expect(Object.keys(content?.responses['200'].content).sort()).toEqual(['image/png', 'video/webm'])
+    const request = spec.components.schemas['CreateVideoDto']
+    expect(request.required).toEqual(['prompt'])
+    // The served document is re-serialised with sorted keys; compare as sets.
+    expect(Object.keys(request.properties).sort()).toEqual(
+      ['model', 'prompt', 'seconds', 'size', 'seed', 'negative_prompt'].sort()
+    )
+    const video = spec.components.schemas['VideoDto']
+    expect(video.properties.status.enum).toEqual(['queued', 'in_progress', 'completed', 'failed'])
+    expect(video.properties.atomic.$ref).toBe('#/components/schemas/VideoAtomicDto')
+    expect(spec.components.responses['VideoApiError']).toBeTypeOf('object')
+  })
 })

@@ -7,7 +7,17 @@ import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { ImageGenerateRequest, ImageSource, ImageWorkflowId } from '../contracts/index.js'
 import type { ServerSpec } from './types.js'
-import { isCanonicalBase64, stripDataUrl, validateRequest } from './validate.js'
+import { sampleVideoRequest, sampleVideoSpec } from '../../test/helpers/diffusion-fixtures.js'
+import {
+  isCanonicalBase64,
+  isValidFrameCount,
+  largestValidFrames,
+  nearestValidFrames,
+  stripDataUrl,
+  validateRequest,
+  validateVideoRequest,
+} from './validate.js'
+import type { VideoGenerateRequest } from '../contracts/index.js'
 
 const EXISTING = '/tmp/source.png'
 const deps = { isFile: async (path: string) => path === EXISTING }
@@ -272,5 +282,165 @@ describe('isCanonicalBase64', () => {
       const encoded = Buffer.from(Array.from({ length }, (_, i) => (i * 37 + 11) % 256)).toString('base64')
       expect(isCanonicalBase64(encoded), encoded).toBe(true)
     }
+  })
+})
+
+describe('the frame lattice', () => {
+  it('accepts k*step+offset inside the range and nothing else', () => {
+    const ltx = { step: 8, offset: 1 }
+    const range: [number, number] = [9, 257]
+    const table: Array<[number, boolean]> = [
+      [9, true],
+      [25, true],
+      [121, true],
+      [257, true],
+      [1, false], // below the range even though it is on the lattice
+      [24, false],
+      [26, false],
+      [265, false],
+      [24.5, false],
+    ]
+    for (const [frames, valid] of table)
+      expect(isValidFrameCount(frames, ltx, range), String(frames)).toBe(valid)
+    const wan = { step: 4, offset: 1 }
+    expect(isValidFrameCount(121, wan, [5, 241])).toBe(true)
+    expect(isValidFrameCount(122, wan, [5, 241])).toBe(false)
+    // A step of zero is read as one, like the dimension multiple.
+    expect(isValidFrameCount(7, { step: 0, offset: 0 }, [1, 10])).toBe(true)
+  })
+
+  it('rounds a wanted count down to the lattice, and gives up below the minimum', () => {
+    const ltx = { step: 8, offset: 1 }
+    const range: [number, number] = [9, 257]
+    expect(largestValidFrames(48, ltx, range)).toBe(41)
+    expect(largestValidFrames(49, ltx, range)).toBe(49)
+    expect(largestValidFrames(120.9, ltx, range)).toBe(113)
+    expect(largestValidFrames(1000, ltx, range)).toBe(257)
+    expect(largestValidFrames(8, ltx, range)).toBeUndefined()
+    expect(largestValidFrames(0, ltx, range)).toBeUndefined()
+    expect(largestValidFrames(5, { step: 4, offset: 1 }, [5, 241])).toBe(5)
+  })
+
+  it('snaps a wanted count to the nearest lattice point inside the range', () => {
+    const ltx = { step: 8, offset: 1 }
+    const range: [number, number] = [9, 257]
+    // 2 s at 24 fps is 48 frames: nearer to 49 than to 41.
+    expect(nearestValidFrames(48, ltx, range)).toBe(49)
+    expect(nearestValidFrames(44, ltx, range)).toBe(41)
+    expect(nearestValidFrames(45, ltx, range)).toBe(49)
+    expect(nearestValidFrames(121, ltx, range)).toBe(121)
+    expect(nearestValidFrames(2, ltx, range)).toBe(9)
+    expect(nearestValidFrames(0, ltx, range)).toBe(9)
+    expect(nearestValidFrames(10_000, ltx, range)).toBe(257)
+    // A range whose top is off the lattice snaps to the highest point under it.
+    expect(nearestValidFrames(10_000, ltx, [9, 260])).toBe(257)
+    expect(nearestValidFrames(120, { step: 4, offset: 1 }, [5, 241])).toBe(121)
+  })
+})
+
+/** A request without the named optionals, for `exactOptionalPropertyTypes`. */
+function without<K extends keyof VideoGenerateRequest>(
+  request: VideoGenerateRequest,
+  ...keys: K[]
+): VideoGenerateRequest {
+  const copy = { ...request }
+  for (const key of keys) delete copy[key]
+  return copy
+}
+
+describe('validateVideoRequest', () => {
+  const video = sampleVideoSpec()
+  async function videoRefusal(r: VideoGenerateRequest, s = video): Promise<AtomicCoreError> {
+    const error = await validateVideoRequest(r, s, deps).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    return error as AtomicCoreError
+  }
+
+  it('accepts a request on the lattice, at the family rate, and fills the defaults', async () => {
+    await expect(validateVideoRequest(sampleVideoRequest(), video, deps)).resolves.toBeUndefined()
+    await expect(
+      validateVideoRequest(without(sampleVideoRequest({ fps: 24, seed: -1 }), 'frames'), video, deps)
+    ).resolves.toBeUndefined()
+    await expect(
+      validateVideoRequest(
+        sampleVideoRequest({ workflow: 'create', seed: Number.MAX_SAFE_INTEGER }),
+        video,
+        deps
+      )
+    ).resolves.toBeUndefined()
+  })
+
+  it('checks the prompt, the dimensions, the steps, the cfg and the seed like an image', async () => {
+    expect((await videoRefusal(sampleVideoRequest({ prompt: ' ' }))).message).toBe('Enter a prompt.')
+    expect((await videoRefusal(sampleVideoRequest({ width: 770 }))).toJSON()).toEqual({
+      code: 'INVALID_DIMENSIONS',
+      message: 'width must be a multiple of 32.',
+      details: 'width=770',
+    })
+    expect((await videoRefusal(sampleVideoRequest({ height: 2048 }))).toJSON()).toEqual({
+      code: 'INVALID_DIMENSIONS',
+      message: 'height must be between 256 and 1216.',
+      details: 'height=2048',
+    })
+    expect((await videoRefusal(sampleVideoRequest({ steps: 0 }))).message).toBe(
+      'Steps must be between 1 and 50.'
+    )
+    expect((await videoRefusal(sampleVideoRequest({ cfgScale: -1 }))).message).toBe(
+      'CFG scale must be a non-negative number.'
+    )
+    expect((await videoRefusal(sampleVideoRequest({ seed: Number.MAX_SAFE_INTEGER + 2 }))).toJSON()).toEqual({
+      code: 'INVALID_REQUEST',
+      message: `The seed must be at most ${Number.MAX_SAFE_INTEGER}.`,
+      details: `seed=${Number.MAX_SAFE_INTEGER + 2}`,
+    })
+  })
+
+  it('holds the frame rate fixed and the frame count to the lattice', async () => {
+    expect((await videoRefusal(sampleVideoRequest({ fps: 30 }))).toJSON()).toEqual({
+      code: 'INVALID_REQUEST',
+      message: 'This model generates at 24 fps.',
+      details: 'fps=30',
+    })
+    expect((await videoRefusal(sampleVideoRequest({ frames: 24 }))).toJSON()).toEqual({
+      code: 'INVALID_REQUEST',
+      message: 'Frames must be 8k+1 between 9 and 257.',
+      details: 'frames=24',
+    })
+    expect((await videoRefusal(sampleVideoRequest({ frames: 265 }))).code).toBe('INVALID_REQUEST')
+    // The family default itself is checked, so a mis-catalogued default fails loudly.
+    const odd = sampleVideoSpec({
+      defaults: { ...video.defaults, video: { ...video.defaults.video!, frames: 120 } },
+    })
+    expect((await videoRefusal(without(sampleVideoRequest(), 'frames'), odd)).message).toBe(
+      'Frames must be 8k+1 between 9 and 257.'
+    )
+  })
+
+  it('serves text-to-video only in this build', async () => {
+    expect((await videoRefusal(sampleVideoRequest({ workflow: 'image-to-video' }))).toJSON()).toEqual({
+      code: 'UNSUPPORTED_WORKFLOW',
+      message: 'Image-to-video is not available yet.',
+      details: 'image-to-video',
+    })
+    expect((await videoRefusal(sampleVideoRequest({ initImage: { path: EXISTING } }))).toJSON()).toEqual({
+      code: 'UNSUPPORTED_WORKFLOW',
+      message: 'Image-to-video is not available yet.',
+      details: 'initImage/endImage need the image-to-video workflow',
+    })
+    expect((await videoRefusal(sampleVideoRequest({ endImage: { base64: 'QUJD' } }))).code).toBe(
+      'UNSUPPORTED_WORKFLOW'
+    )
+  })
+
+  it('refuses a spec that lost its video defaults as an internal error', async () => {
+    const broken = sampleVideoSpec({ ranges: { steps: [1, 50], dims: [256, 1216], dimMultiple: 32 } })
+    expect((await videoRefusal(sampleVideoRequest(), broken)).toJSON()).toEqual({
+      code: 'INTERNAL',
+      message: 'The loaded model has no video defaults.',
+      details: 'ltx-2:q4_k_m',
+    })
   })
 })

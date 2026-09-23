@@ -4,6 +4,8 @@
 --diffusion-model
 --vae
 --vae-format
+--audio-vae
+--embeddings-connectors
 --clip_l
 --t5xxl
 --llm

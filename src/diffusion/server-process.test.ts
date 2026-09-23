@@ -13,7 +13,15 @@ import type { FakeSdOptions } from '../../test/helpers/fake-sd-server.js'
 import { isGgmlUnsupportedOpAbort } from './args.js'
 import { createSdHttpClient } from './http.js'
 import { isProcessAlive } from '../runtime/shared/index.js'
-import { describeExit, earlyExitError, exitCodeOf, parseCapabilities, spawnServer } from './server-process.js'
+import { sampleVideoSpec } from '../../test/helpers/diffusion-fixtures.js'
+import {
+  describeExit,
+  earlyExitError,
+  exitCodeOf,
+  modeMismatchError,
+  parseCapabilities,
+  spawnServer,
+} from './server-process.js'
 import type { ServerHandle } from './state.js'
 
 const posix = process.platform !== 'win32'
@@ -80,6 +88,7 @@ describe.skipIf(!posix)('spawnServer', () => {
     expect(handle.capabilities).toEqual({
       cancelGenerating: true,
       imgGenDefaults: { width: 512, height: 512 },
+      supportedModes: ['img_gen'],
     })
     expect(handle.exitStatus()).toBeUndefined()
     expect(isProcessAlive(handle.pid)).toBe(true)
@@ -277,6 +286,81 @@ describe('parseCapabilities', () => {
       cancelGenerating: false,
     })
   })
+
+  it('reads the modes and the vid_gen sections when the build reports them', () => {
+    const caps = parseCapabilities({
+      supported_modes: ['img_gen', 'vid_gen', 'edit'],
+      features_by_mode: { img_gen: { cancel_generating: false }, vid_gen: { cancel_generating: true } },
+      defaults_by_mode: { vid_gen: { video_frames: 33, fps: 16 } },
+      output_formats_by_mode: { img_gen: ['png'], vid_gen: ['webm', 'webp', 7] },
+    })
+    expect(caps).toEqual({
+      cancelGenerating: false,
+      supportedModes: ['img_gen', 'vid_gen'],
+      vidGen: {
+        cancelGenerating: true,
+        defaults: { video_frames: 33, fps: 16 },
+        outputFormats: ['webm', 'webp'],
+      },
+    })
+    // A vid_gen features block alone is enough to say the mode exists; formats stay unreported.
+    expect(parseCapabilities({ features_by_mode: { vid_gen: {} } })).toEqual({
+      cancelGenerating: false,
+      vidGen: { cancelGenerating: false },
+    })
+    expect(
+      parseCapabilities({ supported_modes: 'vid_gen', output_formats_by_mode: { vid_gen: 'webm' } })
+    ).toEqual({
+      cancelGenerating: false,
+    })
+  })
+})
+
+describe('the mode gate', () => {
+  it('names the mode the catalog promised and the ones the engine has', () => {
+    expect(modeMismatchError('video', ['img_gen']).toJSON()).toEqual({
+      code: 'MODEL_INCOMPATIBLE',
+      message: 'This model is not a video model.',
+      details: 'supported_modes=img_gen; wanted vid_gen',
+    })
+    expect(modeMismatchError('image', ['vid_gen']).message).toBe('This model is not an image model.')
+  })
+
+  it.skipIf(!posix)(
+    'kills a server whose modes lack the one the spec needs, and keeps one that lists it',
+    async () => {
+      const imageOnly = { ...(await engine({ modes: ['img_gen'] })), ...sampleVideoSpec() }
+      imageOnly.binaryDir = join(dir, 'engine')
+      const error = await refusal(spawnServer(imageOnly, join(dir, 'scratch'), { http }))
+      expect(error.code).toBe('MODEL_INCOMPATIBLE')
+      expect(error.details).toBe('supported_modes=img_gen; wanted vid_gen')
+      const [pid] = await startedPids()
+      expect(pid).toBeDefined()
+      expect(isProcessAlive(pid as number)).toBe(false)
+
+      const both = {
+        ...(await engine({ modes: ['img_gen', 'vid_gen'], vidFormats: 'no-webm' })),
+        ...sampleVideoSpec(),
+      }
+      both.binaryDir = join(dir, 'engine')
+      const handle = await spawnServer(both, join(dir, 'scratch'), { http })
+      handles.push(handle)
+      expect(handle.capabilities).toEqual({
+        cancelGenerating: false,
+        imgGenDefaults: { width: 512, height: 512 },
+        supportedModes: ['img_gen', 'vid_gen'],
+        vidGen: {
+          cancelGenerating: false,
+          defaults: { width: 768, height: 512, video_frames: 25, fps: 24 },
+          outputFormats: ['webp', 'avi'],
+        },
+      })
+      // The image spec on a video-only engine is refused the same way.
+      const videoOnly = await engine({ modes: ['vid_gen'] })
+      const refused = await refusal(spawnServer(videoOnly, join(dir, 'scratch'), { http }))
+      expect(refused.message).toBe('This model is not an image model.')
+    }
+  )
 })
 
 describe('exit helpers', () => {

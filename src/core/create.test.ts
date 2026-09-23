@@ -461,6 +461,108 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
   })
 })
 
+describe.skipIf(process.platform === 'win32')('video generation through the owner', () => {
+  it('serves /v1/videos from the same session: queue, poll, download, list, delete', async () => {
+    const { dataLayout } = await import('../config/index.js')
+    const { writeFakeSdLaunchers, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
+    const { fileURLToPath } = await import('node:url')
+    const layout = dataLayout(data.root)
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      diffusion: { timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 } },
+    })
+    cores.push(core)
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const events: string[] = []
+    for (const name of [
+      'diffusion:job',
+      'diffusion:progress',
+      'diffusion:video-job',
+      'diffusion:video-progress',
+    ] as const)
+      core.events.on(name, () => events.push(name))
+    await client.configureDiffusion({ dataFolder: data.root })
+    const dir = join(layout.diffusion.backendsDir, 'master-883-137f740', 'fake-cpu')
+    await writeFakeSdLaunchers(dir, { stepMs: 5, modes: ['img_gen', 'vid_gen'] })
+    await client.finalizeDiffusionBackend({
+      dir,
+      tag: 'master-883-137f740',
+      backendId: 'fake-cpu',
+      backend: 'cpu',
+      engine: 'sd-cpp',
+    })
+    const diffusionModel = await writeFakeSdModel(layout, 'ltx-2/ltx.gguf')
+    await client.loadDiffusionModel({
+      modelId: 'ltx-2:q4_k_m',
+      family: 'ltx-2',
+      modality: 'video',
+      displayName: 'LTX-2.3 Distilled',
+      files: { diffusionModel },
+      defaults: {
+        steps: 2,
+        cfgScale: 1,
+        width: 64,
+        height: 32,
+        video: { fps: 24, frames: 9, frameStep: 8, frameOffset: 1, resolutionPresets: [[64, 32]] },
+      },
+      ranges: { steps: [1, 50], dims: [16, 2048], dimMultiple: 16, frames: [9, 257] },
+      offload: 'none',
+    })
+    expect((await client.diffusionVideoCapabilities()).webmSupported).toBe(true)
+
+    const served = await core.startPublicServer({ port: 0 })
+    const base = `http://127.0.0.1:${served.port}/v1`
+    const queued = await fetch(`${base}/videos`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a cat', seconds: 0.5, size: '64x32', seed: 5 }),
+    })
+    expect(queued.status).toBe(200)
+    const video = (await queued.json()) as { id: string; status: string; seconds: string }
+    expect([video.status, video.seconds]).toEqual(['queued', '0.38'])
+    const deadline = Date.now() + 10_000
+    let polled: { status: string; atomic: { path: string | null; seed: number | null } }
+    for (;;) {
+      polled = (await (await fetch(`${base}/videos/${video.id}`)).json()) as typeof polled
+      if (polled.status === 'completed' || polled.status === 'failed') break
+      if (Date.now() > deadline) throw new Error('the clip did not complete')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    expect(polled.status).toBe('completed')
+    expect(polled.atomic.seed).toBe(5)
+    expect(polled.atomic.path?.startsWith(join(data.root, 'videos'))).toBe(true)
+    const content = await fetch(`${base}/videos/${video.id}/content`)
+    expect(content.headers.get('content-type')).toBe('video/webm')
+    const fixture = await readFile(
+      fileURLToPath(new URL('../../test/fixtures/webm/tiny.webm', import.meta.url))
+    )
+    expect(Buffer.from(await content.arrayBuffer()).equals(fixture)).toBe(true)
+    expect((await client.listVideoGallery({ offset: 0, limit: 10 })).total).toBe(1)
+    const listed = (await (await fetch(`${base}/videos`)).json()) as { data: Array<{ id: string }> }
+    expect(listed.data.map((v) => v.id)).toEqual([video.id])
+    const models = (await (await fetch(`${base}/models`)).json()) as { data: Array<{ id: string }> }
+    expect(models.data.map((m) => m.id)).not.toContain('ltx-2:q4_k_m')
+    // The image facade refuses the video model, in the OpenAI envelope.
+    const image = await fetch(`${base}/images/generations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a cat' }),
+    })
+    expect(image.status).toBe(500)
+    expect(((await image.json()) as { error: { code: string } }).error.code).toBe('server_error')
+    const deleted = await fetch(`${base}/videos/${video.id}`, { method: 'DELETE' })
+    expect(await deleted.json()).toEqual({ id: video.id, object: 'video', deleted: true })
+    expect((await client.listVideoGallery({ offset: 0, limit: 10 })).total).toBe(0)
+    expect((await fetch(`${base}/videos/${video.id}/content`)).status).toBe(404)
+    expect(events).toContain('diffusion:video-job')
+    expect(events).toContain('diffusion:video-progress')
+    expect(events).not.toContain('diffusion:job')
+    expect(events).not.toContain('diffusion:progress')
+    await core.shutdown()
+  })
+})
+
 describe('error reporting', () => {
   it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
     const captured: ErrorReport[] = []

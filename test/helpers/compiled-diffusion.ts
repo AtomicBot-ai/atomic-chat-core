@@ -25,6 +25,9 @@ export const NEW_TAG = 'master-883-137f740'
 export const BACKEND_ID = 'fake-cpu'
 /** Slow enough that the runner's 400 ms poll sees the steps, fast enough for a test. */
 export const STEP_MS = '150'
+/** The clip the fake engine answers every `vid_gen` job with. */
+export const WEBM_FIXTURE = fileURLToPath(new URL('../fixtures/webm/tiny.webm', import.meta.url))
+export const WEBM_MAGIC = Buffer.from([0x1a, 0x45, 0xdf, 0xa3])
 
 /** One test's data folder, its daemons and the streams it opened; `sdCleanup` takes it all down. */
 export interface SdContext {
@@ -167,6 +170,8 @@ export interface LoadFiles {
   llm?: string
   llmVision?: string
   qwen2vl?: string
+  audioVae?: string
+  embeddingsConnectors?: string
 }
 
 /** The app's load request for a Z-Image quant, with `overrides` on top (a family, other files, …). */
@@ -180,6 +185,39 @@ export const sdLoadRequest = (files: LoadFiles, overrides: Record<string, unknow
   ranges: { steps: [1, 50], dims: [256, 2048], dimMultiple: 16 },
   offload: 'none',
   startupTimeoutSecs: 30,
+  ...overrides,
+})
+
+/** The app's load request for an LTX-2.3 distilled quant: 24 fps, frames 8k+1, tiny presets for the fake. */
+export const sdVideoLoadRequest = (files: LoadFiles, overrides: Record<string, unknown> = {}) => ({
+  modelId: 'ltx-2:q4_k_m',
+  family: 'ltx-2',
+  modality: 'video',
+  displayName: 'LTX-2.3 Distilled',
+  files,
+  defaults: {
+    steps: 4,
+    cfgScale: 1,
+    samplingMethod: 'euler',
+    width: 64,
+    height: 32,
+    sigmas: [1, 0.975, 0.725, 0.421875],
+    video: { fps: 24, frames: 9, frameStep: 8, frameOffset: 1, resolutionPresets: [[64, 32]] },
+  },
+  ranges: { steps: [1, 50], dims: [16, 2048], dimMultiple: 16, frames: [9, 257] },
+  offload: 'none',
+  startupTimeoutSecs: 30,
+  ...overrides,
+})
+
+/** A video request the fake completes in a few polls, with `overrides` on top. */
+export const sdVideoRequest = (overrides: Record<string, unknown> = {}) => ({
+  prompt: 'a cat walking',
+  width: 64,
+  height: 32,
+  frames: 9,
+  steps: 4,
+  cfgScale: 1,
   ...overrides,
 })
 
@@ -233,6 +271,48 @@ export async function runJob(
   return (await sdJob(ctx, ready, jobId)) as Job
 }
 
+export interface VideoJob {
+  id: string
+  state: string
+  progress: { phase: string; step: number; totalSteps: number } | null
+  outputs: Array<{
+    id: string
+    path: string
+    posterPath: string | null
+    width: number
+    height: number
+    fps: number
+    frameCount: number
+    recipe: { seed: number; frames: number; frameCount: number; engine: { tag: string } }
+  }>
+  error?: { code: string; message: string; details?: string }
+}
+
+export const sdVideoJob = async (ctx: SdContext, ready: ReadyLine, id: string): Promise<VideoJob | null> =>
+  (await json<{ job: VideoJob | null }>(await control(ctx, ready, `/diffusion/video/jobs/${id}`))).job
+
+/** Submit a video job and wait for it to end; answers the record. */
+export async function runVideoJob(
+  ctx: SdContext,
+  ready: ReadyLine,
+  request: Record<string, unknown> = {},
+  timeoutMs = 30_000
+): Promise<VideoJob> {
+  const { jobId } = await json<{ jobId: string }>(
+    await control(ctx, ready, '/diffusion/video/jobs', {
+      method: 'POST',
+      body: JSON.stringify(sdVideoRequest(request)),
+    })
+  )
+  await waitFor(
+    async () =>
+      ['completed', 'failed', 'cancelled'].includes((await sdVideoJob(ctx, ready, jobId))?.state ?? ''),
+    `video job ${jobId} to end`,
+    timeoutMs
+  )
+  return (await sdVideoJob(ctx, ready, jobId)) as VideoJob
+}
+
 export interface Status {
   configured: boolean
   install: { state: string; tag?: string; backendId?: string; dir?: string }
@@ -242,7 +322,9 @@ export interface Status {
     error?: { code: string; message: string; details?: string }
   }
   activeJob: { id: string } | null
+  activeVideoJob: { id: string } | null
   outputDir: string
+  videoOutputDir: string
   idleUnloadSecs: number
 }
 
@@ -293,6 +375,10 @@ export interface OwnerOptions extends EngineOptions {
   load?: Record<string, unknown>
   /** Extra fields of `PUT /diffusion/config` (an `idleUnloadSecs`, an `outputDir`). */
   config?: Record<string, unknown>
+  /** Load a video model (the fake is told to serve `vid_gen` unless `env` says otherwise). */
+  video?: boolean
+  /** Environment of the core daemon itself (`ATOMIC_DIFFUSION_*` switches), not of the fake. */
+  daemonEnv?: NodeJS.ProcessEnv
 }
 
 /**
@@ -300,14 +386,19 @@ export interface OwnerOptions extends EngineOptions {
  * control API; answers the ready line, the engine directory, the pid and the model file.
  */
 export async function loadedOwner(ctx: SdContext, options: OwnerOptions = {}) {
-  const dir = await writeSdEngine(ctx, options)
-  const modelFile = await writeSdFile(ctx)
-  const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
+  const env = options.video ? { FAKE_SD_MODES: 'img_gen,vid_gen', ...options.env } : options.env
+  const dir = await writeSdEngine(ctx, { ...options, ...(env ? { env } : {}) })
+  const modelFile = await writeSdFile(
+    ctx,
+    options.video ? 'ltx-2/ltx-2.3-22b-distilled-Q4_K_M.gguf' : undefined
+  )
+  const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons, [], options.daemonEnv ?? {})
   const configured = await configure(ctx, ready, options.config)
   expect(configured).toMatchObject({ configured: true, install: { state: 'not-installed' } })
   const record = await finalizeEngine(ctx, ready, dir, options)
   expect(record.dir).toBe(dir)
-  const request = sdLoadRequest({ diffusionModel: modelFile, ...options.files }, options.load)
+  const files = { diffusionModel: modelFile, ...options.files }
+  const request = options.video ? sdVideoLoadRequest(files, options.load) : sdLoadRequest(files, options.load)
   const loaded = await json<{ pid: number; modelId: string }>(
     await control(ctx, ready, '/diffusion/model/load', { method: 'POST', body: JSON.stringify(request) })
   )

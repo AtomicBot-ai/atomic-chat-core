@@ -55,9 +55,12 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('load failures
     await core.writeFakeBackend(dataFolder, { FAKE_LLAMA_MODE: 'tensor-count' }, { provider: 'llamacpp' })
     const { ready } = await core.startDaemon(dataFolder, daemons)
     // No backend chosen for the fork yet: the core picks the installed build with the TurboQuant matrix.
+    // Its only Linux arm64 build is CUDA 13, which it never picks here, so there the pack is named.
+    const forkPack =
+      process.platform === 'linux' && process.arch === 'arm64' ? `b10018-1.3.0/${core.HOST_BACKEND}` : ''
     const chosen = await control(ready, '/settings/llamacpp', {
       method: 'PATCH',
-      body: JSON.stringify({ values: { version_backend: '', fit: false } }),
+      body: JSON.stringify({ values: { version_backend: forkPack, fit: false } }),
     })
     expect(chosen.status, await chosen.clone().text()).toBe(200)
 

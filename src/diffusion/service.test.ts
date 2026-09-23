@@ -6,11 +6,12 @@
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { CoreEvents, LoadDiffusionModelRequest } from '../contracts/index.js'
-import { sampleRequest } from '../../test/helpers/diffusion-fixtures.js'
+import { paintedPng, sampleRequest, sampleVideoRequest } from '../../test/helpers/diffusion-fixtures.js'
 import {
   installFakeSdEngine,
   writeFakeSdLaunchers,
@@ -130,7 +131,9 @@ describe('configure', () => {
       install: { state: 'not-installed' },
       model: { state: 'unloaded', loaded: null },
       activeJob: null,
+      activeVideoJob: null,
       outputDir: join(dataFolder, 'images'),
+      videoOutputDir: join(dataFolder, 'videos'),
       idleUnloadSecs: 0,
     })
     for (const dir of [
@@ -138,6 +141,7 @@ describe('configure', () => {
       layout.diffusion.backendsDir,
       layout.diffusion.modelsDir,
       join(dataFolder, 'images'),
+      join(dataFolder, 'videos'),
     ])
       expect(await exists(dir), dir).toBe(true)
     // Another spelling of the same folder is fine.
@@ -500,6 +504,178 @@ describe.skipIf(!posix)('generating', () => {
   })
 })
 
+async function videoLoadRequest(): Promise<LoadDiffusionModelRequest> {
+  const diffusionModel = await writeFakeSdModel(layout, 'ltx-2/ltx-2.3-22b-distilled-Q4_K_M.gguf')
+  const vae = await writeFakeSdModel(layout, 'shared/ltx/video_vae.safetensors')
+  const audioVae = await writeFakeSdModel(layout, 'shared/ltx/audio_vae.safetensors')
+  const llm = await writeFakeSdModel(layout, 'shared/gemma/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf')
+  const embeddingsConnectors = await writeFakeSdModel(layout, 'shared/ltx/connectors.safetensors')
+  return {
+    modelId: 'ltx-2:q4_k_m',
+    family: 'ltx-2',
+    modality: 'video',
+    displayName: 'LTX-2.3 Distilled',
+    files: { diffusionModel, vae, audioVae, llm, embeddingsConnectors },
+    defaults: {
+      steps: 2,
+      cfgScale: 1.0,
+      samplingMethod: 'euler',
+      width: 64,
+      height: 32,
+      video: { fps: 24, frames: 9, frameStep: 8, frameOffset: 1, resolutionPresets: [[64, 32]] },
+    },
+    ranges: { steps: [1, 50], dims: [16, 2048], dimMultiple: 16, frames: [9, 257] },
+    offload: 'none',
+    startupTimeoutSecs: 10,
+  }
+}
+
+const webmFixture = () =>
+  readFile(fileURLToPath(new URL('../../test/fixtures/webm/tiny.webm', import.meta.url)))
+
+describe.skipIf(!posix)('generating video', () => {
+  async function loadedVideoService(options: FakeSdOptions = {}) {
+    const h = harness()
+    await h.service.configure({ dataFolder })
+    await installFakeSdEngine(layout, { stepMs: 10, modes: ['img_gen', 'vid_gen'], ...options })
+    const request = await videoLoadRequest()
+    const loaded = await h.service.loadModel(request)
+    return { ...h, loaded, request }
+  }
+
+  it('runs a clip into the videos folder with its sidecar, takes a poster, and serves the video gallery', async () => {
+    const h = await loadedVideoService()
+    expect(h.loaded.modality).toBe('video')
+    expect(h.service.getVideoCapabilities()).toMatchObject({
+      fps: 24,
+      frames: { min: 9, max: 257, step: 8, offset: 1, default: 9 },
+      webmSupported: true,
+      cancelGenerating: false,
+    })
+    expect(() => h.service.getCapabilities()).toThrow(expect.objectContaining({ code: 'MODEL_INCOMPATIBLE' }))
+    await expect(h.service.generate(sampleRequest())).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
+    // The model files are the video model's now.
+    await expect(h.service.deleteModelFile(h.request.files.audioVae as string)).rejects.toMatchObject({
+      code: 'BACKEND_IN_USE',
+      message: 'That file belongs to the loaded video model. Unload it first.',
+    })
+
+    const { jobId } = await h.service.generateVideo(
+      sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 4, seed: 7 })
+    )
+    expect(h.service.getVideoJob(jobId)?.state).toBe('queued')
+    expect(h.service.getJob(jobId)).toBeNull()
+    const status = await h.service.getStatus()
+    expect(status.activeVideoJob?.id).toBe(jobId)
+    expect(status.activeJob).toBeNull()
+    await waitFor(() => h.service.getVideoJob(jobId)?.state === 'completed')
+    const job = h.service.getVideoJob(jobId)
+    const [item] = job?.outputs ?? []
+    expect(item?.path).toBe(join(dataFolder, 'videos', `${jobId}.webm`))
+    expect((await readFile(item?.path as string)).equals(await webmFixture())).toBe(true)
+    expect(await exists(join(dataFolder, 'videos', `${jobId}.json`))).toBe(true)
+    expect([item?.frameCount, item?.fps, item?.recipe.seed, item?.posterPath]).toEqual([9, 24, 7, null])
+    const progress = h.events
+      .filter((e) => e.name === 'diffusion:video-progress')
+      .map((e) => (e.payload as CoreEvents['diffusion:video-progress']).progress)
+    expect(
+      progress.some((p) => p.totalSteps === 4 && (p.phase === 'sampling' || p.phase === 'decoding'))
+    ).toBe(true)
+    expect(h.events.some((e) => e.name === 'diffusion:job' || e.name === 'diffusion:progress')).toBe(false)
+
+    const poster = await paintedPng(32, 16)
+    const withPoster = await h.service.setVideoPoster(
+      jobId,
+      `data:image/png;base64,${poster.toString('base64')}`
+    )
+    expect(withPoster.posterPath).toBe(join(dataFolder, 'videos', `${jobId}.thumb.png`))
+    await expect(h.service.setVideoPoster(jobId, 'x'.repeat(30_000_000))).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      message: 'The poster is too large.',
+    })
+    const page = await h.service.listVideoGallery({ offset: 0, limit: 10 })
+    expect(page.total).toBe(1)
+    expect((await h.service.getVideoGalleryItem(jobId))?.posterPath).toBe(withPoster.posterPath)
+    expect((await h.service.setVideoGalleryFlags(jobId, { pinned: true })).pinned).toBe(true)
+    const target = join(dataFolder, 'export', 'clip.webm')
+    await h.service.exportVideoGalleryItem(jobId, target)
+    expect(await exists(target)).toBe(true)
+    await h.service.deleteVideoGalleryItems([jobId])
+    expect((await h.service.listVideoGallery({ offset: 0, limit: 10 })).total).toBe(0)
+    expect(await exists(withPoster.posterPath as string)).toBe(false)
+
+    const outcome = await h.service.runVideoJob(
+      sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 2 })
+    )
+    expect(outcome.images).toHaveLength(1)
+    expect(outcome.job.outputs[0]?.id).toBe(outcome.job.id)
+    expect((await h.service.getStatus()).activeVideoJob).toBeNull()
+    expect(h.events.filter((e) => e.name === 'diffusion:error')).toEqual([])
+  })
+
+  it('cancels a running clip by stopping the engine, and cancelVideoJob knows only video jobs', async () => {
+    const h = await loadedVideoService({ stepMs: 400 })
+    await expect(h.service.cancelVideoJob('nope')).rejects.toMatchObject({ code: 'JOB_NOT_FOUND' })
+    // The facade's view of the same service: the model, the records, the gallery and the cancel.
+    const backend = h.service.videosBackend()
+    expect(backend.loaded()).toMatchObject({ modelId: 'ltx-2:q4_k_m', modality: 'video' })
+    expect(backend.jobs()).toEqual([])
+    expect(await backend.item('nope')).toBeNull()
+    const running = await backend.start(sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 4 }))
+    await waitFor(() => h.service.getVideoJob(running.id)?.state === 'generating')
+    expect(backend.jobs().map((j) => j.id)).toEqual([running.id])
+    expect(backend.job(running.id)?.state).toBe('generating')
+    expect(await backend.cancel(running.id)).toEqual({ cancelled: true, serverStopped: true })
+    expect((await running.done).ok).toBe(false)
+    await waitFor(async () => (await h.service.getStatus()).model.state === 'loaded' || true)
+    const { jobId } = await h.service.generateVideo(
+      sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 4 })
+    )
+    await waitFor(() => h.service.getVideoJob(jobId)?.state === 'generating')
+    expect(await h.service.cancelVideoJob(jobId)).toEqual({ cancelled: true, serverStopped: true })
+    expect(h.service.getVideoJob(jobId)?.state).toBe('cancelled')
+    expect(isProcessAlive(h.loaded.pid)).toBe(false)
+    const next = await h.service.generateVideo(
+      sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 1 })
+    )
+    await waitFor(() => h.service.getVideoJob(next.jobId)?.state === 'completed', 10_000)
+    expect(h.reasons()).toContain('respawn')
+  })
+
+  it('refuses a video model on an engine that serves images only, and a build without WebM before submit', async () => {
+    const h = harness()
+    await h.service.configure({ dataFolder })
+    await installFakeSdEngine(layout, { modes: ['img_gen'], pidFile: join(dataFolder, 'pids') })
+    const request = await videoLoadRequest()
+    await expect(h.service.loadModel(request)).rejects.toMatchObject({
+      code: 'MODEL_INCOMPATIBLE',
+      message: 'This model is not a video model.',
+      details: 'supported_modes=img_gen; wanted vid_gen',
+    })
+    expect((await h.service.getStatus()).model).toMatchObject({
+      state: 'failed',
+      error: { code: 'MODEL_INCOMPATIBLE' },
+    })
+    expect(h.reasons().at(-1)).toBe('load-failed')
+    const [pid] = (await readFile(join(dataFolder, 'pids'), 'utf8')).split('\n').filter(Boolean).map(Number)
+    expect(isProcessAlive(pid as number)).toBe(false)
+    expect(h.journal.map((j) => j.op)).toEqual(['add', 'remove'])
+
+    await rm(layout.diffusion.backendsDir, { recursive: true, force: true })
+    await installFakeSdEngine(layout, { modes: ['vid_gen'], vidFormats: 'no-webm' })
+    const loaded = await h.service.loadModel(request)
+    expect(h.service.getVideoCapabilities().webmSupported).toBe(false)
+    await expect(
+      h.service.runVideoJob(sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 1 }))
+    ).rejects.toMatchObject({
+      code: 'UNSUPPORTED_BACKEND',
+      message: 'This engine build was made without WebM support.',
+    })
+    expect(isProcessAlive(loaded.pid), 'the engine is left running').toBe(true)
+    await h.service.unloadModel()
+  })
+})
+
 describe('without an engine', () => {
   it('the idle task can be started twice and generation needs a model', async () => {
     const { service } = harness()
@@ -508,11 +684,26 @@ describe('without an engine', () => {
     await service.configure({ dataFolder })
     await expect(service.generate(sampleRequest())).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })
     await expect(service.cancelJob('x')).rejects.toMatchObject({ code: 'JOB_NOT_FOUND' })
+    await expect(service.generateVideo(sampleVideoRequest())).rejects.toMatchObject({
+      code: 'MODEL_NOT_LOADED',
+    })
+    expect(service.videosBackend().loaded()).toBeUndefined()
+    // Before `configure`, the facade's gallery view is empty rather than a refusal.
+    const bare = harness().service
+    expect(bare.videosBackend().loaded()).toBeUndefined()
+    expect(await bare.videosBackend().item('x')).toBeNull()
+    expect(await bare.videosBackend().list({ offset: 0, limit: 10 })).toEqual({
+      items: [],
+      hasMore: false,
+      total: 0,
+    })
     expect(DiffusionService.eventNames()).toEqual([
       'diffusion:state',
       'diffusion:progress',
       'diffusion:job',
       'diffusion:error',
+      'diffusion:video-progress',
+      'diffusion:video-job',
     ])
   })
 })

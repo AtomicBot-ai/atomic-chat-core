@@ -2,7 +2,12 @@
  * Sample values for the diffusion tests: the recipe and server spec the plugin's Rust tests used
  * (`gallery.rs`, `jobs.rs` at app commit `767ff6350`), and a painted PNG of any size.
  */
-import type { ImageGenerateRequest, ImageRecipe } from '../../src/contracts/index.js'
+import type {
+  ImageGenerateRequest,
+  ImageRecipe,
+  VideoGenerateRequest,
+  VideoRecipe,
+} from '../../src/contracts/index.js'
 import { encodePng } from '../../src/diffusion/png.js'
 import type { ServerHandle, ServerSpec } from '../../src/diffusion/index.js'
 import type { ExitInfo } from '../../src/runtime/llamacpp/index.js'
@@ -72,6 +77,95 @@ export function sampleRequest(overrides: Partial<ImageGenerateRequest> = {}): Im
     cfgScale: 1.0,
     seed: 1234,
     batchSize: 2,
+    ...overrides,
+  }
+}
+
+/** An LTX-2.3 distilled spec: 24 fps, frames 8k+1, the fixed eight-step sigma schedule. */
+export function sampleVideoSpec(overrides: Partial<ServerSpec> = {}): ServerSpec {
+  return sampleSpec({
+    modelId: 'ltx-2:q4_k_m',
+    family: 'ltx-2',
+    modality: 'video',
+    displayName: 'LTX-2.3 Distilled',
+    files: {
+      diffusionModel: '/models/ltx-2/ltx-2.3-22b-distilled-Q4_K_M.gguf',
+      vae: '/models/shared/ltx-2.3-22b-distilled_video_vae.safetensors',
+      audioVae: '/models/shared/ltx-2.3-22b-distilled_audio_vae.safetensors',
+      llm: '/models/shared/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf',
+      embeddingsConnectors: '/models/shared/ltx-2.3-22b-distilled_embeddings_connectors.safetensors',
+    },
+    defaults: {
+      steps: 8,
+      cfgScale: 1.0,
+      samplingMethod: 'euler',
+      width: 768,
+      height: 512,
+      sigmas: [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875],
+      video: {
+        fps: 24,
+        frames: 121,
+        frameStep: 8,
+        frameOffset: 1,
+        resolutionPresets: [
+          [768, 512],
+          [1216, 704],
+          [704, 1216],
+          [512, 768],
+        ],
+      },
+    },
+    ranges: { steps: [1, 50], dims: [256, 1216], dimMultiple: 32, frames: [9, 257] },
+    ...overrides,
+  })
+}
+
+export function sampleVideoRequest(overrides: Partial<VideoGenerateRequest> = {}): VideoGenerateRequest {
+  return {
+    prompt: 'a cat walking through a rainy alley',
+    width: 768,
+    height: 512,
+    frames: 25,
+    steps: 8,
+    cfgScale: 1.0,
+    seed: 1234,
+    ...overrides,
+  }
+}
+
+export function sampleVideoRecipe(overrides: Partial<VideoRecipe> = {}): VideoRecipe {
+  return {
+    jobId: jobId(9),
+    prompt: 'a cat walking through a rainy alley',
+    negativePrompt: null,
+    width: 768,
+    height: 512,
+    frames: 25,
+    frameCount: 25,
+    fps: 24,
+    steps: 8,
+    cfgScale: 1.0,
+    guidance: null,
+    seed: 1234,
+    samplingMethod: 'euler',
+    flowShift: null,
+    workflow: 'create',
+    outputFormat: 'webm',
+    model: {
+      modelId: 'ltx-2:q4_k_m',
+      family: 'ltx-2',
+      displayName: 'LTX-2.3 Distilled',
+      filename: 'ltx-2.3-22b-distilled-Q4_K_M.gguf',
+    },
+    engine: {
+      kind: 'sd-cpp',
+      backend: 'metal',
+      tag: 'master-883-137f740',
+      offload: 'group',
+      cpuFallback: false,
+    },
+    createdAtMs: 1_700_000_000_000,
+    durationMs: 65_000,
     ...overrides,
   }
 }

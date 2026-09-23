@@ -3,7 +3,7 @@
 // swapping Bun for Node SEA means editing this file, not src/.
 //
 //   node scripts/build-binaries.mjs --host   # current platform only
-//   node scripts/build-binaries.mjs --all    # all four targets (cross-compile)
+//   node scripts/build-binaries.mjs --all    # all six targets (cross-compile)
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -20,14 +20,17 @@ const TARGETS = {
   'bun-darwin-arm64': 'aarch64-apple-darwin',
   'bun-darwin-x64': 'x86_64-apple-darwin',
   'bun-windows-x64': 'x86_64-pc-windows-msvc',
+  'bun-windows-arm64': 'aarch64-pc-windows-msvc',
   'bun-linux-x64': 'x86_64-unknown-linux-gnu',
+  'bun-linux-arm64': 'aarch64-unknown-linux-gnu',
 }
 
 function hostTarget() {
   const { platform, arch } = process
-  if (platform === 'darwin') return arch === 'arm64' ? 'bun-darwin-arm64' : 'bun-darwin-x64'
-  if (platform === 'win32') return 'bun-windows-x64'
-  if (platform === 'linux') return 'bun-linux-x64'
+  if (arch !== 'arm64' && arch !== 'x64') throw new Error(`unsupported host ${platform}/${arch}`)
+  if (platform === 'darwin') return `bun-darwin-${arch}`
+  if (platform === 'win32') return `bun-windows-${arch}`
+  if (platform === 'linux') return `bun-linux-${arch}`
   throw new Error(`unsupported host ${platform}/${arch}`)
 }
 

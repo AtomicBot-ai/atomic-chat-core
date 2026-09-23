@@ -25,7 +25,13 @@ export interface IdentityDeps {
   alive?: (pid: number) => boolean
 }
 
-export const IDENTITY_PROBE_TIMEOUT_MS = 5000
+/**
+ * PowerShell on Windows takes several seconds to start cold, and on a loaded CI runner more than
+ * five; a probe that is cut short answers `undefined`, which is safe for takeover but leaves a
+ * child journalled without its identity. The budget is generous because a slow answer is worth
+ * more than a fast "unknown".
+ */
+export const IDENTITY_PROBE_TIMEOUT_MS = 15_000
 
 const readUtf8 = (path: string) => readFile(path, 'utf8')
 

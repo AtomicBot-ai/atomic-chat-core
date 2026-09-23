@@ -19,6 +19,7 @@ import {
   readFlags,
   THUMB_EDGE,
   thumbPath,
+  writeAtomic,
   writeFlags,
   writeThumbnail,
 } from './gallery.js'
@@ -115,6 +116,21 @@ describe('Gallery.save', () => {
     expect(error.code).toBe('INTERNAL')
     expect(error.message).toBe('Could not finish writing the image.')
     expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([])
+  })
+
+  it('names the folder its caller chose in an atomic-write failure', async () => {
+    await writeFile(join(dir, 'plain'), 'x')
+    await writeAtomic(join(dir, 'plain'), 'y')
+    expect(await readFile(join(dir, 'plain'), 'utf8')).toBe('y')
+    const squatter = join(dir, 'taken')
+    await mkdir(squatter)
+    expect((await refusal(writeAtomic(squatter, 'z'))).message).toBe('Could not finish writing the image.')
+    expect(
+      (await refusal(writeAtomic(squatter, 'z', { write: 'no write', finish: 'no finish' }))).message
+    ).toBe('no finish')
+    expect(
+      (await refusal(writeAtomic(join(dir, 'missing', 'x'), 'z', { write: 'no write', finish: 'f' }))).message
+    ).toBe('no write')
   })
 
   it('refuses what the engine should never send', async () => {

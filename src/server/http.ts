@@ -160,6 +160,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'INVALID_DIMENSIONS':
     case 'UNSUPPORTED_WORKFLOW':
     case 'UNSUPPORTED_BACKEND':
+    case 'MODEL_INCOMPATIBLE':
       return 400
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':

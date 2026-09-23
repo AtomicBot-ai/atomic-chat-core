@@ -11,6 +11,7 @@ import type {
   DiffusionModelState,
   ImageJob,
   LoadedDiffusionModel,
+  VideoJob,
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
@@ -45,8 +46,12 @@ export interface CancelFlag {
   requested: boolean
 }
 
+/** Which runner path a job record belongs to; the job's shape follows. */
+export type JobKindId = 'image' | 'video'
+
 export interface JobRecord {
-  job: ImageJob
+  kind: JobKindId
+  job: ImageJob | VideoJob
   cancel: CancelFlag
   /** The server-side job id once submitted. */
   serverJobId?: string
@@ -86,6 +91,11 @@ export class DiffusionState {
     return chosen ? chosen : this.paths.defaultOutputDir
   }
 
+  videoOutputDir(): string {
+    const chosen = this.config?.videoOutputDir?.trim()
+    return chosen ? chosen : this.paths.defaultVideoOutputDir
+  }
+
   idleUnloadSecs(): number {
     return this.config?.idleUnloadSecs ?? DEFAULT_IDLE_UNLOAD_SECS
   }
@@ -109,7 +119,19 @@ export class DiffusionState {
     return this.idleDeadline !== undefined && this.now() >= this.idleDeadline
   }
 
+  /** An image job's copy; a video job under that id answers `undefined`, like a missing one. */
   job(id: string): ImageJob | undefined {
+    const record = this.jobs.get(id)
+    return record && record.kind === 'image' ? structuredClone(record.job as ImageJob) : undefined
+  }
+
+  videoJob(id: string): VideoJob | undefined {
+    const record = this.jobs.get(id)
+    return record && record.kind === 'video' ? structuredClone(record.job as VideoJob) : undefined
+  }
+
+  /** Whichever kind the id names. */
+  anyJob(id: string): ImageJob | VideoJob | undefined {
     const record = this.jobs.get(id)
     return record ? structuredClone(record.job) : undefined
   }
@@ -118,11 +140,28 @@ export class DiffusionState {
     return this.jobs.get(id)
   }
 
-  /** The active job while it is queued or generating, for the status. */
+  /** The active image job while it is queued or generating, for the status. */
   activeJob(): ImageJob | null {
     if (this.activeJobId === undefined) return null
     const job = this.job(this.activeJobId)
     return job && (job.state === 'queued' || job.state === 'generating') ? job : null
+  }
+
+  /** The active video job while it is queued or generating; null while an image job runs. */
+  activeVideoJob(): VideoJob | null {
+    if (this.activeJobId === undefined) return null
+    const job = this.videoJob(this.activeJobId)
+    return job && (job.state === 'queued' || job.state === 'generating') ? job : null
+  }
+
+  /** Every video job in memory, newest first; the `/v1/videos` listing merges these with the gallery. */
+  videoJobs(): VideoJob[] {
+    const out: VideoJob[] = []
+    for (let i = this.jobOrder.length - 1; i >= 0; i--) {
+      const job = this.videoJob(this.jobOrder[i] as string)
+      if (job) out.push(job)
+    }
+    return out
   }
 
   insertJob(record: JobRecord): void {
@@ -134,7 +173,7 @@ export class DiffusionState {
     this.jobs.set(record.job.id, record)
   }
 
-  updateJob(id: string, update: (record: JobRecord) => void): ImageJob | undefined {
+  updateJob(id: string, update: (record: JobRecord) => void): ImageJob | VideoJob | undefined {
     const record = this.jobs.get(id)
     if (!record) return undefined
     update(record)

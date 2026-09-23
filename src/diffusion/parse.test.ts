@@ -7,6 +7,8 @@ import {
   parseGalleryListOptions,
   parseImageGenerateRequest,
   parseLoadModelRequest,
+  parseVideoGenerateRequest,
+  parseVideoPoster,
   requireString,
   requireStringList,
 } from './parse.js'
@@ -183,6 +185,13 @@ describe('the small bodies', () => {
     expect(parseDiffusionConfig({ dataFolder: '/data', outputDir: null, idleUnloadSecs: null })).toEqual({
       dataFolder: '/data',
     })
+    expect(parseDiffusionConfig({ dataFolder: '/data', videoOutputDir: '/clips' })).toEqual({
+      dataFolder: '/data',
+      videoOutputDir: '/clips',
+    })
+    expect(refusal(() => parseDiffusionConfig({ dataFolder: '/d', videoOutputDir: 7 }))).toBe(
+      'videoOutputDir: expected a string'
+    )
     expect(refusal(() => parseDiffusionConfig({}))).toBe('dataFolder: expected a string')
     expect(refusal(() => parseDiffusionConfig({ dataFolder: '/d', idleUnloadSecs: -5 }))).toBe(
       'idleUnloadSecs: expected a whole number, zero or more'
@@ -233,5 +242,143 @@ describe('the small bodies', () => {
     expect(requireStringList({ ids: [] }, 'ids')).toEqual([])
     expect(refusal(() => requireStringList({ ids: 'a' }, 'ids'))).toBe('ids: expected a list of strings')
     expect(refusal(() => requireStringList({ ids: ['a', 2] }, 'ids'))).toBe('ids[1]: expected a string')
+  })
+})
+
+const videoLoad = () => ({
+  ...load(),
+  modelId: 'ltx-2:q4_k_m',
+  family: 'ltx-2',
+  modality: 'video',
+  displayName: 'LTX-2.3 Distilled',
+  files: {
+    diffusionModel: '/m/ltx.gguf',
+    vae: '/m/video_vae.safetensors',
+    audioVae: '/m/audio_vae.safetensors',
+    llm: '/m/gemma.gguf',
+    embeddingsConnectors: '/m/connectors.safetensors',
+  },
+  defaults: {
+    steps: 8,
+    cfgScale: 1,
+    width: 768,
+    height: 512,
+    sigmas: [1, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875],
+    video: {
+      fps: 24,
+      frames: 121,
+      frameStep: 8,
+      frameOffset: 1,
+      resolutionPresets: [
+        [768, 512],
+        [704, 1216],
+      ],
+    },
+  },
+  ranges: { steps: [1, 50], dims: [256, 1216], dimMultiple: 32, frames: [9, 257] },
+})
+
+describe('parseLoadModelRequest for a video family', () => {
+  it('reads the video files, the video defaults, the sigma schedule and the frame range', () => {
+    expect(parseLoadModelRequest(videoLoad())).toEqual(videoLoad())
+  })
+
+  it('demands the video defaults and the frame range of a video family, and only of one', () => {
+    const noVideo = { ...videoLoad(), defaults: { ...videoLoad().defaults, video: undefined } }
+    expect(refusal(() => parseLoadModelRequest(noVideo))).toBe(
+      'defaults.video: expected the video defaults of a video family'
+    )
+    const noRange = { ...videoLoad(), ranges: { ...videoLoad().ranges, frames: null } }
+    expect(refusal(() => parseLoadModelRequest(noRange))).toBe(
+      'ranges.frames: expected the frame range of a video family'
+    )
+    // An image family may carry a video block; it is read and ignored downstream.
+    const image = { ...load(), defaults: { ...load().defaults, video: videoLoad().defaults.video } }
+    expect(parseLoadModelRequest(image).defaults.video).toEqual(videoLoad().defaults.video)
+  })
+
+  it('refuses a malformed video block', () => {
+    const withVideo = (video: unknown) => ({ ...videoLoad(), defaults: { ...videoLoad().defaults, video } })
+    const video = videoLoad().defaults.video
+    expect(refusal(() => parseLoadModelRequest(withVideo('x')))).toBe('defaults.video: expected an object')
+    expect(refusal(() => parseLoadModelRequest(withVideo({ ...video, fps: 0 })))).toBe(
+      'defaults.video.fps: expected a whole number, one or more'
+    )
+    expect(refusal(() => parseLoadModelRequest(withVideo({ ...video, frameStep: 0 })))).toBe(
+      'defaults.video.frameStep: expected a whole number, one or more'
+    )
+    expect(refusal(() => parseLoadModelRequest(withVideo({ ...video, frameOffset: -1 })))).toBe(
+      'defaults.video.frameOffset: expected a whole number, zero or more'
+    )
+    expect(refusal(() => parseLoadModelRequest(withVideo({ ...video, resolutionPresets: [[768]] })))).toBe(
+      'defaults.video.resolutionPresets[0]: expected a pair of whole numbers'
+    )
+    expect(refusal(() => parseLoadModelRequest(withVideo({ ...video, resolutionPresets: 'x' })))).toBe(
+      'defaults.video.resolutionPresets: expected a list of [width, height] pairs'
+    )
+    const withSigmas = (sigmas: unknown) => ({
+      ...videoLoad(),
+      defaults: { ...videoLoad().defaults, sigmas },
+    })
+    expect(refusal(() => parseLoadModelRequest(withSigmas([])))).toBe(
+      'defaults.sigmas: expected a non-empty list of numbers'
+    )
+    expect(refusal(() => parseLoadModelRequest(withSigmas([1, 'x'])))).toBe(
+      'defaults.sigmas[1]: expected a number'
+    )
+  })
+})
+
+const generateVideo = () => ({ prompt: 'a cat', width: 768, height: 512, steps: 8, cfgScale: 1 })
+
+describe('parseVideoGenerateRequest', () => {
+  it('reads the required fields and every optional one', () => {
+    expect(parseVideoGenerateRequest(generateVideo())).toEqual(generateVideo())
+    const full = {
+      ...generateVideo(),
+      negativePrompt: 'blurry',
+      frames: 49,
+      fps: 24,
+      guidance: 3.5,
+      seed: -1,
+      samplingMethod: 'euler',
+      flowShift: 3,
+      workflow: 'image-to-video',
+      initImage: { path: '/tmp/first.png' },
+      endImage: { base64: 'QUJD' },
+    }
+    expect(parseVideoGenerateRequest(full)).toEqual(full)
+    expect(parseVideoGenerateRequest({ ...generateVideo(), frames: null, fps: null })).toEqual(
+      generateVideo()
+    )
+  })
+
+  it('refuses what does not fit', () => {
+    expect(refusal(() => parseVideoGenerateRequest({ ...generateVideo(), frames: 24.5 }))).toBe(
+      'frames: expected a whole number, zero or more'
+    )
+    expect(refusal(() => parseVideoGenerateRequest({ ...generateVideo(), fps: '24' }))).toBe(
+      'fps: expected a whole number, zero or more'
+    )
+    expect(refusal(() => parseVideoGenerateRequest({ ...generateVideo(), workflow: 'transform' }))).toBe(
+      'workflow: expected one of create, image-to-video'
+    )
+    expect(refusal(() => parseVideoGenerateRequest({ ...generateVideo(), endImage: {} }))).toBe(
+      'endImage: expected an image: {path} or {base64}'
+    )
+    expect(refusal(() => parseVideoGenerateRequest({ ...generateVideo(), prompt: 7 }))).toBe(
+      'prompt: expected a string'
+    )
+  })
+})
+
+describe('parseVideoPoster', () => {
+  it('takes the base64 PNG, with or without a data-URL prefix, and nothing else', () => {
+    expect(parseVideoPoster({ png: 'iVBORw0KGgo=' })).toBe('iVBORw0KGgo=')
+    expect(parseVideoPoster({ png: 'data:image/png;base64,iVBORw0KGgo=' })).toBe('iVBORw0KGgo=')
+    expect(refusal(() => parseVideoPoster({ png: '' }))).toBe('png: expected a base64 PNG')
+    expect(refusal(() => parseVideoPoster({ png: 'not base64!' }))).toBe('png: expected a base64 PNG')
+    expect(refusal(() => parseVideoPoster({ png: 7 }))).toBe('png: expected a string')
+    expect(refusal(() => parseVideoPoster(null))).toBe('body: expected an object')
   })
 })

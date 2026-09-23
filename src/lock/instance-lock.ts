@@ -159,8 +159,11 @@ export class InstanceLock {
     const path = layout.core.instanceLock
     await mkdir(layout.core.dir, { recursive: true })
     const dataFolder = await canonicalDataFolder(layout.root)
-    const selfId = deps.selfStartId ? await deps.selfStartId() : await processStartId(process.pid, deps)
-    const ownerStartedAt = await processStartEpoch(process.pid, deps)
+    // Two probes of the same process; on Windows each is a PowerShell start, so they run together.
+    const [selfId, ownerStartedAt] = await Promise.all([
+      deps.selfStartId ? deps.selfStartId() : processStartId(process.pid, deps),
+      processStartEpoch(process.pid, deps),
+    ])
 
     for (let attempt = 0; attempt < TAKEOVER_ATTEMPTS; attempt++) {
       const handle = await open(path, 'wx').catch((e: unknown) => {

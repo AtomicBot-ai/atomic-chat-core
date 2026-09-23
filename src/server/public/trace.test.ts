@@ -108,6 +108,10 @@ describe('api:request analytics', () => {
       ['unknown', null, 'bad_request'],
     ])
     expect(endpointFromPath('/elsewhere')).toBe('other')
+    expect(endpointFromPath('/videos')).toBe('videos')
+    expect(endpointFromPath('/videos/abc')).toBe('videos')
+    expect(endpointFromPath('/videos/abc/content')).toBe('videos')
+    expect(endpointFromPath('/videosx')).toBe('other')
   })
 })
 

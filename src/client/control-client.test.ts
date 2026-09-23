@@ -489,4 +489,41 @@ describe('image generation', () => {
       details: 'path: expected a string',
     })
   })
+
+  it('drives the video operations, unwrapping the lookups', async () => {
+    diffusionCalls.length = 0
+    expect((await client.diffusionVideoCapabilities()).fps).toBe(24)
+    const { jobId } = await client.generateVideo({
+      prompt: 'a cat walking',
+      width: 768,
+      height: 512,
+      frames: 25,
+      steps: 8,
+      cfgScale: 1,
+    })
+    expect(jobId).toBe('vjob-1')
+    expect((await client.videoJob(jobId))?.state).toBe('queued')
+    expect(await client.videoJob('gone/with/slashes')).toBeNull()
+    expect(await client.cancelVideoJob(jobId)).toEqual({ cancelled: true, serverStopped: false })
+    const page = await client.listVideoGallery({ offset: 0, limit: 40, includeArchived: true })
+    expect(page.total).toBe(1)
+    const item = page.items[0]
+    expect((await client.videoGalleryItem(item?.id as string))?.recipe.prompt).toBe('a cat walking')
+    expect(await client.videoGalleryItem('nope')).toBeNull()
+    expect((await client.setVideoGalleryFlags(item?.id as string, { archived: true })).archived).toBe(true)
+    await client.exportVideoGalleryItem(item?.id as string, '/out/a.webm')
+    expect((await client.setVideoPoster(item?.id as string, 'iVBORw0KGgo=')).posterPath).toBe(
+      `/tmp/data/videos/${item?.id}.thumb.png`
+    )
+    await client.deleteVideoGalleryItems([item?.id as string])
+    expect(diffusionCalls).toEqual([
+      'diffusion generateVideo a cat walking 768x512x25',
+      'diffusion cancelVideoJob vjob-1',
+      'diffusion listVideoGallery {"offset":0,"limit":40,"includeArchived":true}',
+      `diffusion setVideoGalleryFlags ${item?.id} {"archived":true}`,
+      `diffusion exportVideoGalleryItem ${item?.id} /out/a.webm`,
+      `diffusion setVideoPoster ${item?.id} 12`,
+      `diffusion deleteVideoGalleryItems ${item?.id}`,
+    ])
+  })
 })

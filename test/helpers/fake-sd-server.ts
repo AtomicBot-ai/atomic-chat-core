@@ -46,6 +46,10 @@ export interface FakeSdOptions {
   /** Where the fake writes the host switches it was started with. */
   envFile?: string
   ignoreSigterm?: boolean
+  /** `supported_modes`; default `img_gen`. A video model is `['vid_gen']` or both. */
+  modes?: Array<'img_gen' | 'vid_gen'>
+  /** What `output_formats_by_mode.vid_gen` says; default every container. */
+  vidFormats?: 'all' | 'no-webm' | 'unreported'
 }
 
 export function fakeSdEnv(options: FakeSdOptions): Record<string, string> {
@@ -62,6 +66,8 @@ export function fakeSdEnv(options: FakeSdOptions): Record<string, string> {
   if (options.argvFile) env['FAKE_SD_ARGV_FILE'] = options.argvFile
   if (options.envFile) env['FAKE_SD_ENV_FILE'] = options.envFile
   if (options.ignoreSigterm) env['FAKE_SD_IGNORE_SIGTERM'] = '1'
+  if (options.modes !== undefined) env['FAKE_SD_MODES'] = options.modes.join(',')
+  if (options.vidFormats !== undefined) env['FAKE_SD_VID_FORMATS'] = options.vidFormats
   return env
 }
 

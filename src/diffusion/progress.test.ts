@@ -151,6 +151,14 @@ describe('classifyExit', () => {
     expect(
       classifyExit('Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)', 1)
     ).toBe('OUT_OF_MEMORY')
+    // sd.cpp's model manager refusing a graph that does not fit, the server still alive (no code).
+    expect(
+      classifyExit(
+        'wan_vae segment 1/1 (graph) failed during weight preparation\n' +
+          '[WARN   ] model_manager.cpp:1699 - model manager cannot make enough memory available on MTL0: need 27600.43 MB device / 27600.43 MB budget, available 14907.70 MB device',
+        undefined
+      )
+    ).toBe('OUT_OF_MEMORY')
     expect(classifyExit("unsupported op 'RMS_NORM'\nGGML_ABORT", -6)).toBe('ENGINE_CRASHED')
     expect(classifyExit('', undefined)).toBe('ENGINE_CRASHED')
   })

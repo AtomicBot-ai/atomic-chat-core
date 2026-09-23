@@ -11,6 +11,7 @@
 import { constants, cpus } from 'node:os'
 import { mkdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { AtomicCoreError, DiffusionModality } from '../contracts/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import {
   buildProcessEnv,
@@ -26,7 +27,8 @@ import type { SdHttpClient } from './http.js'
 import { serverBinaryName } from './install.js'
 import { classifyExit, diagnosticTail, OutputRecords } from './progress.js'
 import type { ServerHandle } from './state.js'
-import type { ServerCapabilities, ServerSpec } from './types.js'
+import { modeOf } from './types.js'
+import type { SdMode, ServerCapabilities, ServerSpec } from './types.js'
 
 export const READY_PATH = '/v1/models'
 export const CAPABILITIES_PATH = '/sdcpp/v1/capabilities'
@@ -87,20 +89,54 @@ export function earlyExitError(exit: ExitInfo, tail: readonly string[]): ReturnT
   return diffusionError('MODEL_LOAD_FAILED', message, text)
 }
 
+const SD_MODES: readonly SdMode[] = ['img_gen', 'vid_gen']
+
+/**
+ * The capability document, by mode. `img_gen` is read as before; `supported_modes` and the `vid_gen`
+ * sections are optional, because builds before the async video API had neither.
+ */
 export function parseCapabilities(body: unknown): ServerCapabilities {
   const root = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {}
-  const byMode = (key: string): Record<string, unknown> | undefined => {
+  const byMode = (key: string, mode: SdMode): Record<string, unknown> | undefined => {
     const section = root[key]
     if (section === null || typeof section !== 'object') return undefined
-    const imgGen = (section as Record<string, unknown>)['img_gen']
-    return imgGen !== null && typeof imgGen === 'object' ? (imgGen as Record<string, unknown>) : undefined
+    const entry = (section as Record<string, unknown>)[mode]
+    return entry !== null && typeof entry === 'object' ? (entry as Record<string, unknown>) : undefined
   }
   const capabilities: ServerCapabilities = {
-    cancelGenerating: byMode('features_by_mode')?.['cancel_generating'] === true,
+    cancelGenerating: byMode('features_by_mode', 'img_gen')?.['cancel_generating'] === true,
   }
-  const defaults = byMode('defaults_by_mode')
+  const defaults = byMode('defaults_by_mode', 'img_gen')
   if (defaults !== undefined) capabilities.imgGenDefaults = defaults
+  const modes = root['supported_modes']
+  if (Array.isArray(modes))
+    capabilities.supportedModes = modes.filter((mode): mode is SdMode => SD_MODES.includes(mode as SdMode))
+  const vidFeatures = byMode('features_by_mode', 'vid_gen')
+  const vidDefaults = byMode('defaults_by_mode', 'vid_gen')
+  const formatsSection = root['output_formats_by_mode']
+  const vidFormats =
+    formatsSection !== null && typeof formatsSection === 'object'
+      ? (formatsSection as Record<string, unknown>)['vid_gen']
+      : undefined
+  if (vidFeatures !== undefined || vidDefaults !== undefined || Array.isArray(vidFormats)) {
+    capabilities.vidGen = { cancelGenerating: vidFeatures?.['cancel_generating'] === true }
+    if (vidDefaults !== undefined) capabilities.vidGen.defaults = vidDefaults
+    if (Array.isArray(vidFormats))
+      capabilities.vidGen.outputFormats = vidFormats.filter((f): f is string => typeof f === 'string')
+  }
   return capabilities
+}
+
+/** The refusal for a model whose engine modes do not include the one its catalog entry promised. */
+export function modeMismatchError(
+  modality: DiffusionModality,
+  supported: readonly string[]
+): AtomicCoreError {
+  return diffusionError(
+    'MODEL_INCOMPATIBLE',
+    modality === 'video' ? 'This model is not a video model.' : 'This model is not an image model.',
+    `supported_modes=${supported.join(',')}; wanted ${modeOf(modality)}`
+  )
 }
 
 /**
@@ -276,4 +312,8 @@ async function awaitReadyAndProbe(
       log('warn', `capabilities body was not JSON: ${error instanceof Error ? error.message : String(error)}`)
     }
   } else if (response) log('warn', `capabilities probe returned ${response.status}, assuming defaults`)
+  // A catalog can call a file a video model; the engine's own list of modes has the last word.
+  const modes = handle.capabilities.supportedModes
+  if (modes !== undefined && !modes.includes(modeOf(spec.modality)))
+    await abandon(TERMINATE_GRACE_MS, modeMismatchError(spec.modality, modes))
 }

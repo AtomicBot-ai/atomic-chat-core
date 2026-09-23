@@ -12,15 +12,16 @@ import type {
   DiffusionStatus,
   ImageCapabilities,
   LoadedDiffusionModel,
+  VideoCapabilities,
 } from '../contracts/index.js'
 import { checkEngineCompatibility } from './compat.js'
 import { samePath } from './containment.js'
-import { errorBody, modelNotLoadedError, toDiffusionError } from './errors.js'
+import { diffusionError, errorBody, modelNotLoadedError, toDiffusionError } from './errors.js'
 import { listInstalledBackends } from './install.js'
 import type { DiffusionState, ServerHandle } from './state.js'
 import { MAX_BATCH } from './types.js'
 import type { ServerSpec } from './types.js'
-import { workflowsForSpec } from './workflow.js'
+import { videoWorkflowsForFamily, workflowsForSpec } from './workflow.js'
 
 /** CUDA and ROCm need a moment after the chat model's process dies before the driver reports the VRAM as free. */
 export const GPU_SETTLE_MS = 500
@@ -28,7 +29,12 @@ export const GPU_SETTLE_MS = 500
 export const SHUTDOWN_GRACE_MS = 2_000
 
 export type DiffusionEventName =
-  'diffusion:state' | 'diffusion:progress' | 'diffusion:job' | 'diffusion:error'
+  | 'diffusion:state'
+  | 'diffusion:progress'
+  | 'diffusion:job'
+  | 'diffusion:error'
+  | 'diffusion:video-progress'
+  | 'diffusion:video-job'
 export type DiffusionEmitter = <K extends DiffusionEventName>(name: K, payload: CoreEvents[K]) => void
 export type DiffusionLogger = (level: 'info' | 'warn' | 'debug', msg: string) => void
 
@@ -82,7 +88,9 @@ export async function buildStatus(deps: Pick<SessionDeps, 'state' | 'platform'>)
     install: state.configured ? await currentInstall(deps) : { state: 'not-installed' },
     model,
     activeJob: state.activeJob(),
+    activeVideoJob: state.activeVideoJob(),
     outputDir: state.outputDir(),
+    videoOutputDir: state.videoOutputDir(),
     idleUnloadSecs: state.idleUnloadSecs(),
   }
 }
@@ -105,6 +113,8 @@ export function emitError(
 export function capabilities(state: DiffusionState): ImageCapabilities {
   const spec = state.spec
   if (!spec) throw modelNotLoadedError()
+  if (spec.modality !== 'image')
+    throw diffusionError('MODEL_INCOMPATIBLE', 'The loaded model generates video, not images.', spec.modelId)
   return {
     workflows: workflowsForSpec(spec),
     minDim: spec.ranges.dims[0],
@@ -120,6 +130,40 @@ export function capabilities(state: DiffusionState): ImageCapabilities {
       dims: [...spec.ranges.dims],
       dimMultiple: spec.ranges.dimMultiple,
     },
+  }
+}
+
+/** The video counterpart of `capabilities`; an image spec is refused, so the app's form never guesses. */
+export function videoCapabilities(state: DiffusionState): VideoCapabilities {
+  const spec = state.spec
+  if (!spec) throw modelNotLoadedError()
+  const video = spec.defaults.video
+  const range = spec.ranges.frames
+  if (spec.modality !== 'video' || video === undefined || range === undefined)
+    throw diffusionError('MODEL_INCOMPATIBLE', 'The loaded model generates images, not video.', spec.modelId)
+  const vidGen = state.session?.server.capabilities.vidGen
+  const formats = vidGen?.outputFormats
+  return {
+    workflows: videoWorkflowsForFamily(spec.family),
+    minDim: spec.ranges.dims[0],
+    maxDim: spec.ranges.dims[1],
+    dimMultiple: spec.ranges.dimMultiple,
+    supportsNegativePrompt: spec.defaults.cfgScale > 1.0,
+    supportsGuidance: spec.defaults.guidance !== undefined,
+    cancelGenerating: vidGen?.cancelGenerating ?? false,
+    fps: video.fps,
+    frames: {
+      min: range[0],
+      max: range[1],
+      step: video.frameStep,
+      offset: video.frameOffset,
+      default: video.frames,
+    },
+    resolutionPresets: video.resolutionPresets.map(([w, h]) => [w, h]),
+    outputFormat: 'webm',
+    webmSupported: formats === undefined ? null : formats.includes('webm'),
+    defaults: structuredClone(spec.defaults),
+    ranges: structuredClone(spec.ranges),
   }
 }
 
