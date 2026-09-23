@@ -4,7 +4,15 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     projects: [
-      { test: { name: 'unit', include: ['src/**/*.test.ts'], environment: 'node' } },
+      {
+        test: {
+          name: 'unit',
+          include: ['src/**/*.test.ts'],
+          environment: 'node',
+          // The first PowerShell identity probe on a cold Windows CI runner alone takes ~5 s.
+          testTimeout: process.platform === 'win32' ? 20_000 : 5_000,
+        },
+      },
       { test: { name: 'contract', include: ['test/contract/**/*.test.ts'], environment: 'node' } },
       { test: { name: 'e2e', include: ['test/e2e/**/*.test.ts'], environment: 'node', testTimeout: 60_000 } },
       {
