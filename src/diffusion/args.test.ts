@@ -30,6 +30,7 @@ import {
   offloadFlags,
   speedFlags,
   VAE_TILING_AREA,
+  VIDEO_VAE_TILING_PIXEL_FRAMES,
   withoutDeviceBackendFlags,
 } from './args.js'
 import type { ArgsHost } from './args.js'
@@ -508,6 +509,8 @@ describe('buildVidGenRequest', () => {
       fps: 24,
       output_format: 'webm',
       seed: 42,
+      // 768 × 512 × 49 frames is 19 megapixel-frames: the VAE decodes in tiles.
+      vae_tiling_params: { enabled: true },
       sample_params: {
         sample_steps: 8,
         sample_method: 'euler',
@@ -551,22 +554,31 @@ describe('buildVidGenRequest', () => {
     expect(bare['fps']).toBe(24)
   })
 
-  it('sends the resolved first and last frames, and tiles the VAE past a megapixel', () => {
+  it('sends the resolved first and last frames, and tiles the VAE past eight megapixel-frames', () => {
     const spec = sampleVideoSpec()
-    const body = buildVidGenRequest(sampleVideoRequest(), spec.defaults, 1, {
+    const body = buildVidGenRequest(sampleVideoRequest({ frames: 9 }), spec.defaults, 1, {
       refs: [],
       init: 'FIRST',
       end: 'LAST',
     })
     expect(body['init_image']).toBe('FIRST')
     expect(body['end_image']).toBe('LAST')
+    // 768 × 512 × 9 is 3.5 megapixel-frames: one graph.
     expect(body).not.toHaveProperty('vae_tiling_params')
+    // The frame count counts as much as the frame size: 49 frames of the same size tile …
+    expect(
+      buildVidGenRequest(sampleVideoRequest({ frames: 49 }), spec.defaults, 1, NO_VIDEO_INPUTS)[
+        'vae_tiling_params'
+      ]
+    ).toEqual({ enabled: true })
+    // … and so do 9 frames of 1216².
     const big = buildVidGenRequest(
-      sampleVideoRequest({ width: 1216, height: 1216 }),
+      sampleVideoRequest({ width: 1216, height: 1216, frames: 9 }),
       spec.defaults,
       1,
       NO_VIDEO_INPUTS
     )
     expect(big['vae_tiling_params']).toEqual({ enabled: true })
+    expect(VIDEO_VAE_TILING_PIXEL_FRAMES).toBe(8 * 1_048_576)
   })
 })

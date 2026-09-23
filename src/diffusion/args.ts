@@ -182,6 +182,15 @@ export function buildServerArgs(
 export const VAE_TILING_AREA = 1024 * 1024
 
 /**
+ * Pixel-frames (width × height × frames) above which a video request turns VAE tiling on. A video
+ * VAE decodes the whole clip in one graph, so its buffer grows with the frame count as much as with
+ * the frame size: the Wan 2.2 VAE asked Metal for 27.6 GB at 1280×704 × 121 frames (≈250 bytes per
+ * pixel-frame, 2026-09-23) and failed on a machine with 14.9 GB free. Eight megapixel-frames is
+ * about 2 GB of that, the point past which a single-graph decode stops being safe anywhere.
+ */
+export const VIDEO_VAE_TILING_PIXEL_FRAMES = VAE_TILING_AREA * 8
+
+/**
  * The `POST /sdcpp/v1/img_gen` body. The whole batch goes in one request; guidance is split the way
  * sd.cpp expects (CFG → `txt_cfg`, FLUX distilled → `distilled_guidance`). Only set keys are sent,
  * so the server's own defaults apply to the rest. The workflow decides which images go in. sd.cpp
@@ -269,7 +278,9 @@ export function buildVidGenRequest(
   }
   if (inputs.init !== undefined) body['init_image'] = inputs.init
   if (inputs.end !== undefined) body['end_image'] = inputs.end
-  if (request.width * request.height > VAE_TILING_AREA) body['vae_tiling_params'] = { enabled: true }
+  const frames = body['video_frames'] as number
+  if (request.width * request.height * frames > VIDEO_VAE_TILING_PIXEL_FRAMES)
+    body['vae_tiling_params'] = { enabled: true }
   return body
 }
 

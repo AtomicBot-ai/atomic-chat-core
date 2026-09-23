@@ -179,6 +179,8 @@ export const IMAGE_JOB_KIND: JobKind<
   messages: {
     busy: 'An image is already being generated.',
     wrongModel: 'The loaded model generates video, not images. Load an image model first.',
+    outOfMemory: 'sd-server ran out of memory while generating.',
+    failed: 'The image server failed to generate.',
   },
   validate: (request, spec, deps) => validateRequest(request, spec, deps),
   newJob: (id, spec: ServerSpec, request, now) => ({

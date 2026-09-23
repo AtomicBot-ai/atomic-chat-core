@@ -519,9 +519,7 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
         deps.log('warn', `sd-server failed the job (${code}: ${message}):\n${said}`)
         throw diffusionError(
           outOfMemory ? 'OUT_OF_MEMORY' : 'INTERNAL',
-          outOfMemory
-            ? 'sd-server ran out of memory while generating.'
-            : 'The image server failed to generate.',
+          outOfMemory ? kind.messages.outOfMemory : kind.messages.failed,
           `${code}: ${message}\n${said}`
         )
       }

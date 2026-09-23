@@ -52,6 +52,10 @@ export interface JobKind<Req, Job extends JobCommon<Item, Progress>, Item, Progr
     busy: string
     /** `MODEL_INCOMPATIBLE` when the resident model is of the other modality. */
     wrongModel: string
+    /** `OUT_OF_MEMORY` when the engine failed the job for lack of memory. */
+    outOfMemory: string
+    /** `INTERNAL` when the engine failed the job for any other reason. */
+    failed: string
   }
   validate(request: Req, spec: ServerSpec, deps: ValidateDeps): Promise<void>
   /** The record as it is inserted: inline bytes blanked, nothing started. */

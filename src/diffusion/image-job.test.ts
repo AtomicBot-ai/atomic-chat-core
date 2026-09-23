@@ -80,6 +80,8 @@ describe('IMAGE_JOB_KIND', () => {
     expect(IMAGE_JOB_KIND.messages).toEqual({
       busy: 'An image is already being generated.',
       wrongModel: 'The loaded model generates video, not images. Load an image model first.',
+      outOfMemory: 'sd-server ran out of memory while generating.',
+      failed: 'The image server failed to generate.',
     })
     const emitted: Array<{ name: string; payload: unknown }> = []
     const emit = (name: string, payload: unknown) => emitted.push({ name, payload })

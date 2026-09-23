@@ -163,6 +163,9 @@ export const VIDEO_JOB_KIND: JobKind<
   messages: {
     busy: 'A video is already being generated.',
     wrongModel: 'The loaded model generates images, not video. Load a video model first.',
+    outOfMemory:
+      'sd-server ran out of memory while generating the clip: a clip this long at this size does not fit. Fewer frames or a smaller size will.',
+    failed: 'The video server failed to generate.',
   },
   validate: (request, spec, deps) => validateVideoRequest(request, spec, deps),
   newJob: (id, spec: ServerSpec, request, now) => ({

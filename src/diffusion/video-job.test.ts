@@ -77,6 +77,9 @@ describe('VIDEO_JOB_KIND', () => {
     expect(VIDEO_JOB_KIND.messages).toEqual({
       busy: 'A video is already being generated.',
       wrongModel: 'The loaded model generates images, not video. Load a video model first.',
+      outOfMemory:
+        'sd-server ran out of memory while generating the clip: a clip this long at this size does not fit. Fewer frames or a smaller size will.',
+      failed: 'The video server failed to generate.',
     })
     const spec = sampleVideoSpec()
     const job = VIDEO_JOB_KIND.newJob('j', spec, sampleVideoRequest({ endImage: { base64: 'QUJD' } }), 5)

@@ -204,7 +204,10 @@ export function classifyExit(tail: string, code: number | undefined): 'OUT_OF_ME
     lower.includes('out of memory') ||
     lower.includes('failed to allocate') ||
     lower.includes('cudaerrormemoryallocation') ||
-    lower.includes('insufficient memory')
+    lower.includes('insufficient memory') ||
+    // sd.cpp's model manager, when a graph (the Wan VAE decoding a long clip on Metal, seen
+    // 2026-09-23 at 27.6 GB against 14.9 GB) does not fit: the job fails, the server lives on.
+    lower.includes('cannot make enough memory available')
   return outOfMemory ? 'OUT_OF_MEMORY' : 'ENGINE_CRASHED'
 }
 
