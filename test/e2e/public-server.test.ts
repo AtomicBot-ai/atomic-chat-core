@@ -176,6 +176,11 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
       operationId: 'createImageGeneration',
       tags: ['Images'],
     })
+    // Stage 9g: and the video facade.
+    expect(spec.paths['/videos']?.post).toMatchObject({
+      operationId: 'createVideo',
+      tags: ['Videos'],
+    })
 
     for (const [path, fixture] of [
       ['/docs/swagger-ui.css', 'docs_css_served'],
