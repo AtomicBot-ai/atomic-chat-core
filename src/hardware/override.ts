@@ -19,27 +19,10 @@
  */
 
 import { AtomicCoreError } from '../contracts/index.js'
-import type { GpuProbeInfo } from '../backend/index.js'
+import type { GpuProbeInfo, HardwareOverride, HardwareOverrideInput } from '../contracts/index.js'
 
-export interface HardwareOverride {
-  /** What the app's NVML/Vulkan enumeration found. Replaces the core's probe wholesale. */
-  gpus: GpuProbeInfo[]
-  /** CPU instruction-set flags (`avx`, `avx2`, `avx512`), lowercase as the feature check expects. */
-  cpu_extensions?: string[]
-  /** `linux` | `windows` | `macos` — the app's own idea of the OS, for cross-checking. */
-  os_type?: string
-  /** Who injected it, for the log and for the snapshot. */
-  source?: string
-  /** Milliseconds since the epoch, from the core's clock. */
-  received_at: number
-}
-
-export interface HardwareOverrideInput {
-  gpus?: unknown
-  cpu_extensions?: unknown
-  os_type?: unknown
-  source?: unknown
-}
+/** Wire types live in `contracts/hardware.ts`; re-exported so existing imports keep working. */
+export type { HardwareOverride, HardwareOverrideInput } from '../contracts/index.js'
 
 /**
  * The override currently in force, if any.

@@ -3,7 +3,6 @@
   "version": "0.4.0",
   "description": "Inference core of Atomic Chat: local llama.cpp/MLX/Foundation Models runtime, cloud providers, model router and the OpenAI-compatible server on :1337.",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -23,6 +22,18 @@
     "./contracts": {
       "types": "./dist/contracts/index.d.ts",
       "import": "./dist/contracts/index.js"
+    },
+    "./host": {
+      "types": "./dist/host/index.d.ts",
+      "import": "./dist/host/index.js"
+    },
+    "./models": {
+      "types": "./dist/models/index.d.ts",
+      "import": "./dist/models/index.js"
+    },
+    "./downloads": {
+      "types": "./dist/downloads/index.d.ts",
+      "import": "./dist/downloads/index.js"
     }
   },
   "files": [
@@ -47,7 +58,8 @@
     "test:coverage": "vitest run --project unit --project contract --coverage && node scripts/check-coverage-floor.mjs",
     "fixtures:import": "node scripts/import-app-fixtures.mjs",
     "release": "node scripts/release.mjs",
-    "verify": "npm run lint && npm run typecheck && npm run format:check && npm run test:coverage && npm run build && npm run build:bin && npm run test:contract:bun && npm run test:e2e"
+    "verify": "npm run lint && npm run typecheck && npm run format:check && npm run test:coverage && npm run build && npm run build:bin && npm run test:contract:bun && npm run test:e2e",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^1.0.28",
@@ -66,5 +78,8 @@
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.44.0",
     "vitest": "^3.2.4"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

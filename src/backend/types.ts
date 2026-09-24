@@ -83,29 +83,8 @@ export interface SupportedFeatures extends BackendFeatures {
   avx512: boolean
 }
 
-/**
- * The slice of the hardware probe's `GpuInfo` the backend selectors read. `hardware/` must produce
- * at least these fields (its full `GpuInfo` is a superset). Rust `backend.rs::GpuInfo` requires only
- * `driver_version`; everything else is `#[serde(default)]`.
- */
-export interface GpuProbeInfo {
-  driver_version?: string
-  /** `"NVIDIA" | "AMD" | "Intel" | "Unknown (vendor_id: N)"` as `tauri-plugin-hardware` spells it. */
-  vendor?: string | null
-  /** MiB. */
-  total_memory?: number
-  nvidia_info?: {
-    /** NVML `"major.minor"`, e.g. `"7.5"`; empty when NVML did not report it. */
-    compute_capability?: string
-  } | null
-  vulkan_info?: {
-    api_version?: string
-    /** PCI device id — the only gfx signal on Windows. */
-    device_id?: number | null
-    /** `"DiscreteGpu" | "IntegratedGpu" | …` */
-    device_type?: string
-  } | null
-}
+/** Lives in `contracts/hardware.ts` now (every host injects it); re-exported so nothing here moves. */
+export type { GpuProbeInfo } from '../contracts/index.js'
 
 /** Rust `BestBackendResult`. */
 export interface BestBackendResult {
