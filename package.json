@@ -1,5 +1,5 @@
 {
-  "name": "atomic-chat-core",
+  "name": "@atomic-chat/core",
   "version": "0.4.0",
   "description": "Inference core of Atomic Chat: local llama.cpp/MLX/Foundation Models runtime, cloud providers, model router and the OpenAI-compatible server on :1337.",
   "license": "MIT",
