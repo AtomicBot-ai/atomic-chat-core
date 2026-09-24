@@ -38,6 +38,7 @@
   },
   "files": [
     "dist",
+    "!dist/bin",
     "src/settings/schema"
   ],
   "scripts": {
