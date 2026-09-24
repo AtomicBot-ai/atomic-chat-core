@@ -112,6 +112,15 @@ export class CoreClient {
     return body as T
   }
 
+  /**
+   * A typed call to any control route, for a host that needs a route family this client does not
+   * wrap yet (hardware, backends, settings, environments). Same transport and error mapping as the
+   * named methods; `path` is relative to `/atomic/v1`.
+   */
+  request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+    return this.call<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+  }
+
   health(): Promise<{ ok: true; pid: number; version: string; instance_id: string; protocol: number }> {
     return this.call('/health')
   }

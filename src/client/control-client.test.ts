@@ -527,3 +527,12 @@ describe('image generation', () => {
     ])
   })
 })
+
+describe('request', () => {
+  it('reaches any control route with the same auth and error mapping as the named methods', async () => {
+    const health = await client.request<{ ok: true; instance_id: string }>('GET', '/health')
+    expect(health.ok).toBe(true)
+    expect(health.instance_id).toBe('client-test-instance')
+    await expect(client.request('GET', '/no-such-route')).rejects.toBeInstanceOf(AtomicCoreError)
+  })
+})
