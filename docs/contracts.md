@@ -114,3 +114,14 @@ hides embedding models and prints `{id,name,model_path,size_bytes,capabilities,m
 difference is ownership — `serve` attaches to a core that outlives it, so Ctrl+C detaches instead of
 unloading. `--detach` is consequently a compatibility no-op for ownership and selects the default
 `<data>/atomic-core/logs/serve.log`; the help text states this difference.
+
+## Claude Code control bridge
+
+The additive `/atomic/v1/claude-code/status`, `/login`, and `/chat` routes are
+control-only. Their credential-free camelCase payloads are declared in
+`src/contracts/claude-code.ts`. Chat emits per-request `ready`, `delta`, `result`,
+and `error` SSE frames; these are not shared core events. Closing the response
+cancels the child. The app's `src-tauri/src/core/system/claude_chat.rs` emits
+`test/fixtures/app/claude-code` with its source commit and comparator, replayed by
+`test/contract/claude-code.test.ts`. A core release containing these routes must
+ship before the desktop dependency pin is advanced.

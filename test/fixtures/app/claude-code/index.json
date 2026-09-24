@@ -1,0 +1,13 @@
+{
+  "cases": [
+    "request",
+    "result",
+    "status",
+    "delta"
+  ],
+  "comparator": "semantic JSON equality; status model list filtered to the fixture model",
+  "source": {
+    "commit": "baa9604ea1325d615e237281e271462e506ab9c2",
+    "file": "src-tauri/src/core/system/claude_chat.rs"
+  }
+}

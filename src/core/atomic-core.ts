@@ -40,6 +40,7 @@ import { CORE_VERSION } from '../version.js'
 import { createAtomicCore } from './create.js'
 import { PublicServerLifecycle } from './public-server.js'
 import type { PublicServerStartOptions } from './public-server.js'
+import type { ClaudeCodeRuntime } from '../claude-code/index.js'
 import { LocalSessions, sessionsOf, unknownProvider } from './sessions.js'
 import { LOCAL_PROVIDER } from './types.js'
 import type { AtomicCoreOptions, CoreLoadOptions, CoreLogger } from './types.js'
@@ -58,6 +59,7 @@ export interface AtomicCoreParts {
   controlToken: string
   apiKeys: ApiKeyStore
   cloud: CloudRegistry
+  claudeCode: ClaudeCodeRuntime
   chatgpt: ChatGptAuth
   chatgptBackend: ChatGptBackend
   externalSessions: ExternalSessions
@@ -96,6 +98,7 @@ export class AtomicCore {
   readonly cloud: CloudRegistry
   /** The ChatGPT subscription session (`atomic-chatgpt-auth.json`). */
   readonly chatgpt: ChatGptAuth
+  private readonly claudeCode: ClaudeCodeRuntime
   /** Engines the desktop app still owns, registered for routing only (stage 4d). */
   readonly externalSessions: ExternalSessions
   private readonly lock: InstanceLock
@@ -131,6 +134,7 @@ export class AtomicCore {
     this.apiKeys = parts.apiKeys
     this.cloud = parts.cloud
     this.chatgpt = parts.chatgpt
+    this.claudeCode = parts.claudeCode
     this.externalSessions = parts.externalSessions
     this.lock = parts.lock
     this.runtimes = parts.runtimes
@@ -316,6 +320,7 @@ export class AtomicCore {
     this.lifecycle = 'stopping'
     if (this.appLeaseTimer) clearInterval(this.appLeaseTimer)
     this.shutdownPromise = (async () => {
+      this.claudeCode.shutdown()
       await this.publicServer.stop()
       // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
       await this.diffusion.shutdown()

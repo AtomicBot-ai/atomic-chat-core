@@ -5,6 +5,7 @@
 
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
+import type { ClaudeCodeRuntime } from '../../claude-code/index.js'
 import type {
   DeviceInfo,
   DiffusionBackendInstallRecord,
@@ -279,6 +280,7 @@ export interface ControlServerDeps {
    */
   foundationModelsAvailability?: (force: boolean) => Promise<string>
   cloud: CloudControl
+  claudeCode?: Pick<ClaudeCodeRuntime, 'status' | 'login' | 'chat'>
   chatgpt: ChatGptControl
   externalSessions: ExternalSessionControl
   /** Stop the whole core. The server has already answered by the time this runs. */

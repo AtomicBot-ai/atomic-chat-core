@@ -1,0 +1,16 @@
+---
+date: 2026-09-24
+title: "Own Claude subscription processes in the core using the official CLI"
+---
+
+# 2026-09-24 — Own Claude subscription processes in the core using the official CLI
+
+- **Context:** The desktop app needs Claude subscription chat, including account-specific versioned model discovery. Desktop runtimes already belong to this core; putting the Claude process owner back in Tauri would split lifecycle ownership.
+- **Decision:** Supervise the unmodified official Claude Code executable through a Node-compatible runtime with injected environment/platform/executable settings. The CLI exclusively owns Claude sign-in and refresh; the core never reads credential files or forwards OAuth tokens. Discovery uses the Agent SDK's `initialize` exchange without a user message. `/atomic/v1/claude-code/status`, `/login`, and `/chat` live only on the authenticated loopback control listener. Chat streams request-private SSE rather than broadcasting message text on the core event bus.
+- **Consequences:** The desktop can reuse an existing CLI login or request official browser sign-in. The native CLI is a prerequisite; installation is not automatic. The CLI supplies model versions and context variants, including Fable. Named choices pin the resolved model ID; legacy family aliases remain accepted for old saved selections. Requests use stdin, an isolated settings mode, disabled built-in/MCP tools and no inherited credential/routing overrides. A user-specified `CLAUDE_CONFIG_DIR` is preserved. System instructions use a private temporary file removed at completion. Cancellation/disconnection and ordinary core shutdown kill owned children; force-killing the core itself is not covered by a Claude-specific process journal in this first version.
+- **Limits:** Text-only requests, a 2 MiB prompt/system limit, bounded output events, and ten-minute inference deadline. No subscription traffic is added to the public `/v1` router and no fallback to API-key billing. Fable may use enabled usage credits under the user's plan. The routes are additive and leave the existing control protocol unchanged.
+- **Testing:** Unit tests exercise real fake-CLI subprocesses, API-auth rejection, sanitized status, versioned discovery, stdin, temporary-file cleanup, timeout and cancellation. Socket tests cover control authorization, SSE and client disconnect. Compiled-binary e2e tests cover catalog, login and resumed replies. Rust-emitted fixtures from the companion desktop commit are replayed by the contract suite. The desktop UI acceptance scenario is supplied in the companion app PR and requires its dedicated app-e2e build.
+- **Owner:** team.
+- **Links:** [Official programmatic interface](https://code.claude.com/docs/en/headless), [SDK initialize implementation](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/query.py), [integration conditions](https://code.claude.com/docs/en/legal-and-compliance), [model configuration and usage credits](https://code.claude.com/docs/en/model-config).
+
+`ATOMIC_CLAUDE_CODE_EXECUTABLE` is a trusted host override for the installed binary. `ATOMIC_TEST_CLAUDE_ENTRYPOINT` supplies a fixture script after that executable in automated tests; neither can be supplied through a control request. Tests never contact Anthropic or require an account.

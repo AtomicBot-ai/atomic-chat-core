@@ -1,0 +1,40 @@
+{
+  "comparator": "semantic JSON equality",
+  "expected": {
+    "error": null,
+    "installed": true,
+    "loggedIn": true,
+    "models": [
+      {
+        "description": "Fable fixture",
+        "id": "claude-fable-5-1[1m]",
+        "model": "claude-fable-5-1[1m]",
+        "name": "Claude Fable 5.1 · 1M"
+      }
+    ],
+    "plan": "max",
+    "subscription": true,
+    "version": "2.1.281 (fixture)"
+  },
+  "input": {
+    "error": null,
+    "installed": true,
+    "loggedIn": true,
+    "models": [
+      {
+        "description": "Fable fixture",
+        "id": "claude-fable-5-1[1m]",
+        "model": "claude-fable-5-1[1m]",
+        "name": "Claude Fable 5.1 · 1M"
+      }
+    ],
+    "plan": "max",
+    "subscription": true,
+    "version": "2.1.281 (fixture)"
+  },
+  "name": "status",
+  "source": {
+    "commit": "baa9604ea1325d615e237281e271462e506ab9c2",
+    "file": "src-tauri/src/core/system/claude_chat.rs"
+  }
+}

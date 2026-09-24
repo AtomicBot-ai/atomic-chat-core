@@ -1,0 +1,20 @@
+{
+  "comparator": "semantic JSON equality",
+  "expected": {
+    "inputTokens": 17,
+    "outputTokens": 3,
+    "sessionId": "684286da-7283-4e22-9436-c6f6c3c03015",
+    "text": "OK"
+  },
+  "input": {
+    "inputTokens": 17,
+    "outputTokens": 3,
+    "sessionId": "684286da-7283-4e22-9436-c6f6c3c03015",
+    "text": "OK"
+  },
+  "name": "result",
+  "source": {
+    "commit": "baa9604ea1325d615e237281e271462e506ab9c2",
+    "file": "src-tauri/src/core/system/claude_chat.rs"
+  }
+}

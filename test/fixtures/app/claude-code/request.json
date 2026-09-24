@@ -1,0 +1,22 @@
+{
+  "comparator": "semantic JSON equality",
+  "expected": {
+    "model": "claude-fable-5-1[1m]",
+    "prompt": "Say OK",
+    "requestId": "684286da-7283-4e22-9436-c6f6c3c03015",
+    "sessionId": null,
+    "system": "Be concise."
+  },
+  "input": {
+    "model": "claude-fable-5-1[1m]",
+    "prompt": "Say OK",
+    "requestId": "684286da-7283-4e22-9436-c6f6c3c03015",
+    "sessionId": null,
+    "system": "Be concise."
+  },
+  "name": "request",
+  "source": {
+    "commit": "baa9604ea1325d615e237281e271462e506ab9c2",
+    "file": "src-tauri/src/core/system/claude_chat.rs"
+  }
+}
