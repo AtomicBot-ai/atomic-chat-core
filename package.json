@@ -40,7 +40,7 @@
     "test": "vitest run --project unit --project contract",
     "test:watch": "vitest --project unit --project contract",
     "test:e2e": "vitest run --project e2e",
-    "test:contract:bun": "bun test ./test/contract/proxy-http.test.ts ./test/contract/state-file.test.ts ./test/contract/shims.test.ts ./test/contract/chatgpt.test.ts ./test/contract/inspector-telemetry.test.ts ./test/contract/dynamic-hosts.test.ts",
+    "test:contract:bun": "bun test ./test/contract/proxy-http.test.ts ./test/contract/state-file.test.ts ./test/contract/shims.test.ts ./test/contract/chatgpt.test.ts ./test/contract/inspector-telemetry.test.ts ./test/contract/dynamic-hosts.test.ts ./test/contract/claude-code.test.ts",
     "test:app-e2e": "vitest run --project app-e2e",
     "test:runtime-compat": "vitest run --project runtime-compat",
     "test:live": "ATOMIC_LIVE=1 vitest run --project live",

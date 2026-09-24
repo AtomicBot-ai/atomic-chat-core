@@ -1,0 +1,16 @@
+{
+  "comparator": "semantic JSON equality",
+  "expected": {
+    "text": "OK",
+    "type": "delta"
+  },
+  "input": {
+    "text": "OK",
+    "type": "delta"
+  },
+  "name": "delta",
+  "source": {
+    "commit": "baa9604ea1325d615e237281e271462e506ab9c2",
+    "file": "src-tauri/src/core/system/claude_chat.rs"
+  }
+}

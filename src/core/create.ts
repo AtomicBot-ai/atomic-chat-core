@@ -5,6 +5,7 @@
  */
 
 import { homedir } from 'node:os'
+import { ClaudeCodeRuntime } from '../claude-code/index.js'
 import { join } from 'node:path'
 import type { LocalProviderId } from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
@@ -114,6 +115,13 @@ export async function createAtomicCore(
     const apiKeys = await ApiKeyStore.open(layout.core.credentials)
     const cloud = new CloudRegistry(settings, apiKeys)
     const env = options.env ?? process.env
+    const claudeCode = new ClaudeCodeRuntime({
+      cwd: layout.core.dir,
+      env,
+      platform: options.platform,
+      executable: env['ATOMIC_CLAUDE_CODE_EXECUTABLE'],
+      prefixArgs: env['ATOMIC_TEST_CLAUDE_ENTRYPOINT'] ? [env['ATOMIC_TEST_CLAUDE_ENTRYPOINT']] : [],
+    })
     // Test hooks only: point sign-in and the subscription at local stubs. Production never sets them.
     const chatgptIssuer = env['ATOMIC_CHATGPT_ISSUER']
     const chatgptBaseUrl = env['ATOMIC_CHATGPT_BASE_URL']
@@ -373,6 +381,7 @@ export async function createAtomicCore(
           upsert: (input) => cloud.upsert(input),
           remove: (provider) => cloud.remove(provider),
         },
+        claudeCode,
         chatgpt: {
           status: () => chatgpt.status(),
           reload: () => chatgpt.reload(),
@@ -427,6 +436,7 @@ export async function createAtomicCore(
       apiKeys,
       cloud,
       chatgpt,
+      claudeCode,
       chatgptBackend,
       externalSessions,
       appLeaseTimer,

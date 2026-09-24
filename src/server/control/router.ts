@@ -5,6 +5,7 @@
  */
 
 import { CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../../contracts/index.js'
+import { registerClaudeCodeRoutes } from './routes/claude-code.js'
 import { Router } from '../http.js'
 import { registerBackendRoutes } from './routes/backends.js'
 import { registerClientRoutes } from './routes/clients.js'
@@ -56,6 +57,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerSettingsRoutes(router, deps, ctx)
   registerExternalSessionRoutes(router, deps, ctx)
   registerCloudRoutes(router, deps, ctx)
+  registerClaudeCodeRoutes(router, deps, ctx)
   registerPublicServerRoutes(router, deps, ctx)
   registerRemoteAccessRoutes(router, deps, ctx)
   registerDiffusionRoutes(router, deps, ctx)

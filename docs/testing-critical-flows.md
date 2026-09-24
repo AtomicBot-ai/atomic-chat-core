@@ -52,3 +52,15 @@ Line coverage alone never raises a grade. A PR may not lower a grade.
 | Control API over the wire (auth, host gate, snapshot, clients, SSE) | Strong | `src/server/control.test.ts` and `src/client/control-client.test.ts` drive a real server over a socket; `test/e2e/owner.test.ts` does the same against the compiled binary | maintained |
 | Error reports to Sentry (consent, what is reported, zero-PII) | Strong | `test/e2e/telemetry.test.ts` drives the compiled app binary against a fake ingest (nothing without consent; a failed load once consent arrives over `PUT /telemetry`, then deduplicated; a start-up failure reported as fatal with exit 1; a compute failure behind the public API and an engine SIGSEGV after loading; the CLI daemon reporting by itself as host `cli` with its install id, the first-run notice, and silence after `telemetry off`; no home folder, data folder or prompt in anything sent); `src/telemetry/*.test.ts` (scrub, stack, reports, caps, 429); `src/server/control/routes/telemetry.test.ts`; app side `live_tests.rs` | — |
 | Mobile paths survive desktop legacy removal | Missing | — | Existing mobile build/contract checks in phase 6 |
+
+## Claude Code subscription runtime
+
+**Strong (core), Partial (desktop).** `src/claude-code/policy.test.ts`,
+`src/claude-code/process.test.ts`, and `src/claude-code/runtime.test.ts` cover
+actual child processes, limits, authentication rejection, cleanup and cancellation.
+`src/server/control/routes/claude-code.test.ts` crosses the authenticated socket
+boundary and cancels on disconnect. `test/contract/claude-code.test.ts` replays
+the app's Rust-emitted wire fixtures; `test/e2e/claude-code.test.ts` runs through
+the compiled binary. The companion app supplies its native UI scenario; it has
+not been run here. Fresh-account browser consent and Windows/Linux native CLI
+execution remain manual/CI validation.
