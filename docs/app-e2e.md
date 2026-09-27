@@ -30,6 +30,7 @@ ignored. Scenarios 6 and 12 below describe the flag round-trip as it was planned
    `model-factory.ts` resolved (port, api_key).
 4. **auto-increase-ctx** — overflow the context from the proxy path and from the agent path; both recover.
 5. **Backend install** — install/update/"find optimal" from the UI; progress and completion events reach the UI.
+   Since stage 10c (ADR 2026-09-27) the app asks the core what fits: `tests/e2e/desktop/backend-recommendation.spec.ts` checks next to the running app that `GET /hardware/override` stays `null`, `GET /hardware/info` is the core's own probe, and `POST /backends/llamacpp-upstream/{catalog,updates,recommendation}` name the newer build the mirror publishes.
 6. **Flag round-trip** — transfer `atomic_core.runtime` off → llamacpp-upstream → off with no active conflicting
    operation, unload, revision acknowledgment and settings preservation. Reject unsupported flag combinations.
 7. **External clients** — Codex (`/responses`), Claude Code (`/messages`), OpenCode (`/chat/completions`) against `:1337`.
