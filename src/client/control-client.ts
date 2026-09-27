@@ -12,7 +12,14 @@ import type { ChatGptStatus } from '../credentials/index.js'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import type {
+  BackendCatalogRequest,
+  BackendCatalogResponse,
+  BackendRecommendationRequest,
+  BackendRecommendationResponse,
+  BackendUpdateCheckRequest,
+  BackendUpdateCheckResponse,
   CoreEventName,
+  LlamacppProviderId,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
   DiffusionConfig,
@@ -33,6 +40,9 @@ import type {
   VideoGenerateRequest,
   VideoJob,
   GalleryVideoItem,
+  HardwareInfoResponse,
+  HardwareOverride,
+  HardwareOverrideInput,
   LoadedDiffusionModel,
   LocalApiServerState,
   RemoteAccessStatus,
@@ -114,8 +124,8 @@ export class CoreClient {
 
   /**
    * A typed call to any control route, for a host that needs a route family this client does not
-   * wrap yet (hardware, backends, settings, environments). Same transport and error mapping as the
-   * named methods; `path` is relative to `/atomic/v1`.
+   * wrap yet (backends, settings, environments). Same transport and error mapping as the named
+   * methods; `path` is relative to `/atomic/v1`.
    */
   request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
     return this.call<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
@@ -127,6 +137,56 @@ export class CoreClient {
 
   snapshot(): Promise<CoreSnapshot> {
     return this.call('/snapshot')
+  }
+
+  /** The machine as the core measured it, or the override standing in for the probe. */
+  hardwareInfo(): Promise<HardwareInfoResponse> {
+    return this.call('/hardware/info')
+  }
+
+  /** Probe again; answers with the new description. */
+  refreshHardware(): Promise<HardwareInfoResponse> {
+    return this.call('/hardware/refresh', { method: 'POST' })
+  }
+
+  /** What fits this machine for a llama.cpp provider: features, supported ids, the gated catalog. */
+  backendCatalog(
+    provider: LlamacppProviderId,
+    request: BackendCatalogRequest = {}
+  ): Promise<BackendCatalogResponse> {
+    return this.call(`/backends/${provider}/catalog`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** Detect the ideal backend and resolve it to a concrete `<tag>/<id>`; the core stores the record. */
+  recommendBackend(
+    provider: LlamacppProviderId,
+    request: BackendRecommendationRequest
+  ): Promise<BackendRecommendationResponse> {
+    return this.call(`/backends/${provider}/recommendation`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  /** Is a newer build of the current backend's type published, and is it the same family? */
+  checkBackendUpdates(
+    provider: LlamacppProviderId,
+    request: BackendUpdateCheckRequest = {}
+  ): Promise<BackendUpdateCheckResponse> {
+    return this.call(`/backends/${provider}/updates`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  hardwareOverride(): Promise<{ override: HardwareOverride | null }> {
+    return this.call('/hardware/override')
+  }
+
+  /** Replace the probe wholesale with `input` until `clearHardwareOverride`. */
+  setHardwareOverride(input: HardwareOverrideInput): Promise<{ override: HardwareOverride }> {
+    return this.call('/hardware/override', { method: 'PUT', body: JSON.stringify(input) })
+  }
+
+  clearHardwareOverride(): Promise<{ cleared: boolean }> {
+    return this.call('/hardware/override', { method: 'DELETE' })
   }
 
   /** Refuse a binary or ownership scope we cannot safely share. */

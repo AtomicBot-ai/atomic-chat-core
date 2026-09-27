@@ -1,0 +1,60 @@
+==========
+VULKANINFO
+==========
+
+Vulkan Instance Version: 1.3.275
+
+
+Instance Extensions: count = 24
+-------------------------------
+VK_EXT_acquire_drm_display             : extension revision 1
+VK_KHR_surface                         : extension revision 25
+VK_KHR_xcb_surface                     : extension revision 6
+
+Instance Layers: count = 3
+--------------------------
+VK_LAYER_INTEL_nullhw       INTEL NULL HW                                    1.1.73   version 1
+VK_LAYER_MESA_device_select Linux device selection layer                     1.3.211  version 1
+VK_LAYER_NV_optimus         NVIDIA Optimus layer                             1.3.277  version 1
+
+Devices:
+========
+GPU0:
+	apiVersion         = 1.3.277
+	driverVersion      = 550.120.0.0
+	vendorID           = 0x10de
+	deviceID           = 0x2684
+	deviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+	deviceName         = NVIDIA GeForce RTX 4090
+	driverID           = DRIVER_ID_NVIDIA_PROPRIETARY
+	driverName         = NVIDIA
+	driverInfo         = 550.120
+	conformanceVersion = 1.3.7.2
+	deviceUUID         = 0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11
+	driverUUID         = 7d3e1a1c-8b8e-5c3e-9f27-b6f5f0a1b2c3
+GPU1:
+	apiVersion         = 1.3.278
+	driverVersion      = 24.0.9
+	vendorID           = 0x8086
+	deviceID           = 0xa780
+	deviceType         = PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+	deviceName         = Intel(R) Graphics (RPL-S)
+	driverID           = DRIVER_ID_INTEL_OPEN_SOURCE_MESA
+	driverName         = Intel open-source Mesa driver
+	driverInfo         = Mesa 24.0.9-0ubuntu0.1
+	conformanceVersion = 1.3.6.0
+	deviceUUID         = 8680-80a7-0000-0000-0000-0000-0000-0000
+	driverUUID         = 1e26d5f0-4a84-3a45-8e7a-0a1b2c3d4e5f
+GPU2:
+	apiVersion         = 1.3.278
+	driverVersion      = 0.0.1
+	vendorID           = 0x10005
+	deviceID           = 0x0000
+	deviceType         = PHYSICAL_DEVICE_TYPE_CPU
+	deviceName         = llvmpipe (LLVM 17.0.6, 256 bits)
+	driverID           = DRIVER_ID_MESA_LLVMPIPE
+	driverName         = llvmpipe
+	driverInfo         = Mesa 24.0.9-0ubuntu0.1 (LLVM 17.0.6)
+	conformanceVersion = 1.3.1.1
+	deviceUUID         = 6d657361-3234-2e30-2e39-2d3075627500
+	driverUUID         = 6c6c766d-7069-7065-5555-494400000000

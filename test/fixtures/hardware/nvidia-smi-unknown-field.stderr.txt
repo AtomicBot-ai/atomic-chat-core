@@ -1,0 +1,3 @@
+Field "compute_cap" is not a valid field to query.
+
+Please run 'nvidia-smi --help-query-gpu' for a list of available fields.

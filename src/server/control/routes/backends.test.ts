@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { startControlHarness as start } from '../../../../test/helpers/control-harness.js'
+import { fakeCatalog, startControlHarness as start } from '../../../../test/helpers/control-harness.js'
 import type { ControlHarness } from '../../../../test/helpers/control-harness.js'
 
 let h: ControlHarness
@@ -120,5 +120,82 @@ describe('backend routes', () => {
     })
     expect(res.status).toBe(409)
     expect(await res.json()).toEqual({ status: 'conflict', current: { revision: 2, optimal: null } })
+  })
+})
+
+describe('backend advisor routes', () => {
+  it('passes the catalog, recommendation and update bodies through as POSTs', async () => {
+    const seen: string[] = []
+    h.backends.catalog = async (provider, request) => {
+      seen.push(`catalog ${provider} force=${String(request.force)} app=${String(request.app_version)}`)
+      return { ...fakeCatalog(provider), recommended: 'b99999/win-cuda-13.3-x64' }
+    }
+    h.backends.checkUpdates = async (provider, request) => {
+      seen.push(`updates ${provider} current=${request.current ?? ''}`)
+      return {
+        provider: provider as 'llamacpp-upstream',
+        current: request.current ?? '',
+        current_kind: 'concrete',
+        update_needed: true,
+        new_version: 'b99999',
+        target_backend: 'b99999/win-cuda-13.3-x64',
+        same_family: true,
+        offer: 'b99999/win-cuda-13.3-x64',
+      }
+    }
+
+    const catalog = await h.get('/atomic/v1/backends/llamacpp-upstream/catalog', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ force: true, app_version: '2.0.47' }),
+    })
+    expect(catalog.status).toBe(200)
+    expect(await catalog.json()).toMatchObject({ recommended: 'b99999/win-cuda-13.3-x64' })
+
+    const recommendation = await h.get('/atomic/v1/backends/llamacpp/recommendation', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'refresh', current_backend: 'b1/windows-x64-cpu' }),
+    })
+    expect(recommendation.status).toBe(200)
+    expect(await recommendation.json()).toMatchObject({
+      provider: 'llamacpp',
+      mode: 'refresh',
+      outcome: 'cpu_optimal',
+    })
+
+    const updates = await h.get('/atomic/v1/backends/llamacpp-upstream/updates', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ current: 'b1/win-cuda-13.1-x64' }),
+    })
+    expect(updates.status).toBe(200)
+    expect(await updates.json()).toMatchObject({ update_needed: true, same_family: true })
+    expect(seen).toEqual([
+      'catalog llamacpp-upstream force=true app=2.0.47',
+      'updates llamacpp-upstream current=b1/win-cuda-13.1-x64',
+    ])
+  })
+
+  it('refuses a recommendation without a mode and a provider the advisor does not know', async () => {
+    const noMode = await h.get('/atomic/v1/backends/llamacpp-upstream/recommendation', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ current_backend: 'b1/win-cpu-x64' }),
+    })
+    expect(noMode.status).toBe(400)
+    expect((await noMode.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: 'INVALID_ARGUMENT' },
+    })
+
+    const mlx = await h.get('/atomic/v1/backends/mlx/catalog', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(mlx.status).toBe(400)
+    expect((await mlx.json()) as { error: { message: string } }).toMatchObject({
+      error: { message: expect.stringContaining('mlx') },
+    })
   })
 })

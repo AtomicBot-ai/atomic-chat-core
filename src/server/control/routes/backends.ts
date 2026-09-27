@@ -1,7 +1,13 @@
 /** llama.cpp backend packs and the download tasks that install them. */
 
 import { AtomicCoreError } from '../../../contracts/index.js'
+import type {
+  BackendCatalogRequest,
+  BackendRecommendationRequest,
+  BackendUpdateCheckRequest,
+} from '../../../contracts/index.js'
 import type { OptimalBackendCacheRecord } from '../../../backend/index.js'
+import { isLlamacppProviderId } from '../../../backend/index.js'
 import type { ProxyConfig } from '../../../downloads/index.js'
 import { queryOf, readJsonBody, sendError, sendJson } from '../../http.js'
 import type { Router } from '../../http.js'
@@ -73,6 +79,41 @@ export function registerBackendRoutes(
       body.expected_revision
     )
     sendJson(res, result.status === 'conflict' ? 409 : 200, result)
+  })
+
+  // The advisor answers; the app decides when to act (ADR 2026-09-27). All three are POST because the
+  // proxy policy may carry credentials, and those never travel in a query string.
+  const llamacppProvider = (raw: string): 'llamacpp-upstream' | 'llamacpp' => {
+    if (!isLlamacppProviderId(raw))
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `The backend advisor knows llamacpp-upstream and llamacpp, not ${raw}`
+      )
+    return raw
+  }
+
+  router.post(p('/backends/:provider/catalog'), async (req, res, { params }) => {
+    const provider = llamacppProvider(params['provider'] as string)
+    const body = await readJsonBody<BackendCatalogRequest>(req)
+    sendJson(res, 200, await deps.backends.catalog(provider, body))
+  })
+
+  router.post(p('/backends/:provider/recommendation'), async (req, res, { params }) => {
+    const provider = llamacppProvider(params['provider'] as string)
+    const body = await readJsonBody<BackendRecommendationRequest>(req)
+    if (body.mode !== 'refresh' && body.mode !== 'recheck')
+      return sendError(
+        res,
+        new AtomicCoreError('INVALID_ARGUMENT', 'recommendation needs mode: refresh or recheck')
+      )
+    // `detection_failed` is an outcome the caller reads, not an error: the current backend stays.
+    sendJson(res, 200, await deps.backends.recommend(provider, body))
+  })
+
+  router.post(p('/backends/:provider/updates'), async (req, res, { params }) => {
+    const provider = llamacppProvider(params['provider'] as string)
+    const body = await readJsonBody<BackendUpdateCheckRequest>(req)
+    sendJson(res, 200, await deps.backends.checkUpdates(provider, body))
   })
 
   router.post(p('/downloads/*taskId/cancel'), (_req, res, { params }) => {

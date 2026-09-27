@@ -1,8 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../../test/helpers/fake-backend-pack.js'
-import { HardwareOverrideStore } from '../../hardware/index.js'
+import type { GpuProbeInfo } from '../../contracts/index.js'
+import type { HardwareFactsSource } from '../../hardware/index.js'
 import { ensureBackend, platformArch, selectInstalledBackend } from './runtime-backend.js'
+
+/** A `HardwareFactsSource` that answers what a test says the machine is. */
+const facts = (over: {
+  osType: string
+  cpuExtensions?: string[] | undefined
+  gpus?: GpuProbeInfo[]
+}): HardwareFactsSource => ({
+  facts: async () => ({
+    osType: over.osType,
+    arch: 'x86_64',
+    cpuExtensions: over.cpuExtensions,
+    gpus: over.gpus ?? [],
+    source: 'probe',
+  }),
+})
 
 describe('platformArch', () => {
   it.each([
@@ -21,10 +37,9 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
     try {
       await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cpu-x64' })
       await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cuda-13.3-x64' })
-      const hardware = new HardwareOverrideStore()
-      hardware.set({
-        os_type: 'windows',
-        cpu_extensions: ['avx2'],
+      const hardware = facts({
+        osType: 'windows',
+        cpuExtensions: ['avx2'],
         gpus: [
           {
             vendor: 'NVIDIA',
@@ -48,8 +63,8 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
     const data = await makeTmpDataFolder('atomic-runtime-backend-')
     try {
       await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cuda-13.3-x64' })
-      const hardware = new HardwareOverrideStore()
-      hardware.set({ os_type: 'windows', cpu_extensions: [], gpus: [] })
+      // Flags unknown (`undefined`) read as none for the feature gates and never block on their own.
+      const hardware = facts({ osType: 'windows', cpuExtensions: undefined })
 
       await expect(
         ensureBackend(data.layout, 'llamacpp-upstream', 'missing', 'b0', hardware, 'x64')
@@ -64,10 +79,9 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
     try {
       for (const backend of ['windows-x64-cpu', 'windows-x64-cuda-12.4', 'win-cuda-13.3-x64'])
         await installFakeBackend(data.layout, { provider: 'llamacpp', version: 'b10018-1.3.0', backend })
-      const hardware = new HardwareOverrideStore()
-      hardware.set({
-        os_type: 'windows',
-        cpu_extensions: [],
+      const hardware = facts({
+        osType: 'windows',
+        cpuExtensions: [],
         gpus: [
           {
             vendor: 'NVIDIA',
@@ -101,8 +115,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
       )
       expect(repaired).toEqual(['b10018-1.3.0/windows-x64-cuda-12.4', 'b10018-1.3.0/windows-x64-cpu'])
 
-      const linux = new HardwareOverrideStore()
-      linux.set({ os_type: 'linux', cpu_extensions: [], gpus: [] })
+      const linux = facts({ osType: 'linux', cpuExtensions: [] })
       await installFakeBackend(data.layout, {
         provider: 'llamacpp',
         version: 'b10018-1.3.0',
@@ -119,8 +132,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
           hasRuntime: true,
         }))
       ).resolves.toMatchObject({ backend: 'linux-x64-vulkan' })
-      const none = new HardwareOverrideStore()
-      none.set({ os_type: 'linux', cpu_extensions: [], gpus: [] })
+      const none = facts({ osType: 'linux', cpuExtensions: [] })
       await expect(selectInstalledBackend(data.layout, 'llamacpp', none, 'arm64')).resolves.toBeUndefined()
     } finally {
       await data.cleanup()
@@ -141,7 +153,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
           'llamacpp-upstream',
           installed.backend,
           installed.version,
-          new HardwareOverrideStore()
+          facts({ osType: 'macos' })
         )
       ).resolves.toEqual({
         version: installed.version,

@@ -27,6 +27,9 @@ import type {
   VideoGenerateRequest,
   VideoJob,
   GalleryVideoItem,
+  HardwareInfoResponse,
+  HardwareOverride,
+  HardwareOverrideInput,
   LocalApiServerState,
   LocalProviderId,
   RemoteAccessStatus,
@@ -38,8 +41,15 @@ import type { CtxIncreaseResult } from '../../runtime/llamacpp/runtime.js'
 import type { GgufValidation, ModelCapabilities } from '../../models/index.js'
 import type { EmbeddingResponse } from '../../models/index.js'
 import type { ProxyConfig } from '../../downloads/index.js'
-import type { HardwareOverrideStore } from '../../hardware/index.js'
 import type { TelemetryControl } from '../../telemetry/index.js'
+import type {
+  BackendCatalogRequest,
+  BackendCatalogResponse,
+  BackendRecommendationRequest,
+  BackendRecommendationResponse,
+  BackendUpdateCheckRequest,
+  BackendUpdateCheckResponse,
+} from '../../contracts/index.js'
 import type {
   InstallBackendResult,
   InstalledBackendPack,
@@ -105,8 +115,9 @@ export interface SettingsControl {
 }
 
 /**
- * The backend surface the app drives. Narrow on purpose: the updater screen installs, removes and
- * lists, and everything else it shows it computes from those three answers.
+ * The backend surface the app drives: the updater screen installs, removes and lists, and asks the
+ * advisor three questions (what fits this machine, what is recommended, is there an update) that it
+ * used to answer itself (ADR 2026-09-27). When to act on the answers stays the app's decision.
  */
 export interface BackendControl {
   list: (provider: string, currentVersionBackend?: string) => Promise<InstalledBackendPack[]>
@@ -125,6 +136,12 @@ export interface BackendControl {
     expectedRevision: number
   ) => Promise<OptimalUpdate>
   optimalSnapshot: () => Record<string, OptimalState>
+  catalog: (provider: string, request: BackendCatalogRequest) => Promise<BackendCatalogResponse>
+  recommend: (
+    provider: string,
+    request: BackendRecommendationRequest
+  ) => Promise<BackendRecommendationResponse>
+  checkUpdates: (provider: string, request: BackendUpdateCheckRequest) => Promise<BackendUpdateCheckResponse>
 }
 
 /**
@@ -142,6 +159,21 @@ export interface ModelControl {
     input: string[],
     ubatchSize: number
   ) => Promise<EmbeddingResponse>
+}
+
+/**
+ * The machine as the core measured it (`GET /hardware/info`, `POST /hardware/refresh`) and the
+ * override a host may inject in its place (`/hardware/override`). Reads never throw: a probe that
+ * failed answers what it could read plus `warnings`.
+ */
+export interface HardwareControl {
+  info: () => Promise<HardwareInfoResponse>
+  /** Probe again and answer with the new description. */
+  refresh: () => Promise<HardwareInfoResponse>
+  getOverride: () => HardwareOverride | undefined
+  /** Throws `INVALID_ARGUMENT` for a payload it cannot read; nothing is applied then. */
+  setOverride: (input: HardwareOverrideInput) => HardwareOverride
+  clearOverride: () => boolean
 }
 
 /** Room left for a download. Answers for the data folder only; `null` when the platform cannot say. */
@@ -262,8 +294,8 @@ export interface ControlServerDeps {
   publicServer: PublicServerControl
   /** The settings store, for the routes that read and migrate provider settings (PLAN.md §3.4). */
   settings: SettingsControl
-  /** Hardware facts the app injects, which outrank the core's own probe (PLAN.md §2 decision 10). */
-  hardware: HardwareOverrideStore
+  /** The core's hardware probe, and the override a host may inject over it (PLAN.md §2 decision 10). */
+  hardware: HardwareControl
   /** Installing and removing llama.cpp backends (PLAN.md §4, stage 3c). */
   backends: BackendControl
   /** Free space inside the data folder, which the app asks before a download (stage 7b). */

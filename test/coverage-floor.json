@@ -1,4 +1,16 @@
 {
+  "src/backend/advisor/advisor.ts": {
+    "statements": 98,
+    "branches": 83,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/backend/advisor/policy.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
   "src/backend/catalog/archive.ts": {
     "statements": 100,
     "branches": 98,
@@ -29,6 +41,18 @@
     "functions": 100,
     "lines": 97
   },
+  "src/backend/catalog/turboquant-catalog.ts": {
+    "statements": 96,
+    "branches": 85,
+    "functions": 92,
+    "lines": 96
+  },
+  "src/backend/catalog/turboquant-index.ts": {
+    "statements": 99,
+    "branches": 91,
+    "functions": 100,
+    "lines": 99
+  },
   "src/backend/installed/installed.ts": {
     "statements": 100,
     "branches": 91,
@@ -43,7 +67,7 @@
   },
   "src/backend/optimal/optimal-cache.ts": {
     "statements": 100,
-    "branches": 90,
+    "branches": 93,
     "functions": 100,
     "lines": 100
   },
@@ -77,6 +101,12 @@
     "functions": 91,
     "lines": 100
   },
+  "src/backend/select/turboquant-tiers.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
   "src/backend/turboquant.ts": {
     "statements": 99,
     "branches": 94,
@@ -101,10 +131,22 @@
     "functions": 85,
     "lines": 97
   },
+  "src/cli/commands/backends.ts": {
+    "statements": 97,
+    "branches": 73,
+    "functions": 100,
+    "lines": 97
+  },
   "src/cli/commands/daemon.ts": {
     "statements": 100,
     "branches": 66,
     "functions": 100,
+    "lines": 100
+  },
+  "src/cli/commands/hardware.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 80,
     "lines": 100
   },
   "src/cli/commands/models.ts": {
@@ -436,6 +478,84 @@
     "branches": 94,
     "functions": 100,
     "lines": 98
+  },
+  "src/hardware/cpu-flags.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/drm-sysfs.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/facts.ts": {
+    "statements": 98,
+    "branches": 91,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/hardware/merge.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/nvidia-smi.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/probe-common.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/probe-darwin.ts": {
+    "statements": 100,
+    "branches": 87,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/probe-linux.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/probe-windows.ts": {
+    "statements": 100,
+    "branches": 89,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/probe.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/service.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/vulkan.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/hardware/windows-video.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
   },
   "src/integrations/catalog.ts": {
     "statements": 100,

@@ -647,3 +647,172 @@ describe('error reporting', () => {
     expect(() => core.events.emit('server:stopped', {})).not.toThrow()
   })
 })
+
+describe('hardware facts', () => {
+  it('serves the probe over control and feeds its CPU flags to the load preflight', async () => {
+    const probes: number[] = []
+    const core = await createCore({
+      hardware: {
+        probe: async () => {
+          probes.push(Date.now())
+          return {
+            info: {
+              cpu: {
+                name: 'Probe CPU',
+                core_count: 2,
+                arch: 'x86_64',
+                extensions: ['fpu', 'sse2'],
+                extensions_known: true,
+              },
+              os_type: 'windows',
+              os_name: 'Probe OS',
+              total_memory: 8192,
+              gpus: [],
+            },
+            warnings: ['probe: canned'],
+          }
+        },
+      },
+    })
+    const call = (path: string, method = 'GET') =>
+      fetch(`${core.control.url}/atomic/v1${path}`, {
+        method,
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      })
+    const info = (await (await call('/hardware/info')).json()) as {
+      info: { cpu: { name: string; extensions: string[] }; os_type: string }
+      source: string
+      warnings: string[]
+    }
+    expect(info).toMatchObject({
+      info: { cpu: { name: 'Probe CPU', extensions: ['fpu', 'sse2'] }, os_type: 'windows' },
+      source: 'probe',
+      warnings: ['probe: canned'],
+    })
+    // The probe ran once at start-up; a refresh runs it again.
+    expect(probes).toHaveLength(1)
+    expect(((await (await call('/hardware/refresh', 'POST')).json()) as { source: string }).source).toBe(
+      'probe'
+    )
+    expect(probes).toHaveLength(2)
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'lets the advisor verify a GPU tier with the installed pack’s own --list-devices',
+    async () => {
+      const manifest = {
+        tag_name: 'b7000',
+        assets: ['win-cpu-x64', 'win-cuda-13.3-x64', 'win-vulkan-x64'].map((id) => ({
+          name: `llama-b7000-bin-${id}.zip`,
+        })),
+      }
+      const fakeFetch: typeof fetch = async (input) =>
+        String(input instanceof Request ? input.url : input).endsWith('/backends/manifest.json')
+          ? new Response(JSON.stringify(manifest), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            })
+          : new Response('not here', { status: 404 })
+      const core = await createCore({
+        fetch: fakeFetch,
+        hardware: {
+          probe: async () => ({
+            info: {
+              cpu: {
+                name: 'Probe CPU',
+                core_count: 16,
+                arch: 'x86_64',
+                extensions: ['avx2'],
+                extensions_known: true,
+              },
+              os_type: 'windows',
+              os_name: 'Probe OS',
+              total_memory: 65_536,
+              gpus: [
+                {
+                  name: 'NVIDIA GeForce RTX 4090',
+                  vendor: 'NVIDIA',
+                  total_memory: 24_564,
+                  uuid: 'gpu-0',
+                  driver_version: '581.42',
+                  nvidia_info: { index: 0, compute_capability: '8.9' },
+                  vulkan_info: {
+                    index: 0,
+                    device_type: 'DiscreteGpu',
+                    api_version: '1.3.290',
+                    device_id: 0x2684,
+                  },
+                },
+              ],
+            },
+            warnings: [],
+          }),
+        },
+      })
+      // The installed CUDA pack answers `--list-devices` the way llama-server does.
+      await data.writeBackend(
+        'llamacpp-upstream',
+        'b7000',
+        'win-cuda-13.3-x64',
+        '#!/bin/sh\necho "Available devices:"\necho "  CUDA0: NVIDIA GeForce RTX 4090 (24564 MiB, 24000 MiB free)"\n'
+      )
+      const better = new Promise((resolve) => core.events.once('backend:better-detected', resolve))
+      const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+
+      const verdict = await client.recommendBackend('llamacpp-upstream', {
+        mode: 'recheck',
+        current_backend: 'b7000/win-cpu-x64',
+      })
+
+      expect(verdict.outcome).toBe('recommend')
+      expect(verdict.detection).toEqual({ kind: 'gpu', backend: 'win-cuda-13.3-x64' })
+      expect(verdict.recommendation?.recommendedBackend).toBe('b7000/win-cuda-13.3-x64')
+      expect(verdict.revision).toBe(1)
+      await expect(better).resolves.toMatchObject({
+        provider: 'llamacpp-upstream',
+        backendId: 'win-cuda-13.3-x64',
+      })
+      expect((await client.backendCatalog('llamacpp-upstream')).recommended_installed).toBe(
+        'b7000/win-cuda-13.3-x64'
+      )
+    }
+  )
+
+  it.skipIf(process.arch !== 'x64' || process.platform === 'win32')(
+    'blocks a CPU backend load on a probed CPU without AVX, and lets an override lift the block',
+    async () => {
+      const { installFakeBackend } = await import('../../test/helpers/fake-backend-pack.js')
+      const { putHardwareOverride } = await import('../../test/helpers/core-harness.js')
+      const core = await createCore({
+        hardware: {
+          probe: async () => ({
+            info: {
+              cpu: {
+                name: 'Intel Core2 Quad Q9550',
+                core_count: 4,
+                arch: 'x86_64',
+                extensions: ['fpu', 'sse2', 'sse4_1'],
+                extensions_known: true,
+              },
+              os_type: 'windows',
+              os_name: 'Probe OS',
+              total_memory: 8192,
+              gpus: [],
+            },
+            warnings: [],
+          }),
+        },
+      })
+      await data.writeModel('cpu-model')
+      await installFakeBackend(data.layout, { version: 'b7000', backend: 'win-cpu-x64' })
+      await core.settings.update('llamacpp-upstream', { version_backend: 'b7000/win-cpu-x64' })
+
+      await expect(core.load('llamacpp-upstream', 'cpu-model')).rejects.toMatchObject({ code: 'CPU_NO_AVX' })
+
+      await putHardwareOverride(core, { gpus: [], cpu_extensions: ['avx2'], os_type: 'windows' })
+      await expect(core.load('llamacpp-upstream', 'cpu-model')).resolves.toMatchObject({
+        model_id: 'cpu-model',
+      })
+    }
+  )
+})

@@ -6,7 +6,8 @@ import type { RuntimeSettings } from '../../runtime/llamacpp/index.js'
 import { isConcreteVersionBackend } from '../../runtime/llamacpp/index.js'
 import { canonicalProviderDefaults } from '../../settings/index.js'
 import type { SettingsStore } from '../../settings/index.js'
-import type { HardwareOverrideStore } from '../../hardware/index.js'
+import { rustArch } from '../../hardware/index.js'
+import type { HardwareFactsSource } from '../../hardware/index.js'
 import { discoverBackendBinary, resolveBackendExe, scanInstalledBackends } from '../installed/index.js'
 import {
   determineBestBackend,
@@ -28,7 +29,7 @@ export async function readRuntimeSettings(
   settings: SettingsStore,
   provider: LocalProviderId,
   layout: DataLayout,
-  hardware: HardwareOverrideStore
+  hardware: HardwareFactsSource
 ): Promise<RuntimeSettings> {
   const values = { ...canonicalProviderDefaults(provider), ...settings.get(provider) }
   const configured = String(values['version_backend'] ?? '').trim()
@@ -58,7 +59,7 @@ export async function ensureBackend(
   provider: LocalProviderId,
   backend: string,
   version: string,
-  hardware: HardwareOverrideStore,
+  hardware: HardwareFactsSource,
   hostArch = process.arch,
   repair?: (backend: string, version: string) => Promise<void>
 ): Promise<{ version: string; backend: string; exePath: string }> {
@@ -79,31 +80,33 @@ export async function ensureBackend(
   )
 }
 
-/** Choose among installed packs using the app-injected hardware facts, never directory order. */
+/** Choose among installed packs using the hardware facts (probe or override), never directory order. */
 export async function selectInstalledBackend(
   layout: DataLayout,
   provider: LocalProviderId,
-  hardware: HardwareOverrideStore,
+  hardware: HardwareFactsSource,
   hostArch = process.arch,
   probeRocm: () => Promise<RocmHostProbe> = probeLinuxRocmHost
 ) {
   const installed = await scanInstalledBackends(layout, provider)
   if (installed.length === 0) return discoverBackendBinary(layout, provider)
-  const override = hardware.get()
-  const osType = override?.os_type ?? platformOsType(process.platform)
+  const facts = await hardware.facts()
+  const osType = facts.osType
   const arch = platformArch(hostArch)
-  const gpus = hardware.gpus([])
+  const gpus = facts.gpus
+  // Unknown flags read as none here: the feature gates only add tiers for flags that are present.
+  const cpuExtensions = facts.cpuExtensions ?? []
   let selected: string
   if (provider === 'llamacpp') {
     // The fork's own matrix, ids and priorities: the upstream ones filter every TurboQuant pack out.
     const rocm = osType === 'linux' ? await probeRocm() : undefined
-    const features = getTurboquantSupportedFeatures(osType, hardware.cpuExtensions([]), gpus, rocm)
+    const features = getTurboquantSupportedFeatures(osType, cpuExtensions, gpus, rocm)
     const supported = determineTurboquantSupportedBackends(osType, arch, features)
     const compatible = filterTurboquantBackendsBySupport(installed, supported)
     if (compatible.length === 0) return undefined
     selected = determineBestTurboquantBackend(compatible, gpus)
   } else {
-    const features = getSupportedFeatures(osType, hardware.cpuExtensions([]), gpus)
+    const features = getSupportedFeatures(osType, cpuExtensions, gpus)
     const supported = determineSupportedBackends(osType, arch, features)
     const compatible = filterBackendsBySupport(installed, supported, osType)
     if (compatible.length === 0) return undefined
@@ -115,15 +118,7 @@ export async function selectInstalledBackend(
   return path ? { path, version_backend: selected, version, backend } : undefined
 }
 
-function platformOsType(platform: NodeJS.Platform): string {
-  if (platform === 'win32') return 'windows'
-  if (platform === 'darwin') return 'macos'
-  return platform
-}
-
-/** Node's `process.arch` in the Rust spelling the backend and CPU policies expect (`x64` → `x86_64`). */
+/** Node's `process.arch` in the Rust spelling the backend and CPU policies expect; the rule is `hardware/facts.ts`'s `rustArch`. */
 export function platformArch(arch: string): string {
-  if (arch === 'x64') return 'x86_64'
-  if (arch === 'ia32') return 'x86'
-  return arch
+  return rustArch(arch)
 }

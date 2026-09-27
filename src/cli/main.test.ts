@@ -112,6 +112,17 @@ describe('dispatch', () => {
     expect((JSON.parse(io.out.join('')) as Array<{ id: string }>).map((m) => m.id)).toEqual(['demo'])
   })
 
+  it('routes `hardware` and `backends` and lets them report their own usage errors', async () => {
+    const hardware = recordingIo()
+    expect(await runCli(['hardware', 'usage', '--data-folder', data.root], hardware)).toBe(2)
+    expect(hardware.err.join('')).toContain('Unknown hardware subcommand')
+    const backends = recordingIo()
+    expect(
+      await runCli(['backends', 'list', '--provider', 'mlx', '--data-folder', data.root], backends)
+    ).toBe(2)
+    expect(backends.err.join('')).toContain('llamacpp-upstream or llamacpp')
+  })
+
   it('routes `server status` and returns its exit code', async () => {
     const io = recordingIo()
     expect(await runCli(['server', 'status', '--data-folder', data.root, '--port', '1'], io)).toBe(1)
