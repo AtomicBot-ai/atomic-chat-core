@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": "b10018-1.3.0/linux-avx2-x64",
+  "input": {
+    "backend_type": "linux-x64-vulkan",
+    "kind": "latest",
+    "version_backends": [
+      {
+        "backend": "linux-avx2-x64",
+        "order": 0,
+        "version": "b10018-1.3.0"
+      },
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 0,
+        "version": "b10018-1.2.0"
+      }
+    ]
+  },
+  "name": "latest_keeps_legacy_spelling_when_it_wins",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

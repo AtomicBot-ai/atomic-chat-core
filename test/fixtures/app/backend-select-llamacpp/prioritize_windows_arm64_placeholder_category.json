@@ -1,0 +1,25 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b10018-1.3.0/windows-arm64",
+    "backend_type": "windows-arm64",
+    "version": "b10018-1.3.0"
+  },
+  "input": {
+    "has_enough_gpu_memory": true,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "windows-arm64",
+        "order": 0,
+        "version": "b10018-1.3.0"
+      }
+    ]
+  },
+  "name": "prioritize_windows_arm64_placeholder_category",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

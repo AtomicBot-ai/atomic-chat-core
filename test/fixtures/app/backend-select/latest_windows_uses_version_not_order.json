@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": "b7525/win-cuda-12.4-x64",
+  "input": {
+    "backend_type": "win-cuda-12.4-x64",
+    "kind": "latest",
+    "version_backends": [
+      {
+        "backend": "win-cuda-12.4-x64",
+        "order": 1800000000,
+        "version": "b7524"
+      },
+      {
+        "backend": "win-cuda-12.4-x64",
+        "order": 0,
+        "version": "b7525"
+      }
+    ]
+  },
+  "name": "latest_windows_uses_version_not_order",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

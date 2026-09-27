@@ -1,0 +1,25 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b10205/macos-arm64",
+    "backend_type": "macos-arm64",
+    "version": "b10205"
+  },
+  "input": {
+    "has_enough_gpu_memory": false,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "macos-arm64",
+        "order": 0,
+        "version": "b10205"
+      }
+    ]
+  },
+  "name": "prioritize_macos_arm64_category",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

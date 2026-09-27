@@ -1,0 +1,30 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b10344/win-cuda-12.4-x64",
+    "backend_type": "win-cuda-12.4-x64",
+    "version": "b10344"
+  },
+  "input": {
+    "has_enough_gpu_memory": true,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "win-cuda-12.4-x64",
+        "order": 0,
+        "version": "b9999"
+      },
+      {
+        "backend": "win-cuda-12.4-x64",
+        "order": 0,
+        "version": "b10344"
+      }
+    ]
+  },
+  "name": "prioritize_newest_within_category_numeric_tags",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

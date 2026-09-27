@@ -1,0 +1,23 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "error": "Invalid current backend format: b10205"
+  },
+  "input": {
+    "current": "b10205",
+    "kind": "update_check",
+    "version_backends": [
+      {
+        "backend": "macos-arm64",
+        "order": 0,
+        "version": "b10205"
+      }
+    ]
+  },
+  "name": "update_check_invalid_format_no_slash",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b10018-1.3.0/linux-x64-vulkan",
+    "backend_type": "linux-x64-vulkan",
+    "version": "b10018-1.3.0"
+  },
+  "input": {
+    "has_enough_gpu_memory": true,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 9,
+        "version": "b10018-1.2.9"
+      },
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 1,
+        "version": "b10018-1.3.0"
+      },
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 8,
+        "version": "b9900-1.4.0"
+      }
+    ]
+  },
+  "name": "prioritize_newest_unified_tag_within_category",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

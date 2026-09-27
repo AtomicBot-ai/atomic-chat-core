@@ -1,0 +1,30 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b7523/win-avx2-x64",
+    "backend_type": "win-avx2-x64",
+    "version": "b7523"
+  },
+  "input": {
+    "has_enough_gpu_memory": true,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "win-noavx-x64",
+        "order": 0,
+        "version": "b7523"
+      },
+      {
+        "backend": "win-avx2-x64",
+        "order": 0,
+        "version": "b7523"
+      }
+    ]
+  },
+  "name": "prioritize_legacy_avx2_outranks_noavx_read_as_avx",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

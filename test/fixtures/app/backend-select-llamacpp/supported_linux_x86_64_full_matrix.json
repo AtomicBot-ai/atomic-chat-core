@@ -1,0 +1,28 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    "linux-x64-cpu",
+    "linux-x64-cuda-12.4",
+    "linux-x64-cuda-13.3",
+    "linux-x64-rocm",
+    "linux-x64-vulkan"
+  ],
+  "input": {
+    "arch": "x86_64",
+    "features": {
+      "cuda11": true,
+      "cuda12": true,
+      "cuda13": true,
+      "rocm": true,
+      "vulkan": true
+    },
+    "kind": "supported",
+    "os_type": "linux"
+  },
+  "name": "supported_linux_x86_64_full_matrix",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

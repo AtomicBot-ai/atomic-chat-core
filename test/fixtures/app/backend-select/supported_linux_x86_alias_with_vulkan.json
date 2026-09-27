@@ -1,0 +1,25 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    "linux-cpu-x64",
+    "linux-vulkan-x64"
+  ],
+  "input": {
+    "arch": "x86",
+    "features": {
+      "cuda11": false,
+      "cuda12": false,
+      "cuda13": false,
+      "rocm": false,
+      "vulkan": true
+    },
+    "kind": "supported",
+    "os_type": "linux"
+  },
+  "name": "supported_linux_x86_alias_with_vulkan",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

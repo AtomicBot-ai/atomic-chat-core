@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    "win-cpu-x64",
+    "win-rocm-x64",
+    "win-vulkan-x64"
+  ],
+  "input": {
+    "arch": "x86_64",
+    "features": {
+      "cuda11": false,
+      "cuda12": false,
+      "cuda13": false,
+      "rocm": true,
+      "vulkan": true
+    },
+    "kind": "supported",
+    "os_type": "windows"
+  },
+  "name": "supported_windows_x86_64_rocm_family_id_keeps_vulkan",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

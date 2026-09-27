@@ -1,0 +1,38 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    {
+      "backend": "macos-arm64",
+      "order": 0,
+      "version": "b10205"
+    },
+    {
+      "backend": "macos-arm64",
+      "order": 9,
+      "version": "custom-build"
+    }
+  ],
+  "input": {
+    "kind": "merge",
+    "local": [
+      {
+        "backend": "macos-arm64",
+        "order": 9,
+        "version": "custom-build"
+      }
+    ],
+    "remote": [
+      {
+        "backend": "macos-arm64",
+        "order": 0,
+        "version": "b10205"
+      }
+    ]
+  },
+  "name": "merge_tagged_build_before_untagged",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

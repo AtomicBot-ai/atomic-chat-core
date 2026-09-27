@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": "b7524/linux-cpu-x64",
+  "input": {
+    "backend_type": "linux-cpu-x64",
+    "kind": "latest",
+    "version_backends": [
+      {
+        "backend": "linux-avx2-x64",
+        "order": 1,
+        "version": "b7523"
+      },
+      {
+        "backend": "linux-cpu-x64",
+        "order": 2,
+        "version": "b7524"
+      }
+    ]
+  },
+  "name": "latest_legacy_id_matches_after_migration",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend": "linux-cpu-arm64",
+    "backend_type_updated": true,
+    "effective_backend_type": "linux-cpu-arm64",
+    "needs_backend_installation": true,
+    "version": "b10018-1.3.0"
+  },
+  "input": {
+    "key": "version_backend",
+    "kind": "setting_update",
+    "stored_type": null,
+    "value": "b10018-1.3.0/linux-cpu-arm64"
+  },
+  "name": "setting_update_maps_linux_cpu_arm64",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

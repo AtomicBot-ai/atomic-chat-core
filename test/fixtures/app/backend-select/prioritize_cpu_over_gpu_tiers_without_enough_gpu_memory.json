@@ -1,0 +1,35 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b10405/win-cpu-x64",
+    "backend_type": "win-cpu-x64",
+    "version": "b10405"
+  },
+  "input": {
+    "has_enough_gpu_memory": false,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "win-vulkan-x64",
+        "order": 1,
+        "version": "b10405"
+      },
+      {
+        "backend": "win-rocm-7.14-x64",
+        "order": 1,
+        "version": "b10405"
+      },
+      {
+        "backend": "win-cpu-x64",
+        "order": 1,
+        "version": "b10405"
+      }
+    ]
+  },
+  "name": "prioritize_cpu_over_gpu_tiers_without_enough_gpu_memory",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

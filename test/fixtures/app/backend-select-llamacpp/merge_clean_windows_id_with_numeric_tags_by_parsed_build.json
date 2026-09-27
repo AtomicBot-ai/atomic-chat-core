@@ -1,0 +1,37 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    {
+      "backend": "windows-x64-cuda-12.4",
+      "order": 0,
+      "version": "b7525"
+    },
+    {
+      "backend": "windows-x64-cuda-12.4",
+      "order": 9,
+      "version": "b7524"
+    }
+  ],
+  "input": {
+    "kind": "merge",
+    "local": [
+      {
+        "backend": "windows-x64-cuda-12.4",
+        "order": 9,
+        "version": "b7524"
+      },
+      {
+        "backend": "windows-x64-cuda-12.4",
+        "order": 0,
+        "version": "b7525"
+      }
+    ],
+    "remote": []
+  },
+  "name": "merge_clean_windows_id_with_numeric_tags_by_parsed_build",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

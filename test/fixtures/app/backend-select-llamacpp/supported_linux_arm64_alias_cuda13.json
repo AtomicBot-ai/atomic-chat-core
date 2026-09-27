@@ -1,0 +1,24 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    "linux-arm64-cuda-13.3"
+  ],
+  "input": {
+    "arch": "arm64",
+    "features": {
+      "cuda11": true,
+      "cuda12": true,
+      "cuda13": true,
+      "rocm": true,
+      "vulkan": true
+    },
+    "kind": "supported",
+    "os_type": "linux"
+  },
+  "name": "supported_linux_arm64_alias_cuda13",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    {
+      "backend": "backend-c",
+      "order": 2,
+      "version": "b7524"
+    },
+    {
+      "backend": "backend-a",
+      "order": 1,
+      "version": "b7523"
+    },
+    {
+      "backend": "backend-b",
+      "order": 1,
+      "version": "b7523"
+    }
+  ],
+  "input": {
+    "kind": "merge",
+    "local": [
+      {
+        "backend": "backend-a",
+        "order": 0,
+        "version": "b7523"
+      },
+      {
+        "backend": "backend-c",
+        "order": 2,
+        "version": "b7524"
+      }
+    ],
+    "remote": [
+      {
+        "backend": "backend-a",
+        "order": 1,
+        "version": "b7523"
+      },
+      {
+        "backend": "backend-b",
+        "order": 1,
+        "version": "b7523"
+      }
+    ]
+  },
+  "name": "merge_sorting_and_dedup",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

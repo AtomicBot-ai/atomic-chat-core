@@ -1,0 +1,25 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "avx": false,
+    "avx2": false,
+    "avx512": false,
+    "cuda11": false,
+    "cuda12": false,
+    "cuda13": false,
+    "rocm": false,
+    "vulkan": false
+  },
+  "input": {
+    "cpu_extensions": [],
+    "gpus": [],
+    "kind": "features",
+    "os_type": "macos"
+  },
+  "name": "features_profile_macos_arm64_apple_silicon",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

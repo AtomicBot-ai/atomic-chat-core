@@ -1,0 +1,30 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b10205/win-vulkan-x64",
+    "backend_type": "win-vulkan-x64",
+    "version": "b10205"
+  },
+  "input": {
+    "has_enough_gpu_memory": true,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "win-cuda-13-x64",
+        "order": 0,
+        "version": "b10205"
+      },
+      {
+        "backend": "win-vulkan-x64",
+        "order": 0,
+        "version": "b10205"
+      }
+    ]
+  },
+  "name": "prioritize_cuda13_family_id_categorises_as_x64",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

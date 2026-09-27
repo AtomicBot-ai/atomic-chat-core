@@ -1,0 +1,41 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "avx": false,
+    "avx2": false,
+    "avx512": false,
+    "cuda11": false,
+    "cuda12": false,
+    "cuda13": false,
+    "rocm": true,
+    "vulkan": true
+  },
+  "input": {
+    "cpu_extensions": [],
+    "gpus": [
+      {
+        "driver_version": "0.0",
+        "nvidia_info": null,
+        "vendor": "AMD",
+        "vulkan_info": {
+          "api_version": "1.3"
+        }
+      }
+    ],
+    "kind": "features",
+    "os_type": "linux",
+    "rocm_probe": {
+      "gfx_target_versions": [
+        90000,
+        110000
+      ],
+      "has_runtime": true
+    }
+  },
+  "name": "features_linux_amd_any_supported_node_enables_rocm",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}
