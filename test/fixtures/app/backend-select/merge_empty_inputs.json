@@ -1,0 +1,15 @@
+{
+  "comparator": "json-exact",
+  "expected": [],
+  "input": {
+    "kind": "merge",
+    "local": [],
+    "remote": []
+  },
+  "name": "merge_empty_inputs",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

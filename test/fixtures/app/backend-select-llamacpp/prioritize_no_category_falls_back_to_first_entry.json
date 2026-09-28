@@ -1,0 +1,30 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b7523/backend-a",
+    "backend_type": "backend-a",
+    "version": "b7523"
+  },
+  "input": {
+    "has_enough_gpu_memory": true,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "backend-a",
+        "order": 0,
+        "version": "b7523"
+      },
+      {
+        "backend": "backend-b",
+        "order": 0,
+        "version": "b7524"
+      }
+    ]
+  },
+  "name": "prioritize_no_category_falls_back_to_first_entry",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

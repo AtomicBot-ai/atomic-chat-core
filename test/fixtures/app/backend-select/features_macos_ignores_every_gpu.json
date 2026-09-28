@@ -1,0 +1,45 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "avx": true,
+    "avx2": false,
+    "avx512": false,
+    "cuda11": false,
+    "cuda12": false,
+    "cuda13": false,
+    "rocm": false,
+    "vulkan": false
+  },
+  "input": {
+    "cpu_extensions": [
+      "avx"
+    ],
+    "gpus": [
+      {
+        "driver_version": "581.42",
+        "nvidia_info": {
+          "compute_capability": "8.9"
+        },
+        "vendor": "NVIDIA",
+        "vulkan_info": null
+      },
+      {
+        "driver_version": "0.0",
+        "nvidia_info": null,
+        "vendor": "AMD",
+        "vulkan_info": {
+          "api_version": "1.3",
+          "device_id": 29772
+        }
+      }
+    ],
+    "kind": "features",
+    "os_type": "macos"
+  },
+  "name": "features_macos_ignores_every_gpu",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

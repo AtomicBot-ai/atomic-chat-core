@@ -10,6 +10,8 @@ import {
   refreshOptimalBackendCache,
   resolveConcreteOptimalBackend,
 } from './optimal-cache.js'
+import type { OptimalRecordPolicy } from './optimal-cache.js'
+import { getTurboquantBackendCategory } from '../turboquant.js'
 import type { BackendVersion, OptimalBackendCacheRecord } from '../types.js'
 
 const NOW = 1_700_000_000_000
@@ -276,5 +278,130 @@ describe('recheckOptimalBackend', () => {
         )
       ).outcome
     ).toBe('already_optimal')
+  })
+})
+
+describe('OptimalRecordPolicy (TurboQuant records)', () => {
+  const turboquant: OptimalRecordPolicy = {
+    provider: 'llamacpp',
+    getCategory: getTurboquantBackendCategory,
+    alreadyOptimalRule: 'category',
+  }
+  const tqGpu: OptimalBackendCacheRecord = {
+    schemaVersion: 1,
+    provider: 'llamacpp',
+    detectedAt: NOW,
+    detectionKind: 'gpu',
+    currentBackend: 'b10018-1.3.0/windows-x64-cpu',
+    idealBackendId: 'windows-x64-cuda-13.3',
+    recommendedBackend: 'b10269-1.4.0/windows-x64-cuda-13.3',
+    recommendedCategory: 'CUDA 13',
+  }
+
+  it('builds records the fork provider persists and its validator accepts', () => {
+    const gpu = buildOptimalBackendCacheRecord(
+      { kind: 'gpu', backend: 'windows-x64-cuda-13.3' },
+      'b10018-1.3.0/windows-x64-cpu',
+      'b10269-1.4.0/windows-x64-cuda-13.3',
+      NOW,
+      turboquant
+    )
+    expect(gpu).toEqual(tqGpu)
+    expect(parseOptimalBackendCache(JSON.stringify(gpu), 'llamacpp')).toEqual(tqGpu)
+    // The fork's category table labels its `-cpu` builds `common_cpus`, upstream's would say `x64`.
+    expect(
+      buildOptimalBackendCacheRecord({ kind: 'gpu', backend: 'linux-x64-rocm' }, 'x', null, NOW, turboquant)
+        .recommendedCategory
+    ).toBe('rocm')
+    const cpu = buildOptimalBackendCacheRecord(
+      { kind: 'cpu-optimal' },
+      'b10018-1.3.0/macos-arm64',
+      null,
+      NOW,
+      {
+        provider: 'llamacpp',
+      }
+    )
+    expect(cpu.provider).toBe('llamacpp')
+    expect(parseOptimalBackendCache(JSON.stringify(cpu), 'llamacpp')).toEqual(cpu)
+    expect(parseOptimalBackendCache(JSON.stringify(cpu))).toBeNull()
+  })
+
+  it('refreshes with the provider and category table of the policy', async () => {
+    const r = await refreshOptimalBackendCache(
+      { kind: 'gpu', backend: 'windows-x64-cuda-13.3' },
+      'b10018-1.3.0/windows-x64-cpu',
+      async () => 'b10269-1.4.0/windows-x64-cuda-13.3',
+      NOW,
+      turboquant
+    )
+    expect(r).toEqual({ outcome: 'cached', record: tqGpu })
+  })
+
+  it('is already_optimal on the same category alone, naming the current build only when the type matches', async () => {
+    const resolver = vi.fn(async () => 'b10269-1.4.0/linux-x64-cuda-13.3')
+    // CUDA 12.4 → CUDA 13.3 are different fork categories, so this is a recommendation.
+    const upgrade = await recheckOptimalBackend(
+      { kind: 'gpu', backend: 'linux-x64-cuda-13.3' },
+      'b10018-1.3.0/linux-x64-cuda-12.4',
+      resolver,
+      NOW,
+      turboquant
+    )
+    expect(upgrade.outcome).toBe('recommend')
+    expect(upgrade.outcome === 'recommend' && upgrade.payload.provider).toBe('llamacpp')
+    expect(upgrade.outcome === 'recommend' && upgrade.payload.recommendedCategory).toBe('CUDA 13')
+
+    // Same category, same type: the record points at the current build.
+    resolver.mockClear()
+    const same = await recheckOptimalBackend(
+      { kind: 'gpu', backend: 'linux-x64-cuda-13.3' },
+      'b10018-1.3.0/linux-x64-cuda-13.3',
+      resolver,
+      NOW,
+      turboquant
+    )
+    expect(same).toEqual({
+      outcome: 'already_optimal',
+      record: {
+        ...tqGpu,
+        currentBackend: 'b10018-1.3.0/linux-x64-cuda-13.3',
+        idealBackendId: 'linux-x64-cuda-13.3',
+        recommendedBackend: 'b10018-1.3.0/linux-x64-cuda-13.3',
+      },
+    })
+    expect(resolver).not.toHaveBeenCalled()
+
+    // Same category, another type (a legacy `win-cuda-13-x64` install): already optimal, but the
+    // record carries no `recommendedBackend` — the current build is not a `<tag>/<ideal id>`.
+    const legacy = await recheckOptimalBackend(
+      { kind: 'gpu', backend: 'windows-x64-cuda-13.3' },
+      'b9999/win-cuda-13-x64',
+      resolver,
+      NOW,
+      turboquant
+    )
+    expect(legacy.outcome).toBe('already_optimal')
+    expect(legacy.outcome === 'already_optimal' && 'recommendedBackend' in legacy.record).toBe(false)
+    expect(resolver).not.toHaveBeenCalled()
+    expect(
+      parseOptimalBackendCache(
+        JSON.stringify(legacy.outcome === 'already_optimal' && legacy.record),
+        'llamacpp'
+      )
+    ).not.toBeNull()
+  })
+
+  it('keeps the upstream rule strict: same category but another type still resolves', async () => {
+    const resolver = vi.fn(async () => 'b10809/win-cuda-13.3-x64')
+    const r = await recheckOptimalBackend(
+      { kind: 'gpu', backend: 'win-cuda-13.3-x64' },
+      'b9900/win-cuda-13.1-x64',
+      resolver,
+      NOW,
+      { alreadyOptimalRule: 'type-and-category' }
+    )
+    expect(r.outcome).toBe('recommend')
+    expect(resolver).toHaveBeenCalledTimes(1)
   })
 })

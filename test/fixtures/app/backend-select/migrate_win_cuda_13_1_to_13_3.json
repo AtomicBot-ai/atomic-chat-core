@@ -1,0 +1,21 @@
+{
+  "comparator": "json-exact",
+  "expected": "win-cuda-13.3-x64",
+  "input": {
+    "kind": "migrate",
+    "stored_type": "win-cuda-13.1-x64",
+    "version_backends": [
+      {
+        "backend": "win-cuda-13.3-x64",
+        "order": 0,
+        "version": "b10205"
+      }
+    ]
+  },
+  "name": "migrate_win_cuda_13_1_to_13_3",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    {
+      "backend": "macos-arm64",
+      "order": 2,
+      "version": "turboquant-macos-arm64-18a8ef1"
+    },
+    {
+      "backend": "macos-arm64",
+      "order": 1,
+      "version": "turboquant-macos-arm64-e3dad20"
+    }
+  ],
+  "input": {
+    "kind": "merge",
+    "local": [],
+    "remote": [
+      {
+        "backend": "macos-arm64",
+        "order": 1,
+        "version": "turboquant-macos-arm64-e3dad20"
+      },
+      {
+        "backend": "macos-arm64",
+        "order": 2,
+        "version": "turboquant-macos-arm64-18a8ef1"
+      }
+    ]
+  },
+  "name": "merge_legacy_tags_by_order",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

@@ -4,7 +4,10 @@
  * created through `createCore()` (or pushed onto `cores`) is shut down afterwards.
  */
 import { afterEach, beforeEach, expect } from 'vitest'
+import type { SystemInfo } from '../../src/contracts/index.js'
 import { AtomicCore } from '../../src/core/index.js'
+import type { AtomicCoreOptions } from '../../src/core/index.js'
+import { osTypeOf, rustArch } from '../../src/hardware/index.js'
 import { makeTmpDataFolder } from './tmp-data-folder.js'
 import type { TmpDataFolder } from './tmp-data-folder.js'
 
@@ -21,8 +24,31 @@ export function useCoreHarness(): void {
   })
 }
 
-export async function createCore(): Promise<AtomicCore> {
-  const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0 })
+/**
+ * What the harness core "measures": this host's OS and arch, flags unknown, no GPUs — so a facade test
+ * never spawns `nvidia-smi` or PowerShell, and the CPU preflight stays silent unless a test injects flags.
+ */
+export const HARNESS_PROBE_INFO: SystemInfo = {
+  cpu: {
+    name: 'Harness CPU',
+    core_count: 4,
+    arch: rustArch(process.arch),
+    extensions: [],
+    extensions_known: false,
+  },
+  os_type: osTypeOf(process.platform),
+  os_name: 'Harness OS',
+  total_memory: 16_384,
+  gpus: [],
+}
+
+export async function createCore(over: Partial<AtomicCoreOptions> = {}): Promise<AtomicCore> {
+  const core = await AtomicCore.create({
+    dataFolder: data.root,
+    controlPort: 0,
+    hardware: { probe: async () => ({ info: structuredClone(HARNESS_PROBE_INFO), warnings: [] }) },
+    ...over,
+  })
   cores.push(core)
   return core
 }

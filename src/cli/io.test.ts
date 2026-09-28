@@ -3,7 +3,15 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { browserCommand, nodeCliIo, openInBrowser, recordingIo, selectOption, spawnDetached } from './io.js'
+import {
+  browserCommand,
+  detachableWriter,
+  nodeCliIo,
+  openInBrowser,
+  recordingIo,
+  selectOption,
+  spawnDetached,
+} from './io.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -96,5 +104,49 @@ describe('opening a browser', () => {
     expect(spawned).toEqual([['xdg-open', ['https://x']]])
     expect(nodeCliIo().openUrl).toBe(openInBrowser)
     await expect(recordingIo().openUrl('https://x')).resolves.toBeUndefined()
+  })
+})
+
+describe('detachableWriter', () => {
+  const stream = (write: (text: string) => unknown) => {
+    const listeners: Array<(error: unknown) => void> = []
+    return {
+      stream: {
+        write,
+        on: (_event: 'error', listener: (error: unknown) => void) => listeners.push(listener),
+      },
+      fail: (error: unknown) => listeners.forEach((listener) => listener(error)),
+    }
+  }
+
+  it('writes through while the reader is there', () => {
+    const written: string[] = []
+    const { stream: out } = stream((text) => written.push(text))
+    const write = detachableWriter(out)
+    write('one\n')
+    write('two\n')
+    expect(written).toEqual(['one\n', 'two\n'])
+  })
+
+  it('goes quiet instead of throwing once a write fails synchronously', () => {
+    let attempts = 0
+    const { stream: out } = stream(() => {
+      attempts++
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
+    })
+    const write = detachableWriter(out)
+    expect(() => write('lost\n')).not.toThrow()
+    write('also lost\n')
+    expect(attempts).toBe(1)
+  })
+
+  it('goes quiet when the stream reports the failure as an error event', () => {
+    const written: string[] = []
+    const { stream: out, fail } = stream((text) => written.push(text))
+    const write = detachableWriter(out)
+    write('before\n')
+    fail(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    write('after\n')
+    expect(written).toEqual(['before\n'])
   })
 })

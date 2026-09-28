@@ -5,13 +5,17 @@
  */
 
 import type {
+  BackendCatalogResponse,
+  BackendRecommendationRequest,
+  BackendUpdateCheckRequest,
   LocalApiServerState,
   RemoteAccessStatus,
   SessionInfo,
+  SystemInfo,
   UnloadResult,
 } from '../../src/contracts/index.js'
 import { CoreEmitter } from '../../src/events/index.js'
-import { HardwareOverrideStore } from '../../src/hardware/index.js'
+import { HardwareService } from '../../src/hardware/index.js'
 import type { CtxIncreaseResult } from '../../src/runtime/llamacpp/runtime.js'
 import { ClientRegistry } from '../../src/server/clients.js'
 import { ControlServer } from '../../src/server/control/index.js'
@@ -28,6 +32,31 @@ import type { FakeSettingsControl } from './fake-settings-control.js'
 
 export const CONTROL_TOKEN = 'test-control-token'
 
+/** What the harness's hardware probe "measures": a Windows box with one RTX 4090, flags known. */
+export const HARNESS_SYSTEM_INFO: SystemInfo = {
+  cpu: {
+    name: 'Harness CPU',
+    core_count: 8,
+    arch: 'x86_64',
+    extensions: ['fpu', 'avx', 'avx2'],
+    extensions_known: true,
+  },
+  os_type: 'windows',
+  os_name: 'Harness Windows',
+  total_memory: 32_768,
+  gpus: [
+    {
+      name: 'NVIDIA GeForce RTX 4090',
+      total_memory: 24_564,
+      vendor: 'NVIDIA',
+      uuid: 'harness-gpu',
+      driver_version: '581.42',
+      nvidia_info: { index: 0, compute_capability: '8.9' },
+      vulkan_info: { index: 0, device_type: 'DiscreteGpu', api_version: '', device_id: 0x2684 },
+    },
+  ],
+}
+
 export interface ControlHarness {
   server: ControlServer
   emitter: CoreEmitter
@@ -41,7 +70,7 @@ export interface ControlHarness {
   unloadResult: () => Promise<UnloadResult>
   shutdowns: Array<{ force: boolean; requestedBy?: string | undefined }>
   settings: FakeSettingsControl
-  hardware: HardwareOverrideStore
+  hardware: HardwareService
   backends: BackendControl
   models: ModelControl
   ctxIncrease: CtxIncreaseResult
@@ -93,7 +122,14 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     cancelLoadResult: true,
     unloadResult: async () => ({ success: true }),
     settings: fakeSettingsControl({ 'llamacpp-upstream': { ctx_size: 4096 } }),
-    hardware: new HardwareOverrideStore(),
+    hardware: new HardwareService({
+      probe: async () => ({
+        info: structuredClone(HARNESS_SYSTEM_INFO),
+        warnings: ['harness: canned probe'],
+      }),
+      arch: 'x64',
+      platform: 'win32',
+    }),
     backends: {
       list: async () => [],
       install: async (_provider: string, version: string, backend: string) => ({
@@ -107,6 +143,28 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       getOptimal: async () => ({ revision: 0, optimal: null }),
       setOptimal: async () => ({ status: 'updated', current: { revision: 1, optimal: null } }),
       optimalSnapshot: () => ({}),
+      catalog: async (provider: string) => fakeCatalog(provider),
+      recommend: async (provider: string, request: BackendRecommendationRequest) => ({
+        provider: provider as 'llamacpp-upstream' | 'llamacpp',
+        mode: request.mode,
+        outcome: 'cpu_optimal' as const,
+        detection: { kind: 'cpu-optimal' as const },
+        record: null,
+        revision: 1,
+        optimal: null,
+        recommendation: null,
+        elapsed_ms: 0,
+      }),
+      checkUpdates: async (provider: string, request: BackendUpdateCheckRequest) => ({
+        provider: provider as 'llamacpp-upstream' | 'llamacpp',
+        current: request.current ?? '',
+        current_kind: 'concrete' as const,
+        update_needed: false,
+        new_version: '0',
+        target_backend: null,
+        same_family: false,
+        offer: null,
+      }),
     },
     models: {
       capabilities: async (_provider: string, modelId: string) => ({
@@ -255,4 +313,33 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       headers: { authorization: `Bearer ${CONTROL_TOKEN}`, ...(init.headers ?? {}) },
     })
   return harness
+}
+
+/** An empty but well-formed catalog answer; route tests replace `harness.backends.catalog`. */
+export function fakeCatalog(provider: string): BackendCatalogResponse {
+  return {
+    provider: provider as 'llamacpp-upstream' | 'llamacpp',
+    os_type: 'windows',
+    arch_suffix: 'x64',
+    hardware_source: 'probe',
+    features: {
+      avx: true,
+      avx2: true,
+      avx512: false,
+      cuda11: false,
+      cuda12: false,
+      cuda13: false,
+      vulkan: false,
+      rocm: false,
+    },
+    supported_backends: ['win-cpu-x64'],
+    remote: [],
+    installed: [],
+    available: [],
+    recommended: null,
+    recommended_installed: null,
+    latest_by_type: {},
+    static_variants: [],
+    source: 'none',
+  }
 }

@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-27** — [The core advises on backends for both llama.cpp providers; the app decides when to act](2026-09-27-the-core-advises-on-backends-the-app-decides.md)
+- **2026-09-27** — [The core probes hardware with shell tools and is the only source of hardware facts](2026-09-27-the-core-probes-hardware-with-shell-tools.md) — revises PLAN.md §2 decision 10.
 - **2026-09-23** — [Release arm64 binaries for Windows and Linux, proven on native arm runners](2026-09-23-release-arm64-binaries-for-windows-and-linux.md)
 - **2026-09-23** — [Serve /v1/videos as an asynchronous facade backed by the gallery](2026-09-23-serve-v1-videos-as-an-async-facade-backed-by-the-gallery.md)
 - **2026-09-23** — [Generate video through the resident diffusion session, with its own wire types and files](2026-09-23-generate-video-through-the-resident-diffusion-session.md)

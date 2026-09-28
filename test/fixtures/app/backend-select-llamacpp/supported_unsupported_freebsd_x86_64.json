@@ -1,0 +1,24 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "error": "Unsupported system type: freebsd-x86_64"
+  },
+  "input": {
+    "arch": "x86_64",
+    "features": {
+      "cuda11": true,
+      "cuda12": true,
+      "cuda13": true,
+      "rocm": true,
+      "vulkan": true
+    },
+    "kind": "supported",
+    "os_type": "freebsd"
+  },
+  "name": "supported_unsupported_freebsd_x86_64",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

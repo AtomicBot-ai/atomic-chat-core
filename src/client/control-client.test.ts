@@ -5,6 +5,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
+import type {
+  BackendCatalogRequest,
+  BackendRecommendationRequest,
+  BackendUpdateCheckRequest,
+} from '../contracts/index.js'
+import { fakeCatalog } from '../../test/helpers/control-harness.js'
 import type { LocalApiServerState, RemoteAccessStatus, SessionInfo } from '../contracts/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { ClientRegistry } from '../server/clients.js'
@@ -12,7 +18,8 @@ import { ControlServer } from '../server/control/index.js'
 import { CoreClient } from './control-client.js'
 import { fakeDiffusionControl } from '../../test/helpers/fake-diffusion-control.js'
 import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
-import { HardwareOverrideStore } from '../hardware/index.js'
+import { HardwareService } from '../hardware/index.js'
+import { HARNESS_SYSTEM_INFO } from '../../test/helpers/control-harness.js'
 import { CORE_VERSION } from '../version.js'
 
 const TOKEN = 'client-test-token'
@@ -101,6 +108,38 @@ beforeEach(async () => {
       getOptimal: async () => ({ revision: 0, optimal: null }),
       setOptimal: async () => ({ status: 'updated', current: { revision: 1, optimal: null } }),
       optimalSnapshot: () => ({}),
+      catalog: async (provider: string, request: BackendCatalogRequest) => ({
+        ...fakeCatalog(provider),
+        recommended: request.force ? 'b99999/win-cpu-x64' : null,
+      }),
+      recommend: async (provider: string, request: BackendRecommendationRequest) => ({
+        provider: provider as 'llamacpp-upstream' | 'llamacpp',
+        mode: request.mode,
+        outcome: 'recommend' as const,
+        detection: { kind: 'gpu' as const, backend: 'win-cuda-13.3-x64' },
+        record: null,
+        revision: 2,
+        optimal: null,
+        recommendation: {
+          currentBackend: request.current_backend ?? '',
+          recommendedBackend: 'b99999/win-cuda-13.3-x64',
+          recommendedCategory: 'CUDA 13',
+          provider,
+          version: 'b99999',
+          backendId: 'win-cuda-13.3-x64',
+        },
+        elapsed_ms: 1,
+      }),
+      checkUpdates: async (provider: string, request: BackendUpdateCheckRequest) => ({
+        provider: provider as 'llamacpp-upstream' | 'llamacpp',
+        current: request.current ?? '',
+        current_kind: 'concrete' as const,
+        update_needed: true,
+        new_version: 'b99999',
+        target_backend: 'b99999/win-cpu-x64',
+        same_family: true,
+        offer: 'b99999/win-cpu-x64',
+      }),
     },
     models: {
       capabilities: async (_provider: string, modelId: string) => ({
@@ -122,7 +161,12 @@ beforeEach(async () => {
         data: [],
       }),
     },
-    hardware: new HardwareOverrideStore(),
+    hardware: new HardwareService({
+      probe: async () => ({ info: structuredClone(HARNESS_SYSTEM_INFO), warnings: ['canned'] }),
+      arch: 'x64',
+      platform: 'win32',
+      now: () => 4242,
+    }),
     settings: fakeSettingsControl(),
     sessions: () => sessions,
     loadModel: async (_provider, modelId) => {
@@ -525,6 +569,69 @@ describe('image generation', () => {
       `diffusion setVideoPoster ${item?.id} 12`,
       `diffusion deleteVideoGalleryItems ${item?.id}`,
     ])
+  })
+})
+
+describe('hardware', () => {
+  it('reads the probe, refreshes it, and puts an override in front of it', async () => {
+    const info = await client.hardwareInfo()
+    expect(info).toEqual({
+      info: HARNESS_SYSTEM_INFO,
+      source: 'probe',
+      probed_at: 4242,
+      warnings: ['canned'],
+    })
+    expect((await client.refreshHardware()).source).toBe('probe')
+
+    expect(await client.hardwareOverride()).toEqual({ override: null })
+    const gpus = [
+      { vendor: 'AMD', total_memory: 24_576, vulkan_info: { device_id: 0x744c, device_type: 'DiscreteGpu' } },
+    ]
+    const set = await client.setHardwareOverride({ gpus, cpu_extensions: ['AVX2'], source: 'client-test' })
+    expect(set.override).toMatchObject({
+      gpus,
+      cpu_extensions: ['avx2'],
+      source: 'client-test',
+      received_at: 4242,
+    })
+    expect(await client.hardwareOverride()).toEqual({ override: set.override })
+    const overridden = await client.hardwareInfo()
+    expect(overridden.source).toBe('override')
+    expect(overridden.info.gpus.map((g) => g.vendor)).toEqual(['AMD'])
+    expect(overridden.info.cpu.extensions).toEqual(['avx2'])
+
+    await expect(client.setHardwareOverride({ cpu_extensions: ['avx'] })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    expect(await client.clearHardwareOverride()).toEqual({ cleared: true })
+    expect(await client.clearHardwareOverride()).toEqual({ cleared: false })
+    expect((await client.hardwareInfo()).source).toBe('probe')
+  })
+})
+
+describe('backend advisor', () => {
+  it('asks the three advisor questions with POST bodies', async () => {
+    const catalog = await client.backendCatalog('llamacpp-upstream', { force: true })
+    expect(catalog.provider).toBe('llamacpp-upstream')
+    expect(catalog.recommended).toBe('b99999/win-cpu-x64')
+
+    const rec = await client.recommendBackend('llamacpp', {
+      mode: 'recheck',
+      current_backend: 'b10405/windows-x64-cpu',
+    })
+    expect(rec.outcome).toBe('recommend')
+    expect(rec.recommendation?.currentBackend).toBe('b10405/windows-x64-cpu')
+
+    const updates = await client.checkBackendUpdates('llamacpp-upstream', { current: 'b1/win-cpu-x64' })
+    expect(updates).toMatchObject({
+      current: 'b1/win-cpu-x64',
+      update_needed: true,
+      offer: 'b99999/win-cpu-x64',
+    })
+
+    await expect(client.backendCatalog('mlx' as 'llamacpp', {})).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
   })
 })
 

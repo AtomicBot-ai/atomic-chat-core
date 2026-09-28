@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": "b10344/macos-arm64",
+  "input": {
+    "backend_type": "macos-arm64",
+    "kind": "latest",
+    "version_backends": [
+      {
+        "backend": "macos-arm64",
+        "order": 1800000000,
+        "version": "b10205"
+      },
+      {
+        "backend": "macos-arm64",
+        "order": 0,
+        "version": "b10344"
+      }
+    ]
+  },
+  "name": "latest_prefers_newer_tag_over_install_time",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

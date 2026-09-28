@@ -1,0 +1,15 @@
+{
+  "comparator": "json-exact",
+  "expected": null,
+  "input": {
+    "backend_type": "macos-arm64",
+    "kind": "latest",
+    "version_backends": []
+  },
+  "name": "latest_none_for_empty_catalog",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

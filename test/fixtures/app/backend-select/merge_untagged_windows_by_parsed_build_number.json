@@ -1,0 +1,37 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    {
+      "backend": "win-cuda-12.4-x64",
+      "order": 0,
+      "version": "v7525"
+    },
+    {
+      "backend": "win-cuda-12.4-x64",
+      "order": 9,
+      "version": "v7524"
+    }
+  ],
+  "input": {
+    "kind": "merge",
+    "local": [
+      {
+        "backend": "win-cuda-12.4-x64",
+        "order": 9,
+        "version": "v7524"
+      },
+      {
+        "backend": "win-cuda-12.4-x64",
+        "order": 0,
+        "version": "v7525"
+      }
+    ],
+    "remote": []
+  },
+  "name": "merge_untagged_windows_by_parsed_build_number",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

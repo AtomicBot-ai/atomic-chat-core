@@ -1,0 +1,15 @@
+{
+  "comparator": "json-exact",
+  "expected": null,
+  "input": {
+    "kind": "migrate",
+    "stored_type": "linux-avx2-x64",
+    "version_backends": []
+  },
+  "name": "migrate_empty_catalog_skips",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

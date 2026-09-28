@@ -1,0 +1,31 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "avx": false,
+    "avx2": false,
+    "avx512": true,
+    "cuda11": false,
+    "cuda12": false,
+    "cuda13": false,
+    "rocm": false,
+    "vulkan": false
+  },
+  "input": {
+    "cpu_extensions": [
+      "avx512"
+    ],
+    "gpus": [],
+    "kind": "features",
+    "os_type": "windows",
+    "rocm_probe": {
+      "gfx_target_versions": [],
+      "has_runtime": false
+    }
+  },
+  "name": "features_cpu_only_windows_avx512",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

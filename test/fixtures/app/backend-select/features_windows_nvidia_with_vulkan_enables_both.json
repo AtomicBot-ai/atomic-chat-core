@@ -1,0 +1,37 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "avx": false,
+    "avx2": false,
+    "avx512": false,
+    "cuda11": true,
+    "cuda12": true,
+    "cuda13": true,
+    "rocm": false,
+    "vulkan": true
+  },
+  "input": {
+    "cpu_extensions": [],
+    "gpus": [
+      {
+        "driver_version": "581.42",
+        "nvidia_info": {
+          "compute_capability": "8.9"
+        },
+        "vendor": "NVIDIA",
+        "vulkan_info": {
+          "api_version": "1.3",
+          "device_id": 9860
+        }
+      }
+    ],
+    "kind": "features",
+    "os_type": "windows"
+  },
+  "name": "features_windows_nvidia_with_vulkan_enables_both",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

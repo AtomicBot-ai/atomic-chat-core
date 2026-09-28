@@ -1,0 +1,18 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "error": "Invalid backend format: "
+  },
+  "input": {
+    "key": "version_backend",
+    "kind": "setting_update",
+    "stored_type": null,
+    "value": ""
+  },
+  "name": "setting_update_invalid_empty_string",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

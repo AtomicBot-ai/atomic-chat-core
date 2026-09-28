@@ -1,0 +1,21 @@
+{
+  "comparator": "json-exact",
+  "expected": "windows-x64-cuda-12.4",
+  "input": {
+    "kind": "migrate",
+    "stored_type": "win-cuda-12-common_cpus-x64",
+    "version_backends": [
+      {
+        "backend": "win-noavx-cuda-cu12.0-x64",
+        "order": 1,
+        "version": "b7524"
+      }
+    ]
+  },
+  "name": "migrate_target_available_under_legacy_spelling",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

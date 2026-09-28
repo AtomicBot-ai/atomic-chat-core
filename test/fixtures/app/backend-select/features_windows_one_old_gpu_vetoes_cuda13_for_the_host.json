@@ -1,0 +1,42 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "avx": false,
+    "avx2": false,
+    "avx512": false,
+    "cuda11": true,
+    "cuda12": true,
+    "cuda13": false,
+    "rocm": false,
+    "vulkan": false
+  },
+  "input": {
+    "cpu_extensions": [],
+    "gpus": [
+      {
+        "driver_version": "581.42",
+        "nvidia_info": {
+          "compute_capability": "8.9"
+        },
+        "vendor": "NVIDIA",
+        "vulkan_info": null
+      },
+      {
+        "driver_version": "581.42",
+        "nvidia_info": {
+          "compute_capability": "7.0"
+        },
+        "vendor": "NVIDIA",
+        "vulkan_info": null
+      }
+    ],
+    "kind": "features",
+    "os_type": "windows"
+  },
+  "name": "features_windows_one_old_gpu_vetoes_cuda13_for_the_host",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    {
+      "backend": "linux-x64-vulkan",
+      "order": 5,
+      "version": "b10018-1.3.0"
+    }
+  ],
+  "input": {
+    "kind": "merge",
+    "local": [
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 5,
+        "version": "b10018-1.3.0"
+      }
+    ],
+    "remote": [
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 0,
+        "version": "b10018-1.3.0"
+      }
+    ]
+  },
+  "name": "merge_local_higher_order_replaces_remote",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

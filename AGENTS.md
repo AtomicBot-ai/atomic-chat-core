@@ -48,9 +48,9 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
 | `src/settings/`                     | `<data>/atomic-core/settings.json`, JSON schemas of provider settings, legacy `localStorage` import.                  |
 | `src/credentials/`                  | `<data>/atomic-core/credentials.json` (0600), ChatGPT OAuth (PKCE, callback :1455).                                  |
 | `src/events/`                       | Typed `EventEmitter`; the catalog is in `src/contracts/events.ts`.                                                    |
-| `src/hardware/`                     | CPU/GPU/VRAM probes via system tools; override endpoint for NVML/Vulkan facts injected by the app.                    |
+| `src/hardware/`                     | The only source of hardware facts: pure per-source parsers (`nvidia-smi`, DRM sysfs, PowerShell CIM + registry, cpu flags, Vulkan ICDs), `probe*.ts` I/O, `HardwareService` (cached `SystemInfo`, refresh, override seam) behind `GET/POST /hardware/{info,refresh}`. |
 | `src/downloads/`                    | Resumable downloads (`.tmp` + `.url`), sha256, disk-error tags, `.tar.gz`/`.zip` extraction.                         |
-| `src/backend/`                      | llama.cpp backend packs: `catalog/` (manifest, archive names, id migration), `select/` (hardware tiers), `installed/` + `install/` (packs on disk, install/update), `optimal/` (optimal-backend cache), `turboquant.ts`. |
+| `src/backend/`                      | llama.cpp backend packs: `catalog/` (manifest, TurboQuant release index, archive names, id migration), `select/` (hardware tiers, both providers), `installed/` + `install/` (packs on disk, install/update), `optimal/` (optimal-backend cache), `advisor/` (per-provider catalog / recommendation / update check behind `POST /backends/:p/{catalog,recommendation,updates}`), `turboquant.ts`. |
 | `src/models/`                       | `model.yml`, model registry, import (URL/HF/local/sharded), GGUF metadata + KV-cache estimate.                        |
 | `src/speculative/`                  | MTP / DFlash / EAGLE-3 draft registries, transcription model, chat-template overrides.                                |
 | `src/runtime/`                      | `shared/` (spawn / readiness / kill, ports, env, sidecar table), `llamacpp/` (provider-parameterised), `mlx/`, `foundation-models/`. |

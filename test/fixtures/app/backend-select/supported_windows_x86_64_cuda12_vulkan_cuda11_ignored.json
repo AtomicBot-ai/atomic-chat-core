@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    "win-cpu-x64",
+    "win-cuda-12.4-x64",
+    "win-vulkan-x64"
+  ],
+  "input": {
+    "arch": "x86_64",
+    "features": {
+      "cuda11": true,
+      "cuda12": true,
+      "cuda13": false,
+      "rocm": false,
+      "vulkan": true
+    },
+    "kind": "supported",
+    "os_type": "windows"
+  },
+  "name": "supported_windows_x86_64_cuda12_vulkan_cuda11_ignored",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

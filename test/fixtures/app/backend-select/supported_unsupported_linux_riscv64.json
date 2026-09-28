@@ -1,0 +1,24 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "error": "Unsupported system type: linux-riscv64"
+  },
+  "input": {
+    "arch": "riscv64",
+    "features": {
+      "cuda11": false,
+      "cuda12": false,
+      "cuda13": false,
+      "rocm": false,
+      "vulkan": false
+    },
+    "kind": "supported",
+    "os_type": "linux"
+  },
+  "name": "supported_unsupported_linux_riscv64",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

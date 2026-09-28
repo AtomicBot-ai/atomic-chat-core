@@ -26,6 +26,13 @@ export async function startBackendInstallFixture(
     cuda?: boolean
     /** Answer the first N requests for the archive with 503, to walk the retry ladder. */
     archiveFailures?: number
+    /**
+     * More asset names for the manifest, without a mirror entry (the advisor lists them; an install
+     * would fall back to the ggml-org CDN, which the proxy does not reach).
+     */
+    extraAssets?: string[]
+    /** The fork's `index.json`, served at `/releases/latest/download/index.json` on the same origin. */
+    turboquantIndex?: unknown
   } = {}
 ): Promise<InstallFixture> {
   const tag = 'b99999'
@@ -52,6 +59,7 @@ export async function startBackendInstallFixture(
       download_base: 'https://mirror.atomic.invalid/releases',
       assets: [
         { name: archiveName, size: archive.length, sha256: options.badChecksum ? '0'.repeat(64) : sha256 },
+        ...(options.extraAssets ?? []).map((name) => ({ name })),
       ],
     })
   )
@@ -65,6 +73,13 @@ export async function startBackendInstallFixture(
     { key: tlsFixture('server.key'), cert: tlsFixture('server.pem') },
     (req, res) => {
       seen.push(`${req.method} ${req.headers.host}${req.url}`)
+      const isIndex =
+        options.turboquantIndex !== undefined && req.url?.endsWith('/releases/latest/download/index.json')
+      if (isIndex) {
+        const body = Buffer.from(JSON.stringify(options.turboquantIndex))
+        res.writeHead(200, { 'content-length': body.length, 'content-type': 'application/json' })
+        return req.method === 'HEAD' ? res.end() : res.end(body)
+      }
       const isManifest = req.url?.endsWith('/backends/manifest.json')
       const isCompanion = options.cuda && req.url?.endsWith(`/${tag}/${companionName}`)
       const content = isManifest ? manifest : isCompanion ? companion : archive

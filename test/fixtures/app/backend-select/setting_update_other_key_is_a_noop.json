@@ -1,0 +1,22 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend": null,
+    "backend_type_updated": false,
+    "effective_backend_type": null,
+    "needs_backend_installation": false,
+    "version": null
+  },
+  "input": {
+    "key": "ctx_size",
+    "kind": "setting_update",
+    "stored_type": "win-cpu-x64",
+    "value": "4096"
+  },
+  "name": "setting_update_other_key_is_a_noop",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

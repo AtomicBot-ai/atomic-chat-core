@@ -4,7 +4,7 @@
  * `src-tauri/src/core/downloads/helpers.rs`.
  */
 
-import type { DownloadStage } from '../contracts/index.js'
+import type { DownloadStage, ProxyConfig } from '../contracts/index.js'
 
 export const MAX_STREAM_RETRIES = 5
 export const RETRY_BASE_DELAY_MS = 1_000
@@ -115,13 +115,8 @@ export function classifyDownloadStatus(status: number, body: string): DownloadRe
   return new DownloadRequestError(isRetryableStatus(status) ? 'retryable' : 'fatal', message)
 }
 
-export interface ProxyConfig {
-  url: string
-  username?: string | null
-  password?: string | null
-  no_proxy?: string[] | null
-  ignore_ssl?: boolean | null
-}
+/** Lives in `contracts/backend-advisor.ts` now (the advisor routes carry it); re-exported so nothing here moves. */
+export type { ProxyConfig } from '../contracts/index.js'
 
 /** Same rules as `validate_proxy_config`; returns the error text or `undefined`. */
 export function validateProxyConfig(config: ProxyConfig): string | undefined {

@@ -1,0 +1,22 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend": "linux-avx2-cuda-cu12.0-x64",
+    "backend_type_updated": true,
+    "effective_backend_type": "linux-x64-vulkan",
+    "needs_backend_installation": true,
+    "version": "b10018-1.3.0"
+  },
+  "input": {
+    "key": "version_backend",
+    "kind": "setting_update",
+    "stored_type": null,
+    "value": "b10018-1.3.0/linux-avx2-cuda-cu12.0-x64"
+  },
+  "name": "setting_update_maps_linux_avx2_cuda_cu12_0_x64",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

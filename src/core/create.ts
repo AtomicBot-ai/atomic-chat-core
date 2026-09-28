@@ -6,7 +6,7 @@
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { LocalProviderId } from '../contracts/index.js'
+import type { LlamacppProviderId, LocalProviderId } from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
@@ -21,22 +21,25 @@ import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from '../cloud/index.js'
 import type { ChatGptBackend } from '../cloud/index.js'
-import { HardwareOverrideStore } from '../hardware/index.js'
+import { HardwareService, nodeProbeDeps, probeSystemInfo } from '../hardware/index.js'
 import {
+  BackendAdvisor,
   BackendService,
+  TurboquantCatalogService,
   ensureBackend,
   ensureTurboquantCudart,
   ensureUpstreamCudart,
   ManifestSessionCache,
   OptimalBackendStore,
   fetchLiveManifest,
-  platformArch,
   manifestTransportFromFetch,
   readRuntimeSettings,
+  resolveBackendExe,
   selectInstalledBackend,
 } from '../backend/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
-import { Downloader, availableDiskSpace, createPolicyFetch } from '../downloads/index.js'
+import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
+import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
 import {
@@ -134,11 +137,22 @@ export async function createAtomicCore(
     const externalSessions = new ExternalSessions({ emit: (name, payload) => emitter.emit(name, payload) })
     const journal = await ProcessJournal.open(layout)
     const clients = new ClientRegistry()
+    const platform = options.platform ?? process.platform
     // One per core process, in memory: hardware changes between runs, and a stale file claiming
-    // a GPU that is gone would pick a backend that cannot start. The same store is deliberately
+    // a GPU that is gone would pick a backend that cannot start. The same service is deliberately
     // shared by control and the runtime: accepting an override that load never reads is worse
-    // than rejecting the endpoint, because it tells the app a hardware handover succeeded.
-    const hardware = new HardwareOverrideStore()
+    // than rejecting the endpoint, because it tells the app a hardware handover succeeded. The
+    // probe starts now and runs while the rest is wired; the first load waits for it.
+    const hardware = new HardwareService({
+      probe:
+        options.hardware?.probe ??
+        (() =>
+          probeSystemInfo(nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env }))),
+      arch: process.arch,
+      platform,
+      log,
+    })
+    hardware.start()
 
     // One downloader per core process: it owns the active-task table that `cancel` works from, so
     // two of them would each know only half of what is running.
@@ -152,7 +166,6 @@ export async function createAtomicCore(
       [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
     ])
-    const platform = options.platform ?? process.platform
     // Both llama.cpp providers run through one runtime class; what differs — backend ids, the
     // argument rules and Windows CUDA runtime repair — is decided by the provider it is given.
     const llamacppRuntime = (provider: 'llamacpp' | 'llamacpp-upstream') =>
@@ -191,10 +204,9 @@ export async function createAtomicCore(
             }
           ),
         cpuInfo: async () => {
-          const injected = hardware.get()
-          if (!injected?.cpu_extensions) return undefined
-          // The no-AVX policy knows `x86_64`, not Node's `x64`: pass the raw name and it never fires.
-          return { arch: platformArch(process.arch), extensions: hardware.cpuExtensions([]) }
+          // Unknown flags stay `undefined`: the no-AVX preflight fires on a positive signal only.
+          const facts = await hardware.facts()
+          return facts.cpuExtensions ? { arch: facts.arch, extensions: facts.cpuExtensions } : undefined
         },
         ...(options.fetch ? { fetch: options.fetch } : {}),
       })
@@ -245,6 +257,44 @@ export async function createAtomicCore(
       unload: (provider, modelId) => (core as AtomicCore).unload(provider, modelId),
       fetch: options.fetch ?? fetch,
     })
+    // The proxy policy of one request decides that request's fetch; nothing about it is kept.
+    const fetchFor = (proxy?: ProxyConfig | null): typeof fetch =>
+      policyFetchFor({ proxy: proxy ?? null }, options.fetch ?? fetch)
+    // One release-index service for the fork: its memory TTL and in-flight coalescing only help
+    // when every caller shares them.
+    const turboquantCatalog = new TurboquantCatalogService({
+      layout,
+      fetchFor,
+      platform,
+      log: (level, message) => log(level, message),
+    })
+    const advisors = new Map<LlamacppProviderId, BackendAdvisor>()
+    const backendAdvisor = (provider: LlamacppProviderId): BackendAdvisor => {
+      const existing = advisors.get(provider)
+      if (existing) return existing
+      const created = new BackendAdvisor({
+        provider,
+        layout,
+        hardware: () => hardware.facts(),
+        currentVersionBackend: () => String(settings.get(provider)['version_backend'] ?? ''),
+        optimalStore,
+        emit: (name, payload) => emitter.emit(name, payload),
+        fetchFor,
+        manifestCache,
+        turboquantCatalog,
+        // The Windows tier check runs `--list-devices` on the installed pack of that tier.
+        listDevices: async (installed) => {
+          const exePath = await resolveBackendExe(layout, provider, installed.version, installed.backend)
+          if (!exePath) return []
+          const runtime = (core as AtomicCore).runtime(provider)
+          return runtime instanceof LlamacppRuntime ? runtime.getDevices(exePath) : []
+        },
+        platform,
+        log: (level, message) => log(level, message),
+      })
+      advisors.set(provider, created)
+      return created
+    }
     const backendServices = new Map<LocalProviderId, BackendService>()
     const backendService = (provider: LocalProviderId): BackendService => {
       const existing = backendServices.get(provider)
@@ -257,12 +307,9 @@ export async function createAtomicCore(
         readManifest: async (proxy) => {
           const cached = manifestCache.get()
           if (cached) return cached
-          const fetchImpl = proxy
-            ? createPolicyFetch({ proxy, ignore_ssl: proxy.ignore_ssl })
-            : (options.fetch ?? fetch)
           return fetchLiveManifest({
             cache: manifestCache,
-            transports: [manifestTransportFromFetch('core fetch', fetchImpl)],
+            transports: [manifestTransportFromFetch('core fetch', fetchFor(proxy))],
             onWarn: (message) => log('warn', message),
           })
         },
@@ -343,6 +390,10 @@ export async function createAtomicCore(
           setOptimal: (provider, record, expectedRevision) =>
             backendService(provider as LocalProviderId).setOptimalCache(record, expectedRevision),
           optimalSnapshot: () => optimalStore.snapshot(),
+          catalog: (provider, request) => backendAdvisor(provider as LlamacppProviderId).catalog(request),
+          recommend: (provider, request) => backendAdvisor(provider as LlamacppProviderId).recommend(request),
+          checkUpdates: (provider, request) =>
+            backendAdvisor(provider as LlamacppProviderId).checkUpdates(request),
         },
         disk: { available: (path) => availableDiskSpace(layout.root, path) },
         remoteAccess: {

@@ -1,0 +1,21 @@
+{
+  "comparator": "json-exact",
+  "expected": "linux-x64-vulkan",
+  "input": {
+    "kind": "migrate",
+    "stored_type": "linux-avx2-x64",
+    "version_backends": [
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 1,
+        "version": "turboquant-linux-x64-vulkan-aaaa"
+      }
+    ]
+  },
+  "name": "migrate_linux_avx2_to_vulkan_when_available",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

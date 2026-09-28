@@ -1,0 +1,22 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend": "win-cuda-12-common_cpus-x64",
+    "backend_type_updated": false,
+    "effective_backend_type": "windows-x64-cuda-12.4",
+    "needs_backend_installation": true,
+    "version": "b7523"
+  },
+  "input": {
+    "key": "version_backend",
+    "kind": "setting_update",
+    "stored_type": "windows-x64-cuda-12.4",
+    "value": "b7523/win-cuda-12-common_cpus-x64"
+  },
+  "name": "setting_update_legacy_value_compared_after_migration",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

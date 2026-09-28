@@ -10,17 +10,7 @@
  * value produced here can be handed to the app unchanged.
  */
 
-import type { DeviceInfo } from '../contracts/index.js'
-
-/**
- * One backend build. Rust `BackendInfo { version, backend, #[serde(default)] order: u32 }`: `order`
- * is the directory mtime in seconds for a build found on disk and 0 (or absent) for a manifest entry.
- */
-export interface BackendVersion {
-  version: string
-  backend: string
-  order?: number
-}
+import type { BackendVersion, DeviceInfo } from '../contracts/index.js'
 
 /** `os_type` as the hardware probe reports it (`tauri-plugin-hardware`). */
 export type BackendOsType = 'windows' | 'linux' | 'macos'
@@ -64,40 +54,29 @@ export interface BackendArchiveSource {
   size?: number
 }
 
-/**
- * Rust `SystemFeatures` (input of `determine_supported_backends`) and the guest-js
- * `BackendFeatures`. `cuda11` is accepted for wire compatibility but never expands into a backend.
- */
-export interface BackendFeatures {
-  cuda11: boolean
-  cuda12: boolean
-  cuda13: boolean
-  vulkan: boolean
-  rocm: boolean
-}
-
-/** Rust `SupportedFeatures` (output of `get_supported_features`). */
-export interface SupportedFeatures extends BackendFeatures {
-  avx: boolean
-  avx2: boolean
-  avx512: boolean
-}
-
 /** Lives in `contracts/hardware.ts` now (every host injects it); re-exported so nothing here moves. */
 export type { GpuProbeInfo } from '../contracts/index.js'
+
+/**
+ * Live in `contracts/backend-advisor.ts` now (the advisor routes carry them to the app, and `client/`
+ * must import them without `node:*`); re-exported so nothing here moves.
+ */
+export type {
+  BackendFeatures,
+  BackendRecommendation,
+  BackendVersion,
+  IdealBackendResult,
+  OptimalBackendCacheBase,
+  OptimalBackendCacheRecord,
+  SupportedFeatures,
+  UpdateCheckResult,
+} from '../contracts/index.js'
 
 /** Rust `BestBackendResult`. */
 export interface BestBackendResult {
   backend_string: string
   version: string
   backend_type: string
-}
-
-/** Rust `UpdateCheckResult`; `target_backend` serialises as `null` when no update is offered. */
-export interface UpdateCheckResult {
-  update_needed: boolean
-  new_version: string
-  target_backend: string | null
 }
 
 /** Rust `SettingUpdateResult`. */
@@ -111,40 +90,6 @@ export interface SettingUpdateResult {
 
 /** Verdict of the `--list-devices` health probe for one GPU tier (`tierEnumeratesDevices`). */
 export type TierHealth = 'works' | 'unverified' | 'broken'
-
-/**
- * Outcome of `detectIdealBackendType` (ATO-161): a better GPU backend exists, CPU genuinely is the
- * best this hardware can do, or detection could not complete and the current backend must stay.
- */
-export type IdealBackendResult =
-  { kind: 'gpu'; backend: string } | { kind: 'cpu-optimal' } | { kind: 'detection-failed' }
-
-interface OptimalBackendCacheBase {
-  schemaVersion: 1
-  provider: 'llamacpp-upstream' | 'llamacpp'
-  detectedAt: number
-  currentBackend: string
-  recommendedCategory: string
-}
-
-/** Persisted under `OPTIMAL_BACKEND_CACHE_KEY` (app: `localStorage`; core: `<data>/atomic-core/`). */
-export type OptimalBackendCacheRecord =
-  | (OptimalBackendCacheBase & {
-      detectionKind: 'gpu'
-      idealBackendId: string
-      recommendedBackend?: string
-    })
-  | (OptimalBackendCacheBase & { detectionKind: 'cpu-optimal' })
-
-/** Payload of `AppEvent.onBetterBackendDetected` and of `llama_cpp_better_backend_recommendation`. */
-export interface BackendRecommendation {
-  currentBackend: string
-  recommendedBackend: string
-  recommendedCategory: string
-  provider: string
-  version: string
-  backendId: string
-}
 
 /** What a tier probe needs from its caller: the installed builds and a way to run `--list-devices`. */
 export interface TierProbeDeps {

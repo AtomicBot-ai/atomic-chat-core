@@ -18,6 +18,7 @@
 
 import { resolveLatestVersionBackend } from '../catalog/index.js'
 import { backendCategoryToLabel, findLatestVersionForBackend, getBackendCategory } from '../select/index.js'
+import type { LlamacppProviderId } from '../../contracts/index.js'
 import type {
   BackendRecommendation,
   BackendVersion,
@@ -37,6 +38,30 @@ export const BETTER_BACKEND_RECOMMENDATION_KEY = 'llama_cpp_better_backend_recom
 export const BACKEND_DETECTION_FAILED = 'BACKEND_DETECTION_FAILED'
 
 export type CompletedDetection = Exclude<IdealBackendResult, { kind: 'detection-failed' }>
+
+/**
+ * When a recheck calls the current build "already optimal" without resolving a target:
+ * `type-and-category` (upstream) needs the same backend type *and* category; `category` (TurboQuant)
+ * is satisfied by the category alone (`extensions/llamacpp-extension/src/index.ts`).
+ */
+export type AlreadyOptimalRule = 'type-and-category' | 'category'
+
+/**
+ * What differs between the two llama.cpp providers when a record is built and compared. Defaults
+ * are the upstream extension's rules, so every existing caller keeps its behaviour.
+ */
+export interface OptimalRecordPolicy {
+  provider?: LlamacppProviderId
+  /** The provider's `get_backend_category`; labels the record and decides `already_optimal`. */
+  getCategory?: (backend: string) => string | null
+  alreadyOptimalRule?: AlreadyOptimalRule
+}
+
+const resolvePolicy = (policy: OptimalRecordPolicy | undefined) => ({
+  provider: policy?.provider ?? OPTIMAL_BACKEND_PROVIDER,
+  getCategory: policy?.getCategory ?? getBackendCategory,
+  alreadyOptimalRule: policy?.alreadyOptimalRule ?? 'type-and-category',
+})
 
 /**
  * Validate a stored record. Anything with the wrong schema, provider, a non-finite or negative
@@ -99,12 +124,14 @@ export function buildOptimalBackendCacheRecord(
   detection: CompletedDetection,
   currentBackend: string,
   recommendedBackend: string | null | undefined,
-  now: number
+  now: number,
+  policy?: OptimalRecordPolicy
 ): OptimalBackendCacheRecord {
+  const { provider, getCategory } = resolvePolicy(policy)
   if (detection.kind === 'cpu-optimal') {
     return {
       schemaVersion: 1,
-      provider: OPTIMAL_BACKEND_PROVIDER,
+      provider,
       detectedAt: now,
       detectionKind: 'cpu-optimal',
       currentBackend,
@@ -113,13 +140,13 @@ export function buildOptimalBackendCacheRecord(
   }
   return {
     schemaVersion: 1,
-    provider: OPTIMAL_BACKEND_PROVIDER,
+    provider,
     detectedAt: now,
     detectionKind: 'gpu',
     currentBackend,
     idealBackendId: detection.backend,
     ...(recommendedBackend ? { recommendedBackend } : {}),
-    recommendedCategory: backendCategoryToLabel(getBackendCategory(detection.backend) ?? 'unknown'),
+    recommendedCategory: backendCategoryToLabel(getCategory(detection.backend) ?? 'unknown'),
   }
 }
 
@@ -186,12 +213,16 @@ export async function refreshOptimalBackendCache(
   detection: IdealBackendResult,
   currentBackend: string,
   resolveConcrete: (idealType: string, currentBackend: string) => Promise<string | null>,
-  now: number
+  now: number,
+  policy?: OptimalRecordPolicy
 ): Promise<RefreshOutcome> {
   if (detection.kind === 'detection-failed') return { outcome: 'detection_failed' }
   const current = stripBom(currentBackend)
   if (detection.kind === 'cpu-optimal') {
-    return { outcome: 'cached', record: buildOptimalBackendCacheRecord(detection, current, null, now) }
+    return {
+      outcome: 'cached',
+      record: buildOptimalBackendCacheRecord(detection, current, null, now, policy),
+    }
   }
   let recommended: string | null = null
   try {
@@ -199,7 +230,10 @@ export async function refreshOptimalBackendCache(
   } catch {
     recommended = null
   }
-  return { outcome: 'cached', record: buildOptimalBackendCacheRecord(detection, current, recommended, now) }
+  return {
+    outcome: 'cached',
+    record: buildOptimalBackendCacheRecord(detection, current, recommended, now, policy),
+  }
 }
 
 /**
@@ -214,36 +248,44 @@ export type RecheckOutcome =
   | { outcome: 'recommend'; record: OptimalBackendCacheRecord; payload: BackendRecommendation }
 
 /**
- * Manual "Find optimal backend" / onboarding recheck. Same category *and* same backend type as the
- * current build is `already_optimal` without resolving anything; otherwise the concrete target is
- * resolved and compared — equal to current is `already_optimal`, nothing resolvable is
- * `no_catalog_entry`, else `recommend` with the event payload.
+ * Manual "Find optimal backend" / onboarding recheck. The current build is `already_optimal` without
+ * resolving anything when it matches the ideal per `policy.alreadyOptimalRule` (upstream: same
+ * category *and* same type; TurboQuant: same category — its record then names the current build as
+ * `recommendedBackend` only when the type matches too). Otherwise the concrete target is resolved
+ * and compared — equal to current is `already_optimal`, nothing resolvable is `no_catalog_entry`,
+ * else `recommend` with the event payload.
  */
 export async function recheckOptimalBackend(
   detection: IdealBackendResult,
   currentBackend: string,
   resolveConcrete: (idealType: string, currentBackend: string) => Promise<string | null>,
-  now: number
+  now: number,
+  policy?: OptimalRecordPolicy
 ): Promise<RecheckOutcome> {
   if (detection.kind === 'detection-failed') return { outcome: 'detection_failed' }
+  const { provider, getCategory, alreadyOptimalRule } = resolvePolicy(policy)
   const current = stripBom(currentBackend)
   if (detection.kind === 'cpu-optimal') {
-    return { outcome: 'cpu_optimal', record: buildOptimalBackendCacheRecord(detection, current, null, now) }
+    return {
+      outcome: 'cpu_optimal',
+      record: buildOptimalBackendCacheRecord(detection, current, null, now, policy),
+    }
   }
 
   const idealType = detection.backend
-  const idealCategory = getBackendCategory(idealType)
+  const idealCategory = getCategory(idealType)
   const currentType = current.split('/')[1] || ''
-  const currentCategory = getBackendCategory(currentType)
-  if (idealCategory === currentCategory && currentType === idealType) {
+  const currentCategory = getCategory(currentType)
+  const sameType = currentType === idealType
+  if (idealCategory === currentCategory && (sameType || alreadyOptimalRule === 'category')) {
     return {
       outcome: 'already_optimal',
-      record: buildOptimalBackendCacheRecord(detection, current, current, now),
+      record: buildOptimalBackendCacheRecord(detection, current, sameType ? current : null, now, policy),
     }
   }
 
   const recommended = await resolveConcrete(idealType, current)
-  const record = buildOptimalBackendCacheRecord(detection, current, recommended, now)
+  const record = buildOptimalBackendCacheRecord(detection, current, recommended, now, policy)
   if (!recommended) return { outcome: 'no_catalog_entry', record }
   if (recommended === current) return { outcome: 'already_optimal', record }
 
@@ -255,7 +297,7 @@ export async function recheckOptimalBackend(
       currentBackend: current,
       recommendedBackend: recommended,
       recommendedCategory: backendCategoryToLabel(idealCategory ?? 'unknown'),
-      provider: OPTIMAL_BACKEND_PROVIDER,
+      provider,
       version: version ?? '',
       backendId: backendId ?? '',
     },

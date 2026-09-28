@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": "b10018-1.10.0/macos-arm64",
+  "input": {
+    "backend_type": "macos-arm64",
+    "kind": "latest",
+    "version_backends": [
+      {
+        "backend": "macos-arm64",
+        "order": 0,
+        "version": "b10018-1.10.0"
+      },
+      {
+        "backend": "macos-arm64",
+        "order": 0,
+        "version": "b10018-1.9.9"
+      }
+    ]
+  },
+  "name": "latest_unified_fork_semver_decides_at_equal_build",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

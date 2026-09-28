@@ -1,0 +1,26 @@
+{
+  "comparator": "json-exact",
+  "expected": "turboquant-linux-x64-vulkan-bbbb/linux-x64-vulkan",
+  "input": {
+    "backend_type": "linux-x64-vulkan",
+    "kind": "latest",
+    "version_backends": [
+      {
+        "backend": "linux-avx2-x64",
+        "order": 1,
+        "version": "turboquant-linux-x64-vulkan-aaaa"
+      },
+      {
+        "backend": "linux-x64-vulkan",
+        "order": 2,
+        "version": "turboquant-linux-x64-vulkan-bbbb"
+      }
+    ]
+  },
+  "name": "latest_legacy_id_matches_after_migration",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs",
+    "provider": "llamacpp"
+  }
+}

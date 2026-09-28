@@ -1,0 +1,30 @@
+{
+  "comparator": "json-exact",
+  "expected": {
+    "backend_string": "b7523/win-noavx-cuda-cu13.0-x64",
+    "backend_type": "win-noavx-cuda-cu13.0-x64",
+    "version": "b7523"
+  },
+  "input": {
+    "has_enough_gpu_memory": true,
+    "kind": "prioritize",
+    "version_backends": [
+      {
+        "backend": "win-cuda-12.4-x64",
+        "order": 0,
+        "version": "b7523"
+      },
+      {
+        "backend": "win-noavx-cuda-cu13.0-x64",
+        "order": 0,
+        "version": "b7523"
+      }
+    ]
+  },
+  "name": "prioritize_legacy_cu13_0_outranks_cuda_12_4",
+  "source": {
+    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}
