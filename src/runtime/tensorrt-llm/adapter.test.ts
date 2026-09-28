@@ -716,3 +716,86 @@ describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md ite
     expect(tensorrtLlmRewriteRequestBody('/v1/completions', [1, 2], settings)).toEqual([1, 2])
   })
 })
+
+describe('tensorrtLlmAdapter: the session port refuses what the model cannot do (findings-2.14-r1.md item 1)', () => {
+  const settings = tensorrtLlmAdapter.validateSettings({})
+  const caps = (over: Partial<Record<'tools' | 'structured_output', boolean>> = {}) => ({
+    tools: false,
+    reasoning: false,
+    structured_output: false,
+    vision: false,
+    embeddings: false,
+    responses: false,
+    ...over,
+  })
+  const rewrite =
+    (body: unknown, capabilities = caps(), route = '/v1/chat/completions') =>
+    () =>
+      tensorrtLlmAdapter.rewriteRequestBody!(route, body, settings, capabilities)
+  const refusal = (fn: () => unknown) => {
+    try {
+      fn()
+    } catch (error) {
+      return error as { openaiCode?: string; message: string }
+    }
+    throw new Error('expected a refusal')
+  }
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ['a tools list', { tools: [{ type: 'function', function: { name: 'f' } }] }, 'tool calling'],
+    ['a tool_choice', { tool_choice: 'required' }, 'tool calling'],
+    [
+      'a JSON schema',
+      { response_format: { type: 'json_schema', json_schema: { name: 's' } } },
+      'structured output',
+    ],
+    ['a JSON object format', { response_format: { type: 'json_object' } }, 'structured output'],
+  ])('refuses %s with unsupported_capability, worded like :1337', (_label, extra, what) => {
+    const error = refusal(rewrite({ model: 'llama-3', ...extra }))
+    expect(error.openaiCode).toBe('unsupported_capability')
+    expect(error.message).toBe(`The model 'llama-3' does not support ${what}.`)
+  })
+
+  it('lets through what the model can do, and what asks for nothing optional', () => {
+    const tools = { model: 'm', tools: [{ type: 'function' }], tool_choice: 'auto' }
+    expect(rewrite(tools, caps({ tools: true }))()).toMatchObject({ tools: tools.tools })
+    const json = { model: 'm', response_format: { type: 'json_object' } }
+    expect(rewrite(json, caps({ structured_output: true }))()).toMatchObject({
+      response_format: json.response_format,
+    })
+    expect(
+      rewrite({ model: 'm', tools: [], tool_choice: 'none', response_format: { type: 'text' } })()
+    ).toMatchObject({
+      max_tokens: 4096,
+    })
+    expect(rewrite({ model: 'm' }, caps(), '/v1/completions')()).toMatchObject({ max_tokens: 4096 })
+  })
+
+  it('names the model generically when the body does not say which', () => {
+    expect(refusal(rewrite({ tools: [1] })).message).toBe('This model does not support tool calling.')
+  })
+
+  it("maps trtllm-serve's overflow on the session port, and leaves every other error to the engine's own wording", () => {
+    const overflow = JSON.stringify({
+      object: 'error',
+      message: 'The sum of prompt length (9000), query length (0) should not exceed max_num_tokens (8192)',
+      type: 'BadRequestError',
+      param: null,
+      code: 400,
+    })
+    expect(tensorrtLlmAdapter.mapErrorResponse!('/v1/chat/completions', 400, overflow)).toMatchObject({
+      error: { code: 'context_length_exceeded' },
+    })
+    expect(tensorrtLlmAdapter.mapErrorResponse!('/v1/chat/completions', 400, '{"message":"x"}')).toBeNull()
+  })
+
+  it('restarts only for settings the container was started with: context and KV fraction', () => {
+    const key = (raw: Record<string, unknown>) =>
+      JSON.stringify(tensorrtLlmAdapter.restartKey!(tensorrtLlmAdapter.validateSettings(raw)))
+    const base = key({})
+    expect(key({ max_output_tokens: 1024 })).toBe(base)
+    expect(key({ load_timeout_seconds: 900 })).toBe(base)
+    expect(key({ context_length: 16384 })).not.toBe(base)
+    expect(key({ kv_cache_free_gpu_memory_fraction: 0.5 })).not.toBe(base)
+  })
+})

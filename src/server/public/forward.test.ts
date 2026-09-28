@@ -166,6 +166,7 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
           { method: 'GET', path: '/v1/models' },
         ],
         tools,
+        structuredOutput: false,
         mapError: (status, body) =>
           status === 400 && body.includes('max_num_tokens (8192)')
             ? {
@@ -262,6 +263,59 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
     const res = await postJson(server, '/chat/completions', { model: 'trt' })
     expect(res.status).toBe(500)
     expect(asked).toEqual([])
+  })
+
+  it('sends /v1/messages straight to chat completions, never to the undeclared route, and maps an overflow there too', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push(req.url ?? '')
+      if (body.includes('OVERFLOW')) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(overflow)
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          id: 'c1',
+          model: 'trt',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [trt(port)] })
+    const ok = await postJson(server, '/messages', {
+      model: 'trt',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'hello' }],
+    })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ type: 'message', content: [{ type: 'text', text: 'hi' }] })
+    const overflowed = await postJson(server, '/messages', {
+      model: 'trt',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'OVERFLOW' }],
+    })
+    expect(overflowed.status).toBe(400)
+    expect(await overflowed.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    expect(seen).toEqual(['/v1/chat/completions', '/v1/chat/completions'])
+  })
+
+  it('answers a /v1/messages it cannot translate with a 400, and an unreachable session with a 503', async () => {
+    const { port } = await startUpstream((_req, _body, res) => res.end('{}'))
+    const server = await startPublic({ sessions: [trt(port)] })
+    const untranslatable = await postJson(server, '/messages', { model: 'trt' })
+    expect(untranslatable.status).toBe(400)
+    expect(await untranslatable.json()).toMatchObject({ error: { type: 'invalid_request_error' } })
+
+    const down = await startPublic({ sessions: [trt(await closedPort())] })
+    const unreachable = await postJson(down, '/messages', {
+      model: 'trt',
+      max_tokens: 8,
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    expect(unreachable.status).toBe(503)
   })
 
   it('answers /v1/responses for a tensorrt-llm model with a clear error', async () => {

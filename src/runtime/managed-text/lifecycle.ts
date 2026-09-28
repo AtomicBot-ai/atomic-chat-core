@@ -241,6 +241,11 @@ interface Entry {
   modelPath: string
   /** What this session was started with (`loadKeyOf`): a load asking for anything else reloads it. */
   loadKey: string
+  /**
+   * The validated settings in force: replaced by a later load that joins this session with settings
+   * outside the adapter's restart key, which the gateway's rewriter reads on every request.
+   */
+  settings: unknown
   state: ManagedSessionState
   adapter: ManagedTextAdapter
   /** Aborted by `unload` of a model still loading, and by the caller's own signal. */
@@ -287,15 +292,17 @@ function deadline(ms: number, error: () => Error): { promise: Promise<never>; se
 
 /**
  * Everything a running container was started with that a later load could ask differently for: the
- * adapter's validated settings, the pinned descriptor and image, the card and the model directory. A
- * load of a ready model with the same key joins its session; any difference reloads it, since none of
- * these can change inside a running container (spec "изменение настроек, требующих перезапуска, MUST
- * применяться только при следующей загрузке").
+ * adapter's restart-relevant settings (`restartKey`, all of them by default), the pinned descriptor
+ * and image, the card and the model directory. A load of a ready model with the same key joins its
+ * session; any difference reloads it, since none of these can change inside a running container
+ * (spec "изменение настроек, требующих перезапуска, MUST применяться только при следующей загрузке").
+ * A setting outside the restart key — one the gateway enforces per request, or one only a load reads
+ * — never costs a restart (findings-2.14-r1.md item 3).
  */
-function loadKeyOf(request: ManagedLoadRequest, settings: unknown): string {
+function loadKeyOf(request: ManagedLoadRequest, adapter: ManagedTextAdapter, settings: unknown): string {
   const { installation } = request
   return JSON.stringify([
-    settings,
+    adapter.restartKey === undefined ? settings : adapter.restartKey(settings),
     installation.descriptor_id,
     installation.adapter_id,
     installation.adapter_contract_version,
@@ -423,10 +430,13 @@ export class ManagedTextLifecycle {
       adapter.readinessTimeoutMs(request.weightBytes, settings),
       request.timeoutMs
     )
-    const loadKey = loadKeyOf(request, settings)
+    const loadKey = loadKeyOf(request, adapter, settings)
 
     if (existing?.state === 'ready' && existing.info) {
-      if (existing.loadKey === loadKey) return existing.info
+      if (existing.loadKey === loadKey) {
+        existing.settings = settings
+        return existing.info
+      }
       await this.unloadEntry(existing)
       this.assertOpen()
       if (this.entries.has(request.modelId)) {
@@ -450,6 +460,7 @@ export class ManagedTextLifecycle {
       descriptorId: installation.descriptor_id,
       modelPath: request.modelPath,
       loadKey,
+      settings,
       state: 'loading',
       adapter,
       loadAbort,
@@ -576,13 +587,18 @@ export class ManagedTextLifecycle {
 
       const apiKey = generateGatewayKey()
       const adapter = entry.adapter
-      // Bound to this load's own validated settings here, once, so the gateway itself never needs
-      // to know an adapter's settings shape (ManagedTextAdapter.rewriteRequestBody, ADR
-      // 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway). Called through
+      // What this session can do, for the rewriter to refuse what it cannot (findings-2.14-r1.md
+      // item 1): read off the same family the launch was built from, never guessed.
+      const capabilities = adapter.capabilities({ settings, family: request.family })
+      // Bound here, once, so the gateway itself never needs to know an adapter's settings shape
+      // (ManagedTextAdapter.rewriteRequestBody, ADR
+      // 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway). The settings are read off
+      // the entry on every request: a later load that joins this session with new per-request
+      // settings (outside the adapter's restart key) takes effect at once. Called through
       // `adapter.rewriteRequestBody(...)`, not a detached local reference to the function, so an
       // implementation that relies on `this` (an object method, not just a plain function like
       // tensorrt-llm's own) still sees `this === adapter` when the gateway invokes it
-      // (findings-2.13-r2.md item 4).
+      // (findings-2.13-r2.md item 4); the same holds for `mapErrorResponse`.
       entry.gateway = await this.startGateway({
         upstream: { host: '127.0.0.1', port: projectSessionPort(prepared.target) },
         apiKey,
@@ -593,7 +609,13 @@ export class ManagedTextLifecycle {
           ? {}
           : {
               rewriteRequestBody: (route: string, body: unknown) =>
-                adapter.rewriteRequestBody!(route, body, settings),
+                adapter.rewriteRequestBody!(route, body, entry.settings, capabilities),
+            }),
+        ...(adapter.mapErrorResponse === undefined
+          ? {}
+          : {
+              mapErrorResponse: (route: string, status: number, body: string) =>
+                adapter.mapErrorResponse!(route, status, body),
             }),
       })
       this.checkAborted(signal)

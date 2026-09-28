@@ -39,8 +39,26 @@ describe('probeTensorrtLlmHost', () => {
     })
   })
 
-  it('reads SELinux as off when docker info does not answer', async () => {
-    const { exec, docker } = fakes({ code: null, stdout: '' })
+  it.each<[string, { code: number | null; stdout: string }]>([
+    ['does not answer', { code: null, stdout: '' }],
+    ['fails', { code: 1, stdout: '' }],
+    [
+      'answers with no daemon behind it',
+      { code: 0, stdout: JSON.stringify({ ServerErrors: ['Cannot connect'] }) },
+    ],
+  ])('refuses the load when docker info %s: unknown SELinux is never read as "off"', async (_label, info) => {
+    const { exec, docker } = fakes(info)
+    await expect(probeTensorrtLlmHost({ exec, docker, nvidiaSmi: 'nvidia-smi' })).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      message: expect.stringContaining('SELinux'),
+    })
+  })
+
+  it('reads SELinux as off only when docker info answers and lists no SELinux option', async () => {
+    const { exec, docker } = fakes({
+      code: 0,
+      stdout: JSON.stringify({ ServerVersion: '28.1.1', SecurityOptions: [] }),
+    })
     expect((await probeTensorrtLlmHost({ exec, docker, nvidiaSmi: 'nvidia-smi' })).selinux).toBe(false)
   })
 })

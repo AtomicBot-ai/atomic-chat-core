@@ -6,6 +6,7 @@
  * D15: our mounts then carry `:z`). Asked per load rather than cached: a card can disappear between
  * two loads, and the spec wants that noticed ("Выбранная карта исчезла").
  */
+import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts } from '../../contracts/index.js'
 import { withSystemSocket } from '../container/index.js'
 import type { DockerExec } from '../container/index.js'
@@ -30,11 +31,24 @@ export interface ProbeTensorrtLlmHostDeps {
   nvidiaSmi: string
 }
 
-/** A `docker info` that does not answer reads as "no SELinux": the container create fails on its own then. */
+/**
+ * A `docker info` that does not answer, or answers without a daemon behind it, refuses the load
+ * (findings-2.14-r1.md item 2): whether our mounts need the shared `:z` label is then unknown, and
+ * guessing "no SELinux" would start a container that cannot read its own weights on an enforcing host.
+ */
 export async function probeTensorrtLlmHost(deps: ProbeTensorrtLlmHostDeps): Promise<TensorrtLlmHostFacts> {
   const [smi, info] = await Promise.all([
     deps.exec(deps.nvidiaSmi, NVIDIA_SMI_GPU_QUERY),
     deps.docker(withSystemSocket(['info', '--format', '{{json .}}'])).catch(() => null),
   ])
-  return { gpus: parseNvidiaSmi(smi).gpus, selinux: parseDockerInfo(info, null).selinux }
+  const docker = parseDockerInfo(info, null)
+  if (!docker.daemon_reachable) {
+    throw new AtomicCoreError(
+      'MANAGED_PREREQUISITE_BLOCKED',
+      'Docker did not answer `docker info`, so whether SELinux needs our mounts relabelled is unknown; ' +
+        'the model is not loaded. Check that the Docker daemon is running.',
+      [info?.stderr, ...docker.server_errors].filter((line) => line !== undefined && line !== '').join('; ')
+    )
+  }
+  return { gpus: parseNvidiaSmi(smi).gpus, selinux: docker.selinux }
 }

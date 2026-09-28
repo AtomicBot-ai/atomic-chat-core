@@ -153,12 +153,51 @@ export interface ManagedTextAdapter<S = unknown> {
    * must not silently substitute a different value for something invalid and forward that instead.
    * Throw `AtomicCoreError('INVALID_ARGUMENT', message)` for that: the gateway surfaces its
    * `message` verbatim as an OpenAI-shaped `400`, since that text was written to be read by the
-   * client whose request it rejects. Any other throw (a bug in this hook itself, not a rejection of
+   * client whose request it rejects; a `ManagedRequestRefusal` (below) also chooses the OpenAI `code`,
+   * e.g. `unsupported_capability` for what `capabilities` — this session's own, bound by the lifecycle —
+   * says the model cannot do (findings-2.14-r1.md item 1). Any other throw (a bug in this hook itself, not a rejection of
    * the client's input) becomes a generic `500` instead — the gateway does not assume an arbitrary
    * thrown value's `message` is safe to show a client (findings-2.13-r3.md item 3). The response
    * stream is never touched by this hook, on any route, streamed or not.
    */
-  rewriteRequestBody?(route: string, body: unknown, settings: S): unknown
+  rewriteRequestBody?(
+    route: string,
+    body: unknown,
+    settings: S,
+    capabilities: ManagedTextCapabilities
+  ): unknown
+  /**
+   * Optional (task 2.14 fix round 1, findings-2.14-r1.md item 1): the OpenAI error body a client gets
+   * for an engine's own error answer on a declared POST route, or `null` to relay the engine's answer
+   * as it is. The gateway calls this only for a non-2xx answer, reads that answer under a small cap
+   * (`MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES`) to do so, and never touches a 2xx answer — streamed or
+   * not. What an engine needs here is a translation of its own error wording into the one clients
+   * already handle (`context_length_exceeded` for `trtllm-serve`'s context overflow).
+   */
+  mapErrorResponse?(route: string, status: number, body: string): object | null
+  /**
+   * Optional: the part of the validated settings a running container was started with. A later load
+   * of the same model whose settings differ only outside this part joins the running session (with
+   * the new settings in force for what the gateway enforces per request) instead of restarting a
+   * container (findings-2.14-r1.md item 3). Absent, every setting counts.
+   */
+  restartKey?(settings: S): unknown
+}
+
+/**
+ * What a request-side hook (`rewriteRequestBody`) throws to refuse a request with a specific OpenAI
+ * error `code` — e.g. `unsupported_capability` for `tools` sent to a model with no tool-call parser.
+ * The gateway answers it as `400 {"error": {message, type: 'invalid_request_error', code}}`, the same
+ * envelope `:1337` uses, so a client sees one shape whichever port it talks to.
+ */
+export class ManagedRequestRefusal extends AtomicCoreError {
+  readonly openaiCode: string
+
+  constructor(message: string, openaiCode: string) {
+    super('INVALID_ARGUMENT', message)
+    this.name = 'ManagedRequestRefusal'
+    this.openaiCode = openaiCode
+  }
 }
 
 const READINESS_PATH = /^\/(?!\/)[A-Za-z0-9._~/-]*$/

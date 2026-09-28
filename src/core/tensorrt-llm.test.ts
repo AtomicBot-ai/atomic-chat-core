@@ -97,7 +97,17 @@ describe('wireTensorrtLlm', () => {
       options({
         managedRoot,
         descriptors: { forInstallation: async () => ({ kind: 'available', descriptor }) },
-        containers: Promise.resolve({ exec: docker.exec, journal }),
+        containers: Promise.resolve({
+          exec: async (args, callOptions) =>
+            args[2] === 'info'
+              ? {
+                  code: 0,
+                  stdout: JSON.stringify({ ServerVersion: '28.1.1', SecurityOptions: [] }),
+                  stderr: '',
+                }
+              : docker.exec(args, callOptions),
+          journal,
+        }),
         nvidiaSmi: join(data.root, 'no-such-nvidia-smi'),
       })
     ) as TensorrtLlmRuntime
@@ -107,8 +117,11 @@ describe('wireTensorrtLlm', () => {
     await mkdir(modelDir, { recursive: true })
     await writeFile(join(modelDir, 'model.yml'), 'architectures: [LlamaForCausalLM]\n')
     // No nvidia-smi answers on this host: no card, so nothing is created.
-    await expect(runtime.load('m')).rejects.toMatchObject({ code: 'MANAGED_PREREQUISITE_BLOCKED' })
-    expect(docker.subcommands()).toEqual(['info'])
+    await expect(runtime.load('m')).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      message: expect.stringContaining('No NVIDIA GPU'),
+    })
+    expect(docker.calls).toEqual([])
     await runtime.shutdown()
   })
 
@@ -120,6 +133,20 @@ describe('wireTensorrtLlm', () => {
     ) as TensorrtLlmRuntime
     await expect(runtime.load('m')).rejects.toMatchObject({ code: 'MANAGED_ADAPTER_UNAVAILABLE' })
     expect(docker.calls).toEqual([])
+    await runtime.shutdown()
+  })
+})
+
+describe('wireTensorrtLlm: a container runtime that failed to initialise', () => {
+  it('refuses a load naming the failure and its cause, not a missing docker CLI', async () => {
+    const containers = Promise.reject(new Error('journal unreadable'))
+    containers.catch(() => undefined)
+    const runtime = wireTensorrtLlm(options({ containers })) as TensorrtLlmRuntime
+    await expect(runtime.load('m')).rejects.toMatchObject({
+      code: 'MANAGED_ADAPTER_UNAVAILABLE',
+      message: expect.stringContaining('failed to initialise'),
+      details: 'journal unreadable',
+    })
     await runtime.shutdown()
   })
 })

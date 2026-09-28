@@ -33,8 +33,15 @@
  * Every other declared route still proxies byte-for-byte, exactly as before this existed. This
  * module stays engine-neutral about *why* an adapter wants either of these — it only enforces the
  * mechanics (method+path route matching on the decoded path, a body-size cap enforced while the body
- * streams in, a parse failure or a rewriter's own throw answering `400`/`500` instead of forwarding)
- * and never touches the response, streamed or not.
+ * streams in, a parse failure or a rewriter's own throw answering `400`/`500` instead of forwarding).
+ *
+ * `mapErrorResponse` (task 2.14 fix round 1, findings-2.14-r1.md item 1; ADR
+ * `docs/decisions/2026-09-29-tensorrt-llm-sessions-carry-a-route-policy-to-the-public-server.md`) is the
+ * one exception on the response side, and only for errors: a non-2xx answer on a declared POST route
+ * is read (up to `MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES`) and answered with whatever OpenAI error the
+ * adapter maps it to, so a client talking to `SessionInfo.port` directly gets the same
+ * `context_length_exceeded` as one going through `:1337`. A 2xx answer is never read or parsed: it
+ * streams through as it arrives, exactly as before.
  */
 
 import { createServer } from 'node:http'
@@ -43,8 +50,16 @@ import { randomBytes } from 'node:crypto'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { hostAndKeyGate } from '../../server/public/index.js'
 import type { HostAndKeyConfig } from '../../server/public/index.js'
-import { forwardableHeaders, readBody, relay, sendUpstream, sendWhole } from '../../server/public/index.js'
+import {
+  forwardableHeaders,
+  readBody,
+  relay,
+  relayedHeaders,
+  sendUpstream,
+  sendWhole,
+} from '../../server/public/index.js'
 import type { HeaderPairs, UpstreamResponse } from '../../server/public/index.js'
+import { ManagedRequestRefusal } from './adapter.js'
 import type { ManagedRoute } from './adapter.js'
 
 /** Hosts accepted as "loopback" for the upstream the gateway proxies to. */
@@ -94,6 +109,11 @@ export interface ManagedGatewayOptions {
    * `ManagedTextAdapter.rewriteRequestBody`.
    */
   rewriteRequestBody?: (route: string, body: unknown) => unknown
+  /**
+   * Optional: the OpenAI error body for an engine's non-2xx answer on a declared POST route, or null
+   * to relay it as it is (`ManagedTextAdapter.mapErrorResponse`). Never called for a 2xx answer.
+   */
+  mapErrorResponse?: (route: string, status: number, body: string) => object | null
 }
 
 export interface ManagedGateway {
@@ -117,6 +137,13 @@ const CONNECT_TIMEOUT_MS = 30_000
  * existed.
  */
 export const MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES = 8 * 1024 * 1024
+
+/**
+ * The largest engine *error* answer `mapErrorResponse` gets to read. An engine error is a short JSON
+ * document; one past this is answered with a generic error of the same status instead of being held
+ * in memory (findings-2.14-r1.md item 1: bounded, and only ever for non-2xx answers).
+ */
+export const MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES = 1024 * 1024
 
 const OPENAI_ERROR_HEADERS: HeaderPairs = [['content-type', 'application/json']]
 
@@ -273,7 +300,8 @@ async function sendBodyToUpstream(
   req: IncomingMessage,
   res: ServerResponse,
   upstream: ManagedGatewayUpstream,
-  body: Buffer
+  body: Buffer,
+  mapError?: (status: number, body: string) => object | null
 ): Promise<void> {
   // A client that disconnects before the upstream has even answered must not leave that connect
   // attempt, or a slow-to-respond container, running unattended.
@@ -298,9 +326,43 @@ async function sendBodyToUpstream(
     return
   }
   res.off('close', onEarlyClose)
+  const status = upstreamResponse.status
+  if (mapError !== undefined && (status < 200 || status > 299)) {
+    await answerEngineError(res, upstreamResponse, mapError)
+    return
+  }
   // `relay` owns the rest: it writes the status/headers, pipes the body with backpressure, and
   // tears the upstream connection down itself if the client disconnects mid-stream.
   await relay(res, upstreamResponse, [])
+}
+
+/**
+ * An engine's error answer, read under `MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES`: the adapter's mapped
+ * OpenAI error when it has one, otherwise the engine's own answer (status, headers, bytes) as it was.
+ */
+async function answerEngineError(
+  res: ServerResponse,
+  upstream: UpstreamResponse,
+  mapError: (status: number, body: string) => object | null
+): Promise<void> {
+  const capped = await readCappedBody(upstream.body, MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES).catch(() => null)
+  if (capped === null || capped === 'too-large') {
+    upstream.body.destroy()
+    sendOpenAIError(
+      res,
+      upstream.status,
+      'The engine answered with an error that could not be relayed.',
+      'server_error',
+      'upstream_error'
+    )
+    return
+  }
+  const mapped = mapError(upstream.status, capped.toString('utf8'))
+  if (mapped !== null) {
+    sendWhole(res, upstream.status, OPENAI_ERROR_HEADERS, JSON.stringify(mapped))
+    return
+  }
+  sendWhole(res, upstream.status, relayedHeaders(upstream, []), capped)
 }
 
 /**
@@ -342,7 +404,9 @@ async function readAndRewriteBody(
     // leaking an internal error message to the client; the detail still goes to this process's own
     // log, since this module has no injected logger of its own to hand it to (findings-2.13-r3.md
     // item 3).
-    if (error instanceof AtomicCoreError && error.code === 'INVALID_ARGUMENT') {
+    if (error instanceof ManagedRequestRefusal) {
+      sendOpenAIError(res, 400, error.message, 'invalid_request_error', error.openaiCode)
+    } else if (error instanceof AtomicCoreError && error.code === 'INVALID_ARGUMENT') {
       sendOpenAIError(res, 400, error.message, 'invalid_request_error', 'invalid_request_error')
     } else {
       console.error('managed-text gateway: rewriteRequestBody threw an unexpected error:', error)
@@ -414,7 +478,14 @@ async function proxyToUpstream(
     }
   }
 
-  await sendBodyToUpstream(req, res, options.upstream, body)
+  // Only a declared POST route's error answer is ever read: that is where an engine reports what a
+  // client sent it (a prompt past the context), and where a client expects an OpenAI error back.
+  const mapErrorResponse = options.mapErrorResponse
+  const mapError =
+    mapErrorResponse !== undefined && method === 'POST'
+      ? (status: number, text: string) => mapErrorResponse(route, status, text)
+      : undefined
+  await sendBodyToUpstream(req, res, options.upstream, body, mapError)
 }
 
 function assertLoopback(host: string): void {

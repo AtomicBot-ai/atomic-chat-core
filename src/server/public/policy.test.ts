@@ -9,6 +9,7 @@ const policy = (tools: boolean): LocalTargetPolicy => ({
     { method: 'GET', path: '/v1/models' },
   ],
   tools,
+  structuredOutput: false,
   mapError: () => null,
 })
 
@@ -60,6 +61,29 @@ describe('policyRefusal', () => {
       "The model 'trt' does not support /audio/speech."
     )
     expect(policyRefusal(policy(false), '/chat/completions', 'trt', [{ tools: [1] }])).toBeUndefined()
+  })
+
+  it('refuses a tool_choice and a JSON response_format too, worded like the session port', () => {
+    expect(
+      errorOf(policyRefusal(policy(false), '/chat/completions', 'trt', { tool_choice: 'auto' }))
+    ).toMatchObject({
+      message: "The model 'trt' does not support tool calling.",
+    })
+    expect(
+      errorOf(
+        policyRefusal(policy(true), '/chat/completions', 'trt', { response_format: { type: 'json_schema' } })
+      )
+    ).toEqual({
+      message: "The model 'trt' does not support structured output.",
+      type: 'invalid_request_error',
+      code: 'unsupported_capability',
+    })
+    expect(
+      policyRefusal(policy(false), '/chat/completions', 'trt', {
+        tool_choice: 'none',
+        response_format: { type: 'text' },
+      })
+    ).toBeUndefined()
   })
 
   it('refuses tools on the Anthropic route too', () => {

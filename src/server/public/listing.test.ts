@@ -44,6 +44,38 @@ describe('/metrics', () => {
   })
 })
 
+describe('/muse-code/models', () => {
+  it("advertises a declared session's own tool support and context, and llama.cpp defaults otherwise", async () => {
+    const server = await startPublic({
+      sessions: [
+        localSession(1, { modelId: 'gguf' }),
+        localSession(2, {
+          provider: 'tensorrt-llm',
+          modelId: 'trt',
+          policy: {
+            routes: [],
+            tools: false,
+            structuredOutput: false,
+            mapError: () => null,
+            contextLength: 16384,
+            maxOutputTokens: 2048,
+          },
+        }),
+      ],
+    })
+    const res = await fetch(`http://127.0.0.1:${server.port}/v1/muse-code/models`)
+    const body = (await res.json()) as {
+      data: Array<{
+        id: string
+        metadata: { 'muse-code': { tool_call: boolean; limit: { context: number; output: number } } }
+      }>
+    }
+    const muse = (id: string) => body.data.find((m) => m.id === id)?.metadata['muse-code']
+    expect(muse('trt')).toMatchObject({ tool_call: false, limit: { context: 16384, output: 2048 } })
+    expect(muse('gguf')).toMatchObject({ tool_call: true, limit: { context: 32_768, output: 32_768 } })
+  })
+})
+
 describe('/models', () => {
   it('lists a loaded TensorRT-LLM model under its own owner label', async () => {
     const server = await startPublic({

@@ -120,7 +120,7 @@
  */
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
-import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION } from '../managed-text/index.js'
+import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION, ManagedRequestRefusal } from '../managed-text/index.js'
 import type {
   ManagedEngineLaunch,
   ManagedExitClassification,
@@ -644,6 +644,45 @@ function readCandidateField(body: Record<string, unknown>, key: string): Candida
   return { present: true, valid, value: valid ? (value as number) : 0 }
 }
 
+/**
+ * What asks for tool calls: a non-empty `tools` list, or a `tool_choice` other than `"none"`. An
+ * empty list and `"none"` ask for nothing, so they pass (the same rule `:1337` applies).
+ */
+function asksForTools(body: Record<string, unknown>): boolean {
+  const tools = body['tools']
+  const choice = body['tool_choice']
+  return (
+    (Array.isArray(tools) && tools.length > 0) ||
+    (choice !== undefined && choice !== null && choice !== 'none')
+  )
+}
+
+/** `response_format` asking for JSON (a schema or any object); `{"type": "text"}` asks for nothing. */
+function asksForStructuredOutput(body: Record<string, unknown>): boolean {
+  const format = body['response_format']
+  if (format === null || typeof format !== 'object') return false
+  const type = (format as { type?: unknown }).type
+  return type === 'json_schema' || type === 'json_object'
+}
+
+/**
+ * Refuses, on the session gateway itself, what this session cannot do (findings-2.14-r1.md item 1;
+ * spec "запрос с `tools` к этой модели получает ошибку о неподдерживаемой возможности, а не молча
+ * игнорируется"): tool calls without a tool-call parser, JSON output without structured-output support
+ * for the family. `trtllm-serve` would otherwise accept the request and answer without honouring it.
+ * The wording and code are `:1337`'s own (`server/public/policy.ts`), so a client sees one error
+ * whichever port it talks to.
+ */
+function refuseUnsupported(body: Record<string, unknown>, capabilities: ManagedTextCapabilities): void {
+  const model = typeof body['model'] === 'string' ? `The model '${body['model']}'` : 'This model'
+  if (!capabilities.tools && asksForTools(body)) {
+    throw new ManagedRequestRefusal(`${model} does not support tool calling.`, 'unsupported_capability')
+  }
+  if (!capabilities.structured_output && asksForStructuredOutput(body)) {
+    throw new ManagedRequestRefusal(`${model} does not support structured output.`, 'unsupported_capability')
+  }
+}
+
 /** `AtomicCoreError('INVALID_ARGUMENT', ...)`, not a plain `Error`: the gateway
  *  (`../managed-text/gateway.ts`) only surfaces a rewrite-time throw's own message to the client
  *  when it is this exact shape — proof the message was actually written to reject something the
@@ -682,15 +721,21 @@ function invalidMaxTokens(field: string): never {
  *
  * `n` (multiple choices) is untouched: the cap is a per-choice output limit — the same as
  * `max_output_tokens` is documented to mean — not a budget shared across `n` completions.
+ *
+ * With the session's `capabilities` (the lifecycle always passes them; task 2.14 fix round 1), a
+ * request asking for what the model cannot do — tool calls without a parser, JSON output without
+ * structured-output support — is refused first (`refuseUnsupported`), before anything is rewritten.
  */
 export function tensorrtLlmRewriteRequestBody(
   route: string,
   body: unknown,
-  settings: TensorrtLlmSettings
+  settings: TensorrtLlmSettings,
+  capabilities?: ManagedTextCapabilities
 ): unknown {
   if (!OUTPUT_CAP_ROUTES.has(route)) return body
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return body
   const obj = body as Record<string, unknown>
+  if (capabilities !== undefined) refuseUnsupported(obj, capabilities)
   const cap = settings.max_output_tokens
 
   if (route === '/v1/completions') {
@@ -752,4 +797,11 @@ export const tensorrtLlmAdapter: ManagedTextAdapter<TensorrtLlmSettings> = {
   classifyExit: classifyTensorrtLlmExit,
   capabilities: tensorrtLlmCapabilities,
   rewriteRequestBody: tensorrtLlmRewriteRequestBody,
+  // The session port answers `trtllm-serve`'s context overflow the way `:1337` does
+  // (findings-2.14-r1.md item 1): OpenAI's `context_length_exceeded`, with both numbers.
+  mapErrorResponse: (_route, status, body) => mapTensorrtLlmContextLengthError(status, body),
+  // Only these are `trtllm-serve` flags; the output cap is the gateway's and the load timeout only a
+  // load's, so changing either never restarts a container (findings-2.14-r1.md item 3). The card is
+  // part of the lifecycle's own key already, as the one the load actually picked.
+  restartKey: (settings) => [settings.context_length, settings.kv_cache_free_gpu_memory_fraction],
 }

@@ -115,6 +115,8 @@ beforeEach(async () => {
   await installModel('llama-3', 'LlamaForCausalLM')
   await installModel('qwen3', 'Qwen3ForCausalLM')
   await installModel('slow-model', 'LlamaForCausalLM')
+  // An architecture the descriptor has no family entry for: no tool calls, no structured output.
+  await installModel('exotic', 'ExoticForCausalLM')
 })
 
 afterEach(async () => {
@@ -145,6 +147,7 @@ const post = (ready: ReadyLine, path: string, body: unknown = {}) =>
 interface Session {
   pid: number | null
   port: number
+  api_key: string
   model_id: string
   execution?: string
   generation?: string
@@ -156,10 +159,13 @@ async function load(ready: ReadyLine, model: string): Promise<Session> {
   return ((await res.json()) as { session: Session }).session
 }
 
-const publicPost = (port: number, path: string, body: unknown) =>
+const publicPost = (port: number, path: string, body: unknown, key?: string) =>
   fetch(`http://127.0.0.1:${port}/v1${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(key === undefined ? {} : { authorization: `Bearer ${key}` }),
+    },
     body: JSON.stringify(body),
   })
 
@@ -254,6 +260,98 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(Object.keys(dockerState().containers)).toEqual([])
     const gone = await publicPost(port, '/chat/completions', { model: 'qwen3', messages: [] })
     expect(gone.status).toBe(503)
+  })
+
+  it('answers on SessionInfo.port itself the way :1337 does: mapped overflow, refused tools and JSON output, the session key only', async () => {
+    const { ready } = await start()
+    const session = await load(ready, 'exotic')
+    const chat = { model: 'exotic', messages: [{ role: 'user', content: 'hi' }] }
+
+    const plain = await publicPost(
+      session.port,
+      '/chat/completions',
+      { ...chat, max_tokens: 50_000 },
+      session.api_key
+    )
+    expect(plain.status, await plain.clone().text()).toBe(200)
+    const answer = (await plain.json()) as { received: { max_tokens: number }; auth: string | null }
+    expect(answer.received.max_tokens).toBe(4096)
+    // The session key stops at the gateway; the engine never sees any key.
+    expect(answer.auth).toBeNull()
+
+    const streamed = await publicPost(
+      session.port,
+      '/chat/completions',
+      { ...chat, stream: true },
+      session.api_key
+    )
+    expect(streamed.headers.get('content-type')).toContain('text/event-stream')
+    expect(await streamed.text()).toContain('data: [DONE]')
+
+    const overflow = await publicPost(
+      session.port,
+      '/chat/completions',
+      { ...chat, messages: [{ role: 'user', content: 'OVERFLOW' }] },
+      session.api_key
+    )
+    expect(overflow.status).toBe(400)
+    const overflowBody = (await overflow.json()) as { error: { code: string; message: string } }
+    expect(overflowBody.error.code).toBe('context_length_exceeded')
+    expect(overflowBody.error.message).toContain('8192')
+    expect(overflowBody.error.message).toContain('9000')
+
+    for (const [extra, what] of [
+      [{ tools: [{ type: 'function', function: { name: 'f', parameters: {} } }] }, 'tool calling'],
+      [{ tool_choice: 'required' }, 'tool calling'],
+      [{ response_format: { type: 'json_object' } }, 'structured output'],
+    ] as const) {
+      const refused = await publicPost(
+        session.port,
+        '/chat/completions',
+        { ...chat, ...extra },
+        session.api_key
+      )
+      expect(refused.status).toBe(400)
+      expect(await refused.json()).toEqual({
+        error: {
+          message: `The model 'exotic' does not support ${what}.`,
+          type: 'invalid_request_error',
+          code: 'unsupported_capability',
+        },
+      })
+    }
+
+    const embeddings = await publicPost(
+      session.port,
+      '/embeddings',
+      { model: 'exotic', input: 'x' },
+      session.api_key
+    )
+    expect(embeddings.status).toBe(404)
+    expect((await publicPost(session.port, '/chat/completions', chat, 'not-the-key')).status).toBe(401)
+  })
+
+  it(':1337 with an API key: the client key is checked there and stripped, the session key reaches the gateway', async () => {
+    const { ready } = await start()
+    await load(ready, 'llama-3')
+    const serverRes = await post(ready, '/server/start', { port: 0, api_key: 'client-secret' })
+    expect(serverRes.status, await serverRes.clone().text()).toBe(200)
+    const { port } = (await serverRes.json()) as { port: number }
+    const chat = { model: 'llama-3', messages: [{ role: 'user', content: 'hi' }] }
+
+    expect((await publicPost(port, '/chat/completions', chat)).status).toBe(401)
+    const res = await publicPost(port, '/chat/completions', chat, 'client-secret')
+    expect(res.status, await res.clone().text()).toBe(200)
+    const answer = (await res.json()) as { auth: string | null }
+    // The gateway only let this through with the session key; neither key reached the engine.
+    expect(answer.auth).toBeNull()
+    const tools = await publicPost(
+      port,
+      '/chat/completions',
+      { ...chat, tools: [{ type: 'function', function: { name: 'f' } }] },
+      'client-secret'
+    )
+    expect(await tools.json()).toMatchObject({ error: { code: 'unsupported_capability' } })
   })
 
   it('cancels a load that has not become ready: the container is stopped and no session is published', async () => {

@@ -1006,3 +1006,83 @@ describe('ManagedTextLifecycle: carry-forward into task 2.14', () => {
     expect(progress().every((p) => p.gpu_substituted === undefined)).toBe(true)
   })
 })
+
+describe('ManagedTextLifecycle: task 2.14 fix round 1 (findings-2.14-r1.md items 1 and 3)', () => {
+  const toolsCapabilities = { ...capabilities, tools: true }
+  const delta: ManagedTextAdapter<{ tag: string; ctx: number }> = {
+    id: 'delta-engine',
+    contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
+    readiness: { path: '/health', expectedStatus: 200 },
+    routes: [{ method: 'POST', path: '/v1/chat/completions' }],
+    rewritableRoutes: [{ method: 'POST', path: '/v1/chat/completions' }],
+    stageMarkers: [],
+    validateSettings: (raw) => {
+      const r = (raw ?? {}) as { tag?: string; ctx?: number }
+      return { tag: r.tag ?? 'default', ctx: r.ctx ?? 4096 }
+    },
+    buildLaunch: (c) => ({
+      engine: { container_port: 8000 },
+      argv: ['delta', '--ctx', String(c.settings.ctx)],
+    }),
+    readinessTimeoutMs: () => 10_000,
+    classifyExit: () => ({ kind: 'other', message: 'delta exited' }),
+    capabilities: ({ family }) => (family?.tool_parser ? toolsCapabilities : capabilities),
+    rewriteRequestBody: (route, body, settings, caps) => ({
+      route,
+      tag: settings.tag,
+      tools: caps.tools,
+      body,
+    }),
+    mapErrorResponse: (route, status, body) => ({ error: { route, status, body } }),
+    restartKey: (settings) => settings.ctx,
+  }
+  const deltaInstallation = {
+    ...betaInstallation,
+    adapter_id: 'delta-engine',
+    engine_id: 'delta',
+    descriptor_id: 'delta-1.0-r1',
+  }
+
+  async function captureGateway(): Promise<() => ManagedGatewayOptions | undefined> {
+    let captured: ManagedGatewayOptions | undefined
+    await build(
+      {
+        startGateway: async (options) => {
+          captured = options
+          return startManagedGateway(options)
+        },
+      },
+      [delta]
+    )
+    return () => captured
+  }
+
+  it("hands the rewriter this session's capabilities and the gateway the adapter's error mapper, bound to the route", async () => {
+    const gateway = await captureGateway()
+    await lifecycle.load(
+      request_({
+        installation: deltaInstallation,
+        family: { tool_parser: 'qwen3', reasoning_parser: null, structured_output: true },
+      })
+    )
+    expect(gateway()?.rewriteRequestBody?.('/v1/chat/completions', { x: 1 })).toMatchObject({ tools: true })
+    expect(gateway()?.mapErrorResponse?.('/v1/chat/completions', 400, 'boom')).toEqual({
+      error: { route: '/v1/chat/completions', status: 400, body: 'boom' },
+    })
+  })
+
+  it('joins the running session when only settings outside the restart key changed, and enforces the new ones', async () => {
+    const gateway = await captureGateway()
+    const first = await lifecycle.load(request_({ installation: deltaInstallation, settings: { tag: 'a' } }))
+    const again = await lifecycle.load(request_({ installation: deltaInstallation, settings: { tag: 'b' } }))
+    expect(again).toBe(first)
+    expect(docker.subcommands().filter((c) => c === 'create')).toHaveLength(1)
+    expect(gateway()?.rewriteRequestBody?.('/v1/chat/completions', {})).toMatchObject({ tag: 'b' })
+
+    const restarted = await lifecycle.load(
+      request_({ installation: deltaInstallation, settings: { tag: 'b', ctx: 8192 } })
+    )
+    expect(restarted.generation).toBe('gen-2')
+    expect(docker.last().createArgv).toContain('8192')
+  })
+})

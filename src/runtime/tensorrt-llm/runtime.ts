@@ -46,7 +46,8 @@ import { tensorrtLlmSettings } from './settings.js'
 export interface TensorrtLlmRuntimeDeps {
   /**
    * The lifecycle, once core startup has wired the one Docker executor and reconciled its journal;
-   * `null` when this host has no docker CLI at all. Loads wait for it; nothing is listed before it.
+   * `null` when this host has no docker CLI at all; rejected, with the cause, when that wiring failed.
+   * Loads wait for it; nothing is listed before it.
    */
   lifecycle: Promise<ManagedTextLifecycle | null>
   /** The `ready` installation, its pinned descriptor and image; rejects with why there is none. */
@@ -102,7 +103,11 @@ export class TensorrtLlmRuntime implements LocalRuntime {
   /** What each loaded session can do, keyed by model and pinned to the generation it was computed for. */
   private readonly sessionCapabilities = new Map<
     string,
-    { generation: string; capabilities: ManagedTextCapabilities }
+    {
+      generation: string
+      capabilities: ManagedTextCapabilities
+      limits: { contextLength: number; maxOutputTokens: number }
+    }
   >()
 
   constructor(private readonly deps: TensorrtLlmRuntimeDeps) {
@@ -141,7 +146,13 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     }
     // Validated first, before anything is asked of the machine (spec: schema validation before start).
     const settings = tensorrtLlmSettings(this.deps.settings(), opts.overrides)
-    const lifecycle = await this.deps.lifecycle
+    const lifecycle = await this.deps.lifecycle.catch((cause: unknown) => {
+      throw new AtomicCoreError(
+        'MANAGED_ADAPTER_UNAVAILABLE',
+        'The managed container runtime failed to initialise when core started, so tensorrt-llm cannot run models.',
+        cause instanceof Error ? cause.message : String(cause)
+      )
+    })
     if (lifecycle === null) {
       throw new AtomicCoreError(
         'MANAGED_ADAPTER_UNAVAILABLE',
@@ -194,6 +205,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     this.sessionCapabilities.set(modelId, {
       generation: session.generation ?? '',
       capabilities: tensorrtLlmAdapter.capabilities({ settings, family }),
+      limits: { contextLength: settings.context_length, maxOutputTokens: settings.max_output_tokens },
     })
     return session
   }
@@ -243,9 +255,8 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     if (session === undefined) return undefined
     const known = this.sessionCapabilities.get(modelId)
     // A session with no record of what it can do is treated as able to do nothing optional.
-    const capabilities =
-      known !== undefined && known.generation === session.generation ? known.capabilities : NONE
-    return tensorrtLlmRoutePolicy(capabilities)
+    if (known === undefined || known.generation !== session.generation) return tensorrtLlmRoutePolicy(NONE)
+    return tensorrtLlmRoutePolicy(known.capabilities, known.limits)
   }
 
   /** Answers rather than throws, like every provider's capabilities: all false while nothing resolves. */

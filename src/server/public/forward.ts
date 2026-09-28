@@ -194,6 +194,18 @@ export async function serveForward(ex: Exchange): Promise<void> {
     return
   }
 
+  // A session that declares its routes and has no `/v1/messages` of its own goes straight to the
+  // chat-completions translation: asking it first would only be refused (findings-2.14-r1.md item 4).
+  if (
+    isMessages &&
+    backend.kind === 'local' &&
+    backend.session.policy &&
+    !backend.session.policy.routes.some((r) => r.method === 'POST' && r.path === '/v1/messages')
+  ) {
+    await messagesFallback(ex, backend, url, key, json)
+    return
+  }
+
   // While the inspector watches, a local streaming chat is asked for real token counts. Only local
   // backends: a remote provider that rejects unknown fields would turn diagnostics into an outage.
   const injected =
@@ -488,9 +500,10 @@ async function messagesFallback(
   url: string,
   key: string | undefined,
   json: JsonValue,
-  response: UpstreamResponse
+  /** The engine's own answer to `/messages`; absent when the session is known not to serve it. */
+  response?: UpstreamResponse
 ): Promise<void> {
-  const errorBody = await readUpstreamText(response)
+  const errorBody = response === undefined ? undefined : await readUpstreamText(response)
   const trace = ex.trace
   trace.anthropicFallback = true
   const errorKind = backend.kind === 'local' ? 'local_model_error' : 'remote_provider_error'
@@ -523,6 +536,16 @@ async function messagesFallback(
         trace.upstreamStatus = fallback.status
         trace.oomDetected = bodyIndicatesOom(fallbackError)
         trace.ctxOverflowDetected = isContextLimitError(fallback.status, fallbackError)
+        // A declared session's own error wording (its context overflow) reads the same here as on
+        // the chat route itself.
+        const mapped =
+          backend.kind === 'local' ? backend.session.policy?.mapError(fallback.status, fallbackError) : null
+        if (mapped) {
+          answer(ex, fallback.status, serdeToString(mapped as JsonValue), [
+            ['Content-Type', 'application/json'],
+          ])
+          return
+        }
         answer(ex, fallback.status, fallbackError)
         return
       }
@@ -532,9 +555,28 @@ async function messagesFallback(
         fallback.body.destroy()
       )
       return
-    } catch {
+    } catch (e) {
       if (signal.aborted) return
+      if (response === undefined) {
+        answerUnreachable(ex, backend, e as Error)
+        return
+      }
     }
+  }
+  if (response === undefined || errorBody === undefined) {
+    // Nothing was asked of the engine, and the request cannot be put as chat completions either.
+    trace.errorKind = 'bad_request'
+    answer(
+      ex,
+      400,
+      structuredErrorJson(
+        'This request cannot be sent to the model as chat completions.',
+        'invalid_request_error',
+        'invalid_request_error'
+      ),
+      [['Content-Type', 'application/json']]
+    )
+    return
   }
   trace.errorKind = errorKind
   trace.upstreamStatus = response.status

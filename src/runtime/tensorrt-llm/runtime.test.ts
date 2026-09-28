@@ -84,7 +84,10 @@ async function installModel(id: string, architecture: string): Promise<void> {
   )
 }
 
-function build(over: Partial<TensorrtLlmRuntimeDeps> = {}, withDocker = true): TensorrtLlmRuntime {
+function build(
+  over: Partial<TensorrtLlmRuntimeDeps> = {},
+  withDocker: boolean | Error = true
+): TensorrtLlmRuntime {
   const adapters = new ManagedTextAdapterRegistry()
   adapters.register(tensorrtLlmAdapter)
   let port = 43_000
@@ -122,7 +125,8 @@ function build(over: Partial<TensorrtLlmRuntimeDeps> = {}, withDocker = true): T
       })
   )
   runtime = new TensorrtLlmRuntime({
-    lifecycle: withDocker ? made : Promise.resolve(null),
+    lifecycle:
+      withDocker instanceof Error ? Promise.reject(withDocker) : withDocker ? made : Promise.resolve(null),
     readyInstallation: () => installation(),
     hostFacts: async () => facts,
     model: (id) => readTensorrtLlmModel(data.layout.provider('tensorrt-llm').modelsDir, id),
@@ -233,6 +237,16 @@ describe('TensorrtLlmRuntime: refused before a container exists', () => {
   it('answers MANAGED_ADAPTER_UNAVAILABLE on a host with no docker CLI', async () => {
     build({}, false)
     expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_ADAPTER_UNAVAILABLE')
+  })
+
+  it('says the managed container runtime failed to initialise, with the cause, when core startup could not wire it', async () => {
+    build({}, new Error('docker reconcile timed out'))
+    const error = await rejection(runtime.load('qwen3'))
+    expect(error.code).toBe('MANAGED_ADAPTER_UNAVAILABLE')
+    expect(error.message).toMatch(/failed to initialise/)
+    expect(error.message).not.toMatch(/not installed/)
+    expect(error.details).toContain('docker reconcile timed out')
+    expect(runtime.list()).toEqual([])
   })
 
   it.each<[string, Record<string, unknown>]>([
@@ -361,7 +375,12 @@ describe('TensorrtLlmRuntime: what a session can do', () => {
   it("gates tools on the descriptor's parser for the model's family", async () => {
     build()
     await runtime.load('qwen3')
-    expect(runtime.routePolicy('qwen3')).toMatchObject({ tools: true })
+    expect(runtime.routePolicy('qwen3')).toMatchObject({
+      tools: true,
+      structuredOutput: true,
+      contextLength: 8192,
+      maxOutputTokens: 4096,
+    })
     await runtime.load('llama')
     expect(runtime.routePolicy('llama')).toMatchObject({ tools: false })
     expect(runtime.routePolicy('qwen3')).toBeUndefined()

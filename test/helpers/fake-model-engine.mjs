@@ -2,8 +2,9 @@
 /**
  * What `fake-model-docker.mjs` runs as "the container": a tiny OpenAI-compatible server on the given
  * port, shaped like `trtllm-serve` where the e2e looks. `GET /health` answers 200 (or 503 forever in
- * `slow` mode); the completion routes echo the request body back as `received`, stream when asked, and
- * answer a prompt containing `OVERFLOW` with `trtllm-serve`'s own context-overflow error.
+ * `slow` mode); the completion routes echo the request body back as `received` and the
+ * `Authorization` header they got as `auth` (null when none reached the engine), stream when asked,
+ * and answer a prompt containing `OVERFLOW` with `trtllm-serve`'s own context-overflow error.
  *
  *   node fake-model-engine.mjs <port> <ready|slow>
  */
@@ -57,6 +58,7 @@ createServer((req, res) => {
           },
         ],
         received: parsed,
+        auth: req.headers.authorization ?? null,
       })
       return
     }

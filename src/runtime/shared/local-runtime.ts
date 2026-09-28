@@ -59,14 +59,20 @@ export interface LocalLoadOptions {
 export interface SessionRoutePolicy {
   /** The method+path routes the session serves; any other model-bearing route is refused, never forwarded. */
   routes: readonly { method: string; path: string }[]
-  /** False refuses a request that carries `tools` with a clear error, instead of silently dropping them. */
+  /** False refuses a request that asks for tool calls with a clear error, instead of silently dropping them. */
   tools: boolean
+  /** False refuses a request that asks for JSON output (`response_format` json_schema/json_object). */
+  structuredOutput: boolean
   /**
    * The client-facing OpenAI error for an engine error this policy knows (a context overflow), or null
    * for the server's generic wrapping. A session with a policy is never grown or recreated: its
    * context was fixed when its container started.
    */
   mapError: (status: number, body: string) => object | null
+  /** The context the session was started with, when known (advertised to clients that size by it). */
+  contextLength?: number
+  /** The per-request output cap the session enforces, when known. */
+  maxOutputTokens?: number
 }
 
 export interface LocalRuntime {

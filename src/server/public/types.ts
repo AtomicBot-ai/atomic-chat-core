@@ -32,7 +32,12 @@ import type { ErrorSink } from '../../telemetry/index.js'
 export interface LocalTargetPolicy {
   routes: readonly { method: string; path: string }[]
   tools: boolean
+  structuredOutput: boolean
   mapError: (status: number, body: string) => object | null
+  /** The context the session was started with, when known: what `/muse-code/models` advertises. */
+  contextLength?: number
+  /** The per-request output cap the session enforces, when known. */
+  maxOutputTokens?: number
 }
 
 /** A model a local engine is serving right now. */

@@ -3,10 +3,12 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
+import { ManagedRequestRefusal } from './adapter.js'
 import type { ManagedRoute } from './adapter.js'
 import {
   bracketIfIpv6,
   generateGatewayKey,
+  MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES,
   MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES,
   readCappedBody,
   startManagedGateway,
@@ -104,6 +106,7 @@ async function setup(
     routes?: ManagedRoute[]
     rewritableRoutes?: ManagedRoute[]
     rewriteRequestBody?: (route: string, body: unknown) => unknown
+    mapErrorResponse?: (route: string, status: number, body: string) => object | null
   } = {}
 ): Promise<{ gw: ManagedGateway; upstream: FakeUpstream; apiKey: string }> {
   const upstream = await startFakeUpstream(handler)
@@ -116,6 +119,7 @@ async function setup(
     routes: opts.routes ?? DEFAULT_TEST_ROUTES,
     ...(opts.rewritableRoutes ? { rewritableRoutes: opts.rewritableRoutes } : {}),
     ...(opts.rewriteRequestBody ? { rewriteRequestBody: opts.rewriteRequestBody } : {}),
+    ...(opts.mapErrorResponse ? { mapErrorResponse: opts.mapErrorResponse } : {}),
   })
   gateways.push(gw)
   return { gw, upstream, apiKey }
@@ -1039,6 +1043,136 @@ describe('method matching (task 2.13 fix round 3, findings-2.13-r3.md item 1)', 
     })
 
     expect(res.status).toBe(404)
+    expect(reached).toBe(false)
+  })
+})
+
+describe('engine error answers (task 2.14 fix round 1, findings-2.14-r1.md item 1)', () => {
+  const OVERFLOW = '{"object":"error","message":"prompt too long (9000 > 8192)","code":400}'
+  const mapped = {
+    error: { message: 'mapped', type: 'invalid_request_error', code: 'context_length_exceeded' },
+  }
+  const auth = (apiKey: string) => ({ host: '127.0.0.1', authorization: `Bearer ${apiKey}` })
+
+  it('answers the mapped OpenAI error for a non-2xx answer on a declared POST route', async () => {
+    const seen: Array<[string, number, string]> = []
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(OVERFLOW)
+      },
+      {
+        mapErrorResponse: (route, status, body) => {
+          seen.push([route, status, body])
+          return mapped
+        },
+      }
+    )
+    const res = await send(gw.port, { method: 'POST', headers: auth(apiKey), body: '{}' })
+    expect(res.status).toBe(400)
+    expect(res.headers['content-type']).toBe('application/json')
+    expect(JSON.parse(res.body)).toEqual(mapped)
+    expect(seen).toEqual([['/v1/chat/completions', 400, OVERFLOW]])
+  })
+
+  it("relays the engine's own error, status and type when the mapper does not know it", async () => {
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(422, { 'content-type': 'application/json', 'x-engine': 'kept' })
+        res.end('{"detail":"bad sampling"}')
+      },
+      { mapErrorResponse: () => null }
+    )
+    const res = await send(gw.port, { method: 'POST', headers: auth(apiKey), body: '{}' })
+    expect(res.status).toBe(422)
+    expect(res.headers['x-engine']).toBe('kept')
+    expect(res.body).toBe('{"detail":"bad sampling"}')
+  })
+
+  it('never reads a 2xx answer: a stream still arrives chunk by chunk, before the engine ends it', async () => {
+    let finish: (() => void) | undefined
+    const called: number[] = []
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.write('data: first\n\n')
+        finish = () => res.end('data: [DONE]\n\n')
+      },
+      { mapErrorResponse: (_r, status) => (called.push(status), mapped) }
+    )
+    const first = await new Promise<string>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: gw.port,
+          path: '/v1/chat/completions',
+          method: 'POST',
+          headers: auth(apiKey),
+        },
+        (res) => res.once('data', (chunk: Buffer) => resolve(chunk.toString('utf8')))
+      )
+      req.on('error', reject)
+      req.end('{}')
+    })
+    expect(first).toBe('data: first\n\n')
+    finish?.()
+    expect(called).toEqual([])
+  })
+
+  it('leaves a non-2xx answer on a GET route alone', async () => {
+    const called: number[] = []
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(503)
+        res.end('warming up')
+      },
+      { mapErrorResponse: (_r, status) => (called.push(status), mapped) }
+    )
+    const res = await send(gw.port, { path: '/v1/models', headers: auth(apiKey) })
+    expect(res.status).toBe(503)
+    expect(res.body).toBe('warming up')
+    expect(called).toEqual([])
+  })
+
+  it('answers a generic OpenAI error, same status, for an error body past the cap instead of buffering it', async () => {
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(500, { 'content-type': 'text/plain' })
+        res.end(Buffer.alloc(MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES + 1, 0x61))
+      },
+      { mapErrorResponse: () => mapped }
+    )
+    const res = await send(gw.port, { method: 'POST', headers: auth(apiKey), body: '{}' })
+    expect(res.status).toBe(500)
+    expect(JSON.parse(res.body)).toMatchObject({ error: { code: 'upstream_error' } })
+  })
+
+  it("answers a ManagedRequestRefusal thrown by the rewriter as a 400 with the refusal's own code", async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('{}')
+      },
+      {
+        rewritableRoutes: [{ method: 'POST', path: '/v1/chat/completions' }],
+        rewriteRequestBody: () => {
+          throw new ManagedRequestRefusal(
+            "The model 'm' does not support tool calling.",
+            'unsupported_capability'
+          )
+        },
+      }
+    )
+    const res = await send(gw.port, { method: 'POST', headers: auth(apiKey), body: '{"tools":[1]}' })
+    expect(res.status).toBe(400)
+    expect(JSON.parse(res.body)).toEqual({
+      error: {
+        message: "The model 'm' does not support tool calling.",
+        type: 'invalid_request_error',
+        code: 'unsupported_capability',
+      },
+    })
     expect(reached).toBe(false)
   })
 })

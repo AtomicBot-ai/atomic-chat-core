@@ -261,7 +261,13 @@ export async function createAtomicCore(
     const managedPlatform: NodeJS.Platform = testHost === null ? platform : 'linux'
     const managedDockerPath = testHost === null ? options.dockerPath : testHost.dockerPath
     let containersWired!: (containers: ManagedContainers | null) => void
-    const managedContainers = new Promise<ManagedContainers | null>((resolve) => (containersWired = resolve))
+    let containersFailed!: (cause: unknown) => void
+    const managedContainers = new Promise<ManagedContainers | null>((resolve, reject) => {
+      containersWired = resolve
+      containersFailed = reject
+    })
+    // A failure is reported to a load that asks (the provider), never as an unhandled rejection.
+    managedContainers.catch(() => undefined)
     // The public server's trusted hosts, kept in this one array for every session gateway to read.
     const managedTrustedHosts: string[] = []
     const managedRoot = managedSharedRoot(nodeDataFolderEnv(env))
@@ -578,18 +584,17 @@ export async function createAtomicCore(
     // Model containers a previous core left running are stopped and removed before the first load is
     // served, like `reapOrphans` above does for native backends. Linux with a docker CLI only; the
     // `tensorrt-llm` provider takes over the executor and journal this returns.
-    containersWired(
-      await wireManagedContainers({
-        platform: managedPlatform,
-        layout,
-        instanceId: lock.instanceId,
-        log,
-        ...(managedDockerPath !== undefined ? { dockerPath: managedDockerPath } : {}),
-      }).catch((e: unknown) => {
-        warn(`managed runtime container reconcile: ${String(e)}`)
-        return null
-      })
-    )
+    // A failure here is not "no docker": the provider says the runtime failed to initialise, and why.
+    await wireManagedContainers({
+      platform: managedPlatform,
+      layout,
+      instanceId: lock.instanceId,
+      log,
+      ...(managedDockerPath !== undefined ? { dockerPath: managedDockerPath } : {}),
+    }).then(containersWired, (e: unknown) => {
+      warn(`managed runtime container reconcile: ${String(e)}`)
+      containersFailed(e)
+    })
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

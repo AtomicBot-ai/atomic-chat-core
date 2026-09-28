@@ -23,6 +23,7 @@ const info = (model_id: string, port: number): SessionInfo => ({
 const policy: SessionRoutePolicy = {
   routes: [{ method: 'POST', path: '/v1/chat/completions' }],
   tools: false,
+  structuredOutput: false,
   mapError: () => null,
 }
 
