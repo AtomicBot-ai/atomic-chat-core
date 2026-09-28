@@ -37,6 +37,13 @@ export interface HostExecOptions {
 
 const DEFAULT_TIMEOUT_MS = 15_000
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024
+/**
+ * After a timed-out command has exited, how long to wait for its output pipes to close. A leftover
+ * grandchild can hold them open indefinitely, and `close` would wait for it.
+ */
+const PIPE_SETTLE_MS = 1_000
+/** After SIGKILL, answer at the latest this much later, whatever the process table says. */
+const KILL_SETTLE_MS = 5_000
 
 export type HostExec = (
   command: string,
@@ -82,12 +89,21 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
           finish({ code: null, stdout: '', stderr: `timed out after ${timeoutMs} ms` })
           return
         }
-        // Ask first, then insist; `close` below answers once the process is actually gone.
+        // Ask first, then insist. The answer comes when the process is gone (`exit`, then a moment
+        // for the pipes), or at the latest shortly after SIGKILL — never only on `close`.
         timedOut = true
         child.kill('SIGTERM')
-        setTimeout(() => child?.kill('SIGKILL'), options.terminateGraceMs).unref()
+        setTimeout(() => {
+          child?.kill('SIGKILL')
+          setTimeout(finishTimedOut, KILL_SETTLE_MS).unref()
+        }, options.terminateGraceMs).unref()
       }, timeoutMs)
       timer.unref()
+
+      const finishTimedOut = (): void => {
+        const said = Buffer.concat(stderr).toString('utf8')
+        finish({ code: null, stdout: '', stderr: `${said}\ntimed out after ${timeoutMs} ms` })
+      }
 
       const finish = (output: CommandOutput): void => {
         if (settled) return
@@ -129,10 +145,12 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
 
       // A binary that is not on the machine arrives here as ENOENT, not as an exit code.
       child.on('error', (error) => finish({ code: null, stdout: '', stderr: error.message }))
+      child.on('exit', () => {
+        if (timedOut) setTimeout(finishTimedOut, PIPE_SETTLE_MS).unref()
+      })
       child.on('close', (code) => {
         if (timedOut) {
-          const said = Buffer.concat(stderr).toString('utf8')
-          finish({ code: null, stdout: '', stderr: `${said}\ntimed out after ${timeoutMs} ms` })
+          finishTimedOut()
           return
         }
         finish({

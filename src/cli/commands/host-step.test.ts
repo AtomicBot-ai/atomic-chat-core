@@ -118,7 +118,7 @@ describe('the core binary routes host-step to the real executor', () => {
       await writeFile(path, '{}')
       const io = recordingIo({ env: {} })
       expect(await runCli(['host-step', 'exec', path], io)).toBe(2)
-      expect(io.err.join('')).toMatch(/owned by uid/)
+      expect(io.err.join('')).toMatch(/refused before a result file could be written: .*owned by uid/)
       await expect(readFile(join(dir, 'step-9.result.json'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       })

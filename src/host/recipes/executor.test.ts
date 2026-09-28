@@ -503,6 +503,36 @@ describe('never over or around what is already there', () => {
     expect(host.calls.some(([program, sub]) => program === 'apt-get' && sub === 'install')).toBe(false)
   })
 
+  // RPM Obsoletes: a plain `dnf install` of the right-hand package would replace the left-hand one.
+  it.each<[string, ContainerRuntimeComponent[], string]>([
+    ['nvidia-container-runtime', ['nvidia-container-toolkit'], 'toolkit only'],
+    ['nvidia-container-runtime-hook', ['nvidia-container-toolkit'], 'toolkit only'],
+    ['nvidia-container-runtime', ['docker-engine', 'nvidia-container-toolkit'], 'docker and toolkit'],
+    ['nvidia-container-runtime-hook', ['docker-engine', 'nvidia-container-toolkit'], 'docker and toolkit'],
+    ['containerd', ['docker-engine'], 'docker only'],
+    ['runc', ['docker-engine'], 'docker only'],
+    ['docker-ce-selinux', ['docker-engine'], 'docker only'],
+    ['containerd', ['docker-engine', 'nvidia-container-toolkit'], 'docker and toolkit'],
+    ['runc', ['docker-engine', 'nvidia-container-toolkit'], 'docker and toolkit'],
+    ['docker-ce-selinux', ['docker-engine', 'nvidia-container-toolkit'], 'docker and toolkit'],
+  ])(
+    'Fedora with %s installed (%j, %s): refused, nothing installed or replaced',
+    async (installed, components) => {
+      const host = new FakeHost()
+      host.packages.add(installed)
+      host.startsOnInstall = false
+      const result = await run(host, requestFor(fedora(components)))
+      expect(result.outcome).toBe('failed')
+      const packages = result.steps.find((s) => s.id === 'packages')!
+      expect(packages).toMatchObject({
+        status: 'failed',
+        detail: expect.stringContaining(`${installed} is installed`),
+      })
+      expect(packages.detail).toMatch(/Nothing was installed and nothing was removed/)
+      expect(host.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
+    }
+  )
+
   it('the toolkit-only plan on a moby host installs only the toolkit', async () => {
     const host = new FakeHost()
     host.packages.add('moby-engine')
@@ -510,7 +540,7 @@ describe('never over or around what is already there', () => {
     const result = await run(host, requestFor(fedora(['nvidia-container-toolkit'])))
     expect(result.outcome).toBe('completed')
     expect(host.mutations()).toEqual([
-      'dnf install -y --setopt=install_weak_deps=False nvidia-container-toolkit',
+      'dnf install -y --setopt=install_weak_deps=False --setopt=obsoletes=False nvidia-container-toolkit',
     ])
     expect(host.files.has('/etc/yum.repos.d/docker-ce.repo')).toBe(false)
   })

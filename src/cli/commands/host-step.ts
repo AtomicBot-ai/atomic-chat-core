@@ -2,7 +2,16 @@
  * `host-step exec <request-file>` — the privileged helper (design D3). The app copies this binary
  * to a private folder and runs it under `pkexec`; a person without a polkit agent runs the same
  * command with `sudo`. It reads the request, runs the recipe, writes `<step>.result.json` beside
- * the request and exits: 0 completed, 1 failed or refused, 2 usage. It never talks to a core.
+ * the request and exits. It never talks to a core.
+ *
+ * Exit codes:
+ * - 0 — the recipe completed; the result file says `completed`.
+ * - 1 — a result file was written and says `failed` (a refused request or a failed step).
+ * - 2 — refused before a result file could be written: a usage error, a path not named
+ *   `<step_id>.request.json`, or a folder the executor does not trust (not a real directory, writable
+ *   by others, or not owned by the invoking user — or, run as root with neither `PKEXEC_UID` nor
+ *   `SUDO_UID`, not owned by root). The reason is printed on stderr; the client must treat a missing
+ *   result file as failed.
  *
  * Deliberately not in `USAGE`: nobody runs it by choice, and `atc host-step` is hidden the same way.
  */
@@ -13,7 +22,9 @@ import { executeHostStep, nodeHostStepDeps } from '../../host/recipes/index.js'
 import type { HostStepExecutorDeps } from '../../host/recipes/index.js'
 import type { CliIo } from '../io.js'
 
-const HOST_STEP_USAGE = 'Usage: atomic-chat-core host-step exec <step_id.request.json> [--json]\n'
+const HOST_STEP_USAGE =
+  'Usage: atomic-chat-core host-step exec <step_id.request.json> [--json]\n' +
+  'Exit: 0 completed, 1 failed (see the result file), 2 refused before a result file could be written.\n'
 
 export async function hostStepCommand(
   argv: string[],
@@ -40,7 +51,7 @@ export async function hostStepCommand(
     result = await executeHostStep(requestPath, deps)
   } catch (error) {
     if (error instanceof AtomicCoreError && error.code === 'MANAGED_HOST_STEP_INVALID') {
-      io.stderr(`${error.message}\n`)
+      io.stderr(`host-step: refused before a result file could be written: ${error.message}\n`)
       return 2
     }
     throw error

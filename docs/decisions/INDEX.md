@@ -17,6 +17,7 @@ add a new one that says which record it supersedes.
 - **2026-09-28** — [Bump core to 0.7.0 for the TensorRT-LLM descriptor gate](2026-09-28-bump-core-to-0-7-0-for-the-tensorrt-llm-descriptor-gate.md)
 - **2026-09-28** — [tensorrt-llm model check: a fixed KV-cache reserve fraction, and unified memory ranks as zero for GPU selection](2026-09-28-tensorrt-llm-model-check-kv-reserve-and-gpu-selection.md)
 - **2026-09-28** — [Linux probe drops docker-group tracking; the install recipe always pairs enable+group](2026-09-28-linux-probe-drops-docker-group-tracking-and-recipe-blocks-pair.md)
+- **2026-09-28** — [Host-step executor fix round 2: dnf Obsoletes, user-owned folders only, bounded kill](2026-09-28-host-step-executor-fix-round-2.md) — supersedes the round-1 record's dnf and residual-race statements.
 - **2026-09-28** — [Host-step executor fix round 1: trusted folders, --no-remove, own-property lookups](2026-09-28-host-step-executor-fix-round-1.md) — amends the host-step executor record below; states what `recipe_digest` covers.
 - **2026-09-28** — [The host-step executor runs the container-runtime recipe in core, as pinned data](2026-09-28-host-step-executor-runs-the-container-runtime-recipe-in-core.md)
 - **2026-09-28** — [Linux probe fix round 5: an effective group member with something missing gets the plan, not access-unexplained](2026-09-28-linux-probe-effective-member-falls-through-to-plan-round-5.md) — supersedes the unconditional access-unexplained rule (round 2) and the immutable-gate divergence (round 4).

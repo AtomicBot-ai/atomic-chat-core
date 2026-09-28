@@ -16,9 +16,13 @@
  *   system. `assertPermittedCommand` is an allowlist the executor applies to every argv before it
  *   runs, and a test scans every step this module can build for the forbidden words. `apt-get
  *   install` always carries `--no-remove`: without it apt's resolver may remove a conflicting
- *   package to satisfy the install. `dnf install` never removes an installed package unless given
- *   `--allowerasing` (dnf4 and dnf5 alike) — it fails on a conflict instead — and that flag is
- *   forbidden.
+ *   package to satisfy the install. `dnf install` has two ways to take a package away:
+ *   `--allowerasing` (forbidden) and RPM `Obsoletes`, which a plain install honours — containerd.io
+ *   obsoletes `containerd` and `runc`, docker-ce obsoletes `docker-ce-selinux`, and
+ *   nvidia-container-toolkit obsoletes old `nvidia-container-runtime` and
+ *   `nvidia-container-runtime-hook`. So every dnf install carries `--setopt=obsoletes=False`
+ *   (required by the allowlist), and those packages are on the conflict lists, checked before any
+ *   install of the component that would obsolete them: an installed one is refused, never replaced.
  *
  * What `recipe_digest` covers: everything in `INSTALL_CONTAINER_RUNTIME_RECIPE` — argv templates,
  * paths, URLs, key fingerprints, file bodies, modes, the environment, the conflict lists. What it
@@ -26,6 +30,11 @@
  * `PERMITTED`, the check-then-act logic, the restart rule). A change there is a code change like
  * any other; it does not by itself invalidate plans users have already approved.
  */
+
+import { AtomicCoreError } from '../../contracts/index.js'
+import type { Sha256Digest } from '../../contracts/index.js'
+import { canonicalDigest } from '../../runtime/environment/index.js'
+import type { LinuxInstallPlan } from '../../runtime/environment/index.js'
 
 /** A value that is the object's own property — never one inherited from `Object.prototype`. */
 function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
@@ -35,11 +44,6 @@ function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined
 function invalid(message: string): never {
   throw new AtomicCoreError('MANAGED_HOST_STEP_INVALID', message)
 }
-
-import { AtomicCoreError } from '../../contracts/index.js'
-import type { Sha256Digest } from '../../contracts/index.js'
-import { canonicalDigest } from '../../runtime/environment/index.js'
-import type { LinuxInstallPlan } from '../../runtime/environment/index.js'
 
 export const INSTALL_CONTAINER_RUNTIME_RECIPE_ID = 'linux.install-container-runtime'
 
@@ -180,8 +184,15 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
       '-o',
       'DPkg::Lock::Timeout=300',
     ],
-    /** Docker's guide has these removed first. We never remove anything, so we refuse instead. */
-    conflicts: ['docker.io', 'podman-docker', 'containerd', 'runc'],
+    /**
+     * Installed packages that installing a component would have removed or replaced, per component.
+     * Docker's guide has these removed first; we never remove anything, so we refuse instead. With
+     * `--no-remove`, apt fails rather than removing; the check gives the clearer answer first.
+     */
+    conflicts: {
+      'docker-engine': ['docker.io', 'podman-docker', 'containerd', 'runc'],
+      'nvidia-container-toolkit': [] as string[],
+    },
   },
   dnf: {
     /** Fedora's `VERSION_ID` is a plain release number; the descriptor decides which ones qualify. */
@@ -233,22 +244,33 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
       },
     },
     installed: ['rpm', '--query', '--quiet', '{{package}}'],
-    install: ['dnf', 'install', '-y', '--setopt=install_weak_deps=False'],
-    /** Docker's Fedora guide has these removed first; we refuse instead. */
-    conflicts: [
-      'moby-engine',
-      'docker',
-      'docker-client',
-      'docker-client-latest',
-      'docker-common',
-      'docker-latest',
-      'docker-latest-logrotate',
-      'docker-logrotate',
-      'docker-selinux',
-      'docker-engine-selinux',
-      'docker-engine',
-      'podman-docker',
-    ],
+    /** `obsoletes=False`: a plain install must not replace packages through RPM `Obsoletes`. */
+    install: ['dnf', 'install', '-y', '--setopt=install_weak_deps=False', '--setopt=obsoletes=False'],
+    /**
+     * Per component: Docker's Fedora guide has the first twelve removed first; the rest are what the
+     * component's packages `Obsolete` (containerd.io: containerd, runc; docker-ce: docker-ce-selinux;
+     * nvidia-container-toolkit: nvidia-container-runtime, nvidia-container-runtime-hook).
+     */
+    conflicts: {
+      'docker-engine': [
+        'moby-engine',
+        'docker',
+        'docker-client',
+        'docker-client-latest',
+        'docker-common',
+        'docker-latest',
+        'docker-latest-logrotate',
+        'docker-logrotate',
+        'docker-selinux',
+        'docker-engine-selinux',
+        'docker-engine',
+        'podman-docker',
+        'containerd',
+        'runc',
+        'docker-ce-selinux',
+      ],
+      'nvidia-container-toolkit': ['nvidia-container-runtime', 'nvidia-container-runtime-hook'],
+    },
   },
   file_mode: 0o644,
   runtime: {
@@ -441,8 +463,15 @@ export type HostRecipeStep =
       kind: 'install-packages'
       packages: string[]
       queries: { package: string; argv: string[] }[]
-      /** Installed packages that make installing Docker's unsafe. Empty unless Docker is asked for. */
-      conflicts: { package: string; argv: string[] }[]
+      /**
+       * Installed packages that installing `component` would remove or replace. Checked whenever
+       * that component still has a package to install.
+       */
+      conflicts: {
+        package: string
+        argv: string[]
+        component: 'docker-engine' | 'nvidia-container-toolkit'
+      }[]
       refresh: string[][]
       /** Without package names: the executor appends only the ones still missing. */
       install: string[]
@@ -522,7 +551,9 @@ export function buildInstallContainerRuntimeSteps(
       kind: 'install-packages',
       packages,
       queries: packages.map(query),
-      conflicts: wants('docker-engine') ? family.conflicts.map(query) : [],
+      conflicts: vendors.flatMap((vendor) =>
+        family.conflicts[vendor].map((name) => ({ ...query(name), component: vendor }))
+      ),
       refresh:
         parameters.family === 'apt'
           ? vendors.map((vendor) =>
@@ -648,6 +679,8 @@ export function assertPermittedCommand(argv: readonly string[]): void {
     refuse('apt-get update must be restricted to one source list')
   if (program === 'apt-get' && first === 'install' && !argv.includes('--no-remove'))
     refuse('apt-get install must carry --no-remove, so the resolver can never remove a package')
+  if (program === 'dnf' && first === 'install' && !argv.includes('--setopt=obsoletes=False'))
+    refuse('dnf install must carry --setopt=obsoletes=False, so Obsoletes can never replace a package')
   if (program === 'usermod' && (argv[2] !== 'docker' || argv.length !== 4 || argv[3] === 'root'))
     refuse('usermod only ever adds a non-root user to docker')
   if (program === 'docker' && argv.join(' ') !== 'docker info --format {{json .Runtimes}}')

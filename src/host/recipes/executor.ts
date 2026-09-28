@@ -194,15 +194,16 @@ async function installPackages(
   if (missing.length === 0)
     return { status: 'satisfied', detail: `${step.packages.join(', ')} already installed` }
 
-  const dockerPackages = new Set<string>(INSTALL_CONTAINER_RUNTIME_RECIPE.packages['docker-engine'])
-  if (missing.some((name) => dockerPackages.has(name))) {
-    for (const conflict of step.conflicts) {
-      if (await isInstalled(context, conflict))
-        throw new StepFailure(
-          `${conflict.package} is installed, and Docker's packages conflict with it. Nothing was installed ` +
-            'and nothing was removed.'
-        )
-    }
+  // A component with something left to install could remove or replace what it conflicts with.
+  const { packages } = INSTALL_CONTAINER_RUNTIME_RECIPE
+  const installing = (component: 'docker-engine' | 'nvidia-container-toolkit') =>
+    missing.some((name) => packages[component].includes(name))
+  for (const conflict of step.conflicts) {
+    if (installing(conflict.component) && (await isInstalled(context, conflict)))
+      throw new StepFailure(
+        `${conflict.package} is installed, and installing ${packages[conflict.component].join(', ')} would ` +
+          'remove or replace it. Nothing was installed and nothing was removed.'
+      )
   }
   for (const refresh of step.refresh) await mustRun(context, refresh)
   await mustRun(context, [...step.install, ...missing], { longRunning: true })
@@ -435,9 +436,16 @@ async function execute(text: string, fileName: string, deps: HostStepExecutorDep
 }
 
 /**
- * Runs one host-step request and writes `<step>.result.json` beside it. Throws only when the path
- * is not a `*.request.json` (there would be nowhere to put the result); every other problem —
- * an unreadable file, a refused request, a failed step — is a `failed` result file.
+ * Runs one host-step request and writes `<step>.result.json` beside it. This is the entry point
+ * `atomic-chat-core host-step exec` and `atc host-step exec` call as root.
+ *
+ * Client requirement: the folder holding the request must be owned by the invoking user (named by
+ * `PKEXEC_UID`/`SUDO_UID`) with mode `0700`, and the request file must be `0600` — see
+ * `request-file.ts`. With `nodeHostStepDeps`, anything else is refused.
+ *
+ * Throws (`MANAGED_HOST_STEP_INVALID`) when no result can be written: the path is not a
+ * `*.request.json`, or the folder is not trusted. Every other problem — an unreadable request, a
+ * refused request, a failed step, an unexpected error — is a `failed` result file.
  */
 export async function executeHostStep(
   requestPath: string,

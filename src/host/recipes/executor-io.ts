@@ -4,8 +4,13 @@
  * The request and result live in a folder the unprivileged user owns, so everything touching them
  * assumes someone may have planted a link there, or be racing us:
  *
- * - The folder itself must be a real directory (not a symlink), owned by root or the user who asked
- *   for elevation, and writable by nobody else. Otherwise a third account could swap files under us.
+ * - The folder itself must be a real directory (not a symlink), writable by nobody but its owner,
+ *   and owned by the user who asked for elevation (`PKEXEC_UID`/`SUDO_UID`) — not by root, so
+ *   `host-step exec /etc/<dir>/<x>.request.json` can never make root write a result into a system
+ *   folder. Only when nobody is named (root ran it directly) is a root-owned folder the trusted one.
+ *   Clients create it `0700` and the request `0600` (see `request-file.ts`).
+ * - System files (keys, repository files) are written only into root-owned folders that nobody else
+ *   can write.
  * - The request is opened with `O_NOFOLLOW | O_NONBLOCK` — a link is refused, a FIFO cannot hang
  *   root — and, on the open handle, must be a small regular file owned by root or the invoking user
  *   and not group- or world-writable.
@@ -14,11 +19,13 @@
  *   path-based `chmod` that a swapped link would redirect), and is renamed into place, which
  *   replaces a planted link instead of writing through it.
  *
- * What remains: node has no `openat`, so the folder is checked by path and could in principle be
- * swapped between the check and the open by its owner. The worst that buys is a new file named
- * `.<name>.<random>.tmp` / `<step>.result.json` with our own JSON in it, created in some other
- * folder — never an existing file overwritten, since every open is exclusive. Seteuid-ing to the
- * user was ruled out (controller ruling, fix round 1).
+ * What remains: node has no `openat`, so the folder is checked by path, and its owner could swap it
+ * for a link between the check and the write. The temporary file is created exclusively, so no
+ * existing file is written through; but `rename` does replace an existing destination, so the swap
+ * can make root create — or replace — a file named `<step_id>.result.json` (0644, our own JSON) in
+ * whatever folder the link points at. Only files with that suffix are reachable, and only by the
+ * user who already holds the elevation prompt. Seteuid-ing to the user was ruled out (controller
+ * ruling, fix round 1).
  *
  * Commands run through `hostExec` — `spawn` without a shell — with the recipe's fixed environment.
  */
@@ -85,13 +92,22 @@ const refuse = (message: string): never => {
 
 const GROUP_OR_WORLD_WRITABLE = 0o022
 
-function trustedOwners(invokingUid: string | null): Set<number> {
+/** Who may own the request/result folder: the invoking user when known, otherwise root only. */
+function folderOwners(invokingUid: string | null): Set<number> {
+  return new Set([invokingUid === null ? 0 : Number(invokingUid)])
+}
+
+/** Who may own the request file inside that folder: root or the invoking user. */
+function requestOwners(invokingUid: string | null): Set<number> {
   return new Set(invokingUid === null ? [0] : [0, Number(invokingUid)])
 }
 
+/** System folders (`/etc/apt/keyrings`, `/etc/yum.repos.d`, ...): root's alone. */
+const SYSTEM_OWNERS = new Set([0])
+
 function checkOwnership(what: string, info: { uid: number; mode: number }, owners: Set<number>): void {
   if (!owners.has(info.uid))
-    refuse(`${what} is owned by uid ${info.uid}, not by root or the user who asked for elevation`)
+    refuse(`${what} is owned by uid ${info.uid}; only uid ${[...owners].join(' or ')} is trusted here`)
   if ((info.mode & GROUP_OR_WORLD_WRITABLE) !== 0)
     refuse(`${what} is group- or world-writable (mode ${(info.mode & 0o777).toString(8)})`)
 }
@@ -105,8 +121,13 @@ async function checkFolder(fs: HostFs, path: string, owners: Set<number>): Promi
   checkOwnership(folder, info, owners)
 }
 
-async function readRequest(fs: HostFs, owners: Set<number>, path: string): Promise<string> {
-  await checkFolder(fs, path, owners)
+async function readRequest(
+  fs: HostFs,
+  folder: Set<number>,
+  owners: Set<number>,
+  path: string
+): Promise<string> {
+  await checkFolder(fs, path, folder)
   const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
   const handle = await fs.open(path, flags)
   try {
@@ -178,14 +199,14 @@ export function nodeHostStepDeps(env: NodeJS.ProcessEnv, fs: HostFs = nodeHostFs
     env: environment,
   })
   const invokingUid = invokingUidFrom(env)
-  const owners = trustedOwners(invokingUid)
+  const folder = folderOwners(invokingUid)
   return {
-    readRequest: (path) => readRequest(fs, owners, path),
-    writeResult: (path, text) => writeAtomically(fs, owners, path, text, 0o644),
+    readRequest: (path) => readRequest(fs, folder, requestOwners(invokingUid), path),
+    writeResult: (path, text) => writeAtomically(fs, folder, path, text, 0o644),
     readFile: (path) => readFileOrNull(fs, path),
     writeFile: async (path, data, mode) => {
       await fs.mkdir(dirname(path), 0o755)
-      await writeAtomically(fs, owners, path, data, mode)
+      await writeAtomically(fs, SYSTEM_OWNERS, path, data, mode)
     },
     exec: ([command, ...args], options) => (options?.longRunning ? long : quick)(command as string, args),
     fetch: (input, init) => fetch(input, init),

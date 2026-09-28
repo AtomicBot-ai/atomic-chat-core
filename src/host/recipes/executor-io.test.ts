@@ -21,14 +21,14 @@ const me = String(process.getuid?.() ?? 1000)
 const deps = (fs: HostFs = nodeHostFs) => nodeHostStepDeps({ PKEXEC_UID: me }, fs)
 
 /** The real file system, except that the named paths report another owner. */
-const ownedByStranger = (...paths: string[]): HostFs => ({
+const ownedBy = (uid: number, ...paths: string[]): HostFs => ({
   ...nodeHostFs,
   lstat: async (path) => {
     const info = await nodeHostFs.lstat(path)
     return paths.includes(path)
       ? {
           ...info,
-          uid: 4242,
+          uid,
           isDirectory: () => info.isDirectory(),
           isSymbolicLink: () => info.isSymbolicLink(),
         }
@@ -40,13 +40,14 @@ const ownedByStranger = (...paths: string[]): HostFs => ({
     return Object.assign(Object.create(handle) as typeof handle, {
       stat: async () => {
         const info = await handle.stat()
-        return { size: info.size, mode: info.mode, uid: 4242, isFile: () => info.isFile() }
+        return { size: info.size, mode: info.mode, uid, isFile: () => info.isFile() }
       },
       close: () => handle.close(),
       readFile: (encoding: 'utf8') => handle.readFile(encoding),
     })
   },
 })
+const ownedByStranger = (...paths: string[]): HostFs => ownedBy(4242, ...paths)
 
 async function request(name = 's.request.json', body = '{"a":1}', mode = 0o644): Promise<string> {
   const path = join(dir, name)
@@ -180,9 +181,28 @@ describe('writing as root into a folder the user owns', () => {
     expect(await readdir(real)).toEqual([])
   })
 
+  it('with an invoking user known, never trusts a root-owned folder for the request or the result', async () => {
+    // Otherwise `host-step exec /etc/<dir>/<x>.request.json` would have root write a result into /etc.
+    const path = await request()
+    await expect(deps(ownedBy(0, dir)).readRequest(path)).rejects.toThrow(/owned by uid 0/)
+    await expect(deps(ownedBy(0, dir)).writeResult(join(dir, 's.result.json'), '{}')).rejects.toThrow(
+      /owned by uid 0/
+    )
+    expect(await readdir(dir)).toEqual(['s.request.json'])
+  })
+
+  it('writes a system file only into a folder root owns', async () => {
+    const path = join(dir, 'keyrings/docker.asc')
+    await mkdir(join(dir, 'keyrings'), { mode: 0o755 })
+    await expect(deps().writeFile(path, Buffer.from('key'), 0o644)).rejects.toThrow(
+      new RegExp(`owned by uid ${me}`)
+    )
+    expect(await readdir(join(dir, 'keyrings'))).toEqual([])
+  })
+
   it('writes a system file atomically with exactly the given mode, creating its folder', async () => {
     const path = join(dir, 'etc/apt/keyrings/docker.asc')
-    await deps().writeFile(path, Buffer.from('key'), 0o644)
+    await deps(ownedBy(0, join(dir, 'etc/apt/keyrings'))).writeFile(path, Buffer.from('key'), 0o644)
     expect(await readFile(path, 'utf8')).toBe('key')
     expect((await stat(path)).mode & 0o777).toBe(0o644)
     expect((await stat(join(dir, 'etc/apt/keyrings'))).mode & 0o777).toBe(0o755)

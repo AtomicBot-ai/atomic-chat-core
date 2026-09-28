@@ -12,6 +12,13 @@
  *   refused before anything ran, and lists each recipe step's outcome.
  *
  * A reader that knows only the CLI's fields still reads `outcome`, `exit_code` and `log_tail`.
+ *
+ * What a client must do (the app's task 3.5, `atc`): create the host-steps folder owned by the user
+ * with mode `0700`, and write the request file with mode `0600` (or anything not group- or
+ * world-writable) — do not rely on the umask, a desktop's usual `002` makes both group-writable.
+ * Run the executor through `pkexec`/`sudo`, so it learns the user from `PKEXEC_UID`/`SUDO_UID`: it
+ * then trusts only a folder that user owns, never a root-owned one. The executor refuses anything
+ * else, and if it cannot trust the folder it writes no result file at all (exit 2).
  */
 
 import { MANAGED_HOST_ACTIONS } from '../../contracts/index.js'

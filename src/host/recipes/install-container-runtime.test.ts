@@ -131,7 +131,7 @@ describe('the digests a request is bound to', () => {
     // Changing any command, path, URL, key pin or file body changes this. Update it deliberately:
     // every client holding an old plan will then be refused, which is the point.
     expect(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST).toMatchInlineSnapshot(
-      `"sha256:e15709757105ba3d7ab52d97f2253b18b353ddd5a291c146b3bfbd53b739f587"`
+      `"sha256:5c2f60a94e6c83c7f77ec08abac43423e56fb08e70bb31dc8ce7dd401dc450f0"`
     )
   })
 
@@ -337,12 +337,24 @@ describe('dnf steps', () => {
     })
     const packages = step(steps, 'install-packages')
     expect(packages.refresh).toEqual([])
-    expect(packages.install).toEqual(['dnf', 'install', '-y', '--setopt=install_weak_deps=False'])
+    // RPM Obsoletes let a plain `dnf install` replace installed packages; this switches that off.
+    expect(packages.install).toEqual([
+      'dnf',
+      'install',
+      '-y',
+      '--setopt=install_weak_deps=False',
+      '--setopt=obsoletes=False',
+    ])
     expect(packages.queries).toEqual([
       {
         package: 'nvidia-container-toolkit',
         argv: ['rpm', '--query', '--quiet', 'nvidia-container-toolkit'],
       },
+    ])
+    // nvidia-container-toolkit Obsoletes these: checked even when Docker is not being installed.
+    expect(packages.conflicts.map((c) => [c.package, c.component])).toEqual([
+      ['nvidia-container-runtime', 'nvidia-container-toolkit'],
+      ['nvidia-container-runtime-hook', 'nvidia-container-toolkit'],
     ])
   })
 
@@ -373,7 +385,8 @@ describe('dnf steps', () => {
       'containerd.io',
       'nvidia-container-toolkit',
     ])
-    // Docker's Fedora guide has all of these removed first; we refuse instead of removing.
+    // Docker's Fedora guide has the first twelve removed first, and containerd.io / docker-ce
+    // Obsolete the next three; we refuse instead of letting anything be removed or replaced.
     expect(packages.conflicts.map((c) => c.package)).toEqual([
       'moby-engine',
       'docker',
@@ -387,6 +400,11 @@ describe('dnf steps', () => {
       'docker-engine-selinux',
       'docker-engine',
       'podman-docker',
+      'containerd',
+      'runc',
+      'docker-ce-selinux',
+      'nvidia-container-runtime',
+      'nvidia-container-runtime-hook',
     ])
   })
 
@@ -431,7 +449,11 @@ describe('from an install plan', () => {
     const steps = buildInstallContainerRuntimeSteps(parameters)
     expect(ids(steps)).toEqual(['nvidia-key', 'nvidia-source', 'packages', 'nvidia-runtime'])
     expect(step(steps, 'install-packages').packages).toEqual(['nvidia-container-toolkit'])
-    expect(step(steps, 'install-packages').conflicts).toEqual([])
+    // moby-engine needs Fedora's containerd and runc, so only the toolkit's obsoleted packages are checked.
+    expect(step(steps, 'install-packages').conflicts.map((c) => c.package)).toEqual([
+      'nvidia-container-runtime',
+      'nvidia-container-runtime-hook',
+    ])
     expect(step(steps, 'configure-runtime').restart_approved).toBe(true)
   })
 
@@ -534,6 +556,8 @@ describe('what the recipe may never run', () => {
     [['apt-get', 'install', '-y', 'docker-ce']],
     [['apt-get', 'install', '-y', '--no-install-recommends', 'nvidia-container-toolkit']],
     [['dnf', 'install', '-y', '--allowerasing', 'docker-ce']],
+    [['dnf', 'install', '-y', '--setopt=install_weak_deps=False', 'nvidia-container-toolkit']],
+    [['dnf', 'install', '-y', '--setopt=obsoletes=True', 'nvidia-container-toolkit']],
     [['constructor', 'x']],
     [['toString', 'x']],
     [['__proto__', 'x']],
@@ -563,7 +587,10 @@ describe('what the recipe may never run', () => {
       for (const built of build(host, ['docker-engine', 'nvidia-container-toolkit'])) {
         if (built.kind !== 'install-packages') continue
         if (host.family === 'apt') expect(built.install).toContain('--no-remove')
-        else expect(built.install).not.toContain('--allowerasing')
+        else {
+          expect(built.install).not.toContain('--allowerasing')
+          expect(built.install).toContain('--setopt=obsoletes=False')
+        }
       }
     }
   })

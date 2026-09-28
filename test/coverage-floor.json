@@ -955,7 +955,7 @@
   },
   "src/runtime/environment/host-exec.ts": {
     "statements": 96,
-    "branches": 93,
+    "branches": 94,
     "functions": 100,
     "lines": 96
   },

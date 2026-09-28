@@ -53,6 +53,22 @@ describe('running a probe command', () => {
     expect(Date.now() - started).toBeLessThan(4_000)
   })
 
+  it('after the kill, answers even while a grandchild still holds its output open', async () => {
+    // `close` waits for every holder of the pipes; a package manager's leftover helper can hold them
+    // for as long as it likes. The answer must not wait for it.
+    const script = [
+      'const { spawn } = require("node:child_process")',
+      'spawn(process.execPath, ["-e", "setTimeout(() => {}, 8000)"], { stdio: "inherit" })',
+      'process.on("SIGTERM", () => {})',
+      'setInterval(() => {}, 1000)',
+    ].join(';')
+    const started = Date.now()
+    const answer = await hostExec({ timeoutMs: 300, terminateGraceMs: 300 })(node, ['-e', script])
+    expect(answer.code).toBeNull()
+    expect(answer.stderr).toMatch(/timed out after 300 ms/)
+    expect(Date.now() - started).toBeLessThan(4_000)
+  })
+
   it('keeps no more output than it was allowed to', async () => {
     const answer = await hostExec({ maxOutputBytes: 10 })(node, [
       '-e',
