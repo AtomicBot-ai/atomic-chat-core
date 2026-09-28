@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-28** — [Bump core to 0.7.0 for the TensorRT-LLM descriptor gate](2026-09-28-bump-core-to-0-7-0-for-the-tensorrt-llm-descriptor-gate.md)
 - **2026-09-28** — [tensorrt-llm model check: a fixed KV-cache reserve fraction, and unified memory ranks as zero for GPU selection](2026-09-28-tensorrt-llm-model-check-kv-reserve-and-gpu-selection.md)
 - **2026-09-28** — [src/runtime/environment/inventory.ts is the model-file digest, not the host-inventory report](2026-09-28-inventory-ts-is-the-model-file-digest-not-the-host-report.md)
 - **2026-09-28** — [Managed runtime layout: the shared per-user root only, no per-scope artifact store](2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store.md)
