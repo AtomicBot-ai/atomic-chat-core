@@ -56,6 +56,7 @@ const OPERATION: EnvironmentOperation = {
   phase: 'awaiting-consent',
   plan_digest: `sha256:${'a'.repeat(64)}`,
   approved_plan_digest: null,
+  carried_plan_digest: null,
   progress: null,
   pending_host_step: null,
   completed_step_ids: [],

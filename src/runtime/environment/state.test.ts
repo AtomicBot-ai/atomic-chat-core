@@ -690,10 +690,11 @@ describe('consent that was already acted on (task 2.6)', () => {
     expect(driver.phase).toBe('preparing-environment')
     expect(driver.pending).toBe('prepare-environment')
     expect(driver.kinds('host-step')).toBe(1)
-    expect(driver.machine.operation.plan_digest).toBe('sha256:C')
-    // The user's own approval stays on record; what the core carried it over to is kept apart.
+    // The consented plan stays the plan and the approval; what the core continued under is apart
+    // (review r2, ruling A).
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
     expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
-    expect(driver.machine.carried_plan_digest).toBe('sha256:C')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:C')
   })
 
   it('asks again when what remains after the step needs a new privileged change (a Docker restart)', () => {
@@ -870,14 +871,65 @@ describe('consent that was already acted on (task 2.6)', () => {
     )
     expect(driver.phase).toBe('pulling-image')
     expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
-    expect(driver.machine.operation.plan_digest).toBe('sha256:E')
-    expect(driver.machine.carried_plan_digest).toBe('sha256:E')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:E')
     expect(driver.machine.consented).toEqual({
       plan_digest: 'sha256:A',
       descriptor_id: 'tensorrt-llm-1',
       image_digest: 'sha256:img1',
       target: RUNTIME,
     })
+  })
+
+  it('keeps plan_digest equal to the approval in every state outside awaiting-consent (review r2, ruling A)', () => {
+    const seen: string[] = []
+    const check = (driver: Driver): void => {
+      const { phase, plan_digest, approved_plan_digest } = driver.machine.operation
+      seen.push(phase)
+      if (phase !== 'awaiting-consent') expect(plan_digest).toBe(approved_plan_digest)
+    }
+    // A sign-in wait, a reconcile with a moved digest, then carried work through to ready.
+    const driver = atReceipt()
+    check(driver)
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    check(driver)
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    check(driver)
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:C',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    check(driver)
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:C')
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:D', ADOPTED), host_step: null })
+    )
+    check(driver)
+    for (const type of [
+      'environment-verified',
+      'image-pulled',
+      'verification-passed',
+      'activation-committed',
+    ]) {
+      driver.apply(driver.reply({ type }))
+      check(driver)
+    }
+    expect(driver.phase).toBe('ready')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:D')
+    expect(seen).not.toContain('awaiting-consent')
   })
 
   it('never carries consent over for an operation that has not acted on one', () => {

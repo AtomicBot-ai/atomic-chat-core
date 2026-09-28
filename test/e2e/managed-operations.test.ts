@@ -18,7 +18,7 @@
  */
 import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -92,6 +92,7 @@ interface Operation {
   phase: string
   plan_digest: string | null
   approved_plan_digest: string | null
+  carried_plan_digest: string | null
   progress: { completed: number | null; total: number | null; unit: string } | null
   pending_host_step: PendingHostStep | null
   error: { code: string; message: string; details?: string } | null
@@ -326,6 +327,10 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
     )
     // Continued on its own, without asking again for what was already approved and done.
     expect(done.phase).toBe('ready')
+    // The consented plan stays the plan on the wire; the re-probed one is reported apart.
+    expect(done.plan_digest).toBe(done.approved_plan_digest)
+    expect(done.carried_plan_digest).toMatch(/^sha256:/)
+    expect(done.carried_plan_digest).not.toBe(done.plan_digest)
     expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
     expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
   })
@@ -438,6 +443,12 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
       expect(done.phase).toBe('ready')
       // No new consent, no second GPU check; the engine image pulled again only when it was missing.
       expect(host.pulls.slice(pullsBefore)).toEqual(imageLanded ? [] : [ENGINE_IMAGE])
+      // The GPU-check image was pulled by the first core, which died before activating: the second
+      // core still knows it was this setup's own, because that was recorded before the pull.
+      const installation = JSON.parse(
+        await readFile(join(managedRoot, 'installations', 'tensorrt-llm', 'installation.json'), 'utf8')
+      ) as { probe_image?: { repository: string; digest: string } }
+      expect(`${installation.probe_image?.repository}@${installation.probe_image?.digest}`).toBe(PROBE_IMAGE)
 
       await crash()
       await host.close()
@@ -561,6 +572,34 @@ describe('removing the managed engine through the compiled core (task 2.6)', () 
     const environment = (await snapshot(second.ready)).environments[0]
     expect(environment?.installations).toEqual([])
     expect(environment?.availability).toBe('setup-required')
+  })
+})
+
+describe('an image the user already had', () => {
+  it('is never removed with the installation: the GPU-check image was not this setup’s to remove', async () => {
+    host = await fakeManagedHost({ ...readyState(), images: [PROBE_IMAGE] })
+    const { ready } = await start()
+    const setupOp = await beginAndApprove(ready)
+    expect(
+      (await poll(ready, setupOp.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+    ).toBe('ready')
+
+    const started = (await (
+      await post(ready, '/environments/default/operations', {
+        request_id: 'rm-1',
+        target: TARGET,
+        kind: 'remove',
+      })
+    ).json()) as Operation
+    const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+      expected_revision: asking.revision,
+      approved_plan_digest: asking.plan_digest,
+    })
+    expect(
+      (await poll(ready, started.operation_id, (o) => o.phase === 'removed' || o.phase === 'failed')).phase
+    ).toBe('removed')
+    expect(host.state().images).toEqual([PROBE_IMAGE])
   })
 })
 

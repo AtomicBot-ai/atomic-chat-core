@@ -76,12 +76,19 @@ export interface OperationMachine {
    * later plan only when that plan names the same three (review r1, item 2).
    */
   consented?: ConsentBasis | null
-  /**
-   * The latest plan digest the core continued under on the strength of `consented`, kept apart
-   * from `operation.approved_plan_digest`, which always stays the digest the user approved.
-   */
-  carried_plan_digest?: Sha256Digest | null
 }
+
+/**
+ * Where a freshly probed digest goes. Before any consent it is the plan on offer (`plan_digest`).
+ * Once work started under one, `plan_digest` stays the consented digest — equal to
+ * `approved_plan_digest` outside `awaiting-consent` (review r2, ruling A) — and the fresh digest is
+ * reported as `carried_plan_digest` instead.
+ */
+const probedDigest = (
+  state: OperationMachine,
+  digest: Sha256Digest | null
+): Pick<EnvironmentOperation, 'plan_digest'> | Pick<EnvironmentOperation, 'carried_plan_digest'> =>
+  (state.consented ?? null) !== null ? { carried_plan_digest: digest } : { plan_digest: digest }
 
 /** The parts of an approved plan a carried-over consent must still match. */
 export interface ConsentBasis {
@@ -271,6 +278,7 @@ export function startOperation(input: StartOperation, transition: TransitionInpu
     phase: 'checking',
     plan_digest: null,
     approved_plan_digest: input.approved_plan_digest ?? null,
+    carried_plan_digest: null,
     progress: null,
     pending_host_step: null,
     completed_step_ids: [],
@@ -485,13 +493,13 @@ export function reduceOperation(
         if (relogin !== undefined && plan.blockers.length === 1) {
           return advance(
             state,
-            { phase: 'relogin-required', plan_digest: plan.plan_digest, error: errorOf(relogin) },
+            { phase: 'relogin-required', ...probedDigest(state, plan.plan_digest), error: errorOf(relogin) },
             null
           )
         }
         return advance(
           state,
-          { phase: 'failed', plan_digest: plan.plan_digest, error: errorOf(blocker) },
+          { phase: 'failed', ...probedDigest(state, plan.plan_digest), error: errorOf(blocker) },
           null
         )
       }
@@ -509,8 +517,7 @@ export function reduceOperation(
       ) {
         const carried: OperationMachine = {
           ...state,
-          carried_plan_digest: plan.plan_digest,
-          operation: { ...operation, plan_digest: plan.plan_digest },
+          operation: { ...operation, carried_plan_digest: plan.plan_digest },
         }
         return continueConsentedWork(carried, input, event.image_present ?? false)
       }
@@ -522,6 +529,7 @@ export function reduceOperation(
           {
             phase: 'awaiting-consent',
             plan_digest: plan.plan_digest,
+            carried_plan_digest: null,
             error: changed
               ? {
                   code: 'MANAGED_PLAN_CHANGED',
@@ -542,8 +550,7 @@ export function reduceOperation(
             image_digest: plan.image_digest,
             target: plan.target,
           },
-          carried_plan_digest: null,
-          operation: { ...operation, plan_digest: plan.plan_digest },
+          operation: { ...operation, plan_digest: plan.plan_digest, carried_plan_digest: null },
         },
         input,
         event.host_step
@@ -630,7 +637,7 @@ export function reduceOperation(
       const base = {
         instance_id: event.instance_id,
         completed_step_ids: event.verified_completed_step_ids,
-        plan_digest: event.current_plan_digest,
+        ...probedDigest(state, event.current_plan_digest),
         pending_host_step: null,
       }
       if (operation.cancellation_requested) {

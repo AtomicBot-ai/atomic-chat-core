@@ -58,7 +58,15 @@ export interface EnvironmentProvisioner {
   probe(record: PersistedOperation, signal: AbortSignal): Promise<ProvisionerProbe>
   /** Re-probe after a host-step receipt that claims the step ran (task 2.6). Changes nothing. */
   verifyHostStep(record: PersistedOperation, signal: AbortSignal): Promise<HostStepVerdict>
-  prepare(record: PersistedOperation, signal: AbortSignal): Promise<void>
+  /**
+   * `own` records, durably and at once, resources the step is about to create, before it creates
+   * them (`OperationStore.recordOwned`): what the operation later removes is only what it made.
+   */
+  prepare(
+    record: PersistedOperation,
+    signal: AbortSignal,
+    own: (resourceIds: string[]) => Promise<void>
+  ): Promise<void>
   pull(
     record: PersistedOperation,
     onProgress: (progress: ManagedProgress) => void,
@@ -419,6 +427,7 @@ export class EnvironmentService {
           phase: 'checking',
           plan_digest: null,
           approved_plan_digest: null,
+          carried_plan_digest: null,
           progress: null,
           pending_host_step: null,
           completed_step_ids: [],
@@ -455,10 +464,21 @@ export class EnvironmentService {
     return provisioner.verifyHostStep(record, new AbortController().signal)
   }
 
-  /** Announce a committed state, and remember it as the operation's current one. */
+  /**
+   * Announce a committed state, and remember it as the operation's current one while it runs. A
+   * finished operation is forgotten, so this map stays as small as what is in flight.
+   */
   private announce(operation: EnvironmentOperation): void {
-    this.latest.set(operation.operation_id, operation)
+    if (TERMINAL.includes(operation.phase)) this.latest.delete(operation.operation_id)
+    else this.latest.set(operation.operation_id, operation)
     this.options.emit?.('environment:operation', operation)
+  }
+
+  /** `current` is the pull `pulling` started at, still: same phase, same revision. Unknown counts as still. */
+  private stillPulling(current: EnvironmentOperation | undefined, pulling: EnvironmentOperation): boolean {
+    return (
+      current === undefined || (current.phase === 'pulling-image' && current.revision === pulling.revision)
+    )
   }
 
   /** The operation with the byte progress of a pull still in flight, when there is one. */
@@ -690,7 +710,9 @@ export class EnvironmentService {
   ): Promise<{ type: OperationEvent['type'] }> {
     switch (effect.kind) {
       case 'prepare-environment':
-        await provisioner.prepare(record, signal)
+        await provisioner.prepare(record, signal, (ids) =>
+          this.options.store.recordOwned(record.machine.operation.operation_id, ids)
+        )
         return { type: 'environment-verified' }
       case 'pull-image': {
         const operation = record.machine.operation
@@ -702,14 +724,23 @@ export class EnvironmentService {
             (progress) => {
               // Only for the operation as it stands now: a tick still streaming after a cancel (or
               // any other transition) committed must not announce the pull as current again.
-              const current = this.latest.get(operation.operation_id) ?? operation
-              if (current.phase !== 'pulling-image' || current.revision !== operation.revision) return
+              if (!this.stillPulling(this.latest.get(operation.operation_id), operation)) return
               this.progress.set(operation.operation_id, progress)
               const at = now()
               const final = progress.total !== null && progress.completed === progress.total
               if (last !== null && !final && at - last < PROGRESS_EMIT_INTERVAL_MS) return
               last = at
-              this.options.emit?.('environment:operation', { ...current, progress })
+              // The shared record decides, not only what this core announced: the other scope's
+              // core may have cancelled it (review r2, item E). Checked again once it answers.
+              void this.options.store
+                .read(operation.operation_id)
+                .then((stored) => {
+                  const latest = this.latest.get(operation.operation_id)
+                  if (!this.stillPulling(stored?.machine.operation, operation)) return
+                  if (!this.stillPulling(latest, operation)) return
+                  this.options.emit?.('environment:operation', { ...operation, progress })
+                })
+                .catch(() => undefined)
             },
             signal
           )

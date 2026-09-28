@@ -21,6 +21,7 @@ import type { LinuxHost } from './linux-host.js'
 import {
   createLinuxProvisioner,
   imageMatchesDigest,
+  ownedImageId,
   pickGpu,
   toManagedBlocker,
   type HostRecipeBinding,
@@ -235,6 +236,7 @@ const fresh = (request: Partial<BeginOperation> = {}): PersistedOperation => {
 }
 
 const signal = new AbortController().signal
+const noOwn = async (): Promise<void> => undefined
 
 describe('probing a Linux host for a setup', () => {
   it('adopts a ready host: nothing to change, no privileged step, the pinned descriptor named', async () => {
@@ -332,8 +334,8 @@ describe('probing a Linux host for a setup', () => {
       (await createLinuxProvisioner(midPull.deps).probe(fresh(), signal)).plan.blockers.map((b) => b.reason)
     ).toEqual(['insufficient-disk'])
 
-    // A ready installation on a nearly full disk stays supported.
-    const installed = harness(full)
+    // A ready installation, its image there, on a nearly full disk stays supported.
+    const installed = harness({ ...full, images: [IMAGE_REF] })
     const provisioner = createLinuxProvisioner(installed.deps)
     await provisioner.activate(record(), signal)
     installed.machine.free = 1 * GIB
@@ -341,6 +343,16 @@ describe('probing a Linux host for a setup', () => {
     expect(answer.plan.availability).toBe('supported')
     expect(answer.plan.blockers).toEqual([])
     expect(installed.views.at(-1)?.availability).toBe('supported')
+  })
+
+  it('checks the space again for an installed image deleted outside the app (review r2, item D)', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    h.machine.free = 1 * GIB
+    const answer = await provisioner.probe(fresh(), signal)
+    expect(answer.image_present).toBe(false)
+    expect(answer.plan.blockers.map((blocker) => blocker.reason)).toEqual(['insufficient-disk'])
   })
 
   it('plans with the consented descriptor only once the user consented, never a newer one (review r1, item 2)', async () => {
@@ -364,7 +376,7 @@ describe('probing a Linux host for a setup', () => {
     expect(answer.plan.blockers[0]?.code).toBe('MANAGED_METADATA_INVALID')
     expect(answer.plan.blockers[0]?.details).toBe(DESCRIPTOR.descriptor_id)
     // Every effect after the consent refuses too, without looking for another descriptor.
-    await expect(provisioner.prepare(record(), signal)).rejects.toMatchObject({
+    await expect(provisioner.prepare(record(), signal, noOwn)).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
     })
     await expect(provisioner.pull(record(), () => undefined, signal)).rejects.toMatchObject({
@@ -377,7 +389,7 @@ describe('probing a Linux host for a setup', () => {
       code: 'MANAGED_METADATA_INVALID',
     })
     const noPlan = { ...fresh(), request: { ...fresh().request } }
-    await expect(provisioner.prepare(noPlan, signal)).rejects.toMatchObject({
+    await expect(provisioner.prepare(noPlan, signal, noOwn)).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
     })
     expect(forNewSetup).not.toHaveBeenCalled()
@@ -514,9 +526,58 @@ describe('checking a host-step receipt against the machine', () => {
 })
 
 describe('the GPU check, the pull and the verification', () => {
+  it('records the GPU-check image as its own before pulling it, only when it was absent (review r2, item B)', async () => {
+    const absent = harness(readyHost())
+    const owned: string[][] = []
+    const provisioner = createLinuxProvisioner(absent.deps)
+    await provisioner.prepare(record(), signal, async (ids) => {
+      // Recorded before the pull, not after it.
+      expect(absent.pulls).toEqual([])
+      owned.push(ids)
+    })
+    expect(owned).toEqual([[ownedImageId(PROBE_IMAGE)]])
+
+    const already = harness({ ...readyHost(), images: [PROBE_REF] })
+    const none: string[][] = []
+    await createLinuxProvisioner(already.deps).prepare(record(), signal, async (ids) => {
+      none.push(ids)
+    })
+    expect(none).toEqual([])
+
+    // A failed inspect proves nothing: nothing is claimed.
+    const unsure = harness(readyHost())
+    const exec = unsure.deps.docker
+    unsure.deps.docker = async () => {
+      const docker = await exec()
+      return docker === null
+        ? null
+        : {
+            ...docker,
+            exec: async (args) =>
+              args[2] === 'image' && args[3] === 'inspect'
+                ? { code: 1, stdout: '', stderr: 'permission denied' }
+                : docker.exec(args),
+          }
+    }
+    const claims: string[][] = []
+    await createLinuxProvisioner(unsure.deps).prepare(record(), signal, async (ids) => {
+      claims.push(ids)
+    })
+    expect(claims).toEqual([])
+  })
+
+  it('keeps the GPU-check image on the installation only when this operation pulled it', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    expect((await h.installations.read('tensorrt-llm'))?.probe_image).toBeUndefined()
+    await provisioner.activate(record({}, { owned_resource_ids: [ownedImageId(PROBE_IMAGE)] }), signal)
+    expect((await h.installations.read('tensorrt-llm'))?.probe_image).toEqual(PROBE_IMAGE)
+  })
+
   it('pulls the small probe image by digest and runs nvidia-smi on the chosen card', async () => {
     const h = harness(readyHost())
-    await createLinuxProvisioner(h.deps).prepare(record(), signal)
+    await createLinuxProvisioner(h.deps).prepare(record(), signal, noOwn)
     expect(h.pulls.map((pull) => pull.ref)).toEqual([`${PROBE_IMAGE.repository}@${PROBE_IMAGE.digest}`])
     const run = h.dockerCalls.find((args) => args[2] === 'run')
     expect(run).toContain(`device=${GPU}`)
@@ -527,7 +588,7 @@ describe('the GPU check, the pull and the verification', () => {
   it('fails with toolkit diagnostics, and never touches the engine image, when the GPU is not visible', async () => {
     const h = harness({ ...readyHost(), gpu_visible_in_container: false })
     const failure = await createLinuxProvisioner(h.deps)
-      .prepare(record(), signal)
+      .prepare(record(), signal, noOwn)
       .then(
         () => ({ code: 'none', details: '' }),
         (error: unknown) => error as { code: string; details: string }
@@ -543,11 +604,11 @@ describe('the GPU check, the pull and the verification', () => {
       ...readyHost(),
       gpus: [{ uuid: GPU, name: 'RTX 2080', cc: '7.5', total_mib: 8000, free_mib: 8000 }],
     })
-    await expect(createLinuxProvisioner(old.deps).prepare(record(), signal)).rejects.toMatchObject({
+    await expect(createLinuxProvisioner(old.deps).prepare(record(), signal, noOwn)).rejects.toMatchObject({
       code: 'MANAGED_PREREQUISITE_BLOCKED',
     })
     const none = harness(cleanHost())
-    await expect(createLinuxProvisioner(none.deps).prepare(record(), signal)).rejects.toMatchObject({
+    await expect(createLinuxProvisioner(none.deps).prepare(record(), signal, noOwn)).rejects.toMatchObject({
       code: 'MANAGED_PREREQUISITE_BLOCKED',
     })
     expect(old.dockerCalls).toEqual([])
@@ -589,7 +650,10 @@ describe('the GPU check, the pull and the verification', () => {
 
   it('activates by writing the installation pinned to its descriptor and image', async () => {
     const h = harness(readyHost())
-    await createLinuxProvisioner(h.deps).activate(record(), signal)
+    await createLinuxProvisioner(h.deps).activate(
+      record({}, { owned_resource_ids: [ownedImageId(PROBE_IMAGE)] }),
+      signal
+    )
     expect(await h.installations.read('tensorrt-llm')).toEqual({
       schema_version: 1,
       installation: {
@@ -663,6 +727,20 @@ describe('recovery questions', () => {
     })
     h.deps.host = { ...h.deps.host, options: () => ({ user, xdgRuntimeDir: null }) }
     expect(await createLinuxProvisioner(h.deps).inventory.needsRelogin(record())).toBe(expected)
+  })
+
+  it('finds a committed activation by id even when its descriptor has left the cache (review r2, item C)', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    h.deps.descriptors = {
+      ...h.deps.descriptors,
+      forInstallation: async () => ({ kind: 'unsupported', error: new Error('gone') as never }),
+    }
+    const effect = { effect_id: 'e', operation_id: 'op-1', expected_revision: 1, plan_digest: null }
+    expect(
+      (await createLinuxProvisioner(h.deps).inventory.inspect({ ...effect, kind: 'activate' }, record())).kind
+    ).toBe('completed')
   })
 
   it('answers absent rather than throwing when the machine cannot even say its architecture', async () => {
@@ -766,12 +844,26 @@ describe('removing the installation', () => {
     created_at: '2026-09-28T00:00:00.000Z',
   })
 
-  const installed = async (state: FakeLinuxHostState) => {
+  /** Installed by a setup that pulled the GPU-check image itself, unless `probePulled` says otherwise. */
+  const installed = async (state: FakeLinuxHostState, probePulled = true) => {
     const h = harness({ ...state, images: [IMAGE_REF, PROBE_REF, 'docker.io/library/postgres@sha256:beef'] })
     const provisioner = createLinuxProvisioner(h.deps)
-    await provisioner.activate(record(), signal)
+    await provisioner.activate(
+      record({}, { owned_resource_ids: probePulled ? [ownedImageId(PROBE_IMAGE)] : [] }),
+      signal
+    )
     return { h, provisioner }
   }
+
+  it('never removes a GPU-check image the user already had before setup (review r2, item B)', async () => {
+    const { h, provisioner } = await installed(readyHost(), false)
+    expect((await provisioner.probe(removal(), signal)).plan.system_changes.map((c) => c.code)).not.toContain(
+      'remove-probe-image'
+    )
+    await provisioner.remove(removal(), signal)
+    expect(h.machine.state.images).toContain(PROBE_REF)
+    expect(h.machine.state.images).not.toContain(IMAGE_REF)
+  })
 
   const removal = (request: Partial<BeginOperation> = {}) =>
     record({ kind: 'remove', descriptor_id: undefined as never, ...request })

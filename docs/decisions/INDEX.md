@@ -29,6 +29,7 @@ add a new one that says which record it supersedes.
 - **2026-09-28** — [Linux probe fix round 1: docker_group returns as diagnostics, may_require_relogin is always true](2026-09-28-linux-probe-restores-docker-group-diagnostics-round-1.md) — supersedes the same-day "drops docker-group tracking" record.
 - **2026-09-28** — [Linux probe drops docker-group tracking; the install recipe always pairs enable+group](2026-09-28-linux-probe-drops-docker-group-tracking-and-recipe-blocks-pair.md) — superseded same day, kept as record.
 - **2026-09-28** — [src/runtime/environment/inventory.ts is the model-file digest, not the host-inventory report](2026-09-28-inventory-ts-is-the-model-file-digest-not-the-host-report.md)
+- **2026-09-29** — [Keep the consented plan digest on the wire, and remove only images the setup pulled](2026-09-29-linux-setup-keeps-the-consented-digest-and-owns-only-what-it-pulled.md) — amends the two entries below (review r2).
 - **2026-09-29** — [Bind a carried-over consent to its descriptor, and count only the disk the image still needs](2026-09-29-linux-setup-consent-binds-descriptor-and-disk-counts-what-is-left.md) — amends the entry below (review r1).
 - **2026-09-29** — [Run the Linux engine setup and removal as one durable operation](2026-09-29-linux-setup-operation-and-engine-removal.md)
 - **2026-09-28** — [Managed runtime layout: the shared per-user root only, no per-scope artifact store](2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store.md)

@@ -130,6 +130,9 @@ const platformFor = (architecture: string | null): Platform | null =>
 
 const tail = (text: string): string => (text.length > DIAGNOSTIC_TAIL ? text.slice(-DIAGNOSTIC_TAIL) : text)
 
+/** How an image this operation pulled is named among its `owned_resource_ids`. */
+export const ownedImageId = (image: PlatformImage): string => `image:${image.repository}@${image.digest}`
+
 /** A structured `LinuxBlocker` on the wire. A relogin is its own code: the operation waits on it. */
 export function toManagedBlocker(blocker: LinuxBlocker): ManagedBlocker {
   return {
@@ -287,6 +290,12 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     return target.kind === 'runtime' ? target.installation_id : null
   }
 
+  /** Absent by Docker's own answer. A failed inspect proves nothing, and is not "absent". */
+  const imageAbsent = async (docker: ProvisionerDocker, image: PlatformImage): Promise<boolean> => {
+    const inspected = await inspectImage(docker.exec, image).catch(() => null)
+    return inspected !== null && !inspected.found
+  }
+
   const imagePresent = async (image: PlatformImage): Promise<boolean> => {
     const docker = await deps.docker()
     if (docker === null) return false
@@ -395,16 +404,15 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       existing !== null &&
       existing.installation.status === 'ready' &&
       existing.installation.active_descriptor_id === descriptor.descriptor_id
-    // What the engine image still needs on disk (review r1, item 1). Nothing once it is there, or
-    // installed; not checkable once a pull has begun — Docker's layer store already holds part of
-    // it, and counting the free space that is left against the whole image would fail every restart
-    // mid-pull. Only an image not yet started is checked against `required_disk_bytes`. An
-    // environment-only setup pulls no engine image at all.
+    // What the engine image still needs on disk (review r1, item 1): nothing once it is there by
+    // digest — whatever the installation record says, since an image deleted outside the app is
+    // pulled again and needs the space again (review r2, item D); not checkable once a pull has
+    // begun — Docker's layer store already holds part of it, and counting the free space that is
+    // left against the whole image would fail every restart mid-pull. Otherwise the whole
+    // `required_disk_bytes`. An environment-only setup pulls no engine image at all.
     const pullStarted = PULL_PHASES.includes(record.machine.checkpoint ?? 'checking')
     const stillNeeded =
-      target.kind !== 'runtime' || present || readyInstallation || pullStarted
-        ? null
-        : descriptor.required_disk_bytes
+      target.kind !== 'runtime' || present || pullStarted ? null : descriptor.required_disk_bytes
     const recipe = descriptor.recipes.find((entry) => entry.recipe_id === deps.recipe.recipe_id)
     const assessment = assessLinux(machine, {
       recipeId: deps.recipe.recipe_id,
@@ -563,7 +571,10 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
         if (effect.kind === 'activate') {
           const id = installationId(record)
           const existing = id === null ? null : await deps.installations.read(id)
-          const planned = (await pinnedDescriptor(record)).descriptor_id
+          // Compared by id, never resolved: a cache entry gone since the activation must not make
+          // a committed activation look undone (review r2, item C).
+          const planned =
+            record.machine.consented?.descriptor_id ?? record.requirement_plan?.descriptor_id ?? null
           return existing !== null && existing.installation.active_descriptor_id === planned
             ? { kind: 'completed', owned_resource_ids: [] }
             : { kind: 'absent' }
@@ -624,7 +635,11 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       return { prerequisites_met: true, needs_relogin: false, error: null }
     },
 
-    async prepare(record: PersistedOperation, signal: AbortSignal): Promise<void> {
+    async prepare(
+      record: PersistedOperation,
+      signal: AbortSignal,
+      own: (resourceIds: string[]) => Promise<void> = async () => undefined
+    ): Promise<void> {
       const descriptor = await pinnedDescriptor(record)
       const machine = await facts()
       const platform = platformFor(machine.architecture)
@@ -643,6 +658,10 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       }
       const docker = await dockerOrThrow()
       const probeImage = descriptor.probe_image[platform]
+      // Only a GPU-check image this setup pulls itself is its to remove later. Whether it was absent
+      // is recorded on the operation before the pull, so a core that dies between the pull and the
+      // activation still knows (review r2, item B); an image the user already had never is.
+      if (await imageAbsent(docker, probeImage)) await own([ownedImageId(probeImage)])
       await pull(probeImage, { socketPath: docker.socketPath, signal, verify: docker.exec })
       const result = await runOnce(docker.exec, {
         image: probeImage,
@@ -733,7 +752,9 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
           status: 'ready',
         },
         image: descriptor.image[platform],
-        probe_image: descriptor.probe_image[platform],
+        ...(record.owned_resource_ids.includes(ownedImageId(descriptor.probe_image[platform]))
+          ? { probe_image: descriptor.probe_image[platform] }
+          : {}),
         platform,
         installed_at: now().toISOString(),
       }

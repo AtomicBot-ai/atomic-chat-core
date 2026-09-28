@@ -25,6 +25,7 @@ const operation = (over: Partial<EnvironmentOperation> = {}): EnvironmentOperati
   phase: 'preparing-host',
   plan_digest: DIGEST,
   approved_plan_digest: DIGEST,
+  carried_plan_digest: null,
   progress: null,
   pending_host_step: null,
   completed_step_ids: [],

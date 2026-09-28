@@ -463,6 +463,36 @@ describe('two cores on one environment', () => {
   })
 })
 
+describe('what an operation created is recorded at once, and never forgotten (review r2, item B)', () => {
+  it('records a resource without moving the revision, and a commit from an older read keeps it', async () => {
+    const fs = new FakeManagedFs()
+    const s = store(fs)
+    const { record } = await s.createOrGet('env-1', begin(), DIGEST_A)
+    const id = record.machine.operation.operation_id
+
+    await s.recordOwned(id, ['image:probe@sha256:1'])
+    await s.recordOwned(id, ['image:probe@sha256:1'])
+    const read = await s.read(id)
+    expect(read?.owned_resource_ids).toEqual(['image:probe@sha256:1'])
+    expect(read?.machine.operation.revision).toBe(0)
+
+    // A transition computed from the read before the claim still lands, and the claim survives it.
+    const moved = {
+      ...record,
+      machine: { ...record.machine, operation: { ...record.machine.operation, revision: 1 } },
+    }
+    expect(await s.compareAndSwap(id, 0, moved)).toBe(true)
+    expect((await s.read(id))?.owned_resource_ids).toEqual(['image:probe@sha256:1'])
+  })
+
+  it('refuses to record for an operation that does not exist', async () => {
+    const s = store(new FakeManagedFs())
+    await expect(s.recordOwned('op-nobody', ['x'])).rejects.toMatchObject({
+      code: 'MANAGED_OPERATION_NOT_FOUND',
+    })
+  })
+})
+
 describe('committing against a revision (OP08)', () => {
   it('refuses a commit computed from a state the operation has left, and writes nothing', async () => {
     const fs = new FakeManagedFs()

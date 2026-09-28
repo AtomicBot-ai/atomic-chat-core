@@ -140,7 +140,10 @@ class FakeProvisioner implements EnvironmentProvisioner {
       error: this.missing,
     }
   }
-  async prepare(): Promise<void> {
+  /** What `prepare` records as its own before its (paused) work. */
+  claims: string[] = []
+  async prepare(_record: unknown, _signal: unknown, own?: (ids: string[]) => Promise<void>): Promise<void> {
+    if (this.claims.length > 0) await own?.(this.claims)
     await this.step('prepare')
   }
   async pull(_record: unknown, onProgress: (progress: ManagedProgress) => void): Promise<void> {
@@ -507,6 +510,27 @@ describe('a begin that finds an abandoned operation (task 2.6)', () => {
   })
 })
 
+describe('what a step creates is recorded before it creates it (review r2, item B)', () => {
+  it('persists the claim while the step is still running, so a crash right after keeps it', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    provisioner.claims = ['image:probe@sha256:1']
+    const release = provisioner.pauseAt('prepare')
+    const { service, store } = harness(provisioner)
+    await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+    for (let i = 0; i < 200 && !provisioner.calls.includes('prepare'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    const midStep = await store.read('op-1')
+    expect(midStep?.machine.operation.phase).toBe('preparing-environment')
+    expect(midStep?.owned_resource_ids).toEqual(['image:probe@sha256:1'])
+    release()
+    await settle(service)
+    // Every later transition kept it.
+    expect((await store.read('op-1'))?.owned_resource_ids).toEqual(['image:probe@sha256:1'])
+    expect((await service.get('op-1')).phase).toBe('ready')
+  })
+})
+
 describe('byte progress while pulling (task 2.6)', () => {
   it('announces progress without moving the revision, and get() shows it', async () => {
     const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
@@ -532,6 +556,36 @@ describe('byte progress while pulling (task 2.6)', () => {
     release()
     await settle(service)
     expect((await service.get('op-1')).progress).toBeNull()
+  })
+
+  it('stops announcing ticks once the other scope’s core cancelled the operation (review r2, item E)', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    const release = provisioner.pauseAt('pull')
+    let clock = 0
+    const { service, store, events } = harness(provisioner, { now: () => (clock += 1_000) })
+    await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+    for (let i = 0; i < 200 && !provisioner.calls.includes('pull'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    // Another core over the same shared store: this one never hears of its cancel.
+    let n = 1_000
+    const other = new EnvironmentService({
+      store,
+      environmentId: 'env-1',
+      instanceId: 'core-2',
+      newEffectId: () => `other-${(n += 1)}`,
+      provisioner: new FakeProvisioner({ plan: plan(PLAN_A), host_step: null }),
+      readSnapshot: async () => [],
+      identityDeps: { alive: () => true },
+    })
+    await other.cancel('op-1')
+    await other.idle()
+    const before = events.length
+    provisioner.lateProgress = [{ completed: 60, total: 100 }]
+    release()
+    await settle(service)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(events.slice(before).some((event) => event.phase === 'pulling-image')).toBe(false)
   })
 
   it('never announces a tick for an operation that has since moved on (review r1, item 8)', async () => {

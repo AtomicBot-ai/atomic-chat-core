@@ -292,8 +292,30 @@ export class OperationStore {
           operationId
         )
       }
-      await this.write(next)
+      // What an operation created only ever grows: a commit computed from a read taken before
+      // `recordOwned` must not drop what was recorded since (review r2, item B).
+      await this.write({
+        ...next,
+        owned_resource_ids: [...new Set([...current.owned_resource_ids, ...next.owned_resource_ids])],
+      })
       return true
+    })
+  }
+
+  /**
+   * Record, at once and durably, resources this operation is about to create — before creating
+   * them, so a core that dies halfway still knows what was its own. Does not move the revision: it
+   * changes what the operation owns, never where it stands.
+   */
+  async recordOwned(operationId: string, resourceIds: string[]): Promise<void> {
+    await this.withLock(async () => {
+      const current = await this.read(operationId)
+      if (current === null) {
+        throw new AtomicCoreError('MANAGED_OPERATION_NOT_FOUND', 'No such operation.', operationId)
+      }
+      const owned = [...new Set([...current.owned_resource_ids, ...resourceIds])]
+      if (owned.length === current.owned_resource_ids.length) return
+      await this.write({ ...current, owned_resource_ids: owned })
     })
   }
 

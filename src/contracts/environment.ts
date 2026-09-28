@@ -236,7 +236,14 @@ export interface ManagedHostReceipt {
  *
  * `plan_digest` is what the core currently intends; `approved_plan_digest` is what the user agreed
  * to. They differ when the host changed under an operation awaiting consent, and privileged work
- * never starts while they differ.
+ * never starts while they differ. Outside `awaiting-consent` they are equal once the user approved.
+ *
+ * `carried_plan_digest` is the plan the core continued under after work began, covered by the
+ * consent's basis (the same descriptor, engine image digest and target the approved plan named):
+ * after a sign-in or a restart the host looks different (packages installed, space used by the
+ * pull), so a fresh probe yields a new digest, but it asks nothing the user did not approve. It is
+ * reported here, apart, and never replaces `plan_digest` or `approved_plan_digest`. Null until the
+ * core has continued that way, and again after a new approval.
  */
 export interface EnvironmentOperation {
   schema_version: 1
@@ -250,6 +257,7 @@ export interface EnvironmentOperation {
   phase: ManagedPhase
   plan_digest: Sha256Digest | null
   approved_plan_digest: Sha256Digest | null
+  carried_plan_digest: Sha256Digest | null
   progress: ManagedProgress | null
   pending_host_step: ManagedHostStep | null
   completed_step_ids: string[]
