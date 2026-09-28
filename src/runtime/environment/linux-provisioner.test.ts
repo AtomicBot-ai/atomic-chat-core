@@ -345,6 +345,20 @@ describe('probing a Linux host for a setup', () => {
     expect(installed.views.at(-1)?.availability).toBe('supported')
   })
 
+  it('raises no disk blocker for a ready installation while Docker cannot be asked (review r3, N4)', async () => {
+    const h = harness({
+      ...readyHost(),
+      docker: { installed: true, reachable: false, service_active: true, gpu_runtime: true },
+      group: { configured: true, effective: false },
+    })
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    h.machine.free = 1 * GIB
+    const answer = await provisioner.probe(fresh(), signal)
+    // Whether the image is there is unknown, not "absent": only the sign-in is reported.
+    expect(answer.plan.blockers.map((blocker) => blocker.reason)).toEqual(['relogin-required'])
+  })
+
   it('checks the space again for an installed image deleted outside the app (review r2, item D)', async () => {
     const h = harness(readyHost())
     const provisioner = createLinuxProvisioner(h.deps)
@@ -564,6 +578,23 @@ describe('the GPU check, the pull and the verification', () => {
       claims.push(ids)
     })
     expect(claims).toEqual([])
+  })
+
+  it('carries the GPU-check image forward on a repeat setup of the same installation (review r3, N3)', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record({}, { owned_resource_ids: [ownedImageId(PROBE_IMAGE)] }), signal)
+    // The repeat setup found the image present and claimed nothing; the record still says it is ours.
+    await provisioner.activate(record(), signal)
+    expect((await h.installations.read('tensorrt-llm'))?.probe_image).toEqual(PROBE_IMAGE)
+    // A record for another GPU-check image is not carried onto this one.
+    const mine = await h.installations.read('tensorrt-llm')
+    await h.installations.write({
+      ...mine!,
+      probe_image: { ...PROBE_IMAGE, digest: `sha256:${'f'.repeat(64)}` },
+    })
+    await provisioner.activate(record(), signal)
+    expect((await h.installations.read('tensorrt-llm'))?.probe_image).toBeUndefined()
   })
 
   it('keeps the GPU-check image on the installation only when this operation pulled it', async () => {

@@ -236,7 +236,11 @@ export interface ManagedHostReceipt {
  *
  * `plan_digest` is what the core currently intends; `approved_plan_digest` is what the user agreed
  * to. They differ when the host changed under an operation awaiting consent, and privileged work
- * never starts while they differ. Outside `awaiting-consent` they are equal once the user approved.
+ * never starts while they differ. In every work phase (`preparing-host` through `activating`, and
+ * `removing`) and in `ready`/`removed` they are equal: work only ever runs under the approval of
+ * the plan it names. Before any consent they may differ in a phase that is not work — `checking`,
+ * `awaiting-consent`, or `failed`/`relogin-required` straight from a probe (a blocked host, no
+ * approval yet) — and after work began a waiting or failed phase keeps the consented digest in both.
  *
  * `carried_plan_digest` is the plan the core continued under after work began, covered by the
  * consent's basis (the same descriptor, engine image digest and target the approved plan named):
@@ -282,6 +286,11 @@ export interface BeginOperation {
  * Continue an operation that is awaiting consent, blocked on a sign-out or reboot, failed or
  * cancelled. Carrying the approval here rather than in a second `begin` is deliberate: a resume
  * re-probes first and can only continue the operation that already exists.
+ *
+ * `approved_plan_digest` approves the plan on offer only in `awaiting-consent`. In any other phase it
+ * may only restate the operation's current `plan_digest`; a different one is refused with
+ * `MANAGED_PLAN_CHANGED` (409) and nothing changes — resume without it, and approve whatever plan the
+ * re-probe then offers.
  */
 export interface ResumeOperation {
   expected_revision: number

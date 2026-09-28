@@ -42,7 +42,14 @@ export interface PersistedOperation {
   /** Receipt nonce to the digest of the receipt that consumed it. A nonce is used once. */
   accepted_receipt_digests: Record<string, Sha256Digest>
   completed_effect_ids: string[]
-  /** What this operation has actually created, so recovery adopts by identity and not by name. */
+  /**
+   * What this operation has actually created, so recovery adopts by identity and not by name.
+   * Monotonic: `compareAndSwap` writes the union of what is on disk and what it is given, and
+   * `recordOwned` only adds, so no commit — however stale the read it was computed from — ever drops
+   * an entry (review r2, item B). Nothing can remove one today; a future release of a resource (an
+   * update deleting what an operation made) needs a store method of its own that removes under the
+   * lock, not a `compareAndSwap` with a shorter list, which this union would silently undo.
+   */
   owned_resource_ids: string[]
   /**
    * The process that last wrote this record, stamped by the store on every write (never by a

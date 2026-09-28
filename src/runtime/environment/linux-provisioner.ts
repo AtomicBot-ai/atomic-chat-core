@@ -410,9 +410,14 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     // begun — Docker's layer store already holds part of it, and counting the free space that is
     // left against the whole image would fail every restart mid-pull. Otherwise the whole
     // `required_disk_bytes`. An environment-only setup pulls no engine image at all.
+    // A ready installation of this descriptor on a daemon this probe cannot reach: whether its image
+    // is there is unknown, which is not "absent" — no disk blocker on a guess (review r3, N4).
     const pullStarted = PULL_PHASES.includes(record.machine.checkpoint ?? 'checking')
+    const presenceUnknown = readyInstallation && !machine.docker.daemon_reachable
     const stillNeeded =
-      target.kind !== 'runtime' || present || pullStarted ? null : descriptor.required_disk_bytes
+      target.kind !== 'runtime' || present || pullStarted || presenceUnknown
+        ? null
+        : descriptor.required_disk_bytes
     const recipe = descriptor.recipes.find((entry) => entry.recipe_id === deps.recipe.recipe_id)
     const assessment = assessLinux(machine, {
       recipeId: deps.recipe.recipe_id,
@@ -740,6 +745,15 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       if (target.kind !== 'runtime') return
       const descriptor = await pinnedDescriptor(record)
       const platform = await hostPlatform()
+      const probeImage = descriptor.probe_image[platform]
+      // Ours if this operation pulled it, or if the installation it replaces already recorded that
+      // an earlier setup did (a repeat setup finds it present and claims nothing; review r3, N3).
+      // An earlier attempt that never activated leaves no record to carry, so its image stays the
+      // user's to remove: the safe direction.
+      const previous = await deps.installations.read(target.installation_id)
+      const ownsProbe =
+        record.owned_resource_ids.includes(ownedImageId(probeImage)) ||
+        previous?.probe_image?.digest === probeImage.digest
       const installation: InstallationRecord = {
         schema_version: 1,
         installation: {
@@ -752,9 +766,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
           status: 'ready',
         },
         image: descriptor.image[platform],
-        ...(record.owned_resource_ids.includes(ownedImageId(descriptor.probe_image[platform]))
-          ? { probe_image: descriptor.probe_image[platform] }
-          : {}),
+        ...(ownsProbe ? { probe_image: probeImage } : {}),
         platform,
         installed_at: now().toISOString(),
       }

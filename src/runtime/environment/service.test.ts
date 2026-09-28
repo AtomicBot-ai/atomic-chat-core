@@ -465,6 +465,22 @@ describe('an explicit resume looks at the machine (task 2.6)', () => {
   })
 })
 
+describe('a resume never swaps the approval (review r3, N1)', () => {
+  it('refuses another approval on a failed operation and leaves it as it was', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    provisioner.failures.set('pull', new AtomicCoreError('IO_ERROR', 'The registry refused.'))
+    const { service } = harness(provisioner)
+    await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+    await settle(service)
+    const failed = await service.get('op-1')
+    expect(failed.phase).toBe('failed')
+    await expect(
+      service.resume('op-1', { expected_revision: failed.revision, approved_plan_digest: PLAN_B })
+    ).rejects.toMatchObject({ code: 'MANAGED_PLAN_CHANGED' })
+    expect((await service.get('op-1')).revision).toBe(failed.revision)
+  })
+})
+
 describe('a begin that finds an abandoned operation (task 2.6)', () => {
   it('fails the operation a dead core left running and starts the new request', async () => {
     const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })

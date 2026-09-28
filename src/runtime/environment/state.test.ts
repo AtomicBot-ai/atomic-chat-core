@@ -932,6 +932,121 @@ describe('consent that was already acted on (task 2.6)', () => {
     expect(seen).not.toContain('awaiting-consent')
   })
 
+  it('refuses a resume carrying another approval than the plan it is on (review r3, N1 path 1)', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:A', ADOPTED), host_step: null })
+    )
+    driver.apply(driver.reply({ type: 'environment-verified' }))
+    driver.apply(driver.reply({ type: 'failed', error: { code: 'IO_ERROR', message: 'pull broke' } }))
+    expect(driver.phase).toBe('failed')
+    const revision = driver.machine.operation.revision
+    expect(
+      driver.refuse({
+        type: 'resume',
+        input: { expected_revision: revision, approved_plan_digest: 'sha256:X' },
+      })
+    ).toBe('MANAGED_PLAN_CHANGED')
+    // The approval it already has, restated, is fine, and the work carries on under it.
+    driver.apply({ type: 'resume', input: { expected_revision: revision, approved_plan_digest: 'sha256:A' } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: [],
+        current_plan_digest: 'sha256:E',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', ADOPTED),
+        host_step: null,
+        image_present: false,
+      })
+    )
+    expect(driver.phase).toBe('pulling-image')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+  })
+
+  it('keeps plan and approval equal when a core restarts during a re-ask after work began (review r3, N1 path 2)', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:B',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    // Something privileged is needed again (a Docker restart): the operation asks.
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:B'), host_step: HOST_STEP }))
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:B')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+
+    // The core restarts while it asks; recovery reconciles, and the host now needs nothing new.
+    const m = driver.machine
+    const revision = m.operation.revision + 1
+    driver.machine = {
+      ...m,
+      operation: { ...m.operation, phase: 'checking', revision, pending_host_step: null, error: null },
+      pending_effect: {
+        effect_id: 'restart-1',
+        operation_id: 'op-1',
+        expected_revision: revision,
+        kind: 'reconcile',
+        plan_digest: m.operation.plan_digest,
+      },
+    }
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-3',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:F',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:F', ADOPTED), host_step: null })
+    )
+    // Work carries on under the consent the user gave, and the wire says so.
+    expect(driver.phase).toBe('preparing-environment')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:F')
+  })
+
+  it('never carries when the approval on record is not the consent the work began under', () => {
+    const driver = midPull()
+    // An approval that is not the basis (a record tampered with, or written by an older core).
+    driver.machine = {
+      ...driver.machine,
+      operation: { ...driver.machine.operation, approved_plan_digest: 'sha256:Z' },
+    }
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:E', ADOPTED), host_step: null })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+  })
+
   it('never carries consent over for an operation that has not acted on one', () => {
     const driver = new Driver('setup', RUNTIME, 'sha256:A')
     driver.apply(

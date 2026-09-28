@@ -446,6 +446,19 @@ export function reduceOperation(
       ) {
         return conflict(`${phase} is already running`)
       }
+      // An approval is given for the plan on offer, in `awaiting-consent`. A resume may restate the
+      // one the operation already has, never swap in another: that would put an approval the user
+      // never saw a plan for next to the plan the work runs under (review r3, N1). Refused, not
+      // ignored, so a client that meant to approve something new finds out instead of carrying on
+      // under the old consent.
+      const restated = event.input.approved_plan_digest
+      if (restated !== undefined && restated !== operation.plan_digest) {
+        return err(
+          'MANAGED_PLAN_CHANGED',
+          'This approval is not for the plan the operation is on; resume without one, and approve the plan it offers.',
+          `approval ${restated}, plan ${String(operation.plan_digest)}`
+        )
+      }
       // Never continue from a stored phase: look at the machine first.
       return advance(
         state,
@@ -453,7 +466,7 @@ export function reduceOperation(
           phase: 'checking',
           error: null,
           cancellation_requested: false,
-          approved_plan_digest: event.input.approved_plan_digest ?? operation.approved_plan_digest,
+          approved_plan_digest: restated ?? operation.approved_plan_digest,
         },
         { kind: 'reconcile', input }
       )
@@ -513,11 +526,14 @@ export function reduceOperation(
         (state.checkpoint ?? null) !== null &&
         event.host_step === null &&
         basis !== null &&
+        // The approval on record must still be the consent the work began under: only then does
+        // the work continue with plan and approval equal (review r3, N1).
+        operation.approved_plan_digest === basis.plan_digest &&
         consentCovers(basis, plan, operation.kind)
       ) {
         const carried: OperationMachine = {
           ...state,
-          operation: { ...operation, carried_plan_digest: plan.plan_digest },
+          operation: { ...operation, plan_digest: basis.plan_digest, carried_plan_digest: plan.plan_digest },
         }
         return continueConsentedWork(carried, input, event.image_present ?? false)
       }
