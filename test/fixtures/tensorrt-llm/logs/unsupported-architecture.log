@@ -1,0 +1,6 @@
+INFO 09-28 10:31:09 [server.py] Started server process [1]
+INFO 09-28 10:31:09 [server.py] Waiting for application startup.
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/models/automodel.py", line 88, in from_hugging_face
+    raise NotImplementedError(
+NotImplementedError: The given huggingface model architecture ExoticForCausalLM is not supported in TRT-LLM yet

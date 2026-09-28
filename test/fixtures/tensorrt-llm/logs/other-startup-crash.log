@@ -1,0 +1,6 @@
+INFO 09-28 10:41:17 [server.py] Started server process [1]
+INFO 09-28 10:41:17 [server.py] Waiting for application startup.
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/serve/openai_server.py", line 210, in __init__
+    raise RuntimeError("failed to bind metadata server config file: /tmp/meta.yaml not found")
+RuntimeError: failed to bind metadata server config file: /tmp/meta.yaml not found
