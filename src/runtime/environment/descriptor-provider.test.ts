@@ -6,6 +6,7 @@ import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import {
   createRuntimeDescriptorProvider,
+  descriptorFetchFromFetch,
   descriptorMeetsCoreVersion,
   DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL,
   RUNTIME_DESCRIPTOR_URL_ENV,
@@ -185,19 +186,126 @@ describe('forNewSetup', () => {
     expect(fetch).toHaveBeenCalledWith('https://example.test/tensorrt-llm.json', expect.any(Number))
   })
 
-  it('writes the cache atomically: a temp file is written, then renamed into place', async () => {
+  it('writes the cache atomically: a uniquely named temp file is written, then renamed into place', async () => {
     const fs = new FakeManagedFs()
     await provider({ fetch: okFetch(RAW_A), fs }).forNewSetup()
 
     const finalPath = PATHS.descriptorFile('tensorrt-llm-1.2.1-r1')
     const rename = fs.renames.find(([, to]) => to === finalPath)
     expect(rename).toBeDefined()
-    expect(rename?.[0]).toBe(`${finalPath}.tmp`)
+    // Not a fixed `<path>.tmp`: this cache has no lock, so a shared name would let a second,
+    // concurrent writer (the other scope's core) clobber it. `<path>.<uuid>.tmp` per call instead.
+    expect(rename?.[0]).toMatch(/^\/shared\/descriptors\/tensorrt-llm-1\.2\.1-r1\.json\.[0-9a-f-]{36}\.tmp$/)
     // The temp file never lingers: the rename consumed it (FakeManagedFs.rename deletes the source).
-    expect(fs.files.has(`${finalPath}.tmp`)).toBe(false)
+    expect(fs.files.has(rename?.[0] ?? '')).toBe(false)
 
     const latestRename = fs.renames.find(([, to]) => to === PATHS.descriptorLatestFile)
-    expect(latestRename?.[0]).toBe(`${PATHS.descriptorLatestFile}.tmp`)
+    expect(latestRename?.[0]).toMatch(/^\/shared\/descriptors\/latest\.json\.[0-9a-f-]{36}\.tmp$/)
+  })
+
+  it('a cache write failure is not fatal: the freshly fetched descriptor is still returned', async () => {
+    class WriteFailsFs extends FakeManagedFs {
+      override writeFile(): Promise<void> {
+        return Promise.reject(new Error('ENOSPC: no space left on device'))
+      }
+    }
+    const onWarn = vi.fn()
+    const result = await createRuntimeDescriptorProvider({
+      env: {},
+      fetch: okFetch(RAW_A),
+      readFile: unreachableReadFile,
+      fs: new WriteFailsFs(),
+      root: ROOT,
+      coreVersion: CORE_VERSION,
+      onWarn,
+    }).forNewSetup()
+
+    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(onWarn).toHaveBeenCalledTimes(1)
+    expect(onWarn.mock.calls[0]?.[0]).toContain('tensorrt-llm-1.2.1-r1')
+  })
+
+  it('two concurrent accepts of different descriptor ids never clobber each other', async () => {
+    const fs = new FakeManagedFs()
+    const [resultA, resultB] = await Promise.all([
+      provider({ fetch: okFetch(RAW_A), fs }).forNewSetup(),
+      provider({ fetch: okFetch(RAW_B), fs }).forNewSetup(),
+    ])
+
+    expect(resultA).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(resultB).toEqual({ kind: 'available', descriptor: DESCRIPTOR_B })
+    // Both landed on disk, uncorrupted, and no stray .tmp file was left behind by either.
+    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r1')) ?? 'null')).toEqual(
+      JSON.parse(RAW_A)
+    )
+    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.3.0-r1')) ?? 'null')).toEqual(
+      JSON.parse(RAW_B)
+    )
+    expect([...fs.files.keys()].some((path) => path.endsWith('.tmp'))).toBe(false)
+    // latest.json is a benign last-writer-wins race: whichever it is, it must be valid and be one
+    // of the two ids actually written — never a torn or mixed read.
+    const latest = JSON.parse(fs.files.get(PATHS.descriptorLatestFile) ?? 'null') as {
+      descriptor_id: string
+    }
+    expect(['tensorrt-llm-1.2.1-r1', 'tensorrt-llm-1.3.0-r1']).toContain(latest.descriptor_id)
+  })
+})
+
+describe('cachedForNewSetup', () => {
+  it('never calls fetch or readFile', async () => {
+    const fs = new FakeManagedFs()
+    await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
+    const result = await provider({ fs }).cachedForNewSetup()
+
+    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(unreachableFetch).not.toHaveBeenCalled()
+  })
+
+  it('unsupported, network-free, when nothing has ever been cached', async () => {
+    const fs = new FakeManagedFs()
+    const result = await provider({ fs }).cachedForNewSetup()
+
+    expect(result.kind).toBe('unsupported')
+    if (result.kind === 'unsupported') {
+      expect(result.error.code).toBe('MANAGED_METADATA_INVALID')
+    }
+  })
+})
+
+describe('readSource scheme restriction (via forNewSetup)', () => {
+  it('rejects a plain http:// override instead of fetching it, and warns', async () => {
+    const fs = new FakeManagedFs()
+    await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
+    const onWarn = vi.fn()
+    const result = await createRuntimeDescriptorProvider({
+      env: { [RUNTIME_DESCRIPTOR_URL_ENV]: 'http://example.test/tensorrt-llm.json' },
+      fetch: unreachableFetch,
+      readFile: unreachableReadFile,
+      fs,
+      root: ROOT,
+      coreVersion: CORE_VERSION,
+      onWarn,
+    }).forNewSetup()
+
+    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(unreachableFetch).not.toHaveBeenCalled()
+    expect(onWarn).toHaveBeenCalledTimes(1)
+    expect(onWarn.mock.calls[0]?.[0]).toContain('http://example.test/tensorrt-llm.json')
+  })
+
+  it('rejects an unrecognised scheme the same way, with no cache to fall back to', async () => {
+    const fs = new FakeManagedFs()
+    const result = await createRuntimeDescriptorProvider({
+      env: { [RUNTIME_DESCRIPTOR_URL_ENV]: 'ftp://example.test/tensorrt-llm.json' },
+      fetch: unreachableFetch,
+      readFile: unreachableReadFile,
+      fs,
+      root: ROOT,
+      coreVersion: CORE_VERSION,
+    }).forNewSetup()
+
+    expect(result.kind).toBe('unsupported')
+    expect(unreachableFetch).not.toHaveBeenCalled()
   })
 })
 
@@ -263,5 +371,45 @@ describe('descriptorMeetsCoreVersion', () => {
     ['a much newer core still satisfies an old floor', '2.3.0', '0.7.0', true],
   ] as const)('%s: core %s vs minimum %s -> %s', (_label, coreVersion, minimum, expected) => {
     expect(descriptorMeetsCoreVersion(withMinimum(minimum), coreVersion)).toBe(expected)
+  })
+})
+
+describe('descriptorFetchFromFetch', () => {
+  it('sends the url with an Accept: application/json header and an abortable signal', async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      expect(init?.headers).toEqual({ Accept: 'application/json' })
+      expect(init?.signal).toBeInstanceOf(AbortSignal)
+      expect(init?.signal?.aborted).toBe(false)
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const response = await descriptorFetchFromFetch(fetchImpl)('https://example.test/d.json', 5_000)
+
+    expect(fetchImpl).toHaveBeenCalledWith('https://example.test/d.json', expect.any(Object))
+    expect(response.status).toBe(200)
+  })
+
+  it('resolves with whatever Response the transport returns, non-2xx included: readSource decides what that means', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('server error', { status: 503 })
+    ) as unknown as typeof fetch
+
+    const response = await descriptorFetchFromFetch(fetchImpl)('https://example.test/d.json', 5_000)
+
+    expect(response.ok).toBe(false)
+    expect(response.status).toBe(503)
+  })
+
+  it('aborts the underlying request and rejects once the timeout elapses', async () => {
+    let capturedSignal: AbortSignal | undefined
+    const fetchImpl = vi.fn((_url: string | URL, init?: RequestInit) => {
+      capturedSignal = init?.signal as AbortSignal
+      return new Promise<Response>(() => undefined) // never settles on its own
+    }) as unknown as typeof fetch
+
+    await expect(descriptorFetchFromFetch(fetchImpl)('https://example.test/d.json', 10)).rejects.toThrow(
+      /timed out after 10ms/
+    )
+    expect(capturedSignal?.aborted).toBe(true)
   })
 })

@@ -337,6 +337,7 @@ export async function createAtomicCore(
       platform,
       emit: (name, payload) => emitter.emit(name, payload),
       newId: () => randomUUID(),
+      onWarn: (message) => log('warn', message),
       ...(options.fetch ? { fetch: options.fetch } : {}),
     })
 

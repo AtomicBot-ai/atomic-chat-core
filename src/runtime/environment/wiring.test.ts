@@ -2,12 +2,21 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { CoreEvents, ManagedHostStep, RequirementPlan, Sha256Digest } from '../../contracts/index.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AtomicCoreError } from '../../contracts/index.js'
+import type {
+  CoreEvents,
+  ManagedHostStep,
+  RequirementPlan,
+  RuntimeDescriptor,
+  RuntimeInstallation,
+  Sha256Digest,
+} from '../../contracts/index.js'
 import type { DataFolderEnv } from '../../config/index.js'
 import { RUNTIME_DESCRIPTOR_URL_ENV } from './descriptor-provider.js'
+import type { DescriptorProviderResult, RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentProvisioner } from './service.js'
-import { executorFor, provisionerFor, wireManagedRuntimes } from './wiring.js'
+import { executorFor, provisionerFor, resolveMinimumAppVersion, wireManagedRuntimes } from './wiring.js'
 import type { ManagedRuntimes } from './wiring.js'
 
 /** A pid that existed and is now gone: what a crashed core's process leaves behind (finding 1). */
@@ -318,8 +327,91 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     expect(result.kind).toBe('unsupported')
   })
 
-  it('leaves minimum_app_version null: nothing yet decides which descriptor governs this environment', () => {
+  it('minimum_app_version stays null before the first recover(), and after it with nothing cached', async () => {
     const { managed } = wire('linux', fakeProvisioner())
     expect(managed.environments()[0]?.minimum_app_version).toBeNull()
+    await managed.recover()
+    expect(managed.environments()[0]?.minimum_app_version).toBeNull()
+  })
+
+  it('recover() fills minimum_app_version from the latest accepted cache once one exists', async () => {
+    const managed = wireManagedRuntimes({
+      env: env('linux', { [RUNTIME_DESCRIPTOR_URL_ENV]: fixtureUrl }),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: () => undefined,
+      newId: () => 'id-1',
+    })
+    wired.push(managed)
+    // Seeds the cache the way a real setup probe eventually will (task 2.4); recover() itself
+    // never fetches, so this is what makes "latest accepted" non-empty for it to read.
+    await managed.descriptors.forNewSetup()
+
+    await managed.recover()
+
+    expect(managed.environments()[0]?.minimum_app_version).toBe('2.0.49')
+  })
+})
+
+describe('resolveMinimumAppVersion', () => {
+  const installation = (activeDescriptorId: string | null): RuntimeInstallation => ({
+    installation_id: 'inst-1',
+    engine_id: 'tensorrt-llm',
+    environment_id: 'default',
+    active_descriptor_id: activeDescriptorId,
+    candidate_descriptor_id: null,
+    availability: 'supported',
+    status: 'ready',
+  })
+
+  const unsupported = (): DescriptorProviderResult => ({
+    kind: 'unsupported',
+    error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'nothing here'),
+  })
+  // resolveMinimumAppVersion only ever reads `.descriptor.minimum_app_version`; a full RuntimeDescriptor
+  // is real product data this unit test has no business fabricating field-by-field.
+  const available = (minimum_app_version: string): DescriptorProviderResult => ({
+    kind: 'available',
+    descriptor: { minimum_app_version } as unknown as RuntimeDescriptor,
+  })
+
+  const fakeDescriptors = (opts: {
+    forInstallation?: RuntimeDescriptorProvider['forInstallation']
+    cachedForNewSetup?: RuntimeDescriptorProvider['cachedForNewSetup']
+  }): RuntimeDescriptorProvider => ({
+    forNewSetup: () => {
+      throw new Error('resolveMinimumAppVersion must never call forNewSetup (it would reach the network)')
+    },
+    forInstallation: opts.forInstallation ?? (async () => unsupported()),
+    cachedForNewSetup: opts.cachedForNewSetup ?? (async () => unsupported()),
+  })
+
+  it('pinned: a pinned installation wins, resolved without ever reaching the network fallback', async () => {
+    const forInstallation = vi.fn(async (id: string) => {
+      expect(id).toBe('tensorrt-llm-1.2.1-r1')
+      return available('2.0.49')
+    })
+    const cachedForNewSetup = vi.fn(async () => available('9.9.9'))
+    const descriptors = fakeDescriptors({ forInstallation, cachedForNewSetup })
+
+    const result = await resolveMinimumAppVersion(descriptors, [installation('tensorrt-llm-1.2.1-r1')])
+
+    expect(result).toBe('2.0.49')
+    expect(cachedForNewSetup).not.toHaveBeenCalled()
+  })
+
+  it('latest-only: no pinned installation falls back to the latest accepted cache', async () => {
+    const descriptors = fakeDescriptors({ cachedForNewSetup: async () => available('2.0.49') })
+
+    // An installation that exists but has not pinned anything yet (still installing) does not count.
+    const result = await resolveMinimumAppVersion(descriptors, [installation(null)])
+
+    expect(result).toBe('2.0.49')
+  })
+
+  it('none: no installation and nothing cached resolves null', async () => {
+    const descriptors = fakeDescriptors({})
+
+    expect(await resolveMinimumAppVersion(descriptors, [])).toBeNull()
   })
 })

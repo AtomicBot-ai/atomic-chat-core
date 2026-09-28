@@ -18,20 +18,31 @@
  *
  * Fetch transport follows the house pattern in `src/backend/catalog/manifest.ts`: an injected
  * `fetch`, a hard timeout, `raw.githubusercontent.com` of `AtomicBot-ai/atomic-chat-conf` `main`.
- * `ATOMIC_RUNTIME_DESCRIPTOR_URL` overrides the source for development and tests — `file://…` is
- * read from disk (through an injected `readFile`), anything else is fetched.
+ * `ATOMIC_RUNTIME_DESCRIPTOR_URL` overrides the source for development and tests — only `file://…`
+ * (read from disk through an injected `readFile`) and `https://…` (fetched) are accepted; anything
+ * else, including a plain `http://`, is refused as a source and treated the same as "could not
+ * fetch" — a descriptor is production-only network input, and a scheme this provider does not
+ * recognise is not worth guessing about.
  *
  * The cache never deletes anything: this file only ever writes `descriptors/<descriptor_id>.json`
  * and repoints `descriptors/latest.json`, so an installation's pinned descriptor survives a new
  * release exactly because nothing here ever removes a cache entry (removing one is future work, for
- * whichever task cleans up an uninstalled engine's cache).
+ * whichever task cleans up an uninstalled engine's cache). The cache directory is shared by an app
+ * core and a CLI core with no lock over it (unlike `store.ts`'s operation records): every write goes
+ * through a per-call random temp name (the same convention as `execution-journal.ts`/
+ * `optimal-store.ts`) so two concurrent accepts never contend for the same temp file, and a cache
+ * write that fails for any other reason (disk full, permissions) is swallowed rather than failing
+ * the whole resolution — the freshly fetched, already-validated descriptor is still good to hand
+ * back even if this core could not persist it this time.
  */
 
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import {
   readFile as nodeReadFile,
   mkdir as nodeMkdir,
   rename as nodeRename,
+  rm as nodeRm,
   writeFile as nodeWriteFile,
 } from 'node:fs/promises'
 import { compareVersions, withHardTimeout } from '../../backend/index.js'
@@ -76,6 +87,8 @@ export interface DescriptorCacheFs {
   writeFile(path: string, data: string, options?: { encoding?: 'utf8'; mode?: number }): Promise<void>
   rename(from: string, to: string): Promise<void>
   mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>
+  /** Cleans up an orphaned temp file after a failed rename; never the source of truth for anything. */
+  rm(path: string, options?: { force?: boolean }): Promise<void>
 }
 
 const NODE_FS: DescriptorCacheFs = {
@@ -83,6 +96,7 @@ const NODE_FS: DescriptorCacheFs = {
   writeFile: nodeWriteFile,
   rename: nodeRename,
   mkdir: nodeMkdir,
+  rm: (path, options) => nodeRm(path, { force: options?.force ?? false }),
 }
 
 export interface DescriptorProviderOptions {
@@ -99,6 +113,8 @@ export interface DescriptorProviderOptions {
   /** Default source when no override is set; defaults to the published TensorRT-LLM descriptor. */
   url?: string
   timeoutMs?: number
+  /** A rejected source scheme or a failed cache write is never fatal; this is where it is reported. */
+  onWarn?: (message: string) => void
 }
 
 export type DescriptorProviderResult =
@@ -120,6 +136,14 @@ export interface RuntimeDescriptorProvider {
    * cannot change what it resolves to, or even be noticed by this call.
    */
   forInstallation(descriptorId: string): Promise<DescriptorProviderResult>
+  /**
+   * What `forNewSetup()` would answer if it could not reach the network at all: the latest
+   * previously accepted descriptor in the cache, or `unsupported` when nothing has ever been
+   * accepted. Network-free like `forInstallation` — never calls `fetch` or `readFile` — so a caller
+   * that only wants to know "what governs this environment right now" (e.g. the environment
+   * snapshot's `minimum_app_version`) never pays for, or waits on, a fetch just to answer that.
+   */
+  cachedForNewSetup(): Promise<DescriptorProviderResult>
 }
 
 const noDescriptorAvailable = (): AtomicCoreError =>
@@ -127,6 +151,9 @@ const noDescriptorAvailable = (): AtomicCoreError =>
     'MANAGED_METADATA_INVALID',
     'No TensorRT-LLM runtime descriptor is available: the network is unreachable and nothing has been cached yet.'
   )
+
+const noCachedDescriptor = (): AtomicCoreError =>
+  new AtomicCoreError('MANAGED_METADATA_INVALID', 'No TensorRT-LLM runtime descriptor has been cached yet.')
 
 const updateRequired = (descriptorId: string): AtomicCoreError =>
   new AtomicCoreError(
@@ -147,20 +174,30 @@ export function descriptorMeetsCoreVersion(descriptor: RuntimeDescriptor, coreVe
   return compareVersions(coreVersion, descriptor.minimum_core_version) >= 0
 }
 
-/** `file://…` → a filesystem path via `readFile`; anything else → HTTPS via `fetch`. `null` on any failure. */
+/**
+ * `file://…` → a filesystem path via `readFile`; `https://…` → via `fetch`. `null` on any failure,
+ * including a scheme this provider does not accept (`http://` included — a descriptor is production
+ * network input, and an unencrypted source is never treated as equivalent to the real one).
+ */
 async function readSource(
   url: string,
-  deps: { fetch: DescriptorFetch; readFile: (path: string) => Promise<string>; timeoutMs: number }
+  deps: {
+    fetch: DescriptorFetch
+    readFile: (path: string) => Promise<string>
+    timeoutMs: number
+    onWarn: (message: string) => void
+  }
 ): Promise<string | null> {
   try {
     if (url.startsWith('file://')) {
       return await deps.readFile(fileURLToPath(url))
     }
-    if (url.startsWith('https://') || url.startsWith('http://')) {
+    if (url.startsWith('https://')) {
       const response = await deps.fetch(url, deps.timeoutMs)
       if (!response.ok) return null
       return await response.text()
     }
+    deps.onWarn(`Runtime descriptor source "${url}" is neither file:// nor https://; ignoring it.`)
     return null
   } catch {
     return null
@@ -176,6 +213,15 @@ function parseDocument(raw: string): RuntimeDescriptor | null {
   }
 }
 
+/**
+ * Write-then-rename with a per-call random temp name, never a fixed `<path>.tmp`: this cache has no
+ * lock over it (an app core and a CLI core write it directly, unlike `store.ts`'s operation records
+ * behind `environment.lock`), so two concurrent writers sharing one temp name would clobber each
+ * other's bytes or hit `ENOENT` on whichever renames second. The convention matches
+ * `execution-journal.ts`/`optimal-store.ts`. `path` itself may still collide between two concurrent
+ * writers (e.g. `latest.json`, or the same `descriptor_id` accepted twice at once) — that rename is
+ * a single filesystem syscall, so the loser's write is simply superseded, never torn.
+ */
 async function atomicWrite(
   fs: DescriptorCacheFs,
   dir: string,
@@ -183,9 +229,12 @@ async function atomicWrite(
   contents: string
 ): Promise<void> {
   await fs.mkdir(dir, { recursive: true })
-  const tmp = `${path}.tmp`
+  const tmp = `${path}.${randomUUID()}.tmp`
   await fs.writeFile(tmp, contents, { encoding: 'utf8', mode: 0o600 })
-  await fs.rename(tmp, path)
+  await fs.rename(tmp, path).catch(async (error: unknown) => {
+    await fs.rm(tmp, { force: true }).catch(() => undefined)
+    throw error
+  })
 }
 
 async function readCachedDescriptor(
@@ -237,6 +286,7 @@ export function createRuntimeDescriptorProvider(
   const root = options.root
   const coreVersion = options.coreVersion ?? CORE_VERSION
   const timeoutMs = options.timeoutMs ?? DESCRIPTOR_FETCH_TIMEOUT_MS
+  const onWarn = options.onWarn ?? ((): void => undefined)
   const sourceUrl = (): string => {
     const override = options.env[RUNTIME_DESCRIPTOR_URL_ENV]
     if (override !== undefined && override.trim() !== '') return override.trim()
@@ -249,6 +299,7 @@ export function createRuntimeDescriptorProvider(
         fetch: options.fetch,
         readFile: options.readFile,
         timeoutMs,
+        onWarn,
       })
       const fetched = raw === null ? null : parseDocument(raw)
 
@@ -256,7 +307,16 @@ export function createRuntimeDescriptorProvider(
       // out here, rather than casting, is what lets `acceptDescriptor` take a plain `string` and
       // cache the exact bytes received — the literal published document, not a re-serialization.
       if (raw !== null && fetched !== null && descriptorMeetsCoreVersion(fetched, coreVersion)) {
-        await acceptDescriptor(fs, root, raw, fetched)
+        // A cache write that fails (disk full, permissions, a losing rename race) must not fail
+        // this resolution: the descriptor was already fetched and validated, and is still good to
+        // hand back even if this core could not persist it this time around.
+        await acceptDescriptor(fs, root, raw, fetched).catch((error: unknown) => {
+          onWarn(
+            `Could not cache runtime descriptor ${fetched.descriptor_id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+        })
         return { kind: 'available', descriptor: fetched }
       }
 
@@ -274,6 +334,12 @@ export function createRuntimeDescriptorProvider(
       const cached = await readCachedDescriptor(fs, root, descriptorId)
       if (cached !== null) return { kind: 'available', descriptor: cached }
       return { kind: 'unsupported', error: missingPinnedDescriptor(descriptorId) }
+    },
+
+    async cachedForNewSetup(): Promise<DescriptorProviderResult> {
+      const previous = await readLatestAccepted(fs, root)
+      if (previous !== null) return { kind: 'available', descriptor: previous }
+      return { kind: 'unsupported', error: noCachedDescriptor() }
     },
   }
 }

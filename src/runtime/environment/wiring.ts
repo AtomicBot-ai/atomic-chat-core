@@ -15,10 +15,11 @@
  * The descriptor provider (task 2.3) is built here too, over this same `env` and `fetch`, and
  * exposed on `ManagedRuntimes` for whatever probes a host next — its own resolution (fetch, cache,
  * version gate, per-installation pin) is fully wired and tested in `descriptor-provider.ts`.
- * `EnvironmentSnapshot.minimum_app_version` stays `null` here rather than calling it eagerly: with
- * `provisionerFor` answering null everywhere, nothing yet decides which descriptor is "in effect"
- * for this environment (a real host recipe, task 2.4, is what makes that decision) — reaching the
- * network on every core start for a value nothing yet reads would just be an untested guess.
+ * `recover()` fills `EnvironmentSnapshot.minimum_app_version` from it on every call
+ * (`resolveMinimumAppVersion`, below) — cache-only, so this never reaches the network on a core
+ * start. With `provisionerFor` answering null everywhere and `installations` never getting a real
+ * entry until task 2.4's host recipe exists, that resolution has nothing to work from yet on any
+ * real machine and stays `null` in practice — but the wiring is real, not a placeholder.
  */
 
 import { readFile as nodeReadFile } from 'node:fs/promises'
@@ -29,6 +30,7 @@ import type {
   EnvironmentOperation,
   EnvironmentSnapshot,
   ExecutorKind,
+  RuntimeInstallation,
 } from '../../contracts/index.js'
 import { processStartId } from '../../lock/index.js'
 import { createRuntimeDescriptorProvider, descriptorFetchFromFetch } from './descriptor-provider.js'
@@ -63,6 +65,32 @@ export function provisionerFor(_platform: NodeJS.Platform): EnvironmentProvision
   return null
 }
 
+/**
+ * `EnvironmentSnapshot.minimum_app_version`: the descriptor currently in effect for this
+ * environment, network-free (spec `runtime-descriptor-catalog`, "Минимальные версии соблюдаются").
+ * An installation pinned to a descriptor (`active_descriptor_id`) wins — that is the release
+ * actually running, so its own `minimum_app_version` is what the client needs to know — otherwise
+ * the latest descriptor this core has ever accepted into its cache; `null` when neither resolves (no
+ * installation, and nothing has ever been cached). Never calls `fetch` or `readFile`: both
+ * `forInstallation` and `cachedForNewSetup` are cache-only, so this is safe to call on every
+ * `recover()` without adding network latency to core startup for a value most machines will never
+ * populate an installation for.
+ */
+export async function resolveMinimumAppVersion(
+  descriptors: RuntimeDescriptorProvider,
+  installations: readonly RuntimeInstallation[]
+): Promise<string | null> {
+  const pinned = installations.find((installation) => installation.active_descriptor_id !== null)
+  const resolved =
+    pinned !== undefined
+      ? // `pinned.active_descriptor_id` is narrowed non-null by the `find` predicate above; TS does
+        // not carry that through `Array.prototype.find`, hence the assertion rather than a cast of
+        // convenience — the invariant is the one-line filter right above it, not an assumption.
+        await descriptors.forInstallation(pinned.active_descriptor_id as string)
+      : await descriptors.cachedForNewSetup()
+  return resolved.kind === 'available' ? resolved.descriptor.minimum_app_version : null
+}
+
 export interface WireManagedRuntimesOptions {
   env: DataFolderEnv
   instanceId: string
@@ -80,6 +108,8 @@ export interface WireManagedRuntimesOptions {
   ownerPid?: number
   /** What the runtime descriptor provider fetches with; defaults to the global `fetch`. */
   fetch?: typeof fetch
+  /** Where the descriptor provider reports a rejected source or a non-fatal cache write failure. */
+  onWarn?: (message: string) => void
 }
 
 export interface ManagedRuntimes {
@@ -125,6 +155,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     fetch: descriptorFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
     root: managedRoot,
+    ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
   })
 
   // The view a snapshot is built from. A machine with no executor has no environment at all, which
@@ -143,9 +174,10 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
             gpus: [],
             installations: [],
             active_operation_id: null,
-            // No host recipe decides "the descriptor in effect" yet (`provisioner` is always null
-            // until task 2.4), so there is nothing honest to resolve this from. `descriptors` below
-            // is fully wired and ready for whichever task first probes a host to fill this in.
+            // Resolved for real in `recover()`, network-free, from `descriptors` below — `null`
+            // only until the first `recover()` runs (or forever, on a machine with nothing cached
+            // and no pinned installation, which is every machine today: `provisioner` is always
+            // null until task 2.4, so `installations` never gets a real entry yet either).
             minimum_app_version: null,
           },
         ]
@@ -182,6 +214,13 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
         operations.set(record.machine.operation.operation_id, record.machine.operation)
       }
       await service.recover(options.instanceId)
+      const environment = view[0]
+      if (environment !== undefined) {
+        environment.minimum_app_version = await resolveMinimumAppVersion(
+          descriptors,
+          environment.installations
+        )
+      }
     },
     shutdown: (signal) => service.shutdown(signal),
     descriptors,
