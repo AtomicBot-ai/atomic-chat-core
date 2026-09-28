@@ -229,7 +229,8 @@ describe('load', () => {
     await runtime.load('override-tensor', { overrides: { override_tensor_buffer_t: 'exps=CPU' } })
 
     const startLine = logged.find((entry) => entry.level === 'info')
-    expect(startLine?.message).toMatch(/^starting llama-server for llamacpp-upstream\/override-tensor: /)
+    // The resolved executable is `llama-server.exe` on Windows.
+    expect(startLine?.message).toMatch(/^starting llama-server(\.exe)? for llamacpp-upstream\/override-tensor: /)
     expect(startLine?.message).toContain('--override-tensor exps=CPU')
   })
 
@@ -241,14 +242,18 @@ describe('load', () => {
     await data.writeModel('windows-exe')
     const logged: Array<{ level: string; message: string }> = []
     const runtime = await makeRuntime({ log: (level, message) => logged.push({ level, message }) })
-    await runtime.load('windows-exe', {
-      exePath: 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\llama-server.exe',
-    })
+    // On Windows the engine starts in its executable's folder, so there the path must be a real
+    // folder (already drive-lettered and backslashed); elsewhere a made-up one does.
+    const exePath =
+      process.platform === 'win32'
+        ? join(data.root, 'llama-server.exe')
+        : 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\llama-server.exe'
+    await runtime.load('windows-exe', { exePath })
 
+    // Anchored: nothing of the folder may precede the file name. (The arguments after the colon
+    // carry the model's own path, which on Windows has a drive letter and backslashes too.)
     const startLine = logged.find((entry) => entry.level === 'info')
     expect(startLine?.message).toMatch(/^starting llama-server\.exe for llamacpp-upstream\/windows-exe: /)
-    expect(startLine?.message).not.toContain('C:')
-    expect(startLine?.message).not.toContain('\\')
   })
 
   it('relays every line to backendOutput before and after readiness, in addition to logPath and verbose', async () => {
