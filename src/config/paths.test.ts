@@ -45,6 +45,31 @@ describe('dataLayout', () => {
       native('/data/atomic-core/managed-runtimes/executions/abc123.json')
     )
   })
+  it('keeps heartbeats, engine caches, the docker config and the watchdog script under the same scope root (task 2.12)', () => {
+    const m = layout.managed
+    expect(m.heartbeatsDir).toBe(native('/data/atomic-core/managed-runtimes/heartbeats'))
+    expect(m.heartbeatDir('gen-1')).toBe(native('/data/atomic-core/managed-runtimes/heartbeats/gen-1'))
+    expect(m.cachesDir).toBe(native('/data/atomic-core/managed-runtimes/caches'))
+    expect(m.descriptorCachesDir('tensorrt-llm-1.2.1-r1')).toBe(
+      native('/data/atomic-core/managed-runtimes/caches/tensorrt-llm-1.2.1-r1')
+    )
+    expect(m.engineCacheDir('tensorrt-llm-1.2.1-r1', 'qwen3-8b')).toBe(
+      native('/data/atomic-core/managed-runtimes/caches/tensorrt-llm-1.2.1-r1/qwen3-8b')
+    )
+    expect(m.dockerConfigDir).toBe(native('/data/atomic-core/managed-runtimes/docker-config'))
+    expect(m.watchdogScript).toBe(
+      native('/data/atomic-core/managed-runtimes/watchdog/atomic-watchdog-entrypoint.sh')
+    )
+  })
+  it('encodes every id it spells onto disk, so a model id or generation is always exactly one segment', () => {
+    const m = layout.managed
+    expect(m.engineCacheDir('d/../x', 'org/model:rev')).toBe(
+      native('/data/atomic-core/managed-runtimes/caches/d%2F..%2Fx/org%2Fmodel%3Arev')
+    )
+    expect(m.engineCacheDir('..', '.')).toBe(native('/data/atomic-core/managed-runtimes/caches/%2E%2E/%2E'))
+    expect(m.heartbeatDir('a/b')).toBe(native('/data/atomic-core/managed-runtimes/heartbeats/a%2Fb'))
+    expect(() => m.engineCacheDir('', 'm')).toThrow(AtomicCoreError)
+  })
   it("keeps image generation where the app's plugin put it", () => {
     // `state.rs` at 767ff6350: `<data>/diffusion/{backends,models,scratch}`, gallery in `<data>/images`.
     expect(layout.diffusion).toEqual({

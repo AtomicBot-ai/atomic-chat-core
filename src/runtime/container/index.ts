@@ -6,6 +6,9 @@
  * shell is ever used, and everything a descriptor or a probe contributed is validated before it
  * becomes an argv token or a URL query value (`argv.ts`'s `assertSafeArgvValue`).
  *
+ * `wiring.ts` (task 2.12) is what core startup calls on Linux: it resolves the docker CLI to an
+ * absolute system path (`docker-binary.ts`), builds the one executor, and reconciles the journal.
+ *
  * `execution-journal.ts` (task 2.10) is the private record of the containers this core instance
  * created; `reconcile.ts` uses it and `operations.ts` to stop and remove what a previous instance
  * left running, and never touches a container that is not in the journal.
@@ -22,3 +25,5 @@ export * from './execution-journal.js'
 export * from './reconcile.js'
 export * from './watchdog.js'
 export * from './heartbeat.js'
+export * from './docker-binary.js'
+export * from './wiring.js'

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -8,8 +8,65 @@ import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
+import { ExecutionJournal } from '../runtime/container/index.js'
 
 useCoreHarness()
+
+describe('managed runtime containers at startup', () => {
+  /** A `docker` that has never heard of any container, and logs what it was asked. */
+  async function fakeDocker(): Promise<{ path: string; log: string }> {
+    const path = join(data.root, 'fake-docker')
+    const log = join(data.root, 'fake-docker.log')
+    await writeFile(
+      path,
+      `#!/bin/sh\necho "$*" >> '${log}'\necho "Error: No such container: $5" >&2\nexit 1\n`
+    )
+    await chmod(path, 0o755)
+    return { path, log }
+  }
+  const orphan = {
+    container_id: 'orphan0123',
+    engine_id: 'tensorrt-llm',
+    image_digest: `sha256:${'d'.repeat(64)}`,
+    scope: 'app',
+    instance_id: 'previous-core',
+    created_at: '2026-09-28T00:00:00.000Z',
+  }
+
+  it("reconciles a previous core's journalled containers on Linux before the endpoint is published", async () => {
+    await (await ExecutionJournal.open(data.layout)).add(orphan)
+    const docker = await fakeDocker()
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: docker.path,
+    })
+    cores.push(core)
+    expect((await ExecutionJournal.open(data.layout)).list()).toEqual([])
+    expect(await readFile(docker.log, 'utf8')).toContain('container inspect orphan0123')
+  })
+
+  it('leaves the journal alone off Linux, and on Linux without a docker CLI', async () => {
+    await (await ExecutionJournal.open(data.layout)).add(orphan)
+    const docker = await fakeDocker()
+    const mac = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'darwin',
+      dockerPath: docker.path,
+    })
+    await mac.shutdown()
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+    })
+    cores.push(linux)
+    expect((await ExecutionJournal.open(data.layout)).list()).toEqual([orphan])
+  })
+})
 
 describe('taking ownership', () => {
   it('expires an app owner after its registration vanishes, without changing CLI lifetime', async () => {

@@ -81,6 +81,13 @@ only by this repo's own ADR
 Per scope, `<data>/atomic-core/managed-runtimes/executions/` (task 2.10): the execution journal of the
 model containers this core instance created, one file per container id, reconciled at startup before
 the first load is served (ADR 2026-09-28-managed-runtime-orphans-are-any-instance-id-but-our-own).
+Also per scope, for the managed-text load lifecycle (task 2.12, ADR
+2026-09-28-managed-text-lifecycle-owns-load-stages-cache-and-stop): `heartbeats/<generation>/heartbeat`
+(the file core touches while a model container runs, its directory mounted read-only into that
+container), `caches/<descriptor_id>/<model id>/` (the engine cache, mounted read-write, kept between
+loads, removed with its model or installation), `docker-config/` (the empty `config.json` every docker
+CLI call reads as `$DOCKER_CONFIG`) and `watchdog/atomic-watchdog-entrypoint.sh` (mode 0555, the
+model container's read-only entrypoint); ids are one directory each through percent-encoding.
 Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
 `<data>/diffusion/{backends,models,scratch}` and `<data>/images`; `<data>/videos` is the folder the app's ADR
 2026-09-10-store-generated-media-under-the-data-folder-with-recipes-in-png-chunks reserved (core ADR

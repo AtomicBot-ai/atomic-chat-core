@@ -90,7 +90,8 @@ export interface CoreEvents {
   'session:started': SessionInfo & { provider: LocalProviderId }
   'session:died': {
     provider: LocalProviderId
-    pid: number
+    /** null when the session was a container: it never had a host process to report. */
+    pid: number | null
     model_id: string
     exit_code: number | null
     signal: string | null

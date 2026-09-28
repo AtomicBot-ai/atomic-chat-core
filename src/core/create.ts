@@ -40,6 +40,7 @@ import {
 } from '../backend/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
 import { wireManagedRuntimes } from '../runtime/environment/index.js'
+import { wireManagedContainers } from '../runtime/container/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
@@ -516,12 +517,16 @@ export async function createAtomicCore(
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
-    // TODO(task 2.6/2.12): once a Docker executor is constructed here for Linux, reconcile the
-    // managed-runtime execution journal the same way, before the first load: guard on
-    // `platform === 'linux'` and an available executor, then
-    // `await reconcileExecutions(await ExecutionJournal.open(layout), lock.instanceId, exec, log)`
-    // (`src/runtime/container/index.ts`). No executor is wired into core startup yet, so there is
-    // nothing to call this against.
+    // Model containers a previous core left running are stopped and removed before the first load is
+    // served, like `reapOrphans` above does for native backends. Linux with a docker CLI only; the
+    // managed-text provider (task 2.14) takes over the executor and journal this returns.
+    await wireManagedContainers({
+      platform,
+      layout,
+      instanceId: lock.instanceId,
+      log,
+      ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
+    }).catch((e: unknown) => warn(`managed runtime container reconcile: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

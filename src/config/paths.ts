@@ -17,6 +17,9 @@
  *                                                        (managed text runtimes, shared by the app and CLI scopes)
  *   <data>/atomic-core/managed-runtimes/executions/  (task 2.10 execution journal: this scope's own
  *                                                      model containers, one file per container id)
+ *   <data>/atomic-core/managed-runtimes/{heartbeats/<generation>/, caches/<descriptor_id>/<model id>/,
+ *                                        docker-config/, watchdog/atomic-watchdog-entrypoint.sh}
+ *                                                     (task 2.12: the managed-text load lifecycle)
  */
 
 import { join, relative, sep } from 'node:path'
@@ -89,9 +92,9 @@ export interface DiffusionPaths {
  * What this scope (this core's own data folder) owns alone among the managed text runtimes' files —
  * as opposed to the container environment itself (Docker/WSL), which belongs to the machine's user
  * account and is shared by the app and CLI scopes at a fixed per-user root outside any data folder
- * (ADR `2026-09-22-managed-runtimes-split-per-user-environment-from-per-scope-data`). Only the
- * execution journal (task 2.10) is ported so far; heartbeats/artifacts/caches are added by whichever
- * later task first needs them (ADR
+ * (ADR `2026-09-22-managed-runtimes-split-per-user-environment-from-per-scope-data`). The
+ * execution journal (task 2.10) and the load lifecycle's heartbeats, engine caches, docker config and
+ * watchdog script (task 2.12) live here; there is no per-scope artifact store (ADR
  * `2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store`).
  */
 export interface ManagedScopePaths {
@@ -101,6 +104,20 @@ export interface ManagedScopePaths {
   executionsDir: string
   /** This container's execution-journal record. */
   executionFile(containerId: string): string
+  /** `<root>/heartbeats` — one directory per load generation, bind-mounted into its container (task 2.12). */
+  heartbeatsDir: string
+  /** `<heartbeatsDir>/<encoded generation>`: holds the one heartbeat file core touches for that load. */
+  heartbeatDir(generation: string): string
+  /** `<root>/caches` — engine caches, kept across loads (spec `tensorrt-llm-runtime`, "Кэш движка"). */
+  cachesDir: string
+  /** `<cachesDir>/<encoded descriptor_id>`: every model's cache for one pinned engine release. */
+  descriptorCachesDir(descriptorId: string): string
+  /** `<cachesDir>/<encoded descriptor_id>/<encoded model id>`: mounted read-write into that model's container. */
+  engineCacheDir(descriptorId: string, modelId: string): string
+  /** `<root>/docker-config` — the empty directory every docker CLI call reads as `$DOCKER_CONFIG`. */
+  dockerConfigDir: string
+  /** `<root>/watchdog/atomic-watchdog-entrypoint.sh` — the watchdog entrypoint, mounted read-only. */
+  watchdogScript: string
 }
 
 export interface DataLayout {
@@ -122,10 +139,23 @@ export interface DataLayout {
 function managedScopePaths(coreDir: string): ManagedScopePaths {
   const root = join(coreDir, MANAGED_SCOPE_DIR)
   const executionsDir = join(root, 'executions')
+  const heartbeatsDir = join(root, 'heartbeats')
+  const cachesDir = join(root, 'caches')
+  const descriptorCachesDir = (descriptorId: string) => join(cachesDir, encodeManagedId(descriptorId))
   return {
     root,
     executionsDir,
     executionFile: (containerId) => join(executionsDir, `${containerId}.json`),
+    heartbeatsDir,
+    heartbeatDir: (generation) => join(heartbeatsDir, encodeManagedId(generation)),
+    cachesDir,
+    descriptorCachesDir,
+    engineCacheDir: (descriptorId, modelId) =>
+      join(descriptorCachesDir(descriptorId), encodeManagedId(modelId)),
+    dockerConfigDir: join(root, 'docker-config'),
+    // `WATCHDOG_SCRIPT_FILENAME` in `runtime/container/watchdog.ts`; spelled here because `config/`
+    // never imports a runtime module.
+    watchdogScript: join(root, 'watchdog', 'atomic-watchdog-entrypoint.sh'),
   }
 }
 

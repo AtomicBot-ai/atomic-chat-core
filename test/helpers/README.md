@@ -6,6 +6,10 @@
   to exit with a code/signal or hang. Spawned via `process.execPath`, so it works under Node and Bun.
 - `fixture-http-server.ts` — scripted `node:http` server with Range/206/416 support, sha256 bodies and
   injected failures for download tests.
+- `fake-docker-exec.ts` — an in-process `DockerExec` that reads the argv `src/runtime/container/argv.ts`
+  builds and keeps a container table: containers that start, log, exit early (`exit`), lose the start
+  bind race (`startFailures`) or never confirm a stop (`stopConfirms = false`). For the managed-text
+  lifecycle's unit tests; its integration test runs a real spawned fake `docker` instead.
 - `tmp-data-folder.ts` — creates a throwaway `<data>` with the app's layout (`llamacpp/models/...`).
 - `compiled-core.ts` — drives the compiled binaries from `test/e2e/`: a daemon on a data folder, the
   control API with its token, a fake `llama-server` pack, reaping of journalled children. No imports from `src/`.

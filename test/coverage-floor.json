@@ -887,6 +887,18 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/container/docker-binary.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/container/wiring.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/environment/canonical-json.ts": {
     "statements": 100,
     "branches": 91,
@@ -1012,6 +1024,36 @@
     "branches": 86,
     "functions": 81,
     "lines": 89
+  },
+  "src/runtime/managed-text/adapter.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/managed-text/engine-cache.ts": {
+    "statements": 98,
+    "branches": 95,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/runtime/managed-text/lifecycle.ts": {
+    "statements": 92,
+    "branches": 82,
+    "functions": 94,
+    "lines": 92
+  },
+  "src/runtime/managed-text/load-policy.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/managed-text/readiness.ts": {
+    "statements": 100,
+    "branches": 85,
+    "functions": 100,
+    "lines": 100
   },
   "src/runtime/mlx/args.ts": {
     "statements": 100,
