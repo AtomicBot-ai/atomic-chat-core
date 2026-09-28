@@ -40,7 +40,13 @@ import { loadFixtureSet } from './fixtures.js'
 type RocmProbeInput = { gfx_target_versions: number[]; has_runtime: boolean }
 
 type Input =
-  | { kind: 'features'; os_type: string; cpu_extensions: string[]; gpus: GpuProbeInfo[]; rocm_probe?: RocmProbeInput }
+  | {
+      kind: 'features'
+      os_type: string
+      cpu_extensions: string[]
+      gpus: GpuProbeInfo[]
+      rocm_probe?: RocmProbeInput
+    }
   | { kind: 'supported'; os_type: string; arch: string; features: BackendFeatures }
   | { kind: 'prioritize'; version_backends: BackendVersion[]; has_enough_gpu_memory: boolean }
   | { kind: 'merge'; remote: BackendVersion[]; local: BackendVersion[] }
@@ -190,7 +196,16 @@ for (const [set, port] of [
     it('covers every command kind', () => {
       const kinds = new Set(cases.map((c) => c.input.kind))
       expect([...kinds].sort()).toEqual(
-        ['features', 'latest', 'merge', 'migrate', 'prioritize', 'setting_update', 'supported', 'update_check'].sort()
+        [
+          'features',
+          'latest',
+          'merge',
+          'migrate',
+          'prioritize',
+          'setting_update',
+          'supported',
+          'update_check',
+        ].sort()
       )
     })
 
