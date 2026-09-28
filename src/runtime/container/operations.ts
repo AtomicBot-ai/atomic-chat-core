@@ -8,7 +8,12 @@
  * not a failure: an inspect reports `found: false` and an `rm` of an already-removed container
  * resolves. Every other non-zero exit becomes `AtomicCoreError('IO_ERROR', ...)` with docker's own
  * stderr as the detail.
+ *
+ * `createContainer` is also where symlinks get resolved (review round 2, item 2): it is the one
+ * function in this module that does filesystem I/O of its own, `realpath`-ing every mount source and
+ * `selinuxDataRoot` before handing them to `argv.ts`'s pure (and therefore symlink-blind) checks.
  */
+import { realpath as fsRealpath } from 'node:fs/promises'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
   buildCreateModelContainerArgv,
@@ -26,6 +31,7 @@ import type {
   ImageRef,
   ModelContainerCreateSpec,
   OneShotRunSpec,
+  Realpath,
   StopOutcome,
 } from './types.js'
 
@@ -71,12 +77,68 @@ export function inspectContainer(exec: DockerExec, containerId: string): Promise
   return inspect(exec, buildInspectContainerArgv(containerId), 'container inspect')
 }
 
+export interface CreateContainerDeps {
+  /** Defaults to `node:fs/promises`'s `realpath`; tests inject a fake or a real symlinked tmpdir. */
+  realpath?: Realpath
+}
+
+async function resolveOrThrow(realpath: Realpath, path: string, what: string): Promise<string> {
+  try {
+    return await realpath(path)
+  } catch (error) {
+    throw new AtomicCoreError(
+      'IO_ERROR',
+      `${what} could not be resolved to a real path.`,
+      `${path}: ${(error as Error).message}`
+    )
+  }
+}
+
+/**
+ * Resolves every mount source and `selinuxDataRoot` to their canonical, symlink-free real path
+ * before argv is built (review round 2, item 2, controller ruling). `argv.ts`'s
+ * `assertMountSource`/`assertWithinDataRoot` are pure lexical string checks — a mount source that is
+ * a symlink *inside* an allowed SELinux data root but that points *outside* it would pass those
+ * checks unresolved, while Docker's actual bind mount (and its `:z` relabel) act on the resolved
+ * target, not the symlink's own path. Running every source through `realpath` here, before it ever
+ * reaches the pure argv layer, means the checks there always see what Docker will actually mount.
+ */
+async function canonicalizeCreateSpec(
+  spec: ModelContainerCreateSpec,
+  realpath: Realpath
+): Promise<ModelContainerCreateSpec> {
+  const [model, engineCache, entrypoint, heartbeat, selinuxDataRoot] = await Promise.all([
+    resolveOrThrow(realpath, spec.mounts.model.source, 'model mount source'),
+    resolveOrThrow(realpath, spec.mounts.engineCache.source, 'engine cache mount source'),
+    resolveOrThrow(realpath, spec.mounts.entrypoint.source, 'entrypoint mount source'),
+    resolveOrThrow(realpath, spec.mounts.heartbeat.source, 'heartbeat mount source'),
+    spec.selinuxDataRoot === undefined
+      ? Promise.resolve(undefined)
+      : resolveOrThrow(realpath, spec.selinuxDataRoot, 'selinuxDataRoot'),
+  ])
+  return {
+    ...spec,
+    mounts: {
+      model: { source: model },
+      engineCache: { source: engineCache },
+      entrypoint: { source: entrypoint },
+      heartbeat: { source: heartbeat },
+    },
+    // `exactOptionalPropertyTypes`: only set the key at all when there is a value, rather than
+    // assigning `selinuxDataRoot: undefined` (a real, if empty, distinct state under that setting).
+    ...(selinuxDataRoot === undefined ? {} : { selinuxDataRoot }),
+  }
+}
+
 /** Creates (but does not start) the model container; returns the id docker printed to stdout. */
 export async function createContainer(
   exec: DockerExec,
-  spec: ModelContainerCreateSpec
+  spec: ModelContainerCreateSpec,
+  deps: CreateContainerDeps = {}
 ): Promise<{ containerId: string }> {
-  const result = await exec(buildCreateModelContainerArgv(spec))
+  const realpath = deps.realpath ?? fsRealpath
+  const canonicalSpec = await canonicalizeCreateSpec(spec, realpath)
+  const result = await exec(buildCreateModelContainerArgv(canonicalSpec))
   if (result.code !== 0) ioError('create', result)
   const containerId = result.stdout.trim().split('\n').pop()?.trim() ?? ''
   if (containerId === '') {

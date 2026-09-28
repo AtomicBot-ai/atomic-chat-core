@@ -70,6 +70,16 @@ export interface OneShotRunSpec {
   command?: string[]
 }
 
+/**
+ * Resolves symlinks/`.`/`..` to a canonical absolute path (`node:fs/promises`'s `realpath` in
+ * production; a test injects a fake). `operations.ts`'s `createContainer` runs every mount source and
+ * `selinuxDataRoot` through one of these before building argv (review round 2, item 2 — controller
+ * ruling): `argv.ts`'s `assertMountSource`/`assertWithinDataRoot` are lexical string checks, so a
+ * symlink *inside* an allowed data root that points *outside* it would pass them unresolved, while
+ * Docker's `:z` (and the bind mount itself) act on the resolved target, not the symlink's own path.
+ */
+export type Realpath = (path: string) => Promise<string>
+
 /** What one docker CLI invocation answered. `code: null` means it never got as far as an exit code. */
 export interface DockerCommandResult {
   code: number | null

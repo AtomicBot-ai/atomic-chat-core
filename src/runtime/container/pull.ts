@@ -101,8 +101,14 @@ class PullProgressTracker {
     if (parsed.status !== 'Downloading') return undefined
     if (!parsed.id || !parsed.progressDetail || typeof parsed.progressDetail.current !== 'number')
       return undefined
-    const total = parsed.progressDetail.total ?? 0
-    const current = total > 0 ? Math.min(parsed.progressDetail.current, total) : parsed.progressDetail.current
+    const rawCurrent = parsed.progressDetail.current
+    const reportedTotal = parsed.progressDetail.total ?? 0
+    // A layer's own total must never be smaller than its own current: when Docker reports no size (or
+    // a 0 size) for this layer, treat its total as "however much has been downloaded so far" instead
+    // of letting an unclamped current outrun a phantom total (review round 2, item 1 — the earlier
+    // `total > 0 ? clamp : don't` left current > total whenever a line had no/zero total).
+    const total = Math.max(reportedTotal, rawCurrent)
+    const current = Math.min(rawCurrent, total)
     const existing = this.layers.get(parsed.id)
     this.layers.set(parsed.id, {
       current: existing ? Math.max(existing.current, current) : current,
@@ -120,7 +126,10 @@ class PullProgressTracker {
     }
     const total =
       this.knownTotalBytes !== undefined ? Math.max(streamTotal, this.knownTotalBytes) : streamTotal
-    return { current: total > 0 ? Math.min(current, total) : current, total }
+    // Unconditional (review round 2, item 1): with the per-layer invariant above, `current` can never
+    // actually exceed `total` here, but this clamp is the property itself, stated directly, rather
+    // than something that merely follows from the per-layer bookkeeping being correct.
+    return { current: Math.min(current, total), total }
   }
 }
 

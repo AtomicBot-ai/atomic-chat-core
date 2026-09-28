@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from 'node:fs'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -69,5 +69,32 @@ describe('ensureDockerConfigDir', () => {
     dirs.push(dir)
     await expect(ensureDockerConfigDir(dir)).resolves.toBeUndefined()
     await expect(ensureDockerConfigDir(dir)).resolves.toBeUndefined()
+  })
+
+  it('writes an empty config.json into the directory (review round 2, item 3, controller ruling)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'docker-config-test-'))
+    dirs.push(dir)
+    await ensureDockerConfigDir(dir)
+    const contents = await readFile(join(dir, 'config.json'), 'utf8')
+    expect(JSON.parse(contents)).toEqual({})
+  })
+
+  it('overwrites a stray config.json (e.g. one carrying credsStore/proxies) back to empty, on every call', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'docker-config-test-'))
+    dirs.push(dir)
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ credsStore: 'osxkeychain', proxies: { default: { httpProxy: 'http://evil:8080' } } })
+    )
+    await ensureDockerConfigDir(dir)
+    const contents = await readFile(join(dir, 'config.json'), 'utf8')
+    expect(JSON.parse(contents)).toEqual({})
+  })
+
+  it('leaves no leftover .tmp file after the atomic write', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'docker-config-test-'))
+    dirs.push(dir)
+    await ensureDockerConfigDir(dir)
+    expect(existsSync(join(dir, 'config.json.tmp'))).toBe(false)
   })
 })

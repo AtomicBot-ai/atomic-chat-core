@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdir, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
   containerLogs,
@@ -10,7 +14,7 @@ import {
   startContainer,
   stopContainer,
 } from './operations.js'
-import type { DockerCommandResult, DockerExec, ModelContainerCreateSpec } from './types.js'
+import type { DockerCommandResult, DockerExec, ModelContainerCreateSpec, Realpath } from './types.js'
 
 const ok = (stdout = '', stderr = ''): DockerCommandResult => ({ code: 0, stdout, stderr })
 const failed = (code: number | null, stderr: string, stdout = ''): DockerCommandResult => ({
@@ -21,6 +25,15 @@ const failed = (code: number | null, stderr: string, stdout = ''): DockerCommand
 
 const fakeExec = (result: DockerCommandResult | ((args: string[]) => DockerCommandResult)): DockerExec =>
   vi.fn(async (args: string[]) => (typeof result === 'function' ? result(args) : result))
+
+/**
+ * `createContainer` now canonicalizes every mount source through `realpath` by default (review round
+ * 2, item 2) — every test below uses synthetic, non-existent paths, so it must inject this identity
+ * stand-in rather than hit the real filesystem. The real-filesystem symlink behavior is covered by
+ * its own `describe` block further down.
+ */
+const identityRealpath: Realpath = async (path) => path
+const noRealpathIO = { realpath: identityRealpath }
 
 const image = {
   repository: 'nvcr.io/nvidia/tensorrt-llm/release',
@@ -75,17 +88,140 @@ describe('inspectImage / inspectContainer', () => {
 describe('createContainer', () => {
   it('returns the container id docker printed', async () => {
     const exec = fakeExec(ok('abc123def456\n'))
-    expect(await createContainer(exec, createSpec)).toEqual({ containerId: 'abc123def456' })
+    expect(await createContainer(exec, createSpec, noRealpathIO)).toEqual({ containerId: 'abc123def456' })
   })
 
   it('throws IO_ERROR when docker create fails', async () => {
     const exec = fakeExec(failed(1, 'Error: Conflict.'))
-    await expect(createContainer(exec, createSpec)).rejects.toThrow(AtomicCoreError)
+    await expect(createContainer(exec, createSpec, noRealpathIO)).rejects.toThrow(AtomicCoreError)
   })
 
   it('throws IO_ERROR when docker create exits 0 with no id', async () => {
     const exec = fakeExec(ok('  \n'))
-    await expect(createContainer(exec, createSpec)).rejects.toMatchObject({ code: 'IO_ERROR' })
+    await expect(createContainer(exec, createSpec, noRealpathIO)).rejects.toMatchObject({ code: 'IO_ERROR' })
+  })
+
+  it('canonicalizes every mount source (and selinuxDataRoot) through realpath before building argv (review round 2, item 2)', async () => {
+    let capturedArgv: string[] = []
+    const exec: DockerExec = async (args) => {
+      capturedArgv = args
+      return ok('c1')
+    }
+    const canonicalize: Realpath = async (path) => `/canonical${path}`
+    const spec: ModelContainerCreateSpec = {
+      ...createSpec,
+      selinux: true,
+      selinuxDataRoot: '/d',
+    }
+    await createContainer(exec, spec, { realpath: canonicalize })
+    const joined = capturedArgv.join(' ')
+    expect(joined).toContain('/canonical/d/model:/atomic/model:ro,z')
+    expect(joined).toContain('/canonical/d/cache:/atomic/engine-cache:rw,z')
+    // The uncanonicalized source never appears as its own mount ("-v /d/model:..."); only the
+    // canonicalized "/canonical/d/model:..." form does (which, as a substring, does contain
+    // "/d/model:" — that is expected and fine, it is not a false pass).
+    expect(joined).not.toContain('-v /d/model:')
+  })
+
+  it('wraps a realpath failure in AtomicCoreError IO_ERROR, naming which mount could not be resolved', async () => {
+    const exec = fakeExec(ok('c1'))
+    const failing: Realpath = async (path) => {
+      if (path === '/d/cache') throw new Error('ENOENT: no such file or directory')
+      return path
+    }
+    await expect(createContainer(exec, createSpec, { realpath: failing })).rejects.toMatchObject({
+      code: 'IO_ERROR',
+    })
+    try {
+      await createContainer(exec, createSpec, { realpath: failing })
+      expect.unreachable()
+    } catch (error) {
+      expect((error as AtomicCoreError).message).toContain('engine cache mount source')
+    }
+  })
+
+  it('does not resolve selinuxDataRoot when it was not given', async () => {
+    const seen: string[] = []
+    const recording: Realpath = async (path) => {
+      seen.push(path)
+      return path
+    }
+    await createContainer(fakeExec(ok('c1')), createSpec, { realpath: recording })
+    expect(seen).toEqual(['/d/model', '/d/cache', '/d/entrypoint.sh', '/d/heartbeat'])
+  })
+})
+
+describe('createContainer symlink resolution against a real filesystem (review round 2, item 2, controller ruling)', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('refuses a mount source that is a symlink inside the SELinux data root pointing outside it', async () => {
+    const dataRoot = realpathSync(mkdtempSync(join(tmpdir(), 'container-symlink-root-')))
+    dirs.push(dataRoot)
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'container-symlink-outside-')))
+    dirs.push(outside)
+
+    // Real directories for the three mounts that stay honest, plus one symlink inside the root that
+    // resolves to somewhere outside it — the actual attack this ruling defends against.
+    const cache = join(dataRoot, 'cache')
+    const entrypoint = join(dataRoot, 'entrypoint')
+    const heartbeat = join(dataRoot, 'heartbeat')
+    await Promise.all([mkdir(cache), mkdir(entrypoint), mkdir(heartbeat)])
+    const evilLink = join(dataRoot, 'model-escape')
+    await symlink(outside, evilLink)
+
+    const spec: ModelContainerCreateSpec = {
+      ...createSpec,
+      selinux: true,
+      selinuxDataRoot: dataRoot,
+      mounts: {
+        model: { source: evilLink },
+        engineCache: { source: cache },
+        entrypoint: { source: entrypoint },
+        heartbeat: { source: heartbeat },
+      },
+    }
+    // No injected realpath: this is the real `node:fs/promises` default, on a real symlink.
+    await expect(createContainer(fakeExec(ok('c1')), spec)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+  })
+
+  it('allows a symlink inside the data root that points to another location inside it, with the canonical (resolved) path in argv', async () => {
+    const dataRoot = realpathSync(mkdtempSync(join(tmpdir(), 'container-symlink-root-')))
+    dirs.push(dataRoot)
+
+    const realModel = join(dataRoot, 'real-model')
+    const cache = join(dataRoot, 'cache')
+    const entrypoint = join(dataRoot, 'entrypoint')
+    const heartbeat = join(dataRoot, 'heartbeat')
+    await Promise.all([mkdir(realModel), mkdir(cache), mkdir(entrypoint), mkdir(heartbeat)])
+    const modelLink = join(dataRoot, 'model-link')
+    await symlink(realModel, modelLink)
+
+    const spec: ModelContainerCreateSpec = {
+      ...createSpec,
+      selinux: true,
+      selinuxDataRoot: dataRoot,
+      mounts: {
+        model: { source: modelLink },
+        engineCache: { source: cache },
+        entrypoint: { source: entrypoint },
+        heartbeat: { source: heartbeat },
+      },
+    }
+    let capturedArgv: string[] = []
+    const exec: DockerExec = async (args) => {
+      capturedArgv = args
+      return ok('c1')
+    }
+    await createContainer(exec, spec)
+    const joined = capturedArgv.join(' ')
+    // The symlink's own path never appears; only its resolved target does.
+    expect(joined).not.toContain(`${modelLink}:`)
+    expect(joined).toContain(`${realModel}:/atomic/model:ro,z`)
   })
 })
 

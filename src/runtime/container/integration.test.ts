@@ -9,7 +9,7 @@
  * standing in for `docker` — one level down, directly against `createDockerExec` + `operations.ts`.
  */
 import { rmSync } from 'node:fs'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -29,21 +29,6 @@ const image = {
   digest: `sha256:${'a'.repeat(64)}`,
 } as const
 
-const createSpec: ModelContainerCreateSpec = {
-  image,
-  gpuUuid: 'GPU-11111111-2222-3333-4444-555555555555',
-  selinux: true,
-  selinuxDataRoot: '/daemon',
-  mounts: {
-    model: { source: '/daemon/models/qwen3' },
-    engineCache: { source: '/daemon/cache/qwen3' },
-    entrypoint: { source: '/daemon/entrypoint.sh' },
-    heartbeat: { source: '/daemon/heartbeat' },
-  },
-  publication: { host: '127.0.0.1', host_port: 45123, container_port: 8000 },
-  labels: { engine_id: 'tensorrt-llm', scope: 'app', instance_id: 'core-1' },
-}
-
 const dirs: string[] = []
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
@@ -53,6 +38,36 @@ async function tempDockerConfigDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'docker-config-test-'))
   dirs.push(dir)
   return dir
+}
+
+/**
+ * `createContainer` canonicalizes every mount source and `selinuxDataRoot` through the real
+ * `node:fs/promises` `realpath` by default (review round 2, item 2) — this file runs real spawns
+ * end to end, so its spec points at a real, freshly created directory tree rather than an
+ * injected fake realpath.
+ */
+async function realCreateSpec(): Promise<ModelContainerCreateSpec> {
+  const root = await mkdtemp(join(tmpdir(), 'container-integration-'))
+  dirs.push(root)
+  const model = join(root, 'model')
+  const engineCache = join(root, 'cache')
+  const entrypoint = join(root, 'entrypoint')
+  const heartbeat = join(root, 'heartbeat')
+  await Promise.all([mkdir(model), mkdir(engineCache), mkdir(entrypoint), mkdir(heartbeat)])
+  return {
+    image,
+    gpuUuid: 'GPU-11111111-2222-3333-4444-555555555555',
+    selinux: true,
+    selinuxDataRoot: root,
+    mounts: {
+      model: { source: model },
+      engineCache: { source: engineCache },
+      entrypoint: { source: entrypoint },
+      heartbeat: { source: heartbeat },
+    },
+    publication: { host: '127.0.0.1', host_port: 45123, container_port: 8000 },
+    labels: { engine_id: 'tensorrt-llm', scope: 'app', instance_id: 'core-1' },
+  }
 }
 
 /**
@@ -95,7 +110,7 @@ describe('the executor end to end against a fake docker binary', () => {
     })
     const exec: DockerExec = (args, callOptions) => rawExec([...fakeDocker.prefixArgs, ...args], callOptions)
 
-    const { containerId } = await createContainer(exec, createSpec)
+    const { containerId } = await createContainer(exec, await realCreateSpec())
     expect(containerId).toBe('fake0123container')
 
     await expect(startContainer(exec, containerId)).resolves.toBeUndefined()
@@ -144,7 +159,7 @@ describe('the executor end to end against a fake docker binary', () => {
       return rawExec(['-e', echoScript, '--', ...args], callOptions)
     }
 
-    await createContainer(exec, createSpec)
+    await createContainer(exec, await realCreateSpec())
 
     expect(capturedArgv).not.toContain('--privileged')
     expect(capturedArgv.join(' ')).not.toContain('--ipc')

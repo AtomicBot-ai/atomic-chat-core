@@ -115,6 +115,48 @@ describe.skipIf(process.platform === 'win32')('pullImage', () => {
     }
   })
 
+  it('never reports current > total when a Downloading line has no total at all (review round 2, item 1)', async () => {
+    const socketPath = await fakeEngineApi((_req, res) => {
+      ndjson(res, [{ id: 'layer1', status: 'Downloading', progressDetail: { current: 1234 } }])
+    })
+    const progress: Array<{ current: number; total: number }> = []
+    await pullImage(image, { socketPath, onProgress: (p) => progress.push({ ...p }) })
+    expect(progress).toEqual([{ current: 1234, total: 1234 }])
+    for (const p of progress) expect(p.current).toBeLessThanOrEqual(p.total)
+  })
+
+  it('never reports current > total when a Downloading line reports total: 0 (review round 2, item 1)', async () => {
+    const socketPath = await fakeEngineApi((_req, res) => {
+      ndjson(res, [{ id: 'layer1', status: 'Downloading', progressDetail: { current: 777, total: 0 } }])
+    })
+    const progress: Array<{ current: number; total: number }> = []
+    await pullImage(image, { socketPath, onProgress: (p) => progress.push({ ...p }) })
+    expect(progress).toEqual([{ current: 777, total: 777 }])
+    for (const p of progress) expect(p.current).toBeLessThanOrEqual(p.total)
+  })
+
+  it('folds a later line that does report the real total into the layer, without ever exceeding it (review round 2, item 1)', async () => {
+    const socketPath = await fakeEngineApi((_req, res) => {
+      ndjson(res, [
+        // First tick: no total yet (common at the very start of a layer's download).
+        { id: 'layer1', status: 'Downloading', progressDetail: { current: 500 } },
+        // A second layer that never reports a total at all, mixed in.
+        { id: 'layer2', status: 'Downloading', progressDetail: { current: 200, total: 0 } },
+        // Then layer1 reports its real total.
+        { id: 'layer1', status: 'Downloading', progressDetail: { current: 2000, total: 5000 } },
+      ])
+    })
+    const progress: Array<{ current: number; total: number }> = []
+    await pullImage(image, { socketPath, onProgress: (p) => progress.push({ ...p }) })
+    expect(progress).toHaveLength(3)
+    for (let i = 0; i < progress.length; i++) {
+      expect(progress[i]!.current).toBeLessThanOrEqual(progress[i]!.total)
+      if (i > 0) expect(progress[i]!.current).toBeGreaterThanOrEqual(progress[i - 1]!.current)
+    }
+    // layer1 ends at 2000/5000, layer2 stays at 200/200 (its own total inflated to its current).
+    expect(progress[2]).toEqual({ current: 2200, total: 5200 })
+  })
+
   it('uses knownTotalBytes when it is larger than the stream-reported total, from the very first report (review round 1, item 4)', async () => {
     const socketPath = await fakeEngineApi((_req, res) => {
       ndjson(res, [{ id: 'layer1', status: 'Downloading', progressDetail: { current: 100, total: 5000 } }])
