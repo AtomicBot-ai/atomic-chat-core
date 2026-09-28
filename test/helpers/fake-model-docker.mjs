@@ -2,10 +2,10 @@
 /**
  * A stand-in `docker` CLI for the `tensorrt-llm` provider e2e (`test/e2e/tensorrt-llm-provider.test.ts`):
  * enough of `create`/`start`/`container inspect`/`logs`/`stop`/`rm`/`info` for the managed-text
- * lifecycle, with a container table in a JSON file. `start` spawns `fake-model-engine.mjs` on the host
- * port `docker create` was given, standing in for `trtllm-serve` behind the container's published
- * port — so a request through the session gateway really reaches "the container", and a stop really
- * ends it. A model mounted from a directory whose name contains `slow` never becomes healthy.
+ * lifecycle, and `ps`/`image rm` for removing the engine, with a container table in a JSON file.
+ * `start` spawns `fake-model-engine.mjs` on the host port `docker create` was given, standing in for
+ * `trtllm-serve` behind the container's published port — so a request through the session gateway
+ * really reaches "the container", and a stop really ends it. A model mounted from a directory whose name contains `slow` never becomes healthy.
  *
  *   FAKE_DOCKER_STATE  the JSON file holding the container table (required)
  */
@@ -62,6 +62,18 @@ if (sub === 'create') {
     logs: [],
   }
   console.log(newId)
+  done()
+}
+// What a removal of the engine asks (task 2.6): which containers still use an image — none, once
+// every model container is gone (this fake runs nothing else) — and removing it by digest.
+if (sub === 'ps') {
+  const live = Object.keys(db.containers)
+  if (live.length > 0) console.log(live.join('\n'))
+  done()
+}
+if (sub === 'image' && args[1] === 'rm') {
+  db.images_removed = [...(db.images_removed ?? []), args[2]]
+  console.log(`Untagged: ${args[2]}`)
   done()
 }
 if (!c) {

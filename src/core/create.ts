@@ -9,13 +9,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { LlamacppProviderId, LocalProviderId } from '../contracts/index.js'
-import {
-  dataLayout,
-  managedSharedRoot,
-  nodeDataFolderEnv,
-  resolveCliDataFolder,
-  resolveDataFolder,
-} from '../config/index.js'
+import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
 import { EmbedService, ModelCapabilityService, ModelRegistry } from '../models/index.js'
@@ -46,7 +40,6 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
-import type { ManagedContainers } from '../runtime/container/index.js'
 import { TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
@@ -63,7 +56,7 @@ import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
-import { managedTestHost, wireTensorrtLlm } from './tensorrt-llm.js'
+import { tensorrtLlmSessionUnloader, wireTensorrtLlm } from './tensorrt-llm.js'
 import { LOCAL_PROVIDER } from './types.js'
 import type { AtomicCoreOptions, CoreLoadOptions } from './types.js'
 
@@ -253,22 +246,8 @@ export async function createAtomicCore(
       )
     }
 
-    // The managed-text engines run on the one Docker executor core startup wires and reconciles below
-    // (after the facade exists, before the endpoint is published); the provider waits for it. The
-    // e2e stand-in machine (`ATOMIC_MANAGED_TEST_HOST`) counts as Linux with its own docker CLI.
-    const testHost = managedTestHost(env)
-    const managedPlatform: NodeJS.Platform = testHost === null ? platform : 'linux'
-    let containersWired!: (containers: ManagedContainers | null) => void
-    let containersFailed!: (cause: unknown) => void
-    const startupContainers = new Promise<ManagedContainers | null>((resolve, reject) => {
-      containersWired = resolve
-      containersFailed = reject
-    })
-    // A failure is reported to a load that asks (the provider), never as an unhandled rejection.
-    startupContainers.catch(() => undefined)
     // The public server's trusted hosts, kept in this one array for every session gateway to read.
     const managedTrustedHosts: string[] = []
-    const managedRoot = managedSharedRoot(nodeDataFolderEnv(env))
 
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
@@ -359,8 +338,15 @@ export async function createAtomicCore(
     })
 
     // The managed container environment and the one Docker executor of this core (task 2.6). The
-    // managed-text provider (task 2.14) takes `managedContainers`, never a second executor.
-    const { managed, containers: managedContainers } = wireManagedEnvironment({
+    // `tensorrt-llm` provider (task 2.14) takes `managedContainers`, never a second executor, and the
+    // environment's machine (`managedHost`: the e2e stand-in under `ATOMIC_MANAGED_TEST_HOST`, whose
+    // platform counts as Linux). A removal unloads the provider's loaded model first.
+    const {
+      managed,
+      containers: managedContainers,
+      platform: managedPlatform,
+      host: managedHost,
+    } = wireManagedEnvironment({
       env,
       platform,
       layout,
@@ -371,6 +357,7 @@ export async function createAtomicCore(
       onWarn: (message) => log('warn', message),
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
+      unloadEngineSessions: tensorrtLlmSessionUnloader(() => runtimes.get('tensorrt-llm')),
     })
 
     // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").
@@ -380,14 +367,14 @@ export async function createAtomicCore(
       layout,
       instanceId: lock.instanceId,
       scope,
-      managedRoot,
       descriptors: managed.descriptors,
-      containers: startupContainers,
+      installations: managed.installations,
+      containers: managedContainers,
+      host: managedHost,
       trustedHosts: managedTrustedHosts,
       settings: () => settings.get('tensorrt-llm'),
       emit: (name, payload) => emitter.emit(name, payload),
       log,
-      ...(testHost === null ? {} : { nvidiaSmi: testHost.nvidiaSmi }),
     })
     if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
     /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
@@ -584,12 +571,11 @@ export async function createAtomicCore(
     // Model containers a previous core left running are stopped and removed before the first load is
     // served, like `reapOrphans` above does for native backends. Linux with a docker CLI only. This
     // wires the executor first, so a setup recovered just below (a pull in flight) finds it; the
-    // `tensorrt-llm` provider takes over the executor and journal this returns.
-    // A failure here is not "no docker": the provider says the runtime failed to initialise, and why.
-    await managedContainers.resolve().then(containersWired, (e: unknown) => {
-      warn(`managed runtime container reconcile: ${String(e)}`)
-      containersFailed(e)
-    })
+    // `tensorrt-llm` provider uses the same handle. A failure here is not "no docker": the handle
+    // tries again at the next load, which says the runtime failed to initialise, and why.
+    await managedContainers
+      .resolve()
+      .catch((e: unknown) => warn(`managed runtime container reconcile: ${String(e)}`))
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))

@@ -58,6 +58,8 @@ let runtime: TensorrtLlmRuntime
 let stored: Record<string, unknown>
 let facts: TensorrtLlmHostFacts
 let installation: () => Promise<ReadyInstallation>
+/** The lifecycle the last `build()` made over the fake Docker. */
+let lastLifecycle: Promise<ManagedTextLifecycle>
 
 const ready = (): Promise<ReadyInstallation> =>
   Promise.resolve({
@@ -97,7 +99,7 @@ function build(
     return new Response('', { status: readyAt !== null && clock >= readyAt ? 200 : 503 })
   }) as unknown as typeof fetch
   const journal = ExecutionJournal.open(data.layout)
-  const made = journal.then(
+  const made = (lastLifecycle = journal.then(
     (j) =>
       new ManagedTextLifecycle({
         provider: 'tensorrt-llm',
@@ -123,9 +125,9 @@ function build(
         startHeartbeat: (options) => startHeartbeatTicker({ ...options, intervalMs: 60_000 }),
         timings: { pollIntervalMs: 1_000, monitorIntervalMs: 60_000, heartbeatReadyTimeoutMs: 2_000 },
       })
-  )
+  ))
   runtime = new TensorrtLlmRuntime({
-    lifecycle:
+    lifecycle: () =>
       withDocker instanceof Error ? Promise.reject(withDocker) : withDocker ? made : Promise.resolve(null),
     readyInstallation: () => installation(),
     hostFacts: async () => facts,
@@ -237,6 +239,16 @@ describe('TensorrtLlmRuntime: refused before a container exists', () => {
   it('answers MANAGED_ADAPTER_UNAVAILABLE on a host with no docker CLI', async () => {
     build({}, false)
     expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_ADAPTER_UNAVAILABLE')
+  })
+
+  it('finds Docker at the next load once a setup has installed it, with no restart', async () => {
+    let dockerInstalled = false
+    build({ lifecycle: () => (dockerInstalled ? lastLifecycle : Promise.resolve(null)) })
+    expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_ADAPTER_UNAVAILABLE')
+    expect(await runtime.unloadAll()).toEqual({ unloaded: 0 })
+    dockerInstalled = true
+    await runtime.load('qwen3')
+    expect(runtime.getLoadedModels()).toEqual(['qwen3'])
   })
 
   it('says the managed container runtime failed to initialise, with the cause, when core startup could not wire it', async () => {

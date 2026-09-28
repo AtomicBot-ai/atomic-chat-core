@@ -8,7 +8,8 @@
  * own probe reads): `bin/docker` is `test/helpers/fake-model-docker.mjs`, `bin/nvidia-smi` is
  * `test/helpers/fake-nvidia-smi.mjs`, so this runs on any host without Docker or a GPU. The engine
  * installation is `ready` because its record and its pinned descriptor (the conf fixture) are written
- * where the setup operation would leave them, under `ATOMIC_CORE_MANAGED_ROOT`.
+ * where the setup operation would leave them, under `ATOMIC_CORE_MANAGED_ROOT`; removing it through
+ * the environment's own operation unloads a loaded model first (spec "Удаление при загруженной модели").
  *
  * No imports from `src/`: a packaging change that breaks a route cannot pass by type-checking.
  */
@@ -25,8 +26,14 @@ import type { ReadyLine } from '../helpers/compiled-core.js'
 const FAKE_DOCKER = fileURLToPath(new URL('../helpers/fake-model-docker.mjs', import.meta.url))
 const FAKE_NVIDIA_SMI = fileURLToPath(new URL('../helpers/fake-nvidia-smi.mjs', import.meta.url))
 const DESCRIPTOR = fileURLToPath(new URL('../fixtures/runtimes/tensorrt-llm.json', import.meta.url))
-const DESCRIPTOR_ID = (JSON.parse(readFileSync(DESCRIPTOR, 'utf8')) as { descriptor_id: string })
-  .descriptor_id
+const DESCRIPTOR_JSON = JSON.parse(readFileSync(DESCRIPTOR, 'utf8')) as {
+  descriptor_id: string
+  image: Record<string, { repository: string; digest: string }>
+}
+const DESCRIPTOR_ID = DESCRIPTOR_JSON.descriptor_id
+/** The descriptor's image for the CPU this test runs on, as the setup would have pulled it. */
+const PLATFORM = process.arch === 'arm64' ? 'linux/arm64' : 'linux/amd64'
+const ENGINE_IMAGE = DESCRIPTOR_JSON.image[PLATFORM] as { repository: string; digest: string }
 /** The one card `fake-nvidia-smi.mjs` reports. */
 const GPU = 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11'
 
@@ -43,6 +50,7 @@ interface FakeContainer {
 interface FakeDockerState {
   containers: Record<string, FakeContainer>
   calls: string[]
+  images_removed?: string[]
 }
 
 const dockerState = (): FakeDockerState =>
@@ -87,6 +95,7 @@ async function writeInstallation(): Promise<void> {
   await copyFile(DESCRIPTOR, join(managedRoot, 'descriptors', `${DESCRIPTOR_ID}.json`))
   const dir = join(managedRoot, 'installations', 'trt-1')
   await mkdir(dir, { recursive: true })
+  // The record exactly as the setup operation's activation writes it (`InstallationStore`).
   await writeFile(
     join(dir, 'installation.json'),
     JSON.stringify({
@@ -100,6 +109,9 @@ async function writeInstallation(): Promise<void> {
         availability: 'supported',
         status: 'ready',
       },
+      image: ENGINE_IMAGE,
+      platform: PLATFORM,
+      installed_at: '2026-09-29T00:00:00.000Z',
     })
   )
 }
@@ -157,6 +169,31 @@ async function load(ready: ReadyLine, model: string): Promise<Session> {
   const res = await post(ready, `/models/tensorrt-llm/${model}/load`)
   expect(res.status, await res.clone().text()).toBe(200)
   return ((await res.json()) as { session: Session }).session
+}
+
+interface Operation {
+  operation_id: string
+  phase: string
+  revision: number
+  plan_digest: string | null
+  error: unknown
+}
+
+async function pollOperation(
+  ready: ReadyLine,
+  operationId: string,
+  done: (operation: Operation) => boolean
+): Promise<Operation> {
+  const read = async () =>
+    (await (await control(ready, `/environments/operations/${operationId}`)).json()) as Operation
+  const deadline = Date.now() + 15_000
+  let current = await read()
+  while (!done(current) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50))
+    current = await read()
+  }
+  expect(done(current), `stuck at ${current.phase}: ${JSON.stringify(current.error)}`).toBe(true)
+  return current
 }
 
 const publicPost = (port: number, path: string, body: unknown, key?: string) =>
@@ -369,6 +406,46 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(dockerState().calls).toContain('stop')
     const sessions = (await (await control(ready, '/sessions')).json()) as { sessions: unknown[] }
     expect(sessions.sessions).toEqual([])
+  })
+
+  it('removing the engine while a model is loaded unloads it first, with the container confirmed stopped, then removes the image', async () => {
+    const { ready } = await start()
+    const session = await load(ready, 'llama-3')
+    const [container] = Object.values(dockerState().containers)
+    expect(alive(container?.pid ?? null)).toBe(true)
+
+    const begin = await post(ready, '/environments/default/operations', {
+      request_id: 'rm-1',
+      target: { kind: 'runtime', installation_id: 'trt-1', engine_id: 'tensorrt-llm' },
+      kind: 'remove',
+    })
+    expect(begin.status, await begin.clone().text()).toBeLessThan(300)
+    const operationId = ((await begin.json()) as Operation).operation_id
+    const asking = await pollOperation(ready, operationId, (o) => o.phase === 'awaiting-consent')
+    await post(ready, `/environments/operations/${operationId}/resume`, {
+      expected_revision: asking.revision,
+      approved_plan_digest: asking.plan_digest,
+    })
+    const done = await pollOperation(ready, operationId, (o) => o.phase === 'removed' || o.phase === 'failed')
+    expect(done.phase, JSON.stringify(done.error)).toBe('removed')
+
+    // The model's container was stopped (and removed) before the engine image was touched.
+    const calls = dockerState().calls
+    const stop = calls.indexOf('stop')
+    expect(stop).toBeGreaterThanOrEqual(0)
+    expect(calls.indexOf('image')).toBeGreaterThan(stop)
+    expect(dockerState().images_removed).toEqual([`${ENGINE_IMAGE.repository}@${ENGINE_IMAGE.digest}`])
+    expect(Object.keys(dockerState().containers)).toEqual([])
+    expect(alive(container?.pid ?? null)).toBe(false)
+    const sessions = (await (await control(ready, '/sessions')).json()) as { sessions: unknown[] }
+    expect(sessions.sessions).toEqual([])
+    const gone = await fetch(`http://127.0.0.1:${session.port}/v1/models`).catch(() => null)
+    expect(gone === null || gone.status >= 400).toBe(true)
+    // The installation is gone, so the next load is refused; the downloaded model stays.
+    expect(existsSync(join(managedRoot, 'installations', 'trt-1'))).toBe(false)
+    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'llama-3'))).toBe(true)
+    const again = await post(ready, '/models/tensorrt-llm/llama-3/load')
+    expect(await again.json()).toMatchObject({ error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } })
   })
 
   it('refuses to load with MANAGED_ADAPTER_UNAVAILABLE while the engine installation is not ready', async () => {

@@ -157,4 +157,6 @@ change only where this core looks, never what it is allowed to do.
   they do as the same user the core already runs as, the privileged host step is never run by the
   core (the client runs it), and a folder another user wrote is only as trusted as any program that
   user can already put on this core's `PATH`. `ATOMIC_CORE_MANAGED_ROOT` keeps such a run off the
-  real per-user environment.
+  real per-user environment. The `tensorrt-llm` provider reads the same folder through the same
+  machine (ADR 2026-09-29-tensorrt-llm-provider-shares-the-setup-operations-handle-store-and-host):
+  `bin/nvidia-smi` for its per-load card probe and `bin/docker` as the one Docker executor.

@@ -16,8 +16,8 @@
  *  - never growing a context or recreating a session: a restart of a multi-minute container in the
  *    middle of a conversation is worse than an honest `context_length_exceeded` (design D9).
  *
- * Everything that touches the machine arrives injected: the lifecycle once core startup has wired
- * Docker, the ready installation, the host facts, the model lookup and the stored settings.
+ * Everything that touches the machine arrives injected: the lifecycle over the core's one Docker
+ * executor, the ready installation, the host facts, the model lookup and the stored settings.
  */
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport, SessionInfo, UnloadResult } from '../../contracts/index.js'
@@ -45,11 +45,12 @@ import { tensorrtLlmSettings } from './settings.js'
 
 export interface TensorrtLlmRuntimeDeps {
   /**
-   * The lifecycle, once core startup has wired the one Docker executor and reconciled its journal;
-   * `null` when this host has no docker CLI at all; rejected, with the cause, when that wiring failed.
-   * Loads wait for it; nothing is listed before it.
+   * The lifecycle over the core's one Docker executor and journal (the startup handle the setup
+   * operation shares), asked at every load: `null` while this host has no docker CLI — a setup that
+   * installs Docker later makes the next load find it, with no restart; rejected, with the cause,
+   * when wiring the executor failed. The same instance every time it resolves non-null.
    */
-  lifecycle: Promise<ManagedTextLifecycle | null>
+  lifecycle: () => Promise<ManagedTextLifecycle | null>
   /** The `ready` installation, its pinned descriptor and image; rejects with why there is none. */
   readyInstallation: () => Promise<ReadyInstallation>
   /** The cards and SELinux, asked right before each load: a card can disappear between two loads. */
@@ -110,16 +111,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     }
   >()
 
-  constructor(private readonly deps: TensorrtLlmRuntimeDeps) {
-    void deps.lifecycle.then(
-      (lifecycle) => {
-        this.current = lifecycle
-        // Startup wired Docker only after a shutdown began: nothing may load on it now.
-        if (this.closed) void lifecycle?.shutdown()
-      },
-      () => undefined
-    )
-  }
+  constructor(private readonly deps: TensorrtLlmRuntimeDeps) {}
 
   list(): SessionInfo[] {
     return this.current?.list() ?? []
@@ -146,10 +138,10 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     }
     // Validated first, before anything is asked of the machine (spec: schema validation before start).
     const settings = tensorrtLlmSettings(this.deps.settings(), opts.overrides)
-    const lifecycle = await this.deps.lifecycle.catch((cause: unknown) => {
+    const lifecycle = await this.deps.lifecycle().catch((cause: unknown) => {
       throw new AtomicCoreError(
         'MANAGED_ADAPTER_UNAVAILABLE',
-        'The managed container runtime failed to initialise when core started, so tensorrt-llm cannot run models.',
+        'The managed container runtime failed to initialise, so tensorrt-llm cannot run models.',
         cause instanceof Error ? cause.message : String(cause)
       )
     })
@@ -159,6 +151,9 @@ export class TensorrtLlmRuntime implements LocalRuntime {
         'Docker is not installed on this machine, so tensorrt-llm cannot run models.'
       )
     }
+    // Kept from the first load on: what `list`, `unload`, `unloadAll` and `shutdown` act on. Nothing
+    // is loaded before that, so there is nothing for them to find earlier either.
+    this.current = lifecycle
     const ready = await this.deps.readyInstallation()
     throwIfLoadCancelled(signal)
     const model = await this.deps.model(modelId)

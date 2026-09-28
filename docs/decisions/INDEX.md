@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [The tensorrt-llm provider shares the setup operation's Docker handle, installation store and machine](2026-09-29-tensorrt-llm-provider-shares-the-setup-operations-handle-store-and-host.md) — supersedes items 3–4 of the route-policy record below.
 - **2026-09-29** — [tensorrt-llm sessions carry a route policy to the public server](2026-09-29-tensorrt-llm-sessions-carry-a-route-policy-to-the-public-server.md)
 - **2026-09-28** — [tensorrt-llm's output-length setting is enforced by the session gateway, not argv](2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md)
 - **2026-09-28** — [The managed-text lifecycle owns load stages, fast failure, the engine cache and confirmed stop](2026-09-28-managed-text-lifecycle-owns-load-stages-cache-and-stop.md)

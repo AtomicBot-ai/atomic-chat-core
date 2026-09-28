@@ -5,17 +5,14 @@
  * since cannot change what runs), and only with that descriptor's image for this host's CPU. Anything
  * short of that refuses the load with `MANAGED_ADAPTER_UNAVAILABLE` before a container exists.
  *
- * `listInstallations` is a narrow reader of the records the setup operation (task 2.6) writes under
- * the shared per-user root, `installations/<id>/installation.json` (`docs/contracts.md`): the same
- * files both scopes read, so a setup finished by the app is `ready` for the CLI core too. It reads
- * the `installation` part of a record and nothing else.
+ * The installations themselves are read by the setup operation's own store (`InstallationStore`,
+ * `../environment/installations.ts`): the records under the shared per-user root that both scopes
+ * read, so a setup finished by the app is `ready` for the CLI core too. There is one reader of that
+ * format; this file only decides which of its installations a load may run.
  */
-import { readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { PlatformImage, RuntimeDescriptor, RuntimeInstallation } from '../../contracts/index.js'
-import { managedSharedPaths } from '../../config/index.js'
-import type { RuntimeDescriptorProvider } from '../environment/index.js'
+import type { InstallationStore, RuntimeDescriptorProvider } from '../environment/index.js'
 
 /** The engine a `tensorrt-llm` load needs an installation of (the descriptor's own `engine_id`). */
 const ENGINE_ID = 'tensorrt-llm'
@@ -29,39 +26,6 @@ export function containerPlatformFor(arch: string): ContainerPlatform | null {
   return null
 }
 
-function installationOf(value: unknown): RuntimeInstallation | null {
-  const record = value as { schema_version?: unknown; installation?: Partial<RuntimeInstallation> } | null
-  if (record === null || typeof record !== 'object' || record.schema_version !== 1) return null
-  const installation = record.installation
-  if (
-    installation === undefined ||
-    typeof installation.installation_id !== 'string' ||
-    typeof installation.engine_id !== 'string' ||
-    typeof installation.status !== 'string'
-  ) {
-    return null
-  }
-  return installation as RuntimeInstallation
-}
-
-/** Every readable installation under `root` (the shared managed root). A torn or foreign file is skipped. */
-export async function listInstallations(root: string): Promise<RuntimeInstallation[]> {
-  const dir = managedSharedPaths(root).installationsDir
-  const names = await readdir(dir).catch(() => [] as string[])
-  const found: RuntimeInstallation[] = []
-  for (const name of names.sort()) {
-    const text = await readFile(join(dir, name, 'installation.json'), 'utf8').catch(() => null)
-    if (text === null) continue
-    try {
-      const installation = installationOf(JSON.parse(text))
-      if (installation !== null) found.push(installation)
-    } catch {
-      // A record being written right now, or not one of ours: never guessed at.
-    }
-  }
-  return found
-}
-
 export interface ReadyInstallation {
   installation: RuntimeInstallation
   descriptor: RuntimeDescriptor
@@ -70,7 +34,8 @@ export interface ReadyInstallation {
 }
 
 export interface ResolveReadyInstallationDeps {
-  installations: () => Promise<RuntimeInstallation[]>
+  /** The setup operation's installation records (`InstallationStore`); a torn or foreign file is skipped there. */
+  installations: Pick<InstallationStore, 'list'>
   descriptors: Pick<RuntimeDescriptorProvider, 'forInstallation'>
   /** This host's container platform; null when the CPU has no published image. */
   platform: ContainerPlatform | null
@@ -83,7 +48,9 @@ function unavailable(message: string, details?: string): AtomicCoreError {
 export async function resolveReadyInstallation(
   deps: ResolveReadyInstallationDeps
 ): Promise<ReadyInstallation> {
-  const ours = (await deps.installations()).filter((i) => i.engine_id === ENGINE_ID)
+  const ours = (await deps.installations.list())
+    .map((record) => record.installation)
+    .filter((i) => i.engine_id === ENGINE_ID)
   const ready = ours.find((i) => i.status === 'ready' && i.active_descriptor_id !== null)
   if (ready === undefined) {
     const status = ours.map((i) => `${i.installation_id}: ${i.status}`).join(', ')

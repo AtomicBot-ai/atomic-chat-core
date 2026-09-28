@@ -27,7 +27,8 @@ const options = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform = 'darwin') =
 
 describe('wireManagedEnvironment', () => {
   it('offers no environment off Linux, and wires no Docker executor there', async () => {
-    const { managed, containers } = wireManagedEnvironment(options({}))
+    const { managed, containers, platform } = wireManagedEnvironment(options({}))
+    expect(platform).toBe('darwin')
     expect(managed.environments()).toEqual([])
     expect(await containers.resolve()).toBeNull()
   })
@@ -44,8 +45,17 @@ describe('wireManagedEnvironment', () => {
     await mkdir(join(host, 'bin'), { recursive: true })
     await writeFile(join(host, 'bin', 'docker'), '#!/bin/sh\nexit 1\n')
     await chmod(join(host, 'bin', 'docker'), 0o755)
-    const { managed, containers } = wireManagedEnvironment(options({ ATOMIC_MANAGED_TEST_HOST: host }))
+    const {
+      managed,
+      containers,
+      platform,
+      host: machine,
+    } = wireManagedEnvironment(options({ ATOMIC_MANAGED_TEST_HOST: host }))
     expect(managed.environments()[0]?.executor).toBe('linux-docker')
+    // The one place the hook is read: the tensorrt-llm provider gets Linux and this same machine.
+    expect(platform).toBe('linux')
+    expect(machine.dockerPath).toBe(join(host, 'bin', 'docker'))
+    expect((await machine.probeDeps.exec('docker', ['info'])).code).toBe(1)
     const wired = await containers.resolve()
     expect(wired?.dockerPath).toBe(join(host, 'bin', 'docker'))
     expect(wired?.socketPath).toBe(join(host, 'docker.sock'))

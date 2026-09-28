@@ -8,12 +8,13 @@
  * it before recovery runs (so a recovered pull has it), the setup uses it, and the managed-text
  * provider (task 2.14) must take the same handle rather than wire a second one.
  *
- * `unloadEngineSessions` is task 2.14's to supply: a removal unloads a loaded session of the engine
- * first, with its container's stop confirmed. Until the provider exists nothing can be loaded, and
- * the default (`NOTHING_LOADED`) says so.
+ * `unloadEngineSessions` is the `tensorrt-llm` provider's (`tensorrtLlmSessionUnloader`, task 2.14):
+ * a removal unloads a loaded session of the engine first, with its container's stop confirmed. Left
+ * out, the default (`NOTHING_LOADED`) says nothing is loaded.
  *
  * `ATOMIC_MANAGED_TEST_HOST` (see `linux-host.ts`) swaps the whole Linux machine for a folder the
- * e2e suite describes, including on a non-Linux test runner; production never sets it.
+ * e2e suite describes, including on a non-Linux test runner; production never sets it. This is the
+ * one place it is read: the returned `platform` and `host` carry it to the `tensorrt-llm` provider.
  */
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -58,6 +59,10 @@ export interface ManagedEnvironment {
   managed: ManagedRuntimes
   /** The one Docker executor of this core; `resolve()` it at startup, before `managed.recover()`. */
   containers: ManagedContainersHandle
+  /** The platform the managed runtime runs on: `linux` on the test host, whatever the real one is. */
+  platform: NodeJS.Platform
+  /** The machine the environment probes; the `tensorrt-llm` provider asks it for its cards too. */
+  host: LinuxHost
 }
 
 /** An engine id becomes one folder name under the data folder; anything else is refused. */
@@ -130,5 +135,5 @@ export function wireManagedEnvironment(options: WireManagedEnvironmentOptions): 
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     linux: linuxProvisionerParts(options, host, containers),
   })
-  return { managed, containers }
+  return { managed, containers, platform, host }
 }

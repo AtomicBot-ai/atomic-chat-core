@@ -3,11 +3,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { RuntimeDescriptor, RuntimeInstallation } from '../../contracts/index.js'
-import { parseRuntimeDescriptor } from '../environment/index.js'
+import { InstallationStore, parseRuntimeDescriptor } from '../environment/index.js'
+import type { InstallationRecord } from '../environment/index.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { containerPlatformFor, listInstallations, resolveReadyInstallation } from './installation.js'
+import { containerPlatformFor, resolveReadyInstallation } from './installation.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
 
@@ -21,6 +22,16 @@ const installation = (over: Partial<RuntimeInstallation> = {}): RuntimeInstallat
   status: 'ready',
   ...over,
 })
+
+/** Records as the setup operation writes them (`InstallationStore`). */
+const recordOf = (installation: RuntimeInstallation): InstallationRecord => ({
+  schema_version: 1,
+  installation,
+  image: descriptor.image['linux/amd64'],
+  platform: 'linux/amd64',
+  installed_at: '2026-09-29T00:00:00.000Z',
+})
+const store = (list: RuntimeInstallation[]) => ({ list: async () => list.map(recordOf) })
 
 const descriptors = (known: RuntimeDescriptor[] = [descriptor]) => ({
   forInstallation: async (id: string) => {
@@ -47,7 +58,7 @@ describe('containerPlatformFor', () => {
 describe('resolveReadyInstallation', () => {
   it("resolves the ready installation to its pinned descriptor and this host's image", async () => {
     const ready = await resolveReadyInstallation({
-      installations: async () => [installation()],
+      installations: store([installation()]),
       descriptors: descriptors(),
       platform: 'linux/arm64',
     })
@@ -58,10 +69,10 @@ describe('resolveReadyInstallation', () => {
 
   it('prefers a ready installation over one that is not', async () => {
     const ready = await resolveReadyInstallation({
-      installations: async () => [
+      installations: store([
         installation({ installation_id: 'old', status: 'failed' }),
         installation({ installation_id: 'new' }),
-      ],
+      ]),
       descriptors: descriptors(),
       platform: 'linux/amd64',
     })
@@ -76,7 +87,7 @@ describe('resolveReadyInstallation', () => {
   ])('answers MANAGED_ADAPTER_UNAVAILABLE for %s', async (_label, list) => {
     await expect(
       resolveReadyInstallation({
-        installations: async () => list,
+        installations: store(list),
         descriptors: descriptors(),
         platform: 'linux/amd64',
       })
@@ -86,7 +97,7 @@ describe('resolveReadyInstallation', () => {
   it("passes on the descriptor provider's own error when the pinned descriptor is no longer cached", async () => {
     await expect(
       resolveReadyInstallation({
-        installations: async () => [installation()],
+        installations: store([installation()]),
         descriptors: descriptors([]),
         platform: 'linux/amd64',
       })
@@ -97,7 +108,7 @@ describe('resolveReadyInstallation', () => {
     const foreign = { ...descriptor, engine_id: 'vllm' }
     await expect(
       resolveReadyInstallation({
-        installations: async () => [installation()],
+        installations: store([installation()]),
         descriptors: descriptors([foreign]),
         platform: 'linux/amd64',
       })
@@ -107,7 +118,7 @@ describe('resolveReadyInstallation', () => {
   it('answers MANAGED_ADAPTER_UNAVAILABLE on a CPU architecture the descriptor has no image for', async () => {
     await expect(
       resolveReadyInstallation({
-        installations: async () => [installation()],
+        installations: store([installation()]),
         descriptors: descriptors(),
         platform: null,
       })
@@ -115,23 +126,27 @@ describe('resolveReadyInstallation', () => {
   })
 })
 
-describe('listInstallations', () => {
+describe('resolveReadyInstallation over the setup operation’s own store', () => {
   let data: TmpDataFolder
   beforeEach(async () => {
     data = await makeTmpDataFolder('trt-installations-')
   })
   afterEach(() => data.cleanup())
 
-  it('reads every installation record under the shared root and skips what it cannot read', async () => {
+  it('finds the record the setup wrote under the shared root, and skips a torn one', async () => {
     const root = join(data.root, 'managed')
-    const write = async (id: string, text: string) => {
-      await mkdir(join(root, 'installations', id), { recursive: true })
-      await writeFile(join(root, 'installations', id, 'installation.json'), text)
-    }
-    await write('trt-1', JSON.stringify({ schema_version: 1, installation: installation() }))
-    await write('torn', '{"schema_version": 1, "installation": ')
-    await write('foreign', JSON.stringify({ schema_version: 2, installation: installation() }))
-    expect(await listInstallations(root)).toEqual([installation()])
-    expect(await listInstallations(join(data.root, 'nothing-here'))).toEqual([])
+    const installations = new InstallationStore(root)
+    await expect(
+      resolveReadyInstallation({ installations, descriptors: descriptors(), platform: 'linux/amd64' })
+    ).rejects.toMatchObject({ code: 'MANAGED_ADAPTER_UNAVAILABLE' })
+    await installations.write(recordOf(installation()))
+    await mkdir(join(root, 'installations', 'torn'), { recursive: true })
+    await writeFile(join(root, 'installations', 'torn', 'installation.json'), '{"schema_version": 1, ')
+    const ready = await resolveReadyInstallation({
+      installations,
+      descriptors: descriptors(),
+      platform: 'linux/amd64',
+    })
+    expect(ready.installation).toEqual(installation())
   })
 })

@@ -643,7 +643,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     async prepare(
       record: PersistedOperation,
       signal: AbortSignal,
-      own: (resourceIds: string[]) => Promise<void> = async () => undefined
+      own: (resourceIds: string[]) => Promise<void>
     ): Promise<void> {
       const descriptor = await pinnedDescriptor(record)
       const machine = await facts()
