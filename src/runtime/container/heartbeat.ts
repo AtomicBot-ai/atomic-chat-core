@@ -6,11 +6,13 @@
  * on to notice a dead core: no update within the stale limit means the core stopped ticking,
  * whatever the reason (crash, kill, a slept host).
  *
- * Timer, filesystem and clock are all injected so tests run instantly under fake timers, and so a
- * transient write failure (the mount briefly unavailable, a full disk) never throws out of a tick —
- * it is reported through `onError` and retried on the next tick instead of tearing the ticker down.
- * A dead engine is the watchdog's problem to notice via the *absence* of heartbeats, not this
- * ticker's problem to detect directly.
+ * Timer, filesystem and clock are all injected so tests run instantly under fake timers. `onError`
+ * is required, not optional: a write failure here is a silent gap in the one signal the watchdog
+ * trusts, and swallowing it by default is exactly the kind of thing that only gets noticed once the
+ * GPU is stuck — the caller must say what happens to it, even if that is just logging. A failed
+ * write never throws out of a tick either way; it is retried on the next tick, not treated as fatal
+ * to the ticker itself. A dead engine is the watchdog's problem to notice via the *absence* of
+ * heartbeats, not this ticker's problem to detect directly.
  */
 
 import { writeFile } from 'node:fs/promises'
@@ -34,10 +36,12 @@ export interface HeartbeatTickerOptions {
   setIntervalFn?: (handler: () => void, ms: number) => ReturnType<typeof setInterval>
   clearIntervalFn?: (handle: ReturnType<typeof setInterval>) => void
   /** Called instead of throwing when a tick's write fails; the ticker keeps running either way. */
-  onError?: (error: unknown) => void
+  onError: (error: unknown) => void
 }
 
 export interface HeartbeatTicker {
+  /** Resolves once the first write has actually succeeded — never on a failed one. */
+  ready: Promise<void>
   stop(): void
 }
 
@@ -49,14 +53,37 @@ export function startHeartbeatTicker(options: HeartbeatTickerOptions): Heartbeat
   const setIntervalFn = options.setIntervalFn ?? setInterval
   const clearIntervalFn = options.clearIntervalFn ?? clearInterval
 
+  let inFlight = false
+  let readySettled = false
+  let resolveReady!: () => void
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve
+  })
+
+  // A tick that fires while the previous write is still pending is skipped outright rather than
+  // queued: the ticker's only job is to keep the mtime moving, and a queue of stale writes racing
+  // a slow filesystem would just reorder themselves for no benefit, or pile up behind it.
   const tick = (): void => {
-    fs.writeFile(options.path, String(now())).catch((error: unknown) => options.onError?.(error))
+    if (inFlight) return
+    inFlight = true
+    fs.writeFile(options.path, String(now()))
+      .then(() => {
+        if (!readySettled) {
+          readySettled = true
+          resolveReady()
+        }
+      })
+      .catch((error: unknown) => options.onError(error))
+      .finally(() => {
+        inFlight = false
+      })
   }
 
   tick()
   const handle = setIntervalFn(tick, intervalMs)
 
   return {
+    ready,
     stop(): void {
       clearIntervalFn(handle)
     },
