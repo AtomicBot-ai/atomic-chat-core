@@ -247,6 +247,23 @@ describe('FoundationModelsRuntime', () => {
     })
   })
 
+  it('loads despite a backendOutput sink that throws, and warns about it once', async () => {
+    const logged: string[] = []
+    const r = runtime(
+      {},
+      {
+        backendOutput: () => {
+          throw new Error('sink boom')
+        },
+        log: (level, message) => logged.push(`${level}: ${message}`),
+      }
+    )
+    await r.load(APPLE_MODEL_ID)
+    expect(logged).toEqual([
+      'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+    ])
+  })
+
   it('delivers every line printed before an early exit to backendOutput', async () => {
     const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
     const r = runtime({ mode: 'exit-2' }, { backendOutput: (line) => received.push(line) })

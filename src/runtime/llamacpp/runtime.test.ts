@@ -249,15 +249,17 @@ describe('load', () => {
     })
   })
 
-  it('keeps loading, serving and relaying when the backendOutput sink throws', async () => {
+  it('keeps loading, serving and relaying when the backendOutput sink throws, and warns about it once', async () => {
     await data.writeModel('throwing-sink')
     const logPath = join(data.layout.core.logsDir, 'throwing-sink.log')
     const seen: string[] = []
+    const logged: Array<{ level: string; message: string }> = []
     const runtime = await makeRuntime({
       backendOutput: ({ line }) => {
         seen.push(line)
         throw new Error('sink boom')
       },
+      log: (level, message) => logged.push({ level, message }),
       spawn: scriptSpawn(PRINTS_BEFORE_AND_AFTER_READY),
     })
 
@@ -271,6 +273,14 @@ describe('load', () => {
     ])
     expect(runtime.list().map((session) => session.model_id)).toEqual(['throwing-sink'])
     await waitFor(() => readFileSync(logPath, 'utf8').includes('[stdout] after-ready: still running'))
+    // Three throws, one warning, and never the engine line itself.
+    expect(logged.filter((entry) => entry.level === 'warn')).toEqual([
+      {
+        level: 'warn',
+        message: 'backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+      },
+    ])
+    expect(logged.some((entry) => /before-ready|after-ready|listening/.test(entry.message))).toBe(false)
   })
 
   it('fails before spawning when the requested log cannot be opened', async () => {

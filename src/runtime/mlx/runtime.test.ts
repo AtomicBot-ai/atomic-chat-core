@@ -381,6 +381,25 @@ describe('MlxRuntime', () => {
     })
   })
 
+  it('loads despite a backendOutput sink that throws, and warns about it once', async () => {
+    await writeMlxModel('m')
+    const logged: string[] = []
+    const r = runtime(
+      {},
+      {},
+      {
+        backendOutput: () => {
+          throw new Error('sink boom')
+        },
+        log: (level, message) => logged.push(`${level}: ${message}`),
+      }
+    )
+    await r.load('m')
+    expect(logged).toEqual([
+      'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+    ])
+  })
+
   it('delivers every line printed before a crash during load to backendOutput', async () => {
     const dir = await writeMlxModel('m')
     const received: Array<{ provider: string; model: string; stream: string; line: string }> = []

@@ -41,7 +41,7 @@ import {
   nodeCudaProbeEnv,
   textMentionsCudaRuntime,
   randomFreePort,
-  reportBackendOutput,
+  backendOutputReporter,
   spawnAndAwaitReady,
   spawnManaged,
   LLAMA_READY_MARKERS,
@@ -115,9 +115,12 @@ export interface LlamacppRuntimeOptions {
   platform?: NodeJS.Platform
   baseEnv?: NodeJS.ProcessEnv
   fetch?: typeof fetch
-  /** Every stdout/stderr line the backend prints, for the life of the session. A throwing sink is swallowed. */
+  /**
+   * Every stdout/stderr line the backend prints, for the life of the session. A throwing sink is
+   * swallowed, with one `warn` through `log` per session.
+   */
   backendOutput?: BackendOutputSink
-  /** The core's own logger; plumbed here for a later engine-start line, unused otherwise. */
+  /** The core's own logger: the one warning about a throwing `backendOutput` sink goes here. */
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /** Provider settings for a load; re-read per load so a settings change lands on the next one. */
   readSettings: () => Promise<RuntimeSettings>
@@ -394,6 +397,7 @@ export class LlamacppRuntime implements LocalRuntime {
     const apiKey = plan.apiKey
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath) : undefined
+    const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
 
     let proc: ManagedProcess
     try {
@@ -414,12 +418,7 @@ export class LlamacppRuntime implements LocalRuntime {
                 level: 'debug',
                 msg: `[${plan.provider}/${plan.modelId}][${stream}] ${line}`,
               })
-            reportBackendOutput(this.options.backendOutput, {
-              provider: plan.provider,
-              model: plan.modelId,
-              stream,
-              line,
-            })
+            reportOutput({ provider: plan.provider, model: plan.modelId, stream, line })
           },
           classifyExit: (exit, stderr, stdout) =>
             classifyProcessOutput(exit, stderr, stdout, this.platform, plan.provider),

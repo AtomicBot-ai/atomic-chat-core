@@ -28,11 +28,11 @@ import type {
   RecreateResult,
 } from '../shared/index.js'
 import {
+  backendOutputReporter,
   closeLogStream,
   generateApiKey,
   openLogStream,
   randomFreePort,
-  reportBackendOutput,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
@@ -71,9 +71,12 @@ export interface FoundationModelsRuntimeOptions {
   emit?: EmitFn
   baseEnv?: NodeJS.ProcessEnv
   now?: () => number
-  /** Every stdout/stderr line the server prints, for the life of the session. A throwing sink is swallowed. */
+  /**
+   * Every stdout/stderr line the server prints, for the life of the session. A throwing sink is
+   * swallowed, with one `warn` through `log` per session.
+   */
   backendOutput?: BackendOutputSink
-  /** The core's own logger; plumbed here for a later engine-start line, unused otherwise. */
+  /** The core's own logger: the one warning about a throwing `backendOutput` sink goes here. */
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /** Test seams. */
   spawn?: typeof spawnAndAwaitReady
@@ -167,6 +170,7 @@ export class FoundationModelsRuntime implements LocalRuntime {
     const args = ['--port', String(port), '--api-key', apiKey]
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'Foundation Models') : undefined
+    const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
     const env = Object.fromEntries(
       Object.entries(this.options.baseEnv ?? process.env).filter(
         (entry): entry is [string, string] => entry[1] !== undefined
@@ -193,12 +197,7 @@ export class FoundationModelsRuntime implements LocalRuntime {
             logStream?.write(`[${stream}] ${line}\n`)
             if (opts.verbose)
               this.emit('core:log', { level: 'debug', msg: `[foundation-models][${stream}] ${line}` })
-            reportBackendOutput(this.options.backendOutput, {
-              provider: 'foundation-models',
-              model: modelId,
-              stream,
-              line,
-            })
+            reportOutput({ provider: 'foundation-models', model: modelId, stream, line })
           },
         }
       )

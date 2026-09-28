@@ -14,11 +14,11 @@ import { join } from 'node:path'
 import type { AtomicCoreError, DiffusionModality } from '../contracts/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import {
+  backendOutputReporter,
   buildProcessEnv,
   discoverCudaPaths,
   nodeCudaProbeEnv,
   randomFreePort,
-  reportBackendOutput,
   spawnManaged,
 } from '../runtime/shared/index.js'
 import type { BackendOutputSink, ManagedProcess } from '../runtime/shared/index.js'
@@ -46,7 +46,10 @@ export interface SpawnServerDeps {
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
   log?: (level: 'info' | 'warn' | 'debug', msg: string) => void
-  /** Every stdout/stderr line the server prints, for the life of the session. A throwing sink is swallowed. */
+  /**
+   * Every stdout/stderr line the server prints, for the life of the session. A throwing sink is
+   * swallowed, with one `warn` through `log` per session.
+   */
   backendOutput?: BackendOutputSink
   /** Called with the child right after it started, before readiness: the journal entry goes here. */
   onSpawned?: (pid: number, port: number, exe: string) => Promise<void>
@@ -190,9 +193,10 @@ export async function spawnServer(
   const tail: string[] = []
   let listener: ((line: string) => void) | undefined
   const records = { stdout: new OutputRecords(), stderr: new OutputRecords() }
+  const reportOutput = backendOutputReporter(deps.backendOutput, deps.log)
   const deliver = (stream: 'stdout' | 'stderr', lines: string[]) => {
     for (const line of lines) {
-      reportBackendOutput(deps.backendOutput, { provider: spec.engine, model: spec.modelId, stream, line })
+      reportOutput({ provider: spec.engine, model: spec.modelId, stream, line })
       if (tail.length >= TAIL_CAPACITY) tail.shift()
       tail.push(line)
       listener?.(line)

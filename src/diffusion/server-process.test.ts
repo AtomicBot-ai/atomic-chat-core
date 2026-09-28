@@ -174,6 +174,26 @@ describe.skipIf(!posix)('spawnServer', () => {
     ])
   })
 
+  it('comes up despite a backendOutput sink that throws, and warns about it once', async () => {
+    const spec = await engine({ loadMs: 300 })
+    let calls = 0
+    const log: string[] = []
+    const handle = await spawnServer(spec, join(dir, 'scratch'), {
+      http,
+      log: (level, msg) => log.push(`${level}: ${msg}`),
+      backendOutput: () => {
+        calls++
+        throw new Error('sink boom')
+      },
+    })
+    handles.push(handle)
+    expect(calls).toBeGreaterThan(1)
+    expect(handle.tail().at(-1)).toBe(`[INFO   ] server.cpp:100 - listening on 127.0.0.1:${handle.port}`)
+    expect(log.filter((line) => line.startsWith('warn: backendOutput'))).toEqual([
+      'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+    ])
+  })
+
   // `disable_metal_tensor_api_for_host` (`process.rs`, app commit ec1fd3ea7).
   it('switches the Metal Tensor API off for an M5 on the Metal backend, and only there', async () => {
     const envFile = join(dir, 'env.json')

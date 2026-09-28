@@ -42,7 +42,8 @@ export interface AtomicCoreOptions {
    * Every stdout/stderr line an engine prints, for the life of its session — llama.cpp (both
    * providers), MLX, Foundation Models and `sd-server`. In addition to whatever `logPath`/`verbose`
    * already route for one load, never instead; without it, engine output goes nowhere new and never
-   * reaches `logger`. The app's daemon wires this to its `core.log`. A sink that throws is ignored.
+   * reaches `logger`. The app's daemon wires this to its `core.log`. A sink that throws is ignored,
+   * after one `warn` through `logger` per engine session.
    * `cloudflared` output never reaches this sink: it carries the remote-access tunnel's public URL.
    */
   backendOutput?: BackendOutputSink

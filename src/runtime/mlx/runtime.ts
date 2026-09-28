@@ -35,10 +35,10 @@ import type {
   RecreateResult,
 } from '../shared/index.js'
 import {
+  backendOutputReporter,
   closeLogStream,
   openLogStream,
   randomFreePort,
-  reportBackendOutput,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
@@ -81,9 +81,12 @@ export interface MlxRuntimeOptions {
   journal?: ProcessJournal | undefined
   emit?: EmitFn
   baseEnv?: NodeJS.ProcessEnv
-  /** Every stdout/stderr line the server prints, for the life of the session. A throwing sink is swallowed. */
+  /**
+   * Every stdout/stderr line the server prints, for the life of the session. A throwing sink is
+   * swallowed, with one `warn` through `log` per session.
+   */
   backendOutput?: BackendOutputSink
-  /** The core's own logger; plumbed here for a later engine-start line, unused otherwise. */
+  /** The core's own logger: the one warning about a throwing `backendOutput` sink goes here. */
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /**
    * A drafter that is switched on but has no path. Defaults to one already on disk; a caller that
@@ -201,6 +204,7 @@ export class MlxRuntime implements LocalRuntime {
 
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'MLX') : undefined
+    const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
     let started
     try {
       started = await (this.options.spawn ?? spawnAndAwaitReady)(
@@ -218,7 +222,7 @@ export class MlxRuntime implements LocalRuntime {
             logStream?.write(`[${stream}] ${line}\n`)
             if (opts.verbose)
               this.emit('core:log', { level: 'debug', msg: `[mlx/${modelId}][${stream}] ${line}` })
-            reportBackendOutput(this.options.backendOutput, { provider: 'mlx', model: modelId, stream, line })
+            reportOutput({ provider: 'mlx', model: modelId, stream, line })
           },
         }
       )
