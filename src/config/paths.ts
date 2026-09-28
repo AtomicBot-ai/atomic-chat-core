@@ -14,6 +14,8 @@
  *   <data>/atomic-core/  — the only new folder (settings, credentials, lock, journal, logs)
  *   <dataDir>/atomic-managed-runtimes/{environment.json, environment.lock, installations/, operations/}
  *                                                        (managed text runtimes, shared by the app and CLI scopes)
+ *   <data>/atomic-core/managed-runtimes/executions/  (task 2.10 execution journal: this scope's own
+ *                                                      model containers, one file per container id)
  */
 
 import { join, relative, sep } from 'node:path'
@@ -27,6 +29,8 @@ export const CORE_DIR = 'atomic-core'
 export const MODEL_YML = 'model.yml'
 export const LOCAL_API_SERVER_STATE_FILE = 'local-api-server.json'
 export const CHATGPT_AUTH_FILE = 'atomic-chatgpt-auth.json'
+/** Per-scope subtree under `<data>/atomic-core/` for the managed text runtimes (task 2.10). */
+export const MANAGED_SCOPE_DIR = 'managed-runtimes'
 
 export interface ProviderPaths {
   /** `<data>/<provider>` */
@@ -80,6 +84,24 @@ export interface DiffusionPaths {
   defaultVideoOutputDir: string
 }
 
+/**
+ * What this scope (this core's own data folder) owns alone among the managed text runtimes' files —
+ * as opposed to the container environment itself (Docker/WSL), which belongs to the machine's user
+ * account and is shared by the app and CLI scopes at a fixed per-user root outside any data folder
+ * (ADR `2026-09-22-managed-runtimes-split-per-user-environment-from-per-scope-data`). Only the
+ * execution journal (task 2.10) is ported so far; heartbeats/artifacts/caches are added by whichever
+ * later task first needs them (ADR
+ * `2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store`).
+ */
+export interface ManagedScopePaths {
+  /** `<data>/atomic-core/managed-runtimes` */
+  root: string
+  /** `<root>/executions` — one file per container this core created, named by its container id. */
+  executionsDir: string
+  /** This container's execution-journal record. */
+  executionFile(containerId: string): string
+}
+
 export interface DataLayout {
   root: string
   serverStateFile: string
@@ -91,7 +113,19 @@ export interface DataLayout {
   legacyRemoteAccessTunnel: string
   core: CoreFiles
   diffusion: DiffusionPaths
+  /** This scope's half of the managed text runtimes' layout. */
+  managed: ManagedScopePaths
   provider(id: LocalProviderId): ProviderPaths
+}
+
+function managedScopePaths(coreDir: string): ManagedScopePaths {
+  const root = join(coreDir, MANAGED_SCOPE_DIR)
+  const executionsDir = join(root, 'executions')
+  return {
+    root,
+    executionsDir,
+    executionFile: (containerId) => join(executionsDir, `${containerId}.json`),
+  }
 }
 
 export function dataLayout(root: string): DataLayout {
@@ -102,6 +136,7 @@ export function dataLayout(root: string): DataLayout {
     serverStateFile: join(root, LOCAL_API_SERVER_STATE_FILE),
     chatgptAuthFile: join(root, CHATGPT_AUTH_FILE),
     legacyRemoteAccessTunnel: join(root, 'remote-access-tunnel.json'),
+    managed: managedScopePaths(coreDir),
     core: {
       dir: coreDir,
       publicServerState: join(coreDir, LOCAL_API_SERVER_STATE_FILE),

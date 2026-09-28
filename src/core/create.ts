@@ -514,6 +514,12 @@ export async function createAtomicCore(
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
+    // TODO(task 2.6/2.12): once a Docker executor is constructed here for Linux, reconcile the
+    // managed-runtime execution journal the same way, before the first load: guard on
+    // `platform === 'linux'` and an available executor, then
+    // `await reconcileExecutions(await ExecutionJournal.open(layout), lock.instanceId, exec, log)`
+    // (`src/runtime/container/index.ts`). No executor is wired into core startup yet, so there is
+    // nothing to call this against.
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

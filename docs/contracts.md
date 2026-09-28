@@ -78,6 +78,9 @@ record in this repo's own `docs/decisions/`; the decision it made is narrowed to
 only by this repo's own ADR
 2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store).
 `ATOMIC_CORE_MANAGED_ROOT` overrides the root for tests.
+Per scope, `<data>/atomic-core/managed-runtimes/executions/` (task 2.10): the execution journal of the
+model containers this core instance created, one file per container id, reconciled at startup before
+the first load is served (ADR 2026-09-28-managed-runtime-orphans-are-any-instance-id-but-our-own).
 Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
 `<data>/diffusion/{backends,models,scratch}` and `<data>/images`; `<data>/videos` is the folder the app's ADR
 2026-09-10-store-generated-media-under-the-data-folder-with-recipes-in-png-chunks reserved (core ADR

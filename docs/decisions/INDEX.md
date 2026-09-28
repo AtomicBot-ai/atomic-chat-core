@@ -14,6 +14,7 @@ add a new one that says which record it supersedes.
 - **2026-09-28** — [src/runtime/environment/inventory.ts is the model-file digest, not the host-inventory report](2026-09-28-inventory-ts-is-the-model-file-digest-not-the-host-report.md)
 - **2026-09-28** — [Managed runtime layout: the shared per-user root only, no per-scope artifact store](2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store.md)
 - **2026-09-28** — [Point DOCKER_CONFIG at an empty core-owned directory instead of deleting it; --pull=never on create/run](2026-09-28-point-docker-config-at-an-empty-core-owned-directory.md)
+- **2026-09-28** — [Managed-runtime execution journal: an orphan is any instance id but our own, no liveness probe](2026-09-28-managed-runtime-orphans-are-any-instance-id-but-our-own.md)
 - **2026-09-28** — [Pull the model image over the Docker Engine API, not `docker pull`](2026-09-28-pull-the-model-image-over-the-docker-engine-api.md)
 - **2026-09-28** — [Port managed-runtime contracts selectively from feat/tenzor-rt](2026-09-28-port-managed-runtime-contracts-selectively-from-feat-tenzor-rt.md)
 - **2026-09-27** — [The core advises on backends for both llama.cpp providers; the app decides when to act](2026-09-27-the-core-advises-on-backends-the-app-decides.md)

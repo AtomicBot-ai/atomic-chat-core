@@ -38,6 +38,13 @@ describe('dataLayout', () => {
     expect(layout.legacyRemoteAccessTunnel).toBe(native('/data/remote-access-tunnel.json'))
     expect(layout.core.remoteAccessTunnel).toBe(native('/data/atomic-core/remote-access-tunnel.json'))
   })
+  it('puts the execution journal under atomic-core/managed-runtimes/executions, keyed by container id', () => {
+    expect(layout.managed.root).toBe(native('/data/atomic-core/managed-runtimes'))
+    expect(layout.managed.executionsDir).toBe(native('/data/atomic-core/managed-runtimes/executions'))
+    expect(layout.managed.executionFile('abc123')).toBe(
+      native('/data/atomic-core/managed-runtimes/executions/abc123.json')
+    )
+  })
   it("keeps image generation where the app's plugin put it", () => {
     // `state.rs` at 767ff6350: `<data>/diffusion/{backends,models,scratch}`, gallery in `<data>/images`.
     expect(layout.diffusion).toEqual({
