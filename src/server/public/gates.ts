@@ -175,6 +175,37 @@ export function preflight(req: IncomingMessage, config: PublicServerConfig): Ear
   return { status: 200, headers, body: '' }
 }
 
+/** What {@link hostAndKeyGate} needs: a shape `PublicServerConfig` also satisfies. */
+export interface HostAndKeyConfig {
+  /** Key clients must present; empty disables the check. */
+  apiKey: string
+  /** Hosts allowed besides the built-in loopback names; `*` allows every host. */
+  trustedHosts: readonly string[]
+}
+
+/**
+ * The Host and Bearer-key checks alone, with no path whitelist, CORS or hidden-path behaviour: what
+ * a listener that has no docs endpoints and must authenticate every request needs (the managed
+ * session gateway, `runtime/managed-text/gateway.ts`). `undefined` means both checks passed.
+ */
+export function hostAndKeyGate(req: IncomingMessage, config: HostAndKeyConfig): EarlyResponse | undefined {
+  const host = header(req, 'host')
+  if (host === '') return { status: 400, headers: [], body: 'Missing host header', kind: 'bad_request' }
+  if (!isValidHost(host, config.trustedHosts))
+    return { status: 403, headers: [], body: hostMessage(host), kind: 'host' }
+
+  if (config.apiKey !== '') {
+    // `Bearer ` is matched exactly, case included, as the proxy does.
+    const auth = header(req, 'authorization')
+    const bearerOk = auth.startsWith('Bearer ') && auth.slice('Bearer '.length) === config.apiKey
+    const keyOk = header(req, 'x-api-key') === config.apiKey
+    if (!bearerOk && !keyOk) {
+      return { status: 401, headers: [], body: 'Invalid or missing authorization token', kind: 'auth' }
+    }
+  }
+  return undefined
+}
+
 /**
  * The host, key and hidden-path checks, in the proxy's order. `undefined` means the request passes
  * and should be routed.
@@ -184,25 +215,13 @@ export function gate(
   path: string,
   config: PublicServerConfig
 ): EarlyResponse | undefined {
-  const host = header(req, 'host')
   const origin = header(req, 'origin')
   const cors = corsHeaders(origin, config.trustedHosts)
   const whitelisted = WHITELISTED_PATHS.has(path)
 
   if (!whitelisted) {
-    if (host === '') return { status: 400, headers: cors, body: 'Missing host header', kind: 'bad_request' }
-    if (!isValidHost(host, config.trustedHosts))
-      return { status: 403, headers: cors, body: hostMessage(host), kind: 'host' }
-
-    if (config.apiKey !== '') {
-      // `Bearer ` is matched exactly, case included, as the proxy does.
-      const auth = header(req, 'authorization')
-      const bearerOk = auth.startsWith('Bearer ') && auth.slice('Bearer '.length) === config.apiKey
-      const keyOk = header(req, 'x-api-key') === config.apiKey
-      if (!bearerOk && !keyOk) {
-        return { status: 401, headers: cors, body: 'Invalid or missing authorization token', kind: 'auth' }
-      }
-    }
+    const refused = hostAndKeyGate(req, config)
+    if (refused) return { ...refused, headers: cors }
   }
 
   if (path.includes('/configs')) return { status: 404, headers: cors, body: 'Not Found', kind: 'hidden' }
