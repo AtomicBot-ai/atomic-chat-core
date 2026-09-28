@@ -34,6 +34,7 @@ const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): Requir
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: PLAN_A,
   descriptor_id: null,
+  image_digest: null,
   adopts_existing_engine: false,
   system_changes: [{ code: 'install-packages', text: 'Install docker-ce' }],
   download_bytes: null,
@@ -94,6 +95,8 @@ class FakeProvisioner implements EnvironmentProvisioner {
   imagePresent = false
   /** Byte progress `pull` reports before it returns. */
   pullProgress: { completed: number; total: number }[] = []
+  /** Progress `pull` reports after its pause is released, as a pull still streaming would. */
+  lateProgress: { completed: number; total: number }[] = []
   private gates = new Map<string, { promise: Promise<void>; release: () => void }>()
 
   constructor(...answers: { plan: RequirementPlan; host_step: ManagedHostStep | null }[]) {
@@ -145,6 +148,9 @@ class FakeProvisioner implements EnvironmentProvisioner {
       onProgress({ label: 'Downloading', completed: tick.completed, total: tick.total, unit: 'bytes' })
     }
     await this.step('pull')
+    for (const tick of this.lateProgress) {
+      onProgress({ label: 'Downloading', completed: tick.completed, total: tick.total, unit: 'bytes' })
+    }
   }
   async verify(): Promise<void> {
     await this.step('verify')
@@ -182,6 +188,7 @@ interface HarnessIdentity {
   ownerStartId?: string | null
   /** Operation ids; every operation is `op-1` unless a test needs two of them. */
   newOperationId?: () => string
+  now?: () => number
 }
 
 const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessIdentity = {}) => {
@@ -214,6 +221,7 @@ const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessId
     // writes (see OP09, simulating several real app restarts in one process), never a live
     // handoff between two cores. The "a live owner" tests below pass their own `identityDeps`.
     identityDeps: identity.identityDeps ?? { alive: () => false },
+    ...(identity.now === undefined ? {} : { now: identity.now }),
   })
   return { service, store, events, fs }
 }
@@ -470,6 +478,22 @@ describe('a begin that finds an abandoned operation (task 2.6)', () => {
     expect(old.error?.code ?? 'MANAGED_OPERATION_CONFLICT').toBe('MANAGED_OPERATION_CONFLICT')
   })
 
+  it('leaves an operation that waits on the user alone, even with its owner gone (review r1, item 6)', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    let serial = 0
+    const { service, store } = harness(provisioner, { newOperationId: () => `op-${(serial += 1)}` })
+    await service.begin('env-1', begin({ request_id: 'req-old' }))
+    await settle(service)
+    expect((await service.get('op-1')).phase).toBe('awaiting-consent')
+    // The harness reports every owner as gone; a consent the user has not given yet is still theirs.
+    await expect(service.begin('env-1', begin({ request_id: 'req-new' }))).rejects.toMatchObject({
+      code: 'MANAGED_OPERATION_CONFLICT',
+      details: 'op-1',
+    })
+    expect((await service.get('op-1')).phase).toBe('awaiting-consent')
+    expect(await store.listRecoverable()).toHaveLength(1)
+  })
+
   it('still refuses while the owner of the running operation is alive', async () => {
     const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
     const { service, store } = harness(provisioner, {
@@ -488,10 +512,10 @@ describe('byte progress while pulling (task 2.6)', () => {
     const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
     provisioner.pullProgress = [
       { completed: 10, total: 100 },
-      { completed: 100, total: 100 },
+      { completed: 50, total: 100 },
     ]
     const release = provisioner.pauseAt('pull')
-    const { service, events } = harness(provisioner)
+    const { service, events } = harness(provisioner, { now: () => 1_000 })
     await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
     for (let i = 0; i < 200 && !provisioner.calls.includes('pull'); i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0))
@@ -503,9 +527,29 @@ describe('byte progress while pulling (task 2.6)', () => {
     expect(ticks.length).toBeGreaterThan(0)
     expect(ticks.every((event) => event.revision === during.revision)).toBe(true)
     expect(ticks[0]?.progress?.completed).toBe(10)
+    // One clock reading for all ticks: the throttle lets only the first out.
+    expect(ticks).toHaveLength(1)
     release()
     await settle(service)
     expect((await service.get('op-1')).progress).toBeNull()
+  })
+
+  it('never announces a tick for an operation that has since moved on (review r1, item 8)', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    const release = provisioner.pauseAt('pull')
+    let clock = 0
+    const { service, events } = harness(provisioner, { now: () => (clock += 1_000) })
+    await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+    for (let i = 0; i < 200 && !provisioner.calls.includes('pull'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    await service.cancel('op-1')
+    const cancelling = events.length
+    // The stream still delivers a tick after the cancel committed.
+    provisioner.lateProgress = [{ completed: 50, total: 100 }]
+    release()
+    await settle(service)
+    expect(events.slice(cancelling).some((event) => event.phase === 'pulling-image')).toBe(false)
   })
 })
 

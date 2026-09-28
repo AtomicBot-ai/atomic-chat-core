@@ -5,7 +5,7 @@
  *
  * - **probe** reads the machine (`probeLinux`), judges it (`assessLinux`) against the descriptor the
  *   operation installs, and answers with a plan whose digest binds the consent: the system changes,
- *   the GPU set and the free space where the image lands (carry item 1). When the plan needs the
+ *   the GPU set and whether the free space where the image lands suffices (carry item 1). When the plan needs the
  *   privileged step, the step carries the recipe's validated parameters and their digest, built by
  *   the recipe itself (`HostRecipeBinding`, task 2.5), plus a fresh single-use nonce.
  * - **verifyHostStep** probes again after a receipt; the helper's word is never the evidence.
@@ -50,7 +50,7 @@ import {
   type DockerExec,
   type ExecutionRecord,
 } from '../container/index.js'
-import { canonicalDigest, freeDiskGib, planDigest } from './canonical-json.js'
+import { canonicalDigest, planDigest } from './canonical-json.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { InstallationRecord, InstallationStore } from './installations.js'
 import type { LinuxHost } from './linux-host.js'
@@ -118,6 +118,8 @@ export interface LinuxProvisionerDeps {
 }
 
 const ZERO_DIGEST: Sha256Digest = `sha256:${'0'.repeat(64)}`
+/** Checkpoints at which part or all of the engine image is already in Docker's layer store. */
+const PULL_PHASES: readonly string[] = ['pulling-image', 'verifying', 'activating']
 const STOP_TIMEOUT_SECONDS = 10
 const DIAGNOSTIC_TAIL = 1_000
 
@@ -173,6 +175,7 @@ const blockedPlan = (
   recipe_id: 'none',
   recipe_digest: ZERO_DIGEST,
   descriptor_id: null,
+  image_digest: null,
   adopts_existing_engine: false,
   system_changes: [],
   download_bytes: null,
@@ -213,15 +216,30 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     return docker
   }
 
+  const unavailable = (message: string, details?: string): ManagedBlocker => ({
+    code: 'MANAGED_METADATA_INVALID',
+    message,
+    ...(details === undefined ? {} : { details }),
+    reason: 'descriptor-unavailable',
+  })
+
   /**
-   * The descriptor this operation installs: the one its plan already named, or the one the request
-   * named, when this core has it cached (both are pins, design D7); otherwise the newest one this
-   * core can get. A fresh setup names whatever the client last saw, and the plan says which one it
-   * actually is, so the consent covers the real one.
+   * The descriptor a probe plans with. Once the user consented, only the consented descriptor, from
+   * the cache (design D7) — never a newer one: a plan naming another descriptor is a new download
+   * and has to be approved again. Before that: the one the operation's last plan or its request
+   * named, when this core has it cached, otherwise the newest one it can get; the plan says which,
+   * so the consent covers the real one.
    */
-  const descriptorFor = async (
+  const descriptorForProbe = async (
     record: PersistedOperation
   ): Promise<{ descriptor: RuntimeDescriptor } | { blocker: ManagedBlocker }> => {
+    const consented = record.machine.consented?.descriptor_id ?? null
+    if (consented !== null) {
+      const pinned = await deps.descriptors.forInstallation(consented)
+      return pinned.kind === 'available'
+        ? { descriptor: pinned.descriptor }
+        : { blocker: unavailable(pinned.error.message, consented) }
+    }
     const preferred = record.requirement_plan?.descriptor_id ?? record.request.descriptor_id ?? null
     if (preferred !== null) {
       const pinned = await deps.descriptors.forInstallation(preferred)
@@ -229,26 +247,27 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     }
     const latest = await deps.descriptors.forNewSetup()
     if (latest.kind === 'available') return { descriptor: latest.descriptor }
-    return {
-      blocker: {
-        code: 'MANAGED_METADATA_INVALID',
-        message: latest.error.message,
-        ...(latest.error.details === undefined ? {} : { details: latest.error.details }),
-        reason: 'descriptor-unavailable',
-      },
-    }
+    return { blocker: unavailable(latest.error.message, latest.error.details) }
   }
 
-  const requireDescriptor = async (record: PersistedOperation): Promise<RuntimeDescriptor> => {
-    const resolved = await descriptorFor(record)
-    if ('blocker' in resolved) {
+  /**
+   * The descriptor every effect after the consent works with: exactly the one the approved (or
+   * carried) plan named, from the cache, and nothing else — no fallback to a newer descriptor
+   * (review r1, item 2). Missing from the cache is a failure, not a reason to pick another.
+   */
+  const pinnedDescriptor = async (record: PersistedOperation): Promise<RuntimeDescriptor> => {
+    const id = record.machine.consented?.descriptor_id ?? record.requirement_plan?.descriptor_id ?? null
+    if (id === null) {
       throw new AtomicCoreError(
         'MANAGED_METADATA_INVALID',
-        resolved.blocker.message,
-        resolved.blocker.details
+        'This operation has no approved runtime descriptor.'
       )
     }
-    return resolved.descriptor
+    const pinned = await deps.descriptors.forInstallation(id)
+    if (pinned.kind !== 'available') {
+      throw new AtomicCoreError('MANAGED_METADATA_INVALID', pinned.error.message, id)
+    }
+    return pinned.descriptor
   }
 
   const hostPlatform = async (): Promise<Platform> => {
@@ -304,6 +323,15 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
               text: `Remove the engine image ${existing.image.repository}@${existing.image.digest}, unless another container still uses it.`,
               params: { image: `${existing.image.repository}@${existing.image.digest}` },
             },
+            ...(existing.probe_image === undefined
+              ? []
+              : [
+                  {
+                    code: 'remove-probe-image',
+                    text: `Remove the GPU check image ${existing.probe_image.repository}@${existing.probe_image.digest}, unless something else still uses it.`,
+                    params: { image: `${existing.probe_image.repository}@${existing.probe_image.digest}` },
+                  },
+                ]),
             {
               code: 'remove-engine-caches',
               text: 'Remove the engine caches built for this installation.',
@@ -332,6 +360,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       recipe_id: 'none',
       recipe_digest: ZERO_DIGEST,
       descriptor_id: existing?.installation.active_descriptor_id ?? null,
+      image_digest: existing?.image.digest ?? null,
       adopts_existing_engine: true,
       system_changes: changes,
       download_bytes: null,
@@ -345,7 +374,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
   }
 
   const setupProbe = async (record: PersistedOperation): Promise<ProvisionerProbe> => {
-    const resolved = await descriptorFor(record)
+    const resolved = await descriptorForProbe(record)
     if ('blocker' in resolved) {
       const plan = blockedPlan(record, deps.environmentId, 'unsupported', resolved.blocker)
       deps.onAssessment?.({ availability: 'unsupported', gpus: [], blockers: plan.blockers, selinux: null })
@@ -355,13 +384,34 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     const target = record.machine.operation.target
     const machine = await facts()
     const user = deps.host.options().user
+    const platform = platformFor(machine.architecture)
+    const image = platform === null ? null : descriptor.image[platform]
+    const existing = target.kind === 'runtime' ? await deps.installations.read(target.installation_id) : null
+    const present =
+      target.kind === 'runtime' && image !== null && machine.docker.daemon_reachable
+        ? await imagePresent(image)
+        : false
+    const readyInstallation =
+      existing !== null &&
+      existing.installation.status === 'ready' &&
+      existing.installation.active_descriptor_id === descriptor.descriptor_id
+    // What the engine image still needs on disk (review r1, item 1). Nothing once it is there, or
+    // installed; not checkable once a pull has begun — Docker's layer store already holds part of
+    // it, and counting the free space that is left against the whole image would fail every restart
+    // mid-pull. Only an image not yet started is checked against `required_disk_bytes`. An
+    // environment-only setup pulls no engine image at all.
+    const pullStarted = PULL_PHASES.includes(record.machine.checkpoint ?? 'checking')
+    const stillNeeded =
+      target.kind !== 'runtime' || present || readyInstallation || pullStarted
+        ? null
+        : descriptor.required_disk_bytes
     const recipe = descriptor.recipes.find((entry) => entry.recipe_id === deps.recipe.recipe_id)
     const assessment = assessLinux(machine, {
       recipeId: deps.recipe.recipe_id,
       recipeDistributions: recipe?.distributions ?? [],
       minimumDriverVersion: descriptor.minimum_driver_version,
       minimumComputeCapability: descriptor.minimum_compute_capability,
-      requiredDiskBytes: descriptor.required_disk_bytes,
+      requiredDiskBytes: stillNeeded,
       currentUser: user,
     })
 
@@ -373,7 +423,6 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
         reason: 'engine-mismatch',
       })
     }
-    const existing = target.kind === 'runtime' ? await deps.installations.read(target.installation_id) : null
     if (existing !== null && existing.installation.active_descriptor_id !== descriptor.descriptor_id) {
       // An installation keeps its descriptor until an update, which is not part of this change
       // (design D7): a new release applies after remove + setup, never by setting up over it.
@@ -384,8 +433,6 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       })
     }
 
-    const platform = platformFor(machine.architecture)
-    const image = platform === null ? null : descriptor.image[platform]
     let hostStep: ManagedHostStep | null = null
     const installPlan = assessment.install_plan
     if (blockers.length === 0 && installPlan !== null && installPlan.requires_elevation) {
@@ -429,7 +476,6 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       text: change.text,
       ...(change.params === undefined ? {} : { params: change.params }),
     }))
-    const readyInstallation = existing !== null && existing.installation.status === 'ready'
     const availability: ManagedAvailability =
       blockers.length > 0
         ? assessment.availability === 'setup-required'
@@ -452,7 +498,12 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
           image === null ? null : { descriptor_id: descriptor.descriptor_id, image_digest: image.digest },
         host: {
           gpu_ids: machine.gpus.map((gpu) => gpu.gpu_id).sort(),
-          free_disk_gib: freeDiskGib(machine.free_disk_bytes),
+          disk_sufficient:
+            stillNeeded === null
+              ? true
+              : machine.free_disk_bytes === null
+                ? null
+                : machine.free_disk_bytes >= stillNeeded,
           docker_root_dir: machine.docker.docker_root_dir,
         },
       }),
@@ -462,6 +513,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       recipe_id: deps.recipe.recipe_id,
       recipe_digest: deps.recipe.recipe_digest,
       descriptor_id: descriptor.descriptor_id,
+      image_digest: target.kind === 'runtime' ? (image?.digest ?? null) : null,
       adopts_existing_engine: assessment.adopts_existing_engine,
       system_changes: systemChanges,
       download_bytes: descriptor.download_bytes,
@@ -477,10 +529,6 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       blockers,
       selinux: machine.docker.daemon_reachable ? machine.docker.selinux : null,
     })
-    const present =
-      target.kind === 'runtime' && image !== null && machine.docker.daemon_reachable
-        ? await imagePresent(image)
-        : false
     return { plan, host_step: hostStep, image_present: present }
   }
 
@@ -504,21 +552,25 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
   const inventory: EffectInventory = {
     async inspect(effect: EffectIntent, record: PersistedOperation): Promise<EffectFinding> {
       if (record.request.kind === 'remove') return { kind: 'absent' }
-      if (effect.kind === 'pull-image' || effect.kind === 'verify') {
-        const descriptor = await requireDescriptor(record).catch(() => null)
-        if (descriptor === null) return { kind: 'absent' }
-        const image = descriptor.image[await hostPlatform()]
-        return (await imagePresent(image))
-          ? { kind: 'completed', owned_resource_ids: [] }
-          : { kind: 'absent' }
-      }
-      if (effect.kind === 'activate') {
-        const id = installationId(record)
-        const existing = id === null ? null : await deps.installations.read(id)
-        const planned = record.requirement_plan?.descriptor_id ?? null
-        return existing !== null && existing.installation.active_descriptor_id === planned
-          ? { kind: 'completed', owned_resource_ids: [] }
-          : { kind: 'absent' }
+      try {
+        if (effect.kind === 'pull-image' || effect.kind === 'verify') {
+          const descriptor = await pinnedDescriptor(record)
+          const image = descriptor.image[await hostPlatform()]
+          return (await imagePresent(image))
+            ? { kind: 'completed', owned_resource_ids: [] }
+            : { kind: 'absent' }
+        }
+        if (effect.kind === 'activate') {
+          const id = installationId(record)
+          const existing = id === null ? null : await deps.installations.read(id)
+          const planned = (await pinnedDescriptor(record)).descriptor_id
+          return existing !== null && existing.installation.active_descriptor_id === planned
+            ? { kind: 'completed', owned_resource_ids: [] }
+            : { kind: 'absent' }
+        }
+      } catch {
+        // Nothing this core can check (no descriptor cached, no architecture): the effect runs
+        // again, and fails there with its own reason if it still cannot.
       }
       return { kind: 'absent' }
     },
@@ -573,7 +625,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     },
 
     async prepare(record: PersistedOperation, signal: AbortSignal): Promise<void> {
-      const descriptor = await requireDescriptor(record)
+      const descriptor = await pinnedDescriptor(record)
       const machine = await facts()
       const platform = platformFor(machine.architecture)
       if (platform === null) {
@@ -620,7 +672,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       onProgress: (progress: ManagedProgress) => void,
       signal: AbortSignal
     ): Promise<void> {
-      const descriptor = await requireDescriptor(record)
+      const descriptor = await pinnedDescriptor(record)
       const image = descriptor.image[await hostPlatform()]
       const docker = await dockerOrThrow()
       const label = 'Downloading the engine image'
@@ -647,7 +699,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
         }
         return
       }
-      const descriptor = await requireDescriptor(record)
+      const descriptor = await pinnedDescriptor(record)
       const image = descriptor.image[await hostPlatform()]
       const docker = await dockerOrThrow()
       const inspected = await inspectImage(docker.exec, image)
@@ -667,7 +719,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     async activate(record: PersistedOperation): Promise<void> {
       const target = record.machine.operation.target
       if (target.kind !== 'runtime') return
-      const descriptor = await requireDescriptor(record)
+      const descriptor = await pinnedDescriptor(record)
       const platform = await hostPlatform()
       const installation: InstallationRecord = {
         schema_version: 1,
@@ -681,6 +733,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
           status: 'ready',
         },
         image: descriptor.image[platform],
+        probe_image: descriptor.probe_image[platform],
         platform,
         installed_at: now().toISOString(),
       }
@@ -719,6 +772,18 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
           // it — a foreign container keeps the image, and Docker would refuse anyway.
           const users = await containersUsingImage(docker.exec, existing.image)
           if (users.length === 0) await removeImage(docker.exec, existing.image)
+          // The GPU-check image too, unless another installation recorded it or a container uses it.
+          const probe = existing.probe_image
+          if (probe !== undefined) {
+            const others = (await deps.installations.list()).filter(
+              (entry) =>
+                entry.installation.installation_id !== target.installation_id &&
+                entry.probe_image?.digest === probe.digest
+            )
+            if (others.length === 0 && (await containersUsingImage(docker.exec, probe)).length === 0) {
+              await removeImage(docker.exec, probe)
+            }
+          }
         }
       }
 

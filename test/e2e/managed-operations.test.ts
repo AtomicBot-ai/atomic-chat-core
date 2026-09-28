@@ -32,6 +32,7 @@ import {
   GPU_UUID,
   PROBE_IMAGE,
   readyState,
+  REQUIRED_DISK_BYTES,
   type FakeManagedHost,
   type PendingHostStep,
 } from '../helpers/fake-managed-host.js'
@@ -248,6 +249,11 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
     expect(run).toContain(`device=${GPU_UUID}`)
     expect(run).toContain(PROBE_IMAGE)
 
+    // Installed, on a disk the image has now nearly filled: still supported, never disk-blocked.
+    const after = (await (
+      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+    ).json()) as { availability: string; blockers: unknown[] }
+    expect(after).toMatchObject({ availability: 'supported', blockers: [] })
     const environment = (await snapshot(ready)).environments[0]
     expect(environment?.availability).toBe('supported')
     expect(environment?.gpus.map((gpu) => gpu.gpu_id)).toEqual([GPU_UUID])
@@ -358,8 +364,14 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
     ).json()) as Operation
     const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
 
-    // Between the probe and the click, 20 GiB of free space went elsewhere.
-    host.setFreeDisk(480 * 1024 ** 3)
+    // Between the probe and the click, a second card appeared.
+    host.update((state) => ({
+      ...state,
+      gpus: [
+        ...(state.gpus ?? []),
+        { uuid: 'GPU-second', name: 'NVIDIA RTX A6000', cc: '8.6', total_mib: 49140, free_mib: 49000 },
+      ],
+    }))
     await post(ready, `/environments/operations/${started.operation_id}/resume`, {
       expected_revision: asking.revision,
       approved_plan_digest: asking.plan_digest,
@@ -414,7 +426,8 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
 
       await crash()
       host.holdEnginePull = false
-      if (imageLanded) host.update((state) => ({ ...state, images: [...(state.images ?? []), ENGINE_IMAGE] }))
+      // Either way, less than the whole image's requirement is free now: half or all of it is on disk.
+      if (imageLanded) host.landEngineImage()
       const pullsBefore = host.pulls.length
       const second = await start()
       const done = await poll(
@@ -433,6 +446,19 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
       await rm(managedRoot, { recursive: true, force: true })
       await mkdir(managedRoot, { recursive: true })
     }
+  })
+
+  it('refuses a setup the free space cannot hold, before anything is pulled', async () => {
+    host = await fakeManagedHost(readyState())
+    host.setFreeDisk(REQUIRED_DISK_BYTES - 1)
+    const { ready } = await start()
+    const started = (await (
+      await post(ready, '/environments/default/operations', setup())
+    ).json()) as Operation
+    const failed = await poll(ready, started.operation_id, settled)
+    expect(failed.phase).toBe('failed')
+    expect(failed.error?.details).toBe('insufficient-disk')
+    expect(host.pulls).toEqual([])
   })
 
   it('fails with what the machine shows when the helper reports success it did not have', async () => {
@@ -518,9 +544,13 @@ describe('removing the managed engine through the compiled core (task 2.6)', () 
     expect(stop).toBeGreaterThanOrEqual(0)
     expect(imageRm).toBeGreaterThan(stop)
     expect(docker[imageRm]).toContain(ENGINE_IMAGE)
-    // Our container is gone; someone else's container and image are exactly as they were.
+    // Our container and both our images (the engine's and the GPU check's) are gone; someone
+    // else's container and image are exactly as they were.
     expect(host.state().containers?.map((c) => c.id)).toEqual(['their-db'])
-    expect(host.state().images).toEqual(['docker.io/library/postgres@sha256:beef', PROBE_IMAGE])
+    expect(host.state().images).toEqual(['docker.io/library/postgres@sha256:beef'])
+    expect(docker.some((call) => call[3] === 'image' && call[4] === 'rm' && call.includes(PROBE_IMAGE))).toBe(
+      true
+    )
     expect(docker.some((call) => call.includes('their-db'))).toBe(false)
     // The caches are gone, the downloaded model stays, and nothing reached for Docker itself.
     expect(existsSync(cache)).toBe(false)

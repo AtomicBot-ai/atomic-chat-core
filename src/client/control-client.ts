@@ -588,7 +588,10 @@ export class CoreClient {
 
   /**
    * Report what the system authorization prompt did. The core checks it against the machine before
-   * the step counts, and an identical receipt arriving twice authorizes nothing a second time.
+   * the step counts. A nonce is used once: the same receipt again (or another one for a nonce already
+   * used, or for another revision) is refused with 409 `MANAGED_RECEIPT_CONFLICT`, and nothing is
+   * applied a second time — a caller that lost the first answer reads the operation with
+   * `environmentOperation` instead of resending.
    */
   reportHostStep(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation> {
     return this.call(`/environments/operations/${encodeURIComponent(operationId)}/host-step-result`, {

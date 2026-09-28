@@ -223,19 +223,14 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     options.emit('environment:changed', { ...environment })
   }
 
+  /** What the last probe of the host saw; applied to the snapshot with the installations it re-reads. */
+  let seenHost: HostView | null = null
   const onAssessment = (seen: HostView): void => {
-    const environment = view[0]
-    if (environment === undefined) return
     assessed = seen.availability
-    environment.gpus = seen.gpus
-    environment.blockers = seen.blockers
-    environment.selinux = seen.selinux
-    environment.availability = environmentAvailability(
-      provisioner !== null,
-      assessed,
-      environment.installations
-    )
-    publish()
+    seenHost = seen
+    // Installations are shared with the other scope's core, which may have finished (or removed)
+    // one since this core last looked: re-read them with every look at the host (review r1, item 10).
+    void refreshInstallations().then(publish, publish)
   }
 
   const provisioner =
@@ -260,6 +255,11 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
   const refreshInstallations = async (): Promise<void> => {
     const environment = view[0]
     if (environment === undefined) return
+    if (seenHost !== null) {
+      environment.gpus = seenHost.gpus
+      environment.blockers = seenHost.blockers
+      environment.selinux = seenHost.selinux
+    }
     environment.installations = (await installations.list().catch(() => [])).map(
       (record) => record.installation
     )

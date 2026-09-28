@@ -31,7 +31,12 @@ import {
   testLinuxHost,
   wireManagedRuntimes,
 } from '../runtime/environment/index.js'
-import type { ManagedRuntimes, UnloadEngineSessions } from '../runtime/environment/index.js'
+import type {
+  LinuxHost,
+  LinuxProvisionerParts,
+  ManagedRuntimes,
+  UnloadEngineSessions,
+} from '../runtime/environment/index.js'
 import { removeEngineCaches } from '../runtime/managed-text/index.js'
 
 export interface WireManagedEnvironmentOptions {
@@ -66,6 +71,33 @@ export function engineModelsDir(layout: DataLayout, engineId: string): string {
   return join(layout.root, engineId, 'models')
 }
 
+/**
+ * The Linux recipe's host-side parts: the machine, the privileged recipe, the one Docker executor,
+ * and this scope's engine caches and models.
+ */
+export function linuxProvisionerParts(
+  options: Pick<WireManagedEnvironmentOptions, 'layout' | 'unloadEngineSessions'>,
+  host: LinuxHost,
+  containers: ManagedContainersHandle
+): LinuxProvisionerParts {
+  return {
+    host,
+    recipe: INSTALL_CONTAINER_RUNTIME_BINDING,
+    docker: async () => {
+      const wired = await containers.resolve()
+      return wired === null
+        ? null
+        : { exec: wired.exec, socketPath: wired.socketPath, journal: wired.journal }
+    },
+    removeEngineCaches: async (descriptorId) => {
+      await removeEngineCaches(options.layout.managed, { descriptorId })
+    },
+    removeModels: (engineId) =>
+      rm(engineModelsDir(options.layout, engineId), { recursive: true, force: true }),
+    unloadEngineSessions: options.unloadEngineSessions ?? NOTHING_LOADED,
+  }
+}
+
 export function wireManagedEnvironment(options: WireManagedEnvironmentOptions): ManagedEnvironment {
   const testHost = managedTestHostDir(options.env)
   const platform: NodeJS.Platform = testHost === null ? options.platform : 'linux'
@@ -96,22 +128,7 @@ export function wireManagedEnvironment(options: WireManagedEnvironmentOptions): 
     newId: options.newId,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-    linux: {
-      host,
-      recipe: INSTALL_CONTAINER_RUNTIME_BINDING,
-      docker: async () => {
-        const wired = await containers.resolve()
-        return wired === null
-          ? null
-          : { exec: wired.exec, socketPath: wired.socketPath, journal: wired.journal }
-      },
-      removeEngineCaches: async (descriptorId) => {
-        await removeEngineCaches(options.layout.managed, { descriptorId })
-      },
-      removeModels: (engineId) =>
-        rm(engineModelsDir(options.layout, engineId), { recursive: true, force: true }),
-      unloadEngineSessions: options.unloadEngineSessions ?? NOTHING_LOADED,
-    },
+    linux: linuxProvisionerParts(options, host, containers),
   })
   return { managed, containers }
 }

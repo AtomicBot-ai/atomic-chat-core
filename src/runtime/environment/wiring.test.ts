@@ -74,6 +74,7 @@ const plan: RequirementPlan = {
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: DIGEST,
   descriptor_id: null,
+  image_digest: null,
   adopts_existing_engine: true,
   system_changes: [],
   download_bytes: null,
@@ -556,8 +557,31 @@ describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () 
     expect(managed.environments()[0]?.availability).toBe('setup-required')
 
     const target = { kind: 'runtime' as const, installation_id: 'tensorrt-llm', engine_id: 'tensorrt-llm' }
+    // The other scope's core finished a setup of its own meanwhile; a probe here picks it up.
+    await managed.installations.write({
+      schema_version: 1,
+      installation: {
+        installation_id: 'from-the-cli',
+        engine_id: 'other-engine',
+        environment_id: 'default',
+        active_descriptor_id: 'other-1',
+        candidate_descriptor_id: null,
+        availability: 'supported',
+        status: 'ready',
+      },
+      image: { repository: 'example/other', digest: `sha256:${'e'.repeat(64)}` },
+      platform: 'linux/amd64',
+      installed_at: '2026-09-29T00:00:00.000Z',
+    })
     const plan = await managed.service.probe({ descriptor_id: 'tensorrt-llm-1.2.1-r1', target })
     expect(managed.environments()[0]?.gpus.map((gpu) => gpu.gpu_id)).toEqual(['GPU-1'])
+    for (let i = 0; i < 50 && managed.environments()[0]?.installations.length === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(managed.environments()[0]?.installations.map((entry) => entry.installation_id)).toEqual([
+      'from-the-cli',
+    ])
+    await managed.installations.remove('from-the-cli')
     expect(changed.length).toBeGreaterThan(0)
 
     await managed.service.begin('default', {

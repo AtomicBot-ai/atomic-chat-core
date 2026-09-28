@@ -31,7 +31,11 @@ const DESCRIPTOR = JSON.parse(readFileSync(fileURLToPath(DESCRIPTOR_URL), 'utf8'
   descriptor_id: string
   image: Record<string, { repository: string; digest: string }>
   probe_image: Record<string, { repository: string; digest: string }>
+  required_disk_bytes: number
 }
+/** What the engine image takes on disk once pulled, per the descriptor. */
+export const REQUIRED_DISK_BYTES = DESCRIPTOR.required_disk_bytes
+const GIB = 1024 ** 3
 export const DESCRIPTOR_ID = DESCRIPTOR.descriptor_id
 export const ENGINE_IMAGE = `${DESCRIPTOR.image['linux/amd64']!.repository}@${DESCRIPTOR.image['linux/amd64']!.digest}`
 export const PROBE_IMAGE = `${DESCRIPTOR.probe_image['linux/amd64']!.repository}@${DESCRIPTOR.probe_image['linux/amd64']!.digest}`
@@ -91,7 +95,10 @@ export interface FakeManagedHost {
   pulls: string[]
   /** While true, an engine image pull sends one progress line and then never finishes. */
   holdEnginePull: boolean
+  /** Free space before the engine image; what `DockerRootDir` reports is this minus what the image took. */
   setFreeDisk(bytes: number): void
+  /** The engine image finished landing (e.g. while the core was down): present, and its bytes used. */
+  landEngineImage(): void
   /**
    * The privileged executor: `completed` applies every component the step asks for (and leaves the
    * group granted but not yet effective in this session), `none` pretends and changes nothing.
@@ -111,7 +118,16 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
   mkdirSync(join(dir, 'bin'))
   mkdirSync(join(dir, 'root', 'etc', 'docker'), { recursive: true })
   writeFileSync(join(dir, 'root', 'etc', 'os-release'), readLinuxProbeFixture('os-release/ubuntu-24.04.txt'))
-  writeFileSync(join(dir, 'free-disk-bytes'), String(500 * 1024 ** 3))
+  // Just enough for the image and 5 GiB more: once the image is pulled, what is left is far less
+  // than the image's own requirement — the case a re-probe after (or during) a pull must survive.
+  let baseFree = REQUIRED_DISK_BYTES + 5 * GIB
+  let engineOnDisk = 0
+  const writeFree = (): void => writeFileSync(join(dir, 'free-disk-bytes'), String(baseFree - engineOnDisk))
+  const engineUses = (bytes: number): void => {
+    engineOnDisk = Math.max(engineOnDisk, bytes)
+    writeFree()
+  }
+  writeFree()
   for (const command of COMMANDS) {
     const wrapper = join(dir, 'bin', command)
     writeFileSync(
@@ -153,7 +169,14 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
         : [],
     pulls: [],
     holdEnginePull: false,
-    setFreeDisk: (bytes) => writeFileSync(join(dir, 'free-disk-bytes'), String(bytes)),
+    setFreeDisk: (bytes) => {
+      baseFree = bytes
+      writeFree()
+    },
+    landEngineImage: () => {
+      engineUses(REQUIRED_DISK_BYTES)
+      host.update((state) => ({ ...state, images: [...new Set([...(state.images ?? []), ENGINE_IMAGE])] }))
+    },
     runHostStep: (step, outcome, apply = 'all') => {
       appendFileSync(
         `${statePath}.calls`,
@@ -207,11 +230,15 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
       res.write(
         `${JSON.stringify({ status: 'Downloading', id: 'layer-1', progressDetail: { current, total: 4_000_000 } })}\n`
       )
+    const engine = ref === ENGINE_IMAGE
     line(1_000_000)
-    if (ref === ENGINE_IMAGE && host.holdEnginePull) return // the core dies with this pull in flight
+    // The layers land in DockerRootDir as they download: half of the image is on the disk now.
+    if (engine) engineUses(Math.floor(REQUIRED_DISK_BYTES / 2))
+    if (engine && host.holdEnginePull) return // the core dies with this pull in flight
     setTimeout(() => line(2_000_000), 300)
     setTimeout(() => {
       line(4_000_000)
+      if (engine) engineUses(REQUIRED_DISK_BYTES)
       host.update((state) => ({ ...state, images: [...new Set([...(state.images ?? []), ref])] }))
       res.end(`${JSON.stringify({ status: `Digest: ${ref.split('@')[1]}` })}\n`)
     }, 600)

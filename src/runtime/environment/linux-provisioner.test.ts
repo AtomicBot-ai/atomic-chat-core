@@ -34,6 +34,7 @@ const DESCRIPTOR = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'
 const IMAGE = DESCRIPTOR.image['linux/amd64']
 const IMAGE_REF = `${IMAGE.repository}@${IMAGE.digest}`
 const PROBE_IMAGE = DESCRIPTOR.probe_image['linux/amd64']
+const PROBE_REF = `${PROBE_IMAGE.repository}@${PROBE_IMAGE.digest}`
 const GPU = 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11'
 const GIB = 1024 ** 3
 
@@ -205,7 +206,16 @@ const record = (
     { next_effect_id: 'effect-1' }
   )
   return {
-    machine: started.state,
+    // As every effect sees it: work started under a consent to this descriptor, image and target.
+    machine: {
+      ...started.state,
+      consented: {
+        plan_digest: `sha256:${'c'.repeat(64)}`,
+        descriptor_id: DESCRIPTOR.descriptor_id,
+        image_digest: IMAGE.digest,
+        target: input.target,
+      },
+    },
     request_digest: `sha256:${'a'.repeat(64)}`,
     request: input,
     requirement_plan: null,
@@ -216,6 +226,12 @@ const record = (
     owner_process_start_id: null,
     ...over,
   }
+}
+
+/** An operation nobody has consented to yet: what the probe route and a fresh begin see. */
+const fresh = (request: Partial<BeginOperation> = {}): PersistedOperation => {
+  const base = record(request)
+  return { ...base, machine: { ...base.machine, consented: null } }
 }
 
 const signal = new AbortController().signal
@@ -275,15 +291,13 @@ describe('probing a Linux host for a setup', () => {
     expect(again.plan.plan_digest).toBe(answer.plan.plan_digest)
   })
 
-  it('binds the plan digest to the GPU set and to whole GiB of free space (carry item 1)', async () => {
+  it('binds the plan digest to the GPU set and to whether the free space suffices (carry item 1, r1 item 3)', async () => {
     const h = harness(readyHost())
     const provisioner = createLinuxProvisioner(h.deps)
-    const first = (await provisioner.probe(record(), signal)).plan.plan_digest
-    h.machine.free += 10_000_000
-    expect((await provisioner.probe(record(), signal)).plan.plan_digest).toBe(first)
-    h.machine.free -= 2 * GIB
-    const lessSpace = (await provisioner.probe(record(), signal)).plan.plan_digest
-    expect(lessSpace).not.toBe(first)
+    const first = (await provisioner.probe(fresh(), signal)).plan.plan_digest
+    // Space moving while it still covers the image is not a new plan, however much it moves.
+    h.machine.free -= 300 * GIB
+    expect((await provisioner.probe(fresh(), signal)).plan.plan_digest).toBe(first)
     h.machine.state = {
       ...h.machine.state,
       gpus: [
@@ -291,7 +305,96 @@ describe('probing a Linux host for a setup', () => {
         { uuid: 'GPU-second', name: 'NVIDIA RTX A6000', cc: '8.6', total_mib: 49140, free_mib: 49000 },
       ],
     }
-    expect((await provisioner.probe(record(), signal)).plan.plan_digest).not.toBe(lessSpace)
+    expect((await provisioner.probe(fresh(), signal)).plan.plan_digest).not.toBe(first)
+    // Below what the image needs, the plan is blocked outright.
+    h.machine.free = DESCRIPTOR.required_disk_bytes - 1
+    const tight = (await provisioner.probe(fresh(), signal)).plan
+    expect(tight.blockers.map((blocker) => blocker.reason)).toEqual(['insufficient-disk'])
+  })
+
+  it('checks free space only against what the image still needs (review r1, item 1)', async () => {
+    const full = { ...readyHost() }
+    // Image already there: nothing more to fit.
+    const present = harness({ ...full, images: [IMAGE_REF] })
+    present.machine.free = 1 * GIB
+    const withImage = await createLinuxProvisioner(present.deps).probe(fresh(), signal)
+    expect(withImage.plan.blockers).toEqual([])
+    expect(withImage.image_present).toBe(true)
+
+    // A pull already under way: its layers are on the disk already, so the rest is not checked.
+    const midPull = harness(full)
+    midPull.machine.free = 10 * GIB
+    const restarted = record()
+    restarted.machine.checkpoint = 'pulling-image'
+    expect((await createLinuxProvisioner(midPull.deps).probe(restarted, signal)).plan.blockers).toEqual([])
+    // Before the pull began, the same space blocks.
+    expect(
+      (await createLinuxProvisioner(midPull.deps).probe(fresh(), signal)).plan.blockers.map((b) => b.reason)
+    ).toEqual(['insufficient-disk'])
+
+    // A ready installation on a nearly full disk stays supported.
+    const installed = harness(full)
+    const provisioner = createLinuxProvisioner(installed.deps)
+    await provisioner.activate(record(), signal)
+    installed.machine.free = 1 * GIB
+    const answer = await provisioner.probe(fresh(), signal)
+    expect(answer.plan.availability).toBe('supported')
+    expect(answer.plan.blockers).toEqual([])
+    expect(installed.views.at(-1)?.availability).toBe('supported')
+  })
+
+  it('plans with the consented descriptor only once the user consented, never a newer one (review r1, item 2)', async () => {
+    const h = harness(readyHost())
+    const forNewSetup = vi.fn(h.deps.descriptors.forNewSetup)
+    h.deps.descriptors = {
+      ...h.deps.descriptors,
+      forNewSetup,
+      forInstallation: async () => ({
+        kind: 'unsupported',
+        error: Object.assign(
+          new Error('The runtime descriptor this installation was set up with is no longer cached.'),
+          {
+            code: 'MANAGED_METADATA_INVALID',
+          }
+        ) as never,
+      }),
+    }
+    const provisioner = createLinuxProvisioner(h.deps)
+    const answer = await provisioner.probe(record(), signal)
+    expect(answer.plan.blockers[0]?.code).toBe('MANAGED_METADATA_INVALID')
+    expect(answer.plan.blockers[0]?.details).toBe(DESCRIPTOR.descriptor_id)
+    // Every effect after the consent refuses too, without looking for another descriptor.
+    await expect(provisioner.prepare(record(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+    await expect(provisioner.pull(record(), () => undefined, signal)).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+    await expect(provisioner.verify(record(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+    await expect(provisioner.activate(record(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+    const noPlan = { ...fresh(), request: { ...fresh().request } }
+    await expect(provisioner.prepare(noPlan, signal)).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+    expect(forNewSetup).not.toHaveBeenCalled()
+    expect(h.pulls).toEqual([])
+  })
+
+  it('names the descriptor and the engine image digest the plan would pull', async () => {
+    const plan = (await createLinuxProvisioner(harness(readyHost()).deps).probe(fresh(), signal)).plan
+    expect(plan.descriptor_id).toBe(DESCRIPTOR.descriptor_id)
+    expect(plan.image_digest).toBe(IMAGE.digest)
+    const env = (
+      await createLinuxProvisioner(harness(readyHost()).deps).probe(
+        fresh({ target: { kind: 'environment' } }),
+        signal
+      )
+    ).plan
+    expect(env.image_digest).toBeNull()
   })
 
   it('answers unsupported with the descriptor error when no descriptor can be had', async () => {
@@ -499,6 +602,7 @@ describe('the GPU check, the pull and the verification', () => {
         status: 'ready',
       },
       image: IMAGE,
+      probe_image: PROBE_IMAGE,
       platform: 'linux/amd64',
       installed_at: '2026-09-29T00:00:00.000Z',
     })
@@ -506,6 +610,69 @@ describe('the GPU check, the pull and the verification', () => {
 })
 
 describe('recovery questions', () => {
+  it.each([
+    // [what, docker, group, user, expected]
+    [
+      'granted, not in this session, daemon running',
+      { reachable: false, service_active: true },
+      { configured: true, effective: false },
+      'ada',
+      true,
+    ],
+    [
+      'daemon not running: a sign-in would not help',
+      { reachable: false, service_active: false },
+      { configured: true, effective: false },
+      'ada',
+      false,
+    ],
+    [
+      'root never needs a sign-in (design D4)',
+      { reachable: false, service_active: true },
+      { configured: true, effective: false },
+      'root',
+      false,
+    ],
+    [
+      'not in the group at all',
+      { reachable: false, service_active: true },
+      { configured: false, effective: false },
+      'ada',
+      false,
+    ],
+    [
+      'already in this session',
+      { reachable: false, service_active: true },
+      { configured: true, effective: true },
+      'ada',
+      false,
+    ],
+    [
+      'the daemon answers: nothing to wait for',
+      { reachable: true, service_active: true },
+      { configured: true, effective: false },
+      'ada',
+      false,
+    ],
+  ] as const)('needsRelogin: %s', async (_what, docker, group, user, expected) => {
+    const h = harness({
+      ...readyHost(),
+      user,
+      docker: { installed: true, gpu_runtime: true, ...docker },
+      group: { ...group },
+    })
+    h.deps.host = { ...h.deps.host, options: () => ({ user, xdgRuntimeDir: null }) }
+    expect(await createLinuxProvisioner(h.deps).inventory.needsRelogin(record())).toBe(expected)
+  })
+
+  it('answers absent rather than throwing when the machine cannot even say its architecture', async () => {
+    const h = harness({ ...readyHost(), arch: 'riscv64', images: [IMAGE_REF] })
+    const effect = { effect_id: 'e', operation_id: 'op-1', expected_revision: 1, plan_digest: null }
+    await expect(
+      createLinuxProvisioner(h.deps).inventory.inspect({ ...effect, kind: 'pull-image' }, record())
+    ).resolves.toEqual({ kind: 'absent' })
+  })
+
   it('finds a pulled image as a completed pull, and an activation by its record', async () => {
     const h = harness({ ...readyHost(), images: [IMAGE_REF] })
     const provisioner = createLinuxProvisioner(h.deps)
@@ -600,7 +767,7 @@ describe('removing the installation', () => {
   })
 
   const installed = async (state: FakeLinuxHostState) => {
-    const h = harness({ ...state, images: [IMAGE_REF, 'docker.io/library/postgres@sha256:beef'] })
+    const h = harness({ ...state, images: [IMAGE_REF, PROBE_REF, 'docker.io/library/postgres@sha256:beef'] })
     const provisioner = createLinuxProvisioner(h.deps)
     await provisioner.activate(record(), signal)
     return { h, provisioner }
@@ -618,6 +785,7 @@ describe('removing the installation', () => {
       'unload-sessions',
       'remove-containers',
       'remove-image',
+      'remove-probe-image',
       'remove-engine-caches',
       'remove-installation',
     ])
@@ -639,7 +807,20 @@ describe('removing the installation', () => {
     expect(await h.installations.read('tensorrt-llm')).toBeNull()
     // Another engine's container, Docker itself and the rest of the host are not touched.
     const subcommands = h.dockerCalls.map((args) => args.slice(2, 4).join(' '))
-    expect(subcommands).toEqual(['stop --time', 'rm ours-1', 'ps --all', `image rm`])
+    expect(subcommands).toEqual(['stop --time', 'rm ours-1', 'ps --all', 'image rm', 'ps --all', 'image rm'])
+    expect(h.dockerCalls.at(-1)).toContain(PROBE_REF)
+  })
+
+  it('keeps the GPU-check image while another installation recorded it (review r1, item 7)', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    const mine = await h.installations.read('tensorrt-llm')
+    await h.installations.write({
+      ...mine!,
+      installation: { ...mine!.installation, installation_id: 'other-engine', engine_id: 'other' },
+    })
+    await provisioner.remove(removal(), signal)
+    expect(h.machine.state.images).toContain(PROBE_REF)
+    expect(h.machine.state.images).not.toContain(IMAGE_REF)
   })
 
   it('keeps the image when a container that is not ours still uses it', async () => {

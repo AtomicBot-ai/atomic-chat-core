@@ -40,7 +40,8 @@ const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): Requir
   availability: 'setup-required',
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: 'sha256:re',
-  descriptor_id: null,
+  descriptor_id: 'tensorrt-llm-1',
+  image_digest: 'sha256:img1',
   adopts_existing_engine: false,
   system_changes: [{ code: 'install-packages', text: 'Install docker-ce' }],
   download_bytes: null,
@@ -690,7 +691,9 @@ describe('consent that was already acted on (task 2.6)', () => {
     expect(driver.pending).toBe('prepare-environment')
     expect(driver.kinds('host-step')).toBe(1)
     expect(driver.machine.operation.plan_digest).toBe('sha256:C')
-    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:C')
+    // The user's own approval stays on record; what the core carried it over to is kept apart.
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+    expect(driver.machine.carried_plan_digest).toBe('sha256:C')
   })
 
   it('asks again when what remains after the step needs a new privileged change (a Docker restart)', () => {
@@ -812,6 +815,69 @@ describe('consent that was already acted on (task 2.6)', () => {
       driver.reply({ type: 'requirements-ready', plan: plan('sha256:F', ADOPTED), host_step: null })
     )
     expect(driver.phase).toBe('removing')
+  })
+
+  it('asks again when the descriptor changed since the consent, even with no host step (review r1, item 2)', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', { ...ADOPTED, descriptor_id: 'tensorrt-llm-2' }),
+        host_step: null,
+        image_present: false,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.kinds('pull-image')).toBe(1)
+  })
+
+  it('asks again when the image digest for this host changed since the consent', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', { ...ADOPTED, image_digest: 'sha256:img2' }),
+        host_step: null,
+        image_present: true,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+  })
+
+  it('asks again when the target changed since the consent', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', { ...ADOPTED, target: { ...RUNTIME, installation_id: 'other' } }),
+        host_step: null,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+  })
+
+  it('carries over for the same descriptor, image and target, keeping the approval the user gave', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', ADOPTED),
+        host_step: null,
+        image_present: false,
+      })
+    )
+    expect(driver.phase).toBe('pulling-image')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:E')
+    expect(driver.machine.carried_plan_digest).toBe('sha256:E')
+    expect(driver.machine.consented).toEqual({
+      plan_digest: 'sha256:A',
+      descriptor_id: 'tensorrt-llm-1',
+      image_digest: 'sha256:img1',
+      target: RUNTIME,
+    })
   })
 
   it('never carries consent over for an operation that has not acted on one', () => {

@@ -93,6 +93,8 @@ export interface EnvironmentServiceOptions {
    * is deterministic instead of depending on what is actually alive on the machine running them.
    */
   identityDeps?: IdentityDeps
+  /** The clock progress ticks are throttled by; `Date.now` by default. */
+  now?: () => number
 }
 
 const unsupported = (input: {
@@ -106,6 +108,7 @@ const unsupported = (input: {
   recipe_id: 'none',
   recipe_digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
   descriptor_id: null,
+  image_digest: null,
   adopts_existing_engine: false,
   system_changes: [],
   download_bytes: null,
@@ -125,6 +128,9 @@ const notFound = (operationId: string): AtomicCoreError =>
   new AtomicCoreError('MANAGED_OPERATION_NOT_FOUND', 'No such operation.', operationId)
 
 const TERMINAL: readonly ManagedPhase[] = ['ready', 'removed', 'cancelled', 'failed']
+
+/** Phases in which an operation waits on the user, with no core working on it. */
+const WAITING: readonly ManagedPhase[] = ['awaiting-consent', 'relogin-required', 'reboot-required']
 
 /** How often byte progress of a pull is announced, at most. The first tick always goes out. */
 export const PROGRESS_EMIT_INTERVAL_MS = 250
@@ -155,6 +161,8 @@ export class EnvironmentService {
    * revision and has to answer at it, so a revision per tick would make its own result stale.
    */
   private readonly progress = new Map<string, ManagedProgress>()
+  /** The last state of each operation this service announced: what a progress tick is checked against. */
+  private readonly latest = new Map<string, EnvironmentOperation>()
   private running = new Set<Promise<void>>()
   private stopped = false
 
@@ -197,7 +205,7 @@ export class EnvironmentService {
     }
     if (result.created) {
       // Announced from its first state, so the snapshot and the event stream both show it at once.
-      this.options.emit?.('environment:operation', result.record.machine.operation)
+      this.announce(result.record.machine.operation)
       this.dispatch(result.record)
     }
     return result.record.machine.operation
@@ -308,7 +316,7 @@ export class EnvironmentService {
         next
       )
       if (!swapped) continue // someone moved it meanwhile; look again, and maybe it was us
-      this.options.emit?.('environment:operation', next.machine.operation)
+      this.announce(next.machine.operation)
       this.dispatch(next)
       return next.machine.operation
     }
@@ -357,7 +365,7 @@ export class EnvironmentService {
           outcome.record
         )
         if (!swapped) continue
-        this.options.emit?.('environment:operation', outcome.record.machine.operation)
+        this.announce(outcome.record.machine.operation)
         if (outcome.kind === 'reconciled') this.dispatch(outcome.record)
       } catch {
         continue
@@ -447,6 +455,12 @@ export class EnvironmentService {
     return provisioner.verifyHostStep(record, new AbortController().signal)
   }
 
+  /** Announce a committed state, and remember it as the operation's current one. */
+  private announce(operation: EnvironmentOperation): void {
+    this.latest.set(operation.operation_id, operation)
+    this.options.emit?.('environment:operation', operation)
+  }
+
   /** The operation with the byte progress of a pull still in flight, when there is one. */
   private withProgress(operation: EnvironmentOperation): EnvironmentOperation {
     const live = this.progress.get(operation.operation_id)
@@ -464,6 +478,9 @@ export class EnvironmentService {
     if (error.details === undefined) return false
     const running = await this.options.store.read(error.details).catch(() => null)
     if (running === null || TERMINAL.includes(running.machine.operation.phase)) return false
+    // Waiting on the user is not abandonment: a consent not yet given, or a sign-in or reboot the
+    // operation continues after at the next core start, stays theirs (review r1, item 6).
+    if (WAITING.includes(running.machine.operation.phase)) return false
     if (await this.ownerAlive(running)) return false
     await this.failAbandoned(running, {
       code: 'MANAGED_OPERATION_CONFLICT',
@@ -508,7 +525,7 @@ export class EnvironmentService {
       if (fresh === null) throw notFound(operationId)
       return { record: fresh, owned: false }
     }
-    this.options.emit?.('environment:operation', next.machine.operation)
+    this.announce(next.machine.operation)
     return { record: next, owned: true }
   }
 
@@ -677,17 +694,22 @@ export class EnvironmentService {
         return { type: 'environment-verified' }
       case 'pull-image': {
         const operation = record.machine.operation
-        let last = 0
+        const now = this.options.now ?? Date.now
+        let last: number | null = null
         try {
           await provisioner.pull(
             record,
             (progress) => {
+              // Only for the operation as it stands now: a tick still streaming after a cancel (or
+              // any other transition) committed must not announce the pull as current again.
+              const current = this.latest.get(operation.operation_id) ?? operation
+              if (current.phase !== 'pulling-image' || current.revision !== operation.revision) return
               this.progress.set(operation.operation_id, progress)
-              const now = Date.now()
+              const at = now()
               const final = progress.total !== null && progress.completed === progress.total
-              if (last !== 0 && !final && now - last < PROGRESS_EMIT_INTERVAL_MS) return
-              last = now
-              this.options.emit?.('environment:operation', { ...operation, progress })
+              if (last !== null && !final && at - last < PROGRESS_EMIT_INTERVAL_MS) return
+              last = at
+              this.options.emit?.('environment:operation', { ...current, progress })
             },
             signal
           )

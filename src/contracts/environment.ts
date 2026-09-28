@@ -322,6 +322,12 @@ export interface RequirementPlan {
    * Null when none is available. Part of what the consent covers (task 2.6).
    */
   descriptor_id: string | null
+  /**
+   * The engine image this plan pulls (or, for a removal, removes), by digest for this host's
+   * platform. Null when there is none (no descriptor, or an environment-only target). A consent
+   * carries over to a later plan only when this, the descriptor and the target are unchanged.
+   */
+  image_digest: Sha256Digest | null
   adopts_existing_engine: boolean
   /** System changes, shown before the OS authorization prompt. Empty when nothing changes. */
   system_changes: ManagedSystemChange[]

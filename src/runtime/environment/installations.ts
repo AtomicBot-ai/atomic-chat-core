@@ -21,6 +21,11 @@ export interface InstallationRecord {
   installation: RuntimeInstallation
   /** The image this installation runs, pulled by digest for `platform`. */
   image: PlatformImage
+  /**
+   * The GPU-check image the setup pulled for this installation, removed with it unless something
+   * else still uses it. Absent in a record from before it was kept.
+   */
+  probe_image?: PlatformImage
   platform: 'linux/amd64' | 'linux/arm64'
   installed_at: string
 }

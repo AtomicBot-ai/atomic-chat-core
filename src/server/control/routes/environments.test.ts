@@ -41,6 +41,7 @@ const plan: RequirementPlan = {
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: DIGEST,
   descriptor_id: null,
+  image_digest: null,
   adopts_existing_engine: false,
   system_changes: [{ code: 'install-packages', text: 'Install docker-ce' }],
   download_bytes: null,

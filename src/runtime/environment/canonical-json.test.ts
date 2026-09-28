@@ -5,7 +5,6 @@ import {
   beginFingerprint,
   canonicalDigest,
   canonicalJson,
-  freeDiskGib,
   planDigest,
   type PlanFingerprint,
 } from './canonical-json.js'
@@ -127,7 +126,7 @@ describe('planDigest', () => {
       descriptor_id: 'trtllm-1.3.0rc27',
       image_digest: 'sha256:bb',
     },
-    host: { gpu_ids: ['GPU-a', 'GPU-b'], free_disk_gib: 120, docker_root_dir: '/var/lib/docker' },
+    host: { gpu_ids: ['GPU-a', 'GPU-b'], disk_sufficient: true, docker_root_dir: '/var/lib/docker' },
   }
 
   it('changes when the system changes do, including only their order', () => {
@@ -142,14 +141,13 @@ describe('planDigest', () => {
     ).not.toBe(planDigest(plan))
   })
 
-  it('changes when the host changes under it: the GPU set, or whole GiB of free space', () => {
+  it('changes when the host changes under it: the GPU set, or whether the free space suffices', () => {
     const host = plan.host!
     expect(planDigest({ ...plan, host: { ...host, gpu_ids: ['GPU-a'] } })).not.toBe(planDigest(plan))
-    expect(planDigest({ ...plan, host: { ...host, free_disk_gib: 119 } })).not.toBe(planDigest(plan))
-    // A few megabytes moving on their own is not a new plan (whole GiB only).
-    expect(freeDiskGib(120 * 1024 ** 3 + 5_000_000)).toBe(freeDiskGib(120 * 1024 ** 3 + 900_000_000))
-    expect(freeDiskGib(120 * 1024 ** 3 - 1)).toBe(119)
-    expect(freeDiskGib(null)).toBeNull()
+    expect(planDigest({ ...plan, host: { ...host, disk_sufficient: false } })).not.toBe(planDigest(plan))
+    expect(planDigest({ ...plan, host: { ...host, docker_root_dir: '/data/docker' } })).not.toBe(
+      planDigest(plan)
+    )
   })
 
   it('changes when a change keeps its text but not its parameters', () => {

@@ -95,29 +95,23 @@ export function beginFingerprint(input: BeginOperation): Sha256Digest {
 /**
  * What the host looked like when the plan was computed, as far as consent is concerned (spec
  * "Хост изменился до согласия": free space, the set of cards, or what is installed changed between
- * the probe and the consent). `gpu_ids` is the sorted set of GPU UUIDs. `free_disk_gib` is the free
- * space in `DockerRootDir` rounded down to whole GiB: free space moves by kilobytes on its own every
- * second (logs, caches), and a digest over the exact byte count would refuse every consent a user
- * gave a few seconds after the probe — training them to click through the one prompt that matters.
- * A whole-GiB change is a change the user could care about; "what is installed" is already in
- * `system_changes`.
+ * the probe and the consent). `gpu_ids` is the sorted set of GPU UUIDs. `disk_sufficient` is whether
+ * the free space in `DockerRootDir` covers what the image still needs, not the number: free space
+ * moves by kilobytes on its own every second, and a digest over any rounding of it would still flip
+ * at a boundary and refuse a consent given a moment earlier (review r1, item 3). Null when unknown.
+ * "What is installed" is already in `system_changes`.
  */
 export interface PlanHostFingerprint {
   gpu_ids: string[]
-  free_disk_gib: number | null
+  disk_sufficient: boolean | null
   docker_root_dir: string | null
-}
-
-/** Free bytes as the plan digest sees them: whole GiB, rounded down; null when unknown. */
-export function freeDiskGib(bytes: number | null): number | null {
-  return bytes === null ? null : Math.floor(bytes / 1024 ** 3)
 }
 
 /**
  * The part of a requirement plan the user is consenting to. Whatever changes here invalidates an
  * approval and sends the operation back to `awaiting-consent`: the target, the recipe, every system
  * change (code, parameters and the text the user read), and the host facts in `host` — the GPU set
- * and the free space where the image would land (task 2.6, carry item 1). The registry's reported
+ * and whether the free space where the image would land suffices (task 2.6, carry item 1). The registry's reported
  * download size is left out: it is the descriptor's own estimate, pinned by `descriptor_id`.
  */
 export interface PlanFingerprint {

@@ -225,6 +225,7 @@ describe('managed environment wire shapes', () => {
       recipe_id: 'ubuntu-24.04-adopt',
       recipe_digest: 'sha256:ee',
       descriptor_id: null,
+      image_digest: null,
       adopts_existing_engine: true,
       system_changes: [],
       download_bytes: null,
@@ -250,6 +251,7 @@ describe('managed environment wire shapes', () => {
       recipe_id: 'ubuntu-24.04-docker-ce',
       recipe_digest: 'sha256:ee',
       descriptor_id: null,
+      image_digest: null,
       adopts_existing_engine: false,
       system_changes: [
         { code: 'install-packages', text: 'Install docker-ce', params: { packages: 'docker-ce' } },

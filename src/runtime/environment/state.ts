@@ -70,7 +70,41 @@ export interface OperationMachine {
    * операций…"). Optional so a record written before this field existed still reads.
    */
   checkpoint?: ManagedPhase | null
+  /**
+   * What the user's consent was given for, recorded when work first starts under it: the approved
+   * digest and the descriptor, engine image and target that plan named. Consent carries over to a
+   * later plan only when that plan names the same three (review r1, item 2).
+   */
+  consented?: ConsentBasis | null
+  /**
+   * The latest plan digest the core continued under on the strength of `consented`, kept apart
+   * from `operation.approved_plan_digest`, which always stays the digest the user approved.
+   */
+  carried_plan_digest?: Sha256Digest | null
 }
+
+/** The parts of an approved plan a carried-over consent must still match. */
+export interface ConsentBasis {
+  plan_digest: Sha256Digest
+  descriptor_id: string | null
+  image_digest: Sha256Digest | null
+  target: ManagedOperationTarget
+}
+
+const sameTarget = (a: ManagedOperationTarget, b: ManagedOperationTarget): boolean =>
+  a.kind === b.kind &&
+  (a.kind === 'environment' ||
+    (b.kind === 'runtime' && a.installation_id === b.installation_id && a.engine_id === b.engine_id))
+
+/**
+ * Whether `plan` still asks for what the consent covered. A removal downloads nothing, so the
+ * same target is enough; a setup must also name the same descriptor and the same image digest —
+ * otherwise continuing would download something nobody approved.
+ */
+const consentCovers = (basis: ConsentBasis, plan: RequirementPlan, kind: ManagedOperationKind): boolean =>
+  sameTarget(basis.target, plan.target) &&
+  (kind === 'remove' ||
+    (basis.descriptor_id === plan.descriptor_id && basis.image_digest === plan.image_digest))
 
 export interface EventIdentity {
   effect_id: string
@@ -213,6 +247,7 @@ const advance = (
         }
   return ok({
     state: {
+      ...state,
       operation: next,
       pending_effect: effect === KEEP ? state.pending_effect : issued,
       indivisible_host_step_running: flags.indivisible ?? false,
@@ -464,10 +499,18 @@ export function reduceOperation(
       // asks nothing new of the host: the plan digest moves on its own once work has begun (the
       // packages it installed, the space a pull used), and asking again for what is already
       // underway would be asking for nothing.
-      if ((state.checkpoint ?? null) !== null && event.host_step === null) {
+      // It never covers a different descriptor, image or target: that is a new download.
+      const basis = state.consented ?? null
+      if (
+        (state.checkpoint ?? null) !== null &&
+        event.host_step === null &&
+        basis !== null &&
+        consentCovers(basis, plan, operation.kind)
+      ) {
         const carried: OperationMachine = {
           ...state,
-          operation: { ...operation, plan_digest: plan.plan_digest, approved_plan_digest: plan.plan_digest },
+          carried_plan_digest: plan.plan_digest,
+          operation: { ...operation, plan_digest: plan.plan_digest },
         }
         return continueConsentedWork(carried, input, event.image_present ?? false)
       }
@@ -489,8 +532,19 @@ export function reduceOperation(
           null
         )
       }
+      // The user's approval matches this plan: work starts under it, and what it covers is recorded.
       return afterConsent(
-        { ...state, operation: { ...operation, plan_digest: plan.plan_digest } },
+        {
+          ...state,
+          consented: {
+            plan_digest: plan.plan_digest,
+            descriptor_id: plan.descriptor_id,
+            image_digest: plan.image_digest,
+            target: plan.target,
+          },
+          carried_plan_digest: null,
+          operation: { ...operation, plan_digest: plan.plan_digest },
+        },
         input,
         event.host_step
       )

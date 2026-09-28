@@ -141,3 +141,20 @@ hides embedding models and prints `{id,name,model_path,size_bytes,capabilities,m
 difference is ownership — `serve` attaches to a core that outlives it, so Ctrl+C detaches instead of
 unloading. `--detach` is consequently a compatibility no-op for ownership and selects the default
 `<data>/atomic-core/logs/serve.log`; the help text states this difference.
+
+## Test hooks
+
+Environment variables the e2e suite sets on the compiled core. Production never sets them; they
+change only where this core looks, never what it is allowed to do.
+
+- `ATOMIC_CHATGPT_ISSUER`, `ATOMIC_CHATGPT_BASE_URL`, `ATOMIC_CHATGPT_CALLBACK_PORT`: point ChatGPT
+  sign-in and the subscription backend at local stubs.
+- `ATOMIC_MANAGED_TEST_HOST=<folder>` (task 2.6, ADR 2026-09-29-linux-setup-operation-and-engine-removal):
+  the managed runtime treats the platform as Linux and reads the whole Linux machine from the folder —
+  `bin/<command>` for every read-only probe command and the docker CLI, `root/<path>` for every file
+  the probe reads (`/etc/os-release`, `/etc/docker/daemon.json`, ...), `free-disk-bytes` for free
+  space, and `docker.sock` for the Docker Engine API. It grants nothing: whatever those programs do,
+  they do as the same user the core already runs as, the privileged host step is never run by the
+  core (the client runs it), and a folder another user wrote is only as trusted as any program that
+  user can already put on this core's `PATH`. `ATOMIC_CORE_MANAGED_ROOT` keeps such a run off the
+  real per-user environment.
