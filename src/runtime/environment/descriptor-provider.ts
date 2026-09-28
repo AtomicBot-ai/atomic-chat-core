@@ -252,10 +252,11 @@ export function createRuntimeDescriptorProvider(
       })
       const fetched = raw === null ? null : parseDocument(raw)
 
-      if (fetched !== null && descriptorMeetsCoreVersion(fetched, coreVersion)) {
-        // `raw` is non-null whenever `fetched` is: only reached by parsing a document `readSource`
-        // returned. Caching the exact bytes received keeps the cache the literal published document.
-        await acceptDescriptor(fs, root, raw as string, fetched)
+      // `raw !== null` always holds when `fetched` does (parsing needs bytes to parse); spelling it
+      // out here, rather than casting, is what lets `acceptDescriptor` take a plain `string` and
+      // cache the exact bytes received — the literal published document, not a re-serialization.
+      if (raw !== null && fetched !== null && descriptorMeetsCoreVersion(fetched, coreVersion)) {
+        await acceptDescriptor(fs, root, raw, fetched)
         return { kind: 'available', descriptor: fetched }
       }
 
