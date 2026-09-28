@@ -1,0 +1,3 @@
+# core.log fixtures are compared byte for byte against LF output (test/contract/core-log.test.ts);
+# keep them LF on every checkout, core.autocrlf=true on Windows included.
+test/fixtures/**/*.log text eol=lf

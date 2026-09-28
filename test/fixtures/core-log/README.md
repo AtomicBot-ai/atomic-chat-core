@@ -18,3 +18,7 @@ Contents, in order:
 
 When the app copies this file into its own tests (`core::logs`, design D9), it names the core commit
 it copied from, the way this repo's own imported fixtures pin a source commit.
+
+The file is pinned LF by the repo's `.gitattributes` (`test/fixtures/**/*.log text eol=lf`): the
+comparison is byte for byte against the writer's `\n` output, and without that rule a Windows checkout
+with `core.autocrlf=true` would turn it into CRLF and fail the contract test.
