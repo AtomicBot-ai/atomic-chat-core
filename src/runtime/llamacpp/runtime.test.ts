@@ -233,6 +233,24 @@ describe('load', () => {
     expect(startLine?.message).toContain('--override-tensor exps=CPU')
   })
 
+  // The start line uses a platform-appropriate basename: a Windows-style exe path (backslashes,
+  // drive letter) must still collapse to just the file name, even though this suite runs on
+  // whatever OS is native to the CI runner — proves the fix does not regress to `node:path`'s
+  // bare `basename`, which only splits on the host platform's own separator.
+  it('reduces a Windows-style executable path to its basename in the start line', async () => {
+    await data.writeModel('windows-exe')
+    const logged: Array<{ level: string; message: string }> = []
+    const runtime = await makeRuntime({ log: (level, message) => logged.push({ level, message }) })
+    await runtime.load('windows-exe', {
+      exePath: 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\llama-server.exe',
+    })
+
+    const startLine = logged.find((entry) => entry.level === 'info')
+    expect(startLine?.message).toMatch(/^starting llama-server\.exe for llamacpp-upstream\/windows-exe: /)
+    expect(startLine?.message).not.toContain('C:')
+    expect(startLine?.message).not.toContain('\\')
+  })
+
   it('relays every line to backendOutput before and after readiness, in addition to logPath and verbose', async () => {
     await data.writeModel('backend-output')
     const logPath = join(data.layout.core.logsDir, 'backend-output.log')

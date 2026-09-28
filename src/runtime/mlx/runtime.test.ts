@@ -112,6 +112,22 @@ describe('MlxRuntime', () => {
     )
   })
 
+  // Same regression guard as the llama.cpp runtime's equivalent test: a Windows-style exe path
+  // (backslashes, drive letter) must reduce to just the file name in the start line, regardless of
+  // which OS actually runs this suite.
+  it('reduces a Windows-style executable path to its basename in the start line', async () => {
+    const dir = await writeMlxModel('qwen-win')
+    const logged: string[] = []
+    const r = runtime({}, {}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load('qwen-win', {
+      exePath: 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\mlx-server.exe',
+    })
+
+    expect(logged).toContainEqual(
+      `info: starting mlx-server.exe for mlx/qwen-win: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`
+    )
+  })
+
   it('passes quantization, the drafter and a pinned context from settings and overrides', async () => {
     const dir = await writeMlxModel('gemma', { text_config: { max_position_embeddings: '8192' } })
     const r = runtime({

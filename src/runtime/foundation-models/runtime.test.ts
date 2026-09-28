@@ -86,6 +86,21 @@ describe('FoundationModelsRuntime', () => {
     expect(logged.some((line) => line.includes(session.api_key))).toBe(false)
   })
 
+  // Same regression guard as the llama.cpp runtime's equivalent test: a Windows-style exe path
+  // (backslashes, drive letter) must reduce to just the file name in the start line, regardless of
+  // which OS actually runs this suite.
+  it('reduces a Windows-style executable path to its basename in the start line', async () => {
+    const logged: string[] = []
+    const r = runtime({}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load(APPLE_MODEL_ID, {
+      exePath: 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\foundation-models-server.exe',
+    })
+
+    expect(logged).toContainEqual(
+      `info: starting foundation-models-server.exe for foundation-models/${APPLE_MODEL_ID}: --port ${session.port} --api-key <redacted>`
+    )
+  })
+
   it('answers a second load with the running session and joins a load in flight', async () => {
     const r = runtime({ delayMs: 150 })
     const [a, b] = await Promise.all([r.load(APPLE_MODEL_ID), r.load(APPLE_MODEL_ID)])
