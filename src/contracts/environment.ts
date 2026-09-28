@@ -378,6 +378,11 @@ export interface RuntimeDescriptor {
  * and `weight_bytes` describe the checkpoint as submitted; `checked_gpu_id` names the GPU the
  * verdict was computed against — the caller's `gpu_id`, or the one a load would pick when omitted.
  *
+ * `quantization_format` is null when there is no recognised format to report: GGUF is always
+ * rejected outright (spec `tensorrt-llm-models` — "for GGUF there is llama.cpp"), and a checkpoint
+ * whose `config.json`/`hf_quant_config.json` the naming rule from the conf README does not
+ * recognise is rejected the same way, unidentified rather than guessed at.
+ *
  * `curated` is true when the repository and revision matched a `curated_models` entry of the
  * installed descriptor and its `inventory_digest` verified against the submitted file list.
  * `unified_memory` is true when `checked_gpu_id` reports no VRAM of its own (e.g. GB10/DGX Spark),
@@ -386,12 +391,14 @@ export interface RuntimeDescriptor {
  * `checked_gpu_id` itself passed, so a caller can suggest a card switch instead of a dead end.
  *
  * `verdict` carries the pass/fail: `MODEL_INCOMPATIBLE` for an unsupported architecture, a
- * quantization format newer than the card (or on the format's exclusion list), or weights that do
- * not fit; `MANAGED_METADATA_INVALID` when a curated match's `inventory_digest` does not verify.
+ * quantization format newer than the card (or on the format's exclusion list, or not recognised at
+ * all, including GGUF), or weights that do not fit; `MANAGED_METADATA_INVALID` when a curated
+ * match's `inventory_digest` does not verify.
  */
 export interface ModelCompatibility {
   architectures: string[]
-  quantization_format: string
+  /** Null when the checkpoint has no recognised quantization format (GGUF, or an unrecognised naming). */
+  quantization_format: string | null
   weight_bytes: number
   checked_gpu_id: string
   curated: boolean

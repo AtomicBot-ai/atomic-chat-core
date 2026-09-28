@@ -55,6 +55,73 @@ describe('parseRuntimeDescriptor', () => {
     ],
     ['schema_version other than 1', (doc: Record<string, unknown>) => (doc['schema_version'] = 2)],
     ['download_bytes missing', (doc: Record<string, unknown>) => delete doc['download_bytes']],
+    [
+      'a minimum_core_version that is not a semver (major.minor.patch)',
+      (doc: Record<string, unknown>) => (doc['minimum_core_version'] = '0.7'),
+    ],
+    [
+      'a minimum_app_version that is not a semver',
+      (doc: Record<string, unknown>) => (doc['minimum_app_version'] = 'v2.0.49'),
+    ],
+    [
+      'an image repository containing a space',
+      (doc: Record<string, unknown>) => {
+        const image = doc['image'] as Record<string, Record<string, unknown>>
+        image['linux/amd64'] = { ...image['linux/amd64'], repository: 'nvcr.io/nvidia repo/release' }
+      },
+    ],
+    [
+      'a descriptor_id that starts with a dash instead of a letter or digit (the id pattern)',
+      (doc: Record<string, unknown>) => (doc['descriptor_id'] = '-tensorrt-llm-1.2.1-r1'),
+    ],
+    [
+      'an adapter_id with uppercase letters (the id pattern)',
+      (doc: Record<string, unknown>) => (doc['adapter_id'] = 'TensorRT-LLM'),
+    ],
+    [
+      'a curated model revision that is not 40 hex characters',
+      (doc: Record<string, unknown>) => {
+        const curated = doc['curated_models'] as Array<Record<string, unknown>>
+        curated[0] = { ...curated[0], revision: 'main' }
+      },
+    ],
+    [
+      'a curated model repository with no owner/name slash',
+      (doc: Record<string, unknown>) => {
+        const curated = doc['curated_models'] as Array<Record<string, unknown>>
+        curated[0] = { ...curated[0], repository: 'just-a-name' }
+      },
+    ],
+    [
+      'a curated model vram_tier_bytes of 0 (the schema minimum is 1)',
+      (doc: Record<string, unknown>) => {
+        const curated = doc['curated_models'] as Array<Record<string, unknown>>
+        curated[0] = { ...curated[0], vram_tier_bytes: 0 }
+      },
+    ],
+    [
+      'a recipe distribution id with an uppercase letter (the distribution id pattern)',
+      (doc: Record<string, unknown>) => {
+        const recipes = doc['recipes'] as Array<Record<string, unknown>>
+        const distributions = recipes[0]?.['distributions'] as Array<Record<string, unknown>>
+        distributions[0] = { ...distributions[0], id: 'Ubuntu' }
+      },
+    ],
+    [
+      'a recipe distribution version_id that is not digits and dots',
+      (doc: Record<string, unknown>) => {
+        const recipes = doc['recipes'] as Array<Record<string, unknown>>
+        const distributions = recipes[0]?.['distributions'] as Array<Record<string, unknown>>
+        distributions[0] = { ...distributions[0], version_id: '24.04-lts' }
+      },
+    ],
+    [
+      'a quantization format with an uppercase letter (the format pattern)',
+      (doc: Record<string, unknown>) => {
+        const quant = doc['quantization'] as Array<Record<string, unknown>>
+        quant[0] = { ...quant[0], format: 'FP8' }
+      },
+    ],
   ])('rejects the descriptor when it has %s', (_label, mutate) => {
     expect(() => parseRuntimeDescriptor(broken(mutate))).toThrow(AtomicCoreError)
   })
@@ -67,7 +134,7 @@ describe('parseRuntimeDescriptor', () => {
         repository: 'nvcr.io/nvidia/tensorrt-llm/release:1.2.1',
       }
     })
-    expect(() => parseRuntimeDescriptor(doc)).toThrow(/mutable tag|not a sha256 digest/)
+    expect(() => parseRuntimeDescriptor(doc)).toThrow(/not a bare image repository|not a sha256 digest/)
   })
 
   it('rejects an image map missing one of the two required platforms', () => {
@@ -137,7 +204,7 @@ describe('parseRuntimeDescriptor', () => {
     expect(() => parseRuntimeDescriptor(doc)).toThrow(/twice/)
   })
 
-  it('is not fooled by an object whose own shape happens to look right but is not one', () => {
+  it('rejects null, a string and an array instead of a descriptor object', () => {
     expect(() => parseRuntimeDescriptor(null)).toThrow(AtomicCoreError)
     expect(() => parseRuntimeDescriptor('tensorrt-llm-1.2.1-r1')).toThrow(AtomicCoreError)
     expect(() => parseRuntimeDescriptor([])).toThrow(AtomicCoreError)

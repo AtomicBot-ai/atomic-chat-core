@@ -43,6 +43,29 @@ const ARCHITECTURE_NAME = /^[A-Z][A-Za-z0-9]*$/
 const PARSER_NAME = /^[a-z0-9][a-z0-9_.-]*$/
 const ARCHES = ['x86_64', 'aarch64'] as const
 
+// The patterns below are copied character-for-character from
+// `atomic-chat-conf/runtimes/schema.json`'s `definitions`, so this parser's trust boundary is at
+// least as strict as what conf CI already enforced on the published document. Do not relax one of
+// these without updating the schema first — the descriptor is untrusted network input, and a field
+// like a repository ends up in `docker` argv (task 2.8), so a pattern miss here is not cosmetic.
+
+/** `#/definitions/id`: `descriptor_id`, `engine_id`, `adapter_id`, `recipes[].recipe_id`. */
+const ID = /^[a-z0-9][a-z0-9.-]*$/
+/** `#/definitions/semver`: `minimum_core_version`, `minimum_app_version`. */
+const SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/
+/** `#/definitions/imageRepository`: no `@digest`, no `:tag` after the last path segment. */
+const IMAGE_REPOSITORY = /^[a-z0-9.-]+(:[0-9]+)?(\/[a-z0-9._-]+)+$/
+/** `curatedModel.repository`: a Hugging Face `owner/name`. */
+const CURATED_REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
+/** `curatedModel.revision`: an immutable 40-character Hugging Face commit sha. */
+const REVISION = /^[0-9a-f]{40}$/
+/** `distribution.id`: `os-release` `ID`, e.g. `ubuntu`, `fedora`. */
+const DISTRIBUTION_ID = /^[a-z0-9._-]+$/
+/** `distribution.version_id`: `os-release` `VERSION_ID`, e.g. `22.04`. */
+const VERSION_ID = /^[0-9][0-9.]*$/
+/** `quantizationEntry.format`: lowercase with underscores, e.g. `fp8_block_scales`. */
+const QUANTIZATION_FORMAT = /^[a-z0-9_]+$/
+
 const fail = (why: string, details?: string): never => {
   throw new AtomicCoreError('MANAGED_METADATA_INVALID', `Invalid runtime descriptor: ${why}`, details)
 }
@@ -80,15 +103,26 @@ const digest = (value: unknown, at: string): Sha256Digest =>
 const capability = pattern(CAPABILITY, 'a major.minor compute capability')
 const driverVersion = pattern(DRIVER_VERSION, 'a driver version')
 const architectureName = pattern(ARCHITECTURE_NAME, 'an architecture class name')
+const id = pattern(ID, 'a valid id (lowercase, starting with a letter or digit)')
+const semver = pattern(SEMVER, 'a semver version (major.minor.patch)')
+const imageRepository = pattern(IMAGE_REPOSITORY, 'a bare image repository')
+const curatedRepository = pattern(CURATED_REPOSITORY, 'a Hugging Face owner/name repository')
+const revision = pattern(REVISION, 'a 40-character hex commit sha')
+const distributionId = pattern(DISTRIBUTION_ID, 'an os-release id')
+const versionId = pattern(VERSION_ID, 'an os-release version id')
+const quantizationFormat = pattern(QUANTIZATION_FORMAT, 'a lowercase quantization format')
 
 const parserName = (value: unknown, at: string): string | null => {
   if (value === null) return null
   return pattern(PARSER_NAME, 'a bare parser name')(value, at)
 }
 
-const bytes = (value: unknown, at: string): number => {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    fail(`${at} is not a whole number of bytes`, typeof value === 'number' ? String(value) : undefined)
+const bytes = (value: unknown, at: string, min = 0): number => {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
+    fail(
+      `${at} is not a whole number of bytes >= ${min}`,
+      typeof value === 'number' ? String(value) : undefined
+    )
   }
   return value as number
 }
@@ -107,26 +141,20 @@ const unique = (values: string[], at: string, what: string): void => {
   }
 }
 
-/**
- * An image reference must be a bare repository: no `:tag`, no `@digest`. The digest field pins the
- * bytes. A registry host may carry a port, so only a colon after the last `/` is a tag.
- */
-const repository = (value: unknown, at: string): string => {
-  const name = text(value, at)
-  if (name.includes('@')) fail(`${at} pins a digest inside the repository name`, name)
-  const last = name.slice(name.lastIndexOf('/') + 1)
-  if (last.includes(':')) fail(`${at} names a mutable tag; the image is pinned by digest`, name)
-  return name
-}
-
 const PLATFORM_IMAGE_KEYS = ['repository', 'digest'] as const
 const PLATFORMS = ['linux/amd64', 'linux/arm64'] as const
 
+/**
+ * `imageRepository` (schema): a bare repository — no `:tag`, no `@digest`, lowercase, one or more
+ * `/`-separated path segments, an optional `:port` right after the host. The digest field pins the
+ * bytes; the pattern alone is what stops a value like `-v /:/host` from reaching `docker` argv
+ * (task 2.8) disguised as a repository — the old ad hoc "does it contain `@`/`:`" check missed it.
+ */
 const platformImage = (value: unknown, at: string): PlatformImage => {
   const entry = object(value, at)
   known(entry, at, PLATFORM_IMAGE_KEYS)
   return {
-    repository: repository(entry['repository'], `${at}.repository`),
+    repository: imageRepository(entry['repository'], `${at}.repository`),
     digest: digest(entry['digest'], `${at}.digest`),
   }
 }
@@ -162,7 +190,7 @@ const QUANTIZATION_KEYS = ['format', 'min_compute_capability', 'excluded_compute
 const quantizationEntry = (value: unknown, at: string): QuantizationSupport => {
   const entry = object(value, at)
   known(entry, at, QUANTIZATION_KEYS)
-  const format = text(entry['format'], `${at}.format`)
+  const format = quantizationFormat(entry['format'], `${at}.format`)
   const minCapability = capability(entry['min_compute_capability'], `${at}.min_compute_capability`)
   const excluded = strings(entry['excluded_compute_capabilities'], `${at}.excluded_compute_capabilities`).map(
     (value, i) => capability(value, `${at}.excluded_compute_capabilities[${i}]`)
@@ -215,8 +243,8 @@ const distribution = (value: unknown, at: string): RecipeDistribution => {
     fail(`${at}.arch is not x86_64 or aarch64`, arch)
   }
   return {
-    id: text(entry['id'], `${at}.id`),
-    version_id: text(entry['version_id'], `${at}.version_id`),
+    id: distributionId(entry['id'], `${at}.id`),
+    version_id: versionId(entry['version_id'], `${at}.version_id`),
     arch: arch as RecipeDistribution['arch'],
   }
 }
@@ -230,7 +258,7 @@ const recipe = (value: unknown, at: string): InstallRecipe => {
     distribution(item, `${at}.distributions[${i}]`)
   )
   if (distributions.length === 0) fail(`${at}.distributions is empty`)
-  return { recipe_id: text(entry['recipe_id'], `${at}.recipe_id`), distributions }
+  return { recipe_id: id(entry['recipe_id'], `${at}.recipe_id`), distributions }
 }
 
 const CURATED_MODEL_KEYS = ['repository', 'revision', 'inventory_digest', 'vram_tier_bytes', 'note'] as const
@@ -239,10 +267,11 @@ const curatedModel = (value: unknown, at: string): CuratedModel => {
   const entry = object(value, at)
   known(entry, at, CURATED_MODEL_KEYS)
   return {
-    repository: text(entry['repository'], `${at}.repository`),
-    revision: text(entry['revision'], `${at}.revision`),
+    repository: curatedRepository(entry['repository'], `${at}.repository`),
+    revision: revision(entry['revision'], `${at}.revision`),
     inventory_digest: digest(entry['inventory_digest'], `${at}.inventory_digest`),
-    vram_tier_bytes: bytes(entry['vram_tier_bytes'], `${at}.vram_tier_bytes`),
+    // Schema minimum is 1: a curated entry with 0 would claim every card, however small, fits it.
+    vram_tier_bytes: bytes(entry['vram_tier_bytes'], `${at}.vram_tier_bytes`, 1),
     note: text(entry['note'], `${at}.note`),
   }
 }
@@ -322,14 +351,14 @@ export function parseRuntimeDescriptor(input: unknown): RuntimeDescriptor {
 
   return {
     schema_version: 1,
-    descriptor_id: text(raw['descriptor_id'], 'descriptor_id'),
-    engine_id: text(raw['engine_id'], 'engine_id'),
-    adapter_id: text(raw['adapter_id'], 'adapter_id'),
+    descriptor_id: id(raw['descriptor_id'], 'descriptor_id'),
+    engine_id: id(raw['engine_id'], 'engine_id'),
+    adapter_id: id(raw['adapter_id'], 'adapter_id'),
     adapter_contract_version: 1,
     image: platformImageMap(raw['image'], 'image'),
     probe_image: platformImageMap(raw['probe_image'], 'probe_image'),
-    minimum_core_version: text(raw['minimum_core_version'], 'minimum_core_version'),
-    minimum_app_version: text(raw['minimum_app_version'], 'minimum_app_version'),
+    minimum_core_version: semver(raw['minimum_core_version'], 'minimum_core_version'),
+    minimum_app_version: semver(raw['minimum_app_version'], 'minimum_app_version'),
     minimum_driver_version: driverVersion(raw['minimum_driver_version'], 'minimum_driver_version'),
     minimum_compute_capability: capability(raw['minimum_compute_capability'], 'minimum_compute_capability'),
     supported_architectures: architectures,

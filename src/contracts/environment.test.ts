@@ -16,6 +16,7 @@ import {
   type RequirementPlan,
   type RuntimeDescriptor,
 } from './environment.js'
+import { SESSION_LOAD_STAGES } from './session.js'
 
 /** What the wire does to a value: JSON and back, the only transport these shapes travel over. */
 const roundTrip = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -304,6 +305,32 @@ describe('managed environment wire shapes', () => {
     expect(roundTrip(verdict).unified_memory).toBe(true)
   })
 
+  it('reports a null quantization_format when there is no recognised format to name', () => {
+    // GGUF is always rejected (spec tensorrt-llm-models: "for GGUF there is llama.cpp"), and a
+    // checkpoint whose config.json/hf_quant_config.json the conf naming rule cannot classify is
+    // rejected the same way — unidentified rather than guessed at.
+    const verdict: ModelCompatibility = {
+      architectures: ['LlamaForCausalLM'],
+      quantization_format: null,
+      weight_bytes: 8_500_000_000,
+      checked_gpu_id: 'GPU-0',
+      curated: false,
+      unified_memory: false,
+      fits_other_gpus: [],
+      verdict: {
+        ok: false,
+        error: { code: 'MODEL_INCOMPATIBLE', message: 'GGUF is not supported here; use llama.cpp.' },
+      },
+    }
+
+    const back = roundTrip(verdict)
+    expect(back.quantization_format).toBeNull()
+    expect(back.verdict).toEqual({
+      ok: false,
+      error: { code: 'MODEL_INCOMPATIBLE', message: 'GGUF is not supported here; use llama.cpp.' },
+    })
+  })
+
   it('keeps a descriptor to data: what to run per platform, what the host needs, what it can load', () => {
     const descriptor: RuntimeDescriptor = {
       schema_version: 1,
@@ -318,17 +345,17 @@ describe('managed environment wire shapes', () => {
         },
         'linux/arm64': {
           repository: 'nvcr.io/nvidia/tensorrt-llm/release',
-          digest: 'sha256:297c9c04055e142d53976cb8e7e7b314b0df148bbbaeb178494a80eddd885ec',
+          digest: 'sha256:297c9c04055e142d53976cb8e7e7b314b0df148bbbaeb178494a80eddd885ecf',
         },
       },
       probe_image: {
         'linux/amd64': {
           repository: 'nvcr.io/nvidia/cuda',
-          digest: 'sha256:0f4abb216c6d33bc4932a59d8157f9ad75b818ec17e283a401d9c7ce27efb49',
+          digest: 'sha256:0f4abb216c6d33bc4932a59d8157f9ad75b818ec17e283a401d9c7ce27efb49f',
         },
         'linux/arm64': {
           repository: 'nvcr.io/nvidia/cuda',
-          digest: 'sha256:f9f6d7ce4503015b0a21ff75ee2b2e1fbd28d791d860ede9a5063ecc04cca5f',
+          digest: 'sha256:f9f6d7ce4503015b0a21ff75ee2b2e1fbd28d791d860ede9a5063ecc04cca5fe',
         },
       },
       minimum_core_version: '0.7.0',
@@ -351,7 +378,7 @@ describe('managed environment wire shapes', () => {
         {
           repository: 'Qwen/Qwen3-1.7B',
           revision: '70d244cc86ccca08cf5af4e1e306ecf908b1ad5e',
-          inventory_digest: 'sha256:3b3d1df5b8945f32ccdfdbfc72db1944d88e207dfae1c5560950a6ea6b034dd',
+          inventory_digest: 'sha256:3b3d1df5b8945f32ccdfdbfc72db1944d88e207dfae1c5560950a6ea6b034dde',
           vram_tier_bytes: 8_000_000_000,
           note: 'BF16, 4.1 GB of weights.',
         },
@@ -385,6 +412,68 @@ describe('managed environment wire shapes', () => {
       distributions: [{ id: 'ubuntu', version_id: '24.04', arch: 'x86_64' }],
     })
     expect('entrypoint_digest' in back).toBe(false)
+  })
+
+  it('keeps the phases a setup can be in, including both waits that need the user to come back', () => {
+    // The app relays this vocabulary verbatim; a phase added here without a matching app release
+    // would arrive as a string the app does not know how to render.
+    expect([...MANAGED_PHASES]).toEqual([
+      'checking',
+      'awaiting-consent',
+      'preparing-host',
+      'relogin-required',
+      'reboot-required',
+      'preparing-environment',
+      'pulling-image',
+      'verifying',
+      'activating',
+      'removing',
+      'ready',
+      'removed',
+      'cancelling',
+      'cancelled',
+      'failed',
+    ])
+  })
+
+  it('exhausts every phase in a map, so a new one cannot be added without being handled', () => {
+    // Compile-time guard: `Record<ManagedPhase, …>` fails to typecheck when a phase is added and
+    // this table is not. The runtime assertion only proves the table was filled in.
+    const terminal: Record<ManagedPhase, boolean> = {
+      'checking': false,
+      'awaiting-consent': false,
+      'preparing-host': false,
+      'relogin-required': false,
+      'reboot-required': false,
+      'preparing-environment': false,
+      'pulling-image': false,
+      'verifying': false,
+      'activating': false,
+      'removing': false,
+      'ready': true,
+      'removed': true,
+      'cancelling': false,
+      'cancelled': true,
+      'failed': true,
+    }
+
+    expect(Object.keys(terminal)).toHaveLength(MANAGED_PHASES.length)
+    expect(
+      Object.entries(terminal)
+        .filter(([, isTerminal]) => isTerminal)
+        .map(([phase]) => phase)
+    ).toEqual(['ready', 'removed', 'cancelled', 'failed'])
+  })
+
+  it('keeps the session:load-progress stage vocabulary stable', () => {
+    // The app relays this vocabulary verbatim (spec tensorrt-llm-runtime), same reasoning as the
+    // MANAGED_PHASES pin above.
+    expect([...SESSION_LOAD_STAGES]).toEqual([
+      'stopping-previous',
+      'starting-container',
+      'initializing-engine',
+      'ready',
+    ])
   })
 
   it('keeps the enumerated wire vocabularies stable', () => {

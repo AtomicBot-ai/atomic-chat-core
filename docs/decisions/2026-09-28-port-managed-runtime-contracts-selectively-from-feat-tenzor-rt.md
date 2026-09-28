@@ -10,7 +10,7 @@ title: "Port managed-runtime contracts selectively from feat/tenzor-rt"
   runtime-descriptor shape, the `MANAGED_*`/`MODEL_INCOMPATIBLE`/`GPU_BUSY` error codes, and
   `SessionInfo.pid` going nullable for a session that is a container rather than a host process. But
   that branch forked before several `main` features existed (backend-advisor, hardware, diffusion
-  video, telemetry, `session:load-progress`'s own predecessors) and carries stale copies of them; and
+  video, telemetry) and carries stale copies of them; and
   its descriptor shape predates `atomic-chat-conf`'s published schema, which has since gained
   `probe_image`, `model_families`, `minimum_driver_version` and per-quantization
   `excluded_compute_capabilities`, and dropped `entrypoint_digest`. Merging the branch wholesale would
@@ -31,7 +31,11 @@ title: "Port managed-runtime contracts selectively from feat/tenzor-rt"
     and `ModelResolution` were dropped (design D12: model download moves to app/cli, core only
     checks compatibility from a submitted file list, never fetches bytes). Added `ModelCompatibility`
     — new, not on the branch — as the verdict type of the future
-    `POST /atomic/v1/models/tensorrt-llm/check` (spec `tensorrt-llm-models`).
+    `POST /atomic/v1/models/tensorrt-llm/check` (spec `tensorrt-llm-models`); its
+    `quantization_format` is `string | null` rather than a bare `string` (controller ruling), because
+    spec `tensorrt-llm-models` always rejects GGUF outright and always rejects a checkpoint whose
+    naming the conf README's rule does not recognise — in both cases there is no format to report,
+    and `null` says so rather than forcing a placeholder string.
   - Ported the `errors.ts` delta (`MANAGED_*` codes, reusing `MODEL_INCOMPATIBLE` from the diffusion
     codes rather than redeclaring it), the `events.ts` delta (`environment:changed`,
     `environment:operation`), and `session.ts`'s delta (`SessionInfo.pid: number | null`,
@@ -46,12 +50,22 @@ title: "Port managed-runtime contracts selectively from feat/tenzor-rt"
   - Wrote a new `src/runtime/environment/descriptor.ts` shape validator (not a line-for-line port of
     the branch's own `descriptor.ts`, which validates the old, now-wrong shape) that accepts
     `atomic-chat-conf/runtimes/tensorrt-llm.json` verbatim, copied into this repo as
-    `test/fixtures/runtimes/tensorrt-llm.json` at conf commit `c21e520`. It intentionally does not
-    check `adapter_id` against a compiled adapter registry (that registry does not exist until task
-    2.12's `ManagedTextAdapter`) or fetch/cache the descriptor over HTTPS (task 2.2). The rest of
-    `src/runtime/environment/*` from the branch (state machine, store, recovery, service,
-    canonical-json, host-exec, inventory, linux/windows probes) is left for task 2.2, which was
-    already the plan (see the task's own text).
+    `test/fixtures/runtimes/tensorrt-llm.json` at conf commit `c21e520`. Every regex it applies
+    (`id`, `semver`, `imageRepository`, the curated `owner/name` and 40-hex-revision patterns, the
+    distribution `id`/`version_id` patterns, the quantization `format` pattern, and `vram_tier_bytes
+    >= 1`) is copied character-for-character from the schema's own `definitions`, so a value that
+    passes conf CI and a value that passes this parser are held to the same rule — a descriptor is
+    untrusted network input, and fields like a repository end up in `docker` argv (task 2.8), so a
+    pattern gap here is a real hole, not a formality. The parser is *stricter* than the schema in
+    four places conf should consider mirroring: it rejects a duplicate `quantization[].format`, a
+    duplicate `recipes[].recipe_id`, a duplicate `curated_models[]` repository+revision pair, and any
+    string that is present but whitespace-only — the schema's `minLength`/uniqueness constraints
+    don't cover these, so conf CI would currently accept a descriptor this parser refuses. It
+    intentionally does not check `adapter_id` against a compiled adapter registry (that registry does
+    not exist until task 2.12's `ManagedTextAdapter`) or fetch/cache the descriptor over HTTPS (task
+    2.2). The rest of `src/runtime/environment/*` from the branch (state machine, store, recovery,
+    service, canonical-json, host-exec, inventory, linux/windows probes) is left for task 2.2, which
+    was already the plan (see the task's own text).
   - Added `hostPid(session)` to `src/runtime/shared/process.ts`, ported verbatim from the branch,
     and converted every place in `src/` that killed, journalled or probed a `SessionInfo`'s pid
     (`src/runtime/llamacpp/runtime.ts`, `src/runtime/shared/sidecar.ts`, and the test files that
