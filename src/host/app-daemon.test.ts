@@ -38,6 +38,8 @@ afterEach(async () => {
 
 interface HarnessOptions {
   argv?: string[]
+  /** Replaces the real reporter (which sends nothing under the test runner). */
+  createReporter?: AppDaemonDeps['createReporter']
   /** Replaces the fake core's start; the options the daemon passed are recorded first either way. */
   createCore?: (options: AtomicCoreOptions) => Promise<AppDaemonCore>
   /** Runs while the core is up, before the fake shutdown signal arrives. */
@@ -77,7 +79,7 @@ function harness(options: HarnessOptions = {}) {
     now: () => NOW,
     createReporter: async (input) => {
       reporterInput = input
-      return createCoreReporter(input)
+      return options.createReporter ? options.createReporter(input) : createCoreReporter(input)
     },
     createCore: async (coreStart) => {
       coreOptions = coreStart
@@ -113,20 +115,59 @@ describe('runAppDaemon', () => {
     expect(existsSync(data.layout.core.logsDir)).toBe(false)
   })
 
-  it('refuses bad arguments as before, without opening a log', async () => {
-    await expect(runAppDaemon(harness({ argv: ['serve'] }).deps)).rejects.toThrow(
-      'The app core only accepts the daemon command.'
+  it.each([
+    ['a missing --data-folder', ['daemon'], 'The app must supply its data folder.'],
+    [
+      'a bad --telemetry',
+      ['daemon', '--data-folder', '<data>', '--telemetry', 'maybe'],
+      '--telemetry takes "on" or "off", not "maybe".',
+    ],
+    ['a command other than daemon', ['serve'], 'The app core only accepts the daemon command.'],
+  ])(
+    'refuses %s with one headed ERROR entry on stderr, exits 1 and opens no log',
+    async (_, argv, message) => {
+      const run = harness({ argv: argv.map((arg) => (arg === '<data>' ? data.root : arg)) })
+      await runAppDaemon(run.deps)
+
+      expect(run.io.err).toEqual([`${STAMP}[core][ERROR] ${message}\n`])
+      expectEveryChunkHeaded(run.io.err)
+      expect(run.exits).toEqual([1])
+      expect(run.io.out).toEqual([])
+      expect(existsSync(data.layout.core.logsDir)).toBe(false)
+    }
+  )
+
+  it("refuses an unknown flag with the parser's message and no stack, exits 1 and opens no log", async () => {
+    const run = harness({ argv: ['daemon', '--data-folder', data.root, '--verbose'] })
+    await runAppDaemon(run.deps)
+
+    expect(run.io.err).toHaveLength(1)
+    expect(run.io.err[0]).toMatch(
+      /^\[2026-09-28\]\[12:00:05\]\[core\]\[ERROR\] Unknown option '--verbose'.*\n$/
     )
-    await expect(runAppDaemon(harness({ argv: ['daemon'] }).deps)).rejects.toThrow(
-      'The app must supply its data folder.'
-    )
-    await expect(
-      runAppDaemon(harness({ argv: ['daemon', '--data-folder', data.root, '--verbose'] }).deps)
-    ).rejects.toThrow(/--verbose/)
-    await expect(
-      runAppDaemon(harness({ argv: ['daemon', '--data-folder', data.root, '--telemetry', 'maybe'] }).deps)
-    ).rejects.toThrow('--telemetry takes "on" or "off", not "maybe".')
+    expect(run.exits).toEqual([1])
     expect(existsSync(data.layout.core.logsDir)).toBe(false)
+  })
+
+  it('writes an unexpected failure as one inspected ERROR entry on stderr and in the file, then exits 1', async () => {
+    const failure = new Error('telemetry.json cannot be read')
+    const run = harness({
+      createReporter: async () => {
+        throw failure
+      },
+    })
+    await runAppDaemon(run.deps)
+
+    expect(run.exits).toEqual([1])
+    expect(run.io.out).toEqual([])
+    expectEveryChunkHeaded(run.io.err)
+    expect(run.io.err).toHaveLength(2)
+    const entry = run.io.err[1]
+    expect(entry).toMatch(
+      /^\[2026-09-28\]\[12:00:05\]\[core\]\[ERROR\] Error: telemetry.json cannot be read\n {4}at /
+    )
+    expect(entry?.split('\n').filter((line) => STRICT_HEADER.test(line))).toHaveLength(1)
+    expect(run.logFile()).toBe(`${START_LINE}${entry ?? '<no ERROR entry>'}`)
   })
 
   it('starts the log with its version, tees the logger, files engine output and keeps the handshake', async () => {
@@ -207,12 +248,14 @@ describe('runAppDaemon', () => {
       },
       onExit: () => run.coreOptions().logger?.('info', 'written after the exit began'),
     })
-    await expect(runAppDaemon(run.deps)).rejects.toBe(failure)
+    await runAppDaemon(run.deps)
 
     expect(run.exits).toEqual([1])
     expect(run.io.out).toEqual([])
     expectEveryChunkHeaded(run.io.err)
-    const fatal = run.io.err.find((chunk) => chunk.includes('[core][ERROR]'))
+    const errors = run.io.err.filter((chunk) => chunk.includes('[core][ERROR]'))
+    expect(errors).toHaveLength(1)
+    const fatal = errors[0]
     expect(fatal).toMatch(
       /^\[2026-09-28\]\[12:00:05\]\[core\]\[ERROR\] Error: control port 5555 is busy\n {4}at /
     )
