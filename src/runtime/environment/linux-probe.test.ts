@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  nearestExistingAncestor,
   normalizeArchitecture,
+  parseDockerGroup,
   parseNvidiaSmi,
   parseOsRelease,
+  parseServiceActive,
   probeLinux,
   type CommandOutput,
   type LinuxProbeDeps,
@@ -10,9 +13,9 @@ import {
 
 const ok = (stdout: string): CommandOutput => ({ code: 0, stdout, stderr: '' })
 const missing = (): CommandOutput => ({ code: null, stdout: '', stderr: '' })
-const failed = (stderr: string): CommandOutput => ({ code: 1, stdout: '', stderr })
+const failed = (stderr: string, code = 1): CommandOutput => ({ code, stdout: '', stderr })
 
-const SMI = 'GPU-1c6a, NVIDIA GeForce RTX 4070, 8.9, 12282, 11000, 551.23\n'
+const SMI = 'GPU-1c6a, NVIDIA GeForce RTX 4070, 8.9, 12282, 11000, 590.44.01\n'
 const DOCKER_INFO = JSON.stringify({
   ID: 'X4RT:AAAA',
   ServerVersion: '28.3.0',
@@ -21,6 +24,7 @@ const DOCKER_INFO = JSON.stringify({
   SecurityOptions: ['name=seccomp,profile=default'],
   DockerRootDir: '/var/lib/docker',
   ContainersRunning: 0,
+  ServerErrors: [],
 })
 
 describe('reading the machine', () => {
@@ -44,11 +48,26 @@ describe('reading the machine', () => {
       id_like: ['ubuntu', 'debian'],
       family: 'apt',
     })
-    expect(parseOsRelease('ID=arch\nVERSION_ID="rolling"\n')?.family).toBe('pacman')
-    expect(parseOsRelease('ID=nixos\nVERSION_ID="24.05"\n')?.family).toBe('other')
     // A file that is there but says nothing useful is no answer at all.
     expect(parseOsRelease('NAME="Something"\n')).toBeNull()
     expect(parseOsRelease(null)).toBeNull()
+  })
+
+  it('falls back to BUILD_ID, then to "", when there is no VERSION_ID (item 1: real Arch/Debian sid)', () => {
+    // Verbatim shape of Arch's own /etc/os-release: no VERSION_ID at all.
+    expect(parseOsRelease('NAME="Arch Linux"\nID=arch\nBUILD_ID=rolling\n')).toEqual({
+      id: 'arch',
+      version_id: 'rolling',
+      id_like: [],
+      family: 'pacman',
+    })
+    // Neither VERSION_ID nor BUILD_ID: distribution is still read, just matches no recipe.
+    expect(parseOsRelease('NAME="Debian GNU/Linux"\nID=debian\n')).toEqual({
+      id: 'debian',
+      version_id: '',
+      id_like: [],
+      family: 'apt',
+    })
   })
 
   it('normalises the one architecture alias uname would not print on Linux itself', () => {
@@ -59,8 +78,10 @@ describe('reading the machine', () => {
   })
 
   it('reads every card nvidia-smi lists, converting its megabytes to bytes', () => {
-    const answer = parseNvidiaSmi(ok(SMI + 'GPU-9f, NVIDIA GeForce RTX 5090, 12.0, 32607, 32000, 551.23\n'))
-    expect(answer.driver_version).toBe('551.23')
+    const answer = parseNvidiaSmi(
+      ok(SMI + 'GPU-9f, NVIDIA GeForce RTX 5090, 12.0, 32607, 32000, 590.44.01\n')
+    )
+    expect(answer.driver_version).toBe('590.44.01')
     expect(answer.gpus).toHaveLength(2)
     expect(answer.gpus[0]?.compute_capability).toBe('8.9')
     expect(answer.gpus[0]?.total_vram_bytes).toBe(12_282 * 1024 * 1024)
@@ -68,7 +89,7 @@ describe('reading the machine', () => {
   })
 
   it('reports a unified-memory card (GB10/DGX Spark) with null vram instead of a bogus number', () => {
-    const answer = parseNvidiaSmi(ok('GPU-gb10, NVIDIA GB10, 12.1, [N/A], [N/A], 580.65.06\n'))
+    const answer = parseNvidiaSmi(ok('GPU-gb10, NVIDIA GB10, 12.1, [N/A], [N/A], 590.44.01\n'))
     expect(answer.gpus).toEqual([
       {
         gpu_id: 'GPU-gb10',
@@ -76,7 +97,7 @@ describe('reading the machine', () => {
         compute_capability: '12.1',
         total_vram_bytes: null,
         free_vram_bytes: null,
-        driver_version: '580.65.06',
+        driver_version: '590.44.01',
       },
     ])
   })
@@ -86,17 +107,63 @@ describe('reading the machine', () => {
     expect(parseNvidiaSmi(failed('NVIDIA-SMI has failed'))).toEqual({ driver_version: null, gpus: [] })
   })
 
+  it('tells a group this session has from one the account merely belongs to (diagnostic only, item 2)', () => {
+    expect(parseDockerGroup(ok('u docker sudo'), ok('docker:x:999:u'), 'u')).toEqual({
+      configured: true,
+      effective: true,
+    })
+    // Added to the group, but this login predates it: it counts from the next sign-in.
+    expect(parseDockerGroup(ok('u sudo'), ok('docker:x:999:u'), 'u')).toEqual({
+      configured: true,
+      effective: false,
+    })
+    expect(parseDockerGroup(ok('u sudo'), ok('docker:x:999:'), 'u')).toEqual({
+      configured: false,
+      effective: false,
+    })
+  })
+
+  it('reads systemctl is-active strictly: only a real "active" counts', () => {
+    expect(parseServiceActive(ok('active\n'))).toBe(true)
+    expect(parseServiceActive(failed('', 3))).toBe(false) // real is-active exit for "inactive"
+    expect(parseServiceActive(ok('failed\n'))).toBe(false)
+    expect(parseServiceActive(missing())).toBe('unknown') // systemctl itself is not on this machine
+    expect(parseServiceActive(null)).toBe('unknown')
+  })
+
+  it('walks up to the nearest existing ancestor instead of failing on a path that does not exist yet (item 7)', async () => {
+    const missingPaths = new Set(['/var/lib/docker'])
+    const pathExists = async (path: string) => !missingPaths.has(path)
+    expect(await nearestExistingAncestor(pathExists, '/var/lib/docker')).toBe('/var/lib')
+    // Already there: no walking needed.
+    expect(await nearestExistingAncestor(async () => true, '/var/lib/docker')).toBe('/var/lib/docker')
+    // Nothing exists at all: falls all the way back to root rather than throwing.
+    expect(await nearestExistingAncestor(async () => false, '/var/lib/docker')).toBe('/')
+  })
+
   it('runs only read-only commands and records every answer it could not get', async () => {
     const calls: string[] = []
     const probed = await probeLinux(
       {
-        exec: async (command, args) => {
+        exec: async (command, args, env) => {
           calls.push([command, ...args].join(' '))
+          if (command === 'docker' && args.includes('info')) {
+            // Item 17: the forced system-socket call strips a remote/TLS context explicitly.
+            expect(env).toEqual({
+              DOCKER_HOST: undefined,
+              DOCKER_CONTEXT: undefined,
+              DOCKER_TLS_VERIFY: undefined,
+              DOCKER_CERT_PATH: undefined,
+            })
+          }
           if (command === 'uname') return ok('x86_64\n')
           if (command === 'nvidia-smi') return ok(SMI)
           if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
           if (command === 'docker') return ok(DOCKER_INFO)
-          if (command === 'nvidia-ctk' && args[0] === 'cdi') return ok('')
+          if (command === 'nvidia-ctk' && args.includes('cdi')) return ok('')
+          if (command === 'id') return ok('u docker')
+          if (command === 'getent') return ok('docker:x:999:u')
+          if (command === 'systemctl') return ok('active\n')
           return missing()
         },
         readFile: async () => 'ID=ubuntu\nVERSION_ID="24.04"\n',
@@ -109,18 +176,24 @@ describe('reading the machine', () => {
     expect(probed.distribution).toEqual({ id: 'ubuntu', version_id: '24.04', id_like: [], family: 'apt' })
     expect(probed.architecture).toBe('x86_64')
     expect(probed.docker.daemon_reachable).toBe(true)
+    expect(probed.docker_group).toEqual({ configured: true, effective: true })
+    expect(probed.docker.service_active).toBe(true)
     // `nvidia-ctk --version` was not found, so the toolkit is reported absent, not assumed.
     expect(probed.toolkit_installed).toBe(false)
     expect(probed.unknown).toEqual([])
-    // Nothing that could change the machine: no run, no pull, no install, no service, no systemctl.
-    // (The docker socket path legitimately contains "run" as a path segment, so this checks
-    // subcommands, not a bare substring match against the whole call.)
+    // Nothing that could change the machine: no run, no pull, no install, no service enable/start,
+    // no apt/pacman mutation. (The docker socket path legitimately contains "run" as a path
+    // segment, so this checks subcommands, not a bare substring match against the whole call.)
     expect(
       calls.some(
         (call) =>
-          /(^| )(run|pull|install|systemctl|apt-get|usermod)( |$)/.test(call) || /pacman -S/.test(call)
+          /(^| )(run|pull|install|apt-get|usermod)( |$)/.test(call) ||
+          /systemctl (enable|start|restart)/.test(call) ||
+          /pacman -S/.test(call)
       )
     ).toBe(false)
+    // systemctl was only ever asked, never told to do anything.
+    expect(calls.some((call) => call.startsWith('systemctl') && !call.includes('is-active'))).toBe(false)
   })
 
   it('records a probe that could not run as unknown instead of as a no', async () => {
@@ -136,7 +209,21 @@ describe('reading the machine', () => {
     expect(probed.unknown).toEqual(['distribution', 'architecture', 'nvidia-driver', 'free-disk'])
   })
 
-  it('checks free space at DockerRootDir once Docker answers, and at the default install path before it does', async () => {
+  it('lands architecture in unknown on a non-zero uname exit, not just a missing binary (item 16)', async () => {
+    const probed = await probeLinux(
+      {
+        exec: async (command) => (command === 'uname' ? failed('uname: unrecognized option', 1) : missing()),
+        readFile: async () => null,
+        pathExists: async () => false,
+        freeDiskBytes: async () => null,
+      },
+      { user: 'u', xdgRuntimeDir: null }
+    )
+    expect(probed.architecture).toBeNull()
+    expect(probed.unknown).toContain('architecture')
+  })
+
+  it('checks free space at DockerRootDir once Docker answers, and at the nearest existing ancestor before it does', async () => {
     const customRootDir = JSON.stringify({ ...JSON.parse(DOCKER_INFO), DockerRootDir: '/mnt/docker-data' })
     const paths: string[] = []
     const deps: LinuxProbeDeps = {
@@ -147,7 +234,7 @@ describe('reading the machine', () => {
         return missing()
       },
       readFile: async () => 'ID=ubuntu\nVERSION_ID="24.04"\n',
-      pathExists: async () => false,
+      pathExists: async () => true,
       freeDiskBytes: async (path) => {
         paths.push(path)
         return 1
@@ -156,9 +243,16 @@ describe('reading the machine', () => {
     await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
     expect(paths).toEqual(['/mnt/docker-data'])
 
-    // No Docker at all: nothing to read DockerRootDir from, so the default install path is used.
+    // No Docker at all, and /var/lib/docker itself does not exist yet: walks up to /var/lib.
     paths.length = 0
-    await probeLinux({ ...deps, exec: async () => missing() }, { user: 'u', xdgRuntimeDir: null })
-    expect(paths).toEqual(['/var/lib/docker'])
+    await probeLinux(
+      {
+        ...deps,
+        exec: async () => missing(),
+        pathExists: async (path) => path !== '/var/lib/docker',
+      },
+      { user: 'u', xdgRuntimeDir: null }
+    )
+    expect(paths).toEqual(['/var/lib'])
   })
 })

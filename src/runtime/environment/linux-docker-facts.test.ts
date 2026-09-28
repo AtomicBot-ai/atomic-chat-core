@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   DOCKER_PACKAGE_CANDIDATES,
+  cdiListsNvidiaGpu,
+  daemonJsonHasNvidiaRuntime,
   detectDockerInstallMethod,
   installedDpkgPackages,
   installedRpmPackages,
@@ -22,6 +24,7 @@ const info = (over: Record<string, unknown> = {}): string =>
     SecurityOptions: ['name=seccomp,profile=default'],
     DockerRootDir: '/var/lib/docker',
     ContainersRunning: 0,
+    ServerErrors: [],
     ...over,
   })
 
@@ -35,6 +38,7 @@ const NO_INFO: DockerInfoFacts = {
   containers_running: 0,
   rootless: false,
   desktop: false,
+  server_errors: [],
 }
 
 describe('parseDockerInfo', () => {
@@ -70,6 +74,13 @@ describe('parseDockerInfo', () => {
     expect(parseDockerInfo(ok(info()), null).desktop).toBe(false)
   })
 
+  it('surfaces ServerErrors for diagnostics without treating them as unreachable (item 17)', () => {
+    const parsed = parseDockerInfo(ok(info({ ServerErrors: ['devmapper: Failed to remove device'] })), null)
+    expect(parsed.daemon_reachable).toBe(true)
+    expect(parsed.server_errors).toEqual(['devmapper: Failed to remove device'])
+    expect(parseDockerInfo(ok(info()), null).server_errors).toEqual([])
+  })
+
   it('reports nothing reachable when the daemon does not answer or answers garbage', () => {
     expect(parseDockerInfo(failed('Cannot connect to the Docker daemon'), null)).toEqual(NO_INFO)
     expect(parseDockerInfo(ok('not json'), null)).toEqual(NO_INFO)
@@ -78,11 +89,36 @@ describe('parseDockerInfo', () => {
   })
 })
 
+describe('offline GPU-runtime evidence (item 3)', () => {
+  it('reads /etc/docker/daemon.json for a configured nvidia runtime', () => {
+    expect(
+      daemonJsonHasNvidiaRuntime(
+        JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } })
+      )
+    ).toBe(true)
+    expect(daemonJsonHasNvidiaRuntime(JSON.stringify({ runtimes: { runc: {} } }))).toBe(false)
+    expect(daemonJsonHasNvidiaRuntime(null)).toBe(false)
+    expect(daemonJsonHasNvidiaRuntime('not json')).toBe(false)
+  })
+
+  it('reads nvidia-ctk cdi list the same way parseDockerInfo does', () => {
+    expect(cdiListsNvidiaGpu(ok('nvidia.com/gpu=all\n'))).toBe(true)
+    expect(cdiListsNvidiaGpu(ok('INFO[0000] Found 0 CDI devices\n'))).toBe(false)
+    expect(cdiListsNvidiaGpu(null)).toBe(false)
+    expect(cdiListsNvidiaGpu(failed('not found'))).toBe(false)
+  })
+})
+
 describe('package-database install-method detection', () => {
-  it('reads only the packages dpkg-query actually confirms as installed', () => {
-    expect(installedDpkgPackages(ok('docker-ce\n'), DOCKER_PACKAGE_CANDIDATES)).toEqual(['docker-ce'])
+  it('reads only packages dpkg-query\'s status column marks "ii" (installed) as installed (item 4)', () => {
+    expect(installedDpkgPackages(ok('ii docker-ce\n'), DOCKER_PACKAGE_CANDIDATES)).toEqual(['docker-ce'])
     expect(installedDpkgPackages(missing(), DOCKER_PACKAGE_CANDIDATES)).toEqual([])
     expect(installedDpkgPackages(ok(''), DOCKER_PACKAGE_CANDIDATES)).toEqual([])
+  })
+
+  it('does not count a package apt remove left in "rc" (config files remain) as installed (item 4)', () => {
+    const output = ok('rc docker.io\nun docker-ce\nun moby-engine\nun podman-docker\nun docker-desktop\n')
+    expect(installedDpkgPackages(output, DOCKER_PACKAGE_CANDIDATES)).toEqual([])
   })
 
   it('reads rpm -q hits by their name-version-release line and ignores "is not installed" misses', () => {
@@ -112,7 +148,7 @@ describe('package-database install-method detection', () => {
     expect(method).toBe('podman-docker')
   })
 
-  it('recognises snap, rootless and Docker Desktop ahead of a plain package match', () => {
+  it('recognises snap, Desktop (by package or by docker info) and rootless ahead of a plain package match', () => {
     const packages = {
       dockerVersion: ok('Docker version 28.3.0'),
       dpkgQuery: null,
@@ -126,10 +162,26 @@ describe('package-database install-method detection', () => {
         false
       )
     ).toBe('snap')
-    expect(detectDockerInstallMethod({ ...NO_INFO, rootless: true }, packages, false)).toBe('rootless')
-    // The system-socket query never reached a rootless daemon, but its own socket exists.
-    expect(detectDockerInstallMethod(NO_INFO, packages, true)).toBe('rootless')
+    expect(
+      detectDockerInstallMethod(NO_INFO, { ...packages, dpkgQuery: ok('ii docker-desktop\n') }, false)
+    ).toBe('docker-desktop')
     expect(detectDockerInstallMethod({ ...NO_INFO, desktop: true }, packages, false)).toBe('docker-desktop')
+    expect(detectDockerInstallMethod({ ...NO_INFO, rootless: true }, packages, false)).toBe('rootless')
+    // The system socket never reached a rootless daemon, but its own leftover socket exists.
+    expect(detectDockerInstallMethod(NO_INFO, packages, true)).toBe('rootless')
+  })
+
+  it('never reads a stray rootless socket as rootless once the system socket answers a working engine (item 6)', () => {
+    const reachable: DockerInfoFacts = { ...NO_INFO, daemon_reachable: true, rootless: false }
+    const packages = {
+      dockerVersion: ok('Docker version 28.3.0'),
+      dpkgQuery: null,
+      rpmQuery: null,
+      snapList: null,
+    }
+    // A leftover $XDG_RUNTIME_DIR/docker.sock from an abandoned rootless attempt must not shadow a
+    // working rootful engine that just answered the forced system-socket query.
+    expect(detectDockerInstallMethod(reachable, packages, true)).not.toBe('rootless')
   })
 
   it('falls back to the distro package that is actually installed, in docker-ce/moby-engine/docker.io order', () => {
@@ -137,15 +189,19 @@ describe('package-database install-method detection', () => {
     expect(
       detectDockerInstallMethod(
         NO_INFO,
-        { ...base, dpkgQuery: ok('docker-ce\nmoby-engine\n'), rpmQuery: null },
+        { ...base, dpkgQuery: ok('ii docker-ce\nii moby-engine\n'), rpmQuery: null },
         false
       )
     ).toBe('docker-ce')
     expect(
-      detectDockerInstallMethod(NO_INFO, { ...base, dpkgQuery: ok('moby-engine\n'), rpmQuery: null }, false)
+      detectDockerInstallMethod(
+        NO_INFO,
+        { ...base, dpkgQuery: ok('ii moby-engine\n'), rpmQuery: null },
+        false
+      )
     ).toBe('moby-engine')
     expect(
-      detectDockerInstallMethod(NO_INFO, { ...base, dpkgQuery: ok('docker.io\n'), rpmQuery: null }, false)
+      detectDockerInstallMethod(NO_INFO, { ...base, dpkgQuery: ok('ii docker.io\n'), rpmQuery: null }, false)
     ).toBe('docker.io')
   })
 

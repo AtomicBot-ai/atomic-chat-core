@@ -2,21 +2,28 @@
  * Turning `LinuxFacts` into a verdict: adopt the machine as it stands, install what is missing, or
  * explain why neither is possible before anything asks for a password (design D2).
  *
- * Three kinds of answer, and only one of them installs anything:
+ * Four kinds of answer, and only two of them ever propose a system change:
  *
  * - **Adopt.** The daemon answers the current user over the system socket and already exposes a
  *   GPU runtime. Nothing is missing, so nothing is proposed — on any distribution, including ones
  *   nobody has qualified an install recipe for (spec: "Дистрибутив вне рецепта, но Docker с GPU
- *   готов").
+ *   готов"). Per controller ruling (item 11), `availability` still reads `setup-required` here —
+ *   2.6 is the one that upgrades it to `supported` once the installation itself is `ready`.
+ * - **Access only.** The daemon is *active* (`systemctl is-active docker`) but this login session
+ *   cannot reach it — the classic "just added to the `docker` group, haven't logged back in yet"
+ *   story. Nothing about the GPU runtime is touched, because without reaching the daemon there is
+ *   no live evidence of its state to act on (item 3) — the plan is exactly "add the group if it is
+ *   not already configured" and nothing else, with no elevation at all when it already is.
  * - **Install plan.** Docker or the toolkit is missing, but this machine's distribution, version
  *   and architecture are on the descriptor's `linux.install-container-runtime` recipe. The plan
  *   lists only the packages this machine is actually missing, never a whole-system upgrade.
  * - **Blocked.** Either a fact no install can fix (no driver, a driver or card too old, the wrong
  *   architecture), or a Docker install this integration will not touch (snap, rootless, Docker
- *   Desktop without a system Engine, the `podman-docker` shim) or immutable base (rpm-ostree)
- *   without a working Docker already, or — Arch and its derivatives only — exact manual commands,
- *   because Arch has no qualified recipe and a partial `pacman -S` next to a GPU driver risks
- *   leaving the kernel and driver modules out of sync (design D2).
+ *   Desktop without a system Engine, the `podman-docker` shim, or one the package database and
+ *   `docker info` simply do not recognise), or an immutable base (rpm-ostree) without a working
+ *   Docker already, or — Arch and its derivatives only — exact manual commands, because Arch has
+ *   no qualified recipe and installing a single package without a full `pacman -Syu` can leave the
+ *   system inconsistent (design D2).
  *
  * Blockers that no install fixes are checked first and unconditionally: a host that happens to
  * already expose a GPU runtime is still refused if the driver is below `minimum_driver_version` or
@@ -24,9 +31,8 @@
  * всякого согласия" (before any consent), not only on a host that still needs setup.
  */
 
-import type { ErrorBody, ManagedAvailability, RecipeDistribution } from '../../contracts/index.js'
+import type { ManagedAvailability, RecipeDistribution } from '../../contracts/index.js'
 import type { LinuxDistribution, LinuxFacts } from './linux-probe.js'
-import { prerequisiteBlocker } from './linux-probe.js'
 
 export type LinuxSystemChangeCode =
   | 'add-repository'
@@ -50,9 +56,48 @@ export interface LinuxSystemChange {
 export interface LinuxInstallPlan {
   recipe_id: string
   requires_elevation: boolean
-  /** True exactly when the plan adds the user to the `docker` group (design D4). */
+  /**
+   * Always `true` for a plan this module returns (controller ruling, item 10 — spec text states
+   * `requires_elevation: true, may_require_relogin: true` together for the install-plan
+   * requirement): even a plan whose only content is package installs can leave a member of the
+   * `docker` group who is not yet reading as one, and a client should always offer the "log out and
+   * back in" step rather than assume that never applies.
+   */
   may_require_relogin: boolean
   system_changes: LinuxSystemChange[]
+}
+
+/**
+ * A stable, machine-readable reason a host is blocked — for a client to switch on, or a test to
+ * assert against, instead of matching on `message` text (item 8).
+ */
+export type LinuxBlockerReason =
+  | 'unknown-fact'
+  | 'unsupported-architecture'
+  | 'driver-missing'
+  | 'driver-too-old'
+  | 'no-gpu'
+  | 'compute-capability-too-low'
+  | 'docker-snap'
+  | 'docker-rootless'
+  | 'docker-desktop-only'
+  | 'podman-docker'
+  | 'docker-unrecognised'
+  | 'immutable-os'
+  | 'distribution-not-in-recipe'
+  | 'arch-manual-install'
+  | 'insufficient-disk'
+
+/**
+ * One reason a host cannot proceed. `params` carries the machine-checkable specifics (required vs.
+ * actual version, the distro tuple, ...); `commands`, when present, are exact, copyable shell
+ * commands (Arch's manual install); `message` is what a person reads.
+ */
+export interface LinuxBlocker {
+  reason: LinuxBlockerReason
+  message: string
+  params?: Record<string, string>
+  commands?: string[]
 }
 
 export interface LinuxAssessment {
@@ -60,7 +105,7 @@ export interface LinuxAssessment {
   /** The machine is usable as it stands: nothing to install, nothing to authorize. */
   adopts_existing_engine: boolean
   install_plan: LinuxInstallPlan | null
-  blockers: ErrorBody[]
+  blockers: LinuxBlocker[]
 }
 
 export interface LinuxAssessmentOptions {
@@ -93,33 +138,54 @@ export function compareDottedVersions(a: string, b: string): number {
   return 0
 }
 
+function blocker(
+  reason: LinuxBlockerReason,
+  message: string,
+  params?: Record<string, string>,
+  commands?: string[]
+): LinuxBlocker {
+  return {
+    reason,
+    message,
+    ...(params === undefined ? {} : { params }),
+    ...(commands === undefined ? {} : { commands }),
+  }
+}
+
+// Arch never supports a partial `pacman -S` of just these two packages (design D2): installing a
+// package without syncing the whole system can leave it inconsistent, so the commands run a full
+// `-Syu` instead — which may itself bring in a newer kernel and NVIDIA driver, hence the reboot
+// note. `nvidia-ctk runtime configure` changes `/etc/docker/daemon.json`, so Docker is explicitly
+// restarted afterward rather than relying on `enable --now` to notice the new config on its own
+// (item 12).
 const ARCH_COMMANDS = [
-  'sudo pacman -S --needed docker nvidia-container-toolkit',
+  'sudo pacman -Syu --needed docker nvidia-container-toolkit',
   'sudo nvidia-ctk runtime configure --runtime=docker',
+  'sudo systemctl restart docker',
   'sudo systemctl enable --now docker',
   'sudo usermod -aG docker $USER',
-  '# then log out and back in',
-].join('\n')
+]
 
-/** Turn the facts into a verdict: usable now, installable, or not on this machine. */
+/** Turn the facts into a verdict: usable now, installable, waiting on a relogin, or not on this machine. */
 export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions): LinuxAssessment {
-  const blocked = (blockers: ErrorBody[]): LinuxAssessment => ({
+  const blocked = (blockers: LinuxBlocker[]): LinuxAssessment => ({
     availability: 'prerequisite-blocked',
     adopts_existing_engine: false,
     install_plan: null,
     blockers,
   })
 
-  const universal: ErrorBody[] = []
+  const universal: LinuxBlocker[] = []
   for (const name of facts.unknown) {
-    universal.push(prerequisiteBlocker(`Could not determine ${name} on this system.`, name))
+    universal.push(blocker('unknown-fact', `Could not determine ${name} on this system.`, { fact: name }))
   }
 
   if (facts.architecture !== null && !SUPPORTED_ARCHITECTURES.has(facts.architecture)) {
     universal.push(
-      prerequisiteBlocker(
+      blocker(
+        'unsupported-architecture',
         `This machine's architecture (${facts.architecture}) is not supported; only x86_64 and aarch64 can run this runtime.`,
-        facts.architecture
+        { actual: facts.architecture }
       )
     )
   }
@@ -127,29 +193,34 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   if (facts.driver_version === null) {
     if (!facts.unknown.includes('nvidia-driver')) {
       universal.push(
-        prerequisiteBlocker('No NVIDIA driver was found. Install the driver for your card, then try again.')
+        blocker(
+          'driver-missing',
+          'No NVIDIA driver was found. Install the driver for your card, then try again.'
+        )
       )
     }
   } else {
     if (compareDottedVersions(facts.driver_version, options.minimumDriverVersion) < 0) {
       universal.push(
-        prerequisiteBlocker(
+        blocker(
+          'driver-too-old',
           `The NVIDIA driver is too old: this engine needs ${options.minimumDriverVersion} or newer, this machine has ${facts.driver_version}.`,
-          `required=${options.minimumDriverVersion} actual=${facts.driver_version}`
+          { required: options.minimumDriverVersion, actual: facts.driver_version }
         )
       )
     }
     if (facts.gpus.length === 0) {
-      universal.push(prerequisiteBlocker('The NVIDIA driver is installed but reports no usable GPU.'))
+      universal.push(blocker('no-gpu', 'The NVIDIA driver is installed but reports no usable GPU.'))
     } else {
       const best = facts.gpus.reduce((champion, gpu) =>
         compareDottedVersions(gpu.compute_capability, champion.compute_capability) > 0 ? gpu : champion
       )
       if (compareDottedVersions(best.compute_capability, options.minimumComputeCapability) < 0) {
         universal.push(
-          prerequisiteBlocker(
+          blocker(
+            'compute-capability-too-low',
             `Needs a GPU with compute capability ${options.minimumComputeCapability} or newer (Ampere+); the best card here has ${best.compute_capability}.`,
-            `required=${options.minimumComputeCapability} actual=${best.compute_capability}`
+            { required: options.minimumComputeCapability, actual: best.compute_capability }
           )
         )
       }
@@ -170,10 +241,10 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
     facts.free_disk_bytes < options.requiredDiskBytes
   ) {
     universal.push(
-      prerequisiteBlocker(
-        'There is not enough free disk space for the runtime image.',
-        `free=${facts.free_disk_bytes} required=${options.requiredDiskBytes}`
-      )
+      blocker('insufficient-disk', 'There is not enough free disk space for the runtime image.', {
+        free: String(facts.free_disk_bytes),
+        required: String(options.requiredDiskBytes),
+      })
     )
   }
 
@@ -181,12 +252,42 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
 
   const dockerReady = facts.docker.daemon_reachable && facts.docker.gpu_runtime
   if (dockerReady) {
-    return { availability: 'supported', adopts_existing_engine: true, install_plan: null, blockers: [] }
+    // Ruling (item 11): stays 'setup-required' here even though nothing is missing — 2.6 owns the
+    // upgrade to 'supported' once the runtime installation itself reads ready.
+    return { availability: 'setup-required', adopts_existing_engine: true, install_plan: null, blockers: [] }
+  }
+
+  // The daemon is confirmed running but this session cannot reach it: the one thing that can fix
+  // that is a relogin (once the `docker` group is configured), never a package or a runtime change
+  // this probe has no live evidence for (item 2/3).
+  if (!facts.docker.daemon_reachable && facts.docker.service_active === true) {
+    const needsGroup = !facts.docker_group.configured
+    const systemChanges: LinuxSystemChange[] = needsGroup
+      ? [
+          {
+            code: 'add-user-to-docker-group',
+            text: `Add ${options.currentUser} to the docker group. This grants access equivalent to root on this machine.`,
+            params: { user: options.currentUser },
+          },
+        ]
+      : []
+    return {
+      availability: 'setup-required',
+      adopts_existing_engine: false,
+      install_plan: {
+        recipe_id: options.recipeId,
+        requires_elevation: needsGroup,
+        may_require_relogin: true,
+        system_changes: systemChanges,
+      },
+      blockers: [],
+    }
   }
 
   if (facts.immutable_os) {
     return blocked([
-      prerequisiteBlocker(
+      blocker(
+        'immutable-os',
         'This system uses an immutable base (rpm-ostree — Silverblue, Kinoite, Bazzite, or similar). ' +
           'Installing Docker here means layering a package and rebooting, which this integration does ' +
           'not do automatically. Install docker-ce and the NVIDIA Container Toolkit yourself, then try again.'
@@ -200,12 +301,28 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
 
   if (distribution.family === 'pacman') {
     return blocked([
-      prerequisiteBlocker(
-        'Automatic install is not offered on Arch and its derivatives: a partial package install next ' +
-          'to the NVIDIA driver risks leaving the kernel module out of sync until a full system upgrade ' +
-          'and reboot. Install manually from the official repositories instead:\n' +
-          ARCH_COMMANDS,
-        'arch'
+      blocker(
+        'arch-manual-install',
+        "Arch and its derivatives don't support a partial package install: adding just these two " +
+          'packages without a full system sync can leave the system inconsistent, so the commands ' +
+          'below run a full `pacman -Syu` instead — which may itself update your kernel and NVIDIA ' +
+          'driver. Reboot afterward if it does, then log out and back in so the new docker group ' +
+          'membership takes effect. Automatic install is not offered here.',
+        { family: 'pacman' },
+        ARCH_COMMANDS
+      ),
+    ])
+  }
+
+  // Something answers to `docker` here, but neither the package database nor `docker info` places
+  // it as any install this probe recognises — never lay docker-ce over an unknown quantity (item 15).
+  if (facts.docker.cli && facts.docker.install_method === null) {
+    return blocked([
+      blocker(
+        'docker-unrecognised',
+        "This machine's docker command does not match any Docker install this integration " +
+          'recognises (not docker-ce, docker.io, moby-engine, snap, rootless, Docker Desktop, or the ' +
+          'podman-docker shim). Nothing will be installed over it automatically.'
       ),
     ])
   }
@@ -218,9 +335,10 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   )
   if (!qualified) {
     return blocked([
-      prerequisiteBlocker(
+      blocker(
+        'distribution-not-in-recipe',
         'Setting the runtime up automatically is only qualified on some distributions so far.',
-        `${distribution.id} ${distribution.version_id} ${facts.architecture ?? 'unknown'}`
+        { id: distribution.id, version_id: distribution.version_id, arch: facts.architecture ?? 'unknown' }
       ),
     ])
   }
@@ -233,32 +351,33 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   }
 }
 
-function installMethodBlocker(method: LinuxFacts['docker']['install_method']): ErrorBody | null {
+function installMethodBlocker(method: LinuxFacts['docker']['install_method']): LinuxBlocker | null {
   switch (method) {
     case 'snap':
-      return prerequisiteBlocker(
+      return blocker(
+        'docker-snap',
         'Docker was installed from the snap store, which does not support the NVIDIA Container ' +
-          'Toolkit. Switch to the docker-ce package instead; nothing here removes the snap install.',
-        'snap'
+          'Toolkit. Switch to the docker-ce package instead; nothing here removes the snap install.'
       )
     case 'rootless':
-      return prerequisiteBlocker(
+      return blocker(
+        'docker-rootless',
         'Rootless Docker is not supported for this runtime. Switch to a standard (rootful) docker-ce ' +
-          'installation; nothing here removes the rootless install.',
-        'rootless'
+          'installation; nothing here removes the rootless install.'
       )
     case 'docker-desktop':
-      return prerequisiteBlocker(
+      return blocker(
+        'docker-desktop-only',
         'Docker Desktop without a separate system Docker Engine cannot be configured for this runtime. ' +
-          'Install docker-ce as the system engine; nothing here changes the Docker Desktop install.',
-        'docker-desktop'
+          'Install docker-ce as the system engine; nothing here changes the Docker Desktop install.'
       )
     case 'podman-docker':
-      return prerequisiteBlocker(
+      return blocker(
+        'podman-docker',
         "The docker command here is Podman's compatibility shim, not Docker Engine; Podman is not " +
-          'supported by this runtime. Install Docker Engine (docker-ce) to use it; nothing here removes ' +
-          'Podman or installs docker-ce over it.',
-        'podman-docker'
+          'supported by this runtime. podman-docker conflicts with docker-ce at the package level, so ' +
+          'it must be removed first; install Docker Engine (docker-ce) afterward. Nothing here removes ' +
+          'Podman itself or installs docker-ce over it automatically.'
       )
     default:
       return null
@@ -272,9 +391,15 @@ function buildInstallPlan(
   distribution: LinuxDistribution,
   options: LinuxAssessmentOptions
 ): LinuxInstallPlan {
+  // `docker info` is authoritative when it answered; otherwise the only evidence available is the
+  // read-only daemon.json/CDI check (item 3) — never guessed from silence.
+  const liveEvidence = facts.docker.daemon_reachable
+  const effectiveGpuRuntime = liveEvidence ? facts.docker.gpu_runtime : facts.docker.gpu_runtime_from_config
+
   // Never lay docker-ce over a working moby-engine/docker.io install (they conflict at the package
   // level, design D2) or over anything else this probe already recognised; only a genuinely absent
-  // Docker gets the full package set.
+  // Docker gets the full package set. (A `cli && install_method === null` machine never reaches
+  // here — `assessLinux` blocks it first, item 15.)
   const dockerPackages =
     facts.docker.install_method === null ? ['docker-ce', 'docker-ce-cli', 'containerd.io'] : []
   const toolkitPackages = facts.toolkit_installed ? [] : ['nvidia-container-toolkit']
@@ -305,31 +430,32 @@ function buildInstallPlan(
       params: { packages: missingPackages.join(',') },
     })
   }
-  if (!facts.docker.gpu_runtime) {
+  if (!effectiveGpuRuntime) {
     systemChanges.push({
       code: 'configure-nvidia-runtime',
       text: 'Configure the NVIDIA runtime for Docker (nvidia-ctk runtime configure --runtime=docker).',
     })
   }
 
-  // Whatever the exact reason the current user cannot reach the daemon — Docker not installed,
-  // not running, or not accessible to this account — enabling the service and adding the user to
-  // the group are both idempotent, so the recipe always does both rather than trying to diagnose
-  // which one is missing.
-  const needsAccess = !facts.docker.daemon_reachable
-  if (needsAccess) {
-    systemChanges.push({ code: 'enable-docker-service', text: 'Enable and start docker.service.' })
-    systemChanges.push({
-      code: 'add-user-to-docker-group',
-      text: `Add ${options.currentUser} to the docker group. This grants access equivalent to root on this machine.`,
-      params: { user: options.currentUser },
-    })
+  // Access steps are each emitted only when this specific thing is actually missing — never paired
+  // blindly (item 2). When `liveEvidence` is true, access is already proven, so neither applies.
+  if (!liveEvidence) {
+    if (facts.docker.service_active !== true) {
+      systemChanges.push({ code: 'enable-docker-service', text: 'Enable and start docker.service.' })
+    }
+    if (!facts.docker_group.configured) {
+      systemChanges.push({
+        code: 'add-user-to-docker-group',
+        text: `Add ${options.currentUser} to the docker group. This grants access equivalent to root on this machine.`,
+        params: { user: options.currentUser },
+      })
+    }
   }
 
-  // Reconfiguring the runtime on a Docker that is already running requires restarting it, which
-  // stops whatever containers are up (design D5) — only relevant when Docker is not already being
-  // freshly enabled above.
-  if (facts.docker.daemon_reachable && !facts.docker.gpu_runtime) {
+  // Reconfiguring the runtime on a Docker that is confirmed live and running requires restarting
+  // it, which stops whatever containers are up (design D5) — only planned from live evidence, so
+  // the container count in the warning is never a guess.
+  if (liveEvidence && !effectiveGpuRuntime) {
     const count = facts.docker.containers_running
     systemChanges.push({
       code: 'restart-docker',
@@ -343,8 +469,10 @@ function buildInstallPlan(
 
   return {
     recipe_id: options.recipeId,
-    requires_elevation: true,
-    may_require_relogin: needsAccess,
+    requires_elevation: systemChanges.length > 0,
+    // Ruling (item 10): always true for a plan, regardless of whether this particular one happens
+    // to touch the docker group.
+    may_require_relogin: true,
     system_changes: systemChanges,
   }
 }

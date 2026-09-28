@@ -17,13 +17,13 @@
  * and failing halfway through a sixteen-gigabyte download.
  */
 
-import type {
-  ErrorBody,
-  GpuFacts,
-  LinuxDockerInstallMethod,
-  LinuxPackageFamily,
-} from '../../contracts/index.js'
-import { detectDockerInstallMethod, parseDockerInfo } from './linux-docker-facts.js'
+import type { GpuFacts, LinuxDockerInstallMethod, LinuxPackageFamily } from '../../contracts/index.js'
+import {
+  cdiListsNvidiaGpu,
+  daemonJsonHasNvidiaRuntime,
+  detectDockerInstallMethod,
+  parseDockerInfo,
+} from './linux-docker-facts.js'
 
 export interface CommandOutput {
   /** Null when the binary is not on the machine at all. */
@@ -33,11 +33,21 @@ export interface CommandOutput {
 }
 
 export interface LinuxProbeDeps {
-  exec: (command: string, args: string[]) => Promise<CommandOutput>
+  /**
+   * `env`, when given, replaces the inherited environment for this one call (a key mapped to
+   * `undefined` means "strip this variable", never "set it to an empty string") — used to keep a
+   * stray `DOCKER_HOST`/`DOCKER_CONTEXT`/`DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` from steering the
+   * forced system-socket `docker info` call anywhere else.
+   */
+  exec: (command: string, args: string[], env?: Record<string, string | undefined>) => Promise<CommandOutput>
   readFile: (path: string) => Promise<string | null>
   /** For a socket, a directory, or a flag file such as `/run/ostree-booted`; never its contents. */
   pathExists: (path: string) => Promise<boolean>
-  /** Free space at one path, computed however the caller likes (`statfs`, a platform API, ...). */
+  /**
+   * Free space at one path, computed however the caller likes (`statfs`, a platform API, ...).
+   * Always called with a path this probe has already confirmed exists (`freeDiskBytes` itself does
+   * not need to walk up to find one) — see `nearestExistingAncestor` in `probeLinux`.
+   */
   freeDiskBytes: (path: string) => Promise<number | null>
 }
 
@@ -50,10 +60,21 @@ export interface LinuxProbeOptions {
 
 export interface LinuxDistribution {
   id: string
+  /** `VERSION_ID`, or `BUILD_ID` (Arch/Manjaro/EndeavourOS, Debian testing/sid) when there is no
+   *  `VERSION_ID` at all, or `''` when the file has neither — which then matches no install recipe
+   *  (item 1: a rolling-release host is never mistaken for one with no distribution at all). */
   version_id: string
   /** `ID_LIKE`, space-separated, lowercase. Empty when the file has none. */
   id_like: string[]
   family: LinuxPackageFamily
+}
+
+/** The account this probe ran as, from `id -nG` / `getent group docker` — diagnostic only. */
+export interface DockerGroupFacts {
+  /** The account is listed in the `docker` group's members. */
+  configured: boolean
+  /** ...and this login session already carries it (`id -nG`); a group change needs a fresh login. */
+  effective: boolean
 }
 
 export interface DockerFacts {
@@ -63,16 +84,29 @@ export interface DockerFacts {
   engine_identity: string | null
   version: string | null
   install_method: LinuxDockerInstallMethod | null
-  /** A runtime named `nvidia`, or an NVIDIA CDI spec: either can carry `--gpus`. */
+  /** A runtime named `nvidia`, or an NVIDIA CDI spec: either can carry `--gpus`. Only meaningful
+   *  when `daemon_reachable` — otherwise this is `false` because there was no answer, not because
+   *  the runtime is missing; use `gpu_runtime_from_config` when the daemon could not be reached. */
   gpu_runtime: boolean
+  /**
+   * Read-only evidence the GPU runtime is configured that does not require reaching the daemon
+   * (`/etc/docker/daemon.json`'s own `runtimes.nvidia`, or a listed NVIDIA CDI device) — the only
+   * signal available when `daemon_reachable` is false, so a plan never reconfigures a runtime it
+   * has no real evidence about (item 3).
+   */
+  gpu_runtime_from_config: boolean
   /** SELinux is enforcing for containers: mounts of our directories need the `:z` label (D15). */
   selinux: boolean
   docker_root_dir: string | null
   containers_running: number
+  /** `systemctl is-active docker`. `'unknown'` only when the check itself could not run. */
+  service_active: boolean | 'unknown'
+  /** `docker info`'s own `ServerErrors`, surfaced for diagnostics (item 17). */
+  server_errors: string[]
 }
 
 export interface LinuxFacts {
-  /** `uname -m`, `arm64` normalised to `aarch64`. Null when the command could not run. */
+  /** `uname -m`, `arm64` normalised to `aarch64`. Null when the command did not answer with `0`. */
   architecture: string | null
   distribution: LinuxDistribution | null
   /** `/run/ostree-booted` exists: an rpm-ostree host (Silverblue, Kinoite, Bazzite, ...). */
@@ -80,6 +114,10 @@ export interface LinuxFacts {
   driver_version: string | null
   gpus: GpuFacts[]
   docker: DockerFacts
+  /** Diagnostic only — never gates readiness (spec: access is `docker info` answering, not group
+   *  membership). 2.6 reads this to tell "daemon active, this session just needs to relogin" apart
+   *  from "the daemon is not reachable at all" (item 2). */
+  docker_group: DockerGroupFacts
   toolkit_installed: boolean
   free_disk_bytes: number | null
   /** Named checks whose answer could not be read. Each one blocks, none is assumed. */
@@ -100,8 +138,11 @@ export function parseOsRelease(text: string | null): LinuxDistribution | null {
     fields.set(match[1] as string, value)
   }
   const id = fields.get('ID')
-  const versionId = fields.get('VERSION_ID')
-  if (id === undefined || id === '' || versionId === undefined || versionId === '') return null
+  if (id === undefined || id === '') return null
+  // Arch, Manjaro and EndeavourOS ship no VERSION_ID at all (rolling release); Debian testing/sid
+  // has none either. BUILD_ID is Arch's nearest equivalent; when even that is absent, '' matches no
+  // install recipe (item 1) rather than making the whole distribution look unread.
+  const versionId = fields.get('VERSION_ID') ?? fields.get('BUILD_ID') ?? ''
   const idLike = (fields.get('ID_LIKE') ?? '')
     .split(/\s+/)
     .map((entry) => entry.toLowerCase())
@@ -167,7 +208,52 @@ export function parseNvidiaSmi(output: CommandOutput | null): {
   return { driver_version: driver, gpus }
 }
 
+/** Parses `docker` from `id -nG` (this session's groups) and `getent group docker` (its members). */
+export function parseDockerGroup(
+  sessionGroups: CommandOutput | null,
+  groupEntry: CommandOutput | null,
+  user: string
+): DockerGroupFacts {
+  const effective =
+    sessionGroups !== null && sessionGroups.code === 0 && sessionGroups.stdout.split(/\s+/).includes('docker')
+  const members =
+    groupEntry !== null && groupEntry.code === 0
+      ? (groupEntry.stdout.split(':')[3] ?? '').trim().split(',').filter(Boolean)
+      : []
+  return { configured: effective || members.includes(user), effective }
+}
+
+/** `systemctl is-active docker`: exits `0` and prints `active` only when the unit is really up. */
+export function parseServiceActive(output: CommandOutput | null): boolean | 'unknown' {
+  if (output === null || output.code === null) return 'unknown'
+  return output.code === 0 && output.stdout.trim() === 'active'
+}
+
 const DOCKER_SOCKET = 'unix:///var/run/docker.sock'
+// The forced-socket query must never be steered by a leftover remote/TLS context (item 17).
+const STRIP_DOCKER_ENV = {
+  DOCKER_HOST: undefined,
+  DOCKER_CONTEXT: undefined,
+  DOCKER_TLS_VERIFY: undefined,
+  DOCKER_CERT_PATH: undefined,
+}
+
+/**
+ * Walks a path up to the nearest existing ancestor (`/var/lib/docker` → `/var/lib` → `/var` → `/`),
+ * so a free-space check on a not-yet-installed `DockerRootDir` lands somewhere real instead of
+ * failing outright (item 7: a clean machine has no `/var/lib/docker` yet).
+ */
+export async function nearestExistingAncestor(
+  pathExists: LinuxProbeDeps['pathExists'],
+  path: string
+): Promise<string> {
+  const segments = path.split('/').filter(Boolean)
+  for (let end = segments.length; end >= 0; end--) {
+    const candidate = `/${segments.slice(0, end).join('/')}`
+    if (await pathExists(candidate).catch(() => false)) return candidate
+  }
+  return '/'
+}
 
 /**
  * Read the machine. Every command here is read-only; none of them installs, starts, enables or
@@ -179,35 +265,55 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
   const distribution = parseOsRelease(osRelease)
   if (distribution === null) unknown.push('distribution')
 
-  const [unameM, smi, dockerVersion, dockerInfo, ctk, cdiList, dpkgQuery, rpmQuery, snapList, immutableOs] =
-    await Promise.all([
-      deps.exec('uname', ['-m']),
-      deps.exec('nvidia-smi', [
-        '--query-gpu=uuid,name,compute_cap,memory.total,memory.free,driver_version',
-        '--format=csv,noheader,nounits',
-      ]),
-      deps.exec('docker', ['--version']),
-      // `-H` pins the query to the system socket as the current user, overriding both DOCKER_HOST
-      // and an active DOCKER_CONTEXT (spec: access is decided by calling the daemon, never by a
-      // user context or group membership).
-      deps.exec('docker', ['-H', DOCKER_SOCKET, 'info', '--format', '{{json .}}']),
-      deps.exec('nvidia-ctk', ['--version']),
-      deps.exec('nvidia-ctk', ['cdi', 'list']),
-      deps.exec('dpkg-query', [
-        '-W',
-        '-f',
-        '${Package}\n',
-        'docker-ce',
-        'docker.io',
-        'moby-engine',
-        'podman-docker',
-      ]),
-      deps.exec('rpm', ['-q', 'docker-ce', 'docker.io', 'moby-engine', 'podman-docker']),
-      deps.exec('snap', ['list', 'docker']),
-      deps.pathExists('/run/ostree-booted').catch(() => false),
-    ])
+  const [
+    unameM,
+    smi,
+    dockerVersion,
+    dockerInfo,
+    ctk,
+    cdiList,
+    dpkgQuery,
+    rpmQuery,
+    snapList,
+    immutableOs,
+    sessionGroups,
+    groupEntry,
+    serviceActive,
+    daemonJson,
+  ] = await Promise.all([
+    deps.exec('uname', ['-m']),
+    deps.exec('nvidia-smi', [
+      '--query-gpu=uuid,name,compute_cap,memory.total,memory.free,driver_version',
+      '--format=csv,noheader,nounits',
+    ]),
+    deps.exec('docker', ['--version']),
+    // `-H` pins the query to the system socket as the current user, overriding both DOCKER_HOST
+    // and an active DOCKER_CONTEXT; the explicit env override also strips it and TLS settings from
+    // the child process rather than relying on the flag alone (spec: access is decided by calling
+    // the daemon, never by a user context or group membership).
+    deps.exec('docker', ['-H', DOCKER_SOCKET, 'info', '--format', '{{json .}}'], STRIP_DOCKER_ENV),
+    deps.exec('nvidia-ctk', ['--version']),
+    deps.exec('nvidia-ctk', ['cdi', 'list']),
+    deps.exec('dpkg-query', [
+      '-W',
+      '-f',
+      '${db:Status-Abbrev} ${Package}\n',
+      'docker-ce',
+      'docker.io',
+      'moby-engine',
+      'podman-docker',
+      'docker-desktop',
+    ]),
+    deps.exec('rpm', ['-q', 'docker-ce', 'docker.io', 'moby-engine', 'podman-docker', 'docker-desktop']),
+    deps.exec('snap', ['list', 'docker']),
+    deps.pathExists('/run/ostree-booted').catch(() => false),
+    deps.exec('id', ['-nG']),
+    deps.exec('getent', ['group', 'docker']),
+    deps.exec('systemctl', ['is-active', 'docker']),
+    deps.readFile('/etc/docker/daemon.json').catch(() => null),
+  ])
 
-  if (unameM.code === null) unknown.push('architecture')
+  if (unameM.code !== 0) unknown.push('architecture')
   const architecture = unameM.code === 0 ? normalizeArchitecture(unameM.stdout) : null
 
   const nvidia = parseNvidiaSmi(smi)
@@ -225,9 +331,10 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     rootlessSocketPresent
   )
 
-  // Before anything is installed there is no DockerRootDir yet; check the default location a
-  // fresh install would use instead, so a plan can still say whether there is room for it.
-  const diskCheckPath = info.docker_root_dir ?? '/var/lib/docker'
+  // Before anything is installed there is no DockerRootDir yet; check the nearest ancestor that
+  // does exist instead of failing outright on a path that is not there yet (item 7).
+  const diskCheckTarget = info.docker_root_dir ?? '/var/lib/docker'
+  const diskCheckPath = await nearestExistingAncestor(deps.pathExists, diskCheckTarget)
   const disk = await deps.freeDiskBytes(diskCheckPath).catch(() => null)
   if (disk === null) unknown.push('free-disk')
 
@@ -244,19 +351,16 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       version: info.version,
       install_method: installMethod,
       gpu_runtime: info.gpu_runtime,
+      gpu_runtime_from_config: daemonJsonHasNvidiaRuntime(daemonJson) || cdiListsNvidiaGpu(cdiList),
       selinux: info.selinux,
       docker_root_dir: info.docker_root_dir,
       containers_running: info.containers_running,
+      service_active: parseServiceActive(serviceActive),
+      server_errors: info.server_errors,
     },
+    docker_group: parseDockerGroup(sessionGroups, groupEntry, options.user),
     toolkit_installed: ctk.code === 0,
     free_disk_bytes: disk,
     unknown,
   }
 }
-
-/** Shared with `windows-probe.ts` and `linux-plan.ts`: one `MANAGED_PREREQUISITE_BLOCKED` shape. */
-export const prerequisiteBlocker = (message: string, details?: string): ErrorBody => ({
-  code: 'MANAGED_PREREQUISITE_BLOCKED',
-  message,
-  ...(details === undefined ? {} : { details }),
-})

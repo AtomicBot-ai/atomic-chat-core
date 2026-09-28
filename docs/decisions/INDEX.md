@@ -14,6 +14,8 @@ add a new one that says which record it supersedes.
 - **2026-09-28** — [Bump core to 0.7.0 for the TensorRT-LLM descriptor gate](2026-09-28-bump-core-to-0-7-0-for-the-tensorrt-llm-descriptor-gate.md)
 - **2026-09-28** — [tensorrt-llm model check: a fixed KV-cache reserve fraction, and unified memory ranks as zero for GPU selection](2026-09-28-tensorrt-llm-model-check-kv-reserve-and-gpu-selection.md)
 - **2026-09-28** — [Linux probe drops docker-group tracking; the install recipe always pairs enable+group](2026-09-28-linux-probe-drops-docker-group-tracking-and-recipe-blocks-pair.md)
+- **2026-09-28** — [Linux probe fix round 1: docker_group returns as diagnostics, may_require_relogin is always true](2026-09-28-linux-probe-restores-docker-group-diagnostics-round-1.md) — supersedes the same-day "drops docker-group tracking" record.
+- **2026-09-28** — [Linux probe drops docker-group tracking; the install recipe always pairs enable+group](2026-09-28-linux-probe-drops-docker-group-tracking-and-recipe-blocks-pair.md) — superseded same day, kept as record.
 - **2026-09-28** — [src/runtime/environment/inventory.ts is the model-file digest, not the host-inventory report](2026-09-28-inventory-ts-is-the-model-file-digest-not-the-host-report.md)
 - **2026-09-28** — [Managed runtime layout: the shared per-user root only, no per-scope artifact store](2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store.md)
 - **2026-09-28** — [Point DOCKER_CONFIG at an empty core-owned directory instead of deleting it; --pull=never on create/run](2026-09-28-point-docker-config-at-an-empty-core-owned-directory.md)
