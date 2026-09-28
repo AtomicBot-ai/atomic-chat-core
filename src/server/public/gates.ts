@@ -10,6 +10,7 @@
  * Settings to fix it).
  */
 
+import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { PublicServerConfig } from './types.js'
 
@@ -130,6 +131,18 @@ function header(req: IncomingMessage, name: string): string {
   return typeof value === 'string' ? value : Array.isArray(value) ? (value[0] ?? '') : ''
 }
 
+/**
+ * `a === b`, but on the time a key comparison takes rather than where the first differing byte is —
+ * a client guessing the key one byte at a time cannot use response latency to find it. Unequal
+ * lengths are rejected before `timingSafeEqual`, which throws rather than compares on those; the
+ * length itself is not the secret, so leaking it costs nothing a `===` check would not already.
+ */
+function timingSafeEqualString(a: string, b: string): boolean {
+  const bufA = Buffer.from(a)
+  const bufB = Buffer.from(b)
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB)
+}
+
 export function hostMessage(host: string): string {
   return (
     `Host '${host}' is not in Trusted Hosts. Add this server's address (e.g. its LAN IP or hostname) ` +
@@ -197,8 +210,9 @@ export function hostAndKeyGate(req: IncomingMessage, config: HostAndKeyConfig): 
   if (config.apiKey !== '') {
     // `Bearer ` is matched exactly, case included, as the proxy does.
     const auth = header(req, 'authorization')
-    const bearerOk = auth.startsWith('Bearer ') && auth.slice('Bearer '.length) === config.apiKey
-    const keyOk = header(req, 'x-api-key') === config.apiKey
+    const bearerOk =
+      auth.startsWith('Bearer ') && timingSafeEqualString(auth.slice('Bearer '.length), config.apiKey)
+    const keyOk = timingSafeEqualString(header(req, 'x-api-key'), config.apiKey)
     if (!bearerOk && !keyOk) {
       return { status: 401, headers: [], body: 'Invalid or missing authorization token', kind: 'auth' }
     }

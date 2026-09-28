@@ -1,7 +1,8 @@
 import { createServer, request as httpRequest } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
+import { networkInterfaces } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
-import { generateGatewayKey, startManagedGateway } from './gateway.js'
+import { bracketIfIpv6, generateGatewayKey, startManagedGateway } from './gateway.js'
 import type { ManagedGateway } from './gateway.js'
 
 /** A bare local HTTP server standing in for the container's engine port. */
@@ -10,13 +11,21 @@ interface FakeUpstream {
   close: () => Promise<void>
 }
 
+/** Whether this host has `::1` configured on its loopback interface (some CI sandboxes do not). */
+function ipv6LoopbackAvailable(): boolean {
+  return Object.values(networkInterfaces())
+    .flat()
+    .some((info) => info?.internal === true && info.family === 'IPv6' && info.address === '::1')
+}
+
 function startFakeUpstream(
-  handler: (req: IncomingMessage, res: ServerResponse) => void
+  handler: (req: IncomingMessage, res: ServerResponse) => void,
+  bindHost = '127.0.0.1'
 ): Promise<FakeUpstream> {
   const server: Server = createServer(handler)
   return new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, bindHost, () => {
       const address = server.address()
       const port = typeof address === 'object' && address !== null ? address.port : 0
       resolve({
@@ -98,8 +107,9 @@ describe('generateGatewayKey', () => {
 })
 
 describe('startManagedGateway', () => {
-  it('binds 127.0.0.1 on a random port distinct from the upstream', async () => {
+  it('binds on 127.0.0.1, on a random port distinct from the upstream', async () => {
     const { gw, upstream } = await setup((_req, res) => res.end('ok'))
+    expect(gw.host).toBe('127.0.0.1')
     expect(gw.port).toBeGreaterThan(0)
     expect(gw.port).not.toBe(upstream.port)
   })
@@ -108,6 +118,36 @@ describe('startManagedGateway', () => {
     await expect(
       startManagedGateway({ upstream: { host: '0.0.0.0', port: 1 }, apiKey: 'x', allowedHosts: [] })
     ).rejects.toThrow(/loopback/)
+  })
+
+  it('rejects an empty api key: it is the only auth in front of an engine that checks none', async () => {
+    const upstream = await startFakeUpstream((_req, res) => res.end('should not happen'))
+    upstreams.push(upstream)
+
+    await expect(
+      startManagedGateway({
+        upstream: { host: '127.0.0.1', port: upstream.port },
+        apiKey: '',
+        allowedHosts: [],
+      })
+    ).rejects.toThrow(/api key/)
+  })
+})
+
+describe('bracketIfIpv6', () => {
+  it.each([
+    ['127.0.0.1', '127.0.0.1'],
+    ['localhost', 'localhost'],
+    ['::1', '[::1]'],
+    ['[::1]', '[::1]'],
+  ])('%s -> %s', (input, expected) => {
+    expect(bracketIfIpv6(input)).toBe(expected)
+  })
+
+  it('produces an origin every accepted loopback spelling can build a valid URL from', () => {
+    for (const host of ['127.0.0.1', 'localhost', '::1', '[::1]']) {
+      expect(() => new URL(`http://${bracketIfIpv6(host)}:9000/v1/chat/completions`)).not.toThrow()
+    }
   })
 })
 
@@ -141,18 +181,49 @@ describe('authentication', () => {
   })
 
   it('passes an authorized request from an allowed Host through to the container', async () => {
-    const { gw, apiKey } = await setup((_req, res) => {
+    let seenAuthHeaders: IncomingMessage['headers'] | undefined
+    const { gw, apiKey } = await setup((req, res) => {
+      seenAuthHeaders = req.headers
       res.writeHead(200, { 'content-type': 'text/plain' })
       res.end('hello from the container')
     })
 
     const res = await send(gw.port, {
-      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+      headers: { 'host': '127.0.0.1', 'authorization': `Bearer ${apiKey}`, 'x-api-key': apiKey },
     })
 
     expect(res.status).toBe(200)
     expect(res.body).toBe('hello from the container')
+    // The gateway's own key is this listener's secret, not the container's: it must not leak through.
+    expect(seenAuthHeaders?.authorization).toBeUndefined()
+    expect(seenAuthHeaders?.['x-api-key']).toBeUndefined()
   })
+
+  it.skipIf(!ipv6LoopbackAvailable())(
+    'proxies successfully to an upstream given as bare `::1`, not only `127.0.0.1`',
+    async () => {
+      const upstream = await startFakeUpstream((_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('hello over ipv6')
+      }, '::1')
+      upstreams.push(upstream)
+
+      const apiKey = generateGatewayKey()
+      const gw = await startManagedGateway({
+        upstream: { host: '::1', port: upstream.port },
+        apiKey,
+        allowedHosts: [],
+      })
+      gateways.push(gw)
+
+      const res = await send(gw.port, {
+        headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+      })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toBe('hello over ipv6')
+    }
+  )
 
   it('rejects the previous generation key once the gateway has closed and a new one started', async () => {
     const upstream = await startFakeUpstream((_req, res) => res.end('ok'))
@@ -268,5 +339,43 @@ describe('streaming', () => {
     })
 
     await expect.poll(() => upstreamSawEarlyClose, { timeout: 2000 }).toBe(true)
+  })
+
+  it('closes the upstream connection when the client disconnects before any bytes come back (long prefill)', async () => {
+    let upstreamReqClosedEarly = false
+
+    const { gw, apiKey } = await setup((req, res) => {
+      // A container mid-prefill: no writeHead, no bytes, for far longer than this test waits.
+      const timer = setTimeout(() => {
+        res.writeHead(200)
+        res.end('too late')
+      }, 5000)
+      req.on('close', () => {
+        clearTimeout(timer)
+        upstreamReqClosedEarly = true
+      })
+    })
+
+    await new Promise<void>((resolve) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port: gw.port,
+        path: '/v1/chat/completions',
+        headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+      })
+      req.on('error', () => resolve())
+      req.on('socket', (socket) => {
+        socket.on('connect', () => {
+          req.end()
+          // Give the request a moment to actually reach the fake upstream before tearing it down.
+          setTimeout(() => {
+            req.destroy()
+            resolve()
+          }, 50)
+        })
+      })
+    })
+
+    await expect.poll(() => upstreamReqClosedEarly, { timeout: 2000 }).toBe(true)
   })
 })

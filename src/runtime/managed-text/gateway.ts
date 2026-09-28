@@ -31,6 +31,19 @@ import type { UpstreamResponse } from '../../server/public/index.js'
 /** Hosts accepted as "loopback" for the upstream the gateway proxies to. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 
+/** The gateway's own listener never binds anywhere else. */
+const GATEWAY_HOST = '127.0.0.1'
+
+/**
+ * `host`, bracketed when it is a bare IPv6 literal — what has to follow `http://` for `new URL` (and
+ * everything downstream of it) to parse the address instead of tripping over its colons. `::1` alone
+ * would otherwise be read as `host "::1"` with a bogus port after the last colon; `[::1]` already
+ * carries its own brackets and is left alone, as is every other accepted loopback spelling.
+ */
+export function bracketIfIpv6(host: string): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+}
+
 /** The container port the gateway proxies to. Always loopback: never a LAN or public address. */
 export interface ManagedGatewayUpstream {
   host: string
@@ -46,6 +59,8 @@ export interface ManagedGatewayOptions {
 }
 
 export interface ManagedGateway {
+  /** Always `127.0.0.1`: the gateway never binds anything else. */
+  host: string
   /** The gateway's own loopback port; this, not `upstream.port`, is what `SessionInfo.port` gets. */
   port: number
   /** Stops accepting connections and drops whatever is in flight; no drain, no deferral. */
@@ -86,7 +101,8 @@ async function proxyToUpstream(
 
   let upstreamResponse: UpstreamResponse
   try {
-    upstreamResponse = await sendUpstream(`http://${upstream.host}:${upstream.port}${req.url ?? '/'}`, {
+    const origin = `http://${bracketIfIpv6(upstream.host)}:${upstream.port}`
+    upstreamResponse = await sendUpstream(`${origin}${req.url ?? '/'}`, {
       method: req.method ?? 'GET',
       // The client's own auth headers are this gateway's secret, not the container's; they stop here.
       headers: forwardableHeaders(req, ['authorization', 'x-api-key']),
@@ -116,11 +132,29 @@ function assertLoopback(host: string): void {
 }
 
 /**
+ * `trtllm-serve` checks no key of its own — this gateway is the *only* thing standing between the
+ * container's port and anything on the machine (or, via DNS rebinding, a web page). `hostAndKeyGate`
+ * treats an empty `apiKey` as "auth disabled", which is the right default for `:1337` (a user opted
+ * out in Settings) but is never correct here: nobody can opt a managed session out of its own only
+ * guard. A caller starting one without a key is a bug, not a configuration choice, so it fails loud.
+ */
+function assertApiKeyPresent(apiKey: string): void {
+  if (apiKey === '') {
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      'Managed session gateway requires a non-empty api key: it is the only auth in front of an ' +
+        'engine that checks none of its own.'
+    )
+  }
+}
+
+/**
  * Start a gateway for one managed session: binds `127.0.0.1:0`, gates every request on the Host and
  * Bearer checks, and streams whatever passes through to `options.upstream`.
  */
 export async function startManagedGateway(options: ManagedGatewayOptions): Promise<ManagedGateway> {
   assertLoopback(options.upstream.host)
+  assertApiKeyPresent(options.apiKey)
   const gateConfig: HostAndKeyConfig = { apiKey: options.apiKey, trustedHosts: options.allowedHosts }
 
   const server: Server = createServer({ requireHostHeader: false }, (req, res) => {
@@ -137,13 +171,14 @@ export async function startManagedGateway(options: ManagedGatewayOptions): Promi
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => resolve())
+    server.listen(0, GATEWAY_HOST, () => resolve())
   })
 
   const address = server.address()
   const port = typeof address === 'object' && address !== null ? address.port : 0
 
   return {
+    host: GATEWAY_HOST,
     port,
     close: () =>
       new Promise<void>((resolve) => {

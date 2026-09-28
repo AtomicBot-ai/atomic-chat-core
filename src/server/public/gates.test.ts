@@ -50,6 +50,11 @@ describe('hostAndKeyGate', () => {
     ['trusted host, no key at all', { host: '127.0.0.1' }, 401],
     ['trusted host, wrong key', { host: '127.0.0.1', authorization: 'Bearer nope' }, 401],
     [
+      'trusted host, wrong key of the same length (exercises the timing-safe compare, not just !==)',
+      { host: '127.0.0.1', authorization: 'Bearer secreX' },
+      401,
+    ],
+    [
       'trusted host, lowercase bearer scheme rejected',
       { host: '127.0.0.1', authorization: 'bearer secret' },
       401,
