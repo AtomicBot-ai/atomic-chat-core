@@ -19,10 +19,12 @@
 
 import type { GpuFacts, LinuxDockerInstallMethod, LinuxPackageFamily } from '../../contracts/index.js'
 import {
+  cdiEnabledByDefault,
   cdiListsNvidiaGpu,
-  daemonJsonHasCdiEnabled,
+  daemonJsonFeaturesCdi,
   daemonJsonNvidiaRuntimeEvidence,
   detectDockerInstallMethod,
+  detectEngineVersion,
   parseDockerInfo,
 } from './linux-docker-facts.js'
 
@@ -78,9 +80,11 @@ export interface LinuxDistribution {
 export interface DockerGroupFacts {
   /**
    * The account is listed in the `docker` group's members. `'unknown'` when `getent` itself could
-   * not answer and this session's own groups (`id -nG`) do not already show it either — a probe
+   * not answer *and* this session's own groups (`id -nG`) do not already show it either — a probe
    * that cannot read `/etc/group` has not learned "not a member", so this must not be reported as a
-   * confident `false` (round 2, item 9).
+   * confident `false` (round 2, item 9). `getent`'s own exit `2` ("no such key": the `docker` group
+   * does not exist on this system at all) is different — that is a real, definitive answer, not a
+   * failure to read anything, so it reports `false` rather than `'unknown'` (round 3, ruling 7).
    */
   configured: boolean | 'unknown'
   /** ...and this login session already carries it (`id -nG`); a group change needs a fresh login. */
@@ -94,15 +98,26 @@ export interface DockerFacts {
   engine_identity: string | null
   version: string | null
   install_method: LinuxDockerInstallMethod | null
+  /**
+   * The installed engine package's version (`dpkg-query`'s `${Version}`, `rpm -q`'s own
+   * name-version-release string, or `pacman -Q docker`), independent of whether the daemon can be
+   * reached — used only to decide whether Docker's CDI-on-by-default (28.2+) applies when
+   * `daemon.json` does not say so explicitly (round 3, ruling 5). Null when no package database
+   * confirms a version (including for `docker-desktop`/`snap`/`podman-docker`/rootless, which this
+   * never looks at — only `docker-ce`/`docker.io`/`moby-engine`).
+   */
+  engine_version: string | null
   /** A runtime named `nvidia`, or an NVIDIA CDI spec: either can carry `--gpus`. Only meaningful
    *  when `daemon_reachable` — otherwise this is `false` because there was no answer, not because
    *  the runtime is missing; use `gpu_runtime_from_config` when the daemon could not be reached. */
   gpu_runtime: boolean
   /**
    * Read-only evidence the GPU runtime is configured that does not require reaching the daemon
-   * (`/etc/docker/daemon.json`'s own `runtimes.nvidia`, or `features.cdi: true` next to a listed
-   * NVIDIA CDI device — mirroring the live path's own `CDISpecDirs` requirement, round 2 item 7) —
-   * the only signal available when `daemon_reachable` is false, so a plan never reconfigures a
+   * (`/etc/docker/daemon.json`'s own `runtimes.nvidia`, or CDI counted as enabled — either
+   * `daemon.json`'s explicit `features.cdi: true`, or Docker's own 28.2+ default when
+   * `engine_version` is known and `daemon.json` does not say `false` (round 3, ruling 5) — next to a
+   * listed NVIDIA CDI device, mirroring the live path's own `CDISpecDirs` requirement, round 2 item
+   * 7) — the only signal available when `daemon_reachable` is false, so a plan never reconfigures a
    * runtime it has no real evidence about (item 3).
    */
   gpu_runtime_from_config: boolean
@@ -228,10 +243,14 @@ export function parseNvidiaSmi(output: CommandOutput | null): {
 
 /**
  * Parses `docker` from `id -nG` (this session's groups) and `getent group docker` (its members).
- * When `getent` itself failed or is not on the machine, `effective` (this session's own groups,
- * always a real answer) is still trusted; only `configured` falls back to `'unknown'` rather than a
- * confident `false` — this session already showing `docker` in `id -nG` is proof enough of
- * membership even without `getent`, but its absence there proves nothing on its own (round 2, item 9).
+ *
+ * `effective` (this session's own groups) is always a real answer on its own. For `configured`:
+ * `getent` exiting `2` ("no such key" — the `docker` group does not exist on this system at all) is
+ * itself a real, definitive answer, so that reads as `false`, not `'unknown'` (round 3, ruling 7).
+ * Any other failure (a different exit code, or the binary not being on the machine) proves nothing
+ * either way, so it falls back to `'unknown'` unless `effective` already confirmed membership on its
+ * own — this session already showing `docker` in `id -nG` needs no corroboration from `getent`
+ * (round 2, item 9).
  */
 export function parseDockerGroup(
   sessionGroups: CommandOutput | null,
@@ -240,6 +259,9 @@ export function parseDockerGroup(
 ): DockerGroupFacts {
   const effective =
     sessionGroups !== null && sessionGroups.code === 0 && sessionGroups.stdout.split(/\s+/).includes('docker')
+  if (groupEntry !== null && groupEntry.code === 2) {
+    return { configured: effective, effective }
+  }
   if (groupEntry === null || groupEntry.code !== 0) {
     return { configured: effective ? true : 'unknown', effective }
   }
@@ -291,6 +313,26 @@ export async function nearestExistingAncestor(
 }
 
 /**
+ * `readFile` collapses "does not exist" (`ENOENT`) and every other failure (`EACCES` on a `0600`
+ * file, a directory where a file was expected, ...) into the same `null` when a caller blanket-
+ * catches it — which is correct for `/etc/os-release` (never expected to be permission-restricted)
+ * but wrong for `/etc/docker/daemon.json`, which a hardened host may deliberately lock down. This
+ * distinguishes them: `{ text: null, unreadable: false }` only for a `readFile` that itself resolved
+ * `null` (this repo's convention for "not there"); a `readFile` that *rejects* is a real read error,
+ * reported as `{ text: null, unreadable: true }` rather than silently folded into "not configured"
+ * (round 3, item 2).
+ */
+async function readDaemonJson(
+  readFile: LinuxProbeDeps['readFile']
+): Promise<{ text: string | null; unreadable: boolean }> {
+  try {
+    return { text: await readFile('/etc/docker/daemon.json'), unreadable: false }
+  } catch {
+    return { text: null, unreadable: true }
+  }
+}
+
+/**
  * Read the machine. Every command here is read-only; none of them installs, starts, enables or
  * pulls anything.
  */
@@ -309,12 +351,13 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     cdiList,
     dpkgQuery,
     rpmQuery,
+    pacmanQuery,
     snapList,
     immutableOs,
     sessionGroups,
     groupEntry,
     serviceActive,
-    daemonJson,
+    daemonJsonRead,
   ] = await Promise.all([
     deps.exec('uname', ['-m']),
     deps.exec('nvidia-smi', [
@@ -329,10 +372,12 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     deps.exec('docker', ['-H', DOCKER_SOCKET, 'info', '--format', '{{json .}}'], STRIP_DOCKER_ENV),
     deps.exec('nvidia-ctk', ['--version']),
     deps.exec('nvidia-ctk', ['cdi', 'list']),
+    // `${Version}` (round 3, ruling 5) feeds `detectEngineVersion`; install-method detection itself
+    // only ever reads the first two columns (`installedDpkgPackages`).
     deps.exec('dpkg-query', [
       '-W',
       '-f',
-      '${db:Status-Abbrev} ${Package}\n',
+      '${db:Status-Abbrev} ${Package} ${Version}\n',
       'docker-ce',
       'docker.io',
       'moby-engine',
@@ -340,12 +385,15 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       'docker-desktop',
     ]),
     deps.exec('rpm', ['-q', 'docker-ce', 'docker.io', 'moby-engine', 'podman-docker', 'docker-desktop']),
+    // Read-only query; Arch's own `docker` package is not one `dpkg-query`/`rpm -q` ever see, and
+    // this is also `engine_version`'s only source there (round 3, item 1/ruling 5).
+    deps.exec('pacman', ['-Q', 'docker']),
     deps.exec('snap', ['list', 'docker']),
     deps.pathExists('/run/ostree-booted').catch(() => false),
     deps.exec('id', ['-nG']),
     deps.exec('getent', ['group', 'docker']),
     deps.exec('systemctl', ['is-active', 'docker']),
-    deps.readFile('/etc/docker/daemon.json').catch(() => null),
+    readDaemonJson(deps.readFile),
   ])
 
   if (unameM.code !== 0) unknown.push('architecture')
@@ -367,10 +415,12 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     rootlessSocketPresent,
     serviceActiveParsed
   )
+  const engineVersion = detectEngineVersion(dpkgQuery, rpmQuery, pacmanQuery)
 
-  const daemonJsonEvidence = daemonJsonNvidiaRuntimeEvidence(daemonJson)
+  const daemonJsonEvidence = daemonJsonNvidiaRuntimeEvidence(daemonJsonRead)
+  const cdiEnabled = cdiEnabledByDefault(engineVersion, daemonJsonFeaturesCdi(daemonJsonRead))
   const gpuRuntimeFromConfig =
-    daemonJsonEvidence === 'configured' || (daemonJsonHasCdiEnabled(daemonJson) && cdiListsNvidiaGpu(cdiList))
+    daemonJsonEvidence === 'configured' || (cdiEnabled && cdiListsNvidiaGpu(cdiList))
 
   // Before anything is installed there is no DockerRootDir yet; check the nearest ancestor that
   // does exist instead of failing outright on a path that is not there yet (item 7).
@@ -391,6 +441,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       engine_identity: info.engine_identity,
       version: info.version,
       install_method: installMethod,
+      engine_version: engineVersion,
       gpu_runtime: info.gpu_runtime,
       gpu_runtime_from_config: gpuRuntimeFromConfig,
       daemon_json_unreadable: daemonJsonEvidence === 'unreadable',

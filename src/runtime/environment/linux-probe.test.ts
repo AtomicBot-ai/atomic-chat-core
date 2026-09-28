@@ -128,13 +128,27 @@ describe('reading the machine', () => {
       configured: 'unknown',
       effective: false,
     })
-    expect(parseDockerGroup(ok('u sudo'), failed('getent: not found'), 'u')).toEqual({
+    expect(parseDockerGroup(ok('u sudo'), failed('getent: invalid argument', 1), 'u')).toEqual({
       configured: 'unknown',
       effective: false,
     })
     // This session's own groups are a real answer on their own: 'docker' showing there proves
     // membership even without getent confirming it independently.
     expect(parseDockerGroup(ok('u docker sudo'), missing(), 'u')).toEqual({
+      configured: true,
+      effective: true,
+    })
+  })
+
+  it('reads getent exit 2 ("no such key") as a definitive false, not unknown (round 3, ruling 7)', () => {
+    // The docker group does not exist on this system at all — a real answer, not a failure to read one.
+    expect(parseDockerGroup(ok('u sudo'), failed('getent: docker: no such key', 2), 'u')).toEqual({
+      configured: false,
+      effective: false,
+    })
+    // A contradictory machine (session already shows it despite getent disagreeing) trusts the
+    // session's own, always-real answer.
+    expect(parseDockerGroup(ok('u docker sudo'), failed('getent: docker: no such key', 2), 'u')).toEqual({
       configured: true,
       effective: true,
     })
@@ -307,6 +321,57 @@ describe('reading the machine', () => {
     expect(configured.docker.daemon_json_unreadable).toBe(false)
     // features.cdi: true, plus nvidia-ctk cdi list showing a device: counts as configured.
     expect(configured.docker.gpu_runtime_from_config).toBe(true)
+  })
+
+  it('reads a daemon.json read error (readFile rejecting, e.g. EACCES) as unreadable, not as absent (round 3, item 2)', async () => {
+    const deps: LinuxProbeDeps = {
+      exec: async (command, args) => {
+        if (command === 'uname') return ok('x86_64\n')
+        if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
+        if (command === 'docker') return failed('Cannot connect to the Docker daemon')
+        return missing()
+      },
+      readFile: async (path) => {
+        if (path === '/etc/os-release') return 'ID=ubuntu\nVERSION_ID="24.04"\n'
+        if (path === '/etc/docker/daemon.json') throw new Error('EACCES: permission denied')
+        return null
+      },
+      pathExists: async () => true,
+      freeDiskBytes: async () => 200_000_000_000,
+    }
+    const probed = await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
+    expect(probed.docker.daemon_json_unreadable).toBe(true)
+    expect(probed.docker.gpu_runtime_from_config).toBe(false)
+
+    // Contrast: a daemon.json that genuinely does not exist (readFile resolving null) is a real
+    // "not configured" fact, not an unreadable one — probeLinux must not conflate the two.
+    const absent = await probeLinux(
+      {
+        ...deps,
+        readFile: async (path) => (path === '/etc/os-release' ? 'ID=ubuntu\nVERSION_ID="24.04"\n' : null),
+      },
+      { user: 'u', xdgRuntimeDir: null }
+    )
+    expect(absent.docker.daemon_json_unreadable).toBe(false)
+  })
+
+  it('reads the installed engine version from whichever package manager answers, end to end (round 3, ruling 5)', async () => {
+    const deps: LinuxProbeDeps = {
+      exec: async (command, args) => {
+        if (command === 'uname') return ok('x86_64\n')
+        if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.2.0')
+        if (command === 'docker') return failed('Cannot connect to the Docker daemon')
+        if (command === 'dpkg-query') return ok('ii  docker-ce 5:28.2.0-1~ubuntu.24.04~noble\n')
+        return missing()
+      },
+      readFile: async (path) => (path === '/etc/os-release' ? 'ID=ubuntu\nVERSION_ID="24.04"\n' : null),
+      pathExists: async () => true,
+      freeDiskBytes: async () => 200_000_000_000,
+    }
+    const probed = await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
+    expect(probed.docker.engine_version).toBe('28.2.0')
+    // 28.2+, daemon.json silent: CDI counts as enabled by Docker's own default, so a listed CDI
+    // device is enough evidence, with no explicit features.cdi needed.
   })
 
   it('checks free space at DockerRootDir once Docker answers, and at the nearest existing ancestor before it does', async () => {

@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
   DOCKER_PACKAGE_CANDIDATES,
+  cdiEnabledByDefault,
   cdiListsNvidiaGpu,
-  daemonJsonHasCdiEnabled,
+  daemonJsonFeaturesCdi,
   daemonJsonNvidiaRuntimeEvidence,
   detectDockerInstallMethod,
+  detectEngineVersion,
+  dpkgEngineVersion,
+  pacmanEngineVersion,
+  rpmEngineVersion,
   installedDpkgPackages,
   installedRpmPackages,
   parseDockerInfo,
@@ -15,6 +20,13 @@ import type { CommandOutput } from './linux-probe.js'
 const ok = (stdout: string): CommandOutput => ({ code: 0, stdout, stderr: '' })
 const missing = (): CommandOutput => ({ code: null, stdout: '', stderr: '' })
 const failed = (stderr: string): CommandOutput => ({ code: 1, stdout: '', stderr })
+
+/** `readDaemonJson`'s own result shape — `unreadable: true` only for a real read error (item 2). */
+const read = (text: string | null): { text: string | null; unreadable: boolean } => ({
+  text,
+  unreadable: false,
+})
+const unreadableFile = (): { text: string | null; unreadable: boolean } => ({ text: null, unreadable: true })
 
 const info = (over: Record<string, unknown> = {}): string =>
   JSON.stringify({
@@ -130,23 +142,35 @@ describe('offline GPU-runtime evidence (item 3)', () => {
   it('reads /etc/docker/daemon.json for a configured nvidia runtime, three ways (round 2, item 6)', () => {
     expect(
       daemonJsonNvidiaRuntimeEvidence(
-        JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } })
+        read(JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }))
       )
     ).toBe('configured')
-    expect(daemonJsonNvidiaRuntimeEvidence(JSON.stringify({ runtimes: { runc: {} } }))).toBe('not-configured')
+    expect(daemonJsonNvidiaRuntimeEvidence(read(JSON.stringify({ runtimes: { runc: {} } })))).toBe(
+      'not-configured'
+    )
     // No file at all is a real fact: nothing is configured yet.
-    expect(daemonJsonNvidiaRuntimeEvidence(null)).toBe('not-configured')
+    expect(daemonJsonNvidiaRuntimeEvidence(read(null))).toBe('not-configured')
     // A file that exists but will not parse is not the same as one that says "no": this probe does
     // not know, and must not guess.
-    expect(daemonJsonNvidiaRuntimeEvidence('not json')).toBe('unreadable')
+    expect(daemonJsonNvidiaRuntimeEvidence(read('not json'))).toBe('unreadable')
   })
 
-  it('reads features.cdi from daemon.json as the offline mirror of the live CDISpecDirs check (item 7)', () => {
-    expect(daemonJsonHasCdiEnabled(JSON.stringify({ features: { cdi: true } }))).toBe(true)
-    expect(daemonJsonHasCdiEnabled(JSON.stringify({ features: { cdi: false } }))).toBe(false)
-    expect(daemonJsonHasCdiEnabled(JSON.stringify({}))).toBe(false)
-    expect(daemonJsonHasCdiEnabled(null)).toBe(false)
-    expect(daemonJsonHasCdiEnabled('not json')).toBe(false)
+  it('reads a genuine read error (EACCES) as unreadable, never as "not configured" (round 3, item 2)', () => {
+    // A file that does not exist (readFile resolving null) is a real "not configured" fact...
+    expect(daemonJsonNvidiaRuntimeEvidence(read(null))).toBe('not-configured')
+    // ...but a file that exists and could not be read at all (readFile rejecting, e.g. EACCES on a
+    // 0600 file) must not collapse into the same answer — that would plan nvidia-ctk runtime
+    // configure against a file this probe was never able to look at.
+    expect(daemonJsonNvidiaRuntimeEvidence(unreadableFile())).toBe('unreadable')
+  })
+
+  it('reads features.cdi from daemon.json, three-way (round 2 item 7; round 3 ruling 5)', () => {
+    expect(daemonJsonFeaturesCdi(read(JSON.stringify({ features: { cdi: true } })))).toBe(true)
+    expect(daemonJsonFeaturesCdi(read(JSON.stringify({ features: { cdi: false } })))).toBe(false)
+    expect(daemonJsonFeaturesCdi(read(JSON.stringify({})))).toBeUndefined()
+    expect(daemonJsonFeaturesCdi(read(null))).toBeUndefined()
+    expect(daemonJsonFeaturesCdi(read('not json'))).toBeUndefined()
+    expect(daemonJsonFeaturesCdi(unreadableFile())).toBeUndefined()
   })
 
   it('reads nvidia-ctk cdi list the same way parseDockerInfo does', () => {
@@ -154,6 +178,54 @@ describe('offline GPU-runtime evidence (item 3)', () => {
     expect(cdiListsNvidiaGpu(ok('INFO[0000] Found 0 CDI devices\n'))).toBe(false)
     expect(cdiListsNvidiaGpu(null)).toBe(false)
     expect(cdiListsNvidiaGpu(failed('not found'))).toBe(false)
+  })
+})
+
+describe('engine version and the CDI-on-by-default rule (round 3, ruling 5)', () => {
+  it("reads the engine version from dpkg-query's trailing ${Version} column, for a recognised engine package only", () => {
+    expect(dpkgEngineVersion(ok('ii  docker-ce 5:28.3.0-1~ubuntu.24.04~noble\n'))).toBe('28.3.0')
+    expect(dpkgEngineVersion(ok('ii  moby-engine 27.1.1-1\n'))).toBe('27.1.1')
+    // docker-desktop/podman-docker are not "the engine" for this purpose.
+    expect(dpkgEngineVersion(ok('ii  docker-desktop 4.34.0\n'))).toBeNull()
+    expect(dpkgEngineVersion(missing())).toBeNull()
+  })
+
+  it("reads the engine version from rpm -q's name-version-release line", () => {
+    expect(rpmEngineVersion(ok('docker-ce-3:28.3.0-1.fc41.x86_64'))).toBe('28.3.0')
+    expect(rpmEngineVersion(ok('moby-engine-27.1.1-1.fc43.x86_64'))).toBe('27.1.1')
+    expect(rpmEngineVersion(ok('package docker-ce is not installed'))).toBeNull()
+    expect(rpmEngineVersion(missing())).toBeNull()
+  })
+
+  it('reads the engine version from pacman -Q docker (Arch has no docker-ce/moby-engine/docker.io package)', () => {
+    expect(pacmanEngineVersion(ok('docker 28.2.0-1\n'))).toBe('28.2.0')
+    expect(pacmanEngineVersion(failed("error: package 'docker' was not found"))).toBeNull()
+    expect(pacmanEngineVersion(missing())).toBeNull()
+  })
+
+  it('detectEngineVersion tries dpkg, then rpm, then pacman', () => {
+    expect(detectEngineVersion(ok('ii  docker-ce 28.3.0-1\n'), missing(), missing())).toBe('28.3.0')
+    expect(detectEngineVersion(missing(), ok('moby-engine-27.1.1-1.fc43.x86_64'), missing())).toBe('27.1.1')
+    expect(detectEngineVersion(missing(), missing(), ok('docker 28.2.0-1\n'))).toBe('28.2.0')
+    expect(detectEngineVersion(missing(), missing(), missing())).toBeNull()
+  })
+
+  it("counts CDI as Docker's own default once the known engine version is 28.2 or newer", () => {
+    // 28.1: below the default-on threshold, daemon.json says nothing — not enabled.
+    expect(cdiEnabledByDefault('28.1.0', undefined)).toBe(false)
+    // 28.2: exactly the threshold — enabled by Docker's own default.
+    expect(cdiEnabledByDefault('28.2.0', undefined)).toBe(true)
+    // Newer still: also enabled.
+    expect(cdiEnabledByDefault('28.3.1', undefined)).toBe(true)
+    // Unknown version: keep requiring the explicit daemon.json setting rather than assuming recent.
+    expect(cdiEnabledByDefault(null, undefined)).toBe(false)
+  })
+
+  it('an explicit daemon.json features.cdi always wins over the version default', () => {
+    // Old engine, but daemon.json explicitly turns CDI on.
+    expect(cdiEnabledByDefault('27.1.1', true)).toBe(true)
+    // New engine, but daemon.json explicitly turns CDI off — the opt-out is not overridden.
+    expect(cdiEnabledByDefault('28.3.0', false)).toBe(false)
   })
 })
 

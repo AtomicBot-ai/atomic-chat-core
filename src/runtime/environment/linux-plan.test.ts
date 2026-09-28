@@ -6,7 +6,8 @@
  * item 1, a `VERSION_ID`-less Arch, or round 2's item 1, a docker CLI that exits 0 on a failed call)
  * that a test built from a hand-written `LinuxFacts` object would never see. Every test in this file
  * goes through the real probe this way, including the ones in the last `describe` block below —
- * there is no hand-built-`LinuxFacts` shortcut left anywhere in it (round 2, item 12).
+ * there is no hand-built-`LinuxFacts` shortcut left anywhere in it (round 2, item 12; round 3 adds
+ * one more `describe` block at the bottom, same rule).
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -85,14 +86,32 @@ interface Machine {
   cdiList?: CommandOutput
   dpkgQuery?: CommandOutput
   rpmQuery?: CommandOutput
+  pacmanQuery?: CommandOutput
   snapList?: CommandOutput
   idNG?: CommandOutput
   getentGroup?: CommandOutput
   systemctlIsActive?: CommandOutput
   ostreeBooted?: boolean
   daemonJson?: string | null
+  /** Simulates `readFile` rejecting (e.g. `EACCES` on a `0600` daemon.json) rather than resolving
+   *  `null` — the "genuinely unreadable" case `daemonJson: null` cannot express (round 3, item 2). */
+  daemonJsonUnreadable?: boolean
   freeDiskBytesByPath?: Record<string, number>
   pathMissing?: Set<string>
+}
+
+/**
+ * A docker CLI ≥28.3 unreachable call: a non-zero exit, but still a fully-templated JSON document on
+ * stdout (the 28.3 fix was the exit code, not suppressing the template output) — round 3, item 3.
+ * `parseDockerInfo` already ignores stdout whenever `code !== 0`, so this is realism, not a behavior
+ * change; kept as the default so every scenario that does not care about the exact shape still uses
+ * a realistic one.
+ */
+const UNREACHABLE_28_3: CommandOutput = {
+  code: 1,
+  stdout: readLinuxProbeFixture('docker-info/unreachable-28-3-exit1.json'),
+  stderr:
+    'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock',
 }
 
 function depsFor(machine: Machine): LinuxProbeDeps {
@@ -102,20 +121,14 @@ function depsFor(machine: Machine): LinuxProbeDeps {
       return machine.nvidiaSmi ?? ok(readLinuxProbeFixture('nvidia-smi/rtx4070-driver590.csv'))
     }
     if (command === 'docker' && args.includes('--version')) return machine.dockerVersion ?? missing()
-    if (command === 'docker') {
-      return (
-        machine.dockerInfo ??
-        failed(
-          'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?'
-        )
-      )
-    }
+    if (command === 'docker') return machine.dockerInfo ?? UNREACHABLE_28_3
     if (command === 'nvidia-ctk' && args.includes('cdi')) {
       return machine.cdiList ?? ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-empty.txt'))
     }
     if (command === 'nvidia-ctk') return machine.nvidiaCtkVersion ?? missing()
     if (command === 'dpkg-query') return machine.dpkgQuery ?? missing()
     if (command === 'rpm') return machine.rpmQuery ?? missing()
+    if (command === 'pacman') return machine.pacmanQuery ?? missing()
     if (command === 'snap') return machine.snapList ?? failed('error: no matching snaps installed')
     if (command === 'id') return machine.idNG ?? ok(`${machine.user ?? 'ana'} sudo\n`)
     if (command === 'getent') return machine.getentGroup ?? { code: 2, stdout: '', stderr: '' }
@@ -131,7 +144,10 @@ function depsFor(machine: Machine): LinuxProbeDeps {
           ? readLinuxProbeFixture('os-release/ubuntu-24.04.txt')
           : machine.osRelease
       }
-      if (path === '/etc/docker/daemon.json') return machine.daemonJson ?? null
+      if (path === '/etc/docker/daemon.json') {
+        if (machine.daemonJsonUnreadable === true) throw new Error('EACCES: permission denied')
+        return machine.daemonJson ?? null
+      }
       return null
     },
     pathExists: async (path) => {
@@ -200,9 +216,10 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     expect(assessment.availability).toBe('setup-required')
     expect(assessment.adopts_existing_engine).toBe(true)
     expect(assessment.blockers).toEqual([])
-    // root is not a member of the docker group at all, getent could not even confirm that, and it
-    // does not matter either way: root's access is never decided by group membership (round 2, item 9).
-    expect(facts.docker_group.configured).toBe('unknown')
+    // getent exit 2 ("no such key") is a real, definitive answer (round 3, ruling 7): the docker
+    // group does not exist at all — root is not a member, and it does not matter either way: root's
+    // access is never decided by group membership (round 2, item 9).
+    expect(facts.docker_group.configured).toBe(false)
   })
 
   it('a refused socket, group never configured, everything else ready: plans only the group add (items 2/3/5)', async () => {
@@ -226,7 +243,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     expect(assessment.install_plan?.may_require_relogin).toBe(true)
   })
 
-  it('a refused socket, group configured but not effective, toolkit missing: never hides the missing toolkit behind a relogin wait (round 2, item 5)', async () => {
+  it('a refused socket, group never configured, toolkit missing: never hides the missing toolkit behind a relogin wait (round 2, item 5)', async () => {
     const { assessment } = await run({
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: failed(
@@ -234,8 +251,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       ),
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       systemctlIsActive: ok('active\n'),
-      getentGroup: ok('docker:x:999:ana\n'),
-      idNG: ok('ana sudo\n'), // this session's own groups do not have it yet
+      getentGroup: { code: 2, stdout: '', stderr: '' }, // definitively not configured (ruling 7)
       // nvidiaCtkVersion left missing(): the toolkit is not installed. The old access-only branch
       // used to short-circuit here on daemon-unreachable + service-active alone and never mention
       // this at all — now it only takes that shortcut once every other signal is also ready.
@@ -247,24 +263,26 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     ).toBe('nvidia-container-toolkit')
   })
 
-  it('a refused socket, group already configured and effective, everything else ready: relogin only, no elevation, no runtime change (item 2/3)', async () => {
+  it('a refused socket, group configured but not effective: relogin-required blocker, regardless of anything else missing (round 3, ruling 4)', async () => {
     const { facts, assessment } = await run({
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: failed(
         'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock'
       ),
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
-      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
       systemctlIsActive: ok('active\n'),
       getentGroup: ok('docker:x:999:ana\n'),
       idNG: ok('ana sudo\n'), // this session's own groups do not have it yet
-      daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
+      // nvidiaCtkVersion left missing() deliberately: ruling 4 fires on group effectiveness alone,
+      // before toolkit/runtime evidence is even considered — a relogin is either the whole fix or
+      // provably not (docker-access-unexplained), and either way nothing here can be elevated this
+      // session regardless of what else might also be missing.
     })
     expect(facts.docker_group).toEqual({ configured: true, effective: false })
-    expect(assessment.availability).toBe('setup-required')
-    expect(assessment.install_plan?.system_changes).toEqual([])
-    expect(assessment.install_plan?.requires_elevation).toBe(false)
-    expect(assessment.install_plan?.may_require_relogin).toBe(true)
+    expect(assessment.availability).toBe('prerequisite-blocked')
+    expect(assessment.blockers[0]?.reason).toBe('relogin-required')
+    expect(assessment.blockers[0]?.commands).toEqual([])
+    expect(assessment.install_plan).toBeNull()
   })
 
   it('a refused socket, group already configured AND effective, everything else ready: unexplained, not an endless relogin (round 2, item 2)', async () => {
@@ -303,12 +321,13 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     expect(assessment.availability).toBe('prerequisite-blocked')
     expect(assessment.install_plan).toBeNull()
     expect(assessment.blockers[0]?.reason).toBe('arch-manual-install')
+    // The probed account, never the literal $USER (round 3, ruling 8).
     expect(assessment.blockers[0]?.commands).toEqual([
       'sudo pacman -Syu --needed docker nvidia-container-toolkit',
       'sudo nvidia-ctk runtime configure --runtime=docker',
       'sudo systemctl restart docker',
       'sudo systemctl enable --now docker',
-      'sudo usermod -aG docker $USER',
+      'sudo usermod -aG docker ana',
     ])
   })
 
@@ -592,7 +611,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
     expect(assessment.blockers).toEqual([])
   })
 
-  it('Arch in group-not-session never gets an elevated plan either, even with everything else ready (round 2, item 5)', async () => {
+  it("Arch, ready except this session's group membership: a targeted usermod blocker, not the full arch-manual-install wall of text (round 3, item 1/ruling 1)", async () => {
     const { facts, assessment } = await run({
       osRelease: readLinuxProbeFixture('os-release/arch.txt'),
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
@@ -601,24 +620,42 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
       rpmQuery: missing(),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
       systemctlIsActive: ok('active\n'),
-      getentGroup: { code: 2, stdout: '', stderr: '' },
+      getentGroup: { code: 2, stdout: '', stderr: '' }, // "no such key": not configured (ruling 7)
       daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
     })
-    // Arch's own docker package is not one of DOCKER_PACKAGE_CANDIDATES (there is exactly one
-    // common source there, so nothing to disambiguate against docker-ce/moby-engine/docker.io the
-    // way Debian/Fedora need); `install_method` is therefore always null on a real Arch host, which
-    // keeps `readyExceptAccess` from ever triggering there. Arch falls straight through to the
-    // existing full `arch-manual-install` blocker (which already includes the group-add command)
-    // instead of the more targeted `docker-group-manual` one — safe, if less tailored than the
-    // qualified-distribution case below. Documented rather than special-cased: teaching
-    // `detectDockerInstallMethod` about Arch's package name would need it to take the distribution,
-    // which it does not today.
+    // Arch's own docker package is not one of DOCKER_PACKAGE_CANDIDATES — dpkg-query/rpm -q never
+    // see it — so `install_method` stays null; `dockerInstallRecognised` (linux-plan.ts) accepts
+    // `family === 'pacman' && docker.cli` as recognition instead, which is what lets this reach
+    // `readyExceptAccess` at all (round 2's regression: this used to fall through to the full
+    // `arch-manual-install` blocker even though nothing but group access was actually missing).
     expect(facts.docker.install_method).toBeNull()
     expect(assessment.availability).toBe('prerequisite-blocked')
-    expect(assessment.blockers[0]?.reason).toBe('arch-manual-install')
+    expect(assessment.blockers[0]?.reason).toBe('docker-group-manual')
+    expect(assessment.blockers[0]?.commands).toEqual(['sudo usermod -aG docker ana'])
+    expect(assessment.install_plan).toBeNull()
   })
 
-  it("Silverblue, ready except this session's group membership: usermod blocker, no layering plan (round 2, item 5)", async () => {
+  it('Arch, root, Docker genuinely absent: the manual commands omit usermod entirely (round 3, ruling 8)', async () => {
+    const { assessment } = await run(
+      {
+        user: 'root',
+        osRelease: readLinuxProbeFixture('os-release/arch.txt'),
+        idNG: ok('root\n'),
+        getentGroup: { code: 2, stdout: '', stderr: '' },
+      },
+      { currentUser: 'root' }
+    )
+    expect(assessment.blockers[0]?.reason).toBe('arch-manual-install')
+    expect(assessment.blockers[0]?.commands).toEqual([
+      'sudo pacman -Syu --needed docker nvidia-container-toolkit',
+      'sudo nvidia-ctk runtime configure --runtime=docker',
+      'sudo systemctl restart docker',
+      'sudo systemctl enable --now docker',
+    ])
+    expect(assessment.blockers[0]?.commands?.some((c) => c.includes('usermod'))).toBe(false)
+  })
+
+  it("Silverblue, ready except this session's group membership: copies the group line first, then usermod (round 3, ruling 6)", async () => {
     const { assessment } = await run({
       osRelease: readLinuxProbeFixture('os-release/fedora-silverblue-43.txt'),
       ostreeBooted: true,
@@ -632,7 +669,12 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
     })
     expect(assessment.availability).toBe('prerequisite-blocked')
     expect(assessment.blockers[0]?.reason).toBe('docker-group-manual')
-    expect(assessment.blockers[0]?.commands).toEqual(['sudo usermod -aG docker ana'])
+    // rpm-ostree's package layering puts the docker group in /usr/lib/group, which /etc/group does
+    // not automatically inherit — usermod alone would fail with "group 'docker' does not exist".
+    expect(assessment.blockers[0]?.commands).toEqual([
+      "grep -E '^docker:' /usr/lib/group | sudo tee -a /etc/group",
+      'sudo usermod -aG docker ana',
+    ])
     expect(assessment.install_plan).toBeNull()
   })
 
@@ -714,6 +756,118 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
     expect(assessment.blockers[0]?.reason).toBe('docker-access-unexplained')
     expect(assessment.blockers.every((b) => b.reason !== 'docker-group-manual')).toBe(true)
     expect(assessment.install_plan).toBeNull()
+  })
+})
+
+describe('review-round fixes (task 2.4 fix round 3)', () => {
+  // Ruling 4: configured && !effective is a relogin-required blocker, on every distribution — not
+  // conditioned on readyExceptAccess, not an install plan. Ubuntu is covered by the renamed test in
+  // the round-1/round-2 "brief scenarios" block above ("a refused socket, group configured but not
+  // effective"); Arch and Silverblue are here, since ruling 4 explicitly asks for all three.
+  it('Arch, group configured but not effective: relogin-required, not the pacman wall of text (ruling 4)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/arch.txt'),
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      dockerInfo: failed('permission denied while trying to connect to the Docker daemon socket'),
+      getentGroup: ok('docker:x:999:ana\n'),
+      idNG: ok('ana sudo\n'), // this session's own groups do not have it yet
+    })
+    expect(assessment.availability).toBe('prerequisite-blocked')
+    expect(assessment.blockers[0]?.reason).toBe('relogin-required')
+    expect(assessment.blockers[0]?.commands).toEqual([])
+    expect(assessment.install_plan).toBeNull()
+  })
+
+  it('Silverblue, group configured but not effective: relogin-required, not immutable-os or a layering plan (ruling 4)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/fedora-silverblue-43.txt'),
+      ostreeBooted: true,
+      dockerVersion: ok('Docker version 27.1.1, build 30da79c\n'),
+      dockerInfo: failed('permission denied while trying to connect to the Docker daemon socket'),
+      getentGroup: ok('docker:x:999:ana\n'),
+      idNG: ok('ana sudo\n'),
+    })
+    expect(assessment.availability).toBe('prerequisite-blocked')
+    expect(assessment.blockers[0]?.reason).toBe('relogin-required')
+    expect(assessment.install_plan).toBeNull()
+  })
+
+  // Ruling 5: Docker Engine 28.2+ turns CDI on by default; below that, or when the version cannot
+  // be determined, daemon.json's explicit features.cdi is still required.
+  it('engine 28.1 (below the CDI default threshold): a listed CDI device is not enough on its own (ruling 5)', async () => {
+    const { facts, assessment } = await run({
+      dockerVersion: ok('Docker version 28.1.1, build afdd53b\n'),
+      dpkgQuery: { code: 1, stdout: 'ii  docker-ce 28.1.1-1\n', stderr: '' },
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
+      systemctlIsActive: ok('active\n'),
+      getentGroup: { code: 2, stdout: '', stderr: '' },
+    })
+    expect(facts.docker.engine_version).toBe('28.1.1')
+    expect(facts.docker.gpu_runtime_from_config).toBe(false)
+    expect(changeCodes(assessment)).toContain('configure-nvidia-runtime')
+  })
+
+  it('engine 28.2 (at the CDI default threshold): a listed CDI device is enough, daemon.json silent (ruling 5)', async () => {
+    const { facts, assessment } = await run({
+      dockerVersion: ok('Docker version 28.2.0, build afdd53b\n'),
+      dpkgQuery: { code: 1, stdout: 'ii  docker-ce 28.2.0-1\n', stderr: '' },
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
+      systemctlIsActive: ok('active\n'),
+      getentGroup: { code: 2, stdout: '', stderr: '' },
+    })
+    expect(facts.docker.engine_version).toBe('28.2.0')
+    expect(facts.docker.gpu_runtime_from_config).toBe(true)
+    // "Ready except access": the only step left is the group add.
+    expect(changeCodes(assessment)).toEqual(['add-user-to-docker-group'])
+  })
+
+  it('engine version unknown: keeps requiring the explicit daemon.json setting rather than assuming recent (ruling 5)', async () => {
+    const { facts, assessment } = await run({
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      // install_method is recognised (so this reaches buildInstallPlan at all), but its *version*
+      // is not: the dpkg-query fixture here has no trailing ${Version} column, e.g. an older probe
+      // run's cached fixture shape — detectEngineVersion must not guess from that.
+      dpkgQuery: { code: 1, stdout: 'ii  docker-ce\n', stderr: '' },
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
+      systemctlIsActive: ok('active\n'),
+      getentGroup: { code: 2, stdout: '', stderr: '' },
+    })
+    expect(facts.docker.install_method).toBe('docker-ce')
+    expect(facts.docker.engine_version).toBeNull()
+    expect(facts.docker.gpu_runtime_from_config).toBe(false)
+    expect(changeCodes(assessment)).toContain('configure-nvidia-runtime')
+  })
+
+  // Item 2: a daemon.json EACCES read error must block, even when the daemon is directly reachable
+  // and docker info itself already says the runtime is unconfigured.
+  it('a reachable daemon whose daemon.json is unreadable (EACCES) still blocks instead of planning a blind reconfigure (item 2)', async () => {
+    const { facts, assessment } = await run({
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      dockerInfo: ok(readLinuxProbeFixture('docker-info/docker-ce-no-toolkit-3-containers.json')),
+      dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      daemonJsonUnreadable: true,
+    })
+    expect(facts.docker.daemon_reachable).toBe(true)
+    expect(facts.docker.gpu_runtime).toBe(false)
+    expect(facts.docker.daemon_json_unreadable).toBe(true)
+    expect(assessment.availability).toBe('prerequisite-blocked')
+    expect(assessment.blockers[0]?.reason).toBe('daemon-json-unreadable')
+    expect(assessment.install_plan).toBeNull()
+  })
+
+  // Item 3: a ≥28.3 unreachable docker info is realistically JSON-on-stdout + exit 1, not empty
+  // stdout — every scenario in this file already uses that shape by default (UNREACHABLE_28_3); this
+  // just pins the behavior explicitly.
+  it('a realistic ≥28.3 unreachable docker info (JSON body, exit 1) is still read as unreachable (item 3)', async () => {
+    const { facts, assessment } = await run({
+      dpkgQuery: dpkgNoneFound(),
+    })
+    expect(facts.docker.daemon_reachable).toBe(false)
+    expect(assessment.adopts_existing_engine).toBe(false)
   })
 })
 

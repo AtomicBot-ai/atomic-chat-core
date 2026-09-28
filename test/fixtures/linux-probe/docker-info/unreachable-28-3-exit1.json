@@ -1,0 +1,23 @@
+{
+  "ID": "",
+  "Containers": 0,
+  "ContainersRunning": 0,
+  "ContainersPaused": 0,
+  "ContainersStopped": 0,
+  "Images": 0,
+  "Driver": "",
+  "SystemTime": "",
+  "ServerVersion": "",
+  "OperatingSystem": "",
+  "OSType": "",
+  "Architecture": "",
+  "Name": "",
+  "DockerRootDir": "",
+  "Runtimes": null,
+  "DefaultRuntime": "",
+  "CDISpecDirs": null,
+  "SecurityOptions": null,
+  "ServerErrors": [
+    "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.51/info\": dial unix /var/run/docker.sock: connect: permission denied"
+  ]
+}

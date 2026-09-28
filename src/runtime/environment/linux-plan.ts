@@ -2,24 +2,26 @@
  * Turning `LinuxFacts` into a verdict: adopt the machine as it stands, install what is missing, or
  * explain why neither is possible before anything asks for a password (design D2).
  *
- * Five kinds of answer, and only two of them ever propose a system change:
+ * Six kinds of answer, and only two of them ever propose a system change:
  *
  * - **Adopt.** The daemon answers the current user over the system socket and already exposes a
  *   GPU runtime. Nothing is missing, so nothing is proposed — on any distribution, including ones
  *   nobody has qualified an install recipe for (spec: "Дистрибутив вне рецепта, но Docker с GPU
  *   готов"). Per controller ruling (item 11), `availability` still reads `setup-required` here —
  *   2.6 is the one that upgrades it to `supported` once the installation itself is `ready`.
- * - **Relogin only.** Everything is actually ready — Docker, the toolkit, the GPU runtime, the
- *   service — and the account is already a member of the `docker` group; this login session simply
- *   has not picked that up yet. The plan is empty: nothing to elevate, nothing to change, just a
- *   wait for the next sign-in (design D4). If the account is a member *and* this session already
- *   shows it, yet the daemon still refuses the connection, that is not a relogin problem at all —
+ * - **Relogin required.** This account is already a confirmed member of the `docker` group, but this
+ *   login session predates that — the daemon is unreachable for no other reason than a stale
+ *   session. A blocker, not an install plan, on every distribution (design D4, round 3 ruling 4):
+ *   there is nothing to elevate, nothing to change, and no recipe-tagged plan to hand back — just a
+ *   wait for the next sign-in. If the account is a member *and* this session already shows it, yet
+ *   the daemon still refuses the connection, that is not a relogin problem at all —
  *   `docker-access-unexplained` below (round 2, item 2).
- * - **Group only.** Everything else is ready, but the account is not (confirmedly) a member of the
- *   `docker` group yet. On a distribution that would otherwise qualify for an automatic install,
- *   this is a minimal plan: just the group add. Everywhere else (Arch, an immutable base, or a
- *   distribution nobody has qualified), automatic elevation is not offered even for one command —
- *   the answer is a blocker with the exact `usermod` command instead (round 2, item 5).
+ * - **Group only.** Everything else is ready (Docker, the toolkit, the GPU runtime, the service),
+ *   but the account is not (confirmedly) a member of the `docker` group yet. On a distribution that
+ *   would otherwise qualify for an automatic install, this is a minimal plan: just the group add.
+ *   Everywhere else (Arch, an immutable base, or a distribution nobody has qualified), automatic
+ *   elevation is not offered even for one command — the answer is a blocker with the exact commands
+ *   instead (round 2, item 5; round 3, ruling 6 for rpm-ostree's extra step).
  * - **Install plan.** Docker or the toolkit is missing, but this machine's distribution, version
  *   and architecture are on the descriptor's `linux.install-container-runtime` recipe. The plan
  *   lists only the packages this machine is actually missing, never a whole-system upgrade.
@@ -27,9 +29,9 @@
  *   architecture), or a Docker install this integration will not touch (snap, rootless, Docker
  *   Desktop without a system Engine, the `podman-docker` shim, or one the package database and
  *   `docker info` simply do not recognise), or an immutable base (rpm-ostree) without a working
- *   Docker already, or a `daemon.json` this probe cannot parse, or — Arch and its derivatives only —
- *   exact manual commands, because Arch has no qualified recipe and installing a single package
- *   without a full `pacman -Syu` can leave the system inconsistent (design D2).
+ *   Docker already, or a `daemon.json` this probe cannot read or parse, or — Arch and its
+ *   derivatives only — exact manual commands, because Arch has no qualified recipe and installing a
+ *   single package without a full `pacman -Syu` can leave the system inconsistent (design D2).
  *
  * Blockers that no install fixes are checked first and unconditionally: a host that happens to
  * already expose a GPU runtime is still refused if the driver is below `minimum_driver_version` or
@@ -38,7 +40,14 @@
  */
 
 import type { ManagedAvailability, RecipeDistribution } from '../../contracts/index.js'
-import { blocker, installMethodBlocker, type LinuxBlocker } from './linux-blockers.js'
+import {
+  archCommands,
+  blocker,
+  effectiveGpuRuntime,
+  groupOnlyCommands,
+  installMethodBlocker,
+  type LinuxBlocker,
+} from './linux-blockers.js'
 import type { LinuxDistribution, LinuxFacts } from './linux-probe.js'
 
 export type { LinuxBlocker, LinuxBlockerReason } from './linux-blockers.js'
@@ -116,9 +125,14 @@ export function compareDottedVersions(a: string, b: string): number {
   return 0
 }
 
-/** `docker info` when reachable, the read-only daemon.json/CDI evidence when it is not (item 3). */
-function effectiveGpuRuntime(facts: LinuxFacts): boolean {
-  return facts.docker.daemon_reachable ? facts.docker.gpu_runtime : facts.docker.gpu_runtime_from_config
+/**
+ * Whether this probe recognises *something* about how Docker got here. Arch's own `docker` package
+ * is not one `dpkg-query`/`rpm -q` ever see (round 3, item 1/ruling 1) — there is exactly one common
+ * source there, nothing to disambiguate against the way Debian/Fedora need — so `docker.cli`
+ * answering at all on a `pacman`-family host stands in for a real `install_method` match.
+ */
+function dockerInstallRecognised(facts: LinuxFacts, distribution: LinuxDistribution): boolean {
+  return facts.docker.install_method !== null || (distribution.family === 'pacman' && facts.docker.cli)
 }
 
 /** Would automatic package installation even be offered on this host, distribution questions aside? */
@@ -137,20 +151,6 @@ function distroBlocksAutoInstall(
   )
   return !qualified
 }
-
-// Arch never supports a partial `pacman -S` of just these two packages (design D2): installing a
-// package without syncing the whole system can leave it inconsistent, so the commands run a full
-// `-Syu` instead — which may itself bring in a newer kernel and NVIDIA driver, hence the reboot
-// note. `nvidia-ctk runtime configure` changes `/etc/docker/daemon.json`, so Docker is explicitly
-// restarted afterward rather than relying on `enable --now` to notice the new config on its own
-// (item 12).
-const ARCH_COMMANDS = [
-  'sudo pacman -Syu --needed docker nvidia-container-toolkit',
-  'sudo nvidia-ctk runtime configure --runtime=docker',
-  'sudo systemctl restart docker',
-  'sudo systemctl enable --now docker',
-  'sudo usermod -aG docker $USER',
-]
 
 /** Turn the facts into a verdict: usable now, installable, waiting on a relogin, or not on this machine. */
 export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions): LinuxAssessment {
@@ -243,38 +243,23 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
     return { availability: 'setup-required', adopts_existing_engine: true, install_plan: null, blockers: [] }
   }
 
-  // `distribution` is guaranteed non-null here: a null distribution already added 'distribution'
-  // to `facts.unknown`, which returned above.
-  const distribution = facts.distribution as LinuxDistribution
-
-  // Nothing but access is missing: Docker, the toolkit, the GPU runtime and the service are all
-  // there by every signal this probe has (round 2, items 2/3/5 — the previous round's access-only
-  // branch trusted `!daemon_reachable && service_active` alone, which hid a missing toolkit behind
-  // an apparently harmless "just relogin" plan, and never distinguished a session that already has
-  // the group from one that does not).
-  const readyExceptAccess =
-    facts.docker.cli &&
-    facts.toolkit_installed &&
-    facts.docker.install_method !== null &&
-    effectiveGpuRuntime(facts) &&
-    facts.docker.service_active === true &&
-    !facts.docker.daemon_reachable
-
-  if (readyExceptAccess) {
+  // Group effectiveness is a session-level fact, checked before anything distro-specific and on
+  // every distribution (round 3, ruling 4) — it overrides Arch/immutable-base/unqualified gating
+  // the same way it would on Ubuntu, because logging back in is either the whole fix or provably not
+  // the fix, regardless of what else this host is or is not qualified for.
+  if (!facts.docker.daemon_reachable) {
     if (facts.docker_group.configured === true && !facts.docker_group.effective) {
-      // The account is a member; this session just predates it. Nothing to elevate, nothing to
-      // change — only the next sign-in fixes this.
-      return {
-        availability: 'setup-required',
-        adopts_existing_engine: false,
-        install_plan: {
-          recipe_id: options.recipeId,
-          requires_elevation: false,
-          may_require_relogin: true,
-          system_changes: [],
-        },
-        blockers: [],
-      }
+      // The account is a confirmed member; this session just predates it. Never an install plan —
+      // there is nothing to elevate or change, only a wait for the next sign-in.
+      return blocked([
+        blocker(
+          'relogin-required',
+          'This account is already a member of the docker group, but this login session started ' +
+            'before that took effect. Log out and back in (or restart this session) to pick it up.',
+          undefined,
+          []
+        ),
+      ])
     }
     if (facts.docker_group.configured === true && facts.docker_group.effective) {
       // Membership is confirmed *and* this session already has it, yet the daemon still refused —
@@ -283,15 +268,36 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
         blocker(
           'docker-access-unexplained',
           'The docker group already includes this account and this login session already has it, and ' +
-            'docker.service is active, but the daemon still did not answer over the system socket. ' +
-            "Something other than group membership is blocking access — check the socket's permissions " +
-            'or an AppArmor/SELinux policy — this integration cannot fix it automatically.'
+            'the daemon still did not answer over the system socket. Something other than group ' +
+            "membership is blocking access — check the socket's permissions or an AppArmor/SELinux " +
+            'policy — this integration cannot fix it automatically.'
         ),
       ])
     }
-    // Membership is not confirmed (`false` or `'unknown'`). Root never benefits from `docker` group
-    // membership at all, so a root session landing here has the same unexplained problem as above,
-    // not a group to add (design D4, round 2 item 9).
+  }
+
+  // `distribution` is guaranteed non-null here: a null distribution already added 'distribution'
+  // to `facts.unknown`, which returned above.
+  const distribution = facts.distribution as LinuxDistribution
+
+  // Nothing but group membership is missing: Docker, the toolkit, the GPU runtime and the service
+  // are all there by every signal this probe has (round 2, items 2/3/5 — the previous round's
+  // access-only branch trusted `!daemon_reachable && service_active` alone, which hid a missing
+  // toolkit behind an apparently harmless "just relogin" plan). Group *effectiveness* is handled
+  // above already, unconditionally — everything reaching this point has `configured` `false` or
+  // `'unknown'`.
+  const readyExceptAccess =
+    facts.docker.cli &&
+    facts.toolkit_installed &&
+    dockerInstallRecognised(facts, distribution) &&
+    effectiveGpuRuntime(facts) &&
+    facts.docker.service_active === true &&
+    !facts.docker.daemon_reachable
+
+  if (readyExceptAccess) {
+    // Root never benefits from `docker` group membership at all, so a root session landing here has
+    // the same unexplained problem as the confirmed-member case above, not a group to add (design
+    // D4, round 2 item 9).
     if (options.currentUser === 'root') {
       return blocked([
         blocker(
@@ -303,15 +309,16 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
       ])
     }
     if (distroBlocksAutoInstall(facts, distribution, options)) {
-      const command = `sudo usermod -aG docker ${options.currentUser}`
+      const commands = groupOnlyCommands(facts.immutable_os, options.currentUser)
       return blocked([
         blocker(
           'docker-group-manual',
           'Everything else is ready — Docker, the toolkit and the NVIDIA runtime are all configured. ' +
             `This account just needs to join the docker group, which is not something this distribution's ` +
-            `automatic install can add for you: run \`${command}\`, then log out and back in.`,
+            `automatic install can add for you: run ${commands.map((c) => `\`${c}\``).join(', then ')}, then ` +
+            'log out and back in.',
           { user: options.currentUser },
-          [command]
+          commands
         ),
       ])
     }
@@ -349,16 +356,20 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   }
 
   if (distribution.family === 'pacman') {
+    const commands = archCommands(options.currentUser)
     return blocked([
       blocker(
         'arch-manual-install',
         "Arch and its derivatives don't support a partial package install: adding just these two " +
           'packages without a full system sync can leave the system inconsistent, so the commands ' +
           'below run a full `pacman -Syu` instead — which may itself update your kernel and NVIDIA ' +
-          'driver. Reboot afterward if it does, then log out and back in so the new docker group ' +
-          'membership takes effect. Automatic install is not offered here.',
+          'driver. Reboot afterward if it does' +
+          (options.currentUser === 'root'
+            ? '.'
+            : ', then log out and back in so the new docker group membership takes effect.') +
+          ' Automatic install is not offered here.',
         { family: 'pacman' },
-        ARCH_COMMANDS
+        commands
       ),
     ])
   }
@@ -392,16 +403,17 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
     ])
   }
 
-  // A daemon.json this probe cannot parse is not a safe target for `nvidia-ctk runtime configure`
-  // (round 2, item 6) — this only matters when the plan would actually need that step: a reachable
-  // daemon trusts `docker info` directly, and a daemon.json that parses fine either way is not this.
-  if (!facts.docker.daemon_reachable && !effectiveGpuRuntime(facts) && facts.docker.daemon_json_unreadable) {
+  // A daemon.json this probe cannot read or parse is not a safe target for `nvidia-ctk runtime
+  // configure` (round 2, item 6; round 3, item 2 broadens this past `!daemon_reachable` — a
+  // reachable daemon that already says the runtime is unconfigured is just as unsafe to reconfigure
+  // blind when the file behind that configuration cannot even be read back).
+  if (!effectiveGpuRuntime(facts) && facts.docker.daemon_json_unreadable) {
     return blocked([
       blocker(
         'daemon-json-unreadable',
-        '/etc/docker/daemon.json exists but could not be parsed as JSON, so this integration cannot tell ' +
-          'whether the NVIDIA runtime is already configured there. Fix or remove the file by hand, then ' +
-          'try again — nothing here will overwrite a file it cannot read back.'
+        '/etc/docker/daemon.json exists but could not be read or parsed, so this integration cannot tell ' +
+          "whether the NVIDIA runtime is already configured there. Fix the file's permissions or contents " +
+          'by hand, then try again — nothing here will overwrite a file it cannot read back.'
       ),
     ])
   }
