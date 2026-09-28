@@ -9,13 +9,14 @@
  *   nobody has qualified an install recipe for (spec: "Дистрибутив вне рецепта, но Docker с GPU
  *   готов"). Per controller ruling (item 11), `availability` still reads `setup-required` here —
  *   2.6 is the one that upgrades it to `supported` once the installation itself is `ready`.
- * - **Relogin required.** This account is already a confirmed member of the `docker` group, but this
- *   login session predates that — the daemon is unreachable for no other reason than a stale
- *   session. A blocker, not an install plan, on every distribution (design D4, round 3 ruling 4):
- *   there is nothing to elevate, nothing to change, and no recipe-tagged plan to hand back — just a
- *   wait for the next sign-in. If the account is a member *and* this session already shows it, yet
- *   the daemon still refuses the connection, that is not a relogin problem at all —
- *   `docker-access-unexplained` below (round 2, item 2).
+ * - **Relogin required.** This account (never root, design D4) is already a confirmed member of the
+ *   `docker` group, but this login session predates that. A `relogin-required` blocker, never an
+ *   install plan, on every distribution (round 3 ruling 4) — plus one blocker for each other
+ *   component offline evidence shows missing (CLI, toolkit, GPU runtime, service), worded for the
+ *   gate: "setup will do this after you log back in" on a recipe distribution, exact commands on
+ *   Arch, the gate's own blocker elsewhere (round 4, item 1). If the account is a member *and* this
+ *   session already shows it, yet the daemon still refuses the connection, that is not a relogin
+ *   problem at all — `docker-access-unexplained` below (round 2, item 2).
  * - **Group only.** Everything else is ready (Docker, the toolkit, the GPU runtime, the service),
  *   but the account is not (confirmedly) a member of the `docker` group yet. On a distribution that
  *   would otherwise qualify for an automatic install, this is a minimal plan: just the group add.
@@ -37,20 +38,36 @@
  * already expose a GPU runtime is still refused if the driver is below `minimum_driver_version` or
  * every card is below `minimum_compute_capability` — the spec requires that check to run "до
  * всякого согласия" (before any consent), not only on a host that still needs setup.
+ *
+ * Decision order (each step returns; nothing later can override an earlier one):
+ * 1. Universal blockers, all collected together: unread facts, architecture, driver, GPU, compute
+ *    capability, a Docker install method this integration never touches (snap, rootless, Desktop,
+ *    podman-docker), disk space.
+ * 2. Adopt, when the daemon answers and exposes a GPU runtime.
+ * 3. Access paths, daemon unreachable only: relogin (+ missing components), then
+ *    `docker-access-unexplained`, then "ready except access" (root → unexplained; gated →
+ *    `docker-group-manual`; recipe → group-only plan).
+ * 4. Distribution gating (`installGate`): immutable base, Arch, unrecognised docker, not on the recipe.
+ * 5. An unreadable `daemon.json` when the runtime is not already known to be configured.
+ * 6. The install plan.
  */
 
 import type { ManagedAvailability, RecipeDistribution } from '../../contracts/index.js'
 import {
-  archCommands,
   blocker,
+  daemonJsonUnreadableBlocker,
   effectiveGpuRuntime,
+  gateBlocker,
   groupOnlyCommands,
   installMethodBlocker,
+  missingComponentBlockers,
+  reloginRequiredBlocker,
+  type InstallGate,
   type LinuxBlocker,
 } from './linux-blockers.js'
 import type { LinuxDistribution, LinuxFacts } from './linux-probe.js'
 
-export type { LinuxBlocker, LinuxBlockerReason } from './linux-blockers.js'
+export type { InstallGate, LinuxBlocker, LinuxBlockerReason } from './linux-blockers.js'
 
 export type LinuxSystemChangeCode =
   | 'add-repository'
@@ -135,21 +152,42 @@ function dockerInstallRecognised(facts: LinuxFacts, distribution: LinuxDistribut
   return facts.docker.install_method !== null || (distribution.family === 'pacman' && facts.docker.cli)
 }
 
-/** Would automatic package installation even be offered on this host, distribution questions aside? */
-function distroBlocksAutoInstall(
+/**
+ * The one place the install gate is decided (`InstallGate` in `linux-blockers.ts` lists the order).
+ * Every path that could offer or refuse automatic setup reads this, never its own copy (round 4).
+ */
+function installGate(
   facts: LinuxFacts,
   distribution: LinuxDistribution,
   options: LinuxAssessmentOptions
-): boolean {
-  if (facts.immutable_os) return true
-  if (distribution.family === 'pacman') return true
+): InstallGate {
+  if (facts.immutable_os) return 'immutable'
+  if (distribution.family === 'pacman') return 'pacman'
+  if (facts.docker.cli && facts.docker.install_method === null) return 'unrecognised'
   const qualified = options.recipeDistributions.some(
     (entry) =>
       entry.id === distribution.id &&
       entry.version_id === distribution.version_id &&
       entry.arch === facts.architecture
   )
-  return !qualified
+  return qualified ? 'recipe' : 'unqualified'
+}
+
+/**
+ * Whether the relogin path also names the gate itself next to the missing components (round 4, item
+ * 1). Arch's per-component blockers already carry its exact commands; an immutable base only blocks
+ * on a missing package (spec: "Docker или toolkit нет"); anything else not on the recipe blocks on any
+ * missing component, exactly as the full-install path would.
+ */
+function reloginNamesGate(
+  gate: InstallGate,
+  components: LinuxBlocker[]
+): gate is Exclude<InstallGate, 'recipe'> {
+  if (components.length === 0 || gate === 'recipe' || gate === 'pacman') return false
+  if (gate === 'immutable') {
+    return components.some((c) => c.reason === 'docker-cli-missing' || c.reason === 'toolkit-missing')
+  }
+  return true
 }
 
 /** Turn the facts into a verdict: usable now, installable, waiting on a relogin, or not on this machine. */
@@ -243,25 +281,29 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
     return { availability: 'setup-required', adopts_existing_engine: true, install_plan: null, blockers: [] }
   }
 
-  // Group effectiveness is a session-level fact, checked before anything distro-specific and on
-  // every distribution (round 3, ruling 4) — it overrides Arch/immutable-base/unqualified gating
-  // the same way it would on Ubuntu, because logging back in is either the whole fix or provably not
-  // the fix, regardless of what else this host is or is not qualified for.
-  if (!facts.docker.daemon_reachable) {
-    if (facts.docker_group.configured === true && !facts.docker_group.effective) {
-      // The account is a confirmed member; this session just predates it. Never an install plan —
-      // there is nothing to elevate or change, only a wait for the next sign-in.
+  // `distribution` is guaranteed non-null here: a null distribution already added 'distribution'
+  // to `facts.unknown`, which returned above.
+  const distribution = facts.distribution as LinuxDistribution
+  const gate = installGate(facts, distribution, options)
+
+  // Access paths. Group effectiveness is a session-level fact, decided before distribution gating on
+  // every distribution (round 3, ruling 4). Root never needs the group (design D4), so a root session
+  // is never sent to relogin (round 4, item B).
+  if (!facts.docker.daemon_reachable && facts.docker_group.configured === true) {
+    if (!facts.docker_group.effective && options.currentUser !== 'root') {
+      // The account is a confirmed member; this session predates it. Never an install plan: nothing
+      // can be elevated from a session that is about to be replaced. Everything else offline evidence
+      // shows missing is named now, each as its own blocker, not discovered after the relogin
+      // (round 4, item 1 — the refined ruling 4).
+      const components = missingComponentBlockers(facts, gate)
+      const gated = reloginNamesGate(gate, components)
       return blocked([
-        blocker(
-          'relogin-required',
-          'This account is already a member of the docker group, but this login session started ' +
-            'before that took effect. Log out and back in (or restart this session) to pick it up.',
-          undefined,
-          []
-        ),
+        reloginRequiredBlocker(),
+        ...components,
+        ...(gated ? [gateBlocker(gate, facts, distribution, options.currentUser)] : []),
       ])
     }
-    if (facts.docker_group.configured === true && facts.docker_group.effective) {
+    if (facts.docker_group.effective) {
       // Membership is confirmed *and* this session already has it, yet the daemon still refused —
       // relogin will not fix that, and this probe has no further diagnosis to offer (round 2, item 2).
       return blocked([
@@ -276,16 +318,9 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
     }
   }
 
-  // `distribution` is guaranteed non-null here: a null distribution already added 'distribution'
-  // to `facts.unknown`, which returned above.
-  const distribution = facts.distribution as LinuxDistribution
-
   // Nothing but group membership is missing: Docker, the toolkit, the GPU runtime and the service
-  // are all there by every signal this probe has (round 2, items 2/3/5 — the previous round's
-  // access-only branch trusted `!daemon_reachable && service_active` alone, which hid a missing
-  // toolkit behind an apparently harmless "just relogin" plan). Group *effectiveness* is handled
-  // above already, unconditionally — everything reaching this point has `configured` `false` or
-  // `'unknown'`.
+  // are all there by every signal this probe has (round 2, items 2/3/5). Reaching here, `configured`
+  // is `false` or `'unknown'` — or root, which the relogin path above skips.
   const readyExceptAccess =
     facts.docker.cli &&
     facts.toolkit_installed &&
@@ -308,7 +343,7 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
         ),
       ])
     }
-    if (distroBlocksAutoInstall(facts, distribution, options)) {
+    if (gate !== 'recipe') {
       const commands = groupOnlyCommands(facts.immutable_os, options.currentUser)
       return blocked([
         blocker(
@@ -342,80 +377,14 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   }
 
   // Something real is missing beyond access — the toolkit, the runtime configuration, Docker
-  // itself, or the service is not even running. Every path from here goes through the same
-  // distribution gating a full install would.
-  if (facts.immutable_os) {
-    return blocked([
-      blocker(
-        'immutable-os',
-        'This system uses an immutable base (rpm-ostree — Silverblue, Kinoite, Bazzite, or similar). ' +
-          'Installing Docker here means layering a package and rebooting, which this integration does ' +
-          'not do automatically. Install docker-ce and the NVIDIA Container Toolkit yourself, then try again.'
-      ),
-    ])
-  }
-
-  if (distribution.family === 'pacman') {
-    const commands = archCommands(options.currentUser)
-    return blocked([
-      blocker(
-        'arch-manual-install',
-        "Arch and its derivatives don't support a partial package install: adding just these two " +
-          'packages without a full system sync can leave the system inconsistent, so the commands ' +
-          'below run a full `pacman -Syu` instead — which may itself update your kernel and NVIDIA ' +
-          'driver. Reboot afterward if it does' +
-          (options.currentUser === 'root'
-            ? '.'
-            : ', then log out and back in so the new docker group membership takes effect.') +
-          ' Automatic install is not offered here.',
-        { family: 'pacman' },
-        commands
-      ),
-    ])
-  }
-
-  // Something answers to `docker` here, but neither the package database nor `docker info` places
-  // it as any install this probe recognises — never lay docker-ce over an unknown quantity (item 15).
-  if (facts.docker.cli && facts.docker.install_method === null) {
-    return blocked([
-      blocker(
-        'docker-unrecognised',
-        "This machine's docker command does not match any Docker install this integration " +
-          'recognises (not docker-ce, docker.io, moby-engine, snap, rootless, Docker Desktop, or the ' +
-          'podman-docker shim). Nothing will be installed over it automatically.'
-      ),
-    ])
-  }
-
-  const qualified = options.recipeDistributions.some(
-    (entry) =>
-      entry.id === distribution.id &&
-      entry.version_id === distribution.version_id &&
-      entry.arch === facts.architecture
-  )
-  if (!qualified) {
-    return blocked([
-      blocker(
-        'distribution-not-in-recipe',
-        'Setting the runtime up automatically is only qualified on some distributions so far.',
-        { id: distribution.id, version_id: distribution.version_id, arch: facts.architecture ?? 'unknown' }
-      ),
-    ])
-  }
+  // itself, or the service is not even running. Distribution gating decides whether a plan may be
+  // offered at all: immutable base, Arch, an unrecognised docker, a distribution not on the recipe.
+  if (gate !== 'recipe') return blocked([gateBlocker(gate, facts, distribution, options.currentUser)])
 
   // A daemon.json this probe cannot read or parse is not a safe target for `nvidia-ctk runtime
-  // configure` (round 2, item 6; round 3, item 2 broadens this past `!daemon_reachable` — a
-  // reachable daemon that already says the runtime is unconfigured is just as unsafe to reconfigure
-  // blind when the file behind that configuration cannot even be read back).
+  // configure`, whether or not the daemon answered (round 2 item 6; round 3 item 2).
   if (!effectiveGpuRuntime(facts) && facts.docker.daemon_json_unreadable) {
-    return blocked([
-      blocker(
-        'daemon-json-unreadable',
-        '/etc/docker/daemon.json exists but could not be read or parsed, so this integration cannot tell ' +
-          "whether the NVIDIA runtime is already configured there. Fix the file's permissions or contents " +
-          'by hand, then try again — nothing here will overwrite a file it cannot read back.'
-      ),
-    ])
+    return blocked([daemonJsonUnreadableBlocker()])
   }
 
   return {

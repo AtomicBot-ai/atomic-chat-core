@@ -1,0 +1,23 @@
+{
+  "ID": "",
+  "Containers": 0,
+  "ContainersRunning": 0,
+  "ContainersPaused": 0,
+  "ContainersStopped": 0,
+  "Images": 0,
+  "Driver": "",
+  "SystemTime": "",
+  "ServerVersion": "",
+  "OperatingSystem": "",
+  "OSType": "",
+  "Architecture": "",
+  "Name": "",
+  "DockerRootDir": "",
+  "Runtimes": null,
+  "DefaultRuntime": "",
+  "CDISpecDirs": null,
+  "SecurityOptions": null,
+  "ServerErrors": [
+    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+  ]
+}

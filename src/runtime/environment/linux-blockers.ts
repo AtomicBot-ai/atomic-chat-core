@@ -4,10 +4,12 @@
  * is pure: a reason code, the message a person reads, and the machine-checkable specifics. A few
  * small, self-contained decision helpers moved in alongside them in round 3, for the same reason
  * (`linux-plan.ts` growing past the guidance again): `effectiveGpuRuntime` and the two exact-command
- * builders (`archCommands`, `groupOnlyCommands`) that blockers built here actually use.
+ * builders (`archCommands`, `groupOnlyCommands`) that blockers built here actually use. Round 4 moved
+ * the install-gate blockers here too (`gateBlocker`), and added the relogin path's per-component
+ * blockers (`missingComponentBlockers`).
  */
 
-import type { LinuxFacts } from './linux-probe.js'
+import type { LinuxDistribution, LinuxFacts } from './linux-probe.js'
 
 /**
  * A stable, machine-readable reason a host is blocked — for a client to switch on, or a test to
@@ -36,6 +38,11 @@ export type LinuxBlockerReason =
   | 'docker-group-manual'
   /** Group membership confirmed but this session predates it — a relogin, never an install plan, on any distro (round 3, ruling 4). */
   | 'relogin-required'
+  /** Emitted next to `relogin-required` for each other component offline evidence shows missing (round 4, item 1). */
+  | 'docker-cli-missing'
+  | 'toolkit-missing'
+  | 'gpu-runtime-not-configured'
+  | 'docker-service-inactive'
 
 /**
  * One reason a host cannot proceed. `params` carries the machine-checkable specifics (required vs.
@@ -117,7 +124,11 @@ export function effectiveGpuRuntime(facts: LinuxFacts): boolean {
 export function groupOnlyCommands(immutableOs: boolean, user: string): string[] {
   const usermod = `sudo usermod -aG docker ${user}`
   if (!immutableOs) return [usermod]
-  return [`grep -E '^docker:' /usr/lib/group | sudo tee -a /etc/group`, usermod]
+  // Idempotent (round 4, item F): run twice, it must not append a second `docker:` line.
+  return [
+    `grep -q '^docker:' /etc/group || grep -E '^docker:' /usr/lib/group | sudo tee -a /etc/group`,
+    usermod,
+  ]
 }
 
 /**
@@ -138,4 +149,149 @@ export function archCommands(user: string): string[] {
   ]
   if (user !== 'root') commands.push(`sudo usermod -aG docker ${user}`)
   return commands
+}
+
+/** Group membership confirmed, but this login session predates it (round 3, ruling 4). */
+export function reloginRequiredBlocker(): LinuxBlocker {
+  return blocker(
+    'relogin-required',
+    'This account is already a member of the docker group, but this login session started before that ' +
+      'took effect. Log out and back in (or restart this session) to pick it up.',
+    undefined,
+    []
+  )
+}
+
+/**
+ * How far automatic setup can go on this host, decided in this order: an immutable base, Arch and its
+ * derivatives, a `docker` command no package database recognises, a distribution/version/architecture
+ * not on the descriptor's recipe — or `'recipe'` when none of those applies and a plan may be offered.
+ * `assessLinux` computes it once and uses it on every path (group-only, relogin, full install), so the
+ * paths cannot drift apart (round 4).
+ */
+export type InstallGate = 'recipe' | 'immutable' | 'pacman' | 'unrecognised' | 'unqualified'
+
+/** Why automatic setup is not offered, for every gate but `'recipe'`. */
+export function gateBlocker(
+  gate: Exclude<InstallGate, 'recipe'>,
+  facts: LinuxFacts,
+  distribution: LinuxDistribution,
+  user: string
+): LinuxBlocker {
+  switch (gate) {
+    case 'immutable':
+      return blocker(
+        'immutable-os',
+        'This system uses an immutable base (rpm-ostree — Silverblue, Kinoite, Bazzite, or similar). ' +
+          'Installing Docker here means layering a package and rebooting, which this integration does ' +
+          'not do automatically. Install docker-ce and the NVIDIA Container Toolkit yourself, then try again.'
+      )
+    case 'pacman':
+      return blocker(
+        'arch-manual-install',
+        "Arch and its derivatives don't support a partial package install: adding just these two " +
+          'packages without a full system sync can leave the system inconsistent, so the commands ' +
+          'below run a full `pacman -Syu` instead — which may itself update your kernel and NVIDIA ' +
+          'driver. Reboot afterward if it does' +
+          (user === 'root'
+            ? '.'
+            : ', then log out and back in so the new docker group membership takes effect.') +
+          ' Automatic install is not offered here.',
+        { family: 'pacman' },
+        archCommands(user)
+      )
+    case 'unrecognised':
+      // Never lay docker-ce over an unknown quantity (round 1, item 15).
+      return blocker(
+        'docker-unrecognised',
+        "This machine's docker command does not match any Docker install this integration " +
+          'recognises (not docker-ce, docker.io, moby-engine, snap, rootless, Docker Desktop, or the ' +
+          'podman-docker shim). Nothing will be installed over it automatically.'
+      )
+    case 'unqualified':
+      return blocker(
+        'distribution-not-in-recipe',
+        'Setting the runtime up automatically is only qualified on some distributions so far.',
+        { id: distribution.id, version_id: distribution.version_id, arch: facts.architecture ?? 'unknown' }
+      )
+  }
+}
+
+/** Refuses to write next to a daemon.json this probe could not read or parse (round 2, item 6). */
+export function daemonJsonUnreadableBlocker(): LinuxBlocker {
+  return blocker(
+    'daemon-json-unreadable',
+    '/etc/docker/daemon.json exists but could not be read or parsed, so this integration cannot tell ' +
+      "whether the NVIDIA runtime is already configured there. Fix the file's permissions or contents " +
+      'by hand, then try again — nothing here will overwrite a file it cannot read back.'
+  )
+}
+
+const CONFIGURE_RUNTIME_COMMANDS = [
+  'sudo nvidia-ctk runtime configure --runtime=docker',
+  'sudo systemctl restart docker',
+]
+const ENABLE_SERVICE_COMMANDS = ['sudo systemctl enable --now docker']
+
+/**
+ * One blocker per component offline evidence shows missing, for a host that also has to relogin
+ * (round 4, item 1 — the refined ruling 4): the Docker CLI, the NVIDIA Container Toolkit, the GPU
+ * runtime in Docker (or `daemon-json-unreadable` when that cannot be told), and `docker.service`
+ * when `systemctl` says it is not active. An `'unknown'` service state is not evidence of anything and
+ * is not reported. Empty when the relogin alone is the fix.
+ *
+ * What each one tells the person depends on the gate: on a recipe distribution setup will do it after
+ * the relogin, so there is nothing to run by hand; on Arch each carries its exact commands (a full
+ * `pacman -Syu` for packages, design D2); anywhere else the package steps have no command this
+ * integration can vouch for (the caller adds the gate's own blocker), while the runtime and service
+ * steps are the same `nvidia-ctk`/`systemctl` commands on every distribution.
+ */
+export function missingComponentBlockers(facts: LinuxFacts, gate: InstallGate): LinuxBlocker[] {
+  const recipe = gate === 'recipe'
+  const later = (what: string): string => ` After you log back in, setup will offer to ${what}.`
+  const packageStep = (reason: LinuxBlockerReason, subject: string, pacmanPackage: string): LinuxBlocker =>
+    blocker(
+      reason,
+      `${subject} is not installed.` +
+        (recipe
+          ? later('install it')
+          : gate === 'pacman'
+            ? ' Install it with a full system sync (Arch does not support partial upgrades); reboot ' +
+              'afterward if the kernel or NVIDIA driver was updated.'
+            : ' Automatic install is not offered on this system; install it yourself.'),
+      undefined,
+      gate === 'pacman' ? [`sudo pacman -Syu --needed ${pacmanPackage}`] : []
+    )
+
+  const blockers: LinuxBlocker[] = []
+  if (!facts.docker.cli) blockers.push(packageStep('docker-cli-missing', 'Docker Engine', 'docker'))
+  if (!facts.toolkit_installed) {
+    blockers.push(packageStep('toolkit-missing', 'The NVIDIA Container Toolkit', 'nvidia-container-toolkit'))
+  }
+  if (!effectiveGpuRuntime(facts)) {
+    blockers.push(
+      facts.docker.daemon_json_unreadable
+        ? daemonJsonUnreadableBlocker()
+        : blocker(
+            'gpu-runtime-not-configured',
+            'Docker is not configured with the NVIDIA runtime. Configuring it restarts Docker, which ' +
+              'stops any running containers.' +
+              (recipe ? later('configure it') : ' Configure it yourself with the commands below.'),
+            undefined,
+            recipe ? [] : CONFIGURE_RUNTIME_COMMANDS
+          )
+    )
+  }
+  if (facts.docker.service_active === false) {
+    blockers.push(
+      blocker(
+        'docker-service-inactive',
+        'docker.service is not running.' +
+          (recipe ? later('enable and start it') : ' Enable and start it with the command below.'),
+        undefined,
+        recipe ? [] : ENABLE_SERVICE_COMMANDS
+      )
+    )
+  }
+  return blockers
 }

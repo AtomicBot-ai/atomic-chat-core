@@ -10,6 +10,7 @@ import {
   type CommandOutput,
   type LinuxProbeDeps,
 } from './linux-probe.js'
+import { DAEMON_DOWN_28_3, UNREACHABLE_28_3 } from '../../../test/helpers/linux-probe-fixtures.js'
 
 const ok = (stdout: string): CommandOutput => ({ code: 0, stdout, stderr: '' })
 const missing = (): CommandOutput => ({ code: null, stdout: '', stderr: '' })
@@ -291,7 +292,7 @@ describe('reading the machine', () => {
       exec: async (command, args) => {
         if (command === 'uname') return ok('x86_64\n')
         if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
-        if (command === 'docker') return failed('Cannot connect to the Docker daemon')
+        if (command === 'docker') return DAEMON_DOWN_28_3
         if (command === 'nvidia-ctk' && args.includes('cdi')) return ok('nvidia.com/gpu=all\n')
         return missing()
       },
@@ -323,12 +324,18 @@ describe('reading the machine', () => {
     expect(configured.docker.gpu_runtime_from_config).toBe(true)
   })
 
-  it('reads a daemon.json read error (readFile rejecting, e.g. EACCES) as unreadable, not as absent (round 3, item 2)', async () => {
+  it('reads a daemon.json read error (readFile rejecting, e.g. EACCES) as unreadable, not as absent, and assumes no CDI default behind it (round 3 item 2; round 4 item A)', async () => {
     const deps: LinuxProbeDeps = {
       exec: async (command, args) => {
         if (command === 'uname') return ok('x86_64\n')
         if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
-        if (command === 'docker') return failed('Cannot connect to the Docker daemon')
+        if (command === 'docker') return UNREACHABLE_28_3
+        // A 28.2+ engine with a listed CDI device: were daemon.json readable and silent, CDI would
+        // count as on by Docker's own default. Unreadable, it may say features.cdi: false, so the
+        // default must stay unknown (round 4, item A).
+        if (command === 'dpkg-query')
+          return { code: 1, stdout: 'ii  docker-ce 5:28.3.0-1~ubuntu.24.04~noble\n', stderr: '' }
+        if (command === 'nvidia-ctk' && args.includes('cdi')) return ok('nvidia.com/gpu=all\n')
         return missing()
       },
       readFile: async (path) => {
@@ -353,6 +360,8 @@ describe('reading the machine', () => {
       { user: 'u', xdgRuntimeDir: null }
     )
     expect(absent.docker.daemon_json_unreadable).toBe(false)
+    // ...and with no file at all, the 28.2+ default does apply: the listed device counts.
+    expect(absent.docker.gpu_runtime_from_config).toBe(true)
   })
 
   it('reads the installed engine version from whichever package manager answers, end to end (round 3, ruling 5)', async () => {
@@ -360,7 +369,7 @@ describe('reading the machine', () => {
       exec: async (command, args) => {
         if (command === 'uname') return ok('x86_64\n')
         if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.2.0')
-        if (command === 'docker') return failed('Cannot connect to the Docker daemon')
+        if (command === 'docker') return DAEMON_DOWN_28_3
         if (command === 'dpkg-query') return ok('ii  docker-ce 5:28.2.0-1~ubuntu.24.04~noble\n')
         return missing()
       },

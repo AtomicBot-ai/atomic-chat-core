@@ -3,10 +3,14 @@ import {
   archCommands,
   blocker,
   effectiveGpuRuntime,
+  gateBlocker,
   groupOnlyCommands,
   installMethodBlocker,
+  missingComponentBlockers,
+  reloginRequiredBlocker,
+  type InstallGate,
 } from './linux-blockers.js'
-import type { LinuxFacts } from './linux-probe.js'
+import type { LinuxDistribution, LinuxFacts } from './linux-probe.js'
 
 describe('blocker', () => {
   it('omits params and commands when neither is given, rather than storing them as undefined', () => {
@@ -91,9 +95,9 @@ describe('groupOnlyCommands', () => {
     expect(groupOnlyCommands(false, 'ana')).toEqual(['sudo usermod -aG docker ana'])
   })
 
-  it('copies the group line from /usr/lib/group first on an rpm-ostree host (ruling 6)', () => {
+  it('copies the group line from /usr/lib/group first on an rpm-ostree host, only if /etc/group lacks it (ruling 6; round 4 item F)', () => {
     expect(groupOnlyCommands(true, 'ana')).toEqual([
-      "grep -E '^docker:' /usr/lib/group | sudo tee -a /etc/group",
+      "grep -q '^docker:' /etc/group || grep -E '^docker:' /usr/lib/group | sudo tee -a /etc/group",
       'sudo usermod -aG docker ana',
     ])
   })
@@ -114,5 +118,99 @@ describe('archCommands', () => {
     const commands = archCommands('root')
     expect(commands.some((c) => c.includes('usermod'))).toBe(false)
     expect(commands).toHaveLength(4)
+  })
+})
+
+describe('reloginRequiredBlocker', () => {
+  it('has nothing to run by hand: the fix is a new login session', () => {
+    expect(reloginRequiredBlocker()).toEqual(
+      expect.objectContaining({ reason: 'relogin-required', commands: [] })
+    )
+  })
+})
+
+const UBUNTU: LinuxDistribution = { id: 'ubuntu', version_id: '24.04', id_like: [], family: 'apt' }
+
+const hostFacts = (docker: Partial<LinuxFacts['docker']>, over: Partial<LinuxFacts> = {}): LinuxFacts =>
+  ({
+    architecture: 'x86_64',
+    distribution: UBUNTU,
+    immutable_os: false,
+    toolkit_installed: true,
+    docker: dockerFacts({ service_active: true, gpu_runtime_from_config: true, ...docker }),
+    ...over,
+  }) as LinuxFacts
+
+describe('gateBlocker', () => {
+  it('names the reason automatic install is not offered, one per gate', () => {
+    const facts = hostFacts({})
+    const reasons: Array<[Exclude<InstallGate, 'recipe'>, string]> = [
+      ['immutable', 'immutable-os'],
+      ['pacman', 'arch-manual-install'],
+      ['unrecognised', 'docker-unrecognised'],
+      ['unqualified', 'distribution-not-in-recipe'],
+    ]
+    for (const [gate, reason] of reasons) {
+      expect(gateBlocker(gate, facts, UBUNTU, 'ana').reason).toBe(reason)
+    }
+    expect(gateBlocker('unqualified', facts, UBUNTU, 'ana').params).toEqual({
+      id: 'ubuntu',
+      version_id: '24.04',
+      arch: 'x86_64',
+    })
+    expect(gateBlocker('pacman', facts, UBUNTU, 'ana').commands).toEqual(archCommands('ana'))
+  })
+})
+
+describe('missingComponentBlockers (round 4, item 1)', () => {
+  it('is empty when nothing but the session is missing', () => {
+    expect(missingComponentBlockers(hostFacts({}), 'recipe')).toEqual([])
+  })
+
+  it('names each missing component once, in install order', () => {
+    const facts = hostFacts(
+      { cli: false, install_method: null, service_active: false, gpu_runtime_from_config: false },
+      { toolkit_installed: false }
+    )
+    expect(missingComponentBlockers(facts, 'recipe').map((b) => b.reason)).toEqual([
+      'docker-cli-missing',
+      'toolkit-missing',
+      'gpu-runtime-not-configured',
+      'docker-service-inactive',
+    ])
+  })
+
+  it('does not call an unknown service state inactive', () => {
+    expect(missingComponentBlockers(hostFacts({ service_active: 'unknown' }), 'recipe')).toEqual([])
+  })
+
+  it('reports an unreadable daemon.json instead of an unconfigured runtime', () => {
+    const facts = hostFacts({ gpu_runtime_from_config: false, daemon_json_unreadable: true })
+    expect(missingComponentBlockers(facts, 'recipe').map((b) => b.reason)).toEqual(['daemon-json-unreadable'])
+  })
+
+  it('promises setup only on a recipe distribution; Arch gets pacman commands; elsewhere package steps are manual', () => {
+    const facts = hostFacts(
+      { gpu_runtime_from_config: false, service_active: false },
+      { toolkit_installed: false }
+    )
+    const recipe = missingComponentBlockers(facts, 'recipe')
+    expect(recipe.every((b) => /after you log back in/i.test(b.message) && b.commands?.length === 0)).toBe(
+      true
+    )
+
+    expect(missingComponentBlockers(facts, 'pacman').map((b) => b.commands)).toEqual([
+      ['sudo pacman -Syu --needed nvidia-container-toolkit'],
+      ['sudo nvidia-ctk runtime configure --runtime=docker', 'sudo systemctl restart docker'],
+      ['sudo systemctl enable --now docker'],
+    ])
+
+    const elsewhere = missingComponentBlockers(facts, 'unqualified')
+    expect(elsewhere.map((b) => b.commands)).toEqual([
+      [],
+      ['sudo nvidia-ctk runtime configure --runtime=docker', 'sudo systemctl restart docker'],
+      ['sudo systemctl enable --now docker'],
+    ])
+    expect(elsewhere.some((b) => /after you log back in/i.test(b.message))).toBe(false)
   })
 })

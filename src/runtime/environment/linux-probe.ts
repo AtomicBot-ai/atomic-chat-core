@@ -25,6 +25,7 @@ import {
   daemonJsonNvidiaRuntimeEvidence,
   detectDockerInstallMethod,
   detectEngineVersion,
+  PACMAN_PACKAGE_CANDIDATES,
   parseDockerInfo,
 } from './linux-docker-facts.js'
 
@@ -47,6 +48,15 @@ export interface LinuxProbeDeps {
    * onto its own configured base environment, rather than substituting it wholesale).
    */
   exec: (command: string, args: string[], env?: Record<string, string | undefined>) => Promise<CommandOutput>
+  /**
+   * The file's text. Contract (round 4, item D): resolve `null` **only** when the file does not
+   * exist (`ENOENT`); **reject** on every other failure (`EACCES`, `EISDIR`, `EIO`, ...). This probe
+   * relies on the difference for `/etc/docker/daemon.json`: `null` reads as "nothing configured
+   * yet", a rejection as "exists but unreadable", which blocks rather than planning a runtime change
+   * over a file nobody could read. An implementation that maps every error to `null` silently turns
+   * a locked-down file into "not configured". This module ships no default implementation; the
+   * caller that wires `probeLinux` to the real filesystem owns this contract.
+   */
   readFile: (path: string) => Promise<string | null>
   /** For a socket, a directory, or a flag file such as `/run/ostree-booted`; never its contents. */
   pathExists: (path: string) => Promise<boolean>
@@ -122,10 +132,12 @@ export interface DockerFacts {
    */
   gpu_runtime_from_config: boolean
   /**
-   * `/etc/docker/daemon.json` exists but this probe could not parse it as JSON. `assessLinux` must
-   * not plan `nvidia-ctk runtime configure` in this state — it would be writing next to a file it
-   * cannot even read back — and blocks with an instruction to fix or remove it by hand instead
-   * (round 2, item 6).
+   * `/etc/docker/daemon.json` exists but this probe could not use it: reading it failed (`readFile`
+   * rejected — `EACCES` on a `0600` file, a directory at that path, ...) or its contents did not
+   * parse as JSON. `assessLinux` must not plan `nvidia-ctk runtime configure` in this state — it
+   * would be writing next to a file it cannot even read back — and blocks with an instruction to fix
+   * the file by hand instead (round 2 item 6; round 3 item 2; round 4 item C). Neither the runtime
+   * entry nor the CDI setting is assumed behind an unreadable file (round 4, item A).
    */
   daemon_json_unreadable: boolean
   /** SELinux is enforcing for containers: mounts of our directories need the `:z` label (D15). */
@@ -386,8 +398,9 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     ]),
     deps.exec('rpm', ['-q', 'docker-ce', 'docker.io', 'moby-engine', 'podman-docker', 'docker-desktop']),
     // Read-only query; Arch's own `docker` package is not one `dpkg-query`/`rpm -q` ever see, and
-    // this is also `engine_version`'s only source there (round 3, item 1/ruling 5).
-    deps.exec('pacman', ['-Q', 'docker']),
+    // this is also `engine_version`'s only source there (round 3, item 1/ruling 5). `docker-desktop`
+    // is Docker Desktop's package name on Arch (round 4, item E).
+    deps.exec('pacman', ['-Q', ...PACMAN_PACKAGE_CANDIDATES]),
     deps.exec('snap', ['list', 'docker']),
     deps.pathExists('/run/ostree-booted').catch(() => false),
     deps.exec('id', ['-nG']),
@@ -411,7 +424,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     (await deps.pathExists(`${options.xdgRuntimeDir}/docker.sock`).catch(() => false))
   const installMethod = detectDockerInstallMethod(
     info,
-    { dockerVersion, dpkgQuery, rpmQuery, snapList },
+    { dockerVersion, dpkgQuery, rpmQuery, pacmanQuery, snapList },
     rootlessSocketPresent,
     serviceActiveParsed
   )

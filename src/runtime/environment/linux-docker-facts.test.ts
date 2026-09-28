@@ -11,11 +11,13 @@ import {
   pacmanEngineVersion,
   rpmEngineVersion,
   installedDpkgPackages,
+  installedPacmanPackages,
   installedRpmPackages,
   parseDockerInfo,
   type DockerInfoFacts,
 } from './linux-docker-facts.js'
 import type { CommandOutput } from './linux-probe.js'
+import { UNREACHABLE_28_3 } from '../../../test/helpers/linux-probe-fixtures.js'
 
 const ok = (stdout: string): CommandOutput => ({ code: 0, stdout, stderr: '' })
 const missing = (): CommandOutput => ({ code: null, stdout: '', stderr: '' })
@@ -120,6 +122,15 @@ describe('parseDockerInfo', () => {
     expect(parsed).toEqual({ ...NO_INFO, server_errors: [message] })
   })
 
+  it('keeps ServerErrors from a docker CLI ≥28.3 failed call (exit 1, templated JSON on stdout) for diagnostics (round 4, item 2)', () => {
+    const parsed = parseDockerInfo(UNREACHABLE_28_3, null)
+    expect(parsed.daemon_reachable).toBe(false)
+    expect(parsed.server_errors).toHaveLength(1)
+    expect(parsed.server_errors[0]).toMatch(/^permission denied while trying to connect/)
+    // A non-zero exit is never read as reachable, whatever stdout holds.
+    expect(parseDockerInfo({ code: 1, stdout: info(), stderr: '' }, null)).toEqual(NO_INFO)
+  })
+
   it('reads a docker CLI ≥28.3 failed call (non-zero exit) as unreachable, unchanged', () => {
     expect(
       parseDockerInfo(failed('Cannot connect to the Docker daemon at unix:///var/run/docker.sock'), null)
@@ -169,8 +180,10 @@ describe('offline GPU-runtime evidence (item 3)', () => {
     expect(daemonJsonFeaturesCdi(read(JSON.stringify({ features: { cdi: false } })))).toBe(false)
     expect(daemonJsonFeaturesCdi(read(JSON.stringify({})))).toBeUndefined()
     expect(daemonJsonFeaturesCdi(read(null))).toBeUndefined()
-    expect(daemonJsonFeaturesCdi(read('not json'))).toBeUndefined()
-    expect(daemonJsonFeaturesCdi(unreadableFile())).toBeUndefined()
+    // A file this probe could not read or parse may well say features.cdi: false — that is not the
+    // same as silence, so it must not fall through to the version default (round 4, item A).
+    expect(daemonJsonFeaturesCdi(read('not json'))).toBe('unreadable')
+    expect(daemonJsonFeaturesCdi(unreadableFile())).toBe('unreadable')
   })
 
   it('reads nvidia-ctk cdi list the same way parseDockerInfo does', () => {
@@ -199,6 +212,16 @@ describe('engine version and the CDI-on-by-default rule (round 3, ruling 5)', ()
 
   it('reads the engine version from pacman -Q docker (Arch has no docker-ce/moby-engine/docker.io package)', () => {
     expect(pacmanEngineVersion(ok('docker 28.2.0-1\n'))).toBe('28.2.0')
+    // Arch's real package carries an epoch; and `pacman -Q docker docker-desktop` exits 1 whenever
+    // either name is missing while still printing the hit on stdout (round 4, item E).
+    expect(
+      pacmanEngineVersion({
+        code: 1,
+        stdout: 'docker 1:28.3.3-1\n',
+        stderr: "error: package 'docker-desktop' was not found\n",
+      })
+    ).toBe('28.3.3')
+    expect(pacmanEngineVersion(ok('docker-desktop 4.43.2-1\n'))).toBeNull()
     expect(pacmanEngineVersion(failed("error: package 'docker' was not found"))).toBeNull()
     expect(pacmanEngineVersion(missing())).toBeNull()
   })
@@ -227,12 +250,18 @@ describe('engine version and the CDI-on-by-default rule (round 3, ruling 5)', ()
     // New engine, but daemon.json explicitly turns CDI off — the opt-out is not overridden.
     expect(cdiEnabledByDefault('28.3.0', false)).toBe(false)
   })
+
+  it('an unreadable daemon.json leaves CDI unknown, never assumed on by the version default (round 4, item A)', () => {
+    expect(cdiEnabledByDefault('28.3.0', 'unreadable')).toBe(false)
+    expect(cdiEnabledByDefault(null, 'unreadable')).toBe(false)
+  })
 })
 
 const PACKAGES_NONE = {
   dockerVersion: missing(),
   dpkgQuery: missing(),
   rpmQuery: missing(),
+  pacmanQuery: missing(),
   snapList: missing(),
 }
 
@@ -270,6 +299,7 @@ describe('package-database install-method detection', () => {
         dockerVersion: ok('podman version 5.2.2'),
         dpkgQuery: null,
         rpmQuery: ok('docker-ce-3:28.3.0-1.fc41.x86_64'),
+        pacmanQuery: null,
         snapList: null,
       },
       false,
@@ -302,6 +332,7 @@ describe('package-database install-method detection', () => {
       dockerVersion: ok('Docker version 28.3.0'),
       dpkgQuery: ok('ii  docker-desktop\n'),
       rpmQuery: null,
+      pacmanQuery: null,
       snapList: null,
     }
     // Unreachable, and nothing else installed: Desktop is the only explanation.
@@ -313,6 +344,32 @@ describe('package-database install-method detection', () => {
     expect(detectDockerInstallMethod(reachableDockerCe, bothPackages, false, 'unknown')).toBe('docker-ce')
     // Unreachable, but docker-ce is *also* installed (ambiguous): trust the recognised engine package.
     expect(detectDockerInstallMethod(NO_INFO, bothPackages, false, 'unknown')).toBe('docker-ce')
+  })
+
+  it('reads pacman -Q hits by their "name version" lines and ignores the not-found errors on stderr (round 4, item E)', () => {
+    const output: CommandOutput = {
+      code: 1,
+      stdout: 'docker-desktop 4.43.2-1\n',
+      stderr: "error: package 'docker' was not found\n",
+    }
+    expect(installedPacmanPackages(output, ['docker', 'docker-desktop'])).toEqual(['docker-desktop'])
+    expect(installedPacmanPackages(missing(), ['docker', 'docker-desktop'])).toEqual([])
+    expect(installedPacmanPackages(null, ['docker'])).toEqual([])
+  })
+
+  it("reads Docker Desktop on Arch from pacman, but never over Arch's own docker engine package (round 4, item E)", () => {
+    const desktopOnly = {
+      ...PACKAGES_NONE,
+      dockerVersion: ok('Docker version 28.3.2'),
+      pacmanQuery: {
+        code: 1,
+        stdout: 'docker-desktop 4.43.2-1\n',
+        stderr: "error: package 'docker' was not found\n",
+      },
+    }
+    expect(detectDockerInstallMethod(NO_INFO, desktopOnly, false, 'unknown')).toBe('docker-desktop')
+    const both = { ...desktopOnly, pacmanQuery: ok('docker 1:28.3.3-1\ndocker-desktop 4.43.2-1\n') }
+    expect(detectDockerInstallMethod(NO_INFO, both, false, 'unknown')).toBeNull()
   })
 
   it('reads rootless from SecurityOptions on the daemon that actually answered', () => {
@@ -340,7 +397,7 @@ describe('package-database install-method detection', () => {
   })
 
   it('falls back to the distro package that is actually installed, in docker-ce/moby-engine/docker.io order', () => {
-    const base = { dockerVersion: ok('Docker version 28.3.0'), snapList: null }
+    const base = { dockerVersion: ok('Docker version 28.3.0'), pacmanQuery: null, snapList: null }
     expect(
       detectDockerInstallMethod(
         NO_INFO,

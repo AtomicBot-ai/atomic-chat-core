@@ -112,22 +112,24 @@ export function daemonJsonNvidiaRuntimeEvidence(read: {
 }
 
 /**
- * `/etc/docker/daemon.json`'s `features.cdi`, three-way: `true`/`false` when the file says so
- * explicitly, `undefined` when it does not (absent, unset, or the file could not be read/parsed at
- * all) — the "unset" case is what lets {@link cdiEnabledByDefault} fall back to Docker's own
- * version-based default instead (round 3, ruling 5).
+ * `/etc/docker/daemon.json`'s `features.cdi`: `true`/`false` when the file says so explicitly,
+ * `undefined` when it genuinely does not (no file, or a file without the key) — the only case that
+ * lets {@link cdiEnabledByDefault} fall back to Docker's own version-based default (round 3, ruling
+ * 5). A file that exists but could not be read or parsed is `'unreadable'`, not `undefined`: it may
+ * well say `features.cdi: false`, so silence cannot be assumed behind it (round 4, item A).
  */
 export function daemonJsonFeaturesCdi(read: {
   text: string | null
   unreadable: boolean
-}): boolean | undefined {
-  if (read.unreadable || read.text === null) return undefined
+}): boolean | undefined | 'unreadable' {
+  if (read.unreadable) return 'unreadable'
+  if (read.text === null) return undefined
   try {
     const parsed = JSON.parse(read.text) as { features?: { cdi?: unknown } }
     const value = parsed.features?.cdi
     return typeof value === 'boolean' ? value : undefined
   } catch {
-    return undefined
+    return 'unreadable'
   }
 }
 
@@ -180,9 +182,14 @@ export function rpmEngineVersion(output: CommandOutput | null): string | null {
   return null
 }
 
-/** `pacman -Q docker`: `docker 28.2.0-1\n` on a hit, non-zero exit (or nothing on stdout) otherwise. */
+/**
+ * `pacman -Q docker docker-desktop`: a `name version` line on stdout per installed name (`docker
+ * 1:28.3.3-1`, with Arch's epoch), an `error: package '...' was not found` line on stderr per
+ * missing one, and exit `1` whenever any name is missing — so the exit code says nothing about
+ * whether `docker` itself is installed; only stdout does (round 4, item E).
+ */
 export function pacmanEngineVersion(output: CommandOutput | null): string | null {
-  if (output === null || output.code !== 0) return null
+  if (output === null || output.code === null) return null
   const match = /^docker\s+(\S+)/m.exec(output.stdout)
   return match === null ? null : firstSemverLike(match[1] as string)
 }
@@ -204,18 +211,34 @@ const CDI_DEFAULT_SINCE = '28.2.0'
  * default); otherwise, Docker Engine 28.2+ turns CDI on by default, so a *known* engine version at
  * or above that counts as enabled on its own. An engine version this probe could not determine keeps
  * requiring the explicit `daemon.json` setting — silence is never read as "recent enough" (round 3,
- * ruling 5).
+ * ruling 5). A `daemon.json` that exists but could not be read or parsed counts as not enabled
+ * whatever the version: it may hold an explicit opt-out this probe cannot see (round 4, item A).
  */
 export function cdiEnabledByDefault(
   engineVersion: string | null,
-  explicitFeaturesCdi: boolean | undefined
+  explicitFeaturesCdi: boolean | undefined | 'unreadable'
 ): boolean {
+  // Unreadable is unknown, and unknown is never read as enabled (round 4, item A).
+  if (explicitFeaturesCdi === 'unreadable') return false
   if (explicitFeaturesCdi !== undefined) return explicitFeaturesCdi
   if (engineVersion === null) return false
   return compareVersions(engineVersion, CDI_DEFAULT_SINCE) >= 0
 }
 
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value !== ''
+
+function stringEntries(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+}
+
+/** `ServerErrors` from whatever JSON document a failed call still printed; `[]` when there is none. */
+function serverErrorsOf(stdout: string): string[] {
+  try {
+    return stringEntries((JSON.parse(stdout) as { ServerErrors?: unknown }).ServerErrors)
+  } catch {
+    return []
+  }
+}
 
 /**
  * `docker -H unix:///var/run/docker.sock info --format '{{json .}}'`. The `-H` flag pins the
@@ -231,7 +254,11 @@ export function parseDockerInfo(
   output: CommandOutput | null,
   cdiList: CommandOutput | null
 ): DockerInfoFacts {
-  if (output === null || output.code !== 0) return ABSENT
+  if (output === null || output.code === null) return ABSENT
+  // docker CLI ≥28.3 exits non-zero on a failed Info() but still prints the templated document, real
+  // error in ServerErrors. Never reachable; the errors are kept for diagnostics the same way the
+  // ≤28.2 exit-0 shape below keeps them (round 4, item 2).
+  if (output.code !== 0) return { ...ABSENT, server_errors: serverErrorsOf(output.stdout) }
   try {
     const info = JSON.parse(output.stdout) as {
       ID?: unknown
@@ -245,9 +272,7 @@ export function parseDockerInfo(
       OperatingSystem?: unknown
       ServerErrors?: unknown[]
     }
-    const serverErrors = Array.isArray(info.ServerErrors)
-      ? info.ServerErrors.filter((entry): entry is string => typeof entry === 'string')
-      : []
+    const serverErrors = stringEntries(info.ServerErrors)
     const serverVersion = isNonEmptyString(info.ServerVersion) ? info.ServerVersion : null
 
     // docker CLI ≤28.2 (docker.io, moby-engine, and older docker-ce — all on the recipe list) exits
@@ -261,9 +286,7 @@ export function parseDockerInfo(
     const runtimes = Object.keys(info.Runtimes ?? {})
     const specDirs = Array.isArray(info.CDISpecDirs) ? info.CDISpecDirs : []
     const hasCdiGpu = specDirs.length > 0 && cdiListsNvidiaGpu(cdiList)
-    const securityOptions = Array.isArray(info.SecurityOptions)
-      ? info.SecurityOptions.filter((entry): entry is string => typeof entry === 'string')
-      : []
+    const securityOptions = stringEntries(info.SecurityOptions)
     const nameAndOs = `${typeof info.Name === 'string' ? info.Name : ''} ${
       typeof info.OperatingSystem === 'string' ? info.OperatingSystem : ''
     }`.toLowerCase()
@@ -326,12 +349,31 @@ export function installedRpmPackages(output: CommandOutput | null, candidates: s
   return found
 }
 
+/**
+ * `pacman -Q <candidates>`: one `name version` line on stdout per installed name; a missing name
+ * only adds an error line on stderr (and makes the exit code 1, whatever else was found).
+ */
+export function installedPacmanPackages(output: CommandOutput | null, candidates: string[]): string[] {
+  if (output === null) return []
+  const installed = new Set<string>()
+  for (const raw of output.stdout.split('\n')) {
+    const match = /^(\S+)\s+\S+/.exec(raw.trim())
+    if (match !== null) installed.add(match[1] as string)
+  }
+  return candidates.filter((name) => installed.has(name))
+}
+
+/** Arch's own engine package, and Docker Desktop's package on Arch (round 4, item E). */
+export const PACMAN_PACKAGE_CANDIDATES = ['docker', 'docker-desktop']
+
 /** The read-only lookups {@link detectDockerInstallMethod} needs beyond `docker info` itself. */
 export interface DockerPackageSignals {
   /** `docker --version`: podman-docker's shim prints Podman's own banner here, not Docker's. */
   dockerVersion: CommandOutput | null
   dpkgQuery: CommandOutput | null
   rpmQuery: CommandOutput | null
+  /** `pacman -Q docker docker-desktop` (round 4, item E). */
+  pacmanQuery: CommandOutput | null
   /** `snap list docker`. */
   snapList: CommandOutput | null
 }
@@ -365,11 +407,11 @@ export const DOCKER_PACKAGE_CANDIDATES = [
  * is confirmed running, takes priority over a stray rootless socket file from an earlier, abandoned
  * setup.
  *
- * Arch and its derivatives are not resolved here at all: `docker` there is Arch's own package, not
- * one of `DOCKER_PACKAGE_CANDIDATES` (there is exactly one common source, nothing to disambiguate
- * against the way Debian/Fedora need) — `assessLinux` (`linux-plan.ts`) special-cases
- * `distribution.family === 'pacman' && docker.cli` in the one place that needs it instead of
- * teaching this distribution-agnostic function about `pacman -Q` (round 3, item 1/ruling 1).
+ * Arch's own `docker` package never becomes an install method here (it is not a
+ * `LinuxDockerInstallMethod`; `assessLinux` recognises it through `distribution.family === 'pacman'
+ * && docker.cli` instead, round 3 item 1). It does count as an installed engine for the Desktop rule
+ * above, and `pacman -Q docker-desktop` counts as the Desktop package, so a Desktop-only Arch host is
+ * read as Docker Desktop, not as an unrecognised install (round 4, item E).
  */
 export function detectDockerInstallMethod(
   info: DockerInfoFacts,
@@ -387,12 +429,14 @@ export function detectDockerInstallMethod(
   const found = new Set([
     ...installedDpkgPackages(packages.dpkgQuery, DOCKER_PACKAGE_CANDIDATES),
     ...installedRpmPackages(packages.rpmQuery, DOCKER_PACKAGE_CANDIDATES),
+    ...installedPacmanPackages(packages.pacmanQuery, PACMAN_PACKAGE_CANDIDATES),
   ])
   if (found.has('podman-docker')) return 'podman-docker'
   if (packages.snapList !== null && packages.snapList.code === 0 && /docker/.test(packages.snapList.stdout)) {
     return 'snap'
   }
-  const engineInstalled = found.has('docker-ce') || found.has('moby-engine') || found.has('docker.io')
+  const engineInstalled =
+    found.has('docker-ce') || found.has('moby-engine') || found.has('docker.io') || found.has('docker')
   if (info.desktop) return 'docker-desktop'
   if (found.has('docker-desktop') && !info.daemon_reachable && !engineInstalled) return 'docker-desktop'
   if (info.rootless || (!info.daemon_reachable && rootlessSocketPresent && serviceActive !== true)) {
