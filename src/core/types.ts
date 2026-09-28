@@ -1,12 +1,14 @@
 import type { LocalProviderId } from '../contracts/index.js'
 import type { LoadOptions } from '../runtime/llamacpp/index.js'
-import type { LocalLoadOptions } from '../runtime/index.js'
+import type { BackendOutputSink, LocalLoadOptions } from '../runtime/index.js'
 import type { WireDiffusionOptions } from '../diffusion/index.js'
 import type { HardwareProbeResult } from '../hardware/index.js'
 import type { Prober, TunnelSpawner, TunnelTimings } from '../remote-access/index.js'
 import type { TelemetryControl } from '../telemetry/index.js'
 
 export type CoreLogger = (level: 'info' | 'warn' | 'error', message: string) => void
+
+export type { BackendOutputSink }
 
 export interface AtomicCoreOptions {
   ownerScope?: 'app' | 'cli'
@@ -36,6 +38,14 @@ export interface AtomicCoreOptions {
   /** 0 (the default) picks a free port and publishes it in the lock. */
   controlPort?: number
   logger?: CoreLogger
+  /**
+   * Every stdout/stderr line an engine prints, for the life of its session — llama.cpp (both
+   * providers), MLX, Foundation Models and `sd-server`. In addition to whatever `logPath`/`verbose`
+   * already route for one load, never instead; without it, engine output goes nowhere new and never
+   * reaches `logger`. The app's daemon wires this to its `core.log`. A sink that throws is ignored.
+   * `cloudflared` output never reaches this sink: it carries the remote-access tunnel's public URL.
+   */
+  backendOutput?: BackendOutputSink
   /**
    * Where failures worth an issue go, and what `/atomic/v1/telemetry` drives. A host that owns its
    * process (the app's daemon, the CLI) builds one with `createCoreReporter` so start-up failures are

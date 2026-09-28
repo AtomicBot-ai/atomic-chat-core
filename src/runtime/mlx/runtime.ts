@@ -38,10 +38,12 @@ import {
   closeLogStream,
   openLogStream,
   randomFreePort,
+  reportBackendOutput,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
 } from '../shared/index.js'
+import type { BackendOutputSink } from '../shared/index.js'
 import { buildMlxServerArgs, normalizeMlxModelPath } from './args.js'
 import { asNumber, buildMlxConfig, selectMlxDraftSettings } from './config.js'
 import type { MlxDraftKind, MlxExtensionConfigInput } from './config.js'
@@ -79,6 +81,10 @@ export interface MlxRuntimeOptions {
   journal?: ProcessJournal | undefined
   emit?: EmitFn
   baseEnv?: NodeJS.ProcessEnv
+  /** Every stdout/stderr line the server prints, for the life of the session. A throwing sink is swallowed. */
+  backendOutput?: BackendOutputSink
+  /** The core's own logger; plumbed here for a later engine-start line, unused otherwise. */
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /**
    * A drafter that is switched on but has no path. Defaults to one already on disk; a caller that
    * can download may do so here.
@@ -212,6 +218,7 @@ export class MlxRuntime implements LocalRuntime {
             logStream?.write(`[${stream}] ${line}\n`)
             if (opts.verbose)
               this.emit('core:log', { level: 'debug', msg: `[mlx/${modelId}][${stream}] ${line}` })
+            reportBackendOutput(this.options.backendOutput, { provider: 'mlx', model: modelId, stream, line })
           },
         }
       )

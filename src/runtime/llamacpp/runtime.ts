@@ -41,6 +41,7 @@ import {
   nodeCudaProbeEnv,
   textMentionsCudaRuntime,
   randomFreePort,
+  reportBackendOutput,
   spawnAndAwaitReady,
   spawnManaged,
   LLAMA_READY_MARKERS,
@@ -51,6 +52,7 @@ import {
   throwIfLoadCancelled,
 } from '../shared/index.js'
 import type {
+  BackendOutputSink,
   ManagedProcess,
   SpawnSpec,
   CtxIncreaseResult,
@@ -113,6 +115,10 @@ export interface LlamacppRuntimeOptions {
   platform?: NodeJS.Platform
   baseEnv?: NodeJS.ProcessEnv
   fetch?: typeof fetch
+  /** Every stdout/stderr line the backend prints, for the life of the session. A throwing sink is swallowed. */
+  backendOutput?: BackendOutputSink
+  /** The core's own logger; plumbed here for a later engine-start line, unused otherwise. */
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /** Provider settings for a load; re-read per load so a settings change lands on the next one. */
   readSettings: () => Promise<RuntimeSettings>
   /** Resolve `<version>/<backend>` to an installed executable (the backend service in a full core). */
@@ -408,6 +414,12 @@ export class LlamacppRuntime implements LocalRuntime {
                 level: 'debug',
                 msg: `[${plan.provider}/${plan.modelId}][${stream}] ${line}`,
               })
+            reportBackendOutput(this.options.backendOutput, {
+              provider: plan.provider,
+              model: plan.modelId,
+              stream,
+              line,
+            })
           },
           classifyExit: (exit, stderr, stdout) =>
             classifyProcessOutput(exit, stderr, stdout, this.platform, plan.provider),

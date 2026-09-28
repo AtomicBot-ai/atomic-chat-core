@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fakeSidecarSpawn } from '../../../test/helpers/fake-sidecar-server.js'
 import type { FakeSidecarOptions } from '../../../test/helpers/fake-sidecar-server.js'
+import { scriptSpawn } from '../../../test/helpers/script-spawn.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { ProcessJournal } from '../../lock/index.js'
@@ -70,6 +72,14 @@ async function argvs(): Promise<string[][]> {
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line) as string[])
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time')
+    await new Promise((r) => setTimeout(r, 20))
+  }
 }
 
 describe('MlxRuntime', () => {
@@ -333,5 +343,54 @@ describe('MlxRuntime', () => {
     expect(events.some((e) => e.name === 'core:log' && String(e.payload['msg']).startsWith('[mlx/m]'))).toBe(
       true
     )
+  })
+
+  it('relays every line to backendOutput before and after readiness, in addition to logPath and verbose', async () => {
+    await writeMlxModel('m')
+    const logPath = join(data.root, 'logs', 'mlx.log')
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const script = [
+      "console.error('Loading model')",
+      "console.error('INFO:     Uvicorn running on http://127.0.0.1:1 (Press CTRL+C to quit)')",
+      "setTimeout(() => console.log('INFO:     127.0.0.1:50000 - POST /v1/chat/completions 200 OK'), 30)",
+      'setInterval(() => {}, 1000)',
+    ].join('; ')
+    const r = runtime({}, {}, { backendOutput: (line) => received.push(line), spawn: scriptSpawn(script) })
+
+    await r.load('m', { logPath, verbose: true })
+    await waitFor(() => received.length === 3)
+
+    const tagged = { provider: 'mlx', model: 'm' }
+    expect(received).toEqual([
+      { ...tagged, stream: 'stderr', line: 'Loading model' },
+      {
+        ...tagged,
+        stream: 'stderr',
+        line: 'INFO:     Uvicorn running on http://127.0.0.1:1 (Press CTRL+C to quit)',
+      },
+      { ...tagged, stream: 'stdout', line: 'INFO:     127.0.0.1:50000 - POST /v1/chat/completions 200 OK' },
+    ])
+    // In addition to logPath and verbose, never instead of them: both get the late line too.
+    await waitFor(() => readFileSync(logPath, 'utf8').includes('[stdout] INFO:     127.0.0.1:50000'))
+    expect(events).toContainEqual({
+      name: 'core:log',
+      payload: {
+        level: 'debug',
+        msg: '[mlx/m][stdout] INFO:     127.0.0.1:50000 - POST /v1/chat/completions 200 OK',
+      },
+    })
+  })
+
+  it('delivers every line printed before a crash during load to backendOutput', async () => {
+    const dir = await writeMlxModel('m')
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const r = runtime({}, { mode: 'oom' }, { backendOutput: (line) => received.push(line) })
+    await expect(r.load('m')).rejects.toMatchObject({ code: 'OUT_OF_MEMORY' })
+
+    const tagged = { provider: 'mlx', model: 'm', stream: 'stderr' }
+    expect(received).toEqual([
+      { ...tagged, line: `Loading model from ${dir}` },
+      { ...tagged, line: expect.stringContaining('[metal::malloc] Attempting to allocate') },
+    ])
   })
 })

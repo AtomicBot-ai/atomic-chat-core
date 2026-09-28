@@ -32,10 +32,12 @@ import {
   generateApiKey,
   openLogStream,
   randomFreePort,
+  reportBackendOutput,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
 } from '../shared/index.js'
+import type { BackendOutputSink } from '../shared/index.js'
 import {
   FOUNDATION_MODELS_ERROR_PREFIX,
   FOUNDATION_MODELS_READY_MARKERS,
@@ -69,6 +71,10 @@ export interface FoundationModelsRuntimeOptions {
   emit?: EmitFn
   baseEnv?: NodeJS.ProcessEnv
   now?: () => number
+  /** Every stdout/stderr line the server prints, for the life of the session. A throwing sink is swallowed. */
+  backendOutput?: BackendOutputSink
+  /** The core's own logger; plumbed here for a later engine-start line, unused otherwise. */
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /** Test seams. */
   spawn?: typeof spawnAndAwaitReady
   runCheck?: (exe: string) => Promise<string>
@@ -187,6 +193,12 @@ export class FoundationModelsRuntime implements LocalRuntime {
             logStream?.write(`[${stream}] ${line}\n`)
             if (opts.verbose)
               this.emit('core:log', { level: 'debug', msg: `[foundation-models][${stream}] ${line}` })
+            reportBackendOutput(this.options.backendOutput, {
+              provider: 'foundation-models',
+              model: modelId,
+              stream,
+              line,
+            })
           },
         }
       )

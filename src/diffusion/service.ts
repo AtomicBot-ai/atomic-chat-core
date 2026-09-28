@@ -30,6 +30,7 @@ import type {
   VideoJob,
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
+import type { BackendOutputSink } from '../runtime/shared/index.js'
 import type { ImagesBackend, VideosBackend } from '../server/index.js'
 import { selectModelInstall } from './compat.js'
 import { samePath } from './containment.js'
@@ -89,6 +90,8 @@ export interface DiffusionServiceDeps {
     remove(pid: number): Promise<void>
   }
   http?: SdHttpClient
+  /** Every stdout/stderr line `sd-server` prints, for the life of the session. */
+  backendOutput?: BackendOutputSink
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
   now?: () => number
@@ -138,6 +141,7 @@ export class DiffusionService {
           platform,
           env: options.env ?? process.env,
           log,
+          ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
           ...(signal ? { signal } : {}),
           ...(journal
             ? {

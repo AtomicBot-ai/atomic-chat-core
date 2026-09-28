@@ -18,9 +18,10 @@ import {
   discoverCudaPaths,
   nodeCudaProbeEnv,
   randomFreePort,
+  reportBackendOutput,
   spawnManaged,
 } from '../runtime/shared/index.js'
-import type { ManagedProcess } from '../runtime/shared/index.js'
+import type { BackendOutputSink, ManagedProcess } from '../runtime/shared/index.js'
 import { buildServerArgs, commandSummaryForLog, hostEnv } from './args.js'
 import { diffusionError, ioError } from './errors.js'
 import type { SdHttpClient } from './http.js'
@@ -45,6 +46,8 @@ export interface SpawnServerDeps {
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
   log?: (level: 'info' | 'warn' | 'debug', msg: string) => void
+  /** Every stdout/stderr line the server prints, for the life of the session. A throwing sink is swallowed. */
+  backendOutput?: BackendOutputSink
   /** Called with the child right after it started, before readiness: the journal entry goes here. */
   onSpawned?: (pid: number, port: number, exe: string) => Promise<void>
   /** Called when a child that `onSpawned` saw is dead and will never become a session. */
@@ -189,7 +192,7 @@ export async function spawnServer(
   const records = { stdout: new OutputRecords(), stderr: new OutputRecords() }
   const deliver = (stream: 'stdout' | 'stderr', lines: string[]) => {
     for (const line of lines) {
-      log('debug', `[sd-server ${stream}] ${line}`)
+      reportBackendOutput(deps.backendOutput, { provider: spec.engine, model: spec.modelId, stream, line })
       if (tail.length >= TAIL_CAPACITY) tail.shift()
       tail.push(line)
       listener?.(line)
