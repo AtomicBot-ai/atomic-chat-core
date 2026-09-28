@@ -24,7 +24,9 @@ import type {
   ImageJob,
   LoadDiffusionModelRequest,
   LoadedDiffusionModel,
+  SystemInfo,
   VideoCapabilities,
+  VideoEstimate,
   VideoGalleryPage,
   VideoGenerateRequest,
   VideoJob,
@@ -34,7 +36,8 @@ import type { BackendOutputSink } from '../runtime/shared/index.js'
 import type { ImagesBackend, VideosBackend } from '../server/index.js'
 import { selectModelInstall } from './compat.js'
 import { samePath } from './containment.js'
-import { diffusionError, errorBody, ioError } from './errors.js'
+import { VIDEO_VAE_TILING_PIXEL_FRAMES } from './args.js'
+import { diffusionError, errorBody, ioError, modelNotLoadedError } from './errors.js'
 import { Gallery } from './gallery.js'
 import { createSdHttpClient } from './http.js'
 import type { SdHttpClient } from './http.js'
@@ -75,8 +78,12 @@ import type { DiffusionEmitter, DiffusionLogger } from './session.js'
 import { DiffusionState } from './state.js'
 import { DEFAULT_STARTUP_TIMEOUT_SECS } from './types.js'
 import type { ServerSpec } from './types.js'
-import { stripDataUrl } from './validate.js'
+import { stripDataUrl, validateVideoRequest } from './validate.js'
+import { estimateVideoCost } from './video-estimate.js'
+import type { VideoCost, VideoEstimateInput } from './video-estimate.js'
 import { isValidVideoId, MAX_POSTER_BYTES, VideoGallery } from './video-gallery.js'
+import { historyMultiplier, VideoHistory } from './video-history.js'
+import { VIDEO_JOB_KIND } from './video-job.js'
 
 export interface DiffusionServiceDeps {
   paths: DiffusionPaths
@@ -98,6 +105,8 @@ export interface DiffusionServiceDeps {
   sleep?: (ms: number) => Promise<void>
   timings?: Partial<JobTimings>
   idleTickMs?: number
+  /** The core's hardware facts (the override applied), which the video estimate weighs; absent: no estimate. */
+  systemInfo?: () => Promise<SystemInfo>
   /** Test seams. */
   spawn?: (spec: ServerSpec, scratchDir: string, signal?: AbortSignal) => ReturnType<typeof spawnServer>
   drawSeed?: () => number
@@ -114,6 +123,8 @@ export class DiffusionService {
   private readonly deps: JobDeps
   private readonly gallery: Gallery
   private readonly videoGallery: VideoGallery
+  private readonly history: VideoHistory
+  private readonly systemInfo: (() => Promise<SystemInfo>) | undefined
   private readonly platform: NodeJS.Platform
   private readonly dataFolder: string
   private readonly idleTickMs: number | undefined
@@ -132,6 +143,16 @@ export class DiffusionService {
     this.state = new DiffusionState(options.paths, now)
     this.gallery = new Gallery((level, msg) => log(level, msg))
     this.videoGallery = new VideoGallery((level, msg) => log(level, msg))
+    this.history = new VideoHistory(async (dir) =>
+      (
+        await this.videoGallery.list(dir, {
+          offset: 0,
+          limit: Number.MAX_SAFE_INTEGER,
+          includeArchived: true,
+        })
+      ).items.map((item) => item.recipe)
+    )
+    this.systemInfo = options.systemInfo
     const journal = options.journal
     const spawn =
       options.spawn ??
@@ -168,6 +189,8 @@ export class DiffusionService {
       drawSeed: options.drawSeed ?? drawSeed,
       readSource: readSourceFile,
       isFile,
+      planVideo: (request, spec) => this.videoCost(request, spec),
+      videoSaved: () => this.history.invalidate(),
     }
   }
 
@@ -300,6 +323,7 @@ export class DiffusionService {
         await cancelJob(this.deps, state.activeJobId).catch(() => undefined)
       await takeDownSession(this.deps)
       state.spec = undefined
+      state.modelFileBytes = undefined
 
       await checkFiles(request.files)
       const engine = request.engine ?? 'sd-cpp'
@@ -448,6 +472,46 @@ export class DiffusionService {
     return runVideoJob(this.deps, request)
   }
 
+  /**
+   * What `request` would cost on this machine with the loaded model. Refused like a job would be
+   * (no model, an image model, an invalid request), but it starts nothing and answers while another
+   * job runs.
+   */
+  async estimateVideo(request: VideoGenerateRequest): Promise<VideoEstimate> {
+    const spec = this.state.spec
+    if (!spec) throw modelNotLoadedError()
+    if (spec.modality !== 'video')
+      throw diffusionError('MODEL_INCOMPATIBLE', VIDEO_JOB_KIND.messages.wrongModel, spec.modelId)
+    await validateVideoRequest(request, spec, { isFile })
+    return (await this.videoCost(request, spec)).estimate
+  }
+
+  /** The estimate and its forecast for a request already validated against `spec`. */
+  private async videoCost(request: VideoGenerateRequest, spec: ServerSpec): Promise<VideoCost> {
+    if (!this.systemInfo)
+      throw diffusionError('INTERNAL', 'The core has no hardware facts to estimate the video with.')
+    const input: VideoEstimateInput = {
+      family: spec.family,
+      backend: spec.backend,
+      offload: spec.offload,
+      cpuFallback: spec.cpuFallback,
+      fileBytes: this.state.modelFileBytes ?? {},
+      width: request.width,
+      height: request.height,
+      frames: request.frames ?? spec.defaults.video?.frames ?? 1,
+      steps: request.steps,
+      cfgScale: request.cfgScale,
+      tilingPixelFrames: VIDEO_VAE_TILING_PIXEL_FRAMES,
+      system: await this.systemInfo(),
+    }
+    const recipes = this.state.configured
+      ? await this.history.recipes(this.state.videoOutputDir()).catch(() => [])
+      : []
+    const cost = estimateVideoCost(input, historyMultiplier(recipes, input))
+    if (!cost) throw diffusionError('INTERNAL', 'The core could not read how much memory this machine has.')
+    return cost
+  }
+
   getVideoJob(jobId: string): VideoJob | null {
     return this.state.videoJob(jobId) ?? null
   }
@@ -468,8 +532,12 @@ export class DiffusionService {
     return this.videoGallery.get(this.requireVideoOutputDir(), id)
   }
 
-  deleteVideoGalleryItems(ids: string[]): Promise<void> {
-    return this.videoGallery.delete(this.requireVideoOutputDir(), ids)
+  async deleteVideoGalleryItems(ids: string[]): Promise<void> {
+    try {
+      await this.videoGallery.delete(this.requireVideoOutputDir(), ids)
+    } finally {
+      this.history.invalidate()
+    }
   }
 
   setVideoGalleryFlags(id: string, flags: GalleryFlags): Promise<GalleryVideoItem> {

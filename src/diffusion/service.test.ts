@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
-import type { CoreEvents, LoadDiffusionModelRequest } from '../contracts/index.js'
+import type { CoreEvents, LoadDiffusionModelRequest, SystemInfo } from '../contracts/index.js'
 import { paintedPng, sampleRequest, sampleVideoRequest } from '../../test/helpers/diffusion-fixtures.js'
 import {
   installFakeSdEngine,
@@ -43,7 +43,15 @@ interface Harness {
   log: string[]
 }
 
-function harness(options: { idleTickMs?: number } = {}): Harness {
+const MAC_16: SystemInfo = {
+  cpu: { name: 'Apple M3 Pro', core_count: 12, arch: 'aarch64', extensions: [], extensions_known: true },
+  os_type: 'macos',
+  os_name: 'macOS 15',
+  total_memory: 16 * 1024,
+  gpus: [],
+}
+
+function harness(options: { idleTickMs?: number; systemInfo?: SystemInfo } = {}): Harness {
   const events: Harness['events'] = []
   const journal: Harness['journal'] = []
   const log: string[] = []
@@ -62,6 +70,7 @@ function harness(options: { idleTickMs?: number } = {}): Harness {
     },
     timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 },
     idleTickMs: options.idleTickMs ?? 50,
+    ...(options.systemInfo ? { systemInfo: async () => options.systemInfo as SystemInfo } : {}),
   })
   service.start()
   services.push(service)
@@ -534,8 +543,8 @@ const webmFixture = () =>
   readFile(fileURLToPath(new URL('../../test/fixtures/webm/tiny.webm', import.meta.url)))
 
 describe.skipIf(!posix)('generating video', () => {
-  async function loadedVideoService(options: FakeSdOptions = {}) {
-    const h = harness()
+  async function loadedVideoService(options: FakeSdOptions = {}, systemInfo?: SystemInfo) {
+    const h = harness(systemInfo ? { systemInfo } : {})
     await h.service.configure({ dataFolder })
     await installFakeSdEngine(layout, { stepMs: 10, modes: ['img_gen', 'vid_gen'], ...options })
     const request = await videoLoadRequest()
@@ -611,6 +620,60 @@ describe.skipIf(!posix)('generating video', () => {
     expect(outcome.job.outputs[0]?.id).toBe(outcome.job.id)
     expect((await h.service.getStatus()).activeVideoJob).toBeNull()
     expect(h.events.filter((e) => e.name === 'diffusion:error')).toEqual([])
+  })
+
+  it('estimates a clip without starting anything, while another runs, and learns from the clips it made', async () => {
+    const h = harness({ systemInfo: MAC_16 })
+    await h.service.configure({ dataFolder })
+    const clip = sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 2 })
+    await expect(h.service.estimateVideo(clip)).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })
+    await installFakeSdEngine(layout, { stepMs: 150, modes: ['img_gen', 'vid_gen'] })
+    await h.service.loadModel(await loadRequest())
+    await expect(h.service.estimateVideo(clip)).rejects.toMatchObject({
+      code: 'MODEL_INCOMPATIBLE',
+      message: 'The loaded model generates images, not video. Load a video model first.',
+    })
+    await h.service.loadModel(await videoLoadRequest())
+    // The same refusal as the job route, for the same body.
+    const odd = { ...clip, frames: 10 }
+    const refused = await h.service.estimateVideo(odd).catch((error: unknown) => error)
+    const refusedJob = await h.service.generateVideo(odd).catch((error: unknown) => error)
+    expect(refused).toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(refused).toEqual(refusedJob)
+
+    const idle = await h.service.estimateVideo(clip)
+    expect(idle).toMatchObject({ memory: { verdict: 'fits' }, basis: 'heuristic' })
+    expect(idle.seconds?.low).toBeGreaterThan(0)
+
+    const { jobId } = await h.service.generateVideo({ ...clip, steps: 4 })
+    expect(h.service.getVideoJob(jobId)?.estimate).toMatchObject({ memory: { verdict: 'fits' } })
+    await waitFor(() => h.service.getVideoJob(jobId)?.state === 'generating')
+    const before = h.events.length
+    const during = await h.service.estimateVideo(clip)
+    expect(during).toEqual(idle)
+    expect(h.events.length, 'an estimate emits nothing').toBe(before)
+    expect((await h.service.getStatus()).activeVideoJob?.id).toBe(jobId)
+    await waitFor(() => h.service.getVideoJob(jobId)?.state === 'completed', 10_000)
+
+    // The finished clip calibrates the next estimate; deleting it takes the calibration away.
+    const learned = await h.service.estimateVideo(clip)
+    expect(learned.basis).toBe('history')
+    await h.service.deleteVideoGalleryItems([jobId])
+    expect((await h.service.estimateVideo(clip)).basis).toBe('heuristic')
+  })
+
+  it('cannot estimate without hardware facts, and still runs the clip without one', async () => {
+    const h = await loadedVideoService()
+    const clip = sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 1 })
+    await expect(h.service.estimateVideo(clip)).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: 'The core has no hardware facts to estimate the video with.',
+    })
+    const outcome = await h.service.runVideoJob(clip)
+    expect(outcome.job).not.toHaveProperty('estimate')
+    expect(h.log).toContain(
+      'warn: video estimate failed: The core has no hardware facts to estimate the video with.'
+    )
   })
 
   it('cancels a running clip by stopping the engine, and cancelVideoJob knows only video jobs', async () => {

@@ -333,6 +333,7 @@ export async function createAtomicCore(
       layout,
       journal,
       instanceId: lock.instanceId,
+      hardware,
       emit: (name, payload) => emitter.emit(name, payload),
       log: runtimeLog,
       platform,

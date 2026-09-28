@@ -400,15 +400,52 @@ export interface VideoGenerateRequest {
   endImage?: ImageSource
 }
 
+/** Which memory a video generation competes for: Apple's unified memory, a discrete GPU's, or system RAM. */
+export type VideoMemoryPool = 'unified' | 'vram' | 'system'
+
+/** `fits`: at most 80 % of the budget; `tight`: at most 100 %; `exceeds`: past it, into swap. */
+export type VideoMemoryVerdict = 'fits' | 'tight' | 'exceeds'
+
+/** `heuristic`: the core's model of the family and the machine; `history`: calibrated by this machine's clips. */
+export type VideoEstimateBasis = 'heuristic' | 'history'
+
+/**
+ * What a video request will cost on this machine with the loaded model, before it runs. Answered by
+ * `POST /atomic/v1/diffusion/video/estimate` and carried by `VideoJob.estimate`.
+ */
+export interface VideoEstimate {
+  memory: {
+    requiredBytes: number
+    budgetBytes: number
+    /** The pool that decided the verdict. */
+    pool: VideoMemoryPool
+    verdict: VideoMemoryVerdict
+  }
+  /** Whole seconds, `0 < low <= high`; `null` when the verdict is `exceeds`: time in swap is unpredictable. */
+  seconds: { low: number; high: number } | null
+  basis: VideoEstimateBasis
+}
+
 /** One clip per job, so no batch fields. */
 export interface VideoJobProgress {
   phase: VideoJobPhase
   step: number
   totalSteps: number
-  /** 0..1 estimate for the whole job. */
+  /** 0..1 estimate for the whole job; never decreases and stays below 1 until the job is over. */
   fraction: number
+  /**
+   * Seconds left for the whole job: encoding, the remaining steps and the VAE decode. Before the
+   * first measured step it comes from `VideoJob.estimate`; `null` when unknown, when the decode ran
+   * past its forecast, and while saving.
+   */
   etaSeconds: number | null
+  /** Since the runner started the job. */
   elapsedMs: number
+  /**
+   * The steps slowed down sharply (a sign of swapping); once set it stays set for the job. Always
+   * sent by this core; absent from older cores, which a client reads as `false`.
+   */
+  slowdown?: boolean
 }
 
 export interface VideoJob {
@@ -424,6 +461,8 @@ export interface VideoJob {
   /** Zero or one item. */
   outputs: GalleryVideoItem[]
   error?: DiffusionErrorBody
+  /** The estimate for this request, taken when the job started; absent when it could not be made. */
+  estimate?: VideoEstimate
 }
 
 /** Written as `<jobId>.json` beside the video (WebM has no text chunk). Enough to reproduce the clip. */

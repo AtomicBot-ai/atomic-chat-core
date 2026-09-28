@@ -21,8 +21,10 @@ import {
   emitState,
   GPU_SETTLE_MS,
   loadFromSpec,
+  modelFileBytes,
   SHUTDOWN_GRACE_MS,
   shutdownSession,
+  statFileSize,
   stopKeepingSpec,
   takeDownSession,
   unload,
@@ -295,6 +297,52 @@ describe('loading', () => {
         family: 'qwen-image-2.1',
       }
     )
+  })
+})
+
+describe('the model file sizes', () => {
+  it('are read once at load, kept across a respawn of the spec, and forgotten at unload', async () => {
+    const h = harness()
+    const sizes: Record<string, number> = { '/m/ltx.gguf': 14e9, '/m/vae.st': 1.4e9, '/m/gemma.gguf': 7.4e9 }
+    const asked: string[] = []
+    h.deps.fileSize = async (path) => {
+      asked.push(path)
+      return sizes[path]
+    }
+    const spec = sampleVideoSpec({
+      files: {
+        diffusionModel: '/m/ltx.gguf',
+        vae: '/m/vae.st',
+        llm: '/m/gemma.gguf',
+        audioVae: '/m/gone.st',
+        vaeFormat: 'flux2',
+      },
+    })
+    await loadFromSpec(h.deps, spec, 'load')
+    // A file that cannot be read is left out; the VAE format names no file.
+    expect(h.state.modelFileBytes).toEqual({ diffusionModel: 14e9, vae: 1.4e9, llm: 7.4e9 })
+    expect(asked.sort()).toEqual(['/m/gemma.gguf', '/m/gone.st', '/m/ltx.gguf', '/m/vae.st'])
+    await takeDownSession(h.deps)
+    await loadFromSpec(h.deps, spec, 'respawn')
+    await loadFromSpec(h.deps, { ...spec, cpuFallback: true }, 'cpu-fallback')
+    expect(asked, 'no second stat for the same spec').toHaveLength(4)
+    await unload(h.deps, 'unload')
+    expect(h.state.modelFileBytes).toBeUndefined()
+    // A failed load leaves the sizes as they were.
+    h.failNextSpawn(new Error('no'))
+    await expect(loadFromSpec(h.deps, spec, 'load')).rejects.toThrow()
+    expect(h.state.modelFileBytes).toBeUndefined()
+  })
+
+  it('come from the disk by default', async () => {
+    const path = join(dataFolder, 'model.gguf')
+    await writeFile(path, Buffer.alloc(1234))
+    expect(await statFileSize(path)).toBe(1234)
+    expect(await statFileSize(join(dataFolder, 'missing.gguf'))).toBeUndefined()
+    expect(await statFileSize(dataFolder), 'a folder is not a file').toBeUndefined()
+    expect(await modelFileBytes({ diffusionModel: path, vae: join(dataFolder, 'missing') })).toEqual({
+      diffusionModel: 1234,
+    })
   })
 })
 

@@ -121,7 +121,11 @@ describe('IMAGE_JOB_KIND', () => {
         sampleRequest({ steps: 20, workflow: 'transform', initImage: { base64: 'QUJD' }, strength: 0.35 })
       )
     ).toEqual({ steps: 8, batch: 2 })
-    expect(IMAGE_JOB_KIND.progress(progress)).toBe(progress)
+    // Images keep the tracker's progress as it is, on change only: no plan, no heartbeat.
+    const record = { kind: 'image' as const, job, cancel: { requested: false } }
+    expect(IMAGE_JOB_KIND.progressModel(record, 0)(progress, 99)).toBe(progress)
+    expect(IMAGE_JOB_KIND.heartbeatMs).toBeUndefined()
+    expect(IMAGE_JOB_KIND.prepare).toBeUndefined()
     expect(IMAGE_JOB_KIND.cancelGenerating({ cancelGenerating: true })).toBe(true)
     expect(
       IMAGE_JOB_KIND.cancelGenerating({ cancelGenerating: false, vidGen: { cancelGenerating: true } })

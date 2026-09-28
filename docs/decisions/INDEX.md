@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-28** — [Estimate video generation before and during the job](2026-09-28-estimate-video-generation-before-and-during-the-job.md) — widens `VideoJobProgress.etaSeconds` to the whole job.
 - **2026-09-28** — [The app core writes its own log file](2026-09-28-the-app-core-writes-its-own-log-file.md)
 - **2026-09-27** — [The core advises on backends for both llama.cpp providers; the app decides when to act](2026-09-27-the-core-advises-on-backends-the-app-decides.md)
 - **2026-09-27** — [The core probes hardware with shell tools and is the only source of hardware facts](2026-09-27-the-core-probes-hardware-with-shell-tools.md) — revises PLAN.md §2 decision 10.

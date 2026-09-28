@@ -14,6 +14,9 @@
  *                       later one runs `ready` — so "the next job respawns it and completes" can be shown
  *   FAKE_SD_LOAD_MS     milliseconds before the port is bound (the model "loading")
  *   FAKE_SD_STEP_MS     milliseconds per sampling step (default 40)
+ *   FAKE_SD_SLOW_AFTER  n → every sampling step after the n-th takes FAKE_SD_SLOW_STEP_MS instead (a
+ *                       machine that started swapping)
+ *   FAKE_SD_SLOW_STEP_MS  milliseconds per step once slowed (default 10× FAKE_SD_STEP_MS)
  *   FAKE_SD_CANCEL      1 → advertise `cancel_generating` and honour a cancel while generating
  *   FAKE_SD_TILES       n → print a tiled-VAE pass of n tiles before sampling
  *   FAKE_SD_BLANK_SEED  n → a job whose seed is n returns all-black frames (the overflow sd.cpp can
@@ -58,6 +61,9 @@ function configuredMode() {
 }
 const port = Number(flag('--listen-port', '0'))
 const stepMs = Number(env.FAKE_SD_STEP_MS ?? '40')
+const slowAfter =
+  env.FAKE_SD_SLOW_AFTER === undefined ? Number.POSITIVE_INFINITY : Number(env.FAKE_SD_SLOW_AFTER)
+const slowStepMs = Number(env.FAKE_SD_SLOW_STEP_MS ?? String(stepMs * 10))
 const out = (text) => process.stdout.write(text)
 const err = (text) => process.stderr.write(text)
 const line = (text) => out(`${text}\n`)
@@ -203,7 +209,7 @@ async function run(job) {
     )
     for (let step = 1; step <= steps; step++) {
       if (job.status === 'cancelled') return
-      await sleep(stepMs)
+      await sleep(step > slowAfter ? slowStepMs : stepMs)
       const bar = `|${'='.repeat(step)}>${' '.repeat(Math.max(steps - step, 0))}|`
       out(`\r${bar} ${step}/${steps} - ${(stepMs / 1000).toFixed(2)}s/it\x1b[K`)
     }

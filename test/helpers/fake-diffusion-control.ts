@@ -11,6 +11,7 @@ import type {
   ImageJob,
   LoadedDiffusionModel,
   VideoCapabilities,
+  VideoEstimate,
   VideoJob,
   GalleryVideoItem,
 } from '../../src/contracts/index.js'
@@ -197,6 +198,12 @@ export const FAKE_VIDEO_ITEM: GalleryVideoItem = {
   },
 }
 
+export const FAKE_VIDEO_ESTIMATE: VideoEstimate = {
+  memory: { requiredBytes: 9_000_000_000, budgetBytes: 14_600_000_000, pool: 'unified', verdict: 'fits' },
+  seconds: { low: 160, high: 640 },
+  basis: 'heuristic',
+}
+
 export const FAKE_VIDEO_JOB: VideoJob = {
   id: 'vjob-1',
   state: 'queued',
@@ -286,6 +293,10 @@ export function fakeDiffusionControl(calls: string[]): FakeDiffusionControl {
         `generateVideo ${request.prompt} ${request.width}x${request.height}x${request.frames ?? 'default'}`
       )
       return { jobId: FAKE_VIDEO_JOB.id }
+    },
+    estimateVideo: async (request) => {
+      note(`estimateVideo ${request.width}x${request.height}x${request.frames ?? 'default'}`)
+      return FAKE_VIDEO_ESTIMATE
     },
     getVideoJob: (jobId) => (jobId === FAKE_VIDEO_JOB.id ? FAKE_VIDEO_JOB : null),
     cancelVideoJob: async (jobId) => {

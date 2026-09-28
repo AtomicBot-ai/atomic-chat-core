@@ -4,11 +4,13 @@
  * `diffusion:state`. Port of `session.rs` in `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`).
  */
 
+import { stat } from 'node:fs/promises'
 import type {
   CoreEvents,
   DiffusionBackendInstallRecord,
   DiffusionEngineInstall,
   DiffusionErrorBody,
+  DiffusionModelFiles,
   DiffusionStatus,
   ImageCapabilities,
   LoadedDiffusionModel,
@@ -19,8 +21,8 @@ import { samePath } from './containment.js'
 import { diffusionError, errorBody, modelNotLoadedError, toDiffusionError } from './errors.js'
 import { listInstalledBackends } from './install.js'
 import type { DiffusionState, ServerHandle } from './state.js'
-import { MAX_BATCH } from './types.js'
-import type { ServerSpec } from './types.js'
+import { MAX_BATCH, MODEL_FILE_KEYS } from './types.js'
+import type { ModelFileBytes, ServerSpec } from './types.js'
 import { videoWorkflowsForFamily, workflowsForSpec } from './workflow.js'
 
 /** CUDA and ROCm need a moment after the chat model's process dies before the driver reports the VRAM as free. */
@@ -49,6 +51,32 @@ export interface SessionDeps {
   spawn: (spec: ServerSpec, scratchDir: string, signal?: AbortSignal) => Promise<ServerHandle>
   /** The child is gone (or was never journalled); forget it. */
   onServerGone?: (pid: number) => Promise<void>
+  /** A file's size in bytes, `undefined` when it cannot be read. Default: `statFileSize`. */
+  fileSize?: (path: string) => Promise<number | undefined>
+}
+
+/** A regular file's size, or `undefined` when it is missing or not a file. */
+export const statFileSize = (path: string): Promise<number | undefined> =>
+  stat(path).then(
+    (s) => (s.isFile() ? s.size : undefined),
+    () => undefined
+  )
+
+/** The size of every file `files` names; one that cannot be read is left out. */
+export async function modelFileBytes(
+  files: DiffusionModelFiles,
+  fileSize: (path: string) => Promise<number | undefined> = statFileSize
+): Promise<ModelFileBytes> {
+  const bytes: ModelFileBytes = {}
+  await Promise.all(
+    MODEL_FILE_KEYS.map(async (key) => {
+      const path = files[key]
+      if (path === undefined) return
+      const size = await fileSize(path)
+      if (size !== undefined) bytes[key] = size
+    })
+  )
+  return bytes
 }
 
 /** The install the status reports: the resident spec's tree when there is one, otherwise the newest. */
@@ -182,6 +210,12 @@ export async function loadFromSpec(
   await emitState(deps, reason)
   if (spec.backend === 'cuda' || spec.backend === 'rocm') await deps.sleep(GPU_SETTLE_MS)
 
+  // A load reads the sizes the video estimate weighs, once; a respawn of the kept spec reuses them.
+  const fileBytes =
+    reason === 'load' || state.modelFileBytes === undefined
+      ? await modelFileBytes(spec.files, deps.fileSize)
+      : state.modelFileBytes
+
   let server: ServerHandle
   try {
     // A retained spec can name an engine build that an update has since made too old for it.
@@ -211,6 +245,7 @@ export async function loadFromSpec(
   }
   state.session = { server, info, spec, baseUrl: `http://127.0.0.1:${server.port}` }
   state.spec = spec
+  state.modelFileBytes = fileBytes
   state.setModelState('loaded')
   state.touchIdle()
   await emitState(deps, 'loaded')
@@ -241,6 +276,7 @@ export async function unload(deps: SessionDeps, reason: string): Promise<void> {
   }
   await takeDownSession(deps)
   state.spec = undefined
+  state.modelFileBytes = undefined
   state.clearIdle()
   state.setModelState('unloaded')
   await emitState(deps, reason)

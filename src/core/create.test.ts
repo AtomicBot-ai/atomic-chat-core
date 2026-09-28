@@ -556,6 +556,25 @@ describe.skipIf(process.platform === 'win32')('video generation through the owne
       dataFolder: data.root,
       controlPort: 0,
       diffusion: { timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 } },
+      // The video estimate reads the owner's hardware facts: 32 GiB of RAM, sixteen cores.
+      hardware: {
+        probe: async () => ({
+          info: {
+            cpu: {
+              name: 'Probe CPU',
+              core_count: 16,
+              arch: 'x86_64',
+              extensions: [],
+              extensions_known: true,
+            },
+            os_type: 'linux',
+            os_name: 'Probe OS',
+            total_memory: 32 * 1024,
+            gpus: [],
+          },
+          warnings: [],
+        }),
+      },
     })
     cores.push(core)
     const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
@@ -595,6 +614,19 @@ describe.skipIf(process.platform === 'win32')('video generation through the owne
       offload: 'none',
     })
     expect((await client.diffusionVideoCapabilities()).webmSupported).toBe(true)
+    const estimate = await client.estimateVideo({
+      prompt: 'a cat',
+      width: 64,
+      height: 32,
+      steps: 2,
+      cfgScale: 1,
+    })
+    expect(estimate.memory).toMatchObject({
+      pool: 'system',
+      budgetBytes: 32 * 1024 * 1024 * 1024 - 2_288_490_189,
+      verdict: 'fits',
+    })
+    expect(estimate.basis).toBe('heuristic')
 
     const served = await core.startPublicServer({ port: 0 })
     const base = `http://127.0.0.1:${served.port}/v1`

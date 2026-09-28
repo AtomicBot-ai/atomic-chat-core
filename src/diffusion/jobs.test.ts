@@ -1067,6 +1067,144 @@ describe('a video job', () => {
   })
 })
 
+/** A `vid_gen` stub that stays `generating` and lets `onPoll` script the run; completes when told to. */
+async function scriptedVideoStub(onPoll: (poll: number) => 'generating' | 'completed') {
+  const webm = await webmFixture()
+  let polls = 0
+  return stub((method, path) => {
+    if (method === 'POST' && path === '/sdcpp/v1/vid_gen') return json(202, { id: 'job_s', status: 'queued' })
+    if (method === 'GET' && path === '/sdcpp/v1/jobs/job_s') {
+      polls += 1
+      if (onPoll(polls) === 'generating') return json(200, { id: 'job_s', status: 'generating' })
+      return json(200, {
+        id: 'job_s',
+        status: 'completed',
+        result: { output_format: 'webm', fps: 24, frame_count: 25, b64_json: webm.toString('base64') },
+      })
+    }
+    return json(404, {})
+  })
+}
+
+const videoProgressEvents = (h: Harness) =>
+  h.events
+    .filter((e) => e.name === 'diffusion:video-progress')
+    .map((e) => (e.payload as CoreEvents['diffusion:video-progress']).progress)
+
+describe('a video job’s estimate', () => {
+  const estimate = {
+    memory: { requiredBytes: 9e9, budgetBytes: 14.6e9, pool: 'unified' as const, verdict: 'fits' as const },
+    seconds: { low: 100, high: 400 },
+    basis: 'heuristic' as const,
+  }
+  const forecast = {
+    encodeSeconds: 10,
+    stepSeconds: 20,
+    stepSecondsHigh: 40,
+    decodeSeconds: 30,
+    totalSeconds: 200,
+  }
+
+  it('is on the job from its first event, with the forecast kept off the wire', async () => {
+    const port = await scriptedVideoStub((poll) => (poll < 3 ? 'generating' : 'completed'))
+    const h = videoHarness(port)
+    const asked: string[] = []
+    h.deps.planVideo = async (request, spec) => {
+      asked.push(`${spec.modelId} ${request.width}x${request.height}x${request.frames}`)
+      return { estimate, forecast }
+    }
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    const first = h.events.find((e) => e.name === 'diffusion:video-job')
+      ?.payload as CoreEvents['diffusion:video-job']
+    expect(first.job.state).toBe('queued')
+    expect(first.job.estimate).toEqual(estimate)
+    expect(first.job).not.toHaveProperty('forecast')
+    expect(h.state.record(id)?.forecast).toEqual(forecast)
+    expect(asked).toEqual(['ltx-2:q4_k_m 768x512x25'])
+    const result = await done
+    expect(result.ok && result.outcome.job.estimate).toEqual(estimate)
+    // The progress counts from the estimate before any step was measured.
+    expect(videoProgressEvents(h).every((p) => p.slowdown === false)).toBe(true)
+  })
+
+  it('does not stop the job when it cannot be made', async () => {
+    const port = await scriptedVideoStub((poll) => (poll < 3 ? 'generating' : 'completed'))
+    const h = videoHarness(port)
+    h.deps.planVideo = async () => {
+      throw new Error('no hardware facts')
+    }
+    const { done } = await startVideoJob(h.deps, sampleVideoRequest())
+    const result = await done
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.outcome.job).not.toHaveProperty('estimate')
+    expect(h.log).toContain('warn: video estimate failed: no hardware facts')
+  })
+})
+
+describe('progress heartbeat', () => {
+  it('sends a clip’s progress at least once a second through a ten-second step', async () => {
+    const running: { h?: Harness } = {}
+    const port = await scriptedVideoStub((poll) => {
+      if (poll === 3) running.h?.server.say('|=>      | 1/8 - 10.0s/it')
+      // 400 ms polls: 25 of them is the ten-second step.
+      if (poll === 28) running.h?.server.say('|==>     | 2/8 - 10.0s/it')
+      return poll < 31 ? 'generating' : 'completed'
+    })
+    const h = videoHarness(port)
+    running.h = h
+    h.deps.timings.pollIntervalMs = 400
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    expect((await done).ok).toBe(true)
+    const duringStep = videoProgressEvents(h).filter((p) => p.step === 1 && p.phase === 'sampling')
+    expect(duringStep.length).toBeGreaterThanOrEqual(9)
+    const elapsed = duringStep.map((p) => p.elapsedMs)
+    expect(elapsed.every((ms, i) => i === 0 || ms > (elapsed[i - 1] as number))).toBe(true)
+    expect((elapsed.at(-1) as number) - (elapsed[0] as number)).toBeGreaterThanOrEqual(9_000)
+    // Consecutive events are never more than a second apart, and the record carries the latest.
+    expect(elapsed.every((ms, i) => i === 0 || ms - (elapsed[i - 1] as number) <= 1_000)).toBe(true)
+    expect(h.state.videoJob(id)?.progress?.phase).toBe('saving')
+  })
+
+  it('counts elapsed time from the job’s start, not from the submit', async () => {
+    const port = await scriptedVideoStub((poll) => (poll < 4 ? 'generating' : 'completed'))
+    const h = videoHarness(port)
+    h.deps.timings.pollIntervalMs = 400
+    const started = h.clock.now
+    const { done } = await startVideoJob(h.deps, sampleVideoRequest())
+    await done
+    const last = videoProgressEvents(h).at(-1)
+    expect(last?.elapsedMs).toBe(h.clock.now - started)
+  })
+
+  it('leaves image progress on change only', async () => {
+    const running: { h?: Harness } = {}
+    let polls = 0
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/img_gen')
+        return json(202, { id: 'job_i', status: 'queued' })
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_i') {
+        polls += 1
+        if (polls === 3) running.h?.server.say('|=>   | 1/4 - 10.0s/it')
+        if (polls < 30) return json(200, { id: 'job_i', status: 'generating' })
+        return json(200, {
+          id: 'job_i',
+          status: 'completed',
+          result: { images: [{ index: 0, b64_json: pngB64 }] },
+        })
+      }
+      return json(404, {})
+    })
+    const h = harness(port)
+    running.h = h
+    h.deps.timings.pollIntervalMs = 400
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1, steps: 4 }))
+    expect((await done).ok).toBe(true)
+    expect(h.progress().filter((p) => p.progress.step === 1 && p.progress.phase === 'sampling')).toHaveLength(
+      1
+    )
+  })
+})
+
 describe('the defaults', () => {
   it('draw a seed sd.cpp accepts and read a source from disk', async () => {
     const { drawSeed, readSourceFile } = await import('./jobs.js')
