@@ -29,7 +29,7 @@ import type { SdHttpClient } from './http.js'
 import { IMAGE_JOB_KIND } from './image-job.js'
 import { VIDEO_JOB_KIND } from './video-job.js'
 import type { VideoGallery } from './video-gallery.js'
-import type { AnyJobKind, JobCommon, JobKind } from './job-kind.js'
+import type { AnyJobKind, JobCommon, JobKind, JobPlan, ProgressModel } from './job-kind.js'
 import type { AsyncMutex } from './mutex.js'
 import { classifyExit, diagnosticTail, GpuFaultWatch } from './progress.js'
 import { describeExit, exitCodeOf } from './server-process.js'
@@ -76,6 +76,10 @@ export interface JobDeps extends SessionDeps {
   drawSeed: () => number
   readSource: (path: string) => Promise<Buffer>
   isFile: (path: string) => Promise<boolean>
+  /** The estimate a video job carries from its first event; absent: video jobs start without one. */
+  planVideo?: (request: VideoGenerateRequest, spec: ServerSpec) => Promise<JobPlan | undefined>
+  /** A clip landed in the video gallery (the estimate's history is stale). */
+  videoSaved?: () => void
 }
 
 export interface JobOutcome<J = ImageJob> {
@@ -114,8 +118,14 @@ function setJobState(deps: JobDeps, id: string, next: ImageJobState): void {
   if (changed) emitJob(deps, id)
 }
 
-function setProgress(deps: JobDeps, id: string, kind: AnyJobKind, tracker: ProgressTracker): void {
-  const progress: unknown = kind.progress(tracker.snapshot())
+function setProgress(
+  deps: JobDeps,
+  id: string,
+  kind: AnyJobKind,
+  tracker: ProgressTracker,
+  model: ProgressModel<unknown>
+): void {
+  const progress = model(tracker.snapshot(), deps.now())
   deps.state.updateJob(id, (record) => ((record.job as JobCommon<unknown, unknown>).progress = progress))
   kind.emitProgress(deps.emit, id, progress)
 }
@@ -169,6 +179,7 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
   if (spec.modality !== kind.modality)
     throw diffusionError('MODEL_INCOMPATIBLE', kind.messages.wrongModel, spec.modelId)
   await kind.validate(request, spec, { isFile: deps.isFile })
+  const plan = await kind.prepare?.(deps, request, spec)
 
   const id = randomUUID().replaceAll('-', '')
   if (state.activeJobId !== undefined) throw diffusionError('JOB_BUSY', kind.messages.busy, state.activeJobId)
@@ -177,8 +188,9 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
 
   const record: JobRecord = {
     kind: kind.id,
-    job: kind.newJob(id, spec, request, deps.now()) as unknown as ImageJob | VideoJob,
+    job: kind.newJob(id, spec, request, deps.now(), plan) as unknown as ImageJob | VideoJob,
     cancel: { requested: false },
+    ...(plan?.forecast ? { forecast: plan.forecast } : {}),
   }
   state.insertJob(record)
   emitJob(deps, id)
@@ -305,11 +317,15 @@ async function execute<Req, Job extends JobCommon<Item, Progress>, Item, Progres
   const seed = seedOf(request, deps)
   const inputs = await kind.resolveInputs(request, deps)
   const started = deps.now()
+  const record = deps.state.record(id)
+  if (!record) throw internalError('job record vanished')
+  // One model for the whole job, so a CPU-fallback retry keeps its fraction and its slowdown flag.
+  const model = kind.progressModel(record, started) as ProgressModel<unknown>
   for (let attempts = 1; ; attempts++) {
     const view = await ensureSession(deps, cancel)
     kind.preflight?.(deps.state.session?.server.capabilities)
     const body = kind.buildBody(request, view.spec, seed, inputs)
-    const attempt = await runAttempt(deps, kind, id, request, view, body, seed, cancel, started)
+    const attempt = await runAttempt(deps, kind, id, request, view, body, seed, cancel, started, model)
     if (attempt.kind === 'done') return attempt.outcome
     if (attempts > 1) throw diffusionError('ENGINE_CRASHED', 'sd-server crashed again on the CPU backend.')
     deps.log('warn', 'ggml abort on the device backend; restarting sd-server on the CPU backend')
@@ -331,13 +347,14 @@ async function runAttempt<Req, Job extends JobCommon<Item, Progress>, Item, Prog
   body: Record<string, unknown>,
   seed: number,
   cancel: CancelFlag,
-  started: number
+  started: number,
+  model: ProgressModel<unknown>
 ): Promise<Attempt<Job>> {
   if (cancel.requested) throw cancelledError()
   const lines: string[] = []
   deps.state.session?.server.setLineListener((line) => lines.push(line))
   try {
-    return await pollJob(deps, kind, id, request, view, body, seed, cancel, started, lines)
+    return await pollJob(deps, kind, id, request, view, body, seed, cancel, started, lines, model)
   } finally {
     deps.state.session?.server.setLineListener(undefined)
   }
@@ -375,7 +392,8 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
   seed: number,
   cancel: CancelFlag,
   started: number,
-  lines: string[]
+  lines: string[],
+  model: ProgressModel<unknown>
 ): Promise<Attempt<Job>> {
   const { http, state, timings } = deps
   const submitted = await http
@@ -412,6 +430,20 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
       gpu.onLine(line)
     }
   }
+  // Progress goes out on every change and, for a kind with a heartbeat, whenever waiting for the
+  // next poll would leave the last one older than the heartbeat while the job generates.
+  let reportedAt = Number.NEGATIVE_INFINITY
+  const report = (): void => {
+    const changed = tracker.takeDirty()
+    const now = deps.now()
+    const due =
+      kind.heartbeatMs !== undefined &&
+      state.record(id)?.job.state === 'generating' &&
+      now + timings.pollIntervalMs - reportedAt > kind.heartbeatMs
+    if (!changed && !due) return
+    setProgress(deps, id, kind, tracker, model)
+    reportedAt = now
+  }
   // Metal stays in its error state after an address fault, so every retry on this process would
   // fail at once: retire it, keep the spec, and the next job respawns a clean server.
   const retireAfterGpuFault = async (): Promise<void> => {
@@ -428,7 +460,7 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
 
   for (;;) {
     drain()
-    if (tracker.takeDirty()) setProgress(deps, id, kind, tracker)
+    report()
 
     const live = liveness(state)
     if (live.kind === 'gone') {
@@ -495,7 +527,7 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
       case 'completed': {
         setJobState(deps, id, 'generating')
         tracker.setPhase('saving')
-        setProgress(deps, id, kind, tracker)
+        setProgress(deps, id, kind, tracker, model)
         await retireAfterGpuFault()
         const decoded = kind.decode(job)
         const { items, bytes } = await kind.save(
@@ -528,7 +560,7 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
       default:
         break
     }
-    if (tracker.takeDirty()) setProgress(deps, id, kind, tracker)
+    report()
     await deps.sleep(timings.pollIntervalMs)
   }
 }

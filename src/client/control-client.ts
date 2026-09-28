@@ -36,6 +36,7 @@ import type {
   ImageJob,
   LoadDiffusionModelRequest,
   VideoCapabilities,
+  VideoEstimate,
   VideoGalleryPage,
   VideoGenerateRequest,
   VideoJob,
@@ -397,6 +398,16 @@ export class CoreClient {
   /** Answers with the job id at once; progress and the outcome arrive as `diffusion:video-*` events. */
   generateVideo(request: VideoGenerateRequest): Promise<{ jobId: string }> {
     return this.call('/diffusion/video/jobs', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** What `request` would cost on the owner's machine with the loaded model; starts nothing. */
+  async estimateVideo(request: VideoGenerateRequest): Promise<VideoEstimate> {
+    return (
+      await this.call<{ estimate: VideoEstimate }>('/diffusion/video/estimate', {
+        method: 'POST',
+        body: JSON.stringify(request),
+      })
+    ).estimate
   }
 
   async videoJob(jobId: string): Promise<VideoJob | null> {

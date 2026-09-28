@@ -23,6 +23,7 @@ import type {
   LoadDiffusionModelRequest,
   LoadedDiffusionModel,
   VideoCapabilities,
+  VideoEstimate,
   VideoGalleryPage,
   VideoGenerateRequest,
   VideoJob,
@@ -221,6 +222,8 @@ export interface DiffusionControl {
   // --- video (stage 9d): the same session, its own jobs, gallery and poster ---
   getVideoCapabilities: () => VideoCapabilities
   generateVideo: (request: VideoGenerateRequest) => Promise<{ jobId: string }>
+  /** What `request` would cost with the loaded model; starts nothing, answers while a job runs. */
+  estimateVideo: (request: VideoGenerateRequest) => Promise<VideoEstimate>
   getVideoJob: (jobId: string) => VideoJob | null
   cancelVideoJob: (jobId: string) => Promise<DiffusionCancelResult>
   listVideoGallery: (options: GalleryListOptions) => Promise<VideoGalleryPage>

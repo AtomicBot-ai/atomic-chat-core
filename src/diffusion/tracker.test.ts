@@ -133,6 +133,18 @@ describe('ProgressTracker', () => {
     expect(t.snapshot().step).toBe(1)
   })
 
+  it('counts the sampling of a clip after a tile pass whose last redraw was lost', () => {
+    const t = new ProgressTracker(4, 1)
+    t.setPhase('encoding')
+    t.onLine('[VERBOSE] tiling.cpp:203  - processing 4 tiles')
+    t.onLine('|==>   | 3/4 - 0.10s/it')
+    t.onLine('[INFO   ] stable-diffusion.cpp:5705 - generating video: 1/1 - seed 7')
+    t.onLine('|=>    | 1/4 - 9.0s/it')
+    expect([t.snapshot().phase, t.snapshot().step]).toEqual(['sampling', 1])
+    for (let step = 2; step <= 4; step++) t.onLine(`|==>   | ${step}/4 - 9.0s/it`)
+    expect([t.snapshot().phase, t.snapshot().step]).toEqual(['decoding', 4])
+  })
+
   it('remembers what the server said, but not its redraws', () => {
     const t = new ProgressTracker(8, 1)
     t.onLine('|==>   | 1/8 - 12.0s/it')

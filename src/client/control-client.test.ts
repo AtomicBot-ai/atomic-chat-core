@@ -546,6 +546,9 @@ describe('image generation', () => {
       cfgScale: 1,
     })
     expect(jobId).toBe('vjob-1')
+    expect(
+      await client.estimateVideo({ prompt: 'a cat walking', width: 768, height: 512, steps: 8, cfgScale: 1 })
+    ).toMatchObject({ memory: { verdict: 'fits', pool: 'unified' }, seconds: { low: 160, high: 640 } })
     expect((await client.videoJob(jobId))?.state).toBe('queued')
     expect(await client.videoJob('gone/with/slashes')).toBeNull()
     expect(await client.cancelVideoJob(jobId)).toEqual({ cancelled: true, serverStopped: false })
@@ -562,6 +565,7 @@ describe('image generation', () => {
     await client.deleteVideoGalleryItems([item?.id as string])
     expect(diffusionCalls).toEqual([
       'diffusion generateVideo a cat walking 768x512x25',
+      'diffusion estimateVideo 768x512xdefault',
       'diffusion cancelVideoJob vjob-1',
       'diffusion listVideoGallery {"offset":0,"limit":40,"includeArchived":true}',
       `diffusion setVideoGalleryFlags ${item?.id} {"archived":true}`,

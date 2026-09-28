@@ -7,7 +7,6 @@
 import { basename } from 'node:path'
 import type {
   GalleryVideoItem,
-  ImageJobProgress,
   VideoGenerateRequest,
   VideoJob,
   VideoJobProgress,
@@ -16,11 +15,16 @@ import type {
 import { buildVidGenRequest } from './args.js'
 import { diffusionError, internalError } from './errors.js'
 import { redactSource, resolveSource } from './image-job.js'
-import type { JobKind, SaveContext } from './job-kind.js'
+import type { JobKind, JobPlan, ProgressModel, SaveContext } from './job-kind.js'
 import type { JobDeps } from './jobs.js'
+import type { JobRecord } from './state.js'
 import type { ResolvedInputs, ServerCapabilities, ServerSpec } from './types.js'
 import { validateVideoRequest } from './validate.js'
+import { VideoEta } from './video-eta.js'
 import { isWebm } from './video-gallery.js'
+
+/** A clip's progress goes out at least once a second while it generates, whether or not a step landed. */
+export const VIDEO_PROGRESS_HEARTBEAT_MS = 1_000
 
 /** What a completed `vid_gen` job carries once decoded. */
 export interface DecodedVideo {
@@ -123,20 +127,38 @@ export async function saveVideoOutput(
     durationMs: Math.max(createdAtMs - startedAt, 0),
   }
   const saved = await deps.videoGallery.save(deps.state.videoOutputDir(), recipe, decoded.bytes)
+  deps.videoSaved?.()
   deps.state.updateJob(id, (record) => (record.job as VideoJob).outputs.push(saved.item))
   return { items: [saved.item], bytes: [saved.bytes] }
 }
 
-/** The wire progress of a clip: the tracker's snapshot without the batch fields. */
-export function videoProgress(snapshot: ImageJobProgress): VideoJobProgress {
-  return {
-    phase: snapshot.phase,
-    step: snapshot.step,
-    totalSteps: snapshot.totalSteps,
-    fraction: snapshot.fraction,
-    etaSeconds: snapshot.etaSeconds,
-    elapsedMs: snapshot.elapsedMs,
+/** The estimate and its forecast for a job about to start; a failure only costs the job its estimate. */
+export async function prepareVideoJob(
+  deps: Pick<JobDeps, 'planVideo' | 'log'>,
+  request: VideoGenerateRequest,
+  spec: ServerSpec
+): Promise<JobPlan | undefined> {
+  if (!deps.planVideo) return undefined
+  try {
+    return await deps.planVideo(request, spec)
+  } catch (error) {
+    deps.log('warn', `video estimate failed: ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
   }
+}
+
+/**
+ * The wire progress of a clip: the tracker's snapshot without the batch fields, with the ETA,
+ * fraction and slowdown of `VideoEta` over the whole job.
+ */
+export function videoProgressModel(record: JobRecord, startedAt: number): ProgressModel<VideoJobProgress> {
+  const estimate = (record.job as VideoJob).estimate
+  const eta = new VideoEta({
+    startedAt,
+    ...(record.forecast ? { forecast: record.forecast } : {}),
+    estimated: estimate?.seconds != null,
+  })
+  return (snapshot, now) => eta.progress(snapshot, now)
 }
 
 /** A build without libwebm cannot write the one container the app plays; say so before submitting. */
@@ -168,7 +190,8 @@ export const VIDEO_JOB_KIND: JobKind<
     failed: 'The video server failed to generate.',
   },
   validate: (request, spec, deps) => validateVideoRequest(request, spec, deps),
-  newJob: (id, spec: ServerSpec, request, now) => ({
+  prepare: prepareVideoJob,
+  newJob: (id, spec: ServerSpec, request, now, plan) => ({
     id,
     state: 'queued',
     modelId: spec.modelId,
@@ -176,11 +199,13 @@ export const VIDEO_JOB_KIND: JobKind<
     createdAtMs: now,
     progress: null,
     outputs: [],
+    ...(plan?.estimate ? { estimate: plan.estimate } : {}),
   }),
   resolveInputs: resolveVideoInputs,
   buildBody: (request, spec, seed, inputs) => buildVidGenRequest(request, spec.defaults, seed, inputs),
   trackerShape: (request) => ({ steps: Math.max(request.steps, 1), batch: 1 }),
-  progress: videoProgress,
+  progressModel: videoProgressModel,
+  heartbeatMs: VIDEO_PROGRESS_HEARTBEAT_MS,
   emitJob: (emit, job) => emit('diffusion:video-job', { job }),
   emitProgress: (emit, jobId, progress) => emit('diffusion:video-progress', { jobId, progress }),
   cancelGenerating: (capabilities) => capabilities.vidGen?.cancelGenerating ?? false,

@@ -40,6 +40,24 @@ export interface ServerSpec {
   cpuFallback: boolean
 }
 
+/** The files of a spec that take memory once loaded; `vaeFormat` names a format, not a file. */
+export type ModelFileKey = Exclude<keyof DiffusionModelFiles, 'vaeFormat'>
+
+export const MODEL_FILE_KEYS: readonly ModelFileKey[] = [
+  'diffusionModel',
+  'vae',
+  'clipL',
+  't5xxl',
+  'llm',
+  'llmVision',
+  'qwen2vl',
+  'audioVae',
+  'embeddingsConnectors',
+]
+
+/** Bytes on disk of each file of the loaded spec, read once at load; a file that could not be read is absent. */
+export type ModelFileBytes = Partial<Record<ModelFileKey, number>>
+
 /** The engine's generation modes, as `supported_modes` names them. */
 export type SdMode = 'img_gen' | 'vid_gen'
 

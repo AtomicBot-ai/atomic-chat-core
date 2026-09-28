@@ -41,6 +41,14 @@ export function registerDiffusionVideoRoutes(
       )
     )
   )
+  // The same body as a job; nothing starts, and it answers while another job runs.
+  router.post(p('/diffusion/video/estimate'), async (req, res) =>
+    sendJson(res, 200, {
+      estimate: await diffusion.estimateVideo(
+        parseVideoGenerateRequest(await readJsonBody(req, MAX_GENERATE_BODY_BYTES))
+      ),
+    })
+  )
   router.get(p('/diffusion/video/jobs/:jobId'), (_req, res, { params }) =>
     sendJson(res, 200, { job: diffusion.getVideoJob(params['jobId'] as string) })
   )

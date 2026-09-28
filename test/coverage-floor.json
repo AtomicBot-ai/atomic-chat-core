@@ -343,7 +343,7 @@
   },
   "src/diffusion/jobs.ts": {
     "statements": 98,
-    "branches": 87,
+    "branches": 89,
     "functions": 100,
     "lines": 98
   },
@@ -416,6 +416,24 @@
   "src/diffusion/validate.ts": {
     "statements": 100,
     "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/video-estimate.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/video-eta.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/video-history.ts": {
+    "statements": 100,
+    "branches": 96,
     "functions": 100,
     "lines": 100
   },

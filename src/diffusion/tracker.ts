@@ -75,8 +75,8 @@ export class ProgressTracker {
   onLine(line: string): void {
     const announced = parseTileAnnouncement(line)
     if (announced !== undefined) this.tiles = announced
-    // The sampling banner ends a tile pass whose last redraw was lost.
-    else if (line.includes('generating image:')) this.tiles = undefined
+    // The sampling banner (an image's or a clip's) ends a tile pass whose last redraw was lost.
+    else if (line.includes('generating image:') || line.includes('generating video:')) this.tiles = undefined
     if (!isProgressRedraw(line)) {
       if (this.log.length === JOB_LOG_LINES) this.log.shift()
       this.log.push(line)

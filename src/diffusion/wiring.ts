@@ -5,7 +5,7 @@
  */
 
 import type { DataLayout } from '../config/index.js'
-import type { CoreEvents } from '../contracts/index.js'
+import type { CoreEvents, HardwareInfoResponse, SystemInfo } from '../contracts/index.js'
 import { processStartId } from '../lock/index.js'
 import type { ProcessJournal } from '../lock/index.js'
 import { DiffusionService } from './service.js'
@@ -17,6 +17,8 @@ export interface WireDiffusionOptions {
   instanceId: string
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
   log: (level: 'info' | 'warn' | 'debug', msg: string) => void
+  /** The core's hardware service; the video estimate reads its facts, the override applied. */
+  hardware?: { info(): Promise<HardwareInfoResponse> }
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
   /** Test seams, straight through to the service. */
@@ -48,6 +50,13 @@ export function diffusionJournal(
   }
 }
 
+/** The facts the video estimate reads, out of the hardware service's answer. */
+export function hardwareSystemInfo(hardware: {
+  info(): Promise<HardwareInfoResponse>
+}): () => Promise<SystemInfo> {
+  return async () => (await hardware.info()).info
+}
+
 export function wireDiffusion(options: WireDiffusionOptions): DiffusionService {
   const service = new DiffusionService({
     paths: options.layout.diffusion,
@@ -55,6 +64,7 @@ export function wireDiffusion(options: WireDiffusionOptions): DiffusionService {
     emit: options.emit,
     log: options.log,
     journal: diffusionJournal(options.journal, options.instanceId),
+    ...(options.hardware ? { systemInfo: hardwareSystemInfo(options.hardware) } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...options.overrides,

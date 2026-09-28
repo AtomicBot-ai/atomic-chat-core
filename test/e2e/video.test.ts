@@ -364,5 +364,83 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       ).toBeNull()
       expect((await sd.runVideoJob(ctx, ready)).state).toBe('completed')
     }, 60_000)
+
+    it('estimates a clip before it starts, carries the estimate on the job, beats progress through a long step and flags a slowdown', async () => {
+      // Three 3-second steps, then the machine "starts swapping": the fourth takes 25 seconds. The
+      // request is large enough that its forecast step is longer than any of them, so only the
+      // three-medians rule can raise the flag, whatever machine runs this.
+      const { ready } = await sd.loadedOwner(ctx, {
+        video: true,
+        env: {
+          FAKE_SD_STEP_MS: '3000',
+          FAKE_SD_SLOW_AFTER: '3',
+          FAKE_SD_SLOW_STEP_MS: '25000',
+          FAKE_SD_CANCEL: '1',
+        },
+      })
+      const request = sd.sdVideoRequest({ width: 1024, height: 1024, steps: 6 })
+      type Estimate = {
+        memory: { verdict: string; pool: string; requiredBytes: number; budgetBytes: number }
+        seconds: { low: number; high: number } | null
+        basis: string
+      }
+      const answered = await control(ctx, ready, '/diffusion/video/estimate', {
+        method: 'POST',
+        body: JSON.stringify(request),
+      })
+      expect(answered.status).toBe(200)
+      const { estimate } = (await answered.json()) as { estimate: Estimate }
+      expect(['fits', 'tight', 'exceeds']).toContain(estimate.memory.verdict)
+      expect(estimate.memory.requiredBytes).toBeGreaterThan(0)
+      expect(estimate.basis).toBe('heuristic')
+      if (estimate.seconds) expect(estimate.seconds.low).toBeLessThanOrEqual(estimate.seconds.high)
+      // The same refusal as the job route for a frame count off the lattice.
+      const odd = await control(ctx, ready, '/diffusion/video/estimate', {
+        method: 'POST',
+        body: JSON.stringify({ ...request, frames: 10 }),
+      })
+      expect(odd.status).toBe(400)
+      expect(await odd.json()).toMatchObject({ error: { code: 'INVALID_REQUEST' } })
+
+      const events = await sd.collectEvents(ctx, ready)
+      const { jobId } = await json<{ jobId: string }>(
+        await control(ctx, ready, '/diffusion/video/jobs', { method: 'POST', body: JSON.stringify(request) })
+      )
+      await waitFor(() => events.some((e) => e.event === 'diffusion:video-job'), 'the first job event')
+      const first = events.find((e) => e.event === 'diffusion:video-job')?.data['job'] as VideoJob & {
+        estimate?: Estimate
+      }
+      expect(first.estimate?.memory.verdict).toBe(estimate.memory.verdict)
+      // The estimate answers while the job runs.
+      expect(
+        (
+          await control(ctx, ready, '/diffusion/video/estimate', {
+            method: 'POST',
+            body: JSON.stringify(request),
+          })
+        ).status
+      ).toBe(200)
+
+      type Progress = { phase: string; step: number; elapsedMs: number; slowdown?: boolean }
+      const progress = () =>
+        events
+          .filter((e) => e.event === 'diffusion:video-progress')
+          .map((e) => e.data['progress'] as Progress)
+      await waitFor(() => progress().some((p) => p.step === 2), 'the second step', 20_000)
+      // The step after the first mark takes three seconds: the heartbeat fills it.
+      const duringStep = progress().filter((p) => p.step === 1 && p.phase === 'sampling')
+      expect(duringStep.length).toBeGreaterThanOrEqual(2)
+      const elapsed = duringStep.map((p) => p.elapsedMs)
+      expect(elapsed.every((ms, i) => i === 0 || ms > (elapsed[i - 1] as number))).toBe(true)
+      expect(progress().every((p) => p.slowdown === false)).toBe(true)
+
+      // The fourth step drags past three medians and twenty seconds.
+      await waitFor(() => progress().some((p) => p.slowdown === true), 'the slowdown flag', 40_000)
+      const job = await sdVideoJob(ctx, ready, jobId)
+      expect((job?.progress as Progress | null)?.slowdown).toBe(true)
+      expect(
+        await json(await control(ctx, ready, `/diffusion/video/jobs/${jobId}/cancel`, { method: 'POST' }))
+      ).toEqual({ cancelled: true, serverStopped: false })
+    }, 60_000)
   }
 )

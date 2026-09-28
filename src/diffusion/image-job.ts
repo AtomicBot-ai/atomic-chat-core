@@ -195,7 +195,7 @@ export const IMAGE_JOB_KIND: JobKind<
   resolveInputs,
   buildBody: (request, spec, seed, inputs) => buildImgGenRequest(request, spec.defaults, seed, inputs),
   trackerShape: (request) => ({ steps: sampledSteps(request), batch: request.batchSize }),
-  progress: (snapshot) => snapshot,
+  progressModel: () => (snapshot) => snapshot,
   emitJob: (emit, job) => emit('diffusion:job', { job }),
   emitProgress: (emit, jobId, progress) => emit('diffusion:progress', { jobId, progress }),
   cancelGenerating: (capabilities) => capabilities.cancelGenerating,
