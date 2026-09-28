@@ -28,7 +28,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 
@@ -124,7 +124,17 @@ export const WATCHDOG_SCRIPT_MODE = 0o555
 //    each other sidesteps all three: the file being created late, missing outright, or already old
 //    are just more values that either stay the same (and eventually trip the threshold, exactly
 //    `ceil(limit/poll)` polls after the script itself started watching) or change (and reset the
-//    count), independent of what time it is.
+//    count), independent of what time it is. The baseline (`PREV_OBSERVATION`) is read exactly once,
+//    right after the tolerant create, and `UNCHANGED_POLLS` starts at 0 and is reset to 0 (not 1) on
+//    every change — the poll that first observes a value establishes the baseline, it does not itself
+//    count as one confirmed-unchanged poll, or `STALE_LIMIT_SECS <= POLL_INTERVAL_SECS` would kill a
+//    heartbeat that was changing on every single poll (findings-2.9-r2 item 1).
+//
+//  - A heartbeat file that already exists when the script starts is left alone, not truncated: the
+//    tolerant create only runs when nothing is there yet. Its age never mattered to the loop above,
+//    only whether it keeps changing from here on, so there was never a correctness reason to touch
+//    it — and leaving it alone is what makes "a genuinely leftover file" something a test can set up
+//    and then verify was not clobbered.
 //
 //  - mtime is read with `stat -c %Y` (GNU coreutils — the actual runtime is the NGC Ubuntu base
 //    image) falling back to `stat -f %m` (BSD/macOS `stat`), so the exact same file also runs under
@@ -155,6 +165,28 @@ export const WATCHDOG_SCRIPT_MODE = 0o555
 //    TERM, then poll for exit once a second (also backgrounded/`wait`-ed, for the same reason as the
 //    main loop), escalating to KILL once `KILL_GRACE_SECS` has passed with the engine still alive.
 //    Forwarding a stop signal is not allowed to hang forever on an engine that never reacts.
+//
+//  - `terminate_engine` guards against re-entry with `STOPPING`: a second TERM/INT arriving while a
+//    shutdown is already in progress (`docker stop` repeating itself, or a TERM landing during the
+//    stale path's own grace wait) does not restart the grace clock — `GRACE_ELAPSED` is a variable
+//    outside the function, not reset by a fresh call, and the initial signal is sent only once. Before
+//    this guard, a shell trap firing again *during* the interrupted call's own `wait` effectively
+//    restarted `terminate_engine` from its top on every signal, so a TERM repeating faster than
+//    `KILL_GRACE_SECS` could postpone the KILL indefinitely (findings-2.9-r2 item 2). `STOP_EXIT_CODE`
+//    exists for the same re-entry: if the stale path is what is tearing the engine down, its trap
+//    invocation (should one fire mid-shutdown) must still `exit 97`, not whatever status the
+//    interrupted `wait` happened to leave in `$?` — the stale branch sets it before calling
+//    `terminate_engine`, and the TERM/INT trap falls back to `$?` only when nothing set it.
+//
+//  - `terminate_engine` resolves the pid to act on as `${ENGINE_PID:-$!}` (with `set +u`/`set -u`
+//    bracketing it, since `$!` is unset — not just empty — before any job has ever been backgrounded,
+//    and referencing an unset special parameter under `set -u` is itself fatal on at least one real
+//    `/bin/sh`). A TERM/INT landing in the gap between `"$@" &` starting the engine and the very next
+//    statement assigning `ENGINE_PID=$!` would otherwise see `ENGINE_PID` still empty and return
+//    early as if there were nothing to stop — exiting 0 with the engine alive and orphaned
+//    (findings-2.9-r2 item 3). `$!` — the shell's own record of the most recently started background
+//    job — still resolves correctly in exactly that gap, because it is set by `&` itself, before the
+//    next statement ever runs.
 //
 //  - A missing heartbeat file is just another observation value, not a special case: the file is
 //    still created tolerantly at startup (wrapped in a subshell, `( : > "$F" ) 2>/dev/null || true`,
@@ -196,12 +228,15 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '',
   '# A malformed timing value must not silently disable the watchdog (a non-integer',
   '# STALE_LIMIT_SECS would make the arithmetic below fail with "Illegal number" only once it is',
-  '# first used, and a zero POLL_INTERVAL_SECS would turn the poll loop into a busy loop).',
+  '# first used, and a zero POLL_INTERVAL_SECS would turn the poll loop into a busy loop). A leading',
+  '# zero is rejected too, not just tolerated as decimal: "08"/"09" are not valid octal digits and',
+  '# abort arithmetic evaluation outright, and "010" is silently octal 8, not decimal ten — neither',
+  '# is a value anyone setting this env var meant to produce.',
   'validate_positive_int() {',
   '  case $2 in',
-  "    ''|*[!0-9]*) fail \"$1 must be a positive integer (got '$2')\" ;;",
+  "    ''|*[!0-9]*|0|0[0-9]*) fail \"$1 must be a positive integer with no leading zero (got '$2')\" ;;",
   '  esac',
-  '  [ "$2" -gt 0 ] 2>/dev/null || fail "$1 must be a positive integer (got \'$2\')"',
+  '  [ "$2" -gt 0 ] 2>/dev/null || fail "$1 must be a positive integer with no leading zero (got \'$2\')"',
   '}',
   'validate_positive_int ATOMIC_WATCHDOG_STALE_LIMIT_SECS "$STALE_LIMIT_SECS"',
   'validate_positive_int ATOMIC_WATCHDOG_POLL_INTERVAL_SECS "$POLL_INTERVAL_SECS"',
@@ -211,34 +246,16 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   'shift',
   '',
   '# Consecutive-unchanged-polls threshold: the smallest poll count whose span is >= the limit.',
+  "# PREV_OBSERVATION is seeded once, right below (after the tolerant create), from the heartbeat's",
+  '# actual state; UNCHANGED_POLLS then counts polls whose observation matched the one before it,',
+  '# starting from 0 — the poll that establishes the baseline is not itself counted as unchanged.',
   'THRESHOLD=$(( (STALE_LIMIT_SECS + POLL_INTERVAL_SECS - 1) / POLL_INTERVAL_SECS ))',
   '',
-  '# Best-effort only: whether this succeeds or not, staleness is judged by the observation loop',
-  '# below, not by this file having been created.',
-  '( : > "$HEARTBEAT_FILE" ) 2>/dev/null || true',
-  '',
-  'ENGINE_PID=',
-  '',
-  'terminate_engine() {',
-  '  [ -n "$ENGINE_PID" ] || return 0',
-  '  kill -"$1" "$ENGINE_PID" 2>/dev/null || true',
-  '  i=0',
-  '  while kill -0 "$ENGINE_PID" 2>/dev/null; do',
-  '    if [ "$i" -ge "$KILL_GRACE_SECS" ]; then',
-  '      kill -KILL "$ENGINE_PID" 2>/dev/null || true',
-  '      break',
-  '    fi',
-  '    i=$((i + 1))',
-  '    sleep 1 & wait $!',
-  '  done',
-  '  wait "$ENGINE_PID" 2>/dev/null',
-  '}',
-  '',
-  "trap 'terminate_engine TERM; exit $?' TERM",
-  "trap 'terminate_engine TERM; exit $?' INT",
-  '',
-  '"$@" &',
-  'ENGINE_PID=$!',
+  '# Only if nothing is there yet: a genuinely leftover file from a previous run is left alone. Best-',
+  '# effort either way — staleness is judged by the observation loop below, not by this having worked.',
+  'if [ ! -e "$HEARTBEAT_FILE" ]; then',
+  '  ( : > "$HEARTBEAT_FILE" ) 2>/dev/null || true',
+  'fi',
   '',
   'heartbeat_observation() {',
   '  m=$(stat -c %Y "$1" 2>/dev/null) && { echo "$m"; return 0; }',
@@ -246,8 +263,39 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '  echo missing',
   '}',
   '',
-  'PREV_OBSERVATION=""',
+  'PREV_OBSERVATION=$(heartbeat_observation "$HEARTBEAT_FILE")',
   'UNCHANGED_POLLS=0',
+  '',
+  'ENGINE_PID=',
+  'STOPPING=0',
+  'GRACE_ELAPSED=0',
+  'STOP_EXIT_CODE=',
+  '',
+  'terminate_engine() {',
+  '  set +u',
+  '  pid=${ENGINE_PID:-$!}',
+  '  set -u',
+  '  [ -n "$pid" ] || return 0',
+  '  if [ "$STOPPING" -eq 0 ]; then',
+  '    STOPPING=1',
+  '    kill -"$1" "$pid" 2>/dev/null || true',
+  '  fi',
+  '  while kill -0 "$pid" 2>/dev/null; do',
+  '    if [ "$GRACE_ELAPSED" -ge "$KILL_GRACE_SECS" ]; then',
+  '      kill -KILL "$pid" 2>/dev/null || true',
+  '      break',
+  '    fi',
+  '    GRACE_ELAPSED=$((GRACE_ELAPSED + 1))',
+  '    sleep 1 & wait $!',
+  '  done',
+  '  wait "$pid" 2>/dev/null',
+  '}',
+  '',
+  'trap \'terminate_engine TERM; exit "${STOP_EXIT_CODE:-$?}"\' TERM',
+  'trap \'terminate_engine TERM; exit "${STOP_EXIT_CODE:-$?}"\' INT',
+  '',
+  '"$@" &',
+  'ENGINE_PID=$!',
   '',
   'while true; do',
   '  if ! kill -0 "$ENGINE_PID" 2>/dev/null; then',
@@ -261,12 +309,13 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '  if [ "$OBSERVATION" = "$PREV_OBSERVATION" ]; then',
   '    UNCHANGED_POLLS=$((UNCHANGED_POLLS + 1))',
   '  else',
-  '    UNCHANGED_POLLS=1',
+  '    UNCHANGED_POLLS=0',
   '    PREV_OBSERVATION=$OBSERVATION',
   '  fi',
   '',
   '  if [ "$UNCHANGED_POLLS" -ge "$THRESHOLD" ]; then',
   '    echo "atomic-watchdog: heartbeat unchanged for $UNCHANGED_POLLS/$THRESHOLD polls; stopping the engine" >&2',
+  '    STOP_EXIT_CODE=$WATCHDOG_EXIT_STALE_HEARTBEAT',
   '    terminate_engine TERM',
   '    exit "$WATCHDOG_EXIT_STALE_HEARTBEAT"',
   '  fi',
@@ -277,47 +326,77 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
 /** The watchdog entrypoint script text, ready to write to disk verbatim. */
 export const WATCHDOG_SCRIPT: string = WATCHDOG_SCRIPT_LINES.join('\n')
 
+/** The slice of a `fs.Stats` the no-op check needs — real `lstat` results satisfy this structurally. */
+export interface WatchdogScriptLstat {
+  isFile(): boolean
+  mode: number
+}
+
 /** The slice of `node:fs/promises` `writeWatchdogScript` needs; tests pass an in-memory fake. */
 export interface WatchdogScriptFs {
   mkdir(path: string, options: { recursive: boolean }): Promise<string | undefined>
   writeFile(path: string, data: string, options?: { flag?: string; mode?: number }): Promise<void>
   chmod(path: string, mode: number): Promise<void>
   rename(from: string, to: string): Promise<void>
-  /** Used only to short-circuit when the target already holds the current script verbatim. */
+  /** Cleans up an abandoned temp file after a failed `chmod`/`rename`; failures are swallowed. */
+  rm(path: string): Promise<void>
+  /**
+   * `lstat`, not `stat`: a symlink at `path` must never read as "already current" through the file
+   * it points at, or `writeWatchdogScript` would leave the symlink in place instead of replacing it
+   * with a real, independently-owned regular file.
+   */
+  lstat(path: string): Promise<WatchdogScriptLstat>
+  /** Used only to compare content once `lstat` has already confirmed a regular file at `0555`. */
   readFile(path: string, encoding: 'utf8'): Promise<string>
 }
 
-const NODE_FS: WatchdogScriptFs = { mkdir, writeFile, chmod, rename, readFile }
+const NODE_FS: WatchdogScriptFs = { mkdir, writeFile, chmod, rename, rm, lstat, readFile }
+
+/**
+ * Whether `path` is already exactly what `writeWatchdogScript` would produce: a regular file (not a
+ * symlink, not a directory or anything else), mode `0555` exactly, holding `WATCHDOG_SCRIPT`
+ * verbatim. Content alone is not enough — a symlink that happens to point at identical content, or a
+ * regular file with the right content but the wrong mode (e.g. still `0644` from some other writer),
+ * both need to be replaced, not left alone.
+ */
+async function isCurrent(fs: WatchdogScriptFs, path: string): Promise<boolean> {
+  const info = await fs.lstat(path).catch(() => undefined)
+  if (info === undefined || !info.isFile() || (info.mode & 0o777) !== WATCHDOG_SCRIPT_MODE) return false
+  const content = await fs.readFile(path, 'utf8').catch(() => undefined)
+  return content === WATCHDOG_SCRIPT
+}
 
 /**
  * Writes the watchdog entrypoint script to `path`, atomically and idempotently.
  *
- * A second call on a path that already holds the current script (the common case: the executor
- * calls this on every container start, not only the first) is a no-op — worth checking, since the
- * file is `0555` and a second `writeFile` straight at that path would fail `EACCES`. When the
- * content differs, the script is written to a temp file in the same directory (created exclusively,
- * so two writers never interleave into the same temp name), locked to `0555`, then `rename`d over
- * the target: a rename replaces whatever is at the destination — including a symlink itself, not
- * whatever it points at — in one atomic step, so a container that is mid-read of the old script
- * never sees a half-written file, and nothing already running with the old copy open loses it out
- * from under itself.
+ * A second call on a path that already holds the current script at the right mode (the common case:
+ * the executor calls this on every container start, not only the first) is a no-op — worth checking,
+ * since the file is `0555` and a second `writeFile` straight at that path would fail `EACCES`. When
+ * it is not already current, the script is written to a temp file in the same directory (created
+ * exclusively, so two writers never interleave into the same temp name), locked to `0555`, then
+ * `rename`d over the target: a rename replaces whatever is at the destination — including a symlink
+ * itself, not whatever it points at — in one atomic step, so a container that is mid-read of the old
+ * script never sees a half-written file, and nothing already running with the old copy open loses it
+ * out from under itself. If `chmod` or `rename` fails partway through, the abandoned temp file is
+ * removed rather than left behind for the next call (or a directory listing) to trip over.
  *
  * The executor (task 2.8/2.12) bind-mounts the result into the model container read-only and passes
  * it as the container's entrypoint; this function has no opinion on where `path` lives — that is the
  * core's per-scope data directory, chosen by the caller.
  */
 export async function writeWatchdogScript(path: string, fs: WatchdogScriptFs = NODE_FS): Promise<string> {
-  try {
-    const existing = await fs.readFile(path, 'utf8').catch(() => undefined)
-    if (existing === WATCHDOG_SCRIPT) return path
+  if (await isCurrent(fs, path)) return path
 
+  let tempPath: string | undefined
+  try {
     const dir = dirname(path)
     await fs.mkdir(dir, { recursive: true })
-    const tempPath = join(dir, `.${basename(path)}.tmp-${randomBytes(6).toString('hex')}`)
+    tempPath = join(dir, `.${basename(path)}.tmp-${randomBytes(6).toString('hex')}`)
     await fs.writeFile(tempPath, WATCHDOG_SCRIPT, { flag: 'wx' })
     await fs.chmod(tempPath, WATCHDOG_SCRIPT_MODE)
     await fs.rename(tempPath, path)
   } catch (error) {
+    if (tempPath !== undefined) await fs.rm(tempPath).catch(() => {})
     throw new AtomicCoreError(
       'IO_ERROR',
       'Cannot write the watchdog entrypoint script.',

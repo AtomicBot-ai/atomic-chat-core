@@ -13,6 +13,13 @@
  * write never throws out of a tick either way; it is retried on the next tick, not treated as fatal
  * to the ticker itself. A dead engine is the watchdog's problem to notice via the *absence* of
  * heartbeats, not this ticker's problem to detect directly.
+ *
+ * `ready` always settles: it resolves on the first successful write, or rejects if `stop()` is
+ * called before that ever happens (findings-2.9-r2 item 5 — a ticker whose writes keep failing, or
+ * that is stopped before its first attempt lands, used to leave a caller `await`ing `ready` hanging
+ * forever). It can still take arbitrarily long to settle if the ticker is neither stopped nor ever
+ * manages a successful write, so a caller awaiting it should race it against its own timeout rather
+ * than await it unconditionally.
  */
 
 import { writeFile } from 'node:fs/promises'
@@ -40,7 +47,7 @@ export interface HeartbeatTickerOptions {
 }
 
 export interface HeartbeatTicker {
-  /** Resolves once the first write has actually succeeded — never on a failed one. */
+  /** Resolves on the first successful write; rejects if `stop()` is called before that happens. */
   ready: Promise<void>
   stop(): void
 }
@@ -56,9 +63,15 @@ export function startHeartbeatTicker(options: HeartbeatTickerOptions): Heartbeat
   let inFlight = false
   let readySettled = false
   let resolveReady!: () => void
-  const ready = new Promise<void>((resolve) => {
+  let rejectReady!: (error: unknown) => void
+  const ready = new Promise<void>((resolve, reject) => {
     resolveReady = resolve
+    rejectReady = reject
   })
+  // A caller that never touches `ready` (most callers just want the ticker running) must not turn a
+  // stop-before-success into an unhandled rejection; a caller that does await/catch it separately
+  // still observes the same rejection, since a promise can have more than one listener.
+  ready.catch(() => {})
 
   // A tick that fires while the previous write is still pending is skipped outright rather than
   // queued: the ticker's only job is to keep the mtime moving, and a queue of stale writes racing
@@ -86,6 +99,10 @@ export function startHeartbeatTicker(options: HeartbeatTickerOptions): Heartbeat
     ready,
     stop(): void {
       clearIntervalFn(handle)
+      if (!readySettled) {
+        readySettled = true
+        rejectReady(new Error('Heartbeat ticker stopped before its first write succeeded.'))
+      }
     },
   }
 }

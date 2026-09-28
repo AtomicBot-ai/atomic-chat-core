@@ -145,6 +145,55 @@ describe('startHeartbeatTicker', () => {
     ticker.stop()
   })
 
+  // Item 5 (findings-2.9-r2): `ready` used to be a plain resolve-only promise, so a ticker that was
+  // stopped before its first write ever succeeded (every write failing, or stop() called before any
+  // write had a chance to settle) left any caller `await`ing `ready` hanging forever.
+  it('rejects ready if stop() is called before the first write ever succeeds', async () => {
+    const fs: HeartbeatFs = {
+      writeFile: vi.fn().mockRejectedValue(new Error('disk full')),
+    }
+    const ticker = startHeartbeatTicker({
+      path: '/tmp/heartbeat',
+      intervalMs: 1_000,
+      fs,
+      onError: noopOnError,
+    })
+
+    await vi.advanceTimersByTimeAsync(0) // let the first (failing) write settle
+    ticker.stop()
+
+    await expect(ticker.ready).rejects.toThrow(/stopped/i)
+  })
+
+  it('rejects ready if stop() is called synchronously, before the first write has any chance to settle', async () => {
+    const fs = fakeFs()
+    const ticker = startHeartbeatTicker({
+      path: '/tmp/heartbeat',
+      intervalMs: 1_000,
+      fs,
+      onError: noopOnError,
+    })
+
+    ticker.stop()
+
+    await expect(ticker.ready).rejects.toThrow(/stopped/i)
+  })
+
+  it('leaves ready resolved (does not retroactively reject it) if stop() is called after the first write already succeeded', async () => {
+    const fs = fakeFs()
+    const ticker = startHeartbeatTicker({
+      path: '/tmp/heartbeat',
+      intervalMs: 1_000,
+      fs,
+      onError: noopOnError,
+    })
+
+    await ticker.ready
+    ticker.stop()
+
+    await expect(ticker.ready).resolves.toBeUndefined()
+  })
+
   it('skips a tick while the previous write is still in flight, instead of overlapping it', async () => {
     let resolveFirstWrite: (() => void) | undefined
     let writeCalls = 0
