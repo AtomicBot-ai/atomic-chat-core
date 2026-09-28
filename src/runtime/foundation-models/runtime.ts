@@ -16,7 +16,7 @@
 
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
 import type { SessionInfo, UnloadResult } from '../../contracts/index.js'
@@ -33,6 +33,7 @@ import {
   generateApiKey,
   openLogStream,
   randomFreePort,
+  redactArgs,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
@@ -171,6 +172,10 @@ export class FoundationModelsRuntime implements LocalRuntime {
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'Foundation Models') : undefined
     const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
+    this.options.log?.(
+      'info',
+      `starting ${win32.basename(exe)} for foundation-models/${modelId}: ${redactArgs(args).join(' ')}`
+    )
     const env = Object.fromEntries(
       Object.entries(this.options.baseEnv ?? process.env).filter(
         (entry): entry is [string, string] => entry[1] !== undefined

@@ -101,6 +101,17 @@ describe('MlxRuntime', () => {
     expect(journal.list().map((record) => record.provider)).toEqual(['mlx'])
   })
 
+  it('writes the start line to log before spawning', async () => {
+    const dir = await writeMlxModel('qwen')
+    const logged: string[] = []
+    const r = runtime({}, {}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load('qwen')
+
+    expect(logged).toContainEqual(
+      `info: starting mlx-server for mlx/qwen: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`
+    )
+  })
+
   it('passes quantization, the drafter and a pinned context from settings and overrides', async () => {
     const dir = await writeMlxModel('gemma', { text_config: { max_position_embeddings: '8192' } })
     const r = runtime({
@@ -382,7 +393,7 @@ describe('MlxRuntime', () => {
   })
 
   it('loads despite a backendOutput sink that throws, and warns about it once', async () => {
-    await writeMlxModel('m')
+    const dir = await writeMlxModel('m')
     const logged: string[] = []
     const r = runtime(
       {},
@@ -394,8 +405,9 @@ describe('MlxRuntime', () => {
         log: (level, message) => logged.push(`${level}: ${message}`),
       }
     )
-    await r.load('m')
+    const session = await r.load('m')
     expect(logged).toEqual([
+      `info: starting mlx-server for mlx/m: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`,
       'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
     ])
   })

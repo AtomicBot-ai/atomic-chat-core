@@ -20,7 +20,7 @@
  */
 
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import type { DataLayout } from '../../config/index.js'
 import type { SessionInfo, UnloadResult } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
@@ -39,6 +39,7 @@ import {
   closeLogStream,
   openLogStream,
   randomFreePort,
+  redactArgs,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
@@ -205,6 +206,10 @@ export class MlxRuntime implements LocalRuntime {
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'MLX') : undefined
     const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
+    this.options.log?.(
+      'info',
+      `starting ${win32.basename(exe)} for mlx/${modelId}: ${redactArgs(args).join(' ')}`
+    )
     let started
     try {
       started = await (this.options.spawn ?? spawnAndAwaitReady)(

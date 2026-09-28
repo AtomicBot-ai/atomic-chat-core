@@ -75,6 +75,17 @@ describe('FoundationModelsRuntime', () => {
     expect(events.map((e) => e.name)).toEqual(['session:started'])
   })
 
+  it('writes the start line to log with --api-key redacted, and the key itself never in the log', async () => {
+    const logged: string[] = []
+    const r = runtime({}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load(APPLE_MODEL_ID)
+
+    expect(logged).toContainEqual(
+      `info: starting foundation-models-server for foundation-models/${APPLE_MODEL_ID}: --port ${session.port} --api-key <redacted>`
+    )
+    expect(logged.some((line) => line.includes(session.api_key))).toBe(false)
+  })
+
   it('answers a second load with the running session and joins a load in flight', async () => {
     const r = runtime({ delayMs: 150 })
     const [a, b] = await Promise.all([r.load(APPLE_MODEL_ID), r.load(APPLE_MODEL_ID)])
@@ -258,8 +269,9 @@ describe('FoundationModelsRuntime', () => {
         log: (level, message) => logged.push(`${level}: ${message}`),
       }
     )
-    await r.load(APPLE_MODEL_ID)
+    const session = await r.load(APPLE_MODEL_ID)
     expect(logged).toEqual([
+      `info: starting foundation-models-server for foundation-models/${APPLE_MODEL_ID}: --port ${session.port} --api-key <redacted>`,
       'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
     ])
   })

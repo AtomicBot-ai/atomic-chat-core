@@ -222,6 +222,17 @@ describe('load', () => {
     )
   })
 
+  it('writes the redacted start line to log before spawning, args including --override-tensor', async () => {
+    await data.writeModel('override-tensor')
+    const logged: Array<{ level: string; message: string }> = []
+    const runtime = await makeRuntime({ log: (level, message) => logged.push({ level, message }) })
+    await runtime.load('override-tensor', { overrides: { override_tensor_buffer_t: 'exps=CPU' } })
+
+    const startLine = logged.find((entry) => entry.level === 'info')
+    expect(startLine?.message).toMatch(/^starting llama-server for llamacpp-upstream\/override-tensor: /)
+    expect(startLine?.message).toContain('--override-tensor exps=CPU')
+  })
+
   it('relays every line to backendOutput before and after readiness, in addition to logPath and verbose', async () => {
     await data.writeModel('backend-output')
     const logPath = join(data.layout.core.logsDir, 'backend-output.log')

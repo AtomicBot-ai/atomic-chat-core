@@ -16,7 +16,7 @@
  */
 
 import type { WriteStream } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, win32 } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   CoreEvents,
@@ -49,6 +49,7 @@ import {
   openLogStream,
   isLoadCancelled,
   raceLoadCancel,
+  redactArgs,
   throwIfLoadCancelled,
 } from '../shared/index.js'
 import type {
@@ -399,6 +400,10 @@ export class LlamacppRuntime implements LocalRuntime {
     const logStream = opts.logPath ? await openLogStream(opts.logPath) : undefined
     const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
 
+    this.options.log?.(
+      'info',
+      `starting ${win32.basename(plan.exePath)} for ${plan.provider}/${plan.modelId}: ${redactArgs(args.argv).join(' ')}`
+    )
     let proc: ManagedProcess
     try {
       ;({ process: proc } = await spawn(
