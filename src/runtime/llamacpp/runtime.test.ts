@@ -230,7 +230,9 @@ describe('load', () => {
 
     const startLine = logged.find((entry) => entry.level === 'info')
     // The resolved executable is `llama-server.exe` on Windows.
-    expect(startLine?.message).toMatch(/^starting llama-server(\.exe)? for llamacpp-upstream\/override-tensor: /)
+    expect(startLine?.message).toMatch(
+      /^starting llama-server(\.exe)? for llamacpp-upstream\/override-tensor: /
+    )
     expect(startLine?.message).toContain('--override-tensor exps=CPU')
   })
 
