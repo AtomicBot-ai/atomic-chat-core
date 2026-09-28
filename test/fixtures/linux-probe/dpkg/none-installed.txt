@@ -1,5 +1,5 @@
-un docker-ce
-un docker.io
-un moby-engine
-un podman-docker
-un docker-desktop
+dpkg-query: no packages found matching docker-ce
+dpkg-query: no packages found matching docker.io
+dpkg-query: no packages found matching moby-engine
+dpkg-query: no packages found matching podman-docker
+dpkg-query: no packages found matching docker-desktop

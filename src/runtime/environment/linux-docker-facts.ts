@@ -9,6 +9,15 @@
  * Desktop or Podman-shim install at all. So install-method detection also reads the package
  * database (`dpkg-query`/`rpm -q`, both read-only queries) and `docker --version`'s own banner,
  * which is all `podman-docker`'s `docker` shim actually prints differently.
+ *
+ * `docker info`'s own exit code cannot be trusted either: the CLI shipped in docker-ce/docker.io/
+ * moby-engine through roughly 28.2 (which is what Debian, Ubuntu and Fedora's recipe-qualified
+ * releases carry) still exits `0` and prints a fully-formed JSON document when the daemon call
+ * itself failed — `ServerErrors` holds the real error and every other field is the Go zero value
+ * (`""`/`0`/`null`). 28.3 and later exit non-zero instead. `parseDockerInfo` treats the former the
+ * same as the latter (task 2.4 fix round 2, item 1) — the alternative, trusting `code === 0`, was
+ * reading a `docker.io`/`moby-engine` host that plainly refused a connection as reachable, which
+ * broke both relogin detection and runtime-config planning downstream.
  */
 
 import type { CommandOutput } from './linux-probe.js'
@@ -39,8 +48,9 @@ export interface DockerInfoFacts {
   desktop: boolean
   /**
    * `ServerErrors`: partial failures (a plugin, a storage-driver problem) the daemon reports even
-   * though `info` itself returned successfully. Surfaced for diagnostics; this probe still treats a
-   * successful read as reachable either way — a caller that wants to be stricter can inspect this.
+   * though `info` itself returned successfully. Surfaced for diagnostics; a populated payload next
+   * to a real `ServerVersion` is still read as reachable — only an *empty* payload (round 2, item 1)
+   * is read as a failed call.
    */
   server_errors: string[]
 }
@@ -64,19 +74,44 @@ export function cdiListsNvidiaGpu(cdiList: CommandOutput | null): boolean {
 }
 
 /**
- * `/etc/docker/daemon.json`'s own `runtimes` map naming `nvidia` — read-only evidence the GPU
- * runtime is configured that does not require the daemon to answer at all, used when the system
+ * Whether `/etc/docker/daemon.json`'s own `runtimes` map names `nvidia` — read-only evidence the
+ * GPU runtime is configured that does not require the daemon to answer at all, used when the system
  * socket could not be reached (item 3: never plan a runtime reconfigure without real evidence).
+ *
+ * Three-way rather than boolean (round 2, item 6): a file that does not exist yet is a real fact
+ * ("not configured"), but one that exists and fails to parse is not — planning `nvidia-ctk runtime
+ * configure` against a daemon.json this probe cannot even read risks corrupting it further, so that
+ * case is surfaced separately as `'unreadable'` and `assessLinux` blocks instead of guessing.
  */
-export function daemonJsonHasNvidiaRuntime(text: string | null): boolean {
-  if (text === null) return false
+export type DaemonJsonEvidence = 'configured' | 'not-configured' | 'unreadable'
+
+export function daemonJsonNvidiaRuntimeEvidence(text: string | null): DaemonJsonEvidence {
+  if (text === null) return 'not-configured'
   try {
     const parsed = JSON.parse(text) as { runtimes?: Record<string, unknown> }
-    return Object.keys(parsed.runtimes ?? {}).includes('nvidia')
+    return Object.keys(parsed.runtimes ?? {}).includes('nvidia') ? 'configured' : 'not-configured'
+  } catch {
+    return 'unreadable'
+  }
+}
+
+/**
+ * Whether `/etc/docker/daemon.json` turns CDI on (`"features": {"cdi": true}`) — the offline mirror
+ * of the live path's `CDISpecDirs` check: a device `nvidia-ctk cdi list` can see is only a working
+ * `--gpus` route if Docker itself is configured to consume CDI specs, not merely because the device
+ * file happens to exist (round 2, item 7).
+ */
+export function daemonJsonHasCdiEnabled(text: string | null): boolean {
+  if (text === null) return false
+  try {
+    const parsed = JSON.parse(text) as { features?: { cdi?: unknown } }
+    return parsed.features?.cdi === true
   } catch {
     return false
   }
 }
+
+const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value !== ''
 
 /**
  * `docker -H unix:///var/run/docker.sock info --format '{{json .}}'`. The `-H` flag pins the
@@ -106,6 +141,19 @@ export function parseDockerInfo(
       OperatingSystem?: unknown
       ServerErrors?: unknown[]
     }
+    const serverErrors = Array.isArray(info.ServerErrors)
+      ? info.ServerErrors.filter((entry): entry is string => typeof entry === 'string')
+      : []
+    const serverVersion = isNonEmptyString(info.ServerVersion) ? info.ServerVersion : null
+
+    // docker CLI ≤28.2 (docker.io, moby-engine, and older docker-ce — all on the recipe list) exits
+    // 0 and prints a fully-templated JSON document even when Info() itself failed: ServerErrors
+    // carries the real error, and every other field is the Go zero value. That is a failed call,
+    // not a reachable daemon with an empty version string (round 2, item 1).
+    if (serverErrors.length > 0 && serverVersion === null) {
+      return { ...ABSENT, server_errors: serverErrors }
+    }
+
     const runtimes = Object.keys(info.Runtimes ?? {})
     const specDirs = Array.isArray(info.CDISpecDirs) ? info.CDISpecDirs : []
     const hasCdiGpu = specDirs.length > 0 && cdiListsNvidiaGpu(cdiList)
@@ -117,19 +165,19 @@ export function parseDockerInfo(
     }`.toLowerCase()
     return {
       daemon_reachable: true,
-      engine_identity: typeof info.ID === 'string' ? info.ID : null,
-      version: typeof info.ServerVersion === 'string' ? info.ServerVersion : null,
+      engine_identity: isNonEmptyString(info.ID) ? info.ID : null,
+      version: serverVersion,
       gpu_runtime: runtimes.includes('nvidia') || hasCdiGpu,
       selinux: securityOptions.some(
         (option) => option === 'name=selinux' || option.startsWith('name=selinux')
       ),
-      docker_root_dir: typeof info.DockerRootDir === 'string' ? info.DockerRootDir : null,
+      // An empty string is not a path (round 2, item 1): a probe that read '' and fell back to it
+      // literally, instead of to the default install location, would check free space at "".
+      docker_root_dir: isNonEmptyString(info.DockerRootDir) ? info.DockerRootDir : null,
       containers_running: typeof info.ContainersRunning === 'number' ? info.ContainersRunning : 0,
       rootless: securityOptions.some((option) => option === 'rootless' || option.startsWith('name=rootless')),
       desktop: /docker[ -]desktop/.test(nameAndOs),
-      server_errors: Array.isArray(info.ServerErrors)
-        ? info.ServerErrors.filter((entry): entry is string => typeof entry === 'string')
-        : [],
+      server_errors: serverErrors,
     }
   } catch {
     return ABSENT
@@ -142,7 +190,8 @@ export function parseDockerInfo(
  * behind, `un` unknown/never installed, ...). Only `ii` counts as actually installed — `-W` alone
  * (without the status prefix) would also print a `rc` package's name, which is exactly a package
  * that `apt remove` (not `purge`) took out, and treating that as present would leave a stale
- * install undetected.
+ * install undetected. A package dpkg has never heard of at all prints nothing to stdout (and "no
+ * packages found matching ..." to stderr instead), which this simply never matches.
  */
 export function installedDpkgPackages(output: CommandOutput | null, candidates: string[]): string[] {
   if (output === null) return []
@@ -156,8 +205,8 @@ export function installedDpkgPackages(output: CommandOutput | null, candidates: 
 
 /**
  * `rpm -q <candidates>`: a hit prints the full name-version-release (`docker-ce-3:28.3.0-1.fc41...`)
- * on its own line; a miss prints `package <name> is not installed`, which this only has to avoid
- * matching.
+ * on its own line; a miss prints `package <name> is not installed` (to stdout, with a non-zero exit
+ * code this parser does not need to check), which this only has to avoid matching.
  */
 export function installedRpmPackages(output: CommandOutput | null, candidates: string[]): string[] {
   if (output === null) return []
@@ -195,18 +244,26 @@ export const DOCKER_PACKAGE_CANDIDATES = [
  *
  * Order matters: a `podman-docker` shim or a snap package is decided before anything from `docker
  * info` (their `docker` command may not even resolve to a real Engine, so `info`'s own answer is
- * not trusted over the package database for these); Desktop and rootless come next because
- * `docker-ce`/`moby-engine`/`docker.io` packages can be present on a machine that also runs one of
- * those without actually being what answered the socket; the plain distro packages are last.
+ * not trusted over the package database for these).
+ *
+ * Desktop is decided next, but only two ways (round 2, item 4 — the previous order blocked a
+ * working Desktop+Engine host that also happened to have the `docker-desktop` package installed
+ * alongside a real, reachable `docker-ce`): `info.desktop` when the daemon that actually answered
+ * says so directly, or the `docker-desktop` package **only when the system socket did not answer at
+ * all and no recognised engine package is also present** — a reachable `docker-ce`/`moby-engine`/
+ * `docker.io` always wins over a Desktop package that merely happens to be installed alongside it.
  *
  * `rootlessSocketPresent` (a leftover `$XDG_RUNTIME_DIR/docker.sock`) only counts when the system
- * socket itself did not answer — a working rootful engine takes priority over a stray rootless
- * socket file from an earlier, abandoned setup (item 6).
+ * socket itself did not answer *and* `docker.service` is not active either (round 2, item 8) — a
+ * working rootful engine, or one that is simply unreachable for some other reason while the service
+ * is confirmed running, takes priority over a stray rootless socket file from an earlier, abandoned
+ * setup.
  */
 export function detectDockerInstallMethod(
   info: DockerInfoFacts,
   packages: DockerPackageSignals,
-  rootlessSocketPresent: boolean
+  rootlessSocketPresent: boolean,
+  serviceActive: boolean | 'unknown'
 ): LinuxDockerInstallMethod | null {
   if (
     packages.dockerVersion !== null &&
@@ -223,8 +280,12 @@ export function detectDockerInstallMethod(
   if (packages.snapList !== null && packages.snapList.code === 0 && /docker/.test(packages.snapList.stdout)) {
     return 'snap'
   }
-  if (found.has('docker-desktop') || info.desktop) return 'docker-desktop'
-  if (info.rootless || (!info.daemon_reachable && rootlessSocketPresent)) return 'rootless'
+  const engineInstalled = found.has('docker-ce') || found.has('moby-engine') || found.has('docker.io')
+  if (info.desktop) return 'docker-desktop'
+  if (found.has('docker-desktop') && !info.daemon_reachable && !engineInstalled) return 'docker-desktop'
+  if (info.rootless || (!info.daemon_reachable && rootlessSocketPresent && serviceActive !== true)) {
+    return 'rootless'
+  }
   if (found.has('docker-ce')) return 'docker-ce'
   if (found.has('moby-engine')) return 'moby-engine'
   if (found.has('docker.io')) return 'docker.io'

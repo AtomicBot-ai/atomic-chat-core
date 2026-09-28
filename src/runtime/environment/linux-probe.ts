@@ -20,7 +20,8 @@
 import type { GpuFacts, LinuxDockerInstallMethod, LinuxPackageFamily } from '../../contracts/index.js'
 import {
   cdiListsNvidiaGpu,
-  daemonJsonHasNvidiaRuntime,
+  daemonJsonHasCdiEnabled,
+  daemonJsonNvidiaRuntimeEvidence,
   detectDockerInstallMethod,
   parseDockerInfo,
 } from './linux-docker-facts.js'
@@ -34,10 +35,14 @@ export interface CommandOutput {
 
 export interface LinuxProbeDeps {
   /**
-   * `env`, when given, replaces the inherited environment for this one call (a key mapped to
-   * `undefined` means "strip this variable", never "set it to an empty string") — used to keep a
-   * stray `DOCKER_HOST`/`DOCKER_CONTEXT`/`DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` from steering the
-   * forced system-socket `docker info` call anywhere else.
+   * `env`, when given, is an *overlay* on the environment this call would otherwise inherit — never
+   * a full replacement. Every other inherited variable (`PATH`, locale, ...) stays; a key mapped to
+   * a string sets it, a key mapped to `undefined` strips it. Used to keep a stray `DOCKER_HOST`/
+   * `DOCKER_CONTEXT`/`DOCKER_TLS_VERIFY`/`DOCKER_CERT_PATH` from steering the forced system-socket
+   * `docker info` call anywhere else, without discarding the rest of the environment the command
+   * would normally need (round 2, item 10 — the earlier wording here said "replaces", which is not
+   * what a caller should implement: `hostExec` in `host-exec.ts` merges this onto `process.env`, or
+   * onto its own configured base environment, rather than substituting it wholesale).
    */
   exec: (command: string, args: string[], env?: Record<string, string | undefined>) => Promise<CommandOutput>
   readFile: (path: string) => Promise<string | null>
@@ -71,8 +76,13 @@ export interface LinuxDistribution {
 
 /** The account this probe ran as, from `id -nG` / `getent group docker` — diagnostic only. */
 export interface DockerGroupFacts {
-  /** The account is listed in the `docker` group's members. */
-  configured: boolean
+  /**
+   * The account is listed in the `docker` group's members. `'unknown'` when `getent` itself could
+   * not answer and this session's own groups (`id -nG`) do not already show it either — a probe
+   * that cannot read `/etc/group` has not learned "not a member", so this must not be reported as a
+   * confident `false` (round 2, item 9).
+   */
+  configured: boolean | 'unknown'
   /** ...and this login session already carries it (`id -nG`); a group change needs a fresh login. */
   effective: boolean
 }
@@ -90,11 +100,19 @@ export interface DockerFacts {
   gpu_runtime: boolean
   /**
    * Read-only evidence the GPU runtime is configured that does not require reaching the daemon
-   * (`/etc/docker/daemon.json`'s own `runtimes.nvidia`, or a listed NVIDIA CDI device) — the only
-   * signal available when `daemon_reachable` is false, so a plan never reconfigures a runtime it
-   * has no real evidence about (item 3).
+   * (`/etc/docker/daemon.json`'s own `runtimes.nvidia`, or `features.cdi: true` next to a listed
+   * NVIDIA CDI device — mirroring the live path's own `CDISpecDirs` requirement, round 2 item 7) —
+   * the only signal available when `daemon_reachable` is false, so a plan never reconfigures a
+   * runtime it has no real evidence about (item 3).
    */
   gpu_runtime_from_config: boolean
+  /**
+   * `/etc/docker/daemon.json` exists but this probe could not parse it as JSON. `assessLinux` must
+   * not plan `nvidia-ctk runtime configure` in this state — it would be writing next to a file it
+   * cannot even read back — and blocks with an instruction to fix or remove it by hand instead
+   * (round 2, item 6).
+   */
+  daemon_json_unreadable: boolean
   /** SELinux is enforcing for containers: mounts of our directories need the `:z` label (D15). */
   selinux: boolean
   docker_root_dir: string | null
@@ -208,7 +226,13 @@ export function parseNvidiaSmi(output: CommandOutput | null): {
   return { driver_version: driver, gpus }
 }
 
-/** Parses `docker` from `id -nG` (this session's groups) and `getent group docker` (its members). */
+/**
+ * Parses `docker` from `id -nG` (this session's groups) and `getent group docker` (its members).
+ * When `getent` itself failed or is not on the machine, `effective` (this session's own groups,
+ * always a real answer) is still trusted; only `configured` falls back to `'unknown'` rather than a
+ * confident `false` — this session already showing `docker` in `id -nG` is proof enough of
+ * membership even without `getent`, but its absence there proves nothing on its own (round 2, item 9).
+ */
 export function parseDockerGroup(
   sessionGroups: CommandOutput | null,
   groupEntry: CommandOutput | null,
@@ -216,14 +240,25 @@ export function parseDockerGroup(
 ): DockerGroupFacts {
   const effective =
     sessionGroups !== null && sessionGroups.code === 0 && sessionGroups.stdout.split(/\s+/).includes('docker')
-  const members =
-    groupEntry !== null && groupEntry.code === 0
-      ? (groupEntry.stdout.split(':')[3] ?? '').trim().split(',').filter(Boolean)
-      : []
+  if (groupEntry === null || groupEntry.code !== 0) {
+    return { configured: effective ? true : 'unknown', effective }
+  }
+  const members = (groupEntry.stdout.split(':')[3] ?? '').trim().split(',').filter(Boolean)
   return { configured: effective || members.includes(user), effective }
 }
 
-/** `systemctl is-active docker`: exits `0` and prints `active` only when the unit is really up. */
+/**
+ * `systemctl is-active docker`: exits `0` and prints `active` only when the unit is really up.
+ *
+ * Known gap, documented rather than closed here (round 2 finding, "socket-activation note"): a host
+ * where `docker.socket` is active but `docker.service` itself is only started on first connection
+ * (`systemctl is-active docker` answering `inactive` right up until something dials the socket)
+ * would read as not active here, even though a real connection would in fact start it. Closing this
+ * needs a second `systemctl is-active docker.socket` call and a decision about how it interacts with
+ * every branch that reads `service_active` (`assessLinux`'s access-only/relogin path and
+ * `buildInstallPlan`'s `enable-docker-service`/`restart-docker` steps) — left for task 2.6 to decide
+ * against the actual wiring rather than guessed at here.
+ */
 export function parseServiceActive(output: CommandOutput | null): boolean | 'unknown' {
   if (output === null || output.code === null) return 'unknown'
   return output.code === 0 && output.stdout.trim() === 'active'
@@ -321,6 +356,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
 
   const cli = dockerVersion.code === 0
   const info = parseDockerInfo(cli ? dockerInfo : null, cdiList)
+  const serviceActiveParsed = parseServiceActive(serviceActive)
 
   const rootlessSocketPresent =
     options.xdgRuntimeDir !== null &&
@@ -328,8 +364,13 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
   const installMethod = detectDockerInstallMethod(
     info,
     { dockerVersion, dpkgQuery, rpmQuery, snapList },
-    rootlessSocketPresent
+    rootlessSocketPresent,
+    serviceActiveParsed
   )
+
+  const daemonJsonEvidence = daemonJsonNvidiaRuntimeEvidence(daemonJson)
+  const gpuRuntimeFromConfig =
+    daemonJsonEvidence === 'configured' || (daemonJsonHasCdiEnabled(daemonJson) && cdiListsNvidiaGpu(cdiList))
 
   // Before anything is installed there is no DockerRootDir yet; check the nearest ancestor that
   // does exist instead of failing outright on a path that is not there yet (item 7).
@@ -351,11 +392,12 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       version: info.version,
       install_method: installMethod,
       gpu_runtime: info.gpu_runtime,
-      gpu_runtime_from_config: daemonJsonHasNvidiaRuntime(daemonJson) || cdiListsNvidiaGpu(cdiList),
+      gpu_runtime_from_config: gpuRuntimeFromConfig,
+      daemon_json_unreadable: daemonJsonEvidence === 'unreadable',
       selinux: info.selinux,
       docker_root_dir: info.docker_root_dir,
       containers_running: info.containers_running,
-      service_active: parseServiceActive(serviceActive),
+      service_active: serviceActiveParsed,
       server_errors: info.server_errors,
     },
     docker_group: parseDockerGroup(sessionGroups, groupEntry, options.user),

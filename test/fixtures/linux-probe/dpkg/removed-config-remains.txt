@@ -1,5 +1,1 @@
-rc docker.io
-un docker-ce
-un moby-engine
-un podman-docker
-un docker-desktop
+rc  docker.io

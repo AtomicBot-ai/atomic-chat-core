@@ -1,5 +1,1 @@
-ii docker-ce
-un docker.io
-un moby-engine
-un podman-docker
-un docker-desktop
+ii  docker-ce

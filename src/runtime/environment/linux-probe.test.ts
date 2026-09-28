@@ -123,6 +123,23 @@ describe('reading the machine', () => {
     })
   })
 
+  it('reports configured as unknown, never a confident false, when getent itself could not answer (round 2, item 9)', () => {
+    expect(parseDockerGroup(ok('u sudo'), missing(), 'u')).toEqual({
+      configured: 'unknown',
+      effective: false,
+    })
+    expect(parseDockerGroup(ok('u sudo'), failed('getent: not found'), 'u')).toEqual({
+      configured: 'unknown',
+      effective: false,
+    })
+    // This session's own groups are a real answer on their own: 'docker' showing there proves
+    // membership even without getent confirming it independently.
+    expect(parseDockerGroup(ok('u docker sudo'), missing(), 'u')).toEqual({
+      configured: true,
+      effective: true,
+    })
+  })
+
   it('reads systemctl is-active strictly: only a real "active" counts', () => {
     expect(parseServiceActive(ok('active\n'))).toBe(true)
     expect(parseServiceActive(failed('', 3))).toBe(false) // real is-active exit for "inactive"
@@ -221,6 +238,75 @@ describe('reading the machine', () => {
     )
     expect(probed.architecture).toBeNull()
     expect(probed.unknown).toContain('architecture')
+  })
+
+  it('reads a docker CLI ≤28.2 false-success (exit 0, ServerErrors, empty fields) as unreachable end to end (round 2, item 1)', async () => {
+    const legacyFailure = JSON.stringify({
+      ID: '',
+      ServerVersion: '',
+      DockerRootDir: '',
+      Runtimes: null,
+      CDISpecDirs: null,
+      SecurityOptions: null,
+      ServerErrors: ['permission denied while trying to connect to the Docker daemon socket'],
+    })
+    const probed = await probeLinux(
+      {
+        exec: async (command, args) => {
+          if (command === 'uname') return ok('x86_64\n')
+          if (command === 'docker' && args.includes('--version')) return ok('Docker version 26.1.3')
+          if (command === 'docker') return ok(legacyFailure) // exit 0, but a failed call
+          return missing()
+        },
+        readFile: async () => 'ID=ubuntu\nVERSION_ID="24.04"\n',
+        pathExists: async () => true,
+        freeDiskBytes: async () => 200_000_000_000,
+      },
+      { user: 'u', xdgRuntimeDir: null }
+    )
+    expect(probed.docker.daemon_reachable).toBe(false)
+    expect(probed.docker.engine_identity).toBeNull()
+    expect(probed.docker.docker_root_dir).toBeNull()
+    expect(probed.docker.server_errors).toEqual([
+      'permission denied while trying to connect to the Docker daemon socket',
+    ])
+  })
+
+  it('reports gpu_runtime_from_config and daemon_json_unreadable from the offline daemon.json evidence (round 2, items 6/7)', async () => {
+    const deps: LinuxProbeDeps = {
+      exec: async (command, args) => {
+        if (command === 'uname') return ok('x86_64\n')
+        if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
+        if (command === 'docker') return failed('Cannot connect to the Docker daemon')
+        if (command === 'nvidia-ctk' && args.includes('cdi')) return ok('nvidia.com/gpu=all\n')
+        return missing()
+      },
+      readFile: async (path) => {
+        if (path === '/etc/os-release') return 'ID=ubuntu\nVERSION_ID="24.04"\n'
+        if (path === '/etc/docker/daemon.json') return '{ not valid json'
+        return null
+      },
+      pathExists: async () => true,
+      freeDiskBytes: async () => 200_000_000_000,
+    }
+    const unreadable = await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
+    expect(unreadable.docker.daemon_json_unreadable).toBe(true)
+    expect(unreadable.docker.gpu_runtime_from_config).toBe(false)
+
+    const configured = await probeLinux(
+      {
+        ...deps,
+        readFile: async (path) => {
+          if (path === '/etc/os-release') return 'ID=ubuntu\nVERSION_ID="24.04"\n'
+          if (path === '/etc/docker/daemon.json') return JSON.stringify({ features: { cdi: true } })
+          return null
+        },
+      },
+      { user: 'u', xdgRuntimeDir: null }
+    )
+    expect(configured.docker.daemon_json_unreadable).toBe(false)
+    // features.cdi: true, plus nvidia-ctk cdi list showing a device: counts as configured.
+    expect(configured.docker.gpu_runtime_from_config).toBe(true)
   })
 
   it('checks free space at DockerRootDir once Docker answers, and at the nearest existing ancestor before it does', async () => {

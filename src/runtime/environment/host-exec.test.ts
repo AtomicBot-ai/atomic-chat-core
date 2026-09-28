@@ -50,4 +50,28 @@ describe('running a probe command', () => {
     ])
     expect(answer.stdout).toBe('seen')
   })
+
+  it('overlays a per-call env onto the ambient one rather than replacing it (item 10)', async () => {
+    const withMark =
+      process.env.PATH !== undefined ? { ...process.env, ATOMIC_PROBE_MARK: 'seen' } : process.env
+    const run = hostExec({ env: withMark })
+    const readEnv = (name: string) =>
+      run(node, ['-e', `process.stdout.write(process.env.${name} ?? "<unset>")`], {
+        ATOMIC_PROBE_MARK: undefined,
+      })
+
+    // Stripped by the overlay...
+    expect((await readEnv('ATOMIC_PROBE_MARK')).stdout).toBe('<unset>')
+    // ...but PATH (never mentioned in the overlay) still comes through from the base environment.
+    expect((await readEnv('PATH')).stdout).not.toBe('<unset>')
+  })
+
+  it('sets a key the overlay maps to a string, on top of the ambient environment', async () => {
+    const answer = await hostExec()(
+      node,
+      ['-e', 'process.stdout.write(process.env.ATOMIC_PROBE_OVERLAY ?? "")'],
+      { ATOMIC_PROBE_OVERLAY: 'from-overlay' }
+    )
+    expect(answer.stdout).toBe('from-overlay')
+  })
 })

@@ -25,19 +25,39 @@ export interface HostExecOptions {
   timeoutMs?: number
   /** Per stream. Anything past it is dropped, and the command still counts as answered. */
   maxOutputBytes?: number
+  /** Base environment every call spawns with. Defaults to inheriting `process.env` when omitted. */
   env?: NodeJS.ProcessEnv
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024
 
-export type HostExec = (command: string, args: string[]) => Promise<CommandOutput>
+export type HostExec = (
+  command: string,
+  args: string[],
+  env?: Record<string, string | undefined>
+) => Promise<CommandOutput>
+
+/**
+ * Overlays `overlay` onto `base` — a key mapped to a string sets it, a key mapped to `undefined`
+ * strips it, and every other key of `base` passes through untouched. This is the "merge, not
+ * replace" semantics `LinuxProbeDeps.exec`'s own `env` parameter documents (round 2, item 10): a
+ * caller stripping `DOCKER_HOST` for one call must not also lose `PATH` for it.
+ */
+function overlayEnv(base: NodeJS.ProcessEnv, overlay: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  const merged: NodeJS.ProcessEnv = { ...base }
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value === undefined) delete merged[key]
+    else merged[key] = value
+  }
+  return merged
+}
 
 export function hostExec(options: HostExecOptions = {}): HostExec {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const limit = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
 
-  return (command, args) =>
+  return (command, args, envOverlay) =>
     new Promise<CommandOutput>((resolve) => {
       let settled = false
       const stdout: Buffer[] = []
@@ -62,12 +82,17 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
         resolve(output)
       }
 
+      // No overlay for this call and no configured base: `spawn` gets no `env` key at all, which is
+      // how Node inherits `process.env` on its own — the same as before this parameter existed.
+      const spawnEnv =
+        envOverlay === undefined ? options.env : overlayEnv(options.env ?? process.env, envOverlay)
+
       try {
         child = spawn(command, args, {
           shell: false,
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],
-          ...(options.env === undefined ? {} : { env: options.env }),
+          ...(spawnEnv === undefined ? {} : { env: spawnEnv }),
         })
       } catch (error) {
         // `spawn` throws synchronously for some malformed calls; that is an unanswered command.
