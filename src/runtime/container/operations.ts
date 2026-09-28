@@ -19,7 +19,9 @@ import {
   buildCreateModelContainerArgv,
   buildInspectContainerArgv,
   buildInspectImageArgv,
+  buildListContainersByImageArgv,
   buildLogsArgv,
+  buildRemoveImageArgv,
   buildRmArgv,
   buildRunOnceArgv,
   buildStartArgv,
@@ -195,6 +197,24 @@ export async function removeContainer(exec: DockerExec, containerId: string): Pr
   if (result.code === 0) return
   if (ABSENT_PATTERN.test(result.stderr)) return
   ioError('rm', result)
+}
+
+/** Ids of every container, running or stopped, created from `image`. Fails when docker cannot answer. */
+export async function containersUsingImage(exec: DockerExec, image: ImageRef): Promise<string[]> {
+  const result = await exec(buildListContainersByImageArgv(image))
+  if (result.code !== 0) ioError('ps', result)
+  return result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+}
+
+/** Removes the digest reference; an image already gone is `absent`, anything else docker refuses throws. */
+export async function removeImage(exec: DockerExec, image: ImageRef): Promise<'removed' | 'absent'> {
+  const result = await exec(buildRemoveImageArgv(image))
+  if (result.code === 0) return 'removed'
+  if (ABSENT_PATTERN.test(result.stderr)) return 'absent'
+  ioError('image rm', result)
 }
 
 /**

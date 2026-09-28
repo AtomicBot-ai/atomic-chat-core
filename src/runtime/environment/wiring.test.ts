@@ -16,8 +16,24 @@ import type { DataFolderEnv } from '../../config/index.js'
 import { RUNTIME_DESCRIPTOR_URL_ENV } from './descriptor-provider.js'
 import type { DescriptorProviderResult, RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentProvisioner } from './service.js'
-import { executorFor, provisionerFor, resolveMinimumAppVersion, wireManagedRuntimes } from './wiring.js'
+import {
+  environmentAvailability,
+  executorFor,
+  provisionerFor,
+  resolveMinimumAppVersion,
+  wireManagedRuntimes,
+} from './wiring.js'
 import type { ManagedRuntimes } from './wiring.js'
+import { answer, type FakeLinuxHostState } from '../../../test/helpers/fake-linux-host.mjs'
+import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
+import {
+  INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
+  INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+  installContainerRuntimeParametersDigest,
+  parametersFromPlan,
+  type InstallContainerRuntimeParameters,
+} from '../../host/recipes/index.js'
+import type { LinuxProvisionerParts } from './wiring.js'
 
 /** A pid that existed and is now gone: what a crashed core's process leaves behind (finding 1). */
 async function deadPid(): Promise<number> {
@@ -57,6 +73,7 @@ const plan: RequirementPlan = {
   availability: 'setup-required',
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: DIGEST,
+  descriptor_id: null,
   adopts_existing_engine: true,
   system_changes: [],
   download_bytes: null,
@@ -70,6 +87,7 @@ const plan: RequirementPlan = {
 /** Enough of a recipe to let an operation run to the end, so the view can be watched changing. */
 const fakeProvisioner = (hostStep: ManagedHostStep | null = null): EnvironmentProvisioner => ({
   probe: async () => ({ plan, host_step: hostStep }),
+  verifyHostStep: async () => ({ prerequisites_met: true, needs_relogin: false, error: null }),
   prepare: async () => undefined,
   pull: async () => undefined,
   verify: async () => undefined,
@@ -130,7 +148,7 @@ describe('which machines can carry a managed runtime', () => {
   })
 
   it('says unsupported while no host recipe exists, rather than inviting a setup that cannot run', () => {
-    // `provisionerFor` returns null everywhere today, and this is how a caller finds that out.
+    // Without the host-side parts the owner supplies, even Linux has no recipe.
     expect(provisionerFor('linux')).toBeNull()
     expect(provisionerFor('win32')).toBeNull()
     expect(wire('linux').managed.environments()[0]?.availability).toBe('unsupported')
@@ -163,7 +181,12 @@ describe('what a snapshot shows', () => {
     // Finished: nothing is in flight on the environment any more.
     expect(managed.environments()[0]?.active_operation_id).toBeNull()
     // And every state it passed through was announced, so a client can follow from the snapshot.
-    expect(events.map((event) => event.phase)).toEqual(['preparing-environment', 'verifying', 'ready'])
+    expect(events.map((event) => event.phase)).toEqual([
+      'checking',
+      'preparing-environment',
+      'verifying',
+      'ready',
+    ])
     expect(events.every((event) => event.name === 'environment:operation')).toBe(true)
   })
 
@@ -174,6 +197,14 @@ describe('what a snapshot shows', () => {
       recipe_id: 'ubuntu-24.04-docker-ce',
       recipe_digest: DIGEST,
       parameters_digest: DIGEST,
+      parameters: {
+        user: 'ada',
+        arch: 'x86_64',
+        family: 'apt',
+        distro_id: 'ubuntu',
+        version_id: '24.04',
+        components: ['docker-engine'],
+      },
       nonce: 'once-1',
       expected_operation_revision: 1,
     }
@@ -415,3 +446,140 @@ describe('resolveMinimumAppVersion', () => {
     expect(await resolveMinimumAppVersion(descriptors, [])).toBeNull()
   })
 })
+
+describe('resolveMinimumAppVersion picks the provider engine’s own installation (carry item 4)', () => {
+  it('ignores a pinned installation of another engine', async () => {
+    const forInstallation = vi.fn(async () => ({
+      kind: 'available' as const,
+      descriptor: { minimum_app_version: '1.0.0' } as unknown as RuntimeDescriptor,
+    }))
+    const descriptors: RuntimeDescriptorProvider = {
+      forNewSetup: async () => {
+        throw new Error('never')
+      },
+      forInstallation,
+      cachedForNewSetup: async () => ({
+        kind: 'available',
+        descriptor: { minimum_app_version: '2.0.49' } as unknown as RuntimeDescriptor,
+      }),
+    }
+    const other: RuntimeInstallation = {
+      installation_id: 'vllm',
+      engine_id: 'vllm',
+      environment_id: 'default',
+      active_descriptor_id: 'vllm-1',
+      candidate_descriptor_id: null,
+      availability: 'supported',
+      status: 'ready',
+    }
+    expect(await resolveMinimumAppVersion(descriptors, [other])).toBe('2.0.49')
+    expect(forInstallation).not.toHaveBeenCalled()
+  })
+})
+
+describe('environmentAvailability', () => {
+  const ready = { status: 'ready' } as RuntimeInstallation
+  it('is unsupported without a recipe, the probe’s verdict otherwise, supported once installed', () => {
+    expect(environmentAvailability(false, 'setup-required', [ready])).toBe('unsupported')
+    expect(environmentAvailability(true, null, [])).toBe('setup-required')
+    expect(environmentAvailability(true, 'setup-required', [ready])).toBe('supported')
+    expect(environmentAvailability(true, 'prerequisite-blocked', [ready])).toBe('prerequisite-blocked')
+  })
+})
+
+describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () => {
+  const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+
+  it('probes, sets up, and shows the ready installation and the GPUs in the snapshot', async () => {
+    let state: FakeLinuxHostState = {
+      user: 'ada',
+      driver: '590.44.01',
+      gpus: [
+        { uuid: 'GPU-1', name: 'NVIDIA GeForce RTX 4090', cc: '8.9', total_mib: 24564, free_mib: 24000 },
+      ],
+      docker: { installed: true, reachable: true, service_active: true, gpu_runtime: true },
+      toolkit: true,
+      group: { configured: true, effective: true },
+      gpu_visible_in_container: true,
+      images: [],
+    }
+    const run = (command: string, args: string[]) => {
+      const result = answer(state, command, args)
+      if (result.next !== undefined) state = result.next
+      return { code: result.code, stdout: result.stdout, stderr: result.stderr }
+    }
+    const linux: LinuxProvisionerParts = {
+      host: {
+        probeDeps: {
+          exec: async (command, args) => run(command, args),
+          readFile: async (path) =>
+            path === '/etc/os-release' ? readLinuxProbeFixture('os-release/ubuntu-24.04.txt') : null,
+          pathExists: async (path) => ['/', '/var', '/var/lib'].includes(path),
+          freeDiskBytes: async () => 500 * 1024 ** 3,
+        },
+        options: () => ({ user: 'ada', xdgRuntimeDir: null }),
+      },
+      recipe: {
+        recipe_id: INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+        recipe_digest: INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
+        parameters: (p, host) => parametersFromPlan(p, host),
+        parametersDigest: (p) =>
+          installContainerRuntimeParametersDigest(p as InstallContainerRuntimeParameters),
+      },
+      docker: async () => ({
+        exec: async (args) => run('docker', args),
+        socketPath: '/fake.sock',
+        journal: { list: () => [], remove: async () => undefined },
+      }),
+      removeEngineCaches: async () => undefined,
+      removeModels: async () => undefined,
+      pull: async (image) => {
+        state = { ...state, images: [...(state.images ?? []), `${image.repository}@${image.digest}`] }
+      },
+    }
+    const changed: EnvironmentSnapshotLike[] = []
+    const managed = wireManagedRuntimes({
+      env: env('linux', { [RUNTIME_DESCRIPTOR_URL_ENV]: fixtureUrl }),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: ((name: string, payload: EnvironmentSnapshotLike) => {
+        if (name === 'environment:changed') changed.push(payload)
+      }) as never,
+      newId: (() => {
+        let n = 0
+        return () => `id-${(n += 1)}`
+      })(),
+      linux,
+    })
+    wired.push(managed)
+    await managed.recover()
+    expect(managed.environments()[0]?.availability).toBe('setup-required')
+
+    const target = { kind: 'runtime' as const, installation_id: 'tensorrt-llm', engine_id: 'tensorrt-llm' }
+    const plan = await managed.service.probe({ descriptor_id: 'tensorrt-llm-1.2.1-r1', target })
+    expect(managed.environments()[0]?.gpus.map((gpu) => gpu.gpu_id)).toEqual(['GPU-1'])
+    expect(changed.length).toBeGreaterThan(0)
+
+    await managed.service.begin('default', {
+      request_id: 'req-1',
+      target,
+      kind: 'setup',
+      descriptor_id: 'tensorrt-llm-1.2.1-r1',
+      approved_plan_digest: plan.plan_digest,
+    })
+    await managed.service.idle()
+    for (let i = 0; i < 50 && managed.environments()[0]?.availability !== 'supported'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    const environment = managed.environments()[0]
+    expect(managed.operations()[0]?.phase).toBe('ready')
+    expect(environment?.availability).toBe('supported')
+    expect(environment?.installations.map((entry) => entry.active_descriptor_id)).toEqual([
+      'tensorrt-llm-1.2.1-r1',
+    ])
+    expect(environment?.minimum_app_version).toBe('2.0.49')
+    expect(changed.at(-1)?.revision).toBe(environment?.revision)
+  })
+})
+
+type EnvironmentSnapshotLike = { revision: number }

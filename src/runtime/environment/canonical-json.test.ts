@@ -5,6 +5,7 @@ import {
   beginFingerprint,
   canonicalDigest,
   canonicalJson,
+  freeDiskGib,
   planDigest,
   type PlanFingerprint,
 } from './canonical-json.js'
@@ -115,7 +116,10 @@ describe('planDigest', () => {
     recipe_id: 'ubuntu-24.04-docker-ce',
     recipe_digest: 'sha256:aa',
     adopts_existing_engine: false,
-    system_changes: ['Install docker-ce', 'Install nvidia-container-toolkit'],
+    system_changes: [
+      { code: 'install-packages', text: 'Install docker-ce', params: { packages: 'docker-ce' } },
+      { code: 'install-packages', text: 'Install nvidia-container-toolkit' },
+    ],
     requires_elevation: true,
     may_require_relogin: true,
     may_require_reboot: false,
@@ -123,15 +127,36 @@ describe('planDigest', () => {
       descriptor_id: 'trtllm-1.3.0rc27',
       image_digest: 'sha256:bb',
     },
+    host: { gpu_ids: ['GPU-a', 'GPU-b'], free_disk_gib: 120, docker_root_dir: '/var/lib/docker' },
   }
 
   it('changes when the system changes do, including only their order', () => {
     expect(planDigest({ ...plan, system_changes: [...plan.system_changes].reverse() })).not.toBe(
       planDigest(plan)
     )
-    expect(planDigest({ ...plan, system_changes: [...plan.system_changes, 'Add u to docker'] })).not.toBe(
-      planDigest(plan)
-    )
+    expect(
+      planDigest({
+        ...plan,
+        system_changes: [...plan.system_changes, { code: 'add-user-to-docker-group', text: 'Add u' }],
+      })
+    ).not.toBe(planDigest(plan))
+  })
+
+  it('changes when the host changes under it: the GPU set, or whole GiB of free space', () => {
+    const host = plan.host!
+    expect(planDigest({ ...plan, host: { ...host, gpu_ids: ['GPU-a'] } })).not.toBe(planDigest(plan))
+    expect(planDigest({ ...plan, host: { ...host, free_disk_gib: 119 } })).not.toBe(planDigest(plan))
+    // A few megabytes moving on their own is not a new plan (whole GiB only).
+    expect(freeDiskGib(120 * 1024 ** 3 + 5_000_000)).toBe(freeDiskGib(120 * 1024 ** 3 + 900_000_000))
+    expect(freeDiskGib(120 * 1024 ** 3 - 1)).toBe(119)
+    expect(freeDiskGib(null)).toBeNull()
+  })
+
+  it('changes when a change keeps its text but not its parameters', () => {
+    const [first, ...rest] = plan.system_changes
+    expect(
+      planDigest({ ...plan, system_changes: [{ ...first!, params: { packages: 'docker.io' } }, ...rest] })
+    ).not.toBe(planDigest(plan))
   })
 
   it('changes when the recipe or the image changes', () => {
@@ -157,6 +182,7 @@ describe('planDigest', () => {
 
   it('is stable for the same plan, whatever order its fields were built in', () => {
     const rebuilt: PlanFingerprint = {
+      host: plan.host,
       descriptor: plan.descriptor,
       may_require_reboot: plan.may_require_reboot,
       may_require_relogin: plan.may_require_relogin,

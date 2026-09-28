@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { ExecutionJournal } from './execution-journal.js'
-import { wireManagedContainers } from './wiring.js'
+import { createManagedContainersHandle, wireManagedContainers } from './wiring.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -121,5 +121,50 @@ describe('wireManagedContainers', () => {
     expect(wired?.reconciled.failed.map((r) => r.container_id)).toEqual(['orphan0123'])
     expect(wired?.reconciled.skipped.map((r) => r.container_id)).toEqual(['orphan0456'])
     expect(wired?.journal.list()).toHaveLength(2)
+  })
+})
+
+describe('createManagedContainersHandle (task 2.6)', () => {
+  const options = () => ({
+    platform: 'linux' as const,
+    layout: data.layout,
+    instanceId: 'core-1',
+    log: () => {},
+  })
+
+  it('wires once, and hands every later caller the same executor', async () => {
+    const docker = await fakeDocker()
+    const handle = createManagedContainersHandle({ ...options(), dockerPath: docker.path })
+    expect(handle.current()).toBeNull()
+    const [one, two] = await Promise.all([handle.resolve(), handle.resolve()])
+    expect(one).not.toBeNull()
+    expect(two).toBe(one)
+    expect(await handle.resolve()).toBe(one)
+    expect(handle.current()).toBe(one)
+    expect(one?.socketPath).toBe('/var/run/docker.sock')
+  })
+
+  it('tries again after a start with no docker CLI, since the setup may have installed one', async () => {
+    let calls = 0
+    const docker = await fakeDocker()
+    const handle = createManagedContainersHandle({ ...options(), dockerPath: docker.path }, async (wired) => {
+      calls += 1
+      return calls === 1 ? null : wireManagedContainers(wired)
+    })
+    expect(await handle.resolve()).toBeNull()
+    const later = await handle.resolve()
+    expect(later).not.toBeNull()
+    expect(calls).toBe(2)
+    expect(await handle.resolve()).toBe(later)
+  })
+
+  it('carries a test socket through to the executor it wires', async () => {
+    const docker = await fakeDocker()
+    const handle = createManagedContainersHandle({
+      ...options(),
+      dockerPath: docker.path,
+      dockerSocketPath: '/tmp/fake-engine.sock',
+    })
+    expect((await handle.resolve())?.socketPath).toBe('/tmp/fake-engine.sock')
   })
 })

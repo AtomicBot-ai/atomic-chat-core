@@ -43,7 +43,7 @@
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { Sha256Digest } from '../../contracts/index.js'
 import { canonicalDigest } from '../../runtime/environment/index.js'
-import type { LinuxInstallPlan } from '../../runtime/environment/index.js'
+import type { HostRecipeBinding, LinuxInstallPlan } from '../../runtime/environment/index.js'
 
 /** A value that is the object's own property — never one inherited from `Object.prototype`. */
 function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
@@ -467,6 +467,20 @@ export function parametersFromPlan(
     }
   }
   return validated({ ...host, components: [...wanted] })
+}
+
+/**
+ * This recipe as the core's Linux provisioner consumes it (task 2.6): it builds the parameters of a
+ * pending host step from the plan and their digest, with the same functions the executor checks
+ * them against. The provisioner cannot import this module itself (it imports the environment
+ * module), so the core passes it in.
+ */
+export const INSTALL_CONTAINER_RUNTIME_BINDING: HostRecipeBinding = {
+  recipe_id: INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+  recipe_digest: INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
+  parameters: (plan, host) => parametersFromPlan(plan, host),
+  parametersDigest: (parameters) =>
+    installContainerRuntimeParametersDigest(parameters as InstallContainerRuntimeParameters),
 }
 
 // ---------------------------------------------------------------------------------------------

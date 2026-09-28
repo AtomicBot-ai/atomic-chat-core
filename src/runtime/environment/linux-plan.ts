@@ -463,18 +463,24 @@ function buildInstallPlan(
     }
   }
 
-  // Reconfiguring the runtime on a Docker that is confirmed live and running requires restarting
-  // it, which stops whatever containers are up (design D5) — only planned from live evidence, so
-  // the container count in the warning is never a guess.
-  if (liveEvidence && !runtimeConfigured) {
-    const count = facts.docker.containers_running
+  // Reconfiguring the runtime on a Docker that is already running requires restarting it, which
+  // stops whatever containers are up (design D5). With live evidence the warning carries the real
+  // container count. A daemon that is active but not reachable by this user yet (task 2.6, the 2.5
+  // report's concern 2) gets the restart planned too: otherwise the runtime `nvidia-ctk` registers
+  // would only load at Docker's next start, and the setup would need a second elevation after the
+  // sign-in just to restart it. How many containers would stop cannot be asked of that daemon, so
+  // the warning says so instead of guessing a number.
+  if (!runtimeConfigured && (liveEvidence || facts.docker.service_active === true)) {
+    const count = liveEvidence ? facts.docker.containers_running : null
     systemChanges.push({
       code: 'restart-docker',
       text:
-        count > 0
-          ? `Restart Docker to load the new runtime configuration; ${count} running container(s) will stop.`
-          : 'Restart Docker to load the new runtime configuration.',
-      params: { running_containers: String(count) },
+        count === null
+          ? 'Restart Docker to load the new runtime configuration; any running containers will stop.'
+          : count > 0
+            ? `Restart Docker to load the new runtime configuration; ${count} running container(s) will stop.`
+            : 'Restart Docker to load the new runtime configuration.',
+      params: { running_containers: count === null ? 'unknown' : String(count) },
     })
   }
 

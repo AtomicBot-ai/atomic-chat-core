@@ -5,6 +5,7 @@ import type {
   EnvironmentOperation,
   ManagedHostReceipt,
   ManagedHostStep,
+  ManagedProgress,
   RequirementPlan,
   Sha256Digest,
 } from '../../contracts/index.js'
@@ -32,8 +33,9 @@ const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): Requir
   availability: 'setup-required',
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: PLAN_A,
+  descriptor_id: null,
   adopts_existing_engine: false,
-  system_changes: ['Install docker-ce'],
+  system_changes: [{ code: 'install-packages', text: 'Install docker-ce' }],
   download_bytes: null,
   required_disk_bytes: null,
   requires_elevation: true,
@@ -49,6 +51,14 @@ const HOST_STEP: ManagedHostStep = {
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: PLAN_A,
   parameters_digest: PLAN_A,
+  parameters: {
+    user: 'ada',
+    arch: 'x86_64',
+    family: 'apt',
+    distro_id: 'ubuntu',
+    version_id: '24.04',
+    components: ['docker-engine'],
+  },
   nonce: 'once-1',
   expected_operation_revision: 1,
 }
@@ -79,6 +89,11 @@ class FakeProvisioner implements EnvironmentProvisioner {
   failures = new Map<string, Error>()
   relogin = false
   reboot = false
+  /** What the probe after a receipt reports missing, when the step did not take. */
+  missing: { code: 'MANAGED_PREREQUISITE_BLOCKED'; message: string } | null = null
+  imagePresent = false
+  /** Byte progress `pull` reports before it returns. */
+  pullProgress: { completed: number; total: number }[] = []
   private gates = new Map<string, { promise: Promise<void>; release: () => void }>()
 
   constructor(...answers: { plan: RequirementPlan; host_step: ManagedHostStep | null }[]) {
@@ -102,14 +117,33 @@ class FakeProvisioner implements EnvironmentProvisioner {
     if (failure !== undefined) throw failure
   }
 
-  async probe(): Promise<{ plan: RequirementPlan; host_step: ManagedHostStep | null }> {
+  async probe(): Promise<{
+    plan: RequirementPlan
+    host_step: ManagedHostStep | null
+    image_present: boolean
+  }> {
     await this.step('probe')
-    return this.plans.length > 1 ? (this.plans.shift() as never) : (this.plans[0] as never)
+    const answer = this.plans.length > 1 ? this.plans.shift() : this.plans[0]
+    return {
+      ...(answer as { plan: RequirementPlan; host_step: ManagedHostStep | null }),
+      image_present: this.imagePresent,
+    }
+  }
+  async verifyHostStep() {
+    await this.step('verify-host-step')
+    return {
+      prerequisites_met: !this.relogin && !this.reboot && this.missing === null,
+      needs_relogin: this.relogin,
+      error: this.missing,
+    }
   }
   async prepare(): Promise<void> {
     await this.step('prepare')
   }
-  async pull(): Promise<void> {
+  async pull(_record: unknown, onProgress: (progress: ManagedProgress) => void): Promise<void> {
+    for (const tick of this.pullProgress) {
+      onProgress({ label: 'Downloading', completed: tick.completed, total: tick.total, unit: 'bytes' })
+    }
     await this.step('pull')
   }
   async verify(): Promise<void> {
@@ -146,6 +180,8 @@ interface HarnessIdentity {
   identityDeps?: IdentityDeps
   /** What `PersistedOperation.owner_process_start_id` this harness's writes carry. */
   ownerStartId?: string | null
+  /** Operation ids; every operation is `op-1` unless a test needs two of them. */
+  newOperationId?: () => string
 }
 
 const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessIdentity = {}) => {
@@ -155,7 +191,7 @@ const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessId
   const store = new OperationStore({
     root: '/shared',
     instanceId: 'core-1',
-    newOperationId: () => 'op-1',
+    newOperationId: identity.newOperationId ?? (() => 'op-1'),
     newEffectId: () => `effect-${(n += 1)}`,
     fs,
     now: () => fs.clock,
@@ -216,7 +252,10 @@ describe('consent end to end (OP02)', () => {
     await settle(service)
     operation = await service.get('op-1')
     expect(operation.phase).toBe('preparing-host')
-    expect(operation.pending_host_step).toEqual(HOST_STEP)
+    expect(operation.pending_host_step).toEqual({
+      ...HOST_STEP,
+      expected_operation_revision: operation.pending_host_step?.expected_operation_revision,
+    })
   })
 })
 
@@ -229,7 +268,7 @@ describe('an authorization is used once (OP03)', () => {
     return { ...h, provisioner }
   }
 
-  it('acts on a receipt once and treats the identical one as the retry it is', async () => {
+  it('acts on a receipt once, and refuses the same nonce a second time (spec "Повтор квитанции")', async () => {
     const { service, provisioner } = await authorized()
     expect((await service.get('op-1')).phase).toBe('preparing-host')
 
@@ -240,10 +279,12 @@ describe('an authorization is used once (OP03)', () => {
     const prepares = provisioner.calls.filter((call) => call === 'prepare').length
     expect(prepares).toBe(1)
 
-    const replay = await service.acceptHostReceipt('op-1', receipt())
+    await expect(service.acceptHostReceipt('op-1', receipt())).rejects.toMatchObject({
+      code: 'MANAGED_RECEIPT_CONFLICT',
+    })
     await settle(service)
-    // Same operation, and the privileged step did not happen a second time.
-    expect(replay.revision).toBe(after.revision)
+    // Nothing moved, and the privileged step did not count a second time.
+    expect((await service.get('op-1')).revision).toBe(after.revision)
     expect(provisioner.calls.filter((call) => call === 'prepare')).toHaveLength(prepares)
   })
 
@@ -261,6 +302,67 @@ describe('an authorization is used once (OP03)', () => {
     await expect(service.acceptHostReceipt('op-1', receipt({ nonce: 'other' }))).rejects.toThrow(
       /does not match/
     )
+    await expect(service.acceptHostReceipt('op-1', receipt({ nonce: 'other' }))).rejects.toMatchObject({
+      code: 'MANAGED_RECEIPT_CONFLICT',
+    })
+  })
+
+  it('refuses a receipt naming another revision of the operation (task 2.6)', async () => {
+    const { service } = await authorized()
+    await expect(
+      service.acceptHostReceipt('op-1', receipt({ expected_operation_revision: 99 }))
+    ).rejects.toMatchObject({ code: 'MANAGED_RECEIPT_CONFLICT' })
+    expect((await service.get('op-1')).phase).toBe('preparing-host')
+  })
+
+  it('refuses a receipt for other recipe bytes or parameters than the step it names', async () => {
+    const { service } = await authorized()
+    await expect(
+      service.acceptHostReceipt('op-1', receipt({ parameters_digest: PLAN_B }))
+    ).rejects.toMatchObject({ code: 'MANAGED_HOST_STEP_INVALID' })
+  })
+
+  it('applies a receipt that arrives twice at once exactly once (a lost compare-and-swap)', async () => {
+    const { service, provisioner } = await authorized()
+    const outcomes = await Promise.allSettled([
+      service.acceptHostReceipt('op-1', receipt()),
+      service.acceptHostReceipt('op-1', receipt()),
+    ])
+    await settle(service)
+    // One applies; the other finds the nonce spent once it re-reads, and is refused.
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1)
+    const refused = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult
+    expect(refused.reason).toMatchObject({ code: 'MANAGED_RECEIPT_CONFLICT' })
+    expect(provisioner.calls.filter((call) => call === 'prepare')).toHaveLength(1)
+    expect((await service.get('op-1')).phase).toBe('ready')
+  })
+
+  it('fails with what the machine shows when the helper says completed but nothing is there', async () => {
+    const { service, provisioner } = await authorized()
+    provisioner.missing = { code: 'MANAGED_PREREQUISITE_BLOCKED', message: 'Docker Engine is not installed.' }
+    await service.acceptHostReceipt('op-1', receipt())
+    await settle(service)
+    const after = await service.get('op-1')
+    expect(after.phase).toBe('failed')
+    expect(after.error?.message).toBe('Docker Engine is not installed.')
+    expect(provisioner.calls).not.toContain('prepare')
+  })
+
+  it('keeps a declined authorization resumable, and a resume issues a fresh step', async () => {
+    const { service, provisioner } = await authorized()
+    await service.acceptHostReceipt('op-1', receipt({ outcome: 'declined' }))
+    await settle(service)
+    const declined = await service.get('op-1')
+    expect(declined.phase).toBe('failed')
+    expect(declined.error?.code).toBe('MANAGED_ELEVATION_DECLINED')
+    // Nothing on the host was even looked at for a refusal.
+    expect(provisioner.calls).not.toContain('verify-host-step')
+
+    await service.resume('op-1', { expected_revision: declined.revision })
+    await settle(service)
+    const again = await service.get('op-1')
+    expect(again.phase).toBe('preparing-host')
+    expect(again.pending_host_step?.expected_operation_revision).toBe(again.revision - 1)
   })
 })
 
@@ -282,7 +384,8 @@ describe('cancelling a privileged step (OP04)', () => {
     expect(after.phase).toBe('cancelled')
     // The installed package stays recorded, and nothing went on to prepare or pull.
     expect(after.completed_step_ids).toEqual(['step-1'])
-    expect(provisioner.calls).toEqual(['probe', 'cleanup'])
+    // The receipt was checked against the machine; nothing was prepared or pulled after it.
+    expect(provisioner.calls).toEqual(['probe', 'verify-host-step', 'cleanup'])
   })
 })
 
@@ -317,6 +420,92 @@ describe('waiting for a sign-out across restarts (OP09)', () => {
     expect(provisioner.calls.filter((call) => call === 'prepare')).toHaveLength(1)
     // And the single-use authorization is gone, so nothing can re-elevate on its own.
     expect(after.pending_host_step).toBeNull()
+  })
+})
+
+describe('an explicit resume looks at the machine (task 2.6)', () => {
+  it('runs the reconcile a resume asks for, and continues after the sign-in without new consent', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: HOST_STEP })
+    const { service } = harness(provisioner)
+    await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+    await settle(service)
+    provisioner.relogin = true
+    await service.acceptHostReceipt('op-1', receipt())
+    await settle(service)
+    const waiting = await service.get('op-1')
+    expect(waiting.phase).toBe('relogin-required')
+    expect(waiting.error?.code).toBe('MANAGED_RELOGIN_REQUIRED')
+
+    // Still not signed in: the resume looks, and waits again.
+    await service.resume('op-1', { expected_revision: waiting.revision })
+    await settle(service)
+    const still = await service.get('op-1')
+    expect(still.phase).toBe('relogin-required')
+
+    // Signed in; the host now adopts as it stands, under a different plan digest.
+    provisioner.relogin = false
+    provisioner.plans = [
+      { plan: plan(PLAN_B, { system_changes: [], requires_elevation: false }), host_step: null },
+    ]
+    await service.resume('op-1', { expected_revision: still.revision })
+    await settle(service)
+    expect((await service.get('op-1')).phase).toBe('ready')
+    expect(provisioner.calls.filter((call) => call === 'prepare')).toHaveLength(1)
+  })
+})
+
+describe('a begin that finds an abandoned operation (task 2.6)', () => {
+  it('fails the operation a dead core left running and starts the new request', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    let serial = 0
+    const { service, store } = harness(provisioner, { newOperationId: () => `op-${(serial += 1)}` })
+    // What a core that died right after recording its begin leaves behind.
+    await store.createOrGet('env-1', begin({ request_id: 'req-old' }), PLAN_A)
+
+    const started = await service.begin('env-1', begin({ request_id: 'req-new' }))
+    await settle(service)
+    expect(started.operation_id).toBe('op-2')
+    const old = await service.get('op-1')
+    expect(['failed', 'cancelled']).toContain(old.phase)
+    expect(old.error?.code ?? 'MANAGED_OPERATION_CONFLICT').toBe('MANAGED_OPERATION_CONFLICT')
+  })
+
+  it('still refuses while the owner of the running operation is alive', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    const { service, store } = harness(provisioner, {
+      ownerStartId: null,
+      identityDeps: { alive: () => true },
+    })
+    await store.createOrGet('env-1', begin({ request_id: 'req-old' }), PLAN_A)
+    await expect(service.begin('env-1', begin({ request_id: 'req-new' }))).rejects.toMatchObject({
+      code: 'MANAGED_OPERATION_CONFLICT',
+    })
+  })
+})
+
+describe('byte progress while pulling (task 2.6)', () => {
+  it('announces progress without moving the revision, and get() shows it', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    provisioner.pullProgress = [
+      { completed: 10, total: 100 },
+      { completed: 100, total: 100 },
+    ]
+    const release = provisioner.pauseAt('pull')
+    const { service, events } = harness(provisioner)
+    await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+    for (let i = 0; i < 200 && !provisioner.calls.includes('pull'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    const during = await service.get('op-1')
+    expect(during.phase).toBe('pulling-image')
+    expect(during.progress).toMatchObject({ unit: 'bytes', total: 100 })
+    const ticks = events.filter((event) => event.phase === 'pulling-image' && event.progress !== null)
+    expect(ticks.length).toBeGreaterThan(0)
+    expect(ticks.every((event) => event.revision === during.revision)).toBe(true)
+    expect(ticks[0]?.progress?.completed).toBe(10)
+    release()
+    await settle(service)
+    expect((await service.get('op-1')).progress).toBeNull()
   })
 })
 
@@ -590,6 +779,7 @@ describe('ordinary running', () => {
     expect(provisioner.calls).toEqual(['probe', 'prepare', 'pull', 'verify', 'activate'])
     // Every state the operation passed through was announced, in order.
     expect(events.map((event) => event.phase)).toEqual([
+      'checking',
       'preparing-environment',
       'pulling-image',
       'verifying',

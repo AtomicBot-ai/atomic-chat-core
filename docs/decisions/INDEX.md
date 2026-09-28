@@ -29,6 +29,7 @@ add a new one that says which record it supersedes.
 - **2026-09-28** — [Linux probe fix round 1: docker_group returns as diagnostics, may_require_relogin is always true](2026-09-28-linux-probe-restores-docker-group-diagnostics-round-1.md) — supersedes the same-day "drops docker-group tracking" record.
 - **2026-09-28** — [Linux probe drops docker-group tracking; the install recipe always pairs enable+group](2026-09-28-linux-probe-drops-docker-group-tracking-and-recipe-blocks-pair.md) — superseded same day, kept as record.
 - **2026-09-28** — [src/runtime/environment/inventory.ts is the model-file digest, not the host-inventory report](2026-09-28-inventory-ts-is-the-model-file-digest-not-the-host-report.md)
+- **2026-09-29** — [Run the Linux engine setup and removal as one durable operation](2026-09-29-linux-setup-operation-and-engine-removal.md)
 - **2026-09-28** — [Managed runtime layout: the shared per-user root only, no per-scope artifact store](2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store.md)
 - **2026-09-28** — [Point DOCKER_CONFIG at an empty core-owned directory instead of deleting it; --pull=never on create/run](2026-09-28-point-docker-config-at-an-empty-core-owned-directory.md)
 - **2026-09-28** — [Managed-runtime execution journal: an orphan is any instance id but our own, no liveness probe](2026-09-28-managed-runtime-orphans-are-any-instance-id-but-our-own.md)

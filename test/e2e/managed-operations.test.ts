@@ -1,42 +1,78 @@
 /**
- * The managed container runtime through the compiled binary: the routes answer, a setup is recorded
- * durably, the snapshot and the event stream describe the same thing, and a record outlives the core
- * that wrote it.
+ * The managed container runtime through the compiled binary (task 2.6): the whole durable setup of
+ * the TensorRT-LLM engine on a Linux host, and its removal, driven over the control routes the app
+ * and the CLI use.
  *
- * No host recipe is qualified on any platform yet, so every setup here ends in a blocker. That is
- * the point of running it: what a user on an unprepared machine gets is an operation that says why
- * it cannot proceed, not one that appears to be installing something.
+ * The Linux machine is a folder (`ATOMIC_MANAGED_TEST_HOST`, `test/helpers/fake-managed-host.ts`):
+ * fake `docker`, `nvidia-smi`, `systemctl`, ... binaries answering from one state file, a fake Docker
+ * Engine API for the pulls, and a fake privileged executor that changes the state the way the recipe
+ * would. So this runs the same on macOS, Linux and CI, and nothing here runs a real Docker, a package
+ * manager or pkexec. `ATOMIC_CORE_MANAGED_ROOT` keeps the suite off the real per-user environment.
  *
- * `ATOMIC_CORE_MANAGED_ROOT` is set for every daemon, so the suite never touches the real per-user
- * environment on the machine it runs on.
+ * The brief's list, one test each: the adopt path; the install path with a relogin; a polkit
+ * refusal; `MANAGED_PLAN_CHANGED`; a GPU not visible in a container; a repeated `request_id`; a
+ * restart mid-pull (image there → verifying, not there → the pull continues); a receipt with no real
+ * result behind it; and a removal while a model container of the engine still runs.
  *
  * No imports from `src/`: a packaging change that breaks a route cannot pass by type-checking.
  */
 import type { ChildProcess } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
+import {
+  cleanState,
+  DESCRIPTOR_ID,
+  ENGINE_IMAGE,
+  fakeManagedHost,
+  GPU_UUID,
+  PROBE_IMAGE,
+  readyState,
+  type FakeManagedHost,
+  type PendingHostStep,
+} from '../helpers/fake-managed-host.js'
 
 let dataFolder: string
 let managedRoot: string
+let host: FakeManagedHost | undefined
 const daemons: ChildProcess[] = []
 const streams: AbortController[] = []
 
 beforeEach(async () => {
   dataFolder = await mkdtemp(join(tmpdir(), 'atomic-core-e2e-managed-'))
   managedRoot = await mkdtemp(join(tmpdir(), 'atomic-managed-e2e-'))
+  host = undefined
 })
 afterEach(async () => {
   for (const stream of streams.splice(0)) stream.abort()
   for (const daemon of daemons.splice(0)) daemon.kill('SIGKILL')
+  if (host !== undefined) {
+    await host.close()
+    await rm(host.dir, { recursive: true, force: true, maxRetries: 3 })
+  }
   await rm(dataFolder, { recursive: true, force: true, maxRetries: 3 })
   await rm(managedRoot, { recursive: true, force: true, maxRetries: 3 })
 })
 
-const start = () => core.startDaemon(dataFolder, daemons, [], { ATOMIC_CORE_MANAGED_ROOT: managedRoot })
+const start = (extra: Record<string, string> = {}) =>
+  core.startDaemon(dataFolder, daemons, [], {
+    ATOMIC_CORE_MANAGED_ROOT: managedRoot,
+    ...(host?.env ?? {}),
+    ...extra,
+  })
+
+/** SIGKILL, the way a crash ends a core: no chance to tidy up. */
+const crash = async (): Promise<void> => {
+  for (const daemon of daemons.splice(0)) {
+    const exited = new Promise((resolve) => daemon.once('exit', resolve))
+    daemon.kill('SIGKILL')
+    await exited
+  }
+}
 
 const control = (ready: ReadyLine, path: string, init: RequestInit = {}) =>
   core.control(dataFolder, ready, path, init)
@@ -51,21 +87,37 @@ interface Operation {
   operation_id: string
   request_id: string
   instance_id: string
+  revision: number
   phase: string
-  error: { code: string; message: string } | null
+  plan_digest: string | null
+  approved_plan_digest: string | null
+  progress: { completed: number | null; total: number | null; unit: string } | null
+  pending_host_step: PendingHostStep | null
+  error: { code: string; message: string; details?: string } | null
+}
+
+interface Environment {
+  environment_id: string
+  executor: string
+  availability: string
+  gpus: { gpu_id: string }[]
+  installations: { installation_id: string; status: string; active_descriptor_id: string | null }[]
 }
 
 interface Snapshot {
   instance_id: string
-  environments: { environment_id: string; executor: string; availability: string }[]
+  environments: Environment[]
   environment_operations: Operation[]
 }
 
-const setup = (requestId = 'req-1') => ({
+const TARGET = { kind: 'runtime' as const, installation_id: 'tensorrt-llm', engine_id: 'tensorrt-llm' }
+
+const setup = (requestId = 'req-1', extra: Record<string, unknown> = {}) => ({
   request_id: requestId,
-  target: { kind: 'environment' as const },
+  target: TARGET,
   kind: 'setup' as const,
-  descriptor_id: 'trtllm-1.3.0rc27',
+  descriptor_id: DESCRIPTOR_ID,
+  ...extra,
 })
 
 /** Collects event frames as they arrive, the way the app's relay reads them. */
@@ -98,121 +150,419 @@ async function events(ready: ReadyLine): Promise<Array<{ event: string; data: Op
   return seen
 }
 
-const waitFor = async (check: () => boolean, ms = 5_000): Promise<void> => {
-  const deadline = Date.now() + ms
-  while (!check() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25))
-  expect(check()).toBe(true)
-}
+const get = async (ready: ReadyLine, operationId: string): Promise<Operation> =>
+  (await (await control(ready, `/environments/operations/${operationId}`)).json()) as Operation
 
 /** Read the operation back until it reaches the state under test, or give up loudly. */
 async function poll(
   ready: ReadyLine,
   operationId: string,
   done: (operation: Operation) => boolean,
-  ms = 5_000
+  ms = 15_000
 ): Promise<Operation> {
   const deadline = Date.now() + ms
-  let current = (await (await control(ready, `/environments/operations/${operationId}`)).json()) as Operation
+  let current = await get(ready, operationId)
   while (!done(current) && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 25))
-    current = (await (await control(ready, `/environments/operations/${operationId}`)).json()) as Operation
+    await new Promise((r) => setTimeout(r, 50))
+    current = await get(ready, operationId)
   }
-  expect(done(current)).toBe(true)
+  expect(done(current), `stuck at ${current.phase}: ${JSON.stringify(current.error)}`).toBe(true)
   return current
 }
 
-describe('the managed runtime through the compiled core', () => {
-  it('answers the environments route and shows the same thing in the snapshot', async () => {
-    const { ready } = await start()
+const settled = (operation: Operation): boolean =>
+  [
+    'awaiting-consent',
+    'preparing-host',
+    'relogin-required',
+    'ready',
+    'removed',
+    'failed',
+    'cancelled',
+  ].includes(operation.phase) &&
+  // `preparing-host` counts only once the step is out.
+  (operation.phase !== 'preparing-host' || operation.pending_host_step !== null)
 
-    const listed = (await (await control(ready, '/environments')).json()) as {
-      environments: Snapshot['environments']
-    }
-    const snapshot = (await (await control(ready, '/snapshot')).json()) as Snapshot
-
-    expect(snapshot.environments).toEqual(listed.environments)
-    expect(snapshot.environment_operations).toEqual([])
-    // Either this platform has an engine it would drive, or it has no environment at all. Nothing
-    // is installable yet on any of them, and the answer says so rather than offering a setup.
-    for (const environment of listed.environments) {
-      expect(['linux-docker', 'wsl-docker']).toContain(environment.executor)
-      expect(environment.availability).toBe('unsupported')
-    }
+/** Begin, wait for the plan, approve it: the consent a user gives in the setup dialog. */
+async function beginAndApprove(ready: ReadyLine, requestId = 'req-1'): Promise<Operation> {
+  const started = (await (
+    await post(ready, '/environments/default/operations', setup(requestId))
+  ).json()) as Operation
+  const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+  expect(asking.plan_digest).toMatch(/^sha256:/)
+  const approved = await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+    expected_revision: asking.revision,
+    approved_plan_digest: asking.plan_digest,
   })
+  expect(approved.status).toBe(200)
+  return asking
+}
 
-  it('records a setup on a machine with no recipe, and says what is missing', async () => {
-    const { ready } = await start()
-    const started = await post(ready, '/environments/default/operations', setup())
-    expect(started.status).toBe(202)
-    const operation = (await started.json()) as Operation
+const snapshot = async (ready: ReadyLine): Promise<Snapshot> =>
+  (await (await control(ready, '/snapshot')).json()) as Snapshot
 
-    const current = await poll(ready, operation.operation_id, (o) => o.phase === 'failed')
-
-    expect(current.phase).toBe('failed')
-    expect(current.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
-    // An actionable sentence, not a stack trace: this is what the setup dialog would show.
-    expect(current.error?.message).toMatch(/not available on this system/i)
-  })
-
-  it('announces every state the operation passes through, as it happens', async () => {
+describe('setting up the managed engine through the compiled core (task 2.6)', () => {
+  it('adopts a ready host: consent, GPU check, byte-progress pull, verification, activation', async () => {
+    host = await fakeManagedHost(readyState())
     const { ready } = await start()
     const seen = await events(ready)
+
+    const probe = (await (
+      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+    ).json()) as { adopts_existing_engine: boolean; system_changes: unknown[]; requires_elevation: boolean }
+    expect(probe).toMatchObject({
+      adopts_existing_engine: true,
+      system_changes: [],
+      requires_elevation: false,
+    })
+
+    const asking = await beginAndApprove(ready)
+    const done = await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')
+    expect(done.phase).toBe('ready')
+
+    const phases = seen
+      .filter((frame) => frame.event === 'environment:operation')
+      .map((frame) => frame.data.phase)
+      .filter((phase, index, all) => phase !== all[index - 1])
+    expect(phases).toEqual([
+      'checking',
+      'awaiting-consent',
+      'checking',
+      'preparing-environment',
+      'pulling-image',
+      'verifying',
+      'activating',
+      'ready',
+    ])
+    // Byte progress while pulling, measured against the descriptor's download size.
+    const progress = seen
+      .map((frame) => frame.data.progress)
+      .filter((tick): tick is NonNullable<Operation['progress']> => tick !== null && tick !== undefined)
+    expect(progress.length).toBeGreaterThan(0)
+    expect(progress.every((tick) => tick.unit === 'bytes')).toBe(true)
+    expect(progress.some((tick) => (tick.completed ?? 0) > 0)).toBe(true)
+
+    // The GPU check ran on the card, from the probe image, before the engine image was pulled.
+    expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
+    const run = host.calls().find((call) => call[0] === 'docker' && call[3] === 'run')
+    expect(run).toContain(`device=${GPU_UUID}`)
+    expect(run).toContain(PROBE_IMAGE)
+
+    const environment = (await snapshot(ready)).environments[0]
+    expect(environment?.availability).toBe('supported')
+    expect(environment?.gpus.map((gpu) => gpu.gpu_id)).toEqual([GPU_UUID])
+    expect(environment?.installations).toEqual([
+      expect.objectContaining({
+        installation_id: 'tensorrt-llm',
+        status: 'ready',
+        active_descriptor_id: DESCRIPTOR_ID,
+      }),
+    ])
+  })
+
+  it('installs Docker with one privileged step, waits for the sign-in, and continues at the next start', async () => {
+    host = await fakeManagedHost(cleanState())
+    const first = await start()
+    const asking = await beginAndApprove(first.ready)
+    const waiting = await poll(first.ready, asking.operation_id, settled)
+    expect(waiting.phase).toBe('preparing-host')
+    const step = waiting.pending_host_step as PendingHostStep
+    // The step carries the recipe's validated parameters, which the client copies into the request.
+    expect(step.parameters.components).toEqual([
+      'docker-engine',
+      'nvidia-container-toolkit',
+      'nvidia-runtime',
+      'docker-service',
+      'docker-group',
+    ])
+    expect(host.pulls).toEqual([])
+
+    const receipt = host.runHostStep(step, 'completed')
+    expect(
+      (await post(first.ready, `/environments/operations/${asking.operation_id}/host-step-result`, receipt))
+        .status
+    ).toBe(200)
+    const relogin = await poll(first.ready, asking.operation_id, settled)
+    expect(relogin.phase).toBe('relogin-required')
+    expect(relogin.error?.code).toBe('MANAGED_RELOGIN_REQUIRED')
+
+    // The nonce is spent: the same receipt again, or another outcome for it, is refused.
+    const again = await post(
+      first.ready,
+      `/environments/operations/${asking.operation_id}/host-step-result`,
+      receipt
+    )
+    expect(again.status).toBe(409)
+    expect(((await again.json()) as { error: { code: string } }).error.code).toBe('MANAGED_RECEIPT_CONFLICT')
+    const replay = await post(
+      first.ready,
+      `/environments/operations/${asking.operation_id}/host-step-result`,
+      {
+        ...receipt,
+        outcome: 'failed',
+      }
+    )
+    expect(replay.status).toBe(409)
+    expect(((await replay.json()) as { error: { code: string } }).error.code).toBe('MANAGED_RECEIPT_CONFLICT')
+
+    // The user signs out and back in: the group is in the session, and the app opens again.
+    await crash()
+    host.update((state) => ({
+      ...state,
+      group: { configured: true, effective: true },
+      docker: { ...state.docker, reachable: true },
+    }))
+    const second = await start()
+    const done = await poll(
+      second.ready,
+      asking.operation_id,
+      (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
+    )
+    // Continued on its own, without asking again for what was already approved and done.
+    expect(done.phase).toBe('ready')
+    expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
+    expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
+  })
+
+  it('keeps a refused system prompt resumable, with nothing changed on the host', async () => {
+    host = await fakeManagedHost(cleanState())
+    const { ready } = await start()
+    const asking = await beginAndApprove(ready)
+    const waiting = await poll(ready, asking.operation_id, settled)
+    const step = waiting.pending_host_step as PendingHostStep
+
+    await post(
+      ready,
+      `/environments/operations/${asking.operation_id}/host-step-result`,
+      host.runHostStep(step, 'declined')
+    )
+    const declined = await poll(ready, asking.operation_id, settled)
+    expect(declined.phase).toBe('failed')
+    expect(declined.error?.code).toBe('MANAGED_ELEVATION_DECLINED')
+    expect(host.state()).toEqual(cleanState())
+
+    // Resumable: the same approved plan issues a fresh step with a new nonce.
+    await post(ready, `/environments/operations/${asking.operation_id}/resume`, {
+      expected_revision: declined.revision,
+    })
+    const again = await poll(ready, asking.operation_id, settled)
+    expect(again.phase).toBe('preparing-host')
+    expect(again.pending_host_step?.nonce).not.toBe(step.nonce)
+  })
+
+  it('refuses a consent given for a plan the host has outgrown (MANAGED_PLAN_CHANGED)', async () => {
+    host = await fakeManagedHost(readyState())
+    const { ready } = await start()
     const started = (await (
       await post(ready, '/environments/default/operations', setup())
     ).json()) as Operation
+    const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
 
-    await waitFor(() => seen.some((frame) => frame.data.phase === 'failed'))
-    const mine = seen.filter((frame) => frame.event === 'environment:operation')
-    expect(mine.length).toBeGreaterThan(0)
-    expect(mine.every((frame) => frame.data.operation_id === started.operation_id)).toBe(true)
+    // Between the probe and the click, 20 GiB of free space went elsewhere.
+    host.setFreeDisk(480 * 1024 ** 3)
+    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+      expected_revision: asking.revision,
+      approved_plan_digest: asking.plan_digest,
+    })
+    const changed = await poll(
+      ready,
+      started.operation_id,
+      (o) => o.revision > asking.revision + 1 && settled(o)
+    )
+    expect(changed.phase).toBe('awaiting-consent')
+    expect(changed.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(changed.plan_digest).not.toBe(asking.plan_digest)
+    expect(host.pulls).toEqual([])
   })
 
-  it('hands a retried request the operation it already started', async () => {
+  it('fails with toolkit diagnostics when the GPU is not visible in a container, and pulls no engine image', async () => {
+    host = await fakeManagedHost({ ...readyState(), gpu_visible_in_container: false })
+    const { ready } = await start()
+    const asking = await beginAndApprove(ready)
+    const failed = await poll(ready, asking.operation_id, settled)
+    expect(failed.phase).toBe('failed')
+    expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(failed.error?.message).toMatch(/not visible inside a container/)
+    expect(failed.error?.details).toContain(`gpu=${GPU_UUID}`)
+    expect(failed.error?.details).toContain('could not select device driver')
+    expect(host.pulls).toEqual([PROBE_IMAGE])
+  })
+
+  it('hands a retried request the operation it already started, and refuses the id for another one', async () => {
+    host = await fakeManagedHost(readyState())
     const { ready } = await start()
     const first = (await (await post(ready, '/environments/default/operations', setup())).json()) as Operation
     const again = (await (await post(ready, '/environments/default/operations', setup())).json()) as Operation
     expect(again.operation_id).toBe(first.operation_id)
+    const other = await post(ready, '/environments/default/operations', setup('req-1', { kind: 'remove' }))
+    expect(other.status).toBe(409)
+    expect((await snapshot(ready)).environment_operations).toHaveLength(1)
   })
 
+  it('picks a pull back up after a crash: verifying when the image is there, pulling on when it is not', async () => {
+    for (const imageLanded of [true, false]) {
+      host = await fakeManagedHost(readyState())
+      host.holdEnginePull = true
+      const first = await start()
+      const asking = await beginAndApprove(first.ready)
+      const pulling = await poll(
+        first.ready,
+        asking.operation_id,
+        (o) => o.phase === 'pulling-image' && (o.progress?.completed ?? 0) > 0
+      )
+      expect(pulling.progress?.unit).toBe('bytes')
+
+      await crash()
+      host.holdEnginePull = false
+      if (imageLanded) host.update((state) => ({ ...state, images: [...(state.images ?? []), ENGINE_IMAGE] }))
+      const pullsBefore = host.pulls.length
+      const second = await start()
+      const done = await poll(
+        second.ready,
+        asking.operation_id,
+        (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
+      )
+      expect(done.phase).toBe('ready')
+      // No new consent, no second GPU check; the engine image pulled again only when it was missing.
+      expect(host.pulls.slice(pullsBefore)).toEqual(imageLanded ? [] : [ENGINE_IMAGE])
+
+      await crash()
+      await host.close()
+      await rm(host.dir, { recursive: true, force: true })
+      host = undefined
+      await rm(managedRoot, { recursive: true, force: true })
+      await mkdir(managedRoot, { recursive: true })
+    }
+  })
+
+  it('fails with what the machine shows when the helper reports success it did not have', async () => {
+    host = await fakeManagedHost(cleanState())
+    const { ready } = await start()
+    const asking = await beginAndApprove(ready)
+    const waiting = await poll(ready, asking.operation_id, settled)
+    const receipt = host.runHostStep(waiting.pending_host_step as PendingHostStep, 'completed', 'none')
+
+    await post(ready, `/environments/operations/${asking.operation_id}/host-step-result`, receipt)
+    const failed = await poll(ready, asking.operation_id, settled)
+    // The probe after the receipt still finds no Docker: a failure with that result, not a relogin.
+    expect(failed.phase).toBe('failed')
+    expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(failed.error?.message).toMatch(/still needs/)
+    expect(host.pulls).toEqual([])
+  })
+})
+
+describe('removing the managed engine through the compiled core (task 2.6)', () => {
+  it('stops the engine’s running container first, then removes the image and caches; models and Docker stay', async () => {
+    host = await fakeManagedHost({ ...readyState(), images: ['docker.io/library/postgres@sha256:beef'] })
+    const first = await start()
+    const setupOp = await beginAndApprove(first.ready)
+    expect(
+      (await poll(first.ready, setupOp.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed'))
+        .phase
+    ).toBe('ready')
+    await crash()
+
+    // A model container of this engine that is still running (its stop was not confirmed when the
+    // core restarted, so the startup reconcile left it and its journal record alone), the engine's
+    // cache, a downloaded model, and a container of someone else's.
+    const executions = join(dataFolder, 'atomic-core', 'managed-runtimes', 'executions')
+    await mkdir(executions, { recursive: true })
+    await writeFile(
+      join(executions, 'trt-running.json'),
+      JSON.stringify({
+        container_id: 'trt-running',
+        engine_id: 'tensorrt-llm',
+        image_digest: ENGINE_IMAGE.split('@')[1],
+        scope: 'cli',
+        instance_id: 'previous-core',
+        created_at: '2026-09-29T00:00:00.000Z',
+      })
+    )
+    host.update((state) => ({
+      ...state,
+      containers: [
+        { id: 'trt-running', image: ENGINE_IMAGE, running: true },
+        { id: 'their-db', image: 'docker.io/library/postgres@sha256:beef', running: true },
+      ],
+      stop_refusals: 1,
+    }))
+    const cache = join(dataFolder, 'atomic-core', 'managed-runtimes', 'caches', DESCRIPTOR_ID, 'some-model')
+    await mkdir(cache, { recursive: true })
+    const model = join(dataFolder, 'tensorrt-llm', 'models', 'some-model')
+    await mkdir(model, { recursive: true })
+
+    const second = await start()
+    const started = (await (
+      await post(second.ready, '/environments/default/operations', {
+        request_id: 'rm-1',
+        target: TARGET,
+        kind: 'remove',
+      })
+    ).json()) as Operation
+    const asking = await poll(second.ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+    await post(second.ready, `/environments/operations/${started.operation_id}/resume`, {
+      expected_revision: asking.revision,
+      approved_plan_digest: asking.plan_digest,
+    })
+    const removed = await poll(
+      second.ready,
+      started.operation_id,
+      (o) => o.phase === 'removed' || o.phase === 'failed'
+    )
+    expect(removed.phase).toBe('removed')
+
+    const docker = host.calls().filter((call) => call[0] === 'docker' && call[1] === '--host')
+    const stop = docker.findIndex((call) => call[3] === 'stop' && call.includes('trt-running'))
+    const imageRm = docker.findIndex((call) => call[3] === 'image' && call[4] === 'rm')
+    expect(stop).toBeGreaterThanOrEqual(0)
+    expect(imageRm).toBeGreaterThan(stop)
+    expect(docker[imageRm]).toContain(ENGINE_IMAGE)
+    // Our container is gone; someone else's container and image are exactly as they were.
+    expect(host.state().containers?.map((c) => c.id)).toEqual(['their-db'])
+    expect(host.state().images).toEqual(['docker.io/library/postgres@sha256:beef', PROBE_IMAGE])
+    expect(docker.some((call) => call.includes('their-db'))).toBe(false)
+    // The caches are gone, the downloaded model stays, and nothing reached for Docker itself.
+    expect(existsSync(cache)).toBe(false)
+    expect(existsSync(model)).toBe(true)
+    expect(await readdir(executions)).toEqual([])
+    expect(host.calls().some((call) => call[0] === 'host-step')).toBe(false)
+
+    const environment = (await snapshot(second.ready)).environments[0]
+    expect(environment?.installations).toEqual([])
+    expect(environment?.availability).toBe('setup-required')
+  })
+})
+
+describe('without a Linux host', () => {
+  it.skipIf(process.platform === 'linux')(
+    'offers no environment, and a setup says what is missing',
+    async () => {
+      const { ready } = await start()
+      const snap = await snapshot(ready)
+      expect(snap.environments).toEqual([])
+      const started = await post(ready, '/environments/default/operations', setup())
+      expect(started.status).toBe(202)
+      const operation = (await started.json()) as Operation
+      const current = await poll(ready, operation.operation_id, (o) => o.phase === 'failed')
+      expect(current.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+      expect(current.error?.message).toMatch(/not available on this system/i)
+    }
+  )
+
   it('refuses a body it does not understand before anything is recorded', async () => {
+    host = await fakeManagedHost(readyState())
     const { ready } = await start()
     const res = await post(ready, '/environments/default/operations', {
       ...setup(),
       target: { kind: 'runtime' },
     })
     expect(res.status).toBe(400)
-    const snapshot = (await (await control(ready, '/snapshot')).json()) as Snapshot
-    expect(snapshot.environment_operations).toEqual([])
-  })
-
-  it('keeps the record when the core that wrote it is gone', async () => {
-    const first = await start()
-    const started = (await (
-      await post(first.ready, '/environments/default/operations', setup())
-    ).json()) as Operation
-    await poll(first.ready, started.operation_id, (o) => o.phase === 'failed')
-
-    // The core dies without a chance to tidy up, which is the case the record exists for.
-    daemons.splice(0).forEach((daemon) => daemon.kill('SIGKILL'))
-
-    const second = await start()
-    expect(second.ready.instance_id).not.toBe(first.ready.instance_id)
-
-    const recovered = (await (
-      await control(second.ready, `/environments/operations/${started.operation_id}`)
-    ).json()) as Operation
-    expect(recovered.operation_id).toBe(started.operation_id)
-    expect(recovered.request_id).toBe('req-1')
-
-    // Nothing is in flight any more, and the snapshot belongs to the core answering it.
-    const snapshot = (await (await control(second.ready, '/snapshot')).json()) as Snapshot
-    expect(snapshot.instance_id).toBe(second.ready.instance_id)
-    for (const environment of snapshot.environments) {
-      expect(environment.availability).toBe('unsupported')
-    }
+    expect((await snapshot(ready)).environment_operations).toEqual([])
   })
 
   it('answers 404 for an operation nobody started', async () => {
+    host = await fakeManagedHost(readyState())
     const { ready } = await start()
     expect((await control(ready, '/environments/operations/op-nobody')).status).toBe(404)
   })

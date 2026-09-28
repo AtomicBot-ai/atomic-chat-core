@@ -18,8 +18,10 @@ import type {
   BeginOperation,
   EnvironmentOperation,
   EnvironmentSnapshot,
+  ErrorBody,
   ManagedHostReceipt,
   ManagedHostStep,
+  ManagedPhase,
   ManagedProgress,
   ProbeEnvironmentInput,
   RequirementPlan,
@@ -32,13 +34,30 @@ import { recoverOperation, type EffectInventory } from './recovery.js'
 import { reduceOperation, type EffectIntent, type OperationEvent } from './state.js'
 import { classifyReceipt, withReceipt, type OperationStore, type PersistedOperation } from './store.js'
 
+/** What the probe that follows a host-step receipt shows. The receipt itself is never believed. */
+export interface HostStepVerdict {
+  /** Nothing is left to install or authorize: the setup may go on. */
+  prerequisites_met: boolean
+  /** The `docker` group is granted, the daemon runs, and only a sign-in is missing. */
+  needs_relogin: boolean
+  /** What is still missing, as the operation's failure when neither of the above holds. */
+  error: ErrorBody | null
+}
+
+/** A probe's answer: the plan, the privileged step it needs if any, and whether the image is there. */
+export interface ProvisionerProbe {
+  plan: RequirementPlan
+  host_step: ManagedHostStep | null
+  /** The runtime image this operation installs is already present by digest (restart mid-pull). */
+  image_present?: boolean
+}
+
 /** What a host recipe can do. One implementation per platform; none of it is decided here. */
 export interface EnvironmentProvisioner {
   /** Read the machine and say what setting this up would involve. Never changes anything. */
-  probe(
-    record: PersistedOperation,
-    signal: AbortSignal
-  ): Promise<{ plan: RequirementPlan; host_step: ManagedHostStep | null }>
+  probe(record: PersistedOperation, signal: AbortSignal): Promise<ProvisionerProbe>
+  /** Re-probe after a host-step receipt that claims the step ran (task 2.6). Changes nothing. */
+  verifyHostStep(record: PersistedOperation, signal: AbortSignal): Promise<HostStepVerdict>
   prepare(record: PersistedOperation, signal: AbortSignal): Promise<void>
   pull(
     record: PersistedOperation,
@@ -86,6 +105,7 @@ const unsupported = (input: {
   availability: 'unsupported',
   recipe_id: 'none',
   recipe_digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+  descriptor_id: null,
   adopts_existing_engine: false,
   system_changes: [],
   download_bytes: null,
@@ -104,6 +124,17 @@ const unsupported = (input: {
 const notFound = (operationId: string): AtomicCoreError =>
   new AtomicCoreError('MANAGED_OPERATION_NOT_FOUND', 'No such operation.', operationId)
 
+const TERMINAL: readonly ManagedPhase[] = ['ready', 'removed', 'cancelled', 'failed']
+
+/** How often byte progress of a pull is announced, at most. The first tick always goes out. */
+export const PROGRESS_EMIT_INTERVAL_MS = 250
+
+/** How many times a receipt is re-read and re-applied after losing a compare-and-swap. */
+const RECEIPT_ATTEMPTS = 3
+
+const receiptConflict = (why: string, details?: string): AtomicCoreError =>
+  new AtomicCoreError('MANAGED_RECEIPT_CONFLICT', why, details)
+
 /** Resolves once `signal` fires; never, if there is no signal to wait on. */
 const whenAborted = (signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
@@ -118,6 +149,12 @@ const whenAborted = (signal?: AbortSignal): Promise<void> =>
 export class EnvironmentService {
   private readonly options: EnvironmentServiceOptions
   private readonly aborts = new Map<string, AbortController>()
+  /**
+   * Byte progress of a pull in flight, by operation. Kept in memory and announced on
+   * `environment:operation` without a new revision: the pull effect was issued at the current
+   * revision and has to answer at it, so a revision per tick would make its own result stale.
+   */
+  private readonly progress = new Map<string, ManagedProgress>()
   private running = new Set<Promise<void>>()
   private stopped = false
 
@@ -141,21 +178,35 @@ export class EnvironmentService {
     return plan
   }
 
-  /** Start, or hand back the operation this request already started. */
+  /**
+   * Start, or hand back the operation this request already started.
+   *
+   * Recovery only runs when a core starts, so an operation whose core died while another core kept
+   * running would refuse every later `begin` on its environment until that other core restarted.
+   * When the operation in the way belongs to a process that can be shown to be gone, it is ended
+   * here instead (task 2.6), and the new request goes ahead.
+   */
   async begin(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation> {
-    const { record, created } = await this.options.store.createOrGet(
-      environmentId,
-      input,
-      beginFingerprint(input)
-    )
-    if (created) this.dispatch(record)
-    return record.machine.operation
+    const fingerprint = beginFingerprint(input)
+    let result: { record: PersistedOperation; created: boolean }
+    try {
+      result = await this.options.store.createOrGet(environmentId, input, fingerprint)
+    } catch (error) {
+      if (!(await this.endAbandonedBlocker(error))) throw error
+      result = await this.options.store.createOrGet(environmentId, input, fingerprint)
+    }
+    if (result.created) {
+      // Announced from its first state, so the snapshot and the event stream both show it at once.
+      this.options.emit?.('environment:operation', result.record.machine.operation)
+      this.dispatch(result.record)
+    }
+    return result.record.machine.operation
   }
 
   async get(operationId: string): Promise<EnvironmentOperation> {
     const record = await this.options.store.read(operationId)
     if (record === null) throw notFound(operationId)
-    return record.machine.operation
+    return this.withProgress(record.machine.operation)
   }
 
   async cancel(operationId: string): Promise<EnvironmentOperation> {
@@ -189,38 +240,83 @@ export class EnvironmentService {
    * Take the app's word for what the OS prompt did, then check it. A receipt is an assertion: the
    * machine is re-probed before the step counts as done, and a helper that claims success it cannot
    * show is refused by the reducer.
+   *
+   * A receipt is bound to the pending step by all of its identity: step id, single-use nonce, the
+   * revision the step was issued at, and the recipe and parameter digests. A nonce already used —
+   * the identical receipt again included — a nonce this operation is not waiting for, or another
+   * revision is `MANAGED_RECEIPT_CONFLICT` (spec "Повтор квитанции"); a client that lost the answer
+   * reads the operation instead. Recording the nonce and applying the transition are one
+   * compare-and-swap, so a receipt that races itself is applied once: the loser re-reads, finds its
+   * nonce spent, and is refused.
    */
   async acceptHostReceipt(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation> {
-    const current = await this.options.store.read(operationId)
-    if (current === null) throw notFound(operationId)
-    if (classifyReceipt(current, receipt) === 'duplicate') {
-      // The same authorization arriving twice is a retry, not a second authorization.
-      return current.machine.operation
-    }
-    const pending = current.machine.operation.pending_host_step
-    if (pending === null || pending.nonce !== receipt.nonce || pending.step_id !== receipt.step_id) {
-      throw new AtomicCoreError(
-        'MANAGED_HOST_STEP_INVALID',
-        'That result does not match the authorization this operation is waiting for.',
-        receipt.step_id
-      )
-    }
-    const met =
-      receipt.outcome === 'completed' &&
-      this.options.provisioner !== null &&
-      (await this.prerequisitesMet(current))
+    for (let attempt = 0; attempt < RECEIPT_ATTEMPTS; attempt += 1) {
+      const current = await this.options.store.read(operationId)
+      if (current === null) throw notFound(operationId)
+      if (classifyReceipt(current, receipt) === 'duplicate') {
+        // The same authorization arriving twice authorizes nothing a second time.
+        throw receiptConflict(
+          'This authorization was already used; nothing was applied again.',
+          receipt.nonce
+        )
+      }
+      const pending = current.machine.operation.pending_host_step
+      if (pending === null || pending.nonce !== receipt.nonce || pending.step_id !== receipt.step_id) {
+        throw receiptConflict(
+          'That result does not match the authorization this operation is waiting for.',
+          receipt.step_id
+        )
+      }
+      if (pending.expected_operation_revision !== receipt.expected_operation_revision) {
+        throw receiptConflict(
+          'That result is for another revision of this operation.',
+          `step issued at ${pending.expected_operation_revision}, receipt names ${receipt.expected_operation_revision}`
+        )
+      }
+      if (
+        pending.recipe_digest !== receipt.recipe_digest ||
+        pending.parameters_digest !== receipt.parameters_digest
+      ) {
+        throw new AtomicCoreError(
+          'MANAGED_HOST_STEP_INVALID',
+          'That result is for other recipe bytes or parameters than the step that was authorized.',
+          receipt.step_id
+        )
+      }
 
-    const recorded = withReceipt(current, receipt)
-    await this.options.store.compareAndSwap(operationId, recorded.machine.operation.revision, recorded)
-    const { record: next, owned } = await this.apply(operationId, {
-      type: 'host-receipt-verified',
-      effect_id: current.machine.pending_effect?.effect_id ?? '',
-      expected_revision: current.machine.operation.revision,
-      receipt,
-      prerequisites_met: met,
-    })
-    if (owned) this.dispatch(next)
-    return next.machine.operation
+      const verdict = await this.verdictFor(current, receipt)
+      const result = reduceOperation(
+        current.machine,
+        {
+          type: 'host-receipt-verified',
+          effect_id: current.machine.pending_effect?.effect_id ?? '',
+          expected_revision: current.machine.operation.revision,
+          receipt,
+          prerequisites_met: verdict.prerequisites_met,
+          needs_relogin: verdict.needs_relogin,
+          ...(verdict.error === null ? {} : { probe_error: verdict.error }),
+        },
+        { next_effect_id: this.options.newEffectId() }
+      )
+      if (!result.ok) {
+        throw new AtomicCoreError(result.error.code, result.error.message, result.error.details)
+      }
+      const next: PersistedOperation = { ...withReceipt(current, receipt), machine: result.value.state }
+      const swapped = await this.options.store.compareAndSwap(
+        operationId,
+        current.machine.operation.revision,
+        next
+      )
+      if (!swapped) continue // someone moved it meanwhile; look again, and maybe it was us
+      this.options.emit?.('environment:operation', next.machine.operation)
+      this.dispatch(next)
+      return next.machine.operation
+    }
+    throw new AtomicCoreError(
+      'MANAGED_OPERATION_CONFLICT',
+      'The operation kept changing while this result was being recorded; send it again.',
+      operationId
+    )
   }
 
   /**
@@ -336,14 +432,44 @@ export class EnvironmentService {
     }
   }
 
-  private async prerequisitesMet(record: PersistedOperation): Promise<boolean> {
+  /**
+   * What the machine shows after a receipt. A refusal or a failure changed nothing, so there is
+   * nothing to look at; a receipt claiming the step ran is checked by a fresh probe.
+   */
+  private async verdictFor(
+    record: PersistedOperation,
+    receipt: ManagedHostReceipt
+  ): Promise<HostStepVerdict> {
     const provisioner = this.options.provisioner
-    if (provisioner === null) return false
-    const [relogin, reboot] = await Promise.all([
-      provisioner.inventory.needsRelogin(record),
-      provisioner.inventory.needsReboot(record),
-    ])
-    return !relogin && !reboot
+    if (receipt.outcome === 'declined' || receipt.outcome === 'failed' || provisioner === null) {
+      return { prerequisites_met: false, needs_relogin: false, error: null }
+    }
+    return provisioner.verifyHostStep(record, new AbortController().signal)
+  }
+
+  /** The operation with the byte progress of a pull still in flight, when there is one. */
+  private withProgress(operation: EnvironmentOperation): EnvironmentOperation {
+    const live = this.progress.get(operation.operation_id)
+    return live !== undefined && operation.phase === 'pulling-image'
+      ? { ...operation, progress: live }
+      : operation
+  }
+
+  /**
+   * `begin` was refused because another operation is running on this environment. If that
+   * operation's owner is provably gone, end it and say so; the caller then tries again once.
+   */
+  private async endAbandonedBlocker(error: unknown): Promise<boolean> {
+    if (!(error instanceof AtomicCoreError) || error.code !== 'MANAGED_OPERATION_CONFLICT') return false
+    if (error.details === undefined) return false
+    const running = await this.options.store.read(error.details).catch(() => null)
+    if (running === null || TERMINAL.includes(running.machine.operation.phase)) return false
+    if (await this.ownerAlive(running)) return false
+    await this.failAbandoned(running, {
+      code: 'MANAGED_OPERATION_CONFLICT',
+      message: 'The core that was running this operation is gone; a new operation replaced it.',
+    })
+    return true
   }
 
   /**
@@ -359,7 +485,8 @@ export class EnvironmentService {
    */
   private async apply(
     operationId: string,
-    event: OperationEvent
+    event: OperationEvent,
+    patch: Pick<Partial<PersistedOperation>, 'requirement_plan'> = {}
   ): Promise<{ record: PersistedOperation; owned: boolean }> {
     const current = await this.options.store.read(operationId)
     if (current === null) throw notFound(operationId)
@@ -369,7 +496,7 @@ export class EnvironmentService {
     if (!result.ok) {
       throw new AtomicCoreError(result.error.code, result.error.message, result.error.details)
     }
-    const next: PersistedOperation = { ...current, machine: result.value.state }
+    const next: PersistedOperation = { ...current, ...patch, machine: result.value.state }
     const swapped = await this.options.store.compareAndSwap(
       operationId,
       current.machine.operation.revision,
@@ -403,14 +530,16 @@ export class EnvironmentService {
    * own, and leaving it non-terminal would refuse every later `begin` on its environment forever
    * (`MANAGED_OPERATION_CONFLICT`, `OperationStore.createOrGet`'s busy check).
    */
-  private async failAbandoned(record: PersistedOperation): Promise<void> {
-    const operationId = record.machine.operation.operation_id
-    const pending = record.machine.pending_effect
-    const error = {
-      code: 'MANAGED_PREREQUISITE_BLOCKED' as const,
+  private async failAbandoned(
+    record: PersistedOperation,
+    error: ErrorBody = {
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
       message:
         'The core that started this operation is gone, and managed runtimes are not available on this system yet.',
     }
+  ): Promise<void> {
+    const operationId = record.machine.operation.operation_id
+    const pending = record.machine.pending_effect
     if (pending !== null) {
       await this.apply(operationId, {
         type: 'failed',
@@ -452,11 +581,43 @@ export class EnvironmentService {
           provisioner === null
             ? { plan: unsupported(record.machine.operation), host_step: null }
             : await provisioner.probe(record, controller.signal)
+        // The plan is kept with the record: it names the descriptor this operation installs, so a
+        // later probe, the pull and the activation all resolve the same one (design D7).
+        const { record: next, owned } = await this.apply(
+          operationId,
+          {
+            type: 'requirements-ready',
+            ...identity,
+            plan: answer.plan,
+            host_step: answer.host_step,
+            ...('image_present' in answer && answer.image_present !== undefined
+              ? { image_present: answer.image_present }
+              : {}),
+          },
+          { requirement_plan: answer.plan }
+        )
+        if (owned) this.dispatch(next)
+        return
+      }
+
+      if (effect.kind === 'reconcile' && provisioner !== null) {
+        // An explicit resume: the same questions recovery asks at startup, then the reducer decides
+        // whether to keep waiting or to look at requirements again.
+        const inventory = provisioner.inventory
+        const [steps, planDigest, needsRelogin, needsReboot] = await Promise.all([
+          inventory.verifyCompletedSteps(record),
+          inventory.currentPlanDigest(record),
+          inventory.needsRelogin(record),
+          inventory.needsReboot(record),
+        ])
         const { record: next, owned } = await this.apply(operationId, {
-          type: 'requirements-ready',
+          type: 'reconciled',
           ...identity,
-          plan: answer.plan,
-          host_step: answer.host_step,
+          instance_id: this.options.instanceId,
+          verified_completed_step_ids: steps,
+          current_plan_digest: planDigest,
+          needs_relogin: needsRelogin,
+          needs_reboot: needsReboot,
         })
         if (owned) this.dispatch(next)
         return
@@ -514,12 +675,27 @@ export class EnvironmentService {
       case 'prepare-environment':
         await provisioner.prepare(record, signal)
         return { type: 'environment-verified' }
-      case 'pull-image':
-        // Byte progress is dropped for now: recording it is a state change like any other, so it
-        // needs a throttle before a sixteen-gigabyte pull writes a revision per chunk. The route
-        // and event that carry it land with the real executor (T05c/T06c).
-        await provisioner.pull(record, () => undefined, signal)
+      case 'pull-image': {
+        const operation = record.machine.operation
+        let last = 0
+        try {
+          await provisioner.pull(
+            record,
+            (progress) => {
+              this.progress.set(operation.operation_id, progress)
+              const now = Date.now()
+              const final = progress.total !== null && progress.completed === progress.total
+              if (last !== 0 && !final && now - last < PROGRESS_EMIT_INTERVAL_MS) return
+              last = now
+              this.options.emit?.('environment:operation', { ...operation, progress })
+            },
+            signal
+          )
+        } finally {
+          this.progress.delete(operation.operation_id)
+        }
         return { type: 'image-pulled' }
+      }
       case 'verify':
         await provisioner.verify(record, signal)
         return { type: 'verification-passed' }

@@ -89,6 +89,10 @@ container), `caches/<descriptor_id>/<model id>/` (the engine cache, mounted read
 loads, removed with its model or installation), `docker-config/` (the empty `config.json` every docker
 CLI call reads as `$DOCKER_CONFIG`) and `watchdog/atomic-watchdog-entrypoint.sh` (mode 0555, the
 model container's read-only entrypoint); ids are one directory each through percent-encoding.
+The setup operation (task 2.6, ADR 2026-09-29-linux-setup-operation-and-engine-removal) writes
+`installations/<id>/installation.json` under the shared root (the installation pinned to its
+`descriptor_id`, plus the platform image it pulled) on activation; a removal deletes it, this scope's
+`caches/<descriptor_id>/`, and `<data>/<engine_id>/models/` only when `retain_models: false`.
 Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
 `<data>/diffusion/{backends,models,scratch}` and `<data>/images`; `<data>/videos` is the folder the app's ADR
 2026-09-10-store-generated-media-under-the-data-folder-with-recipes-in-png-chunks reserved (core ADR

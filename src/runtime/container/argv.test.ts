@@ -9,6 +9,8 @@ import {
   buildCreateModelContainerArgv,
   buildInspectContainerArgv,
   buildInspectImageArgv,
+  buildListContainersByImageArgv,
+  buildRemoveImageArgv,
   buildLogsArgv,
   buildRmArgv,
   buildRunOnceArgv,
@@ -114,6 +116,28 @@ describe('buildInspectImageArgv / buildInspectContainerArgv', () => {
 
   it('refuses a container id that looks like a flag', () => {
     expect(() => buildInspectContainerArgv('-x')).toThrow(AtomicCoreError)
+  })
+})
+
+describe('buildListContainersByImageArgv / buildRemoveImageArgv (task 2.6)', () => {
+  it('lists every container, running or not, created from exactly this digest', () => {
+    expect(buildListContainersByImageArgv(image)).toEqual([
+      '--host',
+      DOCKER_SYSTEM_SOCKET,
+      'ps',
+      '--all',
+      '--no-trunc',
+      '--filter',
+      `ancestor=${imageReference(image)}`,
+      '--format',
+      '{{.ID}}',
+    ])
+  })
+
+  it('removes the image by its digest reference only, never forced', () => {
+    const argv = buildRemoveImageArgv(image)
+    expect(argv).toEqual(['--host', DOCKER_SYSTEM_SOCKET, 'image', 'rm', imageReference(image)])
+    expect(argv).not.toContain('--force')
   })
 })
 

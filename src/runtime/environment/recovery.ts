@@ -78,6 +78,8 @@ const restarted = (
   }
   return {
     machine: {
+      // Keeps `checkpoint`: where consented work stood is exactly what a restart continues from.
+      ...machine,
       operation: {
         ...machine.operation,
         instance_id: deps.instanceId,
@@ -123,6 +125,7 @@ export async function recoverOperation(
         record: {
           ...record,
           machine: {
+            ...stopped.machine,
             operation: { ...stopped.machine.operation, phase: 'failed', error },
             pending_effect: null,
             indivisible_host_step_running: false,

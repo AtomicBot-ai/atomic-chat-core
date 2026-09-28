@@ -129,6 +129,14 @@ describe('managed environment wire shapes', () => {
       recipe_id: 'ubuntu-24.04-docker-ce',
       recipe_digest: 'sha256:bb',
       parameters_digest: 'sha256:cc',
+      parameters: {
+        user: 'ada',
+        arch: 'x86_64',
+        family: 'apt',
+        distro_id: 'ubuntu',
+        version_id: '24.04',
+        components: ['docker-engine'],
+      },
       nonce: 'once-1',
       expected_operation_revision: 7,
     }
@@ -159,6 +167,8 @@ describe('managed environment wire shapes', () => {
       revision: 12,
       executor: 'wsl-docker',
       availability: 'supported',
+      blockers: [],
+      selinux: false,
       gpus: [
         {
           gpu_id: 'GPU-0',
@@ -214,6 +224,7 @@ describe('managed environment wire shapes', () => {
       availability: 'setup-required',
       recipe_id: 'ubuntu-24.04-adopt',
       recipe_digest: 'sha256:ee',
+      descriptor_id: null,
       adopts_existing_engine: true,
       system_changes: [],
       download_bytes: null,
@@ -238,8 +249,12 @@ describe('managed environment wire shapes', () => {
       availability: 'prerequisite-blocked',
       recipe_id: 'ubuntu-24.04-docker-ce',
       recipe_digest: 'sha256:ee',
+      descriptor_id: null,
       adopts_existing_engine: false,
-      system_changes: ['Install docker-ce', 'Install nvidia-container-toolkit'],
+      system_changes: [
+        { code: 'install-packages', text: 'Install docker-ce', params: { packages: 'docker-ce' } },
+        { code: 'install-packages', text: 'Install nvidia-container-toolkit' },
+      ],
       download_bytes: 17_222_444_000,
       required_disk_bytes: 60_000_000_000,
       requires_elevation: true,

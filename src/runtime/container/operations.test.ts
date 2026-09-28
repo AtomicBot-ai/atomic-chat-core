@@ -6,10 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
   containerLogs,
+  containersUsingImage,
   createContainer,
   inspectContainer,
   inspectImage,
   removeContainer,
+  removeImage,
   runOnce,
   startContainer,
   stopContainer,
@@ -303,6 +305,32 @@ describe('removeContainer', () => {
         code: 'IO_ERROR',
       }
     )
+  })
+})
+
+describe('containersUsingImage / removeImage (task 2.6)', () => {
+  it('lists the ids of every container created from the image', async () => {
+    await expect(containersUsingImage(fakeExec(ok('c1\nc2\n')), image)).resolves.toEqual(['c1', 'c2'])
+    await expect(containersUsingImage(fakeExec(ok('')), image)).resolves.toEqual([])
+  })
+
+  it('fails loudly rather than reporting no users when docker cannot answer', async () => {
+    await expect(containersUsingImage(fakeExec(failed(1, 'permission denied')), image)).rejects.toMatchObject(
+      { code: 'IO_ERROR' }
+    )
+  })
+
+  it('removes an image, and treats one already gone as removed', async () => {
+    await expect(removeImage(fakeExec(ok('Untagged: x')), image)).resolves.toBe('removed')
+    await expect(
+      removeImage(
+        fakeExec(failed(1, `Error response from daemon: No such image: ${image.repository}`)),
+        image
+      )
+    ).resolves.toBe('absent')
+    await expect(
+      removeImage(fakeExec(failed(1, 'image is being used by stopped container')), image)
+    ).rejects.toMatchObject({ code: 'IO_ERROR' })
   })
 })
 

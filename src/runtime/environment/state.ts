@@ -62,6 +62,14 @@ export interface OperationMachine {
    * worse than a completed one.
    */
   indivisible_host_step_running: boolean
+  /**
+   * The last work phase this operation entered (`WORK_PHASES`), or null/absent while it has not
+   * started any work. Work only ever starts under a consent whose digest matched the plan, so a
+   * non-null checkpoint is the record that consent was acted on — and where to pick the work up
+   * again after a sign-in or a restart (task 2.6; spec "Повторный вход…", "Восстановление
+   * операций…"). Optional so a record written before this field existed still reads.
+   */
+  checkpoint?: ManagedPhase | null
 }
 
 export interface EventIdentity {
@@ -70,13 +78,31 @@ export interface EventIdentity {
 }
 
 export type OperationEvent =
-  | ({ type: 'requirements-ready'; plan: RequirementPlan; host_step: ManagedHostStep | null } & EventIdentity)
+  | ({
+      type: 'requirements-ready'
+      plan: RequirementPlan
+      host_step: ManagedHostStep | null
+      /**
+       * The runtime image this operation pulls is already on the machine, by digest. Only read
+       * when picking up work consent already covered: a restart mid-pull goes on to verification
+       * instead of pulling again (spec "Core упал во время pull").
+       */
+      image_present?: boolean
+    } & EventIdentity)
   | { type: 'approve'; input: ResumeOperation }
   | ({ type: 'host-step-started' } & EventIdentity)
   | ({
       type: 'host-receipt-verified'
       receipt: ManagedHostReceipt
+      /** The probe after the receipt shows nothing left to install or authorize. */
       prerequisites_met: boolean
+      /**
+       * The probe after the receipt shows the `docker` group granted but not yet effective for
+       * this session, with the daemon running: waiting for a sign-in is the only thing left.
+       */
+      needs_relogin?: boolean
+      /** What the probe found missing, reported as the failure when the step did not take. */
+      probe_error?: ErrorBody
     } & EventIdentity)
   | ({ type: 'environment-verified' } & EventIdentity)
   | ({ type: 'image-pulled' } & EventIdentity)
@@ -117,6 +143,27 @@ type Transition = { state: OperationMachine; effects: EffectIntent[] }
 
 /** Phases from which nothing more happens on its own. */
 const TERMINAL: readonly ManagedPhase[] = ['ready', 'removed', 'cancelled', 'failed']
+
+/** Phases that change the machine. Entering one records the checkpoint (`OperationMachine.checkpoint`). */
+const WORK_PHASES: readonly ManagedPhase[] = [
+  'preparing-host',
+  'preparing-environment',
+  'pulling-image',
+  'verifying',
+  'activating',
+  'removing',
+]
+
+/** Only the `ErrorBody` part of a blocker becomes the operation's error; its reason goes in `details`. */
+const errorOf = (blocker: ErrorBody & { reason?: string }): ErrorBody => {
+  const details = blocker.details ?? blocker.reason
+  return { code: blocker.code, message: blocker.message, ...(details === undefined ? {} : { details }) }
+}
+
+const RELOGIN_ERROR: ErrorBody = {
+  code: 'MANAGED_RELOGIN_REQUIRED',
+  message: 'Log out and back in so the docker group takes effect; setup continues on its own after that.',
+}
 
 /** Which effect each internal event is the answer to. A result for anything else is not accepted. */
 const ANSWERS: Record<string, EffectKind> = {
@@ -169,6 +216,7 @@ const advance = (
       operation: next,
       pending_effect: effect === KEEP ? state.pending_effect : issued,
       indivisible_host_step_running: flags.indivisible ?? false,
+      checkpoint: WORK_PHASES.includes(next.phase) ? next.phase : (state.checkpoint ?? null),
     },
     effects: issued === null ? [] : [issued],
   })
@@ -222,9 +270,12 @@ const afterConsent = (
   hostStep: ManagedHostStep | null
 ): Result<Transition> => {
   if (hostStep !== null) {
+    // The step is bound to the revision it is issued at, whatever the probe that built it wrote
+    // there: that revision is what a receipt has to name.
+    const issued = { ...hostStep, expected_operation_revision: state.operation.revision + 1 }
     return advance(
       state,
-      { phase: 'preparing-host', pending_host_step: hostStep, error: null },
+      { phase: 'preparing-host', pending_host_step: issued, error: null },
       { kind: 'host-step', input }
     )
   }
@@ -240,6 +291,33 @@ const afterConsent = (
     case 'remove':
       return advance(state, { phase: 'removing', error: null }, { kind: 'remove', input })
   }
+}
+
+/**
+ * Where work consent already covered picks up again, after a sign-in, a failure the user resumed,
+ * or a core restart. What is left changes nothing on the host (the caller checked there is no host
+ * step), so it needs no new consent: an image that was being pulled is verified if it is all there
+ * and pulled on otherwise, without re-running the GPU check that already passed; everything before
+ * the pull starts again at the GPU check; a removal carries on removing.
+ */
+const continueConsentedWork = (
+  state: OperationMachine,
+  input: TransitionInput,
+  imagePresent: boolean
+): Result<Transition> => {
+  const checkpoint = state.checkpoint ?? null
+  const { kind, target } = state.operation
+  const pulledSomething =
+    checkpoint === 'pulling-image' || checkpoint === 'verifying' || checkpoint === 'activating'
+  if (kind !== 'remove' && target.kind === 'runtime' && pulledSomething) {
+    return imagePresent
+      ? advance(state, { phase: 'verifying', error: null }, { kind: 'verify', input })
+      : advance(state, { phase: 'pulling-image', error: null }, { kind: 'pull-image', input })
+  }
+  if (kind !== 'remove' && target.kind === 'environment' && checkpoint === 'verifying') {
+    return advance(state, { phase: 'verifying', error: null }, { kind: 'verify', input })
+  }
+  return afterConsent(state, input, null)
 }
 
 /** After any step that completed, honour a cancellation that arrived while it was running. */
@@ -366,7 +444,32 @@ export function reduceOperation(
       const plan = event.plan
       const blocker = plan.blockers[0]
       if (blocker !== undefined) {
-        return advance(state, { phase: 'failed', plan_digest: plan.plan_digest, error: blocker }, null)
+        // A sign-in is something to wait for, not a failure: the operation stays resumable and
+        // continues on its own at the next core start once the group counts (spec "Повторный вход").
+        const relogin = plan.blockers.find((entry) => entry.code === 'MANAGED_RELOGIN_REQUIRED')
+        if (relogin !== undefined && plan.blockers.length === 1) {
+          return advance(
+            state,
+            { phase: 'relogin-required', plan_digest: plan.plan_digest, error: errorOf(relogin) },
+            null
+          )
+        }
+        return advance(
+          state,
+          { phase: 'failed', plan_digest: plan.plan_digest, error: errorOf(blocker) },
+          null
+        )
+      }
+      // Consent this operation already acted on covers the rest of its work, as long as the rest
+      // asks nothing new of the host: the plan digest moves on its own once work has begun (the
+      // packages it installed, the space a pull used), and asking again for what is already
+      // underway would be asking for nothing.
+      if ((state.checkpoint ?? null) !== null && event.host_step === null) {
+        const carried: OperationMachine = {
+          ...state,
+          operation: { ...operation, plan_digest: plan.plan_digest, approved_plan_digest: plan.plan_digest },
+        }
+        return continueConsentedWork(carried, input, event.image_present ?? false)
       }
       if (operation.approved_plan_digest !== plan.plan_digest) {
         // Either nothing was approved yet, or the host changed under an approval. Both mean asking.
@@ -427,12 +530,22 @@ export function reduceOperation(
       // A completed host step is kept whatever happens next: it changed the machine, and a later
       // cancellation does not un-install a package.
       const kept = { completed_step_ids: steps, pending_host_step: null }
-      if (receipt.outcome === 'relogin-required' || receipt.outcome === 'reboot-required') {
-        const waiting: ManagedPhase =
-          receipt.outcome === 'relogin-required' ? 'relogin-required' : 'reboot-required'
+      // Whether to wait for a sign-in is the probe's call, never the helper's (task 2.6): the
+      // receipt is an assertion, and a helper that reports a relogin the machine does not show is
+      // a helper whose step did not take.
+      const waiting: ManagedPhase | null = event.needs_relogin
+        ? 'relogin-required'
+        : receipt.outcome === 'reboot-required' && !event.prerequisites_met
+          ? 'reboot-required'
+          : null
+      if (waiting !== null) {
         return operation.cancellation_requested
           ? advance(state, { ...kept, phase: 'cancelling' }, { kind: 'cleanup', input })
-          : advance(state, { ...kept, phase: waiting, error: null }, null)
+          : advance(
+              state,
+              { ...kept, phase: waiting, error: waiting === 'relogin-required' ? RELOGIN_ERROR : null },
+              null
+            )
       }
       if (!event.prerequisites_met) {
         // The helper reported success and the machine disagrees. Believe the machine.
@@ -441,7 +554,7 @@ export function reduceOperation(
           {
             ...kept,
             phase: 'failed',
-            error: {
+            error: event.probe_error ?? {
               code: 'MANAGED_PREREQUISITE_BLOCKED',
               message: 'The system change was reported as done, but the requirement is still missing.',
             },
@@ -471,7 +584,9 @@ export function reduceOperation(
       }
       // Still waiting on the user: the group is not effective yet, or the machine has not rebooted.
       // The consumed nonce is dropped either way, so nothing re-elevates on its own.
-      if (event.needs_relogin) return advance(state, { ...base, phase: 'relogin-required' }, null)
+      if (event.needs_relogin) {
+        return advance(state, { ...base, phase: 'relogin-required', error: RELOGIN_ERROR }, null)
+      }
       if (event.needs_reboot) return advance(state, { ...base, phase: 'reboot-required' }, null)
       // The wait is over, or this is a restart mid-operation: look at requirements again.
       return advance(state, base, { kind: 'probe', input })

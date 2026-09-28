@@ -266,6 +266,32 @@ export function buildRmArgv(containerId: string): string[] {
 }
 
 /**
+ * `docker ps --all --filter ancestor=<repo@digest>`: every container, running or stopped, created
+ * from this image (or an image built on it) — what removing an engine asks before deleting the
+ * image, so an image someone else's container still uses is left in place (task 2.6).
+ */
+export function buildListContainersByImageArgv(image: ImageRef): string[] {
+  return withSystemSocket([
+    'ps',
+    '--all',
+    '--no-trunc',
+    '--filter',
+    `ancestor=${imageReference(image)}`,
+    '--format',
+    '{{.ID}}',
+  ])
+}
+
+/**
+ * `docker image rm <repo@digest>`, never `--force`: only the digest reference this core pulled is
+ * removed, and Docker itself refuses while any container still uses the image. A tag the user added
+ * to the same image keeps the image in place (task 2.6).
+ */
+export function buildRemoveImageArgv(image: ImageRef): string[] {
+  return withSystemSocket(['image', 'rm', imageReference(image)])
+}
+
+/**
  * `--timestamps` prefixes every line with its RFC3339Nano time so `operations.ts`'s `containerLogs`
  * can merge stdout and stderr back into one chronological log (review round 1, item 2).
  */

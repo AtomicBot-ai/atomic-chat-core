@@ -8,8 +8,8 @@
  *
  * The privileged step is the reason the shapes look the way they do. The core never runs it: it
  * hands out a step bound to one operation, one revision and a single-use nonce, and the app comes
- * back with a receipt naming all three. A replayed receipt answers with the state as it stands
- * instead of authorizing anything a second time.
+ * back with a receipt naming all three. A replayed receipt is refused with
+ * `MANAGED_RECEIPT_CONFLICT` instead of authorizing anything a second time (task 2.6).
  */
 
 import { AtomicCoreError, MANAGED_OPERATION_KINDS } from '../../../contracts/index.js'

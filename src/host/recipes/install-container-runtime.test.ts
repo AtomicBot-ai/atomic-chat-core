@@ -4,6 +4,7 @@ import type { LinuxInstallPlan } from '../../runtime/environment/index.js'
 import {
   CONTAINER_RUNTIME_COMPONENTS,
   FORBIDDEN_WORDS,
+  INSTALL_CONTAINER_RUNTIME_BINDING,
   INSTALL_CONTAINER_RUNTIME_RECIPE,
   INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
   INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
@@ -680,5 +681,25 @@ describe('what the recipe may never run', () => {
     [['rpm', '--query', '--queryformat=%{NAME}\\n', 'moby-engine']],
   ])('%j is permitted', (argv) => {
     expect(() => assertPermittedCommand(argv)).not.toThrow()
+  })
+})
+
+describe('INSTALL_CONTAINER_RUNTIME_BINDING (task 2.6)', () => {
+  it('is this recipe: its id and digest, parameters from a plan, and their digest', () => {
+    expect(INSTALL_CONTAINER_RUNTIME_BINDING.recipe_id).toBe(INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
+    expect(INSTALL_CONTAINER_RUNTIME_BINDING.recipe_digest).toBe(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST)
+    const parameters = INSTALL_CONTAINER_RUNTIME_BINDING.parameters(
+      {
+        recipe_id: INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+        requires_elevation: true,
+        may_require_relogin: true,
+        system_changes: [{ code: 'configure-nvidia-runtime', text: 'configure' }],
+      },
+      { user: 'ada', arch: 'x86_64', family: 'apt', distro_id: 'ubuntu', version_id: '24.04' }
+    )
+    expect(parameters.components).toEqual(['nvidia-runtime'])
+    expect(INSTALL_CONTAINER_RUNTIME_BINDING.parametersDigest(parameters)).toBe(
+      installContainerRuntimeParametersDigest(parameters as InstallContainerRuntimeParameters)
+    )
   })
 })

@@ -40,6 +40,14 @@ const importing = (): OperationMachine => {
         recipe_id: 'ubuntu-24.04-docker-ce',
         recipe_digest: PLAN_A,
         parameters_digest: PLAN_A,
+        parameters: {
+          user: 'ada',
+          arch: 'x86_64',
+          family: 'apt',
+          distro_id: 'ubuntu',
+          version_id: '24.04',
+          components: ['docker-engine'],
+        },
         nonce: 'once-1',
         expected_operation_revision: 1,
       },
@@ -80,6 +88,17 @@ const deps = (inv: EffectInventory, instanceId = 'core-new') => {
   let n = 0
   return { instanceId, newEffectId: () => `recovered-${(n += 1)}`, inventory: inv }
 }
+
+describe('where consented work stood (task 2.6)', () => {
+  it('keeps the checkpoint across a restart, so the work is picked up where it was', async () => {
+    const outcome = await recoverOperation(
+      record({ ...importing(), checkpoint: 'pulling-image' }),
+      deps(inventory({ kind: 'absent' }))
+    )
+    expect(outcome.kind).toBe('reconciled')
+    expect(outcome.record.machine.checkpoint).toBe('pulling-image')
+  })
+})
 
 describe('adopting only what can be proved (OP05)', () => {
   it('takes over a distribution that was imported before the crash, and imports nothing again', async () => {

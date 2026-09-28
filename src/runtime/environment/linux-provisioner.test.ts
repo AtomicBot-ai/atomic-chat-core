@@ -1,0 +1,738 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { BeginOperation, GpuFacts, RuntimeDescriptor } from '../../contracts/index.js'
+import {
+  INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
+  INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+  installContainerRuntimeParametersDigest,
+  parametersFromPlan,
+  type InstallContainerRuntimeParameters,
+} from '../../host/recipes/index.js'
+import { answer, type FakeLinuxHostState } from '../../../test/helpers/fake-linux-host.mjs'
+import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
+import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
+import type { ExecutionRecord } from '../container/index.js'
+import { parseRuntimeDescriptor } from './descriptor.js'
+import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { InstallationStore } from './installations.js'
+import type { LinuxHost } from './linux-host.js'
+import {
+  createLinuxProvisioner,
+  imageMatchesDigest,
+  pickGpu,
+  toManagedBlocker,
+  type HostRecipeBinding,
+  type HostView,
+  type LinuxProvisionerDeps,
+} from './linux-provisioner.js'
+import { startOperation } from './state.js'
+import type { PersistedOperation } from './store.js'
+
+const DESCRIPTOR = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
+const IMAGE = DESCRIPTOR.image['linux/amd64']
+const IMAGE_REF = `${IMAGE.repository}@${IMAGE.digest}`
+const PROBE_IMAGE = DESCRIPTOR.probe_image['linux/amd64']
+const GPU = 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11'
+const GIB = 1024 ** 3
+
+const RECIPE: HostRecipeBinding = {
+  recipe_id: INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+  recipe_digest: INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
+  parameters: (plan, host) => parametersFromPlan(plan, host),
+  parametersDigest: (parameters) =>
+    installContainerRuntimeParametersDigest(parameters as InstallContainerRuntimeParameters),
+}
+
+/** A ready Ubuntu 24.04 desktop: driver, an RTX 4090, Docker with the NVIDIA runtime, ada in docker. */
+const readyHost = (): FakeLinuxHostState => ({
+  user: 'ada',
+  driver: '590.44.01',
+  gpus: [{ uuid: GPU, name: 'NVIDIA GeForce RTX 4090', cc: '8.9', total_mib: 24564, free_mib: 24000 }],
+  docker: { installed: true, reachable: true, service_active: true, gpu_runtime: true },
+  toolkit: true,
+  group: { configured: true, effective: true },
+  gpu_visible_in_container: true,
+  images: [],
+  containers: [],
+})
+
+/** The same machine before anything: no Docker, no toolkit, no group. */
+const cleanHost = (): FakeLinuxHostState => ({
+  ...readyHost(),
+  docker: { installed: false, reachable: false, service_active: false, gpu_runtime: false },
+  toolkit: false,
+  group: { configured: false, effective: false },
+})
+
+let root: string
+let data: string
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'provisioner-root-'))
+  data = await mkdtemp(join(tmpdir(), 'provisioner-data-'))
+})
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true })
+  await rm(data, { recursive: true, force: true })
+})
+
+interface Harness {
+  machine: { state: FakeLinuxHostState; free: number }
+  deps: LinuxProvisionerDeps
+  pulls: { ref: string; knownTotalBytes: number | undefined }[]
+  dockerCalls: string[][]
+  journal: ExecutionRecord[]
+  views: HostView[]
+  calls: string[]
+  installations: InstallationStore
+}
+
+const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> = {}): Harness => {
+  const machine = { state, free: 500 * GIB }
+  const run = (command: string, args: string[]) => {
+    const result = answer(machine.state, command, args)
+    if (result.next !== undefined) machine.state = result.next
+    return { code: result.code, stdout: result.stdout, stderr: result.stderr }
+  }
+  const files: Record<string, string> = {
+    '/etc/os-release': readLinuxProbeFixture('os-release/ubuntu-24.04.txt'),
+  }
+  const host: LinuxHost = {
+    probeDeps: {
+      exec: async (command, args) => run(command, args),
+      // `nvidia-ctk runtime configure` leaves this behind; the only evidence while the daemon is out of reach.
+      readFile: async (path) =>
+        path === '/etc/docker/daemon.json' && machine.state.docker.gpu_runtime
+          ? JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } })
+          : (files[path] ?? null),
+      pathExists: async (path) => path in files || ['/', '/var', '/var/lib'].includes(path),
+      freeDiskBytes: async () => machine.free,
+    },
+    options: () => ({ user: 'ada', xdgRuntimeDir: null }),
+  }
+  const dockerCalls: string[][] = []
+  const journal: ExecutionRecord[] = []
+  const pulls: Harness['pulls'] = []
+  const views: HostView[] = []
+  const calls: string[] = []
+  const installations = new InstallationStore(root)
+  const descriptors: RuntimeDescriptorProvider = {
+    forNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
+    forInstallation: async (id) =>
+      id === DESCRIPTOR.descriptor_id
+        ? { kind: 'available', descriptor: DESCRIPTOR }
+        : { kind: 'unsupported', error: new Error('not cached') as never },
+    cachedForNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
+  }
+  const deps: LinuxProvisionerDeps = {
+    host,
+    descriptors,
+    recipe: RECIPE,
+    docker: async () =>
+      machine.state.docker.installed
+        ? {
+            exec: async (args) => {
+              dockerCalls.push(args)
+              return run('docker', args)
+            },
+            socketPath: '/fake.sock',
+            journal: {
+              list: () => [...journal],
+              remove: async (id) => {
+                calls.push(`journal-remove:${id}`)
+                journal.splice(
+                  journal.findIndex((entry) => entry.container_id === id),
+                  1
+                )
+              },
+            },
+          }
+        : null,
+    installations,
+    environmentId: 'default',
+    removeEngineCaches: async (descriptorId) => {
+      calls.push(`caches:${descriptorId}`)
+    },
+    removeModels: async (engineId) => {
+      calls.push(`models:${engineId}`)
+    },
+    unloadEngineSessions: async (engineId) => {
+      calls.push(`unload:${engineId}`)
+      return { unloaded: 1 }
+    },
+    onAssessment: (view) => views.push(view),
+    newId: (() => {
+      let n = 0
+      return () => `id-${(n += 1)}`
+    })(),
+    now: () => new Date('2026-09-29T00:00:00.000Z'),
+    pull: vi.fn(async (image, options) => {
+      pulls.push({ ref: `${image.repository}@${image.digest}`, knownTotalBytes: options?.knownTotalBytes })
+      options?.onProgress?.({ current: 5, total: 10 })
+      machine.state = {
+        ...machine.state,
+        images: [...(machine.state.images ?? []), `${image.repository}@${image.digest}`],
+      }
+    }),
+    ...over,
+  }
+  return { machine, deps, pulls, dockerCalls, journal, views, calls, installations }
+}
+
+const TARGET = { kind: 'runtime' as const, installation_id: 'tensorrt-llm', engine_id: 'tensorrt-llm' }
+
+const record = (
+  request: Partial<BeginOperation> = {},
+  over: Partial<PersistedOperation> = {}
+): PersistedOperation => {
+  const input: BeginOperation = {
+    request_id: 'req-1',
+    target: TARGET,
+    kind: 'setup',
+    descriptor_id: DESCRIPTOR.descriptor_id,
+    ...request,
+  }
+  const started = startOperation(
+    {
+      operation_id: 'op-1',
+      request_id: input.request_id,
+      environment_id: 'default',
+      instance_id: 'core-1',
+      target: input.target,
+      kind: input.kind,
+    },
+    { next_effect_id: 'effect-1' }
+  )
+  return {
+    machine: started.state,
+    request_digest: `sha256:${'a'.repeat(64)}`,
+    request: input,
+    requirement_plan: null,
+    accepted_receipt_digests: {},
+    completed_effect_ids: [],
+    owned_resource_ids: [],
+    owner_pid: null,
+    owner_process_start_id: null,
+    ...over,
+  }
+}
+
+const signal = new AbortController().signal
+
+describe('probing a Linux host for a setup', () => {
+  it('adopts a ready host: nothing to change, no privileged step, the pinned descriptor named', async () => {
+    const h = harness(readyHost())
+    const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
+    expect(answer.host_step).toBeNull()
+    expect(answer.plan.adopts_existing_engine).toBe(true)
+    expect(answer.plan.system_changes).toEqual([])
+    expect(answer.plan.blockers).toEqual([])
+    expect(answer.plan.availability).toBe('setup-required')
+    expect(answer.plan.descriptor_id).toBe(DESCRIPTOR.descriptor_id)
+    expect(answer.plan.download_bytes).toBe(DESCRIPTOR.download_bytes)
+    expect(answer.image_present).toBe(false)
+    // The snapshot learns the GPUs and the verdict from the same probe.
+    expect(h.views.at(-1)?.gpus.map((gpu) => gpu.gpu_id)).toEqual([GPU])
+    expect(h.views.at(-1)?.selinux).toBe(false)
+  })
+
+  it('plans the install on a clean Ubuntu and hands out a step with the recipe’s validated parameters', async () => {
+    const h = harness(cleanHost())
+    const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
+    expect(answer.plan.requires_elevation).toBe(true)
+    expect(answer.plan.system_changes.map((change) => change.code)).toEqual([
+      'add-repository',
+      'add-repository',
+      'install-packages',
+      'configure-nvidia-runtime',
+      'enable-docker-service',
+      'add-user-to-docker-group',
+    ])
+    const step = answer.host_step
+    expect(step?.action).toBe('linux.install-container-runtime')
+    expect(step?.recipe_digest).toBe(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST)
+    expect(step?.parameters).toEqual({
+      user: 'ada',
+      arch: 'x86_64',
+      family: 'apt',
+      distro_id: 'ubuntu',
+      version_id: '24.04',
+      components: [
+        'docker-engine',
+        'nvidia-container-toolkit',
+        'nvidia-runtime',
+        'docker-service',
+        'docker-group',
+      ],
+    })
+    expect(step?.parameters_digest).toBe(
+      installContainerRuntimeParametersDigest(step?.parameters as InstallContainerRuntimeParameters)
+    )
+    // A fresh single-use nonce per step.
+    const again = await createLinuxProvisioner(h.deps).probe(record(), signal)
+    expect(again.host_step?.nonce).not.toBe(step?.nonce)
+    expect(again.plan.plan_digest).toBe(answer.plan.plan_digest)
+  })
+
+  it('binds the plan digest to the GPU set and to whole GiB of free space (carry item 1)', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    const first = (await provisioner.probe(record(), signal)).plan.plan_digest
+    h.machine.free += 10_000_000
+    expect((await provisioner.probe(record(), signal)).plan.plan_digest).toBe(first)
+    h.machine.free -= 2 * GIB
+    const lessSpace = (await provisioner.probe(record(), signal)).plan.plan_digest
+    expect(lessSpace).not.toBe(first)
+    h.machine.state = {
+      ...h.machine.state,
+      gpus: [
+        ...(h.machine.state.gpus ?? []),
+        { uuid: 'GPU-second', name: 'NVIDIA RTX A6000', cc: '8.6', total_mib: 49140, free_mib: 49000 },
+      ],
+    }
+    expect((await provisioner.probe(record(), signal)).plan.plan_digest).not.toBe(lessSpace)
+  })
+
+  it('answers unsupported with the descriptor error when no descriptor can be had', async () => {
+    const h = harness(readyHost())
+    h.deps.descriptors = {
+      ...h.deps.descriptors,
+      forInstallation: async () => ({ kind: 'unsupported', error: new Error('x') as never }),
+      forNewSetup: async () => ({
+        kind: 'unsupported',
+        error: Object.assign(new Error('No descriptor is available.'), {
+          code: 'MANAGED_METADATA_INVALID',
+        }) as never,
+      }),
+    }
+    const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
+    expect(answer.plan.availability).toBe('unsupported')
+    expect(answer.plan.blockers[0]?.code).toBe('MANAGED_METADATA_INVALID')
+    expect(h.views.at(-1)?.availability).toBe('unsupported')
+  })
+
+  it('refuses to set up over an installation pinned to another descriptor (design D7)', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    const pinned = await h.installations.read('tensorrt-llm')
+    await h.installations.write({
+      ...pinned!,
+      installation: { ...pinned!.installation, active_descriptor_id: 'tensorrt-llm-older' },
+    })
+    const answer = await provisioner.probe(record(), signal)
+    expect(answer.plan.blockers.map((blocker) => blocker.reason)).toEqual(['installed-with-other-descriptor'])
+    expect(answer.plan.availability).toBe('prerequisite-blocked')
+  })
+
+  it('refuses a descriptor for another engine than the target names', async () => {
+    const h = harness(readyHost())
+    const answer = await createLinuxProvisioner(h.deps).probe(
+      record({ target: { ...TARGET, engine_id: 'vllm' } }),
+      signal
+    )
+    expect(answer.plan.blockers.map((blocker) => blocker.reason)).toEqual(['engine-mismatch'])
+  })
+
+  it('says supported once the installation is ready, and reports the image already there', async () => {
+    const h = harness({ ...readyHost(), images: [IMAGE_REF] })
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    const answer = await provisioner.probe(record(), signal)
+    expect(answer.plan.availability).toBe('supported')
+    expect(answer.image_present).toBe(true)
+  })
+
+  it('turns a recipe refusal into a blocker instead of a step', async () => {
+    const h = harness(cleanHost(), {
+      recipe: {
+        ...RECIPE,
+        parameters: () => {
+          throw new Error('the recipe does not install package foo')
+        },
+      },
+    })
+    const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
+    expect(answer.host_step).toBeNull()
+    expect(answer.plan.blockers[0]?.code).toBe('MANAGED_HOST_STEP_INVALID')
+  })
+})
+
+describe('checking a host-step receipt against the machine', () => {
+  it('sees the relogin when the group is granted, the daemon runs, and this session lacks it', async () => {
+    const h = harness({
+      ...readyHost(),
+      docker: { installed: true, reachable: false, service_active: true, gpu_runtime: true },
+      group: { configured: true, effective: false },
+    })
+    const provisioner = createLinuxProvisioner(h.deps)
+    expect(await provisioner.verifyHostStep(record(), signal)).toEqual({
+      prerequisites_met: false,
+      needs_relogin: true,
+      error: null,
+    })
+    expect(await provisioner.inventory.needsRelogin(record())).toBe(true)
+  })
+
+  it('fails with what the probe found when the helper says completed and Docker is not there', async () => {
+    const h = harness(cleanHost())
+    const verdict = await createLinuxProvisioner(h.deps).verifyHostStep(record(), signal)
+    expect(verdict.prerequisites_met).toBe(false)
+    expect(verdict.needs_relogin).toBe(false)
+    expect(verdict.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(verdict.error?.message).toMatch(/still needs: .*docker-ce/)
+    expect(verdict.error?.details).toContain('install-packages')
+  })
+
+  it('reports a blocker the probe found as the failure, with every reason', async () => {
+    const h = harness({ ...readyHost(), driver: '580.65.06' })
+    const verdict = await createLinuxProvisioner(h.deps).verifyHostStep(record(), signal)
+    expect(verdict.error?.details).toBe('driver-too-old')
+  })
+
+  it('lets the setup go on when the machine is ready', async () => {
+    const h = harness(readyHost())
+    expect((await createLinuxProvisioner(h.deps).verifyHostStep(record(), signal)).prerequisites_met).toBe(
+      true
+    )
+  })
+
+  it('never asks root to sign in again (design D4)', async () => {
+    const h = harness({
+      ...readyHost(),
+      user: 'root',
+      docker: { installed: true, reachable: false, service_active: true, gpu_runtime: false },
+      group: { configured: true, effective: false },
+    })
+    h.deps.host = { ...h.deps.host, options: () => ({ user: 'root', xdgRuntimeDir: null }) }
+    expect(await createLinuxProvisioner(h.deps).inventory.needsRelogin(record())).toBe(false)
+  })
+})
+
+describe('the GPU check, the pull and the verification', () => {
+  it('pulls the small probe image by digest and runs nvidia-smi on the chosen card', async () => {
+    const h = harness(readyHost())
+    await createLinuxProvisioner(h.deps).prepare(record(), signal)
+    expect(h.pulls.map((pull) => pull.ref)).toEqual([`${PROBE_IMAGE.repository}@${PROBE_IMAGE.digest}`])
+    const run = h.dockerCalls.find((args) => args[2] === 'run')
+    expect(run).toContain(`device=${GPU}`)
+    expect(run).toContain('--pull=never')
+    expect(run).toContain('nvidia-smi')
+  })
+
+  it('fails with toolkit diagnostics, and never touches the engine image, when the GPU is not visible', async () => {
+    const h = harness({ ...readyHost(), gpu_visible_in_container: false })
+    const failure = await createLinuxProvisioner(h.deps)
+      .prepare(record(), signal)
+      .then(
+        () => ({ code: 'none', details: '' }),
+        (error: unknown) => error as { code: string; details: string }
+      )
+    expect(failure.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(failure.details).toContain(`gpu=${GPU}`)
+    expect(failure.details).toContain('could not select device driver')
+    expect(h.pulls.map((pull) => pull.ref)).not.toContain(IMAGE_REF)
+  })
+
+  it('fails before any docker call when no card is new enough, or no docker CLI exists', async () => {
+    const old = harness({
+      ...readyHost(),
+      gpus: [{ uuid: GPU, name: 'RTX 2080', cc: '7.5', total_mib: 8000, free_mib: 8000 }],
+    })
+    await expect(createLinuxProvisioner(old.deps).prepare(record(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+    })
+    const none = harness(cleanHost())
+    await expect(createLinuxProvisioner(none.deps).prepare(record(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+    })
+    expect(old.dockerCalls).toEqual([])
+  })
+
+  it('pulls the engine image by the digest for this platform with byte progress', async () => {
+    const h = harness(readyHost())
+    const progress: unknown[] = []
+    await createLinuxProvisioner(h.deps).pull(record(), (tick) => progress.push(tick), signal)
+    expect(h.pulls).toEqual([{ ref: IMAGE_REF, knownTotalBytes: DESCRIPTOR.download_bytes }])
+    expect(progress[0]).toEqual({
+      label: 'Downloading the engine image',
+      completed: 0,
+      total: DESCRIPTOR.download_bytes,
+      unit: 'bytes',
+    })
+    expect(progress[1]).toMatchObject({ completed: 5, total: 10, unit: 'bytes' })
+  })
+
+  it('verifies the digest by inspection and refuses an image that is not there', async () => {
+    const present = harness({ ...readyHost(), images: [IMAGE_REF] })
+    await expect(createLinuxProvisioner(present.deps).verify(record(), signal)).resolves.toBeUndefined()
+    const absent = harness(readyHost())
+    await expect(createLinuxProvisioner(absent.deps).verify(record(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_IDENTITY_MISMATCH',
+    })
+  })
+
+  it('verifies an environment-only setup by the daemon and its GPU runtime', async () => {
+    const env = record({ target: { kind: 'environment' } })
+    await expect(
+      createLinuxProvisioner(harness(readyHost()).deps).verify(env, signal)
+    ).resolves.toBeUndefined()
+    const broken = harness({ ...readyHost(), docker: { ...readyHost().docker, gpu_runtime: false } })
+    await expect(createLinuxProvisioner(broken.deps).verify(env, signal)).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+    })
+  })
+
+  it('activates by writing the installation pinned to its descriptor and image', async () => {
+    const h = harness(readyHost())
+    await createLinuxProvisioner(h.deps).activate(record(), signal)
+    expect(await h.installations.read('tensorrt-llm')).toEqual({
+      schema_version: 1,
+      installation: {
+        installation_id: 'tensorrt-llm',
+        engine_id: 'tensorrt-llm',
+        environment_id: 'default',
+        active_descriptor_id: DESCRIPTOR.descriptor_id,
+        candidate_descriptor_id: null,
+        availability: 'supported',
+        status: 'ready',
+      },
+      image: IMAGE,
+      platform: 'linux/amd64',
+      installed_at: '2026-09-29T00:00:00.000Z',
+    })
+  })
+})
+
+describe('recovery questions', () => {
+  it('finds a pulled image as a completed pull, and an activation by its record', async () => {
+    const h = harness({ ...readyHost(), images: [IMAGE_REF] })
+    const provisioner = createLinuxProvisioner(h.deps)
+    const effect = { effect_id: 'e', operation_id: 'op-1', expected_revision: 1, plan_digest: null }
+    expect((await provisioner.inventory.inspect({ ...effect, kind: 'pull-image' }, record())).kind).toBe(
+      'completed'
+    )
+    const planned = record({}, { requirement_plan: { descriptor_id: DESCRIPTOR.descriptor_id } as never })
+    expect((await provisioner.inventory.inspect({ ...effect, kind: 'activate' }, planned)).kind).toBe(
+      'absent'
+    )
+    await provisioner.activate(planned, signal)
+    expect((await provisioner.inventory.inspect({ ...effect, kind: 'activate' }, planned)).kind).toBe(
+      'completed'
+    )
+    expect(
+      (await provisioner.inventory.inspect({ ...effect, kind: 'prepare-environment' }, planned)).kind
+    ).toBe('absent')
+    const empty = harness(readyHost())
+    expect(
+      (
+        await createLinuxProvisioner(empty.deps).inventory.inspect(
+          { ...effect, kind: 'pull-image' },
+          record()
+        )
+      ).kind
+    ).toBe('absent')
+  })
+
+  it('keeps completed steps only while what they installed is still there', async () => {
+    const withStep = record()
+    withStep.machine.operation.completed_step_ids = ['host-step-1']
+    expect(
+      await createLinuxProvisioner(harness(readyHost()).deps).inventory.verifyCompletedSteps(withStep)
+    ).toEqual(['host-step-1'])
+    expect(
+      await createLinuxProvisioner(harness(cleanHost()).deps).inventory.verifyCompletedSteps(withStep)
+    ).toEqual([])
+    expect(
+      await createLinuxProvisioner(harness(readyHost()).deps).inventory.verifyCompletedSteps(record())
+    ).toEqual([])
+  })
+
+  it('computes the current plan digest, and never needs a reboot', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    expect(await provisioner.inventory.currentPlanDigest(record())).toBe(
+      (await provisioner.probe(record(), signal)).plan.plan_digest
+    )
+    expect(await provisioner.inventory.needsReboot(record())).toBe(false)
+  })
+
+  it('shares one probe of the machine among questions asked at the same time', async () => {
+    const h = harness(readyHost())
+    let unames = 0
+    const exec = h.deps.host.probeDeps.exec
+    h.deps.host = {
+      ...h.deps.host,
+      probeDeps: {
+        ...h.deps.host.probeDeps,
+        exec: async (command, args, env) => {
+          if (command === 'uname') unames += 1
+          return exec(command, args, env)
+        },
+      },
+    }
+    const provisioner = createLinuxProvisioner(h.deps)
+    await Promise.all([
+      provisioner.inventory.needsRelogin(record()),
+      provisioner.inventory.verifyCompletedSteps({
+        ...record(),
+        machine: {
+          ...record().machine,
+          operation: { ...record().machine.operation, completed_step_ids: ['s'] },
+        },
+      }),
+    ])
+    expect(unames).toBe(1)
+    await provisioner.inventory.needsRelogin(record())
+    expect(unames).toBe(2)
+  })
+})
+
+describe('removing the installation', () => {
+  const ours = (id: string): ExecutionRecord => ({
+    container_id: id,
+    engine_id: 'tensorrt-llm',
+    image_digest: IMAGE.digest,
+    scope: 'app',
+    instance_id: 'core-0',
+    created_at: '2026-09-28T00:00:00.000Z',
+  })
+
+  const installed = async (state: FakeLinuxHostState) => {
+    const h = harness({ ...state, images: [IMAGE_REF, 'docker.io/library/postgres@sha256:beef'] })
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    return { h, provisioner }
+  }
+
+  const removal = (request: Partial<BeginOperation> = {}) =>
+    record({ kind: 'remove', descriptor_id: undefined as never, ...request })
+
+  it('plans what it deletes and asks nothing of the host', async () => {
+    const { provisioner } = await installed(readyHost())
+    const answer = await provisioner.probe(removal(), signal)
+    expect(answer.plan.blockers).toEqual([])
+    expect(answer.plan.requires_elevation).toBe(false)
+    expect(answer.plan.system_changes.map((change) => change.code)).toEqual([
+      'unload-sessions',
+      'remove-containers',
+      'remove-image',
+      'remove-engine-caches',
+      'remove-installation',
+    ])
+    const dropModels = await provisioner.probe(removal({ retain_models: false }), signal)
+    expect(dropModels.plan.system_changes.map((change) => change.code)).toContain('remove-models')
+    expect(dropModels.plan.plan_digest).not.toBe(answer.plan.plan_digest)
+  })
+
+  it('unloads first, then removes our containers, the image, the caches and the record — models stay', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    h.journal.push(ours('ours-1'), { ...ours('other-engine'), engine_id: 'vllm' })
+    await provisioner.remove(removal(), signal)
+    expect(h.calls).toEqual([
+      'unload:tensorrt-llm',
+      'journal-remove:ours-1',
+      `caches:${DESCRIPTOR.descriptor_id}`,
+    ])
+    expect(h.machine.state.images).toEqual(['docker.io/library/postgres@sha256:beef'])
+    expect(await h.installations.read('tensorrt-llm')).toBeNull()
+    // Another engine's container, Docker itself and the rest of the host are not touched.
+    const subcommands = h.dockerCalls.map((args) => args.slice(2, 4).join(' '))
+    expect(subcommands).toEqual(['stop --time', 'rm ours-1', 'ps --all', `image rm`])
+  })
+
+  it('keeps the image when a container that is not ours still uses it', async () => {
+    const { h, provisioner } = await installed({
+      ...readyHost(),
+      containers: [{ id: 'theirs', image: IMAGE_REF }],
+    })
+    h.machine.state = { ...h.machine.state, containers: [{ id: 'theirs', image: IMAGE_REF }] }
+    await provisioner.remove(removal(), signal)
+    expect(h.machine.state.images).toContain(IMAGE_REF)
+    expect(await h.installations.read('tensorrt-llm')).toBeNull()
+  })
+
+  it('deletes the models only when asked to', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    await provisioner.remove(removal({ retain_models: false }), signal)
+    expect(h.calls).toContain('models:tensorrt-llm')
+  })
+
+  it('stops when a loaded model cannot be confirmed stopped, and removes nothing', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    h.deps.unloadEngineSessions = async () => {
+      throw Object.assign(new Error('stop unconfirmed'), { code: 'MANAGED_STOP_UNCONFIRMED' })
+    }
+    await expect(createLinuxProvisioner(h.deps).remove(removal(), signal)).rejects.toThrow('stop unconfirmed')
+    expect(h.machine.state.images).toContain(IMAGE_REF)
+    expect(await h.installations.read('tensorrt-llm')).not.toBeNull()
+    void provisioner
+  })
+
+  it('refuses to remove the environment itself', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    const env = removal({ target: { kind: 'environment' } })
+    expect((await provisioner.probe(env, signal)).plan.blockers[0]?.reason).toBe('remove-environment')
+    await expect(provisioner.remove(env, signal)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
+
+  it('is a no-op for an installation that is already gone, and needs no relogin', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.remove(removal(), signal)
+    expect(h.calls).toEqual(['unload:tensorrt-llm'])
+    expect(await provisioner.inventory.needsRelogin(removal())).toBe(false)
+    expect(
+      (
+        await provisioner.inventory.inspect(
+          { effect_id: 'e', operation_id: 'op-1', expected_revision: 1, plan_digest: null, kind: 'remove' },
+          removal()
+        )
+      ).kind
+    ).toBe('absent')
+  })
+
+  it('leaves nothing to clean up on a cancelled setup, and updates are not this change', async () => {
+    const provisioner = createLinuxProvisioner(harness(readyHost()).deps)
+    await expect(provisioner.cleanup(record(), signal)).resolves.toBeUndefined()
+    await expect(provisioner.unloadResident(record(), signal)).resolves.toBeUndefined()
+  })
+})
+
+describe('helpers', () => {
+  const gpu = (id: string, cc: string, total: number | null): GpuFacts => ({
+    gpu_id: id,
+    name: id,
+    compute_capability: cc,
+    total_vram_bytes: total,
+    free_vram_bytes: total,
+    driver_version: '590',
+  })
+
+  it('picks the largest eligible card, a unified-memory one when it is all there is', () => {
+    expect(pickGpu([gpu('a', '8.6', 10), gpu('b', '8.9', 20), gpu('c', '7.5', 99)], '8.0')?.gpu_id).toBe('b')
+    expect(pickGpu([gpu('spark', '12.1', null)], '8.0')?.gpu_id).toBe('spark')
+    expect(pickGpu([gpu('old', '7.5', 8)], '8.0')).toBeNull()
+  })
+
+  it('matches an image by its repo digest only', () => {
+    expect(imageMatchesDigest({ RepoDigests: [IMAGE_REF] }, IMAGE)).toBe(true)
+    expect(imageMatchesDigest({ RepoDigests: ['other@sha256:1'] }, IMAGE)).toBe(false)
+    expect(imageMatchesDigest(null, IMAGE)).toBe(false)
+  })
+
+  it('gives a relogin its own code and keeps the blocker structured', () => {
+    expect(toManagedBlocker({ reason: 'relogin-required', message: 'm', commands: ['c'] })).toEqual({
+      code: 'MANAGED_RELOGIN_REQUIRED',
+      message: 'm',
+      details: 'relogin-required',
+      reason: 'relogin-required',
+      commands: ['c'],
+    })
+    expect(toManagedBlocker({ reason: 'driver-too-old', message: 'm', params: { a: 'b' } }).code).toBe(
+      'MANAGED_PREREQUISITE_BLOCKED'
+    )
+  })
+})

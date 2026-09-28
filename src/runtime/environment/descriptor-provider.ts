@@ -55,6 +55,12 @@ import { parseRuntimeDescriptor } from './descriptor.js'
 /** Overrides the descriptor source: `file://…` is read from disk, anything else is fetched. */
 export const RUNTIME_DESCRIPTOR_URL_ENV = 'ATOMIC_RUNTIME_DESCRIPTOR_URL'
 
+/**
+ * The engine whose descriptor this provider serves: its default source is the TensorRT-LLM
+ * descriptor, so the installation it pins is that engine's (task 2.6, carry item 4).
+ */
+export const TENSORRT_LLM_ENGINE_ID = 'tensorrt-llm'
+
 /** conf main, the published TensorRT-LLM descriptor (controller ruling for task 2.3). */
 export const DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/tensorrt-llm.json'

@@ -7,6 +7,7 @@
  * the returned executor and journal for its lifecycle.
  */
 import type { DataLayout } from '../../config/index.js'
+import { DOCKER_SOCKET_PATH } from './argv.js'
 import { resolveDockerBinary } from './docker-binary.js'
 import { createDockerExec } from './exec.js'
 import { ExecutionJournal } from './execution-journal.js'
@@ -22,6 +23,8 @@ export interface WireManagedContainersOptions {
   log: ReconcileLogger
   /** The docker CLI to run; `undefined` resolves it from the system directories, `null` means none. */
   dockerPath?: string | null
+  /** The Docker Engine API socket image pulls stream from. Default `DOCKER_SOCKET_PATH`; a test seam. */
+  dockerSocketPath?: string
   /** Deadline of each docker call the startup reconcile makes. Default `RECONCILE_CALL_TIMEOUT_MS`. */
   reconcileCallTimeoutMs?: number
   /** Past this, reconcile starts no further record. Default `RECONCILE_BUDGET_MS`. */
@@ -45,6 +48,8 @@ export interface ManagedContainers {
   exec: DockerExec
   journal: ExecutionJournal
   dockerPath: string
+  /** Where `pullImage` reaches the Engine API (the system socket outside tests). */
+  socketPath: string
   reconciled: ExecutionReconcileResult
 }
 
@@ -74,8 +79,53 @@ export async function wireManagedContainers(
       RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS,
       budget.signal
     )
-    return { exec, journal, dockerPath, reconciled }
+    return {
+      exec,
+      journal,
+      dockerPath,
+      socketPath: options.dockerSocketPath ?? DOCKER_SOCKET_PATH,
+      reconciled,
+    }
   } finally {
     clearTimeout(timer)
+  }
+}
+
+/**
+ * The one Docker executor of this core, wired lazily (task 2.6; carry-forward from 2.8/2.12: keep
+ * the startup handle, never construct a second). Core startup resolves it once, which reconciles
+ * the execution journal as before. On a machine with no docker CLI at startup it stays null — until
+ * the setup's privileged step installs Docker, when the next caller wires it then. Every caller —
+ * the environment setup, and the managed-text provider (task 2.14) — goes through the same handle,
+ * so there is only ever one executor and one journal per core.
+ */
+export interface ManagedContainersHandle {
+  /** What has been wired so far, without trying again. */
+  current(): ManagedContainers | null
+  /** The executor, wiring it on first use and retrying after a start that found no docker CLI. */
+  resolve(): Promise<ManagedContainers | null>
+}
+
+export function createManagedContainersHandle(
+  options: WireManagedContainersOptions,
+  wire: (options: WireManagedContainersOptions) => Promise<ManagedContainers | null> = wireManagedContainers
+): ManagedContainersHandle {
+  let wired: ManagedContainers | null = null
+  let inFlight: Promise<ManagedContainers | null> | null = null
+  return {
+    current: () => wired,
+    resolve: () => {
+      if (wired !== null) return Promise.resolve(wired)
+      // Two callers at once share one attempt: two attempts would open the journal twice.
+      inFlight ??= wire(options)
+        .then((result) => {
+          wired = result
+          return result
+        })
+        .finally(() => {
+          inFlight = null
+        })
+      return inFlight
+    },
   }
 }

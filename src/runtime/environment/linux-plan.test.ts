@@ -543,6 +543,31 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     expect(restart?.params?.running_containers).toBe('3')
   })
 
+  it('a running Docker this user cannot reach yet, without the toolkit, plans the restart up front (task 2.6)', async () => {
+    // The daemon is active, so the runtime nvidia-ctk registers would only load at Docker's next
+    // start; without the restart in the consented plan, the setup would need a second elevation
+    // just to restart Docker after the sign-in (task 2.5 report, concern 2).
+    const { facts, assessment } = await run({
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      dockerInfo: UNREACHABLE_28_3,
+      dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+      systemctlIsActive: ok('active\n'),
+      getentGroup: { code: 2, stdout: '', stderr: '' },
+    })
+    expect(facts.docker.daemon_reachable).toBe(false)
+    expect(changeCodes(assessment)).toEqual([
+      'add-repository',
+      'install-packages',
+      'configure-nvidia-runtime',
+      'add-user-to-docker-group',
+      'restart-docker',
+    ])
+    const restart = assessment.install_plan?.system_changes.find((c) => c.code === 'restart-docker')
+    // How many containers would stop is not something this user can ask the daemon yet.
+    expect(restart?.params?.running_containers).toBe('unknown')
+    expect(restart?.text).toMatch(/running containers will stop/)
+  })
+
   it('snap Docker is blocked outright, explaining why and that nothing is removed', async () => {
     const { assessment } = await run({
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),

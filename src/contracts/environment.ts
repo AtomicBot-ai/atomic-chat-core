@@ -8,9 +8,8 @@
  * `add-tensorrt-llm-linux`, design D1; see `docs/decisions/` for the ADR). The descriptor shapes
  * below follow `atomic-chat-conf/runtimes/schema.json`, the source of truth for what a published
  * descriptor contains (design D7/D9/D12); `ModelCompatibility` is new, the verdict of the future
- * `POST /atomic/v1/models/tensorrt-llm/check` (spec `tensorrt-llm-models`). Nothing produces or
- * serves these shapes yet: the routes, the state machine and the descriptor parser are later tasks
- * of this change.
+ * `POST /atomic/v1/models/tensorrt-llm/check` (spec `tensorrt-llm-models`). The environment routes,
+ * the durable operation and the Linux setup (task 2.6) produce the environment shapes.
  *
  * Browser-safe: types and string constants only, no `node:*`.
  *
@@ -148,6 +147,17 @@ export interface EnvironmentSnapshot {
   executor: ExecutorKind
   availability: ManagedAvailability
   gpus: GpuFacts[]
+  /**
+   * Why `availability` is `prerequisite-blocked` (or `unsupported`), as of the last probe of this
+   * host; empty when nothing blocks. Structured, so a client can show each reason with its own
+   * instructions rather than one generic message (task 2.6).
+   */
+  blockers: ManagedBlocker[]
+  /**
+   * SELinux is enforcing for containers on this host (`docker info`), so the core labels its own
+   * mounts `:z` (design D15). Null until a probe has answered.
+   */
+  selinux: boolean | null
   installations: RuntimeInstallation[]
   active_operation_id: string | null
   /**
@@ -169,9 +179,30 @@ export const MANAGED_HOST_ACTIONS = ['linux.install-container-runtime', 'windows
 export type ManagedHostAction = (typeof MANAGED_HOST_ACTIONS)[number]
 
 /**
+ * The validated values of a `linux.install-container-runtime` step (task 2.5's recipe): the account
+ * to add to the `docker` group, the machine, and which missing components to install. The client
+ * copies them verbatim into the host-step request file; the executor recomputes
+ * `parameters_digest` from them and refuses the step if it does not match. Nothing else reaches the
+ * privileged process.
+ */
+export interface ContainerRuntimeStepParameters {
+  user: string
+  arch: 'x86_64' | 'aarch64'
+  family: 'apt' | 'dnf'
+  distro_id: string
+  version_id: string
+  /**
+   * Subset of `docker-engine`, `nvidia-container-toolkit`, `nvidia-runtime`, `docker-restart`,
+   * `docker-service`, `docker-group`, in recipe order.
+   */
+  components: string[]
+}
+
+/**
  * The pending privileged step. `nonce` is single-use and `expected_operation_revision` pins it to
  * one state of one operation, so a receipt cannot be replayed into a later phase. The digests bind
- * it to the exact recipe and parameters the user approved.
+ * it to the exact recipe and parameters the user approved; `parameters` are those parameters, which
+ * the client writes into the host-step request file unchanged.
  */
 export interface ManagedHostStep {
   step_id: string
@@ -179,6 +210,7 @@ export interface ManagedHostStep {
   recipe_id: string
   recipe_digest: Sha256Digest
   parameters_digest: Sha256Digest
+  parameters: ContainerRuntimeStepParameters
   nonce: string
   expected_operation_revision: number
 }
@@ -249,6 +281,30 @@ export interface ResumeOperation {
 }
 
 /**
+ * One change the plan makes to the machine, structured: `code` names the change for a client (and
+ * for the plan digest) to key off, `params` carries its specifics (the packages, the user, the
+ * number of running containers a Docker restart stops), and `text` is what a person reads before
+ * the OS authorization prompt. A removal plan lists what it deletes the same way.
+ */
+export interface ManagedSystemChange {
+  code: string
+  text: string
+  params?: Record<string, string>
+}
+
+/**
+ * One reason the host cannot proceed. The `ErrorBody` part is what becomes the operation's `error`;
+ * `reason` is a stable machine-readable cause (`driver-too-old`, `relogin-required`, ...), `params`
+ * its specifics (required and actual versions, ...), and `commands` exact, copyable shell commands
+ * where the fix is manual (Arch, a group-only host).
+ */
+export interface ManagedBlocker extends ErrorBody {
+  reason?: string
+  params?: Record<string, string>
+  commands?: string[]
+}
+
+/**
  * What setup would actually do, computed without touching the machine. `adopts_existing_engine`
  * says the host already has a working container engine, so there is no privileged step and no
  * system change at all. `blockers` being non-empty is a normal answer, not a transport error.
@@ -260,15 +316,21 @@ export interface RequirementPlan {
   availability: ManagedAvailability
   recipe_id: string
   recipe_digest: Sha256Digest
+  /**
+   * The runtime descriptor this plan installs (or, for a removal, the one being removed): the
+   * cached descriptor the request named when this core has it, otherwise the newest one it can get.
+   * Null when none is available. Part of what the consent covers (task 2.6).
+   */
+  descriptor_id: string | null
   adopts_existing_engine: boolean
-  /** Human-readable system changes, shown before the OS authorization prompt. */
-  system_changes: string[]
+  /** System changes, shown before the OS authorization prompt. Empty when nothing changes. */
+  system_changes: ManagedSystemChange[]
   download_bytes: number | null
   required_disk_bytes: number | null
   requires_elevation: boolean
   may_require_relogin: boolean
   may_require_reboot: boolean
-  blockers: ErrorBody[]
+  blockers: ManagedBlocker[]
 }
 
 /** Ask what setting this target up would involve. Probing never installs or pulls anything. */
