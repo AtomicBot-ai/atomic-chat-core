@@ -86,7 +86,11 @@ const nvidiaGpu = {
   vulkan_info: { index: 0, device_type: 'DiscreteGpu', api_version: '1.3.290', device_id: 0x2684 },
 }
 
-describe.skipIf(!existsSync(BIN))('the backend advisor on the compiled core', () => {
+// Neither provider publishes a Linux or Windows arm64 build the fixture could name, so on those
+// runners the hardware-gated catalog is empty by design; the policy tables cover that case.
+const NO_BUILD_FOR_HOST = process.arch === 'arm64' && process.platform !== 'darwin'
+
+describe.skipIf(!existsSync(BIN) || NO_BUILD_FOR_HOST)('the backend advisor on the compiled core', () => {
   it('lists, recommends, installs what it recommended, and checks for updates', async () => {
     const fixture = await startBackendInstallFixture(dataFolder, {
       extraAssets: isWindows

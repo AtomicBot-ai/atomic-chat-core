@@ -54,10 +54,37 @@ export async function selectOption(
   return index
 }
 
+/**
+ * A writer that survives its reader going away. A core started by a CLI command outlives it: the
+ * launcher reads the handshake and closes the pipes (`launchDaemon`), so everything the core logs
+ * afterwards goes to a pipe nobody reads. Such a write fails with `EPIPE` — synchronously or as an
+ * `error` event on the stream, depending on the runtime — and an unhandled one ends the process. A
+ * log line is never worth the core: the first failure turns the writer off.
+ */
+export function detachableWriter(stream: {
+  write: (text: string) => unknown
+  on: (event: 'error', listener: (error: unknown) => void) => unknown
+}): (text: string) => void {
+  let open = true
+  stream.on('error', () => {
+    open = false
+  })
+  return (text) => {
+    if (!open) return
+    try {
+      stream.write(text)
+    } catch {
+      open = false
+    }
+  }
+}
+
 export function nodeCliIo(): CliIo {
+  const stdout = detachableWriter(process.stdout)
+  const stderr = detachableWriter(process.stderr)
   return {
-    stdout: (text) => process.stdout.write(text),
-    stderr: (text) => process.stderr.write(text),
+    stdout,
+    stderr,
     env: process.env,
     cwd: process.cwd(),
     fetch: (...args) => fetch(...args),
@@ -78,11 +105,7 @@ export function nodeCliIo(): CliIo {
       }).finally(() => readline?.close())
     },
     openUrl: openInBrowser,
-    installProcessHandlers: processHandlersFor(
-      process,
-      process.stderr.write.bind(process.stderr),
-      process.exit.bind(process)
-    ),
+    installProcessHandlers: processHandlersFor(process, stderr, process.exit.bind(process)),
     waitForShutdown: (onStop) =>
       new Promise<void>((resolve) => {
         const stop = () => {

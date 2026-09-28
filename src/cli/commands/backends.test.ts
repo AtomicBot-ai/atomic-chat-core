@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { SystemInfo } from '../../contracts/index.js'
-import { osTypeOf, rustArch } from '../../hardware/index.js'
 import { AtomicCore } from '../../core/index.js'
 import { recordingIo } from '../io.js'
 import { backendsCommand, formatCatalog, formatRecommendation, formatUpdates } from './backends.js'
@@ -20,15 +19,10 @@ afterEach(async () => {
 
 const io = () => recordingIo()
 const folder = () => ['--data-folder', data.root]
-const hostBackend =
-  process.platform === 'win32'
-    ? 'win-cpu-x64'
-    : process.platform === 'linux'
-      ? 'linux-cpu-x64'
-      : `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
-const archiveName = `llama-b99999-bin-${hostBackend === 'linux-cpu-x64' ? 'ubuntu-x64' : hostBackend}.${
-  process.platform === 'win32' ? 'zip' : 'tar.gz'
-}`
+// The machine is the canned probe's, not the runner's: an x64 Linux box without a GPU, so the
+// answers are the same on every CI host (the arm64 ones have no upstream build of their own).
+const hostBackend = 'linux-cpu-x64'
+const archiveName = 'llama-b99999-bin-ubuntu-x64.tar.gz'
 
 /** A core whose manifest comes from this fake fetch and whose hardware is a canned CPU-only host. */
 async function createCore(): Promise<AtomicCore> {
@@ -36,11 +30,11 @@ async function createCore(): Promise<AtomicCore> {
     cpu: {
       name: 'Fake CPU',
       core_count: 8,
-      arch: rustArch(process.arch),
+      arch: 'x86_64',
       extensions: ['avx', 'avx2'],
       extensions_known: true,
     },
-    os_type: osTypeOf(process.platform),
+    os_type: 'linux',
     os_name: 'Fake OS',
     total_memory: 32_768,
     gpus: [],
@@ -100,8 +94,7 @@ describe('backends', () => {
       await backendsCommand(['recommend', '--current', `b1/${hostBackend}`, ...folder()], recommend)
     ).toBe(0)
     const text = recommend.out.join('')
-    if (process.platform === 'darwin') expect(text).toContain('single Metal build')
-    else expect(text).toContain('CPU build is the best')
+    expect(text).toContain('CPU build is the best')
 
     const updates = io()
     expect(

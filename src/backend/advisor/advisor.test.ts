@@ -328,7 +328,11 @@ describe('BackendAdvisor.catalog', () => {
 
   it('scans the data folder when no installed seam is given, and survives a failing one', async () => {
     await data.writeBackend('llamacpp-upstream', 'b10405', 'win-cpu-x64')
-    const scanned = await harness('llamacpp-upstream', host('windows', []), { installed: 'scan' })
+    // The pack on disk carries this host's executable name, so the scan looks for that one.
+    const scanned = await harness('llamacpp-upstream', host('windows', []), {
+      installed: 'scan',
+      deps: { platform: process.platform },
+    })
     const catalog = await scanned.advisor.catalog()
     expect(catalog.installed).toMatchObject([{ version: 'b10405', backend: 'win-cpu-x64' }])
     expect(catalog.recommended_installed).toBe('b10405/win-cpu-x64')

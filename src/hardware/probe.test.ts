@@ -45,7 +45,10 @@ describe('nodeProbeFs / nodeProbeDeps', () => {
     await symlink('../../../0000:01:00.0', join(dir, 'device'))
     expect(await nodeProbeFs.readFile(join(dir, 'vendor'))).toBe('0x10de\n')
     expect((await nodeProbeFs.readdir(dir)).sort()).toEqual(['device', 'vendor'])
-    expect(await nodeProbeFs.readlink(join(dir, 'device'))).toBe('../../../0000:01:00.0')
+    // Windows hands a link target back with its own separators; sysfs is only ever read on Linux.
+    expect((await nodeProbeFs.readlink(join(dir, 'device'))).replaceAll('\\', '/')).toBe(
+      '../../../0000:01:00.0'
+    )
     expect(await nodeProbeFs.exists(join(dir, 'vendor'))).toBe(true)
     expect(await nodeProbeFs.exists(join(dir, 'absent'))).toBe(false)
     await expect(nodeProbeFs.readFile(join(dir, 'absent'))).rejects.toMatchObject({ code: 'ENOENT' })
