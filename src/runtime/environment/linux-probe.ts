@@ -400,7 +400,11 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     // Read-only query; Arch's own `docker` package is not one `dpkg-query`/`rpm -q` ever see, and
     // this is also `engine_version`'s only source there (round 3, item 1/ruling 5). `docker-desktop`
     // is Docker Desktop's package name on Arch (round 4, item E).
-    deps.exec('pacman', ['-Q', ...PACMAN_PACKAGE_CANDIDATES]),
+    // Only on a pacman-family distribution: elsewhere a `pacman` on PATH can be something unrelated
+    // entirely (Debian's /usr/games/pacman), and there is no Arch package to ask about (round 5, item 3).
+    distribution?.family === 'pacman'
+      ? deps.exec('pacman', ['-Q', ...PACMAN_PACKAGE_CANDIDATES])
+      : Promise.resolve(null),
     deps.exec('snap', ['list', 'docker']),
     deps.pathExists('/run/ostree-booted').catch(() => false),
     deps.exec('id', ['-nG']),

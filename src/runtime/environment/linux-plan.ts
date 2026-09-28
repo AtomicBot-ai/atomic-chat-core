@@ -45,9 +45,11 @@
  *    podman-docker), disk space.
  * 2. Adopt, when the daemon answers and exposes a GPU runtime.
  * 3. Access paths, daemon unreachable only: relogin (+ missing components), then
- *    `docker-access-unexplained`, then "ready except access" (root → unexplained; gated →
- *    `docker-group-manual`; recipe → group-only plan).
- * 4. Distribution gating (`installGate`): immutable base, Arch, unrecognised docker, not on the recipe.
+ *    `docker-access-unexplained` (group effective *and* nothing else missing), then "ready except
+ *    access" (root → unexplained; gated → `docker-group-manual`; recipe → group-only plan).
+ * 4. Distribution gating (`installGate` + `gateBlockerApplies`, the same decision the relogin path
+ *    uses): immutable base with a package missing, Arch, unrecognised docker, not on the recipe; an
+ *    immutable base with its packages layered gets the remaining steps one by one instead.
  * 5. An unreadable `daemon.json` when the runtime is not already known to be configured.
  * 6. The install plan.
  */
@@ -57,8 +59,9 @@ import {
   blocker,
   daemonJsonUnreadableBlocker,
   effectiveGpuRuntime,
+  dockerGroupManualBlocker,
   gateBlocker,
-  groupOnlyCommands,
+  gateBlockerApplies,
   installMethodBlocker,
   missingComponentBlockers,
   reloginRequiredBlocker,
@@ -173,23 +176,6 @@ function installGate(
   return qualified ? 'recipe' : 'unqualified'
 }
 
-/**
- * Whether the relogin path also names the gate itself next to the missing components (round 4, item
- * 1). Arch's per-component blockers already carry its exact commands; an immutable base only blocks
- * on a missing package (spec: "Docker или toolkit нет"); anything else not on the recipe blocks on any
- * missing component, exactly as the full-install path would.
- */
-function reloginNamesGate(
-  gate: InstallGate,
-  components: LinuxBlocker[]
-): gate is Exclude<InstallGate, 'recipe'> {
-  if (components.length === 0 || gate === 'recipe' || gate === 'pacman') return false
-  if (gate === 'immutable') {
-    return components.some((c) => c.reason === 'docker-cli-missing' || c.reason === 'toolkit-missing')
-  }
-  return true
-}
-
 /** Turn the facts into a verdict: usable now, installable, waiting on a relogin, or not on this machine. */
 export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions): LinuxAssessment {
   const blocked = (blockers: LinuxBlocker[]): LinuxAssessment => ({
@@ -295,17 +281,25 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
       // can be elevated from a session that is about to be replaced. Everything else offline evidence
       // shows missing is named now, each as its own blocker, not discovered after the relogin
       // (round 4, item 1 — the refined ruling 4).
+      // The gate's own blocker follows under the same rule as the full-install path
+      // (`gateBlockerApplies`, round 5 item 2) — except on Arch, whose per-component blockers already
+      // carry its exact commands, minus the group line this account no longer needs.
       const components = missingComponentBlockers(facts, gate)
-      const gated = reloginNamesGate(gate, components)
+      const gated =
+        components.length > 0 && gate !== 'recipe' && gate !== 'pacman' && gateBlockerApplies(gate, facts)
       return blocked([
         reloginRequiredBlocker(),
         ...components,
         ...(gated ? [gateBlocker(gate, facts, distribution, options.currentUser)] : []),
       ])
     }
-    if (facts.docker_group.effective) {
-      // Membership is confirmed *and* this session already has it, yet the daemon still refused —
-      // relogin will not fix that, and this probe has no further diagnosis to offer (round 2, item 2).
+    if (facts.docker_group.effective && missingComponentBlockers(facts, gate).length === 0) {
+      // Membership is confirmed *and* this session already has it, nothing else is missing, yet the
+      // daemon still refused — relogin will not fix that, and this probe has no further diagnosis to
+      // offer (round 2, item 2). With something missing (Docker gone, the service stopped, ...) that
+      // missing piece explains the refusal, so the host falls through to gating and the plan — which
+      // is what keeps the relogin blockers' "setup will do this after you log back in" true
+      // (round 5, item 1).
       return blocked([
         blocker(
           'docker-access-unexplained',
@@ -344,18 +338,7 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
       ])
     }
     if (gate !== 'recipe') {
-      const commands = groupOnlyCommands(facts.immutable_os, options.currentUser)
-      return blocked([
-        blocker(
-          'docker-group-manual',
-          'Everything else is ready — Docker, the toolkit and the NVIDIA runtime are all configured. ' +
-            `This account just needs to join the docker group, which is not something this distribution's ` +
-            `automatic install can add for you: run ${commands.map((c) => `\`${c}\``).join(', then ')}, then ` +
-            'log out and back in.',
-          { user: options.currentUser },
-          commands
-        ),
-      ])
+      return blocked([dockerGroupManualBlocker(facts.immutable_os, options.currentUser, true)])
     }
     return {
       availability: 'setup-required',
@@ -379,7 +362,22 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   // Something real is missing beyond access — the toolkit, the runtime configuration, Docker
   // itself, or the service is not even running. Distribution gating decides whether a plan may be
   // offered at all: immutable base, Arch, an unrecognised docker, a distribution not on the recipe.
-  if (gate !== 'recipe') return blocked([gateBlocker(gate, facts, distribution, options.currentUser)])
+  if (gate !== 'recipe') {
+    if (gateBlockerApplies(gate, facts)) {
+      return blocked([gateBlocker(gate, facts, distribution, options.currentUser)])
+    }
+    // Only an immutable base with Docker and the toolkit already layered gets here: nothing to layer,
+    // so the remaining steps are named one by one with their commands (round 5, item 2).
+    const groupNeeded =
+      !facts.docker.daemon_reachable &&
+      options.currentUser !== 'root' &&
+      facts.docker_group.configured !== true
+    const steps = [
+      ...missingComponentBlockers(facts, gate),
+      ...(groupNeeded ? [dockerGroupManualBlocker(facts.immutable_os, options.currentUser, false)] : []),
+    ]
+    return blocked(steps.length > 0 ? steps : [gateBlocker(gate, facts, distribution, options.currentUser)])
+  }
 
   // A daemon.json this probe cannot read or parse is not a safe target for `nvidia-ctk runtime
   // configure`, whether or not the daemon answered (round 2 item 6; round 3 item 2).

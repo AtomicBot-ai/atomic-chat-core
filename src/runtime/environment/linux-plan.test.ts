@@ -1047,6 +1047,184 @@ describe('review-round fixes (task 2.4 fix round 4)', () => {
   })
 })
 
+describe('review-round fixes (task 2.4 fix round 5)', () => {
+  const EFFECTIVE = { getentGroup: ok('docker:x:999:ana\n'), idNG: ok('ana docker sudo\n') }
+  const NVIDIA_DAEMON_JSON = JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } })
+
+  it('Ubuntu, Docker gone, group configured and effective: the apt plan, not docker-access-unexplained (item 1)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/ubuntu-26.04.txt'),
+      dpkgQuery: dpkgNoneFound(),
+      dockerInfo: DAEMON_DOWN_28_3,
+      ...EFFECTIVE,
+    })
+    expect(assessment.availability).toBe('setup-required')
+    expect(assessment.blockers).toEqual([])
+    // Already a member: no group step, and so no second relogin.
+    expect(changeCodes(assessment)).toEqual([
+      'add-repository',
+      'add-repository',
+      'install-packages',
+      'configure-nvidia-runtime',
+      'enable-docker-service',
+    ])
+  })
+
+  it('Ubuntu, docker.service stopped, everything else present, group effective: a plan that starts the service (item 1)', async () => {
+    const { assessment } = await run({
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      dockerInfo: DAEMON_DOWN_28_3,
+      dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      daemonJson: NVIDIA_DAEMON_JSON,
+      ...EFFECTIVE, // systemctl is-active: the harness default, inactive (exit 3)
+    })
+    expect(assessment.blockers).toEqual([])
+    expect(changeCodes(assessment)).toEqual(['enable-docker-service'])
+  })
+
+  it('the relogin promise holds: what the relogin blockers name, the next probe after the relogin plans (item 1)', async () => {
+    const host: Machine = {
+      osRelease: readLinuxProbeFixture('os-release/ubuntu-26.04.txt'),
+      dpkgQuery: dpkgNoneFound(),
+      dockerInfo: DAEMON_DOWN_28_3,
+      getentGroup: ok('docker:x:999:ana\n'),
+      idNG: ok('ana sudo\n'), // before: the session predates the membership
+    }
+    const before = await run(host)
+    expect(before.assessment.blockers[0]?.reason).toBe('relogin-required')
+    const promised = before.assessment.blockers.slice(1)
+    for (const component of promised) expect(component.message).toMatch(/after you log back in, setup will/i)
+
+    const after = await run({ ...host, idNG: ok('ana docker sudo\n') }) // same host, new session
+    expect(after.assessment.availability).toBe('setup-required')
+    const steps = changeCodes(after.assessment)
+    const packages =
+      after.assessment.install_plan?.system_changes.find((c) => c.code === 'install-packages')?.params
+        ?.packages ?? ''
+    const delivers: Record<string, () => boolean> = {
+      'docker-cli-missing': () => packages.includes('docker-ce'),
+      'toolkit-missing': () => packages.includes('nvidia-container-toolkit'),
+      'gpu-runtime-not-configured': () => steps.includes('configure-nvidia-runtime'),
+      'docker-service-inactive': () => steps.includes('enable-docker-service'),
+    }
+    expect(promised.map((b) => b.reason)).toEqual(Object.keys(delivers))
+    for (const component of promised) expect(delivers[component.reason]?.()).toBe(true)
+  })
+
+  it('Arch, Docker gone, group effective: the pacman commands, without a usermod the account does not need (item 1)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/arch.txt'),
+      pacmanPackages: {},
+      dockerInfo: DAEMON_DOWN_28_3,
+      getentGroup: ok('docker:x:959:ana\n'),
+      idNG: ok('ana docker wheel\n'),
+    })
+    expect(assessment.install_plan).toBeNull()
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['arch-manual-install'])
+    expect(assessment.blockers[0]?.commands).toEqual([
+      'sudo pacman -Syu --needed docker nvidia-container-toolkit',
+      'sudo nvidia-ctk runtime configure --runtime=docker',
+      'sudo systemctl restart docker',
+      'sudo systemctl enable --now docker',
+    ])
+    expect(assessment.blockers[0]?.message).not.toMatch(/new docker group membership/)
+  })
+
+  it('Silverblue, Docker gone, group effective: immutable-os naming both missing packages, not access-unexplained (items 1, 2)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/fedora-silverblue-43.txt'),
+      ostreeBooted: true,
+      rpmQuery: rpmNoneFound(),
+      dockerInfo: DAEMON_DOWN_28_3,
+      getentGroup: ok('docker:x:981:ana\n'),
+      idNG: ok('ana docker wheel\n'),
+    })
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['immutable-os'])
+    expect(assessment.blockers[0]?.params).toEqual({ missing: 'docker,nvidia-container-toolkit' })
+  })
+
+  it('Silverblue with moby-engine but no toolkit: immutable-os names only the toolkit, never "install docker-ce" (item 2)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/fedora-silverblue-43.txt'),
+      ostreeBooted: true,
+      dockerVersion: ok('Docker version 27.1.1, build 30da79c\n'),
+      dockerInfo: ok(readLinuxProbeFixture('docker-info/moby-engine-no-toolkit.json')),
+      rpmQuery: rpmFound('rpm/moby-engine-installed.txt'),
+    })
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['immutable-os'])
+    expect(assessment.blockers[0]?.params).toEqual({ missing: 'nvidia-container-toolkit' })
+    expect(assessment.blockers[0]?.message).not.toMatch(/docker-ce|Docker Engine/)
+  })
+
+  it('Silverblue with Docker and the toolkit installed, only runtime and service missing: those steps, not immutable-os (item 2)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/fedora-silverblue-43.txt'),
+      ostreeBooted: true,
+      dockerVersion: ok('Docker version 27.1.1, build 30da79c\n'),
+      dockerInfo: DAEMON_DOWN_28_3,
+      rpmQuery: rpmFound('rpm/moby-engine-installed.txt'),
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      ...EFFECTIVE,
+    })
+    expect(assessment.install_plan).toBeNull()
+    expect(assessment.blockers).toEqual([
+      expect.objectContaining({
+        reason: 'gpu-runtime-not-configured',
+        commands: ['sudo nvidia-ctk runtime configure --runtime=docker', 'sudo systemctl restart docker'],
+      }),
+      expect.objectContaining({
+        reason: 'docker-service-inactive',
+        commands: ['sudo systemctl enable --now docker'],
+      }),
+    ])
+  })
+
+  it('Silverblue, only runtime missing, account not in the group: the runtime steps plus the idempotent group commands (item 2)', async () => {
+    const { assessment } = await run({
+      osRelease: readLinuxProbeFixture('os-release/fedora-silverblue-43.txt'),
+      ostreeBooted: true,
+      dockerVersion: ok('Docker version 27.1.1, build 30da79c\n'),
+      dockerInfo: UNREACHABLE_28_3,
+      rpmQuery: rpmFound('rpm/moby-engine-installed.txt'),
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      systemctlIsActive: ok('active\n'),
+      getentGroup: { code: 2, stdout: '', stderr: '' },
+    })
+    expect(assessment.blockers.map((b) => b.reason)).toEqual([
+      'gpu-runtime-not-configured',
+      'docker-group-manual',
+    ])
+    expect(assessment.blockers[1]?.commands).toEqual([
+      "grep -q '^docker:' /etc/group || grep -E '^docker:' /usr/lib/group | sudo tee -a /etc/group",
+      'sudo usermod -aG docker ana',
+    ])
+    expect(assessment.blockers[1]?.message).not.toMatch(/everything else is ready/i)
+  })
+
+  it('pacman is only asked on a pacman-family distribution (item 3)', async () => {
+    const asked: string[] = []
+    const deps = depsFor({ dpkgQuery: dpkgNoneFound() })
+    const tracked: LinuxProbeDeps = {
+      ...deps,
+      exec: async (command, args, env) => {
+        asked.push(command)
+        return deps.exec(command, args, env)
+      },
+    }
+    await probeLinux(tracked, { user: 'ana', xdgRuntimeDir: null })
+    expect(asked).not.toContain('pacman')
+
+    asked.length = 0
+    const arch = depsFor({ osRelease: readLinuxProbeFixture('os-release/arch.txt'), pacmanPackages: {} })
+    await probeLinux(
+      { ...arch, exec: async (c, a, e) => (asked.push(c), arch.exec(c, a, e)) },
+      { user: 'ana', xdgRuntimeDir: null }
+    )
+    expect(asked).toContain('pacman')
+  })
+})
+
 describe('generic prerequisite blockers, also driven through probeLinux like everything else above', () => {
   it('blocks on a fact it could not read rather than assuming the answer it prefers', async () => {
     const { assessment } = await run({ osRelease: null })

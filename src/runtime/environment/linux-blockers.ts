@@ -138,16 +138,17 @@ export function groupOnlyCommands(immutableOs: boolean, user: string): string[] 
  * note. `nvidia-ctk runtime configure` changes `/etc/docker/daemon.json`, so Docker is explicitly
  * restarted afterward rather than relying on `enable --now` to notice the new config on its own
  * (item 12). The `usermod` line uses the actual probed account, never the literal `$USER`, and is
- * omitted entirely for root, which needs no group membership at all (round 3, ruling 8).
+ * omitted entirely for root, which needs no group membership at all (round 3, ruling 8), and for an
+ * account that is already a member (round 5, item 1: `groupNeeded` false).
  */
-export function archCommands(user: string): string[] {
+export function archCommands(user: string, groupNeeded = user !== 'root'): string[] {
   const commands = [
     'sudo pacman -Syu --needed docker nvidia-container-toolkit',
     'sudo nvidia-ctk runtime configure --runtime=docker',
     'sudo systemctl restart docker',
     'sudo systemctl enable --now docker',
   ]
-  if (user !== 'root') commands.push(`sudo usermod -aG docker ${user}`)
+  if (groupNeeded && user !== 'root') commands.push(`sudo usermod -aG docker ${user}`)
   return commands
 }
 
@@ -171,6 +172,65 @@ export function reloginRequiredBlocker(): LinuxBlocker {
  */
 export type InstallGate = 'recipe' | 'immutable' | 'pacman' | 'unrecognised' | 'unqualified'
 
+/**
+ * Whether the gate's own blocker applies to this host — one decision, read by the relogin path and the
+ * full-install path alike (round 5, item 2). Never on a recipe distribution. On an immutable base only
+ * when a package (Docker or the toolkit) is missing, since layering packages is what the gate is about
+ * (spec: "система неизменяемая … и Docker или toolkit нет"); a missing runtime configuration or a
+ * stopped service is an ordinary step there, reported per component. Every other gate always applies.
+ */
+export function gateBlockerApplies(gate: InstallGate, facts: LinuxFacts): boolean {
+  if (gate === 'recipe') return false
+  if (gate === 'immutable') return !facts.docker.cli || !facts.toolkit_installed
+  return true
+}
+
+/** `immutable-os`, naming exactly the packages that are missing — never docker-ce over an engine (round 5, item 2). */
+function immutableOsBlocker(facts: LinuxFacts): LinuxBlocker {
+  const missing: Array<[string, string]> = []
+  if (!facts.docker.cli) missing.push(['docker', 'Docker Engine'])
+  if (!facts.toolkit_installed) missing.push(['nvidia-container-toolkit', 'the NVIDIA Container Toolkit'])
+  const base = 'This system uses an immutable base (rpm-ostree — Silverblue, Kinoite, Bazzite, or similar)'
+  if (missing.length === 0) {
+    return blocker(
+      'immutable-os',
+      `${base}. Automatic setup is not offered here; finish the remaining Docker setup by hand, then try again.`
+    )
+  }
+  const names = missing.map(([, label]) => label).join(' and ')
+  const plural = missing.length > 1
+  return blocker(
+    'immutable-os',
+    `${base}, and ${names} ${plural ? 'are' : 'is'} not installed. Installing a package here means ` +
+      'layering it and rebooting, which this integration does not do automatically. ' +
+      `Layer ${plural ? 'them' : 'it'} yourself, then try again.`,
+    { missing: missing.map(([key]) => key).join(',') }
+  )
+}
+
+/**
+ * The exact commands for joining the `docker` group, for a host where automatic setup is not offered.
+ * `everythingElseReady` picks the wording: the only step left, or one step among others (round 5).
+ */
+export function dockerGroupManualBlocker(
+  immutableOs: boolean,
+  user: string,
+  everythingElseReady: boolean
+): LinuxBlocker {
+  const commands = groupOnlyCommands(immutableOs, user)
+  const run = `run ${commands.map((c) => `\`${c}\``).join(', then ')}, then log out and back in.`
+  return blocker(
+    'docker-group-manual',
+    everythingElseReady
+      ? 'Everything else is ready — Docker, the toolkit and the NVIDIA runtime are all configured. ' +
+          "This account just needs to join the docker group, which is not something this distribution's " +
+          `automatic install can add for you: ${run}`
+      : `This account also needs to join the docker group: ${run}`,
+    { user },
+    commands
+  )
+}
+
 /** Why automatic setup is not offered, for every gate but `'recipe'`. */
 export function gateBlocker(
   gate: Exclude<InstallGate, 'recipe'>,
@@ -180,26 +240,24 @@ export function gateBlocker(
 ): LinuxBlocker {
   switch (gate) {
     case 'immutable':
-      return blocker(
-        'immutable-os',
-        'This system uses an immutable base (rpm-ostree — Silverblue, Kinoite, Bazzite, or similar). ' +
-          'Installing Docker here means layering a package and rebooting, which this integration does ' +
-          'not do automatically. Install docker-ce and the NVIDIA Container Toolkit yourself, then try again.'
-      )
-    case 'pacman':
+      return immutableOsBlocker(facts)
+    case 'pacman': {
+      // An account already in the group (or root) gets no usermod and no "new membership" note.
+      const groupNeeded = user !== 'root' && facts.docker_group.configured !== true
       return blocker(
         'arch-manual-install',
         "Arch and its derivatives don't support a partial package install: adding just these two " +
           'packages without a full system sync can leave the system inconsistent, so the commands ' +
           'below run a full `pacman -Syu` instead — which may itself update your kernel and NVIDIA ' +
           'driver. Reboot afterward if it does' +
-          (user === 'root'
-            ? '.'
-            : ', then log out and back in so the new docker group membership takes effect.') +
+          (groupNeeded
+            ? ', then log out and back in so the new docker group membership takes effect.'
+            : '.') +
           ' Automatic install is not offered here.',
         { family: 'pacman' },
-        archCommands(user)
+        archCommands(user, groupNeeded)
       )
+    }
     case 'unrecognised':
       // Never lay docker-ce over an unknown quantity (round 1, item 15).
       return blocker(

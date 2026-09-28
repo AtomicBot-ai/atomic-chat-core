@@ -4,6 +4,7 @@ import {
   blocker,
   effectiveGpuRuntime,
   gateBlocker,
+  gateBlockerApplies,
   groupOnlyCommands,
   installMethodBlocker,
   missingComponentBlockers,
@@ -137,6 +138,7 @@ const hostFacts = (docker: Partial<LinuxFacts['docker']>, over: Partial<LinuxFac
     distribution: UBUNTU,
     immutable_os: false,
     toolkit_installed: true,
+    docker_group: { configured: false, effective: false },
     docker: dockerFacts({ service_active: true, gpu_runtime_from_config: true, ...docker }),
     ...over,
   }) as LinuxFacts
@@ -212,5 +214,44 @@ describe('missingComponentBlockers (round 4, item 1)', () => {
       ['sudo systemctl enable --now docker'],
     ])
     expect(elsewhere.some((b) => /after you log back in/i.test(b.message))).toBe(false)
+  })
+})
+
+describe('gateBlockerApplies (round 5, item 2)', () => {
+  it('is one decision for both paths: never on recipe, on an immutable base only when a package is missing', () => {
+    const ready = hostFacts({})
+    const noToolkit = hostFacts({}, { toolkit_installed: false })
+    const noDocker = hostFacts({ cli: false, install_method: null })
+    expect(gateBlockerApplies('recipe', noDocker)).toBe(false)
+    expect(gateBlockerApplies('immutable', ready)).toBe(false)
+    expect(gateBlockerApplies('immutable', noToolkit)).toBe(true)
+    expect(gateBlockerApplies('immutable', noDocker)).toBe(true)
+    for (const gate of ['pacman', 'unrecognised', 'unqualified'] as const) {
+      expect(gateBlockerApplies(gate, ready)).toBe(true)
+    }
+  })
+})
+
+describe('immutable-os wording (round 5, item 2)', () => {
+  it('names exactly the missing packages, and never tells a host with an engine to install docker-ce', () => {
+    const toolkitOnly = gateBlocker('immutable', hostFacts({}, { toolkit_installed: false }), UBUNTU, 'ana')
+    expect(toolkitOnly.params).toEqual({ missing: 'nvidia-container-toolkit' })
+    expect(toolkitOnly.message).toMatch(/NVIDIA Container Toolkit/)
+    expect(toolkitOnly.message).not.toMatch(/docker-ce|Docker Engine/)
+
+    const both = gateBlocker(
+      'immutable',
+      hostFacts({ cli: false, install_method: null }, { toolkit_installed: false }),
+      UBUNTU,
+      'ana'
+    )
+    expect(both.params).toEqual({ missing: 'docker,nvidia-container-toolkit' })
+  })
+})
+
+describe('archCommands for an account already in the group (round 5, item 1)', () => {
+  it('omits usermod when the group add is not needed', () => {
+    expect(archCommands('ana', false).some((c) => c.includes('usermod'))).toBe(false)
+    expect(archCommands('ana').at(-1)).toBe('sudo usermod -aG docker ana')
   })
 })
