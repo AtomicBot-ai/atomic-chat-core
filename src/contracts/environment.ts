@@ -150,6 +150,14 @@ export interface EnvironmentSnapshot {
   gpus: GpuFacts[]
   installations: RuntimeInstallation[]
   active_operation_id: string | null
+  /**
+   * `minimum_app_version` of the descriptor currently in effect for this environment — an
+   * installation's pinned descriptor where one exists, otherwise the descriptor a fresh setup would
+   * use — so a client can show "update the app" before the user hits a blocked install. `null` when
+   * no descriptor has been resolved yet (spec `runtime-descriptor-catalog`, "Минимальные версии
+   * соблюдаются").
+   */
+  minimum_app_version: string | null
 }
 
 /**

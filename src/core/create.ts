@@ -337,6 +337,7 @@ export async function createAtomicCore(
       platform,
       emit: (name, payload) => emitter.emit(name, payload),
       newId: () => randomUUID(),
+      ...(options.fetch ? { fetch: options.fetch } : {}),
     })
 
     const control = await ControlServer.start(

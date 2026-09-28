@@ -163,6 +163,22 @@ describe('managed runtime paths', () => {
     expect(shared.operationFile('op/1')).toBe(native('/shared/operations/op%2F1.json'))
   })
 
+  it('lays the accepted-descriptor cache out under its own directory, keyed by descriptor_id', () => {
+    const shared = managedSharedPaths('/shared')
+    expect(shared.descriptorsDir).toBe(native('/shared/descriptors'))
+    expect(shared.descriptorFile('tensorrt-llm-1.2.1-r1')).toBe(
+      native('/shared/descriptors/tensorrt-llm-1.2.1-r1.json')
+    )
+    expect(shared.descriptorLatestFile).toBe(native('/shared/descriptors/latest.json'))
+  })
+
+  it('writes a descriptor_id as one directory entry instead of nesting on its slash', () => {
+    const dir = relative('/shared/descriptors', managedSharedPaths('/shared').descriptorFile('a/b')).split(
+      sep
+    )
+    expect(dir).toHaveLength(1)
+  })
+
   it('writes an operation id as one directory instead of nesting on its slash', () => {
     const dir = relative('/shared/operations', managedSharedPaths('/shared').operationFile('a/b')).split(sep)
     expect(dir).toHaveLength(1)

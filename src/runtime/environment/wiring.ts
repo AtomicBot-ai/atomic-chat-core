@@ -11,8 +11,17 @@
  * No platform has a qualified recipe yet, so `provisionerFor` answers null everywhere and every
  * environment reports itself unsupported. That is the honest state of the feature: the contract,
  * the operation and the routes are here, and nothing can install anything.
+ *
+ * The descriptor provider (task 2.3) is built here too, over this same `env` and `fetch`, and
+ * exposed on `ManagedRuntimes` for whatever probes a host next — its own resolution (fetch, cache,
+ * version gate, per-installation pin) is fully wired and tested in `descriptor-provider.ts`.
+ * `EnvironmentSnapshot.minimum_app_version` stays `null` here rather than calling it eagerly: with
+ * `provisionerFor` answering null everywhere, nothing yet decides which descriptor is "in effect"
+ * for this environment (a real host recipe, task 2.4, is what makes that decision) — reaching the
+ * network on every core start for a value nothing yet reads would just be an untested guess.
  */
 
+import { readFile as nodeReadFile } from 'node:fs/promises'
 import { managedSharedRoot } from '../../config/index.js'
 import type { DataFolderEnv } from '../../config/index.js'
 import type {
@@ -22,6 +31,8 @@ import type {
   ExecutorKind,
 } from '../../contracts/index.js'
 import { processStartId } from '../../lock/index.js'
+import { createRuntimeDescriptorProvider, descriptorFetchFromFetch } from './descriptor-provider.js'
+import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
 import { OperationStore, type OwnerIdentity } from './store.js'
 
@@ -67,6 +78,8 @@ export interface WireManagedRuntimesOptions {
    * core again (the ordinary case) needs nothing, since the real pid stays the real pid.
    */
   ownerPid?: number
+  /** What the runtime descriptor provider fetches with; defaults to the global `fetch`. */
+  fetch?: typeof fetch
 }
 
 export interface ManagedRuntimes {
@@ -77,6 +90,8 @@ export interface ManagedRuntimes {
   /** Reconcile whatever the previous core left behind, then publish the result. */
   recover: () => Promise<void>
   shutdown: (signal: AbortSignal) => Promise<void>
+  /** Gets and caches the TensorRT-LLM runtime descriptor (task 2.3): a host recipe consumes this. */
+  descriptors: RuntimeDescriptorProvider
 }
 
 export function wireManagedRuntimes(options: WireManagedRuntimesOptions): ManagedRuntimes {
@@ -96,12 +111,20 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     return ownerIdentityCache
   }
 
+  const managedRoot = managedSharedRoot(options.env)
   const store = new OperationStore({
-    root: managedSharedRoot(options.env),
+    root: managedRoot,
     instanceId: options.instanceId,
     newOperationId: options.newId,
     newEffectId: options.newId,
     ownerIdentity,
+  })
+
+  const descriptors = createRuntimeDescriptorProvider({
+    env: options.env.env,
+    fetch: descriptorFetchFromFetch(options.fetch ?? fetch),
+    readFile: (path) => nodeReadFile(path, 'utf8'),
+    root: managedRoot,
   })
 
   // The view a snapshot is built from. A machine with no executor has no environment at all, which
@@ -120,6 +143,10 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
             gpus: [],
             installations: [],
             active_operation_id: null,
+            // No host recipe decides "the descriptor in effect" yet (`provisioner` is always null
+            // until task 2.4), so there is nothing honest to resolve this from. `descriptors` below
+            // is fully wired and ready for whichever task first probes a host to fill this in.
+            minimum_app_version: null,
           },
         ]
 
@@ -157,6 +184,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
       await service.recover(options.instanceId)
     },
     shutdown: (signal) => service.shutdown(signal),
+    descriptors,
   }
 }
 

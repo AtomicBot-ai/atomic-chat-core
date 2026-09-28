@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { CoreEvents, ManagedHostStep, RequirementPlan, Sha256Digest } from '../../contracts/index.js'
 import type { DataFolderEnv } from '../../config/index.js'
+import { RUNTIME_DESCRIPTOR_URL_ENV } from './descriptor-provider.js'
 import type { EnvironmentProvisioner } from './service.js'
 import { executorFor, provisionerFor, wireManagedRuntimes } from './wiring.js'
 import type { ManagedRuntimes } from './wiring.js'
@@ -32,9 +33,9 @@ afterEach(async () => {
 })
 
 /** A machine environment pointed at a scratch directory, never at the real per-user one. */
-const env = (platform: NodeJS.Platform): DataFolderEnv => ({
+const env = (platform: NodeJS.Platform, extraEnv: Record<string, string> = {}): DataFolderEnv => ({
   platform,
-  env: { ATOMIC_CORE_MANAGED_ROOT: root },
+  env: { ATOMIC_CORE_MANAGED_ROOT: root, ...extraEnv },
   homedir: '/home/u',
   exists: () => false,
   readFile: () => undefined,
@@ -271,5 +272,54 @@ describe('coming back to what a previous core left', () => {
     const next = wire('linux', fakeProvisioner())
     await next.managed.recover()
     expect(next.managed.operations()).toHaveLength(1)
+  })
+})
+
+describe('the descriptor provider this wiring builds (task 2.3)', () => {
+  /** The real fixture (`descriptor_id` `tensorrt-llm-1.2.1-r1`, `minimum_core_version` `0.7.0`). */
+  const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+
+  it('reads a file:// override end to end and caches it under the wired managed root', async () => {
+    const managed = wireManagedRuntimes({
+      env: env('linux', { [RUNTIME_DESCRIPTOR_URL_ENV]: fixtureUrl }),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: () => undefined,
+      newId: () => 'id-1',
+    })
+    wired.push(managed)
+
+    const result = await managed.descriptors.forNewSetup()
+    expect(result.kind).toBe('available')
+    if (result.kind === 'available') {
+      expect(result.descriptor.descriptor_id).toBe('tensorrt-llm-1.2.1-r1')
+    }
+
+    // A later installation pinned to this id resolves from the cache this wiring just wrote,
+    // with no further reads of the file:// source.
+    const pinned = await managed.descriptors.forInstallation('tensorrt-llm-1.2.1-r1')
+    expect(pinned).toEqual(result)
+  })
+
+  it('has nothing cached and no network by default: forNewSetup is honestly unsupported', async () => {
+    const managed = wireManagedRuntimes({
+      env: env('linux'),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: () => undefined,
+      newId: () => 'id-1',
+      // No real network in a unit test: an unresolvable host makes the one fetch attempt fail
+      // fast instead of hitting the timeout, so this stays quick without stubbing global fetch.
+      fetch: (() => Promise.reject(new Error('no network in this test'))) as typeof fetch,
+    })
+    wired.push(managed)
+
+    const result = await managed.descriptors.forNewSetup()
+    expect(result.kind).toBe('unsupported')
+  })
+
+  it('leaves minimum_app_version null: nothing yet decides which descriptor governs this environment', () => {
+    const { managed } = wire('linux', fakeProvisioner())
+    expect(managed.environments()[0]?.minimum_app_version).toBeNull()
   })
 })

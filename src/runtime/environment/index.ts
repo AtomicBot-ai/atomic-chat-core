@@ -4,7 +4,9 @@
  * rebooting (openspec change `add-tensorrt-llm-linux`).
  *
  * The pieces, in the order a setup goes through them: `descriptor` reads the metadata that says
- * what to install, `canonical-json` hashes what consent and idempotency are decided on, `state` is
+ * what to install, `descriptor-provider` gets it from conf (or an override) over HTTPS, caches it by
+ * `descriptor_id`, applies the version gate, and pins an installation to the one it was set up with
+ * (task 2.3), `canonical-json` hashes what consent and idempotency are decided on, `state` is
  * the transition table, `store` keeps the record across restarts under a lock two cores respect,
  * `recovery` reconciles a record against what the machine actually shows, and `service` turns each
  * decision into one piece of injected external work. `host-exec` runs a read-only probe command for
@@ -18,6 +20,7 @@
  */
 export * from './canonical-json.js'
 export * from './descriptor.js'
+export * from './descriptor-provider.js'
 export * from './host-exec.js'
 export * from './inventory.js'
 export * from './linux-probe.js'
