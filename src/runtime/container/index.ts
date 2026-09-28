@@ -1,0 +1,16 @@
+/**
+ * The Docker executor (task 2.8, openspec change `add-tensorrt-llm-linux`): pulls, inspects,
+ * creates, starts, stops, removes and reads the logs of a model container, and runs one-shot GPU
+ * probes. `argv.ts` is pure argv construction; `exec.ts` and `operations.ts` are the injectable I/O
+ * that runs it; `pull.ts` talks to the Docker Engine API directly for byte-level pull progress. No
+ * shell is ever used, and everything a descriptor or a probe contributed is validated before it
+ * becomes an argv token or a URL query value (`argv.ts`'s `assertSafeArgvValue`).
+ *
+ * Public API of this module is exported from this file only.
+ */
+export * from './types.js'
+export * from './argv.js'
+export * from './env.js'
+export * from './exec.js'
+export * from './operations.js'
+export * from './pull.js'

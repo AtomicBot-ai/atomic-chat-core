@@ -1,6 +1,6 @@
 /**
  * Types for the deployment seam preserved by ADR `docs/decisions/2026-09-23-preserve-deployment-
- * seams.md` ("поправка T01e", openspec change `add-tensorrt-llm-linux`): what a containerized text
+ * seams.md` (task T01e, openspec change `add-tensorrt-llm-linux`): what a containerized text
  * engine needs to run, and how a deployment turns that into a published, reachable target.
  *
  * Keeping these separate from the desktop `LaunchSpec`/`AdapterContext` that task 2.8 builds on
