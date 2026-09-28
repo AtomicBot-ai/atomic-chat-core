@@ -10,6 +10,7 @@ function adapter(
     id: 'fake-engine',
     contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
     readiness: { path: '/health', expectedStatus: 200 },
+    routes: ['/v1/models'],
     stageMarkers: [],
     validateSettings: () => ({ ctx: 4096 }),
     buildLaunch: () => ({ engine: { container_port: 8000 }, argv: ['serve'] }),
@@ -71,6 +72,14 @@ describe('ManagedTextAdapterRegistry', () => {
     ['a readiness path that climbs', { readiness: { path: '/a/../b', expectedStatus: 200 } }],
     ['a redirect as the expected status', { readiness: { path: '/health', expectedStatus: 302 } }],
     ['a non-integer expected status', { readiness: { path: '/health', expectedStatus: 200.5 } }],
+    ['no declared routes at all', { routes: [] }],
+    ['a declared route without a leading slash', { routes: ['v1/models'] }],
+    ['a declared route with a query', { routes: ['/v1/models?x=1'] }],
+    ['a declared route that climbs', { routes: ['/a/../b'] }],
+    [
+      'a rewritable route that is not also a declared route',
+      { routes: ['/v1/models'], rewritableRoutes: ['/v1/chat/completions'] },
+    ],
   ])('refuses to register %s', (_case, over) => {
     const registry = new ManagedTextAdapterRegistry()
     expect(

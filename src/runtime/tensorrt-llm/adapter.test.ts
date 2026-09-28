@@ -16,6 +16,7 @@ import {
   TENSORRT_LLM_MIN_KV_CACHE_FREE_FRACTION,
   TENSORRT_LLM_MIN_LOAD_TIMEOUT_SECONDS,
   TENSORRT_LLM_READINESS_BASE_MS,
+  TENSORRT_LLM_REWRITABLE_ROUTES,
   TENSORRT_LLM_ROUTES,
   tensorrtLlmAdapter,
   type TensorrtLlmSettings,
@@ -56,6 +57,13 @@ describe('tensorrtLlmAdapter shape', () => {
 
   it('declares only the OpenAI routes trtllm-serve actually implements', () => {
     expect(TENSORRT_LLM_ROUTES).toEqual(['/v1/chat/completions', '/v1/completions', '/v1/models'])
+    expect(tensorrtLlmAdapter.routes).toBe(TENSORRT_LLM_ROUTES)
+  })
+
+  it('declares only the two POST routes as rewritable, a subset of routes (findings-2.13-r2.md item 3)', () => {
+    expect(TENSORRT_LLM_REWRITABLE_ROUTES).toEqual(['/v1/chat/completions', '/v1/completions'])
+    expect(tensorrtLlmAdapter.rewritableRoutes).toBe(TENSORRT_LLM_REWRITABLE_ROUTES)
+    for (const route of TENSORRT_LLM_REWRITABLE_ROUTES) expect(TENSORRT_LLM_ROUTES).toContain(route)
   })
 
   it('stays in starting-container until a marker matches, and none match an empty tail', () => {
@@ -64,6 +72,26 @@ describe('tensorrtLlmAdapter shape', () => {
       expect(marker.stage).toBe('initializing-engine')
       expect(marker.pattern.test('')).toBe(false)
     }
+  })
+
+  // Each real line as `weight_loader.py`/`model_engine.py` (pinned tag v1.2.1) actually renders it,
+  // not paraphrased — findings-2.13-r2.md item 7.
+  it.each([
+    [
+      'weight_loader.py:59, HfWeightLoader.load_weights (safetensors)',
+      'Loading safetensors weights in parallel: 100%|##########| 4/4 [00:12<00:00,  3.05s/it]',
+    ],
+    [
+      'weight_loader.py:68, HfWeightLoader.load_weights (bin/pth)',
+      'Loading bin weights in parallel: 100%|##########| 2/2 [00:04<00:00,  2.01s/it]',
+    ],
+    ['weight_loader.py:51, prefetch', 'Prefetching 4.10GB checkpoint files.'],
+    [
+      'model_engine.py:716, _capture_generation_cuda_graphs',
+      'Creating CUDA graph instances for 8 batch sizes.',
+    ],
+  ])('a stage marker matches the real %s line', (_case, line) => {
+    expect(tensorrtLlmAdapter.stageMarkers.some((marker) => marker.pattern.test(line))).toBe(true)
   })
 })
 
@@ -522,7 +550,7 @@ describe('mapTensorrtLlmContextLengthError', () => {
   })
 })
 
-describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md item 1)', () => {
+describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md item 1, corrected by findings-2.13-r2.md item 1)', () => {
   const settings = tensorrtLlmAdapter.validateSettings({ max_output_tokens: 512 })
 
   it('is wired onto the adapter object, not only exported standalone', () => {
@@ -536,7 +564,7 @@ describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md ite
     })
   })
 
-  it('clamps a higher client-requested max_tokens down to the setting', () => {
+  it('clamps a higher client-requested max_tokens down to the setting, on /v1/completions', () => {
     const result = tensorrtLlmRewriteRequestBody(
       '/v1/completions',
       { prompt: 'hi', max_tokens: 4096 },
@@ -545,7 +573,7 @@ describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md ite
     expect(result).toMatchObject({ max_tokens: 512 })
   })
 
-  it('leaves a lower client-requested max_tokens untouched', () => {
+  it('leaves a lower client-requested max_tokens untouched, on /v1/completions', () => {
     const result = tensorrtLlmRewriteRequestBody(
       '/v1/completions',
       { prompt: 'hi', max_tokens: 100 },
@@ -554,30 +582,108 @@ describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md ite
     expect(result).toMatchObject({ max_tokens: 100 })
   })
 
-  it('clamps both max_tokens and max_completion_tokens independently on the chat route', () => {
-    const result = tensorrtLlmRewriteRequestBody(
-      '/v1/chat/completions',
-      { messages: [], max_tokens: 9999, max_completion_tokens: 100 },
-      settings
-    )
-    expect(result).toMatchObject({ max_tokens: 512, max_completion_tokens: 100 })
+  it('throws for a present but invalid max_tokens on /v1/completions, rather than silently substituting the cap', () => {
+    for (const bad of [0, -5, 'lots', 1.5]) {
+      expect(() => tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: bad }, settings)).toThrow(
+        /max_tokens/
+      )
+    }
   })
 
-  it('fills max_completion_tokens with the setting on the chat route when absent, even if max_tokens is present', () => {
-    const result = tensorrtLlmRewriteRequestBody(
-      '/v1/chat/completions',
-      { messages: [], max_tokens: 10 },
-      settings
-    )
-    expect(result).toMatchObject({ max_tokens: 10, max_completion_tokens: 512 })
+  it('treats null max_tokens as absent (not invalid), on /v1/completions', () => {
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: null }, settings)).toMatchObject({
+      max_tokens: 512,
+    })
   })
 
-  it('never adds max_completion_tokens on the plain completions route', () => {
-    const result = tensorrtLlmRewriteRequestBody('/v1/completions', { prompt: 'hi' }, settings) as Record<
-      string,
-      unknown
-    >
-    expect('max_completion_tokens' in result).toBe(false)
+  describe('/v1/chat/completions — exactly one of the two keys (TRT-LLM 1.2.1 extra="forbid" + a single aliased field, findings-2.13-r2.md item 1)', () => {
+    it('writes max_tokens, not max_completion_tokens, when the client sent neither', () => {
+      const result = tensorrtLlmRewriteRequestBody(
+        '/v1/chat/completions',
+        { messages: [] },
+        settings
+      ) as Record<string, unknown>
+      expect(result).toMatchObject({ max_tokens: 512 })
+      expect('max_completion_tokens' in result).toBe(false)
+    })
+
+    it('writes max_tokens, capped, when the client sent only max_tokens', () => {
+      const result = tensorrtLlmRewriteRequestBody(
+        '/v1/chat/completions',
+        { messages: [], max_tokens: 9999 },
+        settings
+      ) as Record<string, unknown>
+      expect(result).toMatchObject({ max_tokens: 512 })
+      expect('max_completion_tokens' in result).toBe(false)
+    })
+
+    it('writes max_completion_tokens, capped, when the client sent only max_completion_tokens', () => {
+      const result = tensorrtLlmRewriteRequestBody(
+        '/v1/chat/completions',
+        { messages: [], max_completion_tokens: 9999 },
+        settings
+      ) as Record<string, unknown>
+      expect(result).toMatchObject({ max_completion_tokens: 512 })
+      expect('max_tokens' in result).toBe(false)
+    })
+
+    it('writes exactly one key — max_completion_tokens — never both, when the client sent both', () => {
+      const result = tensorrtLlmRewriteRequestBody(
+        '/v1/chat/completions',
+        { messages: [], max_tokens: 9999, max_completion_tokens: 100 },
+        settings
+      ) as Record<string, unknown>
+      // The lower of the two, still capped, wins — under max_completion_tokens (item 1's ruling).
+      expect(result).toMatchObject({ max_completion_tokens: 100 })
+      expect('max_tokens' in result).toBe(false)
+    })
+
+    it('picks the lower of the two client values, both still capped, when both are sent', () => {
+      const result = tensorrtLlmRewriteRequestBody(
+        '/v1/chat/completions',
+        { messages: [], max_tokens: 50, max_completion_tokens: 9999 },
+        settings
+      )
+      expect(result).toMatchObject({ max_completion_tokens: 50 })
+    })
+
+    it('throws for a present but invalid value in either field, rather than silently substituting the cap', () => {
+      for (const body of [
+        { max_tokens: 0 },
+        { max_tokens: -1 },
+        { max_tokens: 'lots' },
+        { max_completion_tokens: 0 },
+        { max_completion_tokens: 'lots' },
+      ]) {
+        expect(() => tensorrtLlmRewriteRequestBody('/v1/chat/completions', body, settings)).toThrow()
+      }
+    })
+
+    it('treats null in either field as absent, not invalid', () => {
+      const result = tensorrtLlmRewriteRequestBody(
+        '/v1/chat/completions',
+        { max_tokens: null, max_completion_tokens: null },
+        settings
+      )
+      expect(result).toMatchObject({ max_tokens: 512 })
+    })
+
+    it('never produces a body with both keys present, for any input', () => {
+      const cases: unknown[] = [
+        {},
+        { max_tokens: 10 },
+        { max_completion_tokens: 10 },
+        { max_tokens: 10, max_completion_tokens: 20 },
+      ]
+      for (const body of cases) {
+        const result = tensorrtLlmRewriteRequestBody('/v1/chat/completions', body, settings) as Record<
+          string,
+          unknown
+        >
+        const keys = ['max_tokens', 'max_completion_tokens'].filter((k) => k in result)
+        expect(keys.length).toBe(1)
+      }
+    })
   })
 
   it('leaves a route it does not own (e.g. /v1/models) completely unchanged, same reference', () => {
@@ -589,17 +695,5 @@ describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md ite
     expect(tensorrtLlmRewriteRequestBody('/v1/completions', 'not an object', settings)).toBe('not an object')
     expect(tensorrtLlmRewriteRequestBody('/v1/completions', null, settings)).toBe(null)
     expect(tensorrtLlmRewriteRequestBody('/v1/completions', [1, 2], settings)).toEqual([1, 2])
-  })
-
-  it('treats a non-numeric, zero or negative max_tokens as absent', () => {
-    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: 0 }, settings)).toMatchObject({
-      max_tokens: 512,
-    })
-    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: -5 }, settings)).toMatchObject({
-      max_tokens: 512,
-    })
-    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: 'lots' }, settings)).toMatchObject({
-      max_tokens: 512,
-    })
   })
 })

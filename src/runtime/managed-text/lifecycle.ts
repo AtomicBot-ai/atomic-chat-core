@@ -509,17 +509,26 @@ export class ManagedTextLifecycle {
       await this.waitReady(entry, prepared.target, timeoutMs, progress, signal)
 
       const apiKey = generateGatewayKey()
+      const adapter = entry.adapter
       // Bound to this load's own validated settings here, once, so the gateway itself never needs
       // to know an adapter's settings shape (ManagedTextAdapter.rewriteRequestBody, ADR
-      // 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway).
-      const rewrite = entry.adapter.rewriteRequestBody
+      // 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway). Called through
+      // `adapter.rewriteRequestBody(...)`, not a detached local reference to the function, so an
+      // implementation that relies on `this` (an object method, not just a plain function like
+      // tensorrt-llm's own) still sees `this === adapter` when the gateway invokes it
+      // (findings-2.13-r2.md item 4).
       entry.gateway = await this.startGateway({
         upstream: { host: '127.0.0.1', port: projectSessionPort(prepared.target) },
         apiKey,
         allowedHosts: this.deps.allowedHosts,
-        ...(rewrite === undefined
+        routes: adapter.routes,
+        ...(adapter.rewritableRoutes === undefined ? {} : { rewritableRoutes: adapter.rewritableRoutes }),
+        ...(adapter.rewriteRequestBody === undefined
           ? {}
-          : { rewriteRequestBody: (route: string, body: unknown) => rewrite(route, body, settings) }),
+          : {
+              rewriteRequestBody: (route: string, body: unknown) =>
+                adapter.rewriteRequestBody!(route, body, settings),
+            }),
       })
       this.checkAborted(signal)
       entry.info = {

@@ -20,6 +20,7 @@ import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION, ManagedTextAdapterRegistry } fro
 import type { ManagedTextAdapter } from './adapter.js'
 import { createDesktopManagedDeployment } from './deployment.js'
 import { startManagedGateway } from './gateway.js'
+import type { ManagedGatewayOptions } from './gateway.js'
 import { ManagedLoadError, ManagedTextLifecycle } from './lifecycle.js'
 import type { ManagedLoadRequest, ManagedTextLifecycleDeps } from './lifecycle.js'
 
@@ -40,6 +41,7 @@ const alpha: ManagedTextAdapter<{ ctx: number }> = {
   id: 'alpha-engine',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/health', expectedStatus: 200 },
+  routes: ['/v1/models'],
   stageMarkers: [],
   validateSettings: (raw) => {
     const ctx = (raw as { ctx?: unknown } | undefined)?.ctx ?? 4096
@@ -71,6 +73,7 @@ const beta: ManagedTextAdapter<Record<string, never>> = {
   id: 'beta-engine',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/v1/models', expectedStatus: 200 },
+  routes: ['/v1/models'],
   stageMarkers: [{ stage: 'initializing-engine', pattern: /Loading checkpoint shards/ }],
   validateSettings: () => ({}),
   buildLaunch: () => ({ engine: { container_port: 9000 }, argv: ['beta', 'serve'] }),
@@ -80,6 +83,26 @@ const beta: ManagedTextAdapter<Record<string, never>> = {
       ? { kind: 'unsupported-model', message: 'beta cannot run this architecture.' }
       : { kind: 'other', message: 'beta exited' },
   capabilities: () => capabilities,
+}
+
+/** Engine three: exists only to prove `rewriteRequestBody` is invoked *through* the adapter object,
+ *  not a detached reference to the function (findings-2.13-r2.md item 4) — its `rewriteRequestBody`
+ *  is a real object method that reads `this.id`, which throws if ever called with `this` unbound. */
+const gamma: ManagedTextAdapter<{ tag: string }> = {
+  id: 'gamma-rewrite-engine',
+  contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
+  readiness: { path: '/health', expectedStatus: 200 },
+  routes: ['/v1/models', '/v1/chat/completions'],
+  rewritableRoutes: ['/v1/chat/completions'],
+  stageMarkers: [],
+  validateSettings: (raw) => ({ tag: (raw as { tag?: string } | undefined)?.tag ?? 'default' }),
+  buildLaunch: () => ({ engine: { container_port: 8000 }, argv: ['gamma'] }),
+  readinessTimeoutMs: () => 10_000,
+  classifyExit: () => ({ kind: 'other', message: 'gamma exited' }),
+  capabilities: () => capabilities,
+  rewriteRequestBody(route, body, settings) {
+    return { route, adapterId: this.id, settingsTag: settings.tag, body }
+  },
 }
 
 type Emitted = { name: keyof CoreEvents; payload: unknown }
@@ -97,10 +120,14 @@ let probed: string[]
 let allowedHosts: string[]
 let modelDir: string
 
-async function build(over: Partial<ManagedTextLifecycleDeps> = {}): Promise<ManagedTextLifecycle> {
+async function build(
+  over: Partial<ManagedTextLifecycleDeps> = {},
+  extraAdapters: ManagedTextAdapter[] = []
+): Promise<ManagedTextLifecycle> {
   const adapters = new ManagedTextAdapterRegistry()
   adapters.register(alpha)
   adapters.register(beta)
+  for (const adapter of extraAdapters) adapters.register(adapter)
   let port = 41_000
   let generation = 0
   const fakeFetch = (async (url: string | URL | Request) => {
@@ -826,5 +853,43 @@ describe('ManagedTextLifecycle: review round 1 gaps', () => {
     docker.rmFails = true
     await expect(lifecycle.load(request_())).rejects.toThrow('ENOSPC')
     expect(logged.some((line) => line.startsWith('error:') && line.includes('fakecontainer1'))).toBe(true)
+  })
+})
+
+describe('ManagedTextLifecycle: review round 2 gaps (findings-2.13-r2.md item 4)', () => {
+  it("passes the adapter's declared routes/rewritableRoutes to startGateway, and calls rewriteRequestBody bound to the adapter object, not a detached reference", async () => {
+    let captured: ManagedGatewayOptions | undefined
+    await build(
+      {
+        startGateway: async (options) => {
+          captured = options
+          return startManagedGateway(options)
+        },
+      },
+      [gamma]
+    )
+
+    await lifecycle.load(
+      request_({
+        installation: { ...betaInstallation, adapter_id: 'gamma-rewrite-engine', engine_id: 'gamma' },
+        settings: { tag: 'custom' },
+      })
+    )
+
+    expect(captured?.routes).toEqual(['/v1/models', '/v1/chat/completions'])
+    expect(captured?.rewritableRoutes).toEqual(['/v1/chat/completions'])
+    expect(captured?.rewriteRequestBody).toBeDefined()
+
+    // gamma.rewriteRequestBody reads `this.id`, which throws if the lifecycle ever invoked it as a
+    // detached function instead of through `adapter.rewriteRequestBody(...)`; it returning gamma's
+    // own id (rather than throwing, or `undefined`) is the proof. It also proves this load's own
+    // validated settings reached the call, bound once by the lifecycle rather than re-resolved here.
+    const result = captured?.rewriteRequestBody?.('/v1/chat/completions', { x: 1 })
+    expect(result).toEqual({
+      route: '/v1/chat/completions',
+      adapterId: 'gamma-rewrite-engine',
+      settingsTag: 'custom',
+      body: { x: 1 },
+    })
   })
 })

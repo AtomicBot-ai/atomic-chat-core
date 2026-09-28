@@ -9,11 +9,25 @@
  * Fix round 1 (`findings-2.13-r1.md`): the first pass sourced its CLI/error evidence from a mix of
  * the pytorch and legacy `tensorrt` backends without checking which one this descriptor actually
  * launches (`serve.py`'s `--backend` defaults to `pytorch`, and nothing here ever passes
- * `--backend`), and got `--max_num_tokens`'s meaning on that backend wrong. Every source citation
- * below was re-verified, read-only, against the pinned tag's actual sources
+ * `--backend`), and got `--max_num_tokens`'s meaning on that backend wrong.
+ *
+ * Fix round 2 (`findings-2.13-r2.md`): round 1's own ruling for enforcing the output-length setting
+ * — write both `max_tokens` and `max_completion_tokens` on `/v1/chat/completions` — was itself
+ * wrong: TRT-LLM 1.2.1's `ChatCompletionRequest` (`openai_protocol.py`, `extra="forbid"`) has a
+ * *single* Python field, `max_completion_tokens`, whose `validation_alias` is `max_tokens`, so a
+ * body carrying both as separate top-level keys makes pydantic reject the whole request with `400
+ * extra_forbidden` — every chat request `tensorrtLlmRewriteRequestBody` touched would have failed.
+ * The corrected rule (see `tensorrtLlmRewriteRequestBody` below) writes exactly one of the two keys.
+ * This round also added the gateway-level route declaration/rewrite-route split
+ * (`routes`/`rewritableRoutes` below) and moved the request-body-size cap to be enforced while the
+ * body streams in rather than after it is fully buffered — both are `../managed-text/gateway.ts`
+ * changes this file's `routes`/`rewritableRoutes`/`rewriteRequestBody` feed into, not changes to
+ * this file's own logic beyond declaring the two route lists.
+ *
+ * Every source citation below was re-verified, read-only, against the pinned tag's actual sources
  * (`nvcr.io/nvidia/tensorrt-llm/release` `descriptor_id: tensorrt-llm-1.2.1-r1` builds from
- * `v1.2.1`, https://github.com/NVIDIA/TensorRT-LLM/tree/v1.2.1), this time specifically checking
- * which backend each path belongs to:
+ * `v1.2.1`, https://github.com/NVIDIA/TensorRT-LLM/tree/v1.2.1), specifically checking which backend
+ * each path belongs to:
  * - `tensorrt_llm/commands/serve.py`: the flags this file builds argv from (`--host`, `--port`,
  *   `--max_seq_len`, `--max_num_tokens`, `--kv_cache_free_gpu_memory_fraction` — the long spelling
  *   of the `--free_gpu_memory_fraction` alias — `--tool_parser`, `--reasoning_parser`), and that
@@ -23,24 +37,39 @@
  *   directory is instead wired through the individual upstream PyTorch/Triton/CUDA JIT-cache env
  *   vars `#18897` itself names as the caches it would unify (`TORCHINDUCTOR_CACHE_DIR`,
  *   `TRITON_CACHE_DIR`, `CUDA_CACHE_PATH`) — those already exist independently of that PR.
+ * - `tensorrt_llm/serve/openai_protocol.py`: `OpenAIBaseModel`'s `model_config = ConfigDict(extra=
+ *   "forbid", populate_by_name=True)` (lines 71-73); `ChatCompletionRequest.max_completion_tokens:
+ *   Optional[int] = Field(default=None, validation_alias='max_tokens')` (lines 546-547) — the single
+ *   field, two-name situation `tensorrtLlmRewriteRequestBody` writes around (reproduced failing with
+ *   `pydantic` directly against this exact model in round 2's review).
  * - `tensorrt_llm/llmapi/llm.py`'s `_check_arguments`: on the pytorch backend, and only when
- *   `enable_chunked_prefill` is off and the request is not gen-only, it compares
- *   `prompt_len/cp_size + query_len` against `args.max_num_tokens` alone — **never the output** —
- *   raising `RequestError(f"The sum of prompt length ({promptLen}), query length ({queryLen})
- *   should not exceed max_num_tokens ({limit})")`. `--max_num_tokens` therefore caps the *prompt*,
- *   not a reply's length; the ruling in `findings-2.13-r1.md` item 1 responds by pointing it at
- *   `context_length` (a correct, if generic, prompt-side guard) and enforcing the output setting
- *   elsewhere — see `rewriteRequestBody` below and
- *   `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`. The
+ *   `enable_chunked_prefill` is off (its own default — `llm_args.py`'s `enable_chunked_prefill: bool
+ *   = Field(default=False, ...)`, and nothing here ever passes `--enable_chunked_prefill`) and the
+ *   request is not gen-only, it compares `prompt_len/cp_size + query_len` against
+ *   `args.max_num_tokens` alone — **never the output** — raising `RequestError(f"The sum of prompt
+ *   length ({promptLen}), query length ({queryLen}) should not exceed max_num_tokens ({limit})")`.
+ *   Since this check is unconditional by default, and `--max_num_tokens` now equals
+ *   `context_length` (see `buildTensorrtLlmLaunch`), it catches *every* request whose prompt and
+ *   query alone already exceed the context window — the common overflow case, not an edge case
+ *   (`findings-2.13-r2.md` item 6 correcting round 1's "an extreme case" wording).
+ *   `--max_num_tokens` therefore caps the *prompt*, not a reply's length; the ruling in
+ *   `findings-2.13-r1.md` item 1 responds by pointing it at `context_length` (a correct, if generic,
+ *   prompt-side guard) and enforcing the output setting elsewhere — see `rewriteRequestBody` below
+ *   and `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`. The
  *   `tensorrt`-backend branch of the same method (comparing prompt+query+`max_tokens` against
  *   `max_seq_len`) is real but unreachable from this adapter's launch, which never passes
  *   `--backend`; it is not implemented here (round 1 had a copy of it that could never fire).
  * - `tensorrt_llm/_torch/pyexecutor/base_worker.py`'s `_deduce_max_tokens`: the pytorch backend's
- *   actual per-request overflow signal once `--max_num_tokens` no longer doubles as an output cap —
- *   `default_max_tokens = max_seq_len - splited_prompt_len - query_token_len`, and once that is
- *   `<= 0` it raises `ValueError(f"\`default_max_tokens\` ({default_max_tokens}) must be greater
+ *   *other* per-request overflow signal, now that `--max_num_tokens` no longer doubles as an output
+ *   cap — `default_max_tokens = max_seq_len - splited_prompt_len - query_token_len`, and once that
+ *   is `<= 0` it raises `ValueError(f"\`default_max_tokens\` ({default_max_tokens}) must be greater
  *   than 0, \`default_max_tokens\` ({default_max_tokens}) = max_seq_len ({max_seq_len}) -
  *   \`splited_prompt_len\` ({splited_prompt_len}) - \`query_token_len\` ({query_token_len})")`.
+ *   Unlike `_check_arguments` above, this one is narrow: since `_check_arguments` already guarantees
+ *   `prompt + query <= max_num_tokens == max_seq_len` before this ever runs, `default_max_tokens`
+ *   can only be `<= 0` at the single boundary point where `prompt + query` lands *exactly* on
+ *   `max_seq_len` (`findings-2.13-r2.md` item 6 — round 1's header called this "the case that
+ *   actually fires now", which had the relative weight of the two checks backwards).
  *   `mapTensorrtLlmContextLengthError` matches this alongside the `_check_arguments` message above.
  * - `tensorrt_llm/serve/openai_server.py`: `GET /health` answers 200 only once
  *   `self.llm._check_health()` passes and 503 otherwise (not merely "the HTTP server is up"), and
@@ -440,8 +469,17 @@ export function tensorrtLlmCapabilities(context: {
 /** The OpenAI routes this adapter's engine actually serves (`openai_server.py` registers exactly
  *  these three for text; task 2.14 refuses any other public route for a `tensorrt-llm` model —
  *  spec: "Публичный сервер MUST отвечать понятной ошибкой на маршрут, который провайдер не
- *  объявил"). */
+ *  объявил"). Also `ManagedTextAdapter.routes` below: the session gateway 404s anything else before
+ *  it ever reaches the container, closing off `trtllm-serve`'s own undeclared routes — its
+ *  `/health` (probed directly by the lifecycle, never through the gateway), and its administrative
+ *  routes this adapter never wanted reachable at all (`/update_weights`, `/release_memory`,
+ *  `/resume_memory`, `/kv_cache_events`, `/steady_clock_offset`) — as well as `/v1/responses`, which
+ *  `openai_server.py` does register but this slice does not support (findings-2.13-r2.md item 3). */
 export const TENSORRT_LLM_ROUTES = ['/v1/chat/completions', '/v1/completions', '/v1/models'] as const
+
+/** The subset of `TENSORRT_LLM_ROUTES` `tensorrtLlmRewriteRequestBody` may rewrite: both POST
+ *  routes, never `GET /v1/models` (no request body to rewrite in the first place). */
+export const TENSORRT_LLM_REWRITABLE_ROUTES = ['/v1/chat/completions', '/v1/completions'] as const
 
 // ---------------------------------------------------------------------------------------------
 // Context-length-overflow error mapping
@@ -461,17 +499,21 @@ export interface TensorrtLlmOpenAIError {
 }
 
 const NUM = '(-?[\\d.]+)'
-/** pytorch backend `_check_arguments` (`llmapi/llm.py`, file header): fires only when the *prompt*
- *  alone (now that `--max_num_tokens` == `context_length`, see `buildTensorrtLlmLaunch`) exceeds
- *  the context — an extreme case, but a real, reachable one from this adapter's launch. */
+/** pytorch backend `_check_arguments` (`llmapi/llm.py`, file header): fires unconditionally by
+ *  default (chunked prefill is off unless explicitly enabled, which this adapter never does) for
+ *  *every* prompt whose length alone (now that `--max_num_tokens` == `context_length`, see
+ *  `buildTensorrtLlmLaunch`) exceeds the context — the common overflow case, not an edge case
+ *  (findings-2.13-r2.md item 6). */
 const OVERFLOW_VS_MAX_NUM_TOKENS = new RegExp(
   `sum of prompt length \\(${NUM}\\), query length \\(${NUM}\\) should not exceed max_num_tokens \\(${NUM}\\)`
 )
-/** pytorch backend `_deduce_max_tokens` (`base_worker.py`, file header): the overflow signal that
- *  actually fires in the common case now — prompt plus the room a reply would need leaves nothing
- *  in the context. `default_max_tokens` itself repeats in the message (`(-?[\\d.]+)` because it is
- *  the quantity that is `<= 0`); only the second copy is used, for clarity, in
- *  `mapTensorrtLlmContextLengthError`. */
+/** pytorch backend `_deduce_max_tokens` (`base_worker.py`, file header): a narrow boundary case, not
+ *  the common one — since `_check_arguments` above already guarantees `prompt + query <=
+ *  max_seq_len` before this ever runs, this only fires when `prompt + query` lands *exactly* on
+ *  `max_seq_len`, leaving zero room for any output (findings-2.13-r2.md item 6 corrects round 1's
+ *  claim that this was "the case that actually fires now"). `default_max_tokens` itself repeats in
+ *  the message (`(-?[\\d.]+)` because it is the quantity that is `<= 0`); only the second copy is
+ *  used, for clarity, in `mapTensorrtLlmContextLengthError`. */
 const OVERFLOW_VIA_DEDUCE_MAX_TOKENS = new RegExp(
   '`default_max_tokens` \\(' +
     NUM +
@@ -565,26 +607,62 @@ export function mapTensorrtLlmContextLengthError(
 
 /** The two routes whose request body `tensorrtLlmRewriteRequestBody` touches; every other route
  *  (including the third declared route, `GET /v1/models`, which has no body at all) passes its
- *  body through completely unchanged. */
-const OUTPUT_CAP_ROUTES = new Set(['/v1/chat/completions', '/v1/completions'])
+ *  body through completely unchanged. Same list as `TENSORRT_LLM_REWRITABLE_ROUTES`, kept as its
+ *  own `Set` here for `.has` rather than re-deriving one from the exported `readonly` tuple. */
+const OUTPUT_CAP_ROUTES = new Set<string>(TENSORRT_LLM_REWRITABLE_ROUTES)
 
-/** A present, finite, positive request value wins (capped at the setting); anything else — absent,
- *  zero, negative, non-numeric — falls back to the setting outright. */
-function clampMaxTokens(value: unknown, cap: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.min(value, cap) : cap
+/** One candidate `max_tokens`/`max_completion_tokens` field as the client actually sent it. `null`
+ *  counts as not sent at all (matching how an OpenAI client omits a field, findings-2.13-r2.md item
+ *  1's ruling); anything else present that is not a positive integer is `valid: false` — this never
+ *  substitutes a value for garbage input, only reports what was found, so the caller can throw a
+ *  real `400` instead of silently guessing. */
+interface CandidateField {
+  present: boolean
+  valid: boolean
+  value: number
+}
+
+function readCandidateField(body: Record<string, unknown>, key: string): CandidateField {
+  if (!(key in body) || body[key] === null) return { present: false, valid: false, value: 0 }
+  const value = body[key]
+  const valid = typeof value === 'number' && Number.isInteger(value) && value > 0
+  return { present: true, valid, value: valid ? (value as number) : 0 }
+}
+
+function invalidMaxTokens(field: string): never {
+  throw new Error(`${field} must be a positive integer.`)
 }
 
 /**
  * Enforces `settings.max_output_tokens` per request, since `trtllm-serve` 1.2.1 has no server-side
  * flag that does it (`buildTensorrtLlmLaunch`'s doc comment; ADR
  * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`). Only
- * `POST /v1/chat/completions` and `POST /v1/completions` are touched; every other route's body
- * returns unchanged. Both `max_tokens` (both routes) and, on the chat route,
- * `max_completion_tokens` are clamped to `min(request value, settings.max_output_tokens)`, or set
- * to the setting outright when the field is absent or not a usable positive number. A body that is
- * not a plain JSON object (an array, a primitive, `null`) is returned unchanged rather than
- * guessed at — the gateway's own JSON parse already rejected anything that is not valid JSON at
- * all before this ever runs.
+ * `TENSORRT_LLM_REWRITABLE_ROUTES` are touched; every other route's body returns unchanged, as does
+ * a body that is not a plain JSON object (an array, a primitive, `null`) — the gateway's own JSON
+ * parse already rejected anything that is not valid JSON at all before this ever runs.
+ *
+ * `/v1/completions` only ever had `max_tokens`: a present value is clamped to
+ * `min(value, settings.max_output_tokens)`; absent, the setting is written outright.
+ *
+ * `/v1/chat/completions` writes exactly ONE of `max_tokens`/`max_completion_tokens` — never both —
+ * because TRT-LLM 1.2.1's `ChatCompletionRequest` (`openai_protocol.py`, `extra="forbid"`) has a
+ * single Python field, `max_completion_tokens`, whose `validation_alias` is `max_tokens`; sending
+ * both as separate top-level keys makes pydantic reject the whole request with `400
+ * extra_forbidden` (findings-2.13-r2.md item 1, reproduced by the reviewer with `pydantic` against
+ * this exact model — round 1's own ruling did exactly this and broke every chat request). If the
+ * client sent `max_completion_tokens`, the rewritten body keeps that key; else if it sent
+ * `max_tokens`, that key; else `max_tokens` (this route's own default when nothing was sent at
+ * all). If the client sent both, the lower of the two (each still capped) wins, under the
+ * `max_completion_tokens` key.
+ *
+ * A present value that is not a positive integer (a string, `0`, a negative number — `null` counts
+ * as not sent, matching how OpenAI clients omit a field) throws rather than silently substituting
+ * the setting, so the client sees why its request was refused instead of one that silently used a
+ * different limit than it asked for. The gateway (`../managed-text/gateway.ts`) turns that throw
+ * into an OpenAI-shaped `400` using this function's own `Error.message`.
+ *
+ * `n` (multiple choices) is untouched: the cap is a per-choice output limit — the same as
+ * `max_output_tokens` is documented to mean — not a budget shared across `n` completions.
  */
 export function tensorrtLlmRewriteRequestBody(
   route: string,
@@ -593,16 +671,31 @@ export function tensorrtLlmRewriteRequestBody(
 ): unknown {
   if (!OUTPUT_CAP_ROUTES.has(route)) return body
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return body
+  const obj = body as Record<string, unknown>
+  const cap = settings.max_output_tokens
 
-  const clamped: Record<string, unknown> = { ...(body as Record<string, unknown>) }
-  clamped['max_tokens'] = clampMaxTokens(clamped['max_tokens'], settings.max_output_tokens)
-  if (route === '/v1/chat/completions') {
-    clamped['max_completion_tokens'] = clampMaxTokens(
-      clamped['max_completion_tokens'],
-      settings.max_output_tokens
-    )
+  if (route === '/v1/completions') {
+    const field = readCandidateField(obj, 'max_tokens')
+    if (field.present && !field.valid) invalidMaxTokens('max_tokens')
+    return { ...obj, max_tokens: field.present ? Math.min(field.value, cap) : cap }
   }
-  return clamped
+
+  // /v1/chat/completions
+  const legacy = readCandidateField(obj, 'max_tokens')
+  const modern = readCandidateField(obj, 'max_completion_tokens')
+  if ((legacy.present && !legacy.valid) || (modern.present && !modern.valid)) {
+    invalidMaxTokens('max_tokens/max_completion_tokens')
+  }
+  const values: number[] = []
+  if (legacy.valid) values.push(legacy.value)
+  if (modern.valid) values.push(modern.value)
+  const value = values.length > 0 ? Math.min(cap, ...values) : cap
+  const outKey = modern.present ? 'max_completion_tokens' : 'max_tokens'
+  const rest: Record<string, unknown> = { ...obj }
+  delete rest['max_tokens']
+  delete rest['max_completion_tokens']
+  rest[outKey] = value
+  return rest
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -631,6 +724,8 @@ export const tensorrtLlmAdapter: ManagedTextAdapter<TensorrtLlmSettings> = {
   id: 'tensorrt-llm',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/health', expectedStatus: 200 },
+  routes: TENSORRT_LLM_ROUTES,
+  rewritableRoutes: TENSORRT_LLM_REWRITABLE_ROUTES,
   stageMarkers: STAGE_MARKERS,
   validateSettings: validateTensorrtLlmSettings,
   buildLaunch: buildTensorrtLlmLaunch,

@@ -6,6 +6,7 @@ import {
   bracketIfIpv6,
   generateGatewayKey,
   MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES,
+  readCappedBody,
   startManagedGateway,
 } from './gateway.js'
 import type { ManagedGateway } from './gateway.js'
@@ -84,12 +85,17 @@ afterEach(async () => {
   await Promise.all(upstreams.splice(0).map((u) => u.close()))
 })
 
+/** Every route these tests may send to by default (`send()`'s own default path plus its siblings). */
+const DEFAULT_TEST_ROUTES = ['/v1/chat/completions', '/v1/completions', '/v1/models']
+
 /** Start a fake upstream plus a gateway pointed at it, tracked for teardown. */
 async function setup(
   handler: (req: IncomingMessage, res: ServerResponse) => void,
   opts: {
     apiKey?: string
     allowedHosts?: string[]
+    routes?: string[]
+    rewritableRoutes?: string[]
     rewriteRequestBody?: (route: string, body: unknown) => unknown
   } = {}
 ): Promise<{ gw: ManagedGateway; upstream: FakeUpstream; apiKey: string }> {
@@ -100,6 +106,8 @@ async function setup(
     upstream: { host: '127.0.0.1', port: upstream.port },
     apiKey,
     allowedHosts: opts.allowedHosts ?? [],
+    routes: opts.routes ?? DEFAULT_TEST_ROUTES,
+    ...(opts.rewritableRoutes ? { rewritableRoutes: opts.rewritableRoutes } : {}),
     ...(opts.rewriteRequestBody ? { rewriteRequestBody: opts.rewriteRequestBody } : {}),
   })
   gateways.push(gw)
@@ -126,7 +134,12 @@ describe('startManagedGateway', () => {
 
   it('rejects a non-loopback upstream host', async () => {
     await expect(
-      startManagedGateway({ upstream: { host: '0.0.0.0', port: 1 }, apiKey: 'x', allowedHosts: [] })
+      startManagedGateway({
+        upstream: { host: '0.0.0.0', port: 1 },
+        apiKey: 'x',
+        allowedHosts: [],
+        routes: DEFAULT_TEST_ROUTES,
+      })
     ).rejects.toThrow(/loopback/)
   })
 
@@ -139,6 +152,7 @@ describe('startManagedGateway', () => {
         upstream: { host: '127.0.0.1', port: upstream.port },
         apiKey: '',
         allowedHosts: [],
+        routes: DEFAULT_TEST_ROUTES,
       })
     ).rejects.toThrow(/api key/)
   })
@@ -223,6 +237,7 @@ describe('authentication', () => {
         upstream: { host: '::1', port: upstream.port },
         apiKey,
         allowedHosts: [],
+        routes: DEFAULT_TEST_ROUTES,
       })
       gateways.push(gw)
 
@@ -244,6 +259,7 @@ describe('authentication', () => {
       upstream: { host: '127.0.0.1', port: upstream.port },
       apiKey: oldKey,
       allowedHosts: [],
+      routes: DEFAULT_TEST_ROUTES,
     })
     await gw1.close()
 
@@ -251,6 +267,7 @@ describe('authentication', () => {
       upstream: { host: '127.0.0.1', port: upstream.port },
       apiKey: generateGatewayKey(),
       allowedHosts: [],
+      routes: DEFAULT_TEST_ROUTES,
     })
     gateways.push(gw2)
 
@@ -390,7 +407,9 @@ describe('streaming', () => {
   })
 })
 
-describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway)', () => {
+describe('rewriteRequestBody (task 2.13 fix rounds 1-2, ADR 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway)', () => {
+  const CHAT = ['/v1/chat/completions']
+
   it('rewrites a POST JSON body before it reaches the upstream, with Content-Length recomputed for the new size', async () => {
     let seenBody = ''
     let seenContentLength = ''
@@ -401,6 +420,7 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
         req.on('end', () => res.end('ok'))
       },
       {
+        rewritableRoutes: CHAT,
         rewriteRequestBody: (route, body) => ({
           route,
           ...(body as Record<string, unknown>),
@@ -430,14 +450,14 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
     expect(Number(seenContentLength)).not.toBe(requestBody.length)
   })
 
-  it('answers 400 without reaching the upstream when the POST body is not valid JSON', async () => {
+  it('answers 400 with an OpenAI-shaped JSON body, without reaching the upstream, when the POST body is not valid JSON', async () => {
     let reached = false
     const { gw, apiKey } = await setup(
       (_req, res) => {
         reached = true
         res.end('should not happen')
       },
-      { rewriteRequestBody: (_route, body) => body }
+      { rewritableRoutes: CHAT, rewriteRequestBody: (_route, body) => body }
     )
 
     const res = await send(gw.port, {
@@ -447,17 +467,56 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
     })
 
     expect(res.status).toBe(400)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(JSON.parse(res.body)).toMatchObject({ error: { type: 'invalid_request_error' } })
     expect(reached).toBe(false)
   })
 
-  it('answers 413 without reaching the upstream or attempting to parse a body over the cap', async () => {
+  it('answers 400 with the thrown message, OpenAI-shaped, when rewriteRequestBody itself rejects the value', async () => {
     let reached = false
     const { gw, apiKey } = await setup(
       (_req, res) => {
         reached = true
         res.end('should not happen')
       },
-      { rewriteRequestBody: (_route, body) => body }
+      {
+        rewritableRoutes: CHAT,
+        rewriteRequestBody: () => {
+          throw new Error('max_tokens must be a positive integer.')
+        },
+      }
+    )
+
+    const requestBody = JSON.stringify({ max_tokens: 'lots' })
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-length': String(requestBody.length),
+      },
+      body: requestBody,
+    })
+
+    expect(res.status).toBe(400)
+    expect(JSON.parse(res.body)).toEqual({
+      error: {
+        message: 'max_tokens must be a positive integer.',
+        type: 'invalid_request_error',
+        code: 'invalid_request_error',
+      },
+    })
+    expect(reached).toBe(false)
+  })
+
+  it('answers 413 with an OpenAI-shaped JSON body, without reaching the upstream or attempting to parse a body over the cap', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { rewritableRoutes: CHAT, rewriteRequestBody: (_route, body) => body }
     )
 
     const oversized = 'x'.repeat(MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES + 1)
@@ -472,7 +531,38 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
     })
 
     expect(res.status).toBe(413)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(JSON.parse(res.body)).toMatchObject({ error: { type: 'invalid_request_error' } })
     expect(reached).toBe(false)
+  })
+
+  // An HTTP-level test of "the connection stays open forever while the server waits to finish
+  // reading" is inherently racy — the OS itself resets a connection the server closes with unread
+  // bytes still queued, so a client that keeps writing past that point may see the reset before (or
+  // instead of) the buffered response, independent of anything this gateway does (confirmed against
+  // a minimal reproduction outside this test file). `readAndRewriteBody`'s own test above already
+  // covers the real HTTP path end to end for a body sent in one normal `.end()` call (413, upstream
+  // never reached). This tests the algorithmic claim itself — reading stops as soon as the running
+  // total crosses the cap, not once the whole body has been read — directly against `readCappedBody`
+  // and a source that never ends, with no HTTP or sockets involved at all.
+  it('readCappedBody stops pulling from its source the moment the cap is exceeded, never asking for another chunk (findings-2.13-r2.md item 2)', async () => {
+    const chunkSize = 1024
+    let chunksProduced = 0
+    async function* neverEndingChunks(): AsyncGenerator<Buffer> {
+      for (;;) {
+        chunksProduced += 1
+        yield Buffer.alloc(chunkSize, 'x')
+      }
+    }
+
+    const cap = 10 * chunkSize
+    const result = await readCappedBody(neverEndingChunks(), cap)
+
+    expect(result).toBe('too-large')
+    // Enough chunks to cross the cap, and not meaningfully more — proof the generator was never
+    // asked to keep producing once the running total already exceeded it.
+    const chunksNeededToCrossCap = Math.floor(cap / chunkSize) + 1
+    expect(chunksProduced).toBe(chunksNeededToCrossCap)
   })
 
   it('leaves a GET request untouched even with a rewriter configured (no body to rewrite)', async () => {
@@ -481,10 +571,13 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
         res.writeHead(200, { 'content-type': 'text/plain' })
         res.end('untouched')
       },
-      { rewriteRequestBody: () => ({ should: 'never be reached for GET' }) }
+      { rewritableRoutes: ['/v1/models'], rewriteRequestBody: () => ({ should: 'never be reached for GET' }) }
     )
 
-    const res = await send(gw.port, { headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` } })
+    const res = await send(gw.port, {
+      path: '/v1/models',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
 
     expect(res.status).toBe(200)
     expect(res.body).toBe('untouched')
@@ -499,6 +592,36 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
 
     const requestBody = JSON.stringify({ max_tokens: 1 })
     const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: requestBody,
+    })
+
+    expect(res.status).toBe(200)
+    expect(seenBody).toBe(requestBody)
+  })
+
+  it('streams a declared-but-not-rewritable route through byte-for-byte, never parsing it as JSON even when it looks like JSON', async () => {
+    let seenBody = ''
+    const { gw, apiKey } = await setup(
+      (req, res) => {
+        req.on('data', (chunk: Buffer) => (seenBody += chunk.toString('utf8')))
+        req.on('end', () => res.end('ok'))
+      },
+      {
+        routes: ['/v1/chat/completions', '/v1/models'],
+        rewritableRoutes: CHAT, // deliberately does not include /v1/models
+        rewriteRequestBody: () => ({ this: 'would prove the rewriter ran, which it must not' }),
+      }
+    )
+
+    const requestBody = JSON.stringify({ max_tokens: 99999 })
+    const res = await send(gw.port, {
+      path: '/v1/models',
       method: 'POST',
       headers: {
         'host': '127.0.0.1',
@@ -529,7 +652,7 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
         }
         writeNext()
       },
-      { rewriteRequestBody: (_route, body) => body }
+      { rewritableRoutes: CHAT, rewriteRequestBody: (_route, body) => body }
     )
 
     const requestBody = JSON.stringify({ messages: [] })
@@ -558,5 +681,126 @@ describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm
 
     expect(received).toContain('"n":0')
     expect(received).toContain(`"n":${CHUNK_COUNT - 1}`)
+  })
+
+  it('gives the upstream a Content-Length and no Transfer-Encoding, even for a client that sent the request chunked (findings-2.13-r2.md item 10)', async () => {
+    let seenBody = ''
+    let seenContentLength = ''
+    let seenTransferEncoding: string | undefined
+    const { gw, apiKey } = await setup(
+      (req, res) => {
+        seenContentLength = String(req.headers['content-length'] ?? '')
+        seenTransferEncoding = req.headers['transfer-encoding']
+        req.on('data', (chunk: Buffer) => (seenBody += chunk.toString('utf8')))
+        req.on('end', () => res.end('ok'))
+      },
+      { rewritableRoutes: CHAT, rewriteRequestBody: (_route, body) => body }
+    )
+
+    const requestBody = JSON.stringify({ max_tokens: 10 })
+    await new Promise<void>((resolve, reject) => {
+      // No content-length header at all, and two separate writes: Node's http client falls back to
+      // `Transfer-Encoding: chunked` for exactly this shape of request.
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: gw.port,
+          path: '/v1/chat/completions',
+          method: 'POST',
+          headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+        },
+        (res) => {
+          res.on('data', () => {})
+          res.on('end', resolve)
+        }
+      )
+      req.on('error', reject)
+      req.write(requestBody.slice(0, 5))
+      req.end(requestBody.slice(5))
+    })
+
+    expect(seenTransferEncoding).toBeUndefined()
+    expect(Number(seenContentLength)).toBe(Buffer.byteLength(seenBody))
+    expect(seenBody).toBe(requestBody)
+  })
+})
+
+describe('declared routes (task 2.13 fix round 2, findings-2.13-r2.md item 3)', () => {
+  it('answers 404 with an OpenAI-shaped JSON body, and never reaches the upstream, for a route the adapter did not declare', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { routes: ['/v1/models'] }
+    )
+
+    const res = await send(gw.port, {
+      path: '/update_weights',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(404)
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(JSON.parse(res.body)).toMatchObject({ error: { type: 'invalid_request_error' } })
+    expect(reached).toBe(false)
+  })
+
+  it('proxies a request to a route the adapter declared', async () => {
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('declared')
+      },
+      { routes: ['/v1/models'] }
+    )
+
+    const res = await send(gw.port, {
+      path: '/v1/models',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toBe('declared')
+  })
+
+  it('answers 404, not a decoded match, for a path with an encoded slash — the classic path-confusion trick', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { routes: ['/v1/models'] }
+    )
+
+    // Decodes to /v1/models, but must not be treated as equal to the literal /v1/models route.
+    const res = await send(gw.port, {
+      path: '/v1%2Fmodels',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(404)
+    expect(reached).toBe(false)
+  })
+
+  it('matches a route on its decoded path (an unambiguous encoding still resolves)', async () => {
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('decoded-match')
+      },
+      { routes: ['/v1/models'] }
+    )
+
+    // %6d decodes to "m": /v1/%6dodels -> /v1/models, no slash involved, unambiguous.
+    const res = await send(gw.port, {
+      path: '/v1/%6dodels',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toBe('decoded-match')
   })
 })

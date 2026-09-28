@@ -93,6 +93,24 @@ export interface ManagedTextAdapter<S = unknown> {
   readonly contractVersion: number
   readonly readiness: ManagedReadinessProbe
   readonly stageMarkers: readonly ManagedStageMarker[]
+  /**
+   * Every route this engine serves through the session gateway (absolute paths, no query, no
+   * method — see `assertAdapterShape` below). Anything else gets `404` from the gateway and is
+   * never forwarded upstream at all (findings-2.13-r2.md item 3): this is what closes off an
+   * engine's own undocumented or administrative routes (e.g. `trtllm-serve`'s `/update_weights`,
+   * `/release_memory`) that were never meant to be reachable from outside the container. The
+   * readiness path (`readiness.path` above) is deliberately not part of this list — the lifecycle
+   * probes it directly against the container's own port, never through the gateway a caller's
+   * traffic goes over.
+   */
+  readonly routes: readonly string[]
+  /**
+   * The subset of `routes` whose request body `rewriteRequestBody` may rewrite. Every other
+   * declared route (and every undeclared one, which never gets this far) streams through
+   * byte-for-byte: no JSON parsing, no re-serialization, regardless of method. Absent or empty
+   * when `rewriteRequestBody` is not defined at all.
+   */
+  readonly rewritableRoutes?: readonly string[]
   /** Throws `AtomicCoreError('INVALID_ARGUMENT', ...)` before any container exists. */
   validateSettings(raw: unknown): S
   buildLaunch(context: ManagedLaunchContext<S>): ManagedEngineLaunch
@@ -104,13 +122,17 @@ export interface ManagedTextAdapter<S = unknown> {
    * Optional: rewrites a JSON POST request body before the session gateway forwards it upstream
    * (`../managed-text/gateway.ts`'s `startManagedGateway`; see
    * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md` for why
-   * this exists at all — most engines need no request-side rewriting and should leave it undefined).
-   * `route` is the request path with no query string, exactly as the client sent it. Returning the
-   * body unchanged is always safe for a route this hook does not care about. The gateway applies
-   * this only to POST requests with a non-empty body, under a byte cap (rejected with `413` before
-   * this is even called) and only after the body parses as JSON (a parse failure answers `400`
-   * without calling this or reaching the upstream); the response stream is never touched by this
-   * hook, on any route. Whatever this throws also surfaces as a `400`.
+   * this exists at all — most engines need no request-side rewriting and should leave it undefined,
+   * and `rewritableRoutes` empty/absent). `route` is the request path with no query string, decoded
+   * and already matched against `routes` by the gateway. The gateway calls this only for a request
+   * whose route is listed in `rewritableRoutes`, only on `POST`, only with a non-empty body, under a
+   * byte cap enforced while the body streams in (over it answers `413` before this is even called,
+   * without buffering the rest), and only once the body parses as JSON (a parse failure answers
+   * `400` without calling this or reaching the upstream). This may throw to reject the request
+   * outright — e.g. a client-supplied value that is present but not usable — which the gateway turns
+   * into an OpenAI-shaped `400` using the thrown `Error`'s own `message` when it is an `Error`
+   * instance; it must not silently substitute a different value for something invalid and forward
+   * that instead. The response stream is never touched by this hook, on any route, streamed or not.
    */
   rewriteRequestBody?(route: string, body: unknown, settings: S): unknown
 }
@@ -121,17 +143,31 @@ function invalid(message: string, detail: string): never {
   throw new AtomicCoreError('INVALID_ARGUMENT', message, detail)
 }
 
+/** Same shape a readiness path must have; a declared route is held to the same rule. */
+function assertRoutePath(path: string, what: string): void {
+  if (!READINESS_PATH.test(path) || path.split('/').some((segment) => segment === '..')) {
+    invalid(`${what} is not an absolute path with no query, fragment or \`..\`.`, path)
+  }
+}
+
 function assertAdapterShape(adapter: ManagedTextAdapter): void {
   if (adapter.id === '') invalid('A managed text adapter needs an id.', adapter.id)
   if (!Number.isInteger(adapter.contractVersion) || adapter.contractVersion < 1) {
     invalid('A managed text adapter contract version is a positive integer.', String(adapter.contractVersion))
   }
   const { path, expectedStatus } = adapter.readiness
-  if (!READINESS_PATH.test(path) || path.split('/').some((segment) => segment === '..')) {
-    invalid('A readiness path is an absolute path with no query, fragment or `..`.', path)
-  }
+  assertRoutePath(path, 'A readiness path')
   if (!Number.isInteger(expectedStatus) || expectedStatus < 200 || expectedStatus > 299) {
     invalid('A readiness probe expects a 2xx status.', String(expectedStatus))
+  }
+  if (adapter.routes.length === 0) {
+    invalid('A managed text adapter needs at least one declared route.', adapter.id)
+  }
+  for (const route of adapter.routes) assertRoutePath(route, 'A declared route')
+  for (const route of adapter.rewritableRoutes ?? []) {
+    if (!adapter.routes.includes(route)) {
+      invalid('A rewritable route must also be a declared route.', route)
+    }
   }
 }
 
