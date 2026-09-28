@@ -16,14 +16,15 @@
  * independent of whether the checkpoint would otherwise load, so a tampered curated listing is
  * reported as `MANAGED_METADATA_INVALID` rather than whatever compatibility error the tampered
  * files happen to also trigger. Only then: quantization format recognised, architecture supported,
- * the format's compute-capability rule, and finally weight bytes plus the KV-cache reserve against
- * the selected card's free memory.
+ * format present in this descriptor's own matrix, the file listing has at least one weight file,
+ * the format's compute-capability rule (minimum and exclusion list), and finally weight bytes plus
+ * the KV-cache reserve against the selected card's free memory.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../contracts/index.js'
 import { inventoryDigest } from '../environment/index.js'
-import { isGgufCheckpoint, quantizationFormat } from './quant-format.js'
+import { describeUnrecognizedQuantization, isGgufCheckpoint, quantizationFormat } from './quant-format.js'
 import type { JsonObject } from './quant-format.js'
 
 /** One file of the revision's listing, as the route contract carries it (spec `tensorrt-llm-models`). */
@@ -67,22 +68,70 @@ export function selectLaunchGpu(gpus: readonly GpuFacts[], gpuId?: string): GpuF
   return gpus.reduce((best, gpu) => ((gpu.total_vram_bytes ?? 0) > (best.total_vram_bytes ?? 0) ? gpu : best))
 }
 
-/** Files that count as checkpoint weights for the memory check: every `*.safetensors` shard. */
-const WEIGHT_FILE_SUFFIX = '.safetensors'
+const SAFETENSORS_SUFFIX = '.safetensors'
+const CONSOLIDATED_PREFIX = 'consolidated'
+const LEGACY_WEIGHT_SUFFIXES = ['.bin', '.pth']
+/** `model.safetensors`, or a sharded `model-00001-of-00003.safetensors` (any digit width). */
+const MODEL_SHARD_PATTERN = /^model(-\d+-of-\d+)?\.safetensors$/i
 
-/**
- * `config.json`, tokenizer files and a legacy `pytorch_model*.bin` shard are not weights this
- * engine will read: TensorRT-LLM only loads safetensors checkpoints (see `quant-format.ts` — every
- * format this engine recognises comes from a safetensors-era checkpoint; `fp8` without the right
- * block size, `awq`/`gptq` and every other `quant_method` it cannot load are already rejected by
- * format before `weightBytes` is asked for).
- */
-export function isWeightFile(path: string): boolean {
-  return path.toLowerCase().endsWith(WEIGHT_FILE_SUFFIX)
+/** A file at the root of the listing: a variant subfolder, an ONNX export, ... never counts as a weight. */
+function isRootLevel(path: string): boolean {
+  return !path.includes('/')
 }
 
+/**
+ * A root-level `*.safetensors` file that is not a `consolidated*` redundant export. Some
+ * repositories (Mistral's own releases are the common case) ship both the standard HF
+ * `model-NNNNN-of-MMMMM.safetensors` shards *and* a `consolidated.safetensors` covering the exact
+ * same weights in one file, for their own inference stack; treating both as weights would
+ * double-count the checkpoint's real size.
+ */
+export function isWeightFile(path: string): boolean {
+  return (
+    isRootLevel(path) &&
+    path.toLowerCase().endsWith(SAFETENSORS_SUFFIX) &&
+    !path.toLowerCase().startsWith(CONSOLIDATED_PREFIX)
+  )
+}
+
+function isPreferredShard(path: string): boolean {
+  return isRootLevel(path) && MODEL_SHARD_PATTERN.test(path)
+}
+
+function isAnySafetensors(path: string): boolean {
+  return isRootLevel(path) && path.toLowerCase().endsWith(SAFETENSORS_SUFFIX)
+}
+
+function isLegacyWeightFile(path: string): boolean {
+  if (!isRootLevel(path)) return false
+  const lower = path.toLowerCase()
+  return LEGACY_WEIGHT_SUFFIXES.some((suffix) => lower.endsWith(suffix))
+}
+
+const sumSizes = (files: readonly CheckpointFile[]): number => files.reduce((sum, file) => sum + file.size, 0)
+
+/**
+ * Weight bytes for the memory check. Root-level files only. Prefers the standard
+ * `model[-NNNNN-of-MMMMM].safetensors` shard naming when present — which also excludes a
+ * `consolidated*.safetensors` sitting next to it (the Mistral double-count case above) — because
+ * that naming alone identifies the checkpoint's real weights unambiguously. When no file matches
+ * that preferred naming, every other root-level `*.safetensors` file is summed instead (covers a
+ * repository that ships only `consolidated.safetensors`, or any other single-file naming). Only
+ * when there is no safetensors file at all does a legacy `*.bin`/`*.pth` checkpoint count, so a
+ * checkpoint this engine cannot load (it only reads safetensors) still gets an honest, non-zero
+ * `weight_bytes` rather than a silent `0` that would let `checkModelCompatibility` report `ok` on
+ * any card. A listing with no weight file under any of these rules yields `0`, which
+ * `checkModelCompatibility` itself turns into `MODEL_INCOMPATIBLE`, never a false `ok`.
+ */
 export function weightBytes(files: readonly CheckpointFile[]): number {
-  return files.filter((file) => isWeightFile(file.path)).reduce((sum, file) => sum + file.size, 0)
+  const preferredShards = files.filter((file) => isPreferredShard(file.path))
+  if (preferredShards.length > 0) return sumSizes(preferredShards)
+
+  const anySafetensors = files.filter((file) => isAnySafetensors(file.path))
+  if (anySafetensors.length > 0) return sumSizes(anySafetensors)
+
+  const legacy = files.filter((file) => isLegacyWeightFile(file.path))
+  return sumSizes(legacy)
 }
 
 /**
@@ -107,7 +156,11 @@ function freeMemoryBytes(gpu: GpuFacts, hostMemAvailableBytes: number): number {
   return gpu.total_vram_bytes === null ? hostMemAvailableBytes : (gpu.free_vram_bytes ?? 0)
 }
 
-/** Numeric compare of two `"major.minor[.patch...]"` compute-capability strings, `a - b`'s sign. */
+/**
+ * Numeric compare of two `"major.minor[.patch...]"` compute-capability strings, `a - b`'s sign.
+ * `NaN` when either side has a non-numeric component (an unparseable `compute_capability`) —
+ * callers must never treat a `NaN` result as "not less than", which would fail open.
+ */
 function compareComputeCapability(a: string, b: string): number {
   const partsA = a.split('.').map((part) => Number.parseInt(part, 10))
   const partsB = b.split('.').map((part) => Number.parseInt(part, 10))
@@ -120,11 +173,21 @@ function compareComputeCapability(a: string, b: string): number {
   return 0
 }
 
+/**
+ * Whether `actual` meets `min`. `false` whenever `compareComputeCapability` cannot parse either
+ * side (`NaN`): an unparseable compute capability is treated as incompatible, never as "compatible
+ * by default" — `NaN < 0` is `false`, so comparing the raw sign directly would fail open.
+ */
+function computeCapabilityAtLeast(actual: string, min: string): boolean {
+  const compared = compareComputeCapability(actual, min)
+  return !Number.isNaN(compared) && compared >= 0
+}
+
 /** Whether `format` is loadable on `gpu` per the descriptor's per-format compute-capability rule. */
 function formatAllowedOnGpu(descriptor: RuntimeDescriptor, format: string, gpu: GpuFacts): boolean {
   const support = descriptor.quantization.find((entry) => entry.format === format)
   if (support === undefined) return false
-  if (compareComputeCapability(gpu.compute_capability, support.min_compute_capability) < 0) return false
+  if (!computeCapabilityAtLeast(gpu.compute_capability, support.min_compute_capability)) return false
   return !support.excluded_compute_capabilities.includes(gpu.compute_capability)
 }
 
@@ -182,10 +245,16 @@ function buildCompatibility(
 }
 
 /**
- * The full verdict. Throws `AtomicCoreError('INVALID_ARGUMENT', …)` only when the host has no GPU
- * at all (`gpus` empty) — every other input, however incompatible, is a normal `verdict.ok: false`
- * answer, never a thrown error (design D12: the point of this check is to hand back numbers, not to
- * fail the request).
+ * The full verdict. Throws `AtomicCoreError('INVALID_ARGUMENT', …)` for two caller-input problems
+ * that are never a fact about the checkpoint itself: the host has no GPU at all (`gpus` empty), or
+ * the file listing names `hf_quant_config.json` while `hf_quant_config_json` is `null` (the caller
+ * said the file exists but did not send its content, so the format naming rule cannot be trusted).
+ * `inventoryDigest` can also throw `AtomicCoreError('MANAGED_METADATA_INVALID', …)` for a curated
+ * match whose file listing is itself malformed (an empty or repeated path, a NUL byte, a
+ * non-integer size — see `src/runtime/environment/inventory.ts`), before this function gets a
+ * chance to compare digests. Every other input, however incompatible, is a normal
+ * `verdict.ok: false` answer, never a thrown error (design D12: the point of this check is to hand
+ * back numbers, not to fail the request).
  */
 export function checkModelCompatibility(
   input: ModelCheckInput,
@@ -193,6 +262,16 @@ export function checkModelCompatibility(
   gpus: readonly GpuFacts[],
   hostMemAvailableBytes: number
 ): ModelCompatibility {
+  if (
+    input.files.some((file) => file.path === 'hf_quant_config.json') &&
+    input.hf_quant_config_json === null
+  ) {
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      'The file listing includes hf_quant_config.json but hf_quant_config_json was not provided.'
+    )
+  }
+
   const selected = selectLaunchGpu(gpus, input.gpu_id)
   if (selected === null) {
     throw new AtomicCoreError('INVALID_ARGUMENT', 'No GPU is available to check compatibility against.')
@@ -257,7 +336,7 @@ export function checkModelCompatibility(
         ok: false,
         error: {
           code: 'MODEL_INCOMPATIBLE',
-          message: 'Unsupported quantization format.',
+          message: `Unsupported quantization format: ${describeUnrecognizedQuantization(input.config_json, input.hf_quant_config_json)}.`,
           details: `repository=${input.repository} revision=${input.revision}`,
         },
       },
@@ -292,7 +371,7 @@ export function checkModelCompatibility(
         ok: false,
         error: {
           code: 'MODEL_INCOMPATIBLE',
-          message: 'Unsupported quantization format.',
+          message: `Unsupported quantization format: "${format}" is not part of this engine's descriptor.`,
           details: format,
         },
       },
@@ -300,7 +379,31 @@ export function checkModelCompatibility(
     )
   }
 
-  if (compareComputeCapability(selected.compute_capability, formatSupport.min_compute_capability) < 0) {
+  if (weightBytesTotal === 0) {
+    return buildCompatibility(
+      context,
+      {
+        ok: false,
+        error: {
+          code: 'MODEL_INCOMPATIBLE',
+          message: 'No checkpoint weight files were found in the file listing.',
+        },
+      },
+      []
+    )
+  }
+
+  // Known from here on: architecture and format are both fine, so any card whose own CC clears
+  // this format and has room is a real alternative — compute it once and reuse it in every
+  // remaining branch, including the two CC-failure branches below, so a caller whose selected card
+  // fails on CC still sees a card that would work (spec: "report which other host cards it would
+  // fit").
+  const reserveBytes = kvCacheReserveBytes(weightBytesTotal)
+  const neededBytes = weightBytesTotal + reserveBytes
+  const freeBytes = freeMemoryBytes(selected, hostMemAvailableBytes)
+  const fitsOther = fitsOtherGpus(gpus, selected, descriptor, format, neededBytes, hostMemAvailableBytes)
+
+  if (!computeCapabilityAtLeast(selected.compute_capability, formatSupport.min_compute_capability)) {
     return buildCompatibility(
       context,
       {
@@ -311,7 +414,7 @@ export function checkModelCompatibility(
           details: `required=${formatSupport.min_compute_capability} actual=${selected.compute_capability}`,
         },
       },
-      []
+      fitsOther
     )
   }
 
@@ -326,14 +429,9 @@ export function checkModelCompatibility(
           details: `format=${format} compute_capability=${selected.compute_capability}`,
         },
       },
-      []
+      fitsOther
     )
   }
-
-  const reserveBytes = kvCacheReserveBytes(weightBytesTotal)
-  const neededBytes = weightBytesTotal + reserveBytes
-  const freeBytes = freeMemoryBytes(selected, hostMemAvailableBytes)
-  const fitsOther = fitsOtherGpus(gpus, selected, descriptor, format, neededBytes, hostMemAvailableBytes)
 
   if (neededBytes > freeBytes) {
     return buildCompatibility(

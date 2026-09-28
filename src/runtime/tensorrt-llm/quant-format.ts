@@ -52,12 +52,14 @@ export function isGgufCheckpoint(files: readonly { path: string }[]): boolean {
 
 /**
  * Step 1: `hf_quant_config.json` present (NVIDIA ModelOpt) → its `quantization.quant_algo`,
- * lower-cased and renamed.
+ * lower-cased and renamed. The README rule stops here whenever the file is present at all — a
+ * present-but-empty/missing `quant_algo` (e.g. a ModelOpt KV-cache-only export) is `null`
+ * (unrecognised), never a reason to fall through to `config.json`/`dtype`.
  */
-function fromHfQuantConfig(hfQuantConfigJson: JsonObject): string | undefined {
+function fromHfQuantConfig(hfQuantConfigJson: JsonObject): string | null {
   const quantization = asObject(hfQuantConfigJson.quantization)
   const quantAlgo = quantization === undefined ? undefined : asNonEmptyString(quantization.quant_algo)
-  return quantAlgo === undefined ? undefined : renameFp8PbWo(quantAlgo)
+  return quantAlgo === undefined ? null : renameFp8PbWo(quantAlgo)
 }
 
 /**
@@ -98,16 +100,48 @@ function fromDtype(configJson: JsonObject): string | null {
 /**
  * The naming rule, applied in order. `null` means unrecognised: the caller must reject it as an
  * unsupported format rather than reporting `bf16`/`fp16` by default.
+ *
+ * `hf_quant_config.json` being present at all stops the rule at step 1 — its own `null` (an
+ * unrecognised or missing `quant_algo`) is final and never falls through to `config.json`/`dtype`,
+ * matching the README: "if hf_quant_config.json is present ... the format is its quant_algo".
  */
 export function quantizationFormat(
   configJson: JsonObject,
   hfQuantConfigJson: JsonObject | null
 ): string | null {
   if (hfQuantConfigJson !== null) {
-    const fromHf = fromHfQuantConfig(hfQuantConfigJson)
-    if (fromHf !== undefined) return fromHf
+    return fromHfQuantConfig(hfQuantConfigJson)
   }
   const fromConfig = fromConfigQuantizationConfig(configJson)
   if (fromConfig !== undefined) return fromConfig
   return fromDtype(configJson)
+}
+
+/**
+ * What the naming rule actually saw when it did not recognise a format, for error messages only —
+ * never consulted to decide the format itself (that is `quantizationFormat`'s job alone). Mirrors
+ * `quantizationFormat`'s own step order, so the two must be kept in sync.
+ */
+export function describeUnrecognizedQuantization(
+  configJson: JsonObject,
+  hfQuantConfigJson: JsonObject | null
+): string {
+  if (hfQuantConfigJson !== null) {
+    const quantization = asObject(hfQuantConfigJson.quantization)
+    const quantAlgo = quantization?.quant_algo
+    return `hf_quant_config.json quantization.quant_algo=${JSON.stringify(quantAlgo ?? null)}`
+  }
+  const quantizationConfig = asObject(configJson.quantization_config)
+  if (quantizationConfig !== undefined) {
+    const quantMethod = quantizationConfig.quant_method
+    if (quantMethod === 'modelopt') {
+      return `config.json quantization_config.quant_method="modelopt" quant_algo=${JSON.stringify(quantizationConfig.quant_algo ?? null)}`
+    }
+    if (quantMethod === 'fp8') {
+      return `config.json quantization_config.quant_method="fp8" weight_block_size=${JSON.stringify(quantizationConfig.weight_block_size ?? null)}`
+    }
+    return `config.json quantization_config.quant_method=${JSON.stringify(quantMethod ?? null)}`
+  }
+  const dtype = configJson.dtype ?? configJson.torch_dtype
+  return `config.json dtype=${JSON.stringify(dtype ?? null)}`
 }

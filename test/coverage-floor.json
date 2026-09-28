@@ -1097,6 +1097,18 @@
     "functions": 100,
     "lines": 99
   },
+  "src/runtime/tensorrt-llm/compatibility.ts": {
+    "statements": 99,
+    "branches": 90,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/runtime/tensorrt-llm/quant-format.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/clients.ts": {
     "statements": 100,
     "branches": 100,

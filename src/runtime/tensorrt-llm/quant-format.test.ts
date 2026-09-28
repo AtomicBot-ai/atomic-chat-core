@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { isGgufCheckpoint, quantizationFormat, type JsonObject } from './quant-format.js'
+import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
+import { parseRuntimeDescriptor } from '../environment/index.js'
+import {
+  describeUnrecognizedQuantization,
+  isGgufCheckpoint,
+  quantizationFormat,
+  type JsonObject,
+} from './quant-format.js'
 
 describe('quantizationFormat', () => {
   // Table-driven over the conf README naming rule, "Runtime descriptors" → `quantization[].format`
@@ -122,16 +129,82 @@ describe('quantizationFormat', () => {
       expected: null,
     },
     {
-      name: 'malformed hf_quant_config.json (no quant_algo) falls through to config.json',
+      name: 'hf_quant_config.json present but quant_algo missing is unrecognised, never falls through to config.json',
       config: { dtype: 'bfloat16' },
       hfQuantConfig: { quantization: {} },
-      expected: 'bf16',
+      expected: null,
+    },
+    {
+      name: 'hf_quant_config.json present but with no quantization block at all is unrecognised, never falls through',
+      config: { quantization_config: { quant_method: 'modelopt', quant_algo: 'NVFP4' } },
+      hfQuantConfig: {},
+      expected: null,
     },
   ]
 
   for (const testCase of cases) {
     it(testCase.name, () => {
       expect(quantizationFormat(testCase.config, testCase.hfQuantConfig)).toBe(testCase.expected)
+    })
+  }
+})
+
+describe('describeUnrecognizedQuantization', () => {
+  it('names the hf_quant_config.json quant_algo it saw (including when absent)', () => {
+    expect(describeUnrecognizedQuantization({}, { quantization: { quant_algo: null } })).toBe(
+      'hf_quant_config.json quantization.quant_algo=null'
+    )
+    expect(describeUnrecognizedQuantization({}, { quantization: {} })).toBe(
+      'hf_quant_config.json quantization.quant_algo=null'
+    )
+  })
+
+  it('names the config.json quant_method for a modelopt checkpoint with no quant_algo', () => {
+    expect(
+      describeUnrecognizedQuantization({ quantization_config: { quant_method: 'modelopt' } }, null)
+    ).toBe('config.json quantization_config.quant_method="modelopt" quant_algo=null')
+  })
+
+  it('names the weight_block_size for an fp8 checkpoint with the wrong block size', () => {
+    expect(
+      describeUnrecognizedQuantization(
+        { quantization_config: { quant_method: 'fp8', weight_block_size: [64, 64] } },
+        null
+      )
+    ).toBe('config.json quantization_config.quant_method="fp8" weight_block_size=[64,64]')
+  })
+
+  it('names an unsupported quant_method such as awq or gptq', () => {
+    expect(describeUnrecognizedQuantization({ quantization_config: { quant_method: 'awq' } }, null)).toBe(
+      'config.json quantization_config.quant_method="awq"'
+    )
+  })
+
+  it('names the dtype it saw, including when absent', () => {
+    expect(describeUnrecognizedQuantization({ dtype: 'float32' }, null)).toBe('config.json dtype="float32"')
+    expect(describeUnrecognizedQuantization({}, null)).toBe('config.json dtype=null')
+  })
+})
+
+describe('reachability: every format the real descriptor fixture lists is reachable from some checkpoint metadata', () => {
+  const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
+
+  it('lists at least the formats this naming rule is known to produce (sanity on the fixture itself)', () => {
+    expect(descriptor.quantization.length).toBeGreaterThan(0)
+  })
+
+  for (const support of descriptor.quantization) {
+    it(`"${support.format}" is reachable`, () => {
+      if (support.format === 'bf16') {
+        expect(quantizationFormat({ dtype: 'bfloat16' }, null)).toBe('bf16')
+      } else if (support.format === 'fp16') {
+        expect(quantizationFormat({ dtype: 'float16' }, null)).toBe('fp16')
+      } else {
+        // Every other format name in the descriptor is exactly a ModelOpt quant_algo, spelled
+        // however the descriptor spells it (the naming rule only lower-cases and renames
+        // fp8_pb_wo), so hf_quant_config.json's quant_algo reaches every one of them directly.
+        expect(quantizationFormat({}, { quantization: { quant_algo: support.format } })).toBe(support.format)
+      }
     })
   }
 })

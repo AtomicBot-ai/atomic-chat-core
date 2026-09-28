@@ -11,6 +11,15 @@
 // brief asks for when such fixtures do not exist.
 //
 //   node scripts/verify-curated-inventory-digests.mjs [path/to/tensorrt-llm.json]
+//   node scripts/verify-curated-inventory-digests.mjs --write-fixtures test/fixtures/tensorrt-llm/hf-listings
+//
+// Plain mode only prints OK/FAIL per curated model. `--write-fixtures <dir>` additionally writes
+// each curated model's raw Hugging Face API response body *verbatim* to `<dir>/<owner>__<name>.json`
+// (GET only, no token — every `curated_models[]` repository must stay ungated, conf README), so
+// `src/runtime/tensorrt-llm/curated-inventory-digests.test.ts` can replay the exact same listings
+// through core's own `inventoryDigest` without ever touching the network itself. Run this again,
+// by hand, only when the descriptor's curated list changes (a new engine tag, a re-resolved
+// revision, ...); the written fixtures are what the test suite actually checks against afterwards.
 //
 // The digest algorithm below is copied from src/runtime/environment/inventory.ts (which is itself
 // required to match atomic-chat-conf's .github/scripts/inventory-digest.mjs byte-for-byte, per
@@ -19,7 +28,7 @@
 // same reason. If this ever needs to change, change src/runtime/environment/inventory.ts first and
 // mirror the change here; inventory.test.ts pins the shared test vectors that prove the two agree.
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const NUL = String.fromCharCode(0)
@@ -58,7 +67,8 @@ function filesFromHfSiblings(siblings) {
   })
 }
 
-async function fetchInventoryDigest(repository, revision) {
+/** GET-only, no token: every curated repository must stay ungated (conf README). */
+async function fetchListing(repository, revision) {
   const url = `https://huggingface.co/api/models/${repository}/revision/${encodeURIComponent(revision)}?blobs=true&files_metadata=true`
   const response = await fetch(url)
   if (!response.ok) throw new Error(`Hugging Face returned HTTP ${response.status} for ${url}`)
@@ -67,21 +77,44 @@ async function fetchInventoryDigest(repository, revision) {
   if (body.sha !== revision) {
     throw new Error(`Asked for revision ${revision}, Hugging Face resolved ${body.sha}`)
   }
-  return inventoryDigest(filesFromHfSiblings(body.siblings))
+  return body
+}
+
+/** `owner/name` -> a safe, unambiguous filename (`/` cannot appear in a path segment). */
+function fixtureFileName(repository) {
+  return `${repository.replace(/\//g, '__')}.json`
+}
+
+function parseArgs(args) {
+  const writeIndex = args.indexOf('--write-fixtures')
+  const writeFixturesDir = writeIndex > -1 ? args[writeIndex + 1] : undefined
+  if (writeIndex > -1 && !writeFixturesDir) {
+    throw new Error('--write-fixtures needs a directory argument')
+  }
+  const positional = args.filter((arg, index) => arg !== '--write-fixtures' && index !== writeIndex + 1)
+  return { fixturePath: positional[0], writeFixturesDir }
 }
 
 async function main(args) {
-  const fixturePath = args[0]
-    ? new URL(args[0], `file://${process.cwd()}/`)
+  const { fixturePath: fixturePathArg, writeFixturesDir } = parseArgs(args)
+  const fixturePath = fixturePathArg
+    ? new URL(fixturePathArg, `file://${process.cwd()}/`)
     : new URL('../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url)
   const descriptor = JSON.parse(readFileSync(fileURLToPath(fixturePath), 'utf8'))
   const curatedModels = descriptor.curated_models ?? []
   console.log(`Verifying ${curatedModels.length} curated model(s) against the live Hugging Face API…`)
+  if (writeFixturesDir) mkdirSync(writeFixturesDir, { recursive: true })
 
   let failures = 0
   for (const model of curatedModels) {
     try {
-      const actual = await fetchInventoryDigest(model.repository, model.revision)
+      const listing = await fetchListing(model.repository, model.revision)
+      if (writeFixturesDir) {
+        const dest = `${writeFixturesDir}/${fixtureFileName(model.repository)}`
+        writeFileSync(dest, `${JSON.stringify(listing, null, 2)}\n`)
+        console.log(`     wrote ${dest}`)
+      }
+      const actual = inventoryDigest(filesFromHfSiblings(listing.siblings))
       const ok = actual === model.inventory_digest
       if (!ok) failures += 1
       console.log(

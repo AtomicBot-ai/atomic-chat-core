@@ -101,14 +101,21 @@ function baseInput(overrides: Partial<ModelCheckInput> = {}): ModelCheckInput {
 }
 
 describe('checkModelCompatibility', () => {
-  it('a 75 GB FP8 checkpoint on an 80 GB datacenter card accounts for the KV reserve and reports numbers, with no consumer-card cap', () => {
-    const descriptor = baseDescriptor()
-    const selected = gpu({
+  // Both cases below share the same real-world 80 GiB datacenter card (an H100 reports 81,559 MiB
+  // free — conf README note), so the only variable is the checkpoint's own weight size: this is the
+  // deterministic pair the KV reserve is supposed to distinguish, not a single case that can land
+  // either way.
+  const datacenterCard = () =>
+    gpu({
       gpu_id: 'gpu-0',
       compute_capability: '9.0',
       total_vram_bytes: 85_899_345_920, // 80 GiB nominal
       free_vram_bytes: 85_532_850_176, // an H100 reports 81,559 MiB free (conf README note)
     })
+
+  it('a 75 GB FP8 checkpoint on an 80 GB datacenter card fits once the KV reserve is added, with no consumer-card cap', () => {
+    const descriptor = baseDescriptor()
+    const selected = datacenterCard()
     const input = baseInput({
       config_json: { architectures: ['LlamaForCausalLM'] },
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
@@ -120,15 +127,35 @@ describe('checkModelCompatibility', () => {
     expect(result.quantization_format).toBe('fp8')
     expect(result.weight_bytes).toBe(75_000_000_000)
     expect(result.checked_gpu_id).toBe('gpu-0')
-    // Whichever way the reserve tips the verdict, the numbers must be there — never a hardcoded cap.
-    if (!result.verdict.ok) {
-      expect(result.verdict.error.details).toContain('weight_bytes=75000000000')
-    } else {
-      expect(result.verdict).toEqual({ ok: true })
-    }
+    // 75,000,000,000 + 10% reserve (7,500,000,000) = 82,500,000,000 < 85,532,850,176 free.
+    expect(result.verdict).toEqual({ ok: true })
   })
 
-  it('40 GB of weights: does not fit the selected card (22 GB free) but fits a second card (46 GB free)', () => {
+  it('a 79 GB FP8 checkpoint on the same 80 GB datacenter card is a real, numbered shortage once the KV reserve is added', () => {
+    const descriptor = baseDescriptor()
+    const selected = datacenterCard()
+    const input = baseInput({
+      config_json: { architectures: ['LlamaForCausalLM'] },
+      hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
+      files: weightFiles(79_000_000_000),
+    })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0)
+
+    expect(result.weight_bytes).toBe(79_000_000_000)
+    // 79,000,000,000 + 10% reserve (7,900,000,000) = 86,900,000,000 > 85,532,850,176 free.
+    expect(result.verdict).toEqual({
+      ok: false,
+      error: {
+        code: 'MODEL_INCOMPATIBLE',
+        message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
+        details:
+          'weight_bytes=79000000000 kv_reserve_bytes=7900000000 needed_bytes=86900000000 free_bytes=85532850176',
+      },
+    })
+  })
+
+  it("40 GB of weights: does not fit the selected card (22 GB free) but fits a second card (46 GB free), with the selected card's own numbers reported", () => {
     const descriptor = baseDescriptor()
     const selected = gpu({
       gpu_id: 'gpu-a',
@@ -141,9 +168,15 @@ describe('checkModelCompatibility', () => {
     const result = checkModelCompatibility(input, descriptor, [selected, other], 0)
 
     expect(result.checked_gpu_id).toBe('gpu-a')
+    // 40,000,000,000 + 10% reserve (4,000,000,000) = 44,000,000,000 > 22,000,000,000 free on gpu-a.
     expect(result.verdict).toEqual({
       ok: false,
-      error: expect.objectContaining({ code: 'MODEL_INCOMPATIBLE' }),
+      error: {
+        code: 'MODEL_INCOMPATIBLE',
+        message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
+        details:
+          'weight_bytes=40000000000 kv_reserve_bytes=4000000000 needed_bytes=44000000000 free_bytes=22000000000',
+      },
     })
     expect(result.fits_other_gpus).toEqual(['gpu-b'])
   })
@@ -162,17 +195,25 @@ describe('checkModelCompatibility', () => {
     expect(result.verdict).toEqual({ ok: true })
   })
 
-  it('sm120 (12.0) with fp8_block_scales, an excluded compute capability above the format minimum', () => {
+  it('sm120 (12.0) with fp8_block_scales, an excluded compute capability above the format minimum — fits_other_gpus is still reported', () => {
     const descriptor = baseDescriptor()
     const selected = gpu({ gpu_id: 'gpu-0', compute_capability: '12.0' })
+    // A second card whose CC (9.0) actually supports fp8_block_scales, with plenty of free memory.
+    const other = gpu({
+      gpu_id: 'gpu-1',
+      compute_capability: '9.0',
+      total_vram_bytes: 80_000_000_000,
+      free_vram_bytes: 80_000_000_000,
+    })
     const input = baseInput({
       config_json: {
         architectures: ['LlamaForCausalLM'],
         quantization_config: { quant_method: 'fp8', weight_block_size: [128, 128] },
       },
+      gpu_id: 'gpu-0',
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0)
+    const result = checkModelCompatibility(input, descriptor, [selected, other], 0)
 
     expect(result.quantization_format).toBe('fp8_block_scales')
     expect(result.verdict.ok).toBe(false)
@@ -181,24 +222,141 @@ describe('checkModelCompatibility', () => {
       expect(result.verdict.error.message).toContain('not supported by this engine release')
       expect(result.verdict.error.details).toBe('format=fp8_block_scales compute_capability=12.0')
     }
+    // Regression: fits_other_gpus must not be dropped just because the selected card failed on CC.
+    expect(result.fits_other_gpus).toEqual(['gpu-1'])
   })
 
-  it('NVFP4 on compute capability 8.9 is incompatible, reporting both the required and actual CC', () => {
+  it('NVFP4 on compute capability 8.9 is incompatible, reporting both the required and actual CC — fits_other_gpus is still reported', () => {
     const descriptor = baseDescriptor()
     const selected = gpu({ gpu_id: 'gpu-0', compute_capability: '8.9' })
+    // A second card whose CC (10.0) actually supports NVFP4, with plenty of free memory.
+    const other = gpu({
+      gpu_id: 'gpu-1',
+      compute_capability: '10.0',
+      total_vram_bytes: 32_000_000_000,
+      free_vram_bytes: 32_000_000_000,
+    })
     const input = baseInput({
       config_json: {
         architectures: ['LlamaForCausalLM'],
         quantization_config: { quant_method: 'modelopt', quant_algo: 'NVFP4' },
       },
+      gpu_id: 'gpu-0',
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0)
+    const result = checkModelCompatibility(input, descriptor, [selected, other], 0)
 
     expect(result.quantization_format).toBe('nvfp4')
     expect(result.verdict.ok).toBe(false)
     if (!result.verdict.ok) {
       expect(result.verdict.error.details).toBe('required=10.0 actual=8.9')
+    }
+    // Regression: fits_other_gpus was previously dropped on the min-CC failure branch.
+    expect(result.fits_other_gpus).toEqual(['gpu-1'])
+  })
+
+  it('an unparseable compute capability is treated as incompatible, never as fail-open', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0', compute_capability: 'unknown' })
+    const input = baseInput({
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+    })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0)
+
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok) {
+      expect(result.verdict.error.code).toBe('MODEL_INCOMPATIBLE')
+      expect(result.verdict.error.details).toBe('required=8.0 actual=unknown')
+    }
+  })
+
+  it('an unparseable compute capability on another card excludes it from fits_other_gpus too', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0', compute_capability: '8.0' })
+    const brokenReport = gpu({ gpu_id: 'gpu-1', compute_capability: 'unknown', total_vram_bytes: 999 })
+    // Too small to fit regardless, so only the CC parsing bug could wrongly list it.
+    const input = baseInput({ files: weightFiles(40_000_000_000) })
+
+    const result = checkModelCompatibility(input, descriptor, [selected, brokenReport], 0)
+
+    expect(result.fits_other_gpus).toEqual([])
+  })
+
+  it('a checkpoint with no weight files at all is MODEL_INCOMPATIBLE, never a false ok', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0' })
+    const input = baseInput({
+      files: [
+        { path: 'config.json', size: 1_024, sha256: null },
+        { path: 'tokenizer.json', size: 17_000, sha256: null },
+      ],
+    })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0)
+
+    expect(result.weight_bytes).toBe(0)
+    expect(result.verdict).toEqual({
+      ok: false,
+      error: {
+        code: 'MODEL_INCOMPATIBLE',
+        message: 'No checkpoint weight files were found in the file listing.',
+      },
+    })
+  })
+
+  it('a format the naming rule does not recognise is rejected, naming what it saw', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0' })
+    const input = baseInput({ config_json: { architectures: ['LlamaForCausalLM'], dtype: 'float32' } })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0)
+
+    expect(result.quantization_format).toBeNull()
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok) {
+      expect(result.verdict.error.code).toBe('MODEL_INCOMPATIBLE')
+      expect(result.verdict.error.message).toBe(
+        'Unsupported quantization format: config.json dtype="float32".'
+      )
+    }
+  })
+
+  it('a format the naming rule recognises but this descriptor does not list is rejected by name', () => {
+    // w4a16_awq is a real descriptor format (the published fixture lists it); this test descriptor
+    // deliberately does not, so the naming rule succeeds but the descriptor lookup fails.
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0' })
+    const input = baseInput({
+      config_json: { architectures: ['LlamaForCausalLM'] },
+      hf_quant_config_json: { quantization: { quant_algo: 'w4a16_awq' } },
+    })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0)
+
+    expect(result.quantization_format).toBe('w4a16_awq')
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok) {
+      expect(result.verdict.error.code).toBe('MODEL_INCOMPATIBLE')
+      expect(result.verdict.error.details).toBe('w4a16_awq')
+    }
+  })
+
+  it('the file listing names hf_quant_config.json but its content was not provided', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0' })
+    const input = baseInput({
+      hf_quant_config_json: null,
+      files: [...weightFiles(4_000_000_000), { path: 'hf_quant_config.json', size: 200, sha256: null }],
+    })
+
+    expect(() => checkModelCompatibility(input, descriptor, [selected], 0)).toThrow(AtomicCoreError)
+    try {
+      checkModelCompatibility(input, descriptor, [selected], 0)
+      expect.unreachable()
+    } catch (error) {
+      expect(error).toBeInstanceOf(AtomicCoreError)
+      expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
     }
   })
 
@@ -324,7 +482,13 @@ describe('checkModelCompatibility', () => {
 
   it('throws INVALID_ARGUMENT when the host has no GPU at all', () => {
     const descriptor = baseDescriptor()
-    expect(() => checkModelCompatibility(baseInput(), descriptor, [], 0)).toThrow(AtomicCoreError)
+    try {
+      checkModelCompatibility(baseInput(), descriptor, [], 0)
+      expect.unreachable()
+    } catch (error) {
+      expect(error).toBeInstanceOf(AtomicCoreError)
+      expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+    }
   })
 })
 
@@ -335,6 +499,13 @@ describe('selectLaunchGpu', () => {
 
   it('picks gpu_id when given and present on the host', () => {
     expect(selectLaunchGpu([a, b], 'a')?.gpu_id).toBe('a')
+  })
+
+  it('breaks a tie in total memory by keeping the earlier candidate, deterministically', () => {
+    const tiedA = gpu({ gpu_id: 'tied-a', total_vram_bytes: 24_000_000_000 })
+    const tiedB = gpu({ gpu_id: 'tied-b', total_vram_bytes: 24_000_000_000 })
+    expect(selectLaunchGpu([tiedA, tiedB])?.gpu_id).toBe('tied-a')
+    expect(selectLaunchGpu([tiedB, tiedA])?.gpu_id).toBe('tied-b')
   })
 
   it('falls back to the most total memory when gpu_id is omitted', () => {
@@ -358,21 +529,79 @@ describe('selectLaunchGpu', () => {
   })
 })
 
-describe('isWeightFile / weightBytes', () => {
-  it('counts only *.safetensors files, sharded or single', () => {
-    const files: CheckpointFile[] = [
-      { path: 'model-00001-of-00002.safetensors', size: 100, sha256: null },
-      { path: 'model-00002-of-00002.safetensors', size: 200, sha256: null },
-      { path: 'config.json', size: 5, sha256: null },
-      { path: 'tokenizer.json', size: 6, sha256: null },
-      { path: 'pytorch_model.bin', size: 999, sha256: null },
-    ]
-    expect(files.map((f) => isWeightFile(f.path))).toEqual([true, true, false, false, false])
-    expect(weightBytes(files)).toBe(300)
+describe('isWeightFile', () => {
+  it('is true only for a root-level, non-consolidated *.safetensors file', () => {
+    expect(isWeightFile('model-00001-of-00002.safetensors')).toBe(true)
+    expect(isWeightFile('model.safetensors')).toBe(true)
+    expect(isWeightFile('config.json')).toBe(false)
+    expect(isWeightFile('pytorch_model.bin')).toBe(false)
+    expect(isWeightFile('consolidated.safetensors')).toBe(false)
+    expect(isWeightFile('variant/model.safetensors')).toBe(false)
   })
 
   it('matches the extension case-insensitively', () => {
     expect(isWeightFile('model.SAFETENSORS')).toBe(true)
+  })
+})
+
+describe('weightBytes', () => {
+  const file = (path: string, size: number): CheckpointFile => ({ path, size, sha256: null })
+
+  it('sums ordinary sharded safetensors, ignoring non-weight files', () => {
+    const files = [
+      file('model-00001-of-00002.safetensors', 100),
+      file('model-00002-of-00002.safetensors', 200),
+      file('config.json', 5),
+      file('tokenizer.json', 6),
+    ]
+    expect(weightBytes(files)).toBe(300)
+  })
+
+  it('sums a single-file model.safetensors checkpoint', () => {
+    expect(weightBytes([file('model.safetensors', 4_000), file('config.json', 5)])).toBe(4_000)
+  })
+
+  it('regression: a Mistral-style repo with both standard shards and a redundant consolidated.safetensors is not double-counted', () => {
+    const files = [
+      file('model-00001-of-00003.safetensors', 1_000),
+      file('model-00002-of-00003.safetensors', 1_000),
+      file('model-00003-of-00003.safetensors', 1_000),
+      file('consolidated.safetensors', 3_000), // the same weights again, in one file
+      file('params.json', 2),
+    ]
+    expect(weightBytes(files)).toBe(3_000)
+  })
+
+  it('falls back to a consolidated*.safetensors file when it is the only safetensors present', () => {
+    expect(weightBytes([file('consolidated.safetensors', 5_000), file('params.json', 2)])).toBe(5_000)
+  })
+
+  it('regression: a .bin/.pth-only checkpoint reports its real byte count, not 0', () => {
+    const files = [
+      file('pytorch_model-00001-of-00002.bin', 1_500),
+      file('pytorch_model-00002-of-00002.bin', 1_500),
+      file('config.json', 5),
+    ]
+    expect(weightBytes(files)).toBe(3_000)
+  })
+
+  it('sums a single legacy .pth checkpoint when there is no safetensors file at all', () => {
+    expect(weightBytes([file('model.pth', 2_500), file('config.json', 5)])).toBe(2_500)
+  })
+
+  it('prefers safetensors over a legacy .bin sitting alongside it', () => {
+    const files = [file('model.safetensors', 900), file('pytorch_model.bin', 900), file('config.json', 5)]
+    expect(weightBytes(files)).toBe(900)
+  })
+
+  it('ignores a safetensors file inside a subdirectory (root-level files only)', () => {
+    const files = [file('fp8-variant/model.safetensors', 4_000), file('config.json', 5)]
+    expect(weightBytes(files)).toBe(0)
+  })
+
+  it('is 0 for a listing with no weight file at all', () => {
+    expect(weightBytes([file('config.json', 5), file('tokenizer.json', 6)])).toBe(0)
+    expect(weightBytes([])).toBe(0)
   })
 })
 
