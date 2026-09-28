@@ -29,16 +29,25 @@ export const MAX_LOG_BYTES = 10 * 1024 * 1024
 /** How many rotated `<stem>_*.log` archives are kept; the oldest beyond this is deleted. */
 export const MAX_LOG_ARCHIVES = 4
 
+/** `[`, `]` and the control characters U+0000–U+001F and U+007F: what a target may not contain. */
+// eslint-disable-next-line no-control-regex
+const TARGET_UNSAFE_RE = /[[\]\x00-\x1F\x7F]/g
+
 /**
  * Builds one log entry: UTC, to the second, regardless of the process timezone. A multi-line
- * `message` carries the header on its first line only; the rest is written verbatim. The entry
- * always ends with exactly one trailing `\n`.
+ * `message` carries the header on its first line only; the rest is written verbatim, and one `\n`
+ * is appended, so a caller passes its message without a trailing newline of its own (one that
+ * ends in `\n` leaves an empty line after the entry).
+ *
+ * Each `[`, `]` and control character in `target` becomes `_`: a target comes partly from a model
+ * id, which is a folder name with no character rules (`model [Q4]`), and any of those would break
+ * the header the app splits entries on (`\[[^\]]*\]`, design D7) or split the header line itself.
  */
 export function formatLogLine(date: Date, target: string, level: LogLevel, message: string): string {
   const iso = date.toISOString()
   const day = iso.slice(0, 10)
   const time = iso.slice(11, 19)
-  return `[${day}][${time}][${target}][${level}] ${message}\n`
+  return `[${day}][${time}][${target.replace(TARGET_UNSAFE_RE, '_')}][${level}] ${message}\n`
 }
 
 /** `YYYY-MM-DD_HH-MM-SS`, UTC: the timestamp half of an archive's `<stem>_<...>.log` name. */
@@ -100,10 +109,12 @@ export interface LogFile {
  * the file once an incoming entry would push it past `maxBytes` (default 10 MiB), keeping
  * `maxArchives` (default 4) archives named `<stem>_YYYY-MM-DD_HH-MM-SS.log`.
  *
- * Never throws. An open or write failure — or a rotation failure that leaves no writable file open
- * — writes one `WARN` line built by {@link formatLogLine} to `stderr` and disables the writer for
- * good: every `write`/`close` call afterwards is a silent no-op. A rotation failure that still
- * leaves the *current* file writable is not one of these; see {@link rotate}.
+ * Never throws. An open or write failure, a rotation failure that leaves no writable file open, or
+ * any other error while writing an entry (a close that fails mid-rotation, say) writes one `WARN`
+ * line built by {@link formatLogLine} to `stderr` and disables the writer for good: every
+ * `write`/`close` call afterwards is a silent no-op. A failed rename that still leaves the
+ * *current* file writable is not one of these: the writer keeps appending to it and retries
+ * rotation on the next write; see {@link rotate}.
  */
 export function openLogFile(dir: string, stem: string, options: LogFileOptions = {}): LogFile {
   const now = options.now ?? (() => new Date())
@@ -168,12 +179,17 @@ export function openLogFile(dir: string, stem: string, options: LogFileOptions =
    * file and retries rotation on the next write. Only a failure that leaves nothing open (the
    * fallback reopen also fails, or the freshly-renamed-to file cannot be opened) is fatal; the
    * caller disables the writer for that.
+   *
+   * May throw — a failing close, say. `write` turns that into `disable`, so it is fatal too.
    */
   function rotate(): boolean {
     const current = fd
     if (current === undefined) return false
-    fs.closeSync(current)
+    // Forgotten before the close, not after: a close that throws has still released the number
+    // (close(2) does, even on EIO), so `disable` must not close it again — by then it may be
+    // another file's descriptor.
     fd = undefined
+    fs.closeSync(current)
 
     const target = archivePath(now())
     try {
@@ -206,25 +222,29 @@ export function openLogFile(dir: string, stem: string, options: LogFileOptions =
   return {
     write(target, level, message) {
       if (disabled) return
-      const entry = formatLogLine(now(), target, level, message)
-      const bytes = Buffer.byteLength(entry, 'utf8')
-      if (size > 0 && size + bytes > maxBytes && !rotate()) {
-        disable('rotation left no writable file')
-        return
-      }
-      const openFd = fd
-      if (openFd === undefined) {
-        // Unreachable: `disabled` (checked above) is the only state with no open `fd`, and a
-        // `rotate()` that returns `true` always leaves one open. Kept as a safety net, not a path
-        // any test drives.
-        disable('no open file')
-        return
-      }
+      // One guard around the whole entry, rotation included: whatever throws in here — a failed
+      // write, a close that fails mid-rotation, anything unforeseen — disables the writer with its
+      // one warning instead of reaching the caller (in the app daemon, a throw here would end the
+      // process). A failed rename is not a throw here: `rotate` recovers from it by itself.
       try {
+        const entry = formatLogLine(now(), target, level, message)
+        const bytes = Buffer.byteLength(entry, 'utf8')
+        if (size > 0 && size + bytes > maxBytes && !rotate()) {
+          disable('rotation left no writable file')
+          return
+        }
+        const openFd = fd
+        if (openFd === undefined) {
+          // Unreachable: `disabled` (checked above) is the only state with no open `fd`, and a
+          // `rotate()` that returns `true` always leaves one open. Kept as a safety net, not a path
+          // any test drives.
+          disable('no open file')
+          return
+        }
         fs.writeSync(openFd, entry)
         size += bytes
       } catch (error) {
-        disable((error as Error).message)
+        disable(error instanceof Error ? error.message : String(error))
       }
     },
     close() {

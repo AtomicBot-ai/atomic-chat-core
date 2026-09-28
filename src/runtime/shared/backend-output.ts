@@ -18,6 +18,7 @@ export type BackendOutputSink = (line: {
  * misbehaves (the app's own sink, the log-file writer, never throws; a library consumer's might).
  * The first throw is surfaced once through `log`, so a broken sink does not lose all engine output
  * silently; later throws in the same session stay quiet, and the engine line itself is never logged.
+ * A `log` that throws in turn is swallowed as well: nothing escapes the returned function.
  * Build one per spawned process.
  */
 export function backendOutputReporter(
@@ -33,7 +34,11 @@ export function backendOutputReporter(
       if (warned) return
       warned = true
       const reason = error instanceof Error ? error.message : String(error)
-      log?.('warn', `backendOutput sink threw: ${reason}; further sink errors for this session are ignored`)
+      try {
+        log?.('warn', `backendOutput sink threw: ${reason}; further sink errors for this session are ignored`)
+      } catch {
+        // A logger that throws must not reach the engine's line handler either.
+      }
     }
   }
 }

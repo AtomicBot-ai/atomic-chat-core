@@ -67,6 +67,26 @@ describe('formatLogLine', () => {
       '[2026-09-28][00:00:00][core][ERROR] first line\nsecond line\nthird line\n'
     )
   })
+
+  // The app splits records on this header (design D7 of `add-unified-logs`); model ids are folder
+  // names with no character rules, so a target must never break it.
+  const STRICT_HEADER =
+    /^\[\d{4}-\d{2}-\d{2}\]\[\d{2}:\d{2}:\d{2}\]\[[^\]]*\]\[(TRACE|DEBUG|INFO|WARN|ERROR)\] /
+  it.each([
+    ['a closing bracket', 'engine:llamacpp/model]', 'engine:llamacpp/model_'],
+    ['both brackets', 'engine:llamacpp/model [Q4]', 'engine:llamacpp/model _Q4_'],
+    ['a newline and a carriage return', 'engine:mlx/a\nb\rc', 'engine:mlx/a_b_c'],
+    ['a tab, NUL, U+001F and DEL', 'engine:mlx/\t\u0000\u001f\u007f', 'engine:mlx/____'],
+    [
+      'nothing to replace',
+      'engine:llamacpp-upstream/Qwen3 8B (é, модель)',
+      'engine:llamacpp-upstream/Qwen3 8B (é, модель)',
+    ],
+  ])('replaces [, ] and control characters in the target with _: %s', (_case, target, expected) => {
+    const line = formatLogLine(new Date('2026-09-28T00:00:00Z'), target, 'INFO', '[stdout] hello')
+    expect(line).toBe(`[2026-09-28][00:00:00][${expected}][INFO] [stdout] hello\n`)
+    expect(line).toMatch(STRICT_HEADER)
+  })
 })
 
 describe('openLogFile', () => {
@@ -222,6 +242,37 @@ describe('failure isolation', () => {
 
     expect(() => log.write('core', 'INFO', 'later entry')).not.toThrow() // stays off, no second warning
     expect(warnings).toHaveLength(1)
+  })
+
+  it('a close that fails during rotation disables the log without throwing', () => {
+    const warnings: string[] = []
+    let closeCalls = 0
+    const fs = realFsWith({
+      closeSync: (fd) => {
+        closeCalls++
+        closeSync(fd) // the descriptor is gone, as close(2) leaves it even when it reports EIO
+        throw new Error('EIO: i/o error, close')
+      },
+    })
+    const now = () => new Date('2026-09-28T00:00:05Z')
+    const log = openLogFile(dir, 'core', { now, maxBytes: 80, fs, stderr: (text) => warnings.push(text) })
+
+    log.write('core', 'INFO', 'a'.repeat(40)) // under the limit alone, no rotation yet
+    expect(() => log.write('core', 'INFO', 'b'.repeat(40))).not.toThrow() // rotation: the close throws
+
+    expect(warnings).toEqual([
+      formatLogLine(now(), 'core', 'WARN', 'log file disabled: EIO: i/o error, close'),
+    ])
+
+    // Stays off: no throw, no second warning, nothing more on disk, and the released descriptor
+    // number (which the process may already have reused) is never closed a second time.
+    expect(() => log.write('core', 'INFO', 'later entry')).not.toThrow()
+    expect(() => log.close()).not.toThrow()
+    expect(warnings).toHaveLength(1)
+    expect(closeCalls).toBe(1)
+    expect(readFileSync(join(dir, 'core.log'), 'utf8')).toBe(
+      formatLogLine(now(), 'core', 'INFO', 'a'.repeat(40))
+    )
   })
 
   it('an unwritable folder disables the log without throwing', () => {

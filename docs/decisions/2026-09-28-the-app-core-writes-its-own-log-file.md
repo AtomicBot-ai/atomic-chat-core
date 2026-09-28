@@ -35,10 +35,13 @@ title: "The app core writes its own log file"
      descending). The writer is a small internal module on `node:fs`, `src/host/log-file.ts`, not exported
      from `src/host/index.ts` or the package: a pure `formatLogLine(date, target, level, message)` builds
      every header (used by both the file and stderr), writes are synchronous, and rotation closes the file
-     descriptor *before* the rename — a file a process holds open cannot be renamed on Windows. Any error
+     descriptor *before* the rename — a file a process holds open cannot be renamed on Windows. A failed
+     rename alone keeps the writer appending to the current file and retries rotation on the next write;
+     any other error (open, write, a close during rotation, a rotation that leaves no writable file)
      writes one `WARN` line to stderr and disables the writer for the rest of the process, the way
-     `detachableWriter` disables itself. `pino` and `rotating-file-stream` were rejected as new runtime
-     dependencies; synchronous writes were chosen so lines stay ordered and nothing is lost on a crash.
+     `detachableWriter` disables itself, and a write never throws to its caller. `pino` and
+     `rotating-file-stream` were rejected as new runtime dependencies; synchronous writes were chosen so
+     lines stay ordered and nothing is lost on a crash.
   4. **Engine output reaches a log through a new `AtomicCoreOptions.backendOutput` option**, typed
      `(e: { provider, model, stream: 'stdout' | 'stderr', line }) => void`. `create.ts` wires it into
      `LlamacppRuntime` (both providers), `MlxRuntime`, `FoundationModelsRuntime`, and the diffusion
@@ -57,9 +60,9 @@ title: "The app core writes its own log file"
      `starting sd-server: …` at `info` before this change and needed no new line; only its per-line output
      is new, through `backendOutput`.
   6. **Only the app binary assembles a file log.** `atomic-chat-app-core`'s logic — argument parsing,
-     opening `core.log`, tee-ing the core's logger and `backendOutput` to stderr and the file, dubbing
-     `failFatally`'s reason into the file, headering the reporter's `warn` lines and the process's fatal
-     handlers — moved out of the top-level-await script `src/app-daemon.ts` into an exported
+     opening `core.log`, tee-ing the core's logger to stderr and the file, writing `backendOutput` to the
+     file only, dubbing `failFatally`'s reason into the file, headering the reporter's `warn` lines and the
+     process's fatal handlers — moved out of the top-level-await script `src/app-daemon.ts` into an exported
      `runAppDaemon(deps)` in `src/host/app-daemon.ts` (also not re-exported from `src/host/index.ts`).
      `src/app-daemon.ts` stays the build entry — `scripts/build-binaries.mjs`'s `APP_ENTRY` and
      `docs/app-e2e.md`'s source-mode command both name that path — and now only wires up the real process,

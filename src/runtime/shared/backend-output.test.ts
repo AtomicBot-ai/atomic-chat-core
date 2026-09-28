@@ -61,6 +61,17 @@ describe('backendOutputReporter', () => {
     ])
   })
 
+  it('swallows a log that throws too, and still tries it only once', () => {
+    let logCalls = 0
+    const report = backendOutputReporter(throwing, () => {
+      logCalls++
+      throw new Error('log boom')
+    })
+    for (const line of ['first', 'second'])
+      expect(() => report({ provider: 'mlx', model: 'm', stream: 'stdout', line })).not.toThrow()
+    expect(logCalls).toBe(1)
+  })
+
   it('stays silent about a throwing sink when there is no log to tell', () => {
     const report = backendOutputReporter(throwing)
     expect(() => report({ provider: 'mlx', model: 'm', stream: 'stdout', line: 'x' })).not.toThrow()
