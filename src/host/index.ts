@@ -5,11 +5,13 @@
  * and an external host (the `atc` server CLI) must do it the same way rather than re-implement the
  * lock semantics.
  *
- * Node-only, unlike `./client` and `./contracts`. Nothing here is new behaviour: every symbol is
- * the public API of a module that already existed; this file only makes it reachable from outside
- * the package.
+ * Node-only, unlike `./client` and `./contracts`. Every symbol is the public API of a module; this
+ * file only makes it reachable from outside the package. `./recipes` is the privileged host-step
+ * executor (`executeHostStep`) that `atc host-step exec` runs as root, so the app and the CLI
+ * execute one copy of the install recipe (design D3).
  */
 export * from '../config/index.js'
 export * from '../lock/index.js'
 export * from '../cli/index.js'
 export * from '../telemetry/index.js'
+export * from './recipes/index.js'

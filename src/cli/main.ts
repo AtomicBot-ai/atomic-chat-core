@@ -12,6 +12,7 @@ import {
   daemonCommand,
   backendsCommand,
   hardwareCommand,
+  hostStepCommand,
   modelsCommand,
   serveCommand,
   serverCommand,
@@ -109,6 +110,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await hardwareCommand(rest, io)
       case 'backends':
         return await backendsCommand(rest, io)
+      // Hidden from USAGE: the privileged helper the app runs under pkexec (design D3).
+      case 'host-step':
+        return await hostStepCommand(rest, io)
       default:
         io.stderr(`Unknown command: ${command}\n\n${USAGE}`)
         return 2

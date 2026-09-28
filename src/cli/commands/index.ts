@@ -12,6 +12,7 @@ export { apiUrl, baseUrl, formatBytes, layoutFor, sessionProcess } from './share
 export { modelsCommand } from './models.js'
 export { backendsCommand } from './backends.js'
 export { hardwareCommand } from './hardware.js'
+export { hostStepCommand } from './host-step.js'
 export { daemonCommand } from './daemon.js'
 export {
   DEFAULT_SERVE_CTX_SIZE,

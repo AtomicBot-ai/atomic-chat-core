@@ -1,0 +1,443 @@
+/**
+ * The privileged half of a host step (design D3): read one request file, refuse it unless it names
+ * this build's recipe with matching digests and valid parameters, bring the machine to what the
+ * recipe describes, and write the result file beside the request. `atomic-chat-core host-step exec`
+ * and `atc host-step exec` both call `executeHostStep`, so the app and the CLI run the same code
+ * as root.
+ *
+ * Every step checks the machine before it acts and does nothing when its part is already in place.
+ * That makes the whole request idempotent: a replay — a retried receipt, a person re-running the
+ * manual command — reports `completed` without changing anything. The first failing step stops the
+ * run; the ones after it are reported `not-run`, never attempted.
+ *
+ * All I/O is injected (`HostStepExecutorDeps`); `executor-io.ts` has the real implementations.
+ * This file never touches the file system, the network or a process itself.
+ */
+
+import { AtomicCoreError } from '../../contracts/index.js'
+import {
+  INSTALL_CONTAINER_RUNTIME_RECIPE,
+  INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
+  INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+  assertPermittedCommand,
+  buildInstallContainerRuntimeSteps,
+  installContainerRuntimeParametersDigest,
+  validateInstallContainerRuntimeParameters,
+} from './install-container-runtime.js'
+import type { HostRecipeStep } from './install-container-runtime.js'
+import { dearmorPublicKey, primaryKeyFingerprints } from './openpgp.js'
+import { parseHostStepRequest, resultPathFor } from './request-file.js'
+import type { HostStepEcho, HostStepResult, HostStepStepOutcome } from './request-file.js'
+
+export interface HostCommandOutput {
+  /** Null when the command could not run or answer at all. */
+  code: number | null
+  stdout: string
+  stderr: string
+}
+
+export interface HostStepExecutorDeps {
+  /** The request's text. Throws when it is not a readable regular file of sane size. */
+  readRequest: (path: string) => Promise<string>
+  /** Writes the result without following a link planted at its path. */
+  writeResult: (path: string, text: string) => Promise<void>
+  /** A file's bytes, or null when there is no file there. */
+  readFile: (path: string) => Promise<Uint8Array | null>
+  /** Atomically creates or replaces a file with exactly this mode, creating parent directories. */
+  writeFile: (path: string, data: Uint8Array, mode: number) => Promise<void>
+  /** Runs one argv, no shell, with the recipe's fixed environment. */
+  exec: (argv: string[]) => Promise<HostCommandOutput>
+  fetch: typeof fetch
+  now: () => number
+  /**
+   * The uid of the person who asked for elevation (`PKEXEC_UID`, `SUDO_UID`), or null when this
+   * process was started as root directly. When known, only that account is added to `docker`.
+   */
+  invokingUid: string | null
+}
+
+const STDERR_LIMIT = 2000
+const KEY_SIZE_LIMIT = 256 * 1024
+const KEY_FETCH_TIMEOUT_MS = 60_000
+
+const tail = (text: string): string => text.trim().slice(-STDERR_LIMIT)
+
+/** Why a step could not do its part; carries the command's exit code and stderr when there was one. */
+class StepFailure extends Error {
+  constructor(
+    message: string,
+    readonly exitCode: number | null = null,
+    readonly stderr = ''
+  ) {
+    super(message)
+  }
+}
+
+type StepDone = { status: 'satisfied' | 'applied'; detail: string }
+
+interface RunContext {
+  deps: HostStepExecutorDeps
+  /** Docker's state before this run touched anything; decides whether a restart needs consent. */
+  dockerActiveAtStart: boolean
+}
+
+async function run(context: RunContext, argv: string[]): Promise<HostCommandOutput> {
+  assertPermittedCommand(argv)
+  return context.deps.exec(argv)
+}
+
+async function mustRun(context: RunContext, argv: string[]): Promise<void> {
+  const output = await run(context, argv)
+  if (output.code !== 0)
+    throw new StepFailure(`${argv.join(' ')} exited with ${String(output.code)}`, output.code, output.stderr)
+}
+
+const bytesEqual = (a: Uint8Array | null, b: Uint8Array | null): boolean =>
+  a === null || b === null ? a === b : Buffer.from(a).equals(Buffer.from(b))
+
+async function installKey(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'install-key' }>
+): Promise<StepDone> {
+  if ((await context.deps.readFile(step.path)) !== null)
+    return { status: 'satisfied', detail: `kept the existing ${step.path}` }
+  let response: Response
+  try {
+    response = await context.deps.fetch(step.url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(KEY_FETCH_TIMEOUT_MS),
+    })
+  } catch (error) {
+    throw new StepFailure(`could not download ${step.url}: ${(error as Error).message}`)
+  }
+  if (!response.ok) throw new StepFailure(`${step.url} answered HTTP ${response.status}`)
+  const finalUrl = response.url === '' ? step.url : response.url
+  if (!finalUrl.startsWith('https://'))
+    throw new StepFailure(`${step.url} was not served over https (${finalUrl})`)
+  const body = new Uint8Array(await response.arrayBuffer())
+  if (body.length === 0) throw new StepFailure(`${step.url} returned an empty body`)
+  if (body.length > KEY_SIZE_LIMIT)
+    throw new StepFailure(`${step.url} returned ${body.length} bytes, too many for a key`)
+
+  let binary: Uint8Array
+  let fingerprints: string[]
+  try {
+    binary = dearmorPublicKey(Buffer.from(body).toString('utf8'))
+    fingerprints = primaryKeyFingerprints(binary)
+  } catch (error) {
+    throw new StepFailure(`${step.url} did not return a usable key: ${(error as Error).message}`)
+  }
+  // Every primary key in the file must be one we pinned: an extra key would be trusted by apt/dnf too.
+  if (
+    fingerprints.length === 0 ||
+    fingerprints.some((fingerprint) => !step.fingerprints.includes(fingerprint))
+  )
+    throw new StepFailure(
+      `${step.url} served key ${fingerprints.join(', ') || '(none)'}, expected ${step.fingerprints.join(', ')}`
+    )
+  await context.deps.writeFile(step.path, step.encoding === 'binary' ? binary : body, step.mode)
+  return { status: 'applied', detail: `wrote ${step.path} (key ${fingerprints.join(', ')})` }
+}
+
+async function writeSource(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'write-source' }>
+): Promise<StepDone> {
+  const wanted = Buffer.from(step.content, 'utf8')
+  const existing = await context.deps.readFile(step.path)
+  if (existing !== null) {
+    // Someone's own repository configuration is theirs; it is never overwritten.
+    return bytesEqual(existing, wanted)
+      ? { status: 'satisfied', detail: `${step.path} is already in place` }
+      : { status: 'satisfied', detail: `kept the existing ${step.path}, which differs from the recipe's` }
+  }
+  await context.deps.writeFile(step.path, wanted, step.mode)
+  return { status: 'applied', detail: `wrote ${step.path}` }
+}
+
+async function isInstalled(
+  context: RunContext,
+  query: { package: string; argv: string[] }
+): Promise<boolean> {
+  const output = await run(context, query.argv)
+  if (output.code === null)
+    throw new StepFailure(`could not check whether ${query.package} is installed`, null, output.stderr)
+  // `dpkg-query` prints "install ok installed"; `rpm --quiet` prints nothing.
+  const status = output.stdout.trim()
+  return output.code === 0 && (status === '' || status.split(/\s+/).pop() === 'installed')
+}
+
+async function installPackages(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'install-packages' }>
+): Promise<StepDone> {
+  const missing: string[] = []
+  for (const query of step.queries) if (!(await isInstalled(context, query))) missing.push(query.package)
+  if (missing.length === 0)
+    return { status: 'satisfied', detail: `${step.packages.join(', ')} already installed` }
+
+  const dockerPackages = new Set<string>(INSTALL_CONTAINER_RUNTIME_RECIPE.packages['docker-engine'])
+  if (missing.some((name) => dockerPackages.has(name))) {
+    for (const conflict of step.conflicts) {
+      if (await isInstalled(context, conflict))
+        throw new StepFailure(
+          `${conflict.package} is installed, and Docker's packages conflict with it. Nothing was installed ` +
+            'and nothing was removed.'
+        )
+    }
+  }
+  for (const refresh of step.refresh) await mustRun(context, refresh)
+  await mustRun(context, [...step.install, ...missing])
+  return { status: 'applied', detail: `installed ${missing.join(', ')}` }
+}
+
+const registersNvidia = (bytes: Uint8Array | null): boolean => {
+  if (bytes === null) return false
+  try {
+    const json = JSON.parse(Buffer.from(bytes).toString('utf8')) as { runtimes?: Record<string, unknown> }
+    return typeof json.runtimes === 'object' && json.runtimes !== null && 'nvidia' in json.runtimes
+  } catch {
+    return false
+  }
+}
+
+async function dockerLoadedNvidia(context: RunContext, argv: string[]): Promise<boolean> {
+  const output = await run(context, argv)
+  if (output.code !== 0) return false
+  try {
+    const runtimes = JSON.parse(output.stdout) as Record<string, unknown>
+    return typeof runtimes === 'object' && runtimes !== null && 'nvidia' in runtimes
+  } catch {
+    return false
+  }
+}
+
+/**
+ * `nvidia-ctk runtime configure`, and a Docker restart only when it is both needed and allowed.
+ *
+ * Needed: the running daemon has not loaded the runtime — because `nvidia-ctk` just changed
+ * daemon.json, or because daemon.json already registered it and Docker was never restarted.
+ * Allowed: the plan listed the restart and the user consented to it (design D5), or Docker was not
+ * running before this run began — then the only daemon to restart is the one the package install
+ * just started, with no containers of the user's to stop.
+ */
+async function configureRuntime(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'configure-runtime' }>
+): Promise<StepDone> {
+  const before = await context.deps.readFile(step.daemon_json)
+  const registered = registersNvidia(before)
+  let changed = false
+  if (!registered) {
+    await mustRun(context, step.configure)
+    changed = !bytesEqual(before, await context.deps.readFile(step.daemon_json))
+  }
+  const active = (await run(context, step.docker_active)).code === 0
+  if (!active) {
+    return registered
+      ? { status: 'satisfied', detail: 'the NVIDIA runtime is already registered; Docker is not running' }
+      : {
+          status: 'applied',
+          detail: `registered the NVIDIA runtime; Docker is not running, it loads it on start`,
+        }
+  }
+  if (!changed && (!registered || (await dockerLoadedNvidia(context, step.loaded)))) {
+    return registered
+      ? { status: 'satisfied', detail: 'the NVIDIA runtime is already registered and loaded' }
+      : {
+          status: 'applied',
+          detail: `nvidia-ctk left ${step.daemon_json} unchanged; Docker was not restarted`,
+        }
+  }
+  if (!step.restart_approved && context.dockerActiveAtStart) {
+    return {
+      status: registered ? 'satisfied' : 'applied',
+      detail:
+        'Docker was not restarted: the approved plan did not include a restart. The NVIDIA runtime loads at its next start.',
+    }
+  }
+  await mustRun(context, step.restart)
+  return {
+    status: 'applied',
+    detail: changed
+      ? 'registered the NVIDIA runtime and restarted Docker'
+      : 'restarted Docker to load the registered NVIDIA runtime',
+  }
+}
+
+async function enableService(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'enable-service' }>
+): Promise<StepDone> {
+  const enabled = await run(context, step.enabled)
+  const active = await run(context, step.active)
+  if (enabled.code === 0 && enabled.stdout.trim() === 'enabled' && active.code === 0)
+    return { status: 'satisfied', detail: 'docker.service is already enabled and running' }
+  await mustRun(context, step.enable)
+  return { status: 'applied', detail: 'enabled and started docker.service' }
+}
+
+async function addToDockerGroup(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'add-to-docker-group' }>
+): Promise<StepDone> {
+  const id = await run(context, step.uid)
+  if (id.code !== 0) throw new StepFailure(`there is no user ${step.user}`, id.code, id.stderr)
+  const uid = id.stdout.trim()
+  // A second name for uid 0 is still root, and root never needs the group (design D4).
+  if (uid === '0') throw new StepFailure(`${step.user} is uid 0; root is never added to the docker group`)
+  const invoking = context.deps.invokingUid
+  if (invoking !== null && uid !== invoking)
+    throw new StepFailure(`${step.user} is uid ${uid}, but elevation was requested by uid ${invoking}`)
+  const groups = await run(context, step.groups)
+  if (groups.code === 0 && groups.stdout.trim().split(/\s+/).includes('docker'))
+    return { status: 'satisfied', detail: `${step.user} is already in the docker group` }
+  await mustRun(context, step.add)
+  return { status: 'applied', detail: `added ${step.user} to the docker group` }
+}
+
+async function runStep(context: RunContext, step: HostRecipeStep): Promise<StepDone> {
+  switch (step.kind) {
+    case 'install-key':
+      return installKey(context, step)
+    case 'write-source':
+      return writeSource(context, step)
+    case 'install-packages':
+      return installPackages(context, step)
+    case 'configure-runtime':
+      return configureRuntime(context, step)
+    case 'enable-service':
+      return enableService(context, step)
+    case 'add-to-docker-group':
+      return addToDockerGroup(context, step)
+  }
+}
+
+function refused(echo: HostStepEcho, problems: string[], now: number): HostStepResult {
+  return {
+    schema_version: 1,
+    step_id: echo.step_id ?? '',
+    outcome: 'failed',
+    exit_code: null,
+    log_tail: `refused: ${problems.join('; ')} [MANAGED_HOST_STEP_INVALID]`,
+    finished_at: now,
+    nonce: echo.nonce,
+    recipe_id: echo.recipe_id,
+    recipe_digest: echo.recipe_digest,
+    parameters_digest: echo.parameters_digest,
+    error_code: 'MANAGED_HOST_STEP_INVALID',
+    steps: [],
+  }
+}
+
+/** Decides what to do with a request's text; runs the recipe only for a request it fully accepts. */
+async function execute(text: string, deps: HostStepExecutorDeps): Promise<HostStepResult> {
+  const parsed = parseHostStepRequest(text)
+  if (!parsed.ok) return refused(parsed.echo, parsed.problems, deps.now())
+  const request = parsed.request
+  const echo: HostStepEcho = {
+    step_id: request.step_id,
+    nonce: request.nonce,
+    recipe_id: request.recipe_id,
+    recipe_digest: request.recipe_digest,
+    parameters_digest: request.parameters_digest,
+  }
+  const refuse = (problem: string) => refused(echo, [problem], deps.now())
+
+  if (request.recipe_id !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
+    return refuse(`unknown recipe ${request.recipe_id}`)
+  if (request.action !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
+    return refuse(`action ${request.action} is not what recipe ${request.recipe_id} does`)
+  if (request.recipe_digest !== INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST)
+    return refuse(
+      `recipe_digest ${request.recipe_digest} is not this build's ${INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST}`
+    )
+  const validation = validateInstallContainerRuntimeParameters(request.parameters)
+  if (!validation.ok) return refused(echo, validation.problems, deps.now())
+  const parametersDigest = installContainerRuntimeParametersDigest(validation.parameters)
+  if (request.parameters_digest !== parametersDigest)
+    return refuse(
+      `parameters_digest ${request.parameters_digest} does not match the parameters (${parametersDigest})`
+    )
+
+  const steps = buildInstallContainerRuntimeSteps(validation.parameters)
+  const context: RunContext = { deps, dockerActiveAtStart: false }
+  const configure = steps.find((step) => step.kind === 'configure-runtime')
+  if (configure !== undefined && configure.kind === 'configure-runtime')
+    context.dockerActiveAtStart = (await run(context, configure.docker_active)).code === 0
+
+  const outcomes: HostStepStepOutcome[] = []
+  let failure: StepFailure | null = null
+  for (const step of steps) {
+    if (failure !== null) {
+      outcomes.push({ id: step.id, status: 'not-run', exit_code: null, stderr: '', detail: '' })
+      continue
+    }
+    try {
+      const done = await runStep(context, step)
+      outcomes.push({ id: step.id, status: done.status, exit_code: null, stderr: '', detail: done.detail })
+    } catch (error) {
+      failure = error instanceof StepFailure ? error : new StepFailure((error as Error).message)
+      outcomes.push({
+        id: step.id,
+        status: 'failed',
+        exit_code: failure.exitCode,
+        stderr: tail(failure.stderr),
+        detail: failure.message,
+      })
+    }
+  }
+
+  const failed = outcomes.find((outcome) => outcome.status === 'failed')
+  const applied = outcomes.filter((outcome) => outcome.status === 'applied').length
+  return {
+    schema_version: 1,
+    step_id: request.step_id,
+    outcome: failed === undefined ? 'completed' : 'failed',
+    exit_code: failed === undefined ? 0 : failed.exit_code,
+    log_tail:
+      failed === undefined
+        ? `${request.recipe_id}: ${applied} step(s) applied, ${outcomes.length - applied} already in place`
+        : tail(`${failed.id} failed: ${failed.detail}${failed.stderr ? `\n${failed.stderr}` : ''}`),
+    finished_at: deps.now(),
+    nonce: request.nonce,
+    recipe_id: request.recipe_id,
+    recipe_digest: request.recipe_digest,
+    parameters_digest: request.parameters_digest,
+    error_code: null,
+    steps: outcomes,
+  }
+}
+
+/**
+ * Runs one host-step request and writes `<step>.result.json` beside it. Throws only when the path
+ * is not a `*.request.json` (there would be nowhere to put the result); every other problem —
+ * an unreadable file, a refused request, a failed step — is a `failed` result file.
+ */
+export async function executeHostStep(
+  requestPath: string,
+  deps: HostStepExecutorDeps
+): Promise<HostStepResult> {
+  const resultPath = resultPathFor(requestPath)
+  if (resultPath === null)
+    throw new AtomicCoreError(
+      'MANAGED_HOST_STEP_INVALID',
+      `A host-step request file must be named <step_id>.request.json: ${requestPath}`
+    )
+  const result = await deps.readRequest(requestPath).then(
+    (text) => execute(text, deps),
+    (error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code ?? (error as Error).message
+      const nothing = {
+        step_id: null,
+        nonce: null,
+        recipe_id: null,
+        recipe_digest: null,
+        parameters_digest: null,
+      }
+      return refused(nothing, [`could not read the request file (${code})`], deps.now())
+    }
+  )
+  await deps.writeResult(resultPath, `${JSON.stringify(result, null, 2)}\n`)
+  return result
+}
