@@ -125,6 +125,7 @@ import type {
   ManagedEngineLaunch,
   ManagedExitClassification,
   ManagedLaunchContext,
+  ManagedRoute,
   ManagedTextAdapter,
   ManagedTextCapabilities,
 } from '../managed-text/index.js'
@@ -466,20 +467,33 @@ export function tensorrtLlmCapabilities(context: {
 // Declared routes
 // ---------------------------------------------------------------------------------------------
 
-/** The OpenAI routes this adapter's engine actually serves (`openai_server.py` registers exactly
- *  these three for text; task 2.14 refuses any other public route for a `tensorrt-llm` model —
- *  spec: "Публичный сервер MUST отвечать понятной ошибкой на маршрут, который провайдер не
- *  объявил"). Also `ManagedTextAdapter.routes` below: the session gateway 404s anything else before
- *  it ever reaches the container, closing off `trtllm-serve`'s own undeclared routes — its
- *  `/health` (probed directly by the lifecycle, never through the gateway), and its administrative
- *  routes this adapter never wanted reachable at all (`/update_weights`, `/release_memory`,
- *  `/resume_memory`, `/kv_cache_events`, `/steady_clock_offset`) — as well as `/v1/responses`, which
- *  `openai_server.py` does register but this slice does not support (findings-2.13-r2.md item 3). */
-export const TENSORRT_LLM_ROUTES = ['/v1/chat/completions', '/v1/completions', '/v1/models'] as const
+/** The OpenAI method+path routes this adapter's engine actually serves (`openai_server.py`
+ *  registers exactly these three for text; task 2.14 refuses any other public route for a
+ *  `tensorrt-llm` model — spec: "Публичный сервер MUST отвечать понятной ошибкой на маршрут,
+ *  который провайдер не объявил"). Also `ManagedTextAdapter.routes` below: the session gateway
+ *  404s a path not listed here at all, and 405s a listed path used with a method not listed for
+ *  it (findings-2.13-r3.md item 1) — either way before it ever reaches the container. This closes
+ *  off `trtllm-serve`'s own undeclared routes — its `/health` (probed directly by the lifecycle,
+ *  never through the gateway), its administrative routes this adapter never wanted reachable at
+ *  all (`/update_weights`, `/release_memory`, `/resume_memory`, `/kv_cache_events`,
+ *  `/steady_clock_offset`), `/v1/responses` (real in `openai_server.py`, unsupported in this
+ *  slice) — and a wrong method on a route that is otherwise real, e.g. `GET
+ *  /v1/chat/completions` or `POST /v1/models` (findings-2.13-r2.md item 3, keyed on method+path
+ *  since findings-2.13-r3.md item 1). No route here declares `HEAD`; a `HEAD /v1/models` request
+ *  gets the same `405` as any other undeclared method for a declared path — this engine's `GET
+ *  /v1/models` has no dedicated `HEAD` handler to serve it from. */
+export const TENSORRT_LLM_ROUTES: readonly ManagedRoute[] = [
+  { method: 'POST', path: '/v1/chat/completions' },
+  { method: 'POST', path: '/v1/completions' },
+  { method: 'GET', path: '/v1/models' },
+]
 
 /** The subset of `TENSORRT_LLM_ROUTES` `tensorrtLlmRewriteRequestBody` may rewrite: both POST
  *  routes, never `GET /v1/models` (no request body to rewrite in the first place). */
-export const TENSORRT_LLM_REWRITABLE_ROUTES = ['/v1/chat/completions', '/v1/completions'] as const
+export const TENSORRT_LLM_REWRITABLE_ROUTES: readonly ManagedRoute[] = [
+  { method: 'POST', path: '/v1/chat/completions' },
+  { method: 'POST', path: '/v1/completions' },
+]
 
 // ---------------------------------------------------------------------------------------------
 // Context-length-overflow error mapping
@@ -605,11 +619,12 @@ export function mapTensorrtLlmContextLengthError(
 // Output-length enforcement (session gateway request rewrite)
 // ---------------------------------------------------------------------------------------------
 
-/** The two routes whose request body `tensorrtLlmRewriteRequestBody` touches; every other route
- *  (including the third declared route, `GET /v1/models`, which has no body at all) passes its
- *  body through completely unchanged. Same list as `TENSORRT_LLM_REWRITABLE_ROUTES`, kept as its
- *  own `Set` here for `.has` rather than re-deriving one from the exported `readonly` tuple. */
-const OUTPUT_CAP_ROUTES = new Set<string>(TENSORRT_LLM_REWRITABLE_ROUTES)
+/** The paths whose request body `tensorrtLlmRewriteRequestBody` touches — both are POST-only in
+ *  `TENSORRT_LLM_REWRITABLE_ROUTES`, and `route` here is always a path the gateway already matched
+ *  by method too, so path alone is enough to key this `Set` on. Every other route (including the
+ *  third declared one, `GET /v1/models`, which has no body at all) passes its body through
+ *  completely unchanged. */
+const OUTPUT_CAP_ROUTES = new Set(TENSORRT_LLM_REWRITABLE_ROUTES.map((r) => r.path))
 
 /** One candidate `max_tokens`/`max_completion_tokens` field as the client actually sent it. `null`
  *  counts as not sent at all (matching how an OpenAI client omits a field, findings-2.13-r2.md item
@@ -629,8 +644,12 @@ function readCandidateField(body: Record<string, unknown>, key: string): Candida
   return { present: true, valid, value: valid ? (value as number) : 0 }
 }
 
+/** `AtomicCoreError('INVALID_ARGUMENT', ...)`, not a plain `Error`: the gateway
+ *  (`../managed-text/gateway.ts`) only surfaces a rewrite-time throw's own message to the client
+ *  when it is this exact shape — proof the message was actually written to reject something the
+ *  client itself sent, not an arbitrary internal error message (findings-2.13-r3.md item 3). */
 function invalidMaxTokens(field: string): never {
-  throw new Error(`${field} must be a positive integer.`)
+  throw new AtomicCoreError('INVALID_ARGUMENT', `${field} must be a positive integer.`)
 }
 
 /**

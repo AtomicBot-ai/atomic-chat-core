@@ -55,15 +55,24 @@ describe('tensorrtLlmAdapter shape', () => {
     expect(tensorrtLlmAdapter.readiness).toEqual({ path: '/health', expectedStatus: 200 })
   })
 
-  it('declares only the OpenAI routes trtllm-serve actually implements', () => {
-    expect(TENSORRT_LLM_ROUTES).toEqual(['/v1/chat/completions', '/v1/completions', '/v1/models'])
+  it('declares only the OpenAI method+path routes trtllm-serve actually implements', () => {
+    expect(TENSORRT_LLM_ROUTES).toEqual([
+      { method: 'POST', path: '/v1/chat/completions' },
+      { method: 'POST', path: '/v1/completions' },
+      { method: 'GET', path: '/v1/models' },
+    ])
     expect(tensorrtLlmAdapter.routes).toBe(TENSORRT_LLM_ROUTES)
   })
 
-  it('declares only the two POST routes as rewritable, a subset of routes (findings-2.13-r2.md item 3)', () => {
-    expect(TENSORRT_LLM_REWRITABLE_ROUTES).toEqual(['/v1/chat/completions', '/v1/completions'])
+  it('declares only the two POST routes as rewritable, a subset of routes (findings-2.13-r2.md item 3, method+path since findings-2.13-r3.md item 1)', () => {
+    expect(TENSORRT_LLM_REWRITABLE_ROUTES).toEqual([
+      { method: 'POST', path: '/v1/chat/completions' },
+      { method: 'POST', path: '/v1/completions' },
+    ])
     expect(tensorrtLlmAdapter.rewritableRoutes).toBe(TENSORRT_LLM_REWRITABLE_ROUTES)
-    for (const route of TENSORRT_LLM_REWRITABLE_ROUTES) expect(TENSORRT_LLM_ROUTES).toContain(route)
+    for (const route of TENSORRT_LLM_REWRITABLE_ROUTES) {
+      expect(TENSORRT_LLM_ROUTES).toContainEqual(route)
+    }
   })
 
   it('stays in starting-container until a marker matches, and none match an empty tail', () => {
@@ -587,6 +596,16 @@ describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md ite
       expect(() => tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: bad }, settings)).toThrow(
         /max_tokens/
       )
+    }
+  })
+
+  it('throws an AtomicCoreError INVALID_ARGUMENT specifically, not a plain Error, so the gateway knows this is safe to surface to the client (findings-2.13-r3.md item 3)', () => {
+    try {
+      tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: 0 }, settings)
+      expect.unreachable('expected a throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(AtomicCoreError)
+      expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
     }
   })
 

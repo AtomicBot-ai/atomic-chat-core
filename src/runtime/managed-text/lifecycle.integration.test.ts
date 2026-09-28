@@ -78,7 +78,7 @@ const adapter: ManagedTextAdapter<{ crash: boolean }> = {
   id: 'integration-engine',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/health', expectedStatus: 200 },
-  routes: ['/v1/models'],
+  routes: [{ method: 'GET', path: '/v1/models' }],
   stageMarkers: [],
   validateSettings: (raw) => ({ crash: (raw as { crash?: boolean } | undefined)?.crash === true }),
   buildLaunch: (c) => ({

@@ -83,6 +83,23 @@ export interface ManagedTextCapabilities {
 }
 
 /**
+ * One route this engine serves through the session gateway: method and path together
+ * (findings-2.13-r3.md item 1). Path alone is not enough to declare a route — a path match with the
+ * wrong method must still be refused (`405`), not silently forwarded, or `GET /v1/chat/completions`
+ * would reach the upstream just because the *path* `/v1/chat/completions` happens to be declared for
+ * `POST`. `method` is compared to `IncomingMessage.method` exactly as Node reports it (always
+ * upper-case for a real request; a fake source in a test should match that). `HEAD` is never implied
+ * by a declared `GET` route — an adapter that wants to serve `HEAD` declares it explicitly; the
+ * default (nothing declares it) is a `405`, which is the correct, safe answer for a route that has
+ * no `HEAD` handler of its own.
+ */
+export interface ManagedRoute {
+  method: string
+  /** Absolute path, no query, no `..`: the same shape a readiness path is held to. */
+  path: string
+}
+
+/**
  * One containerized text engine. `S` is the adapter's own validated settings shape; the lifecycle
  * treats it as opaque and only ever hands back what `validateSettings` returned.
  */
@@ -94,23 +111,26 @@ export interface ManagedTextAdapter<S = unknown> {
   readonly readiness: ManagedReadinessProbe
   readonly stageMarkers: readonly ManagedStageMarker[]
   /**
-   * Every route this engine serves through the session gateway (absolute paths, no query, no
-   * method — see `assertAdapterShape` below). Anything else gets `404` from the gateway and is
-   * never forwarded upstream at all (findings-2.13-r2.md item 3): this is what closes off an
-   * engine's own undocumented or administrative routes (e.g. `trtllm-serve`'s `/update_weights`,
-   * `/release_memory`) that were never meant to be reachable from outside the container. The
-   * readiness path (`readiness.path` above) is deliberately not part of this list — the lifecycle
-   * probes it directly against the container's own port, never through the gateway a caller's
-   * traffic goes over.
+   * Every method+path this engine serves through the session gateway. A path with no matching
+   * method gets `404` from the gateway; a path that *is* declared, but not for the method the
+   * request used, gets `405` with an `Allow` header — neither is ever forwarded upstream
+   * (findings-2.13-r2.md item 3, keyed on method+path since findings-2.13-r3.md item 1: path alone
+   * let `GET`/`PUT`/`DELETE /v1/chat/completions` and `POST`/`DELETE`/`HEAD`/`OPTIONS /v1/models`
+   * all reach the upstream). This is what closes off an engine's own undocumented or administrative
+   * routes (e.g. `trtllm-serve`'s `/update_weights`, `/release_memory`) that were never meant to be
+   * reachable from outside the container. The readiness path (`readiness.path` above) is
+   * deliberately not part of this list — the lifecycle probes it directly against the container's
+   * own port, never through the gateway a caller's traffic goes over.
    */
-  readonly routes: readonly string[]
+  readonly routes: readonly ManagedRoute[]
   /**
-   * The subset of `routes` whose request body `rewriteRequestBody` may rewrite. Every other
-   * declared route (and every undeclared one, which never gets this far) streams through
-   * byte-for-byte: no JSON parsing, no re-serialization, regardless of method. Absent or empty
-   * when `rewriteRequestBody` is not defined at all.
+   * The subset of `routes` whose request body `rewriteRequestBody` may rewrite — each entry must
+   * also appear in `routes` (checked at registration). Every other declared route (and every
+   * undeclared or wrong-method one, which never gets this far) streams through byte-for-byte: no
+   * JSON parsing, no re-serialization. Absent or empty when `rewriteRequestBody` is not defined at
+   * all.
    */
-  readonly rewritableRoutes?: readonly string[]
+  readonly rewritableRoutes?: readonly ManagedRoute[]
   /** Throws `AtomicCoreError('INVALID_ARGUMENT', ...)` before any container exists. */
   validateSettings(raw: unknown): S
   buildLaunch(context: ManagedLaunchContext<S>): ManagedEngineLaunch
@@ -124,15 +144,19 @@ export interface ManagedTextAdapter<S = unknown> {
    * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md` for why
    * this exists at all — most engines need no request-side rewriting and should leave it undefined,
    * and `rewritableRoutes` empty/absent). `route` is the request path with no query string, decoded
-   * and already matched against `routes` by the gateway. The gateway calls this only for a request
-   * whose route is listed in `rewritableRoutes`, only on `POST`, only with a non-empty body, under a
-   * byte cap enforced while the body streams in (over it answers `413` before this is even called,
-   * without buffering the rest), and only once the body parses as JSON (a parse failure answers
-   * `400` without calling this or reaching the upstream). This may throw to reject the request
-   * outright — e.g. a client-supplied value that is present but not usable — which the gateway turns
-   * into an OpenAI-shaped `400` using the thrown `Error`'s own `message` when it is an `Error`
-   * instance; it must not silently substitute a different value for something invalid and forward
-   * that instead. The response stream is never touched by this hook, on any route, streamed or not.
+   * and already matched — method and path together — against `routes` by the gateway. The gateway
+   * calls this only for a request whose method+path is listed in `rewritableRoutes`, only with a
+   * non-empty body, under a byte cap enforced while the body streams in (over it answers `413`
+   * before this is even called, without buffering the rest), and only once the body parses as JSON
+   * (a parse failure answers `400` without calling this or reaching the upstream). This may throw to
+   * reject the request outright — e.g. a client-supplied value that is present but not usable — and
+   * must not silently substitute a different value for something invalid and forward that instead.
+   * Throw `AtomicCoreError('INVALID_ARGUMENT', message)` for that: the gateway surfaces its
+   * `message` verbatim as an OpenAI-shaped `400`, since that text was written to be read by the
+   * client whose request it rejects. Any other throw (a bug in this hook itself, not a rejection of
+   * the client's input) becomes a generic `500` instead — the gateway does not assume an arbitrary
+   * thrown value's `message` is safe to show a client (findings-2.13-r3.md item 3). The response
+   * stream is never touched by this hook, on any route, streamed or not.
    */
   rewriteRequestBody?(route: string, body: unknown, settings: S): unknown
 }
@@ -163,10 +187,15 @@ function assertAdapterShape(adapter: ManagedTextAdapter): void {
   if (adapter.routes.length === 0) {
     invalid('A managed text adapter needs at least one declared route.', adapter.id)
   }
-  for (const route of adapter.routes) assertRoutePath(route, 'A declared route')
+  for (const route of adapter.routes) {
+    if (route.method === '') invalid('A declared route needs a method.', route.path)
+    assertRoutePath(route.path, 'A declared route')
+  }
+  const isDeclared = (route: ManagedRoute) =>
+    adapter.routes.some((r) => r.method === route.method && r.path === route.path)
   for (const route of adapter.rewritableRoutes ?? []) {
-    if (!adapter.routes.includes(route)) {
-      invalid('A rewritable route must also be a declared route.', route)
+    if (!isDeclared(route)) {
+      invalid('A rewritable route must also be a declared route.', `${route.method} ${route.path}`)
     }
   }
 }

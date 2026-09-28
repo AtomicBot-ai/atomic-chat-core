@@ -1,7 +1,9 @@
 import { createServer, request as httpRequest } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AtomicCoreError } from '../../contracts/index.js'
+import type { ManagedRoute } from './adapter.js'
 import {
   bracketIfIpv6,
   generateGatewayKey,
@@ -85,8 +87,13 @@ afterEach(async () => {
   await Promise.all(upstreams.splice(0).map((u) => u.close()))
 })
 
-/** Every route these tests may send to by default (`send()`'s own default path plus its siblings). */
-const DEFAULT_TEST_ROUTES = ['/v1/chat/completions', '/v1/completions', '/v1/models']
+/** Every route these tests may send to by default (`send()`'s own default method+path plus its
+ *  siblings) — method+path together, since findings-2.13-r3.md item 1 keys route matching on both. */
+const DEFAULT_TEST_ROUTES: ManagedRoute[] = [
+  { method: 'POST', path: '/v1/chat/completions' },
+  { method: 'POST', path: '/v1/completions' },
+  { method: 'GET', path: '/v1/models' },
+]
 
 /** Start a fake upstream plus a gateway pointed at it, tracked for teardown. */
 async function setup(
@@ -94,8 +101,8 @@ async function setup(
   opts: {
     apiKey?: string
     allowedHosts?: string[]
-    routes?: string[]
-    rewritableRoutes?: string[]
+    routes?: ManagedRoute[]
+    rewritableRoutes?: ManagedRoute[]
     rewriteRequestBody?: (route: string, body: unknown) => unknown
   } = {}
 ): Promise<{ gw: ManagedGateway; upstream: FakeUpstream; apiKey: string }> {
@@ -213,6 +220,7 @@ describe('authentication', () => {
     })
 
     const res = await send(gw.port, {
+      method: 'POST',
       headers: { 'host': '127.0.0.1', 'authorization': `Bearer ${apiKey}`, 'x-api-key': apiKey },
     })
 
@@ -242,6 +250,7 @@ describe('authentication', () => {
       gateways.push(gw)
 
       const res = await send(gw.port, {
+        method: 'POST',
         headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
       })
 
@@ -309,6 +318,7 @@ describe('streaming', () => {
           host: '127.0.0.1',
           port: gw.port,
           path: '/v1/chat/completions',
+          method: 'POST',
           headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
         },
         (res) => {
@@ -352,6 +362,7 @@ describe('streaming', () => {
           host: '127.0.0.1',
           port: gw.port,
           path: '/v1/chat/completions',
+          method: 'POST',
           headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
         },
         (res) => {
@@ -388,6 +399,7 @@ describe('streaming', () => {
         host: '127.0.0.1',
         port: gw.port,
         path: '/v1/chat/completions',
+        method: 'POST',
         headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
       })
       req.on('error', () => resolve())
@@ -408,7 +420,7 @@ describe('streaming', () => {
 })
 
 describe('rewriteRequestBody (task 2.13 fix rounds 1-2, ADR 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway)', () => {
-  const CHAT = ['/v1/chat/completions']
+  const CHAT: ManagedRoute[] = [{ method: 'POST', path: '/v1/chat/completions' }]
 
   it('rewrites a POST JSON body before it reaches the upstream, with Content-Length recomputed for the new size', async () => {
     let seenBody = ''
@@ -472,7 +484,7 @@ describe('rewriteRequestBody (task 2.13 fix rounds 1-2, ADR 2026-09-28-tensorrt-
     expect(reached).toBe(false)
   })
 
-  it('answers 400 with the thrown message, OpenAI-shaped, when rewriteRequestBody itself rejects the value', async () => {
+  it('answers 400 with the thrown message, OpenAI-shaped, when rewriteRequestBody rejects the value with a validation error (AtomicCoreError INVALID_ARGUMENT)', async () => {
     let reached = false
     const { gw, apiKey } = await setup(
       (_req, res) => {
@@ -482,7 +494,7 @@ describe('rewriteRequestBody (task 2.13 fix rounds 1-2, ADR 2026-09-28-tensorrt-
       {
         rewritableRoutes: CHAT,
         rewriteRequestBody: () => {
-          throw new Error('max_tokens must be a positive integer.')
+          throw new AtomicCoreError('INVALID_ARGUMENT', 'max_tokens must be a positive integer.')
         },
       }
     )
@@ -507,6 +519,87 @@ describe('rewriteRequestBody (task 2.13 fix rounds 1-2, ADR 2026-09-28-tensorrt-
       },
     })
     expect(reached).toBe(false)
+  })
+
+  it('answers 500 with a generic message, never the thrown detail, when rewriteRequestBody throws anything other than a validation error (findings-2.13-r3.md item 3)', async () => {
+    // The gateway deliberately logs this one to its own console (it has no injected logger); silence
+    // and inspect it here instead of leaving it printed as unexplained stderr noise.
+    const loggedErrors: unknown[] = []
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      loggedErrors.push(args)
+    })
+
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      {
+        rewritableRoutes: CHAT,
+        rewriteRequestBody: () => {
+          throw new Error('a secret internal stack detail nobody outside this process should see')
+        },
+      }
+    )
+
+    const requestBody = JSON.stringify({ max_tokens: 10 })
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-length': String(requestBody.length),
+      },
+      body: requestBody,
+    })
+
+    expect(res.status).toBe(500)
+    expect(res.body).not.toContain('secret internal stack detail')
+    expect(JSON.parse(res.body)).toEqual({
+      error: {
+        message: 'The request could not be processed.',
+        type: 'server_error',
+        code: 'internal_error',
+      },
+    })
+    expect(reached).toBe(false)
+    expect(loggedErrors.length).toBeGreaterThan(0)
+    consoleError.mockRestore()
+  })
+
+  it('answers 500, not 400, for an AtomicCoreError whose code is not INVALID_ARGUMENT — only that one code is treated as a client-facing validation error', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      {
+        rewritableRoutes: CHAT,
+        rewriteRequestBody: () => {
+          throw new AtomicCoreError('IO_ERROR', 'disk full while rewriting (should never surface like this)')
+        },
+      }
+    )
+
+    const requestBody = JSON.stringify({ max_tokens: 10 })
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-length': String(requestBody.length),
+      },
+      body: requestBody,
+    })
+
+    expect(res.status).toBe(500)
+    expect(res.body).not.toContain('disk full')
+    expect(reached).toBe(false)
+    consoleError.mockRestore()
   })
 
   it('answers 413 with an OpenAI-shaped JSON body, without reaching the upstream or attempting to parse a body over the cap', async () => {
@@ -565,13 +658,17 @@ describe('rewriteRequestBody (task 2.13 fix rounds 1-2, ADR 2026-09-28-tensorrt-
     expect(chunksProduced).toBe(chunksNeededToCrossCap)
   })
 
-  it('leaves a GET request untouched even with a rewriter configured (no body to rewrite)', async () => {
+  it('leaves a GET request untouched even with a rewriter configured (GET /v1/models is declared, but never rewritable)', async () => {
     const { gw, apiKey } = await setup(
       (_req, res) => {
         res.writeHead(200, { 'content-type': 'text/plain' })
         res.end('untouched')
       },
-      { rewritableRoutes: ['/v1/models'], rewriteRequestBody: () => ({ should: 'never be reached for GET' }) }
+      {
+        routes: [{ method: 'GET', path: '/v1/models' }],
+        // No rewritableRoutes at all: the callback below exists, but nothing is ever rewritten.
+        rewriteRequestBody: () => ({ should: 'never be reached for GET' }),
+      }
     )
 
     const res = await send(gw.port, {
@@ -613,8 +710,11 @@ describe('rewriteRequestBody (task 2.13 fix rounds 1-2, ADR 2026-09-28-tensorrt-
         req.on('end', () => res.end('ok'))
       },
       {
-        routes: ['/v1/chat/completions', '/v1/models'],
-        rewritableRoutes: CHAT, // deliberately does not include /v1/models
+        routes: [
+          { method: 'POST', path: '/v1/chat/completions' },
+          { method: 'POST', path: '/v1/models' },
+        ],
+        rewritableRoutes: CHAT, // deliberately does not include POST /v1/models
         rewriteRequestBody: () => ({ this: 'would prove the rewriter ran, which it must not' }),
       }
     )
@@ -733,7 +833,7 @@ describe('declared routes (task 2.13 fix round 2, findings-2.13-r2.md item 3)', 
         reached = true
         res.end('should not happen')
       },
-      { routes: ['/v1/models'] }
+      { routes: [{ method: 'GET', path: '/v1/models' }] }
     )
 
     const res = await send(gw.port, {
@@ -753,7 +853,7 @@ describe('declared routes (task 2.13 fix round 2, findings-2.13-r2.md item 3)', 
         res.writeHead(200, { 'content-type': 'text/plain' })
         res.end('declared')
       },
-      { routes: ['/v1/models'] }
+      { routes: [{ method: 'GET', path: '/v1/models' }] }
     )
 
     const res = await send(gw.port, {
@@ -772,7 +872,7 @@ describe('declared routes (task 2.13 fix round 2, findings-2.13-r2.md item 3)', 
         reached = true
         res.end('should not happen')
       },
-      { routes: ['/v1/models'] }
+      { routes: [{ method: 'GET', path: '/v1/models' }] }
     )
 
     // Decodes to /v1/models, but must not be treated as equal to the literal /v1/models route.
@@ -791,7 +891,7 @@ describe('declared routes (task 2.13 fix round 2, findings-2.13-r2.md item 3)', 
         res.writeHead(200, { 'content-type': 'text/plain' })
         res.end('decoded-match')
       },
-      { routes: ['/v1/models'] }
+      { routes: [{ method: 'GET', path: '/v1/models' }] }
     )
 
     // %6d decodes to "m": /v1/%6dodels -> /v1/models, no slash involved, unambiguous.
@@ -802,5 +902,143 @@ describe('declared routes (task 2.13 fix round 2, findings-2.13-r2.md item 3)', 
 
     expect(res.status).toBe(200)
     expect(res.body).toBe('decoded-match')
+  })
+})
+
+describe('method matching (task 2.13 fix round 3, findings-2.13-r3.md item 1)', () => {
+  it('answers 405 with an Allow header, OpenAI-shaped, never reaching the upstream, for a wrong method on a declared path', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { routes: [{ method: 'POST', path: '/v1/chat/completions' }] }
+    )
+
+    // send()'s default method is GET; the only declared route for this path is POST.
+    const res = await send(gw.port, {
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(405)
+    expect(res.headers['allow']).toBe('POST')
+    expect(res.headers['content-type']).toMatch(/application\/json/)
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: { type: 'invalid_request_error', code: 'method_not_allowed' },
+    })
+    expect(reached).toBe(false)
+  })
+
+  it('answers 405 for the opposite mismatch too: POST on a path only declared for GET', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { routes: [{ method: 'GET', path: '/v1/models' }] }
+    )
+
+    const res = await send(gw.port, {
+      path: '/v1/models',
+      method: 'POST',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(405)
+    expect(res.headers['allow']).toBe('GET')
+    expect(reached).toBe(false)
+  })
+
+  it('answers 405, not 200, for HEAD on a path only declared for GET — HEAD is never implied', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { routes: [{ method: 'GET', path: '/v1/models' }] }
+    )
+
+    const res = await send(gw.port, {
+      path: '/v1/models',
+      method: 'HEAD',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(405)
+    expect(res.headers['allow']).toBe('GET')
+    expect(reached).toBe(false)
+  })
+
+  it('answers 405 for DELETE on a path declared only for GET and POST, listing both in Allow', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      {
+        routes: [
+          { method: 'GET', path: '/v1/models' },
+          { method: 'POST', path: '/v1/models' },
+        ],
+      }
+    )
+
+    const res = await send(gw.port, {
+      path: '/v1/models',
+      method: 'DELETE',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(405)
+    expect(res.headers['allow']).toBe('GET, POST')
+    expect(reached).toBe(false)
+  })
+
+  it('proxies a POST that matches a declared route exactly, on a path that also has a different declared method', async () => {
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('matched')
+      },
+      {
+        routes: [
+          { method: 'GET', path: '/v1/models' },
+          { method: 'POST', path: '/v1/models' },
+        ],
+      }
+    )
+
+    const res = await send(gw.port, {
+      path: '/v1/models',
+      method: 'POST',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toBe('matched')
+  })
+
+  it('answers 404, not 405, when the path itself is not declared for any method', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { routes: [{ method: 'GET', path: '/v1/models' }] }
+    )
+
+    const res = await send(gw.port, {
+      path: '/update_weights',
+      method: 'POST',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+
+    expect(res.status).toBe(404)
+    expect(reached).toBe(false)
   })
 })

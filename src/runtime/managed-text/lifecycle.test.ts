@@ -41,7 +41,7 @@ const alpha: ManagedTextAdapter<{ ctx: number }> = {
   id: 'alpha-engine',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/health', expectedStatus: 200 },
-  routes: ['/v1/models'],
+  routes: [{ method: 'GET', path: '/v1/models' }],
   stageMarkers: [],
   validateSettings: (raw) => {
     const ctx = (raw as { ctx?: unknown } | undefined)?.ctx ?? 4096
@@ -73,7 +73,7 @@ const beta: ManagedTextAdapter<Record<string, never>> = {
   id: 'beta-engine',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/v1/models', expectedStatus: 200 },
-  routes: ['/v1/models'],
+  routes: [{ method: 'GET', path: '/v1/models' }],
   stageMarkers: [{ stage: 'initializing-engine', pattern: /Loading checkpoint shards/ }],
   validateSettings: () => ({}),
   buildLaunch: () => ({ engine: { container_port: 9000 }, argv: ['beta', 'serve'] }),
@@ -92,8 +92,11 @@ const gamma: ManagedTextAdapter<{ tag: string }> = {
   id: 'gamma-rewrite-engine',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/health', expectedStatus: 200 },
-  routes: ['/v1/models', '/v1/chat/completions'],
-  rewritableRoutes: ['/v1/chat/completions'],
+  routes: [
+    { method: 'GET', path: '/v1/models' },
+    { method: 'POST', path: '/v1/chat/completions' },
+  ],
+  rewritableRoutes: [{ method: 'POST', path: '/v1/chat/completions' }],
   stageMarkers: [],
   validateSettings: (raw) => ({ tag: (raw as { tag?: string } | undefined)?.tag ?? 'default' }),
   buildLaunch: () => ({ engine: { container_port: 8000 }, argv: ['gamma'] }),
@@ -773,7 +776,16 @@ describe('ManagedTextLifecycle: review round 1 gaps', () => {
     readyAt = null
     let second: Promise<unknown> | undefined
     onProbe = (now) => {
-      if (now === 2_000) second = lifecycle.load(request_())
+      if (now === 2_000) {
+        second = lifecycle.load(request_())
+        // `second` rejects synchronously (the conflict check throws before any `await`), long before
+        // the first load's own `await` below ever resumes to observe it via `rejection()` — Node
+        // flags that gap as an unhandled rejection even though this test does handle it, just later.
+        // A no-op catch here only marks the rejection observed for that bookkeeping; `rejection()`
+        // below still awaits the same promise and asserts on its real rejection value (findings-
+        // 2.13-r3.md item 2).
+        second.catch(() => {})
+      }
       if (now === 3_000) readyAt = 0
     }
     await lifecycle.load(request_())
@@ -876,8 +888,11 @@ describe('ManagedTextLifecycle: review round 2 gaps (findings-2.13-r2.md item 4)
       })
     )
 
-    expect(captured?.routes).toEqual(['/v1/models', '/v1/chat/completions'])
-    expect(captured?.rewritableRoutes).toEqual(['/v1/chat/completions'])
+    expect(captured?.routes).toEqual([
+      { method: 'GET', path: '/v1/models' },
+      { method: 'POST', path: '/v1/chat/completions' },
+    ])
+    expect(captured?.rewritableRoutes).toEqual([{ method: 'POST', path: '/v1/chat/completions' }])
     expect(captured?.rewriteRequestBody).toBeDefined()
 
     // gamma.rewriteRequestBody reads `this.id`, which throws if the lifecycle ever invoked it as a

@@ -18,20 +18,23 @@
  * New for TensorRT-LLM managed sessions (design D11, spec `managed-session-gateway`). Engine-neutral:
  * nothing here knows about `trtllm-serve` specifically, only that it speaks HTTP on loopback.
  *
- * `routes`/`rewritableRoutes`/`rewriteRequestBody` (task 2.13 fix rounds 1-2; ADR
+ * `routes`/`rewritableRoutes`/`rewriteRequestBody` (task 2.13 fix rounds 1-3; ADR
  * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`) are the
  * deliberate exceptions to design D11's own Risks/Trade-offs entry, "только копирование байтов без
  * парсинга" (only copies bytes, never parses):
- * - every request's route is checked against the adapter's own declared `routes` before anything is
- *   forwarded — a route the adapter never declared gets `404` straight back, without ever reaching
- *   the upstream, closing off whatever else the engine's own HTTP server happens to also expose;
- * - a request to a declared route the adapter also lists as rewritable gets its JSON body parsed,
- *   handed to `rewriteRequestBody`, and re-serialized before forwarding.
+ * - every request's method+path is checked against the adapter's own declared `routes` before
+ *   anything is forwarded — a path the adapter never declared at all gets `404`; a path it declared
+ *   for a *different* method gets `405` with an `Allow` header (round 3: round 2's path-only
+ *   matching let a wrong method through). Neither is ever forwarded, closing off both whatever else
+ *   the engine's own HTTP server happens to also expose, and a wrong method on a route that is
+ *   otherwise real;
+ * - a request matching a declared route the adapter also lists in `rewritableRoutes` gets its JSON
+ *   body parsed, handed to `rewriteRequestBody`, and re-serialized before forwarding.
  * Every other declared route still proxies byte-for-byte, exactly as before this existed. This
  * module stays engine-neutral about *why* an adapter wants either of these — it only enforces the
- * mechanics (route matching on the decoded path, POST-only rewriting, a body-size cap enforced while
- * the body streams in, a parse failure or a rewriter's own throw answering `400` instead of
- * forwarding) and never touches the response, streamed or not.
+ * mechanics (method+path route matching on the decoded path, a body-size cap enforced while the body
+ * streams in, a parse failure or a rewriter's own throw answering `400`/`500` instead of forwarding)
+ * and never touches the response, streamed or not.
  */
 
 import { createServer } from 'node:http'
@@ -42,6 +45,7 @@ import { hostAndKeyGate } from '../../server/public/index.js'
 import type { HostAndKeyConfig } from '../../server/public/index.js'
 import { forwardableHeaders, readBody, relay, sendUpstream, sendWhole } from '../../server/public/index.js'
 import type { HeaderPairs, UpstreamResponse } from '../../server/public/index.js'
+import type { ManagedRoute } from './adapter.js'
 
 /** Hosts accepted as "loopback" for the upstream the gateway proxies to. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
@@ -72,15 +76,16 @@ export interface ManagedGatewayOptions {
   /** The same trusted-hosts list the public server (`:1337`) is configured with. */
   allowedHosts: string[]
   /**
-   * The adapter's own declared routes (`ManagedTextAdapter.routes`; absolute paths, no query, no
-   * method). Matched against the request's percent-decoded path — see `decodedRoute` — before
-   * anything is forwarded; anything that does not match gets `404` and never reaches the upstream
-   * at all.
+   * The adapter's own declared method+path routes (`ManagedTextAdapter.routes`). Matched against
+   * the request's method and percent-decoded path — see `decodedRoute` — before anything is
+   * forwarded: no declared route for the path at all is `404`; the path is declared, but not for
+   * this method, is `405` with an `Allow` header (findings-2.13-r3.md item 1). Neither reaches the
+   * upstream.
    */
-  routes: readonly string[]
+  routes: readonly ManagedRoute[]
   /** The subset of `routes` `rewriteRequestBody` may rewrite (`ManagedTextAdapter.rewritableRoutes`).
    *  Absent or empty: nothing is ever parsed as JSON, even with `rewriteRequestBody` set. */
-  rewritableRoutes?: readonly string[]
+  rewritableRoutes?: readonly ManagedRoute[]
   /**
    * Optional: rewrites a POST request's parsed JSON body before it is forwarded, already bound to
    * whatever settings the adapter needs (the lifecycle does that binding; this callback takes just
@@ -132,13 +137,46 @@ function sendOpenAIError(
 }
 
 /**
+ * `405` for a path this session *does* declare, just not for this method (e.g. `GET
+ * /v1/chat/completions` when only `POST` is declared) — never forwarded, same as a `404`
+ * (findings-2.13-r3.md item 1). `Allow` lists every method actually declared for this path, per
+ * RFC 9110 §15.5.6. `HEAD` is never implied by a declared `GET`: an adapter that wants `HEAD`
+ * served declares it as its own route; the default (nothing declares it) lands here too, which is
+ * the safe answer for a route with no dedicated `HEAD` handler.
+ */
+function sendMethodNotAllowed(res: ServerResponse, allowedMethods: readonly string[]): void {
+  const allow = allowedMethods.join(', ')
+  const body = JSON.stringify({
+    error: {
+      message: `Method not allowed on this route. Allowed: ${allow}.`,
+      type: 'invalid_request_error',
+      code: 'method_not_allowed',
+    },
+  })
+  sendWhole(res, 405, [...OPENAI_ERROR_HEADERS, ['allow', allow]], body)
+}
+
+/**
  * Answers `413` for a body abandoned mid-read (over the rewrite cap) and only *then* — once the
  * response has actually finished writing, via `res.end`'s own callback — destroys the connection.
- * Order matters: `readCappedBody` stopped before consuming the whole request, so the socket still
- * has unread client bytes sitting in it; keeping it alive for a next, pipelined request is not safe,
- * but destroying it before the response leaves would race the client into seeing a truncated
- * response as a bare socket error instead of a clean `413` (this raced and failed exactly that way
- * during development, when the destroy happened immediately instead of after the write).
+ * Order matters: destroying it before the response leaves would race the client into seeing a
+ * truncated response as a bare socket error instead of a clean `413` (this raced and failed exactly
+ * that way during development, when the destroy happened immediately instead of after the write).
+ * `req.destroy()` here is a deliberate, explicit call for a real `IncomingMessage`, even though
+ * `readCappedBody`'s own early `return` already tore down that same stream as a side effect of
+ * leaving its `for await` loop (see that function's own comment) — destroying an already-destroyed
+ * stream is a harmless no-op, and this call stays correct even for a hypothetical future `source`
+ * that is not a Node stream and so has no such side effect.
+ *
+ * Known, accepted limit (findings-2.13-r2.md item 2 / findings-2.13-r3.md item 5): a client that is
+ * still *actively writing* past the cap when the connection closes may never see this `413` body at
+ * all — it can observe a bare transport error instead (`EPIPE`/`ECONNRESET`), because closing a
+ * socket that still has unread bytes queued on it can make the OS send a reset instead of a clean
+ * close. This is not fixable from here (it is how TCP itself behaves, not a Node or gateway quirk),
+ * and is the same trade-off any server rejecting an oversized body mid-stream makes: protecting this
+ * process's memory against an oversized or runaway sender wins over guaranteeing that sender a
+ * pretty error message. A client that sends its body in one normal `write`-then-`end` (every real
+ * OpenAI client) sees the `413` cleanly, as `gateway.test.ts` covers.
  */
 function sendTooLargeAndClose(req: IncomingMessage, res: ServerResponse): void {
   const body = JSON.stringify({
@@ -188,9 +226,20 @@ function decodedRoute(rawPath: string): string | null {
  * `IncomingMessage` specifically, so this exact claim — stops pulling before the cap, not after —
  * has a direct unit test against a source that never ends, instead of only an HTTP-level test whose
  * client would have to keep sending past a connection the server has already closed, which is an
- * inherently racy thing to assert on at the TCP level). Does not itself touch the connection: the
- * caller (`sendTooLargeAndClose`) decides when it is safe to close it, after the `413` has actually
- * been written, not before.
+ * inherently racy thing to assert on at the TCP level).
+ *
+ * That early `return` is not as passive as it looks (findings-2.13-r3.md item 4): exiting a `for
+ * await...of` loop before it runs to completion — by `return`, `break` or an uncaught throw — makes
+ * the language call the async iterator's own `.return()`, and for a Node.js `Readable` (which is
+ * what a real `IncomingMessage` is), that already tears the stream down as a side effect, before
+ * this function's caller ever gets a chance to decide anything. So for the real gateway path, the
+ * connection's read side is already gone by the time `readCappedBody` returns `'too-large'` — this
+ * function does not *decide* to leave the connection alone, the language leaves it no choice in the
+ * matter. (This has no such effect on a `source` that is not backed by a Node stream — an async
+ * generator, say, as this file's own unit test for this function uses — where "stop iterating" truly
+ * is just that.) `sendTooLargeAndClose` still calls `req.destroy()` itself explicitly, both because
+ * destroying an already-destroyed stream is a harmless no-op and because relying on this implicit
+ * side effect would silently stop working for a source that is not a plain Node stream.
  */
 export async function readCappedBody(
   source: AsyncIterable<Buffer>,
@@ -256,7 +305,7 @@ async function sendBodyToUpstream(
 
 /**
  * Reads the client's body under the rewrite cap, parses it as JSON, hands it to `rewriteRequestBody`
- * and re-serializes the result — or answers `413`/`400` itself and returns `null`, meaning the
+ * and re-serializes the result — or answers `413`/`400`/`500` itself and returns `null`, meaning the
  * caller must not proceed to the upstream at all. `sendUpstream` derives `Content-Length` from
  * whatever buffer it is actually given, so a body that grew or shrank under rewriting is never sent
  * with the client's original, now-stale length (and never as `Transfer-Encoding: chunked`, whatever
@@ -287,26 +336,40 @@ async function readAndRewriteBody(
   try {
     rewritten = rewriteRequestBody(route, parsed)
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Request body could not be processed.'
-    sendOpenAIError(res, 400, message, 'invalid_request_error', 'invalid_request_error')
+    // Only a validation error — the adapter rejecting something the *client* sent — is safe to
+    // surface verbatim as a 400: its message was written to be read by that client. Anything else
+    // (a bug in the adapter's own rewrite logic, for instance) becomes a generic 500 instead of
+    // leaking an internal error message to the client; the detail still goes to this process's own
+    // log, since this module has no injected logger of its own to hand it to (findings-2.13-r3.md
+    // item 3).
+    if (error instanceof AtomicCoreError && error.code === 'INVALID_ARGUMENT') {
+      sendOpenAIError(res, 400, error.message, 'invalid_request_error', 'invalid_request_error')
+    } else {
+      console.error('managed-text gateway: rewriteRequestBody threw an unexpected error:', error)
+      sendOpenAIError(res, 500, 'The request could not be processed.', 'server_error', 'internal_error')
+    }
     return null
   }
   return Buffer.from(JSON.stringify(rewritten), 'utf8')
 }
 
 /**
- * Matches the request against `options.routes` (`404` and never forwarded if it does not match —
- * findings-2.13-r2.md item 3), then either rewrites its body (a declared, rewritable route, `POST`,
- * `rewriteRequestBody` configured) or proxies it through untouched — the same byte-for-byte path
- * every request took before rewriting existed at all, still used for every other route/method.
+ * Matches the request against `options.routes`, method and path together (findings-2.13-r3.md item
+ * 1): no declared route for this path at all is `404`; the path is declared, just not for this
+ * method, is `405` with an `Allow` header. Neither is ever forwarded, and neither reads the body.
+ * Otherwise, either rewrites the body (a declared, rewritable route, `rewriteRequestBody`
+ * configured) or proxies it through untouched — the same byte-for-byte path every request took
+ * before rewriting existed at all, still used for every other route.
  */
 async function proxyToUpstream(
   req: IncomingMessage,
   res: ServerResponse,
   options: ManagedGatewayOptions
 ): Promise<void> {
-  const route = decodedRoute(routeOf(req.url))
-  if (route === null || !options.routes.includes(route)) {
+  const path = decodedRoute(routeOf(req.url))
+  const method = req.method ?? 'GET'
+  const declaredForPath = path === null ? [] : options.routes.filter((r) => r.path === path)
+  if (path === null || declaredForPath.length === 0) {
     sendOpenAIError(
       res,
       404,
@@ -316,12 +379,19 @@ async function proxyToUpstream(
     )
     return
   }
+  if (!declaredForPath.some((r) => r.method === method)) {
+    sendMethodNotAllowed(
+      res,
+      declaredForPath.map((r) => r.method)
+    )
+    return
+  }
+  const route = path
 
   const rewriteRequestBody = options.rewriteRequestBody
   const rewritable =
     rewriteRequestBody !== undefined &&
-    (options.rewritableRoutes ?? []).includes(route) &&
-    req.method === 'POST'
+    (options.rewritableRoutes ?? []).some((r) => r.method === method && r.path === route)
 
   let body: Buffer
   if (rewritable) {
