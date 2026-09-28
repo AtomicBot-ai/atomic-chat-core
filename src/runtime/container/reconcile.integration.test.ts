@@ -7,6 +7,7 @@
  * into the compiled binary yet (`core/create.ts`'s TODO next to `reapOrphans`), so a binary-level e2e
  * would only prove the fake binary works, not this module.
  */
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { createDockerExec } from './exec.js'
@@ -70,7 +71,10 @@ describe('reconcile end to end against a fake docker binary', () => {
       await journal.add(record())
 
       // The container this dead instance started is still running on the host after its kill -9.
-      const rawExec = createDockerExec({ dockerPath: process.execPath })
+      const rawExec = createDockerExec({
+        dockerPath: process.execPath,
+        dockerConfigDir: join(data.root, 'docker-config'),
+      })
       const exec = (args: string[]) =>
         rawExec(['-e', fakeDockerScript([record().container_id]), '--', ...args])
       const log = vi.fn()
@@ -94,7 +98,10 @@ describe('reconcile end to end against a fake docker binary', () => {
       const journal = await ExecutionJournal.open(data.layout) // nothing of ours running: empty journal
       const foreignId = 'foreign-labelled-container'
 
-      const rawExec = createDockerExec({ dockerPath: process.execPath })
+      const rawExec = createDockerExec({
+        dockerPath: process.execPath,
+        dockerConfigDir: join(data.root, 'docker-config'),
+      })
       // The foreign container answers "running" if asked — proving reconcile never asks about it at all.
       const exec = (args: string[]) => rawExec(['-e', fakeDockerScript([foreignId]), '--', ...args])
       const execSpy = vi.fn(exec)
