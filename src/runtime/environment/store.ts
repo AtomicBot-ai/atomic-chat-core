@@ -26,7 +26,7 @@ import type {
   Sha256Digest,
 } from '../../contracts/index.js'
 import { encodeManagedId, managedSharedPaths } from '../../config/index.js'
-import { processStartId } from '../../lock/index.js'
+import { TAKEOVER_MUTEX_TTL_MS } from '../../lock/index.js'
 import { canonicalDigest } from './canonical-json.js'
 import { startOperation, type OperationMachine } from './state.js'
 
@@ -101,12 +101,15 @@ export interface OperationStoreOptions {
   lockAttempts?: number
   lockRetryMs?: number
   /**
-   * What to stamp as the owner of every record this store writes. Real process identity by
-   * default (`src/lock/process-identity.ts`), resolved once and cached — a process's start
-   * identity does not change while it runs, and re-probing it on every write would mean an `exec`
-   * per commit on macOS and Windows.
+   * What to stamp as the owner of every record this store writes. Required, not defaulted: the
+   * one production caller (`wireManagedRuntimes`, `wiring.ts`) already builds a real one over
+   * `src/lock/process-identity.ts`'s `processStartId`, resolved once and cached there — a
+   * process's start identity does not change while it runs, and re-probing it on every write would
+   * mean an `exec` per commit on macOS and Windows. A second, unused default here would be code
+   * this store's own tests would have to either exercise for real (slow, platform-dependent, and
+   * pointless when nothing calls it) or leave permanently uncovered.
    */
-  ownerIdentity?: () => Promise<OwnerIdentity>
+  ownerIdentity: () => Promise<OwnerIdentity>
 }
 
 const DEFAULT_LOCK_TTL_MS = 30_000
@@ -158,15 +161,6 @@ const parseRecord = (text: string): PersistedOperation | null => {
   }
 }
 
-/** Real process identity, fetched once per store and cached for its whole lifetime. */
-const defaultOwnerIdentity = (): (() => Promise<OwnerIdentity>) => {
-  let cached: Promise<OwnerIdentity> | undefined
-  return () => {
-    cached ??= processStartId(process.pid).then((startId) => ({ pid: process.pid, startId: startId ?? null }))
-    return cached
-  }
-}
-
 export class OperationStore {
   private readonly paths: ReturnType<typeof managedSharedPaths>
   private readonly fs: StoreFs
@@ -193,7 +187,7 @@ export class OperationStore {
       lockTtlMs: options.lockTtlMs ?? DEFAULT_LOCK_TTL_MS,
       lockAttempts: options.lockAttempts ?? DEFAULT_LOCK_ATTEMPTS,
       lockRetryMs: options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
-      ownerIdentity: options.ownerIdentity ?? defaultOwnerIdentity(),
+      ownerIdentity: options.ownerIdentity,
     }
   }
 
@@ -392,9 +386,11 @@ export class OperationStore {
       // Only the lock still carrying this attempt's token is this attempt's to remove: a takeover
       // that ran while this critical section was itself still inside its (generous) TTL leaves a
       // fresh lock behind under a different token, and releasing unconditionally would delete it
-      // out from under its new, legitimate holder.
+      // out from under its new, legitimate holder. A read that fails proves nothing either way —
+      // it is not evidence the file is gone, only that this attempt could not confirm ownership —
+      // so it is treated the same as a mismatch: leave the file alone rather than guess.
       const onDisk = await this.fs.readFile(this.paths.lockFile, 'utf8').catch(() => null)
-      if (onDisk === null || onDisk.trim() === token) {
+      if (onDisk !== null && onDisk.trim() === token) {
         await this.fs.rm(this.paths.lockFile, { force: true }).catch(() => undefined)
       }
     }
@@ -428,16 +424,31 @@ export class OperationStore {
    * however carefully the removal itself is written. Only the one holding this mutex reads and
    * acts, and it re-reads freshly, so a lock that became live again in the meantime is left alone.
    *
+   * The mutex file is exactly as recoverable as the lock it protects: a waiter that dies holding
+   * it — between creating it and its own `finally` removing it — would otherwise leave it behind
+   * forever, and every later `openExclusive(mutexPath)` would fail permanently, taking the whole
+   * store's stale-lock recovery down with it for good. `src/lock/instance-lock.ts`'s
+   * `tryRecoverStale` faces the same problem for its own takeover mutex and solves it the same
+   * way: when creating the mutex fails, check its own age, and remove it if it is older than
+   * `TAKEOVER_MUTEX_TTL_MS` — generous enough that it is never mistaken for one a live waiter is
+   * still using (a takeover only ever holds it for one stat and one rm).
+   *
    * Returns whether a stale lock was actually cleared — not merely whether this call got to look.
    * `acquire` retries at once only on `true`; otherwise it is genuine contention with a live
    * holder, and the ordinary backoff applies, the same as losing the race for the lock itself.
    */
   private async tryTakeoverStale(): Promise<boolean> {
     const mutexPath = `${this.paths.lockFile}.takeover`
-    const mutex = await this.fs.openExclusive(mutexPath).catch(() => null)
-    if (mutex === null) return false // another waiter is already deciding
+    const mutex = await this.fs.openExclusive(mutexPath).catch(async () => {
+      const age = await this.ageOf(mutexPath)
+      if (age !== null && age > TAKEOVER_MUTEX_TTL_MS) {
+        await this.fs.rm(mutexPath, { force: true }).catch(() => undefined)
+      }
+      return null
+    })
+    if (mutex === null) return false // another waiter is deciding, or just cleaned up an orphan
     try {
-      const age = await this.lockAge()
+      const age = await this.ageOf(this.paths.lockFile)
       if (age === null || age <= this.options.lockTtlMs) return false
       await this.fs.rm(this.paths.lockFile, { force: true }).catch(() => undefined)
       return true
@@ -447,9 +458,9 @@ export class OperationStore {
     }
   }
 
-  private async lockAge(): Promise<number | null> {
+  private async ageOf(path: string): Promise<number | null> {
     try {
-      const info = await this.fs.stat(this.paths.lockFile)
+      const info = await this.fs.stat(path)
       return this.options.now() - info.mtimeMs
     } catch {
       return null

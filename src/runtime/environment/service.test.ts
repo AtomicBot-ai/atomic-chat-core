@@ -8,9 +8,19 @@ import type {
   RequirementPlan,
   Sha256Digest,
 } from '../../contracts/index.js'
+import type { IdentityDeps } from '../../lock/index.js'
 import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
 import { OperationStore } from './store.js'
+
+/**
+ * A `/proc/<pid>/stat` line whose start-tick field is `ticks` — just enough of the real shape for
+ * `processStartId`'s Linux parser to read a genuine `linux:<ticks>` value out of it, without ever
+ * touching an actual process. `tail[19]` (20 whitespace-separated fields after the last `)`) is the
+ * field it reads; the other 19 are unused filler.
+ */
+const fakeProcStat = (ticks: number): string =>
+  `4242 (node) ${['S', ...Array(18).fill('0'), String(ticks)].join(' ')}`
 
 const PLAN_A = `sha256:${'a'.repeat(64)}` as Sha256Digest
 const PLAN_B = `sha256:${'b'.repeat(64)}` as Sha256Digest
@@ -126,10 +136,19 @@ class FakeProvisioner implements EnvironmentProvisioner {
   }
 }
 
-const harness = (
-  provisioner: EnvironmentProvisioner | null,
-  identity: { alive?: (pid: number) => boolean } = { alive: () => false }
-) => {
+interface HarnessIdentity {
+  /**
+   * Fully deterministic on every host: no `platform`/`readText`/`run` here ever reaches the real
+   * OS unless a test supplies its own (as the "a live owner" tests below do, to get a genuine
+   * `match` or `unknown` verdict without depending on what pid 4242 happens to be on the machine
+   * running the suite).
+   */
+  identityDeps?: IdentityDeps
+  /** What `PersistedOperation.owner_process_start_id` this harness's writes carry. */
+  ownerStartId?: string | null
+}
+
+const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessIdentity = {}) => {
   const fs = new FakeManagedFs()
   let n = 0
   const events: EnvironmentOperation[] = []
@@ -144,7 +163,7 @@ const harness = (
     // Fast and deterministic: these tests are about operation flow, not about which real OS
     // process is still running, and the vitest worker's own pid would otherwise make every
     // record's "owner" look alive forever, since it is the one writing them.
-    ownerIdentity: async () => ({ pid: 4242, startId: 'harness:owner' }),
+    ownerIdentity: async () => ({ pid: 4242, startId: identity.ownerStartId ?? 'harness:owner' }),
   })
   const service = new EnvironmentService({
     store,
@@ -157,8 +176,8 @@ const harness = (
     // Every owner is "gone" by default, so `recover` behaves exactly as it did before the owner
     // liveness check existed: most of these tests exercise repeated recovery of the harness's own
     // writes (see OP09, simulating several real app restarts in one process), never a live
-    // handoff between two cores. The "a live owner" tests below pass their own `alive`.
-    identityDeps: identity,
+    // handoff between two cores. The "a live owner" tests below pass their own `identityDeps`.
+    identityDeps: identity.identityDeps ?? { alive: () => false },
   })
   return { service, store, events, fs }
 }
@@ -302,12 +321,17 @@ describe('waiting for a sign-out across restarts (OP09)', () => {
 })
 
 describe('a live owner is left alone (finding 1)', () => {
-  it('does not reconcile a non-terminal operation whose recorded owner is still running', async () => {
+  it('does not reconcile a non-terminal operation whose recorded owner is still running (match)', async () => {
     const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: HOST_STEP })
-    // This harness's every record claims pid 4242 as its owner (see `harness`); telling `alive`
-    // to agree is exactly what a live app core and a live CLI core sharing this store looks like
-    // from the recovering side.
-    const { service } = harness(provisioner, { alive: (pid) => pid === 4242 })
+    // A genuine `match` verdict, the same way `InstanceLock` gets one: `alive` says yes, and the
+    // recorded start id is exactly what this fake `/proc/4242/stat` line parses to. Deterministic
+    // on every host — not "pid 4242 happens not to be running here" (`processStartId` would
+    // otherwise make a real syscall/exec against the real pid 4242, whatever that is today).
+    const ticks = 99_999
+    const { service } = harness(provisioner, {
+      ownerStartId: `linux:${ticks}`,
+      identityDeps: { alive: () => true, platform: 'linux', readText: async () => fakeProcStat(ticks) },
+    })
     await service.begin('env-1', begin())
     await settle(service)
     const before = await service.get('op-1')
@@ -324,12 +348,12 @@ describe('a live owner is left alone (finding 1)', () => {
     expect(provisioner.calls).toEqual(['probe'])
   })
 
-  it('treats an unproven identity as alive too, the same as InstanceLock does for its own lock', async () => {
+  it('treats an unprovable identity as alive too, the same as InstanceLock does for its own lock (unknown)', async () => {
     const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: HOST_STEP })
-    // `alive` throwing is what a probe that could not tell either way looks like; `identityDeps`
-    // defaults the rest (`processStartId`) to real, platform-specific I/O this harness never
-    // reaches because `alive` already answers first.
-    const { service } = harness(provisioner, { alive: () => true })
+    // A genuine `unknown` verdict: `alive` says yes, but no start id was ever recorded to compare
+    // against, so `verifyProcessIdentity` returns `unknown` without probing anything — no real pid
+    // or platform I/O involved, deterministic on every host.
+    const { service } = harness(provisioner, { ownerStartId: null, identityDeps: { alive: () => true } })
     await service.begin('env-1', begin())
     await settle(service)
     const before = await service.get('op-1')
@@ -365,7 +389,9 @@ describe('an abandoned operation with nobody to help it (finding 2)', () => {
   })
 
   it('leaves a live owner alone even with no provisioner to reconcile through', async () => {
-    const { service, store } = harness(null, { alive: (pid) => pid === 4242 })
+    // `unknown` (no recorded start id): deterministic on every host, the same as the "a live
+    // owner is left alone" tests above.
+    const { service, store } = harness(null, { ownerStartId: null, identityDeps: { alive: () => true } })
     await store.createOrGet('env-1', begin(), PLAN_A)
     const before = await service.get('op-1')
     expect(before.phase).toBe('checking')
@@ -377,6 +403,65 @@ describe('an abandoned operation with nobody to help it (finding 2)', () => {
     const after = await service.get('op-1')
     expect(after.revision).toBe(before.revision)
     expect(after.phase).toBe('checking')
+  })
+})
+
+describe('recovering the rest of the list when one record misbehaves (finding 6)', () => {
+  it('keeps recovering later records after an earlier one throws instead of aborting the whole pass', async () => {
+    // A bespoke store/service pair, not the shared `harness()`: that helper pins `newOperationId`
+    // to a single `'op-1'` (every other test in this file only ever recovers one record at a
+    // time), which would make two `createOrGet` calls collide on the same file. Two distinct,
+    // independently recoverable records are the whole point here.
+    const fs = new FakeManagedFs()
+    let opSerial = 0
+    let effectSerial = 0
+    let aliveCalls = 0
+    const store = new OperationStore({
+      root: '/shared',
+      instanceId: 'core-1',
+      newOperationId: () => `op-${(opSerial += 1)}`,
+      newEffectId: () => `effect-${(effectSerial += 1)}`,
+      fs,
+      now: () => fs.clock,
+      sleep: async () => undefined,
+      ownerIdentity: async () => ({ pid: 4242, startId: 'harness:owner' }),
+    })
+    const service = new EnvironmentService({
+      store,
+      environmentId: 'env-1',
+      instanceId: 'core-1',
+      newEffectId: () => `effect-${(effectSerial += 1)}`,
+      provisioner: null,
+      readSnapshot: async () => [],
+      // The first record's liveness probe blows up outright — not a normal dead/unknown verdict,
+      // a genuinely unexpected failure, the same shape a store error or a reducer refusal this
+      // loop did not anticipate would take. The second record's probe must still be reached.
+      identityDeps: {
+        alive: () => {
+          aliveCalls += 1
+          if (aliveCalls === 1) throw new Error('probe exploded')
+          return false
+        },
+      },
+    })
+
+    await store.createOrGet('env-a', begin({ request_id: 'req-a' }), PLAN_A)
+    await store.createOrGet('env-b', begin({ request_id: 'req-b' }), PLAN_A)
+    expect(await store.listRecoverable()).toHaveLength(2)
+
+    await service.recover('core-2')
+
+    // The record whose liveness check threw is exactly where it started: `recover`'s per-record
+    // `try`/`catch` is its backstop, not a second chance to finish the work that failed. But the
+    // throw did not stop the loop — the second record was still reached, found its owner gone,
+    // and (with no provisioner to reconcile it) was abandoned, same as the single-record case in
+    // "an abandoned operation with nobody to help it" above.
+    expect(aliveCalls).toBe(2)
+    const opA = await service.get('op-1')
+    expect(opA.phase).toBe('checking')
+    const opB = await service.get('op-2')
+    expect(opB.phase).toBe('failed')
+    expect(opB.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
   })
 })
 
@@ -417,6 +502,16 @@ describe('shutdown enforces its own deadline (finding 5)', () => {
     provisioner.pauseAt('prepare')
     const { service } = harness(provisioner)
     await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+
+    // Wait until the paused step is actually in flight — `perform` dispatches `prepare` from
+    // inside the `probe` effect's own handler, which `begin` does not wait for, so it is not yet
+    // running the instant `begin` resolves. Aborting before `idle` is actually waiting on it would
+    // let even the old, unraced `idle` return quickly by coincidence (nothing to hang on yet),
+    // rather than by actually enforcing the deadline.
+    for (let i = 0; i < 200 && !provisioner.calls.includes('prepare'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    expect(provisioner.calls).toContain('prepare')
 
     const controller = new AbortController()
     const started = Date.now()

@@ -235,30 +235,37 @@ export class EnvironmentService {
   async recover(instanceId: string): Promise<void> {
     const pending = await this.options.store.listRecoverable()
     for (const record of pending) {
-      if (await this.ownerAlive(record)) continue
+      // One record's recovery failing outright (a store error, a reducer refusal this loop did
+      // not anticipate) must not stop the rest of the list from being looked at — the next core
+      // start, or a client's own `resume`, gets another chance at whichever record it was.
+      try {
+        if (await this.ownerAlive(record)) continue
 
-      if (this.options.provisioner === null) {
-        // No recipe exists to reconcile against, so this operation can never move on its own —
-        // and with nothing to skip it for (its owner is gone), leaving it non-terminal would
-        // block every later `begin` on this environment with MANAGED_OPERATION_CONFLICT forever.
-        await this.failAbandoned(record)
+        if (this.options.provisioner === null) {
+          // No recipe exists to reconcile against, so this operation can never move on its own —
+          // and with nothing to skip it for (its owner is gone), leaving it non-terminal would
+          // block every later `begin` on this environment with MANAGED_OPERATION_CONFLICT forever.
+          await this.failAbandoned(record)
+          continue
+        }
+
+        const outcome = await recoverOperation(record, {
+          instanceId,
+          newEffectId: this.options.newEffectId,
+          inventory: this.options.provisioner.inventory,
+        })
+        if (outcome.kind === 'unchanged') continue
+        const swapped = await this.options.store.compareAndSwap(
+          record.machine.operation.operation_id,
+          record.machine.operation.revision,
+          outcome.record
+        )
+        if (!swapped) continue
+        this.options.emit?.('environment:operation', outcome.record.machine.operation)
+        if (outcome.kind === 'reconciled') this.dispatch(outcome.record)
+      } catch {
         continue
       }
-
-      const outcome = await recoverOperation(record, {
-        instanceId,
-        newEffectId: this.options.newEffectId,
-        inventory: this.options.provisioner.inventory,
-      })
-      if (outcome.kind === 'unchanged') continue
-      const swapped = await this.options.store.compareAndSwap(
-        record.machine.operation.operation_id,
-        record.machine.operation.revision,
-        outcome.record
-      )
-      if (!swapped) continue
-      this.options.emit?.('environment:operation', outcome.record.machine.operation)
-      if (outcome.kind === 'reconciled') this.dispatch(outcome.record)
     }
   }
 
@@ -416,9 +423,11 @@ export class EnvironmentService {
     // Nothing is pending — awaiting consent, or waiting on a sign-out or reboot that will never
     // come from a core that is gone. `cancel` is the one event the reducer accepts without a
     // pending effect; it issues a `cleanup` effect, which the no-provisioner branch of `perform`
-    // (below) turns into the same failure `execute` would have reported for real work.
-    const { record: cancelled, owned } = await this.apply(operationId, { type: 'cancel' })
-    if (owned) this.dispatch(cancelled)
+    // (below) turns into the same failure `execute` would have reported for real work. `recover`'s
+    // own per-record `try`/`catch` is the backstop; this one keeps a refusal here from reading as
+    // an operation this call still owes a result to.
+    const applied = await this.apply(operationId, { type: 'cancel' }).catch(() => null)
+    if (applied?.owned === true) this.dispatch(applied.record)
   }
 
   /** Run whatever the machine is now waiting on, without making the caller wait for it. */
