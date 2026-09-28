@@ -4,7 +4,11 @@
  * src-tauri/plugins/tauri-plugin-llamacpp-upstream/guest-js/types.ts:122-132 and state.rs:9-23.
  */
 
-export type LocalProviderId = 'llamacpp-upstream' | 'llamacpp' | 'mlx' | 'foundation-models'
+/**
+ * `tensorrt-llm` runs in a container on Linux only (openspec change `add-tensorrt-llm-linux`); a core
+ * on any other platform never offers it, and its sessions carry `pid: null`.
+ */
+export type LocalProviderId = 'llamacpp-upstream' | 'llamacpp' | 'mlx' | 'foundation-models' | 'tensorrt-llm'
 
 export interface RuntimeDeviceInfo {
   /** Backends in load order, deduped, e.g. ["CUDA", "CPU"]. */

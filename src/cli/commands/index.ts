@@ -8,7 +8,7 @@
  * after Ctrl+C instead of owning the model itself, which the help text states outright.
  */
 
-export { apiUrl, baseUrl, formatBytes, layoutFor } from './shared.js'
+export { apiUrl, baseUrl, formatBytes, layoutFor, sessionProcess } from './shared.js'
 export { modelsCommand } from './models.js'
 export { backendsCommand } from './backends.js'
 export { hardwareCommand } from './hardware.js'

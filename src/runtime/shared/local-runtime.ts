@@ -51,6 +51,24 @@ export interface LocalLoadOptions {
   signal?: AbortSignal
 }
 
+/**
+ * How the public server must treat one session's traffic, for a runtime whose engine declares what it
+ * serves instead of taking everything (`tensorrt-llm`, spec `tensorrt-llm-runtime`). A runtime without
+ * a policy keeps the server's own behaviour: forward everything, grow the context on an overflow.
+ */
+export interface SessionRoutePolicy {
+  /** The method+path routes the session serves; any other model-bearing route is refused, never forwarded. */
+  routes: readonly { method: string; path: string }[]
+  /** False refuses a request that carries `tools` with a clear error, instead of silently dropping them. */
+  tools: boolean
+  /**
+   * The client-facing OpenAI error for an engine error this policy knows (a context overflow), or null
+   * for the server's generic wrapping. A session with a policy is never grown or recreated: its
+   * context was fixed when its container started.
+   */
+  mapError: (status: number, body: string) => object | null
+}
+
 export interface LocalRuntime {
   list(): SessionInfo[]
   findSession(modelId: string): SessionInfo | undefined
@@ -61,6 +79,8 @@ export interface LocalRuntime {
   autoIncreaseCtx(modelId: string, reason?: string): Promise<CtxIncreaseResult>
   recreateSession(modelId: string): Promise<RecreateResult>
   shutdown(): Promise<void>
+  /** The routing policy of a loaded session; absent (or undefined) keeps the public server's defaults. */
+  routePolicy?(modelId: string): SessionRoutePolicy | undefined
 }
 
 export type { LocalProviderId }

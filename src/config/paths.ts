@@ -210,8 +210,11 @@ export function dataLayout(root: string): DataLayout {
             tmpDir: join(providerRoot, 'tmp'),
             modelsDir: join(root, MODELS_ROOT, 'models'),
           }
+        // `tensorrt-llm`'s `<data>/tensorrt-llm/models/<id>/` is a Hugging Face checkpoint directory
+        // plus `model.yml`, written by the app and the CLI, read by core (spec `tensorrt-llm-models`).
         case 'mlx':
         case 'foundation-models':
+        case 'tensorrt-llm':
           return {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),

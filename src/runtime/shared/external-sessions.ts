@@ -42,7 +42,13 @@ interface Registration {
   expiresAt: number
 }
 
-const PROVIDERS: ReadonlySet<string> = new Set(['llamacpp', 'llamacpp-upstream', 'mlx', 'foundation-models'])
+const PROVIDERS: ReadonlySet<string> = new Set([
+  'llamacpp',
+  'llamacpp-upstream',
+  'mlx',
+  'foundation-models',
+  'tensorrt-llm',
+])
 
 export interface ExternalSessionsOptions {
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void

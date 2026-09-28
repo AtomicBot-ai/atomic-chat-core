@@ -207,3 +207,33 @@ describe('foundation models availability', () => {
     })
   })
 })
+
+describe('model logs route', () => {
+  it("answers the provider's logs for a model whose id contains slashes", async () => {
+    h.models.logs = async (provider, modelId) => ({ provider, model_id: modelId, source: null, log_tail: '' })
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/Qwen/Qwen3-8B-FP8/logs')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      provider: 'tensorrt-llm',
+      model_id: 'Qwen/Qwen3-8B-FP8',
+      source: null,
+      log_tail: '',
+    })
+  })
+
+  it('answers with the error the provider gives, e.g. one this core does not offer', async () => {
+    h.models.logs = async (provider) => {
+      throw Object.assign(new Error(`Unknown provider "${provider}".`), { code: 'PROVIDER_NOT_FOUND' })
+    }
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/m/logs')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('answers PROVIDER_NOT_FOUND when this build keeps no model logs at all', async () => {
+    delete h.models.logs
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/m/logs')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+})

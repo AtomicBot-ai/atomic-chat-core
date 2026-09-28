@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * A stand-in for `nvidia-smi --query-gpu=… --format=csv,noheader,nounits`, for the hardware e2e on
- * Linux: one RTX 4090 with the driver 581.42. Wrapped by a `#!/bin/sh` script named `nvidia-smi` in
- * a directory the test prepends to PATH.
+ * Linux and the `tensorrt-llm` provider e2e's test host: one RTX 4090 with the driver 581.42.
+ * Wrapped by a `#!/bin/sh` script named `nvidia-smi` in a directory the test prepends to PATH (or
+ * the test host's `bin/`).
  *
  *   FAKE_NVIDIA_SMI_MODE  modern (default) | legacy — `legacy` refuses `compute_cap` the way a
  *                         driver older than 470 does, so the probe has to retry with the legacy fields.
@@ -25,6 +26,7 @@ const values = {
   'name': 'NVIDIA GeForce RTX 4090',
   'uuid': 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11',
   'memory.total': '24564',
+  'memory.free': '24000',
   'driver_version': '581.42',
   'compute_cap': '8.9',
   'pci.bus_id': '00000000:01:00.0',

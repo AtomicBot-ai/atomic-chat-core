@@ -1,0 +1,312 @@
+/**
+ * The `tensorrt-llm` provider (task 2.14, spec `tensorrt-llm-runtime`): a `LocalRuntime` on the
+ * engine-neutral managed-text lifecycle (`../managed-text/`), registered by core only on Linux. What
+ * this file adds on top of the lifecycle is the provider's own part of a load:
+ *
+ *  - refusing it before any container exists — no Docker, no `ready` installation
+ *    (`MANAGED_ADAPTER_UNAVAILABLE`), settings the adapter rejects (`INVALID_ARGUMENT`), a model that
+ *    is not installed, a host with no NVIDIA card, an embedding request;
+ *  - the card: the saved `gpu_id` when the probe still finds it, otherwise the one with the most
+ *    memory (`selectLaunchGpu`), with the replacement reported on every load event;
+ *  - one session at a time: the lifecycle's `stopping-previous` stage unloads every other
+ *    `tensorrt-llm` model, with a confirmed stop, before this one's container is created (GPU
+ *    residency across providers is task 2.15's and extends that same callback);
+ *  - what a session can do (`routePolicy`, `capabilities`), read off the pinned descriptor's
+ *    `model_families` entry for the model's architecture — never guessed (design D9);
+ *  - never growing a context or recreating a session: a restart of a multi-minute container in the
+ *    middle of a conversation is worse than an honest `context_length_exceeded` (design D9).
+ *
+ * Everything that touches the machine arrives injected: the lifecycle once core startup has wired
+ * Docker, the ready installation, the host facts, the model lookup and the stored settings.
+ */
+import { AtomicCoreError } from '../../contracts/index.js'
+import type { ModelFamilySupport, SessionInfo, UnloadResult } from '../../contracts/index.js'
+import type { ModelCapabilities } from '../../models/index.js'
+import type {
+  ManagedLastAttempt,
+  ManagedTextCapabilities,
+  ManagedTextLifecycle,
+} from '../managed-text/index.js'
+import { throwIfLoadCancelled } from '../shared/index.js'
+import type {
+  CtxIncreaseResult,
+  LocalLoadOptions,
+  LocalRuntime,
+  RecreateResult,
+  SessionRoutePolicy,
+} from '../shared/index.js'
+import { tensorrtLlmAdapter } from './adapter.js'
+import { selectLaunchGpu } from './compatibility.js'
+import type { TensorrtLlmHostFacts } from './host-facts.js'
+import type { ReadyInstallation } from './installation.js'
+import type { TensorrtLlmModel } from './model-dir.js'
+import { tensorrtLlmRoutePolicy } from './route-policy.js'
+import { tensorrtLlmSettings } from './settings.js'
+
+export interface TensorrtLlmRuntimeDeps {
+  /**
+   * The lifecycle, once core startup has wired the one Docker executor and reconciled its journal;
+   * `null` when this host has no docker CLI at all. Loads wait for it; nothing is listed before it.
+   */
+  lifecycle: Promise<ManagedTextLifecycle | null>
+  /** The `ready` installation, its pinned descriptor and image; rejects with why there is none. */
+  readyInstallation: () => Promise<ReadyInstallation>
+  /** The cards and SELinux, asked right before each load: a card can disappear between two loads. */
+  hostFacts: () => Promise<TensorrtLlmHostFacts>
+  model: (modelId: string) => Promise<TensorrtLlmModel>
+  /** The provider's stored settings (`settings.get('tensorrt-llm')`), read at every load. */
+  settings: () => Record<string, unknown>
+}
+
+/**
+ * `GET /models/tensorrt-llm/:id/capabilities`: the fields every provider's answer has (all false for
+ * this engine — no projector, no embedding, no speculative decoding), and the managed engine's own,
+ * which the app gates Agent, tools and attachments on (task 3.8).
+ */
+export type TensorrtLlmModelCapabilities = ModelCapabilities &
+  ManagedTextCapabilities & {
+    /** The architecture `model.yml` names, which picked the descriptor's `model_families` entry. */
+    architecture: string | null
+  }
+
+/** `GET /models/tensorrt-llm/:id/logs`: the loaded container's live tail, or the last failed attempt's. */
+export type TensorrtLlmModelLogs =
+  | { model_id: string; source: 'session'; generation: string; log_tail: string }
+  | {
+      model_id: string
+      source: 'last-attempt'
+      generation: string
+      log_tail: string
+      error: ManagedLastAttempt['error']
+      at: number
+    }
+  | { model_id: string; source: null; log_tail: '' }
+
+const NONE: ManagedTextCapabilities = {
+  tools: false,
+  reasoning: false,
+  structured_output: false,
+  vision: false,
+  embeddings: false,
+  responses: false,
+}
+
+function familyOf(ready: ReadyInstallation, model: TensorrtLlmModel): ModelFamilySupport | null {
+  if (model.architecture === null) return null
+  return ready.descriptor.model_families[model.architecture] ?? null
+}
+
+export class TensorrtLlmRuntime implements LocalRuntime {
+  private current: ManagedTextLifecycle | null = null
+  private closed = false
+  /** What each loaded session can do, keyed by model and pinned to the generation it was computed for. */
+  private readonly sessionCapabilities = new Map<
+    string,
+    { generation: string; capabilities: ManagedTextCapabilities }
+  >()
+
+  constructor(private readonly deps: TensorrtLlmRuntimeDeps) {
+    void deps.lifecycle.then(
+      (lifecycle) => {
+        this.current = lifecycle
+        // Startup wired Docker only after a shutdown began: nothing may load on it now.
+        if (this.closed) void lifecycle?.shutdown()
+      },
+      () => undefined
+    )
+  }
+
+  list(): SessionInfo[] {
+    return this.current?.list() ?? []
+  }
+
+  findSession(modelId: string): SessionInfo | undefined {
+    return this.current?.findSession(modelId)
+  }
+
+  getLoadedModels(): string[] {
+    return this.list().map((session) => session.model_id)
+  }
+
+  isLoading(modelId: string): boolean {
+    return this.current?.isLoading(modelId) ?? false
+  }
+
+  async load(modelId: string, opts: LocalLoadOptions = {}): Promise<SessionInfo> {
+    const { signal } = opts
+    this.assertOpen()
+    throwIfLoadCancelled(signal)
+    if (opts.isEmbedding) {
+      throw new AtomicCoreError('INVALID_ARGUMENT', 'tensorrt-llm models do not serve embeddings.', modelId)
+    }
+    // Validated first, before anything is asked of the machine (spec: schema validation before start).
+    const settings = tensorrtLlmSettings(this.deps.settings(), opts.overrides)
+    const lifecycle = await this.deps.lifecycle
+    if (lifecycle === null) {
+      throw new AtomicCoreError(
+        'MANAGED_ADAPTER_UNAVAILABLE',
+        'Docker is not installed on this machine, so tensorrt-llm cannot run models.'
+      )
+    }
+    const ready = await this.deps.readyInstallation()
+    throwIfLoadCancelled(signal)
+    const model = await this.deps.model(modelId)
+    const family = familyOf(ready, model)
+    const facts = await this.deps.hostFacts()
+    throwIfLoadCancelled(signal)
+    this.assertOpen()
+
+    const gpu = selectLaunchGpu(facts.gpus, settings.gpu_id ?? undefined)
+    if (gpu === null) {
+      throw new AtomicCoreError(
+        'MANAGED_PREREQUISITE_BLOCKED',
+        'No NVIDIA GPU was found on this machine, so tensorrt-llm cannot load a model.'
+      )
+    }
+    const substituted =
+      settings.gpu_id !== null && gpu.gpu_id !== settings.gpu_id
+        ? { requested_gpu_id: settings.gpu_id, gpu_id: gpu.gpu_id }
+        : undefined
+
+    const { descriptor } = ready
+    const session = await lifecycle.load({
+      modelId,
+      modelPath: model.dir,
+      weightBytes: model.weightBytes,
+      installation: {
+        descriptor_id: descriptor.descriptor_id,
+        engine_id: descriptor.engine_id,
+        adapter_id: descriptor.adapter_id,
+        adapter_contract_version: descriptor.adapter_contract_version,
+        image: ready.image,
+      },
+      family,
+      gpuUuid: gpu.gpu_id,
+      selinux: facts.selinux,
+      settings,
+      // Always passed, evaluated when the stage runs: a second model that arrived a moment earlier
+      // is still found, so two loads racing each other can never both end up running.
+      stopPrevious: () => this.stopOthers(lifecycle, modelId),
+      ...(opts.timeoutSecs !== undefined ? { timeoutMs: opts.timeoutSecs * 1000 } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+      ...(substituted !== undefined ? { gpuSubstituted: substituted } : {}),
+    })
+    this.sessionCapabilities.set(modelId, {
+      generation: session.generation ?? '',
+      capabilities: tensorrtLlmAdapter.capabilities({ settings, family }),
+    })
+    return session
+  }
+
+  /**
+   * Throws `MANAGED_STOP_UNCONFIRMED` when Docker will not confirm the stop: the card stays reserved
+   * and the caller is told, rather than handed a success that is not one.
+   */
+  async unload(modelId: string): Promise<UnloadResult> {
+    await this.current?.unload(modelId)
+    this.sessionCapabilities.delete(modelId)
+    return { success: true }
+  }
+
+  /** Every `tensorrt-llm` session, stopped with confirmation: what removing the engine (task 2.6) needs first. */
+  async unloadAll(): Promise<{ unloaded: number }> {
+    const lifecycle = this.current
+    if (lifecycle === null) return { unloaded: 0 }
+    const models = [...new Set(lifecycle.reservations().map((r) => r.model_id))]
+    for (const modelId of models) await this.unload(modelId)
+    return { unloaded: models.length }
+  }
+
+  /** Never: the context is fixed when the container starts (design D9, spec "без авто-роста"). */
+  autoIncreaseCtx(_modelId: string): Promise<CtxIncreaseResult> {
+    return Promise.resolve({ ok: false, reason: 'unsupported' })
+  }
+
+  recreateSession(modelId: string): Promise<RecreateResult> {
+    return Promise.reject(
+      new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        'A tensorrt-llm session is not recreated in place; unload the model and load it again.',
+        modelId
+      )
+    )
+  }
+
+  async shutdown(): Promise<void> {
+    this.closed = true
+    await this.current?.shutdown()
+    this.sessionCapabilities.clear()
+  }
+
+  routePolicy(modelId: string): SessionRoutePolicy | undefined {
+    const session = this.findSession(modelId)
+    if (session === undefined) return undefined
+    const known = this.sessionCapabilities.get(modelId)
+    // A session with no record of what it can do is treated as able to do nothing optional.
+    const capabilities =
+      known !== undefined && known.generation === session.generation ? known.capabilities : NONE
+    return tensorrtLlmRoutePolicy(capabilities)
+  }
+
+  /** Answers rather than throws, like every provider's capabilities: all false while nothing resolves. */
+  async capabilities(modelId: string): Promise<TensorrtLlmModelCapabilities> {
+    const base: TensorrtLlmModelCapabilities = {
+      modelId,
+      mmprojExists: false,
+      isEmbedding: false,
+      audio: false,
+      gemmaMtp: false,
+      dflash: false,
+      dflashDrafts: [],
+      ...NONE,
+      architecture: null,
+    }
+    try {
+      const [ready, model] = await Promise.all([this.deps.readyInstallation(), this.deps.model(modelId)])
+      const settings = tensorrtLlmSettings({})
+      return {
+        ...base,
+        ...tensorrtLlmAdapter.capabilities({ settings, family: familyOf(ready, model) }),
+        architecture: model.architecture,
+      }
+    } catch {
+      return base
+    }
+  }
+
+  async logs(modelId: string): Promise<TensorrtLlmModelLogs> {
+    const lifecycle = this.current
+    const session = lifecycle?.findSession(modelId)
+    if (lifecycle && session) {
+      return {
+        model_id: modelId,
+        source: 'session',
+        generation: session.generation ?? '',
+        log_tail: (await lifecycle.logs(modelId)) ?? '',
+      }
+    }
+    const attempt = lifecycle?.lastAttempt(modelId)
+    if (attempt === undefined) return { model_id: modelId, source: null, log_tail: '' }
+    return {
+      model_id: modelId,
+      source: 'last-attempt',
+      generation: attempt.generation,
+      log_tail: attempt.log_tail,
+      error: attempt.error,
+      at: attempt.at,
+    }
+  }
+
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new AtomicCoreError('CORE_NOT_RUNNING', 'The tensorrt-llm provider is shutting down.')
+    }
+  }
+
+  /** The `stopping-previous` stage: every other `tensorrt-llm` model, loading or loaded, stopped with confirmation. */
+  private async stopOthers(lifecycle: ManagedTextLifecycle, modelId: string): Promise<void> {
+    const others = new Set(lifecycle.reservations().map((r) => r.model_id))
+    others.delete(modelId)
+    for (const other of others) await this.unload(other)
+  }
+}

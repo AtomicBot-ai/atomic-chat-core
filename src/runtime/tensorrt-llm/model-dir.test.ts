@@ -1,0 +1,96 @@
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
+import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
+import { readTensorrtLlmModel } from './model-dir.js'
+
+let data: TmpDataFolder
+let modelsDir: string
+
+beforeEach(async () => {
+  data = await makeTmpDataFolder('trt-model-dir-')
+  modelsDir = data.layout.provider('tensorrt-llm').modelsDir
+})
+afterEach(() => data.cleanup())
+
+async function install(id: string, yml: string): Promise<string> {
+  const dir = join(modelsDir, ...id.split('/'))
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'model.yml'), yml)
+  return dir
+}
+
+const QWEN = `name: Qwen3 8B FP8
+repository: Qwen/Qwen3-8B-FP8
+revision: 0123456789abcdef
+architectures:
+  - Qwen3ForCausalLM
+quantization: fp8
+files:
+  - path: model-00001-of-00002.safetensors
+    size: 4000000000
+    sha256: ${'a'.repeat(64)}
+  - path: model-00002-of-00002.safetensors
+    size: 4500000000
+    sha256: ${'b'.repeat(64)}
+  - path: config.json
+    size: 1200
+    sha256: null
+`
+
+describe('readTensorrtLlmModel', () => {
+  it('reads the directory, first architecture, quantization and weight bytes of an installed model', async () => {
+    const dir = await install('Qwen/Qwen3-8B-FP8', QWEN)
+    expect(await readTensorrtLlmModel(modelsDir, 'Qwen/Qwen3-8B-FP8')).toEqual({
+      id: 'Qwen/Qwen3-8B-FP8',
+      dir,
+      architecture: 'Qwen3ForCausalLM',
+      quantization: 'fp8',
+      weightBytes: 8_500_000_000,
+    })
+  })
+
+  it('tolerates a model.yml without architectures, quantization or files', async () => {
+    await install('bare', 'name: bare\n')
+    expect(await readTensorrtLlmModel(modelsDir, 'bare')).toMatchObject({
+      architecture: null,
+      quantization: null,
+      weightBytes: 0,
+    })
+  })
+
+  it('answers MODEL_NOT_FOUND for a directory with no model.yml (a download still in progress)', async () => {
+    await mkdir(join(modelsDir, 'half'), { recursive: true })
+    await expect(readTensorrtLlmModel(modelsDir, 'half')).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
+  })
+
+  it('counts only well-formed file entries toward the weight bytes', async () => {
+    await install(
+      'mixed',
+      'files:\n  - path: model.safetensors\n    size: 10\n  - null\n  - path: model-2.safetensors\n  - size: 5\n'
+    )
+    expect((await readTensorrtLlmModel(modelsDir, 'mixed')).weightBytes).toBe(10)
+  })
+
+  it('answers MANAGED_METADATA_INVALID for a model.yml that is not YAML at all', async () => {
+    await install('garbled', 'name: [unclosed\n')
+    await expect(readTensorrtLlmModel(modelsDir, 'garbled')).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+  })
+
+  it('answers MANAGED_METADATA_INVALID for a model.yml that is not a mapping', async () => {
+    await install('broken', '- just\n- a list\n')
+    await expect(readTensorrtLlmModel(modelsDir, 'broken')).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+  })
+
+  it.each(['../escape', 'a/../../b', '', 'a//b', '/abs'])(
+    'refuses the id %j before touching the disk',
+    async (id) => {
+      await expect(readTensorrtLlmModel(modelsDir, id)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    }
+  )
+})

@@ -29,6 +29,7 @@ import type { ModelRegistry } from '../models/index.js'
 import { RemoteAccessManager } from '../remote-access/index.js'
 import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
+import { tensorrtLlmRoutePolicy } from '../runtime/tensorrt-llm/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
 import { captureReport, loadFailureReport } from '../telemetry/index.js'
@@ -70,6 +71,11 @@ export interface AtomicCoreParts {
   diffusion: DiffusionService
   /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
   managed: ManagedRuntimes
+  /**
+   * The public server's trusted hosts, kept in this one array while it runs: every managed session
+   * gateway gates `Host` on the same reference (task 2.11/2.14).
+   */
+  managedTrustedHosts: string[]
   /** Where a failed load and the public server's failures are reported; absent, nothing is. */
   errors?: ErrorSink | undefined
   /** The same reporter, for a host that changes consent, user or tags at run time. */
@@ -155,6 +161,8 @@ export class AtomicCore {
       assertRunning: () => this.assertRunning(),
       increaseCtx: (provider, modelId, reason) => this.increaseCtx(provider, modelId, reason),
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
+      // A `tensorrt-llm` session another process registered still only serves the declared routes.
+      externalPolicy: (provider) => (provider === 'tensorrt-llm' ? tensorrtLlmRoutePolicy(null) : undefined),
     })
     this.remoteAccess = new RemoteAccessManager({
       ...parts.remoteAccess,
@@ -169,6 +177,7 @@ export class AtomicCore {
       log: parts.log,
       assertRunning: () => this.assertRunning(),
       remoteAccess: this.remoteAccess,
+      liveTrustedHosts: parts.managedTrustedHosts,
       serverDeps: () => ({
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),

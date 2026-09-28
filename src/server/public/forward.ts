@@ -46,6 +46,7 @@ import {
   structuredErrorJson,
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
+import { policyRefusal } from './policy.js'
 import type { Exchange } from './exchange.js'
 import type { LocalTarget } from './types.js'
 import {
@@ -178,6 +179,12 @@ export async function serveForward(ex: Exchange): Promise<void> {
     }
     backend = { kind: 'local', session }
     trace.backend = session.provider
+    const refused = session.policy && policyRefusal(session.policy, ex.path, modelId, json)
+    if (refused) {
+      trace.errorKind = 'bad_request'
+      answer(ex, refused.status, refused.body, [['Content-Type', 'application/json']])
+      return
+    }
     key = session.apiKey
     url = `http://127.0.0.1:${session.port}/v1${ex.path}`
   }
@@ -369,6 +376,31 @@ async function upstreamError(
 
   if (backend.kind === 'local') {
     const provider = backend.session.provider
+    const policy = backend.session.policy
+    if (policy) {
+      // A session that declares its routes is never grown or recreated: its context was fixed when
+      // it started. An error it knows (a context overflow) gets its own OpenAI body; any other is
+      // wrapped like every local engine's.
+      recordFailure()
+      captureReport(
+        ex.deps.errors,
+        inferenceFailureReport({
+          provider,
+          modelId,
+          status,
+          body: errorBody,
+          compute: false,
+          oom: trace.oomDetected,
+        })
+      )
+      const mapped = policy.mapError(status, errorBody)
+      if (mapped !== null) {
+        answer(ex, status, serdeToString(mapped as JsonValue), [['Content-Type', 'application/json']])
+        return
+      }
+      answer(ex, status, structureBackendErrorBody(errorBody, trace.oomDetected, trace.ctxOverflowDetected))
+      return
+    }
     if (isContextLimitError(status, errorBody) && (await growAndRetry(ex, provider, modelId, raw, 'error')))
       return
 
@@ -435,6 +467,8 @@ async function inspectFinish(
   }
   if (
     parsed !== undefined &&
+    // A session with a fixed context (a route policy) returns its cut-off answer as it is.
+    session.policy === undefined &&
     isContextOverflowFinishLength(parsed, raw) &&
     (await growAndRetry(ex, session.provider, modelId, raw, 'finish_length'))
   ) {

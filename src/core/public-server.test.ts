@@ -5,7 +5,9 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import { cores, createCore, createOnPort, data, useCoreHarness } from '../../test/helpers/core-harness.js'
 import { CoreClient } from '../client/index.js'
+import { CoreEmitter } from '../events/index.js'
 import { AtomicCore } from './index.js'
+import { PublicServerLifecycle } from './public-server.js'
 
 useCoreHarness()
 
@@ -251,5 +253,50 @@ describe('the public listener is independent', () => {
     expect(failures).toMatchObject([{ port: first.port }])
     expect(core.publicState().running).toBe(false)
     await squatter.close()
+  })
+})
+
+describe('PublicServerLifecycle: the live trusted hosts managed sessions gate on', () => {
+  it("mirrors the running listener's trusted hosts into the one array it was given, in place, and empties it on stop", async () => {
+    const live: string[] = ['left-over']
+    const lifecycle = new PublicServerLifecycle({
+      layout: data.layout,
+      events: new CoreEmitter({ instanceId: 'core-under-test' }),
+      log: () => {},
+      assertRunning: () => {},
+      serverDeps: () => ({
+        findLocal: () => undefined,
+        listLocal: () => [],
+        providers: () => new Map(),
+        increaseCtx: async () => ({ ok: false }),
+      }),
+      liveTrustedHosts: live,
+    })
+    await lifecycle.start({ port: 0, trustedHosts: ['b.example', 'a.example'] })
+    expect(live).toEqual(['a.example', 'b.example'])
+    await lifecycle.stop()
+    expect(live).toEqual([])
+  })
+})
+
+describe('externally registered sessions on the public server', () => {
+  it('holds an external tensorrt-llm session to its declared routes, and leaves other engines alone', async () => {
+    const core = await createCore()
+    core.externalSessions.publish('app', 1, [
+      { provider: 'tensorrt-llm', model_id: 'trt-ext', port: 1, api_key: 'k' },
+      { provider: 'mlx', model_id: 'mlx-ext', port: 2, api_key: '' },
+    ])
+    const { port } = await core.startPublicServer({ port: 0 })
+    const listed = (await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json()) as {
+      data: Array<{ id: string }>
+    }
+    expect(listed.data.map((m) => m.id)).toEqual(['mlx-ext', 'trt-ext'])
+    const embeddings = await fetch(`http://127.0.0.1:${port}/v1/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'trt-ext', input: 'x' }),
+    })
+    expect(embeddings.status).toBe(400)
+    expect(await embeddings.json()).toMatchObject({ error: { code: 'unsupported_endpoint' } })
   })
 })

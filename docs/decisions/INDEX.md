@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [tensorrt-llm sessions carry a route policy to the public server](2026-09-29-tensorrt-llm-sessions-carry-a-route-policy-to-the-public-server.md)
 - **2026-09-28** — [tensorrt-llm's output-length setting is enforced by the session gateway, not argv](2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md)
 - **2026-09-28** — [The managed-text lifecycle owns load stages, fast failure, the engine cache and confirmed stop](2026-09-28-managed-text-lifecycle-owns-load-stages-cache-and-stop.md)
 - **2026-09-28** — [Bump core to 0.7.0 for the TensorRT-LLM descriptor gate](2026-09-28-bump-core-to-0-7-0-for-the-tensorrt-llm-descriptor-gate.md)

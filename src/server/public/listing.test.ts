@@ -43,3 +43,16 @@ describe('/metrics', () => {
     expect(await res.text()).toMatch(/^Failed to fetch metrics from llama-server: /)
   })
 })
+
+describe('/models', () => {
+  it('lists a loaded TensorRT-LLM model under its own owner label', async () => {
+    const server = await startPublic({
+      sessions: [localSession(1, { provider: 'tensorrt-llm', modelId: 'trt-model' })],
+    })
+    const res = await fetch(`http://127.0.0.1:${server.port}/v1/models`)
+    expect(await res.json()).toEqual({
+      object: 'list',
+      data: [{ id: 'trt-model', object: 'model', created: 1, owned_by: 'tensorrt-llm' }],
+    })
+  })
+})

@@ -908,3 +908,101 @@ describe('ManagedTextLifecycle: review round 2 gaps (findings-2.13-r2.md item 4)
     })
   })
 })
+
+describe('ManagedTextLifecycle: carry-forward into task 2.14', () => {
+  it('a load of a ready model with different settings reloads it: old container stopped, a new generation', async () => {
+    await build()
+    const first = await lifecycle.load(request_({ settings: { ctx: 4096 } }))
+    const firstContainer = docker.last().id
+    const second = await lifecycle.load(request_({ settings: { ctx: 8192 } }))
+    expect(second.generation).toBe('gen-2')
+    expect(second).not.toBe(first)
+    expect(docker.containers.has(firstContainer)).toBe(false)
+    expect(docker.last().createArgv).toContain('8192')
+    expect(unloadedEvents()).toHaveLength(1)
+    expect(lifecycle.findSession('org/model-a')).toBe(second)
+  })
+
+  it('a load of a ready model under another descriptor, image or card reloads it too', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const moved = await lifecycle.load(
+      request_({
+        installation: { ...request_().installation, descriptor_id: 'engine-1.1-r1' },
+      })
+    )
+    expect(moved.generation).toBe('gen-2')
+    const onOtherCard = await lifecycle.load(
+      request_({
+        installation: { ...request_().installation, descriptor_id: 'engine-1.1-r1' },
+        gpuUuid: 'GPU-99999999-2222-3333-4444-555555555555',
+      })
+    )
+    expect(onOtherCard.generation).toBe('gen-3')
+    expect(docker.containers.size).toBe(1)
+  })
+
+  it('an invalid settings change is refused before the loaded session is touched', async () => {
+    await build()
+    const first = await lifecycle.load(request_())
+    const error = await rejection(lifecycle.load(request_({ settings: { ctx: 'big' } })))
+    expect(error.code).toBe('INVALID_ARGUMENT')
+    expect(lifecycle.findSession('org/model-a')).toBe(first)
+    expect(docker.subcommands()).not.toContain('stop')
+  })
+
+  it('shutdown blocks new loads, including one that was waiting for a teardown', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const release = gateStops()
+    const unloading = lifecycle.unload('org/model-a')
+    await settle()
+    const waiting = lifecycle.load(request_())
+    await settle()
+    const stopping = lifecycle.shutdown()
+    release()
+    await unloading
+    await stopping
+    expect((await rejection(waiting)).code).toBe('CORE_NOT_RUNNING')
+    expect((await rejection(lifecycle.load(request_()))).code).toBe('CORE_NOT_RUNNING')
+    expect(docker.subcommands().filter((c) => c === 'create')).toHaveLength(1)
+  })
+
+  it('a load while a crash is still reading its log tail never returns the dead session', async () => {
+    let releaseLogs: (() => void) | undefined
+    await build({
+      exec: async (args, options) => {
+        if (args[2] === 'logs' && releaseLogs === undefined) {
+          await new Promise<void>((resolve) => (releaseLogs = resolve))
+        }
+        return docker.exec(args, options)
+      },
+    })
+    const dead = await lifecycle.load(request_())
+    docker.exit(docker.last().id, 1, ['segfault'])
+    for (let i = 0; i < 500 && releaseLogs === undefined; i++) await settle(1)
+    expect(releaseLogs).toBeDefined()
+    expect(lifecycle.findSession('org/model-a')).toBeUndefined()
+
+    const loading = lifecycle.load(request_())
+    await settle()
+    releaseLogs?.()
+    const fresh = await loading
+    expect(fresh).not.toBe(dead)
+    expect(fresh.generation).toBe('gen-2')
+    expect(await lifecycle.logs('org/model-a')).not.toContain('segfault')
+    expect(emitted.filter((e) => e.name === 'session:died')).toHaveLength(1)
+  })
+
+  it('carries a GPU substitution on every progress event of that load', async () => {
+    await build()
+    const substituted = { requested_gpu_id: 'GPU-gone', gpu_id: GPU }
+    await lifecycle.load(request_({ gpuSubstituted: substituted }))
+    expect(progress().length).toBeGreaterThan(1)
+    expect(progress().every((p) => p.gpu_substituted?.gpu_id === GPU)).toBe(true)
+    emitted = []
+    await lifecycle.unload('org/model-a')
+    await lifecycle.load(request_())
+    expect(progress().every((p) => p.gpu_substituted === undefined)).toBe(true)
+  })
+})

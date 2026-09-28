@@ -20,6 +20,7 @@ import { resolveRemoteProvider } from '../../router/index.js'
 import { answer, clientGone, connectTimeoutMs } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { outboundHeaders, readModelRequest, sseEvent } from './forward.js'
+import { policyRefusal } from './policy.js'
 import type { Backend } from './forward.js'
 import { SseLineReader } from './sse.js'
 import { bodyIndicatesOom, isContextLimitError } from './errors.js'
@@ -53,6 +54,14 @@ export async function serveResponses(ex: Exchange): Promise<void> {
     ex.deps.findLocal('llamacpp-upstream', modelId) ??
     ex.deps.findLocal('mlx', modelId)
   if (!session) {
+    // A session that declares its routes and has no Responses API says so, rather than "not found".
+    const declared = ex.deps.findLocal('tensorrt-llm', modelId)
+    const refused = declared?.policy && policyRefusal(declared.policy, ex.path, modelId, json)
+    if (refused) {
+      trace.errorKind = 'bad_request'
+      answer(ex, refused.status, refused.body, [['Content-Type', 'application/json']])
+      return
+    }
     trace.errorKind = 'not_found'
     answer(ex, 404, `No running session found for model '${modelId}'`)
     return

@@ -1,6 +1,6 @@
 /**
- * Sessions and models: load, unload, recreate, context increase, capabilities, embeddings, GGUF
- * validation, Foundation Models availability, and the devices a backend reports.
+ * Sessions and models: load, unload, recreate, context increase, capabilities, container logs,
+ * embeddings, GGUF validation, Foundation Models availability, and the devices a backend reports.
  */
 
 import { AtomicCoreError } from '../../../contracts/index.js'
@@ -50,6 +50,17 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
       200,
       await deps.models.capabilities(params['provider'] as string, params['modelId'] as string)
     )
+  })
+
+  router.get(p('/models/:provider/*modelId/logs'), async (_req, res, { params }) => {
+    const provider = params['provider'] as string
+    if (!deps.models.logs) {
+      return sendError(
+        res,
+        new AtomicCoreError('PROVIDER_NOT_FOUND', `The provider "${provider}" keeps no model logs.`, provider)
+      )
+    }
+    sendJson(res, 200, await deps.models.logs(provider, params['modelId'] as string))
   })
 
   router.post(p('/models/:provider/*modelId/embed'), async (req, res, { params }) => {

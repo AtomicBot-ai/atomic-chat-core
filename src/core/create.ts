@@ -7,8 +7,15 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { AtomicCoreError } from '../contracts/index.js'
 import type { LlamacppProviderId, LocalProviderId } from '../contracts/index.js'
-import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
+import {
+  dataLayout,
+  managedSharedRoot,
+  nodeDataFolderEnv,
+  resolveCliDataFolder,
+  resolveDataFolder,
+} from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
 import { EmbedService, ModelCapabilityService, ModelRegistry } from '../models/index.js'
@@ -41,6 +48,8 @@ import {
 import { wireDiffusion } from '../diffusion/index.js'
 import { wireManagedRuntimes } from '../runtime/environment/index.js'
 import { wireManagedContainers } from '../runtime/container/index.js'
+import type { ManagedContainers } from '../runtime/container/index.js'
+import { TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
@@ -54,7 +63,8 @@ import {
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { reapOrphans } from './reap-orphans.js'
-import { sessionsOf } from './sessions.js'
+import { sessionsOf, unknownProvider } from './sessions.js'
+import { managedTestHost, wireTensorrtLlm } from './tensorrt-llm.js'
 import { LOCAL_PROVIDER } from './types.js'
 import type { AtomicCoreOptions, CoreLoadOptions } from './types.js'
 
@@ -244,6 +254,18 @@ export async function createAtomicCore(
       )
     }
 
+    // The managed-text engines run on the one Docker executor core startup wires and reconciles below
+    // (after the facade exists, before the endpoint is published); the provider waits for it. The
+    // e2e stand-in machine (`ATOMIC_MANAGED_TEST_HOST`) counts as Linux with its own docker CLI.
+    const testHost = managedTestHost(env)
+    const managedPlatform: NodeJS.Platform = testHost === null ? platform : 'linux'
+    const managedDockerPath = testHost === null ? options.dockerPath : testHost.dockerPath
+    let containersWired!: (containers: ManagedContainers | null) => void
+    const managedContainers = new Promise<ManagedContainers | null>((resolve) => (containersWired = resolve))
+    // The public server's trusted hosts, kept in this one array for every session gateway to read.
+    const managedTrustedHosts: string[] = []
+    const managedRoot = managedSharedRoot(nodeDataFolderEnv(env))
+
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
     })
@@ -342,6 +364,30 @@ export async function createAtomicCore(
       ...(options.fetch ? { fetch: options.fetch } : {}),
     })
 
+    // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").
+    const tensorrtLlm = wireTensorrtLlm({
+      platform: managedPlatform,
+      arch: process.arch,
+      layout,
+      instanceId: lock.instanceId,
+      scope,
+      managedRoot,
+      descriptors: managed.descriptors,
+      containers: managedContainers,
+      trustedHosts: managedTrustedHosts,
+      settings: () => settings.get('tensorrt-llm'),
+      emit: (name, payload) => emitter.emit(name, payload),
+      log,
+      ...(testHost === null ? {} : { nvidiaSmi: testHost.nvidiaSmi }),
+    })
+    if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
+    /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
+    const tensorrtLlmOr = (provider: string): TensorrtLlmRuntime => {
+      const runtime = runtimes.get('tensorrt-llm')
+      if (!(runtime instanceof TensorrtLlmRuntime)) throw unknownProvider(provider, runtimes.keys())
+      return runtime
+    }
+
     const control = await ControlServer.start(
       {
         token,
@@ -373,8 +419,19 @@ export async function createAtomicCore(
             : Promise.resolve('unavailable')
         },
         models: {
-          capabilities: (provider, modelId) =>
-            capabilities.capabilities(provider as LocalProviderId, modelId),
+          capabilities: async (provider, modelId) =>
+            provider === 'tensorrt-llm'
+              ? tensorrtLlmOr(provider).capabilities(modelId)
+              : capabilities.capabilities(provider as LocalProviderId, modelId),
+          logs: async (provider, modelId) => {
+            if (provider === 'tensorrt-llm') return tensorrtLlmOr(provider).logs(modelId)
+            if (!runtimes.has(provider as LocalProviderId)) throw unknownProvider(provider, runtimes.keys())
+            throw new AtomicCoreError(
+              'INVALID_ARGUMENT',
+              `The provider "${provider}" runs no container, so it keeps no model logs.`,
+              provider
+            )
+          },
           validateGguf: (path) => capabilities.validateGguf(path),
           devices: async (provider) => {
             // Asking a backend what devices it sees needs a backend; with none installed the
@@ -499,6 +556,7 @@ export async function createAtomicCore(
       appLeaseTimer,
       diffusion,
       managed,
+      managedTrustedHosts,
       errors: reporter,
       telemetry: reporter,
       remoteAccess: await wireRemoteAccess({
@@ -519,14 +577,19 @@ export async function createAtomicCore(
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
     // Model containers a previous core left running are stopped and removed before the first load is
     // served, like `reapOrphans` above does for native backends. Linux with a docker CLI only; the
-    // managed-text provider (task 2.14) takes over the executor and journal this returns.
-    await wireManagedContainers({
-      platform,
-      layout,
-      instanceId: lock.instanceId,
-      log,
-      ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
-    }).catch((e: unknown) => warn(`managed runtime container reconcile: ${String(e)}`))
+    // `tensorrt-llm` provider takes over the executor and journal this returns.
+    containersWired(
+      await wireManagedContainers({
+        platform: managedPlatform,
+        layout,
+        instanceId: lock.instanceId,
+        log,
+        ...(managedDockerPath !== undefined ? { dockerPath: managedDockerPath } : {}),
+      }).catch((e: unknown) => {
+        warn(`managed runtime container reconcile: ${String(e)}`)
+        return null
+      })
+    )
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

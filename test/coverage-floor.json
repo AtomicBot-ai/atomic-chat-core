@@ -275,6 +275,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/core/tensorrt-llm.ts": {
+    "statements": 100,
+    "branches": 87,
+    "functions": 85,
+    "lines": 100
+  },
   "src/credentials/api-keys.ts": {
     "statements": 100,
     "branches": 98,
@@ -1145,9 +1151,45 @@
     "functions": 100,
     "lines": 99
   },
+  "src/runtime/tensorrt-llm/host-facts.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/installation.ts": {
+    "statements": 97,
+    "branches": 94,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/runtime/tensorrt-llm/model-dir.ts": {
+    "statements": 96,
+    "branches": 97,
+    "functions": 100,
+    "lines": 96
+  },
   "src/runtime/tensorrt-llm/quant-format.ts": {
     "statements": 100,
     "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/route-policy.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/runtime.ts": {
+    "statements": 100,
+    "branches": 88,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/settings.ts": {
+    "statements": 100,
+    "branches": 100,
     "functions": 100,
     "lines": 100
   },
@@ -1312,6 +1354,12 @@
     "branches": 84,
     "functions": 100,
     "lines": 98
+  },
+  "src/server/public/policy.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/server/public/responses.ts": {
     "statements": 94,

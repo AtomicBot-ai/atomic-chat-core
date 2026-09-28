@@ -181,6 +181,13 @@ export interface ModelControl {
     input: string[],
     ubatchSize: number
   ) => Promise<EmbeddingResponse>
+  /**
+   * `GET /models/:provider/:id/logs`: a container-backed model's recent log lines — the loaded
+   * container's, or the last failed attempt's until the next load (spec `tensorrt-llm-runtime`,
+   * "Логи контейнера доступны"). Throws `PROVIDER_NOT_FOUND` for a provider that keeps none; absent
+   * in a build that has no such provider at all.
+   */
+  logs?: (provider: string, modelId: string) => Promise<object>
 }
 
 /**

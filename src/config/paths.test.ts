@@ -28,6 +28,7 @@ describe('dataLayout', () => {
     expect(layout.provider('llamacpp').libDir).toBe(native('/data/llamacpp/lib'))
     expect(layout.provider('llamacpp-upstream').libDir).toBeUndefined()
     expect(layout.provider('mlx').modelsDir).toBe(native('/data/mlx/models'))
+    expect(layout.provider('tensorrt-llm').modelsDir).toBe(native('/data/tensorrt-llm/models'))
   })
   it('puts every new file under <data>/atomic-core and keeps the legacy files at the root', () => {
     expect(layout.core.settings).toBe(native('/data/atomic-core/settings.json'))

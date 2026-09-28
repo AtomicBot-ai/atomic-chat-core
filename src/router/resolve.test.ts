@@ -52,7 +52,7 @@ describe('modelIdsMatch', () => {
 })
 
 describe('LOCAL_SEARCH_ORDER', () => {
-  it('searches TurboQuant, then upstream, then MLX', () => {
-    expect(LOCAL_SEARCH_ORDER).toEqual(['llamacpp', 'llamacpp-upstream', 'mlx'])
+  it('searches TurboQuant, then upstream, then MLX, then TensorRT-LLM last so no existing route moves', () => {
+    expect(LOCAL_SEARCH_ORDER).toEqual(['llamacpp', 'llamacpp-upstream', 'mlx', 'tensorrt-llm'])
   })
 })

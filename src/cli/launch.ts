@@ -25,7 +25,7 @@ import {
 } from '../integrations/index.js'
 import type { Agent, AgentDetection } from '../integrations/index.js'
 import { ModelRegistry } from '../models/index.js'
-import { layoutFor, printFirstRunNotice } from './commands/index.js'
+import { layoutFor, printFirstRunNotice, sessionProcess } from './commands/index.js'
 import type { CliIo } from './io.js'
 import { withAttachedOwner } from './owner.js'
 
@@ -185,7 +185,7 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
       io.stderr(`\n  Agent     ${agent.name}\n`)
       io.stderr(`  Endpoint  ${apiUrl}\n`)
       io.stderr(`  Model     ${modelId}\n`)
-      io.stderr(`  Session   pid ${session.pid}, port ${session.port}\n\n`)
+      io.stderr(`  Session   ${sessionProcess(session)}, port ${session.port}\n\n`)
 
       const args = [...agent.runArgs, ...agentArgs]
       const env = agentEnvironment(io.env, agent, apiUrl, modelId, apiKey)

@@ -71,6 +71,13 @@ export interface PublicServerLifecycleDeps {
   serverDeps: () => PublicServerDeps
   /** The tunnel in front of this listener: ended before a stop, re-announced after every transition. */
   remoteAccess?: { stop: () => Promise<unknown>; announce: () => void }
+  /**
+   * One array, owned by the core, that always holds the running listener's configured trusted hosts
+   * (empty while none runs). A managed session's gateway (task 2.11) checks `Host` against this same
+   * reference, so a restart with other hosts reaches every gateway already running — it is changed
+   * in place, never replaced.
+   */
+  liveTrustedHosts?: string[]
 }
 
 /** Owns the public listener and serializes its start/stop transitions. */
@@ -123,6 +130,7 @@ export class PublicServerLifecycle {
       await this.deps.remoteAccess?.stop().catch(() => {})
       this.publicServer = server
       this.publicConfig = { ...requested, port: server.port, requestedPort: requested.port }
+      this.deps.liveTrustedHosts?.splice(0, this.deps.liveTrustedHosts.length, ...requested.trustedHosts)
       this.lastPublicState = server.state()
       await this.publishServerState(server.state())
       if (requested.writeStateFile) {
@@ -163,6 +171,7 @@ export class PublicServerLifecycle {
     }
     this.publicServer = undefined
     this.publicConfig = undefined
+    this.deps.liveTrustedHosts?.splice(0, this.deps.liveTrustedHosts.length)
     await this.publishServerState(this.lastPublicState)
     if (wroteStateFile)
       await markServerStopped(this.deps.layout.serverStateFile, (message) => this.deps.log('warn', message))

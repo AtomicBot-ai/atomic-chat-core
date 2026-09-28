@@ -186,6 +186,8 @@ export interface ManagedLoadRequest {
   signal?: AbortSignal
   /** Frees the card first (task 2.15). Runs before any container of this load exists. */
   stopPrevious?: () => Promise<void>
+  /** The saved card was gone, so `gpuUuid` is a replacement: every progress event of this load says so. */
+  gpuSubstituted?: { requested_gpu_id: string; gpu_id: string }
 }
 
 /**
@@ -237,6 +239,8 @@ interface Entry {
   gpuUuid: string
   descriptorId: string
   modelPath: string
+  /** What this session was started with (`loadKeyOf`): a load asking for anything else reloads it. */
+  loadKey: string
   state: ManagedSessionState
   adapter: ManagedTextAdapter
   /** Aborted by `unload` of a model still loading, and by the caller's own signal. */
@@ -281,8 +285,31 @@ function deadline(ms: number, error: () => Error): { promise: Promise<never>; se
   return { promise, settle: () => clearTimeout(timer) }
 }
 
+/**
+ * Everything a running container was started with that a later load could ask differently for: the
+ * adapter's validated settings, the pinned descriptor and image, the card and the model directory. A
+ * load of a ready model with the same key joins its session; any difference reloads it, since none of
+ * these can change inside a running container (spec "изменение настроек, требующих перезапуска, MUST
+ * применяться только при следующей загрузке").
+ */
+function loadKeyOf(request: ManagedLoadRequest, settings: unknown): string {
+  const { installation } = request
+  return JSON.stringify([
+    settings,
+    installation.descriptor_id,
+    installation.adapter_id,
+    installation.adapter_contract_version,
+    installation.image.repository,
+    installation.image.digest,
+    request.gpuUuid,
+    request.modelPath,
+  ])
+}
+
 export class ManagedTextLifecycle {
   private readonly entries = new Map<string, Entry>()
+  /** Set by `shutdown()`: from then on no load may start a container. */
+  private closed = false
   private readonly lastAttempts = new Map<string, ManagedLastAttempt>()
   private readonly timings: ManagedLifecycleTimings
   private readonly log: ManagedLifecycleLogger
@@ -360,16 +387,18 @@ export class ManagedTextLifecycle {
   }
 
   async load(request: ManagedLoadRequest): Promise<SessionInfo> {
+    this.assertOpen()
     let existing = this.entries.get(request.modelId)
     if (existing?.state === 'stopping') {
       // Wait for the teardown in flight; only a confirmed stop frees the model for a fresh load.
       await existing.ending
+      // A shutdown that began while this load waited must not be followed by a new container.
+      this.assertOpen()
       existing = this.entries.get(request.modelId)
     }
     if (existing?.state === 'stopping') {
       throw new AtomicCoreError('MANAGED_OPERATION_CONFLICT', 'This model is being stopped.', request.modelId)
     }
-    if (existing?.state === 'ready' && existing.info) return existing.info
     if (existing?.state === 'loading') {
       throw new AtomicCoreError(
         'MANAGED_OPERATION_CONFLICT',
@@ -385,6 +414,8 @@ export class ManagedTextLifecycle {
       )
     }
 
+    // Validated before a ready session is compared against, or replaced: settings the adapter
+    // rejects must never cost the caller the session that is already running.
     const { installation } = request
     const adapter = this.deps.adapters.resolve(installation.adapter_id, installation.adapter_contract_version)
     const settings = adapter.validateSettings(request.settings)
@@ -392,6 +423,20 @@ export class ManagedTextLifecycle {
       adapter.readinessTimeoutMs(request.weightBytes, settings),
       request.timeoutMs
     )
+    const loadKey = loadKeyOf(request, settings)
+
+    if (existing?.state === 'ready' && existing.info) {
+      if (existing.loadKey === loadKey) return existing.info
+      await this.unloadEntry(existing)
+      this.assertOpen()
+      if (this.entries.has(request.modelId)) {
+        throw new AtomicCoreError(
+          'MANAGED_OPERATION_CONFLICT',
+          'Another load of this model started while its previous session was stopping.',
+          request.modelId
+        )
+      }
+    }
     if (request.signal?.aborted) throw loadCancelledError()
 
     const generation = this.newGeneration()
@@ -404,6 +449,7 @@ export class ManagedTextLifecycle {
       gpuUuid: request.gpuUuid,
       descriptorId: installation.descriptor_id,
       modelPath: request.modelPath,
+      loadKey,
       state: 'loading',
       adapter,
       loadAbort,
@@ -437,16 +483,12 @@ export class ManagedTextLifecycle {
       }
       return
     }
-    // A teardown already in flight (a second unload, a crash, a failed load) is joined, not repeated.
-    const first = entry.ending === undefined
-    const outcome = await this.end(entry)
-    if (outcome && !outcome.confirmed) throw this.stopUnconfirmed(entry, outcome.reason)
-    if (first)
-      this.deps.emit('session:unloaded', { provider: this.deps.provider, model_id: modelId, pid: null })
+    await this.unloadEntry(entry)
   }
 
   /** Unloads everything; failures are logged, never thrown, so one stuck container cannot block shutdown. */
   async shutdown(): Promise<void> {
+    this.closed = true
     await Promise.all(
       [...this.entries.keys()].map((modelId) =>
         this.unload(modelId).catch((error: unknown) =>
@@ -454,6 +496,29 @@ export class ManagedTextLifecycle {
         )
       )
     )
+  }
+
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new AtomicCoreError(
+        'CORE_NOT_RUNNING',
+        'The managed runtime is shutting down; nothing new loads.'
+      )
+    }
+  }
+
+  /**
+   * Ends a session that is not loading with a Docker-confirmed stop. A teardown already in flight (a
+   * second unload, a crash, a failed load) is joined, not repeated, and only the first caller reports
+   * `session:unloaded`.
+   */
+  private async unloadEntry(entry: Entry): Promise<void> {
+    const first = entry.ending === undefined
+    const outcome = await this.end(entry)
+    if (outcome && !outcome.confirmed) throw this.stopUnconfirmed(entry, outcome.reason)
+    if (first) {
+      this.deps.emit('session:unloaded', { provider: this.deps.provider, model_id: entry.modelId, pid: null })
+    }
   }
 
   // ── load ──────────────────────────────────────────────────────────────────────────────────────
@@ -473,6 +538,7 @@ export class ManagedTextLifecycle {
         generation: entry.generation,
         stage,
         elapsed_ms: this.now() - startedAt,
+        ...(request.gpuSubstituted === undefined ? {} : { gpu_substituted: request.gpuSubstituted }),
       })
 
     try {
@@ -782,11 +848,15 @@ export class ManagedTextLifecycle {
    * container at all) or `stop-unconfirmed`. Concurrent callers share the same promise. A teardown
    * that throws counts as unconfirmed — nothing proved the container stopped. The entry leaves the
    * table only if it is still the one there, never a newer load's.
+   *
+   * `beforeStop` runs once the session is withdrawn but before the container is stopped and removed:
+   * a crash reads its log tail there, while the entry is already `stopping`, so no load in the
+   * meantime can be handed the dead session.
    */
-  private end(entry: Entry): Promise<StopOutcome | null> {
+  private end(entry: Entry, beforeStop?: () => Promise<void>): Promise<StopOutcome | null> {
     if (entry.ending) return entry.ending
     entry.state = 'stopping'
-    entry.ending = this.teardown(entry)
+    entry.ending = this.teardown(entry, beforeStop)
       .catch((error: unknown): StopOutcome => {
         this.log('error', `managed-text: stopping ${entry.modelId} failed: ${String(error)}`)
         return { confirmed: false, reason: String(error) }
@@ -800,9 +870,10 @@ export class ManagedTextLifecycle {
     return entry.ending
   }
 
-  private async teardown(entry: Entry): Promise<StopOutcome | null> {
+  private async teardown(entry: Entry, beforeStop?: () => Promise<void>): Promise<StopOutcome | null> {
     entry.monitor?.abort()
     entry.monitor = undefined
+    entry.info = undefined
     if (entry.gateway) {
       const gateway = entry.gateway
       entry.gateway = undefined
@@ -810,7 +881,9 @@ export class ManagedTextLifecycle {
     }
     entry.ticker?.stop()
     entry.ticker = undefined
-    entry.info = undefined
+    await beforeStop?.().catch((error: unknown) =>
+      this.log('warn', `managed-text: before stopping ${entry.modelId}: ${String(error)}`)
+    )
 
     if (entry.containerId === undefined) {
       await rm(entry.heartbeatDir, { recursive: true, force: true }).catch(() => {})
@@ -861,26 +934,33 @@ export class ManagedTextLifecycle {
     })()
   }
 
+  /**
+   * The entry turns `stopping` synchronously, before its log tail is read: a load arriving while the
+   * tail is still being fetched waits for this teardown instead of being handed the dead session.
+   */
   private async onCrash(entry: Entry, exitCode: number | null): Promise<void> {
-    const containerId = entry.containerId as string
-    const tail = await this.tail(containerId).catch(() => '')
     if (entry.state !== 'ready' || this.entries.get(entry.modelId) !== entry) return
-    const classification = entry.adapter.classifyExit(tail, exitCode)
-    this.lastAttempts.set(entry.modelId, {
-      model_id: entry.modelId,
-      generation: entry.generation,
-      log_tail: tail,
-      error: { code: exitErrorCode(classification.kind), message: classification.message },
-      at: this.now(),
+    const containerId = entry.containerId as string
+    let message = ''
+    await this.end(entry, async () => {
+      const tail = await this.tail(containerId).catch(() => '')
+      const classification = entry.adapter.classifyExit(tail, exitCode)
+      message = classification.message
+      this.lastAttempts.set(entry.modelId, {
+        model_id: entry.modelId,
+        generation: entry.generation,
+        log_tail: tail,
+        error: { code: exitErrorCode(classification.kind), message: classification.message },
+        at: this.now(),
+      })
     })
-    await this.end(entry)
     this.deps.emit('session:died', {
       provider: this.deps.provider,
       pid: null,
       model_id: entry.modelId,
       exit_code: exitCode,
       signal: null,
-      message: classification.message,
+      message,
     })
   }
 }

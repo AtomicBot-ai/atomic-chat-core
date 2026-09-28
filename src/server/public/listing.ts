@@ -27,6 +27,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'llamacpp': 'llama.cpp',
   'llamacpp-upstream': 'llama.cpp-upstream',
   'mlx': 'mlx',
+  'tensorrt-llm': 'tensorrt-llm',
 }
 
 export function servedModels(ex: Exchange): Array<{ id: string; ownedBy: string }> {

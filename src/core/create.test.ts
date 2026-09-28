@@ -173,7 +173,7 @@ describe('taking ownership', () => {
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
     expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
     expect(() => core.runtime('ollama' as never)).toThrow(
-      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp' })
+      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp, tensorrt-llm' })
     )
   })
 
@@ -199,6 +199,60 @@ describe('taking ownership', () => {
     expect(mac.registry('mlx').modelsDir).toBe(join(data.root, 'mlx', 'models'))
     expect(() => mac.llamacpp('foundation-models' as never)).toThrow(/Unknown provider/)
     expect(await call(mac)).toEqual({ status: 'binaryNotFound' })
+  })
+
+  it('offers tensorrt-llm on Linux only; elsewhere its routes answer PROVIDER_NOT_FOUND, not a transport error', async () => {
+    const call = (core: AtomicCore, path: string, method = 'GET') =>
+      fetch(`${core.control.url}/atomic/v1${path}`, {
+        method,
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }))
+
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+    })
+    expect(linux.runtime('tensorrt-llm')).toBeDefined()
+    // No docker CLI on this "Linux": the load is refused before anything else is asked of the machine.
+    expect(await call(linux, '/models/tensorrt-llm/m/load', 'POST')).toMatchObject({
+      body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
+    })
+    expect(await call(linux, '/models/tensorrt-llm/m/capabilities')).toMatchObject({
+      status: 200,
+      body: { modelId: 'm', tools: false, embeddings: false },
+    })
+    expect(await call(linux, '/models/tensorrt-llm/m/logs')).toEqual({
+      status: 200,
+      body: { model_id: 'm', source: null, log_tail: '' },
+    })
+    expect(await call(linux, '/models/llamacpp-upstream/m/logs')).toMatchObject({
+      status: 400,
+      body: { error: { code: 'INVALID_ARGUMENT' } },
+    })
+    await linux.shutdown()
+
+    const mac = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'darwin',
+      resourcesDir: join(data.root, 'no-resources'),
+    })
+    cores.push(mac)
+    expect(() => mac.runtime('tensorrt-llm')).toThrow(/Unknown provider/)
+    for (const [path, method] of [
+      ['/models/tensorrt-llm/m/load', 'POST'],
+      ['/models/tensorrt-llm/m/unload', 'POST'],
+      ['/models/tensorrt-llm/m/load/cancel', 'POST'],
+      ['/models/tensorrt-llm/m/capabilities', 'GET'],
+      ['/models/tensorrt-llm/m/logs', 'GET'],
+    ] as const) {
+      expect(await call(mac, path, method)).toMatchObject({
+        status: 404,
+        body: { error: { code: 'PROVIDER_NOT_FOUND' } },
+      })
+    }
   })
 
   it('wires settings, context and public-server control routes to the facade', async () => {
