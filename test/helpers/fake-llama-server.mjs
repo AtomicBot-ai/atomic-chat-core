@@ -27,6 +27,8 @@
  *                     which only ever shows a process that is still alive. Written after the
  *                     `--list-devices` and `-h` probes, so the file holds starts, not probes.
  *   FAKE_LLAMA_LABEL  free-form name of the pack that launched this fake; recorded verbatim
+ *   FAKE_LLAMA_STDOUT text; printed as one stdout line among the startup log, which llama.cpp itself
+ *                     writes to stderr, so a test can follow both of the engine's streams
  *   LLAMA_API_KEY     when set, every route but `/health` demands `Authorization: Bearer <key>`
  */
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
@@ -81,6 +83,7 @@ if (process.env.FAKE_LLAMA_ARGV_FILE) {
 
 // ── startup log, as llama.cpp prints it ───────────────────────────────────────
 err(`build: 6325 (fake) with cc (GCC) 13.2.0 for x86_64-linux-gnu`)
+if (process.env.FAKE_LLAMA_STDOUT) process.stdout.write(`${process.env.FAKE_LLAMA_STDOUT}\n`)
 if (process.env.FAKE_LLAMA_GPU === '1') {
   err('load_backend: loaded CUDA backend from /backends/libggml-cuda.so')
   err('load_backend: loaded CPU backend from /backends/libggml-cpu.so')
