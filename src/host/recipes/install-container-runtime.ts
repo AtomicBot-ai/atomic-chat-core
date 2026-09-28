@@ -14,9 +14,29 @@
  *   re-checks each one on the machine and skips what is already there, so a replay is a no-op.
  * - **Nothing removed, nothing upgraded.** No step removes a package or a file, or upgrades the
  *   system. `assertPermittedCommand` is an allowlist the executor applies to every argv before it
- *   runs, and a test scans every step this module can build for the forbidden words.
+ *   runs, and a test scans every step this module can build for the forbidden words. `apt-get
+ *   install` always carries `--no-remove`: without it apt's resolver may remove a conflicting
+ *   package to satisfy the install. `dnf install` never removes an installed package unless given
+ *   `--allowerasing` (dnf4 and dnf5 alike) — it fails on a conflict instead — and that flag is
+ *   forbidden.
+ *
+ * What `recipe_digest` covers: everything in `INSTALL_CONTAINER_RUNTIME_RECIPE` — argv templates,
+ * paths, URLs, key fingerprints, file bodies, modes, the environment, the conflict lists. What it
+ * does not cover: the code in this file and in `executor.ts` (how steps are ordered and named,
+ * `PERMITTED`, the check-then-act logic, the restart rule). A change there is a code change like
+ * any other; it does not by itself invalidate plans users have already approved.
  */
 
+/** A value that is the object's own property — never one inherited from `Object.prototype`. */
+function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined
+}
+
+function invalid(message: string): never {
+  throw new AtomicCoreError('MANAGED_HOST_STEP_INVALID', message)
+}
+
+import { AtomicCoreError } from '../../contracts/index.js'
 import type { Sha256Digest } from '../../contracts/index.js'
 import { canonicalDigest } from '../../runtime/environment/index.js'
 import type { LinuxInstallPlan } from '../../runtime/environment/index.js'
@@ -138,18 +158,27 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
       'Dir::Etc::sourceparts=-',
       '-o',
       'APT::Get::List-Cleanup=0',
+      '-o',
+      'DPkg::Lock::Timeout=300',
     ],
     installed: ['dpkg-query', '--show', '--showformat=${Status}', '{{package}}'],
-    /** Missing packages are appended. `confold` keeps the user's config on a dependency's upgrade. */
+    /**
+     * Missing packages are appended. `--no-remove` makes apt fail rather than remove a package its
+     * resolver finds in the way; `confold` keeps the user's config on a dependency's upgrade; the
+     * lock timeout waits out unattended-upgrades instead of failing on dpkg's lock.
+     */
     install: [
       'apt-get',
       'install',
       '-y',
       '--no-install-recommends',
+      '--no-remove',
       '-o',
       'Dpkg::Options::=--force-confdef',
       '-o',
       'Dpkg::Options::=--force-confold',
+      '-o',
+      'DPkg::Lock::Timeout=300',
     ],
     /** Docker's guide has these removed first. We never remove anything, so we refuse instead. */
     conflicts: ['docker.io', 'podman-docker', 'containerd', 'runc'],
@@ -205,7 +234,21 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
     },
     installed: ['rpm', '--query', '--quiet', '{{package}}'],
     install: ['dnf', 'install', '-y', '--setopt=install_weak_deps=False'],
-    conflicts: ['moby-engine', 'docker', 'podman-docker'],
+    /** Docker's Fedora guide has these removed first; we refuse instead. */
+    conflicts: [
+      'moby-engine',
+      'docker',
+      'docker-client',
+      'docker-client-latest',
+      'docker-common',
+      'docker-latest',
+      'docker-latest-logrotate',
+      'docker-logrotate',
+      'docker-selinux',
+      'docker-engine-selinux',
+      'docker-engine',
+      'podman-docker',
+    ],
   },
   file_mode: 0o644,
   runtime: {
@@ -244,9 +287,15 @@ export type ParametersValidation =
   { ok: true; parameters: InstallContainerRuntimeParameters } | { ok: false; problems: string[] }
 
 function familyOf(distro: string): 'apt' | 'dnf' | null {
-  if (distro in INSTALL_CONTAINER_RUNTIME_RECIPE.apt.suites) return 'apt'
-  if (distro in INSTALL_CONTAINER_RUNTIME_RECIPE.dnf.versions) return 'dnf'
+  if (own(INSTALL_CONTAINER_RUNTIME_RECIPE.apt.suites, distro) !== undefined) return 'apt'
+  if (own(INSTALL_CONTAINER_RUNTIME_RECIPE.dnf.versions, distro) !== undefined) return 'dnf'
   return null
+}
+
+/** The apt suite for a release, from own properties only: `constructor`/`name` is not a release. */
+function aptSuite(distro: string, version: string): string | undefined {
+  const releases = own(INSTALL_CONTAINER_RUNTIME_RECIPE.apt.suites, distro)
+  return releases === undefined ? undefined : own(releases, version)
 }
 
 /**
@@ -272,14 +321,11 @@ export function validateInstallContainerRuntimeParameters(raw: unknown): Paramet
     const expected = familyOf(distro)
     if (expected === null) problems.push(`the recipe has no commands for distribution ${distro}`)
     else if (expected !== family) problems.push(`${distro} uses ${expected}, not ${String(family)}`)
-    else if (
-      expected === 'apt' &&
-      INSTALL_CONTAINER_RUNTIME_RECIPE.apt.suites[distro]?.[version] === undefined
-    )
+    else if (expected === 'apt' && aptSuite(distro, version) === undefined)
       problems.push(`the recipe has no apt suite for ${distro} ${version}`)
     else if (
       expected === 'dnf' &&
-      !new RegExp(INSTALL_CONTAINER_RUNTIME_RECIPE.dnf.versions[distro]!).test(version)
+      !new RegExp(own(INSTALL_CONTAINER_RUNTIME_RECIPE.dnf.versions, distro)!).test(version)
     )
       problems.push(`${version} is not a ${distro} release number`)
   }
@@ -315,7 +361,7 @@ export function validateInstallContainerRuntimeParameters(raw: unknown): Paramet
 
 function validated(parameters: InstallContainerRuntimeParameters): InstallContainerRuntimeParameters {
   const result = validateInstallContainerRuntimeParameters(parameters)
-  if (!result.ok) throw new Error(`invalid recipe parameters: ${result.problems.join('; ')}`)
+  if (!result.ok) invalid(`invalid recipe parameters: ${result.problems.join('; ')}`)
   return result.parameters
 }
 
@@ -336,7 +382,7 @@ export function parametersFromPlan(
   host: Omit<InstallContainerRuntimeParameters, 'components'>
 ): InstallContainerRuntimeParameters {
   if (plan.recipe_id !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
-    throw new Error(`the plan is for recipe ${plan.recipe_id}, not ${INSTALL_CONTAINER_RUNTIME_RECIPE_ID}`)
+    invalid(`the plan is for recipe ${plan.recipe_id}, not ${INSTALL_CONTAINER_RUNTIME_RECIPE_ID}`)
   const wanted = new Set<ContainerRuntimeComponent>()
   const { packages } = INSTALL_CONTAINER_RUNTIME_RECIPE
   for (const change of plan.system_changes) {
@@ -348,7 +394,7 @@ export function parametersFromPlan(
         for (const name of (change.params?.['packages'] ?? '').split(',').filter(Boolean)) {
           if (packages['docker-engine'].includes(name)) wanted.add('docker-engine')
           else if (packages['nvidia-container-toolkit'].includes(name)) wanted.add('nvidia-container-toolkit')
-          else throw new Error(`the recipe does not install package ${name}`)
+          else invalid(`the recipe does not install package ${name}`)
         }
         break
       case 'configure-nvidia-runtime':
@@ -362,9 +408,7 @@ export function parametersFromPlan(
         break
       case 'add-user-to-docker-group':
         if (change.params?.['user'] !== host.user)
-          throw new Error(
-            `the plan adds ${String(change.params?.['user'])} to the docker group, not ${host.user}`
-          )
+          invalid(`the plan adds ${String(change.params?.['user'])} to the docker group, not ${host.user}`)
         wanted.add('docker-group')
         break
     }
@@ -419,8 +463,8 @@ export type HostRecipeStep =
 
 function fill(template: string, values: Record<string, string>): string {
   return template.replace(/\{\{([a-z_]+)\}\}/g, (_match, name: string) => {
-    const value = values[name]
-    if (value === undefined) throw new Error(`no value for {{${name}}}`)
+    const value = own(values, name)
+    if (value === undefined) invalid(`no value for {{${name}}}`)
     return value
   })
 }
@@ -445,7 +489,7 @@ export function buildInstallContainerRuntimeSteps(
     distro: parameters.distro_id,
     user: parameters.user,
     deb_arch: recipe.apt.architectures[parameters.arch],
-    suite: recipe.apt.suites[parameters.distro_id]?.[parameters.version_id] ?? '',
+    suite: aptSuite(parameters.distro_id, parameters.version_id) ?? '',
   }
   const steps: HostRecipeStep[] = []
 
@@ -567,6 +611,9 @@ export const FORBIDDEN_WORDS: readonly string[] = [
   'downgrade',
   '-e',
   '--erase',
+  '--allowerasing',
+  '--auto-remove',
+  '--autoremove',
 ]
 
 /** Program → the first argument it may be run with. Nothing else is ever run as root. */
@@ -589,16 +636,18 @@ const PERMITTED: Record<string, readonly string[]> = {
 export function assertPermittedCommand(argv: readonly string[]): void {
   const [program, first] = argv
   const refuse = (why: string): never => {
-    throw new Error(`refusing to run ${JSON.stringify(argv)}: ${why}`)
+    throw new AtomicCoreError('MANAGED_HOST_STEP_INVALID', `refusing to run ${JSON.stringify(argv)}: ${why}`)
   }
   if (program === undefined) refuse('empty command')
-  const allowed = PERMITTED[program as string]
+  const allowed = own(PERMITTED, program as string)
   if (allowed === undefined) refuse(`${String(program)} is not a program this recipe runs`)
   if (first === undefined || !allowed!.includes(first)) refuse(`${String(first)} is not permitted here`)
   for (const word of argv) if (FORBIDDEN_WORDS.includes(word)) refuse(`${word} is forbidden`)
   // An index refresh is only ever of one explicit source list, never of the whole system.
   if (program === 'apt-get' && first === 'update' && !argv.includes('Dir::Etc::sourceparts=-'))
     refuse('apt-get update must be restricted to one source list')
+  if (program === 'apt-get' && first === 'install' && !argv.includes('--no-remove'))
+    refuse('apt-get install must carry --no-remove, so the resolver can never remove a package')
   if (program === 'usermod' && (argv[2] !== 'docker' || argv.length !== 4 || argv[3] === 'root'))
     refuse('usermod only ever adds a non-root user to docker')
   if (program === 'docker' && argv.join(' ') !== 'docker info --format {{json .Runtimes}}')

@@ -1,8 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { constants } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { invokingUidFrom, nodeHostStepDeps } from './executor-io.js'
+import { invokingUidFrom, nodeHostFs, nodeHostStepDeps } from './executor-io.js'
+import type { HostFs } from './executor-io.js'
 import { INSTALL_CONTAINER_RUNTIME_RECIPE } from './install-container-runtime.js'
 
 let dir: string
@@ -13,13 +16,48 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
-const deps = () => nodeHostStepDeps({})
+/** The tests run unprivileged: this process's uid stands in for the one that asked for elevation. */
+const me = String(process.getuid?.() ?? 1000)
+const deps = (fs: HostFs = nodeHostFs) => nodeHostStepDeps({ PKEXEC_UID: me }, fs)
+
+/** The real file system, except that the named paths report another owner. */
+const ownedByStranger = (...paths: string[]): HostFs => ({
+  ...nodeHostFs,
+  lstat: async (path) => {
+    const info = await nodeHostFs.lstat(path)
+    return paths.includes(path)
+      ? {
+          ...info,
+          uid: 4242,
+          isDirectory: () => info.isDirectory(),
+          isSymbolicLink: () => info.isSymbolicLink(),
+        }
+      : info
+  },
+  open: async (path, flags, mode) => {
+    const handle = await nodeHostFs.open(path, flags, mode)
+    if (!paths.includes(path)) return handle
+    return Object.assign(Object.create(handle) as typeof handle, {
+      stat: async () => {
+        const info = await handle.stat()
+        return { size: info.size, mode: info.mode, uid: 4242, isFile: () => info.isFile() }
+      },
+      close: () => handle.close(),
+      readFile: (encoding: 'utf8') => handle.readFile(encoding),
+    })
+  },
+})
+
+async function request(name = 's.request.json', body = '{"a":1}', mode = 0o644): Promise<string> {
+  const path = join(dir, name)
+  await writeFile(path, body)
+  await chmod(path, mode)
+  return path
+}
 
 describe('reading the request as root', () => {
-  it('reads a regular file', async () => {
-    const path = join(dir, 's.request.json')
-    await writeFile(path, '{"a":1}')
-    expect(await deps().readRequest(path)).toBe('{"a":1}')
+  it('reads a regular file the invoking user owns', async () => {
+    expect(await deps().readRequest(await request())).toBe('{"a":1}')
   })
 
   it('refuses a symlink, so a request cannot point root at another file', async () => {
@@ -36,9 +74,49 @@ describe('reading the request as root', () => {
     const folder = join(dir, 'd.request.json')
     await mkdir(folder)
     await expect(deps().readRequest(folder)).rejects.toThrow(/regular file/)
-    const big = join(dir, 'b.request.json')
-    await writeFile(big, 'x'.repeat(70 * 1024))
-    await expect(deps().readRequest(big)).rejects.toThrow(/too large/)
+    await expect(deps().readRequest(await request('b.request.json', 'x'.repeat(70 * 1024)))).rejects.toThrow(
+      /too large/
+    )
+  })
+
+  it('refuses a FIFO without blocking on it', async () => {
+    const path = join(dir, 'f.request.json')
+    execFileSync('mkfifo', [path])
+    await expect(deps().readRequest(path)).rejects.toThrow(/regular file/)
+  })
+
+  it('refuses a request other users could have written', async () => {
+    await expect(deps().readRequest(await request('g.request.json', '{}', 0o664))).rejects.toMatchObject({
+      code: 'MANAGED_HOST_STEP_INVALID',
+      message: expect.stringMatching(/group- or world-writable/),
+    })
+    await expect(deps().readRequest(await request('w.request.json', '{}', 0o646))).rejects.toThrow(
+      /group- or world-writable/
+    )
+  })
+
+  it('refuses a request owned by someone other than the invoking user or root', async () => {
+    const path = await request()
+    await expect(deps(ownedByStranger(path)).readRequest(path)).rejects.toThrow(/owned by uid 4242/)
+    // Started as root directly: only root's own files are trusted (moot when the suite runs as root).
+    if (me !== '0')
+      await expect(nodeHostStepDeps({}).readRequest(path)).rejects.toThrow(new RegExp(`owned by uid ${me}`))
+  })
+
+  it('refuses a request whose folder is a symlink, writable by others, or someone else’s', async () => {
+    const real = join(dir, 'real')
+    await mkdir(real, { mode: 0o700 })
+    await writeFile(join(real, 's.request.json'), '{}')
+    await symlink(real, join(dir, 'link'))
+    await expect(deps().readRequest(join(dir, 'link', 's.request.json'))).rejects.toThrow(/not a directory/)
+
+    await chmod(real, 0o775)
+    await expect(deps().readRequest(join(real, 's.request.json'))).rejects.toThrow(/group- or world-writable/)
+    await chmod(real, 0o700)
+    await expect(deps(ownedByStranger(real)).readRequest(join(real, 's.request.json'))).rejects.toThrow(
+      /owned by uid 4242/
+    )
+    expect(await deps().readRequest(join(real, 's.request.json'))).toBe('{}')
   })
 })
 
@@ -54,6 +132,54 @@ describe('writing as root into a folder the user owns', () => {
     expect((await stat(path)).mode & 0o777).toBe(0o644)
   })
 
+  it('creates the temporary file exclusively without following links, and sets its mode on the handle', async () => {
+    const events: string[] = []
+    const recording: HostFs = {
+      ...nodeHostFs,
+      open: async (path, flags, mode) => {
+        events.push(`open ${flags}`)
+        const handle = await nodeHostFs.open(path, flags, mode)
+        return Object.assign(Object.create(handle) as typeof handle, {
+          writeFile: (data: Uint8Array | string) => handle.writeFile(data),
+          sync: () => handle.sync(),
+          chmod: async (m: number) => {
+            events.push(`fchmod ${m.toString(8)}`)
+            await handle.chmod(m)
+          },
+          close: async () => {
+            events.push('close')
+            await handle.close()
+          },
+        })
+      },
+      rename: async (from, to) => {
+        events.push('rename')
+        await nodeHostFs.rename(from, to)
+      },
+    }
+    await deps(recording).writeResult(join(dir, 's.result.json'), '{}')
+    const expected = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
+    expect(events).toEqual([`open ${expected}`, 'fchmod 644', 'close', 'rename'])
+  })
+
+  it('refuses to write into a folder that is a symlink, writable by others, or someone else’s', async () => {
+    const real = join(dir, 'real')
+    await mkdir(real, { mode: 0o700 })
+    await symlink(real, join(dir, 'link'))
+    await expect(deps().writeResult(join(dir, 'link', 's.result.json'), '{}')).rejects.toThrow(
+      /not a directory/
+    )
+    await chmod(real, 0o777)
+    await expect(deps().writeResult(join(real, 's.result.json'), '{}')).rejects.toThrow(
+      /group- or world-writable/
+    )
+    await chmod(real, 0o700)
+    await expect(deps(ownedByStranger(real)).writeResult(join(real, 's.result.json'), '{}')).rejects.toThrow(
+      /owned by uid 4242/
+    )
+    expect(await readdir(real)).toEqual([])
+  })
+
   it('writes a system file atomically with exactly the given mode, creating its folder', async () => {
     const path = join(dir, 'etc/apt/keyrings/docker.asc')
     await deps().writeFile(path, Buffer.from('key'), 0o644)
@@ -66,7 +192,6 @@ describe('writing as root into a folder the user owns', () => {
     const blocked = join(dir, 'blocked')
     await mkdir(join(blocked, 's.result.json'), { recursive: true }) // a directory where the file goes
     await expect(deps().writeResult(join(blocked, 's.result.json'), 'x')).rejects.toThrow()
-    const { readdir } = await import('node:fs/promises')
     expect(await readdir(blocked)).toEqual(['s.result.json'])
   })
 
@@ -87,9 +212,11 @@ describe('running commands', () => {
     const previous = process.env['APT_CONFIG']
     process.env['APT_CONFIG'] = '/tmp/evil.conf'
     try {
-      const output = await deps().exec([process.execPath, '-e', script])
-      expect(output.code).toBe(0)
-      expect(JSON.parse(output.stdout)).toEqual([INSTALL_CONTAINER_RUNTIME_RECIPE.environment.PATH, null])
+      for (const options of [undefined, { longRunning: true }]) {
+        const output = await deps().exec([process.execPath, '-e', script], options)
+        expect(output.code).toBe(0)
+        expect(JSON.parse(output.stdout)).toEqual([INSTALL_CONTAINER_RUNTIME_RECIPE.environment.PATH, null])
+      }
     } finally {
       if (previous === undefined) delete process.env['APT_CONFIG']
       else process.env['APT_CONFIG'] = previous

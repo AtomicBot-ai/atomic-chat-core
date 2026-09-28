@@ -27,6 +27,12 @@ export interface HostExecOptions {
   maxOutputBytes?: number
   /** Base environment every call spawns with. Defaults to inheriting `process.env` when omitted. */
   env?: NodeJS.ProcessEnv
+  /**
+   * When set, a command past its deadline gets SIGTERM first and this long to exit before SIGKILL,
+   * and the answer waits for it to exit. For a package manager: killed outright, dpkg can be left
+   * half-configured. Unset (the default for probes): SIGKILL and answer at once.
+   */
+  terminateGraceMs?: number
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -69,9 +75,17 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
 
       // Armed before the spawn, so every way of finishing — including a spawn that throws on the
       // spot — has a real timer to clear, and none of them can reach it before it exists.
+      let timedOut = false
       const timer = setTimeout(() => {
-        child?.kill('SIGKILL')
-        finish({ code: null, stdout: '', stderr: `timed out after ${timeoutMs} ms` })
+        if (options.terminateGraceMs === undefined || child === undefined) {
+          child?.kill('SIGKILL')
+          finish({ code: null, stdout: '', stderr: `timed out after ${timeoutMs} ms` })
+          return
+        }
+        // Ask first, then insist; `close` below answers once the process is actually gone.
+        timedOut = true
+        child.kill('SIGTERM')
+        setTimeout(() => child?.kill('SIGKILL'), options.terminateGraceMs).unref()
       }, timeoutMs)
       timer.unref()
 
@@ -116,6 +130,11 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
       // A binary that is not on the machine arrives here as ENOENT, not as an exit code.
       child.on('error', (error) => finish({ code: null, stdout: '', stderr: error.message }))
       child.on('close', (code) => {
+        if (timedOut) {
+          const said = Buffer.concat(stderr).toString('utf8')
+          finish({ code: null, stdout: '', stderr: `${said}\ntimed out after ${timeoutMs} ms` })
+          return
+        }
         finish({
           code,
           stdout: Buffer.concat(stdout).toString('utf8'),

@@ -51,8 +51,12 @@ class FakeHost {
   fetched: string[] = []
   invokingUid: string | null = '1000'
 
-  exec = async (argv: string[]) => {
+  /** Commands the executor marked long-running (package installs get their own timeout). */
+  longRunning: string[] = []
+
+  exec = async (argv: string[], options?: { longRunning?: boolean }) => {
     this.calls.push(argv)
+    if (options?.longRunning) this.longRunning.push(argv.join(' '))
     const line = argv.join(' ')
     for (const [prefix, failure] of Object.entries(this.failures))
       if (line.startsWith(prefix)) return { code: failure.code, stdout: '', stderr: failure.stderr }
@@ -66,7 +70,7 @@ class FakeHost {
     if (program === 'rpm') return this.packages.has(argv[3]!) ? ok() : no()
     if (program === 'apt-get' && sub === 'update') return ok()
     if ((program === 'apt-get' || program === 'dnf') && sub === 'install') {
-      const names = argv.filter((a, i) => i > 1 && !a.startsWith('-') && !a.startsWith('Dpkg::'))
+      const names = argv.filter((a, i) => i > 1 && !a.startsWith('-') && !a.includes('::'))
       for (const name of names) this.packages.add(name)
       if (names.includes('docker-ce') && this.startsOnInstall) this.dockerActive = true
       return ok()
@@ -244,9 +248,9 @@ describe('a clean Ubuntu host', () => {
       ['docker-group', 'applied'],
     ])
     expect(host.mutations()).toEqual([
-      'apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/docker.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0',
-      'apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/nvidia-container-toolkit.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0',
-      'apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io nvidia-container-toolkit',
+      'apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/docker.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o DPkg::Lock::Timeout=300',
+      'apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/nvidia-container-toolkit.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 -o DPkg::Lock::Timeout=300',
+      'apt-get install -y --no-install-recommends --no-remove -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=300 docker-ce docker-ce-cli containerd.io nvidia-container-toolkit',
       'nvidia-ctk runtime configure --runtime=docker',
       // docker-ce's postinst started a daemon nobody had yet: restarting it stops nothing of the
       // user's, and without it the runtime would not load until the next boot.
@@ -254,6 +258,8 @@ describe('a clean Ubuntu host', () => {
       'systemctl enable --now docker',
       'usermod -aG docker alice',
     ])
+    // Only the package install runs under the long timeout that never SIGKILLs dpkg early.
+    expect(host.longRunning).toEqual([host.mutations()[2]])
     expect(host.loadedRuntimes).toContain('nvidia')
     expect(host.fetched).toEqual([
       'https://download.docker.com/linux/ubuntu/gpg',
@@ -367,6 +373,28 @@ describe('refusing a request before anything runs', () => {
       error_code: 'MANAGED_HOST_STEP_INVALID',
     })
     expect(result.log_tail).toContain('ELOOP')
+  })
+
+  it('refuses a request whose step_id is not the one its file is named for', async () => {
+    const host = new FakeHost()
+    const result = await run(host, requestFor(parameters, { step_id: 'step-2' }))
+    expect(result).toMatchObject({
+      outcome: 'failed',
+      error_code: 'MANAGED_HOST_STEP_INVALID',
+      step_id: 'step-2',
+    })
+    expect(result.log_tail).toMatch(/step_id step-2 does not match .*step-1\.request\.json/)
+    expect(host.calls).toEqual([])
+  })
+
+  it('keeps a refusal short however much junk the request carries', async () => {
+    const junk = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`key_${i}_${'x'.repeat(40)}`, 1]))
+    const result = await run(
+      new FakeHost(),
+      requestFor(parameters, { parameters: { ...parameters, ...junk } })
+    )
+    expect(result.outcome).toBe('failed')
+    expect(result.log_tail.length).toBeLessThanOrEqual(2000)
   })
 
   it('refuses a request path it could not name a result file for', async () => {
@@ -587,6 +615,40 @@ describe('the runtime configuration and the Docker restart', () => {
     host.failures['nvidia-ctk'] = { code: 1, stderr: 'unable to load config' }
     const result = await run(host, requestFor(ubuntu(['nvidia-runtime'])))
     expect(result).toMatchObject({ outcome: 'failed', exit_code: 1 })
+  })
+})
+
+describe('whatever goes wrong, a result file is written', () => {
+  it('an error outside any step still ends in a failed result, not a missing file', async () => {
+    const host = new FakeHost()
+    let calls = 0
+    const result = await run(host, requestFor(ubuntu(['docker-group'])), {
+      now: () => {
+        calls += 1
+        if (calls === 1) throw new Error('clock unavailable')
+        return 42
+      },
+    })
+    expect(result).toMatchObject({ outcome: 'failed', error_code: null, finished_at: 42 })
+    expect(result.log_tail).toMatch(/stopped unexpectedly: clock unavailable/)
+  })
+
+  it('a Docker probe that throws before the first step still ends in a failed result', async () => {
+    const host = new FakeHost()
+    const result = await run(host, requestFor(ubuntu(['nvidia-runtime'])), {
+      exec: async () => {
+        throw new Error('spawn EAGAIN')
+      },
+    })
+    expect(result).toMatchObject({ outcome: 'failed', error_code: null })
+    expect(result.log_tail).toMatch(/spawn EAGAIN/)
+    expect(result.steps).toEqual([
+      expect.objectContaining({
+        id: 'nvidia-runtime',
+        status: 'failed',
+        detail: expect.stringMatching(/EAGAIN/),
+      }),
+    ])
   })
 })
 

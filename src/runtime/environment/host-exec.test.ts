@@ -34,6 +34,25 @@ describe('running a probe command', () => {
     expect(answer.stderr).toMatch(/timed out/)
   })
 
+  it('with a grace period, asks a hung command to stop and waits for it before answering', async () => {
+    // A package manager killed outright can leave dpkg half-configured; SIGTERM lets it stop cleanly.
+    const script =
+      'process.on("SIGTERM", () => { process.stderr.write("stopping cleanly"); process.exit(0) }); setInterval(() => {}, 1000)'
+    const answer = await hostExec({ timeoutMs: 300, terminateGraceMs: 5_000 })(node, ['-e', script])
+    expect(answer.code).toBeNull()
+    expect(answer.stderr).toMatch(/stopping cleanly/)
+    expect(answer.stderr).toMatch(/timed out after 300 ms/)
+  })
+
+  it('with a grace period, still kills a command that ignores the request to stop', async () => {
+    const script = 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'
+    const started = Date.now()
+    const answer = await hostExec({ timeoutMs: 200, terminateGraceMs: 300 })(node, ['-e', script])
+    expect(answer.code).toBeNull()
+    expect(answer.stderr).toMatch(/timed out/)
+    expect(Date.now() - started).toBeLessThan(4_000)
+  })
+
   it('keeps no more output than it was allowed to', async () => {
     const answer = await hostExec({ maxOutputBytes: 10 })(node, [
       '-e',

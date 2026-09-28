@@ -14,6 +14,7 @@
  * This file never touches the file system, the network or a process itself.
  */
 
+import { basename } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
   INSTALL_CONTAINER_RUNTIME_RECIPE,
@@ -45,8 +46,11 @@ export interface HostStepExecutorDeps {
   readFile: (path: string) => Promise<Uint8Array | null>
   /** Atomically creates or replaces a file with exactly this mode, creating parent directories. */
   writeFile: (path: string, data: Uint8Array, mode: number) => Promise<void>
-  /** Runs one argv, no shell, with the recipe's fixed environment. */
-  exec: (argv: string[]) => Promise<HostCommandOutput>
+  /**
+   * Runs one argv, no shell, with the recipe's fixed environment. `longRunning` marks a package
+   * install: a much longer deadline, and SIGTERM before SIGKILL, so dpkg is not killed mid-run.
+   */
+  exec: (argv: string[], options?: { longRunning?: boolean }) => Promise<HostCommandOutput>
   fetch: typeof fetch
   now: () => number
   /**
@@ -61,8 +65,14 @@ const KEY_SIZE_LIMIT = 256 * 1024
 const KEY_FETCH_TIMEOUT_MS = 60_000
 
 const tail = (text: string): string => text.trim().slice(-STDERR_LIMIT)
+/** The start of a message, bounded: a refusal can name keys an attacker chose. */
+const head = (text: string): string =>
+  text.length <= STDERR_LIMIT ? text : `${text.slice(0, STDERR_LIMIT - 3)}...`
 
-/** Why a step could not do its part; carries the command's exit code and stderr when there was one. */
+/**
+ * Why a step could not do its part; carries the command's exit code and stderr when there was one.
+ * Internal: it is always caught and turned into a `failed` step outcome, never thrown to a caller.
+ */
 class StepFailure extends Error {
   constructor(
     message: string,
@@ -81,13 +91,21 @@ interface RunContext {
   dockerActiveAtStart: boolean
 }
 
-async function run(context: RunContext, argv: string[]): Promise<HostCommandOutput> {
+async function run(
+  context: RunContext,
+  argv: string[],
+  options?: { longRunning?: boolean }
+): Promise<HostCommandOutput> {
   assertPermittedCommand(argv)
-  return context.deps.exec(argv)
+  return context.deps.exec(argv, options)
 }
 
-async function mustRun(context: RunContext, argv: string[]): Promise<void> {
-  const output = await run(context, argv)
+async function mustRun(
+  context: RunContext,
+  argv: string[],
+  options?: { longRunning?: boolean }
+): Promise<void> {
+  const output = await run(context, argv, options)
   if (output.code !== 0)
     throw new StepFailure(`${argv.join(' ')} exited with ${String(output.code)}`, output.code, output.stderr)
 }
@@ -187,7 +205,7 @@ async function installPackages(
     }
   }
   for (const refresh of step.refresh) await mustRun(context, refresh)
-  await mustRun(context, [...step.install, ...missing])
+  await mustRun(context, [...step.install, ...missing], { longRunning: true })
   return { status: 'applied', detail: `installed ${missing.join(', ')}` }
 }
 
@@ -319,7 +337,7 @@ function refused(echo: HostStepEcho, problems: string[], now: number): HostStepR
     step_id: echo.step_id ?? '',
     outcome: 'failed',
     exit_code: null,
-    log_tail: `refused: ${problems.join('; ')} [MANAGED_HOST_STEP_INVALID]`,
+    log_tail: head(`refused [MANAGED_HOST_STEP_INVALID]: ${problems.join('; ')}`),
     finished_at: now,
     nonce: echo.nonce,
     recipe_id: echo.recipe_id,
@@ -331,7 +349,7 @@ function refused(echo: HostStepEcho, problems: string[], now: number): HostStepR
 }
 
 /** Decides what to do with a request's text; runs the recipe only for a request it fully accepts. */
-async function execute(text: string, deps: HostStepExecutorDeps): Promise<HostStepResult> {
+async function execute(text: string, fileName: string, deps: HostStepExecutorDeps): Promise<HostStepResult> {
   const parsed = parseHostStepRequest(text)
   if (!parsed.ok) return refused(parsed.echo, parsed.problems, deps.now())
   const request = parsed.request
@@ -344,6 +362,9 @@ async function execute(text: string, deps: HostStepExecutorDeps): Promise<HostSt
   }
   const refuse = (problem: string) => refused(echo, [problem], deps.now())
 
+  // A request copied or renamed into another step's slot would otherwise report under that step.
+  if (fileName !== `${request.step_id}.request.json`)
+    return refuse(`step_id ${request.step_id} does not match the request file name ${fileName}`)
   if (request.recipe_id !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
     return refuse(`unknown recipe ${request.recipe_id}`)
   if (request.action !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
@@ -363,17 +384,21 @@ async function execute(text: string, deps: HostStepExecutorDeps): Promise<HostSt
   const steps = buildInstallContainerRuntimeSteps(validation.parameters)
   const context: RunContext = { deps, dockerActiveAtStart: false }
   const configure = steps.find((step) => step.kind === 'configure-runtime')
-  if (configure !== undefined && configure.kind === 'configure-runtime')
-    context.dockerActiveAtStart = (await run(context, configure.docker_active)).code === 0
+  /** Docker's state before anything changes; runs as part of the first step, so a failure is reported. */
+  const recordStartingState = async (): Promise<void> => {
+    if (configure !== undefined && configure.kind === 'configure-runtime')
+      context.dockerActiveAtStart = (await run(context, configure.docker_active)).code === 0
+  }
 
   const outcomes: HostStepStepOutcome[] = []
   let failure: StepFailure | null = null
-  for (const step of steps) {
+  for (const [index, step] of steps.entries()) {
     if (failure !== null) {
       outcomes.push({ id: step.id, status: 'not-run', exit_code: null, stderr: '', detail: '' })
       continue
     }
     try {
+      if (index === 0) await recordStartingState()
       const done = await runStep(context, step)
       outcomes.push({ id: step.id, status: done.status, exit_code: null, stderr: '', detail: done.detail })
     } catch (error) {
@@ -424,10 +449,29 @@ export async function executeHostStep(
       'MANAGED_HOST_STEP_INVALID',
       `A host-step request file must be named <step_id>.request.json: ${requestPath}`
     )
+  const fileName = basename(requestPath)
   const result = await deps.readRequest(requestPath).then(
-    (text) => execute(text, deps),
+    (text) =>
+      execute(text, fileName, deps).catch((error: unknown): HostStepResult => {
+        // Nothing should reach here; if something does, the result file still says so.
+        const nothing = {
+          step_id: null,
+          nonce: null,
+          recipe_id: null,
+          recipe_digest: null,
+          parameters_digest: null,
+        }
+        return {
+          ...refused(nothing, [], deps.now()),
+          log_tail: head(`the executor stopped unexpectedly: ${(error as Error).message}`),
+          error_code: null,
+        }
+      }),
     (error: unknown) => {
-      const code = (error as NodeJS.ErrnoException).code ?? (error as Error).message
+      const code =
+        error instanceof AtomicCoreError
+          ? error.message
+          : ((error as NodeJS.ErrnoException).code ?? (error as Error).message)
       const nothing = {
         step_id: null,
         nonce: null,

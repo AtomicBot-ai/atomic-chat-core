@@ -67,6 +67,19 @@ describe('validating the parameters a request carries', () => {
     ['an unknown ubuntu release', { ...ubuntu, version_id: '20.04' }, /20\.04/],
     ['a fedora version that is not a number', { ...fedora, version_id: 'rawhide' }, /rawhide/],
     ['an unknown distribution', { ...ubuntu, distro_id: 'arch' }, /arch/],
+    // Names that exist on every object's prototype chain must not pass as distributions or releases.
+    ['constructor/name on apt', { ...ubuntu, distro_id: 'constructor', version_id: 'name' }, /constructor/],
+    ['__proto__/toString on apt', { ...ubuntu, distro_id: '__proto__', version_id: 'toString' }, /__proto__/],
+    ['toString/length on apt', { ...ubuntu, distro_id: 'toString', version_id: 'length' }, /toString/],
+    [
+      'hasOwnProperty/name on apt',
+      { ...ubuntu, distro_id: 'hasOwnProperty', version_id: 'name' },
+      /hasOwnProperty/,
+    ],
+    ['constructor/name on dnf', { ...fedora, distro_id: 'constructor', version_id: 'name' }, /constructor/],
+    ['__proto__/toString on dnf', { ...fedora, distro_id: '__proto__', version_id: 'toString' }, /__proto__/],
+    ['ubuntu/toString', { ...ubuntu, version_id: 'toString' }, /toString/],
+    ['ubuntu/__proto__', { ...ubuntu, version_id: '__proto__' }, /__proto__/],
     ['an unknown component', { ...ubuntu, components: ['docker-engine', 'kernel'] }, /kernel/],
     ['a repeated component', { ...ubuntu, components: ['docker-group', 'docker-group'] }, /repeated/],
     ['no components', { ...ubuntu, components: [] }, /nothing to do/],
@@ -103,9 +116,12 @@ describe('the digests a request is bound to', () => {
     )
   })
 
-  it('refuses to hash parameters that do not validate', () => {
+  it('refuses to hash parameters that do not validate, as a core error', () => {
     expect(() => installContainerRuntimeParametersDigest({ ...ubuntu, arch: 'i686' as 'x86_64' })).toThrow(
       /arch/
+    )
+    expect(() => installContainerRuntimeParametersDigest({ ...ubuntu, arch: 'i686' as 'x86_64' })).toThrow(
+      expect.objectContaining({ code: 'MANAGED_HOST_STEP_INVALID' }) as unknown as Error
     )
   })
 
@@ -115,7 +131,7 @@ describe('the digests a request is bound to', () => {
     // Changing any command, path, URL, key pin or file body changes this. Update it deliberately:
     // every client holding an old plan will then be refused, which is the point.
     expect(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST).toMatchInlineSnapshot(
-      `"sha256:a5d045bc488238215a7c80dbc71d2c74e685af37e59a7ffe1d2a362857220b36"`
+      `"sha256:e15709757105ba3d7ab52d97f2253b18b353ddd5a291c146b3bfbd53b739f587"`
     )
   })
 
@@ -156,6 +172,8 @@ describe('apt steps', () => {
         'Dir::Etc::sourceparts=-',
         '-o',
         'APT::Get::List-Cleanup=0',
+        '-o',
+        'DPkg::Lock::Timeout=300',
       ],
     ])
     expect(packages.install).toEqual([
@@ -163,10 +181,16 @@ describe('apt steps', () => {
       'install',
       '-y',
       '--no-install-recommends',
+      // apt's resolver may otherwise remove a conflicting package (e.g. nvidia-docker2) to satisfy
+      // the install; with it, apt fails instead.
+      '--no-remove',
       '-o',
       'Dpkg::Options::=--force-confdef',
       '-o',
       'Dpkg::Options::=--force-confold',
+      // Wait for unattended-upgrades instead of failing on dpkg's lock.
+      '-o',
+      'DPkg::Lock::Timeout=300',
     ])
     expect(packages.queries).toEqual([
       {
@@ -349,7 +373,21 @@ describe('dnf steps', () => {
       'containerd.io',
       'nvidia-container-toolkit',
     ])
-    expect(packages.conflicts.map((c) => c.package)).toEqual(['moby-engine', 'docker', 'podman-docker'])
+    // Docker's Fedora guide has all of these removed first; we refuse instead of removing.
+    expect(packages.conflicts.map((c) => c.package)).toEqual([
+      'moby-engine',
+      'docker',
+      'docker-client',
+      'docker-client-latest',
+      'docker-common',
+      'docker-latest',
+      'docker-latest-logrotate',
+      'docker-logrotate',
+      'docker-selinux',
+      'docker-engine-selinux',
+      'docker-engine',
+      'podman-docker',
+    ])
   })
 
   it.each<[ContainerRuntimeComponent[], string[]]>([
@@ -434,6 +472,15 @@ describe('from an install plan', () => {
     ).toThrow(/mallory/)
   })
 
+  it('refuses with a core error, not a bare Error', () => {
+    expect(() =>
+      parametersFromPlan(
+        plan([{ code: 'add-user-to-docker-group', text: '', params: { user: 'mallory' } }]),
+        host
+      )
+    ).toThrow(expect.objectContaining({ code: 'MANAGED_HOST_STEP_INVALID' }) as unknown as Error)
+  })
+
   it('refuses a plan for a different recipe, or packages outside the recipe', () => {
     expect(() => parametersFromPlan({ ...plan([]), recipe_id: 'other' }, host)).toThrow(/other/)
     expect(() =>
@@ -484,6 +531,12 @@ describe('what the recipe may never run', () => {
     [['apt-get', 'dist-upgrade']],
     [['apt-get', 'full-upgrade']],
     [['apt-get', 'update']],
+    [['apt-get', 'install', '-y', 'docker-ce']],
+    [['apt-get', 'install', '-y', '--no-install-recommends', 'nvidia-container-toolkit']],
+    [['dnf', 'install', '-y', '--allowerasing', 'docker-ce']],
+    [['constructor', 'x']],
+    [['toString', 'x']],
+    [['__proto__', 'x']],
     [['apt', 'install', 'x']],
     [['dnf', 'upgrade']],
     [['dnf', 'update']],
@@ -500,6 +553,18 @@ describe('what the recipe may never run', () => {
     [['nvidia-ctk', 'runtime', 'configure', '--runtime=docker', '--set-as-default']],
     [[]],
   ])('%j is refused', (argv) => {
-    expect(() => assertPermittedCommand(argv)).toThrow()
+    expect(() => assertPermittedCommand(argv)).toThrow(
+      expect.objectContaining({ code: 'MANAGED_HOST_STEP_INVALID' }) as unknown as Error
+    )
+  })
+
+  it('an apt install is only ever run with --no-remove, and dnf never with --allowerasing', () => {
+    for (const host of hosts) {
+      for (const built of build(host, ['docker-engine', 'nvidia-container-toolkit'])) {
+        if (built.kind !== 'install-packages') continue
+        if (host.family === 'apt') expect(built.install).toContain('--no-remove')
+        else expect(built.install).not.toContain('--allowerasing')
+      }
+    }
   })
 })

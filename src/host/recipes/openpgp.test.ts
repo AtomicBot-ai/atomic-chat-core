@@ -53,6 +53,12 @@ describe('refusing what is not one well-formed public key block', () => {
     expect(() => dearmorPublicKey(text)).toThrow()
   })
 
+  it('refuses with a core error', () => {
+    expect(() => dearmorPublicKey('')).toThrow(
+      expect.objectContaining({ code: 'MANAGED_METADATA_INVALID' }) as unknown as Error
+    )
+  })
+
   it('a changed key body is caught by the armor checksum', () => {
     expect(() => dearmorPublicKey(docker.replace('mQINBFit2ioB', 'mQINBFit2ioC'))).toThrow(/checksum/)
   })

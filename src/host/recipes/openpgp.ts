@@ -12,6 +12,11 @@
  */
 
 import { createHash } from 'node:crypto'
+import { AtomicCoreError } from '../../contracts/index.js'
+
+/** A downloaded key that is not what a vendor key must be: remote metadata the core refuses. */
+const keyError = (message: string): AtomicCoreError =>
+  new AtomicCoreError('MANAGED_METADATA_INVALID', message)
 
 const BEGIN = '-----BEGIN PGP PUBLIC KEY BLOCK-----'
 const END = '-----END PGP PUBLIC KEY BLOCK-----'
@@ -38,9 +43,9 @@ export function dearmorPublicKey(text: string): Uint8Array {
   const lines = text.replace(/\r\n/g, '\n').split('\n')
   const begin = lines.findIndex((line) => line.trim() === BEGIN)
   const end = lines.findIndex((line) => line.trim() === END)
-  if (begin === -1 || end === -1 || end < begin) throw new Error('not an ASCII-armored public key block')
+  if (begin === -1 || end === -1 || end < begin) throw keyError('not an ASCII-armored public key block')
   if (lines.filter((line) => line.trim() === BEGIN).length !== 1)
-    throw new Error('more than one public key block')
+    throw keyError('more than one public key block')
 
   // Armor headers ("Version: ...", "Comment: ...") run up to the first blank line.
   let index = begin + 1
@@ -59,19 +64,19 @@ export function dearmorPublicKey(text: string): Uint8Array {
       checksum = line.slice(1)
       continue
     }
-    if (checksum !== null || !BASE64_LINE.test(line)) throw new Error('the armored key body is malformed')
+    if (checksum !== null || !BASE64_LINE.test(line)) throw keyError('the armored key body is malformed')
     body += line
   }
-  if (body === '') throw new Error('the armored key block is empty')
+  if (body === '') throw keyError('the armored key block is empty')
   const bytes = Uint8Array.from(Buffer.from(body, 'base64'))
   // `Buffer.from` skips what it cannot decode; a round trip proves nothing was skipped.
   if (Buffer.from(bytes).toString('base64').replace(/=+$/, '') !== body.replace(/=+$/, ''))
-    throw new Error('the armored key body is not valid base64')
+    throw keyError('the armored key body is not valid base64')
   if (checksum !== null) {
     const expected = Buffer.from(checksum, 'base64')
     const actual = crc24(bytes)
     if (expected.length !== 3 || expected.readUIntBE(0, 3) !== actual)
-      throw new Error('the armor checksum does not match the key body')
+      throw keyError('the armor checksum does not match the key body')
   }
   return bytes
 }
@@ -85,12 +90,12 @@ function readPackets(bytes: Uint8Array): Packet[] {
   const packets: Packet[] = []
   let offset = 0
   const need = (count: number): void => {
-    if (offset + count > bytes.length) throw new Error('the key data is truncated')
+    if (offset + count > bytes.length) throw keyError('the key data is truncated')
   }
   while (offset < bytes.length) {
     const header = bytes[offset]!
     offset += 1
-    if ((header & 0x80) === 0) throw new Error('not an OpenPGP packet header')
+    if ((header & 0x80) === 0) throw keyError('not an OpenPGP packet header')
     let tag: number
     let length: number
     if (header & 0x40) {
@@ -109,12 +114,12 @@ function readPackets(bytes: Uint8Array): Packet[] {
         length = Buffer.from(bytes.subarray(offset + 1, offset + 5)).readUInt32BE(0)
         offset += 5
       } else {
-        throw new Error('partial body lengths are not valid in a key')
+        throw keyError('partial body lengths are not valid in a key')
       }
     } else {
       tag = (header >> 2) & 0x0f
       const lengthType = header & 0x03
-      if (lengthType === 3) throw new Error('an indeterminate packet length is not valid in a key')
+      if (lengthType === 3) throw keyError('an indeterminate packet length is not valid in a key')
       const size = [1, 2, 4][lengthType]!
       need(size)
       length = Buffer.from(bytes.subarray(offset, offset + size)).readUIntBE(0, size)
@@ -139,7 +144,7 @@ export function primaryKeyFingerprints(bytes: Uint8Array): string[] {
   for (const packet of readPackets(bytes)) {
     if (packet.tag !== PUBLIC_KEY_TAG) continue
     const version = packet.body[0]
-    if (version !== 4) throw new Error(`a version ${String(version)} public key cannot be pinned here`)
+    if (version !== 4) throw keyError(`a version ${String(version)} public key cannot be pinned here`)
     const prefix = Buffer.from([0x99, (packet.body.length >> 8) & 0xff, packet.body.length & 0xff])
     fingerprints.push(createHash('sha1').update(prefix).update(packet.body).digest('hex').toUpperCase())
   }

@@ -102,10 +102,26 @@ describe('the core binary routes host-step to the real executor', () => {
   it('a garbage request is refused with a result file, before any command could run', async () => {
     const path = join(dir, 'step-9.request.json')
     await writeFile(path, 'not json at all')
-    const io = recordingIo()
+    // As under pkexec: the invoking user owns the folder and the request.
+    const io = recordingIo({ env: { PKEXEC_UID: String(process.getuid?.() ?? 0) } })
     expect(await runCli(['host-step', 'exec', path], io)).toBe(1)
     const result = JSON.parse(await readFile(join(dir, 'step-9.result.json'), 'utf8')) as HostStepResult
     expect(result).toMatchObject({ outcome: 'failed', error_code: 'MANAGED_HOST_STEP_INVALID', steps: [] })
     expect(result.log_tail).toContain('not valid JSON')
   })
+
+  // Meaningless when the suite itself runs as root: then the folder is root's own.
+  it.skipIf(process.getuid?.() === 0)(
+    'run as root directly, a folder a user owns is not trusted: no result is written there (exit 2)',
+    async () => {
+      const path = join(dir, 'step-9.request.json')
+      await writeFile(path, '{}')
+      const io = recordingIo({ env: {} })
+      expect(await runCli(['host-step', 'exec', path], io)).toBe(2)
+      expect(io.err.join('')).toMatch(/owned by uid/)
+      await expect(readFile(join(dir, 'step-9.result.json'), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      })
+    }
+  )
 })
