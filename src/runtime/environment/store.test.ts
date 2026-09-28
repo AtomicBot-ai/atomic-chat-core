@@ -3,12 +3,20 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { BeginOperation, ManagedHostReceipt, Sha256Digest } from '../../contracts/index.js'
 import { managedSharedPaths } from '../../config/index.js'
 import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
-import { classifyReceipt, withReceipt, OperationStore } from './store.js'
+import { classifyReceipt, withReceipt, OperationStore, type OwnerIdentity } from './store.js'
 
 const ROOT = '/shared'
 const PATHS = managedSharedPaths(ROOT)
 
-const store = (fs: FakeManagedFs, over: { instanceId?: string; serial?: string } = {}): OperationStore => {
+/** A fake identity, fast and deterministic — nothing here needs a real pid or a real OS probe. */
+const fakeOwnerIdentity =
+  (pid = 4242, startId: string | null = 'test:owner'): (() => Promise<OwnerIdentity>) =>
+  async () => ({ pid, startId })
+
+const store = (
+  fs: FakeManagedFs,
+  over: { instanceId?: string; serial?: string; ownerIdentity?: () => Promise<OwnerIdentity> } = {}
+): OperationStore => {
   let n = 0
   const tag = over.serial ?? 'a'
   return new OperationStore({
@@ -20,6 +28,7 @@ const store = (fs: FakeManagedFs, over: { instanceId?: string; serial?: string }
     now: () => fs.clock,
     sleep: async () => undefined,
     lockAttempts: 5,
+    ownerIdentity: over.ownerIdentity ?? fakeOwnerIdentity(),
   })
 }
 
@@ -85,6 +94,49 @@ describe('starting an operation once (OP01)', () => {
   })
 })
 
+describe('owner identity (findings 1/2)', () => {
+  it('stamps every write with this store’s own identity, never the caller’s', async () => {
+    const fs = new FakeManagedFs()
+    const s = store(fs, { ownerIdentity: fakeOwnerIdentity(4242, 'test:owner') })
+    const { record } = await s.createOrGet('env-1', begin(), DIGEST_A)
+    expect(record.owner_pid).toBe(4242)
+    expect(record.owner_process_start_id).toBe('test:owner')
+
+    // A later write re-stamps the *current* store's identity, not whatever the caller's in-memory
+    // copy happened to carry — this is what lets a reader tell who last touched a record.
+    const other = store(fs, { ownerIdentity: fakeOwnerIdentity(9999, 'test:other') })
+    const id = record.machine.operation.operation_id
+    await other.compareAndSwap(id, 0, {
+      ...record,
+      owner_pid: 1, // a stale/forged value from the caller's side must not survive the write
+      owner_process_start_id: 'forged',
+      machine: {
+        ...record.machine,
+        operation: { ...record.machine.operation, revision: 1, phase: 'awaiting-consent' as const },
+      },
+    })
+    const after = await s.read(id)
+    expect(after?.owner_pid).toBe(9999)
+    expect(after?.owner_process_start_id).toBe('test:other')
+  })
+
+  it('reads an old record with no recorded owner as unrecorded, not as a parse failure', async () => {
+    const fs = new FakeManagedFs()
+    const s = store(fs)
+    const { record } = await s.createOrGet('env-1', begin(), DIGEST_A)
+    const id = record.machine.operation.operation_id
+    const path = PATHS.operationFile(id)
+    const onDisk = JSON.parse(fs.files.get(path) as string) as Record<string, unknown>
+    delete onDisk['owner_pid']
+    delete onDisk['owner_process_start_id']
+    fs.files.set(path, JSON.stringify(onDisk))
+
+    const read = await s.read(id)
+    expect(read?.owner_pid).toBeNull()
+    expect(read?.owner_process_start_id).toBeNull()
+  })
+})
+
 describe('two cores on one environment', () => {
   it('lets only one of them create the operation, and the other finds it', async () => {
     const fs = new FakeManagedFs()
@@ -121,6 +173,28 @@ describe('two cores on one environment', () => {
     expect(created.created).toBe(true)
   })
 
+  it('lets only one of two contenders recover a lock left behind by a dead process', async () => {
+    const fs = new FakeManagedFs()
+    await fs.openExclusive(PATHS.lockFile)
+    fs.clock += 60_000 // old enough that both contenders read it as abandoned
+
+    const app = store(fs, { instanceId: 'core-app', serial: 'app' })
+    const cli = store(fs, { instanceId: 'core-cli', serial: 'cli' })
+
+    const [one, other] = await Promise.all([
+      app.createOrGet('env-1', begin(), DIGEST_A),
+      cli.createOrGet('env-1', begin(), DIGEST_A),
+    ])
+
+    // Whichever of the two actually created it, there is exactly one operation and the lock ends
+    // up released — not a second contender's takeover deleting the first's freshly-acquired lock
+    // and both believing they hold it.
+    expect(one.record.machine.operation.operation_id).toBe(other.record.machine.operation.operation_id)
+    expect(await app.listRecoverable()).toHaveLength(1)
+    expect(fs.files.has(PATHS.lockFile)).toBe(false)
+    expect(fs.files.has(`${PATHS.lockFile}.takeover`)).toBe(false)
+  })
+
   it('gives up rather than writing while somebody else is still holding the lock', async () => {
     const fs = new FakeManagedFs()
     await fs.openExclusive(PATHS.lockFile)
@@ -128,6 +202,31 @@ describe('two cores on one environment', () => {
     const s = store(fs)
     await expect(s.createOrGet('env-1', begin(), DIGEST_A)).rejects.toThrow(/another atomic chat process/i)
     expect(await s.listRecoverable()).toHaveLength(0)
+  })
+
+  it('paces itself between attempts on a lock that is genuinely held, rather than spinning', async () => {
+    const fs = new FakeManagedFs()
+    await fs.openExclusive(PATHS.lockFile) // fresh: never stale, never clears on its own
+    let sleeps = 0
+    const s = new OperationStore({
+      root: ROOT,
+      instanceId: 'core-1',
+      newOperationId: () => 'op-1',
+      newEffectId: () => 'effect-1',
+      fs,
+      now: () => fs.clock,
+      sleep: async () => {
+        sleeps += 1
+      },
+      lockAttempts: 5,
+      ownerIdentity: fakeOwnerIdentity(),
+    })
+
+    await expect(s.createOrGet('env-1', begin(), DIGEST_A)).rejects.toThrow(AtomicCoreError)
+    // Every attempt against a lock that is neither won nor found stale backs off once: a takeover
+    // decision that correctly found nothing to clear must not read as "retry immediately", or a
+    // busy lock turns every wait into a tight loop instead of the deliberate one `lockRetryMs` sets.
+    expect(sleeps).toBe(5)
   })
 })
 
@@ -234,6 +333,35 @@ describe('committing against a revision (OP08)', () => {
     expect(fs.files.has(`${path}.tmp`)).toBe(false)
   })
 
+  it('finds an operation whose newest write left only the backup copy on disk', async () => {
+    const fs = new FakeManagedFs()
+    const s = store(fs)
+    const { record } = await s.createOrGet('env-1', begin(), DIGEST_A)
+    const id = record.machine.operation.operation_id
+    const path = PATHS.operationFile(id)
+    await s.compareAndSwap(id, 0, {
+      ...record,
+      machine: {
+        ...record.machine,
+        operation: { ...record.machine.operation, revision: 1, phase: 'awaiting-consent' as const },
+      },
+    })
+    expect(fs.files.has(`${path}.bak`)).toBe(true)
+
+    // The crash lands between renaming the current file to `.bak` and renaming the new one into
+    // place (`write`, in store.ts): `<id>.json` never reappears, only `<id>.json.bak` does.
+    fs.files.delete(path)
+    fs.mtimes.delete(path)
+
+    // `read` already falls back to `.bak`; the directory scan behind `listRecoverable` and the
+    // busy-check in `createOrGet` must see it too, or an abandoned operation becomes invisible to
+    // both while a client keeps being told the environment is free.
+    expect(await s.listRecoverable()).toHaveLength(1)
+    await expect(s.createOrGet('env-1', begin({ request_id: 'req-2' }), DIGEST_B)).rejects.toThrow(
+      /still running/
+    )
+  })
+
   it('leaves a finished operation out of what needs recovering', async () => {
     const fs = new FakeManagedFs()
     const s = store(fs)
@@ -261,6 +389,8 @@ describe('receipts are used once (OP03)', () => {
     accepted_receipt_digests: {},
     completed_effect_ids: [],
     owned_resource_ids: [],
+    owner_pid: null,
+    owner_process_start_id: null,
   }
 
   it('accepts a receipt once and calls the identical one a duplicate', () => {

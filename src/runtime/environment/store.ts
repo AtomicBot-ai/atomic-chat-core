@@ -14,6 +14,7 @@
  * the same id but different contents is a bug, and is told so.
  */
 
+import { randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AtomicCoreError, MANAGED_PHASES } from '../../contracts/index.js'
@@ -25,6 +26,7 @@ import type {
   Sha256Digest,
 } from '../../contracts/index.js'
 import { encodeManagedId, managedSharedPaths } from '../../config/index.js'
+import { processStartId } from '../../lock/index.js'
 import { canonicalDigest } from './canonical-json.js'
 import { startOperation, type OperationMachine } from './state.js'
 
@@ -42,6 +44,17 @@ export interface PersistedOperation {
   completed_effect_ids: string[]
   /** What this operation has actually created, so recovery adopts by identity and not by name. */
   owned_resource_ids: string[]
+  /**
+   * The process that last wrote this record, stamped by the store on every write (never by a
+   * caller). App and CLI cores share this store, so a core deciding whether to recover a
+   * non-terminal operation needs to know whether the core that last touched it is still running —
+   * this is the identity `EnvironmentService.recover` checks with `verifyProcessIdentity`
+   * (`src/lock/process-identity.ts`), the same primitive `InstanceLock` uses for its own takeover
+   * decision. `null` only for a record this store has never written (see `speculative` in
+   * `service.ts`, a probe's throwaway record that never reaches disk).
+   */
+  owner_pid: number | null
+  owner_process_start_id: string | null
 }
 
 /** The slice of `node:fs/promises` the store needs; tests pass an in-memory fake. */
@@ -68,6 +81,12 @@ const NODE_FS: StoreFs = {
   openExclusive: async (path) => open(path, 'wx'),
 }
 
+/** This process's own identity, or a fake one a test injects. See `PersistedOperation.owner_pid`. */
+export interface OwnerIdentity {
+  pid: number
+  startId: string | null
+}
+
 export interface OperationStoreOptions {
   /** The shared per-user managed root; both scopes address the same one. */
   root: string
@@ -81,6 +100,13 @@ export interface OperationStoreOptions {
   lockTtlMs?: number
   lockAttempts?: number
   lockRetryMs?: number
+  /**
+   * What to stamp as the owner of every record this store writes. Real process identity by
+   * default (`src/lock/process-identity.ts`), resolved once and cached — a process's start
+   * identity does not change while it runs, and re-probing it on every write would mean an `exec`
+   * per commit on macOS and Windows.
+   */
+  ownerIdentity?: () => Promise<OwnerIdentity>
 }
 
 const DEFAULT_LOCK_TTL_MS = 30_000
@@ -93,9 +119,16 @@ const busy = (): AtomicCoreError =>
     'Another Atomic Chat process is changing the managed runtime; try again in a moment.'
   )
 
+/**
+ * A record on disk that cannot be read. This is never the caller's fault — nothing in a request
+ * produced it, an interrupted write or a foreign file did — so it carries `IO_ERROR`, not
+ * `MANAGED_METADATA_INVALID`: that code is for a client-supplied descriptor or plan this core
+ * refused, and conflating the two would answer a caller's mistake and this store's own corruption
+ * with the same 400.
+ */
 const corrupt = (operationId: string): AtomicCoreError =>
   new AtomicCoreError(
-    'MANAGED_METADATA_INVALID',
+    'IO_ERROR',
     'The record of this operation cannot be read, so what it owns is unknown.',
     operationId
   )
@@ -112,9 +145,25 @@ const parseRecord = (text: string): PersistedOperation | null => {
     if (!Number.isSafeInteger(operation.revision) || operation.revision < 0) return null
     if (!isPhase(operation.phase)) return null
     if (typeof raw.request_digest !== 'string') return null
-    return raw
+    // Older than this field, or written by something else entirely: treat as unrecorded rather
+    // than reject the whole record over one optional pair of fields.
+    return {
+      ...raw,
+      owner_pid: typeof raw.owner_pid === 'number' ? raw.owner_pid : null,
+      owner_process_start_id:
+        typeof raw.owner_process_start_id === 'string' ? raw.owner_process_start_id : null,
+    }
   } catch {
     return null
+  }
+}
+
+/** Real process identity, fetched once per store and cached for its whole lifetime. */
+const defaultOwnerIdentity = (): (() => Promise<OwnerIdentity>) => {
+  let cached: Promise<OwnerIdentity> | undefined
+  return () => {
+    cached ??= processStartId(process.pid).then((startId) => ({ pid: process.pid, startId: startId ?? null }))
+    return cached
   }
 }
 
@@ -129,6 +178,7 @@ export class OperationStore {
     lockTtlMs: number
     lockAttempts: number
     lockRetryMs: number
+    ownerIdentity: () => Promise<OwnerIdentity>
   }
 
   constructor(options: OperationStoreOptions) {
@@ -143,6 +193,7 @@ export class OperationStore {
       lockTtlMs: options.lockTtlMs ?? DEFAULT_LOCK_TTL_MS,
       lockAttempts: options.lockAttempts ?? DEFAULT_LOCK_ATTEMPTS,
       lockRetryMs: options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
+      ownerIdentity: options.ownerIdentity ?? defaultOwnerIdentity(),
     }
   }
 
@@ -204,9 +255,12 @@ export class OperationStore {
         accepted_receipt_digests: {},
         completed_effect_ids: [],
         owned_resource_ids: [],
+        // `write` stamps this store's own identity before the record reaches disk.
+        owner_pid: null,
+        owner_process_start_id: null,
       }
-      await this.write(record)
-      return { record, created: true }
+      const stamped = await this.write(record, true)
+      return { record: stamped, created: true }
     })
   }
 
@@ -255,6 +309,13 @@ export class OperationStore {
     return all.filter((record) => !TERMINAL.includes(record.machine.operation.phase))
   }
 
+  /**
+   * Every operation this directory holds, one entry per operation id however it currently sits on
+   * disk. `write` always leaves at least one of `<id>.json`/`<id>.json.bak` readable, but a crash
+   * between renaming the old file to `.bak` and renaming the new one into place (`write`, below)
+   * can leave only the `.bak` — so both extensions are scanned for base names before either is
+   * read, or that operation would be invisible here even though `read(operationId)` finds it.
+   */
   private async all(): Promise<PersistedOperation[]> {
     let entries: string[]
     try {
@@ -262,9 +323,13 @@ export class OperationStore {
     } catch {
       return []
     }
-    const records: PersistedOperation[] = []
+    const baseNames = new Set<string>()
     for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue
+      if (entry.endsWith('.json')) baseNames.add(entry)
+      else if (entry.endsWith('.json.bak')) baseNames.add(entry.slice(0, -'.bak'.length))
+    }
+    const records: PersistedOperation[] = []
+    for (const entry of baseNames) {
       const record = await this.readRecord(join(this.paths.operationsDir, entry))
       if (record === null) {
         const recovered = await this.readRecord(join(this.paths.operationsDir, `${entry}.bak`))
@@ -294,42 +359,92 @@ export class OperationStore {
     }
   }
 
-  /** Keep the previous record, then swap the new one in with a rename nothing can half-apply. */
-  private async write(record: PersistedOperation): Promise<void> {
-    const path = this.paths.operationFile(record.machine.operation.operation_id)
+  /**
+   * Keep the previous record, then swap the new one in with a rename nothing can half-apply.
+   * Stamps this store's own process identity on the way out — never the caller's job, so nothing
+   * upstream can claim to be a different core than the one actually holding this handle — and
+   * returns the stamped copy, since that is what actually landed on disk.
+   */
+  private async write(record: PersistedOperation): Promise<void>
+  private async write(record: PersistedOperation, returnStamped: true): Promise<PersistedOperation>
+  private async write(record: PersistedOperation, returnStamped = false): Promise<PersistedOperation | void> {
+    const identity = await this.options.ownerIdentity()
+    const stamped: PersistedOperation = {
+      ...record,
+      owner_pid: identity.pid,
+      owner_process_start_id: identity.startId,
+    }
+    const path = this.paths.operationFile(stamped.machine.operation.operation_id)
     await this.fs.mkdir(this.paths.operationsDir, { recursive: true })
     const tmp = `${path}.tmp`
-    await this.fs.writeFile(tmp, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    await this.fs.writeFile(tmp, `${JSON.stringify(stamped, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
     if (await this.exists(path)) await this.fs.rename(path, `${path}.bak`)
     await this.fs.rename(tmp, path)
+    if (returnStamped) return stamped
   }
 
   private async withLock<T>(run: () => Promise<T>): Promise<T> {
-    const handle = await this.acquire()
+    const { handle, token } = await this.acquire()
     try {
       return await run()
     } finally {
       await handle.close().catch(() => undefined)
-      await this.fs.rm(this.paths.lockFile, { force: true }).catch(() => undefined)
+      // Only the lock still carrying this attempt's token is this attempt's to remove: a takeover
+      // that ran while this critical section was itself still inside its (generous) TTL leaves a
+      // fresh lock behind under a different token, and releasing unconditionally would delete it
+      // out from under its new, legitimate holder.
+      const onDisk = await this.fs.readFile(this.paths.lockFile, 'utf8').catch(() => null)
+      if (onDisk === null || onDisk.trim() === token) {
+        await this.fs.rm(this.paths.lockFile, { force: true }).catch(() => undefined)
+      }
     }
   }
 
-  private async acquire(): Promise<{ close(): Promise<void> }> {
+  private async acquire(): Promise<{ handle: { close(): Promise<void> }; token: string }> {
     await this.fs.mkdir(this.paths.root, { recursive: true })
     for (let attempt = 0; attempt < this.options.lockAttempts; attempt += 1) {
-      try {
-        return await this.fs.openExclusive(this.paths.lockFile)
-      } catch {
-        // Somebody holds it, or somebody died holding it. Only age tells those apart.
-        const age = await this.lockAge()
-        if (age !== null && age > this.options.lockTtlMs) {
-          await this.fs.rm(this.paths.lockFile, { force: true }).catch(() => undefined)
-          continue
-        }
-        await this.options.sleep(this.options.lockRetryMs)
+      const token = randomUUID()
+      const handle = await this.fs.openExclusive(this.paths.lockFile).catch(() => null)
+      if (handle !== null) {
+        await this.fs.writeFile(this.paths.lockFile, token, { encoding: 'utf8' })
+        return { handle, token }
       }
+      // Somebody holds it, or somebody died holding it. Only one waiter at a time may decide which
+      // and act on it — otherwise two waiters can both see the same expired lock, both delete it,
+      // and both end up believing they hold it: the second one's delete lands *after* the first
+      // has already recreated the file, taking the winner's brand new lock with it. Retry at once
+      // only when a stale lock was actually cleared — a lock that is genuinely still held, or a
+      // takeover another waiter is already deciding, waits its normal turn like any contention.
+      if (await this.tryTakeoverStale()) continue
+      await this.options.sleep(this.options.lockRetryMs)
     }
     throw busy()
+  }
+
+  /**
+   * Decide, under a second exclusive-create file, whether the lock is stale enough to remove.
+   * Serializing the decision itself (not just the removal) is what a bare `rm` cannot give: two
+   * waiters that both read a 40-second-old lock and both act on that reading would both remove it,
+   * however carefully the removal itself is written. Only the one holding this mutex reads and
+   * acts, and it re-reads freshly, so a lock that became live again in the meantime is left alone.
+   *
+   * Returns whether a stale lock was actually cleared — not merely whether this call got to look.
+   * `acquire` retries at once only on `true`; otherwise it is genuine contention with a live
+   * holder, and the ordinary backoff applies, the same as losing the race for the lock itself.
+   */
+  private async tryTakeoverStale(): Promise<boolean> {
+    const mutexPath = `${this.paths.lockFile}.takeover`
+    const mutex = await this.fs.openExclusive(mutexPath).catch(() => null)
+    if (mutex === null) return false // another waiter is already deciding
+    try {
+      const age = await this.lockAge()
+      if (age === null || age <= this.options.lockTtlMs) return false
+      await this.fs.rm(this.paths.lockFile, { force: true }).catch(() => undefined)
+      return true
+    } finally {
+      await mutex.close().catch(() => undefined)
+      await this.fs.rm(mutexPath, { force: true }).catch(() => undefined)
+    }
   }
 
   private async lockAge(): Promise<number | null> {

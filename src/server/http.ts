@@ -178,6 +178,13 @@ export function statusForCode(code: ErrorCode): number {
     case 'AUTH_FAILED':
     case 'UPSTREAM_ERROR':
       return 502
+    // `MANAGED_HOST_STEP_INVALID`/`MANAGED_METADATA_INVALID` are a descriptor or plan this core
+    // refused because a *caller* sent it something malformed
+    // (`src/runtime/environment/descriptor.ts`'s parser). Deliberately not shared with an on-disk
+    // operation record this core itself cannot read: that is never the caller's fault, so
+    // `OperationStore`'s own corruption case (`store.ts`'s `corrupt()`) raises `IO_ERROR` instead
+    // and falls through to the 500 below, rather than answering a client mistake and this store's
+    // own corruption with the same 400.
     case 'INVALID_ARGUMENT':
     case 'INVALID_REQUEST':
     case 'INVALID_DIMENSIONS':

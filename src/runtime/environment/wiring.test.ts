@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,13 @@ import type { DataFolderEnv } from '../../config/index.js'
 import type { EnvironmentProvisioner } from './service.js'
 import { executorFor, provisionerFor, wireManagedRuntimes } from './wiring.js'
 import type { ManagedRuntimes } from './wiring.js'
+
+/** A pid that existed and is now gone: what a crashed core's process leaves behind (finding 1). */
+async function deadPid(): Promise<number> {
+  const child = spawn(process.execPath, ['-e', ''], { windowsHide: true })
+  await new Promise((resolve) => child.on('exit', resolve))
+  return child.pid as number
+}
 
 const DIGEST = `sha256:${'a'.repeat(64)}` as Sha256Digest
 
@@ -68,7 +76,7 @@ const fakeProvisioner = (hostStep: ManagedHostStep | null = null): EnvironmentPr
   },
 })
 
-const wire = (platform: NodeJS.Platform, provisioner?: EnvironmentProvisioner | null) => {
+const wire = (platform: NodeJS.Platform, provisioner?: EnvironmentProvisioner | null, ownerPid?: number) => {
   const events: { name: string; phase: string }[] = []
   let serial = 0
   const managed = wireManagedRuntimes({
@@ -80,15 +88,19 @@ const wire = (platform: NodeJS.Platform, provisioner?: EnvironmentProvisioner | 
     }) as never,
     newId: () => `id-${(serial += 1)}`,
     ...(provisioner === undefined ? {} : { provisioner }),
+    ...(ownerPid === undefined ? {} : { ownerPid }),
   })
   wired.push(managed)
   return { managed, events }
 }
 
 describe('which machines can carry a managed runtime', () => {
-  it('names the container engine each platform would drive, and none for the rest', () => {
+  it('names the container engine Linux would drive, and none for every other platform', () => {
+    // Windows is not a goal of this change (no WSL recipe, no Docker executor anywhere in this
+    // build yet): it answers null exactly like darwin, rather than advertising an environment
+    // nothing here can ever set up.
     expect(executorFor('linux')).toBe('linux-docker')
-    expect(executorFor('win32')).toBe('wsl-docker')
+    expect(executorFor('win32')).toBeNull()
     expect(executorFor('darwin')).toBeNull()
     expect(executorFor('freebsd')).toBeNull()
   })
@@ -97,6 +109,7 @@ describe('which machines can carry a managed runtime', () => {
     const { managed } = wire('darwin')
     // Not an environment that cannot be set up: there is nothing here to set up.
     expect(managed.environments()).toEqual([])
+    expect(wire('win32').managed.environments()).toEqual([])
   })
 
   it('offers one environment per user on a platform that could carry it', () => {
@@ -104,7 +117,6 @@ describe('which machines can carry a managed runtime', () => {
     expect(managed.environments()).toHaveLength(1)
     expect(managed.environments()[0]?.executor).toBe('linux-docker')
     expect(managed.environments()[0]?.environment_id).toBe('default')
-    expect(wire('win32').managed.environments()[0]?.executor).toBe('wsl-docker')
   })
 
   it('says unsupported while no host recipe exists, rather than inviting a setup that cannot run', () => {
@@ -191,6 +203,53 @@ describe('coming back to what a previous core left', () => {
     const recovered = second.managed.operations()
     expect(recovered).toHaveLength(1)
     expect(recovered[0]?.request_id).toBe('req-1')
+  })
+
+  it('reconciles an operation whose recorded owner is a process that no longer exists', async () => {
+    const dead = await deadPid()
+    const first = wire('linux', fakeProvisioner(), dead)
+    await first.managed.service.begin('default', {
+      request_id: 'req-1',
+      target: { kind: 'environment' },
+      kind: 'setup',
+      descriptor_id: 'trtllm',
+    })
+    await first.managed.service.idle()
+    const before = first.managed.operations()[0]
+    expect(before?.phase).toBe('awaiting-consent')
+
+    // A genuinely different core: not a restart replaying the same pid, but the real dead-owner
+    // case this fix exists for (finding 1).
+    const second = wire('linux', fakeProvisioner())
+    await second.managed.recover()
+    await second.managed.service.idle()
+
+    const after = second.managed.operations()[0]
+    expect(after?.phase).toBe('awaiting-consent')
+    // Reconciled, not merely made visible from disk: the machine was actually looked at again.
+    expect(after?.revision).toBeGreaterThan(before?.revision ?? 0)
+  })
+
+  it('leaves an operation alone whose recorded owner is this very process', async () => {
+    const first = wire('linux', fakeProvisioner())
+    await first.managed.service.begin('default', {
+      request_id: 'req-1',
+      target: { kind: 'environment' },
+      kind: 'setup',
+      descriptor_id: 'trtllm',
+    })
+    await first.managed.service.idle()
+    const before = first.managed.operations()[0]
+
+    // Another core wired in the same test process is, in truth, exactly as alive as the first —
+    // real app and CLI cores sharing this store are two different processes, but never two cores
+    // that are each other's ghost the moment one starts.
+    const second = wire('linux', fakeProvisioner())
+    await second.managed.recover()
+
+    const after = second.managed.operations()[0]
+    expect(after?.revision).toBe(before?.revision)
+    expect(after?.phase).toBe('awaiting-consent')
   })
 
   it('has nothing to recover on a machine that cannot carry one', async () => {

@@ -72,10 +72,12 @@ New data paths: `<data>/atomic-core/` (settings.json, credentials.json, optimal-
 instance.lock, control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml)
 and, for the managed text runtimes' container environment, the one root outside any data folder:
 `<dataDir>/atomic-managed-runtimes/`, shared by the app and CLI scopes because the environment
-belongs to the machine's user account and must survive a data-folder move (ADR
-2026-09-22-managed-runtimes-split-per-user-environment-from-per-scope-data, narrowed to this shared
-half only by 2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store;
-`ATOMIC_CORE_MANAGED_ROOT` overrides it for tests).
+belongs to the machine's user account and must survive a data-folder move (`origin/feat/tenzor-rt`'s
+branch ADR `2026-09-22-managed-runtimes-split-per-user-environment-from-per-scope-data`, not a
+record in this repo's own `docs/decisions/`; the decision it made is narrowed to this shared half
+only by this repo's own ADR
+2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store).
+`ATOMIC_CORE_MANAGED_ROOT` overrides the root for tests.
 Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
 `<data>/diffusion/{backends,models,scratch}` and `<data>/images`; `<data>/videos` is the folder the app's ADR
 2026-09-10-store-generated-media-under-the-data-folder-with-recipes-in-png-chunks reserved (core ADR

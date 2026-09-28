@@ -61,6 +61,8 @@ const record = (machine = importing(), owned: string[] = []): PersistedOperation
   accepted_receipt_digests: {},
   completed_effect_ids: [],
   owned_resource_ids: owned,
+  owner_pid: null,
+  owner_process_start_id: null,
 })
 
 const inventory = (

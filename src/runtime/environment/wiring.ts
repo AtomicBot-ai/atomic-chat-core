@@ -21,16 +21,23 @@ import type {
   EnvironmentSnapshot,
   ExecutorKind,
 } from '../../contracts/index.js'
+import { processStartId } from '../../lock/index.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
-import { OperationStore } from './store.js'
+import { OperationStore, type OwnerIdentity } from './store.js'
 
 /** The one environment a machine user has, per scope. Its id is fixed: there is only ever one. */
 export const DEFAULT_ENVIRONMENT_ID = 'default'
 
-/** Which container engine this platform would drive. Null where none of them applies. */
+/**
+ * Which container engine this platform would drive. Null where none of them applies — and, for
+ * now, on every platform this change does not target: task 2.2 wires no Windows recipe or Docker
+ * executor (WSL is out of scope of this change entirely), so a `wsl-docker` environment here would
+ * advertise a container engine nothing in this build can ever set up. `darwin` already answers
+ * null for the same reason (there is no container engine for it, ever) — `win32` joins it until a
+ * later change actually adds the Windows recipe.
+ */
 export function executorFor(platform: NodeJS.Platform): ExecutorKind | null {
   if (platform === 'linux') return 'linux-docker'
-  if (platform === 'win32') return 'wsl-docker'
   return null
 }
 
@@ -53,6 +60,13 @@ export interface WireManagedRuntimesOptions {
   newId: () => string
   /** Test seam: a recipe to use instead of the one this platform would get. */
   provisioner?: EnvironmentProvisioner | null
+  /**
+   * Test seam: whose identity this core stamps on what it writes to the shared store
+   * (`OperationStore.ownerIdentity`), instead of this real process's own pid. A test simulating a
+   * second, dead core gives it a pid that really existed and really is gone; simulating the same
+   * core again (the ordinary case) needs nothing, since the real pid stays the real pid.
+   */
+  ownerPid?: number
 }
 
 export interface ManagedRuntimes {
@@ -70,11 +84,24 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
   const provisioner =
     options.provisioner === undefined ? provisionerFor(options.platform) : options.provisioner
 
+  const ownerPid = options.ownerPid ?? process.pid
+  // Resolved once and cached: a process's start identity never changes while it runs, and
+  // re-probing it on every write would mean an `exec` per commit on macOS and Windows.
+  let ownerIdentityCache: Promise<OwnerIdentity> | undefined
+  const ownerIdentity = (): Promise<OwnerIdentity> => {
+    ownerIdentityCache ??= processStartId(ownerPid).then((startId) => ({
+      pid: ownerPid,
+      startId: startId ?? null,
+    }))
+    return ownerIdentityCache
+  }
+
   const store = new OperationStore({
     root: managedSharedRoot(options.env),
     instanceId: options.instanceId,
     newOperationId: options.newId,
     newEffectId: options.newId,
+    ownerIdentity,
   })
 
   // The view a snapshot is built from. A machine with no executor has no environment at all, which

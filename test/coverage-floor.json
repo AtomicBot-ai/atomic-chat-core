@@ -924,10 +924,10 @@
     "lines": 94
   },
   "src/runtime/environment/service.ts": {
-    "statements": 79,
-    "branches": 81,
+    "statements": 82,
+    "branches": 85,
     "functions": 95,
-    "lines": 79
+    "lines": 82
   },
   "src/runtime/environment/state.ts": {
     "statements": 95,
@@ -936,10 +936,10 @@
     "lines": 95
   },
   "src/runtime/environment/store.ts": {
-    "statements": 100,
+    "statements": 97,
     "branches": 95,
-    "functions": 95,
-    "lines": 100
+    "functions": 91,
+    "lines": 97
   },
   "src/runtime/environment/windows-probe.ts": {
     "statements": 97,

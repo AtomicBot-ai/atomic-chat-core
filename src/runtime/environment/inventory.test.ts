@@ -5,12 +5,12 @@ import { inventoryDigest, type InventoryFile } from './inventory.js'
 // `atomic-chat-conf`'s `.github/scripts/inventory-digest.mjs` is a port of this algorithm and
 // re-publishes the same test vectors (`inventory-digest.test.mjs`) against its own copy, so the two
 // must never drift: a curated `RuntimeDescriptor.curated_models[].inventory_digest` conf publishes
-// is only useful if core recomputes the identical value from the same file listing. The first vector
-// below is a known curated entry: it is exactly the file listing the digest values in
-// `test/fixtures/runtimes/tensorrt-llm.json` were themselves computed from (there is no per-file
-// listing checked into either repo to hash live — the fixture only carries the finished digests —
-// so this is conf's own hand-computed case, reused here rather than re-derived, to prove core's
-// algorithm agrees with the one that produced the published descriptor).
+// is only useful if core recomputes the identical value from the same file listing. `coreTestFiles`
+// below is conf's own synthetic vector — a small, hand-picked file listing conf made up to exercise
+// the algorithm, not the real Hugging Face listing behind any specific `curated_models[]` entry in
+// `test/fixtures/runtimes/tensorrt-llm.json` (no per-file listing is checked into either repo; the
+// fixture only carries the finished digests). Reusing it here, rather than a listing derived from
+// the fixture, is what proves the two implementations agree byte-for-byte on the same input.
 const coreTestFiles: InventoryFile[] = [
   { path: 'config.json', bytes: 1_024 },
   { path: 'model-00001-of-00002.safetensors', bytes: 4_250_000_000, sha256: 'aa' },
