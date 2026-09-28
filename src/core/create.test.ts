@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
+import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../test/helpers/fake-backend-pack.js'
+import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
+import type { BackendOutputSink } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
 
@@ -320,6 +323,78 @@ describe('taking ownership', () => {
   })
 })
 
+describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('engine output', () => {
+  it('reaches backendOutput from llama.cpp, tagged with the provider and model', async () => {
+    await data.writeModel('demo')
+    await installFakeBackend(data.layout)
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const backendOutput: BackendOutputSink = (line) => received.push(line)
+    const core = await createCore({ backendOutput })
+    await core.load('llamacpp-upstream', 'demo')
+
+    expect(received.every((l) => l.provider === 'llamacpp-upstream' && l.model === 'demo')).toBe(true)
+    expect(received).toContainEqual({
+      provider: 'llamacpp-upstream',
+      model: 'demo',
+      stream: 'stderr',
+      line: expect.stringMatching(/^build: /),
+    })
+  })
+
+  it('reaches backendOutput from MLX and Foundation Models, tagged with the provider and model', async () => {
+    const resources = join(data.root, 'resources')
+    await writeFakeSidecarBinary(resources, 'mlx-server', { kind: 'mlx' })
+    await writeFakeSidecarBinary(resources, 'foundation-models-server', { kind: 'fm' })
+    const modelDir = join(data.root, 'mlx', 'models', 'qwen-mlx')
+    await mkdir(modelDir, { recursive: true })
+    await writeFile(join(modelDir, 'model.safetensors'), 'w')
+    await writeFile(join(modelDir, 'config.json'), JSON.stringify({ max_position_embeddings: 32768 }))
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const core = await createCore({
+      platform: 'darwin',
+      resourcesDir: resources,
+      backendOutput: (line) => received.push(line),
+    })
+    await core.registry('mlx').write('qwen-mlx', {
+      model_path: 'mlx/models/qwen-mlx/model.safetensors',
+      name: 'qwen-mlx',
+      size_bytes: 1,
+    })
+
+    await core.load('mlx', 'qwen-mlx')
+    await core.load('foundation-models', 'apple/on-device')
+
+    expect(received).toContainEqual({
+      provider: 'mlx',
+      model: 'qwen-mlx',
+      stream: 'stderr',
+      line: expect.stringContaining('Uvicorn running on'),
+    })
+    expect(received).toContainEqual({
+      provider: 'foundation-models',
+      model: 'apple/on-device',
+      stream: 'stdout',
+      line: expect.stringContaining('http server listening on'),
+    })
+  })
+
+  it('without backendOutput, engine lines never reach the logger', async () => {
+    await data.writeModel('demo')
+    await installFakeBackend(data.layout)
+    const logs: string[] = []
+    const verbose: string[] = []
+    const core = await createCore({ logger: (level, message) => logs.push(`${level}: ${message}`) })
+    core.events.on('core:log', ({ msg }) => verbose.push(msg))
+    await core.load('llamacpp-upstream', 'demo', { verbose: true })
+
+    // The engine did print them, and `verbose` still relays them as events...
+    expect(verbose.some((line) => line.includes('build:'))).toBe(true)
+    // ...but the host's logger never sees one.
+    expect(logs.some((line) => line.includes('listening on'))).toBe(false)
+    expect(logs.some((line) => line.includes('build:'))).toBe(false)
+  })
+})
+
 describe.skipIf(process.platform === 'win32')('image generation through the owner', () => {
   it('wires the diffusion service to the control API, the journal, the events and the shutdown order', async () => {
     const { dataLayout } = await import('../config/index.js')
@@ -327,10 +402,12 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
     const { isProcessAlive } = await import('../runtime/shared/index.js')
     const layout = dataLayout(data.root)
     const logs: string[] = []
+    const backendLines: Array<{ provider: string; model: string; stream: string; line: string }> = []
     const core = await AtomicCore.create({
       dataFolder: data.root,
       controlPort: 0,
       logger: (level, message) => logs.push(`${level}: ${message}`),
+      backendOutput: (line) => backendLines.push(line),
       diffusion: { timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 } },
     })
     cores.push(core)
@@ -379,6 +456,14 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
     expect(core.sessions()).toEqual([])
     // The server's own output is not the core's log.
     expect(logs.some((line) => line.includes('[sd-server'))).toBe(false)
+    // ...but it does reach backendOutput, tagged with the engine and the loaded model.
+    expect(backendLines.every((l) => l.provider === 'sd-cpp' && l.model === 'z-image:q4_k_m')).toBe(true)
+    expect(backendLines).toContainEqual({
+      provider: 'sd-cpp',
+      model: 'z-image:q4_k_m',
+      stream: 'stdout',
+      line: expect.stringContaining('listening on 127.0.0.1:'),
+    })
 
     const { jobId } = await client.generateImage({
       prompt: 'a cat',

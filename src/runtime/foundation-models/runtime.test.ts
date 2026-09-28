@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fakeSidecarSpawn } from '../../../test/helpers/fake-sidecar-server.js'
 import type { FakeSidecarOptions } from '../../../test/helpers/fake-sidecar-server.js'
+import { scriptSpawn } from '../../../test/helpers/script-spawn.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { ProcessJournal } from '../../lock/index.js'
@@ -42,6 +44,14 @@ function runtime(
   return r
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time')
+    await new Promise((r) => setTimeout(r, 20))
+  }
+}
+
 describe('FoundationModelsRuntime', () => {
   it('starts the server with a port and the extension key, and serves the on-device model', async () => {
     const argvFile = join(data.root, 'argv.jsonl')
@@ -63,6 +73,32 @@ describe('FoundationModelsRuntime', () => {
       ['foundation-models', session.pid],
     ])
     expect(events.map((e) => e.name)).toEqual(['session:started'])
+  })
+
+  it('writes the start line to log with --api-key redacted, and the key itself never in the log', async () => {
+    const logged: string[] = []
+    const r = runtime({}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load(APPLE_MODEL_ID)
+
+    expect(logged).toContainEqual(
+      `info: starting foundation-models-server for foundation-models/${APPLE_MODEL_ID}: --port ${session.port} --api-key <redacted>`
+    )
+    expect(logged.some((line) => line.includes(session.api_key))).toBe(false)
+  })
+
+  // Same regression guard as the llama.cpp runtime's equivalent test: a Windows-style exe path
+  // (backslashes, drive letter) must reduce to just the file name in the start line, regardless of
+  // which OS actually runs this suite.
+  it('reduces a Windows-style executable path to its basename in the start line', async () => {
+    const logged: string[] = []
+    const r = runtime({}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load(APPLE_MODEL_ID, {
+      exePath: 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\foundation-models-server.exe',
+    })
+
+    expect(logged).toContainEqual(
+      `info: starting foundation-models-server.exe for foundation-models/${APPLE_MODEL_ID}: --port ${session.port} --api-key <redacted>`
+    )
   })
 
   it('answers a second load with the running session and joins a load in flight', async () => {
@@ -200,6 +236,75 @@ describe('FoundationModelsRuntime', () => {
     expect(calls).toBe(3)
     present = false
     expect(await r.checkAvailability(true)).toBe('binaryNotFound')
+  })
+
+  it('relays every line to backendOutput before and after readiness, in addition to logPath and verbose', async () => {
+    const logPath = join(data.root, 'logs', 'fm.log')
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const script = [
+      "console.log('[foundation-models] Foundation Models Server starting...')",
+      "console.log('[foundation-models] http server listening on http://127.0.0.1:1')",
+      "setTimeout(() => console.error('info Hummingbird: request POST /v1/chat/completions'), 30)",
+      'setInterval(() => {}, 1000)',
+    ].join('; ')
+    const r = runtime({}, { backendOutput: (line) => received.push(line), spawn: scriptSpawn(script) })
+
+    await r.load(APPLE_MODEL_ID, { logPath, verbose: true })
+    await waitFor(() => received.length === 3)
+
+    const tagged = { provider: 'foundation-models', model: APPLE_MODEL_ID }
+    expect(received).toEqual([
+      { ...tagged, stream: 'stdout', line: '[foundation-models] Foundation Models Server starting...' },
+      {
+        ...tagged,
+        stream: 'stdout',
+        line: '[foundation-models] http server listening on http://127.0.0.1:1',
+      },
+      { ...tagged, stream: 'stderr', line: 'info Hummingbird: request POST /v1/chat/completions' },
+    ])
+    // In addition to logPath and verbose, never instead of them: both get the late line too.
+    await waitFor(() => readFileSync(logPath, 'utf8').includes('[stderr] info Hummingbird: request'))
+    expect(events).toContainEqual({
+      name: 'core:log',
+      payload: {
+        level: 'debug',
+        msg: '[foundation-models][stderr] info Hummingbird: request POST /v1/chat/completions',
+      },
+    })
+  })
+
+  it('loads despite a backendOutput sink that throws, and warns about it once', async () => {
+    const logged: string[] = []
+    const r = runtime(
+      {},
+      {
+        backendOutput: () => {
+          throw new Error('sink boom')
+        },
+        log: (level, message) => logged.push(`${level}: ${message}`),
+      }
+    )
+    const session = await r.load(APPLE_MODEL_ID)
+    expect(logged).toEqual([
+      `info: starting foundation-models-server for foundation-models/${APPLE_MODEL_ID}: --port ${session.port} --api-key <redacted>`,
+      'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+    ])
+  })
+
+  it('delivers every line printed before an early exit to backendOutput', async () => {
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const r = runtime({ mode: 'exit-2' }, { backendOutput: (line) => received.push(line) })
+    await expect(r.load(APPLE_MODEL_ID)).rejects.toMatchObject({ code: 'SERVER_START_FAILED' })
+
+    const tagged = { provider: 'foundation-models', model: APPLE_MODEL_ID }
+    // Each stream keeps its order; the two streams may interleave either way.
+    expect(received.filter((l) => l.stream === 'stdout')).toEqual([
+      { ...tagged, stream: 'stdout', line: '[foundation-models] Foundation Models Server starting...' },
+      { ...tagged, stream: 'stdout', line: expect.stringMatching(/^\[foundation-models\] Port: \d+$/) },
+    ])
+    expect(received.filter((l) => l.stream === 'stderr')).toEqual([
+      { ...tagged, stream: 'stderr', line: 'Traceback (most recent call last): ...' },
+    ])
   })
 
   it.skipIf(process.platform === 'win32')('runs the real --check through the binary', async () => {

@@ -65,6 +65,11 @@ export async function createAtomicCore(
 ): Promise<AtomicCore> {
   const log = options.logger ?? (() => {})
   const warn = (message: string) => log('warn', message)
+  // The core logger as the local runtimes and diffusion take it: they may also say `debug`, which is
+  // dropped here, because the host's `logger` only understands three levels.
+  const runtimeLog = (level: 'debug' | 'info' | 'warn' | 'error', message: string): void => {
+    if (level !== 'debug') log(level, message)
+  }
   const scope = options.ownerScope ?? 'cli'
   const root =
     options.dataFolder ??
@@ -208,7 +213,9 @@ export async function createAtomicCore(
           const facts = await hardware.facts()
           return facts.cpuExtensions ? { arch: facts.arch, extensions: facts.cpuExtensions } : undefined
         },
+        log: runtimeLog,
         ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
       })
     const runtimes = new Map<LocalProviderId, LocalRuntime>([
       [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
@@ -228,6 +235,8 @@ export async function createAtomicCore(
           readSettings: async () => settings.get('mlx'),
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
+          log: runtimeLog,
+          ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
         })
       )
       runtimes.set(
@@ -237,6 +246,8 @@ export async function createAtomicCore(
           resourcesDir: options.resourcesDir,
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
+          log: runtimeLog,
+          ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
         })
       )
     }
@@ -323,10 +334,11 @@ export async function createAtomicCore(
       journal,
       instanceId: lock.instanceId,
       emit: (name, payload) => emitter.emit(name, payload),
-      log: (level, msg) => (level === 'debug' ? undefined : log(level, msg)),
+      log: runtimeLog,
       platform,
       env,
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
+      ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
     const control = await ControlServer.start(

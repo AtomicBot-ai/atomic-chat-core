@@ -60,6 +60,15 @@ ignored. Scenarios 6 and 12 below describe the flag round-trip as it was planned
     `ATOMIC_CORE_DATA_FOLDER=B`, refuse app-folder aliases. Delay/fail each credentials/settings
     write and restart between writes while an HTTP receiver checks that a key never reaches the URL
     of a different provider configuration.
+17. **Logs** (`add-unified-logs`, not a PLAN.md §4 stage) — load a model in the app; the engine's lines
+    (`starting llama-server for <provider>/<model>: …`, its stdout/stderr) show up in the Logs window
+    labelled as coming from Core, alongside the app's own `[app]` lines; exporting from that window
+    produces a file whose lines carry both `[app]` and `[core]` tags. The core side this depends on is done
+    and e2e-tested against the compiled binary (`test/e2e/app-core-log.test.ts`: `core.log` gets the engine
+    start line and its stdout/stderr under `engine:<provider>/<model>`, everything headed
+    `[YYYY-MM-DD][HH:MM:SS][target][LEVEL]` in UTC). The Logs window and the export are the app's own
+    `app.log` + `core.log` merge, specified in `../atomic-chat-spec/openspec/changes/add-unified-logs/specs/app-logs/spec.md`; as of this writing the app repo has not implemented or driven this scenario yet, so there
+    is no app-side evidence to cite here.
 
 These are target scenarios, not claims of implemented coverage. Record evidence/grade before each phase exit.
 

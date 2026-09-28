@@ -8,6 +8,7 @@ import type { DataLayout } from '../config/index.js'
 import type { CoreEvents } from '../contracts/index.js'
 import { processStartId } from '../lock/index.js'
 import type { ProcessJournal } from '../lock/index.js'
+import type { BackendOutputSink } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
 import type { DiffusionServiceDeps } from './service.js'
 
@@ -17,6 +18,8 @@ export interface WireDiffusionOptions {
   instanceId: string
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
   log: (level: 'info' | 'warn' | 'debug', msg: string) => void
+  /** Every stdout/stderr line `sd-server` prints, for the life of the session. */
+  backendOutput?: BackendOutputSink
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
   /** Test seams, straight through to the service. */
@@ -57,6 +60,7 @@ export function wireDiffusion(options: WireDiffusionOptions): DiffusionService {
     journal: diffusionJournal(options.journal, options.instanceId),
     ...(options.platform ? { platform: options.platform } : {}),
     ...(options.env ? { env: options.env } : {}),
+    ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     ...options.overrides,
   })
   service.start()

@@ -74,14 +74,17 @@ export const runCliAsync = (dataFolder: string, args: string[]) =>
     child.once('exit', (status) => resolve({ status, stdout, stderr }))
   })
 
-/** Start `daemon` and wait for the ready line it prints on stdout. The child is added to `daemons`. */
+/**
+ * Start `daemon` and wait for the ready line it prints on stdout. The child is added to `daemons`.
+ * `stderr` returns everything the daemon has written there so far, from its first line on.
+ */
 export async function startDaemon(
   dataFolder: string,
   daemons: ChildProcess[],
   extra: string[] = [],
   env: NodeJS.ProcessEnv = {},
   binary = BIN
-): Promise<{ ready: ReadyLine; child: ChildProcess }> {
+): Promise<{ ready: ReadyLine; child: ChildProcess; stderr: () => string }> {
   const child = spawn(binary, ['daemon', '--data-folder', dataFolder, '--control-port', '0', ...extra], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, ...env },
@@ -105,7 +108,7 @@ export async function startDaemon(
     child.once('exit', (code) => reject(new Error(`daemon exited with ${code}\n${stderr}`)))
     setTimeout(() => reject(new Error(`no ready line in 20s\n${stderr}`)), 20_000).unref()
   })
-  return { ready, child }
+  return { ready, child, stderr: () => stderr }
 }
 
 /**

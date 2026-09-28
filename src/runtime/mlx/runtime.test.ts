@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fakeSidecarSpawn } from '../../../test/helpers/fake-sidecar-server.js'
 import type { FakeSidecarOptions } from '../../../test/helpers/fake-sidecar-server.js'
+import { scriptSpawn } from '../../../test/helpers/script-spawn.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { ProcessJournal } from '../../lock/index.js'
@@ -72,6 +74,14 @@ async function argvs(): Promise<string[][]> {
     .map((line) => JSON.parse(line) as string[])
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time')
+    await new Promise((r) => setTimeout(r, 20))
+  }
+}
+
 describe('MlxRuntime', () => {
   it('starts mlx-server on the model folder with the context capped at the default and no key', async () => {
     const dir = await writeMlxModel('qwen')
@@ -89,6 +99,33 @@ describe('MlxRuntime', () => {
     })
     expect(res.status).toBe(200)
     expect(journal.list().map((record) => record.provider)).toEqual(['mlx'])
+  })
+
+  it('writes the start line to log before spawning', async () => {
+    const dir = await writeMlxModel('qwen')
+    const logged: string[] = []
+    const r = runtime({}, {}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load('qwen')
+
+    expect(logged).toContainEqual(
+      `info: starting mlx-server for mlx/qwen: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`
+    )
+  })
+
+  // Same regression guard as the llama.cpp runtime's equivalent test: a Windows-style exe path
+  // (backslashes, drive letter) must reduce to just the file name in the start line, regardless of
+  // which OS actually runs this suite.
+  it('reduces a Windows-style executable path to its basename in the start line', async () => {
+    const dir = await writeMlxModel('qwen-win')
+    const logged: string[] = []
+    const r = runtime({}, {}, { log: (level, message) => logged.push(`${level}: ${message}`) })
+    const session = await r.load('qwen-win', {
+      exePath: 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\mlx-server.exe',
+    })
+
+    expect(logged).toContainEqual(
+      `info: starting mlx-server.exe for mlx/qwen-win: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`
+    )
   })
 
   it('passes quantization, the drafter and a pinned context from settings and overrides', async () => {
@@ -333,5 +370,74 @@ describe('MlxRuntime', () => {
     expect(events.some((e) => e.name === 'core:log' && String(e.payload['msg']).startsWith('[mlx/m]'))).toBe(
       true
     )
+  })
+
+  it('relays every line to backendOutput before and after readiness, in addition to logPath and verbose', async () => {
+    await writeMlxModel('m')
+    const logPath = join(data.root, 'logs', 'mlx.log')
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const script = [
+      "console.error('Loading model')",
+      "console.error('INFO:     Uvicorn running on http://127.0.0.1:1 (Press CTRL+C to quit)')",
+      "setTimeout(() => console.log('INFO:     127.0.0.1:50000 - POST /v1/chat/completions 200 OK'), 30)",
+      'setInterval(() => {}, 1000)',
+    ].join('; ')
+    const r = runtime({}, {}, { backendOutput: (line) => received.push(line), spawn: scriptSpawn(script) })
+
+    await r.load('m', { logPath, verbose: true })
+    await waitFor(() => received.length === 3)
+
+    const tagged = { provider: 'mlx', model: 'm' }
+    expect(received).toEqual([
+      { ...tagged, stream: 'stderr', line: 'Loading model' },
+      {
+        ...tagged,
+        stream: 'stderr',
+        line: 'INFO:     Uvicorn running on http://127.0.0.1:1 (Press CTRL+C to quit)',
+      },
+      { ...tagged, stream: 'stdout', line: 'INFO:     127.0.0.1:50000 - POST /v1/chat/completions 200 OK' },
+    ])
+    // In addition to logPath and verbose, never instead of them: both get the late line too.
+    await waitFor(() => readFileSync(logPath, 'utf8').includes('[stdout] INFO:     127.0.0.1:50000'))
+    expect(events).toContainEqual({
+      name: 'core:log',
+      payload: {
+        level: 'debug',
+        msg: '[mlx/m][stdout] INFO:     127.0.0.1:50000 - POST /v1/chat/completions 200 OK',
+      },
+    })
+  })
+
+  it('loads despite a backendOutput sink that throws, and warns about it once', async () => {
+    const dir = await writeMlxModel('m')
+    const logged: string[] = []
+    const r = runtime(
+      {},
+      {},
+      {
+        backendOutput: () => {
+          throw new Error('sink boom')
+        },
+        log: (level, message) => logged.push(`${level}: ${message}`),
+      }
+    )
+    const session = await r.load('m')
+    expect(logged).toEqual([
+      `info: starting mlx-server for mlx/m: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`,
+      'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+    ])
+  })
+
+  it('delivers every line printed before a crash during load to backendOutput', async () => {
+    const dir = await writeMlxModel('m')
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const r = runtime({}, { mode: 'oom' }, { backendOutput: (line) => received.push(line) })
+    await expect(r.load('m')).rejects.toMatchObject({ code: 'OUT_OF_MEMORY' })
+
+    const tagged = { provider: 'mlx', model: 'm', stream: 'stderr' }
+    expect(received).toEqual([
+      { ...tagged, line: `Loading model from ${dir}` },
+      { ...tagged, line: expect.stringContaining('[metal::malloc] Attempting to allocate') },
+    ])
   })
 })

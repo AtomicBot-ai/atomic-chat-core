@@ -119,6 +119,81 @@ describe.skipIf(!posix)('spawnServer', () => {
     expect(await handle.exited).toEqual(exit)
   })
 
+  it('delivers every line to backendOutput while loading and after, instead of the debug log, and keeps the tail', async () => {
+    const spec = await engine({ loadMs: 300 })
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const log: string[] = []
+    const handle = await spawnServer(spec, join(dir, 'scratch'), {
+      http,
+      log: (level, msg) => log.push(`${level}: ${msg}`),
+      backendOutput: (line) => received.push(line),
+    })
+    handles.push(handle)
+
+    expect(received).toContainEqual({
+      provider: spec.engine,
+      model: spec.modelId,
+      stream: 'stdout',
+      line: '  |####      | 40/100 - 637.50MB/s',
+    })
+    expect(received.at(-1)?.line).toBe(`[INFO   ] server.cpp:100 - listening on 127.0.0.1:${handle.port}`)
+    // The 200-line tail is still kept for the server's own post-mortem.
+    expect(handle.tail()).toEqual(received.map((l) => l.line))
+
+    // A generation long after readiness still reaches the sink.
+    const submit = await http.post(
+      `http://127.0.0.1:${handle.port}/sdcpp/v1/img_gen`,
+      { prompt: 'a cat', width: 16, height: 16, batch_count: 1, seed: 1, sample_params: { sample_steps: 2 } },
+      2_000
+    )
+    expect(submit.status).toBe(202)
+    await waitFor(() => received.some((l) => l.line.includes('2/2')))
+    expect(received.every((l) => l.provider === spec.engine && l.model === spec.modelId)).toBe(true)
+    // The old `log('debug', '[sd-server …]')` echo is gone: only backendOutput carries the lines.
+    expect(log.some((line) => line.includes('[sd-server'))).toBe(false)
+  })
+
+  it('delivers every line printed before an early exit to backendOutput', async () => {
+    const spec = await engine({ mode: 'exit-early' })
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const error = await refusal(
+      spawnServer(spec, join(dir, 'scratch'), { http, backendOutput: (line) => received.push(line) })
+    )
+    expect(error.code).toBe('MODEL_LOAD_FAILED')
+    const tagged = { provider: spec.engine, model: spec.modelId }
+    // Each stream keeps its order; the two streams may interleave either way.
+    expect(received.filter((l) => l.stream === 'stdout')).toEqual([
+      { ...tagged, stream: 'stdout', line: expect.stringContaining('loading model from') },
+      { ...tagged, stream: 'stdout', line: '[INFO   ] model.cpp:1000 - load tensors from model' },
+      { ...tagged, stream: 'stdout', line: '  |####      | 40/100 - 637.50MB/s' },
+      { ...tagged, stream: 'stdout', line: '  |##########| 100/100 - 637.50MB/s' },
+    ])
+    expect(received.filter((l) => l.stream === 'stderr')).toEqual([
+      { ...tagged, stream: 'stderr', line: "ggml_metal: error: unsupported op 'RMS_NORM'" },
+      { ...tagged, stream: 'stderr', line: 'GGML_ABORT' },
+    ])
+  })
+
+  it('comes up despite a backendOutput sink that throws, and warns about it once', async () => {
+    const spec = await engine({ loadMs: 300 })
+    let calls = 0
+    const log: string[] = []
+    const handle = await spawnServer(spec, join(dir, 'scratch'), {
+      http,
+      log: (level, msg) => log.push(`${level}: ${msg}`),
+      backendOutput: () => {
+        calls++
+        throw new Error('sink boom')
+      },
+    })
+    handles.push(handle)
+    expect(calls).toBeGreaterThan(1)
+    expect(handle.tail().at(-1)).toBe(`[INFO   ] server.cpp:100 - listening on 127.0.0.1:${handle.port}`)
+    expect(log.filter((line) => line.startsWith('warn: backendOutput'))).toEqual([
+      'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+    ])
+  })
+
   // `disable_metal_tensor_api_for_host` (`process.rs`, app commit ec1fd3ea7).
   it('switches the Metal Tensor API off for an M5 on the Metal backend, and only there', async () => {
     const envFile = join(dir, 'env.json')
