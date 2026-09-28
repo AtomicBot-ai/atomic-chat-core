@@ -108,7 +108,7 @@ describe('reconcile end to end against a fake docker binary', () => {
 
       const result = await reconcileExecutions(journal, 'new-instance', execSpy, vi.fn())
 
-      expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [] })
+      expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [], skipped: [] })
       expect(execSpy).not.toHaveBeenCalled() // no journal record means no inspect, no stop, ever
     } finally {
       await data.cleanup()

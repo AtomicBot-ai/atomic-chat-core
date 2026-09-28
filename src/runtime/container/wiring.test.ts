@@ -97,4 +97,29 @@ describe('wireManagedContainers', () => {
     ])
     expect(await readFile(join(data.layout.managed.dockerConfigDir, 'config.json'), 'utf8')).toBe('{}\n')
   })
+
+  it('bounds each startup reconcile call and the whole pass, so a hung daemon cannot hold startup (review 2.12 round 1)', async () => {
+    const seeded = await ExecutionJournal.open(data.layout)
+    await seeded.add(orphan)
+    await seeded.add({ ...orphan, container_id: 'orphan0456' })
+    const hung = join(data.root, 'hung-docker')
+    await writeFile(hung, '#!/bin/sh\nsleep 5\n')
+    await chmod(hung, 0o755)
+
+    const started = Date.now()
+    const wired = await wireManagedContainers({
+      platform: 'linux',
+      layout: data.layout,
+      instanceId: 'core-1',
+      log: () => {},
+      dockerPath: hung,
+      reconcileCallTimeoutMs: 200,
+      reconcileBudgetMs: 100,
+    })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    // The first record's inspect timed out (unanswered → left alone); the budget then skipped the second.
+    expect(wired?.reconciled.failed.map((r) => r.container_id)).toEqual(['orphan0123'])
+    expect(wired?.reconciled.skipped.map((r) => r.container_id)).toEqual(['orphan0456'])
+    expect(wired?.journal.list()).toHaveLength(2)
+  })
 })

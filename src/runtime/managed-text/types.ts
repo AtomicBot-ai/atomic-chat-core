@@ -67,5 +67,11 @@ export interface PreparedLaunch {
  * this seam.
  */
 export interface ManagedDeployment {
+  /**
+   * The one resolver for every path this deployment's containers mount — model, engine cache,
+   * watchdog script and heartbeat alike (task 2.12 review round 1, ruling 4). The lifecycle never
+   * carries a resolver of its own, so the four mounts can never be resolved two different ways.
+   */
+  readonly mountSource: MountSourceResolver
   prepareLaunch(spec: EngineLaunchSpec, heartbeatCorePath: string): Promise<PreparedLaunch>
 }

@@ -31,12 +31,20 @@ export class FakeDocker {
   startFailures: string[] = []
   /** When false, `docker stop` never answers (the exec's own deadline), so the stop is unconfirmed. */
   stopConfirms = true
+  /** When true, `docker rm` fails with a daemon error the executor cannot classify. */
+  rmFails = false
   /** Lines every newly started container logs at once. */
   bootLog: string[] = []
   private next = 0
   private tick = 0
 
-  readonly exec: DockerExec = (args) => Promise.resolve(this.run(args.slice(2)))
+  /** While set, every `docker stop` waits for it before answering (a slow daemon, a long `--time`). */
+  stopGate: Promise<void> | undefined
+
+  readonly exec: DockerExec = async (args) => {
+    if (args[2] === 'stop' && this.stopGate) await this.stopGate
+    return this.run(args.slice(2))
+  }
 
   /** The container created most recently. */
   last(): FakeContainer {
@@ -115,6 +123,8 @@ export class FakeDocker {
         return ok(`${id}\n`)
       }
       case 'rm': {
+        if (this.rmFails)
+          return { code: 1, stdout: '', stderr: 'Error response from daemon: device or resource busy' }
         if (!c) return noSuch(id)
         this.containers.delete(id)
         return ok(`${id}\n`)

@@ -22,6 +22,11 @@
  * would not confirm keeps the model in `stop-unconfirmed` — no session, but still holding its GPU for
  * task 2.15 to see — and answers `MANAGED_STOP_UNCONFIRMED`; unloading again retries the stop.
  *
+ * While that stop is in flight the model is `stopping`: one teardown per entry, shared by every
+ * caller (a second unload, a crash noticed meanwhile); a load of the same model waits for it and
+ * starts fresh only after a confirmed stop. Every removal from the session table and every event is
+ * guarded by the entry's identity, so a finished teardown can never touch a newer load's session.
+ *
  * There is no `engine_id` branch here: the engine id only travels into the journal record and the
  * container's discovery labels as data.
  */
@@ -84,8 +89,7 @@ import {
   stripDockerTimestamps,
 } from './load-policy.js'
 import { probeReadiness } from './readiness.js'
-import { identityMountSourceResolver } from './mount-source.js'
-import type { BackendTarget, ManagedDeployment, MountSourceResolver, PreparedLaunch } from './types.js'
+import type { BackendTarget, ManagedDeployment, PreparedLaunch } from './types.js'
 
 /** The heartbeat file's name inside its generation's directory (and inside the container). */
 export const HEARTBEAT_FILE = 'heartbeat'
@@ -143,8 +147,6 @@ export interface ManagedTextLifecycleDeps {
   selinuxDataRoot: string
   emit: EmitFn
   log?: ManagedLifecycleLogger
-  /** Resolves core-visible paths (model, cache, script) into mount sources; identity by default. */
-  mountSource?: MountSourceResolver
   fetch?: typeof fetch
   now?: () => number
   /** Rejects when `signal` aborts. Tests inject a fake clock through this and `now`. */
@@ -186,7 +188,11 @@ export interface ManagedLoadRequest {
   stopPrevious?: () => Promise<void>
 }
 
-export type ManagedSessionState = 'loading' | 'ready' | 'stop-unconfirmed'
+/**
+ * `stopping`: a teardown is in flight (unload, failed load or crash). `stop-unconfirmed`: Docker would
+ * not confirm the stop, so the GPU stays reserved until an unload retries it.
+ */
+export type ManagedSessionState = 'loading' | 'ready' | 'stopping' | 'stop-unconfirmed'
 
 /** A model holding (or about to hold) its GPU: what residency (task 2.15) must see, including unconfirmed stops. */
 export interface ManagedReservation {
@@ -242,8 +248,8 @@ interface Entry {
   gateway?: ManagedGateway | undefined
   info?: SessionInfo | undefined
   monitor?: AbortController | undefined
-  /** Set once teardown began, so the crash monitor never races an unload. */
-  closing: boolean
+  /** The one teardown in flight for this entry, shared by every caller that wants it stopped. */
+  ending?: Promise<StopOutcome | null> | undefined
 }
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -280,7 +286,6 @@ export class ManagedTextLifecycle {
   private readonly lastAttempts = new Map<string, ManagedLastAttempt>()
   private readonly timings: ManagedLifecycleTimings
   private readonly log: ManagedLifecycleLogger
-  private readonly mountSource: MountSourceResolver
   private readonly fetchFn: typeof fetch
   private readonly now: () => number
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>
@@ -291,7 +296,6 @@ export class ManagedTextLifecycle {
   constructor(private readonly deps: ManagedTextLifecycleDeps) {
     this.timings = { ...DEFAULT_MANAGED_LIFECYCLE_TIMINGS, ...deps.timings }
     this.log = deps.log ?? (() => {})
-    this.mountSource = deps.mountSource ?? identityMountSourceResolver
     this.fetchFn = deps.fetch ?? fetch
     this.now = deps.now ?? Date.now
     this.sleep = deps.sleep ?? defaultSleep
@@ -356,7 +360,15 @@ export class ManagedTextLifecycle {
   }
 
   async load(request: ManagedLoadRequest): Promise<SessionInfo> {
-    const existing = this.entries.get(request.modelId)
+    let existing = this.entries.get(request.modelId)
+    if (existing?.state === 'stopping') {
+      // Wait for the teardown in flight; only a confirmed stop frees the model for a fresh load.
+      await existing.ending
+      existing = this.entries.get(request.modelId)
+    }
+    if (existing?.state === 'stopping') {
+      throw new AtomicCoreError('MANAGED_OPERATION_CONFLICT', 'This model is being stopped.', request.modelId)
+    }
     if (existing?.state === 'ready' && existing.info) return existing.info
     if (existing?.state === 'loading') {
       throw new AtomicCoreError(
@@ -396,7 +408,6 @@ export class ManagedTextLifecycle {
       adapter,
       loadAbort,
       heartbeatDir: this.deps.paths.heartbeatDir(generation),
-      closing: false,
     }
     this.entries.set(request.modelId, entry)
     this.lastAttempts.delete(request.modelId)
@@ -421,13 +432,17 @@ export class ManagedTextLifecycle {
       entry.loadAbort.abort()
       await entry.settled
       const after = this.entries.get(modelId)
-      if (after?.state === 'stop-unconfirmed') throw this.stopUnconfirmed(after, 'the cancelled load')
+      if (after === entry && after.state === 'stop-unconfirmed') {
+        throw this.stopUnconfirmed(after, 'the cancelled load')
+      }
       return
     }
-    const outcome = await this.teardown(entry)
+    // A teardown already in flight (a second unload, a crash, a failed load) is joined, not repeated.
+    const first = entry.ending === undefined
+    const outcome = await this.end(entry)
     if (outcome && !outcome.confirmed) throw this.stopUnconfirmed(entry, outcome.reason)
-    this.entries.delete(modelId)
-    this.deps.emit('session:unloaded', { provider: this.deps.provider, model_id: modelId, pid: null })
+    if (first)
+      this.deps.emit('session:unloaded', { provider: this.deps.provider, model_id: modelId, pid: null })
   }
 
   /** Unloads everything; failures are logged, never thrown, so one stuck container cannot block shutdown. */
@@ -555,9 +570,10 @@ export class ManagedTextLifecycle {
       selinux: request.selinux,
       ...(request.selinux ? { selinuxDataRoot: this.deps.selinuxDataRoot } : {}),
       mounts: {
-        model: { source: this.mountSource(request.modelPath) },
-        engineCache: { source: this.mountSource(cacheDir) },
-        entrypoint: { source: this.mountSource(this.deps.paths.watchdogScript) },
+        // One resolver for all four mounts: the deployment's, which also resolved `heartbeat`.
+        model: { source: this.deps.deployment.mountSource(request.modelPath) },
+        engineCache: { source: this.deps.deployment.mountSource(cacheDir) },
+        entrypoint: { source: this.deps.deployment.mountSource(this.deps.paths.watchdogScript) },
         heartbeat: { source: prepared.heartbeat.mount_source },
       },
       publication: prepared.publication,
@@ -604,7 +620,13 @@ export class ManagedTextLifecycle {
         })
       } catch (error) {
         // Never started, and not journalled: remove it now, or nothing would ever find it again.
-        await removeContainer(this.deps.exec, containerId).catch(() => {})
+        await removeContainer(this.deps.exec, containerId).catch((rmError: unknown) =>
+          this.log(
+            'error',
+            `managed-text: container ${containerId} is neither journalled nor removed; remove it by hand ` +
+              `(journal: ${String(error)}; rm: ${String(rmError)})`
+          )
+        )
         entry.containerId = undefined
         throw error
       }
@@ -718,14 +740,7 @@ export class ManagedTextLifecycle {
       error,
       at: this.now(),
     })
-    const outcome = await this.teardown(entry).catch((cleanupError: unknown) => {
-      this.log(
-        'error',
-        `managed-text: cleaning up the failed load of ${entry.modelId} failed: ${String(cleanupError)}`
-      )
-      return { confirmed: false, reason: String(cleanupError) } as StopOutcome
-    })
-    if (outcome === null || outcome.confirmed) this.entries.delete(entry.modelId)
+    await this.end(entry)
   }
 
   // ── stop ──────────────────────────────────────────────────────────────────────────────────────
@@ -746,8 +761,30 @@ export class ManagedTextLifecycle {
    * The heartbeat stops either way: if Docker merely lost track of an engine that is still running,
    * the watchdog inside then ends it within its stale limit.
    */
+  /**
+   * The one way an entry is stopped: `stopping` while the teardown runs, then gone (confirmed, or no
+   * container at all) or `stop-unconfirmed`. Concurrent callers share the same promise. A teardown
+   * that throws counts as unconfirmed — nothing proved the container stopped. The entry leaves the
+   * table only if it is still the one there, never a newer load's.
+   */
+  private end(entry: Entry): Promise<StopOutcome | null> {
+    if (entry.ending) return entry.ending
+    entry.state = 'stopping'
+    entry.ending = this.teardown(entry)
+      .catch((error: unknown): StopOutcome => {
+        this.log('error', `managed-text: stopping ${entry.modelId} failed: ${String(error)}`)
+        return { confirmed: false, reason: String(error) }
+      })
+      .then((outcome) => {
+        if (outcome !== null && !outcome.confirmed) entry.state = 'stop-unconfirmed'
+        else if (this.entries.get(entry.modelId) === entry) this.entries.delete(entry.modelId)
+        entry.ending = undefined
+        return outcome
+      })
+    return entry.ending
+  }
+
   private async teardown(entry: Entry): Promise<StopOutcome | null> {
-    entry.closing = true
     entry.monitor?.abort()
     entry.monitor = undefined
     if (entry.gateway) {
@@ -765,11 +802,7 @@ export class ManagedTextLifecycle {
     }
     const containerId = entry.containerId
     const outcome = await stopContainer(this.deps.exec, containerId, this.timings.stopTimeoutSecs)
-    if (!outcome.confirmed) {
-      entry.state = 'stop-unconfirmed'
-      entry.closing = false
-      return outcome
-    }
+    if (!outcome.confirmed) return outcome
     try {
       await removeContainer(this.deps.exec, containerId)
       await this.deps.journal.remove(containerId)
@@ -799,11 +832,11 @@ export class ManagedTextLifecycle {
         } catch {
           return
         }
-        if (monitor.signal.aborted || entry.closing) return
+        if (monitor.signal.aborted || entry.state !== 'ready') return
         const state = await inspectContainer(this.deps.exec, containerId)
           .then(readContainerState)
           .catch(() => ({ exited: false, exitCode: null }))
-        if (monitor.signal.aborted || entry.closing) return
+        if (monitor.signal.aborted || entry.state !== 'ready') return
         if (state.exited) {
           await this.onCrash(entry, state.exitCode)
           return
@@ -815,7 +848,7 @@ export class ManagedTextLifecycle {
   private async onCrash(entry: Entry, exitCode: number | null): Promise<void> {
     const containerId = entry.containerId as string
     const tail = await this.tail(containerId).catch(() => '')
-    if (entry.closing || this.entries.get(entry.modelId) !== entry) return
+    if (entry.state !== 'ready' || this.entries.get(entry.modelId) !== entry) return
     const classification = entry.adapter.classifyExit(tail, exitCode)
     this.lastAttempts.set(entry.modelId, {
       model_id: entry.modelId,
@@ -824,8 +857,7 @@ export class ManagedTextLifecycle {
       error: { code: exitErrorCode(classification.kind), message: classification.message },
       at: this.now(),
     })
-    const outcome = await this.teardown(entry).catch(() => null)
-    if (outcome === null || outcome.confirmed) this.entries.delete(entry.modelId)
+    await this.end(entry)
     this.deps.emit('session:died', {
       provider: this.deps.provider,
       pid: null,

@@ -19,6 +19,7 @@ import { FakeDocker } from '../../../test/helpers/fake-docker-exec.js'
 import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION, ManagedTextAdapterRegistry } from './adapter.js'
 import type { ManagedTextAdapter } from './adapter.js'
 import { createDesktopManagedDeployment } from './deployment.js'
+import { startManagedGateway } from './gateway.js'
 import { ManagedLoadError, ManagedTextLifecycle } from './lifecycle.js'
 import type { ManagedLoadRequest, ManagedTextLifecycleDeps } from './lifecycle.js'
 
@@ -628,5 +629,202 @@ describe('ManagedTextLifecycle: crash after ready', () => {
     expect(journal.list()).toEqual([])
     expect(await lifecycle.logs('org/model-a')).toContain('CUDA out of memory')
     await expect(gatewayGet(info.port, { host: '127.0.0.1' })).rejects.toThrow()
+  })
+})
+
+/** Lets every pending microtask and immediate run, enough for the lifecycle to reach its next await on docker. */
+async function settle(rounds = 50): Promise<void> {
+  for (let i = 0; i < rounds; i++) await new Promise((resolve) => setImmediate(resolve))
+}
+
+/** A promise `docker stop` waits on, released by the test. */
+function gateStops(): () => void {
+  let release!: () => void
+  docker.stopGate = new Promise<void>((resolve) => (release = resolve))
+  return () => {
+    docker.stopGate = undefined
+    release()
+  }
+}
+
+const unloadedEvents = () => emitted.filter((e) => e.name === 'session:unloaded')
+
+describe('ManagedTextLifecycle: teardown races (review round 1)', () => {
+  it('a load while an unload is still stopping waits for it, then starts fresh; the old teardown never touches the new session', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const first = docker.last().id
+    const release = gateStops()
+    const unloading = lifecycle.unload('org/model-a')
+    await settle()
+    expect(lifecycle.reservations()).toEqual([
+      expect.objectContaining({ state: 'stopping', container_id: first }),
+    ])
+    expect(lifecycle.findSession('org/model-a')).toBeUndefined()
+
+    const loading = lifecycle.load(request_())
+    await settle()
+    expect(docker.containers.size).toBe(1) // nothing new is created while the old one is stopping
+    release()
+    await unloading
+    const second = await loading
+
+    expect(second.generation).toBe('gen-2')
+    expect(lifecycle.findSession('org/model-a')).toBe(second)
+    expect(docker.last().id).not.toBe(first)
+    expect(journal.list().map((r) => r.container_id)).toEqual([docker.last().id])
+    expect(unloadedEvents()).toHaveLength(1)
+    expect(tickers.map((t) => t.stopped)).toEqual([true, false])
+  })
+
+  it('a load while a stop is pending, and that stop is unconfirmed, is refused and keeps the reservation', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const release = gateStops()
+    docker.stopConfirms = false
+    const unloading = lifecycle.unload('org/model-a')
+    await settle()
+    const loading = lifecycle.load(request_())
+    release()
+    expect((await rejection(unloading)).code).toBe('MANAGED_STOP_UNCONFIRMED')
+    expect((await rejection(loading)).code).toBe('MANAGED_STOP_UNCONFIRMED')
+    expect(lifecycle.reservations()).toEqual([
+      expect.objectContaining({ state: 'stop-unconfirmed', generation: 'gen-1' }),
+    ])
+    expect(docker.subcommands().filter((c) => c === 'create')).toHaveLength(1)
+  })
+
+  it('a double unload shares one teardown: one docker stop, one unloaded event', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const release = gateStops()
+    const a = lifecycle.unload('org/model-a')
+    const b = lifecycle.unload('org/model-a')
+    await settle()
+    release()
+    await Promise.all([a, b])
+    expect(docker.subcommands().filter((c) => c === 'stop')).toHaveLength(1)
+    expect(unloadedEvents()).toHaveLength(1)
+    expect(lifecycle.reservations()).toEqual([])
+  })
+
+  it('a load during a crash teardown waits for it; the crash cleanup never touches the new session', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const first = docker.last().id
+    const release = gateStops()
+    docker.exit(first, 1, ['segfault'])
+    for (let i = 0; i < 500 && lifecycle.reservations()[0]?.state !== 'stopping'; i++) await settle(1)
+    expect(lifecycle.reservations()).toEqual([expect.objectContaining({ state: 'stopping' })])
+
+    const loading = lifecycle.load(request_())
+    await settle()
+    release()
+    const second = await loading
+    await settle()
+
+    expect(emitted.filter((e) => e.name === 'session:died')).toHaveLength(1)
+    expect(lifecycle.findSession('org/model-a')).toBe(second)
+    expect(journal.list().map((r) => r.container_id)).toEqual([docker.last().id])
+    expect(docker.last().id).not.toBe(first)
+  })
+
+  it('a crash whose cleanup stop is unconfirmed keeps the reservation', async () => {
+    await build()
+    await lifecycle.load(request_())
+    docker.stopConfirms = false
+    docker.exit(docker.last().id, 1, ['gone'])
+    for (let i = 0; i < 500 && !emitted.some((e) => e.name === 'session:died'); i++) await settle(1)
+    expect(lifecycle.reservations()).toEqual([expect.objectContaining({ state: 'stop-unconfirmed' })])
+    expect(journal.list()).toHaveLength(1)
+  })
+})
+
+describe('ManagedTextLifecycle: review round 1 gaps', () => {
+  it('a second load of a model that is still loading is refused with MANAGED_OPERATION_CONFLICT', async () => {
+    await build()
+    readyAt = null
+    let second: Promise<unknown> | undefined
+    onProbe = (now) => {
+      if (now === 2_000) second = lifecycle.load(request_())
+      if (now === 3_000) readyAt = 0
+    }
+    await lifecycle.load(request_())
+    expect((await rejection(second as Promise<unknown>)).code).toBe('MANAGED_OPERATION_CONFLICT')
+    expect(docker.subcommands().filter((c) => c === 'create')).toHaveLength(1)
+  })
+
+  it('a gateway that fails to start fails the load and cleans everything up', async () => {
+    await build({
+      startGateway: async () => {
+        throw new AtomicCoreError('IO_ERROR', 'Cannot bind the session gateway.')
+      },
+    })
+    const error = await rejection(lifecycle.load(request_()))
+    expect(error.code).toBe('IO_ERROR')
+    expect(docker.containers.size).toBe(0)
+    expect(journal.list()).toEqual([])
+    expect(tickers.every((t) => t.stopped)).toBe(true)
+    expect(lifecycle.reservations()).toEqual([])
+    expect(lifecycle.lastAttempt('org/model-a')?.error.code).toBe('IO_ERROR')
+  })
+
+  it('a cancel while the gateway is starting closes that gateway and publishes no session', async () => {
+    const controller = new AbortController()
+    let closed = false
+    await build({
+      startGateway: async (options) => {
+        const gateway = await startManagedGateway(options)
+        controller.abort()
+        return {
+          ...gateway,
+          close: async () => {
+            closed = true
+            await gateway.close()
+          },
+        }
+      },
+    })
+    const error = await rejection(lifecycle.load(request_({ signal: controller.signal })))
+    expect(error.code).toBe('MODEL_LOAD_CANCELLED')
+    expect(closed).toBe(true)
+    expect(docker.containers.size).toBe(0)
+    expect(lifecycle.list()).toEqual([])
+    expect(progress().some((p) => p.stage === 'ready')).toBe(false)
+  })
+
+  it("resolves all four mounts through the deployment's one resolver", async () => {
+    const seen: string[] = []
+    await build({
+      deployment: createDesktopManagedDeployment({
+        allocateHostPort: async () => 42_000,
+        mountSource: (corePath) => {
+          seen.push(corePath)
+          return corePath
+        },
+      }),
+    })
+    await lifecycle.load(request_())
+    expect(seen.sort()).toEqual(
+      [
+        modelDir,
+        data.layout.managed.engineCacheDir('engine-1.0-r1', 'org/model-a'),
+        data.layout.managed.watchdogScript,
+        data.layout.managed.heartbeatDir('gen-1'),
+      ].sort()
+    )
+  })
+
+  it('logs, with the container id, a container it could not remove after the journal write failed', async () => {
+    const logged: string[] = []
+    const failing = Object.assign(Object.create(journal) as ExecutionJournal, {
+      add: async () => {
+        throw new Error('ENOSPC')
+      },
+    })
+    await build({ journal: failing, log: (level, message) => logged.push(`${level}: ${message}`) })
+    docker.rmFails = true
+    await expect(lifecycle.load(request_())).rejects.toThrow('ENOSPC')
+    expect(logged.some((line) => line.startsWith('error:') && line.includes('fakecontainer1'))).toBe(true)
   })
 })

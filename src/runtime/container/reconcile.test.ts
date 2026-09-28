@@ -81,7 +81,7 @@ describe('reconcileExecutions', () => {
 
     const result = await reconcileExecutions(journal, 'current-instance', exec, noopLog)
 
-    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [] })
+    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [], skipped: [] })
     expect(exec).not.toHaveBeenCalled()
   })
 
@@ -204,8 +204,26 @@ describe('reconcileExecutions', () => {
 
     const result = await reconcileExecutions(journal, 'current-instance', exec, noopLog)
 
-    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [] })
+    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [], skipped: [] })
     expect(exec).not.toHaveBeenCalled()
     expect(journal.list().map((r) => r.container_id)).toEqual(['mine'])
+  })
+
+  it('stops at the first record after its signal aborts, leaving the rest journalled and reported as skipped (review 2.12 round 1)', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add(record({ container_id: 'orphan1' }))
+    await journal.add(record({ container_id: 'orphan2' }))
+    const controller = new AbortController()
+    const base = fakeExecFor({ orphan1: { inspect: absent() }, orphan2: { inspect: absent() } })
+    const exec: DockerExec = async (args, options) => {
+      controller.abort() // the startup budget runs out while the first record is being handled
+      return base(args, options)
+    }
+    const log = vi.fn()
+    const result = await reconcileExecutions(journal, 'current-instance', exec, log, 10, controller.signal)
+    expect(result.absent).toHaveLength(1)
+    expect(result.skipped).toHaveLength(1)
+    expect(journal.list()).toEqual([result.skipped[0]])
+    expect(log).toHaveBeenCalledWith('warn', expect.stringContaining(result.skipped[0]!.container_id))
   })
 })

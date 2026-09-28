@@ -22,7 +22,24 @@ export interface WireManagedContainersOptions {
   log: ReconcileLogger
   /** The docker CLI to run; `undefined` resolves it from the system directories, `null` means none. */
   dockerPath?: string | null
+  /** Deadline of each docker call the startup reconcile makes. Default `RECONCILE_CALL_TIMEOUT_MS`. */
+  reconcileCallTimeoutMs?: number
+  /** Past this, reconcile starts no further record. Default `RECONCILE_BUDGET_MS`. */
+  reconcileBudgetMs?: number
 }
+
+/**
+ * Startup must not wait on a hung daemon (task 2.12 review round 1, item 5): every reconcile call gets
+ * this short deadline instead of the executor's usual 30 s, and `docker stop --time` is shortened to
+ * match (`stopContainer` allows `--time` plus 5 s for its own call).
+ */
+export const RECONCILE_CALL_TIMEOUT_MS = 10_000
+export const RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS = 5
+/**
+ * No record is started after this. Worst case, startup waits this long plus one record's three calls
+ * (inspect, stop, rm) at `RECONCILE_CALL_TIMEOUT_MS` each; anything left is reconciled next startup.
+ */
+export const RECONCILE_BUDGET_MS = 20_000
 
 export interface ManagedContainers {
   exec: DockerExec
@@ -40,6 +57,25 @@ export async function wireManagedContainers(
   if (dockerPath === null) return null
   const exec = createDockerExec({ dockerPath, dockerConfigDir: options.layout.managed.dockerConfigDir })
   const journal = await ExecutionJournal.open(options.layout)
-  const reconciled = await reconcileExecutions(journal, options.instanceId, exec, options.log)
-  return { exec, journal, dockerPath, reconciled }
+  const reconcileExec = createDockerExec({
+    dockerPath,
+    dockerConfigDir: options.layout.managed.dockerConfigDir,
+    timeoutMs: options.reconcileCallTimeoutMs ?? RECONCILE_CALL_TIMEOUT_MS,
+  })
+  const budget = new AbortController()
+  const timer = setTimeout(() => budget.abort(), options.reconcileBudgetMs ?? RECONCILE_BUDGET_MS)
+  timer.unref?.()
+  try {
+    const reconciled = await reconcileExecutions(
+      journal,
+      options.instanceId,
+      reconcileExec,
+      options.log,
+      RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS,
+      budget.signal
+    )
+    return { exec, journal, dockerPath, reconciled }
+  } finally {
+    clearTimeout(timer)
+  }
 }

@@ -10,6 +10,7 @@ const SPEC: EngineLaunchSpec = { container_port: 8000 }
  *  sibling-container topology), to prove the desktop session projection still refuses it. */
 function fakeNonLoopbackDeployment(): ManagedDeployment {
   return {
+    mountSource: (corePath) => `/mnt/fake${corePath}`,
     async prepareLaunch(spec, heartbeatCorePath): Promise<PreparedLaunch> {
       return {
         publication: { host: '10.0.0.5', host_port: 9000, container_port: spec.container_port },
@@ -65,6 +66,8 @@ describe('createDesktopManagedDeployment', () => {
       core_path: '/data/session-1/heartbeat',
       mount_source: '/mnt/wsl/data/session-1/heartbeat',
     })
+    // The same resolver serves every other mount the lifecycle makes (review round 1, ruling 4).
+    expect(deployment.mountSource('/data/llamacpp/models/m')).toBe('/mnt/wsl/data/llamacpp/models/m')
   })
 
   it('defaults the heartbeat mount source to identity', async () => {
@@ -76,6 +79,7 @@ describe('createDesktopManagedDeployment', () => {
       core_path: '/data/session-1/heartbeat',
       mount_source: '/data/session-1/heartbeat',
     })
+    expect(deployment.mountSource('/data/cache')).toBe('/data/cache')
   })
 
   it('passes the host ports already in use to the port allocator', async () => {

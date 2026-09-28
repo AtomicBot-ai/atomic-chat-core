@@ -42,6 +42,11 @@ export interface ExecutionReconcileResult {
    * the rest of the journal.
    */
   failed: ExecutionRecord[]
+  /**
+   * Never looked at because `signal` aborted first (core startup's time budget ran out, task 2.12
+   * review round 1): the record — and the container — are left for the next startup.
+   */
+  skipped: ExecutionRecord[]
 }
 
 /**
@@ -54,11 +59,28 @@ export async function reconcileExecutions(
   currentInstanceId: string,
   exec: DockerExec,
   log: ReconcileLogger,
-  stopTimeoutSeconds = RECONCILE_STOP_TIMEOUT_SECONDS
+  stopTimeoutSeconds = RECONCILE_STOP_TIMEOUT_SECONDS,
+  /** Checked before each record: once aborted, the rest are reported as `skipped` and left alone. */
+  signal?: AbortSignal
 ): Promise<ExecutionReconcileResult> {
-  const result: ExecutionReconcileResult = { stopped: [], absent: [], unconfirmed: [], failed: [] }
+  const result: ExecutionReconcileResult = {
+    stopped: [],
+    absent: [],
+    unconfirmed: [],
+    failed: [],
+    skipped: [],
+  }
   for (const record of journal.list()) {
     if (record.instance_id === currentInstanceId) continue // this instance's own container, not an orphan
+    if (signal?.aborted) {
+      result.skipped.push(record)
+      log(
+        'warn',
+        `execution journal: out of time before container ${record.container_id} (engine ${record.engine_id}, ` +
+          `scope ${record.scope}) — leaving it and its journal record for the next startup`
+      )
+      continue
+    }
 
     try {
       const inspected = await inspectContainer(exec, record.container_id)

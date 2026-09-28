@@ -30,6 +30,7 @@ export function createDesktopManagedDeployment(deps: DesktopManagedDeploymentDep
   const mountSource = deps.mountSource ?? identityMountSourceResolver
 
   return {
+    mountSource,
     async prepareLaunch(spec: EngineLaunchSpec, heartbeatCorePath: string): Promise<PreparedLaunch> {
       const host_port = await allocateHostPort(usedHostPorts())
       return {
