@@ -1,4 +1,5 @@
-import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
@@ -108,5 +109,57 @@ describe('ExecutionJournal', () => {
     expect(journal.list()).toEqual([final])
     const reopened = await ExecutionJournal.open(data.layout)
     expect(reopened.list()).toEqual([final])
+  })
+
+  it('a write that fails does not stop a later add/remove from reaching disk', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    // Occupies the record's own on-disk path with a directory, so writeRecord's rename() onto it
+    // fails (EISDIR) — an injected fs failure distinct from a torn write.
+    await mkdir(join(data.layout.managed.executionsDir, 'will-fail.json'), { recursive: true })
+
+    await expect(journal.add(record({ container_id: 'will-fail' }))).rejects.toBeTruthy()
+
+    // Sequential and deterministic (no timing dependence): before the round-2 fix, the queue stayed
+    // permanently rejected after the first failure, so this call would reject too and never touch disk.
+    await journal.add(record({ container_id: 'good' }))
+
+    const reopened = await ExecutionJournal.open(data.layout)
+    expect(reopened.list().map((r) => r.container_id)).toEqual(['good'])
+  })
+
+  it('each failing write rejects with its own error, not a stale one from an earlier failure', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await mkdir(join(data.layout.managed.executionsDir, 'fail-a.json'), { recursive: true })
+    await mkdir(join(data.layout.managed.executionsDir, 'fail-b.json'), { recursive: true })
+
+    const errorA = (await journal.add(record({ container_id: 'fail-a' })).catch((e: unknown) => e)) as Error
+    const errorB = (await journal.add(record({ container_id: 'fail-b' })).catch((e: unknown) => e)) as Error
+
+    expect(errorA.message).toContain('fail-a')
+    expect(errorB.message).toContain('fail-b')
+    // Before the round-2 fix, the second call would skip its own write and reject with the first
+    // call's exact error instead — the queue-poisoning bug this test guards against.
+    expect(errorB.message).not.toBe(errorA.message)
+  })
+
+  it('rolls back the in-memory record when its own write fails, so list() matches what a reopen would find', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await mkdir(join(data.layout.managed.executionsDir, 'will-fail.json'), { recursive: true })
+
+    await expect(journal.add(record({ container_id: 'will-fail' }))).rejects.toBeTruthy()
+
+    expect(journal.list()).toEqual([]) // never durable, so never counted as added
+  })
+
+  it('rolls back the in-memory removal when the disk removal fails, so list() matches what a reopen would find', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add(record({ container_id: 'stuck' }))
+    const path = join(data.layout.managed.executionsDir, 'stuck.json')
+    await rm(path, { force: true })
+    await mkdir(path, { recursive: true }) // occupies the path so rm() without recursive fails
+
+    await expect(journal.remove('stuck')).rejects.toBeTruthy()
+
+    expect(journal.list().map((r) => r.container_id)).toEqual(['stuck']) // the removal never persisted
   })
 })

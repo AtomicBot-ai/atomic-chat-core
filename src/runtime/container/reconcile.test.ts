@@ -1,3 +1,5 @@
+import { mkdir, rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
@@ -157,6 +159,40 @@ describe('reconcileExecutions', () => {
         .sort()
     ).toEqual(['rm-throws']) // kept, not dropped
     expect(log).toHaveBeenCalledWith('error', expect.stringContaining('rm-throws'))
+  })
+
+  it("one record's journal.remove failing (a real disk error, not a thrown docker call) leaves later records' removals intact", async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add(record({ container_id: 'rm-fails-on-disk' }))
+    await journal.add(record({ container_id: 'orphan1' }))
+    // Occupy the first record's own on-disk path with a directory, so journal.remove() itself throws
+    // when reconcile reaches it (docker's own `rm` succeeds fine — this is a filesystem failure, not
+    // a docker one). Before the round-2 fix, this alone would poison the journal's write queue and
+    // silently skip orphan1's later journal.remove() too.
+    const path = join(data.layout.managed.executionsDir, 'rm-fails-on-disk.json')
+    await rm(path, { force: true })
+    await mkdir(path, { recursive: true })
+
+    const exec = fakeExecFor({
+      'rm-fails-on-disk': {
+        inspect: ok(JSON.stringify([{ Id: 'rm-fails-on-disk', State: { Running: true } }])),
+        stop: ok(),
+      },
+      'orphan1': { inspect: ok(JSON.stringify([{ Id: 'orphan1', State: { Running: true } }])), stop: ok() },
+    })
+    const log = vi.fn()
+
+    const result = await reconcileExecutions(journal, 'current-instance', exec, log)
+
+    expect(result.failed.map((r) => r.container_id)).toEqual(['rm-fails-on-disk'])
+    expect(result.stopped.map((r) => r.container_id)).toEqual(['orphan1'])
+    expect(journal.list().map((r) => r.container_id)).toEqual(['rm-fails-on-disk']) // kept: never persisted
+    // orphan1's own removal actually reached disk, proving the earlier failure did not poison the
+    // queue (rm-fails-on-disk's own reopened state is not asserted here: its path is a directory by
+    // this test's own construction, which a reopen can never read back as a valid record regardless).
+    expect((await ExecutionJournal.open(data.layout)).list().map((r) => r.container_id)).not.toContain(
+      'orphan1'
+    )
   })
 
   it('never touches a record that already belongs to the running instance', async () => {
