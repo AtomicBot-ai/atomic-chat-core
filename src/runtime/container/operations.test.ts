@@ -64,6 +64,12 @@ describe('inspectImage / inspectContainer', () => {
       code: 'IO_ERROR',
     })
   })
+
+  it('throws AtomicCoreError, not a raw SyntaxError, when docker exits 0 with unparseable stdout (review round 1, item 12)', async () => {
+    const exec = fakeExec(ok('not json at all'))
+    await expect(inspectContainer(exec, 'c1')).rejects.toBeInstanceOf(AtomicCoreError)
+    await expect(inspectContainer(exec, 'c1')).rejects.toMatchObject({ code: 'IO_ERROR' })
+  })
 })
 
 describe('createContainer', () => {
@@ -106,7 +112,18 @@ describe('stopContainer', () => {
     expect(outcome).toEqual({ confirmed: true, status: 'absent' })
   })
 
-  it('is NOT confirmed when the exec call itself never answers (a stop timeout is not a confirmation)', async () => {
+  it('is NOT confirmed on the real failure shape exec.ts actually produces: a resolved result with code: null (review round 1, item 3)', async () => {
+    // `runDockerCommand` never rejects — an exec deadline resolves with `code: null` and an
+    // explanatory stderr, it does not throw. `failed(null, ...)` is that shape.
+    const outcome = await stopContainer(
+      fakeExec(failed(null, 'docker did not answer within 15000 ms')),
+      'c1',
+      10
+    )
+    expect(outcome).toEqual({ confirmed: false, reason: 'docker did not answer within 15000 ms' })
+  })
+
+  it('is NOT confirmed when the exec call itself throws (a distinct, defensive path for a non-standard DockerExec)', async () => {
     const exec: DockerExec = vi.fn(async () => {
       throw new Error('docker did not answer within 30000 ms')
     })
@@ -118,6 +135,18 @@ describe('stopContainer', () => {
   it('is NOT confirmed on an unrecognized docker error', async () => {
     const outcome = await stopContainer(fakeExec(failed(1, 'Cannot connect to the Docker daemon')), 'c1', 10)
     expect(outcome.confirmed).toBe(false)
+  })
+
+  it('extends the exec deadline past --time by a margin, so a legitimately slow stop is not cut short (review round 1, item 3)', async () => {
+    const exec = fakeExec(ok('c1'))
+    await stopContainer(exec, 'c1', 45)
+    expect(exec).toHaveBeenCalledWith(expect.any(Array), { timeoutMs: 45 * 1000 + 5_000 })
+  })
+
+  it('builds the stop argv (and can throw INVALID_ARGUMENT) outside the try, before any exec call (review round 1, item 9)', async () => {
+    const exec: DockerExec = vi.fn()
+    await expect(stopContainer(exec, 'c1', -1)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    expect(exec).not.toHaveBeenCalled()
   })
 })
 
@@ -142,9 +171,34 @@ describe('removeContainer', () => {
 })
 
 describe('containerLogs', () => {
-  it('returns the tail of stdout', async () => {
+  it('returns stdout as is when stderr is empty', async () => {
     const exec = fakeExec(ok('line1\nline2\n'))
     expect(await containerLogs(exec, 'c1', 200)).toBe('line1\nline2\n')
+  })
+
+  it('merges stdout and stderr chronologically by their --timestamps prefix (review round 1, item 2)', async () => {
+    const exec = fakeExec(
+      ok(
+        '2024-01-01T00:00:00.000000000Z starting up\n2024-01-01T00:00:02.000000000Z ready\n',
+        '2024-01-01T00:00:01.000000000Z a warning on stderr\n'
+      )
+    )
+    expect(await containerLogs(exec, 'c1', 200)).toBe(
+      '2024-01-01T00:00:00.000000000Z starting up\n' +
+        '2024-01-01T00:00:01.000000000Z a warning on stderr\n' +
+        '2024-01-01T00:00:02.000000000Z ready\n'
+    )
+  })
+
+  it('includes an OOM message that only appears on stderr — previously silently dropped', async () => {
+    const exec = fakeExec(
+      ok(
+        '2024-01-01T00:00:00.000000000Z loading weights\n',
+        '2024-01-01T00:00:05.000000000Z CUDA out of memory\n'
+      )
+    )
+    const logs = await containerLogs(exec, 'c1', 200)
+    expect(logs).toContain('CUDA out of memory')
   })
 
   it('throws IO_ERROR on failure', async () => {

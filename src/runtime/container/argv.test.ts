@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
+  DOCKER_SOCKET_PATH,
   DOCKER_SYSTEM_SOCKET,
   MODEL_CONTAINER_SHM_SIZE,
+  MODEL_CONTAINER_SHM_SIZE_CEILING_GB,
   assertSafeArgvValue,
   buildCreateModelContainerArgv,
   buildInspectContainerArgv,
@@ -39,6 +41,10 @@ const baseSpec: ModelContainerCreateSpec = {
 describe('withSystemSocket', () => {
   it('always forces the system unix socket ahead of the subcommand', () => {
     expect(withSystemSocket(['ps'])).toEqual(['--host', DOCKER_SYSTEM_SOCKET, 'ps'])
+  })
+
+  it('DOCKER_SYSTEM_SOCKET is derived from the one DOCKER_SOCKET_PATH constant (review round 1, item 15)', () => {
+    expect(DOCKER_SYSTEM_SOCKET).toBe(`unix://${DOCKER_SOCKET_PATH}`)
   })
 })
 
@@ -129,8 +135,16 @@ describe('buildStartArgv / buildStopArgv / buildRmArgv / buildLogsArgv', () => {
     expect(buildRmArgv('c1')).toEqual(['--host', DOCKER_SYSTEM_SOCKET, 'rm', 'c1'])
   })
 
-  it('builds logs with a tail count', () => {
-    expect(buildLogsArgv('c1', 200)).toEqual(['--host', DOCKER_SYSTEM_SOCKET, 'logs', '--tail', '200', 'c1'])
+  it('builds logs with --timestamps (review round 1, item 2) and a tail count', () => {
+    expect(buildLogsArgv('c1', 200)).toEqual([
+      '--host',
+      DOCKER_SYSTEM_SOCKET,
+      'logs',
+      '--timestamps',
+      '--tail',
+      '200',
+      'c1',
+    ])
   })
 
   it('refuses a non-positive tail count', () => {
@@ -151,6 +165,10 @@ describe('buildCreateModelContainerArgv', () => {
     expect(buildCreateModelContainerArgv(baseSpec)).toContain('--restart=no')
   })
 
+  it('always sets --pull=never, so only pull.ts fetches image bytes (review round 1, item 5 ruling)', () => {
+    expect(buildCreateModelContainerArgv(baseSpec)).toContain('--pull=never')
+  })
+
   it('sets a bounded --shm-size by default', () => {
     expect(buildCreateModelContainerArgv(baseSpec)).toContain(`--shm-size=${MODEL_CONTAINER_SHM_SIZE}`)
   })
@@ -159,11 +177,47 @@ describe('buildCreateModelContainerArgv', () => {
     expect(buildCreateModelContainerArgv({ ...baseSpec, shmSize: '4g' })).toContain('--shm-size=4g')
   })
 
+  it('refuses an shm-size with no integer+unit shape (review round 1, item 8)', () => {
+    for (const bad of ['2', '2gb', 'g2', '-2g', '2.5g', '']) {
+      expect(() => buildCreateModelContainerArgv({ ...baseSpec, shmSize: bad })).toThrow(AtomicCoreError)
+    }
+  })
+
+  it('refuses an shm-size above the ceiling', () => {
+    expect(() =>
+      buildCreateModelContainerArgv({ ...baseSpec, shmSize: `${MODEL_CONTAINER_SHM_SIZE_CEILING_GB + 1}g` })
+    ).toThrow(AtomicCoreError)
+  })
+
+  it('accepts an shm-size exactly at the ceiling, in smaller units too', () => {
+    expect(
+      buildCreateModelContainerArgv({ ...baseSpec, shmSize: `${MODEL_CONTAINER_SHM_SIZE_CEILING_GB}g` })
+    ).toContain(`--shm-size=${MODEL_CONTAINER_SHM_SIZE_CEILING_GB}g`)
+    expect(
+      buildCreateModelContainerArgv({
+        ...baseSpec,
+        shmSize: `${MODEL_CONTAINER_SHM_SIZE_CEILING_GB * 1024}m`,
+      })
+    ).toContain(`--shm-size=${MODEL_CONTAINER_SHM_SIZE_CEILING_GB * 1024}m`)
+  })
+
   it('selects exactly one GPU by UUID', () => {
     const argv = buildCreateModelContainerArgv(baseSpec)
     const i = argv.indexOf('--gpus')
     expect(i).toBeGreaterThan(-1)
     expect(argv[i + 1]).toBe(`device=${baseSpec.gpuUuid}`)
+  })
+
+  it('accepts a MIG-<uuid> gpu id too', () => {
+    const argv = buildCreateModelContainerArgv({ ...baseSpec, gpuUuid: 'MIG-abc123' })
+    const i = argv.indexOf('--gpus')
+    expect(argv[i + 1]).toBe('device=MIG-abc123')
+  })
+
+  it('refuses a gpu id that is not GPU-<uuid>/MIG-<uuid>, including a comma-injection attempt into --gpus (review round 1, item 7)', () => {
+    for (const bad of ['--privileged', 'GPU-1,--privileged', 'gpu-1', 'GPU', 'GPU-']) {
+      expect(() => buildCreateModelContainerArgv({ ...baseSpec, gpuUuid: bad })).toThrow(AtomicCoreError)
+    }
   })
 
   it('mounts the model directory read-only, without SELinux, when selinux is false', () => {
@@ -202,13 +256,67 @@ describe('buildCreateModelContainerArgv', () => {
     }
   })
 
-  it('adds :z to all four mounts when selinux is true, and never label=disable', () => {
-    const argv = buildCreateModelContainerArgv({ ...baseSpec, selinux: true })
+  it('adds :z to all four mounts when selinux is true and selinuxDataRoot covers them all, and never label=disable', () => {
+    const argv = buildCreateModelContainerArgv({
+      ...baseSpec,
+      selinux: true,
+      selinuxDataRoot: '/daemon/view',
+    })
     expect(argv).toContain('/daemon/view/models/qwen3:/atomic/model:ro,z')
     expect(argv).toContain('/daemon/view/cache/qwen3:/atomic/engine-cache:rw,z')
     expect(argv).toContain('/daemon/view/entrypoint.sh:/atomic/entrypoint.sh:ro,z')
     expect(argv).toContain('/daemon/view/heartbeat:/atomic/heartbeat:ro,z')
     expect(argv.join(' ')).not.toContain('label=disable')
+  })
+
+  it('accepts a mount source exactly equal to the data root itself', () => {
+    const argv = buildCreateModelContainerArgv({
+      ...baseSpec,
+      selinux: true,
+      selinuxDataRoot: '/daemon/view',
+      mounts: { ...baseSpec.mounts, model: { source: '/daemon/view' } },
+    })
+    expect(argv).toContain('/daemon/view:/atomic/model:ro,z')
+  })
+
+  it('refuses selinux: true with no selinuxDataRoot (review round 1, item 1)', () => {
+    expect(() => buildCreateModelContainerArgv({ ...baseSpec, selinux: true })).toThrow(AtomicCoreError)
+    try {
+      buildCreateModelContainerArgv({ ...baseSpec, selinux: true })
+      expect.unreachable()
+    } catch (error) {
+      expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+    }
+  })
+
+  it('refuses to :z-relabel a mount source outside the SELinux data root ("MUST NOT relabel outside its own data")', () => {
+    const spec = {
+      ...baseSpec,
+      selinux: true,
+      selinuxDataRoot: '/daemon/view',
+      mounts: { ...baseSpec.mounts, model: { source: '/somewhere/else/models/qwen3' } },
+    }
+    expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
+  })
+
+  it('refuses a mount source that is a sibling of the data root sharing its name as a prefix (not a real ancestor check bypass)', () => {
+    const spec = {
+      ...baseSpec,
+      selinux: true,
+      selinuxDataRoot: '/daemon/view',
+      // "/daemon/viewer" textually starts with "/daemon/view" but is not inside it.
+      mounts: { ...baseSpec.mounts, model: { source: '/daemon/viewer/models/qwen3' } },
+    }
+    expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
+  })
+
+  it('does not require selinuxDataRoot, and does not validate sources against it, when selinux is false', () => {
+    const argv = buildCreateModelContainerArgv({
+      ...baseSpec,
+      selinux: false,
+      mounts: { ...baseSpec.mounts, model: { source: '/anywhere/at/all' } },
+    })
+    expect(argv).toContain('/anywhere/at/all:/atomic/model:ro')
   })
 
   it('adds discovery-only labels for engine id, scope and instance id', () => {
@@ -237,22 +345,44 @@ describe('buildCreateModelContainerArgv', () => {
     expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
   })
 
-  it('refuses a hostile gpu uuid', () => {
-    expect(() => buildCreateModelContainerArgv({ ...baseSpec, gpuUuid: '--privileged' })).toThrow(
-      AtomicCoreError
-    )
-  })
-
-  it('refuses a hostile mount source', () => {
+  it('refuses a hostile mount source that starts with a dash', () => {
     const spec = { ...baseSpec, mounts: { ...baseSpec.mounts, model: { source: '-v /:/host' } } }
     expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
   })
 
-  it('refuses a hostile env value, and validates env keys as identifiers', () => {
-    expect(() => buildCreateModelContainerArgv({ ...baseSpec, env: { FOO: '-bar' } })).toThrow(
+  it('refuses a relative mount source (review round 1, item 1: must be absolute)', () => {
+    const spec = { ...baseSpec, mounts: { ...baseSpec.mounts, model: { source: 'relative/path' } } }
+    expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
+  })
+
+  it('refuses a mount source containing a colon (it would be read as the start of the target)', () => {
+    const spec = { ...baseSpec, mounts: { ...baseSpec.mounts, model: { source: '/daemon/a:b' } } }
+    expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
+  })
+
+  it('refuses a mount source that is the docker socket itself, or a directory that contains it', () => {
+    for (const dockerSocketish of ['/var/run/docker.sock', '/run/docker.sock', '/var/run', '/run']) {
+      const spec = { ...baseSpec, mounts: { ...baseSpec.mounts, model: { source: dockerSocketish } } }
+      expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
+    }
+  })
+
+  it('refuses a hostile env value that only starts with a dash inside an object property — a leading "-" is checked, not the object key', () => {
+    // The env *key* half is validated as an identifier ("1BAD" fails); the *value* half may start
+    // with "-" (review round 1, item 16 — it is embedded inside `KEY=value`, never a standalone token).
+    expect(() => buildCreateModelContainerArgv({ ...baseSpec, env: { '1BAD': 'x' } })).toThrow(
       AtomicCoreError
     )
-    expect(() => buildCreateModelContainerArgv({ ...baseSpec, env: { '1BAD': 'x' } })).toThrow(
+  })
+
+  it('accepts an env value starting with "-" (review round 1, item 16: TEMPERATURE=-0.5 is ordinary)', () => {
+    const argv = buildCreateModelContainerArgv({ ...baseSpec, env: { TEMPERATURE: '-0.5' } })
+    const i = argv.indexOf('-e')
+    expect(argv[i + 1]).toBe('TEMPERATURE=-0.5')
+  })
+
+  it('still refuses a control character in an env value', () => {
+    expect(() => buildCreateModelContainerArgv({ ...baseSpec, env: { FOO: 'a\nb' } })).toThrow(
       AtomicCoreError
     )
   })
@@ -261,6 +391,13 @@ describe('buildCreateModelContainerArgv', () => {
     const argv = buildCreateModelContainerArgv({ ...baseSpec, env: { CTX_LEN: '8192' } })
     const i = argv.indexOf('-e')
     expect(argv[i + 1]).toBe('CTX_LEN=8192')
+  })
+
+  it('validates label keys as identifiers too (review round 1, item 16)', () => {
+    const argv = buildCreateModelContainerArgv(baseSpec)
+    // The fixed ModelContainerLabels keys (engine_id/scope/instance_id) are all valid identifiers;
+    // this asserts the validator ran rather than merely that the fixed keys happen to be safe.
+    expect(argv.some((token) => token.startsWith('atomic.'))).toBe(true)
   })
 })
 
@@ -273,6 +410,14 @@ describe('buildRunOnceArgv', () => {
     expect(argv.join(' ')).not.toContain('--restart')
     expect(argv).not.toContain('-v')
     expect(argv).not.toContain('-p')
+  })
+
+  it('always sets --pull=never (review round 1, item 5 ruling)', () => {
+    expect(buildRunOnceArgv(runSpec)).toContain('--pull=never')
+  })
+
+  it('refuses a gpu id that is not GPU-<uuid>/MIG-<uuid>', () => {
+    expect(() => buildRunOnceArgv({ ...runSpec, gpuUuid: '--privileged' })).toThrow(AtomicCoreError)
   })
 
   it('selects the given GPU', () => {

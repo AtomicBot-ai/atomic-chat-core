@@ -44,7 +44,19 @@ function ioError(operation: string, result: DockerCommandResult): never {
 async function inspect(exec: DockerExec, argv: string[], operation: string): Promise<InspectResult> {
   const result = await exec(argv)
   if (result.code === 0) {
-    const parsed = JSON.parse(result.stdout || '[]') as unknown[]
+    let parsed: unknown[]
+    try {
+      parsed = JSON.parse(result.stdout || '[]') as unknown[]
+    } catch (error) {
+      // A 0 exit with unparseable stdout is not "the thing is absent" — it is docker (or a fake in
+      // tests) answering in a shape this module does not understand; surface it as our own error
+      // rather than letting a raw SyntaxError escape (review round 1, item 12).
+      throw new AtomicCoreError(
+        'IO_ERROR',
+        `docker ${operation} produced output that is not valid JSON.`,
+        `${(error as Error).message}\n${result.stdout}`
+      )
+    }
     return { found: parsed.length > 0, value: parsed[0] ?? null }
   }
   if (ABSENT_PATTERN.test(result.stderr)) return { found: false, value: null }
@@ -79,9 +91,18 @@ export async function startContainer(exec: DockerExec, containerId: string): Pro
 }
 
 /**
+ * Extra time given to the *exec call itself* beyond `docker stop`'s own `--time <timeoutSeconds>`
+ * (review round 1, item 3). `exec.ts`'s default exec deadline is 30 s; without this, any
+ * `timeoutSeconds` beyond ~30 would have our own exec call killed and reported unconfirmed before
+ * Docker's own `--time` even elapsed, which is not "unconfirmed" — it is this module cutting the
+ * call short before Docker had a chance to answer.
+ */
+const STOP_EXEC_MARGIN_MS = 5_000
+
+/**
  * Stops the container and waits for Docker to confirm it exited (or was already absent) — never
  * treats "our own exec call did not get an answer" as a stop (spec `tensorrt-llm-runtime`,
- * requirement "Выгрузка ждёт подтверждённой остановки"). `confirmed: false` is what a caller maps to
+ * requirement "unloading waits for a confirmed stop"). `confirmed: false` is what a caller maps to
  * `MANAGED_STOP_UNCONFIRMED` and a held GPU reservation.
  */
 export async function stopContainer(
@@ -89,9 +110,12 @@ export async function stopContainer(
   containerId: string,
   timeoutSeconds: number
 ): Promise<StopOutcome> {
+  // Built outside the try: an INVALID_ARGUMENT from a bad timeout is a programming error this
+  // caller should see directly, not a report that the stop went unconfirmed (review round 1, item 9).
+  const argv = buildStopArgv(containerId, timeoutSeconds)
   let result: DockerCommandResult
   try {
-    result = await exec(buildStopArgv(containerId, timeoutSeconds))
+    result = await exec(argv, { timeoutMs: timeoutSeconds * 1000 + STOP_EXEC_MARGIN_MS })
   } catch (error) {
     return { confirmed: false, reason: (error as Error).message }
   }
@@ -112,11 +136,36 @@ export async function removeContainer(exec: DockerExec, containerId: string): Pr
 }
 
 /**
- * The last `tailLines` lines of the container's log (spec `tensorrt-llm-runtime`, "Логи контейнера
- * доступны"). Returns only `stdout`: Docker writes a container's stdout and stderr to two separate
- * file descriptors with no combined chronological order available without deeper work (a demuxed
- * read plus manual interleaving); `trtllm-serve`'s own logging is expected on stdout.
+ * Docker writes a container's stdout and stderr to two separate file descriptors; `buildLogsArgv`
+ * asks for `--timestamps` on both so they can be merged back into one chronologically ordered log
+ * (review round 1, item 2 — the lifecycle needs a combined tail to classify an OOM exit, which
+ * `trtllm-serve` can report on either stream). Each line is expected to start with Docker's
+ * RFC3339Nano timestamp followed by a space; timestamps in that spelling sort correctly as plain
+ * strings, so this is a stable two-way merge, not a `Date` parse. A line with no recognizable
+ * timestamp (should not happen with `--timestamps`, but this must not crash on one) sorts using its
+ * own text, which only affects placement relative to other such lines.
  */
+function timestampOf(line: string): string {
+  const spaceIndex = line.indexOf(' ')
+  return spaceIndex === -1 ? line : line.slice(0, spaceIndex)
+}
+
+function mergeTimestampedLogs(stdout: string, stderr: string): string {
+  const stdoutLines = stdout.split('\n').filter((line) => line !== '')
+  const stderrLines = stderr.split('\n').filter((line) => line !== '')
+  const merged: string[] = []
+  let i = 0
+  let j = 0
+  while (i < stdoutLines.length && j < stderrLines.length) {
+    if (timestampOf(stdoutLines[i]!) <= timestampOf(stderrLines[j]!)) merged.push(stdoutLines[i++]!)
+    else merged.push(stderrLines[j++]!)
+  }
+  while (i < stdoutLines.length) merged.push(stdoutLines[i++]!)
+  while (j < stderrLines.length) merged.push(stderrLines[j++]!)
+  return merged.length === 0 ? '' : merged.join('\n') + '\n'
+}
+
+/** The last `tailLines` lines of the container's combined, chronologically merged stdout+stderr log. */
 export async function containerLogs(
   exec: DockerExec,
   containerId: string,
@@ -124,7 +173,7 @@ export async function containerLogs(
 ): Promise<string> {
   const result = await exec(buildLogsArgv(containerId, tailLines))
   if (result.code !== 0) ioError('logs', result)
-  return result.stdout
+  return mergeTimestampedLogs(result.stdout, result.stderr)
 }
 
 /** A one-shot `docker run --rm` probe (task 2.x's GPU check): the raw result, never thrown — the caller classifies it. */

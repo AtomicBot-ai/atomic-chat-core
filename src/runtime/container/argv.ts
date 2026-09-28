@@ -15,15 +15,30 @@
  * command words, so a positional value can never be mistaken for the start of a new flag either.
  *
  * `--host unix:///var/run/docker.sock` is prepended to every argv by `withSystemSocket`; `env.ts`
- * separately strips `DOCKER_HOST`/`DOCKER_CONTEXT`/`DOCKER_CONFIG` from the child's environment, so
- * between the two, no user Docker context is ever consulted (spec `tensorrt-llm-runtime`, "Контейнер
- * модели изолирован").
+ * separately strips `DOCKER_HOST`/`DOCKER_CONTEXT` and points `DOCKER_CONFIG` at an empty,
+ * core-owned directory, so between the two, no user Docker context is ever consulted (spec
+ * `tensorrt-llm-runtime`, "the model container is isolated"). `buildCreateModelContainerArgv`/
+ * `buildRunOnceArgv` also add `--pull=never` (review round 1, item 5 ruling): the only thing in this
+ * module that fetches image bytes is `pull.ts`'s `pullImage`, over the Engine API — `docker
+ * create`/`docker run` must never trigger an implicit pull of their own, which would otherwise use
+ * whatever registry auth `DOCKER_CONFIG`'s directory happens to hold.
  */
+import path from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ImageRef, ModelContainerCreateSpec, ModelContainerLabels, OneShotRunSpec } from './types.js'
 
+/**
+ * The one path to the Docker daemon's system socket, in its two textual forms `argv.ts` and
+ * `pull.ts` each need. `pull.ts` derives its `node:http` `socketPath` from `DOCKER_SOCKET_PATH`
+ * rather than declaring its own literal (review round 1, item 15), so there is exactly one socket
+ * path constant in this module.
+ */
+export const DOCKER_SOCKET_PATH = '/var/run/docker.sock'
 /** Forced with every docker CLI call; no user Docker context (`DOCKER_HOST`/context/config) is ever used. */
-export const DOCKER_SYSTEM_SOCKET = 'unix:///var/run/docker.sock'
+export const DOCKER_SYSTEM_SOCKET = `unix://${DOCKER_SOCKET_PATH}`
+
+/** Docker socket paths (and their parent directories) that must never be used as a mount source — bind-mounting one of these into the container would hand it the socket even though no `-v` flag ever names it directly. */
+const FORBIDDEN_MOUNT_SOURCES = new Set(['/var/run/docker.sock', '/run/docker.sock', '/var/run', '/run'])
 
 /** Container-side mount targets. Fixed by this module; callers only choose the host-side source. */
 export const CONTAINER_MODEL_PATH = '/atomic/model'
@@ -39,9 +54,18 @@ export const CONTAINER_HEARTBEAT_PATH = '/atomic/heartbeat'
  */
 export const MODEL_CONTAINER_SHM_SIZE = '2g'
 
+/** The largest `--shm-size` this module will build, regardless of what a caller passes in `shmSize`. */
+export const MODEL_CONTAINER_SHM_SIZE_CEILING_GB = 16
+
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/
 const NEWLINE_CHARS = /[\n\r]/
-const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+/** An env or label key: `KEY=value`/`atomic.key=value` always starts with this, so the leading
+ *  character can never be misread as a docker flag regardless of what the value contains. */
+const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/
+/** `nvidia-smi -L`'s two UUID spellings: `GPU-<uuid>` and, for a MIG slice, `MIG-<uuid>`. */
+const GPU_UUID_PATTERN = /^(GPU|MIG)-[0-9A-Fa-f-]+$/
+/** An integer byte count with a Docker size suffix, e.g. `2g`, `512m`, `65536k`. */
+const SHM_SIZE_PATTERN = /^([0-9]+)(k|m|g)$/
 const DESKTOP_LOOPBACK_HOST = '127.0.0.1'
 
 function invalidArgument(what: string, value: string): never {
@@ -92,11 +116,102 @@ function assertLoopbackHost(host: string): string {
   return host
 }
 
-function assertEnvKey(key: string): string {
-  if (!ENV_KEY_PATTERN.test(key)) {
-    throw new AtomicCoreError('INVALID_ARGUMENT', 'env variable name is not a valid identifier.', key)
+/** Shared by env and label keys: both are the `KEY` half of a `KEY=value` argv token. */
+function assertIdentifier(value: string, what: string): string {
+  if (!IDENTIFIER_PATTERN.test(value)) {
+    throw new AtomicCoreError('INVALID_ARGUMENT', `${what} is not a valid identifier.`, value)
   }
-  return key
+  return value
+}
+
+/**
+ * An env *value* embedded in `-e KEY=value`: the key half is already validated as an identifier that
+ * cannot start with `-`, so the whole argv token can never be misread as a flag regardless of what
+ * the value contains — unlike a standalone value, this one only needs the control-character guard
+ * (review round 1, item 16: rejecting a leading `-` here wrongly refused an ordinary value like
+ * `TEMPERATURE=-0.5`). Empty is allowed: `FOO=` is a legitimate way to set an empty env var.
+ */
+function assertEnvValue(value: string, what: string): string {
+  if (hasControlChars(value)) invalidArgument(what, value)
+  return value
+}
+
+function assertGpuUuid(value: string): string {
+  if (!GPU_UUID_PATTERN.test(value)) {
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'gpu id is not a GPU-<uuid>/MIG-<uuid> value.', value)
+  }
+  return value
+}
+
+/** `--shm-size=<value>`: an integer with a `k`/`m`/`g` suffix, capped at `MODEL_CONTAINER_SHM_SIZE_CEILING_GB`. */
+function assertShmSize(value: string): string {
+  const match = SHM_SIZE_PATTERN.exec(value)
+  if (!match) {
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'shm size is not an integer with a k/m/g suffix.', value)
+  }
+  const [, digits, unit] = match as unknown as [string, string, 'k' | 'm' | 'g']
+  const amount = Number(digits)
+  const gib = unit === 'g' ? amount : unit === 'm' ? amount / 1024 : amount / (1024 * 1024)
+  if (gib > MODEL_CONTAINER_SHM_SIZE_CEILING_GB) {
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `shm size must not exceed ${MODEL_CONTAINER_SHM_SIZE_CEILING_GB}g.`,
+      value
+    )
+  }
+  return value
+}
+
+/** Normalizes a POSIX (Docker-daemon-side) path: no trailing slash, `.`/`..` resolved, for exact/prefix comparison. */
+function normalizeMountPath(value: string): string {
+  const normalized = path.posix.normalize(value)
+  return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized
+}
+
+/**
+ * A mount source must be an absolute path (the Docker daemon's own view, never a relative path it
+ * would resolve against some unpredictable cwd), must not contain `:` (the character `-v`'s own
+ * `source:target:options` syntax splits on — a `:` inside the source would be read as the start of
+ * the target), and must not be the Docker socket file or a directory that contains it (review round
+ * 1, item 1): none of the four mounts this module builds names the socket directly, but a source
+ * that IS `/var/run` (or its ancestor) would still hand the container the socket as a side effect of
+ * mounting its parent.
+ */
+function assertMountSource(source: string, what: string): string {
+  assertSafeArgvValue(source, what)
+  if (!source.startsWith('/')) {
+    throw new AtomicCoreError('INVALID_ARGUMENT', `${what} must be an absolute path.`, source)
+  }
+  if (source.includes(':')) {
+    throw new AtomicCoreError('INVALID_ARGUMENT', `${what} must not contain ':'.`, source)
+  }
+  if (FORBIDDEN_MOUNT_SOURCES.has(normalizeMountPath(source))) {
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `${what} must not be the Docker socket or a directory that contains it.`,
+      source
+    )
+  }
+  return source
+}
+
+/**
+ * SELinux's `:z` relabels a directory for every container that shares it — spec `tensorrt-llm-runtime`
+ * ("mounts work under SELinux") requires that this module never relabels anything outside its own
+ * data (design D15). `dataRoot` is the one directory this executor owns; every `:z`-relabeled source
+ * must be it, or under it.
+ */
+function assertWithinDataRoot(source: string, dataRoot: string, what: string): void {
+  const normalizedRoot = normalizeMountPath(dataRoot)
+  const normalizedSource = normalizeMountPath(source)
+  const prefix = normalizedRoot === '/' ? '/' : `${normalizedRoot}/`
+  if (normalizedSource !== normalizedRoot && !normalizedSource.startsWith(prefix)) {
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `${what} is outside the SELinux data root and must not be :z-relabeled.`,
+      source
+    )
+  }
 }
 
 /** `repository@digest`, safe only once both halves — and the joined value itself — are validated. */
@@ -150,6 +265,10 @@ export function buildRmArgv(containerId: string): string[] {
   return withSystemSocket(['rm', assertSafeArgvValue(containerId, 'container id')])
 }
 
+/**
+ * `--timestamps` prefixes every line with its RFC3339Nano time so `operations.ts`'s `containerLogs`
+ * can merge stdout and stderr back into one chronological log (review round 1, item 2).
+ */
 export function buildLogsArgv(containerId: string, tailLines: number): string[] {
   if (!Number.isInteger(tailLines) || tailLines < 1) {
     throw new AtomicCoreError(
@@ -160,21 +279,29 @@ export function buildLogsArgv(containerId: string, tailLines: number): string[] 
   }
   return withSystemSocket([
     'logs',
+    '--timestamps',
     '--tail',
     String(tailLines),
     assertSafeArgvValue(containerId, 'container id'),
   ])
 }
 
-/** `-v <source>:<target>:<mode>[,z]`; `:z` only when the caller says this Docker runs with SELinux (design D15). */
+/**
+ * `-v <source>:<target>:<mode>[,z]`; `:z` only when the caller says this Docker runs with SELinux
+ * (design D15), and only once `source` is confirmed to be inside `dataRoot` — the caller
+ * (`buildCreateModelContainerArgv`) has already refused to reach here with `selinux: true` and no
+ * `dataRoot`.
+ */
 function mountFlag(
   source: string,
   target: string,
   mode: 'ro' | 'rw',
   selinux: boolean,
+  dataRoot: string | undefined,
   what: string
 ): string[] {
-  assertSafeArgvValue(source, what)
+  assertMountSource(source, what)
+  if (selinux && dataRoot !== undefined) assertWithinDataRoot(source, dataRoot, what)
   const options = selinux ? `${mode},z` : mode
   return ['-v', `${source}:${target}:${options}`]
 }
@@ -182,6 +309,7 @@ function mountFlag(
 function labelFlags(labels: ModelContainerLabels): string[] {
   const flags: string[] = []
   for (const [key, value] of Object.entries(labels)) {
+    assertIdentifier(key, `label key ${key}`)
     flags.push('-l', `atomic.${key}=${assertSafeArgvValue(value, `label ${key}`)}`)
   }
   return flags
@@ -191,8 +319,8 @@ function envFlags(env: Record<string, string> | undefined): string[] {
   if (!env) return []
   const flags: string[] = []
   for (const [key, value] of Object.entries(env)) {
-    assertEnvKey(key)
-    flags.push('-e', `${key}=${assertSafeArgvValue(value, `env ${key}`)}`)
+    assertIdentifier(key, `env key ${key}`)
+    flags.push('-e', `${key}=${assertEnvValue(value, `env ${key}`)}`)
   }
   return flags
 }
@@ -213,32 +341,52 @@ function commandWords(command: string[] | undefined): string[] {
 }
 
 /**
- * The model container's `docker create` argv (spec `tensorrt-llm-runtime`, requirement "Контейнер
- * модели изолирован"; SELinux per requirement "Монтирования работают при SELinux", design D15).
- * Security posture is not configurable by the spec: no docker socket mount, no `--privileged`, no
- * `--ipc=host`, `--restart=no` always, and the port published only on `127.0.0.1`. Every option
- * comes before the positional image reference and command, so nothing derived from a descriptor or
- * a probe can land where Docker would read it as the start of a new flag.
+ * The model container's `docker create` argv (spec `tensorrt-llm-runtime`, requirement "the model
+ * container is isolated"; SELinux per requirement "mounts work under SELinux", design D15). Security
+ * posture is not configurable by the spec: no docker socket mount, no `--privileged`, no
+ * `--ipc=host`, `--restart=no` always, `--pull=never` always (review round 1, item 5 ruling — only
+ * `pull.ts` fetches image bytes), and the port published only on `127.0.0.1`. Every option comes
+ * before the positional image reference and command, so nothing derived from a descriptor or a probe
+ * can land where Docker would read it as the start of a new flag. `spec.selinuxDataRoot` is required
+ * whenever `spec.selinux` is true — see `assertWithinDataRoot`.
  */
 export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): string[] {
   const ref = imageReference(spec.image)
-  const gpuUuid = assertSafeArgvValue(spec.gpuUuid, 'gpu id')
+  const gpuUuid = assertGpuUuid(spec.gpuUuid)
   const host = assertLoopbackHost(spec.publication.host)
   const hostPort = assertPort(spec.publication.host_port, 'host port')
   const containerPort = assertPort(spec.publication.container_port, 'container port')
+  const shmSize = assertShmSize(spec.shmSize ?? MODEL_CONTAINER_SHM_SIZE)
+  if (spec.selinux && spec.selinuxDataRoot === undefined) {
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      'selinuxDataRoot is required to :z-relabel mounts under SELinux.',
+      'selinuxDataRoot'
+    )
+  }
+  const dataRoot = spec.selinux ? spec.selinuxDataRoot : undefined
 
   const args: string[] = [
     'create',
     '--restart=no',
-    `--shm-size=${spec.shmSize ?? MODEL_CONTAINER_SHM_SIZE}`,
+    '--pull=never',
+    `--shm-size=${shmSize}`,
     '--gpus',
     `device=${gpuUuid}`,
-    ...mountFlag(spec.mounts.model.source, CONTAINER_MODEL_PATH, 'ro', spec.selinux, 'model mount source'),
+    ...mountFlag(
+      spec.mounts.model.source,
+      CONTAINER_MODEL_PATH,
+      'ro',
+      spec.selinux,
+      dataRoot,
+      'model mount source'
+    ),
     ...mountFlag(
       spec.mounts.engineCache.source,
       CONTAINER_ENGINE_CACHE_PATH,
       'rw',
       spec.selinux,
+      dataRoot,
       'engine cache mount source'
     ),
     ...mountFlag(
@@ -246,6 +394,7 @@ export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): s
       CONTAINER_ENTRYPOINT_PATH,
       'ro',
       spec.selinux,
+      dataRoot,
       'entrypoint mount source'
     ),
     ...mountFlag(
@@ -253,6 +402,7 @@ export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): s
       CONTAINER_HEARTBEAT_PATH,
       'ro',
       spec.selinux,
+      dataRoot,
       'heartbeat mount source'
     ),
     '--entrypoint',
@@ -267,12 +417,15 @@ export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): s
   return withSystemSocket(args)
 }
 
-/** A one-shot `docker run --rm` probe (task 2.x's GPU check): no mounts, no port publication, no restart policy. */
+/**
+ * A one-shot `docker run --rm` probe (task 2.x's GPU check): no mounts, no port publication, no
+ * restart policy, `--pull=never` (same reasoning as `buildCreateModelContainerArgv`).
+ */
 export function buildRunOnceArgv(spec: OneShotRunSpec): string[] {
   const ref = imageReference(spec.image)
-  const args: string[] = ['run', '--rm']
+  const args: string[] = ['run', '--rm', '--pull=never']
   if (spec.gpuUuid !== undefined) {
-    args.push('--gpus', `device=${assertSafeArgvValue(spec.gpuUuid, 'gpu id')}`)
+    args.push('--gpus', `device=${assertGpuUuid(spec.gpuUuid)}`)
   }
   args.push(...envFlags(spec.env), ref, ...commandWords(spec.command))
   return withSystemSocket(args)

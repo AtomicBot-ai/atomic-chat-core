@@ -1,6 +1,6 @@
 /**
  * End-to-end evidence for this module against a fake `docker` binary, per the task brief's
- * acceptance check ("e2e с фейковым docker-бинарём"). This is not `test/e2e/` — that layer builds
+ * acceptance check ("e2e with a fake docker binary"). This is not `test/e2e/` — that layer builds
  * and runs the compiled `atomic-chat-core` binary (see `test/e2e/binary.test.ts`), and nothing wires
  * the model container executor to a route, a CLI command or `src/core/create.ts` yet: that is task
  * 2.6/2.12/2.9's work, explicitly out of scope here. Wiring a fake docker into a binary that has no
@@ -8,7 +8,11 @@
  * the same thing an e2e would — the whole executor, wired together, against a real spawned process
  * standing in for `docker` — one level down, directly against `createDockerExec` + `operations.ts`.
  */
-import { describe, expect, it } from 'vitest'
+import { rmSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import { createDockerExec } from './exec.js'
 import {
   containerLogs,
@@ -18,7 +22,7 @@ import {
   startContainer,
   stopContainer,
 } from './operations.js'
-import type { ModelContainerCreateSpec } from './types.js'
+import type { DockerExec, ModelContainerCreateSpec } from './types.js'
 
 const image = {
   repository: 'nvcr.io/nvidia/tensorrt-llm/release',
@@ -29,6 +33,7 @@ const createSpec: ModelContainerCreateSpec = {
   image,
   gpuUuid: 'GPU-11111111-2222-3333-4444-555555555555',
   selinux: true,
+  selinuxDataRoot: '/daemon',
   mounts: {
     model: { source: '/daemon/models/qwen3' },
     engineCache: { source: '/daemon/cache/qwen3' },
@@ -37,6 +42,17 @@ const createSpec: ModelContainerCreateSpec = {
   },
   publication: { host: '127.0.0.1', host_port: 45123, container_port: 8000 },
   labels: { engine_id: 'tensorrt-llm', scope: 'app', instance_id: 'core-1' },
+}
+
+const dirs: string[] = []
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+async function tempDockerConfigDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'docker-config-test-'))
+  dirs.push(dir)
+  return dir
 }
 
 /**
@@ -59,7 +75,7 @@ if (sub === 'stop') {
   process.exit(0)
 }
 if (sub === 'logs') {
-  console.log('engine ready')
+  console.log('2024-01-01T00:00:00.000000000Z engine ready')
   process.exit(0)
 }
 if (sub === 'rm') {
@@ -73,8 +89,11 @@ const fakeDocker = { exe: process.execPath, prefixArgs: ['-e', FAKE_DOCKER_SCRIP
 
 describe('the executor end to end against a fake docker binary', () => {
   it('runs the full model-container lifecycle: create, start, confirmed stop, logs, rm', async () => {
-    const rawExec = createDockerExec({ dockerPath: fakeDocker.exe })
-    const exec = (args: string[]) => rawExec([...fakeDocker.prefixArgs, ...args])
+    const rawExec = createDockerExec({
+      dockerPath: fakeDocker.exe,
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
+    const exec: DockerExec = (args, callOptions) => rawExec([...fakeDocker.prefixArgs, ...args], callOptions)
 
     const { containerId } = await createContainer(exec, createSpec)
     expect(containerId).toBe('fake0123container')
@@ -100,25 +119,55 @@ describe('the executor end to end against a fake docker binary', () => {
       }
       process.exit(0)
     `
-    const rawExec = createDockerExec({ dockerPath: process.execPath })
-    const exec = (args: string[]) => rawExec(['-e', absentScript, '--', ...args])
+    const rawExec = createDockerExec({
+      dockerPath: process.execPath,
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
+    const exec: DockerExec = (args, callOptions) => rawExec(['-e', absentScript, '--', ...args], callOptions)
 
     expect(await stopContainer(exec, 'gone', 5)).toEqual({ confirmed: true, status: 'absent' })
     await expect(removeContainer(exec, 'gone')).resolves.toBeUndefined()
   })
 
-  it('never touches the docker socket, --privileged, or --ipc=host end to end, and the real spawn sees no shell', async () => {
+  it('runs createContainer through a real spawn and asserts on the exact argv the fake received: no socket mount, no --privileged, no --ipc, and --pull=never (review round 1, item 13)', async () => {
     const echoScript = `
       console.log(JSON.stringify(process.argv.slice(1)))
       process.exit(0)
     `
-    const rawExec = createDockerExec({ dockerPath: process.execPath })
-    const exec = (args: string[]) => rawExec(['-e', echoScript, '--', ...args])
+    const rawExec = createDockerExec({
+      dockerPath: process.execPath,
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
+    let capturedArgv: string[] = []
+    const exec: DockerExec = (args, callOptions) => {
+      capturedArgv = args
+      return rawExec(['-e', echoScript, '--', ...args], callOptions)
+    }
+
+    await createContainer(exec, createSpec)
+
+    expect(capturedArgv).not.toContain('--privileged')
+    expect(capturedArgv.join(' ')).not.toContain('--ipc')
+    expect(capturedArgv.join(' ')).not.toContain('docker.sock:/var/run/docker.sock')
+    expect(capturedArgv).toContain('--pull=never')
+    expect(capturedArgv).toContain('--restart=no')
+  })
+
+  it('never touches the docker socket, --privileged, or --ipc=host on an inspect call either, and the real spawn sees no shell', async () => {
+    const echoScript = `
+      console.log(JSON.stringify(process.argv.slice(1)))
+      process.exit(0)
+    `
+    const rawExec = createDockerExec({
+      dockerPath: process.execPath,
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
+    const exec: DockerExec = (args, callOptions) => rawExec(['-e', echoScript, '--', ...args], callOptions)
 
     const seen: string[] = []
-    const capturing = (args: string[]) => {
+    const capturing: DockerExec = (args, callOptions) => {
       seen.push(...args)
-      return exec(args)
+      return exec(args, callOptions)
     }
     await inspectContainer(capturing, 'c1').catch(() => undefined) // fake prints its own argv, not JSON; ignore parse errors here
     const joined = seen.join(' ')

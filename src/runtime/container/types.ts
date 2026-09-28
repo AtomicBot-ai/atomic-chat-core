@@ -47,6 +47,12 @@ export interface ModelContainerCreateSpec {
   gpuUuid: string
   /** Whether this Docker installation runs with SELinux enforcing (`docker info` `SecurityOptions`, design D15). */
   selinux: boolean
+  /**
+   * The one directory this executor owns and may `:z`-relabel. Required when `selinux` is true: every
+   * mount source must be it, or under it (spec "mounts work under SELinux" — never relabel outside
+   * this executor's own data, review round 1 item 1). Ignored when `selinux` is false.
+   */
+  selinuxDataRoot?: string
   mounts: ModelContainerMounts
   publication: HostPublication
   labels: ModelContainerLabels
@@ -71,8 +77,20 @@ export interface DockerCommandResult {
   stderr: string
 }
 
-/** Runs one already-built argv against the real `docker`, or a fake, and reports what happened. */
-export type DockerExec = (args: string[]) => Promise<DockerCommandResult>
+/** Per-call overrides a caller may pass to one `DockerExec` invocation (review round 1, item 3). */
+export interface DockerExecCallOptions {
+  /** Overrides the exec's own default deadline for just this call — `stopContainer` extends it past
+   *  `--time <timeoutSeconds>` so a legitimately slow stop is not mistaken for an unconfirmed one. */
+  timeoutMs?: number
+}
+
+/**
+ * Runs one already-built argv against the real `docker`, or a fake, and reports what happened. The
+ * second parameter is additive (review round 1, item 3): an existing fake typed
+ * `(args: string[]) => Promise<DockerCommandResult>` — ignoring a second argument — remains a valid
+ * `DockerExec` with no change.
+ */
+export type DockerExec = (args: string[], options?: DockerExecCallOptions) => Promise<DockerCommandResult>
 
 /**
  * Whether a stop is safe to treat as done. `confirmed: false` covers both "docker answered with an

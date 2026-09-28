@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { existsSync, rmSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import { createDockerExec, runDockerCommand } from './exec.js'
 
 // Same fake-binary convention as `src/runtime/llamacpp/probe.test.ts` and `src/hardware/probe.test.ts`:
@@ -10,17 +14,32 @@ import { createDockerExec, runDockerCommand } from './exec.js'
 // real child process.
 const fakeDocker = (script: string) => ({ exe: process.execPath, prefixArgs: ['-e', script, '--'] })
 
+const dirs: string[] = []
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+async function tempDockerConfigDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'docker-config-test-'))
+  dirs.push(dir)
+  return dir
+}
+
 describe('runDockerCommand', () => {
   it('spawns with no shell and passes argv through unmodified', async () => {
     const fake = fakeDocker('console.log(JSON.stringify(process.argv.slice(1))); process.exit(0)')
-    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs, '--host', 'unix:///x', 'ps'])
+    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs, '--host', 'unix:///x', 'ps'], {
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
     expect(result.code).toBe(0)
     expect(JSON.parse(result.stdout)).toEqual(['--host', 'unix:///x', 'ps'])
   })
 
   it('captures a non-zero exit code and stderr', async () => {
     const fake = fakeDocker('console.error("no such container: c1"); process.exit(1)')
-    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs])
+    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], {
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
     expect(result.code).toBe(1)
     expect(result.stderr).toContain('no such container: c1')
   })
@@ -28,42 +47,76 @@ describe('runDockerCommand', () => {
   it('reports a shell metacharacter in an argv value as a literal, inert argument (no shell involved)', async () => {
     const fake = fakeDocker('console.log(JSON.stringify(process.argv.slice(1))); process.exit(0)')
     const hostile = '$(rm -rf /); echo pwned; `id`'
-    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs, hostile])
+    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs, hostile], {
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
     expect(JSON.parse(result.stdout)).toEqual([hostile])
   })
 
-  it('strips DOCKER_HOST/DOCKER_CONTEXT/DOCKER_CONFIG from the child environment', async () => {
+  it('strips DOCKER_HOST/DOCKER_CONTEXT from the child environment', async () => {
     const fake = fakeDocker(
-      'console.log(JSON.stringify({h: process.env.DOCKER_HOST, c: process.env.DOCKER_CONTEXT, f: process.env.DOCKER_CONFIG, kept: process.env.ATOMIC_TEST_KEEP})); process.exit(0)'
+      'console.log(JSON.stringify({h: process.env.DOCKER_HOST, c: process.env.DOCKER_CONTEXT, kept: process.env.ATOMIC_TEST_KEEP})); process.exit(0)'
     )
     const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], {
+      dockerConfigDir: await tempDockerConfigDir(),
       env: {
         ...process.env,
         DOCKER_HOST: 'ssh://elsewhere',
         DOCKER_CONTEXT: 'remote',
-        DOCKER_CONFIG: '/tmp/x',
         ATOMIC_TEST_KEEP: 'yes',
       },
     })
-    expect(JSON.parse(result.stdout)).toEqual({ h: undefined, c: undefined, f: undefined, kept: 'yes' })
+    expect(JSON.parse(result.stdout)).toEqual({ h: undefined, c: undefined, kept: 'yes' })
+  })
+
+  it('points DOCKER_CONFIG at the given directory, and creates it if missing (review round 1, item 5 ruling)', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'docker-config-test-'))
+    dirs.push(parent)
+    const dockerConfigDir = join(parent, 'not-yet-created')
+    expect(existsSync(dockerConfigDir)).toBe(false)
+    const fake = fakeDocker('console.log(JSON.stringify(process.env.DOCKER_CONFIG)); process.exit(0)')
+    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], { dockerConfigDir })
+    expect(JSON.parse(result.stdout)).toBe(dockerConfigDir)
+    expect(existsSync(dockerConfigDir)).toBe(true)
   })
 
   it('reports code: null and a message, never rejecting, when the binary does not exist', async () => {
-    const result = await runDockerCommand('/definitely/not/a/real/docker/binary', ['ps'])
+    const result = await runDockerCommand('/definitely/not/a/real/docker/binary', ['ps'], {
+      dockerConfigDir: await tempDockerConfigDir(),
+    })
     expect(result.code).toBeNull()
     expect(result.stderr.length).toBeGreaterThan(0)
   })
 
   it('kills a hung process at the timeout and reports code: null', async () => {
     const fake = fakeDocker('setInterval(() => {}, 1000)')
-    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], { timeoutMs: 100 })
+    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], {
+      dockerConfigDir: await tempDockerConfigDir(),
+      timeoutMs: 100,
+    })
     expect(result.code).toBeNull()
   })
 
   it('truncates output past maxOutputBytes without hanging the child', async () => {
     const fake = fakeDocker('process.stdout.write("x".repeat(10_000)); process.exit(0)')
-    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], { maxOutputBytes: 10 })
+    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], {
+      dockerConfigDir: await tempDockerConfigDir(),
+      maxOutputBytes: 10,
+    })
     expect(result.stdout.length).toBe(10)
+  })
+
+  it('lets a per-call timeoutMs override the options default (review round 1, item 3)', async () => {
+    const fake = fakeDocker('setInterval(() => {}, 1000)')
+    const start = Date.now()
+    const result = await runDockerCommand(
+      fake.exe,
+      [...fake.prefixArgs],
+      { dockerConfigDir: await tempDockerConfigDir(), timeoutMs: 5_000 },
+      { timeoutMs: 100 }
+    )
+    expect(result.code).toBeNull()
+    expect(Date.now() - start).toBeLessThan(2_000)
   })
 })
 
@@ -72,7 +125,7 @@ describe('createDockerExec', () => {
     const fake = fakeDocker('console.log(JSON.stringify(process.argv.slice(1))); process.exit(0)')
     // The `-e <script> --` prefix stands in for "docker" itself in this test; a real caller only
     // ever passes `dockerPath: 'docker'` and the argv `argv.ts` built.
-    const exec = createDockerExec({ dockerPath: fake.exe })
+    const exec = createDockerExec({ dockerPath: fake.exe, dockerConfigDir: await tempDockerConfigDir() })
     // Mirrors a real argv shape (`withSystemSocket`'s `--host ...` first); a bare `inspect` as the
     // very first post-`--` token would collide with node's own `node inspect` debugger CLI, which
     // real docker argv never produces (it is always preceded by `--host ...`).
@@ -81,11 +134,31 @@ describe('createDockerExec', () => {
     expect(JSON.parse(result.stdout)).toEqual(['--host', 'unix:///x', 'container', 'inspect', 'c1'])
   })
 
-  it('defaults to "docker" on PATH when no dockerPath is given', async () => {
-    const exec = createDockerExec({ timeoutMs: 50 })
+  it('passes a per-call DockerExecCallOptions through to runDockerCommand', async () => {
+    const fake = fakeDocker('setInterval(() => {}, 1000)')
+    const exec = createDockerExec({
+      dockerPath: fake.exe,
+      dockerConfigDir: await tempDockerConfigDir(),
+      timeoutMs: 5_000,
+    })
+    const start = Date.now()
+    const result = await exec([...fake.prefixArgs], { timeoutMs: 100 })
+    expect(result.code).toBeNull()
+    expect(Date.now() - start).toBeLessThan(2_000)
+  })
+
+  it('defaults to the literal "docker" binary when no dockerPath is given (review round 1, item 14: a meaningful assertion)', async () => {
+    // Force ENOENT by clearing PATH, so the spawn's own error names the executable it tried to run —
+    // this is what actually proves the default is "docker" and not some other fallback, rather than
+    // the previous version's assertion that only checked `result.code`'s type, which was true for
+    // any outcome at all.
+    const exec = createDockerExec({
+      dockerConfigDir: await tempDockerConfigDir(),
+      timeoutMs: 2_000,
+      env: { ...process.env, PATH: '' },
+    })
     const result = await exec(['--host', 'unix:///nonexistent', 'ps'])
-    // Whether or not this host has a `docker` binary, the call must resolve (never reject) with
-    // *some* result: either a real exit code or `code: null` for "not found"/"could not answer".
-    expect(typeof result.code === 'number' || result.code === null).toBe(true)
+    expect(result.code).toBeNull()
+    expect(result.stderr).toContain('docker')
   })
 })

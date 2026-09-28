@@ -10,20 +10,33 @@
  *
  * This talks to the Engine API directly over its unix socket (`node:http`'s `socketPath`, injectable
  * for tests) rather than through `exec.ts`'s `DockerExec` — there is no docker CLI subcommand that
- * streams byte counts, so there is no argv to build for this one operation.
+ * streams byte counts, so there is no argv to build for this one operation. The default socket path
+ * is `argv.ts`'s `DOCKER_SOCKET_PATH`, not a separate literal (review round 1, item 15).
  */
 import http from 'node:http'
 import { AtomicCoreError } from '../../contracts/index.js'
-import { assertDigest, assertSafeArgvValue } from './argv.js'
-import type { ImageRef, PullProgress, PullProgressCallback } from './types.js'
-
-const DEFAULT_SOCKET_PATH = '/var/run/docker.sock'
+import { DOCKER_SOCKET_PATH, assertDigest, assertSafeArgvValue } from './argv.js'
+import { inspectImage } from './operations.js'
+import type { DockerExec, ImageRef, PullProgress, PullProgressCallback } from './types.js'
 
 export interface PullImageOptions {
-  /** Default `/var/run/docker.sock`; tests point this at a fake Engine API. */
+  /** Default derived from `argv.ts`'s `DOCKER_SOCKET_PATH` (review round 1, item 15 — one socket path constant); tests point this at a fake Engine API. */
   socketPath?: string
   onProgress?: PullProgressCallback
   signal?: AbortSignal
+  /**
+   * A known total byte size (e.g. the descriptor's `download_bytes`) used instead of the stream's
+   * own running total whenever it is larger. The stream's total only sums layers that have already
+   * reported at least one `Downloading` line, so early in a pull it always undercounts (review round
+   * 1, item 4).
+   */
+  knownTotalBytes?: number
+  /**
+   * After a successful pull, confirm `image` is actually present locally via `operations.ts`'s
+   * `inspectImage` (review round 1, item 10). Optional: a caller that only has the Engine API socket
+   * and no `DockerExec` yet (as every test in this file does) can omit it and skip verification.
+   */
+  verify?: DockerExec
 }
 
 interface ProgressDetail {
@@ -45,21 +58,75 @@ function ioError(message: string, details?: string): AtomicCoreError {
 
 /**
  * Pulls `image.repository@image.digest`. Resolves once the daemon's response stream ends without an
- * `error` line; rejects with `AtomicCoreError('IO_ERROR', ...)` for a non-200 response, an `error`
- * line, a stream failure, or an unreachable socket. `onProgress` receives the sum of every layer's
- * reported `current`/`total` seen so far — a status-only line (e.g. "Already exists", the digest
- * line at the end) reports nothing and contributes nothing.
+ * `error` line (and, if `options.verify` is given, once `inspectImage` confirms the image is present
+ * locally); rejects with `AtomicCoreError('IO_ERROR', ...)` for a non-200 response, an `error` line,
+ * a stream failure, an unreachable socket, or a failed post-pull verification.
  */
 export async function pullImage(image: ImageRef, options: PullImageOptions = {}): Promise<void> {
   // An `async` function: a validation failure below becomes a rejected promise, never a synchronous
   // throw, so every caller can treat `pullImage` uniformly as `.catch`/`await`-able I/O.
   const repository = assertSafeArgvValue(image.repository, 'image repository')
   const digest = assertDigest(image.digest, 'image digest')
-  const socketPath = options.socketPath ?? DEFAULT_SOCKET_PATH
+  const socketPath = options.socketPath ?? DOCKER_SOCKET_PATH
   const path = `/images/create?fromImage=${encodeURIComponent(repository)}&tag=${encodeURIComponent(digest)}`
 
+  await streamPull(path, socketPath, options)
+
+  if (options.verify) {
+    const { found } = await inspectImage(options.verify, image)
+    if (!found) {
+      throw ioError(
+        'Docker image pull completed but the image is not present locally.',
+        `${repository}@${digest}`
+      )
+    }
+  }
+}
+
+/**
+ * Aggregates byte progress across layers. Only a `status: 'Downloading'` line counts: the same layer
+ * `id` is reused for `Extracting` (and other phases) with its *own*, unrelated `progressDetail`, so
+ * folding every phase into one sum makes the total regress as a layer moves from "fully downloaded"
+ * to "partway extracted" (review round 1, item 4 — the non-monotonic bug). Each layer's contribution
+ * is the running *max* ever reported for it (defensive: a real `Downloading` sequence is already
+ * monotonic, but this does not trust that), clamped to that layer's own total.
+ */
+class PullProgressTracker {
+  private readonly layers = new Map<string, PullProgress>()
+
+  constructor(private readonly knownTotalBytes: number | undefined) {}
+
+  /** Returns the new aggregate to report, or `undefined` if this line contributes nothing. */
+  observe(parsed: ProgressLine): PullProgress | undefined {
+    if (parsed.status !== 'Downloading') return undefined
+    if (!parsed.id || !parsed.progressDetail || typeof parsed.progressDetail.current !== 'number')
+      return undefined
+    const total = parsed.progressDetail.total ?? 0
+    const current = total > 0 ? Math.min(parsed.progressDetail.current, total) : parsed.progressDetail.current
+    const existing = this.layers.get(parsed.id)
+    this.layers.set(parsed.id, {
+      current: existing ? Math.max(existing.current, current) : current,
+      total: existing ? Math.max(existing.total, total) : total,
+    })
+    return this.aggregate()
+  }
+
+  private aggregate(): PullProgress {
+    let current = 0
+    let streamTotal = 0
+    for (const layer of this.layers.values()) {
+      current += layer.current
+      streamTotal += layer.total
+    }
+    const total =
+      this.knownTotalBytes !== undefined ? Math.max(streamTotal, this.knownTotalBytes) : streamTotal
+    return { current: total > 0 ? Math.min(current, total) : current, total }
+  }
+}
+
+function streamPull(path: string, socketPath: string, options: PullImageOptions): Promise<void> {
   return new Promise((resolve, reject) => {
-    const layers = new Map<string, PullProgress>()
+    const tracker = new PullProgressTracker(options.knownTotalBytes)
     let buffer = ''
     let settled = false
 
@@ -71,15 +138,14 @@ export async function pullImage(image: ImageRef, options: PullImageOptions = {})
       else reject(outcome.error)
     }
 
-    const reportProgress = (): void => {
+    const reportProgress = (progress: PullProgress): void => {
       if (!options.onProgress) return
-      let current = 0
-      let total = 0
-      for (const layer of layers.values()) {
-        current += layer.current
-        total += layer.total
+      try {
+        options.onProgress(progress)
+      } catch {
+        // A caller's progress callback misbehaving must not abort a multi-gigabyte pull that is
+        // otherwise proceeding fine (review round 1, item 11).
       }
-      options.onProgress({ current, total })
     }
 
     const handleLine = (line: string, req: http.ClientRequest): void => {
@@ -98,13 +164,8 @@ export async function pullImage(image: ImageRef, options: PullImageOptions = {})
         req.destroy()
         return
       }
-      if (parsed.id && parsed.progressDetail && typeof parsed.progressDetail.current === 'number') {
-        layers.set(parsed.id, {
-          current: parsed.progressDetail.current,
-          total: parsed.progressDetail.total ?? 0,
-        })
-        reportProgress()
-      }
+      const progress = tracker.observe(parsed)
+      if (progress) reportProgress(progress)
     }
 
     const req = http.request({ socketPath, path, method: 'POST' }, (res) => {
@@ -133,7 +194,13 @@ export async function pullImage(image: ImageRef, options: PullImageOptions = {})
           if (settled) return
         }
       })
-      res.on('end', () => finish({ ok: true }))
+      res.on('end', () => {
+        // The stream can end with a final line that never got a trailing `\n` (review round 1, item
+        // 10): flush whatever is left in `buffer` before declaring the pull done.
+        if (!settled && buffer.trim() !== '') handleLine(buffer, req)
+        buffer = ''
+        finish({ ok: true })
+      })
       res.on('error', (error) =>
         finish({ ok: false, error: ioError('Docker image pull stream failed.', error.message) })
       )
