@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
-  assessLinux,
-  parseDockerGroup,
-  parseDockerInfo,
+  normalizeArchitecture,
   parseNvidiaSmi,
   parseOsRelease,
   probeLinux,
   type CommandOutput,
-  type LinuxFacts,
+  type LinuxProbeDeps,
 } from './linux-probe.js'
 
 const ok = (stdout: string): CommandOutput => ({ code: 0, stdout, stderr: '' })
@@ -20,50 +18,44 @@ const DOCKER_INFO = JSON.stringify({
   ServerVersion: '28.3.0',
   Runtimes: { runc: {}, nvidia: {} },
   CDISpecDirs: [],
-})
-
-const OPTIONS = {
-  supportedDistributions: [{ id: 'ubuntu', versions: ['24.04'] }],
-  requiredDiskBytes: 60_000_000_000,
-}
-
-const facts = (over: Partial<LinuxFacts> = {}): LinuxFacts => ({
-  distribution: { id: 'ubuntu', version: '24.04' },
-  driver_version: '551.23',
-  gpus: [
-    {
-      gpu_id: 'GPU-1c6a',
-      name: 'NVIDIA GeForce RTX 4070',
-      compute_capability: '8.9',
-      total_vram_bytes: 12_282 * 1024 * 1024,
-      free_vram_bytes: 11_000 * 1024 * 1024,
-      driver_version: '551.23',
-    },
-  ],
-  docker: {
-    cli: true,
-    daemon_reachable: true,
-    engine_identity: 'X4RT:AAAA',
-    version: '28.3.0',
-    gpu_runtime: true,
-  },
-  docker_group: { configured: true, effective: true },
-  toolkit_installed: true,
-  free_disk_bytes: 200_000_000_000,
-  unknown: [],
-  ...over,
+  SecurityOptions: ['name=seccomp,profile=default'],
+  DockerRootDir: '/var/lib/docker',
+  ContainersRunning: 0,
 })
 
 describe('reading the machine', () => {
-  it('takes the distribution from os-release, quotes and all', () => {
+  it('takes the distribution, ID_LIKE and package family from os-release, quotes and all', () => {
     expect(parseOsRelease('ID=ubuntu\nVERSION_ID="24.04"\nNAME="Ubuntu"\n')).toEqual({
       id: 'ubuntu',
-      version: '24.04',
+      version_id: '24.04',
+      id_like: [],
+      family: 'apt',
     })
-    expect(parseOsRelease("ID='fedora'\nVERSION_ID=41\n")).toEqual({ id: 'fedora', version: '41' })
+    expect(parseOsRelease("ID='fedora'\nVERSION_ID=41\n")).toEqual({
+      id: 'fedora',
+      version_id: '41',
+      id_like: [],
+      family: 'dnf',
+    })
+    // A derivative distribution qualifies its family through ID_LIKE, not ID.
+    expect(parseOsRelease('ID=linuxmint\nVERSION_ID="22"\nID_LIKE="ubuntu debian"\n')).toEqual({
+      id: 'linuxmint',
+      version_id: '22',
+      id_like: ['ubuntu', 'debian'],
+      family: 'apt',
+    })
+    expect(parseOsRelease('ID=arch\nVERSION_ID="rolling"\n')?.family).toBe('pacman')
+    expect(parseOsRelease('ID=nixos\nVERSION_ID="24.05"\n')?.family).toBe('other')
     // A file that is there but says nothing useful is no answer at all.
     expect(parseOsRelease('NAME="Something"\n')).toBeNull()
     expect(parseOsRelease(null)).toBeNull()
+  })
+
+  it('normalises the one architecture alias uname would not print on Linux itself', () => {
+    expect(normalizeArchitecture('x86_64\n')).toBe('x86_64')
+    expect(normalizeArchitecture('aarch64\n')).toBe('aarch64')
+    expect(normalizeArchitecture('arm64\n')).toBe('aarch64')
+    expect(normalizeArchitecture('armv7l\n')).toBe('armv7l')
   })
 
   it('reads every card nvidia-smi lists, converting its megabytes to bytes', () => {
@@ -75,44 +67,23 @@ describe('reading the machine', () => {
     expect(answer.gpus[1]?.compute_capability).toBe('12.0')
   })
 
+  it('reports a unified-memory card (GB10/DGX Spark) with null vram instead of a bogus number', () => {
+    const answer = parseNvidiaSmi(ok('GPU-gb10, NVIDIA GB10, 12.1, [N/A], [N/A], 580.65.06\n'))
+    expect(answer.gpus).toEqual([
+      {
+        gpu_id: 'GPU-gb10',
+        name: 'NVIDIA GB10',
+        compute_capability: '12.1',
+        total_vram_bytes: null,
+        free_vram_bytes: null,
+        driver_version: '580.65.06',
+      },
+    ])
+  })
+
   it('reports no driver rather than an empty one when nvidia-smi is not there', () => {
     expect(parseNvidiaSmi(missing())).toEqual({ driver_version: null, gpus: [] })
     expect(parseNvidiaSmi(failed('NVIDIA-SMI has failed'))).toEqual({ driver_version: null, gpus: [] })
-  })
-
-  it('counts either road to --gpus, and neither when the daemon does not answer', () => {
-    expect(parseDockerInfo(ok(DOCKER_INFO)).gpu_runtime).toBe(true)
-    expect(
-      parseDockerInfo(ok(JSON.stringify({ ID: 'a', Runtimes: { runc: {} }, CDISpecDirs: ['/etc/cdi'] })))
-        .gpu_runtime
-    ).toBe(true)
-    expect(
-      parseDockerInfo(ok(JSON.stringify({ ID: 'a', Runtimes: { runc: {} }, CDISpecDirs: [] }))).gpu_runtime
-    ).toBe(false)
-    // A daemon that is not running answers nothing; that is not the same as answering "no GPU".
-    expect(parseDockerInfo(failed('Cannot connect to the Docker daemon'))).toEqual({
-      daemon_reachable: false,
-      engine_identity: null,
-      version: null,
-      gpu_runtime: false,
-    })
-    expect(parseDockerInfo(ok('not json')).daemon_reachable).toBe(false)
-  })
-
-  it('tells a group this session has from one the account merely belongs to', () => {
-    expect(parseDockerGroup(ok('u docker sudo'), ok('docker:x:999:u'), 'u')).toEqual({
-      configured: true,
-      effective: true,
-    })
-    // Added to the group, but this login predates it: it counts from the next sign-in.
-    expect(parseDockerGroup(ok('u sudo'), ok('docker:x:999:u'), 'u')).toEqual({
-      configured: true,
-      effective: false,
-    })
-    expect(parseDockerGroup(ok('u sudo'), ok('docker:x:999:'), 'u')).toEqual({
-      configured: false,
-      effective: false,
-    })
   })
 
   it('runs only read-only commands and records every answer it could not get', async () => {
@@ -121,26 +92,35 @@ describe('reading the machine', () => {
       {
         exec: async (command, args) => {
           calls.push([command, ...args].join(' '))
+          if (command === 'uname') return ok('x86_64\n')
           if (command === 'nvidia-smi') return ok(SMI)
-          if (command === 'docker' && args[0] === '--version') return ok('Docker version 28.3.0')
+          if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
           if (command === 'docker') return ok(DOCKER_INFO)
-          if (command === 'id') return ok('u docker')
-          if (command === 'getent') return ok('docker:x:999:u')
+          if (command === 'nvidia-ctk' && args[0] === 'cdi') return ok('')
           return missing()
         },
         readFile: async () => 'ID=ubuntu\nVERSION_ID="24.04"\n',
+        pathExists: async () => false,
         freeDiskBytes: async () => 200_000_000_000,
       },
-      'u'
+      { user: 'u', xdgRuntimeDir: null }
     )
 
-    expect(probed.distribution).toEqual({ id: 'ubuntu', version: '24.04' })
+    expect(probed.distribution).toEqual({ id: 'ubuntu', version_id: '24.04', id_like: [], family: 'apt' })
+    expect(probed.architecture).toBe('x86_64')
     expect(probed.docker.daemon_reachable).toBe(true)
     // `nvidia-ctk --version` was not found, so the toolkit is reported absent, not assumed.
     expect(probed.toolkit_installed).toBe(false)
     expect(probed.unknown).toEqual([])
-    // Nothing that could change the machine: no run, no pull, no install, no service.
-    expect(calls.some((call) => /run|pull|install|systemctl|apt/.test(call))).toBe(false)
+    // Nothing that could change the machine: no run, no pull, no install, no service, no systemctl.
+    // (The docker socket path legitimately contains "run" as a path segment, so this checks
+    // subcommands, not a bare substring match against the whole call.)
+    expect(
+      calls.some(
+        (call) =>
+          /(^| )(run|pull|install|systemctl|apt-get|usermod)( |$)/.test(call) || /pacman -S/.test(call)
+      )
+    ).toBe(false)
   })
 
   it('records a probe that could not run as unknown instead of as a no', async () => {
@@ -148,99 +128,37 @@ describe('reading the machine', () => {
       {
         exec: async () => missing(),
         readFile: async () => null,
+        pathExists: async () => false,
         freeDiskBytes: async () => null,
       },
-      'u'
+      { user: 'u', xdgRuntimeDir: null }
     )
-    expect(probed.unknown).toEqual(['distribution', 'nvidia-driver', 'docker-group', 'free-disk'])
-  })
-})
-
-describe('what the machine needs', () => {
-  it('adopts a host that already runs containers on its GPU, asking for nothing', () => {
-    const assessment = assessLinux(facts(), OPTIONS)
-    expect(assessment.availability).toBe('supported')
-    expect(assessment.adopts_existing_engine).toBe(true)
-    expect(assessment.missing).toEqual([])
-    expect(assessment.blockers).toEqual([])
-    expect(assessment.needs_relogin).toBe(false)
+    expect(probed.unknown).toEqual(['distribution', 'architecture', 'nvidia-driver', 'free-disk'])
   })
 
-  it('lists what a clean machine is missing, in the order an install would add it', () => {
-    const assessment = assessLinux(
-      facts({
-        docker: {
-          cli: false,
-          daemon_reachable: false,
-          engine_identity: null,
-          version: null,
-          gpu_runtime: false,
-        },
-        docker_group: { configured: false, effective: false },
-        toolkit_installed: false,
-      }),
-      OPTIONS
-    )
-    expect(assessment.availability).toBe('setup-required')
-    expect(assessment.adopts_existing_engine).toBe(false)
-    expect(assessment.missing).toEqual(['docker-engine', 'nvidia-container-toolkit', 'docker-group'])
-  })
+  it('checks free space at DockerRootDir once Docker answers, and at the default install path before it does', async () => {
+    const customRootDir = JSON.stringify({ ...JSON.parse(DOCKER_INFO), DockerRootDir: '/mnt/docker-data' })
+    const paths: string[] = []
+    const deps: LinuxProbeDeps = {
+      exec: async (command, args) => {
+        if (command === 'uname') return ok('x86_64\n')
+        if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
+        if (command === 'docker') return ok(customRootDir)
+        return missing()
+      },
+      readFile: async () => 'ID=ubuntu\nVERSION_ID="24.04"\n',
+      pathExists: async () => false,
+      freeDiskBytes: async (path) => {
+        paths.push(path)
+        return 1
+      },
+    }
+    await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
+    expect(paths).toEqual(['/mnt/docker-data'])
 
-  it('asks only for the toolkit when Docker is there but cannot reach the GPU', () => {
-    const assessment = assessLinux(
-      facts({
-        docker: {
-          cli: true,
-          daemon_reachable: true,
-          engine_identity: 'X',
-          version: '28.3.0',
-          gpu_runtime: false,
-        },
-        toolkit_installed: false,
-      }),
-      OPTIONS
-    )
-    expect(assessment.missing).toEqual(['nvidia-container-toolkit'])
-    expect(assessment.adopts_existing_engine).toBe(false)
-  })
-
-  it('says a sign-out is needed when the group is granted but this session predates it', () => {
-    const assessment = assessLinux(facts({ docker_group: { configured: true, effective: false } }), OPTIONS)
-    expect(assessment.needs_relogin).toBe(true)
-    // Everything is installed, so it is not adoptable yet only because of the session.
-    expect(assessment.missing).toEqual([])
-    expect(assessment.adopts_existing_engine).toBe(false)
-  })
-
-  it('will not offer a one-click install on a distribution nobody has qualified', () => {
-    const assessment = assessLinux(facts({ distribution: { id: 'arch', version: 'rolling' } }), OPTIONS)
-    expect(assessment.availability).toBe('prerequisite-blocked')
-    expect(assessment.blockers[0]?.details).toContain('arch')
-  })
-
-  it('reports a missing driver as something the user installs, not something setup can fix', () => {
-    const assessment = assessLinux(facts({ driver_version: null, gpus: [] }), OPTIONS)
-    expect(assessment.availability).toBe('prerequisite-blocked')
-    expect(assessment.missing).toContain('nvidia-driver')
-    expect(assessment.blockers.some((b) => b.message.includes('NVIDIA driver'))).toBe(true)
-  })
-
-  it('reports a driver that sees no card, which no install will change either', () => {
-    const assessment = assessLinux(facts({ gpus: [] }), OPTIONS)
-    expect(assessment.availability).toBe('prerequisite-blocked')
-    expect(assessment.blockers.some((b) => b.message.includes('no usable GPU'))).toBe(true)
-  })
-
-  it('blocks on a fact it could not read rather than assuming the answer it prefers', () => {
-    const assessment = assessLinux(facts({ unknown: ['docker-group'] }), OPTIONS)
-    expect(assessment.availability).toBe('prerequisite-blocked')
-    expect(assessment.blockers[0]?.details).toBe('docker-group')
-    expect(assessment.adopts_existing_engine).toBe(false)
-  })
-
-  it('refuses when the image would not fit, and says by how much', () => {
-    const assessment = assessLinux(facts({ free_disk_bytes: 10_000_000_000 }), OPTIONS)
-    expect(assessment.availability).toBe('prerequisite-blocked')
-    expect(assessment.blockers[0]?.details).toContain('required=60000000000')
+    // No Docker at all: nothing to read DockerRootDir from, so the default install path is used.
+    paths.length = 0
+    await probeLinux({ ...deps, exec: async () => missing() }, { user: 'u', xdgRuntimeDir: null })
+    expect(paths).toEqual(['/var/lib/docker'])
   })
 })

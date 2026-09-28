@@ -327,6 +327,32 @@ export interface RecipeDistribution {
 }
 
 /**
+ * Package-manager family a Linux distribution uses, read from `/etc/os-release` `ID`/`ID_LIKE`
+ * (task 2.4). Arch and its derivatives (`pacman`) never check the install recipe's distribution
+ * list — they only ever adopt a working host or get exact manual instructions (design D2).
+ */
+export const LINUX_PACKAGE_FAMILIES = ['apt', 'dnf', 'pacman', 'other'] as const
+export type LinuxPackageFamily = (typeof LINUX_PACKAGE_FAMILIES)[number]
+
+/**
+ * How Docker Engine reached this machine, as far as a read-only probe can tell (task 2.4, design
+ * D2). `docker-ce`/`docker.io`/`moby-engine` are alternative distro packages this integration can
+ * adopt or complete; `snap`, `rootless`, `docker-desktop` and `podman-docker` describe an
+ * installation it will never install over or adopt, because there is no safe way to layer
+ * `docker-ce` on top of, or automatically replace, someone else's existing setup.
+ */
+export const LINUX_DOCKER_INSTALL_METHODS = [
+  'docker-ce',
+  'docker.io',
+  'moby-engine',
+  'snap',
+  'rootless',
+  'docker-desktop',
+  'podman-docker',
+] as const
+export type LinuxDockerInstallMethod = (typeof LINUX_DOCKER_INSTALL_METHODS)[number]
+
+/**
  * One install recipe as data: an id naming argv compiled into core, and the distributions it is
  * qualified for. Never a command, a shell script or code — the recipe body lives in core, not here.
  */
