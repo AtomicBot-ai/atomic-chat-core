@@ -89,6 +89,7 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
         if (options.terminateGraceMs === undefined || child === undefined) {
           child?.kill('SIGKILL')
           finish({ code: null, stdout: '', stderr: `timed out after ${timeoutMs} ms` })
+          releasePipes()
           return
         }
         // Ask first, then insist. The answer comes when the process is gone (`exit`, then a moment
@@ -102,13 +103,19 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
       }, timeoutMs)
       timer.unref()
 
+      /**
+       * After a timeout has been answered: release our ends of the pipes, so a grandchild still
+       * holding theirs cannot keep this (possibly root) process alive.
+       */
+      const releasePipes = (): void => {
+        child?.stdout?.destroy()
+        child?.stderr?.destroy()
+      }
+
       const finishTimedOut = (): void => {
         const said = Buffer.concat(stderr).toString('utf8')
         finish({ code: null, stdout: '', stderr: `${said}\ntimed out after ${timeoutMs} ms` })
-        // Release our ends of the pipes: a grandchild still holding theirs must not keep this
-        // (root) process alive after it has answered.
-        child?.stdout?.destroy()
-        child?.stderr?.destroy()
+        releasePipes()
       }
 
       const finish = (output: CommandOutput): void => {

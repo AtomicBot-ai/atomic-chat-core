@@ -47,7 +47,8 @@ class FakeHost {
   startsOnInstall = true
   /** `nvidia-ctk` writes the file; set to false to model it leaving the file untouched. */
   ctkWrites = true
-  failures: Record<string, { code: number | null; stderr: string }> = {}
+  /** Command-line prefix → the answer every command starting with it gets instead. */
+  failures: Record<string, { code: number | null; stdout?: string; stderr: string }> = {}
   calls: string[][] = []
   fetched: string[] = []
   invokingUid: string | null = '1000'
@@ -61,8 +62,6 @@ class FakeHost {
       'nvidia-container-runtime-hook <= 1.4.0-2',
     ],
   }
-  /** Capabilities provided by installed packages under another name (capability → package). */
-  provides: Record<string, string> = { containerd: 'containerd.io', runc: 'containerd.io' }
 
   /** Commands the executor marked long-running (package installs get their own timeout). */
   longRunning: string[] = []
@@ -72,24 +71,23 @@ class FakeHost {
     if (options?.longRunning) this.longRunning.push(argv.join(' '))
     const line = argv.join(' ')
     for (const [prefix, failure] of Object.entries(this.failures))
-      if (line.startsWith(prefix)) return { code: failure.code, stdout: '', stderr: failure.stderr }
+      if (line.startsWith(prefix)) return { stdout: '', ...failure }
     const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' })
     const no = (code = 1) => ({ code, stdout: '', stderr: '' })
     const [program, sub] = argv
+    // What dpkg-query and rpm really print under LC_ALL=C, "not installed" included.
     if (program === 'dpkg-query') {
       const name = argv[3]!
-      return this.packages.has(name) ? ok('install ok installed') : no()
+      if (this.packages.has(name)) return ok('install ok installed')
+      return { code: 1, stdout: '', stderr: `dpkg-query: no packages found matching ${name}\n` }
     }
-    if (program === 'rpm' && argv[2] === '--whatprovides') {
-      const capability = argv[4]!
-      if (this.packages.has(capability)) return ok(`${capability}\n`)
-      const provider = this.provides[capability]
-      if (provider !== undefined && this.packages.has(provider)) return ok(`${provider}\n`)
-      return { code: 1, stdout: `no package provides ${capability}\n`, stderr: '' }
+    if (program === 'rpm') {
+      const name = argv[3]!
+      if (this.packages.has(name)) return ok(`${name}\n`)
+      return { code: 1, stdout: `package ${name} is not installed\n`, stderr: '' }
     }
-    if (program === 'rpm') return this.packages.has(argv[3]!) ? ok() : no()
     if (program === 'dnf' && sub === 'repoquery')
-      return ok(`${(this.obsoletesOf[argv[5]!] ?? []).join('\n')}\n`)
+      return ok(`${(this.obsoletesOf[argv.at(-1)!] ?? []).join('\n')}\n`)
     if (program === 'apt-get' && sub === 'update') return ok()
     if ((program === 'apt-get' || program === 'dnf') && sub === 'install') {
       const names = argv.filter((a, i) => i > 1 && !a.startsWith('-') && !a.includes('::'))
@@ -572,30 +570,49 @@ describe('never over or around what is already there', () => {
 
   describe('the live Obsoletes check on dnf', () => {
     it.each<[string, string, ContainerRuntimeComponent[]]>([
-      // Installed under another name, so the static name list cannot see them.
-      ['runc', 'runc-legacy', ['docker-engine']],
-      ['containerd', 'containerd-compat', ['docker-engine']],
-      ['nvidia-container-runtime', 'nvidia-container-runtime-compat', ['nvidia-container-toolkit']],
-      ['nvidia-container-runtime-hook', 'libnvidia-container-hook-old', ['nvidia-container-toolkit']],
+      // Obsoleted in the repositories but on no static list: only the live check can see them.
+      ['docker-ce', 'docker-compose-legacy', ['docker-engine']],
+      ['containerd.io', 'containerd-shim-legacy', ['docker-engine']],
+      ['nvidia-container-toolkit', 'nvidia-docker2', ['nvidia-container-toolkit']],
+      [
+        'nvidia-container-toolkit',
+        'nvidia-container-hook-old',
+        ['docker-engine', 'nvidia-container-toolkit'],
+      ],
     ])(
-      '%s provided by %s: refused before installing, nothing removed',
-      async (capability, provider, components) => {
+      '%s obsoletes installed %s: refused before installing, nothing removed',
+      async (installing, obsoleted, components) => {
         const host = new FakeHost()
         host.startsOnInstall = false
-        host.packages.add(provider)
-        host.provides[capability] = provider
+        host.packages.add(obsoleted)
+        host.obsoletesOf[installing] = [...host.obsoletesOf[installing]!, `${obsoleted} < 2.0`]
         const result = await run(host, requestFor(fedora(components)))
         const packages = result.steps.find((s) => s.id === 'packages')!
         expect(packages).toMatchObject({ status: 'failed' })
-        expect(packages.detail).toContain(`${capability} is provided by installed ${provider}`)
+        expect(packages.detail).toContain(
+          `${obsoleted} is installed, and installing ${installing} would replace it (RPM Obsoletes)`
+        )
         expect(packages.detail).toMatch(/Nothing was installed and nothing was removed/)
         expect(host.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
       }
     )
 
-    it('a capability one of the recipe’s own installed packages provides is not a conflict', async () => {
-      // containerd.io provides and obsoletes `containerd`; with it already installed, finishing
-      // docker-ce must not be refused over containerd.io itself.
+    it('asks rpm about the obsoleted name only, so a package merely providing it is no conflict', async () => {
+      // nvidia-container-toolkit-base provides `nvidia-container-runtime` but is not named that;
+      // libsolv matches Obsoletes against names, so the install would not replace it.
+      const host = new FakeHost()
+      host.startsOnInstall = false
+      host.packages.add('nvidia-container-toolkit-base')
+      const result = await run(host, requestFor(fedora(['nvidia-container-toolkit'])))
+      expect(result.outcome).toBe('completed')
+      const rpm = host.calls.filter(([program]) => program === 'rpm').map((argv) => argv.join(' '))
+      expect(rpm).toContain('rpm --query --queryformat=%{NAME}\\n nvidia-container-runtime')
+      expect(rpm.every((line) => line.startsWith('rpm --query --queryformat=%{NAME}\\n '))).toBe(true)
+    })
+
+    it('a recipe package already installed is never read as what the install would replace', async () => {
+      // containerd.io both provides and obsoletes `containerd`; a name-only query of `containerd`
+      // does not see containerd.io, so finishing docker-ce is not refused over it.
       const host = new FakeHost()
       host.startsOnInstall = false
       host.packages.add('containerd.io')
@@ -606,33 +623,99 @@ describe('never over or around what is already there', () => {
       ])
       // Only the packages still to install are asked about.
       expect(
-        host.calls.filter(([program, sub]) => program === 'dnf' && sub === 'repoquery').map((c) => c[5])
+        host.calls.filter(([program, sub]) => program === 'dnf' && sub === 'repoquery').map((c) => c.at(-1))
       ).toEqual(['docker-ce', 'docker-ce-cli'])
     })
 
-    it('an rpm that cannot answer whether a capability is provided fails the step', async () => {
-      const host = new FakeHost()
-      host.failures['rpm --query --whatprovides'] = { code: null, stderr: 'rpm: database locked' }
-      const result = await run(host, requestFor(fedora(['nvidia-container-toolkit'])))
-      expect(result.steps.find((s) => s.id === 'packages')).toMatchObject({
-        status: 'failed',
-        detail: expect.stringMatching(/could not check whether anything provides nvidia-container-runtime/),
-      })
-      expect(host.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
-    })
-
-    it('a repoquery that fails, or prints something that is not a capability, fails the step', async () => {
+    it('a repoquery that fails, or prints something that is not a package name, fails the step', async () => {
       const failing = new FakeHost()
       failing.failures['dnf repoquery'] = { code: 1, stderr: 'Failed to download metadata' }
       const failed = await run(failing, requestFor(fedora(['nvidia-container-toolkit'])))
       expect(failed.steps.find((s) => s.id === 'packages')).toMatchObject({ status: 'failed', exit_code: 1 })
       expect(failing.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
 
-      const odd = new FakeHost()
-      odd.obsoletesOf['nvidia-container-toolkit'] = ['-rf /']
-      const refused = await run(odd, requestFor(fedora(['nvidia-container-toolkit'])))
-      expect(refused.steps.find((s) => s.id === 'packages')!.detail).toMatch(/not a package capability/)
-      expect(odd.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
+      for (const line of ['-rf /', 'config(nvidia-container-toolkit) < 2']) {
+        const odd = new FakeHost()
+        odd.obsoletesOf['nvidia-container-toolkit'] = [line]
+        const refused = await run(odd, requestFor(fedora(['nvidia-container-toolkit'])))
+        expect(refused.steps.find((s) => s.id === 'packages')!.detail).toMatch(/not a package name/)
+        expect(odd.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
+      }
+    })
+  })
+
+  describe('a package query that does not answer "not installed" in so many words fails closed', () => {
+    const RPMDB = 'error: cannot open Packages database in /var/lib/rpm'
+    const rpmQuery = (name: string) => `rpm --query --queryformat=%{NAME}\\n ${name}`
+    // Each case breaks one query. The step must fail with nothing installed: a broken query is never
+    // read as "not installed", which would let a conflict slip through or an install run blind.
+    it.each<{
+      name: string
+      broken: string
+      components: ContainerRuntimeComponent[]
+      answer: { code: number | null; stdout?: string; stderr: string }
+    }>([
+      {
+        name: 'rpm cannot open its database: is a recipe package installed?',
+        broken: rpmQuery('nvidia-container-toolkit'),
+        components: ['nvidia-container-toolkit'],
+        answer: { code: 1, stderr: RPMDB },
+      },
+      {
+        name: 'rpm cannot open its database: is a conflict installed?',
+        broken: rpmQuery('moby-engine'),
+        components: ['docker-engine'],
+        answer: { code: 1, stderr: RPMDB },
+      },
+      {
+        name: 'rpm cannot open its database: is a name the repositories obsolete installed?',
+        broken: rpmQuery('nvidia-docker2'),
+        components: ['nvidia-container-toolkit'],
+        answer: { code: 1, stderr: RPMDB },
+      },
+      {
+        name: 'rpm could not run at all',
+        broken: 'rpm',
+        components: ['nvidia-container-toolkit'],
+        answer: { code: null, stderr: 'spawn rpm ENOENT' },
+      },
+      {
+        name: 'rpm exits 1 with a reply other than "package <name> is not installed"',
+        broken: rpmQuery('nvidia-container-toolkit'),
+        components: ['nvidia-container-toolkit'],
+        answer: { code: 1, stdout: 'package nvidia-container-toolkit is locked\n', stderr: '' },
+      },
+      {
+        name: 'rpm answers with another package than the one asked about',
+        broken: rpmQuery('nvidia-container-toolkit'),
+        components: ['nvidia-container-toolkit'],
+        answer: { code: 0, stdout: 'nvidia-container\n', stderr: '' },
+      },
+      {
+        name: 'dpkg-query fails outright',
+        broken: 'dpkg-query',
+        components: ['nvidia-container-toolkit'],
+        answer: { code: 2, stderr: 'dpkg-query: error: parsing file /var/lib/dpkg/status' },
+      },
+      {
+        name: 'dpkg-query exits 1 without saying the package is unknown',
+        broken: 'dpkg-query --show --showformat=${Status} docker.io',
+        components: ['docker-engine'],
+        answer: { code: 1, stderr: '' },
+      },
+    ])('$name', async ({ broken, components, answer }) => {
+      const host = new FakeHost()
+      host.obsoletesOf['nvidia-container-toolkit']!.push('nvidia-docker2 < 2.0')
+      host.failures[broken] = answer
+      const plan = broken.startsWith('dpkg') ? ubuntu(components) : fedora(components)
+      const result = await run(host, requestFor(plan))
+      expect(result.steps.find((s) => s.id === 'packages')).toMatchObject({
+        status: 'failed',
+        exit_code: answer.code,
+        detail: expect.stringMatching(/^could not tell whether \S+ is installed$/),
+      })
+      expect(host.calls.some(([, sub]) => sub === 'install')).toBe(false)
+      expect(host.calls.some((argv) => argv.join(' ').startsWith(broken))).toBe(true)
     })
   })
 

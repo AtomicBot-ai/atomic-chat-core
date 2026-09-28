@@ -17,6 +17,7 @@ add a new one that says which record it supersedes.
 - **2026-09-28** — [Bump core to 0.7.0 for the TensorRT-LLM descriptor gate](2026-09-28-bump-core-to-0-7-0-for-the-tensorrt-llm-descriptor-gate.md)
 - **2026-09-28** — [tensorrt-llm model check: a fixed KV-cache reserve fraction, and unified memory ranks as zero for GPU selection](2026-09-28-tensorrt-llm-model-check-kv-reserve-and-gpu-selection.md)
 - **2026-09-28** — [Linux probe drops docker-group tracking; the install recipe always pairs enable+group](2026-09-28-linux-probe-drops-docker-group-tracking-and-recipe-blocks-pair.md)
+- **2026-09-28** — [Host-step executor fix round 4: name-only, fail-closed package queries](2026-09-28-host-step-executor-fix-round-4.md) — supersedes round 3's rpm query shapes, its recipe-package exclusion and its `-y`/read-only claims.
 - **2026-09-28** — [Host-step executor fix round 3: live Obsoletes check, /proc/self/fd folder pinning](2026-09-28-host-step-executor-fix-round-3.md) — supersedes round 2's `--setopt=obsoletes=False` claim and its residual-race text.
 - **2026-09-28** — [Host-step executor fix round 2: dnf Obsoletes, user-owned folders only, bounded kill](2026-09-28-host-step-executor-fix-round-2.md) — supersedes the round-1 record's dnf and residual-race statements.
 - **2026-09-28** — [Host-step executor fix round 1: trusted folders, --no-remove, own-property lookups](2026-09-28-host-step-executor-fix-round-1.md) — amends the host-step executor record below; states what `recipe_digest` covers.

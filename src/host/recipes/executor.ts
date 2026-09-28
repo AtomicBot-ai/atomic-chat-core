@@ -20,11 +20,10 @@ import {
   INSTALL_CONTAINER_RUNTIME_RECIPE,
   INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
   INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
-  RECIPE_PACKAGES,
   assertPermittedCommand,
   buildInstallContainerRuntimeSteps,
   installContainerRuntimeParametersDigest,
-  isPackageCapability,
+  isPackageName,
   validateInstallContainerRuntimeParameters,
 } from './install-container-runtime.js'
 import type { HostRecipeStep } from './install-container-runtime.js'
@@ -175,16 +174,44 @@ async function writeSource(
   return { status: 'applied', detail: `wrote ${step.path}` }
 }
 
+/**
+ * Whether a package of exactly `query.package`'s name is installed. Only the package manager's own
+ * "not installed" answer means no (the recipe runs it with `LC_ALL=C`, so the wording is fixed).
+ * Anything else — an rpm database it cannot open, a lock, a command that did not run, a reply this
+ * does not recognise — fails the step: read as "absent", it would let a conflict slip past the
+ * checks before an install.
+ */
 async function isInstalled(
   context: RunContext,
   query: { package: string; argv: string[] }
 ): Promise<boolean> {
   const output = await run(context, query.argv)
-  if (output.code === null)
-    throw new StepFailure(`could not check whether ${query.package} is installed`, null, output.stderr)
-  // `dpkg-query` prints "install ok installed"; `rpm --quiet` prints nothing.
-  const status = output.stdout.trim()
-  return output.code === 0 && (status === '' || status.split(/\s+/).pop() === 'installed')
+  const stdout = output.stdout.trim()
+  const stderr = output.stderr.trim()
+  if (query.argv[0] === 'rpm') {
+    // `rpm --query --queryformat=%{NAME}\n <name>`: the name once per installed version, or exit 1
+    // with "package <name> is not installed" on stdout and nothing on stderr.
+    if (
+      output.code === 0 &&
+      stdout !== '' &&
+      stdout.split('\n').every((line) => line.trim() === query.package)
+    )
+      return true
+    if (output.code === 1 && stderr === '' && stdout === `package ${query.package} is not installed`)
+      return false
+  } else {
+    // `dpkg-query --show --showformat=${Status} <name>`: "<want> <error> <status>" for a package dpkg
+    // knows (installed only when the status is `installed`), or exit 1 and "no packages found
+    // matching <name>" on stderr for one it has never seen.
+    if (output.code === 0 && stdout !== '') return stdout.split(/\s+/).pop() === 'installed'
+    if (
+      output.code === 1 &&
+      stdout === '' &&
+      stderr === `dpkg-query: no packages found matching ${query.package}`
+    )
+      return false
+  }
+  throw new StepFailure(`could not tell whether ${query.package} is installed`, output.code, output.stderr)
 }
 
 async function installPackages(
@@ -215,9 +242,12 @@ async function installPackages(
 
 /**
  * dnf honours RPM `Obsoletes` on every install and no option turns that off, so before installing,
- * ask the configured repositories what each missing package obsoletes and refuse if anything
- * installed — other than the recipe's own packages — provides one of those capabilities. Read-only:
- * `dnf repoquery` and `rpm --query` change nothing.
+ * ask the configured repositories what each missing package obsoletes and refuse if a package of
+ * any of those names is installed. By name only: libsolv matches Obsoletes against package names,
+ * never against what a package provides. Nothing is installed or removed here, but `dnf repoquery`
+ * refreshes dnf's metadata cache and, with `-y`, accepts repository signing keys the install would
+ * accept too (see the recipe's `dnf.obsoletes`). Only the recipe's own packages are asked about,
+ * not the dependencies the install pulls in.
  */
 async function refuseObsoletedPackages(
   context: RunContext,
@@ -233,36 +263,24 @@ async function refuseObsoletedPackages(
         answer.code,
         answer.stderr
       )
-    const capabilities = new Set<string>()
+    const names = new Set<string>()
     for (const line of answer.stdout.split('\n')) {
       const trimmed = line.trim()
       if (trimmed === '') continue
-      // "name <= version": the capability is the first word; the constraint is dropped, so any
-      // installed provider counts, whatever its version.
-      const capability = trimmed.split(/\s+/)[0]!
-      if (!isPackageCapability(capability))
+      // "name <= version": the name is the first word; the constraint is dropped, so an installed
+      // package of that name counts whatever its version.
+      const name = trimmed.split(/\s+/)[0]!
+      if (!isPackageName(name))
         throw new StepFailure(
-          `dnf repoquery printed ${JSON.stringify(trimmed.slice(0, 80))} for ${query.package}, which is not a package capability`
+          `dnf repoquery printed ${JSON.stringify(trimmed.slice(0, 80))} for ${query.package}, which is not a package name`
         )
-      capabilities.add(capability)
+      names.add(name)
     }
-    for (const capability of capabilities) {
-      const providers = await run(context, [...obsoletes.provides, capability])
-      if (providers.code === null)
+    for (const name of names) {
+      if (await isInstalled(context, { package: name, argv: [...obsoletes.installed, name] }))
         throw new StepFailure(
-          `could not check whether anything provides ${capability}`,
-          null,
-          providers.stderr
-        )
-      if (providers.code !== 0) continue // rpm: "no package provides ..."
-      const foreign = providers.stdout
-        .split('\n')
-        .map((name) => name.trim())
-        .filter((name) => name !== '' && !RECIPE_PACKAGES.has(name))
-      if (foreign.length > 0)
-        throw new StepFailure(
-          `${capability} is provided by installed ${[...new Set(foreign)].join(', ')}, and installing ` +
-            `${query.package} would replace it (RPM Obsoletes). Nothing was installed and nothing was removed.`
+          `${name} is installed, and installing ${query.package} would replace it (RPM Obsoletes). ` +
+            'Nothing was installed and nothing was removed.'
         )
     }
   }

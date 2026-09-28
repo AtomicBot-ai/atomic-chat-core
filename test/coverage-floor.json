@@ -583,7 +583,7 @@
   },
   "src/host/recipes/executor.ts": {
     "statements": 100,
-    "branches": 96,
+    "branches": 97,
     "functions": 100,
     "lines": 100
   },

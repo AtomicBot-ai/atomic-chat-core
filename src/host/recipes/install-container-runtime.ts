@@ -22,10 +22,16 @@
  *   `obsoletes=False` only changes candidate selection). containerd.io obsoletes `containerd` and
  *   `runc`, older docker-ce releases obsolete `docker-ce-selinux`, and nvidia-container-toolkit
  *   obsoletes old `nvidia-container-runtime` and `nvidia-container-runtime-hook`. So two checks run
- *   before any dnf install, and either refuses it: a static per-component conflict list (installed
- *   by those names), and a live, read-only one — `dnf repoquery --obsoletes <package>` for each
- *   package still to install, then `rpm --query --whatprovides <capability>` for each capability it
- *   obsoletes. An installed provider other than the recipe's own packages is refused, never replaced.
+ *   before any dnf install, and either refuses it: a static per-component conflict list, and a live
+ *   one — `dnf repoquery --obsoletes <package>` for each package still to install, then
+ *   `rpm --query <name>` for each name it obsoletes. Both ask rpm by package name only, because
+ *   libsolv matches Obsoletes against names, not against what a package provides. An installed
+ *   package of such a name is refused, never replaced. Only the packages the recipe names are
+ *   queried, not the dependencies the install pulls in (nvidia-container-toolkit-base, which the
+ *   toolkit requires, repeats the toolkit's Obsoletes).
+ * - **A package query fails closed.** A package counts as absent only when `rpm` or `dpkg-query`
+ *   says so in its own words; a database it cannot open, a lock or any other reply fails the step,
+ *   so a broken query can never make a conflict look absent.
  *
  * What `recipe_digest` covers: everything in `INSTALL_CONTAINER_RUNTIME_RECIPE` — argv templates,
  * paths, URLs, key fingerprints, file bodies, modes, the environment, the conflict lists. What it
@@ -246,19 +252,30 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
         },
       },
     },
-    installed: ['rpm', '--query', '--quiet', '{{package}}'],
+    /**
+     * Whether a package of exactly this name is installed: its name once per installed version, or
+     * exit 1 and "package <name> is not installed" (no `--quiet`, which would hide that answer). The
+     * `\\n` is the two characters rpm's query format expands itself, as a shell would pass `'%{NAME}\\n'`.
+     */
+    installed: ['rpm', '--query', '--queryformat=%{NAME}\\n', '{{package}}'],
     /** No option here stops RPM `Obsoletes`; the two checks above the install do (see header). */
     install: ['dnf', 'install', '-y', '--setopt=install_weak_deps=False'],
     /**
-     * Read-only: what a package from the configured repos `Obsoletes`, one capability per line
-     * (`-y` only lets dnf import the repository key this recipe pinned, as the install would).
+     * What a package from the configured repos `Obsoletes`, one per line. It installs and removes
+     * nothing, but it is not free of effects: it refreshes dnf's metadata cache, and `-y` accepts the
+     * import of the signing key of every enabled repository that has `repo_gpgcheck` on — the same
+     * keys, and the same prompt, the install itself would answer. `skip_if_unavailable=False`: a
+     * repository that cannot be read fails the query instead of being skipped into an empty answer.
      */
-    obsoletes: ['dnf', 'repoquery', '--quiet', '-y', '--obsoletes', '{{package}}'],
-    /**
-     * Read-only: the names of installed packages that provide a capability. The `\\n` is the two
-     * characters rpm's query format expands itself, exactly as a shell would pass `'%{NAME}\\n'`.
-     */
-    provides: ['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n'],
+    obsoletes: [
+      'dnf',
+      'repoquery',
+      '--quiet',
+      '-y',
+      '--setopt=skip_if_unavailable=False',
+      '--obsoletes',
+      '{{package}}',
+    ],
     /**
      * Per component: Docker's Fedora guide has the first twelve removed first; the rest are what the
      * component's packages `Obsolete` (containerd.io: containerd, runc; older docker-ce releases:
@@ -488,10 +505,10 @@ export type HostRecipeStep =
       }[]
       /**
        * dnf only (null on apt, where `--no-remove` makes apt fail instead): per package still to
-       * install, the read-only query for what it obsoletes, and the prefix that asks which installed
-       * packages provide one of those capabilities (the capability is appended).
+       * install, the query for what it obsoletes, and the prefix that asks whether a package of an
+       * obsoleted name is installed (the name is appended).
        */
-      obsoletes: { queries: { package: string; argv: string[] }[]; provides: string[] } | null
+      obsoletes: { queries: { package: string; argv: string[] }[]; installed: string[] } | null
       refresh: string[][]
       /** Without package names: the executor appends only the ones still missing. */
       install: string[]
@@ -587,7 +604,8 @@ export function buildInstallContainerRuntimeSteps(
                 package: name,
                 argv: argv(recipe.dnf.obsoletes, { package: name }),
               })),
-              provides: [...recipe.dnf.provides],
+              // The presence query without its trailing `{{package}}`: the executor appends each name.
+              installed: recipe.dnf.installed.slice(0, -1),
             }
           : null,
       install: [...family.install],
@@ -645,7 +663,7 @@ export function commandsOf(step: HostRecipeStep): string[][] {
           ? []
           : [
               ...step.obsoletes.queries.map((query) => query.argv),
-              [...step.obsoletes.provides, 'capability'],
+              [...step.obsoletes.installed, 'obsoleted-name'],
             ]),
         ...step.refresh,
         [...step.install, ...step.packages],
@@ -663,18 +681,20 @@ export function commandsOf(step: HostRecipeStep): string[][] {
 // The allowlist every command passes before it runs
 // ---------------------------------------------------------------------------------------------
 
-/** Every package the recipe itself installs: never a conflict with itself. */
+/** Every package the recipe itself installs: the only ones `dnf repoquery` is asked about. */
 export const RECIPE_PACKAGES: ReadonlySet<string> = new Set([
   ...INSTALL_CONTAINER_RUNTIME_RECIPE.packages['docker-engine'],
   ...INSTALL_CONTAINER_RUNTIME_RECIPE.packages['nvidia-container-toolkit'],
 ])
 
 const PACKAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}$/
-const CAPABILITY = /^[A-Za-z0-9_/][A-Za-z0-9._+:()/-]{0,255}$/
 
-/** An RPM capability as `dnf repoquery` prints it, without its version constraint; never an option. */
-export function isPackageCapability(value: string): boolean {
-  return CAPABILITY.test(value)
+/**
+ * A package name — what an RPM `Obsoletes` names, as `dnf repoquery` prints it without its version
+ * constraint. Never an option, a path or any other kind of capability.
+ */
+export function isPackageName(value: string): boolean {
+  return PACKAGE_NAME.test(value)
 }
 
 /** Words that remove or upgrade. None may appear in any argument of any command. */
@@ -729,27 +749,24 @@ export function assertPermittedCommand(argv: readonly string[]): void {
     refuse('apt-get update must be restricted to one source list')
   if (program === 'apt-get' && first === 'install' && !argv.includes('--no-remove'))
     refuse('apt-get install must carry --no-remove, so the resolver can never remove a package')
-  // The read-only queries are allowed in exactly the shapes the recipe builds, and nothing else.
+  // The queries (they install and remove nothing) are allowed in exactly the shapes the recipe
+  // builds, and nothing else.
   if (program === 'dnf' && first === 'repoquery') {
     const [, , ...rest] = argv
-    const target = rest[3]
+    const target = rest[4]
     if (
-      rest.length !== 4 ||
-      rest.slice(0, 3).join(' ') !== '--quiet -y --obsoletes' ||
+      rest.length !== 5 ||
+      rest.slice(0, 4).join(' ') !== '--quiet -y --setopt=skip_if_unavailable=False --obsoletes' ||
       target === undefined ||
       !RECIPE_PACKAGES.has(target)
     )
       refuse('dnf repoquery is only ever asked what one of the recipe’s packages obsoletes')
   }
-  if (program === 'rpm') {
-    const quiet = argv.length === 4 && argv[2] === '--quiet' && PACKAGE_NAME.test(argv[3] as string)
-    const provides =
-      argv.length === 5 &&
-      argv[2] === '--whatprovides' &&
-      argv[3] === '--queryformat=%{NAME}\\n' &&
-      isPackageCapability(argv[4] as string)
-    if (!quiet && !provides) refuse('rpm is only ever asked whether a package or capability is installed')
-  }
+  if (
+    program === 'rpm' &&
+    !(argv.length === 4 && argv[2] === '--queryformat=%{NAME}\\n' && isPackageName(argv[3] as string))
+  )
+    refuse('rpm is only ever asked whether a package of one exact name is installed')
   if (program === 'usermod' && (argv[2] !== 'docker' || argv.length !== 4 || argv[3] === 'root'))
     refuse('usermod only ever adds a non-root user to docker')
   if (program === 'docker' && argv.join(' ') !== 'docker info --format {{json .Runtimes}}')

@@ -72,9 +72,11 @@ describe('running a probe command', () => {
     expect(Date.now() - started).toBeLessThan(4_000)
   })
 
-  it('destroys its end of the pipes after answering, so root can exit while a grandchild holds them', async () => {
-    // A child that ignores SIGTERM, exits on SIGKILL, and whose pipes never close (a grandchild
-    // still holds them): the answer comes, and our ends of the pipes are released.
+  /**
+   * A child that ignores SIGTERM, exits on SIGKILL, and whose pipes never close (a grandchild still
+   * holds them), so `close` never fires.
+   */
+  function childWhosePipesNeverClose() {
     const emitter = new EventEmitter()
     const signals: string[] = []
     const stdout = new PassThrough()
@@ -89,9 +91,23 @@ describe('running a probe command', () => {
       },
     })
     const spawnProcess = (() => child) as unknown as NonNullable<HostExecOptions['spawnProcess']>
+    return { signals, stdout, stderr, spawnProcess }
+  }
+
+  it('destroys its end of the pipes after answering, so root can exit while a grandchild holds them', async () => {
+    const { signals, stdout, stderr, spawnProcess } = childWhosePipesNeverClose()
     const answer = await hostExec({ timeoutMs: 20, terminateGraceMs: 20, spawnProcess })(node, [])
     expect(answer.code).toBeNull()
     expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(stdout.destroyed).toBe(true)
+    expect(stderr.destroyed).toBe(true)
+  })
+
+  it('without a grace period too: kills, answers, and releases its end of the pipes', async () => {
+    const { signals, stdout, stderr, spawnProcess } = childWhosePipesNeverClose()
+    const answer = await hostExec({ timeoutMs: 20, spawnProcess })(node, [])
+    expect(answer).toEqual({ code: null, stdout: '', stderr: 'timed out after 20 ms' })
+    expect(signals).toEqual(['SIGKILL'])
     expect(stdout.destroyed).toBe(true)
     expect(stderr.destroyed).toBe(true)
   })
