@@ -5,10 +5,19 @@
  * container/Docker wiring that would run it for real is task 2.8/2.12's job, not this one's).
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile as fsWriteFile } from 'node:fs/promises'
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile as fsWriteFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
   DEFAULT_WATCHDOG_KILL_GRACE_SECS,
@@ -254,6 +263,12 @@ describe('writeWatchdogScript', () => {
     try {
       const target = join(dir, 'real.sh')
       await fsWriteFile(target, WATCHDOG_SCRIPT)
+      // Item 5 (findings-2.9-r3): also give the target itself mode 0555 — content alone left the
+      // mode check able to "accidentally" pass this test even if the code regressed to `stat` (which
+      // follows the symlink) instead of `lstat`, since the target's default mode wouldn't match
+      // WATCHDOG_SCRIPT_MODE either way. Matching the target's mode too means only the `lstat`
+      // (symlink-vs-regular-file) check itself can be what makes this test replace the link.
+      await chmod(target, WATCHDOG_SCRIPT_MODE)
       const link = join(dir, 'link.sh')
       await symlink(target, link)
 
@@ -302,6 +317,18 @@ const TERM_IGNORING_ENGINE =
   'process.on("SIGTERM", () => {}); ' +
   'setInterval(() => {}, 1000)'
 
+/** Writes the exact Date.now() it received SIGTERM at, then exits cleanly — for timing the watchdog's
+ *  own signal-forwarding latency against real wall-clock time, not against its own process exit. */
+const TERM_TIMESTAMP_ENGINE =
+  'const fs = require("fs"); fs.writeFileSync(process.argv[1], String(process.pid)); ' +
+  'process.on("SIGTERM", () => { fs.writeFileSync(process.argv[2], String(Date.now())); process.exit(0) }); ' +
+  'setInterval(() => {}, 1000)'
+
+/** Exits on its own, with a distinctive code, after `delayMs` — used to land inside a poll that is
+ *  also about to turn out stale, so a test can check whose exit status wins. */
+const selfExitingEngine = (delayMs: number, code: number): string =>
+  `require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(${code}), ${delayMs})`
+
 interface RunResult {
   code: number | null
   signal: NodeJS.Signals | null
@@ -330,7 +357,23 @@ function runWatchdog(
   return { child, done }
 }
 
+/**
+ * `Number(text)` on a pid file is never used directly anywhere below — only through this. A pid file
+ * read mid-write (Node's `writeFileSync` truncates before it writes, so a reader can catch it exactly
+ * between those two steps) reads back as `''`, and `Number('')` is `0`, not `NaN`: an unguarded
+ * `Number(text.trim())` therefore silently produces a *valid-looking* pid of 0 for a file that is
+ * simply not finished being written yet (findings-2.9-r3 item 1, reproduced by the reviewer). Signal
+ * 0 is not "no such process" to `kill()` — POSIX defines pid 0 as "every process in the caller's own
+ * process group", so `process.kill(0, 'SIGKILL')` kills the entire vitest process group, not a fake
+ * engine. Every pid this file signals goes through this parser and is checked for `> 0` first.
+ */
+function parseValidPid(text: string): number | undefined {
+  const pid = Number(text.trim())
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined
+}
+
 async function pidAlive(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
     return true
@@ -340,22 +383,22 @@ async function pidAlive(pid: number): Promise<boolean> {
 }
 
 /**
- * Kills the fake engine directly by its own pid, if the pid file exists. `child.kill()` alone only
- * kills the spawned watchdog *shell*; SIGKILL never propagates to a shell's own background children
- * (there is no chance for it to clean up after itself), so a test that deliberately leaves the engine
- * running (to assert it survives) and then SIGKILLs the watchdog for cleanup orphans that engine
- * process. Best-effort and silent: the pid file may not exist, and the process may already be dead.
+ * Kills the fake engine directly by its own pid, if the pid file exists and holds a valid pid yet.
+ * `child.kill()` alone only kills the spawned watchdog *shell*; SIGKILL never propagates to a shell's
+ * own background children (there is no chance for it to clean up after itself), so a test that
+ * deliberately leaves the engine running (to assert it survives) and then SIGKILLs the watchdog for
+ * cleanup orphans that engine process. Best-effort and silent otherwise: the pid file may not exist
+ * yet, may not be fully written yet (see `parseValidPid`), or the process may already be dead.
  */
 async function killEngineIfKnown(pidFile: string): Promise<void> {
   const text = await readFile(pidFile, 'utf8').catch(() => undefined)
   if (text === undefined) return
-  const pid = Number(text.trim())
-  if (Number.isFinite(pid)) {
-    try {
-      process.kill(pid, 'SIGKILL')
-    } catch {
-      // already dead
-    }
+  const pid = parseValidPid(text)
+  if (pid === undefined) return
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    // already dead
   }
 }
 
@@ -379,23 +422,77 @@ async function raceDone(done: Promise<RunResult>, timeoutMs: number): Promise<Ru
 }
 
 /**
- * Reads an engine's pid file, retrying for up to `timeoutMs` instead of throwing on the first
- * ENOENT. Item 7 (findings-2.9-r2): a plain `readFile` right after the watchdog exits assumed the
+ * Reads an engine's pid file, retrying for up to `timeoutMs` instead of throwing on the first ENOENT
+ * — or on the truncate/write race `parseValidPid` guards against (findings-2.9-r3 item 1: the file
+ * existing is not the same as it holding a complete pid yet, and a mid-write empty read used to parse
+ * as pid 0). Item 7 (findings-2.9-r2): a plain `readFile` right after the watchdog exits assumed the
  * engine (a separate, independently-scheduled Node process) had already gotten around to writing its
  * own pid file by then — true almost always, but not guaranteed under a slow/loaded CI host, and a
  * bare ENOENT there threw out of the test instead of failing it with a clear message. Returns
- * `undefined`, rather than throwing, if the file never appears — the caller decides whether that
+ * `undefined`, rather than throwing, if a valid pid never appears — the caller decides whether that
  * itself is a failure.
  */
 async function readPidFileTolerant(path: string, timeoutMs: number): Promise<number | undefined> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const text = await readFile(path, 'utf8').catch(() => undefined)
-    if (text !== undefined) return Number(text.trim())
+    if (text !== undefined) {
+      const pid = parseValidPid(text)
+      if (pid !== undefined) return pid
+    }
     if (Date.now() > deadline) return undefined
     await new Promise((r) => setTimeout(r, 20))
   }
 }
+
+// Item 1 (findings-2.9-r3, Important): deterministic, not a real writeFileSync-race reproduction —
+// forcing the actual truncate→write window is inherently racy, and if the guard genuinely regressed,
+// forcing it for real would call `process.kill(0, 'SIGKILL')` against this very test process's own
+// process group (exactly the bug being tested for). These pin the parsing/guarding logic directly
+// against a pid file holding the exact bogus content that race window produces, with no race needed:
+// `Number('')` and `Number('0')` are both `0`, and POSIX defines `kill(0, sig)` as "every process in
+// the caller's own process group", not "no such process".
+describe('pid-file safety (findings-2.9-r3 item 1)', () => {
+  // Reuses the shared `dir` fixture (module-level `beforeEach`/`afterEach` below, in scope by the
+  // time this describe block runs) rather than declaring its own — same temp-dir-per-test pattern,
+  // no need for a second one.
+  it('never calls process.kill with pid 0 or a negative pid, however the pid file reads', async () => {
+    const pidFile = join(dir, 'engine.pid')
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    try {
+      for (const bogus of ['', '0', '-1', '   ', 'not-a-pid', '0\n', '-0']) {
+        await fsWriteFile(pidFile, bogus)
+        await killEngineIfKnown(pidFile)
+      }
+      expect(await pidAlive(0)).toBe(false)
+      expect(await pidAlive(-5)).toBe(false)
+      expect(killSpy).not.toHaveBeenCalled()
+    } finally {
+      killSpy.mockRestore()
+    }
+  })
+
+  it('readPidFileTolerant retries past an empty pid file instead of returning 0', async () => {
+    const pidFile = join(dir, 'engine.pid')
+    await fsWriteFile(pidFile, '')
+    setTimeout(() => {
+      fsWriteFile(pidFile, '4242').catch(() => {})
+    }, 150)
+
+    const pid = await readPidFileTolerant(pidFile, 2_000)
+
+    expect(pid).toBe(4242)
+  })
+
+  it('readPidFileTolerant returns undefined, not 0, if only an invalid pid ever appears', async () => {
+    const pidFile = join(dir, 'engine.pid')
+    await fsWriteFile(pidFile, '0')
+
+    const pid = await readPidFileTolerant(pidFile, 300)
+
+    expect(pid).toBeUndefined()
+  })
+})
 
 describe.skipIf(!posix)('the watchdog entrypoint script', () => {
   it('lets the engine keep running while the heartbeat stays fresh', async () => {
@@ -425,8 +522,9 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       await waitFor(async () => (await stat(pidFile).catch(() => undefined)) !== undefined, 2_000)
       await new Promise((r) => setTimeout(r, 8_000))
       expect(child.exitCode).toBeNull()
-      const pid = Number((await readFile(pidFile, 'utf8')).trim())
-      expect(await pidAlive(pid)).toBe(true)
+      const pid = await readPidFileTolerant(pidFile, 2_000)
+      expect(pid).toBeDefined()
+      if (pid !== undefined) expect(await pidAlive(pid)).toBe(true)
     } finally {
       clearInterval(tick)
       child.kill('SIGKILL')
@@ -535,14 +633,14 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 30, pollIntervalSecs: 1, killGraceSecs: 1 })
     )
 
-    await waitFor(async () => (await stat(pidFile).catch(() => undefined)) !== undefined, 2_000)
-    const pid = Number((await readFile(pidFile, 'utf8')).trim())
+    const pid = await readPidFileTolerant(pidFile, 2_000)
+    expect(pid).toBeDefined()
     child.kill('SIGTERM')
 
     const result = await raceDone(done, 6_000)
     expect(result.signal).toBeNull()
     expect(result.code).not.toBe(0)
-    await waitFor(async () => !(await pidAlive(pid)), 2_000)
+    if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 2_000)
   }, 10_000)
 
   // Item 3 (findings-2.9-r1): a malformed timing value must fail closed (exit 96, engine never
@@ -737,11 +835,17 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
   // THRESHOLD, because that first observation already "counted". This reproduces the reviewer's own
   // dash measurement (STALE_LIMIT_SECS=4, POLL_INTERVAL_SECS=2: measured kill 3.09s after the last
   // write, violating the >= 4s guarantee) and fails against the round-1 script for the same reason.
+  // Item 3 (findings-2.9-r3): timestamps TERM receipt at the *engine* (TERM_TIMESTAMP_ENGINE writes
+  // its own Date.now() the instant it gets SIGTERM) rather than timing the watchdog process's exit.
+  // Measuring at the watchdog's exit conflated "how long staleness detection took" with "however long
+  // terminate_engine's own signal-forwarding and reaping then additionally took" — extra, unrelated
+  // latency that could pad the measured gap enough to mask a real violation of the >= L guarantee.
   it('never kills sooner than STALE_LIMIT_SECS after the true last heartbeat write', async () => {
     const scriptPath = join(dir, 'entrypoint.sh')
     await writeWatchdogScript(scriptPath)
     const heartbeatPath = join(dir, 'heartbeat')
     const pidFile = join(dir, 'engine.pid')
+    const termTimestampFile = join(dir, 'term-timestamp')
     await fsWriteFile(heartbeatPath, '')
 
     const staleLimitSecs = 4
@@ -750,11 +854,12 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
 
     const { done } = runWatchdog(
       scriptPath,
-      [process.execPath, '-e', LONG_LIVED_ENGINE, pidFile],
+      [process.execPath, '-e', TERM_TIMESTAMP_ENGINE, pidFile, termTimestampFile],
       watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs, pollIntervalSecs, killGraceSecs })
     )
 
-    await waitFor(async () => (await stat(pidFile).catch(() => undefined)) !== undefined, 2_000)
+    const enginePid = await readPidFileTolerant(pidFile, 2_000)
+    expect(enginePid).toBeDefined()
 
     let lastWriteAt = 0
     const tick = setInterval(() => {
@@ -772,15 +877,16 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
 
     const budgetMs = (staleLimitSecs + pollIntervalSecs * 2 + 5) * 1000
     const result = await raceDone(done, budgetMs)
-    const killedAt = Date.now()
 
     expect(result.code).toBe(WATCHDOG_EXIT_CODE_STALE_HEARTBEAT)
-    const elapsedFromLastWriteSecs = (killedAt - lastWriteAt) / 1000
+    const termTimestampText = await readFile(termTimestampFile, 'utf8')
+    const termReceivedAt = Number(termTimestampText.trim())
+    expect(Number.isFinite(termReceivedAt)).toBe(true)
+
+    const elapsedFromLastWriteSecs = (termReceivedAt - lastWriteAt) / 1000
     // Small measurement slack for scheduling/process overhead, not for correctness margin.
     expect(elapsedFromLastWriteSecs).toBeGreaterThanOrEqual(staleLimitSecs - 0.3)
-    expect(elapsedFromLastWriteSecs).toBeLessThanOrEqual(
-      staleLimitSecs + pollIntervalSecs + killGraceSecs + 3
-    )
+    expect(elapsedFromLastWriteSecs).toBeLessThanOrEqual(staleLimitSecs + pollIntervalSecs * 2 + 1)
   }, 20_000)
 
   // Item 2 (findings-2.9-r2, new breakage ruled into this round): before the STOPPING guard, a
@@ -841,7 +947,22 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       clearInterval(bombard)
 
       expect(result.code).toBe(WATCHDOG_EXIT_CODE_STALE_HEARTBEAT)
+      // Upper bound: catches the grace clock being restarted (findings-2.9-r2 item 2).
       expect(elapsedSinceBombardStartSecs).toBeLessThanOrEqual(killGraceSecs + 2)
+      // Lower bound: catches the *other* failure mode a per-iteration grace counter had
+      // (findings-2.9-r3 item 2) — each interrupted "sleep 1 & wait $!" still advanced the counter by
+      // a full nominal second regardless of how little real time had elapsed, so a rapid-enough TERM
+      // storm could cut a real killGraceSecs-second grace period down to a small fraction of a second
+      // (confirmed by hand: as low as ~300ms for killGraceSecs=3 under 100ms-spaced TERMs, since only
+      // `killGraceSecs` reentries — not real seconds — were needed). The tolerance here is loose
+      // (`- 2`, not a tight measurement slack) because this bound is not measuring the grace duration
+      // itself: `bombardStart` is captured after a fixed pre-bombard wait, not at the exact instant
+      // `terminate_engine` first set the deadline, and `GRACE_DEADLINE` itself is computed from
+      // whole-second `date +%s`, whose own floor rounding alone lets the real elapsed grace legitimately
+      // land anywhere in `(killGraceSecs - 1, killGraceSecs]` (confirmed by hand: 1.6-2.1s observed for
+      // killGraceSecs=3, well above the ~0.3s a restored per-iteration-counter bug produces, and well
+      // below what `- 2` would flag).
+      expect(elapsedSinceBombardStartSecs).toBeGreaterThanOrEqual(killGraceSecs - 2)
       if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 2_000)
     },
     25_000
@@ -859,7 +980,13 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
   // round-1 script: `[ -n "$ENGINE_PID" ]` sees it still empty, returns early, and the trap exits 0
   // with the engine alive and orphaned.
   it('does not leak the engine when TERM lands in the gap before ENGINE_PID is assigned (widened, deterministic)', async () => {
-    const widenedScript = WATCHDOG_SCRIPT.replace('"$@" &\nENGINE_PID=$!', '"$@" &\nsleep 1\nENGINE_PID=$!')
+    // Item 4 (findings-2.9-r3): widened from 1s to 3s, and TERM is now sent right after the pid file
+    // is observed to exist rather than after a fixed 300ms guess — a slow/loaded CI host could take
+    // longer than 300ms just to fork+exec node and have it write that file, which would send TERM
+    // *after* the widened gap had already closed and made the test flaky rather than meaningful.
+    // Waiting for the pid file instead ties "when to send TERM" to "the engine has actually started",
+    // which holds regardless of host speed, as long as it starts within the 3s window at all.
+    const widenedScript = WATCHDOG_SCRIPT.replace('"$@" &\nENGINE_PID=$!', '"$@" &\nsleep 3\nENGINE_PID=$!')
     expect(widenedScript).not.toBe(WATCHDOG_SCRIPT)
     const scriptPath = join(dir, 'entrypoint-widened.sh')
     await fsWriteFile(scriptPath, widenedScript)
@@ -874,17 +1001,17 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 30, pollIntervalSecs: 5, killGraceSecs: 1 })
     )
 
-    // Comfortably inside the widened 1s gap, well after "$@" & has backgrounded the engine.
-    await new Promise((r) => setTimeout(r, 300))
-    child.kill('SIGTERM')
-
-    const result = await raceDone(done, 5_000)
-    expect(result.code).not.toBe(0)
-
+    // Confirms the engine has actually started (and is therefore inside the widened gap, which does
+    // not close until the script's own "sleep 3" completes) before sending TERM.
     const pid = await readPidFileTolerant(pidFile, 3_000)
     expect(pid).toBeDefined()
+    child.kill('SIGTERM')
+
+    const result = await raceDone(done, 6_000)
+    expect(result.code).not.toBe(0)
+
     if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 2_000)
-  }, 10_000)
+  }, 12_000)
 
   // Item 3 (findings-2.9-r2), end-to-end, best effort: TERM sent as early as this harness can manage
   // after spawn, racing the real (un-widened) script's own boundary directly. This is not a reliable
@@ -922,4 +1049,27 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       }
     }
   }, 90_000)
+
+  // Item 6 (findings-2.9-r3): if the engine happens to exit on its own during the very poll that also
+  // turns out stale, its own exit status must win over 97 — hiding a real crash/OOM behind the
+  // generic stale-heartbeat code would make that failure unreadable from the exit code alone.
+  // staleLimitSecs=1, pollIntervalSecs=1 => THRESHOLD=2, so staleness is declared at the end of the
+  // second poll (~t=2s); the fake engine self-exits at t=1.5s, squarely inside that second poll's
+  // sleep, so by the time the watchdog re-checks liveness it is already gone.
+  it("reports the engine's own exit status when it exits on its own during a poll that is also stale", async () => {
+    const scriptPath = join(dir, 'entrypoint.sh')
+    await writeWatchdogScript(scriptPath)
+    const heartbeatPath = join(dir, 'heartbeat')
+    const pidFile = join(dir, 'engine.pid')
+    await fsWriteFile(heartbeatPath, '')
+
+    const { done } = runWatchdog(
+      scriptPath,
+      [process.execPath, '-e', selfExitingEngine(1_500, 9), pidFile],
+      watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 1, pollIntervalSecs: 1, killGraceSecs: 1 })
+    )
+
+    const result = await raceDone(done, 6_000)
+    expect(result.code).toBe(9)
+  }, 10_000)
 })

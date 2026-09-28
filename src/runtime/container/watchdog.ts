@@ -112,23 +112,36 @@ export const WATCHDOG_SCRIPT_MODE = 0o555
 //    checked explicitly instead.
 //
 //  - Staleness is judged by whether the heartbeat *observation* — its mtime, or the literal
-//    "missing" — has stayed the same for `ceil(STALE_LIMIT_SECS / POLL_INTERVAL_SECS)` consecutive
-//    polls counted from script start, never by comparing that mtime against the current wall clock.
-//    A wall-clock "now - mtime >= limit" check has three real failure modes this avoids: an
-//    unwritable heartbeat directory made the tolerant create's own redirection fail in a way that
-//    used to abort the whole shell before the engine even started (a `: > file` redirection failure
-//    is a *special builtin* error, which POSIX allows a non-interactive shell to treat as fatal); a
-//    leftover heartbeat file from a previous run has an mtime old enough to look already-stale on
-//    the very first poll; and a host clock that jumps (NTP step, VM pause/resume) desyncs "now" from
-//    the mtime it is compared against in either direction. Comparing consecutive observations to
-//    each other sidesteps all three: the file being created late, missing outright, or already old
-//    are just more values that either stay the same (and eventually trip the threshold, exactly
-//    `ceil(limit/poll)` polls after the script itself started watching) or change (and reset the
-//    count), independent of what time it is. The baseline (`PREV_OBSERVATION`) is read exactly once,
-//    right after the tolerant create, and `UNCHANGED_POLLS` starts at 0 and is reset to 0 (not 1) on
-//    every change — the poll that first observes a value establishes the baseline, it does not itself
-//    count as one confirmed-unchanged poll, or `STALE_LIMIT_SECS <= POLL_INTERVAL_SECS` would kill a
-//    heartbeat that was changing on every single poll (findings-2.9-r2 item 1).
+//    "missing" — has stayed the same for `THRESHOLD` consecutive polls counted from script start,
+//    never by comparing that mtime against the current wall clock. A wall-clock "now - mtime >=
+//    limit" check has three real failure modes this avoids: an unwritable heartbeat directory made
+//    the tolerant create's own redirection fail in a way that used to abort the whole shell before
+//    the engine even started (a `: > file` redirection failure is a *special builtin* error, which
+//    POSIX allows a non-interactive shell to treat as fatal); a leftover heartbeat file from a
+//    previous run has an mtime old enough to look already-stale on the very first poll; and a host
+//    clock that jumps (NTP step, VM pause/resume) desyncs "now" from the mtime it is compared against
+//    in either direction. Comparing consecutive observations to each other sidesteps all three: the
+//    file being created late, missing outright, or already old are just more values that either stay
+//    the same (and eventually trip the threshold) or change (and reset the count), independent of
+//    what time it is. The baseline (`PREV_OBSERVATION`) is read exactly once, right after the
+//    tolerant create, and `UNCHANGED_POLLS` starts at 0 and is reset to 0 (not 1) on every change —
+//    the poll that first observes a value establishes the baseline, it does not itself count as one
+//    confirmed-unchanged poll, or `STALE_LIMIT_SECS <= POLL_INTERVAL_SECS` would kill a heartbeat
+//    that was changing on every single poll (findings-2.9-r2 item 1).
+//
+//  - `THRESHOLD = ceil((STALE_LIMIT_SECS + 1) / POLL_INTERVAL_SECS)`, not `ceil(STALE_LIMIT_SECS /
+//    POLL_INTERVAL_SECS)`. Plain `ceil(limit/poll)` polls after the baseline is *usually* enough, but
+//    mtime's whole-second resolution can make it up to a second short: a write at, say, X.9s records
+//    mtime X, and a later poll landing at exactly X+limit can already show that same integer second
+//    as its own most recent write if that write also happened to floor to X — so a plain
+//    `ceil(limit/poll)` can fire as early as `limit - 1` real seconds after the true last write when
+//    `poll` evenly divides `limit`. Padding the numerator by one whole second absorbs that one-second
+//    floor error, so the kill is never earlier than `STALE_LIMIT_SECS` after the last real write —
+//    only, in the worst case, up to `POLL_INTERVAL_SECS` later than the old formula would have fired
+//    (findings-2.9-r3 item 3; a smaller, residual version of the round-2 off-by-one's own symptom —
+//    that one could fire a full poll interval early in the general case and is fixed separately
+//    above; this is the up-to-one-second error that remains from mtime's own rounding even once the
+//    poll counting itself is exactly right).
 //
 //  - A heartbeat file that already exists when the script starts is left alone, not truncated: the
 //    tolerant create only runs when nothing is there yet. Its age never mattered to the loop above,
@@ -162,21 +175,35 @@ export const WATCHDOG_SCRIPT_MODE = 0o555
 //    no-op. TERM has no such carve-out, so both signals converge on it.
 //
 //  - Both the stale-heartbeat path and TERM/INT forwarding go through the same `terminate_engine`:
-//    TERM, then poll for exit once a second (also backgrounded/`wait`-ed, for the same reason as the
-//    main loop), escalating to KILL once `KILL_GRACE_SECS` has passed with the engine still alive.
-//    Forwarding a stop signal is not allowed to hang forever on an engine that never reacts.
+//    TERM, then poll for exit, escalating to KILL once `KILL_GRACE_SECS` has passed with the engine
+//    still alive. Forwarding a stop signal is not allowed to hang forever on an engine that never
+//    reacts. The poll itself is a short `sleep 0.25 & wait $!` (backgrounded/`wait`-ed, for the same
+//    reason as the main loop's poll sleep) rather than a full second, so an engine that dies right
+//    after TERM is noticed promptly — `kill -0` cannot tell a genuinely running process from a
+//    not-yet-reaped zombie, so without frequent re-checking, the *first* check after sending TERM
+//    would still see the (zombie) pid as present and commit to a full second's wait before checking
+//    again (findings-2.9-r3 item 7).
 //
 //  - `terminate_engine` guards against re-entry with `STOPPING`: a second TERM/INT arriving while a
 //    shutdown is already in progress (`docker stop` repeating itself, or a TERM landing during the
-//    stale path's own grace wait) does not restart the grace clock — `GRACE_ELAPSED` is a variable
-//    outside the function, not reset by a fresh call, and the initial signal is sent only once. Before
-//    this guard, a shell trap firing again *during* the interrupted call's own `wait` effectively
-//    restarted `terminate_engine` from its top on every signal, so a TERM repeating faster than
-//    `KILL_GRACE_SECS` could postpone the KILL indefinitely (findings-2.9-r2 item 2). `STOP_EXIT_CODE`
-//    exists for the same re-entry: if the stale path is what is tearing the engine down, its trap
-//    invocation (should one fire mid-shutdown) must still `exit 97`, not whatever status the
-//    interrupted `wait` happened to leave in `$?` — the stale branch sets it before calling
-//    `terminate_engine`, and the TERM/INT trap falls back to `$?` only when nothing set it.
+//    stale path's own grace wait) does not restart the grace clock, and — as of this round — does not
+//    even shorten it. `GRACE_DEADLINE` is a wall-clock deadline (`date +%s` plus `KILL_GRACE_SECS`,
+//    seconds since the epoch) taken once, the first time `STOPPING` flips to 1, and never touched
+//    again; the initial signal is likewise sent only once. Two rounds of the same bug, both from
+//    treating the grace period as a count of loop iterations instead of an actual span of time:
+//    counting *polls* let a trap firing again *during* the interrupted call's own `wait` restart
+//    `terminate_engine` from its top on every signal, so a TERM repeating faster than `KILL_GRACE_SECS`
+//    could postpone the KILL indefinitely (findings-2.9-r2 item 2); the first fix for that counted
+//    *elapsed polls* instead of restarting them, which stopped the postponement but introduced the
+//    opposite problem — each interrupted poll still advanced the count by a full nominal second
+//    regardless of how little real time had actually elapsed, so ten TERMs 100ms apart could cut a
+//    10s grace period down to close to 1s (findings-2.9-r3 item 2). A wall-clock deadline is immune to
+//    both: however many times the wait gets interrupted and re-entered, "is it past the deadline yet"
+//    gives the same answer it would have without any interruptions at all. `STOP_EXIT_CODE` exists for
+//    the same re-entry: if the stale path is what is tearing the engine down, its trap invocation
+//    (should one fire mid-shutdown) must still `exit 97`, not whatever status the interrupted `wait`
+//    happened to leave in `$?` — the stale branch sets it before calling `terminate_engine`, and the
+//    TERM/INT trap falls back to `$?` only when nothing set it.
 //
 //  - `terminate_engine` resolves the pid to act on as `${ENGINE_PID:-$!}` (with `set +u`/`set -u`
 //    bracketing it, since `$!` is unset — not just empty — before any job has ever been backgrounded,
@@ -192,6 +219,13 @@ export const WATCHDOG_SCRIPT_MODE = 0o555
 //    still created tolerantly at startup (wrapped in a subshell, `( : > "$F" ) 2>/dev/null || true`,
 //    so a failure there cannot take the special-builtin-abort path down with it), but nothing past
 //    that point depends on it having worked.
+//
+//  - The main loop re-checks `kill -0 "$ENGINE_PID"` immediately before acting on a stale reading, not
+//    only at the top of the loop: the poll sleep can span the exact moment the engine exits on its
+//    own, and without this second check a poll that turned out stale *and* found the engine already
+//    gone would still report the stale-heartbeat exit code (97) instead of the engine's own — hiding
+//    what actually happened (a crash, an OOM kill) behind a code that means something else entirely
+//    (findings-2.9-r3 item 6).
 //
 //  - "$@" is always quoted and only ever used to start a background process, never passed to `eval`
 //    or a shell -c string, so nothing in the engine's own argv can be interpreted as shell syntax.
@@ -245,11 +279,13 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '[ "${1:-}" = "--" ] || fail "expected -- before the engine command"',
   'shift',
   '',
-  '# Consecutive-unchanged-polls threshold: the smallest poll count whose span is >= the limit.',
+  '# Consecutive-unchanged-polls threshold. +1 on the limit (equivalently: ceil((limit+1)/poll))',
+  "# pads out one whole second of slack for mtime's own whole-second rounding, so a kill can never",
+  '# land earlier than STALE_LIMIT_SECS after the true last write, only possibly a bit later.',
   "# PREV_OBSERVATION is seeded once, right below (after the tolerant create), from the heartbeat's",
   '# actual state; UNCHANGED_POLLS then counts polls whose observation matched the one before it,',
   '# starting from 0 — the poll that establishes the baseline is not itself counted as unchanged.',
-  'THRESHOLD=$(( (STALE_LIMIT_SECS + POLL_INTERVAL_SECS - 1) / POLL_INTERVAL_SECS ))',
+  'THRESHOLD=$(( (STALE_LIMIT_SECS + POLL_INTERVAL_SECS) / POLL_INTERVAL_SECS ))',
   '',
   '# Only if nothing is there yet: a genuinely leftover file from a previous run is left alone. Best-',
   '# effort either way — staleness is judged by the observation loop below, not by this having worked.',
@@ -268,7 +304,7 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '',
   'ENGINE_PID=',
   'STOPPING=0',
-  'GRACE_ELAPSED=0',
+  'GRACE_DEADLINE=',
   'STOP_EXIT_CODE=',
   '',
   'terminate_engine() {',
@@ -279,14 +315,14 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '  if [ "$STOPPING" -eq 0 ]; then',
   '    STOPPING=1',
   '    kill -"$1" "$pid" 2>/dev/null || true',
+  '    GRACE_DEADLINE=$(( $(date +%s) + KILL_GRACE_SECS ))',
   '  fi',
   '  while kill -0 "$pid" 2>/dev/null; do',
-  '    if [ "$GRACE_ELAPSED" -ge "$KILL_GRACE_SECS" ]; then',
+  '    if [ "$(date +%s)" -ge "$GRACE_DEADLINE" ]; then',
   '      kill -KILL "$pid" 2>/dev/null || true',
   '      break',
   '    fi',
-  '    GRACE_ELAPSED=$((GRACE_ELAPSED + 1))',
-  '    sleep 1 & wait $!',
+  '    sleep 0.25 & wait $!',
   '  done',
   '  wait "$pid" 2>/dev/null',
   '}',
@@ -314,6 +350,12 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '  fi',
   '',
   '  if [ "$UNCHANGED_POLLS" -ge "$THRESHOLD" ]; then',
+  '    # The engine may have exited on its own during the sleep just above, in the same poll that',
+  '    # also turned out stale; its own exit status is what happened and takes priority over 97.',
+  '    if ! kill -0 "$ENGINE_PID" 2>/dev/null; then',
+  '      wait "$ENGINE_PID"',
+  '      exit $?',
+  '    fi',
   '    echo "atomic-watchdog: heartbeat unchanged for $UNCHANGED_POLLS/$THRESHOLD polls; stopping the engine" >&2',
   '    STOP_EXIT_CODE=$WATCHDOG_EXIT_STALE_HEARTBEAT',
   '    terminate_engine TERM',
