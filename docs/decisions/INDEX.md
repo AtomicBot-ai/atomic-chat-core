@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-28** — [src/runtime/environment/inventory.ts is the model-file digest, not the host-inventory report](2026-09-28-inventory-ts-is-the-model-file-digest-not-the-host-report.md)
+- **2026-09-28** — [Managed runtime layout: the shared per-user root only, no per-scope artifact store](2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store.md)
 - **2026-09-28** — [Port managed-runtime contracts selectively from feat/tenzor-rt](2026-09-28-port-managed-runtime-contracts-selectively-from-feat-tenzor-rt.md)
 - **2026-09-27** — [The core advises on backends for both llama.cpp providers; the app decides when to act](2026-09-27-the-core-advises-on-backends-the-app-decides.md)
 - **2026-09-27** — [The core probes hardware with shell tools and is the only source of hardware facts](2026-09-27-the-core-probes-hardware-with-shell-tools.md) — revises PLAN.md §2 decision 10.

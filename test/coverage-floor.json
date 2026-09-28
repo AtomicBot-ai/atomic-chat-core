@@ -251,6 +251,12 @@
     "functions": 92,
     "lines": 97
   },
+  "src/core/gpu/policy.ts": {
+    "statements": 90,
+    "branches": 84,
+    "functions": 100,
+    "lines": 90
+  },
   "src/core/public-server.ts": {
     "statements": 100,
     "branches": 95,
@@ -881,11 +887,71 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/environment/canonical-json.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/environment/descriptor.ts": {
+    "statements": 98,
+    "branches": 88,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/runtime/environment/host-exec.ts": {
+    "statements": 94,
+    "branches": 89,
+    "functions": 100,
+    "lines": 94
+  },
+  "src/runtime/environment/inventory.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/linux-probe.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/recovery.ts": {
+    "statements": 94,
+    "branches": 91,
+    "functions": 100,
+    "lines": 94
+  },
+  "src/runtime/environment/service.ts": {
+    "statements": 79,
+    "branches": 81,
+    "functions": 95,
+    "lines": 79
+  },
+  "src/runtime/environment/state.ts": {
+    "statements": 95,
+    "branches": 81,
+    "functions": 100,
+    "lines": 95
+  },
+  "src/runtime/environment/store.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 95,
+    "lines": 100
+  },
+  "src/runtime/environment/windows-probe.ts": {
     "statements": 97,
-    "branches": 86,
+    "branches": 91,
     "functions": 100,
     "lines": 97
+  },
+  "src/runtime/environment/wiring.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/runtime/foundation-models/errors.ts": {
     "statements": 100,
@@ -1072,6 +1138,12 @@
     "branches": 100,
     "functions": 100,
     "lines": 100
+  },
+  "src/server/control/routes/environments.ts": {
+    "statements": 97,
+    "branches": 90,
+    "functions": 100,
+    "lines": 97
   },
   "src/server/control/routes/external-sessions.ts": {
     "statements": 100,
@@ -1386,6 +1458,12 @@
     "lines": 100
   },
   "src/telemetry/subscribe.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/util/result.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,

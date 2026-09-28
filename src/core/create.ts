@@ -4,6 +4,7 @@
  * previous owner left running and only then publish the endpoint.
  */
 
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LlamacppProviderId, LocalProviderId } from '../contracts/index.js'
@@ -38,6 +39,7 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
+import { wireManagedRuntimes } from '../runtime/environment/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
@@ -329,6 +331,14 @@ export async function createAtomicCore(
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
     })
 
+    const managed = wireManagedRuntimes({
+      env: nodeDataFolderEnv(env),
+      instanceId: lock.instanceId,
+      platform,
+      emit: (name, payload) => emitter.emit(name, payload),
+      newId: () => randomUUID(),
+    })
+
     const control = await ControlServer.start(
       {
         token,
@@ -336,6 +346,9 @@ export async function createAtomicCore(
         version: CORE_VERSION,
         ownerScope: scope,
         dataFolder: layout.root,
+        environments: managed.service,
+        environmentsSnapshot: managed.environments,
+        environmentOperations: managed.operations,
         emitter,
         clients,
         sessions: () => sessionsOf(runtimes),
@@ -482,6 +495,7 @@ export async function createAtomicCore(
       externalSessions,
       appLeaseTimer,
       diffusion,
+      managed,
       errors: reporter,
       telemetry: reporter,
       remoteAccess: await wireRemoteAccess({
@@ -497,6 +511,9 @@ export async function createAtomicCore(
       }),
     })
     await reapOrphans(journal, lock.instanceId, log)
+    // A setup the previous core was in the middle of is reconciled against the machine before the
+    // endpoint is published, so the first snapshot a client sees already describes it.
+    await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

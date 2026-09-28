@@ -1,9 +1,15 @@
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { AtomicCoreError } from '../contracts/index.js'
+import type { DataFolderEnv } from './data-folder.js'
 import {
   backendExeCandidates,
   dataLayout,
+  decodeManagedId,
+  encodeManagedId,
   llamaServerExeName,
+  managedSharedPaths,
+  managedSharedRoot,
   modelDirFromId,
   modelIdFromDir,
   resolveDataRelative,
@@ -66,5 +72,92 @@ describe('path helpers', () => {
       native('/data/llamacpp/models/x/model.gguf')
     )
     expect(resolveDataRelative('/data', '/abs/model.gguf', isAbsolute)).toBe('/abs/model.gguf')
+  })
+})
+
+describe('managed runtime paths', () => {
+  const managedEnv = (platform: NodeJS.Platform, vars: NodeJS.ProcessEnv = {}): DataFolderEnv => ({
+    platform,
+    env: vars,
+    homedir: '/home/u',
+    exists: () => false,
+    readFile: () => undefined,
+  })
+
+  it('encodes everything outside [A-Za-z0-9._-] as %XX of its UTF-8 bytes', () => {
+    expect(encodeManagedId('nvidia/Llama-3.1-8B-Instruct-FP8')).toBe('nvidia%2FLlama-3.1-8B-Instruct-FP8')
+    expect(encodeManagedId('a:b c')).toBe('a%3Ab%20c')
+  })
+
+  it('escapes the shapes that are legal characters but illegal directory names', () => {
+    expect(encodeManagedId('.')).toBe('%2E')
+    expect(encodeManagedId('..')).toBe('%2E%2E')
+    expect(encodeManagedId('name.')).toBe('name%2E')
+    expect(encodeManagedId('CON')).toBe('%43ON')
+    expect(encodeManagedId('nul.json')).toBe('%6Eul.json')
+    expect(encodeManagedId('LPT1.txt')).toBe('%4CPT1.txt')
+    // Not a device name and not a run of dots: passes through untouched.
+    expect(encodeManagedId('CONSOLE')).toBe('CONSOLE')
+    expect(encodeManagedId('nulls')).toBe('nulls')
+  })
+
+  it('round-trips ids through the directory name, including non-Latin scripts and punctuation', () => {
+    for (const id of [
+      'nvidia/Qwen3-8B-FP8',
+      'op/1',
+      '日本語のモデル',
+      'a b:c*d?e',
+      '..hidden',
+      String.fromCharCode(0x2028),
+    ]) {
+      const encoded = encodeManagedId(id)
+      // Always exactly one path segment: no separator, never `.` or `..`.
+      expect(encoded.includes('/')).toBe(false)
+      expect(encoded).not.toBe('.')
+      expect(encoded).not.toBe('..')
+      expect(decodeManagedId(encoded)).toBe(id)
+    }
+  })
+
+  it('refuses an empty id and a directory name that is not an encoded one', () => {
+    expect(() => encodeManagedId('')).toThrow(AtomicCoreError)
+    expect(() => decodeManagedId('%ZZ')).toThrow(AtomicCoreError)
+    expect(() => decodeManagedId('%E0%A4%A')).toThrow(AtomicCoreError)
+    // A lone stray continuation byte is not valid UTF-8 on its own.
+    expect(() => decodeManagedId('%FF%FE')).toThrow(AtomicCoreError)
+  })
+
+  it('puts the shared environment under the user account, not under the movable data folder', () => {
+    expect(managedSharedRoot(managedEnv('darwin'))).toBe(
+      join('/home/u', 'Library', 'Application Support', 'atomic-managed-runtimes')
+    )
+    expect(managedSharedRoot(managedEnv('linux'))).toBe(
+      join('/home/u', '.local', 'share', 'atomic-managed-runtimes')
+    )
+    expect(managedSharedRoot(managedEnv('win32', { APPDATA: 'C:\\Users\\u\\AppData\\Roaming' }))).toBe(
+      join('C:\\Users\\u\\AppData\\Roaming', 'atomic-managed-runtimes')
+    )
+    // Moving the data folder must not strand the containers, nor make the CLI scope reinstall.
+    expect(managedSharedRoot(managedEnv('linux', { ATOMIC_CORE_DATA_FOLDER: '/elsewhere' }))).toBe(
+      join('/home/u', '.local', 'share', 'atomic-managed-runtimes')
+    )
+    expect(managedSharedRoot(managedEnv('linux', { ATOMIC_CORE_MANAGED_ROOT: '/tmp/fake' }))).toBe(
+      '/tmp/fake'
+    )
+  })
+
+  it('lays the shared root out as one record, one lock, the installations and the operations', () => {
+    const shared = managedSharedPaths('/shared')
+    expect(shared.environmentFile).toBe(native('/shared/environment.json'))
+    expect(shared.lockFile).toBe(native('/shared/environment.lock'))
+    expect(shared.installationsDir).toBe(native('/shared/installations'))
+    expect(shared.operationsDir).toBe(native('/shared/operations'))
+    expect(shared.installationFile('inst-1')).toBe(native('/shared/installations/inst-1/installation.json'))
+    expect(shared.operationFile('op/1')).toBe(native('/shared/operations/op%2F1.json'))
+  })
+
+  it('writes an operation id as one directory instead of nesting on its slash', () => {
+    const dir = relative('/shared/operations', managedSharedPaths('/shared').operationFile('a/b')).split(sep)
+    expect(dir).toHaveLength(1)
   })
 })

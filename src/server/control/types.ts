@@ -6,12 +6,15 @@
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
+  BeginOperation,
   DeviceInfo,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
+  EnvironmentOperation,
+  EnvironmentSnapshot,
   FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
@@ -32,7 +35,11 @@ import type {
   HardwareOverrideInput,
   LocalApiServerState,
   LocalProviderId,
+  ManagedHostReceipt,
+  ProbeEnvironmentInput,
   RemoteAccessStatus,
+  RequirementPlan,
+  ResumeOperation,
   SessionInfo,
   UnloadResult,
 } from '../../contracts/index.js'
@@ -70,6 +77,21 @@ export const SSE_HEARTBEAT_MS = 15_000
 
 export interface SessionSummary extends SessionInfo {
   provider: LocalProviderId
+}
+
+/**
+ * The managed container runtime, as the control API needs it (openspec change
+ * `add-tensorrt-llm-linux`, task 2.2). A narrow view on purpose: the control layer does not depend
+ * on the runtime module's class, and a build with no managed runtime wired simply leaves it out.
+ */
+export interface ManagedEnvironmentControl {
+  list(): Promise<EnvironmentSnapshot[]>
+  probe(input: ProbeEnvironmentInput): Promise<RequirementPlan>
+  begin(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation>
+  get(operationId: string): Promise<EnvironmentOperation>
+  cancel(operationId: string): Promise<EnvironmentOperation>
+  resume(operationId: string, input: ResumeOperation): Promise<EnvironmentOperation>
+  acceptHostReceipt(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation>
 }
 
 export interface PublicServerControl {
@@ -260,6 +282,11 @@ export interface ChatGptControl {
 }
 
 export interface ControlServerDeps {
+  /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
+  environments?: ManagedEnvironmentControl
+  /** The snapshot's view of them, kept in memory so it needs no disk read. */
+  environmentsSnapshot?: () => EnvironmentSnapshot[]
+  environmentOperations?: () => EnvironmentOperation[]
   token: string
   instanceId: string
   version: string
@@ -339,6 +366,9 @@ export interface ControlSnapshot {
   clients: ReturnType<ClientRegistry['list']>
   downloads: unknown[]
   optimal_backends: Record<string, OptimalState>
+  /** The managed container runtimes this user has, and the changes in flight on them. */
+  environments: EnvironmentSnapshot[]
+  environment_operations: EnvironmentOperation[]
 }
 
 /**

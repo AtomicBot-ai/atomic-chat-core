@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
@@ -815,4 +816,71 @@ describe('hardware facts', () => {
       })
     }
   )
+})
+
+describe('managed runtime environment', () => {
+  it('wires the environment routes, the snapshot and the event stream to one core', async () => {
+    // A throwaway shared root, so this never touches the real per-user environment on the host
+    // running the test — the same isolation the e2e suite gives every daemon it starts.
+    const managedRoot = await mkdtemp(join(tmpdir(), 'atomic-core-managed-unit-'))
+    try {
+      const core = await createCore({ env: { ...process.env, ATOMIC_CORE_MANAGED_ROOT: managedRoot } })
+      const call = (path: string, init: RequestInit = {}) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          ...init,
+          headers: { authorization: `Bearer ${core.controlToken}`, ...init.headers },
+        })
+
+      const listed = (await (await call('/environments')).json()) as {
+        environments: Array<{ environment_id: string; executor: string; availability: string }>
+      }
+      const snapshot = (await (await call('/snapshot')).json()) as {
+        environments: unknown[]
+        environment_operations: unknown[]
+      }
+      // The control snapshot and the dedicated route describe the same in-memory view.
+      expect(snapshot.environments).toEqual(listed.environments)
+      expect(snapshot.environment_operations).toEqual([])
+
+      const started = await call('/environments/default/operations', {
+        method: 'POST',
+        body: JSON.stringify({
+          request_id: 'req-1',
+          target: { kind: 'environment' },
+          kind: 'setup',
+          descriptor_id: 'trtllm-1.3.0rc27',
+        }),
+      })
+      // No host recipe is qualified on this platform yet: the request is still recorded and
+      // dispatched (202), it just runs straight into a blocker.
+      expect(started.status).toBe(202)
+      const operation = (await started.json()) as { operation_id: string }
+
+      const deadline = Date.now() + 5_000
+      let current: { phase: string; error: { code: string } | null } = { phase: 'checking', error: null }
+      while (current.phase !== 'failed' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        current = (await (
+          await call(`/environments/operations/${operation.operation_id}`)
+        ).json()) as typeof current
+      }
+      expect(current.phase).toBe('failed')
+      expect(current.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+
+      // A retried request with the same id gets the operation it already started, not a new one —
+      // exercising the id generator's idempotency path a second time changes nothing.
+      const again = await call('/environments/default/operations', {
+        method: 'POST',
+        body: JSON.stringify({
+          request_id: 'req-1',
+          target: { kind: 'environment' },
+          kind: 'setup',
+          descriptor_id: 'trtllm-1.3.0rc27',
+        }),
+      })
+      expect(((await again.json()) as { operation_id: string }).operation_id).toBe(operation.operation_id)
+    } finally {
+      await rm(managedRoot, { recursive: true, force: true, maxRetries: 3 })
+    }
+  })
 })

@@ -22,6 +22,7 @@ import type {
 import type { DataLayout } from '../config/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
 import type { CoreEmitter } from '../events/index.js'
+import type { ManagedRuntimes } from '../runtime/environment/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
 import type { InstanceLock } from '../lock/index.js'
 import type { ModelRegistry } from '../models/index.js'
@@ -67,6 +68,8 @@ export interface AtomicCoreParts {
   remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
   /** Image generation (stage 7): its own module, not a runtime. */
   diffusion: DiffusionService
+  /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
+  managed: ManagedRuntimes
   /** Where a failed load and the public server's failures are reported; absent, nothing is. */
   errors?: ErrorSink | undefined
   /** The same reporter, for a host that changes consent, user or tags at run time. */
@@ -120,6 +123,8 @@ export class AtomicCore {
   private readonly remoteAccess: RemoteAccessManager
   /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
   readonly diffusion: DiffusionService
+  /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
+  readonly managed: ManagedRuntimes
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -138,6 +143,7 @@ export class AtomicCore {
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
+    this.managed = parts.managed
     this.errors = parts.errors
     this.telemetry = parts.telemetry
     this.localSessions = new LocalSessions({
@@ -319,6 +325,9 @@ export class AtomicCore {
       await this.publicServer.stop()
       // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
       await this.diffusion.shutdown()
+      // Whatever a managed-runtime operation is doing stops here; its intent stays on disk for the
+      // next core to resume, so this never races the lock release below.
+      await this.managed.shutdown(AbortSignal.timeout(5_000)).catch(() => {})
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
       await this.localSessions.releaseAll()
       await this.control.close()
