@@ -19,13 +19,15 @@
  *   path-based `chmod` that a swapped link would redirect), and is renamed into place, which
  *   replaces a planted link instead of writing through it.
  *
- * What remains: node has no `openat`, so the folder is checked by path, and its owner could swap it
- * for a link between the check and the write. The temporary file is created exclusively, so no
- * existing file is written through; but `rename` does replace an existing destination, so the swap
- * can make root create — or replace — a file named `<step_id>.result.json` (0644, our own JSON) in
- * whatever folder the link points at. Only files with that suffix are reachable, and only by the
- * user who already holds the elevation prompt. Seteuid-ing to the user was ruled out (controller
- * ruling, fix round 1).
+ * The folder is opened once (`O_DIRECTORY | O_NOFOLLOW`) and checked through that handle, and every
+ * file in it is then addressed as `/proc/self/fd/<fd>/<name>`, which the kernel resolves to the
+ * directory that was checked — node has no `openat`, and this is the same guarantee. A swap of the
+ * folder's path after the check changes nothing. Only where `/proc` is not mounted (never on the
+ * distributions the recipe supports) does the executor fall back to the checked path; there a
+ * swap between check and write could make root create or replace a `<step_id>.result.json` (0644,
+ * our JSON) in whatever folder the swapped-in link points at. The trusted folder owner — the
+ * invoking user, or root — is the only one who could make that swap. Seteuid-ing to the user was
+ * ruled out (controller ruling, fix round 1).
  *
  * Commands run through `hostExec` — `spawn` without a shell — with the recipe's fixed environment.
  */
@@ -50,12 +52,20 @@ export interface HostFileHandle {
   close(): Promise<void>
 }
 
+/** An open directory: checked through its handle, and addressed through its descriptor. */
+export interface HostDirHandle {
+  fd: number
+  stat(): Promise<{ isDirectory(): boolean; uid: number; mode: number }>
+  close(): Promise<void>
+}
+
 /** The file-system calls the executor makes, injectable so tests can fake owners they cannot create. */
 export interface HostFs {
   open(path: string, flags: number, mode?: number): Promise<HostFileHandle>
-  lstat(
-    path: string
-  ): Promise<{ isDirectory(): boolean; isSymbolicLink(): boolean; uid: number; mode: number }>
+  /** `open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)`: a link or a non-directory is refused. */
+  openDirectory(path: string): Promise<HostDirHandle>
+  /** Whether something is at `path` (used for `/proc/self/fd/<fd>`). */
+  exists(path: string): Promise<boolean>
   rename(from: string, to: string): Promise<void>
   /** Removes one file if it is there; used only on our own temporary files. */
   remove(path: string): Promise<void>
@@ -65,7 +75,12 @@ export interface HostFs {
 
 export const nodeHostFs: HostFs = {
   open: (path, flags, mode) => open(path, flags, mode),
-  lstat: (path) => lstat(path),
+  openDirectory: (path) => open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW),
+  exists: (path) =>
+    lstat(path).then(
+      () => true,
+      () => false
+    ),
   rename: (from, to) => rename(from, to),
   remove: (path) => rm(path, { force: true }),
   mkdir: async (path, mode) => {
@@ -112,13 +127,38 @@ function checkOwnership(what: string, info: { uid: number; mode: number }, owner
     refuse(`${what} is group- or world-writable (mode ${(info.mode & 0o777).toString(8)})`)
 }
 
-/** The folder a file lives in: a real directory that only root or the invoking user can write. */
-async function checkFolder(fs: HostFs, path: string, owners: Set<number>): Promise<void> {
+/**
+ * Opens the folder `path` lives in (`O_DIRECTORY | O_NOFOLLOW`), checks it through the handle —
+ * a real directory, trusted owner, writable by nobody else — and hands `act` a base to address
+ * files in it by. On Linux that base is `/proc/self/fd/<fd>`, which the kernel resolves to the very
+ * directory that was checked, whatever happens to its path afterwards. Only where `/proc` is not
+ * mounted does it fall back to the checked path, and the race described in the header returns.
+ */
+async function withFolder<T>(
+  fs: HostFs,
+  path: string,
+  owners: Set<number>,
+  act: (base: string) => Promise<T>
+): Promise<T> {
   const folder = dirname(path)
-  const info = await fs.lstat(folder)
-  if (info.isSymbolicLink() || !info.isDirectory())
-    refuse(`${folder} is not a directory (a symlink is refused)`)
-  checkOwnership(folder, info, owners)
+  let handle: HostDirHandle
+  try {
+    handle = await fs.openDirectory(folder)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ELOOP' || code === 'ENOTDIR' || code === 'EMLINK')
+      refuse(`${folder} is not a directory (a symlink is refused)`)
+    throw error
+  }
+  try {
+    const info = await handle.stat()
+    if (!info.isDirectory()) refuse(`${folder} is not a directory (a symlink is refused)`)
+    checkOwnership(folder, info, owners)
+    const pinned = `/proc/self/fd/${handle.fd}`
+    return await act((await fs.exists(pinned)) ? pinned : folder)
+  } finally {
+    await handle.close()
+  }
 }
 
 async function readRequest(
@@ -127,18 +167,19 @@ async function readRequest(
   owners: Set<number>,
   path: string
 ): Promise<string> {
-  await checkFolder(fs, path, folder)
-  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-  const handle = await fs.open(path, flags)
-  try {
-    const info = await handle.stat()
-    if (!info.isFile()) refuse(`${path} is not a regular file`)
-    checkOwnership(path, info, owners)
-    if (info.size > REQUEST_SIZE_LIMIT) refuse(`${path} is too large to be a request`)
-    return await handle.readFile('utf8')
-  } finally {
-    await handle.close()
-  }
+  return withFolder(fs, path, folder, async (base) => {
+    const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    const handle = await fs.open(join(base, basename(path)), flags)
+    try {
+      const info = await handle.stat()
+      if (!info.isFile()) refuse(`${path} is not a regular file`)
+      checkOwnership(path, info, owners)
+      if (info.size > REQUEST_SIZE_LIMIT) refuse(`${path} is too large to be a request`)
+      return await handle.readFile('utf8')
+    } finally {
+      await handle.close()
+    }
+  })
 }
 
 async function writeAtomically(
@@ -148,24 +189,26 @@ async function writeAtomically(
   data: Uint8Array | string,
   mode: number
 ): Promise<void> {
-  await checkFolder(fs, path, owners)
-  const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString('hex')}.tmp`)
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
-  const handle = await fs.open(tmp, flags, mode)
-  try {
+  await withFolder(fs, path, owners, async (base) => {
+    const name = basename(path)
+    const tmp = join(base, `.${name}.${randomBytes(6).toString('hex')}.tmp`)
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
+    const handle = await fs.open(tmp, flags, mode)
     try {
-      await handle.writeFile(data)
-      await handle.chmod(mode)
-      await handle.sync()
-    } finally {
-      await handle.close()
+      try {
+        await handle.writeFile(data)
+        await handle.chmod(mode)
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      await fs.rename(tmp, join(base, name))
+    } catch (error) {
+      // Only our own temporary file: it was created exclusively, so nobody else's can be at that name.
+      await fs.remove(tmp)
+      throw error
     }
-    await fs.rename(tmp, path)
-  } catch (error) {
-    // Only our own temporary file: it was created exclusively, so nobody else's can be at that name.
-    await fs.remove(tmp)
-    throw error
-  }
+  })
 }
 
 async function readFileOrNull(fs: HostFs, path: string): Promise<Uint8Array | null> {

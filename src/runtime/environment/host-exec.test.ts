@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import { hostExec } from './host-exec.js'
+import type { HostExecOptions } from './host-exec.js'
 
 /** A real child process: the point of this module is what spawning actually does. */
 const node = process.execPath
@@ -67,6 +70,30 @@ describe('running a probe command', () => {
     expect(answer.code).toBeNull()
     expect(answer.stderr).toMatch(/timed out after 300 ms/)
     expect(Date.now() - started).toBeLessThan(4_000)
+  })
+
+  it('destroys its end of the pipes after answering, so root can exit while a grandchild holds them', async () => {
+    // A child that ignores SIGTERM, exits on SIGKILL, and whose pipes never close (a grandchild
+    // still holds them): the answer comes, and our ends of the pipes are released.
+    const emitter = new EventEmitter()
+    const signals: string[] = []
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    const child = Object.assign(emitter, {
+      stdout,
+      stderr,
+      kill: (signal: string) => {
+        signals.push(signal)
+        if (signal === 'SIGKILL') setImmediate(() => emitter.emit('exit', null, 'SIGKILL'))
+        return true
+      },
+    })
+    const spawnProcess = (() => child) as unknown as NonNullable<HostExecOptions['spawnProcess']>
+    const answer = await hostExec({ timeoutMs: 20, terminateGraceMs: 20, spawnProcess })(node, [])
+    expect(answer.code).toBeNull()
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(stdout.destroyed).toBe(true)
+    expect(stderr.destroyed).toBe(true)
   })
 
   it('keeps no more output than it was allowed to', async () => {

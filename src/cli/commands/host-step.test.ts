@@ -90,6 +90,18 @@ describe('host-step exec', () => {
   })
 })
 
+describe('when no result file can be written', () => {
+  it('a write that fails for any reason exits 2 and says so on stderr', async () => {
+    const io = recordingIo()
+    const fake = fakeDeps(request())
+    fake.deps.writeResult = async () => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+    }
+    expect(await hostStepCommand(['exec', '/x/step-7.request.json'], io, fake.deps)).toBe(2)
+    expect(io.err.join('')).toMatch(/no result file was written: ENOSPC: no space left on device/)
+  })
+})
+
 describe('the core binary routes host-step to the real executor', () => {
   let dir: string
   beforeEach(async () => {
@@ -118,7 +130,7 @@ describe('the core binary routes host-step to the real executor', () => {
       await writeFile(path, '{}')
       const io = recordingIo({ env: {} })
       expect(await runCli(['host-step', 'exec', path], io)).toBe(2)
-      expect(io.err.join('')).toMatch(/refused before a result file could be written: .*owned by uid/)
+      expect(io.err.join('')).toMatch(/no result file was written: .*owned by uid/)
       await expect(readFile(join(dir, 'step-9.result.json'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       })

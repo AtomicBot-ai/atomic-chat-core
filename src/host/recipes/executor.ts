@@ -20,9 +20,11 @@ import {
   INSTALL_CONTAINER_RUNTIME_RECIPE,
   INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
   INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
+  RECIPE_PACKAGES,
   assertPermittedCommand,
   buildInstallContainerRuntimeSteps,
   installContainerRuntimeParametersDigest,
+  isPackageCapability,
   validateInstallContainerRuntimeParameters,
 } from './install-container-runtime.js'
 import type { HostRecipeStep } from './install-container-runtime.js'
@@ -205,9 +207,65 @@ async function installPackages(
           'remove or replace it. Nothing was installed and nothing was removed.'
       )
   }
+  if (step.obsoletes !== null) await refuseObsoletedPackages(context, step.obsoletes, missing)
   for (const refresh of step.refresh) await mustRun(context, refresh)
   await mustRun(context, [...step.install, ...missing], { longRunning: true })
   return { status: 'applied', detail: `installed ${missing.join(', ')}` }
+}
+
+/**
+ * dnf honours RPM `Obsoletes` on every install and no option turns that off, so before installing,
+ * ask the configured repositories what each missing package obsoletes and refuse if anything
+ * installed — other than the recipe's own packages — provides one of those capabilities. Read-only:
+ * `dnf repoquery` and `rpm --query` change nothing.
+ */
+async function refuseObsoletedPackages(
+  context: RunContext,
+  obsoletes: NonNullable<Extract<HostRecipeStep, { kind: 'install-packages' }>['obsoletes']>,
+  missing: string[]
+): Promise<void> {
+  for (const query of obsoletes.queries) {
+    if (!missing.includes(query.package)) continue
+    const answer = await run(context, query.argv)
+    if (answer.code !== 0)
+      throw new StepFailure(
+        `could not ask the repositories what ${query.package} obsoletes`,
+        answer.code,
+        answer.stderr
+      )
+    const capabilities = new Set<string>()
+    for (const line of answer.stdout.split('\n')) {
+      const trimmed = line.trim()
+      if (trimmed === '') continue
+      // "name <= version": the capability is the first word; the constraint is dropped, so any
+      // installed provider counts, whatever its version.
+      const capability = trimmed.split(/\s+/)[0]!
+      if (!isPackageCapability(capability))
+        throw new StepFailure(
+          `dnf repoquery printed ${JSON.stringify(trimmed.slice(0, 80))} for ${query.package}, which is not a package capability`
+        )
+      capabilities.add(capability)
+    }
+    for (const capability of capabilities) {
+      const providers = await run(context, [...obsoletes.provides, capability])
+      if (providers.code === null)
+        throw new StepFailure(
+          `could not check whether anything provides ${capability}`,
+          null,
+          providers.stderr
+        )
+      if (providers.code !== 0) continue // rpm: "no package provides ..."
+      const foreign = providers.stdout
+        .split('\n')
+        .map((name) => name.trim())
+        .filter((name) => name !== '' && !RECIPE_PACKAGES.has(name))
+      if (foreign.length > 0)
+        throw new StepFailure(
+          `${capability} is provided by installed ${[...new Set(foreign)].join(', ')}, and installing ` +
+            `${query.package} would replace it (RPM Obsoletes). Nothing was installed and nothing was removed.`
+        )
+    }
+  }
 }
 
 const registersNvidia = (bytes: Uint8Array | null): boolean => {
@@ -443,9 +501,10 @@ async function execute(text: string, fileName: string, deps: HostStepExecutorDep
  * `PKEXEC_UID`/`SUDO_UID`) with mode `0700`, and the request file must be `0600` — see
  * `request-file.ts`. With `nodeHostStepDeps`, anything else is refused.
  *
- * Throws (`MANAGED_HOST_STEP_INVALID`) when no result can be written: the path is not a
- * `*.request.json`, or the folder is not trusted. Every other problem — an unreadable request, a
- * refused request, a failed step, an unexpected error — is a `failed` result file.
+ * Throws only when no result file can be written: `MANAGED_HOST_STEP_INVALID` when the path is not
+ * a `*.request.json` or the folder is not trusted, or the file system's own error when the write
+ * itself fails (ENOSPC, EROFS, ...). Every other problem — an unreadable request, a refused
+ * request, a failed step, an unexpected error — is a `failed` result file.
  */
 export async function executeHostStep(
   requestPath: string,

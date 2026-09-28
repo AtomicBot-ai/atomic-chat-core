@@ -150,10 +150,10 @@
     "lines": 100
   },
   "src/cli/commands/host-step.ts": {
-    "statements": 94,
-    "branches": 94,
+    "statements": 100,
+    "branches": 100,
     "functions": 100,
-    "lines": 94
+    "lines": 100
   },
   "src/cli/commands/models.ts": {
     "statements": 100,
@@ -582,10 +582,10 @@
     "lines": 100
   },
   "src/host/recipes/executor.ts": {
-    "statements": 98,
-    "branches": 93,
+    "statements": 100,
+    "branches": 96,
     "functions": 100,
-    "lines": 98
+    "lines": 100
   },
   "src/host/recipes/install-container-runtime.ts": {
     "statements": 99,

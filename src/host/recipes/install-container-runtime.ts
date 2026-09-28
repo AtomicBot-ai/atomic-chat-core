@@ -17,12 +17,15 @@
  *   runs, and a test scans every step this module can build for the forbidden words. `apt-get
  *   install` always carries `--no-remove`: without it apt's resolver may remove a conflicting
  *   package to satisfy the install. `dnf install` has two ways to take a package away:
- *   `--allowerasing` (forbidden) and RPM `Obsoletes`, which a plain install honours — containerd.io
- *   obsoletes `containerd` and `runc`, docker-ce obsoletes `docker-ce-selinux`, and
- *   nvidia-container-toolkit obsoletes old `nvidia-container-runtime` and
- *   `nvidia-container-runtime-hook`. So every dnf install carries `--setopt=obsoletes=False`
- *   (required by the allowlist), and those packages are on the conflict lists, checked before any
- *   install of the component that would obsolete them: an installed one is refused, never replaced.
+ *   `--allowerasing` (forbidden) and RPM `Obsoletes`, which a plain install always honours — no
+ *   dnf option turns that off (libdnf and libdnf5 set `SOLVER_FLAG_YUM_OBSOLETES` unconditionally;
+ *   `obsoletes=False` only changes candidate selection). containerd.io obsoletes `containerd` and
+ *   `runc`, older docker-ce releases obsolete `docker-ce-selinux`, and nvidia-container-toolkit
+ *   obsoletes old `nvidia-container-runtime` and `nvidia-container-runtime-hook`. So two checks run
+ *   before any dnf install, and either refuses it: a static per-component conflict list (installed
+ *   by those names), and a live, read-only one — `dnf repoquery --obsoletes <package>` for each
+ *   package still to install, then `rpm --query --whatprovides <capability>` for each capability it
+ *   obsoletes. An installed provider other than the recipe's own packages is refused, never replaced.
  *
  * What `recipe_digest` covers: everything in `INSTALL_CONTAINER_RUNTIME_RECIPE` — argv templates,
  * paths, URLs, key fingerprints, file bodies, modes, the environment, the conflict lists. What it
@@ -244,12 +247,23 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
       },
     },
     installed: ['rpm', '--query', '--quiet', '{{package}}'],
-    /** `obsoletes=False`: a plain install must not replace packages through RPM `Obsoletes`. */
-    install: ['dnf', 'install', '-y', '--setopt=install_weak_deps=False', '--setopt=obsoletes=False'],
+    /** No option here stops RPM `Obsoletes`; the two checks above the install do (see header). */
+    install: ['dnf', 'install', '-y', '--setopt=install_weak_deps=False'],
+    /**
+     * Read-only: what a package from the configured repos `Obsoletes`, one capability per line
+     * (`-y` only lets dnf import the repository key this recipe pinned, as the install would).
+     */
+    obsoletes: ['dnf', 'repoquery', '--quiet', '-y', '--obsoletes', '{{package}}'],
+    /**
+     * Read-only: the names of installed packages that provide a capability. The `\\n` is the two
+     * characters rpm's query format expands itself, exactly as a shell would pass `'%{NAME}\\n'`.
+     */
+    provides: ['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n'],
     /**
      * Per component: Docker's Fedora guide has the first twelve removed first; the rest are what the
-     * component's packages `Obsolete` (containerd.io: containerd, runc; docker-ce: docker-ce-selinux;
-     * nvidia-container-toolkit: nvidia-container-runtime, nvidia-container-runtime-hook).
+     * component's packages `Obsolete` (containerd.io: containerd, runc; older docker-ce releases:
+     * docker-ce-selinux; nvidia-container-toolkit: nvidia-container-runtime ≤ 3.5.0-1,
+     * nvidia-container-runtime-hook ≤ 1.4.0-2). The live check covers anything else they obsolete.
      */
     conflicts: {
       'docker-engine': [
@@ -472,6 +486,12 @@ export type HostRecipeStep =
         argv: string[]
         component: 'docker-engine' | 'nvidia-container-toolkit'
       }[]
+      /**
+       * dnf only (null on apt, where `--no-remove` makes apt fail instead): per package still to
+       * install, the read-only query for what it obsoletes, and the prefix that asks which installed
+       * packages provide one of those capabilities (the capability is appended).
+       */
+      obsoletes: { queries: { package: string; argv: string[] }[]; provides: string[] } | null
       refresh: string[][]
       /** Without package names: the executor appends only the ones still missing. */
       install: string[]
@@ -560,6 +580,16 @@ export function buildInstallContainerRuntimeSteps(
               argv(recipe.apt.refresh, { source: recipe.apt.repositories[vendor].source.path })
             )
           : [],
+      obsoletes:
+        parameters.family === 'dnf'
+          ? {
+              queries: packages.map((name) => ({
+                package: name,
+                argv: argv(recipe.dnf.obsoletes, { package: name }),
+              })),
+              provides: [...recipe.dnf.provides],
+            }
+          : null,
       install: [...family.install],
     })
   }
@@ -611,6 +641,12 @@ export function commandsOf(step: HostRecipeStep): string[][] {
       return [
         ...step.queries.map((query) => query.argv),
         ...step.conflicts.map((conflict) => conflict.argv),
+        ...(step.obsoletes === null
+          ? []
+          : [
+              ...step.obsoletes.queries.map((query) => query.argv),
+              [...step.obsoletes.provides, 'capability'],
+            ]),
         ...step.refresh,
         [...step.install, ...step.packages],
       ]
@@ -626,6 +662,20 @@ export function commandsOf(step: HostRecipeStep): string[][] {
 // ---------------------------------------------------------------------------------------------
 // The allowlist every command passes before it runs
 // ---------------------------------------------------------------------------------------------
+
+/** Every package the recipe itself installs: never a conflict with itself. */
+export const RECIPE_PACKAGES: ReadonlySet<string> = new Set([
+  ...INSTALL_CONTAINER_RUNTIME_RECIPE.packages['docker-engine'],
+  ...INSTALL_CONTAINER_RUNTIME_RECIPE.packages['nvidia-container-toolkit'],
+])
+
+const PACKAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}$/
+const CAPABILITY = /^[A-Za-z0-9_/][A-Za-z0-9._+:()/-]{0,255}$/
+
+/** An RPM capability as `dnf repoquery` prints it, without its version constraint; never an option. */
+export function isPackageCapability(value: string): boolean {
+  return CAPABILITY.test(value)
+}
 
 /** Words that remove or upgrade. None may appear in any argument of any command. */
 export const FORBIDDEN_WORDS: readonly string[] = [
@@ -651,7 +701,7 @@ export const FORBIDDEN_WORDS: readonly string[] = [
 const PERMITTED: Record<string, readonly string[]> = {
   'apt-get': ['install', 'update'],
   'dpkg-query': ['--show'],
-  'dnf': ['install'],
+  'dnf': ['install', 'repoquery'],
   'rpm': ['--query'],
   'nvidia-ctk': ['runtime'],
   'systemctl': ['is-active', 'is-enabled', 'enable', 'restart'],
@@ -679,8 +729,27 @@ export function assertPermittedCommand(argv: readonly string[]): void {
     refuse('apt-get update must be restricted to one source list')
   if (program === 'apt-get' && first === 'install' && !argv.includes('--no-remove'))
     refuse('apt-get install must carry --no-remove, so the resolver can never remove a package')
-  if (program === 'dnf' && first === 'install' && !argv.includes('--setopt=obsoletes=False'))
-    refuse('dnf install must carry --setopt=obsoletes=False, so Obsoletes can never replace a package')
+  // The read-only queries are allowed in exactly the shapes the recipe builds, and nothing else.
+  if (program === 'dnf' && first === 'repoquery') {
+    const [, , ...rest] = argv
+    const target = rest[3]
+    if (
+      rest.length !== 4 ||
+      rest.slice(0, 3).join(' ') !== '--quiet -y --obsoletes' ||
+      target === undefined ||
+      !RECIPE_PACKAGES.has(target)
+    )
+      refuse('dnf repoquery is only ever asked what one of the recipe’s packages obsoletes')
+  }
+  if (program === 'rpm') {
+    const quiet = argv.length === 4 && argv[2] === '--quiet' && PACKAGE_NAME.test(argv[3] as string)
+    const provides =
+      argv.length === 5 &&
+      argv[2] === '--whatprovides' &&
+      argv[3] === '--queryformat=%{NAME}\\n' &&
+      isPackageCapability(argv[4] as string)
+    if (!quiet && !provides) refuse('rpm is only ever asked whether a package or capability is installed')
+  }
   if (program === 'usermod' && (argv[2] !== 'docker' || argv.length !== 4 || argv[3] === 'root'))
     refuse('usermod only ever adds a non-root user to docker')
   if (program === 'docker' && argv.join(' ') !== 'docker info --format {{json .Runtimes}}')

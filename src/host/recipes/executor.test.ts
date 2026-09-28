@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { AtomicCoreError } from '../../contracts/index.js'
 import { executeHostStep } from './executor.js'
 import type { HostStepExecutorDeps } from './executor.js'
 import {
@@ -46,10 +47,22 @@ class FakeHost {
   startsOnInstall = true
   /** `nvidia-ctk` writes the file; set to false to model it leaving the file untouched. */
   ctkWrites = true
-  failures: Record<string, { code: number; stderr: string }> = {}
+  failures: Record<string, { code: number | null; stderr: string }> = {}
   calls: string[][] = []
   fetched: string[] = []
   invokingUid: string | null = '1000'
+
+  /** What `dnf repoquery --obsoletes <pkg>` prints for each package, one capability per line. */
+  obsoletesOf: Record<string, string[]> = {
+    'containerd.io': ['containerd <= 1.2.0', 'runc'],
+    'docker-ce': ['docker-ce-selinux <= 17.03.0'],
+    'nvidia-container-toolkit': [
+      'nvidia-container-runtime <= 3.5.0-1',
+      'nvidia-container-runtime-hook <= 1.4.0-2',
+    ],
+  }
+  /** Capabilities provided by installed packages under another name (capability → package). */
+  provides: Record<string, string> = { containerd: 'containerd.io', runc: 'containerd.io' }
 
   /** Commands the executor marked long-running (package installs get their own timeout). */
   longRunning: string[] = []
@@ -67,7 +80,16 @@ class FakeHost {
       const name = argv[3]!
       return this.packages.has(name) ? ok('install ok installed') : no()
     }
+    if (program === 'rpm' && argv[2] === '--whatprovides') {
+      const capability = argv[4]!
+      if (this.packages.has(capability)) return ok(`${capability}\n`)
+      const provider = this.provides[capability]
+      if (provider !== undefined && this.packages.has(provider)) return ok(`${provider}\n`)
+      return { code: 1, stdout: `no package provides ${capability}\n`, stderr: '' }
+    }
     if (program === 'rpm') return this.packages.has(argv[3]!) ? ok() : no()
+    if (program === 'dnf' && sub === 'repoquery')
+      return ok(`${(this.obsoletesOf[argv[5]!] ?? []).join('\n')}\n`)
     if (program === 'apt-get' && sub === 'update') return ok()
     if ((program === 'apt-get' || program === 'dnf') && sub === 'install') {
       const names = argv.filter((a, i) => i > 1 && !a.startsWith('-') && !a.includes('::'))
@@ -131,7 +153,10 @@ class FakeHost {
     const reads = ['dpkg-query', 'rpm', 'id', 'docker']
     return this.calls
       .filter(
-        ([program, sub]) => !reads.includes(program!) && !(program === 'systemctl' && sub!.startsWith('is-'))
+        ([program, sub]) =>
+          !reads.includes(program!) &&
+          !(program === 'systemctl' && sub!.startsWith('is-')) &&
+          !(program === 'dnf' && sub === 'repoquery')
       )
       .map((argv) => argv.join(' '))
   }
@@ -397,6 +422,18 @@ describe('refusing a request before anything runs', () => {
     expect(result.log_tail.length).toBeLessThanOrEqual(2000)
   })
 
+  it('names a refusal of the request file itself in the result', async () => {
+    const result = await run(new FakeHost(), '', {
+      readRequest: async () => {
+        throw new AtomicCoreError(
+          'MANAGED_HOST_STEP_INVALID',
+          '/x/step-1.request.json is group- or world-writable'
+        )
+      },
+    })
+    expect(result.log_tail).toContain('group- or world-writable')
+  })
+
   it('refuses a request path it could not name a result file for', async () => {
     const host = new FakeHost()
     await expect(executeHostStep('/tmp/step.json', host.deps(requestFor(parameters)))).rejects.toMatchObject({
@@ -533,6 +570,72 @@ describe('never over or around what is already there', () => {
     }
   )
 
+  describe('the live Obsoletes check on dnf', () => {
+    it.each<[string, string, ContainerRuntimeComponent[]]>([
+      // Installed under another name, so the static name list cannot see them.
+      ['runc', 'runc-legacy', ['docker-engine']],
+      ['containerd', 'containerd-compat', ['docker-engine']],
+      ['nvidia-container-runtime', 'nvidia-container-runtime-compat', ['nvidia-container-toolkit']],
+      ['nvidia-container-runtime-hook', 'libnvidia-container-hook-old', ['nvidia-container-toolkit']],
+    ])(
+      '%s provided by %s: refused before installing, nothing removed',
+      async (capability, provider, components) => {
+        const host = new FakeHost()
+        host.startsOnInstall = false
+        host.packages.add(provider)
+        host.provides[capability] = provider
+        const result = await run(host, requestFor(fedora(components)))
+        const packages = result.steps.find((s) => s.id === 'packages')!
+        expect(packages).toMatchObject({ status: 'failed' })
+        expect(packages.detail).toContain(`${capability} is provided by installed ${provider}`)
+        expect(packages.detail).toMatch(/Nothing was installed and nothing was removed/)
+        expect(host.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
+      }
+    )
+
+    it('a capability one of the recipe’s own installed packages provides is not a conflict', async () => {
+      // containerd.io provides and obsoletes `containerd`; with it already installed, finishing
+      // docker-ce must not be refused over containerd.io itself.
+      const host = new FakeHost()
+      host.startsOnInstall = false
+      host.packages.add('containerd.io')
+      const result = await run(host, requestFor(fedora(['docker-engine'])))
+      expect(result.outcome).toBe('completed')
+      expect(host.mutations()).toEqual([
+        'dnf install -y --setopt=install_weak_deps=False docker-ce docker-ce-cli',
+      ])
+      // Only the packages still to install are asked about.
+      expect(
+        host.calls.filter(([program, sub]) => program === 'dnf' && sub === 'repoquery').map((c) => c[5])
+      ).toEqual(['docker-ce', 'docker-ce-cli'])
+    })
+
+    it('an rpm that cannot answer whether a capability is provided fails the step', async () => {
+      const host = new FakeHost()
+      host.failures['rpm --query --whatprovides'] = { code: null, stderr: 'rpm: database locked' }
+      const result = await run(host, requestFor(fedora(['nvidia-container-toolkit'])))
+      expect(result.steps.find((s) => s.id === 'packages')).toMatchObject({
+        status: 'failed',
+        detail: expect.stringMatching(/could not check whether anything provides nvidia-container-runtime/),
+      })
+      expect(host.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
+    })
+
+    it('a repoquery that fails, or prints something that is not a capability, fails the step', async () => {
+      const failing = new FakeHost()
+      failing.failures['dnf repoquery'] = { code: 1, stderr: 'Failed to download metadata' }
+      const failed = await run(failing, requestFor(fedora(['nvidia-container-toolkit'])))
+      expect(failed.steps.find((s) => s.id === 'packages')).toMatchObject({ status: 'failed', exit_code: 1 })
+      expect(failing.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
+
+      const odd = new FakeHost()
+      odd.obsoletesOf['nvidia-container-toolkit'] = ['-rf /']
+      const refused = await run(odd, requestFor(fedora(['nvidia-container-toolkit'])))
+      expect(refused.steps.find((s) => s.id === 'packages')!.detail).toMatch(/not a package capability/)
+      expect(odd.calls.some(([program, sub]) => program === 'dnf' && sub === 'install')).toBe(false)
+    })
+  })
+
   it('the toolkit-only plan on a moby host installs only the toolkit', async () => {
     const host = new FakeHost()
     host.packages.add('moby-engine')
@@ -540,7 +643,7 @@ describe('never over or around what is already there', () => {
     const result = await run(host, requestFor(fedora(['nvidia-container-toolkit'])))
     expect(result.outcome).toBe('completed')
     expect(host.mutations()).toEqual([
-      'dnf install -y --setopt=install_weak_deps=False --setopt=obsoletes=False nvidia-container-toolkit',
+      'dnf install -y --setopt=install_weak_deps=False nvidia-container-toolkit',
     ])
     expect(host.files.has('/etc/yum.repos.d/docker-ce.repo')).toBe(false)
   })
@@ -638,6 +741,39 @@ describe('the runtime configuration and the Docker restart', () => {
       'systemctl enable --now docker',
     ])
     expect(host.loadedRuntimes).toContain('nvidia')
+  })
+
+  it('reads a daemon.json it cannot parse as not registering the runtime, and configures it', async () => {
+    const host = new FakeHost()
+    host.files.set('/etc/docker/daemon.json', { data: Buffer.from('{ not json'), mode: 0o644 })
+    host.ctkWrites = false
+    await run(host, requestFor(ubuntu(['nvidia-runtime'])))
+    expect(host.mutations()).toEqual(['nvidia-ctk runtime configure --runtime=docker'])
+  })
+
+  it('registered, Docker stopped: nothing to do', async () => {
+    const host = new FakeHost()
+    host.files.set('/etc/docker/daemon.json', {
+      data: Buffer.from('{"runtimes":{"nvidia":{}}}'),
+      mode: 0o644,
+    })
+    const result = await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-restart'])))
+    expect(result.steps[0]).toMatchObject({ status: 'satisfied' })
+    expect(host.mutations()).toEqual([])
+  })
+
+  it('a docker info it cannot parse counts as not loaded, and the approved restart runs', async () => {
+    const host = new FakeHost()
+    host.dockerActive = true
+    host.files.set('/etc/docker/daemon.json', {
+      data: Buffer.from('{"runtimes":{"nvidia":{}}}'),
+      mode: 0o644,
+    })
+    const exec = host.exec
+    const garbled: typeof exec = async (argv, options) =>
+      argv[0] === 'docker' ? { code: 0, stdout: 'not json', stderr: '' } : exec(argv, options)
+    await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-restart'])), { exec: garbled })
+    expect(host.mutations()).toEqual(['systemctl restart docker'])
   })
 
   it('a failed nvidia-ctk fails the step with its exit code', async () => {

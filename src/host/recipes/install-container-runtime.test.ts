@@ -10,6 +10,7 @@ import {
   assertPermittedCommand,
   buildInstallContainerRuntimeSteps,
   commandsOf,
+  isPackageCapability,
   installContainerRuntimeParametersDigest,
   parametersFromPlan,
   validateInstallContainerRuntimeParameters,
@@ -131,7 +132,7 @@ describe('the digests a request is bound to', () => {
     // Changing any command, path, URL, key pin or file body changes this. Update it deliberately:
     // every client holding an old plan will then be refused, which is the point.
     expect(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST).toMatchInlineSnapshot(
-      `"sha256:5c2f60a94e6c83c7f77ec08abac43423e56fb08e70bb31dc8ce7dd401dc450f0"`
+      `"sha256:328f8621d8c80934a92148a5efd99d33a5c37febeb1b3b223a1745bcd0dc71e8"`
     )
   })
 
@@ -199,6 +200,8 @@ describe('apt steps', () => {
       },
     ])
     expect(packages.conflicts).toEqual([])
+    // apt: `--no-remove` makes apt fail rather than remove; there is no Obsoletes-style replacement.
+    expect(packages.obsoletes).toBeNull()
   })
 
   it('docker and toolkit: both vendors, the four packages, and the Docker conflicts checked', () => {
@@ -337,14 +340,20 @@ describe('dnf steps', () => {
     })
     const packages = step(steps, 'install-packages')
     expect(packages.refresh).toEqual([])
-    // RPM Obsoletes let a plain `dnf install` replace installed packages; this switches that off.
-    expect(packages.install).toEqual([
-      'dnf',
-      'install',
-      '-y',
-      '--setopt=install_weak_deps=False',
-      '--setopt=obsoletes=False',
-    ])
+    // No dnf option stops RPM Obsoletes (libdnf always sets SOLVER_FLAG_YUM_OBSOLETES), so the
+    // install carries none; the live check below refuses instead.
+    expect(packages.install).toEqual(['dnf', 'install', '-y', '--setopt=install_weak_deps=False'])
+    // Live, read-only: what each package to install Obsoletes in the configured repos, and whether
+    // anything installed provides it.
+    expect(packages.obsoletes).toEqual({
+      queries: [
+        {
+          package: 'nvidia-container-toolkit',
+          argv: ['dnf', 'repoquery', '--quiet', '-y', '--obsoletes', 'nvidia-container-toolkit'],
+        },
+      ],
+      provides: ['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n'],
+    })
     expect(packages.queries).toEqual([
       {
         package: 'nvidia-container-toolkit',
@@ -385,8 +394,8 @@ describe('dnf steps', () => {
       'containerd.io',
       'nvidia-container-toolkit',
     ])
-    // Docker's Fedora guide has the first twelve removed first, and containerd.io / docker-ce
-    // Obsolete the next three; we refuse instead of letting anything be removed or replaced.
+    // Docker's Fedora guide has the first twelve removed first; containerd.io Obsoletes containerd
+    // and runc, and older docker-ce releases Obsolete docker-ce-selinux. We refuse instead.
     expect(packages.conflicts.map((c) => c.package)).toEqual([
       'moby-engine',
       'docker',
@@ -511,6 +520,23 @@ describe('from an install plan', () => {
   })
 })
 
+describe('what counts as a package capability', () => {
+  it.each<[string, boolean]>([
+    ['runc', true],
+    ['nvidia-container-runtime', true],
+    ['config(docker-ce)', true],
+    ['/usr/bin/runc', true],
+    ['libc.so.6()(64bit)', true],
+    ['-e', false],
+    ['--all', false],
+    ['a;b', false],
+    ['a b', false],
+    ['', false],
+  ])('%j → %s', (value, expected) => {
+    expect(isPackageCapability(value)).toBe(expected)
+  })
+})
+
 describe('what the recipe may never run', () => {
   const hosts: InstallContainerRuntimeParameters[] = [
     ubuntu,
@@ -556,8 +582,15 @@ describe('what the recipe may never run', () => {
     [['apt-get', 'install', '-y', 'docker-ce']],
     [['apt-get', 'install', '-y', '--no-install-recommends', 'nvidia-container-toolkit']],
     [['dnf', 'install', '-y', '--allowerasing', 'docker-ce']],
-    [['dnf', 'install', '-y', '--setopt=install_weak_deps=False', 'nvidia-container-toolkit']],
-    [['dnf', 'install', '-y', '--setopt=obsoletes=True', 'nvidia-container-toolkit']],
+    [['dnf', 'repoquery', '--quiet', '-y', '--obsoletes', 'kernel']],
+    [['dnf', 'repoquery', '--installed']],
+    [['dnf', 'repoquery', '--quiet', '-y', '--obsoletes', 'docker-ce', 'extra']],
+    [['dnf', 'makecache']],
+    [['rpm', '--query', '-a']],
+    [['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n', '-e']],
+    [['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n', 'a;b']],
+    [['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n', 'x', 'y']],
+    [['rpm', '--query', '--quiet', 'x', 'y']],
     [['constructor', 'x']],
     [['toString', 'x']],
     [['__proto__', 'x']],
@@ -582,16 +615,27 @@ describe('what the recipe may never run', () => {
     )
   })
 
-  it('an apt install is only ever run with --no-remove, and dnf never with --allowerasing', () => {
+  it('an apt install is only ever run with --no-remove; a dnf install never with --allowerasing, always after the live Obsoletes check', () => {
     for (const host of hosts) {
       for (const built of build(host, ['docker-engine', 'nvidia-container-toolkit'])) {
         if (built.kind !== 'install-packages') continue
         if (host.family === 'apt') expect(built.install).toContain('--no-remove')
         else {
           expect(built.install).not.toContain('--allowerasing')
-          expect(built.install).toContain('--setopt=obsoletes=False')
+          expect(built.obsoletes?.queries.map((q) => q.package)).toEqual(built.packages)
         }
       }
     }
+  })
+
+  it.each<[string[]]>([
+    // What the dnf path runs, read-only, and nothing more is needed to permit it.
+    [['dnf', 'install', '-y', '--setopt=install_weak_deps=False', 'nvidia-container-toolkit']],
+    [['dnf', 'repoquery', '--quiet', '-y', '--obsoletes', 'containerd.io']],
+    [['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n', 'runc']],
+    [['rpm', '--query', '--whatprovides', '--queryformat=%{NAME}\\n', 'config(docker-ce)']],
+    [['rpm', '--query', '--quiet', 'moby-engine']],
+  ])('%j is permitted', (argv) => {
+    expect(() => assertPermittedCommand(argv)).not.toThrow()
   })
 })

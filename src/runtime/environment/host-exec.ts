@@ -33,6 +33,8 @@ export interface HostExecOptions {
    * half-configured. Unset (the default for probes): SIGKILL and answer at once.
    */
   terminateGraceMs?: number
+  /** Tests only: stands in for `child_process.spawn`. */
+  spawnProcess?: typeof spawn
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -103,6 +105,10 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
       const finishTimedOut = (): void => {
         const said = Buffer.concat(stderr).toString('utf8')
         finish({ code: null, stdout: '', stderr: `${said}\ntimed out after ${timeoutMs} ms` })
+        // Release our ends of the pipes: a grandchild still holding theirs must not keep this
+        // (root) process alive after it has answered.
+        child?.stdout?.destroy()
+        child?.stderr?.destroy()
       }
 
       const finish = (output: CommandOutput): void => {
@@ -118,7 +124,7 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
         envOverlay === undefined ? options.env : overlayEnv(options.env ?? process.env, envOverlay)
 
       try {
-        child = spawn(command, args, {
+        child = (options.spawnProcess ?? spawn)(command, args, {
           shell: false,
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],

@@ -19,6 +19,11 @@
  * Run the executor through `pkexec`/`sudo`, so it learns the user from `PKEXEC_UID`/`SUDO_UID`: it
  * then trusts only a folder that user owns, never a root-owned one. The executor refuses anything
  * else, and if it cannot trust the folder it writes no result file at all (exit 2).
+ *
+ * A caller that is already root (the `atc` daemon as a root service, a root shell) but still carries
+ * `SUDO_UID`/`PKEXEC_UID` from how it was started is treated as acting for that uid: it must either
+ * `chown` the host-steps folder to that uid, or clear both variables before running the executor so
+ * that its own root-owned folder is the trusted one.
  */
 
 import { MANAGED_HOST_ACTIONS } from '../../contracts/index.js'

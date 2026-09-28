@@ -23,16 +23,17 @@ const deps = (fs: HostFs = nodeHostFs) => nodeHostStepDeps({ PKEXEC_UID: me }, f
 /** The real file system, except that the named paths report another owner. */
 const ownedBy = (uid: number, ...paths: string[]): HostFs => ({
   ...nodeHostFs,
-  lstat: async (path) => {
-    const info = await nodeHostFs.lstat(path)
-    return paths.includes(path)
-      ? {
-          ...info,
-          uid,
-          isDirectory: () => info.isDirectory(),
-          isSymbolicLink: () => info.isSymbolicLink(),
-        }
-      : info
+  openDirectory: async (path) => {
+    const handle = await nodeHostFs.openDirectory(path)
+    if (!paths.includes(path)) return handle
+    return {
+      fd: handle.fd,
+      stat: async () => {
+        const info = await handle.stat()
+        return { mode: info.mode, uid, isDirectory: () => info.isDirectory() }
+      },
+      close: () => handle.close(),
+    }
   },
   open: async (path, flags, mode) => {
     const handle = await nodeHostFs.open(path, flags, mode)
@@ -118,6 +119,77 @@ describe('reading the request as root', () => {
       /owned by uid 4242/
     )
     expect(await deps().readRequest(join(real, 's.request.json'))).toBe('{}')
+  })
+})
+
+describe('root with nobody named (neither PKEXEC_UID nor SUDO_UID)', () => {
+  it('reads a request from a root-owned folder and writes the result beside it', async () => {
+    const path = await request()
+    const rootOwned = ownedBy(0, dir, path)
+    const asRoot = nodeHostStepDeps({}, rootOwned)
+    expect(await asRoot.readRequest(path)).toBe('{"a":1}')
+    await asRoot.writeResult(join(dir, 's.result.json'), '{"outcome":"completed"}\n')
+    expect(await readFile(join(dir, 's.result.json'), 'utf8')).toBe('{"outcome":"completed"}\n')
+  })
+})
+
+describe('working through /proc/self/fd when the kernel offers it', () => {
+  it('writes into the folder it checked even if the path is swapped for a link afterwards', async () => {
+    const original = join(dir, 'steps')
+    const moved = join(dir, 'moved')
+    const elsewhere = join(dir, 'elsewhere')
+    await mkdir(original, { mode: 0o700 })
+    await mkdir(elsewhere, { mode: 0o700 })
+    // Stands in for the kernel: /proc/self/fd/<fd> follows the opened directory, wherever it went.
+    const opened = new Map<number, string>()
+    const paths: string[] = []
+    const real = (path: string): string => {
+      const match = /^\/proc\/self\/fd\/(\d+)(\/.*)?$/.exec(path)
+      if (match === null) return path
+      return `${opened.get(Number(match[1]))!}${match[2] ?? ''}`
+    }
+    const proc: HostFs = {
+      ...nodeHostFs,
+      openDirectory: async (path) => {
+        const handle = await nodeHostFs.openDirectory(path)
+        opened.set(handle.fd, path)
+        // The race: once the folder is open, its owner moves it and plants a link in its place.
+        await nodeHostFs.rename(original, moved)
+        await symlink(elsewhere, original)
+        opened.set(handle.fd, moved)
+        return handle
+      },
+      exists: async (path) =>
+        /^\/proc\/self\/fd\/\d+$/.test(path) && opened.has(Number(path.split('/').pop())),
+      open: async (path, flags, mode) => {
+        paths.push(path)
+        return nodeHostFs.open(real(path), flags, mode)
+      },
+      rename: async (from, to) => {
+        paths.push(from, to)
+        await nodeHostFs.rename(real(from), real(to))
+      },
+      remove: async (path) => nodeHostFs.remove(real(path)),
+    }
+    await deps(proc).writeResult(join(original, 's.result.json'), '{}')
+    expect(paths.length).toBeGreaterThan(0)
+    for (const path of paths) expect(path).toMatch(/^\/proc\/self\/fd\/\d+\//)
+    expect(await readdir(moved)).toEqual(['s.result.json'])
+    expect(await readdir(elsewhere)).toEqual([])
+  })
+
+  it('falls back to the checked path where there is no /proc (and says so in the header)', async () => {
+    const opened: string[] = []
+    const noProc: HostFs = {
+      ...nodeHostFs,
+      exists: async () => false,
+      open: async (path, flags, mode) => {
+        opened.push(path)
+        return nodeHostFs.open(path, flags, mode)
+      },
+    }
+    await deps(noProc).writeResult(join(dir, 's.result.json'), '{}')
+    expect(opened[0]!.startsWith(`${dir}/.s.result.json.`)).toBe(true)
   })
 })
 
@@ -213,6 +285,29 @@ describe('writing as root into a folder the user owns', () => {
     await mkdir(join(blocked, 's.result.json'), { recursive: true }) // a directory where the file goes
     await expect(deps().writeResult(join(blocked, 's.result.json'), 'x')).rejects.toThrow()
     expect(await readdir(blocked)).toEqual(['s.result.json'])
+  })
+
+  it('a folder that is not there is the file system’s error, not a refusal', async () => {
+    await expect(deps().writeResult(join(dir, 'gone', 's.result.json'), '{}')).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+
+  it('a handle that is not a directory is refused', async () => {
+    const notDirectory: HostFs = {
+      ...nodeHostFs,
+      openDirectory: async (path) => {
+        const handle = await nodeHostFs.openDirectory(path)
+        return {
+          fd: handle.fd,
+          close: () => handle.close(),
+          stat: async () => ({ isDirectory: () => false, uid: Number(me), mode: 0o700 }),
+        }
+      },
+    }
+    await expect(deps(notDirectory).writeResult(join(dir, 's.result.json'), '{}')).rejects.toThrow(
+      /not a directory/
+    )
   })
 
   it('reads an unreadable path as an error, not as absent', async () => {

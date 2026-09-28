@@ -7,11 +7,12 @@
  * Exit codes:
  * - 0 — the recipe completed; the result file says `completed`.
  * - 1 — a result file was written and says `failed` (a refused request or a failed step).
- * - 2 — refused before a result file could be written: a usage error, a path not named
- *   `<step_id>.request.json`, or a folder the executor does not trust (not a real directory, writable
- *   by others, or not owned by the invoking user — or, run as root with neither `PKEXEC_UID` nor
- *   `SUDO_UID`, not owned by root). The reason is printed on stderr; the client must treat a missing
- *   result file as failed.
+ * - 2 — no result file was written: a usage error, a path not named `<step_id>.request.json`, a
+ *   folder the executor does not trust (not a real directory, writable by others, or not owned by
+ *   the invoking user — or, run as root with neither `PKEXEC_UID` nor `SUDO_UID`, not owned by
+ *   root), or a result write that failed for any other reason (full disk, read-only file system,
+ *   the folder gone). The reason is printed on stderr; the client must treat a missing result file
+ *   as failed.
  *
  * Deliberately not in `USAGE`: nobody runs it by choice, and `atc host-step` is hidden the same way.
  */
@@ -24,7 +25,7 @@ import type { CliIo } from '../io.js'
 
 const HOST_STEP_USAGE =
   'Usage: atomic-chat-core host-step exec <step_id.request.json> [--json]\n' +
-  'Exit: 0 completed, 1 failed (see the result file), 2 refused before a result file could be written.\n'
+  'Exit: 0 completed, 1 failed (see the result file), 2 no result file was written (see stderr).\n'
 
 export async function hostStepCommand(
   argv: string[],
@@ -50,11 +51,12 @@ export async function hostStepCommand(
   try {
     result = await executeHostStep(requestPath, deps)
   } catch (error) {
-    if (error instanceof AtomicCoreError && error.code === 'MANAGED_HOST_STEP_INVALID') {
-      io.stderr(`host-step: refused before a result file could be written: ${error.message}\n`)
-      return 2
-    }
-    throw error
+    // `executeHostStep` throws only when it could not write a result file: a refused path or folder
+    // (`MANAGED_HOST_STEP_INVALID`) or a failed write (ENOSPC, EROFS, ENOENT, ...). Either way the
+    // caller finds no result, and exit 2 is what tells it so.
+    const why = error instanceof AtomicCoreError ? error.message : (error as Error).message
+    io.stderr(`host-step: no result file was written: ${why}\n`)
+    return 2
   }
   if (values.json) io.stdout(`${JSON.stringify(result, null, 2)}\n`)
   else io.stdout(`${result.step_id || '(unknown step)'}: ${result.outcome} — ${result.log_tail}\n`)
