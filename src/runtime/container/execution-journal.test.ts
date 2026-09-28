@@ -93,4 +93,20 @@ describe('ExecutionJournal', () => {
       code: 'INVALID_ARGUMENT',
     })
   })
+
+  it('serializes concurrent add/remove on the same id so disk state matches the final in-memory state', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    const id = record().container_id
+    // Padding the first write makes its own I/O slower than the later, tiny writes it races against;
+    // without the write queue, that write's rename can land *after* the later ones and win on disk
+    // even though it was called first — the bug this test guards against.
+    const padded = record({ container_id: id, scope: 'x'.repeat(5_000_000) })
+    const final = record({ container_id: id, scope: 'final' })
+
+    await Promise.all([journal.add(padded), journal.remove(id), journal.add(final)])
+
+    expect(journal.list()).toEqual([final])
+    const reopened = await ExecutionJournal.open(data.layout)
+    expect(reopened.list()).toEqual([final])
+  })
 })

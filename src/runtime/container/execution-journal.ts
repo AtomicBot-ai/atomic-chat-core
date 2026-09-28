@@ -89,6 +89,14 @@ async function writeRecord(dir: string, path: string, record: ExecutionRecord): 
 
 export class ExecutionJournal {
   private records = new Map<string, ExecutionRecord>()
+  /**
+   * Serializes every disk write behind this journal, so concurrent `add`/`remove` calls land on disk
+   * in the order they were *called*, never the order their own I/O happens to finish in — the same
+   * `flush` queue `process-journal.ts` chains its whole-array rewrites through. The in-memory map is
+   * always mutated synchronously before a write is enqueued, so `list()` is never behind the queue;
+   * only what ends up on disk depended on write-completion order before this queue existed.
+   */
+  private queue: Promise<void> = Promise.resolve()
 
   private constructor(private readonly dir: string) {}
 
@@ -106,17 +114,25 @@ export class ExecutionJournal {
   async add(record: ExecutionRecord): Promise<void> {
     assertSafeContainerId(record.container_id)
     this.records.set(record.container_id, record)
-    await writeRecord(this.dir, this.fileFor(record.container_id), record)
+    const path = this.fileFor(record.container_id)
+    await this.enqueue(() => writeRecord(this.dir, path, record))
   }
 
   /** Drop the record for a container that is gone, stopped, or adopted by reconcile. Idempotent. */
   async remove(containerId: string): Promise<void> {
     if (!this.records.has(containerId)) return
     this.records.delete(containerId)
-    await rm(this.fileFor(containerId), { force: true })
+    const path = this.fileFor(containerId)
+    await this.enqueue(() => rm(path, { force: true }))
   }
 
   private fileFor(containerId: string): string {
     return join(this.dir, `${assertSafeContainerId(containerId)}.json`)
+  }
+
+  /** Chains one disk write onto whatever this journal already had queued. */
+  private enqueue(task: () => Promise<void>): Promise<void> {
+    this.queue = this.queue.then(task)
+    return this.queue
   }
 }

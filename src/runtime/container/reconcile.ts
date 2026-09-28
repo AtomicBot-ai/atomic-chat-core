@@ -35,6 +35,13 @@ export interface ExecutionReconcileResult {
   absent: ExecutionRecord[]
   /** The stop could not be confirmed: the record — and the container — are left alone, and reported. */
   unconfirmed: ExecutionRecord[]
+  /**
+   * `inspectContainer`, `stopContainer` or `removeContainer` threw for this record (an `IO_ERROR` the
+   * executor could not classify as "absent" or "unconfirmed"): the record — and the container — are
+   * left alone, exactly like `unconfirmed`, so one bad record can never stop reconcile from reaching
+   * the rest of the journal.
+   */
+  failed: ExecutionRecord[]
 }
 
 /**
@@ -49,36 +56,48 @@ export async function reconcileExecutions(
   log: ReconcileLogger,
   stopTimeoutSeconds = RECONCILE_STOP_TIMEOUT_SECONDS
 ): Promise<ExecutionReconcileResult> {
-  const result: ExecutionReconcileResult = { stopped: [], absent: [], unconfirmed: [] }
+  const result: ExecutionReconcileResult = { stopped: [], absent: [], unconfirmed: [], failed: [] }
   for (const record of journal.list()) {
     if (record.instance_id === currentInstanceId) continue // this instance's own container, not an orphan
 
-    const inspected = await inspectContainer(exec, record.container_id)
-    if (!inspected.found) {
+    try {
+      const inspected = await inspectContainer(exec, record.container_id)
+      if (!inspected.found) {
+        await journal.remove(record.container_id)
+        result.absent.push(record)
+        continue
+      }
+
+      const outcome = await stopContainer(exec, record.container_id, stopTimeoutSeconds)
+      if (!outcome.confirmed) {
+        log(
+          'warn',
+          `execution journal: could not confirm container ${record.container_id} (engine ${record.engine_id}, ` +
+            `scope ${record.scope}) stopped — leaving it and its journal record alone (${outcome.reason})`
+        )
+        result.unconfirmed.push(record)
+        continue
+      }
+
+      await removeContainer(exec, record.container_id)
       await journal.remove(record.container_id)
-      result.absent.push(record)
-      continue
-    }
-
-    const outcome = await stopContainer(exec, record.container_id, stopTimeoutSeconds)
-    if (!outcome.confirmed) {
+      result.stopped.push(record)
       log(
-        'warn',
-        `execution journal: could not confirm container ${record.container_id} (engine ${record.engine_id}, ` +
-          `scope ${record.scope}) stopped — leaving it and its journal record alone (${outcome.reason})`
+        'info',
+        `stopped and removed orphaned managed-runtime container ${record.container_id} ` +
+          `(engine ${record.engine_id}, scope ${record.scope}) left by a previous core instance`
       )
-      result.unconfirmed.push(record)
-      continue
+    } catch (error) {
+      // inspectContainer/stopContainer/removeContainer threw (an IO_ERROR neither "absent" nor
+      // "unconfirmed" already covers): one bad record must never stop reconcile from reaching the rest.
+      const detail = error instanceof Error ? error.message : String(error)
+      log(
+        'error',
+        `execution journal: reconcile failed for container ${record.container_id} (engine ${record.engine_id}, ` +
+          `scope ${record.scope}) — leaving it and its journal record alone (${detail})`
+      )
+      result.failed.push(record)
     }
-
-    await removeContainer(exec, record.container_id)
-    await journal.remove(record.container_id)
-    result.stopped.push(record)
-    log(
-      'warn',
-      `stopped and removed orphaned managed-runtime container ${record.container_id} ` +
-        `(engine ${record.engine_id}, scope ${record.scope}) left by a previous core instance`
-    )
   }
   return result
 }

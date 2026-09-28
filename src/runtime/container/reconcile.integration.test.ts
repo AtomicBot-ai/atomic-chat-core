@@ -79,9 +79,10 @@ describe('reconcile end to end against a fake docker binary', () => {
 
       expect(result.stopped.map((r) => r.container_id)).toEqual([record().container_id])
       expect(result.unconfirmed).toEqual([])
+      expect(result.failed).toEqual([])
       expect(journal.list()).toEqual([]) // dropped before the first load can be served
       expect((await ExecutionJournal.open(data.layout)).list()).toEqual([])
-      expect(log).toHaveBeenCalledWith('warn', expect.stringContaining(record().container_id))
+      expect(log).toHaveBeenCalledWith('info', expect.stringContaining(record().container_id))
     } finally {
       await data.cleanup()
     }
@@ -100,7 +101,7 @@ describe('reconcile end to end against a fake docker binary', () => {
 
       const result = await reconcileExecutions(journal, 'new-instance', execSpy, vi.fn())
 
-      expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [] })
+      expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [] })
       expect(execSpy).not.toHaveBeenCalled() // no journal record means no inspect, no stop, ever
     } finally {
       await data.cleanup()

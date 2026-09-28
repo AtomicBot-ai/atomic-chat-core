@@ -56,14 +56,19 @@ describe('reconcileExecutions', () => {
     const exec = fakeExecFor({
       orphan1: { inspect: ok(JSON.stringify([{ Id: 'orphan1', State: { Running: true } }])), stop: ok() },
     })
+    const log = vi.fn()
 
-    const result = await reconcileExecutions(journal, 'current-instance', exec, noopLog)
+    const result = await reconcileExecutions(journal, 'current-instance', exec, log)
 
     expect(result.stopped.map((r) => r.container_id)).toEqual(['orphan1'])
     expect(result.absent).toEqual([])
     expect(result.unconfirmed).toEqual([])
+    expect(result.failed).toEqual([])
     expect(journal.list()).toEqual([])
     expect((await ExecutionJournal.open(data.layout)).list()).toEqual([])
+    // A successful stop+remove is routine, not a warning: only an unconfirmed stop or a thrown error is.
+    expect(log).toHaveBeenCalledWith('info', expect.stringContaining('orphan1'))
+    expect(log).not.toHaveBeenCalledWith('warn', expect.anything())
   })
 
   it('never calls the executor for a foreign container that carries our labels but is not in the journal', async () => {
@@ -74,7 +79,7 @@ describe('reconcileExecutions', () => {
 
     const result = await reconcileExecutions(journal, 'current-instance', exec, noopLog)
 
-    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [] })
+    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [] })
     expect(exec).not.toHaveBeenCalled()
   })
 
@@ -107,6 +112,53 @@ describe('reconcileExecutions', () => {
     expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('stuck'))
   })
 
+  it('keeps the record and continues with the rest of the journal when inspect throws for one record', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add(record({ container_id: 'throws' }))
+    await journal.add(record({ container_id: 'orphan1' })) // a second, healthy record after the failing one
+    const exec = vi.fn(async (args: string[]): Promise<DockerCommandResult> => {
+      const containerId = args[args.length - 1] as string
+      if (containerId === 'throws') throw new Error('Cannot connect to the Docker daemon')
+      if (args.includes('inspect')) return ok(JSON.stringify([{ Id: containerId, State: { Running: true } }]))
+      return ok()
+    })
+    const log = vi.fn()
+
+    const result = await reconcileExecutions(journal, 'current-instance', exec, log)
+
+    expect(result.failed.map((r) => r.container_id)).toEqual(['throws'])
+    expect(result.stopped.map((r) => r.container_id)).toEqual(['orphan1']) // the rest of the journal still ran
+    expect(journal.list().map((r) => r.container_id)).toEqual(['throws']) // the failed record is kept
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('throws'))
+  })
+
+  it('keeps the record and continues with the rest of the journal when removeContainer throws for one record', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add(record({ container_id: 'rm-throws' }))
+    await journal.add(record({ container_id: 'orphan1' }))
+    const exec = vi.fn(async (args: string[]): Promise<DockerCommandResult> => {
+      const containerId = args[args.length - 1] as string
+      if (args.includes('inspect')) return ok(JSON.stringify([{ Id: containerId, State: { Running: true } }]))
+      if (args.includes('stop')) return ok()
+      if (args.includes('rm') && containerId === 'rm-throws')
+        throw new Error('Cannot connect to the Docker daemon')
+      return ok()
+    })
+    const log = vi.fn()
+
+    const result = await reconcileExecutions(journal, 'current-instance', exec, log)
+
+    expect(result.failed.map((r) => r.container_id)).toEqual(['rm-throws'])
+    expect(result.stopped.map((r) => r.container_id)).toEqual(['orphan1'])
+    expect(
+      journal
+        .list()
+        .map((r) => r.container_id)
+        .sort()
+    ).toEqual(['rm-throws']) // kept, not dropped
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('rm-throws'))
+  })
+
   it('never touches a record that already belongs to the running instance', async () => {
     const journal = await ExecutionJournal.open(data.layout)
     await journal.add(record({ container_id: 'mine', instance_id: 'current-instance' }))
@@ -116,7 +168,7 @@ describe('reconcileExecutions', () => {
 
     const result = await reconcileExecutions(journal, 'current-instance', exec, noopLog)
 
-    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [] })
+    expect(result).toEqual({ stopped: [], absent: [], unconfirmed: [], failed: [] })
     expect(exec).not.toHaveBeenCalled()
     expect(journal.list().map((r) => r.container_id)).toEqual(['mine'])
   })
