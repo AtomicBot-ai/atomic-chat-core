@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionInfo } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
-import { spawnManaged } from './process.js'
+import { hostPid, spawnManaged } from './process.js'
 import type { ManagedProcess } from './process.js'
 import { SidecarTable } from './sidecar.js'
 import type { SidecarTableOptions } from './sidecar.js'
@@ -88,7 +88,7 @@ describe('SidecarTable', () => {
     expect(await unload).toEqual({ success: true })
     expect(t.list()).toEqual([])
     expect(events.map((event) => event.name)).toEqual(['session:started', 'session:unloaded'])
-    expect(() => process.kill(session.pid, 0)).toThrow()
+    expect(() => process.kill(hostPid(session), 0)).toThrow()
   })
 
   it('deduplicates unloads and waits before starting a replacement load', async () => {

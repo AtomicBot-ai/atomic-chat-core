@@ -881,6 +881,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/environment/descriptor.ts": {
+    "statements": 97,
+    "branches": 86,
+    "functions": 100,
+    "lines": 97
+  },
   "src/runtime/foundation-models/errors.ts": {
     "statements": 100,
     "branches": 100,

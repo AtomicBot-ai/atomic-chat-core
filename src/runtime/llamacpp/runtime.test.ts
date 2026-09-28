@@ -13,7 +13,7 @@ import type { CoreEvents } from '../../contracts/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { ProcessJournal } from '../../lock/index.js'
 import { ModelRegistry } from '../../models/index.js'
-import { spawnManaged } from '../shared/index.js'
+import { hostPid, spawnManaged } from '../shared/index.js'
 import type { ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
@@ -306,7 +306,7 @@ describe('failure paths', () => {
     await data.writeModel('dies')
     const runtime = await makeRuntime()
     const info = await runtime.load('dies')
-    process.kill(info.pid, 'SIGKILL')
+    process.kill(hostPid(info), 'SIGKILL')
     await waitFor(() => events.some((e) => e.name === 'session:died'))
     expect(runtime.list()).toEqual([])
     expect(runtime.findSession('dies')).toBeUndefined()
@@ -371,8 +371,8 @@ describe('unload', () => {
     expect(await runtime.unload('demo')).toEqual({ success: true })
     expect(runtime.list()).toEqual([])
     expect(journal.list()).toEqual([])
-    await waitFor(() => !isAlive(info.pid))
-    expect(isAlive(info.pid)).toBe(false)
+    await waitFor(() => !isAlive(hostPid(info)))
+    expect(isAlive(hostPid(info))).toBe(false)
     expect(payloads('session:unloaded')).toMatchObject([{ model_id: 'demo', pid: info.pid }])
     expect(await runtime.unload('demo')).toEqual({ success: true })
   })
@@ -384,7 +384,7 @@ describe('unload', () => {
     const [first, second] = [await runtime.load('a'), await runtime.load('b')]
     await runtime.unloadAll()
     expect(runtime.list()).toEqual([])
-    await waitFor(() => !isAlive(first.pid) && !isAlive(second.pid))
+    await waitFor(() => !isAlive(hostPid(first)) && !isAlive(hostPid(second)))
   })
 
   it('auto-unloads another text model before starting the next one', async () => {
@@ -399,8 +399,8 @@ describe('unload', () => {
     const first = await runtime.load('first')
     const second = await runtime.load('second')
     expect(runtime.getLoadedModels()).toEqual(['second'])
-    await waitFor(() => !isAlive(first.pid))
-    expect(isAlive(second.pid)).toBe(true)
+    await waitFor(() => !isAlive(hostPid(first)))
+    expect(isAlive(hostPid(second))).toBe(true)
   })
 
   it('honours a per-load auto_unload override', async () => {

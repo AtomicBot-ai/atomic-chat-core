@@ -12,8 +12,9 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { RemoteAccessStatus } from './remote-access.js'
-import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.js'
+import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo, SessionLoadStage } from './session.js'
 
 export type DownloadKind = 'model' | 'backend' | 'draft' | 'cudart'
 
@@ -102,7 +103,21 @@ export interface CoreEvents {
     newCtx: number
     reason: string
   }
-  'session:unloaded': { provider: LocalProviderId; model_id: string; pid: number }
+  /** `pid` is null when the session was a container: it never had a host process to report. */
+  'session:unloaded': { provider: LocalProviderId; model_id: string; pid: number | null }
+  /**
+   * Managed-runtime load stages (design D8, spec `tensorrt-llm-runtime`): `generation` ties the
+   * progress to the exact load a caller started, since a second load of the same model replaces it
+   * with a new one. Only a container-backed provider emits this; a native load has no stages to
+   * report and goes straight from `session:started` to ready.
+   */
+  'session:load-progress': {
+    provider: LocalProviderId
+    model_id: string
+    generation: string
+    stage: SessionLoadStage
+    elapsed_ms: number
+  }
 
   'server:started': { host: string; port: number }
   'server:stopped': Record<string, never>
@@ -126,6 +141,18 @@ export interface CoreEvents {
   /** Video generation shares `state` and `error`; its jobs have their own two, so image consumers see no new shape. */
   'diffusion:video-progress': DiffusionVideoProgressEvent
   'diffusion:video-job': DiffusionVideoJobEvent
+
+  /**
+   * Managed text runtimes (`src/contracts/environment.ts`; openspec change `add-tensorrt-llm-linux`).
+   * Both carry full state rather than a delta, so a client that reconnects rebuilds from the
+   * snapshot and then applies whatever arrives. Both are proposed: no producer exists yet.
+   *
+   * `changed` is one environment and the engines installed into it. `operation` is one durable
+   * setup, update or removal. Each carries `instance_id` and `revision`: apply only a strictly
+   * newer revision of the current instance, and treat an equal revision as a no-op.
+   */
+  'environment:changed': EnvironmentSnapshot
+  'environment:operation': EnvironmentOperation
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

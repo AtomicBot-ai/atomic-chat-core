@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { classifyProcessOutput } from '../llamacpp/index.js'
-import { isProcessAlive, isReadyLogLine, spawnAndAwaitReady, spawnManaged } from './process.js'
+import type { SessionInfo } from '../../contracts/index.js'
+import { hostPid, isProcessAlive, isReadyLogLine, spawnAndAwaitReady, spawnManaged } from './process.js'
 
 const node = (script: string) => ({
   exe: process.execPath,
@@ -306,5 +307,45 @@ describe('spawnManaged hooks', () => {
     )
     expect((await silent.exited).code).toBe(7)
     expect(silent.output()).toEqual({ stdout: '', stderr: '' })
+  })
+})
+
+describe('hostPid', () => {
+  const native: SessionInfo = {
+    pid: 4242,
+    port: 39_411,
+    model_id: 'qwen3-4b',
+    model_path: '/models/qwen3-4b.gguf',
+    is_embedding: false,
+    api_key: '',
+  }
+
+  it('hands back the process id of a session that really is a process here', () => {
+    expect(hostPid(native)).toBe(4242)
+    // A record written before managed runtimes existed carries no kind, and is native.
+    expect(hostPid({ ...native, execution: 'native' })).toBe(4242)
+  })
+
+  it('refuses a container session instead of handing out a number that means nothing here', () => {
+    // The pid inside a container belongs to another kernel's numbering. Killing it, journalling it
+    // or probing it would address whatever else on this machine happens to hold that number.
+    expect(() => hostPid({ ...native, pid: null, execution: 'container' })).toThrow(AtomicCoreError)
+    expect(() => hostPid({ ...native, pid: 1, execution: 'container' })).toThrow(
+      /does not run as a process on this machine/
+    )
+  })
+
+  it('refuses a session with no process id whatever it claims to be', () => {
+    expect(() => hostPid({ ...native, pid: null })).toThrow(AtomicCoreError)
+  })
+
+  it('names the session it refused, so the caller can tell which one it was', () => {
+    try {
+      hostPid({ ...native, pid: null, execution: 'container' })
+      throw new Error('expected a throw')
+    } catch (error) {
+      expect((error as AtomicCoreError).details).toContain('qwen3-4b')
+      expect((error as AtomicCoreError).code).toBe('MANAGED_IDENTITY_MISMATCH')
+    }
   })
 })
