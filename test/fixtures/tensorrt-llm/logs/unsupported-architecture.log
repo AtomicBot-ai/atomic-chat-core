@@ -1,6 +1,8 @@
 INFO 09-28 10:31:09 [server.py] Started server process [1]
 INFO 09-28 10:31:09 [server.py] Waiting for application startup.
 Traceback (most recent call last):
-  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/models/automodel.py", line 88, in from_hugging_face
-    raise NotImplementedError(
-NotImplementedError: The given huggingface model architecture ExoticForCausalLM is not supported in TRT-LLM yet
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/pyexecutor/model_loader.py", line 240, in _load_model
+    model = AutoModelForCausalLM.from_config(config_copy)
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/models/modeling_auto.py", line 41, in from_config
+    raise ValueError(
+ValueError: Unknown architecture for AutoModelForCausalLM: ExoticForCausalLM

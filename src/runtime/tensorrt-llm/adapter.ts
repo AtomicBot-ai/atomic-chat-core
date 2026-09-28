@@ -1,52 +1,89 @@
 /**
  * The `tensorrt-llm` `ManagedTextAdapter` (task 2.13, spec `tensorrt-llm-runtime`, design D8/D9):
  * settings validation, the `trtllm-serve` argv, readiness, log stage markers, the readiness
- * timeout, exit classification (OOM etc.), declared capabilities and routes, and the
- * context-length-overflow error mapping. Plugs into the engine-neutral load lifecycle (task 2.12,
- * `../managed-text/`) through `ManagedTextAdapter`; nothing here does I/O.
+ * timeout, exit classification (OOM etc.), declared capabilities and routes, request-body
+ * rewriting for the output-length setting, and the context-length-overflow error mapping. Plugs
+ * into the engine-neutral load lifecycle (task 2.12, `../managed-text/`) through
+ * `ManagedTextAdapter`; nothing here does I/O.
  *
- * `trtllm-serve`'s CLI surface and error wording below is read from the pinned tag
- * `nvcr.io/nvidia/tensorrt-llm/release` `descriptor_id: tensorrt-llm-1.2.1-r1` builds from
- * (`v1.2.1`, https://github.com/NVIDIA/TensorRT-LLM/tree/v1.2.1), fetched read-only while writing
- * this file:
- * - `tensorrt_llm/commands/serve.py` (`DefaultGroup` + `@click.command("serve")`): the flags this
- *   file builds argv from (`--host`, `--port`, `--max_seq_len`, `--max_num_tokens`,
- *   `--kv_cache_free_gpu_memory_fraction` — the long spelling of the `--free_gpu_memory_fraction`
- *   alias — `--tool_parser`, `--reasoning_parser`). No `--cache_dir`/engine-cache flag exists on
- *   `serve` in this tag (the unifying `TRTLLM_CACHE_DIR` env var, NVIDIA/TensorRT-LLM#18897, was
- *   still an open PR as of this reading, so it is not in `v1.2.1`); the engine cache directory is
- *   instead wired through the individual upstream PyTorch/Triton/CUDA JIT-cache env vars that
- *   `#18897` itself names as the caches it would unify (`TORCHINDUCTOR_CACHE_DIR`,
+ * Fix round 1 (`findings-2.13-r1.md`): the first pass sourced its CLI/error evidence from a mix of
+ * the pytorch and legacy `tensorrt` backends without checking which one this descriptor actually
+ * launches (`serve.py`'s `--backend` defaults to `pytorch`, and nothing here ever passes
+ * `--backend`), and got `--max_num_tokens`'s meaning on that backend wrong. Every source citation
+ * below was re-verified, read-only, against the pinned tag's actual sources
+ * (`nvcr.io/nvidia/tensorrt-llm/release` `descriptor_id: tensorrt-llm-1.2.1-r1` builds from
+ * `v1.2.1`, https://github.com/NVIDIA/TensorRT-LLM/tree/v1.2.1), this time specifically checking
+ * which backend each path belongs to:
+ * - `tensorrt_llm/commands/serve.py`: the flags this file builds argv from (`--host`, `--port`,
+ *   `--max_seq_len`, `--max_num_tokens`, `--kv_cache_free_gpu_memory_fraction` — the long spelling
+ *   of the `--free_gpu_memory_fraction` alias — `--tool_parser`, `--reasoning_parser`), and that
+ *   `--backend` defaults to `pytorch` (`DefaultGroup` + `@click.command("serve")`). No
+ *   `--cache_dir`/engine-cache flag exists on `serve` in this tag (the unifying `TRTLLM_CACHE_DIR`
+ *   env var, NVIDIA/TensorRT-LLM#18897, was still an open PR as of this reading); the engine cache
+ *   directory is instead wired through the individual upstream PyTorch/Triton/CUDA JIT-cache env
+ *   vars `#18897` itself names as the caches it would unify (`TORCHINDUCTOR_CACHE_DIR`,
  *   `TRITON_CACHE_DIR`, `CUDA_CACHE_PATH`) — those already exist independently of that PR.
+ * - `tensorrt_llm/llmapi/llm.py`'s `_check_arguments`: on the pytorch backend, and only when
+ *   `enable_chunked_prefill` is off and the request is not gen-only, it compares
+ *   `prompt_len/cp_size + query_len` against `args.max_num_tokens` alone — **never the output** —
+ *   raising `RequestError(f"The sum of prompt length ({promptLen}), query length ({queryLen})
+ *   should not exceed max_num_tokens ({limit})")`. `--max_num_tokens` therefore caps the *prompt*,
+ *   not a reply's length; the ruling in `findings-2.13-r1.md` item 1 responds by pointing it at
+ *   `context_length` (a correct, if generic, prompt-side guard) and enforcing the output setting
+ *   elsewhere — see `rewriteRequestBody` below and
+ *   `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`. The
+ *   `tensorrt`-backend branch of the same method (comparing prompt+query+`max_tokens` against
+ *   `max_seq_len`) is real but unreachable from this adapter's launch, which never passes
+ *   `--backend`; it is not implemented here (round 1 had a copy of it that could never fire).
+ * - `tensorrt_llm/_torch/pyexecutor/base_worker.py`'s `_deduce_max_tokens`: the pytorch backend's
+ *   actual per-request overflow signal once `--max_num_tokens` no longer doubles as an output cap —
+ *   `default_max_tokens = max_seq_len - splited_prompt_len - query_token_len`, and once that is
+ *   `<= 0` it raises `ValueError(f"\`default_max_tokens\` ({default_max_tokens}) must be greater
+ *   than 0, \`default_max_tokens\` ({default_max_tokens}) = max_seq_len ({max_seq_len}) -
+ *   \`splited_prompt_len\` ({splited_prompt_len}) - \`query_token_len\` ({query_token_len})")`.
+ *   `mapTensorrtLlmContextLengthError` matches this alongside the `_check_arguments` message above.
  * - `tensorrt_llm/serve/openai_server.py`: `GET /health` answers 200 only once
  *   `self.llm._check_health()` passes and 503 otherwise (not merely "the HTTP server is up"), and
  *   `create_error_response`/the generic `except Exception` handler wrap any exception raised while
- *   handling a request — including the context-overflow `ValueError` below — as
+ *   handling a request as
  *   `{"object":"error","message":<str(exc)>,"type":"BadRequestError","param":null,"code":400}`, a
  *   flat envelope with an HTTP-status `code`, not OpenAI's `context_length_exceeded` string (that
  *   OpenAI-style remap is NVIDIA/TensorRT-LLM#19457, also still open, so this tag needs its own).
- * - `tensorrt_llm/llmapi/llm.py`'s `_check_arguments`: the two request-time `ValueError` messages a
- *   too-long prompt raises, one per backend — pytorch (this descriptor's default backend, per
- *   `serve.py`): "The sum of prompt length ({promptLen}), query length ({queryLen}) should not
- *   exceed max_num_tokens ({limit})"; tensorrt: "The sum of prompt length ({promptLen}) and query
- *   length ({queryLen}) max_tokens ({maxTokens}) should not exceed max_seq_len ({limit})".
- * - `tensorrt_llm/models/automodel.py`'s `TopModelMixin.from_hugging_face`: an architecture with no
- *   TRT-LLM implementation raises `NotImplementedError("The given huggingface model architecture
- *   {arch} is not supported in TRT-LLM yet")` (matches NVIDIA/TensorRT-LLM issue #2845's report for
- *   `DeepseekV3ForCausalLM` on an older tag before it gained support).
+ * - `tensorrt_llm/_torch/models/modeling_auto.py`'s `AutoModelForCausalLM.from_config` — the
+ *   pytorch backend's model class lookup (`_torch/pyexecutor/model_loader.py` imports
+ *   `AutoModelForCausalLM` from exactly this module) — raises `ValueError(f"Unknown architecture
+ *   for AutoModelForCausalLM: {config.pretrained_config.architectures[0]}")` for an architecture it
+ *   has no class for. `tensorrt_llm/models/automodel.py`'s `TopModelMixin.from_hugging_face`
+ *   ("...is not supported in TRT-LLM yet", round 1's source, matching NVIDIA/TensorRT-LLM issue
+ *   #2845's older report) belongs to the legacy `tensorrt`-backend model loader, not the pytorch one
+ *   — dropped here for the same reason as the `max_seq_len` overflow branch above.
+ * - `tensorrt_llm/_torch/modules/linear.py`: two real `quant_mode`/`quant mode` rejections —
+ *   `raise NotImplementedError(f"Unsupported quant_mode: {module.quant_config.layer_quant_mode}")`
+ *   (line 292, weight-only int4/int8 dispatch) and `raise ValueError(f'unsupported quant mode:
+ *   {quant_config.quant_mode}')` (line 2066, the general per-layer quant-method dispatch). Round 1
+ *   matched a *warning* string ("Unsupported quant algo") that these modules never raise as an
+ *   exception at all.
  * - The CUDA/PyTorch out-of-memory wording ("CUDA out of memory. Tried to allocate X GiB. GPU 0 has
- *   a total capacity of Y GiB of which Z GiB/bytes is free.") is PyTorch's own allocator message,
- *   unrelated to any TensorRT-LLM release; quoted from real `trtllm-serve` crash reports in
+ *   a total capacity of Y GiB of which Z GiB/MiB/KiB/bytes is free.") is PyTorch's own allocator
+ *   message, unrelated to any TensorRT-LLM release; quoted from real `trtllm-serve` crash reports in
  *   NVIDIA/TensorRT-LLM issues #7818 (mid-size allocation, `MiB`) and #8642 (`0 bytes` free, the KV
- *   cache size estimation case).
- * - Startup log lines were harder to source verbatim for this exact tag (no full console capture
- *   found for `v1.2.1` specifically): `stageMarkers` uses the one line confirmed both by search and
- *   by this repo's own fake-adapter test fixture (`../managed-text/lifecycle.test.ts`) as realistic
- *   for a Hugging-Face-checkpoint-loading Python inference server, `Loading checkpoint shards:` (the
- *   `transformers`/`huggingface_hub` progress bar `trtllm-serve`'s pytorch backend goes through to
- *   read a safetensors checkpoint), plus the CUDA-graph-capture progress line the pytorch backend
- *   logs while warming up before it is ready. Live test 2.19 replaces this with a maker set actually
- *   observed against a live container, per the design's own open question on this point.
+ *   cache size estimation case). `tensorrt_llm/_torch/pyexecutor/py_executor_creator.py`'s
+ *   `_maybe_explain_if_oom` additionally treats any exception whose text contains the lowercase
+ *   substring `"out of memory"` as OOM regardless of its own wording — covering the executor's own
+ *   C++-side allocator failure, which this adapter matches as `CUDA runtime error in .*: out of
+ *   memory` (the shape that class of error takes; no single tag-pinned verbatim capture of the full
+ *   C++ message was found, so the fixture for it is labelled as a constructed line around that
+ *   confirmed substring, not a captured console transcript — see
+ *   `test/helpers/tensorrt-llm-log-fixtures.ts`).
+ * - Startup log lines: `stageMarkers` now uses three lines read directly from the pinned tag's
+ *   pytorch-backend source rather than search results —
+ *   `tensorrt_llm/_torch/pyexecutor/weight_loader.py`'s `HfWeightLoader.load_weights` (tqdm
+ *   descriptions `"Loading safetensors weights in parallel"`/`"Loading bin weights in parallel"`,
+ *   and `logger.info(f"Prefetching {prefetch_size / (1024**3):.2f}GB checkpoint files.")` when
+ *   prefetch is enabled) and `tensorrt_llm/_torch/pyexecutor/model_engine.py`'s
+ *   `_capture_generation_cuda_graphs` (`logger.info(f"Creating CUDA graph instances for {n} batch
+ *   sizes.")`). Round 1's two markers (`Loading checkpoint shards`, `Capturing CUDA graphs`) do not
+ *   appear anywhere in this tag's pytorch-backend source; dropped.
  * - The readiness-timeout coefficients are explicitly placeholders (see the constants below):
  *   design D8's open question defers their real values to live test 2.19 on real hardware. The
  *   chosen numbers only have to satisfy the spec scenario headroom this file's own test checks
@@ -157,22 +194,33 @@ export function validateTensorrtLlmSettings(raw: unknown): TensorrtLlmSettings {
     invalid('tensorrt-llm settings must be an object.', raw)
   }
   const r = (raw ?? {}) as Record<string, unknown>
+  const context_length = validateBoundedInt(
+    r['context_length'],
+    'context_length',
+    TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
+    TENSORRT_LLM_MIN_CONTEXT_LENGTH,
+    TENSORRT_LLM_MAX_CONTEXT_LENGTH
+  )
+  const max_output_tokens = validateBoundedInt(
+    r['max_output_tokens'],
+    'max_output_tokens',
+    TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS,
+    TENSORRT_LLM_MIN_MAX_OUTPUT_TOKENS,
+    TENSORRT_LLM_MAX_MAX_OUTPUT_TOKENS
+  )
+  // A setting that could never leave room for a prompt is rejected here, not discovered later as
+  // every request failing the gateway's own clamp (findings-2.13-r1.md item 1's cross-field rule;
+  // see docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md).
+  if (max_output_tokens >= context_length) {
+    invalid(
+      `tensorrt-llm max_output_tokens (${max_output_tokens}) must be less than context_length (${context_length}).`,
+      max_output_tokens
+    )
+  }
   return {
     gpu_id: validateGpuId(r['gpu_id']),
-    context_length: validateBoundedInt(
-      r['context_length'],
-      'context_length',
-      TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
-      TENSORRT_LLM_MIN_CONTEXT_LENGTH,
-      TENSORRT_LLM_MAX_CONTEXT_LENGTH
-    ),
-    max_output_tokens: validateBoundedInt(
-      r['max_output_tokens'],
-      'max_output_tokens',
-      TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS,
-      TENSORRT_LLM_MIN_MAX_OUTPUT_TOKENS,
-      TENSORRT_LLM_MAX_MAX_OUTPUT_TOKENS
-    ),
+    context_length,
+    max_output_tokens,
     kv_cache_free_gpu_memory_fraction: validateFraction(r['kv_cache_free_gpu_memory_fraction']),
     load_timeout_seconds: validateLoadTimeoutOverride(r['load_timeout_seconds']),
   }
@@ -196,7 +244,16 @@ const CONTAINER_BIND_HOST = '0.0.0.0'
  *  fallback dispatch. The tool/reasoning parser flags are appended only when the pinned descriptor's
  *  `model_families` entry for this model's architecture names them (spec "Возможности модели
  *  объявляются, а не угадываются", design D9); the descriptor's own regex already validated those
- *  names, so they are passed through verbatim. */
+ *  names, so they are passed through verbatim.
+ *
+ *  `--max_num_tokens` is set to `context_length`, not `max_output_tokens` (findings-2.13-r1.md item
+ *  1's ruling): on the pytorch backend this flag caps the *prompt* alone
+ *  (`llmapi/llm.py`'s `_check_arguments`, file header), so pointing it at the output-length setting
+ *  was wrong from the start — it silently shrank the usable prompt window to whatever the output
+ *  setting happened to be. `max_output_tokens` is enforced per request instead, by
+ *  `tensorrtLlmRewriteRequestBody` through the session gateway (below; see
+ *  `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`), because
+ *  this engine release has no server-side flag that caps a reply's length at all. */
 export function buildTensorrtLlmLaunch(
   context: ManagedLaunchContext<TensorrtLlmSettings>
 ): ManagedEngineLaunch {
@@ -212,7 +269,7 @@ export function buildTensorrtLlmLaunch(
     '--max_seq_len',
     String(settings.context_length),
     '--max_num_tokens',
-    String(settings.max_output_tokens),
+    String(settings.context_length),
     '--kv_cache_free_gpu_memory_fraction',
     String(settings.kv_cache_free_gpu_memory_fraction),
   ]
@@ -250,11 +307,15 @@ export const TENSORRT_LLM_READINESS_PER_GIB_MS = 6_000
 /** Applied to the whole base-plus-per-GiB estimate — to be measured in live test 2.19. */
 export const TENSORRT_LLM_READINESS_MARGIN = 1.5
 
-/** Base plus time-per-GiB-of-weights, with margin (spec "Этапы и таймаут загрузки", design D8). A
- *  provider setting overriding this happens above the adapter, in the lifecycle's own
- *  `resolveReadinessTimeoutMs` (`../managed-text/load-policy.ts`) — this function's job is only the
- *  adapter's own weight-based estimate, which the lifecycle uses when no override is given. */
-export function tensorrtLlmReadinessTimeoutMs(weightBytes: number): number {
+/** Base plus time-per-GiB-of-weights, with margin (spec "Этапы и таймаут загрузки", design D8) —
+ *  unless `settings.load_timeout_seconds` is set, which wins outright (findings-2.13-r1.md item 4:
+ *  round 1 validated this setting but never read it back, so it was accepted and then silently
+ *  ignored). The lifecycle's own `resolveReadinessTimeoutMs` (`../managed-text/load-policy.ts`)
+ *  still applies a *second*, load-request-level override on top of whatever this returns — that
+ *  path exists for a caller that computes its own override outside the settings object entirely; a
+ *  `tensorrt-llm` load never populates it, so this function's return value is what actually wins. */
+export function tensorrtLlmReadinessTimeoutMs(weightBytes: number, settings: TensorrtLlmSettings): number {
+  if (settings.load_timeout_seconds !== null) return settings.load_timeout_seconds * 1000
   const weightGiB = Math.max(weightBytes, 0) / GiB
   const estimate = TENSORRT_LLM_READINESS_BASE_MS + TENSORRT_LLM_READINESS_PER_GIB_MS * weightGiB
   return Math.ceil(estimate * TENSORRT_LLM_READINESS_MARGIN)
@@ -266,21 +327,28 @@ export function tensorrtLlmReadinessTimeoutMs(weightBytes: number): number {
 
 /** `torch`'s own CUDA allocator wording (not TensorRT-LLM-specific), both the modern
  *  `torch.OutOfMemoryError` subclass and the plain `RuntimeError` older/lower call sites still
- *  raise (`_create_kv_cache_manager`'s KV-cache sizing step, `resource_manager.py`, does the latter). */
-const OOM_MARKER = /torch\.(?:cuda\.)?OutOfMemoryError|CUDA out of memory/
-const OOM_TRIED_TO_ALLOCATE = /Tried to allocate ([\d.]+)\s*(GiB|MiB)/
-const OOM_FREE = /of which ([\d.]+)\s*(GiB|MiB|bytes) is free/
+ *  raise, plus the executor's own C++-side allocator failure — `py_executor_creator.py`'s
+ *  `_maybe_explain_if_oom` treats any exception whose text contains `"out of memory"` (lowercase)
+ *  as OOM regardless of its own wording, which is why this also matches a generic `CUDA runtime
+ *  error in ...: out of memory` shape rather than only `torch`'s own message (file header). */
+const OOM_MARKER =
+  /torch\.(?:cuda\.)?OutOfMemoryError|CUDA out of memory|CUDA runtime error in .*: out of memory/
+const OOM_TRIED_TO_ALLOCATE = /Tried to allocate ([\d.]+)\s*(GiB|MiB|KiB)/
+const OOM_FREE = /of which ([\d.]+)\s*(GiB|MiB|KiB|bytes) is free/
 
-/** `tensorrt_llm/models/automodel.py`'s `TopModelMixin.from_hugging_face`. */
-const UNSUPPORTED_ARCHITECTURE = /is not supported in TRT-LLM yet/
-/** No single verbatim source string found for this tag's quantization-rejection wording (unlike the
- *  architecture one); matches the shape used across `NotImplementedError`s this engine's linear/
- *  quantization modules raise for a `quant_method`/`quantization_config` this release does not load. */
-const UNSUPPORTED_QUANTIZATION = /unsupported quant(?:ization(?:_config)?)?/i
+/** `tensorrt_llm/_torch/models/modeling_auto.py`'s `AutoModelForCausalLM.from_config` — the
+ *  pytorch backend's model class lookup (file header); not the legacy `tensorrt`-backend loader's
+ *  wording, which this adapter's launch never reaches. */
+const UNSUPPORTED_ARCHITECTURE = /Unknown architecture for AutoModelForCausalLM: (\S+)/
+/** `tensorrt_llm/_torch/modules/linear.py`'s two real `quant_mode`/`quant mode` rejections (file
+ *  header, lines 292 and 2066); deliberately not the `"Unsupported quant algo"` *warning* those
+ *  modules also log, which is never raised as an exception. */
+const UNSUPPORTED_QUANTIZATION = /unsupported quant[_ ]mode:/i
 
 function toGiB(amount: number, unit: string): number {
   if (unit === 'GiB') return amount
   if (unit === 'MiB') return amount / 1024
+  if (unit === 'KiB') return amount / (1024 * 1024)
   return amount / GiB // 'bytes'
 }
 
@@ -309,14 +377,11 @@ function classifyOom(logTail: string): ManagedExitClassification | null {
 }
 
 function classifyUnsupported(logTail: string): ManagedExitClassification | null {
-  const archMatch = UNSUPPORTED_ARCHITECTURE.test(logTail)
-  if (archMatch) {
-    const named = /architecture (\S+) is not supported in TRT-LLM yet/.exec(logTail)
+  const arch = UNSUPPORTED_ARCHITECTURE.exec(logTail)
+  if (arch) {
     return {
       kind: 'unsupported-model',
-      message: named
-        ? `The model architecture ${named[1]} is not supported by this TensorRT-LLM release.`
-        : 'This model architecture is not supported by this TensorRT-LLM release.',
+      message: `The model architecture ${arch[1]} is not supported by this TensorRT-LLM release.`,
     }
   }
   if (UNSUPPORTED_QUANTIZATION.test(logTail)) {
@@ -395,16 +460,30 @@ export interface TensorrtLlmOpenAIError {
   }
 }
 
-const NUM = '([\\d.]+)'
-/** pytorch backend (this descriptor's default, `serve.py`'s `--backend` default): `_check_arguments`
- *  in `llmapi/llm.py` compares the prompt against `max_num_tokens`. */
+const NUM = '(-?[\\d.]+)'
+/** pytorch backend `_check_arguments` (`llmapi/llm.py`, file header): fires only when the *prompt*
+ *  alone (now that `--max_num_tokens` == `context_length`, see `buildTensorrtLlmLaunch`) exceeds
+ *  the context — an extreme case, but a real, reachable one from this adapter's launch. */
 const OVERFLOW_VS_MAX_NUM_TOKENS = new RegExp(
   `sum of prompt length \\(${NUM}\\), query length \\(${NUM}\\) should not exceed max_num_tokens \\(${NUM}\\)`
 )
-/** tensorrt backend: the same check instead compares prompt + query + the reserved output budget
- *  (`max_tokens`) against `max_seq_len`. */
-const OVERFLOW_VS_MAX_SEQ_LEN = new RegExp(
-  `sum of prompt length \\(${NUM}\\) and query length \\(${NUM}\\) max_tokens \\(${NUM}\\) should not exceed max_seq_len \\(${NUM}\\)`
+/** pytorch backend `_deduce_max_tokens` (`base_worker.py`, file header): the overflow signal that
+ *  actually fires in the common case now — prompt plus the room a reply would need leaves nothing
+ *  in the context. `default_max_tokens` itself repeats in the message (`(-?[\\d.]+)` because it is
+ *  the quantity that is `<= 0`); only the second copy is used, for clarity, in
+ *  `mapTensorrtLlmContextLengthError`. */
+const OVERFLOW_VIA_DEDUCE_MAX_TOKENS = new RegExp(
+  '`default_max_tokens` \\(' +
+    NUM +
+    '\\) must be greater than 0, `default_max_tokens` \\(' +
+    NUM +
+    '\\) = max_seq_len \\(' +
+    NUM +
+    '\\) - `splited_prompt_len` \\(' +
+    NUM +
+    '\\) - `query_token_len` \\(' +
+    NUM +
+    '\\)'
 )
 
 /** `trtllm-serve`'s own `ErrorResponse` (`openai_server.py`'s `create_error_response`) is
@@ -444,13 +523,12 @@ function contextLengthExceeded(requestedTokens: number, maxTokens: number): Tens
 }
 
 /**
- * Maps `trtllm-serve` 1.2.1's context-overflow error (a `400` whose message compares prompt length
- * against `max_num_tokens`/`max_seq_len`, see the file header) to an OpenAI-compatible
- * `context_length_exceeded` envelope with both numbers. `null` for any other `400` (a different
- * validation failure, e.g. a bad sampling parameter) or any other status — 2.14 falls back to its
- * own generic error wrapping for those, the same way `server/public/errors.ts` already does for
- * llama.cpp/MLX. This is a pure text mapping; wiring it into the public `/v1/*` route handler is
- * task 2.14's.
+ * Maps `trtllm-serve` 1.2.1's context-overflow errors — the pytorch backend's two real, reachable
+ * shapes, see the file header — to an OpenAI-compatible `context_length_exceeded` envelope with
+ * both numbers. `null` for any other `400` (a different validation failure, e.g. a bad sampling
+ * parameter) or any other status — 2.14 falls back to its own generic error wrapping for those, the
+ * same way `server/public/errors.ts` already does for llama.cpp/MLX. This is a pure text mapping;
+ * wiring it into the public `/v1/*` route handler is task 2.14's.
  */
 export function mapTensorrtLlmContextLengthError(
   status: number,
@@ -465,19 +543,66 @@ export function mapTensorrtLlmContextLengthError(
     return contextLengthExceeded(Number(promptLen) + Number(queryLen), Number(limit))
   }
 
-  const viaMaxSeqLen = OVERFLOW_VS_MAX_SEQ_LEN.exec(message)
-  if (viaMaxSeqLen) {
-    const [, promptLen, queryLen, maxTokens, limit] = viaMaxSeqLen as unknown as [
+  const viaDeduceMaxTokens = OVERFLOW_VIA_DEDUCE_MAX_TOKENS.exec(message)
+  if (viaDeduceMaxTokens) {
+    const [, , , maxSeqLen, splitedPromptLen, queryTokenLen] = viaDeduceMaxTokens as unknown as [
+      string,
       string,
       string,
       string,
       string,
       string,
     ]
-    return contextLengthExceeded(Number(promptLen) + Number(queryLen) + Number(maxTokens), Number(limit))
+    return contextLengthExceeded(Number(splitedPromptLen) + Number(queryTokenLen), Number(maxSeqLen))
   }
 
   return null
+}
+
+// ---------------------------------------------------------------------------------------------
+// Output-length enforcement (session gateway request rewrite)
+// ---------------------------------------------------------------------------------------------
+
+/** The two routes whose request body `tensorrtLlmRewriteRequestBody` touches; every other route
+ *  (including the third declared route, `GET /v1/models`, which has no body at all) passes its
+ *  body through completely unchanged. */
+const OUTPUT_CAP_ROUTES = new Set(['/v1/chat/completions', '/v1/completions'])
+
+/** A present, finite, positive request value wins (capped at the setting); anything else — absent,
+ *  zero, negative, non-numeric — falls back to the setting outright. */
+function clampMaxTokens(value: unknown, cap: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.min(value, cap) : cap
+}
+
+/**
+ * Enforces `settings.max_output_tokens` per request, since `trtllm-serve` 1.2.1 has no server-side
+ * flag that does it (`buildTensorrtLlmLaunch`'s doc comment; ADR
+ * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`). Only
+ * `POST /v1/chat/completions` and `POST /v1/completions` are touched; every other route's body
+ * returns unchanged. Both `max_tokens` (both routes) and, on the chat route,
+ * `max_completion_tokens` are clamped to `min(request value, settings.max_output_tokens)`, or set
+ * to the setting outright when the field is absent or not a usable positive number. A body that is
+ * not a plain JSON object (an array, a primitive, `null`) is returned unchanged rather than
+ * guessed at — the gateway's own JSON parse already rejected anything that is not valid JSON at
+ * all before this ever runs.
+ */
+export function tensorrtLlmRewriteRequestBody(
+  route: string,
+  body: unknown,
+  settings: TensorrtLlmSettings
+): unknown {
+  if (!OUTPUT_CAP_ROUTES.has(route)) return body
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return body
+
+  const clamped: Record<string, unknown> = { ...(body as Record<string, unknown>) }
+  clamped['max_tokens'] = clampMaxTokens(clamped['max_tokens'], settings.max_output_tokens)
+  if (route === '/v1/chat/completions') {
+    clamped['max_completion_tokens'] = clampMaxTokens(
+      clamped['max_completion_tokens'],
+      settings.max_output_tokens
+    )
+  }
+  return clamped
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -489,12 +614,15 @@ export function mapTensorrtLlmContextLengthError(
  * маркерам логов адаптера, если они есть"). With no markers the lifecycle would move straight from
  * `starting-container` to `initializing-engine` the instant the container starts; these keep a load
  * in `starting-container` — Python/CUDA-context bring-up, not yet touching the checkpoint — until
- * one of them shows the engine is actually reading weights or building itself. See the file header
- * for sourcing; live test 2.19 is expected to add to or replace this set from a real container.
+ * one of them shows the engine is actually reading weights or building itself. All three are read
+ * directly from the pinned tag's pytorch-backend source (file header: `weight_loader.py`,
+ * `model_engine.py`), not search results. Live test 2.19 is expected to add to or replace this set
+ * from a real container.
  */
 const STAGE_MARKERS = [
-  { stage: 'initializing-engine' as const, pattern: /Loading checkpoint shards/ },
-  { stage: 'initializing-engine' as const, pattern: /Capturing CUDA graphs/ },
+  { stage: 'initializing-engine' as const, pattern: /Loading (?:safetensors|bin) weights in parallel/ },
+  { stage: 'initializing-engine' as const, pattern: /Prefetching [\d.]+GB checkpoint files/ },
+  { stage: 'initializing-engine' as const, pattern: /Creating CUDA graph instances/ },
 ]
 
 /** The `tensorrt-llm` engine's `ManagedTextAdapter` (task 2.13). Registered against the pinned
@@ -506,7 +634,8 @@ export const tensorrtLlmAdapter: ManagedTextAdapter<TensorrtLlmSettings> = {
   stageMarkers: STAGE_MARKERS,
   validateSettings: validateTensorrtLlmSettings,
   buildLaunch: buildTensorrtLlmLaunch,
-  readinessTimeoutMs: (weightBytes) => tensorrtLlmReadinessTimeoutMs(weightBytes),
+  readinessTimeoutMs: tensorrtLlmReadinessTimeoutMs,
   classifyExit: classifyTensorrtLlmExit,
   capabilities: tensorrtLlmCapabilities,
+  rewriteRequestBody: tensorrtLlmRewriteRequestBody,
 }

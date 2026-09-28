@@ -6,6 +6,7 @@ import type { ManagedLaunchContext } from '../managed-text/index.js'
 import { readTensorrtLlmLogFixture } from '../../../test/helpers/tensorrt-llm-log-fixtures.js'
 import {
   mapTensorrtLlmContextLengthError,
+  tensorrtLlmRewriteRequestBody,
   TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
   TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
   TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS,
@@ -21,6 +22,12 @@ import {
 } from './adapter.js'
 
 const GiB = 1024 ** 3
+
+/** The value right after `flag` in an argv array, or `undefined` if `flag` is not present. */
+function flagValue(argv: readonly string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag)
+  return i === -1 ? undefined : argv[i + 1]
+}
 
 function baseContext(overrides: Partial<ManagedLaunchContext<TensorrtLlmSettings>> = {}) {
   const settings = tensorrtLlmAdapter.validateSettings({})
@@ -96,10 +103,11 @@ describe('validateSettings', () => {
     ],
     ['a numeric gpu_id is rejected', { gpu_id: 42 }, 'throws'],
     [
-      'the minimum context length is accepted',
-      { context_length: TENSORRT_LLM_MIN_CONTEXT_LENGTH },
+      'the minimum context length is accepted (with a compatible max_output_tokens)',
+      { context_length: TENSORRT_LLM_MIN_CONTEXT_LENGTH, max_output_tokens: 1 },
       {
         context_length: TENSORRT_LLM_MIN_CONTEXT_LENGTH,
+        max_output_tokens: 1,
       },
     ],
     [
@@ -122,6 +130,21 @@ describe('validateSettings', () => {
     ['a fractional context length is rejected', { context_length: 4096.5 }, 'throws'],
     ['a zero max_output_tokens is rejected', { max_output_tokens: 0 }, 'throws'],
     ['a negative max_output_tokens is rejected', { max_output_tokens: -1 }, 'throws'],
+    [
+      'max_output_tokens equal to context_length is rejected (no room left for any prompt; cross-field rule, findings-2.13-r1.md item 1)',
+      { context_length: 4096, max_output_tokens: 4096 },
+      'throws',
+    ],
+    [
+      'max_output_tokens one below context_length is accepted',
+      { context_length: 4096, max_output_tokens: 4095 },
+      { context_length: 4096, max_output_tokens: 4095 },
+    ],
+    [
+      'max_output_tokens greater than context_length is rejected, even though each is individually in bounds',
+      { context_length: 2048, max_output_tokens: 4096 },
+      'throws',
+    ],
     [
       'the minimum kv-cache fraction is accepted',
       { kv_cache_free_gpu_memory_fraction: TENSORRT_LLM_MIN_KV_CACHE_FREE_FRACTION },
@@ -203,12 +226,24 @@ describe('buildLaunch', () => {
       '--max_seq_len',
       String(TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH),
       '--max_num_tokens',
-      String(TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS),
+      // --max_num_tokens caps the pytorch backend's PROMPT alone (llmapi/llm.py's
+      // _check_arguments, adapter.ts file header), never the output, so it always tracks
+      // context_length here, never max_output_tokens (findings-2.13-r1.md item 1's ruling).
+      String(TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH),
       '--kv_cache_free_gpu_memory_fraction',
       String(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION),
     ])
     expect(launch.argv).not.toContain('--tool_parser')
     expect(launch.argv).not.toContain('--reasoning_parser')
+  })
+
+  it('sets --max_num_tokens to context_length, never to max_output_tokens, when the two differ', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({ context_length: 16384, max_output_tokens: 256 })
+    const context = baseContext({ settings })
+    const launch = tensorrtLlmAdapter.buildLaunch(context)
+    expect(flagValue(launch.argv, '--max_seq_len')).toBe('16384')
+    expect(flagValue(launch.argv, '--max_num_tokens')).toBe('16384')
+    expect(launch.argv).not.toContain('256')
   })
 
   it('builds argv with no family entry at all (architecture missing from model_families)', () => {
@@ -221,17 +256,18 @@ describe('buildLaunch', () => {
   it('appends --tool_parser and --reasoning_parser only when the family names them', () => {
     const context = baseContext({ family: family({ tool_parser: 'qwen3', reasoning_parser: 'qwen3' }) })
     const launch = tensorrtLlmAdapter.buildLaunch(context)
-    expect(launch.argv.slice(-4)).toEqual(['--tool_parser', 'qwen3', '--reasoning_parser', 'qwen3'])
+    expect(flagValue(launch.argv, '--tool_parser')).toBe('qwen3')
+    expect(flagValue(launch.argv, '--reasoning_parser')).toBe('qwen3')
   })
 
   it('appends only --tool_parser when the family names a tool parser but no reasoning parser', () => {
     const context = baseContext({ family: family({ tool_parser: 'qwen3_coder' }) })
     const launch = tensorrtLlmAdapter.buildLaunch(context)
-    expect(launch.argv.slice(-2)).toEqual(['--tool_parser', 'qwen3_coder'])
+    expect(flagValue(launch.argv, '--tool_parser')).toBe('qwen3_coder')
     expect(launch.argv).not.toContain('--reasoning_parser')
   })
 
-  it('reflects a non-default settings object in argv', () => {
+  it('reflects a non-default settings object in argv, by flag/value pair rather than loose membership', () => {
     const settings = tensorrtLlmAdapter.validateSettings({
       context_length: 32768,
       max_output_tokens: 8192,
@@ -239,9 +275,9 @@ describe('buildLaunch', () => {
     })
     const context = baseContext({ settings })
     const launch = tensorrtLlmAdapter.buildLaunch(context)
-    expect(launch.argv).toContain('32768')
-    expect(launch.argv).toContain('8192')
-    expect(launch.argv).toContain('0.75')
+    expect(flagValue(launch.argv, '--max_seq_len')).toBe('32768')
+    expect(flagValue(launch.argv, '--max_num_tokens')).toBe('32768')
+    expect(flagValue(launch.argv, '--kv_cache_free_gpu_memory_fraction')).toBe('0.75')
   })
 
   it('points the engine cache env vars at the mounted engine cache directory', () => {
@@ -273,6 +309,20 @@ describe('readinessTimeoutMs', () => {
     const settings = tensorrtLlmAdapter.validateSettings({})
     expect(tensorrtLlmAdapter.readinessTimeoutMs(0, settings)).toBeGreaterThanOrEqual(
       TENSORRT_LLM_READINESS_BASE_MS
+    )
+  })
+
+  it('honors settings.load_timeout_seconds outright, bypassing the weight-based estimate entirely (findings-2.13-r1.md item 4: validated but previously never read back)', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({ load_timeout_seconds: 45 })
+    // A 500 GiB weight would otherwise dominate the computed estimate by orders of magnitude.
+    expect(tensorrtLlmAdapter.readinessTimeoutMs(500 * GiB, settings)).toBe(45_000)
+  })
+
+  it('falls back to the weight-based estimate when load_timeout_seconds is null', () => {
+    const withNull = tensorrtLlmAdapter.validateSettings({ load_timeout_seconds: null })
+    const withoutField = tensorrtLlmAdapter.validateSettings({})
+    expect(tensorrtLlmAdapter.readinessTimeoutMs(4 * GiB, withNull)).toBe(
+      tensorrtLlmAdapter.readinessTimeoutMs(4 * GiB, withoutField)
     )
   })
 })
@@ -349,17 +399,39 @@ describe('classifyExit', () => {
     expect(result.numbers).toMatchObject({ requested_gib: 135, free_gib: 0 })
   })
 
-  it('classifies an unsupported architecture', () => {
+  it('classifies a CUDA OOM reported in KiB on both sides', () => {
+    const tail = readTensorrtLlmLogFixture('oom-small-allocation-kib.log')
+    const result = tensorrtLlmAdapter.classifyExit(tail, 1)
+    expect(result.kind).toBe('out-of-memory')
+    expect(result.numbers?.['requested_gib']).toBeCloseTo(768 / (1024 * 1024), 9)
+    expect(result.numbers?.['free_gib']).toBeCloseTo(512 / (1024 * 1024), 9)
+  })
+
+  it('classifies the executor\'s own C++ CUDA runtime OOM, with no "Tried to allocate" numbers to extract', () => {
+    const tail = readTensorrtLlmLogFixture('oom-cpp-runtime.log')
+    const result = tensorrtLlmAdapter.classifyExit(tail, 1)
+    expect(result.kind).toBe('out-of-memory')
+    expect(result.numbers).toBeUndefined()
+    expect(result.message).toMatch(/unknown amount/)
+  })
+
+  it('classifies an unsupported architecture (pytorch backend wording)', () => {
     const tail = readTensorrtLlmLogFixture('unsupported-architecture.log')
     const result = tensorrtLlmAdapter.classifyExit(tail, 1)
     expect(result.kind).toBe('unsupported-model')
     expect(result.message).toMatch(/ExoticForCausalLM/)
   })
 
-  it('classifies an unsupported quantization format', () => {
+  it('classifies an unsupported quantization format (the real quant_mode raise, not the "quant algo" warning)', () => {
     const tail = readTensorrtLlmLogFixture('unsupported-quantization.log')
     const result = tensorrtLlmAdapter.classifyExit(tail, 1)
     expect(result.kind).toBe('unsupported-model')
+    expect(result.message.length).toBeGreaterThan(0)
+  })
+
+  it('does not misclassify plain "Unsupported quant algo" warning text as an exit (never raised as an exception, so never a log tail on its own)', () => {
+    const result = tensorrtLlmAdapter.classifyExit('Unsupported quant algo: FP8_QDQ, falling back', 1)
+    expect(result.kind).toBe('other')
   })
 
   it('falls back to "other" for a crash that matches neither pattern', () => {
@@ -397,19 +469,33 @@ describe('mapTensorrtLlmContextLengthError', () => {
     })
   })
 
-  it('maps the tensorrt-backend max_seq_len overflow message, folding in the output reservation', () => {
+  it('maps the pytorch-backend _deduce_max_tokens overflow (base_worker.py) — the case that actually fires now that --max_num_tokens tracks context_length', () => {
     const body = JSON.stringify({
       object: 'error',
       message:
-        'The sum of prompt length (4000) and query length (0) max_tokens (2048) should not exceed max_seq_len (4096)',
+        '`default_max_tokens` (-152) must be greater than 0, `default_max_tokens` (-152) = ' +
+        'max_seq_len (8192) - `splited_prompt_len` (8000) - `query_token_len` (344)',
       type: 'BadRequestError',
       param: null,
       code: 400,
     })
     const mapped = mapTensorrtLlmContextLengthError(400, body)
-    expect(mapped?.error.code).toBe('context_length_exceeded')
-    expect(mapped?.error.message).toContain('4096')
-    expect(mapped?.error.message).toContain('6048')
+    expect(mapped).toEqual({
+      error: {
+        message:
+          "This model's maximum context length is 8192 tokens. However, your messages resulted in " +
+          '8344 tokens. Please reduce the length of the messages.',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'context_length_exceeded',
+      },
+    })
+  })
+
+  it('no longer matches the legacy tensorrt-backend "max_tokens ... should not exceed max_seq_len" wording (findings-2.13-r1.md item 9: unreachable, this adapter never passes --backend, so it was dropped, not just documented)', () => {
+    const body =
+      'The sum of prompt length (4000) and query length (0) max_tokens (2048) should not exceed max_seq_len (4096)'
+    expect(mapTensorrtLlmContextLengthError(400, body)).toBeNull()
   })
 
   it('accepts a raw unstructured body, not only the ErrorResponse JSON envelope', () => {
@@ -433,5 +519,87 @@ describe('mapTensorrtLlmContextLengthError', () => {
 
   it('returns null for malformed JSON that is not the known message shape', () => {
     expect(mapTensorrtLlmContextLengthError(400, '{not json')).toBeNull()
+  })
+})
+
+describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md item 1)', () => {
+  const settings = tensorrtLlmAdapter.validateSettings({ max_output_tokens: 512 })
+
+  it('is wired onto the adapter object, not only exported standalone', () => {
+    expect(tensorrtLlmAdapter.rewriteRequestBody).toBe(tensorrtLlmRewriteRequestBody)
+  })
+
+  it('fills max_tokens with the setting when the field is absent, on /v1/completions', () => {
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { prompt: 'hi' }, settings)).toEqual({
+      prompt: 'hi',
+      max_tokens: 512,
+    })
+  })
+
+  it('clamps a higher client-requested max_tokens down to the setting', () => {
+    const result = tensorrtLlmRewriteRequestBody(
+      '/v1/completions',
+      { prompt: 'hi', max_tokens: 4096 },
+      settings
+    )
+    expect(result).toMatchObject({ max_tokens: 512 })
+  })
+
+  it('leaves a lower client-requested max_tokens untouched', () => {
+    const result = tensorrtLlmRewriteRequestBody(
+      '/v1/completions',
+      { prompt: 'hi', max_tokens: 100 },
+      settings
+    )
+    expect(result).toMatchObject({ max_tokens: 100 })
+  })
+
+  it('clamps both max_tokens and max_completion_tokens independently on the chat route', () => {
+    const result = tensorrtLlmRewriteRequestBody(
+      '/v1/chat/completions',
+      { messages: [], max_tokens: 9999, max_completion_tokens: 100 },
+      settings
+    )
+    expect(result).toMatchObject({ max_tokens: 512, max_completion_tokens: 100 })
+  })
+
+  it('fills max_completion_tokens with the setting on the chat route when absent, even if max_tokens is present', () => {
+    const result = tensorrtLlmRewriteRequestBody(
+      '/v1/chat/completions',
+      { messages: [], max_tokens: 10 },
+      settings
+    )
+    expect(result).toMatchObject({ max_tokens: 10, max_completion_tokens: 512 })
+  })
+
+  it('never adds max_completion_tokens on the plain completions route', () => {
+    const result = tensorrtLlmRewriteRequestBody('/v1/completions', { prompt: 'hi' }, settings) as Record<
+      string,
+      unknown
+    >
+    expect('max_completion_tokens' in result).toBe(false)
+  })
+
+  it('leaves a route it does not own (e.g. /v1/models) completely unchanged, same reference', () => {
+    const body = { anything: 'unchanged' }
+    expect(tensorrtLlmRewriteRequestBody('/v1/models', body, settings)).toBe(body)
+  })
+
+  it('leaves a non-plain-object body unchanged rather than guessing at its shape', () => {
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', 'not an object', settings)).toBe('not an object')
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', null, settings)).toBe(null)
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', [1, 2], settings)).toEqual([1, 2])
+  })
+
+  it('treats a non-numeric, zero or negative max_tokens as absent', () => {
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: 0 }, settings)).toMatchObject({
+      max_tokens: 512,
+    })
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: -5 }, settings)).toMatchObject({
+      max_tokens: 512,
+    })
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { max_tokens: 'lots' }, settings)).toMatchObject({
+      max_tokens: 512,
+    })
   })
 })

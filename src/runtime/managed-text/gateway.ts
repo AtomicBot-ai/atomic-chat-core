@@ -17,6 +17,14 @@
  *
  * New for TensorRT-LLM managed sessions (design D11, spec `managed-session-gateway`). Engine-neutral:
  * nothing here knows about `trtllm-serve` specifically, only that it speaks HTTP on loopback.
+ *
+ * `rewriteRequestBody` (task 2.13 fix round 1; ADR
+ * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`) is the one
+ * deliberate exception to "copies bytes without parsing" (design D11's own Risks/Trade-offs entry):
+ * an adapter may ask to rewrite a POST request's JSON body before it reaches the upstream. This
+ * module stays engine-neutral about *why* — it only enforces the mechanics (POST only, a body-size
+ * cap, a parse failure answers 400 instead of forwarding) and never touches the response, streamed
+ * or not.
  */
 
 import { createServer } from 'node:http'
@@ -56,6 +64,13 @@ export interface ManagedGatewayOptions {
   apiKey: string
   /** The same trusted-hosts list the public server (`:1337`) is configured with. */
   allowedHosts: string[]
+  /**
+   * Optional: rewrites a POST request's parsed JSON body before it is forwarded, already bound to
+   * whatever settings the adapter needs (the lifecycle does that binding; this callback takes just
+   * `route` and the parsed `body`). Absent, every request proxies exactly as before. See the file
+   * header and `ManagedTextAdapter.rewriteRequestBody`.
+   */
+  rewriteRequestBody?: (route: string, body: unknown) => unknown
 }
 
 export interface ManagedGateway {
@@ -71,6 +86,21 @@ export interface ManagedGateway {
 const CONNECT_TIMEOUT_MS = 30_000
 
 /**
+ * The largest request body `rewriteRequestBody` will attempt to `JSON.parse`. Only bounds this
+ * rewrite path — every request body is already read into memory in full before this point
+ * (`readBody`, below) regardless of whether a rewriter is configured at all; this cap exists so a
+ * huge POST cannot also be handed to `JSON.parse` for no reason when nothing will use the parse.
+ */
+export const MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES = 8 * 1024 * 1024
+
+/** The request path, with no query string — what `rewriteRequestBody` sees as `route`. */
+function routeOf(url: string | undefined): string {
+  if (url === undefined) return '/'
+  const qIndex = url.indexOf('?')
+  return qIndex === -1 ? url : url.slice(0, qIndex)
+}
+
+/**
  * A fresh, unguessable session key: 256 bits of `crypto.randomBytes`, base64url so it fits a Bearer
  * header verbatim. Call this once per generation — a reload gets a new key, so a caller holding the
  * previous one is refused (`SESSION_GENERATION_STALE` at the session layer; here, plain 401).
@@ -83,7 +113,8 @@ export function generateGatewayKey(): string {
 async function proxyToUpstream(
   req: IncomingMessage,
   res: ServerResponse,
-  upstream: ManagedGatewayUpstream
+  upstream: ManagedGatewayUpstream,
+  rewriteRequestBody?: (route: string, body: unknown) => unknown
 ): Promise<void> {
   let body: Buffer
   try {
@@ -91,6 +122,30 @@ async function proxyToUpstream(
   } catch {
     if (!res.headersSent) sendWhole(res, 400, [], 'Failed to read request body')
     return
+  }
+
+  if (rewriteRequestBody !== undefined && req.method === 'POST' && body.length > 0) {
+    if (body.length > MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES) {
+      sendWhole(res, 413, [], 'Request body too large')
+      return
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(body.toString('utf8'))
+    } catch {
+      sendWhole(res, 400, [], 'Invalid JSON request body')
+      return
+    }
+    let rewritten: unknown
+    try {
+      rewritten = rewriteRequestBody(routeOf(req.url), parsed)
+    } catch {
+      sendWhole(res, 400, [], 'Request body could not be processed')
+      return
+    }
+    // `sendUpstream` derives `Content-Length` from this buffer's own byte length, so a body that
+    // grew or shrank under rewriting is never sent with the client's original (now stale) length.
+    body = Buffer.from(JSON.stringify(rewritten), 'utf8')
   }
 
   // A client that disconnects before the upstream has even answered must not leave that connect
@@ -163,7 +218,7 @@ export async function startManagedGateway(options: ManagedGatewayOptions): Promi
       sendWhole(res, refused.status, [], refused.body)
       return
     }
-    proxyToUpstream(req, res, options.upstream).catch(() => {
+    proxyToUpstream(req, res, options.upstream, options.rewriteRequestBody).catch(() => {
       if (!res.headersSent && !res.destroyed) sendWhole(res, 502, [], 'Bad Gateway')
       else res.destroy()
     })

@@ -1,6 +1,6 @@
 INFO 09-28 10:36:55 [server.py] Started server process [1]
 INFO 09-28 10:36:55 [server.py] Waiting for application startup.
 Traceback (most recent call last):
-  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/modules/linear.py", line 401, in get_quant_method
-    raise NotImplementedError(
-NotImplementedError: Unsupported quantization_config: quant_method=awq is not supported by this TensorRT-LLM release
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/modules/linear.py", line 2066, in get_quant_method
+    raise ValueError(f'unsupported quant mode: {quant_config.quant_mode}')
+ValueError: unsupported quant mode: QuantMode.AWQ

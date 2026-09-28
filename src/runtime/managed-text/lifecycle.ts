@@ -509,10 +509,17 @@ export class ManagedTextLifecycle {
       await this.waitReady(entry, prepared.target, timeoutMs, progress, signal)
 
       const apiKey = generateGatewayKey()
+      // Bound to this load's own validated settings here, once, so the gateway itself never needs
+      // to know an adapter's settings shape (ManagedTextAdapter.rewriteRequestBody, ADR
+      // 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway).
+      const rewrite = entry.adapter.rewriteRequestBody
       entry.gateway = await this.startGateway({
         upstream: { host: '127.0.0.1', port: projectSessionPort(prepared.target) },
         apiKey,
         allowedHosts: this.deps.allowedHosts,
+        ...(rewrite === undefined
+          ? {}
+          : { rewriteRequestBody: (route: string, body: unknown) => rewrite(route, body, settings) }),
       })
       this.checkAborted(signal)
       entry.info = {

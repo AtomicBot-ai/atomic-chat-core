@@ -100,6 +100,19 @@ export interface ManagedTextAdapter<S = unknown> {
   readinessTimeoutMs(weightBytes: number, settings: S): number
   classifyExit(logTail: string, exitCode: number | null): ManagedExitClassification
   capabilities(context: { settings: S; family: ModelFamilySupport | null }): ManagedTextCapabilities
+  /**
+   * Optional: rewrites a JSON POST request body before the session gateway forwards it upstream
+   * (`../managed-text/gateway.ts`'s `startManagedGateway`; see
+   * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md` for why
+   * this exists at all — most engines need no request-side rewriting and should leave it undefined).
+   * `route` is the request path with no query string, exactly as the client sent it. Returning the
+   * body unchanged is always safe for a route this hook does not care about. The gateway applies
+   * this only to POST requests with a non-empty body, under a byte cap (rejected with `413` before
+   * this is even called) and only after the body parses as JSON (a parse failure answers `400`
+   * without calling this or reaching the upstream); the response stream is never touched by this
+   * hook, on any route. Whatever this throws also surfaces as a `400`.
+   */
+  rewriteRequestBody?(route: string, body: unknown, settings: S): unknown
 }
 
 const READINESS_PATH = /^\/(?!\/)[A-Za-z0-9._~/-]*$/

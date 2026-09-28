@@ -2,7 +2,12 @@ import { createServer, request as httpRequest } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bracketIfIpv6, generateGatewayKey, startManagedGateway } from './gateway.js'
+import {
+  bracketIfIpv6,
+  generateGatewayKey,
+  MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES,
+  startManagedGateway,
+} from './gateway.js'
 import type { ManagedGateway } from './gateway.js'
 
 /** A bare local HTTP server standing in for the container's engine port. */
@@ -49,7 +54,7 @@ interface RawResponse {
 /** A plain request via `node:http`, not `fetch`: a foreign `Host` header cannot be set through `fetch`. */
 function send(
   port: number,
-  options: { path?: string; method?: string; headers?: Record<string, string> } = {}
+  options: { path?: string; method?: string; headers?: Record<string, string>; body?: string | Buffer } = {}
 ): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
@@ -67,7 +72,7 @@ function send(
       }
     )
     req.on('error', reject)
-    req.end()
+    req.end(options.body)
   })
 }
 
@@ -82,7 +87,11 @@ afterEach(async () => {
 /** Start a fake upstream plus a gateway pointed at it, tracked for teardown. */
 async function setup(
   handler: (req: IncomingMessage, res: ServerResponse) => void,
-  opts: { apiKey?: string; allowedHosts?: string[] } = {}
+  opts: {
+    apiKey?: string
+    allowedHosts?: string[]
+    rewriteRequestBody?: (route: string, body: unknown) => unknown
+  } = {}
 ): Promise<{ gw: ManagedGateway; upstream: FakeUpstream; apiKey: string }> {
   const upstream = await startFakeUpstream(handler)
   upstreams.push(upstream)
@@ -91,6 +100,7 @@ async function setup(
     upstream: { host: '127.0.0.1', port: upstream.port },
     apiKey,
     allowedHosts: opts.allowedHosts ?? [],
+    ...(opts.rewriteRequestBody ? { rewriteRequestBody: opts.rewriteRequestBody } : {}),
   })
   gateways.push(gw)
   return { gw, upstream, apiKey }
@@ -377,5 +387,176 @@ describe('streaming', () => {
     })
 
     await expect.poll(() => upstreamReqClosedEarly, { timeout: 2000 }).toBe(true)
+  })
+})
+
+describe('rewriteRequestBody (task 2.13 fix round 1, ADR 2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway)', () => {
+  it('rewrites a POST JSON body before it reaches the upstream, with Content-Length recomputed for the new size', async () => {
+    let seenBody = ''
+    let seenContentLength = ''
+    const { gw, apiKey } = await setup(
+      (req, res) => {
+        seenContentLength = String(req.headers['content-length'] ?? '')
+        req.on('data', (chunk: Buffer) => (seenBody += chunk.toString('utf8')))
+        req.on('end', () => res.end('ok'))
+      },
+      {
+        rewriteRequestBody: (route, body) => ({
+          route,
+          ...(body as Record<string, unknown>),
+          rewritten: true,
+        }),
+      }
+    )
+
+    const requestBody = JSON.stringify({ max_tokens: 99999 })
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'content-length': String(requestBody.length),
+      },
+      body: requestBody,
+    })
+
+    expect(res.status).toBe(200)
+    const parsed = JSON.parse(seenBody) as Record<string, unknown>
+    expect(parsed).toEqual({ route: '/v1/chat/completions', max_tokens: 99999, rewritten: true })
+    // The rewritten body is a different size than the client's original; the upstream must see a
+    // length matching what was actually sent, never the client's stale original.
+    expect(Number(seenContentLength)).toBe(Buffer.byteLength(seenBody))
+    expect(Number(seenContentLength)).not.toBe(requestBody.length)
+  })
+
+  it('answers 400 without reaching the upstream when the POST body is not valid JSON', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { rewriteRequestBody: (_route, body) => body }
+    )
+
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: { 'host': '127.0.0.1', 'authorization': `Bearer ${apiKey}`, 'content-length': '9' },
+      body: 'not json!',
+    })
+
+    expect(res.status).toBe(400)
+    expect(reached).toBe(false)
+  })
+
+  it('answers 413 without reaching the upstream or attempting to parse a body over the cap', async () => {
+    let reached = false
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        reached = true
+        res.end('should not happen')
+      },
+      { rewriteRequestBody: (_route, body) => body }
+    )
+
+    const oversized = 'x'.repeat(MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES + 1)
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-length': String(oversized.length),
+      },
+      body: oversized,
+    })
+
+    expect(res.status).toBe(413)
+    expect(reached).toBe(false)
+  })
+
+  it('leaves a GET request untouched even with a rewriter configured (no body to rewrite)', async () => {
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('untouched')
+      },
+      { rewriteRequestBody: () => ({ should: 'never be reached for GET' }) }
+    )
+
+    const res = await send(gw.port, { headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` } })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toBe('untouched')
+  })
+
+  it('proxies exactly as before when no rewriter is configured at all', async () => {
+    let seenBody = ''
+    const { gw, apiKey } = await setup((req, res) => {
+      req.on('data', (chunk: Buffer) => (seenBody += chunk.toString('utf8')))
+      req.on('end', () => res.end('ok'))
+    })
+
+    const requestBody = JSON.stringify({ max_tokens: 1 })
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: requestBody,
+    })
+
+    expect(res.status).toBe(200)
+    expect(seenBody).toBe(requestBody)
+  })
+
+  it('still streams the response through unaffected when a rewriter is configured for the request side', async () => {
+    const CHUNK_COUNT = 50
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        let i = 0
+        const writeNext = (): void => {
+          if (i >= CHUNK_COUNT) {
+            res.end()
+            return
+          }
+          res.write(`data: {"n":${i}}\n\n`)
+          i += 1
+          setImmediate(writeNext)
+        }
+        writeNext()
+      },
+      { rewriteRequestBody: (_route, body) => body }
+    )
+
+    const requestBody = JSON.stringify({ messages: [] })
+    let received = ''
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: gw.port,
+          path: '/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'host': '127.0.0.1',
+            'authorization': `Bearer ${apiKey}`,
+            'content-type': 'application/json',
+          },
+        },
+        (res) => {
+          res.on('data', (chunk: Buffer) => (received += chunk.toString('utf8')))
+          res.on('end', resolve)
+        }
+      )
+      req.on('error', reject)
+      req.end(requestBody)
+    })
+
+    expect(received).toContain('"n":0')
+    expect(received).toContain(`"n":${CHUNK_COUNT - 1}`)
   })
 })
