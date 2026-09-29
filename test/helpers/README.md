@@ -24,3 +24,8 @@
 - `fake-sidecar-server.ts` / `.mjs` — a stand-in for the app's `mlx-server` and `foundation-models-server`,
   with the modes and switches its header lists (`FAKE_SIDECAR_PID_FILE` for a process the core has not
   journalled yet).
+- `live-linux-host.ts`, `live-core.ts`, `live-hf-model.ts`, `live-report.ts` — the managed-install live test's view of a
+  real Linux VM (host facts read independently of the core's probe, setup-path classification, `sudo` helpers), the
+  compiled core started in the test's session or a fresh login's group set (`sudo -u`), control calls over `node:http`
+  with no five-minute cap, the SSE phase log replayed from `<instance_id>:0`, the documented Hugging Face download of a
+  curated checkpoint with its `inventory_digest` checked, and the `summary.json` recorder. No imports from `src/`.

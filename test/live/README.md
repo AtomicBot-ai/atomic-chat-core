@@ -30,3 +30,9 @@ Stage 5 providers, each opt-in on its own:
   Wan; `ATOMIC_LIVE_SD_VIDEO_MODE_FLAG=1` also passes `-M vid_gen`): load → a nine-frame clip with parsed step progress,
   the WebM and its sidecar → `/v1/videos` queue, poll and content → a hard cancel → respawn → unload. It prints the
   engine's capabilities and the clip's numbers, which is the evidence the ADR of 2026-09-23 leaves open.
+
+Managed TensorRT-LLM install on Linux (`test/live/managed-install.test.ts`, task 2.18): `ATOMIC_LIVE=1` **and**
+`ATOMIC_LIVE_MANAGED=1`, on a throwaway Linux VM with an NVIDIA GPU, driver ≥ the descriptor's minimum and passwordless
+sudo. It installs Docker and the NVIDIA Container Toolkit through the core's own recipe, emulates the relogin, pulls the
+engine, loads a curated model and streams a chat on `:1337`, then writes `summary.json` for the PR. VM states, build,
+exact command and what to attach: [`docs/live-tests.md`](../../docs/live-tests.md).
