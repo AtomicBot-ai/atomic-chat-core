@@ -43,8 +43,9 @@ qualifies (see `atomic-chat-conf/runtimes/`), then the NVIDIA runtime registered
 invoking user added to the `docker` group. Nothing is ever removed or upgraded on the host.
 
 Live tests that actually install this on a real Linux VM are opt-in and change the machine — see
-[`docs/live-tests.md`](docs/live-tests.md) for what they do and the environment variables that gate
-them (`ATOMIC_LIVE`, `ATOMIC_LIVE_MANAGED`, `ATOMIC_RUNTIME_DESCRIPTOR_URL`, ...).
+[`docs/live-tests.md`](docs/live-tests.md) for what they do. They run only when `ATOMIC_LIVE=1` and
+`ATOMIC_LIVE_MANAGED=1` are both set; `ATOMIC_RUNTIME_DESCRIPTOR_URL` optionally points them at a
+local descriptor.
 
 ## Releasing
 
