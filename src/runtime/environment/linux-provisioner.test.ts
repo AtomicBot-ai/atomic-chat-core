@@ -994,6 +994,34 @@ describe('removing the installation', () => {
     }
   )
 
+  it('keeps loads of the engine held off for the whole removal, and lifts the hold however it ends (final review M-1)', async () => {
+    const { h } = await installed(readyHost())
+    let released = 0
+    let heldWhileRecordDeleted = false
+    h.deps.unloadEngineSessions = async (engineId) => {
+      h.calls.push(`unload:${engineId}`)
+      return { unloaded: 0, release: () => (released += 1) }
+    }
+    const remove = h.installations.remove.bind(h.installations)
+    h.installations.remove = async (id) => {
+      heldWhileRecordDeleted = released === 0
+      await remove(id)
+    }
+    // A provisioner reads its `unloadEngineSessions` once, when it is made.
+    await createLinuxProvisioner(h.deps).remove(removal(), signal)
+    expect(heldWhileRecordDeleted).toBe(true)
+    expect(released).toBe(1)
+
+    const again = await installed(readyHost())
+    let releasedOnFailure = 0
+    again.h.deps.unloadEngineSessions = async () => ({ unloaded: 0, release: () => (releasedOnFailure += 1) })
+    again.h.deps.removeEngineCaches = async () => {
+      throw new Error('disk gone')
+    }
+    await expect(createLinuxProvisioner(again.h.deps).remove(removal(), signal)).rejects.toThrow('disk gone')
+    expect(releasedOnFailure).toBe(1)
+  })
+
   it('stops when a loaded model cannot be confirmed stopped, and removes nothing', async () => {
     const { h, provisioner } = await installed(readyHost())
     h.deps.unloadEngineSessions = async () => {

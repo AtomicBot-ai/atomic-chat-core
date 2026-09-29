@@ -144,6 +144,8 @@ function familyFromResolved(
 export class TensorrtLlmRuntime implements LocalRuntime {
   private current: ManagedTextLifecycle | null = null
   private closed = false
+  /** Removals of the engine in progress: while any holds loads off, every load is refused (M-1). */
+  private loadHolds = 0
   /** Generations whose GPU claim succeeded: a load only holds its card from then on. */
   private readonly claimed = new Set<string>()
   /** What each loaded session can do, keyed by model and pinned to the generation it was computed for. */
@@ -177,6 +179,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
   async load(modelId: string, opts: LocalLoadOptions = {}): Promise<SessionInfo> {
     const { signal } = opts
     this.assertOpen()
+    this.assertNotHeldOff(modelId)
     throwIfLoadCancelled(signal)
     if (opts.isEmbedding) {
       throw new AtomicCoreError('INVALID_ARGUMENT', 'tensorrt-llm models do not serve embeddings.', modelId)
@@ -242,6 +245,9 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     const family = familyFromResolved(ready, resolved)
 
     const { descriptor } = ready
+    // Again right before the lifecycle registers this load (synchronously, inside `lifecycle.load`):
+    // a removal that began while this load was probing the host must not find it past the check.
+    this.assertNotHeldOff(modelId)
     const session = await lifecycle.load({
       modelId,
       modelPath: model.dir,
@@ -287,13 +293,28 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     return { success: true }
   }
 
-  /** Every `tensorrt-llm` session, stopped with confirmation: what removing the engine (task 2.6) needs first. */
-  async unloadAll(): Promise<{ unloaded: number }> {
-    const lifecycle = this.current
-    if (lifecycle === null) return { unloaded: 0 }
-    const models = [...new Set(lifecycle.reservations().map((r) => r.model_id))]
-    for (const modelId of models) await this.unload(modelId)
-    return { unloaded: models.length }
+  /**
+   * Every model holding a card through this provider — loading, ready, stopping, or stopped without
+   * Docker's confirmation: what a removal of the engine must unload first (task 2.6), through core's
+   * own unload so each model's cross-process claim is released with it (final review M-1).
+   */
+  residentModels(): string[] {
+    return [...new Set((this.current?.reservations() ?? []).map((r) => r.model_id))]
+  }
+
+  /**
+   * Refuses every load with `MANAGED_OPERATION_CONFLICT` until the returned release is called (final
+   * review M-1): a removal of the engine holds loads off for as long as it runs, so no load creates
+   * a container on an installation being removed. Holds nest; each release counts once.
+   */
+  holdOffLoads(): () => void {
+    this.loadHolds += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.loadHolds -= 1
+    }
   }
 
   /** Never: the context is fixed when the container starts (design D9, spec "без авто-роста"). */
@@ -378,6 +399,16 @@ export class TensorrtLlmRuntime implements LocalRuntime {
   private assertOpen(): void {
     if (this.closed) {
       throw new AtomicCoreError('CORE_NOT_RUNNING', 'The tensorrt-llm provider is shutting down.')
+    }
+  }
+
+  private assertNotHeldOff(modelId: string): void {
+    if (this.loadHolds > 0) {
+      throw new AtomicCoreError(
+        'MANAGED_OPERATION_CONFLICT',
+        'The TensorRT-LLM engine is being removed; load the model once the removal has finished.',
+        modelId
+      )
     }
   }
 

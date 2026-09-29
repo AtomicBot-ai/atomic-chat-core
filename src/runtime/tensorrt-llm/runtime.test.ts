@@ -257,7 +257,7 @@ describe('TensorrtLlmRuntime: refused before a container exists', () => {
     let dockerInstalled = false
     build({ lifecycle: () => (dockerInstalled ? lastLifecycle : Promise.resolve(null)) })
     expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_ADAPTER_UNAVAILABLE')
-    expect(await runtime.unloadAll()).toEqual({ unloaded: 0 })
+    expect(runtime.residentModels()).toEqual([])
     dockerInstalled = true
     await runtime.load('qwen3')
     expect(runtime.getLoadedModels()).toEqual(['qwen3'])
@@ -537,8 +537,47 @@ describe('TensorrtLlmRuntime: sessions', () => {
     await runtime.load('llama')
     docker.stopConfirms = false
     expect((await rejection(runtime.unload('llama'))).code).toBe('MANAGED_STOP_UNCONFIRMED')
+    // Still holding its card: a removal of the engine finds it and retries the stop.
+    expect(runtime.residentModels()).toEqual(['llama'])
     docker.stopConfirms = true
-    expect(await runtime.unloadAll()).toEqual({ unloaded: 1 })
+    expect(await runtime.unload('llama')).toEqual({ success: true })
+    expect(runtime.residentModels()).toEqual([])
+  })
+
+  it('refuses every load with MANAGED_OPERATION_CONFLICT while an engine removal holds loads off (final review M-1)', async () => {
+    build()
+    const release = runtime.holdOffLoads()
+    const refused = await rejection(runtime.load('qwen3'))
+    expect(refused.code).toBe('MANAGED_OPERATION_CONFLICT')
+    expect(docker.calls).toEqual([])
+    const second = runtime.holdOffLoads()
+    release()
+    release()
+    // One removal ending does not lift another's hold.
+    expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_OPERATION_CONFLICT')
+    second()
+    await runtime.load('qwen3')
+    expect(runtime.residentModels()).toEqual(['qwen3'])
+  })
+
+  it('refuses a load that was already past its first checks when the removal began, before any container (final review M-1)', async () => {
+    let arrived!: () => void
+    const atHostFacts = new Promise<void>((resolve) => (arrived = resolve))
+    let proceed!: () => void
+    const gate = new Promise<void>((resolve) => (proceed = resolve))
+    build({
+      hostFacts: async () => {
+        arrived()
+        await gate
+        return facts
+      },
+    })
+    const load = rejection(runtime.load('qwen3'))
+    await atHostFacts
+    runtime.holdOffLoads()
+    proceed()
+    expect((await load).code).toBe('MANAGED_OPERATION_CONFLICT')
+    expect(docker.calls).toEqual([])
   })
 
   it('asks core for its card, as the provider’s only session, before any container exists — and holds it from then on', async () => {

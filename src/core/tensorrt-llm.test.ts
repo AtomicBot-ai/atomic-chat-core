@@ -1,14 +1,16 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { RuntimeDescriptor, SessionInfo } from '../contracts/index.js'
+import type { LocalProviderId, RuntimeDescriptor, SessionInfo } from '../contracts/index.js'
+import { acquireModelClaim } from '../lock/index.js'
 import { ExecutionJournal, reconcileExecutions } from '../runtime/container/index.js'
 import type { DockerExec, ManagedContainers, ManagedContainersHandle } from '../runtime/container/index.js'
 import { InstallationStore, parseRuntimeDescriptor } from '../runtime/environment/index.js'
 import type { LinuxProbeDeps } from '../runtime/environment/index.js'
 import type { ManagedTextLifecycle } from '../runtime/managed-text/index.js'
-import type { LocalRuntime } from '../runtime/shared/index.js'
+import { raceLoadCancel } from '../runtime/shared/index.js'
+import type { ExternalSessions, LocalRuntime } from '../runtime/shared/index.js'
 import { NVIDIA_SMI_GPU_QUERY, TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
 import { FakeDocker } from '../../test/helpers/fake-docker-exec.js'
 import { readRuntimeFixture } from '../../test/helpers/runtime-fixtures.js'
@@ -21,6 +23,7 @@ import {
   wireTensorrtLlmModelCheck,
 } from './tensorrt-llm.js'
 import type { WireTensorrtLlmModelCheckOptions, WireTensorrtLlmOptions } from './tensorrt-llm.js'
+import { LocalSessions } from './sessions.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
 
@@ -267,17 +270,30 @@ describe('tensorrtLlmSessionUnloader', () => {
    */
   function provider(stopConfirms: () => boolean) {
     const loaded = new Set<string>()
+    const loading = new Set<string>()
     const events: string[] = []
+    /** While set, a load waits for it (or for its own cancel) before it counts as loaded. */
+    const hold: { gate: Promise<void> | null } = { gate: null }
     const lifecycle = {
-      load: async ({ modelId }: { modelId: string }) => {
+      load: async ({ modelId, signal }: { modelId: string; signal?: AbortSignal }) => {
+        if (hold.gate !== null) {
+          loading.add(modelId)
+          try {
+            await raceLoadCancel(hold.gate, signal ?? new AbortController().signal)
+          } finally {
+            loading.delete(modelId)
+          }
+        }
         loaded.add(modelId)
         return { model_id: modelId, generation: 'gen-1' } as unknown as SessionInfo
       },
-      reservations: () => [...loaded].map((model_id) => ({ model_id })),
+      reservations: () => [...loaded, ...loading].map((model_id) => ({ model_id })),
       list: () => [...loaded].map((model_id) => ({ model_id }) as unknown as SessionInfo),
       findSession: (modelId: string) =>
         loaded.has(modelId) ? ({ model_id: modelId } as unknown as SessionInfo) : undefined,
+      isLoading: (modelId: string) => loading.has(modelId),
       unload: async (modelId: string) => {
+        if (!loaded.has(modelId)) return
         if (!stopConfirms()) {
           throw new AtomicCoreError('MANAGED_STOP_UNCONFIRMED', 'Docker did not confirm the stop.', modelId)
         }
@@ -319,28 +335,84 @@ describe('tensorrtLlmSessionUnloader', () => {
       }),
       settings: () => ({}),
     })
-    return { runtime, events }
+    // The facade's own per-model transitions and cross-process model claims, over this runtime.
+    const runtimes = new Map<LocalProviderId, LocalRuntime>([['tensorrt-llm', runtime]])
+    const sessions = new LocalSessions({
+      layout: data.layout,
+      instanceId: 'core-1',
+      runtimes,
+      externalSessions: {} as ExternalSessions,
+      runtime: (id) => runtimes.get(id) as LocalRuntime,
+      assertRunning: () => {},
+      increaseCtx: async () => ({ ok: false, reason: 'unsupported' }),
+      recreateSession: async () => ({ ok: false, reason: 'not-loaded' }),
+    })
+    return { runtime, events, sessions, hold }
   }
 
-  it('unloads the loaded tensorrt-llm model with its stop confirmed, before a removal goes on', async () => {
-    const { runtime, events } = provider(() => true)
-    await runtime.load('m')
-    const unload = tensorrtLlmSessionUnloader(() => runtime)
-    expect(await unload('tensorrt-llm')).toEqual({ unloaded: 1 })
+  /** Whether another core instance could claim model `m` now: only once this one released it. */
+  const otherCoreCanClaim = async (modelId: string): Promise<boolean> =>
+    acquireModelClaim(data.layout, 'tensorrt-llm', modelId, 'core-2').then(
+      async (claim) => {
+        await claim.release()
+        return true
+      },
+      () => false
+    )
+
+  it('unloads through the facade — stop confirmed, cross-process claim released — and holds loads off until released (final review M-1)', async () => {
+    const { runtime, events, sessions } = provider(() => true)
+    await sessions.acquire('tensorrt-llm', 'm', {})
+    expect(await otherCoreCanClaim('m')).toBe(false)
+    const unload = tensorrtLlmSessionUnloader(
+      () => runtime,
+      () => sessions
+    )
+    const removal = await unload('tensorrt-llm')
+    expect(removal.unloaded).toBe(1)
     expect(events).toEqual(['stopped:m'])
     expect(runtime.getLoadedModels()).toEqual([])
-    expect(await unload('tensorrt-llm')).toEqual({ unloaded: 0 })
+    expect(await otherCoreCanClaim('m')).toBe(true)
+    await expect(sessions.acquire('tensorrt-llm', 'm', {})).rejects.toMatchObject({
+      code: 'MANAGED_OPERATION_CONFLICT',
+    })
+    removal.release?.()
+    await expect(sessions.acquire('tensorrt-llm', 'm', {})).resolves.toMatchObject({ created: true })
   })
 
-  it('fails the removal with MANAGED_STOP_UNCONFIRMED when Docker will not confirm the stop', async () => {
+  it('cancels a load still in flight rather than queue behind it (final review M-1)', async () => {
+    const { runtime, sessions, hold } = provider(() => true)
+    hold.gate = new Promise(() => {})
+    const pending = sessions.acquire('tensorrt-llm', 'slow', {}).catch((e: unknown) => e)
+    await vi.waitFor(() => expect(runtime.isLoading('slow')).toBe(true))
+    const removal = await tensorrtLlmSessionUnloader(
+      () => runtime,
+      () => sessions
+    )('tensorrt-llm')
+    expect(await pending).toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    expect(runtime.residentModels()).toEqual([])
+    expect(await otherCoreCanClaim('slow')).toBe(true)
+    removal.release?.()
+  })
+
+  it('fails the removal with MANAGED_STOP_UNCONFIRMED when Docker will not confirm the stop, and lifts its hold', async () => {
     let confirms = false
-    const { runtime } = provider(() => confirms)
-    await runtime.load('m')
-    const unload = tensorrtLlmSessionUnloader(() => runtime)
+    const { runtime, sessions } = provider(() => confirms)
+    await sessions.acquire('tensorrt-llm', 'm', {})
+    const unload = tensorrtLlmSessionUnloader(
+      () => runtime,
+      () => sessions
+    )
     await expect(unload('tensorrt-llm')).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED' })
     expect(runtime.getLoadedModels()).toEqual(['m'])
+    // Never released over a container that may still run.
+    expect(await otherCoreCanClaim('m')).toBe(false)
+    // The failed removal holds nothing off.
+    await expect(sessions.acquire('tensorrt-llm', 'm', {})).resolves.toMatchObject({ created: false })
     confirms = true
-    expect(await unload('tensorrt-llm')).toEqual({ unloaded: 1 })
+    const removal = await unload('tensorrt-llm')
+    expect(removal.unloaded).toBe(1)
+    removal.release?.()
   })
 
   it.each<[string, string, () => LocalRuntime | undefined]>([
@@ -348,7 +420,10 @@ describe('tensorrtLlmSessionUnloader', () => {
     ['a core that offers no tensorrt-llm provider', 'tensorrt-llm', () => undefined],
     ['a provider that is not the tensorrt-llm one', 'tensorrt-llm', () => ({}) as LocalRuntime],
   ])('reports nothing unloaded for %s', async (_label, engineId, runtime) => {
-    expect(await tensorrtLlmSessionUnloader(runtime)(engineId)).toEqual({ unloaded: 0 })
+    const facade = () => {
+      throw new Error('never asked')
+    }
+    expect(await tensorrtLlmSessionUnloader(runtime, facade)(engineId)).toEqual({ unloaded: 0 })
   })
 })
 

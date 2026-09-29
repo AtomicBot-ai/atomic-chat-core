@@ -8,14 +8,15 @@
  * What it shares with the managed environment rather than duplicating: the installation records
  * (`InstallationStore`, the one reader of that format), the Linux machine (`LinuxHost`, which is the
  * `ATOMIC_MANAGED_TEST_HOST` stand-in machine in the e2e suite, so that hook is read in one place),
- * and, the other way round, `unloadEngineSessions`: a removal of the engine unloads its loaded model
- * first, through `tensorrtLlmSessionUnloader`.
+ * and, the other way round, `unloadEngineSessions`: a removal of the engine holds its loads off and
+ * unloads its loaded model first, through `tensorrtLlmSessionUnloader` and the facade's own unload.
  *
  * `wireTensorrtLlmModelCheck` (task 2.16) composes `POST /models/tensorrt-llm/check`'s deps
  * separately from the runtime above: it shares the installation records, the descriptor provider and
  * `LinuxHost.probeDeps`, but deliberately never touches `containers`/Docker (`check.ts`'s own file
  * banner explains why) and is offered even when the runtime itself would refuse every load.
  */
+import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreEvents } from '../contracts/index.js'
 import type { ModelCompatibility } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
@@ -57,6 +58,7 @@ import {
   resolveReadyInstallation,
   tensorrtLlmAdapter,
 } from '../runtime/tensorrt-llm/index.js'
+import type { AtomicCore } from './atomic-core.js'
 import type { ResidencyOccupant } from './gpu/index.js'
 import type { CoreLogger } from './types.js'
 
@@ -267,15 +269,42 @@ export function leftoverContainers(options: {
 
 /**
  * The managed environment's `unloadEngineSessions` (spec "Удаление при загруженной модели"): before
- * a removal touches the engine's image, every loaded or loading `tensorrt-llm` model is unloaded with
- * its container's stop confirmed (`TensorrtLlmRuntime.unloadAll`); an unconfirmed stop rejects with
- * `MANAGED_STOP_UNCONFIRMED`, which fails the removal with nothing removed. `runtime` is read at
- * removal time: the provider is registered after the environment is wired.
+ * a removal touches the engine's image, loads of `tensorrt-llm` are held off (`holdOffLoads`) and
+ * every model holding a card is unloaded with its container's stop confirmed — through the facade's
+ * own `unload`, as a client's unload or GPU residency would, so each model's cross-process claim is
+ * released and a load still pending is cancelled rather than queued behind (final review M-1). The
+ * hold lasts until the removal calls `release`. An unconfirmed stop rejects with
+ * `MANAGED_STOP_UNCONFIRMED`, which fails the removal with nothing removed, and lifts the hold at
+ * once. `runtime` and `sessions` are read at removal time: the provider is registered after the
+ * environment is wired, and the facade after both.
  */
-export function tensorrtLlmSessionUnloader(runtime: () => LocalRuntime | undefined): UnloadEngineSessions {
+export function tensorrtLlmSessionUnloader(
+  runtime: () => LocalRuntime | undefined,
+  sessions: () => Pick<AtomicCore, 'cancelLoad' | 'unload'>
+): UnloadEngineSessions {
   return async (engineId) => {
     if (engineId !== TENSORRT_LLM_ENGINE_ID) return { unloaded: 0 }
     const provider = runtime()
-    return provider instanceof TensorrtLlmRuntime ? provider.unloadAll() : { unloaded: 0 }
+    if (!(provider instanceof TensorrtLlmRuntime)) return { unloaded: 0 }
+    const release = provider.holdOffLoads()
+    try {
+      const facade = sessions()
+      const models = provider.residentModels()
+      for (const modelId of models) {
+        facade.cancelLoad(TENSORRT_LLM_ENGINE_ID, modelId)
+        const result = await facade.unload(TENSORRT_LLM_ENGINE_ID, modelId)
+        if (!result.success) {
+          throw new AtomicCoreError(
+            'MANAGED_STOP_UNCONFIRMED',
+            result.error ?? `The unload of ${modelId} failed.`,
+            modelId
+          )
+        }
+      }
+      return { unloaded: models.length, release }
+    } catch (error) {
+      release()
+      throw error
+    }
   }
 }

@@ -379,7 +379,10 @@ export async function createAtomicCore(
       onWarn: (message) => log('warn', message),
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
-      unloadEngineSessions: tensorrtLlmSessionUnloader(() => runtimes.get('tensorrt-llm')),
+      unloadEngineSessions: tensorrtLlmSessionUnloader(
+        () => runtimes.get('tensorrt-llm'),
+        () => core as AtomicCore
+      ),
     })
     // Containers a previous core left that startup reconcile could not confirm stopped: they hold every
     // card for GPU residency until a retried stop is confirmed.

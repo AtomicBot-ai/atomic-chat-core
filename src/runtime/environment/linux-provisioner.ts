@@ -90,10 +90,12 @@ export interface HostView {
 
 /**
  * Unloads every loaded session of one engine, confirming the stop of its container (spec "Удаление
- * при загруженной модели"); rejects when a stop cannot be confirmed. Task 2.14's provider supplies
- * the real one; until then nothing can be loaded, and the default reports nothing unloaded.
+ * при загруженной модели"); rejects when a stop cannot be confirmed, holding nothing off then. On
+ * success, new loads of that engine stay refused until the removal calls `release` — which it does
+ * however it ends — so no load starts a container on an installation being removed (final review
+ * M-1). The `tensorrt-llm` provider supplies the real one; the default reports nothing unloaded.
  */
-export type UnloadEngineSessions = (engineId: string) => Promise<{ unloaded: number }>
+export type UnloadEngineSessions = (engineId: string) => Promise<{ unloaded: number; release?: () => void }>
 
 export const NOTHING_LOADED: UnloadEngineSessions = async () => ({ unloaded: 0 })
 
@@ -780,60 +782,64 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       }
       const existing = await deps.installations.read(target.installation_id)
       // A loaded model goes first, with its container confirmed stopped: removing the image under a
-      // running container is not something Docker allows, and a GPU must never be left held.
-      await unload(target.engine_id)
-
-      const docker = await deps.docker()
-      if (docker !== null) {
-        // Our own containers of this engine that outlived their session (a crash, a failed load).
-        for (const container of docker.journal
-          .list()
-          .filter((entry) => entry.engine_id === target.engine_id)) {
-          const stopped = await stopContainer(docker.exec, container.container_id, STOP_TIMEOUT_SECONDS)
-          if (!stopped.confirmed) {
-            throw new AtomicCoreError(
-              'MANAGED_STOP_UNCONFIRMED',
-              'A container of this engine could not be confirmed stopped, so nothing was removed.',
-              `${container.container_id}: ${stopped.reason}`
-            )
+      // running container is not something Docker allows, and a GPU must never be left held. Loads
+      // of the engine stay held off until this removal ends, whichever way.
+      const hold = await unload(target.engine_id)
+      try {
+        const docker = await deps.docker()
+        if (docker !== null) {
+          // Our own containers of this engine that outlived their session (a crash, a failed load).
+          for (const container of docker.journal
+            .list()
+            .filter((entry) => entry.engine_id === target.engine_id)) {
+            const stopped = await stopContainer(docker.exec, container.container_id, STOP_TIMEOUT_SECONDS)
+            if (!stopped.confirmed) {
+              throw new AtomicCoreError(
+                'MANAGED_STOP_UNCONFIRMED',
+                'A container of this engine could not be confirmed stopped, so nothing was removed.',
+                `${container.container_id}: ${stopped.reason}`
+              )
+            }
+            await removeContainer(docker.exec, container.container_id)
+            await docker.journal.remove(container.container_id)
           }
-          await removeContainer(docker.exec, container.container_id)
-          await docker.journal.remove(container.container_id)
-        }
-        if (existing !== null) {
-          // No longer `ready` from here on (final review I-1): once the image may be gone, a record
-          // that still said `ready` would send every load to `docker create` for a missing image,
-          // and a step that fails below (a cache the user cannot delete) would leave it that way.
-          // `removing` refuses loads as "not ready" and keeps the removal retryable.
-          if (existing.installation.status !== 'removing') {
-            await deps.installations.write({
-              ...existing,
-              installation: { ...existing.installation, status: 'removing' },
-            })
-          }
-          // Only the digest this installation pulled, and only when nobody else's container uses
-          // it — a foreign container keeps the image, and Docker would refuse anyway.
-          const users = await containersUsingImage(docker.exec, existing.image)
-          if (users.length === 0) await removeImage(docker.exec, existing.image)
-          // The GPU-check image too, unless another installation recorded it or a container uses it.
-          const probe = existing.probe_image
-          if (probe !== undefined) {
-            const others = (await deps.installations.list()).filter(
-              (entry) =>
-                entry.installation.installation_id !== target.installation_id &&
-                entry.probe_image?.digest === probe.digest
-            )
-            if (others.length === 0 && (await containersUsingImage(docker.exec, probe)).length === 0) {
-              await removeImage(docker.exec, probe)
+          if (existing !== null) {
+            // No longer `ready` from here on (final review I-1): once the image may be gone, a record
+            // that still said `ready` would send every load to `docker create` for a missing image,
+            // and a step that fails below (a cache the user cannot delete) would leave it that way.
+            // `removing` refuses loads as "not ready" and keeps the removal retryable.
+            if (existing.installation.status !== 'removing') {
+              await deps.installations.write({
+                ...existing,
+                installation: { ...existing.installation, status: 'removing' },
+              })
+            }
+            // Only the digest this installation pulled, and only when nobody else's container uses
+            // it — a foreign container keeps the image, and Docker would refuse anyway.
+            const users = await containersUsingImage(docker.exec, existing.image)
+            if (users.length === 0) await removeImage(docker.exec, existing.image)
+            // The GPU-check image too, unless another installation recorded it or a container uses it.
+            const probe = existing.probe_image
+            if (probe !== undefined) {
+              const others = (await deps.installations.list()).filter(
+                (entry) =>
+                  entry.installation.installation_id !== target.installation_id &&
+                  entry.probe_image?.digest === probe.digest
+              )
+              if (others.length === 0 && (await containersUsingImage(docker.exec, probe)).length === 0) {
+                await removeImage(docker.exec, probe)
+              }
             }
           }
         }
-      }
 
-      const descriptorId = existing?.installation.active_descriptor_id ?? null
-      if (descriptorId !== null) await deps.removeEngineCaches(descriptorId)
-      if (record.request.retain_models === false) await deps.removeModels(target.engine_id)
-      await deps.installations.remove(target.installation_id)
+        const descriptorId = existing?.installation.active_descriptor_id ?? null
+        if (descriptorId !== null) await deps.removeEngineCaches(descriptorId)
+        if (record.request.retain_models === false) await deps.removeModels(target.engine_id)
+        await deps.installations.remove(target.installation_id)
+      } finally {
+        hold.release?.()
+      }
     },
 
     async cleanup(): Promise<void> {
