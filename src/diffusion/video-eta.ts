@@ -1,18 +1,20 @@
 /**
  * The live progress of a clip: how long the whole job has left (encoding, the remaining steps and
- * the VAE decode), a fraction that never goes back, and whether the steps slowed down sharply (the
- * sign of swapping). One per job, fed the tracker's snapshot at every emit; it keeps the step marks,
- * the phase it saw last, the fraction it reported and the sticky slowdown flag. Pure over the
- * times it is given. The rules are the `video-generation/progress` spec of the
- * `add-video-generation-estimate` change.
+ * the VAE decode), a fraction that never goes back, the decode's tiles, and whether the steps or the
+ * tiles slowed down sharply (the sign of swapping or a stalled engine). One per job, fed the
+ * tracker's snapshot and the decode's tile pass at every emit; it keeps the step and tile marks, the
+ * phase it saw last, the fraction it reported and the sticky slowdown flag. Pure over the times it
+ * is given. The rules are the `video-generation/progress` spec of the `add-video-generation-estimate`
+ * change, and ADR 2026-09-29-report-the-tiled-decode-and-tile-it-by-memory for the decode.
  */
 
 import type { ImageJobPhase, ImageJobProgress, VideoJobProgress } from '../contracts/index.js'
+import type { DecodeTiles } from './tracker.js'
 import type { VideoForecast } from './video-estimate.js'
 
 /** The step-time ratio (measured against forecast) the decode forecast is scaled by stays in here. */
 export const STEP_RATIO_RANGE: readonly [number, number] = [0.25, 20]
-/** Slowdown: the running step took this many medians of the completed ones… */
+/** Slowdown: the running step (or decode tile) took this many medians of the completed ones… */
 export const SLOWDOWN_MEDIANS = 3
 /** …and at least this long, so a slow first step (graph build, weights paged in) never trips it. */
 export const SLOWDOWN_FLOOR_MS = 20_000
@@ -46,8 +48,23 @@ function median(values: readonly number[]): number {
     : ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2
 }
 
+/** The duration (ms) of every unit completed after the first mark, one entry per unit. */
+function completedAfter(marks: readonly Mark[]): number[] {
+  const out: number[] = []
+  for (let i = 1; i < marks.length; i++) {
+    const prev = marks[i - 1] as Mark
+    const mark = marks[i] as Mark
+    const units = mark.step - prev.step
+    for (let u = 0; u < units; u++) out.push((mark.at - prev.at) / units)
+  }
+  return out
+}
+
 export class VideoEta {
   private marks: Mark[] = []
+  /** The decode's tile pass: its start (`step: 0`) and each tile finished (`step` = tiles done). */
+  private tileMarks: Mark[] = []
+  private tileTotal: number | undefined
   private phase: ImageJobPhase | undefined
   private phaseAt = 0
   private reported = 0
@@ -55,9 +72,10 @@ export class VideoEta {
 
   constructor(private readonly options: VideoEtaOptions) {}
 
-  /** The wire progress for `snapshot` at `now` (ms). */
-  progress(snapshot: ImageJobProgress, now: number): VideoJobProgress {
+  /** The wire progress for `snapshot` at `now` (ms), with the decode's tile pass when there is one. */
+  progress(snapshot: ImageJobProgress, now: number, decodeTiles?: DecodeTiles): VideoJobProgress {
     this.observe(snapshot, now)
+    this.observeTiles(decodeTiles, now)
     const elapsedMs = Math.max(now - this.options.startedAt, 0)
     const etaSeconds = this.eta(snapshot, now, elapsedMs)
     this.slow ||= this.slowNow(snapshot, now)
@@ -68,6 +86,7 @@ export class VideoEta {
       fraction: this.fraction(snapshot, elapsedMs, etaSeconds),
       etaSeconds,
       elapsedMs,
+      ...(decodeTiles ? { decodeTiles: { done: decodeTiles.done, total: decodeTiles.total } } : {}),
       slowdown: this.slow,
     }
   }
@@ -85,24 +104,51 @@ export class VideoEta {
       this.marks.push({ step: snapshot.step, at: now })
   }
 
+  /**
+   * Record the decode's tile pass: its start the first time it is seen, then every tile finished. A
+   * new pass (sd.cpp retrying a failed decode, or a later attempt's decode) starts over, and no pass
+   * (another phase, a decode in one graph) forgets the last one.
+   */
+  private observeTiles(tiles: DecodeTiles | undefined, now: number): void {
+    if (!tiles) {
+      this.tileMarks = []
+      this.tileTotal = undefined
+      return
+    }
+    const last = this.tileMarks[this.tileMarks.length - 1]
+    if (last === undefined || tiles.total !== this.tileTotal || tiles.done < last.step) {
+      this.tileTotal = tiles.total
+      this.tileMarks = [{ step: 0, at: now }]
+    }
+    const latest = this.tileMarks[this.tileMarks.length - 1] as Mark
+    if (tiles.done > latest.step) this.tileMarks.push({ step: tiles.done, at: now })
+  }
+
+  /**
+   * The rest of a tiled decode at the measured pace per tile: the running tile's remainder and the
+   * tiles after it; a tile running past the pace stretches the pace, as a step does. Zero once every
+   * tile is done (the clip is being assembled and encoded); undefined before a tile finished.
+   */
+  private tileEta(now: number): number | undefined {
+    const first = this.tileMarks[0]
+    const last = this.tileMarks[this.tileMarks.length - 1]
+    const total = this.tileTotal
+    if (first === undefined || last === undefined || total === undefined) return undefined
+    if (last.step <= first.step || last.at <= first.at) return undefined
+    if (last.step >= total) return 0
+    const pace = (last.at - first.at) / 1000 / (last.step - first.step)
+    const inTile = (now - last.at) / 1000
+    const after = Math.max(total - last.step - 1, 0)
+    if (inTile <= pace) return pace - inTile + after * pace
+    return after * ((now - first.at) / 1000 / (last.step - first.step + 1))
+  }
+
   /** Seconds per step since the first mark; undefined before two marks. */
   private measuredStep(): number | undefined {
     const first = this.marks[0]
     const last = this.marks[this.marks.length - 1]
     if (first === undefined || last === undefined || last.step <= first.step) return undefined
     return (last.at - first.at) / 1000 / (last.step - first.step)
-  }
-
-  /** The duration (ms) of every completed step after the first mark, one entry per step. */
-  private completedSteps(): number[] {
-    const out: number[] = []
-    for (let i = 1; i < this.marks.length; i++) {
-      const prev = this.marks[i - 1] as Mark
-      const mark = this.marks[i] as Mark
-      const steps = mark.step - prev.step
-      for (let s = 0; s < steps; s++) out.push((mark.at - prev.at) / steps)
-    }
-    return out
   }
 
   /** The measured step against the forecast one, for scaling the decode. */
@@ -120,6 +166,8 @@ export class VideoEta {
         return null
       case 'decoding':
       case 'postprocessing': {
+        const tiles = this.tileEta(now)
+        if (tiles !== undefined) return tiles > 0 ? tiles : null
         if (!forecast) return null
         const left = forecast.decodeSeconds * this.ratio(measured) - (now - this.phaseAt) / 1000
         return left > 0 ? left : null
@@ -164,7 +212,8 @@ export class VideoEta {
   }
 
   private slowNow(snapshot: ImageJobProgress, now: number): boolean {
-    const completed = this.completedSteps()
+    if (this.tileStalled(snapshot, now)) return true
+    const completed = completedAfter(this.marks)
     const last = this.marks[this.marks.length - 1]
     const running =
       snapshot.phase === 'sampling' && last !== undefined && last.step < snapshot.totalSteps
@@ -180,5 +229,20 @@ export class VideoEta {
     if (!forecast) return false
     const slowest = Math.max(running, ...completed)
     return slowest > SLOWDOWN_FORECAST_FACTOR * forecast.stepSecondsHigh * 1000
+  }
+
+  /**
+   * A tile of the decode running past three medians of the finished ones (at least two) and past the
+   * floor. Tiles have no forecast of their own to hold them against.
+   */
+  private tileStalled(snapshot: ImageJobProgress, now: number): boolean {
+    const last = this.tileMarks[this.tileMarks.length - 1]
+    if (snapshot.phase !== 'decoding' || last === undefined || this.tileTotal === undefined) return false
+    if (last.step >= this.tileTotal) return false
+    const completed = completedAfter(this.tileMarks)
+    const running = now - last.at
+    return (
+      completed.length >= 2 && running > SLOWDOWN_MEDIANS * median(completed) && running > SLOWDOWN_FLOOR_MS
+    )
   }
 }

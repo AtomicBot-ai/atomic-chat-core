@@ -28,6 +28,12 @@ export function sampledSteps(request: ImageGenerateRequest): number {
 /** Non-progress lines a job keeps for its own failure report. */
 export const JOB_LOG_LINES = 60
 
+/** How far a tiled VAE decode got: tiles finished out of the pass sd.cpp announced. */
+export interface DecodeTiles {
+  done: number
+  total: number
+}
+
 export class ProgressTracker {
   private readonly steps: number
   private readonly batch: number
@@ -40,6 +46,8 @@ export class ProgressTracker {
   private dirty = true
   /** Tiles left in an announced VAE pass; its bar is not the sampler's. */
   private tiles: number | undefined
+  /** The tile pass of the decode, once one was announced after the last step. */
+  private decode: DecodeTiles | undefined
   /** What the server said during this job, progress redraws aside. */
   private readonly log: string[] = []
 
@@ -70,14 +78,23 @@ export class ProgressTracker {
   /**
    * Feed one output line. Only a denominator equal to the sampled step count is trusted, so a
    * loader's `1/100` cannot move the bar; and an announced tile pass is skipped whole, because nine
-   * tiles at nine steps would otherwise finish the bar before sampling began.
+   * tiles at nine steps would otherwise finish the bar before sampling began. A tile pass announced
+   * while decoding is the decode itself: its redraws count as `decodeTiles`, and a second one (sd.cpp
+   * retrying a failed decode with finer tiling) starts the count again.
    */
   onLine(line: string): void {
     const announced = parseTileAnnouncement(line)
-    if (announced !== undefined) this.tiles = announced
+    if (announced !== undefined) {
+      this.tiles = announced
+      if (this.current === 'decoding') {
+        this.decode = { done: 0, total: announced }
+        this.dirty = true
+      }
+    }
     // The sampling banner (an image's or a clip's) ends a tile pass whose last redraw was lost.
     else if (line.includes('generating image:') || line.includes('generating video:')) this.tiles = undefined
-    if (!isProgressRedraw(line)) {
+    const redraw = isProgressRedraw(line)
+    if (!redraw) {
       if (this.log.length === JOB_LOG_LINES) this.log.shift()
       this.log.push(line)
     }
@@ -85,6 +102,11 @@ export class ProgressTracker {
     if (!parsed) return
     const [step, total] = parsed
     if (this.tiles === total) {
+      const decode = this.decode
+      if (redraw && decode?.total === total && step > decode.done && step <= total) {
+        this.decode = { done: step, total }
+        this.dirty = true
+      }
       if (step >= total) this.tiles = undefined
       return
     }
@@ -105,6 +127,11 @@ export class ProgressTracker {
 
   private done(): number {
     return this.batchIndex * this.steps + this.step
+  }
+
+  /** The decode's tile pass while the job decodes; undefined in any other phase or for a single-graph decode. */
+  decodeTiles(): DecodeTiles | undefined {
+    return this.current === 'decoding' && this.decode ? { ...this.decode } : undefined
   }
 
   snapshot(): ImageJobProgress {

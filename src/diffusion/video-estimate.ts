@@ -18,6 +18,10 @@ import type {
 } from '../contracts/index.js'
 import { RESERVE_BYTES } from '../models/index.js'
 import type { ModelFileBytes } from './types.js'
+import { ENGINE_TILE_LATENT, engineDefaultLayout, tilesAlong, tilingLayout } from './video-tiling.js'
+import type { DecodeLayout, VideoDecodeTiling } from './video-tiling.js'
+
+export type { VideoDecodeTiling } from './video-tiling.js'
 
 const MIB = 1024 * 1024
 const GIB = 1024 * MIB
@@ -36,8 +40,8 @@ export interface VideoFamilyProfile {
   decodeSeconds: number
   /** Seconds for the text encoders and the job's fixed costs. */
   encodeSeconds: number
-  /** Pixels on a side of one VAE tile once the decode is tiled. */
-  vaeTile: number
+  /** Image pixels per latent pixel on a side in the VAE alone, without the transformer's patch. */
+  vaeScale: number
 }
 
 /**
@@ -53,7 +57,7 @@ export const VIDEO_FAMILY_PROFILES: Readonly<Record<string, VideoFamilyProfile>>
     attentionSeconds: 1.6e-7,
     decodeSeconds: 0.8e-6,
     encodeSeconds: 15,
-    vaeTile: 1024,
+    vaeScale: 32,
   },
   'wan2.2-ti2v-5b': {
     compression: { x: 32, y: 32, t: 4 },
@@ -62,7 +66,7 @@ export const VIDEO_FAMILY_PROFILES: Readonly<Record<string, VideoFamilyProfile>>
     attentionSeconds: 7.4e-8,
     decodeSeconds: 1.6e-6,
     encodeSeconds: 5,
-    vaeTile: 512,
+    vaeScale: 16,
   },
 }
 
@@ -74,7 +78,7 @@ export const DEFAULT_VIDEO_FAMILY_PROFILE: VideoFamilyProfile = {
   attentionSeconds: 1.6e-7,
   decodeSeconds: 1.6e-6,
   encodeSeconds: 15,
-  vaeTile: 512,
+  vaeScale: 16,
 }
 
 /**
@@ -95,9 +99,6 @@ export const UNIFIED_BUDGET_SHARE = 0.85
 /** `fits` up to this share of the budget, `tight` up to all of it, `exceeds` past it. */
 export const FITS_SHARE = 0.8
 
-/** A tiled decode walks overlapping tiles: it costs this much more than one pass over the frame. */
-export const TILED_DECODE_FACTOR = 1.25
-
 /** How far the heuristic range reaches either side of its middle: known hardware, unknown hardware or family. */
 export const HEURISTIC_SPREAD = 2
 export const UNKNOWN_SPREAD = 3
@@ -117,8 +118,10 @@ export interface VideoEstimateInput {
   frames: number
   steps: number
   cfgScale: number
-  /** The pixel-frames past which `args.ts` tiles the decode. */
+  /** The pixel-frames past which `args.ts` tiles the decode when the plan chose no tiling. */
   tilingPixelFrames: number
+  /** The tiling the plan chose for the decode; absent: the threshold and sd.cpp's own tiles. */
+  decodeTiling?: VideoDecodeTiling
   system: SystemInfo
 }
 
@@ -157,11 +160,41 @@ export function latentTokens(
   return Math.ceil(width / x) * Math.ceil(height / y) * latentFrames
 }
 
-/** Whether the decode of this request is tiled: past the pixel-frame threshold, or always under `model` offload. */
+/** Latent pixels across and down the decode's input: the frame over the VAE's own scale. */
+export function decodeLatent(
+  input: Pick<VideoEstimateInput, 'width' | 'height'>,
+  profile: VideoFamilyProfile
+): { width: number; height: number } {
+  return {
+    width: Math.max(Math.ceil(input.width / profile.vaeScale), 1),
+    height: Math.max(Math.ceil(input.height / profile.vaeScale), 1),
+  }
+}
+
+/**
+ * Whether the decode of this request is tiled: as the plan chose; without one, past the pixel-frame
+ * threshold, or always under `model` offload.
+ */
 export function decodeTiled(
-  input: Pick<VideoEstimateInput, 'width' | 'height' | 'frames' | 'offload' | 'tilingPixelFrames'>
+  input: Pick<
+    VideoEstimateInput,
+    'width' | 'height' | 'frames' | 'offload' | 'tilingPixelFrames' | 'decodeTiling'
+  >
 ): boolean {
+  if (input.decodeTiling) return input.decodeTiling.tilesX > 1 || input.decodeTiling.tilesY > 1
   return input.offload === 'model' || input.width * input.height * input.frames > input.tilingPixelFrames
+}
+
+/**
+ * The tiles the engine runs for this request: the plan's tiling, or sd.cpp's own 32-pixel tiles when
+ * the threshold switches tiling on without one.
+ */
+export function decodeLayout(input: VideoEstimateInput, profile = familyProfile(input.family)): DecodeLayout {
+  const latent = decodeLatent(input, profile)
+  if (input.decodeTiling) return tilingLayout(latent.width, latent.height, input.decodeTiling)
+  if (!decodeTiled(input))
+    return { tiled: false, tilesX: 1, tilesY: 1, tileWidth: latent.width, tileHeight: latent.height, work: 1 }
+  return engineDefaultLayout(latent.width, latent.height)
 }
 
 /**
@@ -170,10 +203,13 @@ export function decodeTiled(
  */
 export function vaeDecodePeakBytes(input: VideoEstimateInput, profile = familyProfile(input.family)): number {
   const pixelFrames = input.width * input.height * input.frames
-  if (!decodeTiled(input)) return pixelFrames * BYTES_PER_PIXEL_FRAME
-  const tile = profile.vaeTile
-  const tilePixelFrames = Math.min(input.width, tile) * Math.min(input.height, tile) * input.frames
-  return tilePixelFrames * BYTES_PER_PIXEL_FRAME + pixelFrames * OUTPUT_BYTES_PER_PIXEL_FRAME
+  const layout = decodeLayout(input, profile)
+  if (!layout.tiled) return pixelFrames * BYTES_PER_PIXEL_FRAME
+  const tileWidth = Math.min(input.width, layout.tileWidth * profile.vaeScale)
+  const tileHeight = Math.min(input.height, layout.tileHeight * profile.vaeScale)
+  return (
+    tileWidth * tileHeight * input.frames * BYTES_PER_PIXEL_FRAME + pixelFrames * OUTPUT_BYTES_PER_PIXEL_FRAME
+  )
 }
 
 const sum = (values: Array<number | undefined>): number => values.reduce<number>((a, b) => a + (b ?? 0), 0)
@@ -265,6 +301,58 @@ export function estimateVideoMemory(input: VideoEstimateInput): VideoEstimate['m
     side.budgetBytes > 0 ? side.requiredBytes / side.budgetBytes : Number.POSITIVE_INFINITY
   const worse = hostRequired > 0 && share(host) > share(device) ? host : device
   return { ...worse, verdict: verdictOf(worse.requiredBytes, worse.budgetBytes) }
+}
+
+interface TilingOption {
+  tiling: VideoDecodeTiling
+  peak: number
+  work: number
+  tiles: number
+}
+
+/** Less recomputed overlap first, then fewer graphs, then the smaller peak. */
+const cheaper = (a: TilingOption, b: TilingOption): boolean =>
+  a.work !== b.work ? a.work < b.work : a.tiles !== b.tiles ? a.tiles < b.tiles : a.peak < b.peak
+
+/**
+ * How to tile the clip's VAE decode on this machine. One graph over the frame when the whole job
+ * then fits (the estimate's `fits`, at most 80 % of the budget), since every tile recomputes its
+ * overlap; otherwise the tiling with the least work among those that fit, from one tile per axis
+ * down to as many as sd.cpp's own 32-pixel tiles make; and when none fits, the one with the smallest
+ * peak. Undefined, so the pixel-frame threshold and sd.cpp's own tiles decide as before, under
+ * `model` offload (the engine decodes on the CPU, tiled by its own flag), on the CPU fallback, and
+ * when the machine's memory is unknown.
+ */
+export function planDecodeTiling(input: VideoEstimateInput): VideoDecodeTiling | undefined {
+  if (input.offload === 'model' || input.cpuFallback) return undefined
+  const profile = familyProfile(input.family)
+  const latent = decodeLatent(input, profile)
+  const mostX = tilesAlong(latent.width, Math.min(ENGINE_TILE_LATENT, latent.width))
+  const mostY = tilesAlong(latent.height, Math.min(ENGINE_TILE_LATENT, latent.height))
+  let fitting: TilingOption | undefined
+  let smallest: TilingOption | undefined
+  for (let tilesX = 1; tilesX <= mostX; tilesX++) {
+    for (let tilesY = 1; tilesY <= mostY; tilesY++) {
+      const candidate: VideoEstimateInput = { ...input, decodeTiling: { tilesX, tilesY } }
+      const memory = estimateVideoMemory(candidate)
+      if (!memory) return undefined
+      const layout = decodeLayout(candidate, profile)
+      const option: TilingOption = {
+        tiling: { tilesX, tilesY },
+        peak: vaeDecodePeakBytes(candidate, profile),
+        work: layout.work,
+        tiles: layout.tilesX * layout.tilesY,
+      }
+      if (memory.verdict === 'fits' && (!fitting || cheaper(option, fitting))) fitting = option
+      if (
+        !smallest ||
+        option.peak < smallest.peak ||
+        (option.peak === smallest.peak && cheaper(option, smallest))
+      )
+        smallest = option
+    }
+  }
+  return (fitting ?? smallest)?.tiling
 }
 
 /** How fast a machine generates against the reference (Apple M3 Max), and whether the table knew it. */
@@ -375,8 +463,7 @@ export function heuristicParts(input: VideoEstimateInput): {
   const tokens = latentTokens(profile, input.width, input.height, input.frames)
   const pass = profile.linearSeconds * tokens + profile.attentionSeconds * tokens * tokens
   const pixelFrames = input.width * input.height * input.frames
-  const decode =
-    (profile.decodeSeconds * pixelFrames * (decodeTiled(input) ? TILED_DECODE_FACTOR : 1)) / speed
+  const decode = (profile.decodeSeconds * pixelFrames * decodeLayout(input, profile).work) / speed
   return {
     encodeSeconds: profile.encodeSeconds / speed,
     stepSeconds: (pass * passesPerStep(input.cfgScale)) / speed + STEP_OVERHEAD_SECONDS,

@@ -16,6 +16,8 @@ import type {
   VideoGenerateRequest,
 } from '../contracts/index.js'
 import type { ResolvedInputs, ServerSpec } from './types.js'
+import { decodeTilingParams } from './video-tiling.js'
+import type { VideoDecodeTiling } from './video-tiling.js'
 import { defaultStrength, usesInitImage, usesMask, usesReferences, workflowOf } from './workflow.js'
 
 /** Kill switch for the Metal text-encoder placement: `1`/`true`/`yes`/`on` keeps the encoder on Metal. */
@@ -243,13 +245,15 @@ export function buildImgGenRequest(
  * The `POST /sdcpp/v1/vid_gen` body: one clip, the frame count and rate resolved against the family,
  * `custom_sigmas` when the family ships a fixed schedule for exactly this many steps (LTX-2 distilled),
  * VP8 in WebM (the one container the app plays), and the first and last frames when a later workflow
- * resolves them. Only set keys are sent, like the image body.
+ * resolves them. The decode is tiled as `tiling` says (none for one graph); without a tiling the
+ * pixel-frame threshold switches sd.cpp's own tiles on. Only set keys are sent, like the image body.
  */
 export function buildVidGenRequest(
   request: VideoGenerateRequest,
   defaults: DiffusionFamilyDefaults,
   seed: number,
-  inputs: ResolvedInputs
+  inputs: ResolvedInputs,
+  tiling?: VideoDecodeTiling
 ): Record<string, unknown> {
   const guidance: Record<string, unknown> = { txt_cfg: request.cfgScale }
   const distilled = request.guidance ?? defaults.guidance
@@ -279,7 +283,10 @@ export function buildVidGenRequest(
   if (inputs.init !== undefined) body['init_image'] = inputs.init
   if (inputs.end !== undefined) body['end_image'] = inputs.end
   const frames = body['video_frames'] as number
-  if (request.width * request.height * frames > VIDEO_VAE_TILING_PIXEL_FRAMES)
+  if (tiling) {
+    const params = decodeTilingParams(tiling)
+    if (params) body['vae_tiling_params'] = params
+  } else if (request.width * request.height * frames > VIDEO_VAE_TILING_PIXEL_FRAMES)
     body['vae_tiling_params'] = { enabled: true }
   return body
 }

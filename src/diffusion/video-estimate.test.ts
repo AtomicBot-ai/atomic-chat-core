@@ -12,18 +12,20 @@ import {
   familyProfile,
   heuristicParts,
   heuristicSeconds,
+  decodeLayout,
   latentTokens,
   machineSpeed,
   memoryPool,
   OUTPUT_BYTES_PER_PIXEL_FRAME,
   OVERHEAD_BYTES,
   passesPerStep,
+  planDecodeTiling,
   STEP_OVERHEAD_SECONDS,
   vaeDecodePeakBytes,
   verdictOf,
   VIDEO_FAMILY_PROFILES,
 } from './video-estimate.js'
-import type { VideoEstimateInput } from './video-estimate.js'
+import type { VideoDecodeTiling, VideoEstimateInput } from './video-estimate.js'
 
 const MIB = 1024 * 1024
 const GIB = 1024 * MIB
@@ -135,6 +137,54 @@ describe('the memory model', () => {
     expect(vaeDecodePeakBytes(ltx({ width: 1216, height: 704, frames: 121 }))).toBe(
       1024 * 704 * 121 * BYTES_PER_PIXEL_FRAME + 1216 * 704 * 121 * OUTPUT_BYTES_PER_PIXEL_FRAME
     )
+  })
+
+  it('follows the plan’s tiling for the decode peak, and prices a tiled decode by its tiles', () => {
+    // The feedback clip: Wan 2.2 at 704×1280, 25 frames, a 44×80 latent.
+    const clip = wan({ width: 704, height: 1280, frames: 25, offload: 'none' })
+    const pixelFrames = 704 * 1280 * 25
+    expect(vaeDecodePeakBytes({ ...clip, decodeTiling: { tilesX: 1, tilesY: 1 } })).toBe(
+      pixelFrames * BYTES_PER_PIXEL_FRAME
+    )
+    expect(vaeDecodePeakBytes({ ...clip, decodeTiling: { tilesX: 1, tilesY: 4 } })).toBe(
+      704 * 512 * 25 * BYTES_PER_PIXEL_FRAME + pixelFrames * OUTPUT_BYTES_PER_PIXEL_FRAME
+    )
+    // Without a plan, past the threshold: sd.cpp's own 2×4 tiles of 32 latent pixels.
+    expect(decodeLayout(clip)).toMatchObject({ tiled: true, tilesX: 2, tilesY: 4 })
+    const legacy = heuristicParts(clip).decodeSeconds
+    const oneGraph = heuristicParts({ ...clip, decodeTiling: { tilesX: 1, tilesY: 1 } }).decodeSeconds
+    expect(legacy / oneGraph).toBeCloseTo((8 * 32 * 32) / (44 * 80), 9)
+    expect(decodeTiled({ ...clip, decodeTiling: { tilesX: 1, tilesY: 1 } })).toBe(false)
+    expect(decodeTiled({ ...clip, width: 64, height: 64, decodeTiling: { tilesX: 2, tilesY: 1 } })).toBe(true)
+  })
+
+  it('plans one graph when the clip fits, the cheapest tiles that fit when it does not, and the smallest peak past that', () => {
+    const clip = (system: SystemInfo) =>
+      wan({ width: 704, height: 1280, frames: 25, steps: 10, cfgScale: 3, offload: 'none', system })
+    // 24 GB M4 Pro: the whole decode fits, no tile recomputes an overlap.
+    expect(planDecodeTiling(clip(mac(24, 'Apple M4 Pro')))).toEqual({ tilesX: 1, tilesY: 1 })
+    // 18 GB: one graph does not fit, nor do two strips; three full-width strips do, at 1.5× the
+    // work of one graph instead of the 2.33× of sd.cpp's own tiles.
+    const strips = planDecodeTiling(clip(mac(18))) as VideoDecodeTiling
+    expect(strips).toEqual({ tilesX: 1, tilesY: 3 })
+    expect(estimateVideoMemory({ ...clip(mac(18)), decodeTiling: strips })?.verdict).toBe('fits')
+    expect(
+      estimateVideoMemory({ ...clip(mac(18)), decodeTiling: { tilesX: 1, tilesY: 2 } })?.verdict
+    ).not.toBe('fits')
+    expect(decodeLayout({ ...clip(mac(18)), decodeTiling: strips }).work).toBeCloseTo(1.5, 9)
+    // 16 GB: nothing fits at 80 %; the finest tiles keep the peak lowest, as sd.cpp's own did.
+    expect(planDecodeTiling(clip(mac(16)))).toEqual({ tilesX: 2, tilesY: 4 })
+    // A small clip: one graph anywhere.
+    expect(planDecodeTiling(wan({ width: 256, height: 256, frames: 9, system: mac(8) }))).toEqual({
+      tilesX: 1,
+      tilesY: 1,
+    })
+  })
+
+  it('leaves the decode to the threshold under model offload, on the CPU fallback and on unknown memory', () => {
+    expect(planDecodeTiling(wan({ offload: 'model' }))).toBeUndefined()
+    expect(planDecodeTiling(wan({ cpuFallback: true }))).toBeUndefined()
+    expect(planDecodeTiling(wan({ system: mac(0) }))).toBeUndefined()
   })
 
   it('judges LTX-2 on a 16 GB Mac as exceeding unified memory', () => {

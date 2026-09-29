@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [Report the tiled decode and tile it by memory](2026-09-29-report-the-tiled-decode-and-tile-it-by-memory.md) — adds `VideoJobProgress.decodeTiles`.
 - **2026-09-29** — [Leave half of RAM to the system when fitting on unified memory](2026-09-29-leave-half-of-ram-to-the-system-when-fitting-on-unified-memory.md) — qualifies the app's ATO-465 fit default on Apple silicon.
 - **2026-09-28** — [Estimate video generation before and during the job](2026-09-28-estimate-video-generation-before-and-during-the-job.md) — widens `VideoJobProgress.etaSeconds` to the whole job.
 - **2026-09-28** — [The app core writes its own log file](2026-09-28-the-app-core-writes-its-own-log-file.md)

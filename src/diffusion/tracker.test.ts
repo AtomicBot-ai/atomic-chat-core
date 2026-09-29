@@ -145,6 +145,49 @@ describe('ProgressTracker', () => {
     expect([t.snapshot().phase, t.snapshot().step]).toEqual(['decoding', 4])
   })
 
+  it('counts the tiles of a tiled decode, and starts again on a retried pass', () => {
+    const t = new ProgressTracker(4, 1)
+    t.setPhase('encoding')
+    // A tile pass before sampling (an init image's encode) is not the decode.
+    t.onLine('[VERBOSE] tiling.cpp:203  - processing 4 tiles')
+    t.onLine('|==>   | 2/4 - 0.10s/it')
+    expect(t.decodeTiles()).toBeUndefined()
+    t.onLine('[INFO   ] stable-diffusion.cpp:5705 - generating video: 1/1 - seed 7')
+    for (let step = 1; step <= 4; step++) t.onLine(`|==>   | ${step}/4 - 9.0s/it`)
+    expect(t.phase).toBe('decoding')
+    expect(t.decodeTiles(), 'a single-graph decode has no tiles').toBeUndefined()
+    t.takeDirty()
+
+    t.onLine('[VERBOSE] tiling.cpp:203  - processing 8 tiles')
+    expect(t.decodeTiles()).toEqual({ done: 0, total: 8 })
+    expect(t.takeDirty()).toBe(true)
+    t.onLine('|====>     | 1/8 - 250.00s/it')
+    t.onLine('|=====>    | 2/8 - 245.10s/it')
+    expect(t.decodeTiles()).toEqual({ done: 2, total: 8 })
+    expect(t.takeDirty()).toBe(true)
+    // The same redraw again is not news; a verbose line carrying `k/8` is not a tile.
+    t.onLine('|=====>    | 2/8 - 245.10s/it')
+    t.onLine('[VERBOSE] vae.hpp:112 - wan_vae temporal tile 3/8: input frames [8, 12)')
+    expect(t.decodeTiles()).toEqual({ done: 2, total: 8 })
+    expect(t.takeDirty()).toBe(false)
+    expect([t.snapshot().phase, t.snapshot().step], 'the steps stay where sampling left them').toEqual([
+      'decoding',
+      4,
+    ])
+
+    // sd.cpp retries a failed decode with finer tiling: a new pass, counted from zero.
+    t.onLine(
+      '[WARN ] backend_fit.cpp:501 - VAE decode failed (likely out of memory); retrying with spatial+temporal tiling'
+    )
+    t.onLine('[VERBOSE] tiling.cpp:203  - processing 12 tiles')
+    expect(t.decodeTiles()).toEqual({ done: 0, total: 12 })
+    for (let tile = 1; tile <= 12; tile++) t.onLine(`|==>   | ${tile}/12 - 90.00s/it`)
+    expect(t.decodeTiles()).toEqual({ done: 12, total: 12 })
+
+    t.setPhase('saving')
+    expect(t.decodeTiles(), 'only while decoding').toBeUndefined()
+  })
+
   it('remembers what the server said, but not its redraws', () => {
     const t = new ProgressTracker(8, 1)
     t.onLine('|==>   | 1/8 - 12.0s/it')

@@ -7,7 +7,7 @@
  */
 
 import type { VideoRecipe } from '../contracts/index.js'
-import { estimateVideoMemory, heuristicSeconds } from './video-estimate.js'
+import { estimateVideoMemory, heuristicSeconds, planDecodeTiling } from './video-estimate.js'
 import type { VideoEstimateInput } from './video-estimate.js'
 
 /** At most this many clips, the newest first. */
@@ -15,16 +15,24 @@ export const HISTORY_LIMIT = 5
 /** The multiplier never moves the heuristic further than this either way. */
 export const HISTORY_MULTIPLIER_RANGE: readonly [number, number] = [0.1, 10]
 
-/** The request's inputs with a recipe's own size, length, steps and guidance. */
+/**
+ * The request's inputs with a recipe's own size, length, steps and guidance, and the decode tiling
+ * this machine plans for that clip (the recipe does not record one; a clip made before the plan
+ * existed ran on the pixel-frame threshold instead).
+ */
 export function recipeInput(input: VideoEstimateInput, recipe: VideoRecipe): VideoEstimateInput {
-  return {
-    ...input,
+  const { decodeTiling: _request, ...rest } = input
+  const base: VideoEstimateInput = {
+    ...rest,
     width: recipe.width,
     height: recipe.height,
     frames: recipe.frames,
     steps: recipe.steps,
     cfgScale: recipe.cfgScale,
   }
+  if (!input.decodeTiling) return base
+  const decodeTiling = planDecodeTiling(base)
+  return decodeTiling ? { ...base, decodeTiling } : base
 }
 
 /**

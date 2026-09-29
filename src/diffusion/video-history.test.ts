@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { SystemInfo, VideoRecipe } from '../contracts/index.js'
 import { jobId, sampleVideoRecipe } from '../../test/helpers/diffusion-fixtures.js'
 import { VIDEO_VAE_TILING_PIXEL_FRAMES } from './args.js'
-import { estimateVideoCost, heuristicSeconds } from './video-estimate.js'
+import { estimateVideoCost, heuristicSeconds, planDecodeTiling } from './video-estimate.js'
 import type { VideoEstimateInput } from './video-estimate.js'
 import {
   HISTORY_LIMIT,
@@ -66,6 +66,22 @@ describe('historyRecipes', () => {
     const chosen = historyRecipes(recipes, input())
     expect(chosen).toHaveLength(HISTORY_LIMIT)
     expect(chosen[0]?.jobId).toBe(jobId(9))
+  })
+})
+
+describe('recipeInput', () => {
+  it('takes the clip’s own parameters, and the tiling this machine plans for them when the request has a plan', () => {
+    const recipe = sampleVideoRecipe({ width: 1216, height: 704, frames: 49, steps: 4, cfgScale: 2 })
+    const plain = recipeInput(input(), recipe)
+    expect(plain).toMatchObject({ width: 1216, height: 704, frames: 49, steps: 4, cfgScale: 2 })
+    expect(plain).not.toHaveProperty('decodeTiling')
+    // The request's own tiling is for its own size: the clip gets the one planned for its.
+    const planned = recipeInput(input({ decodeTiling: { tilesX: 2, tilesY: 2 } }), recipe)
+    expect(planned.decodeTiling).toEqual(planDecodeTiling({ ...plain }))
+    expect(planned.decodeTiling).toEqual({ tilesX: 1, tilesY: 1 })
+    // A plan the machine would not make for the clip (under model offload) is not carried over.
+    const unplanned = recipeInput(input({ offload: 'model', decodeTiling: { tilesX: 2, tilesY: 2 } }), recipe)
+    expect(unplanned).not.toHaveProperty('decodeTiling')
   })
 })
 
