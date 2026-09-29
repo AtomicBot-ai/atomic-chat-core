@@ -30,8 +30,9 @@
  * Opt in with ATOMIC_LIVE=1 and ATOMIC_LIVE_MANAGED=1 on Linux (it installs system packages with
  * sudo, so `npm run test:live` alone never starts it). Optional: ATOMIC_LIVE_CORE_BIN,
  * ATOMIC_RUNTIME_DESCRIPTOR_URL (default: the conf fixture copy in this repo), ATOMIC_LIVE_OUT,
- * ATOMIC_LIVE_MODEL_CACHE, ATOMIC_LIVE_TRT_MODEL, ATOMIC_LIVE_PUBLIC_PORT, ATOMIC_LIVE_SENTINELS,
- * ATOMIC_LIVE_SENTINEL_IMAGE, HF_ENDPOINT, HF_TOKEN.
+ * ATOMIC_LIVE_MODEL_CACHE, ATOMIC_LIVE_TRT_MODEL, ATOMIC_LIVE_TRT_CONTEXT_LENGTH,
+ * ATOMIC_LIVE_PUBLIC_PORT, ATOMIC_LIVE_SENTINELS, ATOMIC_LIVE_SENTINEL_IMAGE, HF_ENDPOINT, HF_TOKEN.
+ * Both cores run with DO_NOT_TRACK=1: a test run sends no error reports.
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -80,6 +81,9 @@ const DESCRIPTOR_URL =
   process.env['ATOMIC_RUNTIME_DESCRIPTOR_URL'] ??
   pathToFileURL(join(ROOT, 'test/fixtures/runtimes/tensorrt-llm.json')).href
 const PUBLIC_PORT = Number(process.env['ATOMIC_LIVE_PUBLIC_PORT'] ?? 1337)
+const CONTEXT_LENGTH = process.env['ATOMIC_LIVE_TRT_CONTEXT_LENGTH']
+  ? Number(process.env['ATOMIC_LIVE_TRT_CONTEXT_LENGTH'])
+  : null
 const SENTINELS = Number(process.env['ATOMIC_LIVE_SENTINELS'] ?? 2)
 const SENTINEL_IMAGE = process.env['ATOMIC_LIVE_SENTINEL_IMAGE'] ?? 'busybox:1.36'
 const RECIPE_ID = 'linux.install-container-runtime'
@@ -148,7 +152,7 @@ const SCENARIOS = [
   ],
   [
     'selinux-no-permission-denied',
-    'SELinux enforcing: mounts carry :z and the engine logs no Permission denied',
+    "SELinux enforcing: the core reports the daemon's SELinux, labels mounts :z when it does, and nothing is denied",
   ],
 ] as const
 type ScenarioId = (typeof SCENARIOS)[number][0]
@@ -222,6 +226,7 @@ const S: {
   pullBytes: number
   ready: boolean
   modelId: string | null
+  modelLoadStartedAt: number
   containerId: string | null
 } = {
   descriptor: undefined as unknown as Descriptor,
@@ -247,6 +252,7 @@ const S: {
   pullBytes: 0,
   ready: false,
   modelId: null,
+  modelLoadStartedAt: 0,
   containerId: null,
 }
 let report: LiveReport
@@ -299,17 +305,32 @@ async function startCore(label: string, freshLoginAs?: string): Promise<LiveCore
     `core ${label} ready: pid ${core.ready.pid}, version ${core.ready.version}, control :${core.ready.control_port}`
   )
   const events = core.api.events((event, data) => {
-    if (event !== 'environment:operation') return
-    const op = data as OperationView
-    if (op.operation_id !== S.operationId && S.operationId !== null) return
-    report.phase(label, op.phase, op.revision, op.progress)
-    if (op.phase === 'pulling-image' && op.progress?.unit === 'bytes')
-      S.pullBytes = Math.max(S.pullBytes, op.progress.completed ?? 0)
+    if (event === 'environment:operation') record(label, data as OperationView)
   })
   S.closeEvents = events.close
   S.core = core
   return core
 }
+
+/**
+ * One view of the operation into the phase log, from the event stream or from a poll: two sources,
+ * so a dropped stream or a frame still in flight when a poll already sees `ready` loses nothing.
+ */
+function record(label: string, op: OperationView): void {
+  if (op.operation_id !== S.operationId && S.operationId !== null) return
+  report.phase(label, op.phase, op.revision, op.progress)
+  if (op.phase === 'pulling-image' && op.progress?.unit === 'bytes')
+    S.pullBytes = Math.max(S.pullBytes, op.progress.completed ?? 0)
+}
+
+/** `pollOperation` with every view recorded under the running core's label. */
+const poll = (
+  api: LiveCore['api'],
+  operationId: string,
+  done: (operation: OperationView) => boolean,
+  timeoutMs: number
+): Promise<OperationView> =>
+  pollOperation(api, operationId, done, timeoutMs, (op) => record(S.core?.label ?? 'unknown', op))
 
 async function stopCore(): Promise<void> {
   S.closeEvents?.()
@@ -381,6 +402,9 @@ const needsOperation = (): string | null =>
     : S.core === null
       ? 'no core is running (an earlier scenario failed)'
       : null
+/** The step added this user to `docker`, and the test's session did not carry the group before. */
+const reloginExpected = (): boolean =>
+  change('add-user-to-docker-group') !== undefined && !S.facts.groups_effective.includes('docker')
 const needsReady = (): string | null =>
   S.ready ? null : 'the setup did not reach ready (see gpu-pull-ready)'
 const needsApproval = (): string | null =>
@@ -419,6 +443,10 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       ATOMIC_CORE_MANAGED_ROOT: join(S.out, 'managed'),
       ATOMIC_RUNTIME_DESCRIPTOR_URL: DESCRIPTOR_URL,
       HOME: homedir(),
+      // Both cores alike: the relogin core goes through sudo's env_reset, which would drop what the
+      // first one inherits. No error reports from a test run, and the runtime dir a login has.
+      DO_NOT_TRACK: '1',
+      XDG_RUNTIME_DIR: process.env['XDG_RUNTIME_DIR'] ?? `/run/user/${S.facts.uid}`,
     }
     const version = run(BIN, ['--version'])
     report.section('core', {
@@ -546,7 +574,9 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     () => (S.path === 'install' ? null : `setup path is ${S.path}; needs a recipe VM without Docker`),
     async () => {
       expect(change('add-repository', 'docker')?.params?.['family']).toBe(S.facts.family)
-      expect(change('add-repository', 'nvidia')?.params?.['family']).toBe(S.facts.family)
+      // The NVIDIA repository and package come only with a missing toolkit, never both ways.
+      if (S.facts.toolkit_installed) expect(change('add-repository', 'nvidia')).toBeUndefined()
+      else expect(change('add-repository', 'nvidia')?.params?.['family']).toBe(S.facts.family)
       expect(change('install-packages')?.params?.['packages']).toBe(
         [
           'docker-ce',
@@ -607,7 +637,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     expect([200, 201, 202], begin.text).toContain(begin.status)
     S.operationId = begin.body.operation_id
     report.log(`operation ${S.operationId}`)
-    const asking = await pollOperation(
+    const asking = await poll(
       core().api,
       S.operationId,
       (o) => o.phase === 'awaiting-consent' || o.phase === 'failed',
@@ -618,7 +648,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
 
     // Dwell in the consent dialog: the core must not start anything on its own.
     await new Promise((resolve) => setTimeout(resolve, 15_000))
-    const still = await pollOperation(core().api, S.operationId, () => true, MIN)
+    const still = await poll(core().api, S.operationId, () => true, MIN)
     const evidence = {
       phase: still.phase,
       pending_host_step: still.pending_host_step,
@@ -645,7 +675,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
         approved_plan_digest: offered.plan_digest,
       })
       expect(approval.status, approval.text).toBe(200)
-      const next = await pollOperation(
+      const next = await poll(
         core().api,
         S.operationId,
         (o) => o.revision > offered.revision && o.phase !== 'checking',
@@ -670,7 +700,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     () => (S.path === 'adopt' ? 'adopt path: no privileged step' : needsApproval()),
     async () => {
       const api = core().api
-      const waiting = await pollOperation(
+      const waiting = await poll(
         api,
         S.operationId as string,
         (o) =>
@@ -735,7 +765,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       })
       expect(receipt.status, receipt.text).toBe(200)
       // The core re-probes after the receipt and moves on only by what it finds (spec).
-      S.afterStep = await pollOperation(
+      S.afterStep = await poll(
         api,
         S.operationId as string,
         (o) => !['checking', 'preparing-host'].includes(o.phase),
@@ -781,12 +811,18 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     () =>
       S.afterStep === null
         ? 'the privileged step did not complete (see privileged-step)'
-        : S.afterStep.phase === 'relogin-required'
+        : S.afterStep.phase === 'relogin-required' || reloginExpected()
           ? null
           : `${S.facts.user} already had Docker access in this session; the operation went on to ${S.afterStep.phase}`,
     async () => {
       const operationId = S.operationId as string
       const waiting = S.afterStep as OperationView
+      // The group was added for a user whose session did not carry it: skipping the relogin here
+      // would be the core's bug, not a reason to skip the scenario.
+      expect(
+        waiting.phase,
+        `${S.facts.user} was not in docker before the step, yet the operation went on to ${waiting.phase}`
+      ).toBe('relogin-required')
       expect(waiting.error?.code).toBe('MANAGED_RELOGIN_REQUIRED')
       // The old session really cannot reach the daemon, and the group really exists for a new one.
       const dockerGid = Number(run('getent', ['group', 'docker']).stdout.split(':')[2])
@@ -816,7 +852,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
         expected_revision: waiting.revision,
       })
       expect(resumed.status, resumed.text).toBe(200)
-      const rechecked = await pollOperation(
+      const rechecked = await poll(
         core().api,
         operationId,
         (o) => o.revision > waiting.revision && !['checking'].includes(o.phase),
@@ -834,7 +870,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
         'sudo -u did not give the new core the docker group; is `preserve_groups` set in sudoers?'
       ).toContain(dockerGid)
       // No resume from the test: the core continues at startup by itself (spec, D4).
-      const continued = await pollOperation(
+      const continued = await poll(
         fresh.api,
         operationId,
         (o) => !['checking', 'relogin-required'].includes(o.phase),
@@ -848,7 +884,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
   )
 
   scenario('gpu-pull-ready', 5 * HOUR, needsHostPrepared, async () => {
-    const done = await pollOperation(
+    const done = await poll(
       core().api,
       S.operationId as string,
       (o) => ['ready', 'failed', 'cancelled'].includes(o.phase),
@@ -938,7 +974,12 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
   scenario(
     'recipe-rerun-noop',
     30 * MIN,
-    () => (S.requestFile === null ? 'no privileged step ran in this run (adopt path)' : null),
+    () =>
+      S.requestFile === null
+        ? 'no privileged step ran in this run (adopt path)'
+        : S.afterStep === null
+          ? 'the privileged step did not complete (see privileged-step)'
+          : null,
     async () => {
       const folder = privateDir(join(S.hostSteps, 'rerun'))
       const again = join(folder, S.requestFile?.split('/').pop() as string)
@@ -980,17 +1021,22 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       },
       process.env['ATOMIC_LIVE_TRT_MODEL']
     )
-    expect(curated, `no curated model fits ${gpu?.name}`).not.toBeNull()
+    // A non-curated ATOMIC_LIVE_TRT_MODEL throws with its own message inside pickCuratedModel.
+    expect(
+      curated,
+      `no curated model fits ${gpu?.name} (${cardBytes(gpu as NonNullable<typeof gpu>)} bytes, cc ${gpu?.compute_capability})`
+    ).not.toBeNull()
     const model = curated as CuratedModel
+    const hfLog = (line: string): void => report.log(line)
     const id = model.repository.split('/').pop() as string
     report.log(`model: ${model.repository}@${model.revision} (${model.note})`)
 
     // The documented flow: the exact revision's listing must be the one the descriptor pinned.
-    const files = await listRevision(model.repository, model.revision)
+    const files = await listRevision(model.repository, model.revision, hfLog)
     expect(inventoryDigest(files)).toBe(model.inventory_digest)
-    const config = await fetchJson(model.repository, model.revision, 'config.json')
+    const config = await fetchJson(model.repository, model.revision, 'config.json', hfLog)
     const hfQuant = files.some((f) => f.path === 'hf_quant_config.json')
-      ? await fetchJson(model.repository, model.revision, 'hf_quant_config.json')
+      ? await fetchJson(model.repository, model.revision, 'hf_quant_config.json', hfLog)
       : null
     let quantization = quantizationOf(config, hfQuant)
     const check = await api.post<{
@@ -1019,7 +1065,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       model.revision
     )
     const downloadStarted = Date.now()
-    await downloadRevision(model.repository, model.revision, files, cache, (line) => report.log(line))
+    await downloadRevision(model.repository, model.revision, files, cache, hfLog)
     const downloadMs = Date.now() - downloadStarted
     const dir = await installModel({
       dataFolder: S.dataFolder,
@@ -1033,10 +1079,20 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     })
     report.log(`model installed at ${dir}`)
 
-    const loadStarted = Date.now()
+    // A small card can be refused by the pre-launch memory check (weights plus the KV reserve for
+    // the context length); ATOMIC_LIVE_TRT_CONTEXT_LENGTH shrinks that reserve for this load only.
+    const overrides =
+      CONTEXT_LENGTH === null
+        ? {}
+        : {
+            context_length: CONTEXT_LENGTH,
+            max_output_tokens: Math.min(4096, Math.floor(CONTEXT_LENGTH / 2)),
+          }
+    S.modelLoadStartedAt = Date.now()
+    const loadStarted = S.modelLoadStartedAt
     const load = await api.post<{ session: { execution?: string; port: number } }>(
       `/models/tensorrt-llm/${id}/load`,
-      {},
+      Object.keys(overrides).length === 0 ? {} : { overrides },
       HOUR
     )
     const loadMs = Date.now() - loadStarted
@@ -1094,6 +1150,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       revision: model.revision,
       id,
       quantization,
+      overrides,
       bytes: files.reduce((sum, f) => sum + f.size, 0),
       download_ms: downloadMs,
       load_ms: loadMs,
@@ -1124,28 +1181,60 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
           : null,
     async () => {
       const id = S.containerId as string
+      // What the core must report is the *daemon's* SELinux, not the host's: Docker CE's dockerd runs
+      // without --selinux-enabled by default (state A), Fedora's moby-engine with it (state C). Only a
+      // daemon that labels containers needs the `:z` on our mounts (design D15).
+      const options = sudoDocker(['info', '--format', '{{json .SecurityOptions}}'])
+      expect(options.code, options.stderr).toBe(0)
+      const securityOptions = JSON.parse(options.stdout.trim() || '[]') as string[]
+      const daemonSelinux = securityOptions.some((o) => /(^|,)name=selinux(,|$)/.test(o))
       const snapshot = await core().api.get<{ environments: Array<{ selinux: boolean | null }> }>('/snapshot')
       const mounts = JSON.parse(
         sudoDocker(['inspect', '--format', '{{json .Mounts}}', id]).stdout || '[]'
       ) as Array<{
         Type: string
         Source: string
+        Destination: string
         Mode: string
       }>
+      const binds = mounts.filter((m) => m.Type === 'bind')
+      // "Permission denied" only where it concerns our mounts: the engine image may print it about
+      // unrelated things (MPI, UCX probing /sys) that no label change would fix.
       const containerLogs = sudoDocker(['logs', id], 5 * MIN)
       const coreLogs = await core().api.get<{ log_tail?: string }>(`/models/tensorrt-llm/${S.modelId}/logs`)
-      const denials = run('sudo', ['-n', 'ausearch', '-m', 'AVC', '-ts', 'today'])
-      const logText = `${containerLogs.stdout}\n${containerLogs.stderr}\n${coreLogs.body?.log_tail ?? ''}`
+      const logLines =
+        `${containerLogs.stdout}\n${containerLogs.stderr}\n${coreLogs.body?.log_tail ?? ''}`.split('\n')
+      const paths = binds.flatMap((m) => [m.Source, m.Destination]).filter((p) => p !== '' && p !== '/')
+      const deniedOnOurMounts = logLines.filter(
+        (line) => /permission denied/i.test(line) && paths.some((p) => line.includes(p))
+      )
+      const deniedAnywhere = logLines.filter((line) => /permission denied/i.test(line))
+      // AVC denials of container processes since the model load began: the kernel's own record.
+      const since = Math.floor(S.modelLoadStartedAt / 1000)
+      const audit = run('sudo', ['-n', 'ausearch', '-m', 'AVC', '-ts', 'today'])
+      const avc = audit.stdout
+        .split('\n')
+        .filter((line) => /denied/.test(line) && /container_t/.test(line))
+        .filter((line) => Number(/audit\((\d+)\./.exec(line)?.[1] ?? 0) >= since)
+      report.detail('selinux-no-permission-denied', 'daemon_security_options', securityOptions)
       report.detail('selinux-no-permission-denied', 'mounts', mounts)
       report.detail(
         'selinux-no-permission-denied',
-        'avc_container_denials_today',
-        denials.stdout.split('\n').filter((l) => /denied/.test(l) && /container_t/.test(l)).length
+        'permission_denied_lines_anywhere',
+        deniedAnywhere.slice(0, 20)
       )
-      expect(snapshot.body.environments[0]?.selinux).toBe(true)
-      for (const mount of mounts.filter((m) => m.Type === 'bind'))
-        expect(mount.Mode, `${mount.Source} is mounted without :z`).toMatch(/z/)
-      expect(logText).not.toMatch(/Permission denied/i)
+      report.detail('selinux-no-permission-denied', 'avc_container_denials_since_load', avc.slice(0, 20))
+      report.log(
+        `selinux: daemon ${daemonSelinux ? 'labels containers' : 'does not label containers'}; ` +
+          `${avc.length} AVC denial(s) for container_t since the load`
+      )
+
+      expect(snapshot.body.environments[0]?.selinux).toBe(daemonSelinux)
+      if (daemonSelinux)
+        for (const mount of binds) expect(mount.Mode, `${mount.Source} is mounted without :z`).toMatch(/z/)
+      expect(deniedOnOurMounts, 'Permission denied on a mounted path').toEqual([])
+      // ausearch answers 1 with "<no matches>" when there is nothing; anything else is recorded above.
+      expect(avc, 'SELinux denied a container access since the model load').toEqual([])
     }
   )
 })

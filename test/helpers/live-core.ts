@@ -123,42 +123,74 @@ export class ControlApi {
    * the app's own view of an operation, so the phase log is taken from it rather than from polling,
    * which would miss a phase shorter than its interval. The cursor `<instance_id>:0` replays what
    * this core emitted before the subscription, so a core that resumes an operation at startup (the
-   * relogin) cannot slip a phase past the log.
+   * relogin) cannot slip a phase past the log. A dropped stream (hours of pulling) reconnects after a
+   * second with the last `id:` it saw, which replays whatever it missed from the core's ring.
    */
   events(onFrame: (event: string, data: unknown) => void): { close: () => void } {
-    const url = new URL(`${this.base}/events?cursor=${encodeURIComponent(`${this.ready.instance_id}:0`)}`)
-    let pending = ''
-    const request = http.request(
-      {
-        host: url.hostname,
-        port: url.port,
-        path: `${url.pathname}${url.search}`,
-        method: 'GET',
-        headers: { authorization: `Bearer ${this.token()}`, accept: 'text/event-stream' },
-      },
-      (res) => {
-        res.setEncoding('utf8')
-        res.on('data', (chunk: string) => {
-          pending += chunk
-          const frames = pending.split('\n\n')
-          pending = frames.pop() ?? ''
-          for (const frame of frames) {
-            const event = /^event: (.*)$/m.exec(frame)?.[1]
-            const data = /^data: (.*)$/m.exec(frame)?.[1]
-            if (event === undefined || data === undefined) continue
-            try {
-              onFrame(event, JSON.parse(data))
-            } catch {
-              // A frame that is not JSON is not an operation update.
-            }
-          }
-        })
-        res.on('error', () => undefined)
+    let cursor = `${this.ready.instance_id}:0`
+    let closed = false
+    let request: http.ClientRequest | null = null
+    let timer: NodeJS.Timeout | null = null
+    const reconnect = (): void => {
+      if (closed || timer !== null) return
+      timer = setTimeout(() => {
+        timer = null
+        connect()
+      }, 1000)
+    }
+    const connect = (): void => {
+      if (closed) return
+      const url = new URL(`${this.base}/events?cursor=${encodeURIComponent(cursor)}`)
+      let pending = ''
+      let token: string
+      try {
+        token = this.token()
+      } catch {
+        reconnect()
+        return
       }
-    )
-    request.on('error', () => undefined)
-    request.end()
-    return { close: () => request.destroy() }
+      request = http.request(
+        {
+          host: url.hostname,
+          port: url.port,
+          path: `${url.pathname}${url.search}`,
+          method: 'GET',
+          headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+        },
+        (res) => {
+          res.setEncoding('utf8')
+          res.on('data', (chunk: string) => {
+            pending += chunk
+            const frames = pending.split('\n\n')
+            pending = frames.pop() ?? ''
+            for (const frame of frames) {
+              const id = /^id: (.*)$/m.exec(frame)?.[1]
+              if (id !== undefined && id !== '') cursor = id
+              const event = /^event: (.*)$/m.exec(frame)?.[1]
+              const data = /^data: (.*)$/m.exec(frame)?.[1]
+              if (event === undefined || data === undefined) continue
+              try {
+                onFrame(event, JSON.parse(data))
+              } catch {
+                // A frame that is not JSON is not an operation update.
+              }
+            }
+          })
+          res.on('error', reconnect)
+          res.on('end', reconnect)
+        }
+      )
+      request.on('error', reconnect)
+      request.end()
+    }
+    connect()
+    return {
+      close: () => {
+        closed = true
+        if (timer !== null) clearTimeout(timer)
+        request?.destroy()
+      },
+    }
   }
 }
 
@@ -323,17 +355,22 @@ export interface PendingHostStep {
   expected_operation_revision: number
 }
 
-/** Reads the operation until `done`, or throws with where it got stuck. */
+/**
+ * Reads the operation until `done`, or throws with where it got stuck. Every view is also handed to
+ * `observe`, so the phase log has a second source besides the event stream.
+ */
 export async function pollOperation(
   api: ControlApi,
   operationId: string,
   done: (operation: OperationView) => boolean,
-  timeoutMs: number
+  timeoutMs: number,
+  observe?: (operation: OperationView) => void
 ): Promise<OperationView> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const answer = await api.get<OperationView>(`/environments/operations/${operationId}`)
     if (answer.status !== 200) throw new Error(`GET operation answered ${answer.status}: ${answer.text}`)
+    observe?.(answer.body)
     if (done(answer.body)) return answer.body
     if (Date.now() > deadline)
       throw new Error(

@@ -88,10 +88,17 @@ export class LiveReport {
     return this.require(id).status
   }
 
-  /** Records a phase transition the first time it is seen, and closes the previous one's duration. */
+  /**
+   * Records a phase transition the first time it is seen, and closes the previous one's duration.
+   * Phases arrive from two sources — the event stream and the test's own polls — so a view older
+   * than the newest one recorded (a lower operation revision, which is durable across cores) is
+   * dropped instead of being logged out of order.
+   */
   phase(core: string, phase: string, revision: number, progress: PhaseRecord['progress']): void {
     const last = this.phases[this.phases.length - 1]
-    if (last !== undefined && last.phase === phase && last.core === core) {
+    if (last !== undefined && revision < last.revision) return
+    if (last !== undefined && last.phase === phase) {
+      last.revision = revision
       last.progress = progress ?? last.progress
       return
     }

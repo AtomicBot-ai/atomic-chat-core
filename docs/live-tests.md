@@ -17,7 +17,7 @@ exercise. The others are skipped, and each skip gives its reason.
 
 | Scenario | Runs when the VM starts as |
 | --- | --- |
-| `preconditions` | always; fails with every problem listed (root user, no passwordless sudo, no GPU, old driver, no binary, unsupported distribution) |
+| `preconditions` | always; fails with every problem listed (root user, no passwordless sudo to root or to yourself, no GPU, old driver, no binary, unsupported distribution) |
 | `probe-plan` | always; the plan fits the machine, and probing changes nothing (packages, `daemon.json` and Docker's PID are compared) |
 | `install-from-clean` | recipe distribution, no Docker |
 | `toolkit-only-plan` | Fedora with `moby-engine` (or Debian/Ubuntu with `docker.io`), no toolkit |
@@ -32,7 +32,7 @@ exercise. The others are skipped, and each skip gives its reason.
 | `post-ready-probe-noop` | after `ready`: the plan adopts and lists no changes |
 | `recipe-rerun-noop` | after a privileged step: the same request run again reports every step `satisfied`, and packages, `daemon.json` and Docker's PID stay the same |
 | `model-chat` | after `ready`: smallest curated model for the GPU tier (inventory digest verified), `POST /models/tensorrt-llm/check` when the build has it, load, streamed chat on `:1337` |
-| `selinux-no-permission-denied` | SELinux enforcing (Fedora): the snapshot reports SELinux, bind mounts carry `z`, and neither `docker logs` nor the core's log tail contains `Permission denied` |
+| `selinux-no-permission-denied` | host SELinux enforcing (Fedora), with a model loaded. The snapshot's `selinux` must equal the **daemon's** (`docker info` `SecurityOptions` has `name=selinux`). Only when the daemon labels containers must bind mounts carry `z`. Always required: no `Permission denied` on a mounted path in `docker logs` or the core's log tail, and no `container_t` AVC denial since the load |
 
 **How the relogin is tested.** A test cannot log out, so it emulates the new session. The first core
 runs in the test's own session. That session predates the `docker` group, so the core must stop at
@@ -51,11 +51,18 @@ because it needs an interactive shell.
   `getenforce` must print `Enforcing`). All are x86_64, plus aarch64 where hardware exists (GH200,
   GB10/DGX Spark, Ampere Altra with an NVIDIA card). Arch is optional: it covers `arch-blocked` and
   `arch-adopt`.
-- **GPU**: an NVIDIA card with compute capability 8.0 or newer (Ampere or later) and at least 8 GB
-  (the smallest curated model, `Qwen/Qwen3-1.7B`, BF16). On a KVM/Proxmox host, pass the card through
-  with VFIO (the whole IOMMU group, `rombar` as your platform needs, `x-vga` off). A cloud GPU instance
-  (for example AWS g5/g6 or GCP g2) with a stock image also works. Inside the VM, `lspci | grep -i nvidia`
-  must list the card.
+- **GPU**: an NVIDIA card with compute capability 8.0 or newer (Ampere or later), **12 GB or more
+  recommended**. The smallest curated model, `Qwen/Qwen3-1.7B` in BF16, has 4.1 GB of weights and is
+  listed for 8 GB cards. However, the core's pre-launch check compares weights plus a KV-cache reserve
+  for the context length against the card's *free* memory, and on an 8 GB card with a desktop or another
+  process on it, that check can refuse the load. On 8 GB, set `ATOMIC_LIVE_TRT_CONTEXT_LENGTH=4096` (or
+  lower), which the test passes as the load's `overrides.context_length`.
+- **Virtualization**: on a KVM/Proxmox host, pass the card through with VFIO (the whole IOMMU group,
+  `rombar` as your platform needs, `x-vga` off), and set the **vCPU type to `host`**. The Bun-compiled
+  `bun-linux-x64` binary needs AVX2, and Proxmox's default `x86-64-v2-AES` lacks it, so the core would
+  die with `SIGILL`. A cloud GPU instance (for example AWS g5/g6 or GCP g2) with a stock image also
+  works. Inside the VM, `lspci | grep -i nvidia` must list the card, and `grep -m1 -o avx2 /proc/cpuinfo`
+  must print `avx2`.
 - **Driver**: NVIDIA driver **590.44.01 or newer** (`minimum_driver_version` in
   `atomic-chat-conf/runtimes/tensorrt-llm.json`). Install it the distribution's usual way. The test and
   the recipe never install drivers. Examples: Ubuntu `sudo ubuntu-drivers install`, or `nvidia-driver-590`;
@@ -63,13 +70,23 @@ because it needs an interactive shell.
   with `nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv`.
 - **User**: a normal user, not root, with passwordless sudo for any target user:
   `<user> ALL=(ALL) NOPASSWD: ALL` (for example in `/etc/sudoers.d/90-live`). sudoers must not set
-  `Defaults preserve_groups`, because the relogin emulation depends on sudo resetting the groups. The
+  `Defaults preserve_groups`, because the relogin emulation depends on sudo resetting the groups. A rule
+  for root only, such as `(root) NOPASSWD: ALL`, is not enough: `preconditions` also checks
+  `sudo -n -u $USER true`, which the relogin core needs. The
   repository checkout must be on a local disk that root can read (not NFS with `root_squash`).
 - **Disk**: at least 100 GB free under `/var/lib/docker` (the descriptor's `required_disk_bytes` is 63 GiB),
   plus 5 GB in `$HOME` for the model cache.
 - **Network**: `download.docker.com`, `nvidia.github.io`, `nvcr.io`, `huggingface.co`, and Docker Hub
   (for the `busybox` sentinels).
-- **Node.js 22+** and npm, for vitest. Bun is not needed on the VM if the binary is built elsewhere.
+- **Node.js 22+** (vitest runs on it) and **Bun** (the repository's lockfile is `bun.lock`, and there is
+  no `package-lock.json`, so `npm ci` cannot work): `curl -fsSL https://bun.sh/install | bash`, then open
+  a new shell.
+- **Ubuntu/Debian: no background upgrades during the run.** `unattended-upgrades` can hold the dpkg lock
+  past the recipe's timeout, or change the installed-package set that `probe-plan` and
+  `recipe-rerun-noop` compare. Before the run, wait for it to finish and stop it:
+  `sudo systemctl stop unattended-upgrades apt-daily.timer apt-daily-upgrade.timer`, and check that
+  `pgrep -a 'apt|dpkg'` prints nothing. Fedora: `sudo systemctl stop dnf-makecache.timer`, and keep
+  GNOME Software from updating in the background.
 
 ### Starting states to prepare
 
@@ -77,10 +94,10 @@ Snapshot each state so you can run it again.
 
 | State | How to prepare it | Covers |
 | --- | --- | --- |
-| **A. Clean** (every distribution) | fresh install + NVIDIA driver, nothing else | `install-from-clean`, `privileged-step`, `relogin`, `gpu-pull-ready`, `recipe-rerun-noop`, `model-chat`, Fedora: `selinux-no-permission-denied` |
+| **A. Clean** (every distribution) | fresh install + NVIDIA driver, nothing else | `install-from-clean`, `privileged-step`, `relogin`, `gpu-pull-ready`, `recipe-rerun-noop`, `model-chat`. On Fedora also `selinux-no-permission-denied` with a daemon that does **not** label containers: Docker CE's `dockerd` runs without `--selinux-enabled`, so the core must report `selinux: false` and mount without `:z` |
 | **A′. Ready** | state A after a passing run, then **log out and back in** | `adopt-ready-host` |
 | **B. Docker with containers** (one apt and one dnf distribution) | Docker CE from Docker's repository (`docker-ce`), `sudo usermod -aG docker $USER`, log in again, no toolkit | `restart-with-consent` (exact container count), `privileged-step` without relogin |
-| **C. Fedora moby-engine** (Fedora 43 and 44) | `sudo dnf install moby-engine && sudo systemctl enable --now docker`, no toolkit | `toolkit-only-plan`, and `restart-with-consent`. The count shows as `unknown` unless you are also in `docker` |
+| **C. Fedora moby-engine** (Fedora 43 and 44) | `sudo dnf install moby-engine && sudo systemctl enable --now docker`, no toolkit | `toolkit-only-plan`, and `restart-with-consent` (the count shows as `unknown` unless you are also in `docker`). This is **the run that covers `:z`**: Fedora's `moby-engine` runs with `--selinux-enabled`, so `selinux-no-permission-denied` requires `selinux: true` and `z` on every bind mount |
 | **D. Arch, missing** | Arch + NVIDIA driver, no Docker | `arch-blocked` |
 | **D′. Arch, by hand** | `sudo pacman -Syu --needed docker nvidia-container-toolkit`, `sudo nvidia-ctk runtime configure --runtime=docker`, `sudo systemctl enable --now docker`, `sudo usermod -aG docker $USER`, reboot or log in again | `arch-adopt`, `gpu-pull-ready`, `model-chat` |
 
@@ -90,21 +107,32 @@ On the development machine (macOS or Linux, Bun on PATH), at the commit under te
 
 ```sh
 cd atomic-chat-core
-npm ci
-npm run build:bin:all          # cross-compiles all six targets into dist/bin/
+bun install --frozen-lockfile
+npm run build:bin:all          # 12 binaries: the CLI and app cores for six targets, into dist/bin/
 ls dist/bin/atomic-chat-core-*-unknown-linux-gnu
 ```
 
-Only one target is needed:
-`bun build --compile --target=bun-linux-x64 --minify-syntax --minify-whitespace src/cli/bin.ts --outfile dist/bin/atomic-chat-core-x86_64-unknown-linux-gnu`
-(or `--target=bun-linux-arm64 … atomic-chat-core-aarch64-unknown-linux-gnu`).
+Only the CLI core for the VM's architecture is needed. These are the flags `scripts/build-binaries.mjs`
+uses. For x86_64:
+
+```sh
+bun build --compile --target=bun-linux-x64 --minify-syntax --minify-whitespace --sourcemap \
+  src/cli/bin.ts --outfile dist/bin/atomic-chat-core-x86_64-unknown-linux-gnu
+```
+
+For aarch64:
+
+```sh
+bun build --compile --target=bun-linux-arm64 --minify-syntax --minify-whitespace --sourcemap \
+  src/cli/bin.ts --outfile dist/bin/atomic-chat-core-aarch64-unknown-linux-gnu
+```
 
 Copy the checkout without `node_modules`, the binary, and the conf descriptor to the VM:
 
 ```sh
 rsync -a --exclude node_modules --exclude test/tmp ./ vm:atomic-chat-core/
 scp ../atomic-chat-conf/runtimes/tensorrt-llm.json vm:tensorrt-llm.json
-ssh vm 'cd atomic-chat-core && npm ci'
+ssh vm 'cd atomic-chat-core && ~/.bun/bin/bun install --frozen-lockfile'
 ```
 
 On the VM, `dist/bin/atomic-chat-core-$(uname -m)-unknown-linux-gnu` must exist and be executable. If it
@@ -112,10 +140,13 @@ lives elsewhere, point `ATOMIC_LIVE_CORE_BIN` at it.
 
 ## Run
 
-Open a **fresh ssh login** to the VM as the normal user. Do not use `sudo -i` or `su`, and do not attach
-to a tmux started after the user was added to `docker`. Then run:
+Open a **fresh ssh login** to the VM as the normal user. Do not use `sudo -i` or `su`. Start `tmux`
+**inside that login**, so an ssh drop in the middle of `apt` or the pull does not kill the run. A tmux
+started now still predates the `docker` group, so the relogin emulation is unaffected. Do not attach to
+a tmux server started earlier by another login. Then run:
 
 ```sh
+tmux new -s live
 cd ~/atomic-chat-core
 . /etc/os-release
 ATOMIC_LIVE=1 ATOMIC_LIVE_MANAGED=1 \
@@ -136,7 +167,8 @@ Optional variables:
 | `ATOMIC_LIVE_CORE_BIN` | `dist/bin/atomic-chat-core-<arch>-unknown-linux-gnu` | the core binary under test |
 | `ATOMIC_LIVE_OUT` | `test/tmp/live-managed-install/<id>-<version>-<arch>-<time>/` | output folder |
 | `ATOMIC_LIVE_MODEL_CACHE` | `~/.cache/atomic-chat-live/hf` | downloaded checkpoints, kept across runs |
-| `ATOMIC_LIVE_TRT_MODEL` | smallest curated model the card holds | a curated `repository` to load instead |
+| `ATOMIC_LIVE_TRT_MODEL` | smallest curated model the card holds | a curated `repository` to load instead (anything not in `curated_models` fails with that message) |
+| `ATOMIC_LIVE_TRT_CONTEXT_LENGTH` | unset (the provider's 8192) | the load's `context_length` override, for 8 GB cards; `max_output_tokens` becomes half of it, at most 4096 |
 | `ATOMIC_LIVE_PUBLIC_PORT` | `1337` | public server port |
 | `ATOMIC_LIVE_SENTINELS` / `ATOMIC_LIVE_SENTINEL_IMAGE` | `2` / `busybox:1.36` | containers a Docker restart must stop |
 | `HF_ENDPOINT`, `HF_TOKEN` | huggingface.co, none | a mirror; curated models are ungated |
@@ -147,8 +179,13 @@ model load.
 The model comes from the documented Hugging Face flow, because the core never downloads models (design
 D12). The test lists the curated revision (`/api/models/<repo>/revision/<rev>?blobs=true&files_metadata=true`),
 refuses it unless the listing's `inventory_digest` matches the descriptor's, downloads every file, checks
-each size and LFS sha256, hard-links the files into `<data>/tensorrt-llm/models/<id>/`, and writes
+each size and LFS sha256 (each request and file up to 6 tries, honouring `Retry-After` on 429/503, and a
+broken transfer resumes its `.part` with a `Range` request), hard-links the files into `<data>/tensorrt-llm/models/<id>/`, and writes
 `model.yml` (`repository`, `revision`, `architectures`, `quantization`, `files`) last.
+
+Both cores run with `DO_NOT_TRACK=1`, so a test run sends no error reports, and with the login's
+`XDG_RUNTIME_DIR`. The relogin core goes through sudo's `env_reset`, so everything it needs is passed
+explicitly, the same for both.
 
 The run leaves Docker, the toolkit, the group and the engine image installed. It unloads the model,
 stops the core and removes the sentinel containers. To reset, go back to the snapshot.

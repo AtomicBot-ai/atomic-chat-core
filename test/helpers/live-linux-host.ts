@@ -188,6 +188,11 @@ export interface HostFacts {
   docker_group_members: string[]
   docker_gid: number | null
   passwordless_sudo: boolean
+  /**
+   * `sudo -n -u <self> true`: the relogin emulation starts a core as this same user through sudo, which
+   * a rule like `(root) NOPASSWD: ALL` passes for root yet refuses for the user.
+   */
+  passwordless_sudo_as_self: boolean
   gpus: LiveGpu[]
   driver_version: string | null
   selinux: 'enforcing' | 'permissive' | 'disabled' | null
@@ -307,6 +312,7 @@ export function detectHost(descriptor: RecipeDescriptor): HostFacts {
     docker_group_members: (groupFields[3] ?? '').split(',').filter(Boolean),
     docker_gid: groupFields[2] === undefined ? null : Number(groupFields[2]),
     passwordless_sudo: run('sudo', ['-n', 'true']).code === 0,
+    passwordless_sudo_as_self: run('sudo', ['-n', '-u', me.username, 'true']).code === 0,
     gpus,
     driver_version: gpus[0]?.driver_version ?? null,
     selinux,
@@ -339,6 +345,11 @@ export function preconditionProblems(facts: HostFacts, descriptor: RecipeDescrip
   if (facts.uid === 0)
     problems.push('run the test as a normal user with passwordless sudo, not as root (root needs no relogin)')
   if (!facts.passwordless_sudo) problems.push('passwordless sudo is required (`sudo -n true` failed)')
+  else if (!facts.passwordless_sudo_as_self)
+    problems.push(
+      `passwordless sudo to ${facts.user} itself is required for the relogin emulation ` +
+        `(\`sudo -n -u ${facts.user} true\` failed; use \`${facts.user} ALL=(ALL) NOPASSWD: ALL\`)`
+    )
   if (facts.arch !== 'x86_64' && facts.arch !== 'aarch64')
     problems.push(`unsupported architecture ${facts.arch}`)
   if (facts.gpus.length === 0)
