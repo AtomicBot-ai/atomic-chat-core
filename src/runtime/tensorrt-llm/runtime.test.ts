@@ -27,6 +27,7 @@ import type { ReadyInstallation } from './installation.js'
 import { readTensorrtLlmModel } from './model-dir.js'
 import { TensorrtLlmRuntime } from './runtime.js'
 import type { TensorrtLlmRuntimeDeps } from './runtime.js'
+import type { GpuClaim } from '../shared/index.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
 const MiB = 1024 * 1024
@@ -363,6 +364,66 @@ describe('TensorrtLlmRuntime: sessions', () => {
     expect((await rejection(runtime.unload('llama'))).code).toBe('MANAGED_STOP_UNCONFIRMED')
     docker.stopConfirms = true
     expect(await runtime.unloadAll()).toEqual({ unloaded: 1 })
+  })
+
+  it('asks core for its card, as the provider’s only session, before any container exists — and holds it from then on', async () => {
+    const claims: Array<{ claim: GpuClaim; signal: AbortSignal | undefined; containers: number }> = []
+    build({
+      claimGpu: async (claim, signal) => {
+        // Not an occupant while its claim is pending: nothing of this load has started.
+        expect(runtime.gpuOccupancy()).toEqual([])
+        claims.push({ claim, signal, containers: docker.containers.size })
+      },
+    })
+    await runtime.load('qwen3')
+    expect(claims).toEqual([
+      {
+        claim: { model_id: 'qwen3', cards: [LARGE.gpu_id], auxiliary: false, soleSessionOfProvider: true },
+        signal: expect.any(AbortSignal),
+        containers: 0,
+      },
+    ])
+    expect(runtime.gpuOccupancy()).toEqual([
+      { model_id: 'qwen3', cards: [LARGE.gpu_id], auxiliary: false, state: 'ready' },
+    ])
+    expect(progress()[0]?.stage).toBe('stopping-previous')
+  })
+
+  it('with core’s residency, leaves stopping its other session to core rather than stopping it itself', async () => {
+    let stopOthers = false
+    build({
+      claimGpu: async (claim) => {
+        if (claim.model_id === 'llama') stopOthers = true
+      },
+    })
+    await runtime.load('qwen3')
+    await runtime.load('llama')
+    expect(stopOthers).toBe(true)
+    // Core decided nothing had to go (a test double), so the runtime did not stop qwen3 behind its back.
+    expect(runtime.getLoadedModels().sort()).toEqual(['llama', 'qwen3'])
+  })
+
+  it('refuses the load with what core answered, starting no container', async () => {
+    build({
+      claimGpu: async () => {
+        throw new AtomicCoreError('GPU_BUSY', 'busy', 'holder=llamacpp-upstream/chat')
+      },
+    })
+    const error = await rejection(runtime.load('qwen3'))
+    expect(error.code).toBe('GPU_BUSY')
+    expect(docker.calls.filter((argv) => argv[0] === 'create')).toEqual([])
+    expect(runtime.gpuOccupancy()).toEqual([])
+  })
+
+  it('keeps reporting a session whose stop docker would not confirm: its card is still held', async () => {
+    build()
+    await runtime.load('llama')
+    docker.stopConfirms = false
+    await rejection(runtime.unload('llama'))
+    expect(runtime.gpuOccupancy()).toEqual([
+      { model_id: 'llama', cards: [LARGE.gpu_id], auxiliary: false, state: 'stop-unconfirmed' },
+    ])
+    docker.stopConfirms = true
   })
 
   it('never grows the context and never recreates a session in place', async () => {

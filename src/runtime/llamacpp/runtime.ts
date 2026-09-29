@@ -55,6 +55,8 @@ import type {
   ManagedProcess,
   SpawnSpec,
   CtxIncreaseResult,
+  GpuClaimHook,
+  GpuOccupancy,
   LocalRuntime,
   RecreateResult,
 } from '../shared/index.js'
@@ -63,7 +65,7 @@ import type { LlamacppConfigInput } from './args.js'
 import { parseDeviceOutput } from './devices.js'
 import { classifyProcessOutput } from './errors.js'
 import type { ExitInfo } from './errors.js'
-import { autoUnloadTargets, nextRetry, planLlamaLoad } from './load-plan.js'
+import { autoUnloadTargets, llamaGpuFootprint, nextRetry, planLlamaLoad } from './load-plan.js'
 import type { LlamacppEngineSettings, LoadPlan, LoadPlanDeps } from './load-plan.js'
 import { classifyBackendMismatch, formatLoadError, isConcreteVersionBackend } from './policy.js'
 import { checkSpecTypeSupport, DFLASH_SPEC_TYPE } from './probe.js'
@@ -125,6 +127,11 @@ export interface LlamacppRuntimeOptions {
   /** Model that must never be auto-unloaded. */
   transcriptionModelId?: string
   /**
+   * Core's GPU residency (spec `gpu-residency`): asked once a load knows its backend, before anything
+   * is spawned, to free the cards it will take from every other engine. Absent, nothing is asked.
+   */
+  claimGpu?: GpuClaimHook | undefined
+  /**
    * Read a model's GGUF metadata. A seam because the model's trained context comes from here, and
    * it is what decides when the context ladder has nowhere left to climb — untestable otherwise
    * without hand-building a GGUF file.
@@ -149,6 +156,8 @@ export const DEVICE_PROBE_TIMEOUT_MS = 10_000
 export class LlamacppRuntime implements LocalRuntime {
   private readonly sessions = new Map<string, Session>()
   private readonly loading = new Map<string, Promise<SessionInfo>>()
+  /** Loads past their GPU claim and not yet a session: they hold their cards as `loading`. */
+  private readonly claimed = new Map<string, GpuOccupancy>()
   private loadTail: Promise<void> = Promise.resolve()
   private readonly shutdownController = new AbortController()
   private closing = false
@@ -176,6 +185,19 @@ export class LlamacppRuntime implements LocalRuntime {
 
   getLoadedModels(): string[] {
     return [...this.sessions.keys()]
+  }
+
+  /** The GPUs every session holds, and every load past its claim, for core's residency rule. */
+  gpuOccupancy(): GpuOccupancy[] {
+    const ready = [...this.sessions.values()].map((session): GpuOccupancy => {
+      return { model_id: session.plan.modelId, ...this.footprint(session.plan), state: 'ready' }
+    })
+    const loading = [...this.claimed.values()].filter((claim) => !this.sessions.has(claim.model_id))
+    return [...ready, ...loading]
+  }
+
+  private footprint(plan: LoadPlan): Pick<GpuOccupancy, 'cards' | 'auxiliary'> {
+    return llamaGpuFootprint(plan, this.options.transcriptionModelId)
   }
 
   getRuntimeDeviceInfo(modelId: string): RuntimeDeviceInfo | undefined {
@@ -274,6 +296,26 @@ export class LlamacppRuntime implements LocalRuntime {
     )
     if (opts.port !== undefined) plan = { ...plan, port: opts.port }
 
+    // GPU residency: the backend is known now, and nothing is started yet. Every other engine on the
+    // cards this build takes is stopped, with its exit confirmed, before the spawn below.
+    const footprint = this.footprint(plan)
+    if (this.options.claimGpu) {
+      await this.options.claimGpu({ model_id: modelId, ...footprint }, opts.signal)
+      this.assertRunning()
+      throwIfLoadCancelled(opts.signal)
+    }
+    this.claimed.set(modelId, { model_id: modelId, ...footprint, state: 'loading' })
+    try {
+      return await this.spawnWithRetries(plan, opts)
+    } finally {
+      this.claimed.delete(modelId)
+    }
+  }
+
+  /** The spawn, and the two post-failure retries of `performLoad` (drop mmproj, drop MTP), once each. */
+  private async spawnWithRetries(initial: LoadPlan, opts: LoadOptions): Promise<SessionInfo> {
+    let plan = initial
+    const { modelId } = plan
     for (let attempt = 0; attempt < 3; attempt++) {
       this.assertRunning()
       throwIfLoadCancelled(opts.signal)

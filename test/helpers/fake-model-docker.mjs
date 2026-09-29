@@ -5,7 +5,9 @@
  * lifecycle, and `ps`/`image rm` for removing the engine, with a container table in a JSON file.
  * `start` spawns `fake-model-engine.mjs` on the host port `docker create` was given, standing in for
  * `trtllm-serve` behind the container's published port — so a request through the session gateway
- * really reaches "the container", and a stop really ends it. A model mounted from a directory whose name contains `slow` never becomes healthy.
+ * really reaches "the container", and a stop really ends it. A model mounted from a directory whose name contains `slow` never becomes healthy;
+ * one whose name contains `stuck` never stops: `docker stop` fails the way a daemon that timed out
+ * does, and the container keeps running (GPU residency's "Контейнер не останавливается").
  *
  *   FAKE_DOCKER_STATE  the JSON file holding the container table (required)
  */
@@ -56,6 +58,7 @@ if (sub === 'create') {
     status: 'created',
     hostPort: Number(hostPort),
     slow: /slow/.test(model),
+    stuck: /stuck/.test(model),
     gpus,
     pid: null,
     exitCode: 0,
@@ -106,6 +109,10 @@ if (sub === 'logs') {
   done()
 }
 if (sub === 'stop') {
+  if (c.stuck) {
+    console.error(`Error response from daemon: cannot stop container: ${id}: context deadline exceeded`)
+    done(1)
+  }
   if (c.pid && alive(c.pid)) process.kill(c.pid, 'SIGKILL')
   c.status = 'exited'
   console.log(id)

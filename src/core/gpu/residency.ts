@@ -1,0 +1,88 @@
+/**
+ * Runs the residency rule (`policy.ts`) for one core: every runtime's claim hook lands here, before
+ * the runtime starts anything on a GPU. What to stop comes from the pure policy over what the engines
+ * report; how to stop each one — and to wait for its confirmed exit — is the `evict` the core's
+ * wiring (`create.ts`) attaches to each occupant.
+ *
+ * GPU claims are taken one at a time. A load becomes an occupant only once its claim has succeeded
+ * (the runtimes report it `loading` from then on), so of two loads racing for a card the later claim
+ * sees the earlier one and stops it: the model the user asked for last is the one that stays. A claim
+ * that is cancelled while it waits gives up its turn without touching anything.
+ *
+ * A claim that cannot free its card is refused with `GPU_BUSY` naming what still holds it: an
+ * eviction that rejected, or "succeeded" while its session is still listed (a `stop-unconfirmed`
+ * container, a process that would not die), leaves the card reserved, and the next claim tries to
+ * stop it again.
+ */
+
+import { AtomicCoreError } from '../../contracts/index.js'
+import { raceLoadCancel, throwIfLoadCancelled } from '../../runtime/index.js'
+import type { GpuClaimHook } from '../../runtime/index.js'
+import { claimsGpu, gpuBusyError, gpuEvictions } from './policy.js'
+import type { GpuOccupant, GpuRequest } from './policy.js'
+
+/** An occupant with the one way to stop it: resolves once its exit is confirmed. */
+export interface ResidencyOccupant extends GpuOccupant {
+  evict: () => Promise<void>
+}
+
+export interface GpuResidencyDeps {
+  /** Every session of this core that holds, or is about to hold, a GPU — read fresh at every step. */
+  occupants: () => ResidencyOccupant[]
+}
+
+const key = (occupant: GpuOccupant): string => `${occupant.provider}\0${occupant.model_id}`
+
+/** Why an eviction failed, with the engine's own details (Docker's answer, the container id) when it has them. */
+const reason = (error: unknown): string => {
+  if (!(error instanceof Error)) return String(error)
+  const details = error instanceof AtomicCoreError ? error.details : undefined
+  return details === undefined ? error.message : `${error.message} (${details})`
+}
+
+export class GpuResidency {
+  /** The end of the queue of GPU claims: each one waits for the claim before it. */
+  private tail: Promise<void> = Promise.resolve()
+
+  constructor(private readonly deps: GpuResidencyDeps) {}
+
+  /** The claim hook one provider's runtime is given. */
+  hook(provider: string): GpuClaimHook {
+    return (claim, signal) => this.claim({ ...claim, provider }, signal)
+  }
+
+  async claim(request: GpuRequest, signal?: AbortSignal): Promise<void> {
+    throwIfLoadCancelled(signal)
+    // Outside the rule both ways: it neither evicts nor waits for anyone to be evicted.
+    if (!claimsGpu(request)) return
+    const release = await this.turn(signal)
+    try {
+      const causes = new Map<string, string>()
+      for (const occupant of gpuEvictions(request, this.deps.occupants())) {
+        throwIfLoadCancelled(signal)
+        await occupant.evict().catch((error: unknown) => causes.set(key(occupant), reason(error)))
+      }
+      throwIfLoadCancelled(signal)
+      const [holder] = gpuEvictions(request, this.deps.occupants())
+      if (holder !== undefined) throw gpuBusyError(holder, causes.get(key(holder)))
+    } finally {
+      release()
+    }
+  }
+
+  /** Waits for the claims ahead; a cancel ends the wait, and the turn is handed on untouched. */
+  private async turn(signal?: AbortSignal): Promise<() => void> {
+    const ahead = this.tail
+    let release!: () => void
+    const mine = new Promise<void>((resolve) => (release = resolve))
+    this.tail = ahead.then(() => mine)
+    try {
+      await raceLoadCancel(ahead, signal)
+      throwIfLoadCancelled(signal)
+    } catch (error) {
+      void ahead.then(release)
+      throw error
+    }
+    return release
+  }
+}

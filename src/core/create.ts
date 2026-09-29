@@ -19,6 +19,7 @@ import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
 import { MlxRuntime } from '../runtime/mlx/index.js'
 import { SettingsStore } from '../settings/index.js'
+import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from '../cloud/index.js'
@@ -54,9 +55,10 @@ import {
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
+import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
-import { tensorrtLlmSessionUnloader, wireTensorrtLlm } from './tensorrt-llm.js'
+import { leftoverContainers, tensorrtLlmSessionUnloader, wireTensorrtLlm } from './tensorrt-llm.js'
 import { LOCAL_PROVIDER } from './types.js'
 import type { AtomicCoreOptions, CoreLoadOptions } from './types.js'
 
@@ -213,12 +215,25 @@ export async function createAtomicCore(
           const facts = await hardware.facts()
           return facts.cpuExtensions ? { arch: facts.arch, extensions: facts.cpuExtensions } : undefined
         },
+        // The voice model the app loads next to a chat model: auxiliary, like an embedding model —
+        // never auto-unloaded, never evicted by GPU residency, never evicting.
+        transcriptionModelId: TRANSCRIPTION_MODEL_ID,
+        claimGpu: (claim, signal) => gpuResidency.hook(provider)(claim, signal),
         ...(options.fetch ? { fetch: options.fetch } : {}),
       })
     const runtimes = new Map<LocalProviderId, LocalRuntime>([
       [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
       ['llamacpp', llamacppRuntime('llamacpp')],
     ])
+    // GPU residency (task 2.15, spec `gpu-residency`): one resident model per card across every local
+    // engine of this core. Every part is read at claim time — image generation, the Docker executor's
+    // leftovers and the facade are wired further down.
+    const gpuResidency = wireGpuResidency({
+      runtimes,
+      diffusion: () => diffusion,
+      leftovers: () => managedLeftovers(),
+      sessions: () => core as AtomicCore,
+    })
 
     if (platform === 'darwin') {
       const mlxRegistry = new ModelRegistry(layout, 'mlx')
@@ -233,6 +248,7 @@ export async function createAtomicCore(
           readSettings: async () => settings.get('mlx'),
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
+          claimGpu: gpuResidency.hook('mlx'),
         })
       )
       runtimes.set(
@@ -334,6 +350,7 @@ export async function createAtomicCore(
       log: (level, msg) => (level === 'debug' ? undefined : log(level, msg)),
       platform,
       env,
+      claimGpu: gpuResidency.hook(DIFFUSION_GPU_PROVIDER),
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
     })
 
@@ -359,6 +376,13 @@ export async function createAtomicCore(
       ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
       unloadEngineSessions: tensorrtLlmSessionUnloader(() => runtimes.get('tensorrt-llm')),
     })
+    // Containers a previous core left that startup reconcile could not confirm stopped: they hold every
+    // card for GPU residency until a retried stop is confirmed.
+    const managedLeftovers = leftoverContainers({
+      containers: managedContainers,
+      instanceId: lock.instanceId,
+      log,
+    })
 
     // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").
     const tensorrtLlm = wireTensorrtLlm({
@@ -375,6 +399,7 @@ export async function createAtomicCore(
       settings: () => settings.get('tensorrt-llm'),
       emit: (name, payload) => emitter.emit(name, payload),
       log,
+      claimGpu: gpuResidency.hook('tensorrt-llm'),
     })
     if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
     /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */

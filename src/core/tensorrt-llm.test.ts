@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { RuntimeDescriptor, SessionInfo } from '../contracts/index.js'
-import { ExecutionJournal } from '../runtime/container/index.js'
+import { ExecutionJournal, reconcileExecutions } from '../runtime/container/index.js'
 import type { DockerExec, ManagedContainers, ManagedContainersHandle } from '../runtime/container/index.js'
 import { InstallationStore, parseRuntimeDescriptor } from '../runtime/environment/index.js'
 import type { LinuxProbeDeps } from '../runtime/environment/index.js'
@@ -14,7 +14,7 @@ import { FakeDocker } from '../../test/helpers/fake-docker-exec.js'
 import { readRuntimeFixture } from '../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { tensorrtLlmSessionUnloader, wireTensorrtLlm } from './tensorrt-llm.js'
+import { leftoverContainers, tensorrtLlmSessionUnloader, wireTensorrtLlm } from './tensorrt-llm.js'
 import type { WireTensorrtLlmOptions } from './tensorrt-llm.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
@@ -314,5 +314,66 @@ describe('tensorrtLlmSessionUnloader', () => {
     ['a provider that is not the tensorrt-llm one', 'tensorrt-llm', () => ({}) as LocalRuntime],
   ])('reports nothing unloaded for %s', async (_label, engineId, runtime) => {
     expect(await tensorrtLlmSessionUnloader(runtime)(engineId)).toEqual({ unloaded: 0 })
+  })
+})
+
+describe('leftoverContainers', () => {
+  it('holds every card for a container a previous core left that startup could not stop, until a retried stop is confirmed', async () => {
+    const docker = new FakeDocker()
+    const journal = await ExecutionJournal.open(data.layout)
+    docker.containers.set('oldctr', {
+      id: 'oldctr',
+      createArgv: [],
+      status: 'running',
+      exitCode: null,
+      logs: [],
+    })
+    await journal.add({
+      container_id: 'oldctr',
+      engine_id: 'tensorrt-llm',
+      image_digest: 'sha256:0',
+      scope: 'app',
+      instance_id: 'core-0',
+      created_at: '2026-09-29T00:00:00.000Z',
+    })
+    docker.stopConfirms = false
+    const reconciled = await reconcileExecutions(journal, 'core-1', docker.exec, () => {})
+    expect(reconciled.unconfirmed.map((r) => r.container_id)).toEqual(['oldctr'])
+    const wired: ManagedContainers = {
+      exec: docker.exec,
+      journal,
+      dockerPath: '/usr/bin/docker',
+      socketPath: '/var/run/docker.sock',
+      reconciled,
+    }
+    const leftovers = leftoverContainers({
+      containers: { current: () => wired },
+      instanceId: 'core-1',
+      log: () => {},
+    })
+
+    const [held] = leftovers()
+    expect(held).toMatchObject({
+      provider: 'tensorrt-llm',
+      model_id: 'oldctr',
+      cards: 'all',
+      auxiliary: false,
+      state: 'stop-unconfirmed',
+    })
+    // Still no confirmation: still held, and the eviction says why.
+    await expect(held?.evict()).rejects.toThrow('Docker did not confirm container oldctr stopped')
+    expect(leftovers().map((o) => o.model_id)).toEqual(['oldctr'])
+
+    docker.stopConfirms = true
+    await leftovers()[0]?.evict()
+    expect(leftovers()).toEqual([])
+    expect(journal.list()).toEqual([])
+    expect(docker.containers.has('oldctr')).toBe(false)
+  })
+
+  it('holds nothing while no Docker executor is wired', () => {
+    expect(
+      leftoverContainers({ containers: { current: () => null }, instanceId: 'core-1', log: () => {} })()
+    ).toEqual([])
   })
 })

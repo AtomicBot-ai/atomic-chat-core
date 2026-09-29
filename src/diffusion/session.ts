@@ -22,6 +22,7 @@ import type { DiffusionState, ServerHandle } from './state.js'
 import { MAX_BATCH } from './types.js'
 import type { ServerSpec } from './types.js'
 import { videoWorkflowsForFamily, workflowsForSpec } from './workflow.js'
+import type { GpuCards } from '../runtime/shared/index.js'
 
 /** CUDA and ROCm need a moment after the chat model's process dies before the driver reports the VRAM as free. */
 export const GPU_SETTLE_MS = 500
@@ -49,6 +50,19 @@ export interface SessionDeps {
   spawn: (spec: ServerSpec, scratchDir: string, signal?: AbortSignal) => Promise<ServerHandle>
   /** The child is gone (or was never journalled); forget it. */
   onServerGone?: (pid: number) => Promise<void>
+  /**
+   * Core's GPU residency (spec `gpu-residency`): asked before every spawn — a load and a respawn
+   * alike — to free the GPU of the other engines. Rejects (`GPU_BUSY`, a cancel) fail the load.
+   */
+  claimGpu?: (spec: ServerSpec, signal?: AbortSignal) => Promise<void>
+}
+
+/**
+ * Which GPUs an `sd-server` holds: every card on a device backend (the model is spread over whatever
+ * the build can see), none on the CPU backend or after the recovery moved it to the CPU.
+ */
+export function diffusionGpuCards(spec: Pick<ServerSpec, 'backend' | 'cpuFallback'>): GpuCards {
+  return spec.backend === 'cpu' || spec.cpuFallback ? [] : 'all'
 }
 
 /** The install the status reports: the resident spec's tree when there is one, otherwise the newest. */
@@ -186,6 +200,9 @@ export async function loadFromSpec(
   try {
     // A retained spec can name an engine build that an update has since made too old for it.
     checkEngineCompatibility(spec.family, spec.tag)
+    // Every other engine is off the GPU, its exit confirmed, before this server starts.
+    await deps.claimGpu?.(spec, signal)
+    state.starting = spec
     server = await deps.spawn(spec, state.paths.scratchDir, signal)
   } catch (raw) {
     const error = toDiffusionError(raw)
@@ -194,6 +211,8 @@ export async function loadFromSpec(
     await emitState(deps, 'load-failed')
     emitError(deps, undefined, body)
     throw error
+  } finally {
+    state.starting = undefined
   }
 
   const info: LoadedDiffusionModel = {

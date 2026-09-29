@@ -10,6 +10,7 @@
  */
 
 import type { LocalProviderId, SessionInfo, UnloadResult } from '../../contracts/index.js'
+import type { GpuOccupancy } from './gpu-occupancy.js'
 
 /** What `autoIncreaseCtx` did, or why it declined to do anything. */
 export type CtxIncreaseResult =
@@ -87,6 +88,12 @@ export interface LocalRuntime {
   shutdown(): Promise<void>
   /** The routing policy of a loaded session; absent (or undefined) keeps the public server's defaults. */
   routePolicy?(modelId: string): SessionRoutePolicy | undefined
+  /**
+   * The GPUs this runtime's sessions hold, for core's residency rule (spec `gpu-residency`): every
+   * session that is ready, loading past its claim, stopping, or whose stop was never confirmed. A
+   * runtime without it holds no GPU core has to free (Foundation Models).
+   */
+  gpuOccupancy?(): GpuOccupancy[]
 }
 
 export type { LocalProviderId }

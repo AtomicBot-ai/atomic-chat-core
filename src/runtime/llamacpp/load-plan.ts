@@ -21,6 +21,7 @@ import {
   parseGgufShard,
 } from '../../models/index.js'
 import { generateApiKey } from '../shared/index.js'
+import type { GpuCards } from '../shared/index.js'
 import { withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
 import {
@@ -125,6 +126,32 @@ export function autoUnloadTargets(
   return sessions
     .filter((s) => s.is_embedding === false && s.model_id !== opts.transcriptionModelId)
     .map((s) => s.model_id)
+}
+
+/** A GPU API in the backend's id: CUDA, Vulkan, ROCm/HIP, SYCL, Metal, OpenCL, MUSA, CANN. */
+const GPU_BACKEND = /cuda|vulkan|rocm|hip|sycl|metal|opencl|musa|cann/i
+/** What only a CPU build says: `-cpu`, an instruction-set tier, or a bare `<os>-<arch>` build. */
+const CPU_BACKEND =
+  /(^|-)cpu(-|$)|(^|-)(no)?avx(2|512)?(-|$)|common_cpus|^(linux|win)-(x64|x86_64|arm64|aarch64)$/i
+
+/**
+ * Which GPUs a llama.cpp session holds, for core's residency rule (spec `gpu-residency`, design D10):
+ * a GPU build spreads the model over every card, so it holds all of them; only a build whose id says
+ * it is CPU-only holds none. macOS builds use Metal. Anything else — an executable the CLI was
+ * pointed at — is treated as holding the GPUs: calling a GPU session CPU-only would let a second
+ * engine onto a card that is not free. Embeddings and the transcription companion are auxiliary,
+ * with the same exemption `autoUnloadTargets` gives them.
+ */
+export function llamaGpuFootprint(
+  plan: Pick<LoadPlan, 'backend' | 'isEmbedding' | 'modelId'>,
+  transcriptionModelId?: string
+): { cards: GpuCards; auxiliary: boolean } {
+  const backend = stripBom(plan.backend)
+  const cpuOnly = !GPU_BACKEND.test(backend) && !backend.startsWith('macos-') && CPU_BACKEND.test(backend)
+  return {
+    cards: cpuOnly ? [] : 'all',
+    auxiliary: plan.isEmbedding || plan.modelId === transcriptionModelId,
+  }
 }
 
 export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): Promise<LoadPlan> {

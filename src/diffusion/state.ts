@@ -68,6 +68,8 @@ export class DiffusionState {
   session: DiffusionSession | undefined
   /** The last spec that loaded; the respawn source after a cancel or a crash. Cleared only by an unload. */
   spec: ServerSpec | undefined
+  /** A server whose GPU claim succeeded and that is starting: it holds the GPU before it is a session. */
+  starting: ServerSpec | undefined
   modelState: DiffusionModelState = 'unloaded'
   modelError: DiffusionErrorBody | undefined
   activeJobId: string | undefined

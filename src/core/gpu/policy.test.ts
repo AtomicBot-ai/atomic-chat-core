@@ -1,224 +1,210 @@
 import { describe, expect, it } from 'vitest'
-import { ResidencyPolicy, type Reservation, type SessionKey } from './policy.js'
+import { AtomicCoreError } from '../../contracts/index.js'
+import { cardsOverlap, claimsGpu, gpuBusyError, gpuEvictions } from './policy.js'
+import type { GpuOccupant, GpuRequest } from './policy.js'
 
-const session = (over: Partial<SessionKey> = {}): SessionKey => ({
-  scope_id: 'app',
-  provider: 'llamacpp',
-  model_id: 'qwen3-4b',
-  generation: 'g1',
+const GPU0 = 'GPU-0'
+const GPU1 = 'GPU-1'
+
+const occupant = (over: Partial<GpuOccupant> & Pick<GpuOccupant, 'provider' | 'model_id'>): GpuOccupant => ({
+  cards: 'all',
+  auxiliary: false,
+  state: 'ready',
   ...over,
 })
 
-const policy = (): ResidencyPolicy => {
-  let serial = 0
-  return new ResidencyPolicy({
-    newReservationId: () => {
-      serial += 1
-      return `res-${serial}`
-    },
-  })
-}
+const request = (over: Partial<GpuRequest> & Pick<GpuRequest, 'provider' | 'model_id'>): GpuRequest => ({
+  cards: 'all',
+  auxiliary: false,
+  ...over,
+})
 
-const taken = (p: ResidencyPolicy, key: SessionKey, gpu = 'GPU-0'): Reservation => {
-  const result = p.reserve(key, gpu)
-  if (!result.ok) throw new Error(`expected the reserve to succeed: ${result.error.code}`)
-  return result.value
-}
+const llamaChat = occupant({ provider: 'llamacpp-upstream', model_id: 'qwen3-4b' })
+const forkChat = occupant({ provider: 'llamacpp', model_id: 'gemma-3' })
+const llamaCpu = occupant({ provider: 'llamacpp-upstream', model_id: 'cpu-model', cards: [] })
+const embedding = occupant({
+  provider: 'llamacpp-upstream',
+  model_id: 'sentence-transformer-mini',
+  auxiliary: true,
+})
+const transcription = occupant({ provider: 'llamacpp-upstream', model_id: 'voxtral', auxiliary: true })
+const mlxChat = occupant({ provider: 'mlx', model_id: 'mlx-qwen' })
+const diffusion = occupant({ provider: 'diffusion', model_id: 'flux' })
+const trtOn0 = occupant({ provider: 'tensorrt-llm', model_id: 'llama-3', cards: [GPU0] })
+const trtOn1 = occupant({ provider: 'tensorrt-llm', model_id: 'qwen3', cards: [GPU1] })
+const trtStuck = occupant({
+  provider: 'tensorrt-llm',
+  model_id: 'stuck',
+  cards: [GPU0],
+  state: 'stop-unconfirmed',
+})
 
-const refusal = (result: { ok: boolean; error?: { code: string } }): string => {
-  if (result.ok) throw new Error('expected a refusal')
-  return result.error?.code ?? ''
-}
+const ids = (list: GpuOccupant[]) => list.map((o) => `${o.provider}/${o.model_id}`)
 
-describe('one resident model per GPU (GPU01)', () => {
-  it('turns a second load away, names what to stop, and hands over once it is confirmed gone', () => {
-    const p = policy()
-    const a = session()
-    const b = session({ provider: 'tensorrt-llm', model_id: 'llama-3.1-8b-fp8', generation: 'g2' })
-
-    const first = taken(p, a)
-    expect(refusal(p.reserve(b, 'GPU-0'))).toBe('GPU_BUSY')
-    expect(p.evictionsFor(b, 'GPU-0')).toEqual([a])
-
-    p.markStarted(first, 'exec-a')
-    // A model answering a request right now is listed exactly like an idle one: the user asked to
-    // load something else, and that is the whole decision.
-    expect(p.evictionsFor(b, 'GPU-0')).toEqual([a])
-    expect(refusal(p.reserve(b, 'GPU-0'))).toBe('GPU_BUSY')
-
-    expect(
-      p.confirmStopped(first, { kind: 'container', execution_id: 'exec-a', observed: 'exited' }).ok
-    ).toBe(true)
-    expect(p.evictionsFor(b, 'GPU-0')).toEqual([])
-    const second = taken(p, b)
-    expect(second.session).toEqual(b)
-    expect(p.list()).toEqual([{ gpu_id: 'GPU-0', session: b, started: false }])
-  })
-
-  it('leaves another device alone, because the rule is per GPU and not per machine', () => {
-    const p = policy()
-    taken(p, session(), 'GPU-0')
-    const other = session({ model_id: 'other', generation: 'g9' })
-    expect(p.evictionsFor(other, 'GPU-1')).toEqual([])
-    expect(p.reserve(other, 'GPU-1').ok).toBe(true)
-  })
-
-  it('answers a repeated reserve from the same session instead of calling it busy', () => {
-    const p = policy()
-    const a = session()
-    const first = taken(p, a)
-    const again = p.reserve(a, 'GPU-0')
-    expect(again.ok && again.value.reservation_id).toBe(first.reservation_id)
+describe('cardsOverlap', () => {
+  it.each([
+    ['all vs all', 'all', 'all', true],
+    ['all vs one card', 'all', [GPU0], true],
+    ['one card vs all', [GPU1], 'all', true],
+    ['same card', [GPU0], [GPU0], true],
+    ['different cards', [GPU0], [GPU1], false],
+    ['one of several', [GPU0, GPU1], [GPU1], true],
+    ['CPU-only vs all', [], 'all', false],
+    ['all vs CPU-only', 'all', [], false],
+    ['CPU-only vs CPU-only', [], [], false],
+  ] as const)('%s → %s', (_name, a, b, expected) => {
+    expect(cardsOverlap(a, b)).toBe(expected)
   })
 })
 
-describe('releasing only on evidence (GPU02)', () => {
-  it('lets a spawn that never started anything go, and refuses that excuse afterwards', () => {
-    const p = policy()
-    const a = session()
-    const reservation = taken(p, a)
-
-    // The child never existed, so there is nothing to observe exiting.
-    expect(
-      p.confirmStopped(reservation, { kind: 'not-started', reservation_id: reservation.reservation_id }).ok
-    ).toBe(true)
-    expect(p.list()).toEqual([])
-
-    const second = taken(p, a)
-    expect(p.markStarted(second, 'exec-1').ok).toBe(true)
-    // Now something is running: only its observed exit frees the device.
-    expect(
-      refusal(p.confirmStopped(second, { kind: 'not-started', reservation_id: second.reservation_id }))
-    ).toBe('MANAGED_STOP_UNCONFIRMED')
-    expect(p.list()).toHaveLength(1)
-  })
-
-  it('keeps the reservation when a stop cannot be proved, so the memory is never handed on twice', () => {
-    const p = policy()
-    const a = session()
-    const b = session({ provider: 'mlx', generation: 'g2' })
-    const reservation = taken(p, a)
-    p.markStarted(reservation, 'exec-1')
-
-    // An unload that timed out simply produces no proof; the caller has nothing to pass here.
-    expect(refusal(p.reserve(b, 'GPU-0'))).toBe('GPU_BUSY')
-    expect(p.list()).toHaveLength(1)
-
-    expect(
-      p.confirmStopped(reservation, {
-        kind: 'native',
-        host_pid: 4242,
-        process_identity: 'exec-1',
-        verified_exited: true,
-      }).ok
-    ).toBe(true)
-    expect(p.reserve(b, 'GPU-0').ok).toBe(true)
-  })
-
-  it('refuses a proof that names a different container than the one it started', () => {
-    const p = policy()
-    const reservation = taken(p, session())
-    p.markStarted(reservation, 'exec-1')
-    expect(
-      refusal(
-        p.confirmStopped(reservation, { kind: 'container', execution_id: 'exec-2', observed: 'exited' })
-      )
-    ).toBe('MANAGED_IDENTITY_MISMATCH')
-    expect(p.list()).toHaveLength(1)
-  })
-
-  it('accepts a container reported absent as readily as one reported exited', () => {
-    const p = policy()
-    const reservation = taken(p, session())
-    p.markStarted(reservation, 'exec-1')
-    expect(
-      p.confirmStopped(reservation, { kind: 'container', execution_id: 'exec-1', observed: 'absent' }).ok
-    ).toBe(true)
-  })
-
-  it('refuses to start a second thing under one reservation', () => {
-    const p = policy()
-    const reservation = taken(p, session())
-    expect(p.markStarted(reservation, 'exec-1').ok).toBe(true)
-    // Idempotent for the same execution, a mismatch for another.
-    expect(p.markStarted(reservation, 'exec-1').ok).toBe(true)
-    expect(refusal(p.markStarted(reservation, 'exec-2'))).toBe('MANAGED_IDENTITY_MISMATCH')
+describe('claimsGpu', () => {
+  it.each([
+    ['a GPU chat load', request({ provider: 'llamacpp', model_id: 'c' }), true],
+    ['a load on one card', request({ provider: 'tensorrt-llm', model_id: 't', cards: [GPU0] }), true],
+    ['a CPU-only load', request({ provider: 'llamacpp', model_id: 'c', cards: [] }), false],
+    [
+      'an embedding or transcription load',
+      request({ provider: 'llamacpp', model_id: 'e', auxiliary: true }),
+      false,
+    ],
+    [
+      'a CPU-only load of a one-session provider (it still stops its other session)',
+      request({ provider: 'x', model_id: 'y', cards: [], soleSessionOfProvider: true }),
+      true,
+    ],
+    [
+      'an auxiliary load, even of a one-session provider',
+      request({ provider: 'x', model_id: 'y', auxiliary: true, soleSessionOfProvider: true }),
+      false,
+    ],
+  ])('%s → %s', (_name, req, expected) => {
+    expect(claimsGpu(req)).toBe(expected)
   })
 })
 
-describe('identity (GPU03)', () => {
-  it('ignores a confirmation from a generation that has been replaced', () => {
-    const p = policy()
-    const old = taken(p, session({ generation: 'g1' }))
-    p.markStarted(old, 'exec-1')
-    p.confirmStopped(old, { kind: 'container', execution_id: 'exec-1', observed: 'exited' })
+describe('gpuEvictions: one resident model per card (spec gpu-residency)', () => {
+  const everyone = [
+    llamaChat,
+    forkChat,
+    llamaCpu,
+    embedding,
+    transcription,
+    mlxChat,
+    diffusion,
+    trtOn0,
+    trtOn1,
+  ]
 
-    const fresh = taken(p, session({ generation: 'g2' }))
-    p.markStarted(fresh, 'exec-2')
-
-    // The old owner comes back and confirms its stop again.
-    expect(
-      refusal(p.confirmStopped(old, { kind: 'container', execution_id: 'exec-1', observed: 'exited' }))
-    ).toBe('SESSION_GENERATION_STALE')
-    expect(p.list()).toEqual([{ gpu_id: 'GPU-0', session: session({ generation: 'g2' }), started: true }])
-    expect(fresh.reservation_id).not.toBe(old.reservation_id)
+  it.each([
+    [
+      'llama.cpp GPU chat evicts every other provider on any card, never its own provider or helpers',
+      request({ provider: 'llamacpp-upstream', model_id: 'new-chat' }),
+      ['llamacpp/gemma-3', 'mlx/mlx-qwen', 'diffusion/flux', 'tensorrt-llm/llama-3', 'tensorrt-llm/qwen3'],
+    ],
+    [
+      'the TurboQuant fork is a provider of its own: it evicts upstream chat too',
+      request({ provider: 'llamacpp', model_id: 'fork-chat' }),
+      [
+        'llamacpp-upstream/qwen3-4b',
+        'mlx/mlx-qwen',
+        'diffusion/flux',
+        'tensorrt-llm/llama-3',
+        'tensorrt-llm/qwen3',
+      ],
+    ],
+    [
+      'tensorrt-llm on its card: whatever occupies every card, the other tensorrt-llm session anywhere',
+      request({ provider: 'tensorrt-llm', model_id: 'new-trt', cards: [GPU0], soleSessionOfProvider: true }),
+      [
+        'llamacpp-upstream/qwen3-4b',
+        'llamacpp/gemma-3',
+        'mlx/mlx-qwen',
+        'diffusion/flux',
+        'tensorrt-llm/llama-3',
+        'tensorrt-llm/qwen3',
+      ],
+    ],
+    [
+      'diffusion evicts chat of every provider',
+      request({ provider: 'diffusion', model_id: 'sdxl' }),
+      [
+        'llamacpp-upstream/qwen3-4b',
+        'llamacpp/gemma-3',
+        'mlx/mlx-qwen',
+        'tensorrt-llm/llama-3',
+        'tensorrt-llm/qwen3',
+      ],
+    ],
+    [
+      'a CPU-only load evicts nothing',
+      request({ provider: 'llamacpp-upstream', model_id: 'cpu', cards: [] }),
+      [],
+    ],
+    [
+      'an embedding load evicts nothing',
+      request({ provider: 'llamacpp-upstream', model_id: 'emb', auxiliary: true }),
+      [],
+    ],
+    [
+      'a transcription load evicts nothing',
+      request({ provider: 'llamacpp-upstream', model_id: 'voxtral', auxiliary: true }),
+      [],
+    ],
+  ])('%s', (_name, req, expected) => {
+    expect(ids(gpuEvictions(req, everyone))).toEqual(expected)
   })
 
-  it('treats the same model on another engine as another session entirely', () => {
-    const p = policy()
-    const llama = session({ provider: 'llamacpp', model_id: 'qwen3-4b' })
-    const trt = session({ provider: 'tensorrt-llm', model_id: 'qwen3-4b' })
-    taken(p, llama)
-    // Same model id, different engine: not the holder, so it has to wait like anything else.
-    expect(refusal(p.reserve(trt, 'GPU-0'))).toBe('GPU_BUSY')
-    expect(p.evictionsFor(trt, 'GPU-0')).toEqual([llama])
+  it('leaves a session on another card alone when neither side takes every card', () => {
+    const req = request({ provider: 'mlx', model_id: 'x', cards: [GPU1] })
+    expect(ids(gpuEvictions(req, [trtOn0]))).toEqual([])
+    expect(ids(gpuEvictions(req, [trtOn1]))).toEqual(['tensorrt-llm/qwen3'])
   })
 
-  it('keeps the two data scopes apart', () => {
-    const p = policy()
-    const app = session({ scope_id: 'app' })
-    const cli = session({ scope_id: 'cli' })
-    taken(p, app)
-    expect(p.evictionsFor(cli, 'GPU-0')).toEqual([app])
-    expect(refusal(p.reserve(cli, 'GPU-0'))).toBe('GPU_BUSY')
+  it('never lists the model being loaded itself, even on another provider-wide sweep', () => {
+    const req = request({
+      provider: 'tensorrt-llm',
+      model_id: 'llama-3',
+      cards: [GPU0],
+      soleSessionOfProvider: true,
+    })
+    expect(ids(gpuEvictions(req, [trtOn0, trtOn1]))).toEqual(['tensorrt-llm/qwen3'])
   })
 
-  it('treats a duplicate confirmation of a reservation nobody replaced as harmless', () => {
-    const p = policy()
-    const reservation = taken(p, session())
-    p.markStarted(reservation, 'exec-1')
-    const proof = { kind: 'container', execution_id: 'exec-1', observed: 'exited' } as const
-    expect(p.confirmStopped(reservation, proof).ok).toBe(true)
-    expect(p.confirmStopped(reservation, proof).ok).toBe(true)
-    expect(p.list()).toEqual([])
+  it('lists a session whose stop was never confirmed like any other: it still holds its card', () => {
+    const req = request({ provider: 'llamacpp-upstream', model_id: 'chat' })
+    expect(gpuEvictions(req, [trtStuck])).toEqual([trtStuck])
+  })
+
+  it('lists loading and stopping sessions too: they hold, or are about to hold, the card', () => {
+    const loading = { ...trtOn0, state: 'loading' as const }
+    const stopping = { ...mlxChat, state: 'stopping' as const }
+    expect(gpuEvictions(request({ provider: 'llamacpp', model_id: 'c' }), [loading, stopping])).toEqual([
+      loading,
+      stopping,
+    ])
+  })
+
+  it('keeps the caller’s own shape, so the wiring can act on what it gets back', () => {
+    const tagged = { ...diffusion, evict: 'diffusion.unloadModel' }
+    const [first] = gpuEvictions(request({ provider: 'mlx', model_id: 'm' }), [tagged])
+    expect(first?.evict).toBe('diffusion.unloadModel')
   })
 })
 
-describe('across engines (GPU04)', () => {
-  it('makes image generation and text inference take turns on the one card', () => {
-    const p = policy()
-    const image = session({ provider: 'sd-cpp', model_id: 'sdxl' })
-    const text = session({ provider: 'tensorrt-llm', model_id: 'llama-3.1-8b-fp8', generation: 'g2' })
-
-    const held = taken(p, image)
-    expect(p.evictionsFor(text, 'GPU-0')).toEqual([image])
-    expect(refusal(p.reserve(text, 'GPU-0'))).toBe('GPU_BUSY')
-
-    p.markStarted(held, 'sd-1')
-    p.confirmStopped(held, { kind: 'native', host_pid: 11, process_identity: 'sd-1', verified_exited: true })
-    const textHeld = taken(p, text)
-
-    // And the other way round: the image engine now waits for the container.
-    expect(p.evictionsFor(image, 'GPU-0')).toEqual([text])
-    expect(refusal(p.reserve(image, 'GPU-0'))).toBe('GPU_BUSY')
-    expect(textHeld.gpu_id).toBe('GPU-0')
+describe('gpuBusyError', () => {
+  it('names the blocking session, its state and cards, and why it could not be stopped', () => {
+    const error = gpuBusyError(trtStuck, 'docker stop timed out')
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    expect(error.code).toBe('GPU_BUSY')
+    expect(error.message).toBe(
+      'tensorrt-llm/stuck still holds the GPU: its stop has not been confirmed, so nothing else loads there yet.'
+    )
+    expect(error.details).toBe(
+      'holder=tensorrt-llm/stuck state=stop-unconfirmed cards=GPU-0 cause=docker stop timed out'
+    )
   })
 
-  it('never lists a model that is not on the GPU at all', () => {
-    const p = policy()
-    const text = session({ provider: 'tensorrt-llm', generation: 'g2' })
-    // A CPU-only session does not reserve, so there is nothing here to evict for.
-    expect(p.evictionsFor(text, 'GPU-0')).toEqual([])
-    expect(p.reserve(text, 'GPU-0').ok).toBe(true)
+  it('reads cards held on every GPU as "all", and omits a cause it was not given', () => {
+    expect(gpuBusyError(llamaChat).details).toBe('holder=llamacpp-upstream/qwen3-4b state=ready cards=all')
   })
 })

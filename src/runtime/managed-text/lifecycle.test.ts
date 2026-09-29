@@ -553,6 +553,25 @@ describe('ManagedTextLifecycle: cancel and stop', () => {
     expect(docker.calls).toEqual([])
   })
 
+  it('hands stopping-previous the load’s own signal, which an unload of the loading model aborts', async () => {
+    await build()
+    let seen: AbortSignal | undefined
+    const loading = lifecycle.load(
+      request_({
+        stopPrevious: (signal) => {
+          seen = signal
+          return new Promise(() => {})
+        },
+      })
+    )
+    for (let i = 0; i < 50 && seen === undefined; i++) await settle(1)
+    expect(seen?.aborted).toBe(false)
+    await lifecycle.unload('org/model-a')
+    expect(seen?.aborted).toBe(true)
+    expect((await rejection(loading)).code).toBe('MODEL_LOAD_CANCELLED')
+    expect(docker.calls).toEqual([])
+  })
+
   it('unloading a model that is still loading cancels that load', async () => {
     await build()
     readyAt = null

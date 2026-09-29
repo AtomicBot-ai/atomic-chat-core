@@ -75,6 +75,8 @@ import { DiffusionState } from './state.js'
 import { DEFAULT_STARTUP_TIMEOUT_SECS } from './types.js'
 import type { ServerSpec } from './types.js'
 import { stripDataUrl } from './validate.js'
+import { diffusionGpuCards } from './session.js'
+import type { GpuClaimHook, GpuOccupancy } from '../runtime/shared/index.js'
 import { isValidVideoId, MAX_POSTER_BYTES, VideoGallery } from './video-gallery.js'
 
 export interface DiffusionServiceDeps {
@@ -98,6 +100,11 @@ export interface DiffusionServiceDeps {
   /** Test seams. */
   spawn?: (spec: ServerSpec, scratchDir: string, signal?: AbortSignal) => ReturnType<typeof spawnServer>
   drawSeed?: () => number
+  /**
+   * Core's GPU residency (spec `gpu-residency`): asked before every `sd-server` spawn — a load, a
+   * respawn after a cancel or a crash — to free the GPU of the other engines. Absent, nothing is asked.
+   */
+  claimGpu?: GpuClaimHook
 }
 
 const isFile = (path: string): Promise<boolean> =>
@@ -117,6 +124,11 @@ export class DiffusionService {
   private idle: { stop(): void } | undefined
   /** Stops a load still waiting for its port when the model is unloaded or the core shuts down. */
   private loading: AbortController | undefined
+  /**
+   * GPU claims in flight, a load's or a respawn's. An unload aborts them: a claim waits for its turn
+   * under the load lock, and an unload that core asks for to free the GPU must not wait behind it.
+   */
+  private readonly claims = new Set<AbortController>()
 
   constructor(options: DiffusionServiceDeps) {
     const now = options.now ?? Date.now
@@ -156,6 +168,7 @@ export class DiffusionService {
       sleep: options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
       spawn,
       ...(journal ? { onServerGone: (pid: number) => journal.remove(pid) } : {}),
+      ...(options.claimGpu ? { claimGpu: this.claimGpu(options.claimGpu) } : {}),
       http,
       gallery: this.gallery,
       videoGallery: this.videoGallery,
@@ -347,6 +360,7 @@ export class DiffusionService {
 
   async unloadModel(): Promise<void> {
     this.loading?.abort()
+    for (const claim of this.claims) claim.abort()
     await this.deps.loadLock.run(async () => {
       if (this.state.activeJobId !== undefined)
         await cancelJob(this.deps, this.state.activeJobId).catch(() => undefined)
@@ -530,7 +544,40 @@ export class DiffusionService {
     this.idle?.stop()
     this.idle = undefined
     this.loading?.abort()
+    for (const claim of this.claims) claim.abort()
     await shutdownSession(this.deps)
+  }
+
+  /** The GPU the resident or starting `sd-server` holds, for core's residency rule. */
+  gpuOccupancy(): GpuOccupancy[] {
+    const session = this.state.session
+    if (session && session.server.exitStatus() === undefined) {
+      const { spec } = session
+      return [{ model_id: spec.modelId, cards: diffusionGpuCards(spec), auxiliary: false, state: 'ready' }]
+    }
+    const starting = this.state.starting
+    if (starting === undefined) return []
+    return [
+      { model_id: starting.modelId, cards: diffusionGpuCards(starting), auxiliary: false, state: 'loading' },
+    ]
+  }
+
+  /** The session's claim hook over core's: abortable by an unload, whatever signal the caller had. */
+  private claimGpu(hook: GpuClaimHook): (spec: ServerSpec, signal?: AbortSignal) => Promise<void> {
+    return async (spec, signal) => {
+      const controller = new AbortController()
+      const forward = () => controller.abort()
+      if (signal?.aborted) controller.abort()
+      signal?.addEventListener('abort', forward, { once: true })
+      this.claims.add(controller)
+      try {
+        const claim = { model_id: spec.modelId, cards: diffusionGpuCards(spec), auxiliary: false }
+        await hook(claim, controller.signal)
+      } finally {
+        this.claims.delete(controller)
+        signal?.removeEventListener('abort', forward)
+      }
+    }
   }
 
   /** What the events carry; for tests and the facade. */

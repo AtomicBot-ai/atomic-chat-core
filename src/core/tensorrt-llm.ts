@@ -13,7 +13,12 @@
  */
 import type { CoreEvents } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
-import type { ManagedContainersHandle } from '../runtime/container/index.js'
+import { reconcileExecutions } from '../runtime/container/index.js'
+import type {
+  ExecutionReconcileResult,
+  ManagedContainersHandle,
+  ReconcileLogger,
+} from '../runtime/container/index.js'
 import { TENSORRT_LLM_ENGINE_ID } from '../runtime/environment/index.js'
 import type {
   InstallationStore,
@@ -26,7 +31,7 @@ import {
   ManagedTextLifecycle,
   createDesktopManagedDeployment,
 } from '../runtime/managed-text/index.js'
-import type { LocalRuntime } from '../runtime/shared/index.js'
+import type { GpuClaimHook, LocalRuntime } from '../runtime/shared/index.js'
 import {
   TensorrtLlmRuntime,
   containerPlatformFor,
@@ -35,6 +40,7 @@ import {
   resolveReadyInstallation,
   tensorrtLlmAdapter,
 } from '../runtime/tensorrt-llm/index.js'
+import type { ResidencyOccupant } from './gpu/index.js'
 import type { CoreLogger } from './types.js'
 
 export interface WireTensorrtLlmOptions {
@@ -57,6 +63,8 @@ export interface WireTensorrtLlmOptions {
   settings: () => Record<string, unknown>
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
   log: CoreLogger
+  /** Core's GPU residency (task 2.15): the provider's `stopping-previous` stage. */
+  claimGpu?: GpuClaimHook
 }
 
 /** The provider, or null where it is not offered: everywhere but Linux. */
@@ -112,7 +120,46 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
       }),
     model: (modelId) => readTensorrtLlmModel(options.layout.provider('tensorrt-llm').modelsDir, modelId),
     settings: options.settings,
+    ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
   })
+}
+
+/**
+ * What GPU residency must see of the containers a previous core left (task 2.15; carry-forward from
+ * 2.12/2.14): startup reconcile could not confirm them stopped — the stop went unconfirmed, a docker
+ * call failed, or its time budget ran out — so they may still be running and holding a GPU. Which one
+ * is not recorded, so each holds every card, as `stop-unconfirmed`, under its engine id and container
+ * id. Evicting one runs the reconcile again (this scope's journal only; this instance's own records
+ * are never touched), and it is released only once Docker confirms it gone.
+ */
+export function leftoverContainers(options: {
+  containers: Pick<ManagedContainersHandle, 'current'>
+  instanceId: string
+  log: ReconcileLogger
+}): () => ResidencyOccupant[] {
+  let latest: ExecutionReconcileResult | null = null
+  const unresolved = (result: ExecutionReconcileResult) => [
+    ...result.unconfirmed,
+    ...result.failed,
+    ...result.skipped,
+  ]
+  return () => {
+    const wired = options.containers.current()
+    if (wired === null) return []
+    return unresolved(latest ?? wired.reconciled).map((record) => ({
+      provider: record.engine_id,
+      model_id: record.container_id,
+      cards: 'all',
+      auxiliary: false,
+      state: 'stop-unconfirmed',
+      evict: async () => {
+        latest = await reconcileExecutions(wired.journal, options.instanceId, wired.exec, options.log)
+        if (unresolved(latest).some((left) => left.container_id === record.container_id)) {
+          throw new Error(`Docker did not confirm container ${record.container_id} stopped.`)
+        }
+      },
+    }))
+  }
 }
 
 /**

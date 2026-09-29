@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,6 +9,7 @@ import { AtomicCore, CORE_VERSION } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
 import { ExecutionJournal } from '../runtime/container/index.js'
+import { isProcessAlive } from '../runtime/index.js'
 
 useCoreHarness()
 
@@ -925,6 +926,44 @@ describe('hardware facts', () => {
       await expect(core.load('llamacpp-upstream', 'cpu-model')).resolves.toMatchObject({
         model_id: 'cpu-model',
       })
+    }
+  )
+})
+
+describe('GPU residency', () => {
+  it.skipIf(process.platform === 'win32')(
+    'loading on one llama.cpp provider stops the other’s GPU session through the facade, claim and all, and leaves the voice model',
+    async () => {
+      const { installFakeBackend } = await import('../../test/helpers/fake-backend-pack.js')
+      const core = await createCore()
+      for (const id of ['a', 'b', 'ggml-org/Voxtral-Mini-3B-2507-Q4_K_M']) await data.writeModel(id)
+      for (const [provider, version] of [
+        ['llamacpp-upstream', 'b6325'],
+        ['llamacpp', 'b10018-1.3.0'],
+      ] as const) {
+        const pack = await installFakeBackend(data.layout, { provider, version, backend: 'linux-vulkan-x64' })
+        await core.settings.update(provider, { version_backend: pack.versionBackend, fit: false })
+      }
+      const claims = () => readdir(data.layout.core.modelClaims).catch(() => [] as string[])
+
+      const voice = await core.load('llamacpp-upstream', 'ggml-org/Voxtral-Mini-3B-2507-Q4_K_M', {
+        bypassAutoUnload: true,
+      })
+      const a = await core.load('llamacpp-upstream', 'a')
+      const heldBefore = await claims()
+      await core.load('llamacpp', 'b')
+
+      expect(core.runtime('llamacpp-upstream').getLoadedModels()).toEqual([
+        'ggml-org/Voxtral-Mini-3B-2507-Q4_K_M',
+      ])
+      expect(core.runtime('llamacpp').getLoadedModels()).toEqual(['b'])
+      expect(isProcessAlive(voice.pid as number)).toBe(true)
+      expect(isProcessAlive(a.pid as number)).toBe(false)
+      // a's cross-process claim went with its confirmed stop; the voice model's is still held, and b's is new.
+      expect(heldBefore).toHaveLength(2)
+      const heldAfter = await claims()
+      expect(heldAfter).toHaveLength(2)
+      expect(heldAfter.filter((claim) => heldBefore.includes(claim))).toHaveLength(1)
     }
   )
 })

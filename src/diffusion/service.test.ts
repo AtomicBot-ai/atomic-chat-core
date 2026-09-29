@@ -18,7 +18,8 @@ import {
   writeFakeSdModel,
 } from '../../test/helpers/fake-sd-server.js'
 import type { FakeSdOptions } from '../../test/helpers/fake-sd-server.js'
-import { isProcessAlive } from '../runtime/shared/index.js'
+import { isProcessAlive, loadCancelledError } from '../runtime/shared/index.js'
+import type { GpuClaim, GpuClaimHook } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
 
 const posix = process.platform !== 'win32'
@@ -43,7 +44,7 @@ interface Harness {
   log: string[]
 }
 
-function harness(options: { idleTickMs?: number } = {}): Harness {
+function harness(options: { idleTickMs?: number; claimGpu?: GpuClaimHook } = {}): Harness {
   const events: Harness['events'] = []
   const journal: Harness['journal'] = []
   const log: string[] = []
@@ -62,6 +63,7 @@ function harness(options: { idleTickMs?: number } = {}): Harness {
     },
     timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 },
     idleTickMs: options.idleTickMs ?? 50,
+    ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
   })
   service.start()
   services.push(service)
@@ -352,6 +354,73 @@ describe.skipIf(!posix)('the engine and the model', () => {
     expect(await loading).toMatchObject({ code: 'CANCELLED', message: 'The image model load was stopped.' })
     const [pid] = (await readFile(join(dataFolder, 'pids'), 'utf8')).split('\n').filter(Boolean).map(Number)
     expect(isProcessAlive(pid as number)).toBe(false)
+  })
+})
+
+describe.skipIf(!posix)('GPU residency', () => {
+  it('claims the GPU for a load, reports the server it holds, and nothing once it is unloaded', async () => {
+    const claims: GpuClaim[] = []
+    const built: { service?: DiffusionService } = {}
+    const h = harness({
+      claimGpu: async (claim) => {
+        claims.push(claim)
+        expect(built.service?.gpuOccupancy()).toEqual([])
+      },
+    })
+    built.service = h.service
+    await installFakeSdEngine(layout)
+    await h.service.configure({ dataFolder })
+    expect(h.service.gpuOccupancy()).toEqual([])
+    await h.service.loadModel(await loadRequest())
+    // The fake engine is a CPU build: it holds no card, and says so.
+    expect(claims).toEqual([{ model_id: 'z-image:q4_k_m', cards: [], auxiliary: false }])
+    expect(h.service.gpuOccupancy()).toEqual([
+      { model_id: 'z-image:q4_k_m', cards: [], auxiliary: false, state: 'ready' },
+    ])
+    await h.service.unloadModel()
+    expect(h.service.gpuOccupancy()).toEqual([])
+  })
+
+  it('holds the GPU as loading while the server starts, once its claim went through', async () => {
+    const h = harness({ claimGpu: async () => {} })
+    await installFakeSdEngine(layout, { loadMs: 5_000, pidFile: join(dataFolder, 'pids') })
+    await h.service.configure({ dataFolder })
+    const loading = h.service.loadModel(await loadRequest()).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await waitFor(() => exists(join(dataFolder, 'pids')))
+    expect(h.service.gpuOccupancy()).toEqual([
+      { model_id: 'z-image:q4_k_m', cards: [], auxiliary: false, state: 'loading' },
+    ])
+    await h.service.unloadModel()
+    await loading
+    expect(h.service.gpuOccupancy()).toEqual([])
+  })
+
+  it('an unload aborts a load still waiting for its GPU claim, so the load lock is never held hostage', async () => {
+    let waiting = false
+    const h = harness({
+      claimGpu: (_claim, signal) =>
+        new Promise((_resolve, reject) => {
+          waiting = true
+          signal?.addEventListener('abort', () => reject(loadCancelledError()), { once: true })
+        }),
+    })
+    await installFakeSdEngine(layout)
+    await h.service.configure({ dataFolder })
+    const loading = h.service.loadModel(await loadRequest()).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await waitFor(() => waiting)
+    await h.service.unloadModel()
+    expect(await loading).toMatchObject({
+      code: 'INTERNAL',
+      details: expect.stringContaining('MODEL_LOAD_CANCELLED'),
+    })
+    expect(h.journal).toEqual([])
+    expect(h.service.gpuOccupancy()).toEqual([])
   })
 })
 

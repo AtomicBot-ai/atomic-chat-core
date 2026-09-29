@@ -30,6 +30,8 @@ import { DEFAULT_CTX_LEN, computeNextCtxLen } from '../llamacpp/ctx-ladder.js'
 import type {
   CtxIncreaseResult,
   EmitFn,
+  GpuClaimHook,
+  GpuOccupancy,
   LocalLoadOptions,
   LocalRuntime,
   RecreateResult,
@@ -84,6 +86,11 @@ export interface MlxRuntimeOptions {
    * can download may do so here.
    */
   resolveDraft?: (kind: MlxDraftKind, modelId: string) => Promise<string | undefined>
+  /**
+   * Core's GPU residency (spec `gpu-residency`): asked right before the spawn to free every card —
+   * an MLX model holds the whole Apple GPU — from the other engines. Absent, nothing is asked.
+   */
+  claimGpu?: GpuClaimHook | undefined
   /** Test seams. */
   spawn?: typeof spawnAndAwaitReady
   exists?: (path: string) => boolean
@@ -92,6 +99,8 @@ export interface MlxRuntimeOptions {
 export class MlxRuntime implements LocalRuntime {
   private readonly table: SidecarTable<MlxSessionExtra>
   private readonly emit: EmitFn
+  /** Loads past their GPU claim and not yet a session: they hold the GPU as `loading`. */
+  private readonly claimed = new Map<string, GpuOccupancy>()
 
   constructor(private readonly options: MlxRuntimeOptions) {
     this.emit = options.emit ?? (() => {})
@@ -125,6 +134,18 @@ export class MlxRuntime implements LocalRuntime {
 
   isLoading(modelId: string): boolean {
     return this.table.isLoading(modelId)
+  }
+
+  /** Every session, and every load past its claim, holds the whole GPU; embeddings are auxiliary. */
+  gpuOccupancy(): GpuOccupancy[] {
+    const ready = this.table.list().map((session): GpuOccupancy => ({
+      model_id: session.model_id,
+      cards: 'all',
+      auxiliary: session.is_embedding,
+      state: 'ready',
+    }))
+    const loading = [...this.claimed.values()].filter((claim) => !this.table.findSession(claim.model_id))
+    return [...ready, ...loading]
   }
 
   /** The context a loaded session runs with. */
@@ -194,6 +215,49 @@ export class MlxRuntime implements LocalRuntime {
     env['MLX_VLM_SINGLE_MODEL'] = '1'
 
     throwIfLoadCancelled(opts.signal)
+    // GPU residency: every other engine is off the GPU, its exit confirmed, before this one starts.
+    const footprint = { model_id: modelId, cards: 'all' as const, auxiliary: isEmbedding }
+    if (this.options.claimGpu) {
+      await this.options.claimGpu(footprint, opts.signal)
+      this.table.assertRunning()
+      throwIfLoadCancelled(opts.signal)
+    }
+    this.claimed.set(modelId, { ...footprint, state: 'loading' })
+    try {
+      return await this.startServer(modelId, opts, {
+        exe,
+        args,
+        env,
+        port,
+        timeoutSecs,
+        config,
+        maxCtxTrain,
+        overrides,
+        modelPath,
+      })
+    } finally {
+      this.claimed.delete(modelId)
+    }
+  }
+
+  /** Spawn the planned server and adopt it once ready (the second half of `start`). */
+  private async startServer(
+    modelId: string,
+    opts: LocalLoadOptions,
+    launch: {
+      exe: string
+      args: string[]
+      env: Record<string, string>
+      port: number
+      timeoutSecs: number
+      config: ReturnType<typeof buildMlxConfig>
+      maxCtxTrain: number | undefined
+      overrides: Record<string, unknown>
+      modelPath: string
+    }
+  ): Promise<SessionInfo> {
+    const { exe, args, env, port, timeoutSecs, config, maxCtxTrain, overrides, modelPath } = launch
+    const isEmbedding = opts.isEmbedding ?? false
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'MLX') : undefined
     let started
     try {

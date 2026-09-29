@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ModelYmlDocument } from '../../models/index.js'
 import { withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
-import { autoUnloadTargets, nextRetry, planLlamaLoad, resolveModelMaxCtxTrain } from './load-plan.js'
+import {
+  autoUnloadTargets,
+  llamaGpuFootprint,
+  nextRetry,
+  planLlamaLoad,
+  resolveModelMaxCtxTrain,
+} from './load-plan.js'
 import type { LoadPlan, LoadPlanDeps } from './load-plan.js'
 
 const baseConfig = (): LlamacppConfigInput => ({
@@ -338,6 +344,38 @@ describe('nextRetry / autoUnloadTargets / resolveModelMaxCtxTrain', () => {
     expect(
       autoUnloadTargets(sessions, { autoUnload: true, isEmbedding: false, bypassAutoUnload: true })
     ).toEqual([])
+  })
+  it.each([
+    ['linux-cuda-12-common_cpus-x64', 'all'],
+    ['linux-x64-cuda-12.4', 'all'],
+    ['win-cuda-13.3-x64', 'all'],
+    ['linux-vulkan-x64', 'all'],
+    ['linux-x64-vulkan', 'all'],
+    ['linux-x64-rocm', 'all'],
+    ['win-rocm-10.0-x64', 'all'],
+    ['macos-arm64', 'all'],
+    ['macos-x64', 'all'],
+    // An executable the CLI was pointed at: nothing says CPU, so it is treated as holding the GPUs.
+    ['llama-server', 'all'],
+    ['linux-cpu-x64', []],
+    ['linux-x64-cpu', []],
+    ['linux-aarch64-cpu', []],
+    ['win-cpu-arm64', []],
+    ['linux-avx2-x64', []],
+    ['win-avx512-x64', []],
+    ['linux-noavx-x64', []],
+    ['linux-common_cpus-x64', []],
+    ['linux-x64', []],
+    ['linux-arm64', []],
+  ] as const)('llamaGpuFootprint: backend %s holds %j', (backend, cards) => {
+    expect(llamaGpuFootprint({ backend, isEmbedding: false, modelId: 'm' }).cards).toEqual(cards)
+  })
+  it('llamaGpuFootprint marks embeddings and the transcription companion auxiliary, chat not', () => {
+    const gpu = { backend: 'linux-vulkan-x64' }
+    expect(llamaGpuFootprint({ ...gpu, isEmbedding: true, modelId: 'e' }, 'voice').auxiliary).toBe(true)
+    expect(llamaGpuFootprint({ ...gpu, isEmbedding: false, modelId: 'voice' }, 'voice').auxiliary).toBe(true)
+    expect(llamaGpuFootprint({ ...gpu, isEmbedding: false, modelId: 'chat' }, 'voice').auxiliary).toBe(false)
+    expect(llamaGpuFootprint({ ...gpu, isEmbedding: false, modelId: 'chat' }).auxiliary).toBe(false)
   })
   it('resolveModelMaxCtxTrain reads the arch key or returns undefined with a warning', async () => {
     const warn = vi.fn()

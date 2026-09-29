@@ -8,9 +8,10 @@
  *    is not installed, a host with no NVIDIA card, an embedding request;
  *  - the card: the saved `gpu_id` when the probe still finds it, otherwise the one with the most
  *    memory (`selectLaunchGpu`), with the replacement reported on every load event;
- *  - one session at a time: the lifecycle's `stopping-previous` stage unloads every other
- *    `tensorrt-llm` model, with a confirmed stop, before this one's container is created (GPU
- *    residency across providers is task 2.15's and extends that same callback);
+ *  - one session at a time, and one resident model per card: the lifecycle's `stopping-previous`
+ *    stage asks core's GPU residency (`claimGpu`, task 2.15) to stop every other `tensorrt-llm`
+ *    model and every other engine on the chosen card, each with a confirmed exit, before this one's
+ *    container is created — or, with no residency wired, stops the other `tensorrt-llm` models itself;
  *  - what a session can do (`routePolicy`, `capabilities`), read off the pinned descriptor's
  *    `model_families` entry for the model's architecture — never guessed (design D9);
  *  - never growing a context or recreating a session: a restart of a multi-minute container in the
@@ -30,6 +31,8 @@ import type {
 import { throwIfLoadCancelled } from '../shared/index.js'
 import type {
   CtxIncreaseResult,
+  GpuClaimHook,
+  GpuOccupancy,
   LocalLoadOptions,
   LocalRuntime,
   RecreateResult,
@@ -58,6 +61,12 @@ export interface TensorrtLlmRuntimeDeps {
   model: (modelId: string) => Promise<TensorrtLlmModel>
   /** The provider's stored settings (`settings.get('tensorrt-llm')`), read at every load. */
   settings: () => Record<string, unknown>
+  /**
+   * Core's GPU residency (spec `gpu-residency`), run as the `stopping-previous` stage: frees the chosen
+   * card of every other engine and this provider's other session. Absent, the stage stops only the
+   * other `tensorrt-llm` models, itself.
+   */
+  claimGpu?: GpuClaimHook
 }
 
 /**
@@ -101,6 +110,8 @@ function familyOf(ready: ReadyInstallation, model: TensorrtLlmModel): ModelFamil
 export class TensorrtLlmRuntime implements LocalRuntime {
   private current: ManagedTextLifecycle | null = null
   private closed = false
+  /** Generations whose GPU claim succeeded: a load only holds its card from then on. */
+  private readonly claimed = new Set<string>()
   /** What each loaded session can do, keyed by model and pinned to the generation it was computed for. */
   private readonly sessionCapabilities = new Map<
     string,
@@ -192,7 +203,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       settings,
       // Always passed, evaluated when the stage runs: a second model that arrived a moment earlier
       // is still found, so two loads racing each other can never both end up running.
-      stopPrevious: () => this.stopOthers(lifecycle, modelId),
+      stopPrevious: (stageSignal) => this.stopOthers(lifecycle, modelId, gpu.gpu_id, stageSignal),
       ...(opts.timeoutSecs !== undefined ? { timeoutMs: opts.timeoutSecs * 1000 } : {}),
       ...(signal !== undefined ? { signal } : {}),
       ...(substituted !== undefined ? { gpuSubstituted: substituted } : {}),
@@ -309,10 +320,40 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     }
   }
 
-  /** The `stopping-previous` stage: every other `tensorrt-llm` model, loading or loaded, stopped with confirmation. */
-  private async stopOthers(lifecycle: ManagedTextLifecycle, modelId: string): Promise<void> {
-    const others = new Set(lifecycle.reservations().map((r) => r.model_id))
-    others.delete(modelId)
-    for (const other of others) await this.unload(other)
+  /**
+   * The card each container holds, for core's residency rule: every model past its claim — loading,
+   * ready, stopping, or stopped without Docker's confirmation, which still holds the card.
+   */
+  gpuOccupancy(): GpuOccupancy[] {
+    const reservations = this.current?.reservations() ?? []
+    const live = new Set(reservations.map((r) => r.generation))
+    for (const generation of this.claimed) if (!live.has(generation)) this.claimed.delete(generation)
+    return reservations
+      .filter((r) => r.state !== 'loading' || this.claimed.has(r.generation))
+      .map((r) => ({ model_id: r.model_id, cards: [r.gpu_uuid], auxiliary: false, state: r.state }))
+  }
+
+  /**
+   * The `stopping-previous` stage. With core's residency: its claim on `gpuId`, which stops every other
+   * `tensorrt-llm` model (one session at a time) and every other engine on that card, each with a
+   * confirmed exit, and refuses with `GPU_BUSY` while one will not stop. Without it: every other
+   * `tensorrt-llm` model, loading or loaded, stopped with confirmation.
+   */
+  private async stopOthers(
+    lifecycle: ManagedTextLifecycle,
+    modelId: string,
+    gpuId: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    const generation = lifecycle.reservations().find((r) => r.model_id === modelId)?.generation
+    if (this.deps.claimGpu) {
+      const claim = { model_id: modelId, cards: [gpuId], auxiliary: false, soleSessionOfProvider: true }
+      await this.deps.claimGpu(claim, signal)
+    } else {
+      const others = new Set(lifecycle.reservations().map((r) => r.model_id))
+      others.delete(modelId)
+      for (const other of others) await this.unload(other)
+    }
+    if (generation !== undefined) this.claimed.add(generation)
   }
 }

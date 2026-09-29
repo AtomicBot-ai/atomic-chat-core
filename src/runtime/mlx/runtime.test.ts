@@ -8,6 +8,7 @@ import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { ProcessJournal } from '../../lock/index.js'
 import { ModelRegistry } from '../../models/index.js'
 import { hostPid } from '../shared/index.js'
+import type { GpuClaim } from '../shared/index.js'
 import { MlxRuntime } from './runtime.js'
 import type { MlxRuntimeOptions } from './runtime.js'
 
@@ -334,5 +335,58 @@ describe('MlxRuntime', () => {
     expect(events.some((e) => e.name === 'core:log' && String(e.payload['msg']).startsWith('[mlx/m]'))).toBe(
       true
     )
+  })
+})
+
+describe('MlxRuntime: GPU residency', () => {
+  it('asks core for every GPU before it spawns, and holds them as loading, then ready', async () => {
+    await writeMlxModel('qwen')
+    const order: string[] = []
+    const claims: Array<{ claim: GpuClaim; signal: AbortSignal | undefined }> = []
+    const base = fakeSidecarSpawn({ kind: 'mlx', argvFile })
+    const r = runtime(
+      {},
+      {},
+      {
+        claimGpu: async (claim, signal) => {
+          order.push('claim')
+          claims.push({ claim, signal })
+          expect(r.gpuOccupancy()).toEqual([])
+        },
+        spawn: async (spec, opts) => {
+          order.push('spawn')
+          expect(r.gpuOccupancy()).toEqual([
+            { model_id: 'qwen', cards: 'all', auxiliary: false, state: 'loading' },
+          ])
+          return base(spec, opts)
+        },
+      }
+    )
+    const controller = new AbortController()
+    await r.load('qwen', { signal: controller.signal })
+    expect(order).toEqual(['claim', 'spawn'])
+    expect(claims).toEqual([
+      { claim: { model_id: 'qwen', cards: 'all', auxiliary: false }, signal: controller.signal },
+    ])
+    expect(r.gpuOccupancy()).toEqual([{ model_id: 'qwen', cards: 'all', auxiliary: false, state: 'ready' }])
+  })
+
+  it('reports an embedding session as auxiliary, and starts nothing when core refuses the GPU', async () => {
+    await writeMlxModel('emb')
+    await writeMlxModel('chat')
+    // MLX's own auto-unload is off: what is under test is only what residency is told.
+    const r = runtime(
+      { auto_unload: false },
+      {},
+      {
+        claimGpu: async (claim) => {
+          if (!claim.auxiliary) throw new Error('GPU_BUSY')
+        },
+      }
+    )
+    await r.load('emb', { isEmbedding: true })
+    await expect(r.load('chat')).rejects.toThrow('GPU_BUSY')
+    expect(r.gpuOccupancy()).toEqual([{ model_id: 'emb', cards: 'all', auxiliary: true, state: 'ready' }])
+    expect(await argvs()).toHaveLength(1)
   })
 })
