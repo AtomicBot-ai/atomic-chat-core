@@ -74,7 +74,7 @@ export interface WireTensorrtLlmOptions {
   /** The setup operation's installation records, under the shared per-user root. */
   installations: Pick<InstallationStore, 'list'>
   /** The one Docker executor of this core (`wireManagedEnvironment`'s handle). */
-  containers: Pick<ManagedContainersHandle, 'resolve' | 'current'>
+  containers: Pick<ManagedContainersHandle, 'resolve'>
   /** The machine the managed environment probes: `nvidia-smi` runs through it. */
   host: Pick<LinuxHost, 'probeDeps'>
   /** The public server's live trusted hosts: the same array, so a restart reaches every gateway. */
@@ -98,30 +98,34 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
   const adapters = new ManagedTextAdapterRegistry()
   adapters.register(tensorrtLlmAdapter)
   const deployment = createDesktopManagedDeployment()
-  let built: ManagedTextLifecycle | null = null
+  /** The lifecycle and the executor it was built over: the load path's probe asks the same one. */
+  let built: { lifecycle: ManagedTextLifecycle; exec: DockerExec } | null = null
   // Asked at every load, through the handle: a host with no docker CLI when core started gets one
   // from the setup's privileged step, and the next load finds it (the handle wires it then).
   const lifecycle = async (): Promise<ManagedTextLifecycle | null> => {
-    if (built !== null) return built
+    if (built !== null) return built.lifecycle
     const containers = await options.containers.resolve()
     if (containers === null) return null
     // Two loads that raced here built nothing twice: the first to resume assigns, the second reuses.
-    built ??= new ManagedTextLifecycle({
-      provider: 'tensorrt-llm',
-      adapters,
+    built ??= {
       exec: containers.exec,
-      deployment,
-      journal: containers.journal,
-      paths: options.layout.managed,
-      instanceId: options.instanceId,
-      scope: options.scope,
-      allowedHosts: options.trustedHosts,
-      selinuxDataRoot: options.layout.root,
-      emit: options.emit,
-      log: options.log,
-      ...(options.containerUser === null ? {} : { containerUser: options.containerUser }),
-    })
-    return built
+      lifecycle: new ManagedTextLifecycle({
+        provider: 'tensorrt-llm',
+        adapters,
+        exec: containers.exec,
+        deployment,
+        journal: containers.journal,
+        paths: options.layout.managed,
+        instanceId: options.instanceId,
+        scope: options.scope,
+        allowedHosts: options.trustedHosts,
+        selinuxDataRoot: options.layout.root,
+        emit: options.emit,
+        log: options.log,
+        ...(options.containerUser === null ? {} : { containerUser: options.containerUser }),
+      }),
+    }
+    return built.lifecycle
   }
   const platform = containerPlatformFor(options.arch)
   return new TensorrtLlmRuntime({
@@ -135,27 +139,19 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
     // Probed fresh at every load, never read off the environment snapshot: that view is only as new
     // as the last setup or removal probe (and empty after a restart), while a card can disappear
     // between two loads (spec "Выбранная карта исчезла"). An unanswered `docker info` refuses the load.
-    hostFacts: hostFactsProbe(options),
+    // Through the lifecycle's own executor: `TensorrtLlmRuntime` asks for host facts only once the
+    // lifecycle resolved, so it is always there (final review T-288 removed a dead fallback).
+    hostFacts: () =>
+      probeTensorrtLlmHost({
+        exec: options.host.probeDeps.exec,
+        docker: (built as NonNullable<typeof built>).exec,
+        nvidiaSmi: 'nvidia-smi',
+        readFile: options.host.probeDeps.readFile,
+      }),
     model: (modelId) => readTensorrtLlmModel(options.layout.provider('tensorrt-llm').modelsDir, modelId),
     settings: options.settings,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
   })
-}
-
-/** The load path's own probe (`options.host`/`options.containers`), shared with `wireTensorrtLlm` above. */
-function hostFactsProbe(
-  options: Pick<WireTensorrtLlmOptions, 'host' | 'containers'>
-): () => ReturnType<typeof probeTensorrtLlmHost> {
-  return () =>
-    probeTensorrtLlmHost({
-      exec: options.host.probeDeps.exec,
-      // Only ever asked after the lifecycle resolved non-null, so the executor is there.
-      docker:
-        options.containers.current()?.exec ??
-        (async () => ({ code: null, stdout: '', stderr: 'no docker CLI' })),
-      nvidiaSmi: 'nvidia-smi',
-      readFile: options.host.probeDeps.readFile,
-    })
 }
 
 export interface WireTensorrtLlmModelCheckOptions {
@@ -170,8 +166,8 @@ export interface WireTensorrtLlmModelCheckOptions {
 /**
  * `POST /models/tensorrt-llm/check` (task 2.16): `null` off Linux, where the provider is not offered
  * at all. Available even when the engine is not installed yet — the check falls back to the latest
- * cached descriptor itself (`check.ts`) — and never asks `options.containers`/Docker anything, unlike
- * `wireTensorrtLlm`'s own `hostFacts` above.
+ * cached descriptor itself (`check.ts`) — and never asks Docker anything, unlike `wireTensorrtLlm`'s
+ * own `hostFacts` above.
  */
 export function wireTensorrtLlmModelCheck(
   platform: NodeJS.Platform,

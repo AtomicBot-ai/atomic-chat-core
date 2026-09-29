@@ -200,18 +200,17 @@ describe('wireTensorrtLlm', () => {
       options({
         installations,
         descriptors: { forInstallation: async () => ({ kind: 'available', descriptor }) },
-        // An executor the handle no longer reports: the probe gets no `docker info` answer at all.
-        containers: {
-          resolve: async () => ({ exec: docker.exec, journal }) as unknown as ManagedContainers,
-          current: () => null,
-        },
+        // The lifecycle's own executor, which answers nothing to `docker info` (final review T-288:
+        // the probe asks the executor the lifecycle was built over, never a second lookup).
+        containers: handle(async () => ({ exec: docker.exec, journal }) as unknown as ManagedContainers),
       })
     ) as TensorrtLlmRuntime
     await expect(runtime.load('m')).rejects.toMatchObject({
       code: 'MANAGED_PREREQUISITE_BLOCKED',
       message: expect.stringContaining('docker info'),
     })
-    expect(docker.calls).toEqual([])
+    // `docker info` was asked, and nothing was ever created.
+    expect(docker.calls.map((args) => args[0])).toEqual(['info'])
     await runtime.shutdown()
   })
 
