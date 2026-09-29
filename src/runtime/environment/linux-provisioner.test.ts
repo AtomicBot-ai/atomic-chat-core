@@ -777,6 +777,29 @@ describe('recovery questions', () => {
     ).toBe('completed')
   })
 
+  it('does not count a `removing` record as a completed activation, and resuming re-activates it to `ready` (N-1)', async () => {
+    const h = harness(readyHost())
+    const provisioner = createLinuxProvisioner(h.deps)
+    // A first setup completed activation...
+    await provisioner.activate(record(), signal)
+    const activated = await h.installations.read('tensorrt-llm')
+    // ...then a removal started (writing `removing` first, final review I-1) and crashed partway,
+    // before the record was ever deleted. The descriptor id on the record is untouched, so a check
+    // that only compares ids would see this as an already-completed activation.
+    await h.installations.write({
+      ...activated!,
+      installation: { ...activated!.installation, status: 'removing' },
+    })
+    const effect = { effect_id: 'e', operation_id: 'op-1', expected_revision: 1, plan_digest: null }
+    expect((await provisioner.inventory.inspect({ ...effect, kind: 'activate' }, record())).kind).toBe(
+      'absent'
+    )
+    // Resuming (a fresh setup of the same descriptor) must therefore re-run activation...
+    await provisioner.activate(record(), signal)
+    // ...and end with a `ready` record, not stuck `removing` forever.
+    expect((await h.installations.read('tensorrt-llm'))?.installation.status).toBe('ready')
+  })
+
   it('answers absent rather than throwing when the machine cannot even say its architecture', async () => {
     const h = harness({ ...readyHost(), arch: 'riscv64', images: [IMAGE_REF] })
     const effect = { effect_id: 'e', operation_id: 'op-1', expected_revision: 1, plan_digest: null }

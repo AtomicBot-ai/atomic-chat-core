@@ -199,8 +199,8 @@ export class TensorrtLlmRuntime implements LocalRuntime {
         'Docker is not installed on this machine, so tensorrt-llm cannot run models.'
       )
     }
-    // Kept from the first load on: what `list`, `unload`, `unloadAll` and `shutdown` act on. Nothing
-    // is loaded before that, so there is nothing for them to find earlier either.
+    // Kept from the first load on: what `list`, `unload` and `shutdown` act on. Nothing is loaded
+    // before that, so there is nothing for them to find earlier either.
     this.current = lifecycle
     const ready = await this.deps.readyInstallation()
     throwIfLoadCancelled(signal)

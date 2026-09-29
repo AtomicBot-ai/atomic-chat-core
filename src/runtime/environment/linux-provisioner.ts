@@ -582,7 +582,13 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
           // a committed activation look undone (review r2, item C).
           const planned =
             record.machine.consented?.descriptor_id ?? record.requirement_plan?.descriptor_id ?? null
-          return existing !== null && existing.installation.active_descriptor_id === planned
+          // Status too (N-1), not only the id: a removal that failed part-way leaves the record
+          // `removing` with the same descriptor id it activated. Treating that as a completed
+          // activation would let recovery skip re-running it, and the record would never reach
+          // `ready` again.
+          return existing !== null &&
+            existing.installation.active_descriptor_id === planned &&
+            existing.installation.status === 'ready'
             ? { kind: 'completed', owned_resource_ids: [] }
             : { kind: 'absent' }
         }

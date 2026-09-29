@@ -97,17 +97,31 @@ container at `/atomic/heartbeat`), `heartbeats/<generation>/llm-api-options.yaml
 per-generation option file an adapter's launch asks core to write there, read-only in the container;
 `tensorrt-llm` writes `guided_decoding_backend: xgrammar` for a family that declares structured
 output, ADR 2026-09-29-tensorrt-llm-guided-decoding-is-enabled-per-family), `caches/<descriptor_id>/<model id>/` (the engine cache, mounted read-write, kept between
-loads, removed with its model or installation), `docker-config/` (the empty `config.json` every docker
+loads, removed with its model or installation; two subfolders, `home/` and `xdg-cache/`, are created by
+core before start and mounted in as the container user's `HOME`/`XDG_CACHE_HOME`, so a Python engine
+with no passwd entry for that uid has somewhere writable — see the container-user note below), `docker-config/` (the empty `config.json` every docker
 CLI call reads as `$DOCKER_CONFIG`) and `watchdog/atomic-watchdog-entrypoint.sh` (mode 0555, the
-model container's read-only entrypoint); ids are one directory each through percent-encoding.
+model container's read-only entrypoint); ids are one directory each through percent-encoding. Every
+model container runs as the core process's own `uid:gid`, never root (`--user`, final review I-1, ADR
+2026-09-29-the-engine-container-runs-as-the-invoking-user), so the files it writes under the engine
+cache can be removed again by the same account without elevation.
 Under SELinux every mount source must resolve (after symlinks) inside the data folder, the only tree
 this core `:z`-relabels (design D15): a `<data>/<provider>/models` that is a symlink to another disk is
 refused with `INVALID_ARGUMENT` saying so — move the models into the data folder, or bind-mount the
 other disk at that path instead of linking it.
 The setup operation (task 2.6, ADR 2026-09-29-linux-setup-operation-and-engine-removal) writes
 `installations/<id>/installation.json` under the shared root (the installation pinned to its
-`descriptor_id`, plus the platform image it pulled) on activation; a removal deletes it, this scope's
-`caches/<descriptor_id>/`, and `<data>/<engine_id>/models/` only when `retain_models: false`.
+`descriptor_id`, plus the platform image it pulled) on activation. A removal first rewrites the
+record's `status` to `removing` (final review I-1) before touching anything else; every reader of
+installation status (a load's readiness check, the probe, the environment wiring) then treats the
+engine as not ready, so a load racing the removal is refused rather than started against an image that
+may already be gone. Only after that does the removal stop the engine's own containers, remove the
+image(s) it owns, remove this scope's `caches/<descriptor_id>/` (`removeEngineCaches`), and
+`<data>/<engine_id>/models/` only when `retain_models: false`; `installations/<id>/installation.json`
+itself is deleted last, once every other step has succeeded. A removal that fails part-way (for
+example an engine-cache file the container's own user cannot delete) is left `removing` rather than
+`ready` or deleted, and is retryable: calling removal again on the same installation resumes from
+`removing` and finishes deleting what is left.
 Adopted from the app as they are, not new (ADR 2026-09-17-image-generation-is-its-own-module-not-a-local-runtime):
 `<data>/diffusion/{backends,models,scratch}` and `<data>/images`; `<data>/videos` is the folder the app's ADR
 2026-09-10-store-generated-media-under-the-data-folder-with-recipes-in-png-chunks reserved (core ADR
