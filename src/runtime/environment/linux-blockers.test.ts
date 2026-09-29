@@ -6,6 +6,7 @@ import {
   gateBlocker,
   gateBlockerApplies,
   groupOnlyCommands,
+  initNotSystemdBlocker,
   installMethodBlocker,
   missingComponentBlockers,
   reloginRequiredBlocker,
@@ -119,6 +120,23 @@ describe('archCommands', () => {
     const commands = archCommands('root')
     expect(commands.some((c) => c.includes('usermod'))).toBe(false)
     expect(commands).toHaveLength(4)
+  })
+})
+
+describe('initNotSystemdBlocker', () => {
+  it.each([
+    [false, 'This system does not run systemd, which the Docker install needs.', 'absent'],
+    [
+      'unknown',
+      'Could not tell whether this system runs systemd, which the Docker install needs.',
+      'unknown',
+    ],
+  ] as const)('systemd %s', (systemd, message, observed) => {
+    expect(initNotSystemdBlocker(systemd)).toEqual({
+      reason: 'init-not-systemd',
+      message,
+      params: { systemd: observed },
+    })
   })
 })
 

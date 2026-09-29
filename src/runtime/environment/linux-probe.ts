@@ -156,6 +156,11 @@ export interface LinuxFacts {
   distribution: LinuxDistribution | null
   /** `/run/ostree-booted` exists: an rpm-ostree host (Silverblue, Kinoite, Bazzite, ...). */
   immutable_os: boolean
+  /**
+   * The host runs systemd: `/run/systemd/system` exists, the `sd_booted()` test. `false` on a
+   * container whose PID 1 is not an init system; `'unknown'` when the check itself failed.
+   */
+  systemd: boolean | 'unknown'
   driver_version: string | null
   gpus: GpuFacts[]
   docker: DockerFacts
@@ -378,6 +383,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     pacmanQuery,
     snapList,
     immutableOs,
+    systemd,
     sessionGroups,
     groupEntry,
     serviceActive,
@@ -419,6 +425,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       : Promise.resolve(null),
     deps.exec('snap', ['list', 'docker']),
     deps.pathExists('/run/ostree-booted').catch(() => false),
+    deps.pathExists('/run/systemd/system').catch((): 'unknown' => 'unknown'),
     deps.exec('id', ['-nG']),
     deps.exec('getent', ['group', 'docker']),
     deps.exec('systemctl', ['is-active', 'docker']),
@@ -462,6 +469,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     architecture,
     distribution,
     immutable_os: immutableOs,
+    systemd,
     driver_version: nvidia.driver_version,
     gpus: nvidia.gpus,
     docker: {

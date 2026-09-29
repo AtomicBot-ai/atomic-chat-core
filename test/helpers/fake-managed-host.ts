@@ -117,6 +117,8 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
   const statePath = join(dir, 'state.json')
   mkdirSync(join(dir, 'bin'))
   mkdirSync(join(dir, 'root', 'etc', 'docker'), { recursive: true })
+  // A systemd host (`sd_booted()`): the install recipe enables and starts docker.service through it.
+  mkdirSync(join(dir, 'root', 'run', 'systemd', 'system'), { recursive: true })
   writeFileSync(join(dir, 'root', 'etc', 'os-release'), readLinuxProbeFixture('os-release/ubuntu-24.04.txt'))
   // Just enough for the image and 5 GiB more: once the image is pulled, what is left is far less
   // than the image's own requirement — the case a re-probe after (or during) a pull must survive.

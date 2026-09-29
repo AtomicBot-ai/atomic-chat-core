@@ -43,6 +43,8 @@ export type LinuxBlockerReason =
   | 'toolkit-missing'
   | 'gpu-runtime-not-configured'
   | 'docker-service-inactive'
+  /** No systemd (`/run/systemd/system` absent, or unreadable): the recipe's service steps would fail after consent. */
+  | 'init-not-systemd'
 
 /**
  * One reason a host cannot proceed. `params` carries the machine-checkable specifics (required vs.
@@ -276,6 +278,24 @@ export function gateBlocker(
 }
 
 /** Refuses to write next to a daemon.json this probe could not read or parse (round 2, item 6). */
+/**
+ * The recipe installs and starts Docker through systemd (`systemctl enable --now docker`, a restart
+ * after `nvidia-ctk runtime configure`), so on a host that does not run it — a container whose PID 1
+ * is a shell, as the vast.ai GB10 instance was — every such plan would fail only at the privileged
+ * step, after the user consented. `'unknown'` when whether it runs could not be read: not assumed.
+ */
+export function initNotSystemdBlocker(systemd: false | 'unknown'): LinuxBlocker {
+  return systemd === false
+    ? blocker('init-not-systemd', 'This system does not run systemd, which the Docker install needs.', {
+        systemd: 'absent',
+      })
+    : blocker(
+        'init-not-systemd',
+        'Could not tell whether this system runs systemd, which the Docker install needs.',
+        { systemd: 'unknown' }
+      )
+}
+
 export function daemonJsonUnreadableBlocker(): LinuxBlocker {
   return blocker(
     'daemon-json-unreadable',

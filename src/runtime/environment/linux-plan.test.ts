@@ -16,6 +16,7 @@ import {
   type LinuxAssessment,
   type LinuxAssessmentOptions,
 } from './linux-plan.js'
+import { initNotSystemdBlocker } from './linux-blockers.js'
 import { probeLinux, type CommandOutput, type LinuxProbeDeps, type LinuxProbeOptions } from './linux-probe.js'
 import type { RecipeDistribution } from '../../contracts/index.js'
 import {
@@ -106,6 +107,8 @@ interface Machine {
   daemonJsonUnreadable?: boolean
   freeDiskBytesByPath?: Record<string, number>
   pathMissing?: Set<string>
+  /** Paths whose `pathExists` rejects (the check itself failed), rather than answering false. */
+  pathUnreadable?: Set<string>
 }
 
 function pacmanQ(installed: Record<string, string>, args: string[]): CommandOutput {
@@ -160,6 +163,7 @@ function depsFor(machine: Machine): LinuxProbeDeps {
     },
     pathExists: async (path) => {
       if (path === '/run/ostree-booted') return machine.ostreeBooted ?? false
+      if (machine.pathUnreadable?.has(path)) throw new Error('EIO: i/o error')
       if (machine.pathMissing?.has(path)) return false
       const xdg = machine.xdgRuntimeDir
       if (xdg !== undefined && xdg !== null && path === `${xdg}/docker.sock`) {
@@ -1267,6 +1271,74 @@ describe('review-round fixes (task 2.4 fix round 5)', () => {
       { user: 'ana', xdgRuntimeDir: null }
     )
     expect(asked).toContain('pacman')
+  })
+})
+
+describe('a host that does not run systemd (the GB10 vast.ai container: PID 1 is bash, no /run/systemd/system)', () => {
+  const NO_SYSTEMD = new Set(['/run/systemd/system'])
+  // `systemctl is-active docker` on such a host: the binary may exist, systemd is not running.
+  const OFFLINE = {
+    code: 1,
+    stdout: 'offline\n',
+    stderr: 'System has not been booted with systemd as init system (PID 1).\n',
+  }
+
+  it('reads the init system from /run/systemd/system, the sd_booted() test', async () => {
+    expect((await run({})).facts.systemd).toBe(true)
+    expect((await run({ pathMissing: NO_SYSTEMD })).facts.systemd).toBe(false)
+    expect((await run({ pathUnreadable: NO_SYSTEMD })).facts.systemd).toBe('unknown')
+  })
+
+  it.each<[string, Machine]>([
+    ['a clean Ubuntu (full install plan)', { dpkgQuery: dpkgNoneFound() }],
+    [
+      'the GB10 container: aarch64, captured nvidia-smi, clean Ubuntu 24.04',
+      {
+        uname: ok('aarch64\n'),
+        nvidiaSmi: ok(readLinuxProbeFixture('nvidia-smi/gb10-driver595-captured.csv')),
+        dpkgQuery: dpkgNoneFound(),
+      },
+    ],
+  ])(
+    '%s: blocked with init-not-systemd instead of a plan whose service steps would fail after consent',
+    async (_label, machine) => {
+      const { assessment } = await run({ ...machine, pathMissing: NO_SYSTEMD, systemctlIsActive: OFFLINE })
+      expect(assessment).toEqual({
+        availability: 'prerequisite-blocked',
+        adopts_existing_engine: false,
+        install_plan: null,
+        blockers: [initNotSystemdBlocker(false)],
+      })
+      expect(assessment.blockers[0]?.message).toBe(
+        'This system does not run systemd, which the Docker install needs.'
+      )
+    }
+  )
+
+  it('blocks the same way, with its own wording, when whether systemd runs could not be read', async () => {
+    const { assessment } = await run({ dpkgQuery: dpkgNoneFound(), pathUnreadable: NO_SYSTEMD })
+    expect(assessment.install_plan).toBeNull()
+    expect(assessment.blockers).toEqual([initNotSystemdBlocker('unknown')])
+  })
+
+  it('still adopts a host whose Docker already answers with a GPU runtime: nothing needs systemd then', async () => {
+    const { assessment } = await run({
+      pathMissing: NO_SYSTEMD,
+      systemctlIsActive: OFFLINE,
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+    })
+    expect(assessment.adopts_existing_engine).toBe(true)
+    expect(assessment.blockers).toEqual([])
+  })
+
+  it('a universal blocker still comes first: an old driver is named, not the init system', async () => {
+    const { assessment } = await run({
+      pathMissing: NO_SYSTEMD,
+      nvidiaSmi: ok(readLinuxProbeFixture('nvidia-smi/rtx4070-driver580.csv')),
+    })
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['driver-too-old'])
   })
 })
 
