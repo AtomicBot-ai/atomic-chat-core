@@ -277,6 +277,182 @@ describe('planLlamaLoad', () => {
   })
 })
 
+describe('planLlamaLoad — fit margin on unified memory', () => {
+  const GiB = 2 ** 30
+  const MODEL = '/data/llamacpp/models/m/model.gguf'
+  // owao/Nanbeige4.2-3B-GGUF IQ4_XS, as its GGUF describes itself.
+  const NANBEIGE_META = {
+    'general.architecture': 'nanbeige',
+    'nanbeige.block_count': '22',
+    'nanbeige.attention.head_count': '48',
+    'nanbeige.attention.head_count_kv': '8',
+    'nanbeige.attention.key_length': '128',
+    'nanbeige.attention.value_length': '128',
+    'nanbeige.embedding_length': '3072',
+    'nanbeige.context_length': '262144',
+  }
+  // An 18 GiB Mac: Metal lets the GPU use about three quarters of it.
+  const METAL_18 = [
+    { id: 'MTL0', name: 'Apple M3 Pro', mem: 13_641, free: 13_640 },
+    { id: 'BLAS', name: 'Accelerate', mem: 0, free: 0 },
+  ]
+  const fitDeps = (over: Partial<LoadPlanDeps> & { files?: Record<string, number> } = {}) =>
+    deps({
+      files: { [MODEL]: 2_403_808_096 },
+      meta: NANBEIGE_META,
+      unifiedMemory: async () => ({ totalMemoryBytes: 18 * GiB }),
+      listDevices: async () => METAL_18,
+      ...over,
+    })
+  // Half of 18 GiB is 9216 MiB; the rest of Metal's 13640 MiB is the margin.
+  const HALF_OF_18 = String(13_640 - 9 * 1024)
+
+  it('widens the margin so llama.cpp keeps to half of an 18 GB Mac', async () => {
+    const listDevices = vi.fn(async () => METAL_18)
+    const plan = await planLlamaLoad(input({ fit: true, fit_target: '1024' }), fitDeps({ listDevices }))
+    expect(plan.config.fit_target).toBe(HALF_OF_18)
+    expect(listDevices).toHaveBeenCalledWith('/b/b10405/macos-arm64/llama-server')
+    expect(plan.warnings).toContain(
+      `Unified memory: fitting "m" with a ${HALF_OF_18} MiB margin so llama.cpp leaves half of RAM to the system.`
+    )
+  })
+
+  it('treats an empty margin, and one pinned to the Metal device, as the default', async () => {
+    const empty = await planLlamaLoad(input({ fit: true, fit_target: '' }), fitDeps())
+    expect(empty.config.fit_target).toBe(HALF_OF_18)
+    const pinned = await planLlamaLoad(input({ fit: true, fit_target: '', device: 'MTL0' }), fitDeps())
+    expect(pinned.config.fit_target).toBe(HALF_OF_18)
+  })
+
+  it.each([
+    ['fit is off', { fit: false, fit_target: '1024' }, '1024'],
+    ['the user set their own margin', { fit: true, fit_target: '2048' }, '2048'],
+    ['the user pinned another device', { fit: true, fit_target: '', device: 'none' }, ''],
+  ])('leaves the margin alone when %s', async (_name, config, expected) => {
+    const listDevices = vi.fn(async () => METAL_18)
+    const plan = await planLlamaLoad(input(config), fitDeps({ listDevices }))
+    expect(plan.config.fit_target).toBe(expected)
+  })
+
+  it('never lists devices off Apple silicon or for an embedding model', async () => {
+    const listDevices = vi.fn(async () => METAL_18)
+    const { unifiedMemory: _unused, ...offMac } = fitDeps({ listDevices })
+    const plan = await planLlamaLoad(input({ fit: true, fit_target: '' }), offMac)
+    expect(plan.config.fit_target).toBe('')
+    const noFacts = await planLlamaLoad(
+      input({ fit: true, fit_target: '' }),
+      fitDeps({ listDevices, unifiedMemory: async () => undefined })
+    )
+    expect(noFacts.config.fit_target).toBe('')
+    const embedding = await planLlamaLoad(
+      { ...input({ fit: true, fit_target: '' }), isEmbedding: true },
+      fitDeps({ listDevices })
+    )
+    expect(embedding.config.fit_target).toBe('')
+    expect(listDevices).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['the RAM probe throws', { unifiedMemory: async () => Promise.reject(new Error('os gone')) }],
+    ['the device probe throws', { listDevices: async () => Promise.reject(new Error('timed out')) }],
+    [
+      'the build lists no Metal device',
+      { listDevices: async () => [{ id: 'BLAS', name: 'x', mem: 0, free: 0 }] },
+    ],
+  ])('keeps the default when %s', async (_name, over) => {
+    const plan = await planLlamaLoad(
+      input({ fit: true, fit_target: '' }),
+      fitDeps(over as Partial<LoadPlanDeps>)
+    )
+    expect(plan.config.fit_target).toBe('')
+  })
+
+  it('keeps the default for a model that needs more than half of RAM, so no layer leaves the GPU', async () => {
+    const plan = await planLlamaLoad(
+      input({ fit: true, fit_target: '1024' }),
+      fitDeps({ files: { [MODEL]: 12 * GiB } })
+    )
+    expect(plan.config.fit_target).toBe('1024')
+    expect(plan.warnings.some((w) => w.startsWith('Unified memory'))).toBe(false)
+  })
+
+  it('never lists devices when the host cannot', async () => {
+    const { listDevices: _unused, ...noProbe } = fitDeps()
+    const plan = await planLlamaLoad(input({ fit: true, fit_target: '' }), noProbe)
+    expect(plan.config.fit_target).toBe('')
+  })
+
+  it('counts a draft model with the weights, and nothing for a draft it cannot measure', async () => {
+    const draft = (kind: 'mtp' | 'dflash', onDisk: boolean) =>
+      planLlamaLoad(
+        input({ fit: true, fit_target: '', [kind]: true }, { dflash_block_size: 16 }),
+        fitDeps({
+          files: { [MODEL]: 2_403_808_096, ...(onDisk ? { [`/data/drafts/${kind}.gguf`]: 6 * GiB } : {}) },
+          readModelYml: async () => yml({ [`${kind}_draft_path`]: `drafts/${kind}.gguf` }),
+          backendSupportsDflashSpec: async () => true,
+        })
+      )
+    // 2292 MiB of model + 6144 MiB of draft + 352 MiB of KV + 1024 MiB of reserve = 9812 MiB.
+    expect((await draft('mtp', true)).config.fit_target).toBe(String(13_640 - 9_813))
+    expect((await draft('dflash', true)).config.fit_target).toBe(String(13_640 - 9_813))
+    expect((await draft('dflash', false)).config.fit_target).toBe(HALF_OF_18)
+  })
+
+  it('counts no KV for a model whose metadata cannot be read', async () => {
+    // An 8 GiB model: weights + reserve alone are exactly half of 18 GiB, the KV tips it over.
+    const at = (readGgufMetadata: LoadPlanDeps['readGgufMetadata']) =>
+      planLlamaLoad(
+        input({ fit: true, fit_target: '' }),
+        fitDeps({ files: { [MODEL]: 8 * GiB }, readGgufMetadata })
+      )
+    expect((await at(async () => NANBEIGE_META)).config.fit_target).toBe(String(13_640 - 9_568))
+    expect((await at(async () => undefined)).config.fit_target).toBe(HALF_OF_18)
+    expect(
+      (
+        await at(async () => {
+          throw new Error('not a GGUF')
+        })
+      ).config.fit_target
+    ).toBe(HALF_OF_18)
+  })
+
+  it('counts every shard and the minimum context of every slot toward what the model needs', async () => {
+    const shard = (i: number) => `/data/llamacpp/models/m/model-0000${i}-of-00003.gguf`
+    const shards = { [shard(1)]: 3 * GiB, [shard(2)]: 3 * GiB, [shard(3)]: 3 * GiB }
+    const sharded = await planLlamaLoad(
+      input({ fit: true, fit_target: '' }),
+      fitDeps({
+        files: shards,
+        readModelYml: async () =>
+          yml({ model_path: 'llamacpp/models/m/model-00001-of-00003.gguf', model_size_bytes: 0 }),
+      })
+    )
+    // 9 GiB of weights + 352 MiB of KV at 4096 + 1 GiB of reserve = 10592 MiB, past half of 18 GiB:
+    // the budget grows to hold it and the margin shrinks by as much.
+    expect(sharded.config.fit_target).toBe(String(13_640 - 10_592))
+    // Four slots at a 32K floor: 11 GiB of KV alone, more than Metal leaves.
+    const slots = await planLlamaLoad(
+      input({ fit: true, fit_target: '', fit_ctx: '32768', parallel: 4 } as Partial<LlamacppConfigInput>),
+      fitDeps()
+    )
+    expect(slots.config.fit_target).toBe('')
+    // Concurrent mode's slots count, not `parallel`: three slots at 32K are 8448 MiB of KV, and
+    // 2292 + 8448 + 1024 MiB needs more than half of 18 GiB.
+    const concurrent = await planLlamaLoad(
+      input({
+        fit: true,
+        fit_target: '',
+        fit_ctx: '32768',
+        parallel: 1,
+        concurrent_mode: true,
+        concurrent_slots: 3,
+      } as Partial<LlamacppConfigInput>),
+      fitDeps()
+    )
+    expect(concurrent.config.fit_target).toBe(String(13_640 - 11_765))
+  })
+})
+
 describe('nextRetry / autoUnloadTargets / resolveModelMaxCtxTrain', () => {
   const plan = (over: Partial<LoadPlan> = {}): LoadPlan => ({
     provider: 'llamacpp-upstream',

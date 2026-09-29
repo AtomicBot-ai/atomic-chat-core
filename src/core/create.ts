@@ -21,7 +21,7 @@ import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from '../cloud/index.js'
 import type { ChatGptBackend } from '../cloud/index.js'
-import { HardwareService, nodeProbeDeps, probeSystemInfo } from '../hardware/index.js'
+import { HardwareService, nodeProbeDeps, probeSystemInfo, probeUnifiedMemory } from '../hardware/index.js'
 import {
   BackendAdvisor,
   BackendService,
@@ -213,6 +213,10 @@ export async function createAtomicCore(
           const facts = await hardware.facts()
           return facts.cpuExtensions ? { arch: facts.arch, extensions: facts.cpuExtensions } : undefined
         },
+        unifiedMemory: async () =>
+          probeUnifiedMemory(
+            nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+          ),
         log: runtimeLog,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),

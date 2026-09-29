@@ -10,10 +10,11 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { LlamacppConfig, LocalProviderId } from '../../contracts/index.js'
+import type { DeviceInfo, LlamacppConfig, LocalProviderId } from '../../contracts/index.js'
 import type { ModelYmlDocument } from '../../models/index.js'
 import {
   effectiveCtxSize,
+  estimateKvCache,
   firstGgufShardPath,
   ggufShardSetPaths,
   isMtpCapable,
@@ -23,6 +24,12 @@ import {
 import { generateApiKey } from '../shared/index.js'
 import { withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
+import {
+  DEFAULT_FIT_CTX,
+  DEFAULT_FIT_TARGET_MIB,
+  metalDevice,
+  unifiedMemoryFitTargetMiB,
+} from './fit-margin.js'
 import {
   BACKEND_NOT_CONFIGURED_MESSAGE,
   CPU_NO_AVX_ERROR_CODE,
@@ -78,6 +85,13 @@ export interface LoadPlanDeps {
   ) => Promise<{ version: string; backend: string; exePath: string }>
   /** CPU facts for the AVX preflight; `undefined` when the probe failed. */
   cpuInfo: () => Promise<{ arch: string; extensions: string[] } | undefined>
+  /**
+   * RAM the GPU shares with the system — Apple silicon only. `undefined` elsewhere: a discrete
+   * GPU's own memory is llama.cpp's to fill, and fit keeps its default margin there.
+   */
+  unifiedMemory?: () => Promise<{ totalMemoryBytes: number } | undefined>
+  /** `<exe> --list-devices`: what fit will measure as free on each device. */
+  listDevices?: (exePath: string) => Promise<DeviceInfo[]>
   exists: (path: string) => Promise<boolean>
   fileSize: (path: string) => Promise<number | undefined>
   readGgufMetadata: (path: string) => Promise<Record<string, string> | undefined>
@@ -300,6 +314,17 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
   // 19. legacy stringly `fit`
   if (typeof (cfg as { fit: unknown }).fit === 'string') cfg.fit = true
 
+  // 19b. fit margin on unified memory (a margin the user set stands)
+  if (cfg.fit && !input.isEmbedding && isDefaultFitTarget(cfg.fit_target)) {
+    const marginMiB = await unifiedMemoryMargin(exePath, modelPath, cfg, deps)
+    if (marginMiB !== undefined) {
+      cfg.fit_target = String(marginMiB)
+      warn(
+        `Unified memory: fitting "${modelId}" with a ${marginMiB} MiB margin so llama.cpp leaves half of RAM to the system.`
+      )
+    }
+  }
+
   return {
     provider: input.provider,
     modelId,
@@ -390,6 +415,63 @@ async function assertCompleteGguf(
       'MODEL_FILE_CORRUPT',
       `The model file is incomplete (${size} of ${expectedSize} bytes), likely from an interrupted download: ${filePath}`
     )
+  }
+}
+
+/**
+ * The widened `--fit-target` on a unified-memory Mac, or `undefined` to keep llama.cpp's default:
+ * off Apple silicon, on a device the user pinned elsewhere, or when the backend lists no Metal device.
+ */
+async function unifiedMemoryMargin(
+  exePath: string,
+  modelPath: string,
+  cfg: LlamacppConfig,
+  deps: LoadPlanDeps
+): Promise<number | undefined> {
+  if (!deps.unifiedMemory || !deps.listDevices) return undefined
+  const memory = await deps.unifiedMemory().catch(() => undefined)
+  if (!memory) return undefined
+  const gpu = metalDevice(await deps.listDevices(exePath).catch(() => []))
+  if (!gpu || (cfg.device !== '' && cfg.device !== gpu.id)) return undefined
+  return unifiedMemoryFitTargetMiB({
+    totalMemoryBytes: memory.totalMemoryBytes,
+    gpuFreeBytes: gpu.free * 2 ** 20,
+    weightsBytes: await gpuWeightsBytes(modelPath, cfg, deps),
+    minContextKvBytes: await minContextKvBytes(modelPath, cfg, deps),
+  })
+}
+
+/** No margin of the user's own: the key is empty or holds llama.cpp's default. */
+function isDefaultFitTarget(value: string): boolean {
+  const text = String(value).trim()
+  return text === '' || text === String(DEFAULT_FIT_TARGET_MIB)
+}
+
+/** Every shard of the model plus any draft model: what fit measures as weights on the GPU. */
+async function gpuWeightsBytes(modelPath: string, cfg: LlamacppConfig, deps: LoadPlanDeps): Promise<number> {
+  const files = parseGgufShard(modelPath) ? ggufShardSetPaths(modelPath) : [modelPath]
+  if (cfg.mtp_draft_path) files.push(cfg.mtp_draft_path)
+  if (cfg.dflash_draft_path) files.push(cfg.dflash_draft_path)
+  let total = 0
+  for (const file of files) total += (await deps.fileSize(file).catch(() => undefined)) ?? 0
+  return total
+}
+
+/** The KV cache at the smallest window fit may settle on, across every slot; 0 when unreadable. */
+async function minContextKvBytes(
+  modelPath: string,
+  cfg: LlamacppConfig,
+  deps: LoadPlanDeps
+): Promise<number> {
+  const fitCtx = parseInt(String(cfg.fit_ctx).trim(), 10)
+  const minCtx = Number.isFinite(fitCtx) && fitCtx > 0 ? fitCtx : DEFAULT_FIT_CTX
+  const slots = cfg.concurrent_mode ? Math.max(cfg.concurrent_slots, 2) : Math.max(cfg.parallel, 1)
+  try {
+    const meta = await deps.readGgufMetadata(modelPath)
+    if (!meta) return 0
+    return estimateKvCache(meta, minCtx, cfg.cache_type_k, cfg.cache_type_v).size * slots
+  } catch {
+    return 0
   }
 }
 
