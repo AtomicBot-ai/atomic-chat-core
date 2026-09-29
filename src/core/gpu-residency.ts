@@ -7,8 +7,9 @@
  * How an occupant is stopped is decided here, and only ever inside this core's scope:
  *  - a local runtime's session goes through the facade's own `unload` (`LocalSessions`), exactly as a
  *    client's unload would: per-model serialization, and the cross-process model claim released only
- *    once the runtime confirmed the stop — never over a live process or an unconfirmed container. A
- *    session still loading has its load cancelled first, so the unload is not queued behind it;
+ *    once the runtime confirmed the stop — never over a live process or an unconfirmed container. Any
+ *    acquire of that model still pending — a first load, or a reload in place of a ready one — is
+ *    cancelled first, so the unload is not queued behind it;
  *  - the image model through the diffusion service's own `unloadModel`;
  *  - a leftover container by reconciling it again (`leftoverContainers`).
  * Sessions of another scope (the app vs the CLI core), and sessions another process registered, are
@@ -41,7 +42,11 @@ export interface WireGpuResidencyOptions {
 export function wireGpuResidency(options: WireGpuResidencyOptions): GpuResidency {
   const stopSession = (provider: LocalProviderId, occupant: GpuOccupancy) => async () => {
     const sessions = options.sessions()
-    if (occupant.state === 'loading') sessions.cancelLoad(provider, occupant.model_id)
+    // Always, whatever state the occupant reports (final review I-3): a reload in place of a `ready`
+    // model holds its per-model transition while it stops the old session and then waits for this
+    // very claim's turn, so the unload below would queue behind it forever. Cancelling makes that
+    // reload give up and release the transition; with no acquire pending it does nothing.
+    sessions.cancelLoad(provider, occupant.model_id)
     const result = await sessions.unload(provider, occupant.model_id)
     if (!result.success) throw new Error(result.error ?? `The unload of ${occupant.model_id} failed.`)
   }
