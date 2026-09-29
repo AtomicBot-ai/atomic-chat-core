@@ -86,14 +86,25 @@ async function wrap(path: string, script: string, env: Record<string, string> = 
   await chmod(path, 0o755)
 }
 
+/**
+ * A real `config.json` and an actually-present weight file at its declared size: the tensorrt-llm
+ * pre-launch check (task 2.16) re-verifies both before any container is created, so a model.yml-only
+ * fixture would be refused with `MODEL_FILE_NOT_FOUND` before residency is ever exercised. Same shape
+ * as `installModel` in `tensorrt-llm-provider.test.ts`: `bf16` clears the fake card's compute
+ * capability, and 20 bytes of weights fit its free VRAM.
+ */
 async function installTrtModel(id: string): Promise<void> {
   const dir = join(dataFolder, 'tensorrt-llm', 'models', id)
   await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, 'config.json'), JSON.stringify({ architectures: ['LlamaForCausalLM'] }))
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
+  )
+  await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(20, 1))
   await writeFile(
     join(dir, 'model.yml'),
-    `name: ${id}\narchitectures:\n  - LlamaForCausalLM\nquantization: fp8\nfiles:\n` +
-      `  - path: model.safetensors\n    size: 1000000000\n    sha256: null\n`
+    `name: ${id}\nrepository: acme/${id}\nrevision: deadbeef\narchitectures:\n  - LlamaForCausalLM\nquantization: bf16\nfiles:\n` +
+      `  - path: model.safetensors\n    size: 20\n    sha256: null\n`
   )
 }
 

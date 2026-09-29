@@ -368,6 +368,49 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
     expect(docker.containers.size).toBe(1)
   })
 
+  it('with core’s GPU residency, the memory check waits for the claim’s eviction to finish: eviction done → beforeCreate → docker create', async () => {
+    await installBigModel('big-a')
+    await installBigModel('big-b')
+    const order: string[] = []
+    const creates = () => docker.calls.filter((argv) => argv[0] === 'create').length
+    build({
+      // The card only has room for `big-b` once `big-a`'s container is gone (as in the test above).
+      hostFacts: async () => {
+        order.push(`probe: ${docker.containers.size} containers, ${creates()} creates`)
+        return {
+          gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 1_000_000_000 }],
+          selinux: false,
+          memAvailableBytes: 0,
+        }
+      },
+      // A stand-in for core's `GpuResidency.claim` (task 2.15): evict every other occupant of the
+      // card and wait for its confirmed exit — made slow here, so a `beforeCreate` that did not wait
+      // for the claim would probe while `big-a` still runs — then grant inside the turn.
+      claimGpu: async (claim, _signal, granted) => {
+        order.push(`claim ${claim.model_id}`)
+        for (const other of runtime.gpuOccupancy()) {
+          if (other.model_id === claim.model_id) continue
+          for (let tick = 0; tick < 5; tick++) await new Promise((resolve) => setImmediate(resolve))
+          expect(await runtime.unload(other.model_id)).toEqual({ success: true })
+          order.push(`evicted ${other.model_id}`)
+        }
+        granted?.()
+      },
+    })
+
+    await runtime.load('big-a')
+    order.length = 0
+    await runtime.load('big-b')
+
+    expect(runtime.getLoadedModels()).toEqual(['big-b'])
+    expect(creates()).toBe(2)
+    // load()'s own probe(s) run before the claim, while big-a still holds the card; the one
+    // `beforeCreate` probe runs strictly after the eviction and strictly before big-b's create.
+    const claimAt = order.indexOf('claim big-b')
+    expect(order.slice(0, claimAt).every((step) => step === 'probe: 1 containers, 1 creates')).toBe(true)
+    expect(order.slice(claimAt)).toEqual(['claim big-b', 'evicted big-a', 'probe: 0 containers, 1 creates'])
+  })
+
   it('a genuinely-too-big model still fails before create, even once eviction has freed the card', async () => {
     await installModel('small', 'LlamaForCausalLM') // weight 20 bytes: fits easily
     await installBigModel('big-b') // needs 2,200 bytes

@@ -1273,7 +1273,7 @@
   },
   "src/runtime/tensorrt-llm/runtime.ts": {
     "statements": 100,
-    "branches": 87,
+    "branches": 88,
     "functions": 100,
     "lines": 100
   },
