@@ -80,9 +80,11 @@ export interface OperationMachine {
 
 /**
  * Where a freshly probed digest goes. Before any consent it is the plan on offer (`plan_digest`).
- * Once work started under one, `plan_digest` stays the consented digest — equal to
- * `approved_plan_digest` outside `awaiting-consent` (review r2, ruling A) — and the fresh digest is
- * reported as `carried_plan_digest` instead.
+ * Once work started under one, `plan_digest` is left as it is and the fresh digest is reported as
+ * `carried_plan_digest` instead. What `plan_digest` then holds is the consented digest — equal to
+ * `approved_plan_digest` (review r2, ruling A) — or, once the core re-asked because the host changed
+ * beyond the consent, the plan it last offered, which differs from the approval until the user
+ * approves it; no work runs while they differ.
  */
 const probedDigest = (
   state: OperationMachine,
@@ -446,10 +448,11 @@ export function reduceOperation(
       ) {
         return conflict(`${phase} is already running`)
       }
-      // An approval is given for the plan on offer, in `awaiting-consent`. A resume may restate the
-      // one the operation already has, never swap in another: that would put an approval the user
+      // A resume may carry an approval only of the plan the operation names now (`plan_digest`):
+      // normally the approval it already has, restated; after a re-ask, the plan that was on offer,
+      // which the user did see. Any other digest is refused: it would put an approval the user
       // never saw a plan for next to the plan the work runs under (review r3, N1). Refused, not
-      // ignored, so a client that meant to approve something new finds out instead of carrying on
+      // ignored, so a client that meant to approve something else finds out instead of carrying on
       // under the old consent.
       const restated = event.input.approved_plan_digest
       if (restated !== undefined && restated !== operation.plan_digest) {

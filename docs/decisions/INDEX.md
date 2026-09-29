@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [Plan digest after a re-ask, and what a resume may approve](2026-09-29-plan-digest-after-a-re-ask-and-what-a-resume-may-approve.md) — corrects the text of the resume-never-swaps-the-approval record below; no behaviour change.
 - **2026-09-29** — [An engine removal holds its loads off and unloads through the facade](2026-09-29-an-engine-removal-holds-loads-off-and-unloads-through-the-facade.md) — supersedes item 2 and the load-vs-removal consequences of the provider-shares-handle record below.
 - **2026-09-29** — [The engine container runs as the invoking user, and a removal never leaves a ready record behind](2026-09-29-the-engine-container-runs-as-the-invoking-user.md)
 - **2026-09-29** — [tensorrt-llm: guided decoding is enabled per family, and every non-text response_format is gated](2026-09-29-tensorrt-llm-guided-decoding-is-enabled-per-family.md)

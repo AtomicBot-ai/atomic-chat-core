@@ -240,7 +240,11 @@ export interface ManagedHostReceipt {
  * `removing`) and in `ready`/`removed` they are equal: work only ever runs under the approval of
  * the plan it names. Before any consent they may differ in a phase that is not work — `checking`,
  * `awaiting-consent`, or `failed`/`relogin-required` straight from a probe (a blocked host, no
- * approval yet) — and after work began a waiting or failed phase keeps the consented digest in both.
+ * approval yet). After work began a waiting or failed phase keeps the consented digest in both,
+ * unless the core re-asked: when the host changed beyond what the consent covers, `awaiting-consent`
+ * offers the new plan in `plan_digest` while `approved_plan_digest` still names the old approval,
+ * and a phase reached from there (a cancel, a failed or blocked probe) keeps them different. Work
+ * never starts again until they are equal.
  *
  * `carried_plan_digest` is the plan the core continued under after work began, covered by the
  * consent's basis (the same descriptor, engine image digest and target the approved plan named):
