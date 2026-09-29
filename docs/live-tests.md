@@ -1,4 +1,14 @@
-# Live test: managed TensorRT-LLM install on Linux
+# Live tests: managed TensorRT-LLM on Linux
+
+Two live tests cover the managed TensorRT-LLM engine on real Linux machines with NVIDIA cards:
+
+- [Install test](#install-test-task-218), `test/live/managed-install.test.ts` (task 2.18): installs Docker,
+  the NVIDIA Container Toolkit and the engine through the core's own setup, on a throwaway VM.
+- [Engine test](#engine-test-task-219), `test/live/tensorrt-llm.test.ts` (task 2.19): runs the installed
+  engine on every NVIDIA card of a host and measures the values the design left open. It changes nothing
+  on the host.
+
+## Install test (task 2.18)
 
 `test/live/managed-install.test.ts` (task 2.18 of change `add-tensorrt-llm-linux`) installs the managed
 TensorRT-LLM engine on a real Linux VM through the compiled core. It runs the whole path: probe, plan,
@@ -10,7 +20,7 @@ It changes the machine: it installs Docker, the NVIDIA Container Toolkit and rep
 dnf, adds you to the `docker` group, may restart Docker, and pulls about 20 GiB of images. Run it only on
 a throwaway VM, and take a snapshot first.
 
-## What a run does
+### What a run does
 
 The test reads the machine before the core touches it and runs the scenarios that starting state can
 exercise. The others are skipped, and each skip gives its reason.
@@ -44,7 +54,7 @@ must continue the operation on its own at startup, and the test never sends it a
 was not used, because it runs a shell string and sets only the primary group. `newgrp` was not used,
 because it needs an interactive shell.
 
-## VM requirements
+### VM requirements
 
 - **Distributions** (the descriptor's `linux.install-container-runtime` list): Ubuntu 22.04, 24.04 and 26.04
   LTS; Debian 12 and 13; Fedora 43 and 44 (Workstation or Server) with SELinux **enforcing** (the default;
@@ -88,7 +98,7 @@ because it needs an interactive shell.
   `pgrep -a 'apt|dpkg'` prints nothing. Fedora: `sudo systemctl stop dnf-makecache.timer`, and keep
   GNOME Software from updating in the background.
 
-### Starting states to prepare
+#### Starting states to prepare
 
 Snapshot each state so you can run it again.
 
@@ -101,7 +111,7 @@ Snapshot each state so you can run it again.
 | **D. Arch, missing** | Arch + NVIDIA driver, no Docker | `arch-blocked` |
 | **D′. Arch, by hand** | `sudo pacman -Syu --needed docker nvidia-container-toolkit`, `sudo nvidia-ctk runtime configure --runtime=docker`, `sudo systemctl enable --now docker`, `sudo usermod -aG docker $USER`, reboot or log in again | `arch-adopt`, `gpu-pull-ready`, `model-chat` |
 
-## Build and copy
+### Build and copy
 
 On the development machine (macOS or Linux, Bun on PATH), at the commit under test:
 
@@ -138,7 +148,7 @@ ssh vm 'cd atomic-chat-core && ~/.bun/bin/bun install --frozen-lockfile'
 On the VM, `dist/bin/atomic-chat-core-$(uname -m)-unknown-linux-gnu` must exist and be executable. If it
 lives elsewhere, point `ATOMIC_LIVE_CORE_BIN` at it.
 
-## Run
+### Run
 
 Open a **fresh ssh login** to the VM as the normal user. Do not use `sudo -i` or `su`. Start `tmux`
 **inside that login**, so an ssh drop in the middle of `apt` or the pull does not kill the run. A tmux
@@ -190,7 +200,7 @@ explicitly, the same for both.
 The run leaves Docker, the toolkit, the group and the engine image installed. It unloads the model,
 stops the core and removes the sentinel containers. To reset, go back to the snapshot.
 
-## What to attach to the PR
+### What to attach to the PR
 
 For every run, one per distribution and starting state, attach from the output folder the test prints
 (`output folder …` on its first log line):
@@ -208,3 +218,162 @@ Do not attach `data/`, which holds the model's hard links.
 Put a table in the PR description: one row per distribution, version, arch and starting state, with its
 passed, failed and skipped counts. A distribution or version whose run fails must not stay in
 `recipes[].distributions` of `atomic-chat-conf/runtimes/tensorrt-llm.json` (conf task 1.2).
+
+## Engine test (task 2.19)
+
+`test/live/tensorrt-llm.test.ts` runs the installed engine through the compiled core on **every NVIDIA
+card of the host**, one card after another. Each card is pinned the way the app pins it: through the
+provider's stored `gpu_id` setting (`PATCH /atomic/v1/settings/tensorrt-llm`), in the run's own data
+folder, never yours. The test also measures what the design left open: the heartbeat interval,
+the watchdog limit, `--shm-size`, the container memory limit, and the load timeout coefficients. It
+records the measurements and does not decide them. You carry them into an ADR (see below).
+
+It changes nothing on the host. It never installs, removes or reconfigures packages, Docker or groups.
+It downloads curated models into a cache in your home folder, loads and unloads them, reads Docker as
+root through `sudo -n` (`inspect`, `ps`, `logs`, and one read-only `df` inside the engine container), and
+sends `SIGKILL` only to the core process it started itself.
+
+### What a run does
+
+Each card gets five named scenarios, `gpu<N>-<scenario>`, where `N` is the card's `nvidia-smi` index. A
+card below the descriptor's minimum compute capability, or with no curated model that fits, has its
+scenarios skipped with that reason.
+
+| Scenario | What it checks |
+| --- | --- |
+| `preconditions` | Checked once. Fails with every problem listed: no binary, no GPU, a driver older than the descriptor's minimum, no passwordless sudo, or a session that cannot reach Docker. It then starts the core and reads `/snapshot`, and **fails unless the engine installation is `ready`** and pinned to the same descriptor the test reads. |
+| `gpu<N>-load` | Loads the curated model of the card's memory tier, pinned to this card. The download goes through the documented flow (inventory digest, `POST /models/tensorrt-llm/check` with this card's `gpu_id`, sizes and sha256). The check: the container got exactly this card (`DeviceRequests`), the core substituted no other card, and `session:load-progress` reached `ready`. Records the load time, each stage's elapsed time, peak VRAM and peak `/dev/shm`. |
+| `gpu<N>-stream` | Streams a chat through the public server (`POST /v1/chat/completions` on `:1337`, which routes to the session gateway). The session's own gateway port answers `401` without the session key and `200` with it. Records the time to the first token. |
+| `gpu<N>-reload-cached` | Unloads (the container must no longer run once the unload answers), records what the engine cache holds, and loads the same model again. **The second load must be faster than the first.** Both durations are recorded. |
+| `gpu<N>-tool-call` | Sends one tool call (`get_weather`) through `:1337` to a model whose family has a `tool_parser` in the descriptor's `model_families`. If the tier model's family has no parser, the test uses the smallest other curated model that fits the card and has one. With no such model the scenario is skipped. The check: `capabilities` declares `tools: true`, the engine was started with `--tool_parser <name>`, and the answer carries a `get_weather` call whose arguments name Paris. |
+| `gpu<N>-kill-core` | Measures the heartbeat for 20 s, then sends `kill -9` to the core. The engine container must exit through its watchdog: the exit code is 97, and it exits within the watchdog's own bound (computed from the container's `ATOMIC_WATCHDOG_*` env) plus 30 s. The card's `memory.used` must return to its level before the first load, within `ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB`, within 60 s. A new core then starts on the same data folder. The run records whether that core removed the killed core's container, and the next card runs on the new core. |
+
+The tier model is the curated model with the largest `vram_tier_bytes` the card holds, among the formats
+the card runs. Within that tier the test takes the format that needs the newest card: NVFP4 on Blackwell,
+FP8 on Ada and Hopper, BF16 on Ampere. This follows the `note` of each curated entry. For example, an RTX
+4090 gets `nvidia/Qwen3-14B-FP8`, an RTX 5090 gets `nvidia/Qwen3-32B-NVFP4`, an RTX 3090 gets
+`Qwen/Qwen3-8B`, and an H100 80 GB gets `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8`.
+`ATOMIC_LIVE_TRT_MODEL` forces one curated repository on every card.
+
+### Prerequisites
+
+- **The engine is `ready` for your user.** Either the [install test](#install-test-task-218) passed on this
+  host, or the app or `atc` set the engine up. The install test keeps its state in its own output folder, so
+  point this test at it with `ATOMIC_LIVE_MANAGED_ROOT=<install test output folder>/managed`. Without the
+  variable, the core uses your normal per-user managed root (`<dataDir>/atomic-managed-runtimes`), which is
+  where the app and `atc` keep it.
+- **A login that reaches Docker.** The core runs as you, so `docker -H unix:///var/run/docker.sock info`
+  must work in the shell you start the test from. After the install test added you to `docker`, open a
+  **new** ssh login.
+- **Passwordless sudo** (`sudo -n true`), which the test uses to inspect the engine container as root.
+- **Driver** at or above the descriptor's `minimum_driver_version`, and a core binary built from the commit
+  under test (see [Build and copy](#build-and-copy)).
+- **Nothing else on the cards.** Quit the Atomic Chat app, stop other CUDA work, and close desktop sessions
+  on the cards if you can. The core never stops another scope's sessions, and they would skew the memory
+  check and the VRAM baseline.
+- **Port 1337 free**, or set `ATOMIC_LIVE_PUBLIC_PORT`.
+- **Disk and network**: `huggingface.co` (or `HF_ENDPOINT`) and room in `~/.cache/atomic-chat-live/hf` for
+  each card's tier model, from 4 GB up to about 45 GB for the 80 GB tier. The checkpoints are hard-linked
+  into the run's data folder, not copied.
+- **Hosts to cover** (the task's acceptance): at least one Ada card (compute capability 8.9) and one
+  Blackwell (12.0) or datacenter card (9.0 or 10.0). A host with several cards covers all of them in one
+  run.
+
+### Run
+
+From a fresh login on the host, in the checkout that holds the binary:
+
+```sh
+cd ~/atomic-chat-core
+ATOMIC_LIVE=1 \
+ATOMIC_RUNTIME_DESCRIPTOR_URL="file://$HOME/tensorrt-llm.json" \
+ATOMIC_LIVE_MANAGED_ROOT="$HOME/atomic-chat-core/test/tmp/live-managed-install/<install run>/managed" \
+npx vitest run --project live test/live/tensorrt-llm.test.ts 2>&1 \
+  | tee "tensorrt-llm-$(hostname)-$(date +%Y%m%d-%H%M).log"
+```
+
+Leave out `ATOMIC_LIVE_MANAGED_ROOT` when the app or `atc` set the engine up. `ATOMIC_RUNTIME_DESCRIPTOR_URL`
+must name the descriptor the engine was installed with, because `preconditions` compares the ids. Until
+conf merges, that is the `file://` URL of your copy of `atomic-chat-conf/runtimes/tensorrt-llm.json`.
+Without it, the test reads the fixture copy in `test/fixtures/runtimes/tensorrt-llm.json`.
+
+The only opt-in is `ATOMIC_LIVE=1`, on Linux with `/usr/bin/nvidia-smi`. Anywhere else, every scenario is
+skipped with the reason. The CI live job on runners without a GPU is one example. `npm run test:live`
+sets `ATOMIC_LIVE=1`, so on an NVIDIA Linux host it runs this test too, downloads included.
+
+Optional variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ATOMIC_LIVE_CORE_BIN` | `dist/bin/atomic-chat-core-<arch>-unknown-linux-gnu` | the core binary under test |
+| `ATOMIC_LIVE_MANAGED_ROOT` | the per-user managed root | where the `ready` engine installation lives; passed to the core as `ATOMIC_CORE_MANAGED_ROOT` |
+| `ATOMIC_LIVE_OUT` | `test/tmp/live-tensorrt-llm/<id>-<version>-<arch>-<time>/` | output folder |
+| `ATOMIC_LIVE_MODEL_CACHE` | `~/.cache/atomic-chat-live/hf` | downloaded checkpoints, kept across runs and shared with the install test |
+| `ATOMIC_LIVE_TRT_MODEL` | each card's tier model | one curated `repository` to load on every card |
+| `ATOMIC_LIVE_TRT_CONTEXT_LENGTH` | unset (the provider's 8192) | stored as the run's `context_length` setting (`max_output_tokens` half of it, at most 4096), so the check route and every load reserve KV cache for it; for 8 GB cards |
+| `ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB` | `512` | how far above its pre-load level a card's memory may settle after the kill |
+| `ATOMIC_LIVE_PUBLIC_PORT` | `1337` | public server port |
+| `HF_ENDPOINT`, `HF_TOKEN` | huggingface.co, none | a mirror; curated models are ungated |
+
+No run has been timed yet. Per card, the time goes to the tier model's download on the first run, to its
+two loads (the first one cold), to a second model's download and load when the tier model has no tool
+parser, and to about two minutes of heartbeat sampling and waiting for the watchdog.
+
+The run unloads the last model and stops its core. The container of a killed core is removed by the next
+core, which starts on the same data folder. If a run is interrupted right after a `kill-core` scenario,
+the exited container stays. Its id is `cards[].kill.container_id` in `summary.json`. Remove it with
+`sudo docker rm <id>`, or start any core on that data folder.
+
+### Where the report lands
+
+In the output folder the test prints on its first log line (`output folder …`):
+
+- `summary.json`: rewritten after every scenario, so an interrupted run still keeps what it proved. It
+  holds:
+  - `host` (distribution, kernel, driver, GPUs) and `core` (binary sha256, git HEAD, managed root);
+  - `source_constants`: every constant the measurements are compared against, with its `src/` file and
+    line, read from the checkout at run time;
+  - `cards[]`, one entry per card: `name`, `compute_capability`, `driver_version`, `total_bytes`,
+    `model` (repository, revision, tier, quantization, architectures, the core's check verdict), and
+    `scenarios` (passed, failed or skipped per scenario);
+  - per card, `first_load` and `reload` (`load_ms`, `stages`, `weight_bytes`, `readiness_timeout_ms`,
+    `load_to_timeout`, `vram_peak_bytes`, `shm_peak_bytes`, `command`), plus `reload_to_first_load`,
+    `engine_cache`, `stream` (`first_token_ms`), `tool` and `kill`;
+- `run.log` (the same lines the console shows, prefixed `[tensorrt-llm …]`) and `core.log` (every core's
+  stdout and stderr);
+- the `tee`'d console log.
+
+Attach `summary.json`, `run.log`, `core.log` and the console log to the PR, one set per host. Do not attach
+`data/`, which holds the models' hard links.
+
+### Carrying the measurements into an ADR
+
+The run does not write an ADR. After the runs on every host, write one ADR from `docs/decisions/_TEMPLATE.md`
+and add its line to `docs/decisions/INDEX.md`. It lists every host and card (GPU name, compute capability,
+driver, model) and decides each value below. Each placeholder is cited in `source_constants`. Change it at
+that file and line in the same change, and reference the ADR there:
+
+| Value | Placeholder in `src/` | Measured in `summary.json` |
+| --- | --- | --- |
+| Heartbeat interval | `DEFAULT_HEARTBEAT_INTERVAL_SECS` (and the watchdog poll, which follows it) | `cards[].kill.heartbeat_gaps_ms`: min, median and max of how often the core really wrote the file |
+| Watchdog stale limit and kill grace | `DEFAULT_WATCHDOG_STALE_LIMIT_SECS`, `DEFAULT_WATCHDOG_KILL_GRACE_SECS` | `cards[].kill.watchdog_env` (what the container got), `observed_staleness_ms` (last heartbeat to container exit), `kill_to_exit_ms`, `watchdog_exit_bound_ms`, and `exit_code` 97 |
+| `--shm-size` | `MODEL_CONTAINER_SHM_SIZE` | `cards[].kill.shm_size_bytes` (what the container got) against `shm_peak_bytes` (the highest `/dev/shm` use seen during load, chat and tool call) |
+| Container memory limit | none: the core sets no `--memory` | `cards[].kill.container_memory_limit_bytes` (`0` means Docker sets no limit) |
+| Load timeout coefficients | `TENSORRT_LLM_READINESS_BASE_MS`, `TENSORRT_LLM_READINESS_PER_GIB_MS`, `TENSORRT_LLM_READINESS_MARGIN` | `cards[].first_load.load_ms` against `weight_bytes`. A line through the cold first loads gives the base (intercept) and the per-GiB cost (slope). The margin must cover the slowest card's first load, which `load_to_timeout` shows as a fraction of today's timeout. `reload.load_ms` shows what the engine cache saves. |
+
+Also note in the ADR the `stages` split (`starting-container` against `initializing-engine`) and the time
+to the first token, because they tell users what to expect.
+
+### Carrying the model results into conf
+
+Each card's `model` and `scenarios` in `summary.json` are the input for `curated_models` in
+`atomic-chat-conf/runtimes/tensorrt-llm.json`:
+
+- A model whose `load`, `stream` or `reload-cached` failed on its tier's card generation must not stay in
+  that tier. Remove it, or move it to the tier where it passed, and recompute nothing else: the
+  `inventory_digest` belongs to the revision, not the tier.
+- Write the cards it passed on into its `note`, for example "verified on RTX 4090 (8.9) and L40S (8.9)".
+- A `tool-call` failure on a family whose `model_families` entry names a `tool_parser` means that parser
+  name is wrong for this engine release. Fix `model_families`, not the model list.
+- Put the table of hosts and cards (name, compute capability, driver, model, pass or fail per scenario,
+  load, reload and first-token times) in the conf PR that changes the list.

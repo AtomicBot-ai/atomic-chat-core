@@ -36,3 +36,11 @@ Managed TensorRT-LLM install on Linux (`test/live/managed-install.test.ts`, task
 sudo. It installs Docker and the NVIDIA Container Toolkit through the core's own recipe, emulates the relogin, pulls the
 engine, loads a curated model and streams a chat on `:1337`, then writes `summary.json` for the PR. VM states, build,
 exact command and what to attach: [`docs/live-tests.md`](../../docs/live-tests.md).
+
+TensorRT-LLM engine on every NVIDIA card (`test/live/tensorrt-llm.test.ts`, task 2.19): `ATOMIC_LIVE=1` on Linux with
+`/usr/bin/nvidia-smi` and the engine already `ready` (after the install test, pass its `managed/` folder as
+`ATOMIC_LIVE_MANAGED_ROOT`). It changes nothing on the host. Per card, pinned through the stored `gpu_id` setting: the
+tier's curated model loads, streams on `:1337`, reloads faster from its engine cache, answers a tool call, and after
+`kill -9` of the core its container exits through the watchdog and the card's memory comes back. It writes the measured
+heartbeat, watchdog, `--shm-size`, memory-limit and load-timeout values into `summary.json` for an ADR. Prerequisites,
+exact command and how to carry the results into an ADR and conf: [`docs/live-tests.md`](../../docs/live-tests.md).

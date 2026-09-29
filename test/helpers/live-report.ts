@@ -1,5 +1,6 @@
 /**
- * The evidence a managed-install live run leaves behind (task 2.18): one line per event on stdout
+ * The evidence a live run of the managed TensorRT-LLM engine leaves behind (the install test, task
+ * 2.18, and the engine test, task 2.19): one line per event on stdout
  * (prefixed, so it can be grepped out of vitest's output) and the same in `run.log`, plus a
  * `summary.json` that is rewritten after every scenario — a run that dies half way still leaves
  * what it proved so far. Both land in the run's output folder, which is what gets attached to the PR.
@@ -33,16 +34,28 @@ export interface PhaseRecord {
   progress: { completed: number | null; total: number | null; unit: string } | null
 }
 
+export interface LiveReportOptions {
+  /** The prefix of every log line (`[<tag> <time>]`). Default `managed-install`. */
+  tag?: string
+  /** The test file named in `summary.json`. Default `test/live/managed-install.test.ts`. */
+  test?: string
+}
+
 export class LiveReport {
   readonly startedAt = new Date()
   private readonly scenarios = new Map<string, ScenarioRecord>()
   private readonly phases: PhaseRecord[] = []
   private readonly sections: Record<string, unknown> = {}
+  private readonly tag: string
+  private readonly test: string
 
   constructor(
     readonly outDir: string,
-    scenarioTitles: ReadonlyArray<readonly [string, string]>
+    scenarioTitles: ReadonlyArray<readonly [string, string]>,
+    options: LiveReportOptions = {}
   ) {
+    this.tag = options.tag ?? 'managed-install'
+    this.test = options.test ?? 'test/live/managed-install.test.ts'
     mkdirSync(outDir, { recursive: true })
     for (const [id, title] of scenarioTitles)
       this.scenarios.set(id, { id, title, status: 'not-run', reason: null, duration_ms: null, details: {} })
@@ -54,12 +67,12 @@ export class LiveReport {
 
   /** One human-readable line, to stdout and `run.log`. */
   log(message: string): void {
-    const line = `[managed-install ${new Date().toISOString()}] ${message}`
+    const line = `[${this.tag} ${new Date().toISOString()}] ${message}`
     console.log(line)
     appendFileSync(join(this.outDir, 'run.log'), `${line}\n`)
   }
 
-  /** A top-level section of the summary (`host`, `core`, `descriptor`, `model`, ...). */
+  /** A top-level section of the summary (`host`, `core`, `descriptor`, `model`, `cards`, ...). */
   section(name: string, value: unknown): void {
     this.sections[name] = value
     this.flush()
@@ -116,7 +129,7 @@ export class LiveReport {
   flush(): void {
     const summary = {
       schema_version: 1,
-      test: 'test/live/managed-install.test.ts',
+      test: this.test,
       started_at: this.startedAt.toISOString(),
       updated_at: new Date().toISOString(),
       ...this.sections,
@@ -148,7 +161,12 @@ export class LiveReport {
           p.duration_ms === null ? '' : `${(p.duration_ms / 1000).toFixed(1)} s`
         }`
     )
-    return ['Scenarios:', ...rows, 'Operation phases:', ...phases, `Summary: ${this.summaryPath}`].join('\n')
+    return [
+      'Scenarios:',
+      ...rows,
+      ...(phases.length === 0 ? [] : ['Operation phases:', ...phases]),
+      `Summary: ${this.summaryPath}`,
+    ].join('\n')
   }
 
   private count(status: ScenarioStatus): number {

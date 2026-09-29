@@ -40,17 +40,9 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { httpRequest, pollOperation, startLiveCore } from '../helpers/live-core.js'
+import { pollOperation, startLiveCore, streamChat } from '../helpers/live-core.js'
 import type { LiveCore, OperationView, PendingHostStep } from '../helpers/live-core.js'
-import {
-  downloadRevision,
-  fetchJson,
-  installModel,
-  inventoryDigest,
-  listRevision,
-  pickCuratedModel,
-  quantizationOf,
-} from '../helpers/live-hf-model.js'
+import { pickCuratedModel, prepareCuratedModel, readDescriptor } from '../helpers/live-hf-model.js'
 import type { CuratedModel } from '../helpers/live-hf-model.js'
 import {
   cardBytes,
@@ -278,13 +270,6 @@ const restartApplies = (): boolean =>
   (S.path === 'complete' || S.path === 'install') && S.facts.docker.service_active && !gpuRuntimeBefore()
 const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
-async function readDescriptor(url: string): Promise<Descriptor> {
-  if (url.startsWith('file://')) return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as Descriptor
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`descriptor ${url} answered ${res.status}`)
-  return (await res.json()) as Descriptor
-}
-
 /** A 0700 folder the invoking user owns — what `host-step exec` trusts (request-file.ts). */
 function privateDir(path: string): string {
   mkdirSync(path, { recursive: true, mode: 0o700 })
@@ -422,7 +407,7 @@ const needsHostPrepared = (): string | null =>
 
 describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task 2.18)', () => {
   beforeAll(async () => {
-    S.descriptor = await readDescriptor(DESCRIPTOR_URL)
+    S.descriptor = await readDescriptor<Descriptor>(DESCRIPTOR_URL)
     S.facts = detectHost(S.descriptor)
     S.path = setupPath(S.facts)
     S.problems = preconditionProblems(S.facts, S.descriptor)
@@ -1027,57 +1012,22 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       `no curated model fits ${gpu?.name} (${cardBytes(gpu as NonNullable<typeof gpu>)} bytes, cc ${gpu?.compute_capability})`
     ).not.toBeNull()
     const model = curated as CuratedModel
-    const hfLog = (line: string): void => report.log(line)
-    const id = model.repository.split('/').pop() as string
     report.log(`model: ${model.repository}@${model.revision} (${model.note})`)
-
-    // The documented flow: the exact revision's listing must be the one the descriptor pinned.
-    const files = await listRevision(model.repository, model.revision, hfLog)
-    expect(inventoryDigest(files)).toBe(model.inventory_digest)
-    const config = await fetchJson(model.repository, model.revision, 'config.json', hfLog)
-    const hfQuant = files.some((f) => f.path === 'hf_quant_config.json')
-      ? await fetchJson(model.repository, model.revision, 'hf_quant_config.json', hfLog)
-      : null
-    let quantization = quantizationOf(config, hfQuant)
-    const check = await api.post<{
-      quantization_format: string | null
-      curated: boolean
-      verdict: { ok: boolean }
-    }>('/models/tensorrt-llm/check', {
-      repository: model.repository,
-      revision: model.revision,
-      config_json: config,
-      hf_quant_config_json: hfQuant,
-      files,
-      gpu_id: gpu?.uuid,
-    })
-    report.detail('model-chat', 'check', check.status === 404 ? 'route not in this build' : check.body)
-    if (check.status !== 404) {
-      expect(check.status, check.text).toBe(200)
-      expect(check.body.verdict.ok, check.text).toBe(true)
-      expect(check.body.curated).toBe(true)
-      quantization = check.body.quantization_format ?? quantization
-    }
-
-    const cache = join(
-      process.env['ATOMIC_LIVE_MODEL_CACHE'] ?? join(homedir(), '.cache', 'atomic-chat-live', 'hf'),
-      ...model.repository.split('/'),
-      model.revision
-    )
-    const downloadStarted = Date.now()
-    await downloadRevision(model.repository, model.revision, files, cache, hfLog)
-    const downloadMs = Date.now() - downloadStarted
-    const dir = await installModel({
+    // The documented flow: the exact revision's listing must be the one the descriptor pinned, and
+    // the core's check route (when this build has it) must say it runs on this card.
+    const prepared = await prepareCuratedModel({
+      api,
+      model,
+      gpuId: gpu?.uuid,
       dataFolder: S.dataFolder,
-      id,
-      cacheDir: cache,
-      repository: model.repository,
-      revision: model.revision,
-      files,
-      architectures: (config['architectures'] as string[] | undefined) ?? [],
-      quantization,
+      cacheRoot:
+        process.env['ATOMIC_LIVE_MODEL_CACHE'] ?? join(homedir(), '.cache', 'atomic-chat-live', 'hf'),
+      log: (line) => report.log(line),
     })
-    report.log(`model installed at ${dir}`)
+    report.detail('model-chat', 'check', prepared.check ?? 'route not in this build')
+    const { id, quantization, files } = prepared
+    const downloadMs = prepared.download_ms
+    report.log(`model installed at ${prepared.dir}`)
 
     // A small card can be refused by the pre-launch memory check (weights plus the KV reserve for
     // the context length); ATOMIC_LIVE_TRT_CONTEXT_LENGTH shrinks that reserve for this load only.
@@ -1107,44 +1057,17 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
 
     const server = await api.post<{ port: number }>('/server/start', { port: PUBLIC_PORT })
     expect(server.status, server.text).toBe(200)
-    const chatStarted = Date.now()
-    let firstTokenMs: number | null = null
-    let answer = ''
-    let reasoning = ''
-    let pending = ''
-    const chat = await httpRequest({
+    const chat = await streamChat({
       url: `http://127.0.0.1:${server.body.port}/v1/chat/completions`,
-      method: 'POST',
-      body: JSON.stringify({
+      body: {
         model: id,
         stream: true,
         max_tokens: 128,
         messages: [{ role: 'user', content: 'What is 2 + 2? Answer in one short sentence. /no_think' }],
-      }),
-      timeoutMs: 10 * MIN,
-      onChunk: (chunk) => {
-        pending += chunk
-        const lines = pending.split('\n')
-        pending = lines.pop() ?? ''
-        for (const line of lines) {
-          const data = /^data: (.*)$/.exec(line.trim())?.[1]
-          if (data === undefined || data === '[DONE]') continue
-          try {
-            const delta = (
-              JSON.parse(data) as {
-                choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>
-              }
-            ).choices?.[0]?.delta
-            const text = `${delta?.content ?? ''}${delta?.reasoning_content ?? ''}`
-            if (text !== '' && firstTokenMs === null) firstTokenMs = Date.now() - chatStarted
-            answer += delta?.content ?? ''
-            reasoning += delta?.reasoning_content ?? ''
-          } catch {
-            // A partial or non-JSON line is not a token.
-          }
-        }
       },
+      timeoutMs: 10 * MIN,
     })
+    const { content: answer, reasoning, first_token_ms: firstTokenMs } = chat
     const result = {
       repository: model.repository,
       revision: model.revision,
@@ -1156,7 +1079,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       load_ms: loadMs,
       chat_status: chat.status,
       first_token_ms: firstTokenMs,
-      chat_ms: Date.now() - chatStarted,
+      chat_ms: chat.total_ms,
       answer,
       reasoning,
       container_id: S.containerId,

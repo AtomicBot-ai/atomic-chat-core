@@ -1,7 +1,8 @@
 /**
- * The compiled core on a real Linux VM, for the managed-install live test (task 2.18): start a
- * daemon either in the test's own session or in a fresh login's group set, talk to its control API,
- * follow its event stream, and stop it without leaving it behind.
+ * The compiled core on a real Linux machine, for the managed TensorRT-LLM live tests (install, task
+ * 2.18; engine, task 2.19): start a daemon either in the test's own session or in a fresh login's
+ * group set, talk to its control API, follow its event stream, stream a chat from it, and stop it
+ * without leaving it behind.
  *
  * HTTP goes through `node:http`, not `fetch`: a TensorRT-LLM load can take longer than undici's
  * fixed five-minute headers timeout, and a load that "failed" because the test's client gave up would
@@ -77,6 +78,73 @@ export function httpRequest(
     if (req.body !== undefined) request.write(req.body)
     request.end()
   })
+}
+
+export interface StreamedChat {
+  status: number
+  headers: http.IncomingHttpHeaders
+  /** The raw SSE body, `data: [DONE]` included. */
+  text: string
+  /** `delta.content` of every chunk, joined. */
+  content: string
+  /** `delta.reasoning_content` of every chunk, joined (a reasoning parser splits the thinking out). */
+  reasoning: string
+  /** From the request to the first chunk carrying content or reasoning; null when none came. */
+  first_token_ms: number | null
+  total_ms: number
+}
+
+/**
+ * One streamed `POST /v1/chat/completions` (`stream: true` in `body`), read chunk by chunk as it
+ * arrives, so the time to the first token is the client's own, not the end of the body's.
+ */
+export async function streamChat(options: {
+  url: string
+  body: Record<string, unknown>
+  timeoutMs: number
+}): Promise<StreamedChat> {
+  const started = Date.now()
+  let firstTokenMs: number | null = null
+  let content = ''
+  let reasoning = ''
+  let pending = ''
+  const answer = await httpRequest({
+    url: options.url,
+    method: 'POST',
+    body: JSON.stringify(options.body),
+    timeoutMs: options.timeoutMs,
+    onChunk: (chunk) => {
+      pending += chunk
+      const lines = pending.split('\n')
+      pending = lines.pop() ?? ''
+      for (const line of lines) {
+        const data = /^data: (.*)$/.exec(line.trim())?.[1]
+        if (data === undefined || data === '[DONE]') continue
+        try {
+          const delta = (
+            JSON.parse(data) as {
+              choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>
+            }
+          ).choices?.[0]?.delta
+          const text = `${delta?.content ?? ''}${delta?.reasoning_content ?? ''}`
+          if (text !== '' && firstTokenMs === null) firstTokenMs = Date.now() - started
+          content += delta?.content ?? ''
+          reasoning += delta?.reasoning_content ?? ''
+        } catch {
+          // A partial or non-JSON line is not a token.
+        }
+      }
+    },
+  })
+  return {
+    status: answer.status,
+    headers: answer.headers,
+    text: answer.text,
+    content,
+    reasoning,
+    first_token_ms: firstTokenMs,
+    total_ms: Date.now() - started,
+  }
 }
 
 export class ControlApi {

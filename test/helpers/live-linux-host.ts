@@ -1,7 +1,8 @@
 /**
- * The real Linux VM the managed-install live test runs on (task 2.18): what the machine is before
- * the core touches it, read by the test itself — independently of the core's own probe, so the two
- * can be compared — and which of the brief's scenarios that starting state can exercise.
+ * The real Linux machine the managed TensorRT-LLM live tests run on (install, task 2.18; engine, task
+ * 2.19): what the machine is before the core touches it, read by the test itself — independently of
+ * the core's own probe, so the two can be compared — and which of the brief's scenarios that starting
+ * state can exercise.
  *
  * Everything here is read-only except `sudo`, which the test uses for what its own unprivileged
  * session cannot see (the Docker daemon before the relogin, container logs, `daemon.json`) and for
@@ -69,6 +70,13 @@ export function sudoDocker(args: string[], timeoutMs?: number): CommandResult {
   const cli = dockerCli()
   if (cli === null) return { code: null, stdout: '', stderr: 'no docker CLI' }
   return sudo([cli, '-H', SOCKET, ...args], timeoutMs)
+}
+
+/** `sudoDocker` without blocking the event loop: for sampling while a load request is in flight. */
+export function sudoDockerAsync(args: string[], timeoutMs: number): Promise<CommandResult> {
+  const cli = dockerCli()
+  if (cli === null) return Promise.resolve({ code: null, stdout: '', stderr: 'no docker CLI' })
+  return runAsync('sudo', ['-n', cli, '-H', SOCKET, ...args], timeoutMs)
 }
 
 export interface OsRelease {
@@ -139,6 +147,29 @@ export function parseNvidiaSmi(csv: string): LiveGpu[] {
       free_bytes: mib(free),
       driver_version: driver as string,
     }))
+}
+
+/**
+ * `nvidia-smi --query-gpu=uuid,memory.used --format=csv,noheader,nounits`: each card's used memory in
+ * bytes, by UUID; null for a unified-memory card that reports `[N/A]`.
+ */
+export function parseMemoryUsed(csv: string): Map<string, number | null> {
+  const used = new Map<string, number | null>()
+  for (const line of csv.split('\n')) {
+    const [uuid, cell] = line.split(',').map((part) => part.trim())
+    if (uuid?.startsWith('GPU-')) used.set(uuid, mib(cell))
+  }
+  return used
+}
+
+/** Every card's used memory now (see `parseMemoryUsed`); empty when nvidia-smi does not answer. */
+export async function gpuMemoryUsed(): Promise<Map<string, number | null>> {
+  const out = await runAsync(
+    'nvidia-smi',
+    ['--query-gpu=uuid,memory.used', '--format=csv,noheader,nounits'],
+    30_000
+  )
+  return out.code === 0 ? parseMemoryUsed(out.stdout) : new Map()
 }
 
 export type PackageFamily = 'apt' | 'dnf' | 'pacman' | 'other'

@@ -1,6 +1,7 @@
 /**
- * The model half of the managed-install live test (task 2.18): the core never downloads a model
- * (design D12), so the test does what the app and the CLI do for a curated `tensorrt-llm` model —
+ * The model half of the managed TensorRT-LLM live tests (install, task 2.18; engine, task 2.19): the
+ * core never downloads a model (design D12), so the test does what the app and the CLI do for a
+ * curated `tensorrt-llm` model —
  *
  *   1. list the repository at exactly the curated revision (`/api/models/<repo>/revision/<rev>?
  *      blobs=true&files_metadata=true`, the endpoint conf's `inventory-digest.mjs` uses) and refuse
@@ -18,13 +19,15 @@
  * run then checks the published digest independently of the core's copy.
  */
 import { createHash } from 'node:crypto'
-import { createReadStream, createWriteStream, existsSync } from 'node:fs'
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs'
 import { copyFile, link, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream as WebReadableStream } from 'node:stream/web'
+import { fileURLToPath } from 'node:url'
 import { stringify } from 'yaml'
+import type { ControlApi } from './live-core.js'
 
 export interface CuratedModel {
   repository: string
@@ -370,6 +373,37 @@ export async function installModel(options: {
   return dir
 }
 
+export interface CardShape {
+  total_bytes: number
+  compute_capability: string
+}
+
+/** The compute capability a curated checkpoint's format needs, by its name (NVFP4 10.0, FP8 8.9, BF16 8.0). */
+const formatNeeds = (m: CuratedModel): number =>
+  /nvfp4/i.test(m.repository) ? 10 : /fp8/i.test(m.repository) ? 8.9 : 8
+
+/** The one curated model `override` names; a throw when it is not curated. */
+function namedCurated(curated: readonly CuratedModel[], override: string): CuratedModel {
+  const named = curated.find((m) => m.repository === override)
+  if (named === undefined)
+    throw new Error(
+      `ATOMIC_LIVE_TRT_MODEL=${override} is not in the descriptor's curated_models ` +
+        `(${curated.map((m) => m.repository).join(', ')}); only curated models have a pinned revision and inventory digest`
+    )
+  return named
+}
+
+/**
+ * Every curated model this card can run: its `vram_tier_bytes` within the card's memory, and a format
+ * its compute capability runs. Smallest tier first.
+ */
+export function fittingCuratedModels(curated: readonly CuratedModel[], gpu: CardShape): CuratedModel[] {
+  const cc = Number.parseFloat(gpu.compute_capability)
+  return [...curated]
+    .filter((m) => m.vram_tier_bytes <= gpu.total_bytes && formatNeeds(m) <= cc)
+    .sort((a, b) => a.vram_tier_bytes - b.vram_tier_bytes)
+}
+
 /**
  * The curated model for this card: the smallest `vram_tier_bytes` the card holds whose format the
  * card's compute capability runs (NVFP4 needs 10.0, FP8 8.9, BF16 8.0 — the names say which), or the
@@ -377,24 +411,139 @@ export async function installModel(options: {
  */
 export function pickCuratedModel(
   curated: readonly CuratedModel[],
-  gpu: { total_bytes: number; compute_capability: string },
+  gpu: CardShape,
   override?: string
 ): CuratedModel | null {
-  if (override !== undefined && override !== '') {
-    const named = curated.find((m) => m.repository === override)
-    if (named === undefined)
-      throw new Error(
-        `ATOMIC_LIVE_TRT_MODEL=${override} is not in the descriptor's curated_models ` +
-          `(${curated.map((m) => m.repository).join(', ')}); only curated models have a pinned revision and inventory digest`
-      )
-    return named
-  }
-  const cc = Number.parseFloat(gpu.compute_capability)
-  const needs = (m: CuratedModel): number =>
-    /nvfp4/i.test(m.repository) ? 10 : /fp8/i.test(m.repository) ? 8.9 : 8
+  if (override !== undefined && override !== '') return namedCurated(curated, override)
+  return fittingCuratedModels(curated, gpu)[0] ?? null
+}
+
+/**
+ * The curated model of this card's own memory tier (task 2.19): the largest `vram_tier_bytes` the
+ * card holds among the formats it runs, and within that tier the format that needs the newest card —
+ * NVFP4 on Blackwell, FP8 on Ada and Hopper, BF16 on Ampere, the way conf's notes assign each tier's
+ * models to card generations. `override` as in `pickCuratedModel`.
+ */
+export function pickTierModel(
+  curated: readonly CuratedModel[],
+  gpu: CardShape,
+  override?: string
+): CuratedModel | null {
+  if (override !== undefined && override !== '') return namedCurated(curated, override)
+  const fitting = fittingCuratedModels(curated, gpu)
+  const top = fitting[fitting.length - 1]
+  if (top === undefined) return null
   return (
-    [...curated]
-      .filter((m) => m.vram_tier_bytes <= gpu.total_bytes && needs(m) <= cc)
-      .sort((a, b) => a.vram_tier_bytes - b.vram_tier_bytes)[0] ?? null
+    fitting
+      .filter((m) => m.vram_tier_bytes === top.vram_tier_bytes)
+      .sort((a, b) => formatNeeds(b) - formatNeeds(a))[0] ?? null
   )
+}
+
+/** A runtime descriptor from a `file://` URL (a conf checkout or the fixture copy) or over HTTPS. */
+export async function readDescriptor<T>(url: string): Promise<T> {
+  if (url.startsWith('file://')) return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as T
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`descriptor ${url} answered ${res.status}`)
+  return (await res.json()) as T
+}
+
+/** What `POST /atomic/v1/models/tensorrt-llm/check` answers (spec `tensorrt-llm-models`). */
+export interface ModelCheck {
+  architectures: string[]
+  quantization_format: string | null
+  weight_bytes: number
+  checked_gpu_id: string
+  curated: boolean
+  unified_memory: boolean
+  fits_other_gpus: string[]
+  verdict: { ok: boolean; error?: { code: string; message: string; details?: string } }
+}
+
+export interface PreparedModel {
+  model: CuratedModel
+  /** The model id the core knows it by: the repository's last segment. */
+  id: string
+  files: RepoFile[]
+  config: Record<string, unknown>
+  architectures: string[]
+  quantization: string
+  /** The core's verdict; null when this core build has no check route (it answered 404). */
+  check: ModelCheck | null
+  /** The whole revision, every file. */
+  bytes: number
+  download_ms: number
+  /** `<data>/tensorrt-llm/models/<id>/`. */
+  dir: string
+}
+
+/**
+ * The documented flow for one curated model, end to end: the exact revision's listing must carry the
+ * descriptor's `inventory_digest`; the core's check route (when the build has it) must say it runs
+ * on `gpuId`; then every file is downloaded into `<cacheRoot>/<repository>/<revision>/` (kept across
+ * runs) and hard-linked into the data folder with `model.yml` last. Throws with the reason on any
+ * refusal, before anything is downloaded.
+ */
+export async function prepareCuratedModel(options: {
+  api: Pick<ControlApi, 'post'>
+  model: CuratedModel
+  gpuId: string | undefined
+  dataFolder: string
+  cacheRoot: string
+  log: (line: string) => void
+}): Promise<PreparedModel> {
+  const { api, model, log } = options
+  const id = model.repository.split('/').pop() as string
+  const files = await listRevision(model.repository, model.revision, log)
+  const digest = inventoryDigest(files)
+  if (digest !== model.inventory_digest)
+    throw new Error(
+      `${model.repository}@${model.revision} lists inventory ${digest}, the descriptor pinned ${model.inventory_digest}`
+    )
+  const config = await fetchJson(model.repository, model.revision, 'config.json', log)
+  const hfQuant = files.some((f) => f.path === 'hf_quant_config.json')
+    ? await fetchJson(model.repository, model.revision, 'hf_quant_config.json', log)
+    : null
+  let quantization = quantizationOf(config, hfQuant)
+  const answer = await api.post<ModelCheck>('/models/tensorrt-llm/check', {
+    repository: model.repository,
+    revision: model.revision,
+    config_json: config,
+    hf_quant_config_json: hfQuant,
+    files,
+    ...(options.gpuId === undefined ? {} : { gpu_id: options.gpuId }),
+  })
+  const check = answer.status === 404 ? null : answer.body
+  if (check !== null) {
+    if (answer.status !== 200 || !check.verdict.ok || !check.curated)
+      throw new Error(`the core's check refused ${model.repository}: ${answer.status} ${answer.text}`)
+    quantization = check.quantization_format ?? quantization
+  }
+  const cache = join(options.cacheRoot, ...model.repository.split('/'), model.revision)
+  const started = Date.now()
+  await downloadRevision(model.repository, model.revision, files, cache, log)
+  const downloadMs = Date.now() - started
+  const architectures = (config['architectures'] as string[] | undefined) ?? []
+  const dir = await installModel({
+    dataFolder: options.dataFolder,
+    id,
+    cacheDir: cache,
+    repository: model.repository,
+    revision: model.revision,
+    files,
+    architectures,
+    quantization,
+  })
+  return {
+    model,
+    id,
+    files,
+    config,
+    architectures,
+    quantization,
+    check,
+    bytes: files.reduce((sum, f) => sum + f.size, 0),
+    download_ms: downloadMs,
+    dir,
+  }
 }
