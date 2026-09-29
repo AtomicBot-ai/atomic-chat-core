@@ -8,6 +8,16 @@ Two live tests cover the managed TensorRT-LLM engine on real Linux machines with
   engine on every NVIDIA card of a host and measures the values the design left open. It changes nothing
   on the host.
 
+**Thinking is off in every chat request.** Where a scenario wants a plain answer (the install test's
+`model-chat`; the engine test's `stream`, `tool-call`, `structured-output` and
+`structured-output-refused`), the request carries `chat_template_kwargs: {"enable_thinking": false}`
+(`THINKING_OFF` in `test/helpers/live-core.ts`). Qwen3's `/no_think` soft switch is not used: TRT-LLM
+1.2.1's `qwen3` reasoning parser ends reasoning only at `</think>`, and with `/no_think` Qwen3-1.7B opens
+`<think>` and never closes it, so the whole answer, a tool call included, lands in `reasoning_content`
+(4 of 4 on the first live run). `enable_thinking: false` closes the think block in the prompt itself, and
+the tool parser returned the call 3 of 3 times. The report still records `reasoning_content` and
+`finish_reason`.
+
 ## Install test (task 2.18)
 
 `test/live/managed-install.test.ts` (task 2.18 of change `add-tensorrt-llm-linux`) installs the managed
@@ -95,9 +105,20 @@ that gid, but the core reaches the daemon with it and rightly goes on without a 
   plus 5 GB in `$HOME` for the model cache.
 - **Network**: `download.docker.com`, `nvidia.github.io`, `nvcr.io`, `huggingface.co`, and Docker Hub
   (for the `busybox` sentinels).
-- **Node.js 22+** (vitest runs on it) and **Bun** (the repository's lockfile is `bun.lock`, and there is
-  no `package-lock.json`, so `npm ci` cannot work): `curl -fsSL https://bun.sh/install | bash`, then open
-  a new shell.
+  - **nvcr.io from a restricted region** answers `403`, on `proxy_auth` too. The egress must stay
+    outside such regions for the whole engine image pull, which takes a long time; a route that changes
+    halfway fails the pull.
+  - **A full-tunnel VPN** (routes `0.0.0.0/1` and `128.0.0.0/1`) leaves dockerd no private range it
+    considers free, and Docker does not start: "all predefined address pools have been fully subnetted"
+    in `journalctl -u docker.service` (the privileged step's result now carries that journal tail). Before
+    the run, and before Docker is installed, create `/etc/docker/daemon.json` with a bridge address in any
+    unused `/24`, for example `{"bip": "172.30.99.1/24"}`
+    (`sudo mkdir -p /etc/docker && echo '{"bip": "172.30.99.1/24"}' | sudo tee /etc/docker/daemon.json`).
+    The recipe's `nvidia-ctk runtime configure` merges the NVIDIA runtime into that file and keeps the
+    key.
+- **Node.js 22+** (vitest runs on it) and **Bun 1.3.10**, the version CI pins (the repository's lockfile
+  is `bun.lock`, and there is no `package-lock.json`, so `npm ci` cannot work):
+  `curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.10"`, then open a new shell.
 - **Ubuntu/Debian: no background upgrades during the run.** `unattended-upgrades` can hold the dpkg lock
   past the recipe's timeout, or change the installed-package set that `probe-plan` and
   `recipe-rerun-noop` compare. Before the run, wait for it to finish and stop it:
@@ -171,6 +192,11 @@ ATOMIC_RUNTIME_DESCRIPTOR_URL="file://$HOME/tensorrt-llm.json" \
 npx vitest run --project live test/live/managed-install.test.ts 2>&1 \
   | tee "managed-install-$ID-$VERSION_ID-$(uname -m).log"
 ```
+
+Without tmux, a detached process survives an ssh drop too. Put the command above (without `tmux new`)
+into a script, `chmod +x` it, and start it from the same fresh login with
+`setsid nohup ./run-live.sh > run-live.log 2>&1 < /dev/null &`; follow it with `tail -f run-live.log`. It
+keeps that login's groups, so the relogin emulation is unaffected as well.
 
 Both opt-ins are required: `ATOMIC_LIVE=1` alone (which `npm run test:live` sets) never starts this test,
 because it installs system packages. Without `ATOMIC_RUNTIME_DESCRIPTOR_URL` the test uses the verbatim
@@ -310,6 +336,9 @@ ATOMIC_LIVE_MANAGED_ROOT="$HOME/atomic-chat-core/test/tmp/live-managed-install/<
 npx vitest run --project live test/live/tensorrt-llm.test.ts 2>&1 \
   | tee "tensorrt-llm-$(hostname)-$(date +%Y%m%d-%H%M).log"
 ```
+
+Without tmux, `setsid nohup ./run-engine.sh > run-engine.log 2>&1 < /dev/null &` from the same login (the
+command above in a script) survives an ssh drop as well.
 
 Leave out `ATOMIC_LIVE_MANAGED_ROOT` when the app or `atc` set the engine up. `ATOMIC_RUNTIME_DESCRIPTOR_URL`
 must name the descriptor the engine was installed with, because `preconditions` compares the ids. Until
