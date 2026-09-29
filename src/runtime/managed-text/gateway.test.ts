@@ -1147,6 +1147,58 @@ describe('engine error answers (task 2.14 fix round 1, findings-2.14-r1.md item 
     expect(JSON.parse(res.body)).toMatchObject({ error: { code: 'upstream_error' } })
   })
 
+  it.each<[number, string]>([
+    [400, 'invalid_request_error'],
+    [500, 'server_error'],
+  ])('labels an error body past the cap by its status: %i is %s (final review M-4)', async (status, type) => {
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.writeHead(status, { 'content-type': 'text/plain' })
+        res.end(Buffer.alloc(MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES + 1, 0x61))
+      },
+      { mapErrorResponse: () => mapped }
+    )
+    const res = await send(gw.port, { method: 'POST', headers: auth(apiKey), body: '{}' })
+    expect(res.status).toBe(status)
+    expect(res.headers['content-type']).toBe('application/json')
+    expect(JSON.parse(res.body)).toMatchObject({ error: { type, code: 'upstream_error' } })
+  })
+
+  it('tears the engine connection down when the client leaves while an error body is still arriving (final review M-4)', async () => {
+    let upstreamClosed!: () => void
+    const closed = new Promise<void>((resolve) => (upstreamClosed = resolve))
+    let headSent!: () => void
+    const stalled = new Promise<void>((resolve) => (headSent = resolve))
+    const { gw, apiKey } = await setup(
+      (_req, res) => {
+        res.on('close', () => upstreamClosed())
+        res.writeHead(400, { 'content-type': 'application/json' })
+        // Part of an error body, then nothing: an engine stalled mid-answer.
+        res.write('{"object":"error","message":"')
+        headSent()
+      },
+      { mapErrorResponse: () => mapped }
+    )
+    const client = httpRequest({
+      host: '127.0.0.1',
+      port: gw.port,
+      path: '/v1/chat/completions',
+      method: 'POST',
+      headers: auth(apiKey),
+    })
+    client.on('error', () => {})
+    client.end('{}')
+    await stalled
+    client.destroy()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([
+      closed.then(() => 'closed' as const),
+      new Promise<'held'>((resolve) => (timer = setTimeout(() => resolve('held'), 2_000))),
+    ])
+    clearTimeout(timer)
+    expect(outcome).toBe('closed')
+  })
+
   it("answers a ManagedRequestRefusal thrown by the rewriter as a 400 with the refusal's own code", async () => {
     let reached = false
     const { gw, apiKey } = await setup(

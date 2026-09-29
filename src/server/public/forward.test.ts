@@ -265,6 +265,35 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
     expect(asked).toEqual([])
   })
 
+  it('answers an engine error it does not map as JSON, on chat and on the Anthropic fallback (final review M-4)', async () => {
+    // What the session gateway answers once it has already mapped the engine's error itself.
+    const alreadyMapped = JSON.stringify({
+      error: {
+        message: 'too long',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'context_length_exceeded',
+      },
+    })
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(alreadyMapped)
+    })
+    const server = await startPublic({ sessions: [trt(port)] })
+    const chat = await postJson(server, '/chat/completions', { model: 'trt' })
+    expect(chat.status).toBe(400)
+    expect(chat.headers.get('content-type')).toContain('application/json')
+    expect(await chat.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    const messages = await postJson(server, '/messages', {
+      model: 'trt',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'hello' }],
+    })
+    expect(messages.status).toBe(400)
+    expect(messages.headers.get('content-type')).toContain('application/json')
+    expect(await messages.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+  })
+
   it('sends /v1/messages straight to chat completions, never to the undeclared route, and maps an overflow there too', async () => {
     const seen: string[] = []
     const { port } = await startUpstream((req, body, res) => {

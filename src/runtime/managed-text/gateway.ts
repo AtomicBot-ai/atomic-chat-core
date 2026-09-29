@@ -339,20 +339,37 @@ async function sendBodyToUpstream(
 /**
  * An engine's error answer, read under `MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES`: the adapter's mapped
  * OpenAI error when it has one, otherwise the engine's own answer (status, headers, bytes) as it was.
+ * A client that leaves while the body is still arriving tears the engine connection down with it
+ * (final review M-4): an engine stalled mid-error would otherwise hold that socket forever. An
+ * answer that cannot be relayed keeps the engine's status, labelled a client error for a `4xx`.
  */
 async function answerEngineError(
   res: ServerResponse,
   upstream: UpstreamResponse,
   mapError: (status: number, body: string) => object | null
 ): Promise<void> {
-  const capped = await readCappedBody(upstream.body, MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES).catch(() => null)
+  const onClientGone = () => upstream.body.destroy()
+  res.once('close', onClientGone)
+  let capped: Buffer | 'too-large' | null
+  try {
+    capped = res.destroyed
+      ? null
+      : await readCappedBody(upstream.body, MANAGED_GATEWAY_ERROR_BODY_CAP_BYTES).catch(() => null)
+  } finally {
+    res.off('close', onClientGone)
+  }
+  if (res.destroyed) {
+    upstream.body.destroy()
+    return
+  }
   if (capped === null || capped === 'too-large') {
     upstream.body.destroy()
+    const clientError = upstream.status >= 400 && upstream.status < 500
     sendOpenAIError(
       res,
       upstream.status,
       'The engine answered with an error that could not be relayed.',
-      'server_error',
+      clientError ? 'invalid_request_error' : 'server_error',
       'upstream_error'
     )
     return

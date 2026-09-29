@@ -410,7 +410,11 @@ async function upstreamError(
         answer(ex, status, serdeToString(mapped as JsonValue), [['Content-Type', 'application/json']])
         return
       }
-      answer(ex, status, structureBackendErrorBody(errorBody, trace.oomDetected, trace.ctxOverflowDetected))
+      // Always a JSON error body here, so say so (final review M-4): the session gateway may already
+      // have mapped the engine's error, which then reaches this branch unmapped.
+      answer(ex, status, structureBackendErrorBody(errorBody, trace.oomDetected, trace.ctxOverflowDetected), [
+        ['Content-Type', 'application/json'],
+      ])
       return
     }
     if (isContextLimitError(status, errorBody) && (await growAndRetry(ex, provider, modelId, raw, 'error')))
@@ -538,12 +542,23 @@ async function messagesFallback(
         trace.ctxOverflowDetected = isContextLimitError(fallback.status, fallbackError)
         // A declared session's own error wording (its context overflow) reads the same here as on
         // the chat route itself.
-        const mapped =
-          backend.kind === 'local' ? backend.session.policy?.mapError(fallback.status, fallbackError) : null
+        const policy = backend.kind === 'local' ? backend.session.policy : undefined
+        const mapped = policy?.mapError(fallback.status, fallbackError)
         if (mapped) {
           answer(ex, fallback.status, serdeToString(mapped as JsonValue), [
             ['Content-Type', 'application/json'],
           ])
+          return
+        }
+        if (policy !== undefined) {
+          // The session gateway may already have mapped it (final review M-4): an OpenAI error body,
+          // wrapped like the chat route's own and answered as the JSON it is.
+          answer(
+            ex,
+            fallback.status,
+            structureBackendErrorBody(fallbackError, trace.oomDetected, trace.ctxOverflowDetected),
+            [['Content-Type', 'application/json']]
+          )
           return
         }
         answer(ex, fallback.status, fallbackError)
