@@ -100,6 +100,9 @@ const COMMAND_TIMEOUT_MS = 10 * 60_000
  */
 const INSTALL_TIMEOUT_MS = 2 * 60 * 60_000
 const INSTALL_TERMINATE_GRACE_MS = 5 * 60_000
+/** A read that only explains a failure (the Docker journal): quick, and small. */
+const DIAGNOSTIC_TIMEOUT_MS = 30_000
+const DIAGNOSTIC_MAX_OUTPUT_BYTES = 64 * 1024
 
 const refuse = (message: string): never => {
   throw new AtomicCoreError('MANAGED_HOST_STEP_INVALID', message)
@@ -241,6 +244,11 @@ export function nodeHostStepDeps(env: NodeJS.ProcessEnv, fs: HostFs = nodeHostFs
     terminateGraceMs: INSTALL_TERMINATE_GRACE_MS,
     env: environment,
   })
+  const diagnostic = hostExec({
+    timeoutMs: DIAGNOSTIC_TIMEOUT_MS,
+    maxOutputBytes: DIAGNOSTIC_MAX_OUTPUT_BYTES,
+    env: environment,
+  })
   const invokingUid = invokingUidFrom(env)
   const folder = folderOwners(invokingUid)
   return {
@@ -251,7 +259,8 @@ export function nodeHostStepDeps(env: NodeJS.ProcessEnv, fs: HostFs = nodeHostFs
       await fs.mkdir(dirname(path), 0o755)
       await writeAtomically(fs, SYSTEM_OWNERS, path, data, mode)
     },
-    exec: ([command, ...args], options) => (options?.longRunning ? long : quick)(command as string, args),
+    exec: ([command, ...args], options) =>
+      (options?.longRunning ? long : options?.diagnostic ? diagnostic : quick)(command as string, args),
     fetch: (input, init) => fetch(input, init),
     now: () => Date.now(),
     invokingUid,

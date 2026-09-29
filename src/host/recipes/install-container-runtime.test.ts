@@ -133,7 +133,7 @@ describe('the digests a request is bound to', () => {
     // Changing any command, path, URL, key pin or file body changes this. Update it deliberately:
     // every client holding an old plan will then be refused, which is the point.
     expect(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST).toMatchInlineSnapshot(
-      `"sha256:137f549214074dd3b15cbd62e55c58391d9221746cc86dfbcecfcc63a6497a9d"`
+      `"sha256:852ceac8b172a4f9c9ddb6b60d20ead2280a2dc763c9e6f61bd930ffe615e030"`
     )
   })
 
@@ -265,6 +265,7 @@ describe('apt steps', () => {
         docker_active: ['systemctl', 'is-active', '--quiet', 'docker'],
         loaded: ['docker', 'info', '--format', '{{json .Runtimes}}'],
         restart: ['systemctl', 'restart', 'docker'],
+        journal: ['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat'],
         restart_approved: false,
       },
     ])
@@ -285,6 +286,7 @@ describe('apt steps', () => {
         enabled: ['systemctl', 'is-enabled', 'docker'],
         active: ['systemctl', 'is-active', '--quiet', 'docker'],
         enable: ['systemctl', 'enable', '--now', 'docker'],
+        journal: ['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat'],
       },
     ])
   })
@@ -642,6 +644,12 @@ describe('what the recipe may never run', () => {
     [['docker', 'rm', '-f', 'x']],
     [['docker', 'info']],
     [['nvidia-ctk', 'runtime', 'configure', '--runtime=docker', '--set-as-default']],
+    // journalctl only ever reads docker.service's last lines; never rotates, vacuums or reads others.
+    [['journalctl', '--rotate']],
+    [['journalctl', '-u', 'docker.service', '--vacuum-time=1s']],
+    [['journalctl', '-u', 'sshd.service', '-n', '40', '--no-pager', '-o', 'cat']],
+    [['journalctl', '-u', 'docker.service', '-n', '100000', '--no-pager', '-o', 'cat']],
+    [['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat', '-f']],
     [[]],
   ])('%j is refused', (argv) => {
     expect(() => assertPermittedCommand(argv)).toThrow(
@@ -681,6 +689,8 @@ describe('what the recipe may never run', () => {
     ],
     [['rpm', '--query', '--queryformat=%{NAME}\\n', 'runc']],
     [['rpm', '--query', '--queryformat=%{NAME}\\n', 'moby-engine']],
+    // Why Docker did not start, when systemctl only says "see journalctl".
+    [['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat']],
   ])('%j is permitted', (argv) => {
     expect(() => assertPermittedCommand(argv)).not.toThrow()
   })

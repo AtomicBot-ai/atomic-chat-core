@@ -103,6 +103,11 @@ const DOCKER_RPM_KEY = '060A61C51B558A7F742B77AAC52FEB6B621E9F35'
 const NVIDIA_KEY = 'C95B321B61E88C1809C4F759DDCAE044F796ECB0'
 
 const DOCKER_ACTIVE = ['systemctl', 'is-active', '--quiet', 'docker']
+/**
+ * Why docker.service did not start: `systemctl` itself only says "see journalctl". The last 40
+ * lines, message text only; run solely after a start or restart failed, never as a step of its own.
+ */
+const DOCKER_JOURNAL = ['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat']
 
 /**
  * The whole recipe as data. `{{name}}` marks a whole-argument or in-file substitution of a
@@ -311,11 +316,13 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
     /** Which runtimes the running daemon actually loaded, as opposed to what daemon.json says. */
     loaded: ['docker', 'info', '--format', '{{json .Runtimes}}'],
     restart: ['systemctl', 'restart', 'docker'],
+    journal: DOCKER_JOURNAL,
   },
   service: {
     enabled: ['systemctl', 'is-enabled', 'docker'],
     active: DOCKER_ACTIVE,
     enable: ['systemctl', 'enable', '--now', 'docker'],
+    journal: DOCKER_JOURNAL,
   },
   group: {
     uid: ['id', '-u', '{{user}}'],
@@ -535,10 +542,20 @@ export type HostRecipeStep =
       docker_active: string[]
       loaded: string[]
       restart: string[]
+      /** Read only when `restart` fails, to say why Docker did not come back. */
+      journal: string[]
       /** The plan listed the restart and the user consented to it (design D5). */
       restart_approved: boolean
     }
-  | { id: string; kind: 'enable-service'; enabled: string[]; active: string[]; enable: string[] }
+  | {
+      id: string
+      kind: 'enable-service'
+      enabled: string[]
+      active: string[]
+      enable: string[]
+      /** Read only when `enable` fails, to say why Docker did not start. */
+      journal: string[]
+    }
   | { id: string; kind: 'add-to-docker-group'; user: string; uid: string[]; groups: string[]; add: string[] }
 
 function fill(template: string, values: Record<string, string>): string {
@@ -635,6 +652,7 @@ export function buildInstallContainerRuntimeSteps(
       docker_active: [...recipe.runtime.docker_active],
       loaded: [...recipe.runtime.loaded],
       restart: [...recipe.runtime.restart],
+      journal: [...recipe.runtime.journal],
       restart_approved: wants('docker-restart'),
     })
   }
@@ -646,6 +664,7 @@ export function buildInstallContainerRuntimeSteps(
       enabled: [...recipe.service.enabled],
       active: [...recipe.service.active],
       enable: [...recipe.service.enable],
+      journal: [...recipe.service.journal],
     })
   }
 
@@ -683,9 +702,9 @@ export function commandsOf(step: HostRecipeStep): string[][] {
         [...step.install, ...step.packages],
       ]
     case 'configure-runtime':
-      return [step.configure, step.docker_active, step.loaded, step.restart]
+      return [step.configure, step.docker_active, step.loaded, step.restart, step.journal]
     case 'enable-service':
-      return [step.enabled, step.active, step.enable]
+      return [step.enabled, step.active, step.enable, step.journal]
     case 'add-to-docker-group':
       return [step.uid, step.groups, step.add]
   }
@@ -742,6 +761,7 @@ const PERMITTED: Record<string, readonly string[]> = {
   'id': ['-u', '-nG'],
   'docker': ['info'],
   'usermod': ['-aG'],
+  'journalctl': ['-u'],
 }
 
 /**
@@ -787,4 +807,6 @@ export function assertPermittedCommand(argv: readonly string[]): void {
     refuse('docker is only ever asked which runtimes it loaded')
   if (program === 'nvidia-ctk' && argv.join(' ') !== 'nvidia-ctk runtime configure --runtime=docker')
     refuse('nvidia-ctk only ever configures the docker runtime')
+  if (program === 'journalctl' && argv.join(' ') !== DOCKER_JOURNAL.join(' '))
+    refuse('journalctl only ever reads the last lines of docker.service')
 }

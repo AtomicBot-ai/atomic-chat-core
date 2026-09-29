@@ -444,7 +444,7 @@ describe('running commands', () => {
     const previous = process.env['APT_CONFIG']
     process.env['APT_CONFIG'] = '/tmp/evil.conf'
     try {
-      for (const options of [undefined, { longRunning: true }]) {
+      for (const options of [undefined, { longRunning: true }, { diagnostic: true }]) {
         const output = await deps().exec([process.execPath, '-e', script], options)
         expect(output.code).toBe(0)
         expect(JSON.parse(output.stdout)).toEqual([INSTALL_CONTAINER_RUNTIME_RECIPE.environment.PATH, null])

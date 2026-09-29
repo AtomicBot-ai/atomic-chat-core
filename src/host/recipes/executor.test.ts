@@ -65,10 +65,15 @@ class FakeHost {
 
   /** Commands the executor marked long-running (package installs get their own timeout). */
   longRunning: string[] = []
+  /** Commands the executor marked diagnostic (a short timeout of their own). */
+  diagnostic: string[] = []
+  /** What `journalctl -u docker.service` prints; null models a host without a journal to read. */
+  journal: string | null = null
 
-  exec = async (argv: string[], options?: { longRunning?: boolean }) => {
+  exec = async (argv: string[], options?: { longRunning?: boolean; diagnostic?: boolean }) => {
     this.calls.push(argv)
     if (options?.longRunning) this.longRunning.push(argv.join(' '))
+    if (options?.diagnostic) this.diagnostic.push(argv.join(' '))
     const line = argv.join(' ')
     for (const [prefix, failure] of Object.entries(this.failures))
       if (line.startsWith(prefix)) return { stdout: '', ...failure }
@@ -133,6 +138,10 @@ class FakeHost {
       if (!user) return { code: 1, stdout: '', stderr: `id: '${argv[2]}': no such user` }
       return ok(sub === '-u' ? `${user.uid}\n` : `${user.groups.join(' ')}\n`)
     }
+    if (program === 'journalctl') {
+      if (this.journal === null) return { code: 1, stdout: '', stderr: 'No journal files were found.\n' }
+      return ok(this.journal)
+    }
     if (program === 'usermod') {
       this.users[argv[3]!]!.groups.push('docker')
       return ok()
@@ -148,7 +157,7 @@ class FakeHost {
   }
 
   mutations(): string[] {
-    const reads = ['dpkg-query', 'rpm', 'id', 'docker']
+    const reads = ['dpkg-query', 'rpm', 'id', 'docker', 'journalctl']
     return this.calls
       .filter(
         ([program, sub]) =>
@@ -955,5 +964,110 @@ describe('the service and the docker group', () => {
     const host = new FakeHost()
     const result = await run(host, requestFor(ubuntu(['docker-group'], { user: 'ghost' })))
     expect(result.steps[0]).toMatchObject({ status: 'failed', detail: expect.stringMatching(/ghost/) })
+  })
+})
+
+describe("why Docker did not start: the journal tail joins systemctl's own stderr", () => {
+  const JOURNAL = ['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat']
+  const SYSTEMCTL_SAID =
+    'Job for docker.service failed because the control process exited with error code.\n' +
+    'See "systemctl status docker.service" and "journalctl -xeu docker.service" for details.\n'
+  const REASON =
+    'failed to start daemon: Error initializing network controller: error obtaining controller instance: ' +
+    'failed to create NAT chain DOCKER: all predefined address pools have been fully subnetted'
+
+  const failingEnable = (host: FakeHost) => {
+    host.failures['systemctl enable'] = { code: 1, stderr: SYSTEMCTL_SAID }
+  }
+
+  it('enabling docker.service fails: the step keeps its exit code and detail, and its stderr ends with the reason', async () => {
+    const host = new FakeHost()
+    failingEnable(host)
+    host.journal = `Starting docker.service - Docker Application Container Engine...\n${REASON}\n`
+    const result = await run(host, requestFor(ubuntu(['docker-service', 'docker-group'])))
+    expect(result).toMatchObject({ outcome: 'failed', exit_code: 1 })
+    expect(result.steps[0]).toMatchObject({
+      id: 'docker-service',
+      status: 'failed',
+      exit_code: 1,
+      detail: 'systemctl enable --now docker exited with 1',
+    })
+    expect(result.steps[0]!.stderr).toContain('journalctl -xeu docker.service')
+    expect(result.steps[0]!.stderr).toContain('journalctl -u docker.service:')
+    expect(result.steps[0]!.stderr.endsWith(REASON)).toBe(true)
+    expect(result.log_tail).toContain('all predefined address pools have been fully subnetted')
+    expect(result.steps[1]).toMatchObject({ id: 'docker-group', status: 'not-run' })
+    // The journal is read with the recipe's own argv, on the short diagnostic deadline, and changes nothing.
+    expect(host.calls).toContainEqual(JOURNAL)
+    expect(host.diagnostic).toEqual([JOURNAL.join(' ')])
+    expect(host.mutations()).toEqual(['systemctl enable --now docker'])
+  })
+
+  it('an approved restart that fails carries the reason too', async () => {
+    const host = new FakeHost()
+    host.dockerActive = true
+    host.failures['systemctl restart'] = { code: 1, stderr: SYSTEMCTL_SAID }
+    host.journal = `${REASON}\n`
+    const result = await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-restart'])))
+    expect(result.steps[0]).toMatchObject({ id: 'nvidia-runtime', status: 'failed', exit_code: 1 })
+    expect(result.steps[0]!.stderr.endsWith(REASON)).toBe(true)
+  })
+
+  it.each<[string, (host: FakeHost) => Partial<HostStepExecutorDeps>]>([
+    ['journalctl answers with an error', () => ({})],
+    [
+      'journalctl is not installed',
+      (host) => ({
+        exec: async (argv, options) =>
+          argv[0] === 'journalctl'
+            ? { code: null, stdout: '', stderr: 'spawn journalctl ENOENT' }
+            : host.exec(argv, options),
+      }),
+    ],
+    [
+      'running journalctl throws',
+      (host) => ({
+        exec: async (argv, options) => {
+          if (argv[0] === 'journalctl') throw new Error('spawn EAGAIN')
+          return host.exec(argv, options)
+        },
+      }),
+    ],
+    [
+      'the journal is empty',
+      (host) => {
+        host.journal = '\n'
+        return {}
+      },
+    ],
+  ])('%s: nothing is appended and the outcome is the same', async (_label, over) => {
+    const host = new FakeHost()
+    failingEnable(host)
+    const result = await run(host, requestFor(ubuntu(['docker-service'])), over(host))
+    expect(result).toMatchObject({ outcome: 'failed', exit_code: 1 })
+    expect(result.steps[0]).toMatchObject({
+      status: 'failed',
+      exit_code: 1,
+      detail: 'systemctl enable --now docker exited with 1',
+      stderr: SYSTEMCTL_SAID.trim(),
+    })
+  })
+
+  it('a long journal is cut to the step stderr limit, keeping its end', async () => {
+    const host = new FakeHost()
+    failingEnable(host)
+    host.journal = `${'x'.repeat(5000)}\n${REASON}\n`
+    const result = await run(host, requestFor(ubuntu(['docker-service'])))
+    expect(result.steps[0]!.stderr.length).toBeLessThanOrEqual(2000)
+    expect(result.steps[0]!.stderr.endsWith(REASON)).toBe(true)
+    expect(result.log_tail.length).toBeLessThanOrEqual(2000)
+  })
+
+  it('a docker.service that starts is never followed by a journal read', async () => {
+    const host = new FakeHost()
+    host.journal = REASON
+    const result = await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-service'])))
+    expect(result.outcome).toBe('completed')
+    expect(host.calls.some(([program]) => program === 'journalctl')).toBe(false)
   })
 })

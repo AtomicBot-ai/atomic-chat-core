@@ -50,8 +50,13 @@ export interface HostStepExecutorDeps {
   /**
    * Runs one argv, no shell, with the recipe's fixed environment. `longRunning` marks a package
    * install: a much longer deadline, and SIGTERM before SIGKILL, so dpkg is not killed mid-run.
+   * `diagnostic` marks a read made only to explain a failure: a short deadline and a small output
+   * cap, so explaining never holds the result back.
    */
-  exec: (argv: string[], options?: { longRunning?: boolean }) => Promise<HostCommandOutput>
+  exec: (
+    argv: string[],
+    options?: { longRunning?: boolean; diagnostic?: boolean }
+  ) => Promise<HostCommandOutput>
   fetch: typeof fetch
   now: () => number
   /**
@@ -95,7 +100,7 @@ interface RunContext {
 async function run(
   context: RunContext,
   argv: string[],
-  options?: { longRunning?: boolean }
+  options?: { longRunning?: boolean; diagnostic?: boolean }
 ): Promise<HostCommandOutput> {
   assertPermittedCommand(argv)
   return context.deps.exec(argv, options)
@@ -109,6 +114,29 @@ async function mustRun(
   const output = await run(context, argv, options)
   if (output.code !== 0)
     throw new StepFailure(`${argv.join(' ')} exited with ${String(output.code)}`, output.code, output.stderr)
+}
+
+/**
+ * Starts or restarts Docker; when that fails, the failure's stderr also carries the tail of
+ * docker.service's journal, because `systemctl` only says "see journalctl" and the reason (say,
+ * "all predefined address pools have been fully subnetted" under a full-tunnel VPN) is there. The
+ * journal read can only add text: when it cannot run, fails or prints nothing, the failure is
+ * exactly what it would have been without it. The outcome's `tail` keeps the end of the combined
+ * text, so the reason survives the stderr limit.
+ */
+async function mustStartDocker(context: RunContext, argv: string[], journal: string[]): Promise<void> {
+  const output = await run(context, argv)
+  if (output.code === 0) return
+  let reason = ''
+  try {
+    const read = await run(context, journal, { diagnostic: true })
+    if (read.code === 0) reason = read.stdout.trim()
+  } catch {
+    // No journal to read (not permitted, not installed, could not spawn): systemctl's own words stand.
+  }
+  const said = output.stderr.trim()
+  const stderr = reason === '' ? said : `${said}\n${journal.slice(0, 3).join(' ')}:\n${reason}`
+  throw new StepFailure(`${argv.join(' ')} exited with ${String(output.code)}`, output.code, stderr)
 }
 
 const bytesEqual = (a: Uint8Array | null, b: Uint8Array | null): boolean =>
@@ -351,7 +379,7 @@ async function configureRuntime(
         'Docker was not restarted: the approved plan did not include a restart. The NVIDIA runtime loads at its next start.',
     }
   }
-  await mustRun(context, step.restart)
+  await mustStartDocker(context, step.restart, step.journal)
   return {
     status: 'applied',
     detail: changed
@@ -368,7 +396,7 @@ async function enableService(
   const active = await run(context, step.active)
   if (enabled.code === 0 && enabled.stdout.trim() === 'enabled' && active.code === 0)
     return { status: 'satisfied', detail: 'docker.service is already enabled and running' }
-  await mustRun(context, step.enable)
+  await mustStartDocker(context, step.enable, step.journal)
   return { status: 'applied', detail: 'enabled and started docker.service' }
 }
 

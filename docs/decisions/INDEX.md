@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [The host step reads docker.service's journal when Docker does not start](2026-09-29-host-step-reads-the-docker-journal-when-docker-does-not-start.md)
 - **2026-09-29** — [tensorrt-llm: the session gateway unwraps OpenAI's json_schema wrapper to the bare schema](2026-09-29-tensorrt-llm-json-schema-wrapper-unwrapped-by-the-session-gateway.md)
 - **2026-09-29** — [Plan digest after a re-ask, and what a resume may approve](2026-09-29-plan-digest-after-a-re-ask-and-what-a-resume-may-approve.md) — corrects the text of the resume-never-swaps-the-approval record below; no behaviour change.
 - **2026-09-29** — [An engine removal holds its loads off and unloads through the facade](2026-09-29-an-engine-removal-holds-loads-off-and-unloads-through-the-facade.md) — supersedes item 2 and the load-vs-removal consequences of the provider-shares-handle record below.
