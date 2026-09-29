@@ -42,7 +42,13 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { contextLengthSettings, pollOperation, startLiveCore, streamChat } from '../helpers/live-core.js'
+import {
+  THINKING_OFF,
+  contextLengthSettings,
+  pollOperation,
+  startLiveCore,
+  streamChat,
+} from '../helpers/live-core.js'
 import type { LiveCore, OperationView, PendingHostStep } from '../helpers/live-core.js'
 import { pickCuratedModel, prepareCuratedModel, readDescriptor } from '../helpers/live-hf-model.js'
 import type { CuratedModel } from '../helpers/live-hf-model.js'
@@ -1072,7 +1078,8 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
         model: id,
         stream: true,
         max_tokens: 128,
-        messages: [{ role: 'user', content: 'What is 2 + 2? Answer in one short sentence. /no_think' }],
+        ...THINKING_OFF,
+        messages: [{ role: 'user', content: 'What is 2 + 2? Answer in one short sentence.' }],
       },
       timeoutMs: 10 * MIN,
     })

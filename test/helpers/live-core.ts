@@ -148,6 +148,17 @@ export async function streamChat(options: {
 }
 
 /**
+ * What a chat request adds to turn a reasoning model's thinking off: the chat template's own switch
+ * (Qwen3's `enable_thinking`), which closes the think block in the prompt itself. Qwen3's `/no_think`
+ * soft switch is not used: TRT-LLM 1.2.1's `qwen3` reasoning parser (`DeepSeekR1Parser` with
+ * `reasoning_at_start=False`) only ends reasoning at `</think>`, and Qwen3-1.7B answers `/no_think` with
+ * an opening `<think>` it never closes, so the whole answer, a tool call included, lands in
+ * `reasoning_content` (seen 4 of 4 times on the first live run; 3 of 3 tool calls parsed with this).
+ * A template without the variable ignores it.
+ */
+export const THINKING_OFF = { chat_template_kwargs: { enable_thinking: false } } as const
+
+/**
  * The `tensorrt-llm` settings a context-length override needs: `context_length`, and
  * `max_output_tokens` at half of it (at most 4096, the provider's default) so the output cap stays
  * below the context. Empty without an override.

@@ -45,7 +45,13 @@ import { homedir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { contextLengthSettings, httpRequest, startLiveCore, streamChat } from '../helpers/live-core.js'
+import {
+  THINKING_OFF,
+  contextLengthSettings,
+  httpRequest,
+  startLiveCore,
+  streamChat,
+} from '../helpers/live-core.js'
 import type { HttpAnswer, LiveCore, StreamedChat } from '../helpers/live-core.js'
 import {
   dirStats,
@@ -1097,7 +1103,8 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
               model: loaded.modelId,
               stream: true,
               max_tokens: 128,
-              messages: [{ role: 'user', content: 'What is 2 + 2? Answer in one short sentence. /no_think' }],
+              ...THINKING_OFF,
+              messages: [{ role: 'user', content: 'What is 2 + 2? Answer in one short sentence.' }],
             },
             timeoutMs: 10 * MIN,
           })
@@ -1219,6 +1226,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
             model: prepared.id,
             stream: false,
             max_tokens: 2048,
+            ...THINKING_OFF,
             tool_choice: 'auto',
             tools: [
               {
@@ -1237,7 +1245,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
             messages: [
               {
                 role: 'user',
-                content: 'What is the weather in Paris right now? Use the get_weather tool. /no_think',
+                content: 'What is the weather in Paris right now? Use the get_weather tool.',
               },
             ],
           })
@@ -1307,6 +1315,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
             model: prepared.id,
             stream: false,
             max_tokens: 2048,
+            ...THINKING_OFF,
             response_format: {
               type: 'json_schema',
               json_schema: { name: 'capital', strict: true, schema: CAPITAL_SCHEMA },
@@ -1315,7 +1324,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
               {
                 role: 'user',
                 content:
-                  'What is the capital of France? Answer with its city, country and population in millions. /no_think',
+                  'What is the capital of France? Answer with its city, country and population in millions.',
               },
             ],
           })
@@ -1382,6 +1391,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           model: prepared.id,
           stream: false,
           max_tokens: 64,
+          ...THINKING_OFF,
           response_format: { type: 'json_schema', json_schema: { name: 'capital', schema: CAPITAL_SCHEMA } },
           messages: [{ role: 'user', content: 'What is the capital of France?' }],
         }
