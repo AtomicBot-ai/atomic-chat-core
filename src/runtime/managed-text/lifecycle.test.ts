@@ -553,19 +553,23 @@ describe('ManagedTextLifecycle: cancel and stop', () => {
     expect(docker.calls).toEqual([])
   })
 
-  it('hands stopping-previous the load’s own signal, which an unload of the loading model aborts', async () => {
+  it('hands stopping-previous the load’s own signal, which an unload of the loading model aborts, and its generation', async () => {
     await build()
     let seen: AbortSignal | undefined
+    let generation: string | undefined
     const loading = lifecycle.load(
       request_({
-        stopPrevious: (signal) => {
+        stopPrevious: (signal, gen) => {
           seen = signal
+          generation = gen
           return new Promise(() => {})
         },
       })
     )
     for (let i = 0; i < 50 && seen === undefined; i++) await settle(1)
     expect(seen?.aborted).toBe(false)
+    // The generation this load's reservation carries.
+    expect(lifecycle.reservations()).toEqual([expect.objectContaining({ generation, state: 'loading' })])
     await lifecycle.unload('org/model-a')
     expect(seen?.aborted).toBe(true)
     expect((await rejection(loading)).code).toBe('MODEL_LOAD_CANCELLED')

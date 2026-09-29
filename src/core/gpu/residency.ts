@@ -48,23 +48,36 @@ export class GpuResidency {
 
   /** The claim hook one provider's runtime is given. */
   hook(provider: string): GpuClaimHook {
-    return (claim, signal) => this.claim({ ...claim, provider }, signal)
+    return (claim, signal, granted) => this.claim({ ...claim, provider }, signal, granted)
   }
 
-  async claim(request: GpuRequest, signal?: AbortSignal): Promise<void> {
+  /**
+   * `granted` runs synchronously once the claim has succeeded, still inside this claim's turn: the
+   * runtime registers its load there, so the next claim — which cannot start before this turn ends —
+   * always finds it.
+   */
+  async claim(request: GpuRequest, signal?: AbortSignal, granted?: () => void): Promise<void> {
     throwIfLoadCancelled(signal)
     // Outside the rule both ways: it neither evicts nor waits for anyone to be evicted.
-    if (!claimsGpu(request)) return
+    if (!claimsGpu(request)) {
+      granted?.()
+      return
+    }
     const release = await this.turn(signal)
     try {
       const causes = new Map<string, string>()
       for (const occupant of gpuEvictions(request, this.deps.occupants())) {
         throwIfLoadCancelled(signal)
-        await occupant.evict().catch((error: unknown) => causes.set(key(occupant), reason(error)))
+        // A load cancelled while it waits for a stop stops waiting; the stop itself goes on.
+        const stopped = occupant.evict().catch((error: unknown) => {
+          causes.set(key(occupant), reason(error))
+        })
+        await raceLoadCancel(stopped, signal)
       }
       throwIfLoadCancelled(signal)
       const [holder] = gpuEvictions(request, this.deps.occupants())
       if (holder !== undefined) throw gpuBusyError(holder, causes.get(key(holder)))
+      granted?.()
     } finally {
       release()
     }

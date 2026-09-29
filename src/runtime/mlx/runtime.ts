@@ -136,7 +136,10 @@ export class MlxRuntime implements LocalRuntime {
     return this.table.isLoading(modelId)
   }
 
-  /** Every session, and every load past its claim, holds the whole GPU; embeddings are auxiliary. */
+  /**
+   * Every session, every one still stopping (until its process exited), and every load past its claim
+   * holds the whole GPU; embeddings are auxiliary.
+   */
   gpuOccupancy(): GpuOccupancy[] {
     const ready = this.table.list().map((session): GpuOccupancy => ({
       model_id: session.model_id,
@@ -144,8 +147,14 @@ export class MlxRuntime implements LocalRuntime {
       auxiliary: session.is_embedding,
       state: 'ready',
     }))
+    const stopping = this.table.stopping().map((session): GpuOccupancy => ({
+      model_id: session.model_id,
+      cards: 'all',
+      auxiliary: session.is_embedding,
+      state: 'stopping',
+    }))
     const loading = [...this.claimed.values()].filter((claim) => !this.table.findSession(claim.model_id))
-    return [...ready, ...loading]
+    return [...ready, ...stopping, ...loading]
   }
 
   /** The context a loaded session runs with. */
@@ -216,14 +225,19 @@ export class MlxRuntime implements LocalRuntime {
 
     throwIfLoadCancelled(opts.signal)
     // GPU residency: every other engine is off the GPU, its exit confirmed, before this one starts.
+    // It holds the GPU as `loading` from the moment core grants the claim, inside core's turn.
     const footprint = { model_id: modelId, cards: 'all' as const, auxiliary: isEmbedding }
-    if (this.options.claimGpu) {
-      await this.options.claimGpu(footprint, opts.signal)
-      this.table.assertRunning()
-      throwIfLoadCancelled(opts.signal)
+    const occupancy: GpuOccupancy = { ...footprint, state: 'loading' }
+    const hold = () => {
+      this.claimed.set(modelId, occupancy)
     }
-    this.claimed.set(modelId, { ...footprint, state: 'loading' })
     try {
+      if (this.options.claimGpu) {
+        await this.options.claimGpu(footprint, opts.signal, hold)
+        hold()
+        this.table.assertRunning()
+        throwIfLoadCancelled(opts.signal)
+      } else hold()
       return await this.startServer(modelId, opts, {
         exe,
         args,
@@ -236,7 +250,7 @@ export class MlxRuntime implements LocalRuntime {
         modelPath,
       })
     } finally {
-      this.claimed.delete(modelId)
+      if (this.claimed.get(modelId) === occupancy) this.claimed.delete(modelId)
     }
   }
 

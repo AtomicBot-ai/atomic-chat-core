@@ -186,10 +186,11 @@ export interface ManagedLoadRequest {
   signal?: AbortSignal
   /**
    * Frees the card first (GPU residency, task 2.15). Runs before any container of this load exists,
-   * with the load's own signal: aborted when the load is cancelled or unloaded, so a callback still
-   * waiting for its turn gives up rather than stopping sessions for a load that is gone.
+   * with the load's own signal — aborted when the load is cancelled or unloaded, so a callback still
+   * waiting for its turn gives up rather than stopping sessions for a load that is gone — and the
+   * generation this load's reservation carries.
    */
-  stopPrevious?: (signal: AbortSignal) => Promise<void>
+  stopPrevious?: (signal: AbortSignal, generation: string) => Promise<void>
   /** The saved card was gone, so `gpuUuid` is a replacement: every progress event of this load says so. */
   gpuSubstituted?: { requested_gpu_id: string; gpu_id: string }
 }
@@ -559,7 +560,7 @@ export class ManagedTextLifecycle {
     try {
       if (request.stopPrevious) {
         progress('stopping-previous')
-        await raceLoadCancel(request.stopPrevious(signal), signal)
+        await raceLoadCancel(request.stopPrevious(signal, entry.generation), signal)
       }
       progress('starting-container')
       const cacheDir = await ensureEngineCacheDir(

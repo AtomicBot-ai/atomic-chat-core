@@ -118,17 +118,92 @@ describe('GpuResidency.claim', () => {
     expect(m.occupants).toEqual([])
   })
 
-  it('never waits and never evicts for a CPU-only, embedding or transcription load', async () => {
+  it('never waits and never evicts for a CPU-only, embedding or transcription load, and grants it at once', async () => {
     const m = machine()
     m.add('tensorrt-llm', 'stuck', { cards: ['GPU-0'], stuck: true })
-    // A GPU claim holding the lock (its eviction never finishes) must not hold these up.
+    // A GPU claim holding the turn (its eviction does not finish) must not hold these up.
+    let finish!: () => void
     const hung = m.add('mlx', 'hung')
-    hung.evict = () => new Promise(() => {})
-    void m.residency.claim({ provider: 'llamacpp', model_id: 'gpu', cards: 'all', auxiliary: false })
+    const gone = new Promise<void>((resolve) => {
+      finish = () => {
+        m.occupants.splice(m.occupants.indexOf(hung), 1)
+        resolve()
+      }
+    })
+    hung.evict = () => gone
+    const holding = m.residency
+      .claim({ provider: 'llamacpp', model_id: 'gpu', cards: 'all', auxiliary: false })
+      .catch((e: unknown) => e)
 
-    await m.residency.claim({ provider: 'llamacpp', model_id: 'cpu', cards: [], auxiliary: false })
-    await m.residency.claim({ provider: 'llamacpp-upstream', model_id: 'emb', cards: 'all', auxiliary: true })
+    const granted: string[] = []
+    await m.residency.claim(
+      { provider: 'llamacpp', model_id: 'cpu', cards: [], auxiliary: false },
+      undefined,
+      () => granted.push('cpu')
+    )
+    await m.residency.claim(
+      { provider: 'llamacpp-upstream', model_id: 'emb', cards: 'all', auxiliary: true },
+      undefined,
+      () => granted.push('emb')
+    )
+    expect(granted).toEqual(['cpu', 'emb'])
     expect(m.evicted).toEqual(['tensorrt-llm/stuck'])
+    // Leave nothing pending: the held claim ends (refused over the stuck container).
+    finish()
+    expect(((await holding) as AtomicCoreError).code).toBe('GPU_BUSY')
+  })
+
+  it('grants inside its turn, so the next claim always sees the load it granted', async () => {
+    const m = machine()
+    const first = m.residency.claim(
+      { provider: 'llamacpp', model_id: 'a', cards: 'all', auxiliary: false },
+      undefined,
+      () => void m.add('llamacpp', 'a', { state: 'loading' })
+    )
+    const second = m.residency.claim({ provider: 'mlx', model_id: 'b', cards: 'all', auxiliary: false })
+    await first
+    await second
+    expect(m.evicted).toEqual(['llamacpp/a'])
+  })
+
+  it('does not grant a claim it refuses', async () => {
+    const m = machine()
+    m.add('tensorrt-llm', 'stuck', { cards: ['GPU-0'], stuck: true })
+    let granted = false
+    const error = await rejection(
+      m.residency.claim({ provider: 'mlx', model_id: 'm', cards: 'all', auxiliary: false }, undefined, () => {
+        granted = true
+      })
+    )
+    expect(error.code).toBe('GPU_BUSY')
+    expect(granted).toBe(false)
+  })
+
+  it('stops waiting for an eviction once its own load is cancelled, and hands the turn on', async () => {
+    const m = machine()
+    let finish!: () => void
+    const slow = m.add('diffusion', 'flux')
+    // One stop in flight, shared by every eviction that asks for it, as the engines do.
+    const gone = new Promise<void>((resolve) => {
+      finish = () => {
+        m.occupants.splice(m.occupants.indexOf(slow), 1)
+        resolve()
+      }
+    })
+    slow.evict = () => gone
+    const controller = new AbortController()
+    const cancelled = m.residency.claim(
+      { provider: 'llamacpp', model_id: 'c', cards: 'all', auxiliary: false },
+      controller.signal
+    )
+    await new Promise((resolve) => setImmediate(resolve))
+    controller.abort()
+    expect((await rejection(cancelled)).code).toBe('MODEL_LOAD_CANCELLED')
+    // The turn is free: another claim runs (and finds the image model still stopping).
+    const next = m.residency.claim({ provider: 'mlx', model_id: 'm', cards: 'all', auxiliary: false })
+    await new Promise((resolve) => setImmediate(resolve))
+    finish()
+    await next
   })
 
   it('takes GPU claims one at a time, so a load that finished its claim is seen, and stopped, by the next', async () => {

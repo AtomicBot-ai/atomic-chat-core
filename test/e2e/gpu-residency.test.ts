@@ -283,6 +283,8 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('GPU resi
       const { error } = (await res.json()) as { error: { code: string; message: string; details: string } }
       expect(error.code).toBe('GPU_BUSY')
       expect(error.message).toContain('tensorrt-llm/stuck-model')
+      // What to do about it: loading again retries the stop, or remove the container.
+      expect(error.message).toContain('docker rm -f')
       expect(error.details).toContain('holder=tensorrt-llm/stuck-model state=stop-unconfirmed')
       expect(error.details).toContain('context deadline exceeded')
     }

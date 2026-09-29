@@ -382,6 +382,7 @@ export async function createAtomicCore(
       containers: managedContainers,
       instanceId: lock.instanceId,
       log,
+      dockerConfigDir: layout.managed.dockerConfigDir,
     })
 
     // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").

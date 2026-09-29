@@ -350,6 +350,8 @@ describe('leftoverContainers', () => {
       containers: { current: () => wired },
       instanceId: 'core-1',
       log: () => {},
+      dockerConfigDir: data.layout.managed.dockerConfigDir,
+      exec: () => docker.exec,
     })
 
     const [held] = leftovers()
@@ -359,6 +361,8 @@ describe('leftoverContainers', () => {
       cards: 'all',
       auxiliary: false,
       state: 'stop-unconfirmed',
+      remedy:
+        'Start Docker, or remove container oldctr yourself (docker rm -f oldctr); the next load retries the stop.',
     })
     // Still no confirmation: still held, and the eviction says why.
     await expect(held?.evict()).rejects.toThrow('Docker did not confirm container oldctr stopped')
@@ -371,9 +375,82 @@ describe('leftoverContainers', () => {
     expect(docker.containers.has('oldctr')).toBe(false)
   })
 
+  it('retries within the startup reconcile’s time budget: out of time, the container stays held', async () => {
+    const docker = new FakeDocker()
+    const journal = await ExecutionJournal.open(data.layout)
+    docker.containers.set('oldctr', {
+      id: 'oldctr',
+      createArgv: [],
+      status: 'running',
+      exitCode: null,
+      logs: [],
+    })
+    await journal.add({
+      container_id: 'oldctr',
+      engine_id: 'tensorrt-llm',
+      image_digest: 'sha256:0',
+      scope: 'app',
+      instance_id: 'core-0',
+      created_at: '2026-09-29T00:00:00.000Z',
+    })
+    const wired: ManagedContainers = {
+      exec: docker.exec,
+      journal,
+      dockerPath: '/usr/bin/docker',
+      socketPath: '/var/run/docker.sock',
+      reconciled: { stopped: [], absent: [], unconfirmed: [], failed: [], skipped: journal.list() },
+    }
+    const leftovers = leftoverContainers({
+      containers: { current: () => wired },
+      instanceId: 'core-1',
+      log: () => {},
+      dockerConfigDir: data.layout.managed.dockerConfigDir,
+      exec: () => docker.exec,
+      budgetMs: 0,
+    })
+    await expect(leftovers()[0]?.evict()).rejects.toThrow('Docker did not confirm container oldctr stopped')
+    expect(docker.calls).toEqual([])
+    expect(leftovers().map((o) => o.model_id)).toEqual(['oldctr'])
+  })
+
+  it('retries through its own short-deadline docker executor by default: no docker there, the container stays held', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add({
+      container_id: 'oldctr',
+      engine_id: 'tensorrt-llm',
+      image_digest: 'sha256:0',
+      scope: 'app',
+      instance_id: 'core-0',
+      created_at: '2026-09-29T00:00:00.000Z',
+    })
+    const unusable: DockerExec = async () => {
+      throw new Error('must not use the long-deadline executor')
+    }
+    const wired: ManagedContainers = {
+      exec: unusable,
+      journal,
+      dockerPath: join(data.root, 'no-such-docker'),
+      socketPath: '/var/run/docker.sock',
+      reconciled: { stopped: [], absent: [], unconfirmed: [], failed: journal.list(), skipped: [] },
+    }
+    const leftovers = leftoverContainers({
+      containers: { current: () => wired },
+      instanceId: 'core-1',
+      log: () => {},
+      dockerConfigDir: data.layout.managed.dockerConfigDir,
+    })
+    await expect(leftovers()[0]?.evict()).rejects.toThrow('Docker did not confirm container oldctr stopped')
+    expect(leftovers().map((o) => o.model_id)).toEqual(['oldctr'])
+    expect(journal.list().map((r) => r.container_id)).toEqual(['oldctr'])
+  })
+
   it('holds nothing while no Docker executor is wired', () => {
-    expect(
-      leftoverContainers({ containers: { current: () => null }, instanceId: 'core-1', log: () => {} })()
-    ).toEqual([])
+    const leftovers = leftoverContainers({
+      containers: { current: () => null },
+      instanceId: 'core-1',
+      log: () => {},
+      dockerConfigDir: data.layout.managed.dockerConfigDir,
+    })
+    expect(leftovers()).toEqual([])
   })
 })

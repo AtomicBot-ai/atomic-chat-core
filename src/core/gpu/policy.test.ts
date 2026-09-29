@@ -197,10 +197,19 @@ describe('gpuBusyError', () => {
     expect(error).toBeInstanceOf(AtomicCoreError)
     expect(error.code).toBe('GPU_BUSY')
     expect(error.message).toBe(
-      'tensorrt-llm/stuck still holds the GPU: its stop has not been confirmed, so nothing else loads there yet.'
+      'tensorrt-llm/stuck still holds the GPU: its stop has not been confirmed, so nothing else loads there yet. ' +
+        'Try again once it has stopped.'
     )
     expect(error.details).toBe(
       'holder=tensorrt-llm/stuck state=stop-unconfirmed cards=GPU-0 cause=docker stop timed out'
+    )
+  })
+
+  it('tells the user what to do, in the occupant’s own words when it has them', () => {
+    const leftover = { ...trtStuck, model_id: 'ctr1', remedy: 'Start Docker, or remove container ctr1.' }
+    expect(gpuBusyError(leftover).message).toBe(
+      'tensorrt-llm/ctr1 still holds the GPU: its stop has not been confirmed, so nothing else loads there yet. ' +
+        'Start Docker, or remove container ctr1.'
     )
   })
 

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
+import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
@@ -964,6 +965,71 @@ describe('GPU residency', () => {
       const heldAfter = await claims()
       expect(heldAfter).toHaveLength(2)
       expect(heldAfter.filter((claim) => heldBefore.includes(claim))).toHaveLength(1)
+    }
+  )
+})
+
+describe('GPU residency: racing loads and other owners', () => {
+  const gpuPacks = async (layout: typeof data.layout, core: AtomicCore) => {
+    const { installFakeBackend } = await import('../../test/helpers/fake-backend-pack.js')
+    for (const [provider, version] of [
+      ['llamacpp-upstream', 'b6325'],
+      ['llamacpp', 'b10018-1.3.0'],
+    ] as const) {
+      const pack = await installFakeBackend(layout, { provider, version, backend: 'linux-vulkan-x64' })
+      await core.settings.update(provider, { version_backend: pack.versionBackend, fit: false })
+    }
+  }
+
+  it.skipIf(process.platform === 'win32')(
+    'two GPU loads on two engines at once: the later claim stops the earlier load, and one model ends up resident',
+    async () => {
+      const core = await createCore()
+      for (const id of ['a', 'b']) await data.writeModel(id)
+      await gpuPacks(data.layout, core)
+      const outcomes = await Promise.allSettled([
+        core.load('llamacpp-upstream', 'a'),
+        core.load('llamacpp', 'b'),
+      ])
+      const loaded = [
+        ...core.runtime('llamacpp-upstream').getLoadedModels(),
+        ...core.runtime('llamacpp').getLoadedModels(),
+      ]
+      expect(loaded).toHaveLength(1)
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1)
+      const [refused] = outcomes.filter((o) => o.status === 'rejected')
+      expect((refused as PromiseRejectedResult).reason).toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'never stops what another core scope runs, nor a session another process registered here',
+    async () => {
+      // The CLI core, in its own data folder, holds a model on the card.
+      const cliData = await makeTmpDataFolder('atomic-core-cli-scope-')
+      try {
+        const cli = await createCore({ dataFolder: cliData.root, ownerScope: 'cli' })
+        await cliData.writeModel('cli-model')
+        await gpuPacks(cliData.layout, cli)
+        const held = await cli.load('llamacpp-upstream', 'cli-model')
+
+        // The app core: the app also registered that session with it as external.
+        const app = await createCore({ ownerScope: 'app' })
+        await data.writeModel('app-model')
+        await gpuPacks(data.layout, app)
+        app.externalSessions.publish('cli', 1, [
+          { provider: 'llamacpp-upstream', model_id: 'cli-model', port: held.port, api_key: held.api_key },
+        ])
+        await app.load('llamacpp-upstream', 'app-model')
+
+        expect(isProcessAlive(held.pid as number)).toBe(true)
+        expect(cli.runtime('llamacpp-upstream').getLoadedModels()).toEqual(['cli-model'])
+        expect(app.externalSessions.list().map((s) => s.model_id)).toEqual(['cli-model'])
+        expect(app.runtime('llamacpp-upstream').getLoadedModels()).toEqual(['app-model'])
+      } finally {
+        await Promise.all(cores.splice(0).map((c) => c.shutdown()))
+        await cliData.cleanup()
+      }
     }
   )
 })

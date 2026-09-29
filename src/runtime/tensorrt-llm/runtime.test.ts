@@ -369,10 +369,15 @@ describe('TensorrtLlmRuntime: sessions', () => {
   it('asks core for its card, as the provider’s only session, before any container exists — and holds it from then on', async () => {
     const claims: Array<{ claim: GpuClaim; signal: AbortSignal | undefined; containers: number }> = []
     build({
-      claimGpu: async (claim, signal) => {
+      claimGpu: async (claim, signal, granted) => {
         // Not an occupant while its claim is pending: nothing of this load has started.
         expect(runtime.gpuOccupancy()).toEqual([])
         claims.push({ claim, signal, containers: docker.containers.size })
+        // Granted inside core's turn: from that moment it holds its card, still before any container.
+        granted?.()
+        expect(runtime.gpuOccupancy()).toEqual([
+          { model_id: 'qwen3', cards: [LARGE.gpu_id], auxiliary: false, state: 'loading' },
+        ])
       },
     })
     await runtime.load('qwen3')
@@ -420,8 +425,17 @@ describe('TensorrtLlmRuntime: sessions', () => {
     await runtime.load('llama')
     docker.stopConfirms = false
     await rejection(runtime.unload('llama'))
+    const container = docker.last().id
     expect(runtime.gpuOccupancy()).toEqual([
-      { model_id: 'llama', cards: [LARGE.gpu_id], auxiliary: false, state: 'stop-unconfirmed' },
+      {
+        model_id: 'llama',
+        cards: [LARGE.gpu_id],
+        auxiliary: false,
+        state: 'stop-unconfirmed',
+        remedy:
+          `Loading again retries the stop; if Docker keeps failing, restart Docker or remove ` +
+          `container ${container} (docker rm -f ${container}).`,
+      },
     ])
     docker.stopConfirms = true
   })

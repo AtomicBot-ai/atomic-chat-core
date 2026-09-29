@@ -448,6 +448,44 @@ describe('unload', () => {
     ])
   })
 
+  it('keeps a session it is stopping on the GPU as stopping until its process has exited, and a second unload waits for that exit', async () => {
+    await data.writeModel('chat')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const baseSpawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        const started = await baseSpawn(spec, opts)
+        const terminate = started.process.terminate
+        started.process.terminate = async (graceMs) => {
+          await gate
+          return terminate(graceMs)
+        }
+        return started
+      },
+    })
+    const info = await runtime.load('chat')
+    const first = runtime.unload('chat')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(runtime.gpuOccupancy()).toEqual([
+      { model_id: 'chat', cards: 'all', auxiliary: false, state: 'stopping' },
+    ])
+    let joined = false
+    const second = runtime.unload('chat').then((result) => {
+      joined = true
+      return result
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(joined).toBe(false)
+    expect(isAlive(hostPid(info))).toBe(true)
+
+    release()
+    expect(await first).toEqual({ success: true })
+    expect(await second).toEqual({ success: true })
+    expect(isAlive(hostPid(info))).toBe(false)
+    expect(runtime.gpuOccupancy()).toEqual([])
+  })
+
   it('starts nothing when core refuses the GPU, and holds nothing afterwards', async () => {
     await data.writeModel('chat')
     let spawned = false

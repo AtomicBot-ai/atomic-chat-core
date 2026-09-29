@@ -318,10 +318,11 @@ describe('GPU residency', () => {
     const order: string[] = []
     const claimed: Array<{ modelId: string; signal: AbortSignal | undefined }> = []
     const spawn = h.deps.spawn
-    h.deps.claimGpu = async (spec, signal) => {
+    h.deps.claimGpu = async (spec, signal, granted) => {
       order.push('claim')
       claimed.push({ modelId: spec.modelId, signal })
       expect(h.state.starting).toBeUndefined()
+      granted?.()
     }
     h.deps.spawn = async (spec, scratch, signal) => {
       order.push('spawn')
@@ -334,6 +335,61 @@ describe('GPU residency', () => {
     expect(claimed).toEqual([{ modelId: 'z-image:q4_k_m', signal: controller.signal }])
     expect(h.state.starting).toBeUndefined()
     expect(h.state.modelState).toBe('loaded')
+  })
+
+  it('claims the GPU first, then lets it settle, then spawns: the settle follows the evicted model’s exit', async () => {
+    const h = harness()
+    const order: string[] = []
+    const sleep = h.deps.sleep
+    const spawn = h.deps.spawn
+    h.deps.claimGpu = async () => void order.push('claim')
+    h.deps.sleep = async (ms) => {
+      order.push(`sleep ${ms}`)
+      return sleep(ms)
+    }
+    h.deps.spawn = async (spec, scratch, signal) => {
+      order.push('spawn')
+      return spawn(spec, scratch, signal)
+    }
+    await loadFromSpec(h.deps, sampleSpec({ backend: 'cuda' }), 'load')
+    expect(order).toEqual(['claim', `sleep ${GPU_SETTLE_MS}`, 'spawn'])
+  })
+
+  it('keeps a server it is taking down as stopping, with its spec, until its exit is confirmed', async () => {
+    const h = harness()
+    const spec = sampleSpec({ backend: 'cuda' })
+    await loadFromSpec(h.deps, spec, 'load')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const server = h.servers[0]?.handle
+    if (!server) throw new Error('no server')
+    const terminate = server.terminate
+    server.terminate = async (graceMs) => {
+      await gate
+      return terminate(graceMs)
+    }
+    const down = takeDownSession(h.deps)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(h.state.session).toBeUndefined()
+    expect(h.state.stopping?.spec).toBe(spec)
+    release()
+    expect(await down).toBe(true)
+    expect(h.state.stopping).toBeUndefined()
+  })
+
+  it('keeps a server whose stop failed as the session: a process that may still run is never forgotten', async () => {
+    const h = harness()
+    await loadFromSpec(h.deps, sampleSpec({ backend: 'cuda' }), 'load')
+    const session = h.state.session
+    const server = h.servers[0]?.handle
+    if (!session || !server) throw new Error('no server')
+    server.terminate = async () => {
+      throw new Error('kill failed')
+    }
+    await expect(takeDownSession(h.deps)).rejects.toThrow('kill failed')
+    expect(h.state.session).toBe(session)
+    expect(h.state.stopping).toBeUndefined()
+    expect(h.gone).toEqual([])
   })
 
   it('fails the load like a spawn failure when the GPU is refused, starting nothing', async () => {

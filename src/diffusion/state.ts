@@ -70,6 +70,12 @@ export class DiffusionState {
   spec: ServerSpec | undefined
   /** A server whose GPU claim succeeded and that is starting: it holds the GPU before it is a session. */
   starting: ServerSpec | undefined
+  /**
+   * A server being taken down whose exit is not confirmed yet: no longer the session, still on the
+   * GPU. `done` settles once the exit is confirmed (or the stop failed and the server is the session
+   * again).
+   */
+  stopping: { spec: ServerSpec; done: Promise<void> } | undefined
   modelState: DiffusionModelState = 'unloaded'
   modelError: DiffusionErrorBody | undefined
   activeJobId: string | undefined

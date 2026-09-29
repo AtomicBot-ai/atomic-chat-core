@@ -158,6 +158,11 @@ export class LlamacppRuntime implements LocalRuntime {
   private readonly loading = new Map<string, Promise<SessionInfo>>()
   /** Loads past their GPU claim and not yet a session: they hold their cards as `loading`. */
   private readonly claimed = new Map<string, GpuOccupancy>()
+  /**
+   * Sessions being stopped: out of the session table, but their process has not exited yet, so they
+   * still hold their cards (`stopping`) and a second unload waits for the same exit.
+   */
+  private readonly stopping = new Map<string, { session: Session; done: Promise<UnloadResult> }>()
   private loadTail: Promise<void> = Promise.resolve()
   private readonly shutdownController = new AbortController()
   private closing = false
@@ -192,8 +197,13 @@ export class LlamacppRuntime implements LocalRuntime {
     const ready = [...this.sessions.values()].map((session): GpuOccupancy => {
       return { model_id: session.plan.modelId, ...this.footprint(session.plan), state: 'ready' }
     })
+    const stopping = [...this.stopping.values()].map(({ session }): GpuOccupancy => ({
+      model_id: session.plan.modelId,
+      ...this.footprint(session.plan),
+      state: 'stopping',
+    }))
     const loading = [...this.claimed.values()].filter((claim) => !this.sessions.has(claim.model_id))
-    return [...ready, ...loading]
+    return [...ready, ...stopping, ...loading]
   }
 
   private footprint(plan: LoadPlan): Pick<GpuOccupancy, 'cards' | 'auxiliary'> {
@@ -298,17 +308,22 @@ export class LlamacppRuntime implements LocalRuntime {
 
     // GPU residency: the backend is known now, and nothing is started yet. Every other engine on the
     // cards this build takes is stopped, with its exit confirmed, before the spawn below.
+    // It holds its cards as `loading` from the moment core grants the claim, inside core's turn.
     const footprint = this.footprint(plan)
-    if (this.options.claimGpu) {
-      await this.options.claimGpu({ model_id: modelId, ...footprint }, opts.signal)
-      this.assertRunning()
-      throwIfLoadCancelled(opts.signal)
+    const occupancy: GpuOccupancy = { model_id: modelId, ...footprint, state: 'loading' }
+    const hold = () => {
+      this.claimed.set(modelId, occupancy)
     }
-    this.claimed.set(modelId, { model_id: modelId, ...footprint, state: 'loading' })
     try {
+      if (this.options.claimGpu) {
+        await this.options.claimGpu({ model_id: modelId, ...footprint }, opts.signal, hold)
+        hold()
+        this.assertRunning()
+        throwIfLoadCancelled(opts.signal)
+      } else hold()
       return await this.spawnWithRetries(plan, opts)
     } finally {
-      this.claimed.delete(modelId)
+      if (this.claimed.get(modelId) === occupancy) this.claimed.delete(modelId)
     }
   }
 
@@ -654,10 +669,23 @@ export class LlamacppRuntime implements LocalRuntime {
     return { ok: true, session: info }
   }
 
-  private async unloadSession(modelId: string): Promise<UnloadResult> {
+  private unloadSession(modelId: string): Promise<UnloadResult> {
+    // A stop already in flight is joined: its answer comes only once the process has exited.
+    const inFlight = this.stopping.get(modelId)
+    if (inFlight) return inFlight.done
     const session = this.sessions.get(modelId)
-    if (!session) return { success: true }
+    if (!session) return Promise.resolve({ success: true })
     this.sessions.delete(modelId)
+    const done = this.terminateSession(modelId, session)
+    const entry = { session, done }
+    this.stopping.set(modelId, entry)
+    void done.finally(() => {
+      if (this.stopping.get(modelId) === entry) this.stopping.delete(modelId)
+    })
+    return done
+  }
+
+  private async terminateSession(modelId: string, session: Session): Promise<UnloadResult> {
     try {
       await session.process.terminate()
       if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})

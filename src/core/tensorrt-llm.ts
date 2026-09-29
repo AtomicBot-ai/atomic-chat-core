@@ -13,9 +13,17 @@
  */
 import type { CoreEvents } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
-import { reconcileExecutions } from '../runtime/container/index.js'
+import {
+  RECONCILE_BUDGET_MS,
+  RECONCILE_CALL_TIMEOUT_MS,
+  RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS,
+  createDockerExec,
+  reconcileExecutions,
+} from '../runtime/container/index.js'
 import type {
+  DockerExec,
   ExecutionReconcileResult,
+  ManagedContainers,
   ManagedContainersHandle,
   ReconcileLogger,
 } from '../runtime/container/index.js'
@@ -129,13 +137,20 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
  * 2.12/2.14): startup reconcile could not confirm them stopped — the stop went unconfirmed, a docker
  * call failed, or its time budget ran out — so they may still be running and holding a GPU. Which one
  * is not recorded, so each holds every card, as `stop-unconfirmed`, under its engine id and container
- * id. Evicting one runs the reconcile again (this scope's journal only; this instance's own records
- * are never touched), and it is released only once Docker confirms it gone.
+ * id, with the remedy a refusal names. Evicting one runs the reconcile again, bounded like the startup
+ * one (a short deadline per docker call, a short `--time`, a total budget), over this scope's journal
+ * only — this instance's own records are never touched — and it is released only once Docker confirms
+ * it gone.
  */
 export function leftoverContainers(options: {
   containers: Pick<ManagedContainersHandle, 'current'>
   instanceId: string
   log: ReconcileLogger
+  /** The core's own empty `DOCKER_CONFIG` (`layout.managed.dockerConfigDir`), as every docker call uses. */
+  dockerConfigDir: string
+  /** Test seams: the executor of a retried reconcile (default: the startup deadline per call) and its budget. */
+  exec?: (wired: ManagedContainers) => DockerExec
+  budgetMs?: number
 }): () => ResidencyOccupant[] {
   let latest: ExecutionReconcileResult | null = null
   const unresolved = (result: ExecutionReconcileResult) => [
@@ -143,6 +158,33 @@ export function leftoverContainers(options: {
     ...result.failed,
     ...result.skipped,
   ]
+  const boundedExec =
+    options.exec ??
+    ((wired: ManagedContainers) =>
+      createDockerExec({
+        dockerPath: wired.dockerPath,
+        dockerConfigDir: options.dockerConfigDir,
+        timeoutMs: RECONCILE_CALL_TIMEOUT_MS,
+      }))
+  const retry = async (wired: ManagedContainers): Promise<ExecutionReconcileResult> => {
+    const budget = new AbortController()
+    const budgetMs = options.budgetMs ?? RECONCILE_BUDGET_MS
+    if (budgetMs <= 0) budget.abort()
+    const timer = setTimeout(() => budget.abort(), Math.max(budgetMs, 0))
+    timer.unref?.()
+    try {
+      return await reconcileExecutions(
+        wired.journal,
+        options.instanceId,
+        boundedExec(wired),
+        options.log,
+        RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS,
+        budget.signal
+      )
+    } finally {
+      clearTimeout(timer)
+    }
+  }
   return () => {
     const wired = options.containers.current()
     if (wired === null) return []
@@ -152,8 +194,11 @@ export function leftoverContainers(options: {
       cards: 'all',
       auxiliary: false,
       state: 'stop-unconfirmed',
+      remedy:
+        `Start Docker, or remove container ${record.container_id} yourself ` +
+        `(docker rm -f ${record.container_id}); the next load retries the stop.`,
       evict: async () => {
-        latest = await reconcileExecutions(wired.journal, options.instanceId, wired.exec, options.log)
+        latest = await retry(wired)
         if (unresolved(latest).some((left) => left.container_id === record.container_id)) {
           throw new Error(`Docker did not confirm container ${record.container_id} stopped.`)
         }

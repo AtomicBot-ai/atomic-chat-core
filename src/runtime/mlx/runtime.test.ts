@@ -371,6 +371,38 @@ describe('MlxRuntime: GPU residency', () => {
     expect(r.gpuOccupancy()).toEqual([{ model_id: 'qwen', cards: 'all', auxiliary: false, state: 'ready' }])
   })
 
+  it('keeps a session it is stopping on the GPU as stopping until its process has exited', async () => {
+    await writeMlxModel('qwen')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const base = fakeSidecarSpawn({ kind: 'mlx', argvFile })
+    const r = runtime(
+      {},
+      {},
+      {
+        spawn: async (spec, opts) => {
+          const started = await base(spec, opts)
+          const terminate = started.process.terminate
+          started.process.terminate = async (graceMs) => {
+            await gate
+            return terminate(graceMs)
+          }
+          return started
+        },
+      }
+    )
+    const session = await r.load('qwen')
+    const unloading = r.unload('qwen')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(r.gpuOccupancy()).toEqual([
+      { model_id: 'qwen', cards: 'all', auxiliary: false, state: 'stopping' },
+    ])
+    release()
+    expect(await unloading).toEqual({ success: true })
+    expect(r.gpuOccupancy()).toEqual([])
+    expect(session.pid).toBeGreaterThan(0)
+  })
+
   it('reports an embedding session as auxiliary, and starts nothing when core refuses the GPU', async () => {
     await writeMlxModel('emb')
     await writeMlxModel('chat')

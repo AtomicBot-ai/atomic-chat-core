@@ -362,9 +362,10 @@ describe.skipIf(!posix)('GPU residency', () => {
     const claims: GpuClaim[] = []
     const built: { service?: DiffusionService } = {}
     const h = harness({
-      claimGpu: async (claim) => {
+      claimGpu: async (claim, _signal, granted) => {
         claims.push(claim)
         expect(built.service?.gpuOccupancy()).toEqual([])
+        granted?.()
       },
     })
     built.service = h.service
@@ -382,7 +383,7 @@ describe.skipIf(!posix)('GPU residency', () => {
   })
 
   it('holds the GPU as loading while the server starts, once its claim went through', async () => {
-    const h = harness({ claimGpu: async () => {} })
+    const h = harness({ claimGpu: async (_claim, _signal, granted) => granted?.() })
     await installFakeSdEngine(layout, { loadMs: 5_000, pidFile: join(dataFolder, 'pids') })
     await h.service.configure({ dataFolder })
     const loading = h.service.loadModel(await loadRequest()).then(
@@ -396,6 +397,68 @@ describe.skipIf(!posix)('GPU residency', () => {
     await h.service.unloadModel()
     await loading
     expect(h.service.gpuOccupancy()).toEqual([])
+  })
+
+  it(
+    'an unload that arrives while a load is still taking the old server down never deadlocks with that load’s claim',
+    { timeout: 10_000 },
+    async () => {
+      // The claim behaves like core's residency while it evicts this very service: it is granted only
+      // once the eviction — `unloadModel` — has finished, unless the load is aborted first.
+      let unloaded: Promise<void> = new Promise(() => {})
+      let blocking = false
+      const h = harness({
+        claimGpu: (_claim, signal, granted) => {
+          if (!blocking) {
+            granted?.()
+            return Promise.resolve()
+          }
+          if (signal?.aborted) return Promise.reject(loadCancelledError())
+          return new Promise((resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(loadCancelledError()), { once: true })
+            void unloaded.then(() => {
+              granted?.()
+              resolve()
+            })
+          })
+        },
+      })
+      await installFakeSdEngine(layout)
+      await h.service.configure({ dataFolder })
+      const request = await loadRequest()
+      await h.service.loadModel(request)
+
+      blocking = true
+      const reloading = h.service.loadModel(request).then(
+        () => 'loaded',
+        (e: unknown) => (e as { details?: string }).details ?? String(e)
+      )
+      unloaded = h.service.unloadModel()
+      await unloaded
+      expect(await reloading).toContain('MODEL_LOAD_CANCELLED')
+      expect(h.service.gpuOccupancy()).toEqual([])
+      // The lock is free: the next load goes through.
+      blocking = false
+      await h.service.loadModel(request)
+    }
+  )
+
+  it('reports a server being taken down as stopping, and an unload waits for that exit even when it began outside the lock', async () => {
+    const h = harness()
+    const stopping = { spec: { modelId: 'flux', backend: 'cuda', cpuFallback: false } }
+    let release!: () => void
+    const done = new Promise<void>((resolve) => (release = resolve))
+    h.service.state.stopping = { ...stopping, done } as unknown as typeof h.service.state.stopping
+    expect(h.service.gpuOccupancy()).toEqual([
+      { model_id: 'flux', cards: 'all', auxiliary: false, state: 'stopping' },
+    ])
+    let finished = false
+    const unloading = h.service.unloadModel().then(() => (finished = true))
+    await sleep(30)
+    expect(finished).toBe(false)
+    release()
+    await unloading
+    expect(finished).toBe(true)
   })
 
   it('an unload aborts a load still waiting for its GPU claim, so the load lock is never held hostage', async () => {

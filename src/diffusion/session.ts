@@ -54,7 +54,7 @@ export interface SessionDeps {
    * Core's GPU residency (spec `gpu-residency`): asked before every spawn — a load and a respawn
    * alike — to free the GPU of the other engines. Rejects (`GPU_BUSY`, a cancel) fail the load.
    */
-  claimGpu?: (spec: ServerSpec, signal?: AbortSignal) => Promise<void>
+  claimGpu?: (spec: ServerSpec, signal?: AbortSignal, granted?: () => void) => Promise<void>
 }
 
 /**
@@ -194,15 +194,20 @@ export async function loadFromSpec(
   const { state } = deps
   state.setModelState('loading')
   await emitState(deps, reason)
-  if (spec.backend === 'cuda' || spec.backend === 'rocm') await deps.sleep(GPU_SETTLE_MS)
 
   let server: ServerHandle
   try {
     // A retained spec can name an engine build that an update has since made too old for it.
     checkEngineCompatibility(spec.family, spec.tag)
-    // Every other engine is off the GPU, its exit confirmed, before this server starts.
-    await deps.claimGpu?.(spec, signal)
-    state.starting = spec
+    // Every other engine is off the GPU, its exit confirmed, before this server starts; from the
+    // moment the claim is granted this server holds the GPU as starting.
+    const hold = () => {
+      state.starting = spec
+    }
+    if (deps.claimGpu) await deps.claimGpu(spec, signal, hold)
+    hold()
+    // After the claim, so the settle follows the exit of whatever the claim evicted as well as ours.
+    if (spec.backend === 'cuda' || spec.backend === 'rocm') await deps.sleep(GPU_SETTLE_MS)
     server = await deps.spawn(spec, state.paths.scratchDir, signal)
   } catch (raw) {
     const error = toDiffusionError(raw)
@@ -246,7 +251,19 @@ export async function takeDownSession(deps: SessionDeps, graceMs?: number): Prom
   if (!session) return false
   state.session = undefined
   session.server.setLineListener(undefined)
-  await session.server.terminate(graceMs)
+  // Still on the GPU until its exit is confirmed: GPU residency sees it as stopping until then.
+  const exit = session.server.terminate(graceMs).then(() => undefined)
+  const stopping = { spec: session.spec, done: exit.catch(() => undefined) }
+  state.stopping = stopping
+  try {
+    await exit
+  } catch (error) {
+    // Not confirmed: a server that may still be running stays the session, never forgotten.
+    if (session.server.exitStatus() === undefined && state.session === undefined) state.session = session
+    throw error
+  } finally {
+    if (state.stopping === stopping) state.stopping = undefined
+  }
   await deps.onServerGone?.(session.server.pid)
   return true
 }

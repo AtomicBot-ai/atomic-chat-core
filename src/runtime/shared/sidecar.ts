@@ -57,6 +57,8 @@ export class SidecarTable<Extra = unknown> {
   private readonly sessions = new Map<string, SidecarSession<Extra>>()
   private readonly loading = new Map<string, Promise<SessionInfo>>()
   private readonly unloading = new Map<string, Promise<UnloadResult>>()
+  /** Sessions out of the table whose process has not exited yet: they still hold what they held. */
+  private readonly terminating = new Map<string, SessionInfo>()
   private loadTail: Promise<void> = Promise.resolve()
   private closing = false
   private readonly shutdownController = new AbortController()
@@ -91,6 +93,11 @@ export class SidecarTable<Extra = unknown> {
 
   isLoading(modelId: string): boolean {
     return this.loading.has(modelId)
+  }
+
+  /** Sessions being stopped whose process has not exited yet (GPU residency reports them `stopping`). */
+  stopping(): SessionInfo[] {
+    return [...this.terminating.values()].map((info) => ({ ...info }))
   }
 
   /** Ports sessions already hold, so a new load never picks one of them. */
@@ -217,6 +224,7 @@ export class SidecarTable<Extra = unknown> {
     const session = this.sessions.get(modelId)
     if (!session) return { success: true }
     this.sessions.delete(modelId)
+    this.terminating.set(modelId, session.info)
     try {
       await session.process.terminate(graceMs)
       if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
@@ -232,6 +240,8 @@ export class SidecarTable<Extra = unknown> {
         this.sessions.set(modelId, session)
       else if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       return { success: false, error: (e as Error).message }
+    } finally {
+      if (this.terminating.get(modelId) === session.info) this.terminating.delete(modelId)
     }
   }
 

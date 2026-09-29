@@ -38,6 +38,29 @@ const sleeper = () =>
   })
 
 describe('SidecarTable', () => {
+  it('lists a session it is stopping until its process has exited', async () => {
+    const { t } = table()
+    const child = sleeper()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const terminate = child.terminate
+    child.terminate = async (graceMs) => {
+      await gate
+      return terminate(graceMs)
+    }
+    await t.load('m', () =>
+      t.adopt({ info: info('m', child.pid), process: child, exe: process.execPath, extra: undefined })
+    )
+    expect(t.stopping()).toEqual([])
+    const unloading = t.unload('m')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(t.list()).toEqual([])
+    expect(t.stopping()).toEqual([info('m', child.pid)])
+    release()
+    expect(await unloading).toEqual({ success: true })
+    expect(t.stopping()).toEqual([])
+  })
+
   it('runs one load at a time for the provider and lets a second caller join a load in flight', async () => {
     const { t } = table()
     const order: string[] = []

@@ -30,6 +30,8 @@ export interface GpuOccupancy {
    */
   auxiliary: boolean
   state: GpuOccupancyState
+  /** What the user can do when this session will not stop (a `GPU_BUSY` names it); a default otherwise. */
+  remedy?: string
 }
 
 /** What a load is about to take, asked of core before anything is started. */
@@ -47,7 +49,10 @@ export interface GpuClaim {
 /**
  * Core's answer to a claim: resolves once everything else on those cards is confirmed gone, rejects
  * with `GPU_BUSY` (a stop nobody could confirm) or `MODEL_LOAD_CANCELLED` (`signal` aborted while
- * waiting). The runtime starts nothing before it resolves, and reports the load as `loading` only
- * after it did.
+ * waiting). The runtime starts nothing before it resolves.
+ *
+ * `granted` is called synchronously, inside core's turn, the moment the claim succeeds: that is where
+ * the runtime starts reporting the load as `loading`, so the next claim — which cannot run before this
+ * turn ends — always sees it. A runtime with no hook registers the load itself.
  */
-export type GpuClaimHook = (claim: GpuClaim, signal?: AbortSignal) => Promise<void>
+export type GpuClaimHook = (claim: GpuClaim, signal?: AbortSignal, granted?: () => void) => Promise<void>

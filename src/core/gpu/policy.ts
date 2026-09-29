@@ -76,12 +76,20 @@ export function gpuEvictions<T extends GpuOccupant>(request: GpuRequest, occupan
 
 const describeCards = (cards: GpuCards): string => (cards === 'all' ? 'all' : cards.join(','))
 
-/** The refusal of a load whose card `holder` still occupies after an attempt to stop it. */
+/** What a refusal suggests when the occupant has nothing better to say. */
+const DEFAULT_REMEDY = 'Try again once it has stopped.'
+
+/**
+ * The refusal of a load whose card `holder` still occupies after an attempt to stop it: who, what to
+ * do about it (the occupant's own remedy — remove a container, restart Docker — or try again), and in
+ * the details why the stop failed.
+ */
 export function gpuBusyError(holder: GpuOccupant, cause?: string): AtomicCoreError {
   const id = `${holder.provider}/${holder.model_id}`
   return new AtomicCoreError(
     'GPU_BUSY',
-    `${id} still holds the GPU: its stop has not been confirmed, so nothing else loads there yet.`,
+    `${id} still holds the GPU: its stop has not been confirmed, so nothing else loads there yet. ` +
+      (holder.remedy ?? DEFAULT_REMEDY),
     `holder=${id} state=${holder.state} cards=${describeCards(holder.cards)}` +
       (cause === undefined ? '' : ` cause=${cause}`)
   )

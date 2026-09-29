@@ -203,7 +203,8 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       settings,
       // Always passed, evaluated when the stage runs: a second model that arrived a moment earlier
       // is still found, so two loads racing each other can never both end up running.
-      stopPrevious: (stageSignal) => this.stopOthers(lifecycle, modelId, gpu.gpu_id, stageSignal),
+      stopPrevious: (stageSignal, generation) =>
+        this.stopOthers(lifecycle, { modelId, generation, gpuId: gpu.gpu_id }, stageSignal),
       ...(opts.timeoutSecs !== undefined ? { timeoutMs: opts.timeoutSecs * 1000 } : {}),
       ...(signal !== undefined ? { signal } : {}),
       ...(substituted !== undefined ? { gpuSubstituted: substituted } : {}),
@@ -325,35 +326,54 @@ export class TensorrtLlmRuntime implements LocalRuntime {
    * ready, stopping, or stopped without Docker's confirmation, which still holds the card.
    */
   gpuOccupancy(): GpuOccupancy[] {
-    const reservations = this.current?.reservations() ?? []
-    const live = new Set(reservations.map((r) => r.generation))
-    for (const generation of this.claimed) if (!live.has(generation)) this.claimed.delete(generation)
-    return reservations
+    return (this.current?.reservations() ?? [])
       .filter((r) => r.state !== 'loading' || this.claimed.has(r.generation))
-      .map((r) => ({ model_id: r.model_id, cards: [r.gpu_uuid], auxiliary: false, state: r.state }))
+      .map((r) => ({
+        model_id: r.model_id,
+        cards: [r.gpu_uuid],
+        auxiliary: false,
+        state: r.state,
+        ...(r.state === 'stop-unconfirmed' && r.container_id !== null
+          ? {
+              remedy:
+                `Loading again retries the stop; if Docker keeps failing, restart Docker or remove ` +
+                `container ${r.container_id} (docker rm -f ${r.container_id}).`,
+            }
+          : {}),
+      }))
   }
 
   /**
    * The `stopping-previous` stage. With core's residency: its claim on `gpuId`, which stops every other
    * `tensorrt-llm` model (one session at a time) and every other engine on that card, each with a
    * confirmed exit, and refuses with `GPU_BUSY` while one will not stop. Without it: every other
-   * `tensorrt-llm` model, loading or loaded, stopped with confirmation.
+   * `tensorrt-llm` model, loading or loaded, stopped with confirmation. Either way the load holds its
+   * card from then on — with residency, from the moment core grants the claim, inside core's turn.
    */
   private async stopOthers(
     lifecycle: ManagedTextLifecycle,
-    modelId: string,
-    gpuId: string,
+    load: { modelId: string; generation: string; gpuId: string },
     signal: AbortSignal
   ): Promise<void> {
-    const generation = lifecycle.reservations().find((r) => r.model_id === modelId)?.generation
+    // Generations whose reservation is gone are forgotten here, never while answering a read.
+    const live = new Set(lifecycle.reservations().map((r) => r.generation))
+    for (const generation of this.claimed) if (!live.has(generation)) this.claimed.delete(generation)
+    const hold = () => {
+      this.claimed.add(load.generation)
+    }
     if (this.deps.claimGpu) {
-      const claim = { model_id: modelId, cards: [gpuId], auxiliary: false, soleSessionOfProvider: true }
-      await this.deps.claimGpu(claim, signal)
+      const claim = {
+        model_id: load.modelId,
+        cards: [load.gpuId],
+        auxiliary: false,
+        soleSessionOfProvider: true,
+      }
+      await this.deps.claimGpu(claim, signal, hold)
     } else {
       const others = new Set(lifecycle.reservations().map((r) => r.model_id))
-      others.delete(modelId)
+      others.delete(load.modelId)
       for (const other of others) await this.unload(other)
     }
-    if (generation !== undefined) this.claimed.add(generation)
+    hold()
   }
 }

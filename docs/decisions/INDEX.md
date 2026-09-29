@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [GPU residency holds stopping sessions until exit, grants inside the turn, and names a remedy](2026-09-29-gpu-residency-holds-stopping-sessions-and-grants-inside-the-turn.md) — amends the entry below (review r1).
 - **2026-09-29** — [GPU residency is derived from what each engine reports, and GPU_BUSY names what would not stop](2026-09-29-gpu-residency-is-derived-from-what-each-engine-reports.md) — replaces the stateful `ResidencyPolicy` ported by task 2.2.
 - **2026-09-29** — [The tensorrt-llm provider shares the setup operation's Docker handle, installation store and machine](2026-09-29-tensorrt-llm-provider-shares-the-setup-operations-handle-store-and-host.md) — supersedes items 3–4 of the route-policy record below.
 - **2026-09-29** — [tensorrt-llm sessions carry a route policy to the public server](2026-09-29-tensorrt-llm-sessions-carry-a-route-policy-to-the-public-server.md)
