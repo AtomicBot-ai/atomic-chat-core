@@ -172,6 +172,20 @@ async function poll(
   return current
 }
 
+/**
+ * Wait until the event stream has delivered a frame the test needs (final review T-312): reading the
+ * operation back can see a phase before the SSE stream has carried the event that announced it.
+ */
+async function frame(
+  seen: Array<{ event: string; data: Operation }>,
+  match: (frame: { event: string; data: Operation }) => boolean,
+  ms = 5_000
+): Promise<void> {
+  const deadline = Date.now() + ms
+  while (!seen.some(match) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+  expect(seen.some(match), 'the event stream never delivered the frame').toBe(true)
+}
+
 const settled = (operation: Operation): boolean =>
   [
     'awaiting-consent',
@@ -221,6 +235,13 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
     const asking = await beginAndApprove(ready)
     const done = await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')
     expect(done.phase).toBe('ready')
+    await frame(
+      seen,
+      (f) =>
+        f.event === 'environment:operation' &&
+        f.data.operation_id === asking.operation_id &&
+        f.data.phase === 'ready'
+    )
 
     const phases = seen
       .filter((frame) => frame.event === 'environment:operation')

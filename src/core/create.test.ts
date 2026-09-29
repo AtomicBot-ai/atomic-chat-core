@@ -12,6 +12,13 @@ import type { ErrorReport } from '../telemetry/index.js'
 import { ExecutionJournal } from '../runtime/container/index.js'
 import { isProcessAlive } from '../runtime/index.js'
 
+/**
+ * The tests here build a whole core, several of them with real (fake-engine) child processes. Under the
+ * full suite's parallel load some crossed vitest's 5 s default and failed at random (final review
+ * T-282), so the whole file gets an explicit, longer per-test timeout.
+ */
+vi.setConfig({ testTimeout: 20_000 })
+
 useCoreHarness()
 
 describe('managed runtime containers at startup', () => {

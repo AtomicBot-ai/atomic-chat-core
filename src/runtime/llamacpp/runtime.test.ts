@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -17,6 +17,13 @@ import { hostPid, spawnManaged } from '../shared/index.js'
 import type { GpuClaim, ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
+
+/**
+ * The tests here build a llama.cpp runtime, several of them with real (fake-engine) child processes. Under the
+ * full suite's parallel load some crossed vitest's 5 s default and failed at random (final review
+ * T-282), so the whole file gets an explicit, longer per-test timeout.
+ */
+vi.setConfig({ testTimeout: 20_000 })
 
 let data: TmpDataFolder
 let journal: ProcessJournal

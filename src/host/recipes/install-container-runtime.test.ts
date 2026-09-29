@@ -344,7 +344,8 @@ describe('dnf steps', () => {
     // No dnf option stops RPM Obsoletes (libdnf always sets SOLVER_FLAG_YUM_OBSOLETES), so the
     // install carries none; the live check below refuses instead.
     expect(packages.install).toEqual(['dnf', 'install', '-y', '--setopt=install_weak_deps=False'])
-    // Live, read-only: what each package to install Obsoletes in the configured repos (a repository
+    // Live, before anything is installed, and installing or removing nothing (dnf may still refresh
+    // its metadata cache): what each package to install Obsoletes in the configured repos (a repository
     // that cannot answer fails the query instead of being skipped), and whether a package of that
     // name is installed: libsolv matches Obsoletes against package names, not what they provide.
     expect(packages.obsoletes).toEqual({
@@ -664,7 +665,8 @@ describe('what the recipe may never run', () => {
   })
 
   it.each<[string[]]>([
-    // What the dnf path runs, read-only, and nothing more is needed to permit it.
+    // What the dnf path runs — the install itself, and the queries before it — and nothing more is
+    // needed to permit it.
     [['dnf', 'install', '-y', '--setopt=install_weak_deps=False', 'nvidia-container-toolkit']],
     [
       [

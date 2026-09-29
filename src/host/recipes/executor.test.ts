@@ -646,6 +646,9 @@ describe('never over or around what is already there', () => {
 
   describe('a package query that does not answer "not installed" in so many words fails closed', () => {
     const RPMDB = 'error: cannot open Packages database in /var/lib/rpm'
+    // What rpm really prints when it cannot open its database (final review T-247, N1): the error on
+    // stderr *and* the usual "not installed" line on stdout, so only the stderr guard tells them apart.
+    const rpmdb = (name: string) => ({ code: 1, stdout: `package ${name} is not installed\n`, stderr: RPMDB })
     const rpmQuery = (name: string) => `rpm --query --queryformat=%{NAME}\\n ${name}`
     // Each case breaks one query. The step must fail with nothing installed: a broken query is never
     // read as "not installed", which would let a conflict slip through or an install run blind.
@@ -659,19 +662,19 @@ describe('never over or around what is already there', () => {
         name: 'rpm cannot open its database: is a recipe package installed?',
         broken: rpmQuery('nvidia-container-toolkit'),
         components: ['nvidia-container-toolkit'],
-        answer: { code: 1, stderr: RPMDB },
+        answer: rpmdb('nvidia-container-toolkit'),
       },
       {
         name: 'rpm cannot open its database: is a conflict installed?',
         broken: rpmQuery('moby-engine'),
         components: ['docker-engine'],
-        answer: { code: 1, stderr: RPMDB },
+        answer: rpmdb('moby-engine'),
       },
       {
         name: 'rpm cannot open its database: is a name the repositories obsolete installed?',
         broken: rpmQuery('nvidia-docker2'),
         components: ['nvidia-container-toolkit'],
-        answer: { code: 1, stderr: RPMDB },
+        answer: rpmdb('nvidia-docker2'),
       },
       {
         name: 'rpm could not run at all',
@@ -702,6 +705,18 @@ describe('never over or around what is already there', () => {
         broken: 'dpkg-query --show --showformat=${Status} docker.io',
         components: ['docker-engine'],
         answer: { code: 1, stderr: '' },
+      },
+      {
+        // Pins the `stdout === ''` guard (final review T-247, N1): the "unknown" line alone is not
+        // enough when dpkg-query also printed something about the package.
+        name: 'dpkg-query says the package is unknown but also printed a status',
+        broken: 'dpkg-query --show --showformat=${Status} docker.io',
+        components: ['docker-engine'],
+        answer: {
+          code: 1,
+          stdout: 'install ok half-configured',
+          stderr: 'dpkg-query: no packages found matching docker.io',
+        },
       },
     ])('$name', async ({ broken, components, answer }) => {
       const host = new FakeHost()

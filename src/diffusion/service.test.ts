@@ -7,7 +7,7 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { CoreEvents, LoadDiffusionModelRequest } from '../contracts/index.js'
@@ -21,6 +21,13 @@ import type { FakeSdOptions } from '../../test/helpers/fake-sd-server.js'
 import { isProcessAlive, loadCancelledError } from '../runtime/shared/index.js'
 import type { GpuClaim, GpuClaimHook } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
+
+/**
+ * The tests here build the diffusion service, several of them with real (fake-engine) child processes. Under the
+ * full suite's parallel load some crossed vitest's 5 s default and failed at random (final review
+ * T-282), so the whole file gets an explicit, longer per-test timeout.
+ */
+vi.setConfig({ testTimeout: 20_000 })
 
 const posix = process.platform !== 'win32'
 
