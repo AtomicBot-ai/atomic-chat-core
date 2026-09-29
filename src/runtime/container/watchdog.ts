@@ -187,8 +187,8 @@ export const WATCHDOG_SCRIPT_MODE = 0o555
 //  - `terminate_engine` guards against re-entry with `STOPPING`: a second TERM/INT arriving while a
 //    shutdown is already in progress (`docker stop` repeating itself, or a TERM landing during the
 //    stale path's own grace wait) does not restart the grace clock, and — as of this round — does not
-//    even shorten it. `GRACE_DEADLINE` is a wall-clock deadline (`date +%s` plus `KILL_GRACE_SECS`,
-//    seconds since the epoch) taken once, the first time `STOPPING` flips to 1, and never touched
+//    even shorten it. `GRACE_DEADLINE` is a wall-clock deadline (`date +%s` plus `KILL_GRACE_SECS`
+//    plus one, seconds since the epoch) taken once, the first time `STOPPING` flips to 1, and never touched
 //    again; the initial signal is likewise sent only once. Two rounds of the same bug, both from
 //    treating the grace period as a count of loop iterations instead of an actual span of time:
 //    counting *polls* let a trap firing again *during* the interrupted call's own `wait` restart
@@ -203,7 +203,14 @@ export const WATCHDOG_SCRIPT_MODE = 0o555
 //    the same re-entry: if the stale path is what is tearing the engine down, its trap invocation
 //    (should one fire mid-shutdown) must still `exit 97`, not whatever status the interrupted `wait`
 //    happened to leave in `$?` — the stale branch sets it before calling `terminate_engine`, and the
-//    TERM/INT trap falls back to `$?` only when nothing set it.
+//    TERM/INT trap falls back to `$?` only when nothing set it. The `+ 1` (final review M-10):
+//    `date +%s` floors, so a deadline of `now + KILL_GRACE_SECS` taken at X.9 s fired at X+G, only
+//    G-0.9 s later — the real grace landed anywhere in (G-1, G]. Adding one second makes it
+//    (G, G+1]: never shorter than the grace an engine was promised, at most a second longer.
+//
+//  - `date +%s` and a fractional `sleep 0.25` are not POSIX, but both shells this script runs under
+//    support them: GNU coreutils in the NGC Ubuntu base image, and BSD `date`/`sleep` on the macOS
+//    machines its tests run on. A base image without them would need this revisited.
 //
 //  - `terminate_engine` resolves the pid to act on as `${ENGINE_PID:-$!}` (with `set +u`/`set -u`
 //    bracketing it, since `$!` is unset — not just empty — before any job has ever been backgrounded,
@@ -315,7 +322,7 @@ const WATCHDOG_SCRIPT_LINES: readonly string[] = [
   '  if [ "$STOPPING" -eq 0 ]; then',
   '    STOPPING=1',
   '    kill -"$1" "$pid" 2>/dev/null || true',
-  '    GRACE_DEADLINE=$(( $(date +%s) + KILL_GRACE_SECS ))',
+  '    GRACE_DEADLINE=$(( $(date +%s) + KILL_GRACE_SECS + 1 ))',
   '  fi',
   '  while kill -0 "$pid" 2>/dev/null; do',
   '    if [ "$(date +%s)" -ge "$GRACE_DEADLINE" ]; then',

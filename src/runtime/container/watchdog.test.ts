@@ -506,21 +506,22 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
     // occasionally alias two consecutive polls onto the same integer second under scheduling jitter
     // (e.g. the full test suite's own CPU contention) even though the file is genuinely being
     // rewritten every 300ms — a false "unchanged" reading with nothing wrong. A 2s gap between polls
-    // leaves enough margin that this essentially cannot happen, and threshold=3 (limit=6s) means it
-    // would have to happen three times in a row to produce a false positive.
+    // leaves enough margin that this essentially cannot happen, and threshold=4 ((6+2)/2) means it
+    // would have to happen four times in a row to produce a false positive.
     const { child, done } = runWatchdog(
       scriptPath,
       [process.execPath, '-e', LONG_LIVED_ENGINE, pidFile],
       watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 6, pollIntervalSecs: 2, killGraceSecs: 1 })
     )
 
-    // A ticker keeping the heartbeat fresh for well past the stale window (3 polls * 2s = 6s).
+    // A ticker keeping the heartbeat fresh for two whole stale windows (4 polls * 2s = 8s, final review
+    // M-10: an 8 s watch was barely one window, so a late kill could still pass unnoticed).
     const tick = setInterval(() => {
       fsWriteFile(heartbeatPath, '').catch(() => {})
     }, 300)
     try {
       await waitFor(async () => (await stat(pidFile).catch(() => undefined)) !== undefined, 2_000)
-      await new Promise((r) => setTimeout(r, 8_000))
+      await new Promise((r) => setTimeout(r, 12_000))
       expect(child.exitCode).toBeNull()
       const pid = await readPidFileTolerant(pidFile, 2_000)
       expect(pid).toBeDefined()
@@ -531,7 +532,7 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       await done.catch(() => undefined)
       await killEngineIfKnown(pidFile)
     }
-  }, 15_000)
+  }, 20_000)
 
   it('kills the engine and exits with the stale-heartbeat code once the heartbeat stops changing', async () => {
     const scriptPath = join(dir, 'entrypoint.sh')
@@ -540,7 +541,7 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
     const pidFile = join(dir, 'engine.pid')
     await fsWriteFile(heartbeatPath, '')
 
-    // limit=2, poll=1 => threshold = ceil(2/1) = 2 polls, so staleness fires ~2s after start.
+    // limit=2, poll=1 => threshold = (2+1)/1 = 3 polls, so staleness fires ~3s after start.
     const { done } = runWatchdog(
       scriptPath,
       [process.execPath, '-e', LONG_LIVED_ENGINE, pidFile],
@@ -548,7 +549,7 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
     )
     // Heartbeat is never touched again after the script's own initial creation: it goes stale.
 
-    // threshold*poll(2s) + grace(1s, irrelevant here since nothing needs killing) + generous slack.
+    // threshold*poll(3s) + grace(1-2s, irrelevant here since nothing needs killing) + generous slack.
     const result = await raceDone(done, 8_000)
 
     expect(result.code).toBe(WATCHDOG_EXIT_CODE_STALE_HEARTBEAT)
@@ -572,7 +573,7 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 2, pollIntervalSecs: 1, killGraceSecs: 1 })
     )
 
-    // threshold*poll(2s) + grace(1s) before KILL + generous slack.
+    // threshold*poll(3s) + grace(1-2s) before KILL + generous slack.
     const result = await raceDone(done, 10_000)
 
     expect(result.code).toBe(WATCHDOG_EXIT_CODE_STALE_HEARTBEAT)
@@ -642,6 +643,45 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
     expect(result.code).not.toBe(0)
     if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 2_000)
   }, 10_000)
+
+  // Final review M-10: `date +%s` floors, so a deadline of `now + KILL_GRACE_SECS` taken late in a
+  // second let the KILL land up to a second early — anywhere in (G-1, G]. TERM is sent just before a
+  // second boundary here, the worst case: the engine must still get its whole grace.
+  it('gives a TERM-ignoring engine its whole grace before KILL, even when TERM lands just before a second boundary', async () => {
+    const scriptPath = join(dir, 'entrypoint.sh')
+    await writeWatchdogScript(scriptPath)
+    const heartbeatPath = join(dir, 'heartbeat')
+    const pidFile = join(dir, 'engine.pid')
+    const termFile = join(dir, 'term-at')
+    await fsWriteFile(heartbeatPath, '')
+    const killGraceSecs = 1
+    const engine =
+      'const fs = require("fs"); fs.writeFileSync(process.argv[1], String(process.pid)); ' +
+      'process.on("SIGTERM", () => fs.writeFileSync(process.argv[2], String(Date.now()))); ' +
+      'setInterval(() => {}, 1000)'
+    const { child, done } = runWatchdog(
+      scriptPath,
+      [process.execPath, '-e', engine, pidFile, termFile],
+      watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 30, pollIntervalSecs: 1, killGraceSecs })
+    )
+    try {
+      const pid = await readPidFileTolerant(pidFile, 3_000)
+      expect(pid).toBeDefined()
+      // Into the last tenth of a second, then TERM.
+      while (Date.now() % 1000 < 880) await new Promise((r) => setTimeout(r, 5))
+      child.kill('SIGTERM')
+      if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 5_000)
+      const diedAt = Date.now()
+      const termAt = Number((await readFile(termFile, 'utf8')).trim())
+      expect(Number.isFinite(termAt)).toBe(true)
+      // Measured to the poll that saw it gone (20 ms), so only scheduling slack is allowed below G.
+      expect(diedAt - termAt).toBeGreaterThanOrEqual(killGraceSecs * 1000 - 50)
+      await raceDone(done, 3_000)
+    } finally {
+      child.kill('SIGKILL')
+      await killEngineIfKnown(pidFile)
+    }
+  }, 12_000)
 
   // Item 3 (findings-2.9-r1): a malformed timing value must fail closed (exit 96, engine never
   // started), not silently disable the watchdog.
@@ -794,7 +834,7 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
 
   // Item 1 (findings-2.9-r2, Important, controller-described off-by-one): the round-1 script counted
   // the poll that *establishes* the baseline observation as "1 unchanged poll" already, instead of 0.
-  // With STALE_LIMIT_SECS <= POLL_INTERVAL_SECS (THRESHOLD == 1), that alone satisfied the threshold
+  // With STALE_LIMIT_SECS < POLL_INTERVAL_SECS (THRESHOLD == 1), that alone satisfied the threshold
   // on literally the first poll, killing the engine immediately regardless of freshness. This test
   // fails against the round-1 script (exits 97 almost immediately instead of surviving).
   it('never kills a continuously-fresh heartbeat when STALE_LIMIT_SECS <= POLL_INTERVAL_SECS', async () => {
@@ -804,11 +844,13 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
     const pidFile = join(dir, 'engine.pid')
     await fsWriteFile(heartbeatPath, '')
 
-    // L == P (THRESHOLD = ceil(2/2) = 1).
+    // L < P (THRESHOLD = (1+2)/2 = 1): the only case where one observation alone reaches the
+    // threshold, which is what the round-1 off-by-one needed (final review M-10: with L == P the
+    // threshold is 2 now, so that test no longer exercised it).
     const { child, done } = runWatchdog(
       scriptPath,
       [process.execPath, '-e', LONG_LIVED_ENGINE, pidFile],
-      watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 2, pollIntervalSecs: 2, killGraceSecs: 1 })
+      watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 1, pollIntervalSecs: 2, killGraceSecs: 1 })
     )
 
     const tick = setInterval(() => {
@@ -911,7 +953,7 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
 
       const staleLimitSecs = 2
       const pollIntervalSecs = 1
-      const killGraceSecs = 3
+      const killGraceSecs = 4
 
       const { child, done } = runWatchdog(
         scriptPath,
@@ -923,11 +965,12 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       const pid = await readPidFileTolerant(pidFile, 2_000)
       expect(pid).toBeDefined()
 
-      // Let staleness actually trigger (threshold*poll ~= 2s) before bombarding with TERM, so this
+      // Let staleness actually trigger (threshold*poll ~= 3s; a whole second of margin, final review
+      // M-10 — half a second was not enough under a loaded full suite) before bombarding with TERM, so this
       // targets the stale path's own grace wait specifically, not ordinary TERM-forwarding. Bombard
       // for several seconds at 100ms — the cadence confirmed by hand to reliably interrupt dash's
       // 1-second grace-loop sleep — well past killGraceSecs, then stop and let it finish.
-      await new Promise((r) => setTimeout(r, (staleLimitSecs + pollIntervalSecs + 0.5) * 1000))
+      await new Promise((r) => setTimeout(r, (staleLimitSecs + pollIntervalSecs + 1) * 1000))
       const bombardStart = Date.now()
       const bombardEnd = bombardStart + (killGraceSecs + 3) * 1000
       const bombard = setInterval(() => {
@@ -958,10 +1001,10 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
       // (`- 2`, not a tight measurement slack) because this bound is not measuring the grace duration
       // itself: `bombardStart` is captured after a fixed pre-bombard wait, not at the exact instant
       // `terminate_engine` first set the deadline, and `GRACE_DEADLINE` itself is computed from
-      // whole-second `date +%s`, whose own floor rounding alone lets the real elapsed grace legitimately
-      // land anywhere in `(killGraceSecs - 1, killGraceSecs]` (confirmed by hand: 1.6-2.1s observed for
-      // killGraceSecs=3, well above the ~0.3s a restored per-iteration-counter bug produces, and well
-      // below what `- 2` would flag).
+      // whole-second `date +%s` plus one (final review M-10), which puts the real elapsed grace anywhere
+      // in `(killGraceSecs, killGraceSecs + 1]`; less the ~1 s between staleness and the first TERM,
+      // that is well above the fraction of a second a restored per-iteration-counter bug produces.
+      // killGraceSecs=4 (was 3) keeps this bound clear of the wider pre-bombard margin above.
       expect(elapsedSinceBombardStartSecs).toBeGreaterThanOrEqual(killGraceSecs - 2)
       if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 2_000)
     },
@@ -1002,15 +1045,21 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
     )
 
     // Confirms the engine has actually started (and is therefore inside the widened gap, which does
-    // not close until the script's own "sleep 3" completes) before sending TERM.
-    const pid = await readPidFileTolerant(pidFile, 3_000)
-    expect(pid).toBeDefined()
-    child.kill('SIGTERM')
+    // not close until the script's own "sleep 3" completes) before sending TERM. In try/finally
+    // (final review M-10): a failed assertion must not leave the long-lived engine running.
+    try {
+      const pid = await readPidFileTolerant(pidFile, 3_000)
+      expect(pid).toBeDefined()
+      child.kill('SIGTERM')
 
-    const result = await raceDone(done, 6_000)
-    expect(result.code).not.toBe(0)
+      const result = await raceDone(done, 6_000)
+      expect(result.code).not.toBe(0)
 
-    if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 2_000)
+      if (pid !== undefined) await waitFor(async () => !(await pidAlive(pid)), 2_000)
+    } finally {
+      child.kill('SIGKILL')
+      await killEngineIfKnown(pidFile)
+    }
   }, 12_000)
 
   // Item 3 (findings-2.9-r2), end-to-end, best effort: TERM sent as early as this harness can manage
@@ -1053,9 +1102,10 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
   // Item 6 (findings-2.9-r3): if the engine happens to exit on its own during the very poll that also
   // turns out stale, its own exit status must win over 97 — hiding a real crash/OOM behind the
   // generic stale-heartbeat code would make that failure unreadable from the exit code alone.
-  // staleLimitSecs=1, pollIntervalSecs=1 => THRESHOLD=2, so staleness is declared at the end of the
-  // second poll (~t=2s); the fake engine self-exits at t=1.5s, squarely inside that second poll's
-  // sleep, so by the time the watchdog re-checks liveness it is already gone.
+  // staleLimitSecs=2, pollIntervalSecs=2 => THRESHOLD=2, so staleness is declared at the end of the
+  // second poll (~t=4s); the fake engine self-exits at t=3s, squarely inside that second poll's sleep
+  // with a whole second either side (final review M-10: was t=1.5s against polls at 1s and 2s), so by
+  // the time the watchdog re-checks liveness it is already gone.
   it("reports the engine's own exit status when it exits on its own during a poll that is also stale", async () => {
     const scriptPath = join(dir, 'entrypoint.sh')
     await writeWatchdogScript(scriptPath)
@@ -1065,11 +1115,11 @@ describe.skipIf(!posix)('the watchdog entrypoint script', () => {
 
     const { done } = runWatchdog(
       scriptPath,
-      [process.execPath, '-e', selfExitingEngine(1_500, 9), pidFile],
-      watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 1, pollIntervalSecs: 1, killGraceSecs: 1 })
+      [process.execPath, '-e', selfExitingEngine(3_000, 9), pidFile],
+      watchdogEnv({ heartbeatFile: heartbeatPath, staleLimitSecs: 2, pollIntervalSecs: 2, killGraceSecs: 1 })
     )
 
-    const result = await raceDone(done, 6_000)
+    const result = await raceDone(done, 8_000)
     expect(result.code).toBe(9)
-  }, 10_000)
+  }, 12_000)
 })
