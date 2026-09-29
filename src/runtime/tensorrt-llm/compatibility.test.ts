@@ -4,7 +4,9 @@ import type { GpuFacts, RuntimeDescriptor, Sha256Digest } from '../../contracts/
 import { inventoryDigest } from '../environment/index.js'
 import {
   checkModelCompatibility,
-  isWeightFile,
+  checkModelCompatibilityFiles,
+  checkModelMemory,
+  kvCacheBytes,
   kvCacheReserveBytes,
   selectLaunchGpu,
   weightBytes,
@@ -121,7 +123,10 @@ describe('checkModelCompatibility', () => {
       files: weightFiles(75_000_000_000),
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.quantization_format).toBe('fp8')
     expect(result.weight_bytes).toBe(75_000_000_000)
@@ -139,17 +144,22 @@ describe('checkModelCompatibility', () => {
       files: weightFiles(79_000_000_000),
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.weight_bytes).toBe(79_000_000_000)
+    // No KV-cache shape in config.json: falls back to the weight-proportional rule.
     // 79,000,000,000 + 10% reserve (7,900,000,000) = 86,900,000,000 > 85,532,850,176 free.
+    expect(result.kv_reserve_basis).toBe('weight_fraction')
     expect(result.verdict).toEqual({
       ok: false,
       error: {
         code: 'MODEL_INCOMPATIBLE',
         message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
         details:
-          'weight_bytes=79000000000 kv_reserve_bytes=7900000000 needed_bytes=86900000000 free_bytes=85532850176',
+          'weight_bytes=79000000000 kv_reserve_bytes=7900000000 kv_reserve_basis=weight_fraction needed_bytes=86900000000 free_bytes=85532850176',
       },
     })
   })
@@ -163,12 +173,18 @@ describe('checkModelCompatibility', () => {
       files: weightFiles(75_000_000_000),
     })
 
-    const atDefault = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const atDefault = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
     expect(atDefault.verdict).toEqual({ ok: true })
 
     // 0.5 leaves half of post-weight memory unspent as headroom: reserve becomes 50% of weights
     // (37,500,000,000), so 75,000,000,000 + 37,500,000,000 = 112,500,000,000 > 85,532,850,176 free.
-    const atLowerFraction = checkModelCompatibility(input, descriptor, [selected], 0, 0.5)
+    const atLowerFraction = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.5,
+    })
     expect(atLowerFraction.verdict.ok).toBe(false)
   })
 
@@ -182,7 +198,10 @@ describe('checkModelCompatibility', () => {
     const other = gpu({ gpu_id: 'gpu-b', total_vram_bytes: 46_000_000_000, free_vram_bytes: 46_000_000_000 })
     const input = baseInput({ files: weightFiles(40_000_000_000), gpu_id: 'gpu-a' })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.checked_gpu_id).toBe('gpu-a')
     // 40,000,000,000 + 10% reserve (4,000,000,000) = 44,000,000,000 > 22,000,000,000 free on gpu-a.
@@ -192,7 +211,7 @@ describe('checkModelCompatibility', () => {
         code: 'MODEL_INCOMPATIBLE',
         message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
         details:
-          'weight_bytes=40000000000 kv_reserve_bytes=4000000000 needed_bytes=44000000000 free_bytes=22000000000',
+          'weight_bytes=40000000000 kv_reserve_bytes=4000000000 kv_reserve_basis=weight_fraction needed_bytes=44000000000 free_bytes=22000000000',
       },
     })
     expect(result.fits_other_gpus).toEqual(['gpu-b'])
@@ -206,7 +225,10 @@ describe('checkModelCompatibility', () => {
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.quantization_format).toBe('fp8')
     expect(result.verdict).toEqual({ ok: true })
@@ -230,7 +252,10 @@ describe('checkModelCompatibility', () => {
       gpu_id: 'gpu-0',
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.quantization_format).toBe('fp8_block_scales')
     expect(result.verdict.ok).toBe(false)
@@ -261,7 +286,10 @@ describe('checkModelCompatibility', () => {
       gpu_id: 'gpu-0',
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.quantization_format).toBe('nvfp4')
     expect(result.verdict.ok).toBe(false)
@@ -279,7 +307,10 @@ describe('checkModelCompatibility', () => {
       config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.verdict.ok).toBe(false)
     if (!result.verdict.ok) {
@@ -295,7 +326,10 @@ describe('checkModelCompatibility', () => {
     // Too small to fit regardless, so only the CC parsing bug could wrongly list it.
     const input = baseInput({ files: weightFiles(40_000_000_000) })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, brokenReport], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected, brokenReport], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.fits_other_gpus).toEqual([])
   })
@@ -310,7 +344,10 @@ describe('checkModelCompatibility', () => {
       ],
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.weight_bytes).toBe(0)
     expect(result.verdict).toEqual({
@@ -327,7 +364,10 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ config_json: { architectures: ['LlamaForCausalLM'], dtype: 'float32' } })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.quantization_format).toBeNull()
     expect(result.verdict.ok).toBe(false)
@@ -349,7 +389,10 @@ describe('checkModelCompatibility', () => {
       hf_quant_config_json: { quantization: { quant_algo: 'w4a16_awq' } },
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.quantization_format).toBe('w4a16_awq')
     expect(result.verdict.ok).toBe(false)
@@ -367,9 +410,17 @@ describe('checkModelCompatibility', () => {
       files: [...weightFiles(4_000_000_000), { path: 'hf_quant_config.json', size: 200, sha256: null }],
     })
 
-    expect(() => checkModelCompatibility(input, descriptor, [selected], 0, 0.9)).toThrow(AtomicCoreError)
+    expect(() =>
+      checkModelCompatibility(input, descriptor, [selected], 0, {
+        contextLength: 8192,
+        kvCacheFreeGpuMemoryFraction: 0.9,
+      })
+    ).toThrow(AtomicCoreError)
     try {
-      checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+      checkModelCompatibility(input, descriptor, [selected], 0, {
+        contextLength: 8192,
+        kvCacheFreeGpuMemoryFraction: 0.9,
+      })
       expect.unreachable()
     } catch (error) {
       expect(error).toBeInstanceOf(AtomicCoreError)
@@ -382,7 +433,10 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ config_json: { architectures: ['GPT2LMHeadModel'], dtype: 'bfloat16' } })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.verdict.ok).toBe(false)
     if (!result.verdict.ok) {
@@ -402,7 +456,10 @@ describe('checkModelCompatibility', () => {
       ],
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.quantization_format).toBeNull()
     expect(result.verdict.ok).toBe(false)
@@ -417,7 +474,10 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ files: [{ path: 'model.gguf', size: 5_000_000_000, sha256: null }] })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.verdict.ok).toBe(false)
   })
@@ -432,11 +492,17 @@ describe('checkModelCompatibility', () => {
     })
     const input = baseInput({ files: weightFiles(4_000_000_000) })
 
-    const fitsHost = checkModelCompatibility(input, descriptor, [selected], 20_000_000_000, 0.9)
+    const fitsHost = checkModelCompatibility(input, descriptor, [selected], 20_000_000_000, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
     expect(fitsHost.unified_memory).toBe(true)
     expect(fitsHost.verdict).toEqual({ ok: true })
 
-    const tooTightOnHost = checkModelCompatibility(input, descriptor, [selected], 1_000_000_000, 0.9)
+    const tooTightOnHost = checkModelCompatibility(input, descriptor, [selected], 1_000_000_000, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
     expect(tooTightOnHost.unified_memory).toBe(true)
     expect(tooTightOnHost.verdict.ok).toBe(false)
     if (!tooTightOnHost.verdict.ok) {
@@ -461,7 +527,10 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ repository: 'acme/curated-model', revision: 'c0ffee', files })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.curated).toBe(true)
     expect(result.verdict).toEqual({ ok: true })
@@ -486,7 +555,10 @@ describe('checkModelCompatibility', () => {
     const rewrittenFiles = weightFiles(5_000_000_000)
     const input = baseInput({ repository: 'acme/curated-model', revision: 'c0ffee', files: rewrittenFiles })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, 0.9)
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
 
     expect(result.curated).toBe(false)
     expect(result.verdict.ok).toBe(false)
@@ -497,14 +569,17 @@ describe('checkModelCompatibility', () => {
     }
   })
 
-  it('throws INVALID_ARGUMENT when the host has no GPU at all', () => {
+  it('throws MANAGED_PREREQUISITE_BLOCKED when the host has no GPU at all (an absent/failing nvidia-smi is a missing prerequisite, not a bad request)', () => {
     const descriptor = baseDescriptor()
     try {
-      checkModelCompatibility(baseInput(), descriptor, [], 0, 0.9)
+      checkModelCompatibility(baseInput(), descriptor, [], 0, {
+        contextLength: 8192,
+        kvCacheFreeGpuMemoryFraction: 0.9,
+      })
       expect.unreachable()
     } catch (error) {
       expect(error).toBeInstanceOf(AtomicCoreError)
-      expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+      expect((error as AtomicCoreError).code).toBe('MANAGED_PREREQUISITE_BLOCKED')
     }
   })
 })
@@ -543,48 +618,6 @@ describe('selectLaunchGpu', () => {
 
   it('a lone unified-memory card is still selected as the only candidate', () => {
     expect(selectLaunchGpu([unified])?.gpu_id).toBe('u')
-  })
-})
-
-describe('isWeightFile', () => {
-  const file = (path: string, size: number): CheckpointFile => ({ path, size, sha256: null })
-
-  it('is true only for a root-level, non-consolidated *.safetensors file, when a preferred shard sits next to it', () => {
-    const files = [
-      file('model-00001-of-00002.safetensors', 100),
-      file('model-00002-of-00002.safetensors', 100),
-      file('consolidated.safetensors', 200),
-      file('config.json', 5),
-    ]
-    expect(isWeightFile('model-00001-of-00002.safetensors', files)).toBe(true)
-    expect(isWeightFile('config.json', files)).toBe(false)
-    expect(isWeightFile('consolidated.safetensors', files)).toBe(false)
-  })
-
-  it('a single model.safetensors is a weight file', () => {
-    const files = [file('model.safetensors', 100), file('config.json', 5)]
-    expect(isWeightFile('model.safetensors', files)).toBe(true)
-  })
-
-  it('pytorch_model.bin is never a weight file while a safetensors file is present', () => {
-    const files = [file('model.safetensors', 100), file('pytorch_model.bin', 100)]
-    expect(isWeightFile('pytorch_model.bin', files)).toBe(false)
-  })
-
-  it('a safetensors file inside a subdirectory is never a weight file', () => {
-    const files = [file('variant/model.safetensors', 100), file('config.json', 5)]
-    expect(isWeightFile('variant/model.safetensors', files)).toBe(false)
-  })
-
-  it('matches the extension case-insensitively', () => {
-    const files = [file('model.SAFETENSORS', 100)]
-    expect(isWeightFile('model.SAFETENSORS', files)).toBe(true)
-  })
-
-  it('regression: agrees with weightBytes for a consolidated-only repository (no HF shard naming)', () => {
-    const files = [file('consolidated.safetensors', 5_000), file('params.json', 2)]
-    expect(isWeightFile('consolidated.safetensors', files)).toBe(true)
-    expect(weightBytes(files)).toBe(5_000)
   })
 })
 
@@ -649,19 +682,220 @@ describe('weightBytes', () => {
   })
 })
 
-describe('kvCacheReserveBytes', () => {
-  it('is weight bytes times (1 - kv_cache_free_gpu_memory_fraction)', () => {
-    expect(kvCacheReserveBytes(100_000_000_000, 0.9)).toBe(10_000_000_000)
-    expect(kvCacheReserveBytes(100_000_000_000, 0.5)).toBe(50_000_000_000)
+// Llama-3-8B's own real shape (GQA: 8 KV heads out of 32 query heads, head_dim 128 — standard
+// 4096/32) and a 70B-class shape, for the KV-formula tests below (task 2.16w round 1, finding 6).
+const LLAMA_3_8B_SHAPE = {
+  num_hidden_layers: 32,
+  num_attention_heads: 32,
+  num_key_value_heads: 8,
+  hidden_size: 4096,
+}
+const SEVENTY_B_SHAPE = {
+  num_hidden_layers: 80,
+  num_attention_heads: 64,
+  num_key_value_heads: 8,
+  hidden_size: 8192,
+}
+
+describe('kvCacheBytes', () => {
+  it('is 2 x layers x kv_heads x head_dim x dtype_bytes x context_length, bf16 (2 bytes) by default', () => {
+    // 2 * 32 * 8 * 128 * 2 * 8192 = 1,073,741,824
+    expect(kvCacheBytes({ ...LLAMA_3_8B_SHAPE, dtype: 'bfloat16' }, null, 8192)).toBe(1_073_741_824)
   })
 
-  it('a higher configured fraction (more of what is left spent on KV) shrinks the reserve; a lower one grows it', () => {
-    const low = kvCacheReserveBytes(100_000_000_000, 0.1) // TENSORRT_LLM_MIN_KV_CACHE_FREE_FRACTION
-    const high = kvCacheReserveBytes(100_000_000_000, 0.95) // TENSORRT_LLM_MAX_KV_CACHE_FREE_FRACTION
+  it('uses head_dim directly when config.json spells it out, instead of deriving it', () => {
+    const shape = { num_hidden_layers: 1, num_attention_heads: 1, num_key_value_heads: 1, head_dim: 64 }
+    // 2 * 1 * 1 * 64 * 2 * 1 = 256
+    expect(kvCacheBytes(shape, null, 1)).toBe(256)
+  })
+
+  it('falls back num_key_value_heads to num_attention_heads (plain multi-head attention, no GQA field)', () => {
+    const shape = { num_hidden_layers: 1, num_attention_heads: 4, head_dim: 64 }
+    // 2 * 1 * 4 * 64 * 2 * 1 = 1024
+    expect(kvCacheBytes(shape, null, 1)).toBe(1_024)
+  })
+
+  it('is 1 byte per KV element when kv_cache_quant_algo is FP8', () => {
+    const withFp8Kv = {
+      ...LLAMA_3_8B_SHAPE,
+      quantization_config: { quant_method: 'fp8', kv_cache_quant_algo: 'FP8' },
+    }
+    // Half of the bf16 case above: 536,870,912
+    expect(kvCacheBytes(withFp8Kv, null, 8192)).toBe(536_870_912)
+  })
+
+  it('is undefined when config.json lacks num_hidden_layers, or every head/dim fallback', () => {
+    expect(kvCacheBytes({ num_attention_heads: 32, hidden_size: 4096 }, null, 8192)).toBeUndefined()
+    expect(kvCacheBytes({ num_hidden_layers: 32 }, null, 8192)).toBeUndefined()
+  })
+
+  it('treats a zero or negative field as absent, never as a zero-sized (and so free) KV cache', () => {
+    expect(kvCacheBytes({ ...LLAMA_3_8B_SHAPE, num_hidden_layers: 0 }, null, 8192)).toBeUndefined()
+    expect(kvCacheBytes({ ...LLAMA_3_8B_SHAPE, num_hidden_layers: -1 }, null, 8192)).toBeUndefined()
+  })
+})
+
+describe('kvCacheReserveBytes', () => {
+  it('is KV_bytes / kv_cache_free_gpu_memory_fraction when config.json has a real KV-cache shape ("config" basis)', () => {
+    // kvCacheBytes = 1,073,741,824 (see above); / 0.9 = 1,193,046,471.1 -> ceil.
+    const { reserveBytes, basis } = kvCacheReserveBytes(
+      16_000_000_000,
+      { ...LLAMA_3_8B_SHAPE, dtype: 'bfloat16' },
+      null,
+      8192,
+      0.9
+    )
+    expect(basis).toBe('config')
+    expect(reserveBytes).toBe(1_193_046_472)
+  })
+
+  it('falls back to weights x (1 - fraction) when config.json lacks a KV-cache shape ("weight_fraction" basis)', () => {
+    const { reserveBytes, basis } = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.9)
+    expect(basis).toBe('weight_fraction')
+    expect(reserveBytes).toBe(10_000_000_000)
+  })
+
+  it('a higher configured fraction shrinks the fallback reserve; a lower one grows it', () => {
+    const low = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.1).reserveBytes // MIN fraction
+    const high = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.95).reserveBytes // MAX fraction
     expect(high).toBeLessThan(low)
   })
 
-  it('rounds up so a reserve is never under-counted', () => {
-    expect(kvCacheReserveBytes(1, 0.9)).toBe(1)
+  it('a higher configured fraction shrinks the config-basis reserve too (more of what is left spent on KV)', () => {
+    const low = kvCacheReserveBytes(16_000_000_000, LLAMA_3_8B_SHAPE, null, 8192, 0.1).reserveBytes
+    const high = kvCacheReserveBytes(16_000_000_000, LLAMA_3_8B_SHAPE, null, 8192, 0.95).reserveBytes
+    expect(high).toBeLessThan(low)
+  })
+
+  it('rounds up so a reserve is never under-counted, on both bases', () => {
+    expect(kvCacheReserveBytes(1, {}, null, 8192, 0.9).reserveBytes).toBe(1)
+    expect(kvCacheReserveBytes(1, LLAMA_3_8B_SHAPE, null, 1, 0.9999999).reserveBytes).toBeGreaterThanOrEqual(
+      1
+    )
+  })
+})
+
+describe('checkModelCompatibility: the real KV-cache formula (finding 6)', () => {
+  it('a 75 GB FP8 checkpoint (70B-class shape) still fits an 80 GB datacenter card at the default context length', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({
+      gpu_id: 'gpu-0',
+      compute_capability: '9.0',
+      total_vram_bytes: 85_899_345_920,
+      free_vram_bytes: 85_532_850_176, // an H100 reports 81,559 MiB free (conf README note)
+    })
+    const input = baseInput({
+      config_json: { architectures: ['LlamaForCausalLM'], ...SEVENTY_B_SHAPE },
+      hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
+      files: weightFiles(75_000_000_000),
+    })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
+
+    expect(result.kv_reserve_basis).toBe('config')
+    expect(result.verdict).toEqual({ ok: true })
+  })
+
+  it('an 8B bf16 checkpoint at a 128k context is refused on a 24 GB card, even though the weights alone would fit', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0', compute_capability: '8.9', free_vram_bytes: 24_000_000_000 })
+    const input = baseInput({
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16', ...LLAMA_3_8B_SHAPE },
+      files: weightFiles(16_000_000_000), // ~8B params at bf16 (2 bytes/param)
+    })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 131_072,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
+
+    expect(result.kv_reserve_basis).toBe('config')
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok) expect(result.verdict.error.code).toBe('MODEL_INCOMPATIBLE')
+  })
+
+  it('the same 8B checkpoint at a short context comfortably fits the same 24 GB card', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0', compute_capability: '8.9', free_vram_bytes: 24_000_000_000 })
+    const input = baseInput({
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16', ...LLAMA_3_8B_SHAPE },
+      files: weightFiles(16_000_000_000),
+    })
+
+    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
+
+    expect(result.verdict).toEqual({ ok: true })
+  })
+})
+
+describe('checkModelCompatibilityFiles / checkModelMemory: the pre-launch split (finding 1, Critical)', () => {
+  const memory = { contextLength: 8192, kvCacheFreeGpuMemoryFraction: 0.9 }
+
+  it("checkModelCompatibilityFiles passes without ever looking at the selected card's free memory", () => {
+    const descriptor = baseDescriptor()
+    // A card reporting 0 free memory: if the files-only check consulted it at all, this would fail.
+    const starved = gpu({ gpu_id: 'gpu-0', free_vram_bytes: 0 })
+    const input = baseInput({ files: weightFiles(75_000_000_000) })
+
+    const result = checkModelCompatibilityFiles(input, descriptor, [starved], 0, memory)
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('checkModelCompatibilityFiles still fails architecture/format/CC checks the same way the combined check does', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0' })
+    const input = baseInput({ config_json: { architectures: ['GPT2LMHeadModel'], dtype: 'bfloat16' } })
+
+    const result = checkModelCompatibilityFiles(input, descriptor, [selected], 0, memory)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.verdict.verdict.ok).toBe(false)
+      if (!result.verdict.verdict.ok)
+        expect(result.verdict.verdict.error.message).toContain('GPT2LMHeadModel')
+    }
+  })
+
+  it("checkModelMemory alone re-reads the selected card's free memory from whatever gpus[] it is given, resolving switching a single-GPU host from one model to another", () => {
+    const descriptor = baseDescriptor()
+    const input = baseInput({
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+      files: weightFiles(20_000_000_000),
+    })
+
+    // A stale snapshot, taken while a previous model still holds the card: not enough free memory.
+    const staleGpu = gpu({ gpu_id: 'gpu-0', free_vram_bytes: 1_000_000_000 })
+    const filesResult = checkModelCompatibilityFiles(input, descriptor, [staleGpu], 0, memory)
+    expect(filesResult.ok).toBe(true)
+    if (!filesResult.ok) throw new Error('unreachable')
+
+    const staleMemory = checkModelMemory(filesResult.resolved, descriptor, [staleGpu], 0, memory)
+    expect(staleMemory.verdict.ok).toBe(false)
+
+    // The previous model was stopped: a fresh probe of the same card reports it free now.
+    const freedGpu = gpu({ gpu_id: 'gpu-0', free_vram_bytes: 24_000_000_000 })
+    const freshMemory = checkModelMemory(filesResult.resolved, descriptor, [freedGpu], 0, memory)
+    expect(freshMemory.verdict).toEqual({ ok: true })
+  })
+
+  it('checkModelCompatibility (the combined /check route call) equals checkModelCompatibilityFiles then checkModelMemory on the same snapshot', () => {
+    const descriptor = baseDescriptor()
+    const selected = gpu({ gpu_id: 'gpu-0' })
+    const input = baseInput({ files: weightFiles(75_000_000_000) })
+
+    const combined = checkModelCompatibility(input, descriptor, [selected], 0, memory)
+    const files = checkModelCompatibilityFiles(input, descriptor, [selected], 0, memory)
+    expect(files.ok).toBe(true)
+    if (!files.ok) throw new Error('unreachable')
+    const split = checkModelMemory(files.resolved, descriptor, [selected], 0, memory)
+
+    expect(combined).toEqual(split)
   })
 })

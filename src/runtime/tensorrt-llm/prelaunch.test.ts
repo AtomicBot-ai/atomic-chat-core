@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, RuntimeDescriptor, Sha256Digest } from '../../contracts/index.js'
 import type { CheckpointFile } from './compatibility.js'
-import { verifyModelBeforeLaunch } from './prelaunch.js'
+import { verifyModelFilesAndCompatibility } from './prelaunch.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
 
@@ -67,19 +67,31 @@ async function writeCheckpoint(
 
 const model = () => ({ dir, repository: 'acme/model', revision: 'deadbeef', files })
 const gpus = [gpu({ gpu_id: 'gpu-0' })]
-const options = { gpuId: 'gpu-0', kvCacheFreeGpuMemoryFraction: 0.9 }
+const memory = { contextLength: 8192, kvCacheFreeGpuMemoryFraction: 0.9 }
+const options = { gpuId: 'gpu-0', memory }
 
-describe('verifyModelBeforeLaunch', () => {
-  it('passes and returns the ok verdict when every file matches and config.json checks out', async () => {
+describe('verifyModelFilesAndCompatibility', () => {
+  it('passes and returns the resolved checkpoint when every file matches and config.json checks out', async () => {
     await writeCheckpoint()
-    const result = await verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)
-    expect(result.verdict).toEqual({ ok: true })
+    const resolved = await verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    expect(resolved.architectures).toEqual(['LlamaForCausalLM'])
+    expect(resolved.quantizationFormat).toBe('bf16')
+    expect(resolved.weightBytesTotal).toBe(WEIGHT_BYTES)
+  })
+
+  it("never checks the selected card's free memory (task 2.16w round 1, finding 1, Critical): a starved card still passes", async () => {
+    await writeCheckpoint()
+    const starved = [gpu({ gpu_id: 'gpu-0', free_vram_bytes: 0 })]
+    const resolved = await verifyModelFilesAndCompatibility(model(), baseDescriptor(), starved, 0, options)
+    expect(resolved.weightBytesTotal).toBe(WEIGHT_BYTES)
   })
 
   it('refuses with MODEL_FILE_NOT_FOUND, naming the file, when a shard was deleted after download', async () => {
     await writeCheckpoint()
     await rm(join(dir, 'model.safetensors'))
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).rejects.toMatchObject({
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('model.safetensors') as unknown as string,
     })
@@ -88,7 +100,9 @@ describe('verifyModelBeforeLaunch', () => {
   it('refuses with MODEL_FILE_CORRUPT when a file on disk does not match the size model.yml recorded', async () => {
     await writeCheckpoint()
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES - 1, 1))
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).rejects.toMatchObject({
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
       code: 'MODEL_FILE_CORRUPT',
     })
   })
@@ -97,7 +111,9 @@ describe('verifyModelBeforeLaunch', () => {
     // No files at all: model.safetensors is missing, and so is config.json — the file-presence
     // error must win, naming the checkpoint file, not a generic "config.json missing" error.
     await mkdir(dir, { recursive: true })
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).rejects.toMatchObject({
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('model.safetensors') as unknown as string,
     })
@@ -106,7 +122,9 @@ describe('verifyModelBeforeLaunch', () => {
   it('refuses with MODEL_FILE_NOT_FOUND when config.json itself is missing', async () => {
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES, 1))
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).rejects.toMatchObject({
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('config.json') as unknown as string,
     })
@@ -116,7 +134,9 @@ describe('verifyModelBeforeLaunch', () => {
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES, 1))
     await writeFile(join(dir, 'config.json'), '{not json')
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).rejects.toMatchObject({
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
       message: expect.stringContaining('config.json') as unknown as string,
     })
@@ -126,7 +146,9 @@ describe('verifyModelBeforeLaunch', () => {
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES, 1))
     await writeFile(join(dir, 'config.json'), '[1, 2, 3]')
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).rejects.toMatchObject({
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
       message: expect.stringContaining('config.json') as unknown as string,
     })
@@ -135,7 +157,9 @@ describe('verifyModelBeforeLaunch', () => {
   it('re-checks compatibility against config.json as it is on disk now, not as model.yml recorded it', async () => {
     // On disk the architecture no longer matches the descriptor's supported list.
     await writeCheckpoint({ architectures: ['SomeOtherForCausalLM'] })
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).rejects.toMatchObject({
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
       code: 'MODEL_INCOMPATIBLE',
     })
   })
@@ -144,11 +168,25 @@ describe('verifyModelBeforeLaunch', () => {
     await writeCheckpoint()
     const tooOld = [gpu({ gpu_id: 'gpu-0', compute_capability: '7.5' })]
     await expect(
-      verifyModelBeforeLaunch(model(), baseDescriptor(), tooOld, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), tooOld, 0, options)
     ).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
   })
 
-  it('reads a present hf_quant_config.json and folds it into the compatibility re-check', async () => {
+  it('reads hf_quant_config.json whenever it exists on disk, even when model.yml does not list it (finding 4)', async () => {
+    await writeCheckpoint({ architectures: ['LlamaForCausalLM'] }) // no dtype: format must come from hf_quant_config.json
+    await writeFile(
+      join(dir, 'hf_quant_config.json'),
+      JSON.stringify({ quantization: { quant_algo: 'FP8' } })
+    )
+    // model.yml's own files list does NOT mention hf_quant_config.json at all.
+    const fp8Descriptor = baseDescriptor({
+      quantization: [{ format: 'fp8', min_compute_capability: '8.0', excluded_compute_capabilities: [] }],
+    })
+    const resolved = await verifyModelFilesAndCompatibility(model(), fp8Descriptor, gpus, 0, options)
+    expect(resolved.quantizationFormat).toBe('fp8')
+  })
+
+  it('reads a present, listed hf_quant_config.json and folds it into the compatibility re-check', async () => {
     await writeCheckpoint({ architectures: ['LlamaForCausalLM'] }) // no dtype: format comes from hf_quant_config.json
     const hfQuantConfigText = JSON.stringify({ quantization: { quant_algo: 'FP8' } })
     await writeFile(join(dir, 'hf_quant_config.json'), hfQuantConfigText)
@@ -162,9 +200,14 @@ describe('verifyModelBeforeLaunch', () => {
     const fp8Descriptor = baseDescriptor({
       quantization: [{ format: 'fp8', min_compute_capability: '8.0', excluded_compute_capabilities: [] }],
     })
-    const result = await verifyModelBeforeLaunch(withHfQuantConfig, fp8Descriptor, gpus, 0, options)
-    expect(result.quantization_format).toBe('fp8')
-    expect(result.verdict).toEqual({ ok: true })
+    const resolved = await verifyModelFilesAndCompatibility(
+      withHfQuantConfig,
+      fp8Descriptor,
+      gpus,
+      0,
+      options
+    )
+    expect(resolved.quantizationFormat).toBe('fp8')
   })
 
   it('refuses with MODEL_FILE_NOT_FOUND when model.yml lists hf_quant_config.json but it is missing on disk', async () => {
@@ -176,7 +219,7 @@ describe('verifyModelBeforeLaunch', () => {
     // The checkpoint file-presence loop only walks model.yml's own list, which now includes
     // hf_quant_config.json at a declared size, so it fails there first, still by name.
     await expect(
-      verifyModelBeforeLaunch(withHfQuantConfig, baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(withHfQuantConfig, baseDescriptor(), gpus, 0, options)
     ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('hf_quant_config.json') as unknown as string,
@@ -186,22 +229,24 @@ describe('verifyModelBeforeLaunch', () => {
   it('refuses a file.path that would climb out of the model directory', async () => {
     await writeCheckpoint()
     const escaping = { ...model(), files: [{ path: '../../etc/passwd', size: 1, sha256: null }] }
-    await expect(verifyModelBeforeLaunch(escaping, baseDescriptor(), gpus, 0, options)).rejects.toMatchObject(
-      {
-        code: 'MANAGED_METADATA_INVALID',
-      }
-    )
+    await expect(
+      verifyModelFilesAndCompatibility(escaping, baseDescriptor(), gpus, 0, options)
+    ).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
   })
 
-  it('creates no container: it only ever throws or returns a verdict, never touches Docker', async () => {
+  it('creates no container: it only ever throws or returns the resolved checkpoint, never touches Docker', async () => {
     await writeCheckpoint()
-    await expect(verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)).resolves.toBeDefined()
+    await expect(
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    ).resolves.toBeDefined()
   })
 
   it('is an AtomicCoreError with the code both a missing file and an incompatible checkpoint would carry over HTTP', async () => {
     await writeCheckpoint({ architectures: ['SomeOtherForCausalLM'] })
     try {
-      await verifyModelBeforeLaunch(model(), baseDescriptor(), gpus, 0, options)
+      await verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
       expect.unreachable()
     } catch (error) {
       expect(error).toBeInstanceOf(AtomicCoreError)

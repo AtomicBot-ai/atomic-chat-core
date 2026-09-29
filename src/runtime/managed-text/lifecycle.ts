@@ -191,6 +191,14 @@ export interface ManagedLoadRequest {
    * generation this load's reservation carries.
    */
   stopPrevious?: (signal: AbortSignal, generation: string) => Promise<void>
+  /**
+   * Runs once, after `stopPrevious` has resolved and right before the first `docker create` attempt
+   * (task 2.16w round 1, finding 1 (Critical)): a provider's own re-check that only makes sense once
+   * whatever `stopPrevious` freed is actually free — free VRAM on the chosen card, for
+   * `tensorrt-llm`, re-probed fresh rather than trusted from a snapshot taken before eviction.
+   * Throwing refuses the load with no container ever created, the same as `stopPrevious` throwing.
+   */
+  beforeCreate?: () => Promise<void>
   /** The saved card was gone, so `gpuUuid` is a replacement: every progress event of this load says so. */
   gpuSubstituted?: { requested_gpu_id: string; gpu_id: string }
 }
@@ -703,7 +711,8 @@ export class ManagedTextLifecycle {
   /**
    * `docker create` + journal + `docker start`. Core picked the host port, so another process can
    * bind it before Docker does; that one failure is retried with a new port (bounded), everything
-   * else fails the load.
+   * else fails the load. `beforeCreate` runs once, before the first attempt — never repeated on a
+   * port-bind retry — since it is about whether the card has room, not about the host port.
    */
   private async createAndStart(
     entry: Entry,
@@ -712,6 +721,10 @@ export class ManagedTextLifecycle {
     cacheDir: string,
     signal: AbortSignal
   ): Promise<PreparedLaunch> {
+    if (request.beforeCreate) {
+      await raceLoadCancel(request.beforeCreate(), signal)
+      this.checkAborted(signal)
+    }
     for (let attempt = 1; ; attempt++) {
       const prepared = await this.deps.deployment.prepareLaunch(launch.engine, entry.heartbeatDir)
       this.checkAborted(signal)

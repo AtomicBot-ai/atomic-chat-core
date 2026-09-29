@@ -1,15 +1,26 @@
 /**
  * The pre-launch check `TensorrtLlmRuntime.load` runs once `deps.model` has resolved an installed
- * model and before `lifecycle.load` ever creates a container (task 2.16, spec `tensorrt-llm-models`,
- * "Проверка файлов при загрузке"): every file `model.yml` recorded is still on disk at its declared
- * size — a shard deleted after download is refused by name, the way a corrupt GGUF already is for
- * llama.cpp (`MODEL_FILE_NOT_FOUND`/`MODEL_FILE_CORRUPT`, `../llamacpp/load-plan.ts`'s own
- * convention, reused here) — and the compatibility verdict (`compatibility.ts`'s pure
- * `checkModelCompatibility`) is recomputed against `config.json` and `hf_quant_config.json` exactly
- * as they sit in the model's directory right now, not as `model.yml` last recorded them, and against
+ * model (task 2.16, spec `tensorrt-llm-models`, "Проверка файлов при загрузке"): every file
+ * `model.yml` recorded is still on disk at its declared size — a shard deleted after download is
+ * refused by name, the way a corrupt GGUF already is for llama.cpp (`MODEL_FILE_NOT_FOUND`/
+ * `MODEL_FILE_CORRUPT`, `../llamacpp/load-plan.ts`'s own convention, reused here) — and the
+ * compatibility verdict is recomputed against `config.json` and `hf_quant_config.json` exactly as
+ * they sit in the model's directory right now, not as `model.yml` last recorded them, and against
  * the card this load is about to use (its `gpu_id` is passed in, already resolved and possibly
- * substituted by the caller — this never re-picks a card). No container exists yet; a failure here
- * never creates one.
+ * substituted by the caller — this never re-picks a card).
+ *
+ * `verifyModelFilesAndCompatibility` below is everything above the memory line only — files,
+ * architecture, format, compute capability — and returns a `ResolvedCheckpoint`
+ * (`compatibility.ts`) rather than a final verdict, on purpose: memory is checked separately, later,
+ * by `checkModelMemory` (re-exported from `compatibility.ts`) called from `runtime.ts`'s
+ * `beforeCreate` hook, once `stopPrevious` has actually freed the card (task 2.16w round 1, finding
+ * 1 (Critical) — reading free memory here, before eviction, would refuse a same-card model switch
+ * outright on a single-GPU host). No container exists before either call; a failure in either never
+ * creates one.
+ *
+ * `hf_quant_config.json` is read whenever it exists on disk (finding 4), independent of whether
+ * `model.yml`'s own `files` list happens to mention it — `model.yml` is a record the app/CLI wrote
+ * when the download finished, and can be stale or incomplete in ways the file itself on disk is not.
  *
  * Direct `node:fs/promises`, no injected `exec`/`readFile`: reading the model's own checkpoint
  * directory is local disk I/O, the same convention `model-dir.ts` already uses for `model.yml`
@@ -19,9 +30,14 @@
 import { readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../contracts/index.js'
-import { checkModelCompatibility } from './compatibility.js'
-import type { CheckpointFile, ModelCheckInput } from './compatibility.js'
+import type { ErrorBody, GpuFacts, RuntimeDescriptor } from '../../contracts/index.js'
+import { checkModelCompatibilityFiles } from './compatibility.js'
+import type {
+  CheckpointFile,
+  MemorySizingInputs,
+  ModelCheckInput,
+  ResolvedCheckpoint,
+} from './compatibility.js'
 import type { TensorrtLlmModel } from './model-dir.js'
 import type { JsonObject } from './quant-format.js'
 
@@ -91,25 +107,29 @@ async function readJsonObjectFile(path: string): Promise<JsonObject | null> {
   return parsed as JsonObject
 }
 
-export interface VerifyModelBeforeLaunchOptions {
+export interface VerifyModelFilesOptions {
   /** The card this load is about to use; already resolved (and possibly substituted) by the caller. */
   gpuId: string
-  kvCacheFreeGpuMemoryFraction: number
+  memory: MemorySizingInputs
 }
 
 /**
- * Throws `MODEL_FILE_NOT_FOUND`/`MODEL_FILE_CORRUPT` for a missing or resized checkpoint file, or the
- * pure check's own error (`MODEL_INCOMPATIBLE`/`MANAGED_METADATA_INVALID`/`INVALID_ARGUMENT`) for a
- * checkpoint that no longer checks out — every case before `lifecycle.load` is ever called. Answers
- * the passing verdict on success, mirroring `checkModelCompatibility`'s own shape.
+ * The pre-`stopPrevious` half of the pre-launch check: files, architecture, format and compute
+ * capability — never memory (see the file banner). Throws `MODEL_FILE_NOT_FOUND`/`MODEL_FILE_CORRUPT`
+ * for a missing or resized checkpoint file, or the pure check's own error
+ * (`MODEL_INCOMPATIBLE`/`MANAGED_METADATA_INVALID`/`MANAGED_PREREQUISITE_BLOCKED`) for a checkpoint
+ * that no longer checks out. On success, returns the `ResolvedCheckpoint` `checkModelMemory` needs
+ * for the memory half — including `config.json`'s own verified `architectures`, which is what
+ * `runtime.ts` now looks the descriptor's `model_families` entry up by (finding 5), never
+ * `model.yml`'s possibly-stale copy.
  */
-export async function verifyModelBeforeLaunch(
+export async function verifyModelFilesAndCompatibility(
   model: Pick<TensorrtLlmModel, 'dir' | 'repository' | 'revision' | 'files'>,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
   hostMemAvailableBytes: number,
-  options: VerifyModelBeforeLaunchOptions
-): Promise<ModelCompatibility> {
+  options: VerifyModelFilesOptions
+): Promise<ResolvedCheckpoint> {
   await assertFilesOnDisk(model.dir, model.files)
 
   const configJson = await readJsonObjectFile(join(model.dir, CONFIG_FILE))
@@ -120,14 +140,8 @@ export async function verifyModelBeforeLaunch(
       join(model.dir, CONFIG_FILE)
     )
   }
-  // `assertFilesOnDisk` above already walked `model.files` and would have thrown
-  // `MODEL_FILE_NOT_FOUND` had this entry been missing, so a `carriesHfQuantConfig` repository's
-  // file is guaranteed present here: `readJsonObjectFile` reads it for real content or throws for
-  // malformed JSON, never a silent `null`.
-  const carriesHfQuantConfig = model.files.some((file) => file.path === HF_QUANT_CONFIG_FILE)
-  const hfQuantConfigJson = carriesHfQuantConfig
-    ? await readJsonObjectFile(join(model.dir, HF_QUANT_CONFIG_FILE))
-    : null
+  // Read whenever the file is actually there, independent of model.yml's own files list (finding 4).
+  const hfQuantConfigJson = await readJsonObjectFile(join(model.dir, HF_QUANT_CONFIG_FILE))
 
   const input: ModelCheckInput = {
     repository: model.repository ?? '',
@@ -137,16 +151,11 @@ export async function verifyModelBeforeLaunch(
     files: model.files,
     gpu_id: options.gpuId,
   }
-  const verdict = checkModelCompatibility(
-    input,
-    descriptor,
-    gpus,
-    hostMemAvailableBytes,
-    options.kvCacheFreeGpuMemoryFraction
-  )
-  if (!verdict.verdict.ok) {
-    const { code, message, details } = verdict.verdict.error
+  const result = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemAvailableBytes, options.memory)
+  if (!result.ok) {
+    // `FilesCheckResult`'s own type guarantees `result.verdict.verdict` is the failed branch here.
+    const { code, message, details } = (result.verdict.verdict as { ok: false; error: ErrorBody }).error
     throw new AtomicCoreError(code, message, details)
   }
-  return verdict
+  return result.resolved
 }

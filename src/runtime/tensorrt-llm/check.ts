@@ -135,13 +135,29 @@ async function descriptorForCheck(
   return resolved.descriptor
 }
 
-/** The full route: validate, resolve the descriptor and host facts (in parallel), then the pure check. */
+/**
+ * The full route: validate, resolve the descriptor and host facts (in parallel), then the pure
+ * check. Without an explicit `gpu_id` in the request, checks against the card a real load would
+ * pick — the provider's own stored `gpu_id` setting, falling back to `selectLaunchGpu`'s "most
+ * memory" rule only when nothing is saved either (task 2.16w round 1, finding 3) — never just
+ * "most memory" outright, which could silently check a different card than the one that would load.
+ */
 export async function checkTensorrtLlmModel(
   body: unknown,
   deps: ModelCheckDeps
 ): Promise<ModelCompatibility> {
   const input = parseModelCheckInput(body)
   const [descriptor, facts] = await Promise.all([descriptorForCheck(deps), deps.hostFacts()])
-  const { kv_cache_free_gpu_memory_fraction: kvFraction } = tensorrtLlmSettings(deps.settings())
-  return checkModelCompatibility(input, descriptor, facts.gpus, facts.memAvailableBytes, kvFraction)
+  const settings = tensorrtLlmSettings(deps.settings())
+  const gpuId = input.gpu_id ?? settings.gpu_id ?? undefined
+  return checkModelCompatibility(
+    { ...input, ...(gpuId === undefined ? {} : { gpu_id: gpuId }) },
+    descriptor,
+    facts.gpus,
+    facts.memAvailableBytes,
+    {
+      contextLength: settings.context_length,
+      kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,
+    }
+  )
 }

@@ -16,16 +16,28 @@
  *    `model_families` entry for the model's architecture — never guessed (design D9);
  *  - never growing a context or recreating a session: a restart of a multi-minute container in the
  *    middle of a conversation is worse than an honest `context_length_exceeded` (design D9);
- *  - the pre-launch check (task 2.16, `prelaunch.ts`): between the card just picked and the
- *    container that would use it, every file `model.yml` recorded is re-verified present on disk at
- *    its size, and compatibility is recomputed against `config.json`/`hf_quant_config.json` as they
- *    sit in the model's directory right now, not as `model.yml` last recorded them.
+ *  - the pre-launch check (task 2.16), split in two (round 1, finding 1 (Critical)): before
+ *    `stopPrevious` runs, `verifyModelFilesAndCompatibility` (`prelaunch.ts`) re-verifies every file
+ *    `model.yml` recorded present on disk at its size, and recomputes architecture/format/compute-
+ *    capability against `config.json`/`hf_quant_config.json` as they sit in the model's directory
+ *    right now — never memory, which the model this load is about to replace may still be holding on
+ *    the very same card. Memory is checked after `stopPrevious`, through the lifecycle's own
+ *    `beforeCreate` hook (`checkMemoryBeforeCreate` below), which re-probes the chosen card's free
+ *    memory once whatever `stopPrevious` freed is actually free;
+ *  - `family` (tools/structured output/route policy) is read off the descriptor's `model_families`
+ *    entry for the *verified* `config.json` architecture (finding 5) — `model.yml`'s own copy of the
+ *    architecture is never consulted for this, since the pre-launch check may have found it stale.
  *
  * Everything that touches the machine arrives injected: the lifecycle over the core's one Docker
  * executor, the ready installation, the host facts, the model lookup and the stored settings.
  */
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { ModelFamilySupport, SessionInfo, UnloadResult } from '../../contracts/index.js'
+import type {
+  ModelFamilySupport,
+  RuntimeDescriptor,
+  SessionInfo,
+  UnloadResult,
+} from '../../contracts/index.js'
 import type { ModelCapabilities } from '../../models/index.js'
 import type {
   ManagedLastAttempt,
@@ -43,11 +55,12 @@ import type {
   SessionRoutePolicy,
 } from '../shared/index.js'
 import { tensorrtLlmAdapter } from './adapter.js'
-import { selectLaunchGpu } from './compatibility.js'
+import { checkModelMemory, selectLaunchGpu } from './compatibility.js'
+import type { MemorySizingInputs, ResolvedCheckpoint } from './compatibility.js'
 import type { TensorrtLlmHostFacts } from './host-facts.js'
 import type { ReadyInstallation } from './installation.js'
 import type { TensorrtLlmModel } from './model-dir.js'
-import { verifyModelBeforeLaunch } from './prelaunch.js'
+import { verifyModelFilesAndCompatibility } from './prelaunch.js'
 import { tensorrtLlmRoutePolicy } from './route-policy.js'
 import { tensorrtLlmSettings } from './settings.js'
 
@@ -107,9 +120,25 @@ const NONE: ManagedTextCapabilities = {
   responses: false,
 }
 
+/** `capabilities()`'s own lookup, off `model.yml`'s architecture: no disk verification runs for it. */
 function familyOf(ready: ReadyInstallation, model: TensorrtLlmModel): ModelFamilySupport | null {
   if (model.architecture === null) return null
   return ready.descriptor.model_families[model.architecture] ?? null
+}
+
+/**
+ * The load path's own lookup (finding 5): off the *verified* `config.json` architecture
+ * (`ResolvedCheckpoint.architectures[0]`, from the pre-launch check), never `model.yml`'s — the two
+ * can disagree (a stale `model.yml`, or none at all), and only the one the compatibility check just
+ * confirmed against the descriptor's `supported_architectures` is trustworthy enough to gate what a
+ * session is allowed to do.
+ */
+function familyFromResolved(
+  ready: ReadyInstallation,
+  resolved: ResolvedCheckpoint
+): ModelFamilySupport | null {
+  const architecture = resolved.architectures[0]
+  return architecture === undefined ? null : (ready.descriptor.model_families[architecture] ?? null)
 }
 
 export class TensorrtLlmRuntime implements LocalRuntime {
@@ -173,7 +202,6 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     const ready = await this.deps.readyInstallation()
     throwIfLoadCancelled(signal)
     const model = await this.deps.model(modelId)
-    const family = familyOf(ready, model)
     const facts = await this.deps.hostFacts()
     throwIfLoadCancelled(signal)
     this.assertOpen()
@@ -189,18 +217,29 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       settings.gpu_id !== null && gpu.gpu_id !== settings.gpu_id
         ? { requested_gpu_id: settings.gpu_id, gpu_id: gpu.gpu_id }
         : undefined
-
-    // Pre-launch check (task 2.16, spec "Проверка файлов при загрузке"): every file model.yml
-    // recorded is still on disk at its size, and the compatibility verdict is recomputed against
-    // config.json/hf_quant_config.json as they sit on disk right now and the card just picked above
-    // — never model.yml's or the descriptor's word for it from whenever the model finished
-    // downloading. No container exists yet; a failure here never creates one.
-    await verifyModelBeforeLaunch(model, ready.descriptor, facts.gpus, facts.memAvailableBytes, {
-      gpuId: gpu.gpu_id,
+    const memory: MemorySizingInputs = {
+      contextLength: settings.context_length,
       kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,
-    })
+    }
+
+    // Pre-launch check, phase 1 (task 2.16, spec "Проверка файлов при загрузке"; round 1, finding 1
+    // (Critical)): every file model.yml recorded is still on disk at its size, and architecture/
+    // format/compute-capability are recomputed against config.json/hf_quant_config.json as they sit
+    // on disk right now — never model.yml's word for it, and never memory, which the model this load
+    // is about to replace may still be holding on this very card. No container exists yet; a failure
+    // here never creates one.
+    const resolved = await verifyModelFilesAndCompatibility(
+      model,
+      ready.descriptor,
+      facts.gpus,
+      facts.memAvailableBytes,
+      { gpuId: gpu.gpu_id, memory }
+    )
     throwIfLoadCancelled(signal)
     this.assertOpen()
+
+    // family from the *verified* config.json architecture, never model.yml's own (finding 5).
+    const family = familyFromResolved(ready, resolved)
 
     const { descriptor } = ready
     const session = await lifecycle.load({
@@ -222,6 +261,10 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       // is still found, so two loads racing each other can never both end up running.
       stopPrevious: (stageSignal, generation) =>
         this.stopOthers(lifecycle, { modelId, generation, gpuId: gpu.gpu_id }, stageSignal),
+      // Pre-launch check, phase 2 (finding 1): the memory line alone, re-probed fresh once
+      // stopPrevious (above) has actually freed the card — never the snapshot `facts` took before
+      // eviction, which is why this is a lifecycle hook and not just more code in this function.
+      beforeCreate: () => this.checkMemoryBeforeCreate(gpu.gpu_id, descriptor, resolved, memory),
       ...(opts.timeoutSecs !== undefined ? { timeoutMs: opts.timeoutSecs * 1000 } : {}),
       ...(signal !== undefined ? { signal } : {}),
       ...(substituted !== undefined ? { gpuSubstituted: substituted } : {}),
@@ -392,5 +435,34 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       for (const other of others) await this.unload(other)
     }
     hold()
+  }
+
+  /**
+   * The lifecycle's `beforeCreate` hook (task 2.16w round 1, finding 1 (Critical)): the pre-launch
+   * check's memory line, re-probed fresh right before the container is actually created — after
+   * `stopPrevious` has run, so a model switch on a single-GPU host sees the card the previous
+   * session just freed, never a snapshot `load()` took before eviction. `MANAGED_PREREQUISITE_
+   * BLOCKED` when the chosen card is no longer on the host at all (the same code a missing card gets
+   * earlier in `load()`); `MODEL_INCOMPATIBLE` when it is still there but does not have room.
+   */
+  private async checkMemoryBeforeCreate(
+    gpuId: string,
+    descriptor: RuntimeDescriptor,
+    resolved: ResolvedCheckpoint,
+    memory: MemorySizingInputs
+  ): Promise<void> {
+    const facts = await this.deps.hostFacts()
+    if (!facts.gpus.some((gpu) => gpu.gpu_id === gpuId)) {
+      throw new AtomicCoreError(
+        'MANAGED_PREREQUISITE_BLOCKED',
+        'The selected GPU disappeared before the container could start.',
+        gpuId
+      )
+    }
+    const verdict = checkModelMemory(resolved, descriptor, facts.gpus, facts.memAvailableBytes, memory)
+    if (!verdict.verdict.ok) {
+      const { code, message, details } = verdict.verdict.error
+      throw new AtomicCoreError(code, message, details)
+    }
   }
 }

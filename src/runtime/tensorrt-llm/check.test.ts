@@ -149,10 +149,49 @@ describe('checkTensorrtLlmModel', () => {
     ).rejects.toMatchObject({ code: 'MANAGED_METADATA_INVALID' })
   })
 
-  it('never calls fetch or touches the network: the deps it is given are the only I/O surface', async () => {
-    // No `fetch` dependency exists anywhere in `ModelCheckDeps` for this route to call.
-    const result = await checkTensorrtLlmModel(body(), deps())
-    expect(result.verdict).toEqual({ ok: true })
+  it('never touches the network: global fetch is never called, only the injected deps (finding 9)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const hostFacts = vi.fn(async () => ({ gpus: [gpu({ gpu_id: 'gpu-0' })], memAvailableBytes: 0 }))
+    try {
+      const result = await checkTensorrtLlmModel(body(), deps({ hostFacts }))
+      expect(result.verdict).toEqual({ ok: true })
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(hostFacts).toHaveBeenCalledOnce()
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('checks the stored gpu_id when the request names none, not just "most memory" (finding 3)', async () => {
+    const SMALL_ID = 'GPU-00000000-0000-0000-0000-000000000001'
+    const LARGE_ID = 'GPU-00000000-0000-0000-0000-000000000002'
+    const small = gpu({ gpu_id: SMALL_ID, total_vram_bytes: 8_000_000_000, free_vram_bytes: 8_000_000_000 })
+    const large = gpu({ gpu_id: LARGE_ID, total_vram_bytes: 40_000_000_000, free_vram_bytes: 40_000_000_000 })
+    const hostFacts = async () => ({ gpus: [small, large], memAvailableBytes: 0 })
+
+    // No gpu_id anywhere: falls back to "most memory" (the large card), same as a load with nothing saved.
+    const noSetting = await checkTensorrtLlmModel(body(), deps({ hostFacts, settings: () => ({}) }))
+    expect(noSetting.checked_gpu_id).toBe(LARGE_ID)
+
+    // A stored gpu_id, no gpu_id in the request: checks the card a real load would actually pick.
+    const withSetting = await checkTensorrtLlmModel(
+      body(),
+      deps({ hostFacts, settings: () => ({ gpu_id: SMALL_ID }) })
+    )
+    expect(withSetting.checked_gpu_id).toBe(SMALL_ID)
+
+    // The request's own gpu_id still wins over the stored setting.
+    const withBoth = await checkTensorrtLlmModel(
+      body({ gpu_id: LARGE_ID }),
+      deps({ hostFacts, settings: () => ({ gpu_id: SMALL_ID }) })
+    )
+    expect(withBoth.checked_gpu_id).toBe(LARGE_ID)
+  })
+
+  it('nvidia-smi absent/failing (no candidate GPU at all) answers MANAGED_PREREQUISITE_BLOCKED, not INVALID_ARGUMENT (finding 11)', async () => {
+    await expect(
+      checkTensorrtLlmModel(body(), deps({ hostFacts: async () => ({ gpus: [], memAvailableBytes: 0 }) }))
+    ).rejects.toMatchObject({ code: 'MANAGED_PREREQUISITE_BLOCKED' })
   })
 
   it('reads the kv_cache_free_gpu_memory_fraction from stored settings and passes it to the pure check', async () => {

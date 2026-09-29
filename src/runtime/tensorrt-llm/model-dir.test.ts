@@ -75,12 +75,51 @@ describe('readTensorrtLlmModel', () => {
     await expect(readTensorrtLlmModel(modelsDir, 'half')).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
   })
 
-  it('counts only well-formed file entries toward the weight bytes', async () => {
+  it('rejects a model.yml with a malformed files entry, rather than silently dropping it (finding 4)', async () => {
     await install(
       'mixed',
       'files:\n  - path: model.safetensors\n    size: 10\n  - null\n  - path: model-2.safetensors\n  - size: 5\n'
     )
-    expect((await readTensorrtLlmModel(modelsDir, 'mixed')).weightBytes).toBe(10)
+    await expect(readTensorrtLlmModel(modelsDir, 'mixed')).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+  })
+
+  it('rejects a model.yml whose files key is present but not an array', async () => {
+    await install('files-not-array', 'files: "oops"\n')
+    await expect(readTensorrtLlmModel(modelsDir, 'files-not-array')).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+  })
+
+  it.each([
+    ['a non-string path', 'files:\n  - path: 42\n    size: 10\n'],
+    ['an absolute path', 'files:\n  - path: /etc/passwd\n    size: 10\n'],
+    ['a path that climbs out with ..', 'files:\n  - path: ../../etc/passwd\n    size: 10\n'],
+    ['a size that is not a number', 'files:\n  - path: model.safetensors\n    size: "10"\n'],
+    ['a negative size', 'files:\n  - path: model.safetensors\n    size: -1\n'],
+    ['a non-integer size', 'files:\n  - path: model.safetensors\n    size: 10.5\n'],
+    [
+      'a sha256 that is neither a string nor null',
+      'files:\n  - path: model.safetensors\n    size: 10\n    sha256: 42\n',
+    ],
+  ])('rejects a files entry with %s', async (_label, yml) => {
+    await install('bad-files', yml)
+    await expect(readTensorrtLlmModel(modelsDir, 'bad-files')).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+  })
+
+  it('accepts a safe nested path and a null/omitted sha256', async () => {
+    await install(
+      'nested-path',
+      'files:\n  - path: variant/model.safetensors\n    size: 10\n  - path: config.json\n    size: 5\n    sha256: null\n'
+    )
+    const model = await readTensorrtLlmModel(modelsDir, 'nested-path')
+    expect(model.files).toEqual([
+      { path: 'variant/model.safetensors', size: 10, sha256: null },
+      { path: 'config.json', size: 5, sha256: null },
+    ])
   })
 
   it('answers MANAGED_METADATA_INVALID for a model.yml that is not YAML at all', async () => {

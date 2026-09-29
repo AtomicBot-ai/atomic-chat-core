@@ -326,6 +326,96 @@ describe('TensorrtLlmRuntime: pre-launch check (task 2.16, spec "Проверк�
   })
 })
 
+describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (task 2.16w round 1, finding 1, Critical)', () => {
+  // needed = weights (2,000) + the 10% weight-fraction fallback reserve (200) = 2,200 bytes.
+  const WEIGHT_BYTES = 2_000
+
+  async function installBigModel(id: string): Promise<void> {
+    const dir = join(data.layout.provider('tensorrt-llm').modelsDir, id)
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
+    )
+    await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES, 1))
+    await writeFile(
+      join(dir, 'model.yml'),
+      `name: ${id}\nrepository: acme/${id}\nrevision: deadbeef\narchitectures: [LlamaForCausalLM]\nquantization: bf16\nfiles:\n  - path: model.safetensors\n    size: ${WEIGHT_BYTES}\n    sha256: null\n`
+    )
+  }
+
+  it("loads B on the single GPU A still holds: A is stopped first, and B's memory check reads the freed card, not the stale pre-eviction snapshot", async () => {
+    await installBigModel('big-a')
+    await installBigModel('big-b')
+    // While `big-a`'s container exists, the card reports too little free memory for `big-b`
+    // (1,000 < 2,200 needed); once stopPrevious has actually stopped it, a fresh probe reports
+    // plenty. A stale, pre-eviction snapshot re-used for the memory gate would refuse `big-b`
+    // outright on this single-GPU host — exactly the bug this split fixes.
+    build({
+      hostFacts: async () => ({
+        gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 1_000_000_000 }],
+        selinux: false,
+        memAvailableBytes: 0,
+      }),
+    })
+
+    await runtime.load('big-a')
+    expect(runtime.getLoadedModels()).toEqual(['big-a'])
+    expect(docker.containers.size).toBe(1)
+
+    await runtime.load('big-b')
+    expect(runtime.getLoadedModels()).toEqual(['big-b'])
+    expect(docker.containers.size).toBe(1)
+  })
+
+  it('a genuinely-too-big model still fails before create, even once eviction has freed the card', async () => {
+    await installModel('small', 'LlamaForCausalLM') // weight 20 bytes: fits easily
+    await installBigModel('big-b') // needs 2,200 bytes
+    build({
+      // A fixed, small card throughout: enough for `small` (needed 22 bytes), never enough for
+      // `big-b` (needed 2,200) — whether or not anything else currently holds it.
+      hostFacts: async () => ({
+        gpus: [{ ...SMALL, free_vram_bytes: 2_000 }],
+        selinux: false,
+        memAvailableBytes: 0,
+      }),
+    })
+
+    await runtime.load('small')
+    expect(docker.containers.size).toBe(1)
+    const callsBeforeBigB = docker.calls.length
+
+    const error = await rejection(runtime.load('big-b'))
+    expect(error.code).toBe('MODEL_INCOMPATIBLE')
+    // `small` was still evicted by stopPrevious (it runs before the memory check), but no new
+    // container was ever created for big-b.
+    expect(docker.containers.size).toBe(0)
+    expect(docker.calls.slice(callsBeforeBigB).some((argv) => argv[0] === 'create')).toBe(false)
+    expect(runtime.getLoadedModels()).toEqual([])
+  })
+
+  it('refuses with MANAGED_PREREQUISITE_BLOCKED when the selected card is no longer on the host by the time beforeCreate re-probes it', async () => {
+    await installModel('vanishing', 'LlamaForCausalLM')
+    let calls = 0
+    build({
+      hostFacts: async () => {
+        calls += 1
+        // The card is there for load()'s own selection and the phase-1 check (call 1), but gone by
+        // the time the beforeCreate hook re-probes it (call 2, after stopPrevious — nothing to stop
+        // here, but the hook still runs).
+        return calls === 1
+          ? { gpus: [SMALL], selinux: false, memAvailableBytes: 0 }
+          : { gpus: [], selinux: false, memAvailableBytes: 0 }
+      },
+    })
+
+    const error = await rejection(runtime.load('vanishing'))
+    expect(error.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(error.message).toContain('disappeared')
+    expect(docker.calls).toEqual([])
+  })
+})
+
 describe('TensorrtLlmRuntime: sessions', () => {
   it('publishes a container session: null pid, a generation, the gateway port and key', async () => {
     build()

@@ -3,8 +3,8 @@
  * whether a Hugging Face checkpoint can run on TensorRT-LLM on this host, computed entirely from
  * what the caller already has — `config.json`, `hf_quant_config.json` when the repository carries
  * one, the revision's file listing, the pinned `RuntimeDescriptor`, the host's `GpuFacts[]`, its
- * `MemAvailable` and the provider's `kv_cache_free_gpu_memory_fraction` setting — before a single
- * byte of the checkpoint is downloaded.
+ * `MemAvailable`, the provider's `kv_cache_free_gpu_memory_fraction` setting and a context length —
+ * before a single byte of the checkpoint is downloaded.
  *
  * This is the pure verdict only. It does not read the pinned descriptor from disk, does not probe
  * the host for `GpuFacts`, does not read `<data>/tensorrt-llm/models/*`, does not read stored
@@ -18,15 +18,30 @@
  * independent of whether the checkpoint would otherwise load, so a tampered curated listing is
  * reported as `MANAGED_METADATA_INVALID` rather than whatever compatibility error the tampered
  * files happen to also trigger. Only then: quantization format recognised, architecture supported,
- * format present in this descriptor's own matrix, the file listing has at least one weight file,
- * the format's compute-capability rule (minimum and exclusion list), and finally weight bytes plus
- * the KV-cache reserve against the selected card's free memory.
+ * format present in this descriptor's own matrix, the file listing has at least one weight file, the
+ * format's compute-capability rule (minimum and exclusion list) — everything above is genuinely
+ * static, true or false regardless of what else is running on the host — and finally weight bytes
+ * plus the KV-cache reserve against the selected card's free memory.
+ *
+ * `checkModelCompatibility` runs every check as one call, for `check.ts`'s single live snapshot. The
+ * load path (`runtime.ts`, `prelaunch.ts`) cannot: a pre-launch check runs before `stopPrevious` has
+ * freed whatever the model it is about to replace holds on the very same card, so reading that card's
+ * free memory then would refuse a same-card model switch outright (task 2.16w round 1, finding 1
+ * (Critical)). `checkModelCompatibilityFiles` is every check above the memory line — everything that
+ * cannot change by evicting a previous session — and `checkModelMemory` is the memory line alone, so
+ * the load path can run the first before `stopPrevious` and the second after it, against a freshly
+ * re-probed card. `checkModelCompatibility` itself is just the two run back to back.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../contracts/index.js'
 import { inventoryDigest } from '../environment/index.js'
-import { describeUnrecognizedQuantization, isGgufCheckpoint, quantizationFormat } from './quant-format.js'
+import {
+  describeUnrecognizedQuantization,
+  isGgufCheckpoint,
+  kvCacheQuantAlgo,
+  quantizationFormat,
+} from './quant-format.js'
 import type { JsonObject } from './quant-format.js'
 
 /** One file of the revision's listing, as the route contract carries it (spec `tensorrt-llm-models`). */
@@ -97,8 +112,7 @@ function isLegacyWeightFile(path: string): boolean {
 const sumSizes = (files: readonly CheckpointFile[]): number => files.reduce((sum, file) => sum + file.size, 0)
 
 /**
- * The files that count as checkpoint weights — the single rule `weightBytes` and `isWeightFile`
- * both defer to, so the two can never disagree. Root-level files only. Prefers the standard
+ * The files that count as checkpoint weights. Root-level files only. Prefers the standard
  * `model[-NNNNN-of-MMMMM].safetensors` shard naming when present — which also excludes a
  * `consolidated*.safetensors` sitting next to it (Mistral's own releases ship both, covering the
  * exact same weights, for their own inference stack; counting both would double the checkpoint's
@@ -106,13 +120,12 @@ const sumSizes = (files: readonly CheckpointFile[]): number => files.reduce((sum
  * When no file matches that preferred naming, every other root-level `*.safetensors` file is
  * selected instead, `consolidated*` included: this is the *only* branch a `consolidated`-only
  * repository (no HF shard naming at all) ever reaches, so its `consolidated.safetensors` has to
- * count here — the same file that the preferred-shard branch above deliberately excludes when a
- * real shard set sits next to it. Only when there is no safetensors file at all does a legacy
- * `*.bin`/`*.pth` checkpoint count, so a checkpoint this engine cannot load (it only reads
- * safetensors) still gets an honest, non-zero total rather than a silent `0` that would let
- * `checkModelCompatibility` report `ok` on any card. No file matches any of these rules for an
- * empty selection, which `weightBytes` turns into `0` and `checkModelCompatibility` itself turns
- * into `MODEL_INCOMPATIBLE`, never a false `ok`.
+ * count here. Only when there is no safetensors file at all does a legacy `*.bin`/`*.pth` checkpoint
+ * count, so a checkpoint this engine cannot load (it only reads safetensors) still gets an honest,
+ * non-zero total rather than a silent `0` that would let `checkModelCompatibilityFiles` report `ok`
+ * on any card. No file matches any of these rules for an empty selection, which `weightBytes` turns
+ * into `0` and `checkModelCompatibilityFiles` itself turns into `MODEL_INCOMPATIBLE`, never a false
+ * `ok`.
  */
 function selectWeightFiles(files: readonly CheckpointFile[]): readonly CheckpointFile[] {
   const preferredShards = files.filter((file) => isPreferredShard(file.path))
@@ -130,44 +143,99 @@ export function weightBytes(files: readonly CheckpointFile[]): number {
 }
 
 /**
- * Whether `path` is one of the files `weightBytes(files)` actually sums, given the rest of the
- * listing it sits in — the same `selectWeightFiles` rule, so the two can never disagree, including
- * for a `consolidated`-only repository: `isWeightFile('consolidated.safetensors', files)` is `true`
- * when no other shard sits next to it (the "any safetensors" branch above selects it) and `false`
- * when a real shard set does (the preferred-shard branch selects those instead). A path's answer is
- * therefore not a property of the path alone — it depends on which other files are present, which a
- * single-argument version of this function could not have gotten right in both cases at once.
+ * A finite, positive number read from `configJson[key]`; `undefined` for anything else (missing,
+ * the wrong type, zero, negative, `NaN`/`Infinity`) — every field the KV-cache formula below needs
+ * is a strictly positive count or dimension, and treating `0` or a negative value as "present" would
+ * size a KV cache of zero or negative bytes, silently passing a check that should have fallen back.
  */
-export function isWeightFile(path: string, files: readonly CheckpointFile[]): boolean {
-  return selectWeightFiles(files).some((file) => file.path === path)
+function positiveNumberField(configJson: JsonObject, key: string): number | undefined {
+  const value = configJson[key]
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+interface KvCacheShape {
+  numHiddenLayers: number
+  numKeyValueHeads: number
+  headDim: number
 }
 
 /**
- * Bytes reserved on top of the weights when checking whether a checkpoint fits a card's free
- * memory: headroom for the engine build step and a minimal KV cache, as
- * `weightBytesTotal * (1 - kvCacheFreeGpuMemoryFraction)` — `kvCacheFreeGpuMemoryFraction` is the
- * provider's own `kv_cache_free_gpu_memory_fraction` setting (spec `tensorrt-llm-runtime`, "доля
- * свободной GPU-памяти под KV-cache"; task 2.14), passed in rather than read from anywhere here —
- * this module stays settings-free (see the file banner).
- *
- * `trtllm-serve`'s real KV-cache budget is that fraction of whatever memory remains free *after*
- * weights load, sized against a context length this check never has (design D12: there is no
- * session yet to size a KV cache for). Reusing the real formula against *remaining* free memory
- * would make the check nearly always pass — `weights + kv_fraction * (free - weights) <= free`
- * reduces to `weights <= free`, true whenever the checkpoint fits at all, whatever the fraction is
- * — which defeats the point of the check for exactly the case the spec calls out by name: "75 GB
- * FP8 on an 80 GB card" has to come back as either `ok` or a real, numbered shortage, not always
- * `ok` by construction (see the ADR this formula documents, which also derives this reduction in
- * full). Scaling `1 - kv_cache_free_gpu_memory_fraction` — the share of *post-weight* memory the
- * setting leaves unspent — against the checkpoint's own weight bytes instead keeps a real number
- * for a card with no session on it yet, and keeps it tied to what the operator configured: raising
- * `kv_cache_free_gpu_memory_fraction` (spend more of what is left on KV) shrinks this reserve, and
- * lowering it (keep more headroom) grows it. At this setting's own default, `0.9`, the reserve is
- * `10%` of weight bytes, matching the number this check used before the setting existed to derive
- * it from.
+ * The architecture fields a transformer's KV-cache size is computed from, with the two standard
+ * fallbacks: `num_key_value_heads` falls back to `num_attention_heads` (plain multi-head attention —
+ * every attention head is its own KV head, the GQA/MQA field simply absent) and `head_dim` falls
+ * back to `hidden_size / num_attention_heads` (the standard derivation, for a config that does not
+ * spell `head_dim` out explicitly). `undefined` when `config.json` lacks what even the fallbacks
+ * need — `kvCacheBytes` then has nothing to compute from, and `kvCacheReserveBytes` falls back to
+ * the older weight-proportional rule.
  */
-export function kvCacheReserveBytes(weightBytesTotal: number, kvCacheFreeGpuMemoryFraction: number): number {
-  return Math.ceil(weightBytesTotal * (1 - kvCacheFreeGpuMemoryFraction))
+function readKvCacheShape(configJson: JsonObject): KvCacheShape | undefined {
+  const numHiddenLayers = positiveNumberField(configJson, 'num_hidden_layers')
+  const numAttentionHeads = positiveNumberField(configJson, 'num_attention_heads')
+  const numKeyValueHeads = positiveNumberField(configJson, 'num_key_value_heads') ?? numAttentionHeads
+  const hiddenSize = positiveNumberField(configJson, 'hidden_size')
+  const headDim =
+    positiveNumberField(configJson, 'head_dim') ??
+    (hiddenSize !== undefined && numAttentionHeads !== undefined ? hiddenSize / numAttentionHeads : undefined)
+  if (numHiddenLayers === undefined || numKeyValueHeads === undefined || headDim === undefined) {
+    return undefined
+  }
+  return { numHiddenLayers, numKeyValueHeads, headDim }
+}
+
+/**
+ * The KV cache's own footprint for one sequence at `contextLength` tokens:
+ * `2 × num_hidden_layers × num_key_value_heads × head_dim × kv_dtype_bytes × context_length` — one
+ * K tensor and one V tensor (the leading `2`) per layer, each holding `context_length` tokens of
+ * `num_key_value_heads × head_dim` values at `kv_dtype_bytes` each. `kv_dtype_bytes` is `1` when
+ * `kvCacheQuantAlgo` names `FP8`, else `2` (`bf16`/`fp16`, this engine's other supported weight
+ * dtypes). `undefined` when `config.json` lacks the architecture fields `readKvCacheShape` needs.
+ */
+export function kvCacheBytes(
+  configJson: JsonObject,
+  hfQuantConfigJson: JsonObject | null,
+  contextLength: number
+): number | undefined {
+  const shape = readKvCacheShape(configJson)
+  if (shape === undefined) return undefined
+  const kvDtypeBytes = kvCacheQuantAlgo(configJson, hfQuantConfigJson)?.toUpperCase() === 'FP8' ? 1 : 2
+  return 2 * shape.numHiddenLayers * shape.numKeyValueHeads * shape.headDim * kvDtypeBytes * contextLength
+}
+
+/** How `kvCacheReserveBytes` sized the reserve it returned — carried into `ModelCompatibility.kv_reserve_basis`. */
+export type KvReserveBasis = 'config' | 'weight_fraction'
+
+export interface MemoryReserve {
+  reserveBytes: number
+  basis: KvReserveBasis
+}
+
+/**
+ * Bytes reserved on top of the weights when checking whether a checkpoint fits a card's free memory,
+ * as `KV_bytes / kv_cache_free_gpu_memory_fraction` (task 2.16w round 1, finding 6 (RULING),
+ * superseding the placeholder `weights × (1 − fraction)` rule): `trtllm-serve` spends only that
+ * fraction of whatever memory remains free *after* weights load on the KV cache, keeping the rest as
+ * headroom, so guaranteeing `KV_bytes` of real cache capacity needs `KV_bytes / fraction` of free
+ * memory left over once weights are loaded — the ADR this formula documents derives that division in
+ * full. `basis: 'config'` when `kvCacheBytes` had what it needed; `basis: 'weight_fraction'` — the
+ * older, cruder `weights × (1 − fraction)` rule — only when `config.json` lacked the architecture
+ * fields the real formula needs, and the returned `basis` says so, so a verdict computed from the
+ * fallback is never silently indistinguishable from one computed from the checkpoint's real shape.
+ */
+export function kvCacheReserveBytes(
+  weightBytesTotal: number,
+  configJson: JsonObject,
+  hfQuantConfigJson: JsonObject | null,
+  contextLength: number,
+  kvCacheFreeGpuMemoryFraction: number
+): MemoryReserve {
+  const kvBytes = kvCacheBytes(configJson, hfQuantConfigJson, contextLength)
+  if (kvBytes !== undefined) {
+    return { reserveBytes: Math.ceil(kvBytes / kvCacheFreeGpuMemoryFraction), basis: 'config' }
+  }
+  return {
+    reserveBytes: Math.ceil(weightBytesTotal * (1 - kvCacheFreeGpuMemoryFraction)),
+    basis: 'weight_fraction',
+  }
 }
 
 /** Free memory to compare against for one card: `MemAvailable` for a unified-memory card (design D13). */
@@ -249,7 +317,8 @@ interface VerdictContext {
 function buildCompatibility(
   context: VerdictContext,
   verdict: ModelCompatibility['verdict'],
-  fitsOther: string[]
+  fitsOther: string[],
+  kvReserveBasis?: KvReserveBasis
 ): ModelCompatibility {
   return {
     architectures: context.architectures,
@@ -259,32 +328,73 @@ function buildCompatibility(
     curated: context.curated,
     unified_memory: context.selected.total_vram_bytes === null,
     fits_other_gpus: fitsOther,
+    ...(kvReserveBasis === undefined ? {} : { kv_reserve_basis: kvReserveBasis }),
     verdict,
   }
 }
 
+/** What sizes the KV-cache reserve, shared by `checkModelCompatibilityFiles` (for `fits_other_gpus`
+ * on a compute-capability failure) and `checkModelMemory` (for the memory gate itself). */
+export interface MemorySizingInputs {
+  /** The session's context length: stored provider settings, a load's own overrides, or the
+   * adapter's default — resolved by the caller (`check.ts`, `runtime.ts`); this module stays
+   * settings-free. */
+  contextLength: number
+  kvCacheFreeGpuMemoryFraction: number
+}
+
 /**
- * The full verdict. Throws `AtomicCoreError('INVALID_ARGUMENT', …)` for two caller-input problems
- * that are never a fact about the checkpoint itself: the host has no GPU at all (`gpus` empty), or
- * the file listing names `hf_quant_config.json` while `hf_quant_config_json` is `null` (the caller
- * said the file exists but did not send its content, so the format naming rule cannot be trusted).
+ * Everything `checkModelMemory` needs about the checkpoint once every non-memory check has passed.
+ * `configJson`/`hfQuantConfigJson` travel here (rather than being re-passed alongside `sizing`)
+ * because they are exactly `input.config_json`/`input.hf_quant_config_json` as
+ * `checkModelCompatibilityFiles` already read them — carrying its own copy here means
+ * `checkModelMemory` can never be called with a `config.json` that disagrees with the one the rest
+ * of the verdict was computed from.
+ */
+export interface ResolvedCheckpoint {
+  architectures: string[]
+  /** Never null here: `checkModelCompatibilityFiles` only returns this once a format was recognised. */
+  quantizationFormat: string
+  weightBytesTotal: number
+  selected: GpuFacts
+  curated: boolean
+  configJson: JsonObject
+  hfQuantConfigJson: JsonObject | null
+}
+
+export type FilesCheckResult =
+  { ok: true; resolved: ResolvedCheckpoint } | { ok: false; verdict: ModelCompatibility }
+
+/**
+ * Throws `AtomicCoreError` for two caller-input problems that are never a fact about the checkpoint
+ * itself: `INVALID_ARGUMENT` when the file listing names `hf_quant_config.json` while
+ * `hf_quant_config_json` is `null` (the caller said the file exists but did not send its content, so
+ * the format naming rule cannot be trusted), and `MANAGED_PREREQUISITE_BLOCKED` when the host has no
+ * GPU at all (`gpus` empty — the same code, and the same host condition, `runtime.ts`'s own
+ * `selectLaunchGpu` check already answers with for a real load; task 2.16w round 1, finding 11:
+ * an absent or failing `nvidia-smi` is a missing prerequisite, not a malformed request).
  * `inventoryDigest` can also throw `AtomicCoreError('MANAGED_METADATA_INVALID', …)` for a curated
  * match whose file listing is itself malformed (an empty or repeated path, a NUL byte, a
  * non-integer size — see `src/runtime/environment/inventory.ts`), before this function gets a
- * chance to compare digests. Every other input, however incompatible, is a normal
- * `verdict.ok: false` answer, never a thrown error (design D12: the point of this check is to hand
- * back numbers, not to fail the request).
+ * chance to compare digests. Every other input, however incompatible, is a normal `verdict.ok: false`
+ * answer, never a thrown error (design D12: the point of this check is to hand back numbers, not to
+ * fail the request).
  *
- * `kvCacheFreeGpuMemoryFraction` is the provider's `kv_cache_free_gpu_memory_fraction` setting
- * (see `kvCacheReserveBytes`); the caller reads it from stored settings, never this module.
+ * Every check above the memory line: GGUF, the curated digest, the quantization format, the
+ * architecture, the format's presence in this descriptor and its compute-capability rule. None of
+ * these can change by evicting whatever session currently holds the selected card, so all of them
+ * run before `stopPrevious` on the load path (task 2.16w round 1, finding 1). `fits_other_gpus` on a
+ * compute-capability failure is still computed here (`memory` sizes the reserve needed to report it),
+ * using whichever `gpus`/`hostMemAvailableBytes` snapshot the caller passed in — informational only,
+ * about *other* cards the eviction race does not touch.
  */
-export function checkModelCompatibility(
+export function checkModelCompatibilityFiles(
   input: ModelCheckInput,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
   hostMemAvailableBytes: number,
-  kvCacheFreeGpuMemoryFraction: number
-): ModelCompatibility {
+  memory: MemorySizingInputs
+): FilesCheckResult {
   if (
     input.files.some((file) => file.path === 'hf_quant_config.json') &&
     input.hf_quant_config_json === null
@@ -297,7 +407,10 @@ export function checkModelCompatibility(
 
   const selected = selectLaunchGpu(gpus, input.gpu_id)
   if (selected === null) {
-    throw new AtomicCoreError('INVALID_ARGUMENT', 'No GPU is available to check compatibility against.')
+    throw new AtomicCoreError(
+      'MANAGED_PREREQUISITE_BLOCKED',
+      'No NVIDIA GPU was found on this machine, so tensorrt-llm compatibility cannot be checked.'
+    )
   }
 
   const architectures = readArchitectures(input.config_json)
@@ -323,138 +436,228 @@ export function checkModelCompatibility(
   if (curatedEntry !== undefined) {
     const actualDigest = inventoryDigest(input.files.map(toInventoryFile))
     if (actualDigest !== curatedEntry.inventory_digest) {
-      return buildCompatibility(
-        { ...context, curated: false },
-        {
-          ok: false,
-          error: {
-            code: 'MANAGED_METADATA_INVALID',
-            message: 'The submitted file listing does not match the curated inventory digest.',
-            details: `expected=${curatedEntry.inventory_digest} actual=${actualDigest}`,
+      return {
+        ok: false,
+        verdict: buildCompatibility(
+          { ...context, curated: false },
+          {
+            ok: false,
+            error: {
+              code: 'MANAGED_METADATA_INVALID',
+              message: 'The submitted file listing does not match the curated inventory digest.',
+              details: `expected=${curatedEntry.inventory_digest} actual=${actualDigest}`,
+            },
           },
-        },
-        []
-      )
+          []
+        ),
+      }
     }
   }
 
   if (gguf) {
-    return buildCompatibility(
-      context,
-      {
-        ok: false,
-        error: {
-          code: 'MODEL_INCOMPATIBLE',
-          message: 'GGUF checkpoints are not supported by tensorrt-llm; use the llama.cpp provider for GGUF.',
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        {
+          ok: false,
+          error: {
+            code: 'MODEL_INCOMPATIBLE',
+            message:
+              'GGUF checkpoints are not supported by tensorrt-llm; use the llama.cpp provider for GGUF.',
+          },
         },
-      },
-      []
-    )
+        []
+      ),
+    }
   }
 
   if (format === null) {
-    return buildCompatibility(
-      context,
-      {
-        ok: false,
-        error: {
-          code: 'MODEL_INCOMPATIBLE',
-          message: `Unsupported quantization format: ${describeUnrecognizedQuantization(input.config_json, input.hf_quant_config_json)}.`,
-          details: `repository=${input.repository} revision=${input.revision}`,
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        {
+          ok: false,
+          error: {
+            code: 'MODEL_INCOMPATIBLE',
+            message: `Unsupported quantization format: ${describeUnrecognizedQuantization(input.config_json, input.hf_quant_config_json)}.`,
+            details: `repository=${input.repository} revision=${input.revision}`,
+          },
         },
-      },
-      []
-    )
+        []
+      ),
+    }
   }
 
   const architecture = architectures.length > 0 ? architectures[0] : undefined
   if (architecture === undefined || !descriptor.supported_architectures.includes(architecture)) {
-    return buildCompatibility(
-      context,
-      {
-        ok: false,
-        error: {
-          code: 'MODEL_INCOMPATIBLE',
-          message:
-            architecture === undefined
-              ? 'config.json does not declare an architecture.'
-              : `Unsupported architecture: ${architecture}.`,
-          ...(architecture !== undefined ? { details: architecture } : {}),
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        {
+          ok: false,
+          error: {
+            code: 'MODEL_INCOMPATIBLE',
+            message:
+              architecture === undefined
+                ? 'config.json does not declare an architecture.'
+                : `Unsupported architecture: ${architecture}.`,
+            ...(architecture !== undefined ? { details: architecture } : {}),
+          },
         },
-      },
-      []
-    )
+        []
+      ),
+    }
   }
 
   const formatSupport = descriptor.quantization.find((entry) => entry.format === format)
   if (formatSupport === undefined) {
-    return buildCompatibility(
-      context,
-      {
-        ok: false,
-        error: {
-          code: 'MODEL_INCOMPATIBLE',
-          message: `Unsupported quantization format: "${format}" is not part of this engine's descriptor.`,
-          details: format,
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        {
+          ok: false,
+          error: {
+            code: 'MODEL_INCOMPATIBLE',
+            message: `Unsupported quantization format: "${format}" is not part of this engine's descriptor.`,
+            details: format,
+          },
         },
-      },
-      []
-    )
+        []
+      ),
+    }
   }
 
   if (weightBytesTotal === 0) {
-    return buildCompatibility(
-      context,
-      {
-        ok: false,
-        error: {
-          code: 'MODEL_INCOMPATIBLE',
-          message: 'No checkpoint weight files were found in the file listing.',
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        {
+          ok: false,
+          error: {
+            code: 'MODEL_INCOMPATIBLE',
+            message: 'No checkpoint weight files were found in the file listing.',
+          },
         },
-      },
-      []
-    )
+        []
+      ),
+    }
   }
 
   // Known from here on: architecture and format are both fine, so any card whose own CC clears
-  // this format and has room is a real alternative — compute it once and reuse it in every
-  // remaining branch, including the two CC-failure branches below, so a caller whose selected card
-  // fails on CC still sees a card that would work (spec: "report which other host cards it would
-  // fit").
-  const reserveBytes = kvCacheReserveBytes(weightBytesTotal, kvCacheFreeGpuMemoryFraction)
+  // this format and has room is a real alternative — compute it once and reuse it in both CC-failure
+  // branches below, so a caller whose selected card fails on CC still sees a card that would work
+  // (spec: "report which other host cards it would fit").
+  const { reserveBytes, basis } = kvCacheReserveBytes(
+    weightBytesTotal,
+    input.config_json,
+    input.hf_quant_config_json,
+    memory.contextLength,
+    memory.kvCacheFreeGpuMemoryFraction
+  )
   const neededBytes = weightBytesTotal + reserveBytes
-  const freeBytes = freeMemoryBytes(selected, hostMemAvailableBytes)
   const fitsOther = fitsOtherGpus(gpus, selected, descriptor, format, neededBytes, hostMemAvailableBytes)
 
   if (!computeCapabilityAtLeast(selected.compute_capability, formatSupport.min_compute_capability)) {
-    return buildCompatibility(
-      context,
-      {
-        ok: false,
-        error: {
-          code: 'MODEL_INCOMPATIBLE',
-          message: `Format ${format} requires compute capability ${formatSupport.min_compute_capability} or newer.`,
-          details: `required=${formatSupport.min_compute_capability} actual=${selected.compute_capability}`,
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        {
+          ok: false,
+          error: {
+            code: 'MODEL_INCOMPATIBLE',
+            message: `Format ${format} requires compute capability ${formatSupport.min_compute_capability} or newer.`,
+            details: `required=${formatSupport.min_compute_capability} actual=${selected.compute_capability}`,
+          },
         },
-      },
-      fitsOther
-    )
+        fitsOther,
+        basis
+      ),
+    }
   }
 
   if (formatSupport.excluded_compute_capabilities.includes(selected.compute_capability)) {
-    return buildCompatibility(
-      context,
-      {
-        ok: false,
-        error: {
-          code: 'MODEL_INCOMPATIBLE',
-          message: `Format ${format} is not supported by this engine release on compute capability ${selected.compute_capability}.`,
-          details: `format=${format} compute_capability=${selected.compute_capability}`,
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        {
+          ok: false,
+          error: {
+            code: 'MODEL_INCOMPATIBLE',
+            message: `Format ${format} is not supported by this engine release on compute capability ${selected.compute_capability}.`,
+            details: `format=${format} compute_capability=${selected.compute_capability}`,
+          },
         },
-      },
-      fitsOther
-    )
+        fitsOther,
+        basis
+      ),
+    }
   }
+
+  return {
+    ok: true,
+    resolved: {
+      architectures,
+      quantizationFormat: format,
+      weightBytesTotal,
+      selected,
+      curated: context.curated,
+      configJson: input.config_json,
+      hfQuantConfigJson: input.hf_quant_config_json,
+    },
+  }
+}
+
+/**
+ * The memory line alone (task 2.16w round 1, finding 1): whether `resolved.weightBytesTotal` plus
+ * the KV-cache reserve fits the selected card's free memory. Callers pass a fresh `gpus`/
+ * `hostMemAvailableBytes` snapshot — the load path's `beforeCreate` hook re-probes the host after
+ * `stopPrevious` has run, so this sees whatever that freed, never a snapshot taken before it — and
+ * this function re-reads the free-memory figure for `resolved.selected.gpu_id` from *that* fresh
+ * `gpus`, rather than trusting `resolved.selected`'s own (possibly stale) copy: that stale copy is
+ * only a fallback for the case `gpus` no longer lists the card at all (it disappeared), which
+ * `runtime.ts`'s own `beforeCreate` hook checks for and reports as `MANAGED_PREREQUISITE_BLOCKED`
+ * before ever calling this. This never picks a *different* card — the caller already committed to
+ * this exact one (`checkModelCompatibilityFiles`, or a load's own `selectLaunchGpu`).
+ */
+export function checkModelMemory(
+  resolved: ResolvedCheckpoint,
+  descriptor: RuntimeDescriptor,
+  gpus: readonly GpuFacts[],
+  hostMemAvailableBytes: number,
+  memory: MemorySizingInputs
+): ModelCompatibility {
+  const selected = gpus.find((gpu) => gpu.gpu_id === resolved.selected.gpu_id) ?? resolved.selected
+  const context: VerdictContext = {
+    architectures: resolved.architectures,
+    quantizationFormat: resolved.quantizationFormat,
+    weightBytesTotal: resolved.weightBytesTotal,
+    selected,
+    curated: resolved.curated,
+  }
+  const { reserveBytes, basis } = kvCacheReserveBytes(
+    resolved.weightBytesTotal,
+    resolved.configJson,
+    resolved.hfQuantConfigJson,
+    memory.contextLength,
+    memory.kvCacheFreeGpuMemoryFraction
+  )
+  const neededBytes = resolved.weightBytesTotal + reserveBytes
+  const freeBytes = freeMemoryBytes(selected, hostMemAvailableBytes)
+  const fitsOther = fitsOtherGpus(
+    gpus,
+    selected,
+    descriptor,
+    resolved.quantizationFormat,
+    neededBytes,
+    hostMemAvailableBytes
+  )
 
   if (neededBytes > freeBytes) {
     return buildCompatibility(
@@ -464,12 +667,30 @@ export function checkModelCompatibility(
         error: {
           code: 'MODEL_INCOMPATIBLE',
           message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
-          details: `weight_bytes=${weightBytesTotal} kv_reserve_bytes=${reserveBytes} needed_bytes=${neededBytes} free_bytes=${freeBytes}`,
+          details: `weight_bytes=${resolved.weightBytesTotal} kv_reserve_bytes=${reserveBytes} kv_reserve_basis=${basis} needed_bytes=${neededBytes} free_bytes=${freeBytes}`,
         },
       },
-      fitsOther
+      fitsOther,
+      basis
     )
   }
 
-  return buildCompatibility(context, { ok: true }, fitsOther)
+  return buildCompatibility(context, { ok: true }, fitsOther, basis)
+}
+
+/**
+ * The full verdict: `checkModelCompatibilityFiles` then, if it passed, `checkModelMemory` — for
+ * `check.ts`'s single live snapshot, where there is no previous session on the selected card to
+ * evict first. The load path runs the two separately instead (see the file banner).
+ */
+export function checkModelCompatibility(
+  input: ModelCheckInput,
+  descriptor: RuntimeDescriptor,
+  gpus: readonly GpuFacts[],
+  hostMemAvailableBytes: number,
+  memory: MemorySizingInputs
+): ModelCompatibility {
+  const files = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemAvailableBytes, memory)
+  if (!files.ok) return files.verdict
+  return checkModelMemory(files.resolved, descriptor, gpus, hostMemAvailableBytes, memory)
 }

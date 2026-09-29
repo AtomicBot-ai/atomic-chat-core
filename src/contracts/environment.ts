@@ -514,6 +514,15 @@ export interface RuntimeDescriptor {
  * quantization format newer than the card (or on the format's exclusion list, or not recognised at
  * all, including GGUF), or weights that do not fit; `MANAGED_METADATA_INVALID` when a curated
  * match's `inventory_digest` does not verify.
+ *
+ * `kv_reserve_basis` says how the KV-cache memory reserve behind `verdict` was sized (task 2.16w
+ * round 1, finding 6): `'config'` when `config.json` carried the architecture fields
+ * (`num_hidden_layers`, `num_key_value_heads`/`num_attention_heads`, `head_dim`/`hidden_size`) the
+ * real formula needs — `weights + KV_bytes / kv_cache_free_gpu_memory_fraction`, `KV_bytes` sized
+ * from those fields, the context length and the KV dtype; `'weight_fraction'` when they were
+ * missing and the reserve fell back to the older, cruder `weights × (1 − fraction)` rule. `undefined`
+ * only when the verdict never reached the memory check at all (an earlier failure — GGUF, an
+ * unrecognised format, an unsupported architecture, a curated digest mismatch).
  */
 export interface ModelCompatibility {
   architectures: string[]
@@ -524,5 +533,6 @@ export interface ModelCompatibility {
   curated: boolean
   unified_memory: boolean
   fits_other_gpus: string[]
+  kv_reserve_basis?: 'config' | 'weight_fraction'
   verdict: { ok: true } | { ok: false; error: ErrorBody }
 }

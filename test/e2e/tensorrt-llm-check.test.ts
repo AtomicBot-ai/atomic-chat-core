@@ -4,8 +4,9 @@
  * descriptor of the `ready` installation (or the latest cached one when nothing is installed), the
  * host's GPUs (`fake-nvidia-smi.mjs`, the same test host `tensorrt-llm-provider.test.ts` uses) and
  * `/proc/meminfo` — over `ATOMIC_MANAGED_TEST_HOST`, so this runs on any host without a real GPU or
- * Docker. No fake `docker` is installed at all: the check route never asks Docker anything (unlike a
- * load), which the "no installation at all" case below exercises directly.
+ * Docker. A fake `docker` (`fake-model-docker.mjs`, the same one the provider e2e uses) *is*
+ * installed, so "never calls Docker" below is a real, falsifiable claim: if the check route shelled
+ * out to it, `docker.json` would exist.
  *
  * No imports from `src/`: a packaging change that breaks the route cannot pass by type-checking.
  */
@@ -20,6 +21,7 @@ import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 
 const FAKE_NVIDIA_SMI = fileURLToPath(new URL('../helpers/fake-nvidia-smi.mjs', import.meta.url))
+const FAKE_DOCKER = fileURLToPath(new URL('../helpers/fake-model-docker.mjs', import.meta.url))
 const DESCRIPTOR = fileURLToPath(new URL('../fixtures/runtimes/tensorrt-llm.json', import.meta.url))
 const DESCRIPTOR_JSON = JSON.parse(readFileSync(DESCRIPTOR, 'utf8')) as { descriptor_id: string }
 const DESCRIPTOR_ID = DESCRIPTOR_JSON.descriptor_id
@@ -32,10 +34,13 @@ let managedRoot: string
 let host: string
 const daemons: ChildProcess[] = []
 
-async function wrap(path: string, script: string): Promise<void> {
+async function wrap(path: string, script: string, env: Record<string, string> = {}): Promise<void> {
+  const exports = Object.entries(env)
+    .map(([name, value]) => `export ${name}=${JSON.stringify(value)}\n`)
+    .join('')
   await writeFile(
     path,
-    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`
+    `#!/bin/sh\n${exports}exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`
   )
   await chmod(path, 0o755)
 }
@@ -66,14 +71,23 @@ async function writeInstallation(): Promise<void> {
   )
 }
 
+/** The descriptor cache alone (`descriptors/<id>.json` + `descriptors/latest.json`), no installation. */
+async function writeCachedDescriptor(): Promise<void> {
+  await mkdir(join(managedRoot, 'descriptors'), { recursive: true })
+  await copyFile(DESCRIPTOR, join(managedRoot, 'descriptors', `${DESCRIPTOR_ID}.json`))
+  await writeFile(
+    join(managedRoot, 'descriptors', 'latest.json'),
+    JSON.stringify({ descriptor_id: DESCRIPTOR_ID })
+  )
+}
+
 beforeEach(async () => {
   dataFolder = await mkdtemp(join(tmpdir(), 'atomic-core-e2e-trt-check-'))
   managedRoot = await mkdtemp(join(tmpdir(), 'atomic-managed-e2e-trt-check-'))
   host = await mkdtemp(join(tmpdir(), 'atomic-trt-check-host-'))
   await mkdir(join(host, 'bin'))
   await wrap(join(host, 'bin', 'nvidia-smi'), FAKE_NVIDIA_SMI)
-  // No fake docker at all: `docker` on this host's PATH is whatever the test runner has (or nothing),
-  // and the check route is never allowed to shell out to it either way.
+  await wrap(join(host, 'bin', 'docker'), FAKE_DOCKER, { FAKE_DOCKER_STATE: join(host, 'docker.json') })
 })
 
 afterEach(async () => {
@@ -167,8 +181,19 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')(
       expect(existsSync(join(host, 'docker.json'))).toBe(false)
     })
 
-    it('falls back to the latest cached descriptor when the engine is not installed at all, and refuses cleanly when nothing was ever cached', async () => {
-      // No `writeInstallation()`: the shared root has no installation and no cached descriptor.
+    it('falls back to the latest cached descriptor and answers a real verdict from it when the engine is not installed at all', async () => {
+      await writeCachedDescriptor()
+      // No `writeInstallation()`: nothing is installed, only a previously cached descriptor exists.
+      const { ready } = await start()
+      const res = await check(ready, bf16Body())
+      expect(res.status, await res.clone().text()).toBe(200)
+      const body = (await res.json()) as { checked_gpu_id: string; verdict: { ok: boolean } }
+      expect(body.checked_gpu_id).toBe(GPU)
+      expect(body.verdict).toEqual({ ok: true })
+    })
+
+    it('refuses cleanly with MANAGED_METADATA_INVALID when nothing is installed and nothing was ever cached', async () => {
+      // No `writeInstallation()`, no `writeCachedDescriptor()`: the shared root is entirely empty.
       const { ready } = await start()
       const res = await check(ready, bf16Body())
       expect(res.status).toBe(400)

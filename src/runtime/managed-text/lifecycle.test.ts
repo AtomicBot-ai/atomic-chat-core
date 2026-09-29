@@ -330,6 +330,55 @@ describe('ManagedTextLifecycle: stages and timeout', () => {
     expect(order).toEqual(['stop-previous with 0 containers'])
     expect(progress().map((p) => p.stage)[0]).toBe('stopping-previous')
   })
+
+  it('runs beforeCreate after stopPrevious and before docker create (task 2.16w round 1, finding 1)', async () => {
+    await build()
+    const order: string[] = []
+    await lifecycle.load(
+      request_({
+        stopPrevious: async () => {
+          order.push('stop-previous')
+        },
+        beforeCreate: async () => {
+          order.push(`before-create with ${docker.containers.size} containers`)
+        },
+      })
+    )
+    expect(order).toEqual(['stop-previous', 'before-create with 0 containers'])
+  })
+
+  it('a beforeCreate that throws refuses the load with no container ever created', async () => {
+    await build()
+    const error = await rejection(
+      lifecycle.load(
+        request_({
+          beforeCreate: async () => {
+            throw new AtomicCoreError('MODEL_INCOMPATIBLE', 'not enough free memory on the chosen card')
+          },
+        })
+      )
+    )
+    expect(error.code).toBe('MODEL_INCOMPATIBLE')
+    expect(docker.containers.size).toBe(0)
+    expect(docker.calls).toEqual([])
+  })
+
+  it('beforeCreate runs once even when the first docker start attempt loses the port-bind race and retries', async () => {
+    await build()
+    docker.startFailures = [
+      'Error response from daemon: Bind for 127.0.0.1:41000 failed: port is already allocated',
+    ]
+    let calls = 0
+    await lifecycle.load(
+      request_({
+        beforeCreate: async () => {
+          calls += 1
+        },
+      })
+    )
+    expect(calls).toBe(1)
+    expect(docker.containers.size).toBe(1)
+  })
 })
 
 describe('ManagedTextLifecycle: early exit', () => {

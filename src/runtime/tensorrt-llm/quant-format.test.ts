@@ -4,6 +4,7 @@ import { parseRuntimeDescriptor } from '../environment/index.js'
 import {
   describeUnrecognizedQuantization,
   isGgufCheckpoint,
+  kvCacheQuantAlgo,
   quantizationFormat,
   type JsonObject,
 } from './quant-format.js'
@@ -207,6 +208,35 @@ describe('reachability: every format the real descriptor fixture lists is reacha
       }
     })
   }
+})
+
+describe('kvCacheQuantAlgo', () => {
+  it('reads hf_quant_config.json quantization.kv_cache_quant_algo when the repository carries the file', () => {
+    expect(kvCacheQuantAlgo({}, { quantization: { quant_algo: 'FP8', kv_cache_quant_algo: 'FP8' } })).toBe(
+      'FP8'
+    )
+  })
+
+  it('is undefined when hf_quant_config.json carries no kv_cache_quant_algo', () => {
+    expect(kvCacheQuantAlgo({}, { quantization: { quant_algo: 'FP8' } })).toBeUndefined()
+  })
+
+  it('reads config.json quantization_config.kv_cache_quant_algo when there is no hf_quant_config.json', () => {
+    expect(
+      kvCacheQuantAlgo(
+        { quantization_config: { quant_method: 'modelopt', kv_cache_quant_algo: 'FP8' } },
+        null
+      )
+    ).toBe('FP8')
+  })
+
+  it('is undefined for an unquantized checkpoint (neither object present)', () => {
+    expect(kvCacheQuantAlgo({ dtype: 'bfloat16' }, null)).toBeUndefined()
+  })
+
+  it('never falls through to config.json when hf_quant_config.json is present but empty', () => {
+    expect(kvCacheQuantAlgo({ quantization_config: { kv_cache_quant_algo: 'FP8' } }, {})).toBeUndefined()
+  })
 })
 
 describe('isGgufCheckpoint', () => {

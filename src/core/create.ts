@@ -41,7 +41,7 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
-import { TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
+import { TensorrtLlmModelRegistry, TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
@@ -174,7 +174,7 @@ export async function createAtomicCore(
       fetch: options.fetch ?? fetch,
       emit: (name, payload) => emitter.emit(name, payload),
     })
-    const registries = new Map<LocalProviderId, ModelRegistry>([
+    const registries = new Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>([
       [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
     ])
@@ -410,6 +410,11 @@ export async function createAtomicCore(
       claimGpu: gpuResidency.hook('tensorrt-llm'),
     })
     if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
+    // `core.registry('tensorrt-llm')` (task 2.16w round 1, finding 2): the same Linux-only gate as
+    // the runtime above, so the two are never offered one without the other.
+    if (managedPlatform === 'linux') {
+      registries.set('tensorrt-llm', new TensorrtLlmModelRegistry(layout.provider('tensorrt-llm').modelsDir))
+    }
     /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
     const tensorrtLlmOr = (provider: string): TensorrtLlmRuntime => {
       const runtime = runtimes.get('tensorrt-llm')

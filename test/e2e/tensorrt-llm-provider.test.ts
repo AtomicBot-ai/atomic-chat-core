@@ -102,27 +102,20 @@ async function installModel(id: string, architecture: string): Promise<void> {
 }
 
 /**
- * A model whose `config.json` on disk names a real, descriptor-supported architecture (so the
- * pre-launch check, task 2.16, lets it load) but whose `model.yml` names none at all — `familyOf`
- * looks the architecture up from `model.yml`, not `config.json`, so this session finds no
- * `model_families` entry and every optional capability (tool calls, structured output) is refused.
- * The real published descriptor's `model_families` and `supported_architectures` are the same set
- * (every supported architecture has a family entry), so an architecture unsupported outright is no
- * longer loadable at all now that the pre-launch check validates it — this is the only way left to
- * exercise the "no family entry" capabilities path against a checkpoint that actually loads.
+ * `MistralForCausalLM`: a real, descriptor-supported architecture whose `model_families` entry has
+ * no tool parser (`tool_parser: null`) but does support structured output — used for the "no tool
+ * calling" half of the capabilities-gating e2e below.
+ *
+ * Round 1 of this task's own review (finding 5) is why this is a *real* architecture rather than a
+ * made-up one `model_families` has no entry for: `family` is now read off the architecture the
+ * pre-launch check just verified against `config.json` on disk, never off `model.yml`'s own
+ * (possibly stale) copy, and the real published descriptor's `model_families` and
+ * `supported_architectures` are the exact same set — so an architecture the descriptor's family map
+ * has no entry for is, by construction, also not in `supported_architectures`, and is refused before
+ * it can ever load at all. There is no longer a "loads, but with no family entry" case to exercise.
  */
 async function installExoticModel(): Promise<void> {
-  const dir = join(dataFolder, 'tensorrt-llm', 'models', 'exotic')
-  await mkdir(dir, { recursive: true })
-  await writeFile(
-    join(dir, 'config.json'),
-    JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
-  )
-  await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(20, 1))
-  await writeFile(
-    join(dir, 'model.yml'),
-    'name: exotic\nquantization: bf16\nfiles:\n  - path: model.safetensors\n    size: 20\n    sha256: null\n'
-  )
+  await installModel('exotic', 'MistralForCausalLM')
 }
 
 async function writeInstallation(): Promise<void> {
@@ -333,7 +326,7 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(gone.status).toBe(503)
   })
 
-  it('answers on SessionInfo.port itself the way :1337 does: mapped overflow, refused tools and JSON output, the session key only', async () => {
+  it('answers on SessionInfo.port itself the way :1337 does: mapped overflow, tools refused but structured output allowed, the session key only', async () => {
     const { ready } = await start()
     const session = await load(ready, 'exotic')
     const chat = { model: 'exotic', messages: [{ role: 'user', content: 'hi' }] }
@@ -371,10 +364,10 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(overflowBody.error.message).toContain('8192')
     expect(overflowBody.error.message).toContain('9000')
 
+    // MistralForCausalLM's family entry has no tool parser: both tool-calling shapes are refused.
     for (const [extra, what] of [
       [{ tools: [{ type: 'function', function: { name: 'f', parameters: {} } }] }, 'tool calling'],
       [{ tool_choice: 'required' }, 'tool calling'],
-      [{ response_format: { type: 'json_object' } }, 'structured output'],
     ] as const) {
       const refused = await publicPost(
         session.port,
@@ -391,6 +384,15 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
         },
       })
     }
+
+    // ...but its family entry does support structured output, so this is let through, not refused.
+    const structured = await publicPost(
+      session.port,
+      '/chat/completions',
+      { ...chat, response_format: { type: 'json_object' } },
+      session.api_key
+    )
+    expect(structured.status, await structured.clone().text()).toBe(200)
 
     const embeddings = await publicPost(
       session.port,

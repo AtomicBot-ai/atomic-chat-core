@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -255,6 +255,38 @@ describe('taking ownership', () => {
         body: { error: { code: 'PROVIDER_NOT_FOUND' } },
       })
     }
+  })
+
+  it("exposes the tensorrt-llm model registry through core.registry('tensorrt-llm') on Linux only, a fresh scan on every list() (task 2.16w round 1, finding 2)", async () => {
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+    })
+
+    const modelsDir = linux.layout.provider('tensorrt-llm').modelsDir
+    // A directory with files but no model.yml is not shown at all (spec "Недокачанный каталог").
+    await mkdir(join(modelsDir, 'downloading'), { recursive: true })
+    await writeFile(join(modelsDir, 'downloading', 'model.safetensors'), 'partial')
+    expect((await linux.registry('tensorrt-llm').list()).map((m) => m.id)).toEqual([])
+
+    // The app finishes the download and writes model.yml last: the very next list() finds it, no restart.
+    await writeFile(
+      join(modelsDir, 'downloading', 'model.yml'),
+      'repository: acme/model\nrevision: deadbeef\narchitectures:\n  - LlamaForCausalLM\nquantization: bf16\nfiles: []\n'
+    )
+    expect((await linux.registry('tensorrt-llm').list()).map((m) => m.id)).toEqual(['downloading'])
+    await linux.shutdown()
+
+    const mac = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'darwin',
+      resourcesDir: join(data.root, 'no-resources'),
+    })
+    cores.push(mac)
+    expect(() => mac.registry('tensorrt-llm')).toThrow(/Unknown provider/)
   })
 
   it('wires settings, context and public-server control routes to the facade', async () => {

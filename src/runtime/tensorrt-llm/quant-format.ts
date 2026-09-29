@@ -118,6 +118,29 @@ export function quantizationFormat(
 }
 
 /**
+ * The KV-cache's own quantization algorithm — NVIDIA ModelOpt's `kv_cache_quant_algo`, a sibling
+ * field to `quant_algo` above, read the same way and from the same object: `hf_quant_config.json`'s
+ * `quantization` when the repository carries the file, else `config.json`'s `quantization_config`.
+ * Used by the KV-cache memory formula (`compatibility.ts`, task 2.16w round 1) to size a KV cache
+ * entry at 1 byte (`FP8`) instead of the engine's own default 2 bytes (`bf16`/`fp16`). `undefined`
+ * when neither object carries it — an unquantized KV cache, or a checkpoint this naming rule does
+ * not otherwise recognise.
+ */
+export function kvCacheQuantAlgo(
+  configJson: JsonObject,
+  hfQuantConfigJson: JsonObject | null
+): string | undefined {
+  if (hfQuantConfigJson !== null) {
+    const quantization = asObject(hfQuantConfigJson.quantization)
+    return quantization === undefined ? undefined : asNonEmptyString(quantization.kv_cache_quant_algo)
+  }
+  const quantizationConfig = asObject(configJson.quantization_config)
+  return quantizationConfig === undefined
+    ? undefined
+    : asNonEmptyString(quantizationConfig.kv_cache_quant_algo)
+}
+
+/**
  * What the naming rule actually saw when it did not recognise a format, for error messages only —
  * never consulted to decide the format itself (that is `quantizationFormat`'s job alone). Mirrors
  * `quantizationFormat`'s own step order, so the two must be kept in sync.
