@@ -34,7 +34,7 @@ exercise. The others are skipped, and each skip gives its reason.
 | `restart-with-consent` | Docker running without the NVIDIA runtime. The test starts 2 `busybox` sentinel containers first |
 | `consent-gates-work` | any setup: for 15 s at `awaiting-consent`, nothing is elevated, pulled or restarted |
 | `privileged-step` | install or complete path: request file `0600` in a `0700` folder, `sudo -n <core> host-step exec`, receipt |
-| `relogin` | the step added you to `docker` and this session predates it (see below) |
+| `relogin` | the step added you to `docker` and the first core's process does not hold the `docker` gid (see below) |
 | `gpu-pull-ready` | any setup: `preparing-environment` → `pulling-image` (byte progress) → `verifying` → `activating` → `ready` |
 | `adopt-ready-host` | Docker already reachable by you, with the NVIDIA runtime |
 | `arch-blocked` | Arch without Docker or the toolkit: `prerequisite-blocked` with `pacman -Syu` commands |
@@ -54,6 +54,12 @@ begins. The test reads `/proc/<pid>/status` to check that the new core has the `
 must continue the operation on its own at startup, and the test never sends it a resume. `sg docker -c`
 was not used, because it runs a shell string and sets only the primary group. `newgrp` was not used,
 because it needs an interactive shell.
+
+Whether a relogin is expected at all is decided by number, not by name: the `docker` gid is read with
+`getent group docker` after the privileged step, and compared with the `Groups:` line of the first
+core's `/proc/<pid>/status`. A session can already hold a gid whose group was deleted (Docker purged by
+hand) and then re-created with the same number by the step. `id -nG` taken before the step cannot name
+that gid, but the core reaches the daemon with it and rightly goes on without a relogin.
 
 ### VM requirements
 

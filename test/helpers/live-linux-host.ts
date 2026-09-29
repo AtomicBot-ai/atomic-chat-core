@@ -426,6 +426,13 @@ export function daemonJsonDigest(): string | null {
   return out.code === 0 ? `sha256:${createHash('sha256').update(out.stdout).digest('hex')}` : null
 }
 
+/** A group's gid as `getent group` reports it now; null when there is no such group. */
+export function groupGid(name: string): number | null {
+  const out = run('getent', ['group', name])
+  const gid = out.code === 0 ? out.stdout.trim().split(':')[2] : undefined
+  return gid === undefined || !/^\d+$/.test(gid) ? null : Number(gid)
+}
+
 /** The supplementary gids of a running process, from `/proc/<pid>/status`. */
 export function processGroups(pid: number): number[] {
   try {

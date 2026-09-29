@@ -58,6 +58,7 @@ import {
   detectHost,
   dockerCli,
   packageSetDigest,
+  groupGid,
   preconditionProblems,
   processGroups,
   run,
@@ -214,6 +215,8 @@ const S: {
   hostSteps: string
   coreEnv: Record<string, string>
   core: LiveCore | null
+  /** The supplementary gids of the first core this run started (`/proc/<pid>/status`); null before. */
+  firstCoreGroups: number[] | null
   closeEvents: (() => void) | null
   plan: Plan | null
   operationId: string | null
@@ -245,6 +248,7 @@ const S: {
   hostSteps: '',
   coreEnv: {},
   core: null,
+  firstCoreGroups: null,
   closeEvents: null,
   plan: null,
   operationId: null,
@@ -309,6 +313,7 @@ async function startCore(label: string, freshLoginAs?: string): Promise<LiveCore
   })
   S.closeEvents = events.close
   S.core = core
+  S.firstCoreGroups ??= processGroups(core.ready.pid)
   return core
 }
 
@@ -402,9 +407,18 @@ const needsOperation = (): string | null =>
     : S.core === null
       ? 'no core is running (an earlier scenario failed)'
       : null
-/** The step added this user to `docker`, and the test's session did not carry the group before. */
-const reloginExpected = (): boolean =>
-  change('add-user-to-docker-group') !== undefined && !S.facts.groups_effective.includes('docker')
+/**
+ * The step added this user to `docker`, and the first core's process did not carry the group. By
+ * number, not name: the gid is read now, after the step made sure the group exists, and compared with
+ * the gids the first core's process holds. A login session can already hold a docker gid whose group
+ * was deleted and then re-created with the same number by the step; `id -nG` taken before the step
+ * cannot name that gid, yet the core reaches the daemon and rightly never asks for a relogin.
+ */
+const reloginExpected = (): boolean => {
+  if (change('add-user-to-docker-group') === undefined) return false
+  const gid = groupGid('docker')
+  return gid === null || !(S.firstCoreGroups ?? []).includes(gid)
+}
 const needsReady = (): string | null =>
   S.ready ? null : 'the setup did not reach ready (see gpu-pull-ready)'
 const needsApproval = (): string | null =>
@@ -838,6 +852,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       const members = run('getent', ['group', 'docker']).stdout.trim().split(':')[3]?.split(',') ?? []
       report.detail('relogin', 'old_session', {
         test_process_groups: process.getgroups?.() ?? [],
+        first_core_groups: S.firstCoreGroups,
         docker_gid: dockerGid,
         docker_info_exit: oldSession.code,
         docker_info_reached: oldSessionReached,
