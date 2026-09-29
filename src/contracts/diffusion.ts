@@ -426,6 +426,12 @@ export interface VideoEstimate {
   basis: VideoEstimateBasis
 }
 
+/** How far a tiled VAE decode got: tiles finished out of the pass the engine announced. */
+export interface VideoDecodeTiles {
+  done: number
+  total: number
+}
+
 /** One clip per job, so no batch fields. */
 export interface VideoJobProgress {
   phase: VideoJobPhase
@@ -435,15 +441,22 @@ export interface VideoJobProgress {
   fraction: number
   /**
    * Seconds left for the whole job: encoding, the remaining steps and the VAE decode. Before the
-   * first measured step it comes from `VideoJob.estimate`; `null` when unknown, when the decode ran
-   * past its forecast, and while saving.
+   * first measured step it comes from `VideoJob.estimate`; once a tiled decode finished a tile, from
+   * the measured time per tile. `null` when unknown, when a decode without a finished tile ran past
+   * its forecast, and while saving.
    */
   etaSeconds: number | null
+  /**
+   * The decode's tiles while a tiled decode runs; absent in every other phase, for a decode in one
+   * graph, and from older cores. A retried decode starts a new pass from `done: 0`.
+   */
+  decodeTiles?: VideoDecodeTiles
   /** Since the runner started the job. */
   elapsedMs: number
   /**
-   * The steps slowed down sharply (a sign of swapping); once set it stays set for the job. Always
-   * sent by this core; absent from older cores, which a client reads as `false`.
+   * The steps, or the tiles of a tiled decode, slowed down sharply (a sign of swapping or a stalled
+   * engine); once set it stays set for the job. Always sent by this core; absent from older cores,
+   * which a client reads as `false`.
    */
   slowdown?: boolean
 }

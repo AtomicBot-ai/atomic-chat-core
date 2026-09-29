@@ -581,4 +581,26 @@ describe('buildVidGenRequest', () => {
     expect(big['vae_tiling_params']).toEqual({ enabled: true })
     expect(VIDEO_VAE_TILING_PIXEL_FRAMES).toBe(8 * 1_048_576)
   })
+
+  it('tiles the decode as the plan says, whatever the threshold would', () => {
+    const spec = sampleVideoSpec()
+    const long = sampleVideoRequest({ frames: 49 })
+    // Past the threshold, but the plan found room for one graph.
+    expect(
+      buildVidGenRequest(long, spec.defaults, 1, NO_VIDEO_INPUTS, { tilesX: 1, tilesY: 1 })
+    ).not.toHaveProperty('vae_tiling_params')
+    // Tile counts, under the spelling of either sd.cpp build.
+    expect(
+      buildVidGenRequest(long, spec.defaults, 1, NO_VIDEO_INPUTS, { tilesX: 1, tilesY: 3 })[
+        'vae_tiling_params'
+      ]
+    ).toEqual({ enabled: true, rel_size_x: 1, rel_size_y: 3, rel_size_w: 1, rel_size_h: 3 })
+    // Below the threshold the plan still decides.
+    expect(
+      buildVidGenRequest(sampleVideoRequest({ frames: 9 }), spec.defaults, 1, NO_VIDEO_INPUTS, {
+        tilesX: 2,
+        tilesY: 1,
+      })['vae_tiling_params']
+    ).toMatchObject({ enabled: true, rel_size_x: 2, rel_size_y: 1 })
+  })
 })

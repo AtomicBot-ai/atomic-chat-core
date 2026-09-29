@@ -139,6 +139,32 @@ describe('VIDEO_JOB_KIND', () => {
       fps: 24,
       output_format: 'webm',
     })
+    // The decode's tiles reach the wire while it decodes.
+    const decoding = videoProgressModel({ kind: 'video', job, cancel: { requested: false } }, 0)(
+      { ...snapshot, phase: 'decoding', step: 8 },
+      20,
+      { done: 2, total: 8 }
+    )
+    expect(decoding.decodeTiles).toEqual({ done: 2, total: 8 })
+  })
+
+  it('tiles the decode as the plan says, and by the threshold again on the CPU fallback', () => {
+    const spec = sampleVideoSpec()
+    // 768 × 512 × 49 is past the threshold: tiled without a plan.
+    const long = sampleVideoRequest({ frames: 49 })
+    const plan = { decodeTiling: { tilesX: 1, tilesY: 1 } }
+    expect(VIDEO_JOB_KIND.buildBody(long, spec, 9, { refs: [] }, plan)).not.toHaveProperty(
+      'vae_tiling_params'
+    )
+    expect(VIDEO_JOB_KIND.buildBody(long, spec, 9, { refs: [] }, {})['vae_tiling_params']).toEqual({
+      enabled: true,
+    })
+    // The plan was made for the device; the CPU backend weighs system RAM instead.
+    expect(
+      VIDEO_JOB_KIND.buildBody(long, { ...spec, cpuFallback: true }, 9, { refs: [] }, plan)[
+        'vae_tiling_params'
+      ]
+    ).toEqual({ enabled: true })
   })
 
   it('refuses a build without WebM before submitting, and lets an unreported one try', () => {

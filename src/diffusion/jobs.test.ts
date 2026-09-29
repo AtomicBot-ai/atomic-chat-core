@@ -1127,6 +1127,59 @@ describe('a video job’s estimate', () => {
     expect(videoProgressEvents(h).every((p) => p.slowdown === false)).toBe(true)
   })
 
+  it('sends the plan’s decode tiling, and reports the decode’s tiles as the engine prints them', async () => {
+    const webm = await webmFixture()
+    const running: { h?: Harness } = {}
+    let submitted: Record<string, unknown> | undefined
+    let polls = 0
+    const port = await stub((method, path, body) => {
+      if (method === 'POST' && path === '/sdcpp/v1/vid_gen') {
+        submitted = JSON.parse(body) as Record<string, unknown>
+        return json(202, { id: 'job_t', status: 'queued' })
+      }
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_t') {
+        polls += 1
+        const say = (line: string) => running.h?.server.say(line)
+        if (polls === 2) for (let step = 1; step <= 8; step++) say(`|====>   | ${step}/8 - 1.00s/it`)
+        if (polls === 3) say('[VERBOSE] tiling.cpp:203  - processing 3 tiles')
+        if (polls === 4) say('|==>     | 1/3 - 250.00s/it')
+        if (polls < 6) return json(200, { id: 'job_t', status: 'generating' })
+        return json(200, {
+          id: 'job_t',
+          status: 'completed',
+          result: { output_format: 'webm', fps: 24, frame_count: 25, b64_json: webm.toString('base64') },
+        })
+      }
+      return json(404, {})
+    })
+    const h = videoHarness(port)
+    running.h = h
+    const decodeTiling = { tilesX: 1, tilesY: 3 }
+    h.deps.planVideo = async () => ({ estimate, forecast, decodeTiling })
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    expect(h.state.record(id)?.decodeTiling).toEqual(decodeTiling)
+    const result = await done
+    expect(result.ok).toBe(true)
+    expect(submitted?.['vae_tiling_params']).toEqual({
+      enabled: true,
+      rel_size_x: 1,
+      rel_size_y: 3,
+      rel_size_w: 1,
+      rel_size_h: 3,
+    })
+    expect(result.ok && result.outcome.job).not.toHaveProperty('decodeTiling')
+    const tiles = videoProgressEvents(h)
+      .filter((p) => p.phase === 'decoding')
+      .map((p) => p.decodeTiles)
+    expect(tiles).toContainEqual({ done: 0, total: 3 })
+    expect(tiles).toContainEqual({ done: 1, total: 3 })
+    expect(
+      videoProgressEvents(h)
+        .filter((p) => p.phase !== 'decoding')
+        .every((p) => !('decodeTiles' in p))
+    ).toBe(true)
+  })
+
   it('does not stop the job when it cannot be made', async () => {
     const port = await scriptedVideoStub((poll) => (poll < 3 ? 'generating' : 'completed'))
     const h = videoHarness(port)

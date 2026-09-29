@@ -442,5 +442,48 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
         await json(await control(ctx, ready, `/diffusion/video/jobs/${jobId}/cancel`, { method: 'POST' }))
       ).toEqual({ cancelled: true, serverStopped: false })
     }, 60_000)
+
+    it('decodes a clip that fits in one graph, and counts a tiled decode down tile by tile', async () => {
+      // The engine decodes in four 1.5-second tiles whatever it is asked, so the tile pass shows on
+      // any machine; what the core asked for is in the body it submitted.
+      const bodyFile = join(ctx.dataFolder, 'sd-body.json')
+      const { ready } = await sd.loadedOwner(ctx, {
+        video: true,
+        env: { FAKE_SD_DECODE_TILES: '4', FAKE_SD_TILE_MS: '1500', FAKE_SD_BODY_FILE: bodyFile },
+      })
+      const events = await sd.collectEvents(ctx, ready)
+      // Past the old eight-megapixel-frame threshold, but one graph needs about 2.4 GB.
+      const request = sd.sdVideoRequest({ width: 1024, height: 1024, frames: 9, steps: 2 })
+      const { jobId } = await json<{ jobId: string }>(
+        await control(ctx, ready, '/diffusion/video/jobs', { method: 'POST', body: JSON.stringify(request) })
+      )
+      await waitFor(
+        async () => (await sdVideoJob(ctx, ready, jobId))?.state === 'completed',
+        'the clip to complete',
+        30_000
+      )
+      const body = JSON.parse(await readFile(bodyFile, 'utf8')) as Record<string, unknown>
+      expect(body).not.toHaveProperty('vae_tiling_params')
+
+      type Progress = {
+        phase: string
+        etaSeconds: number | null
+        decodeTiles?: { done: number; total: number }
+      }
+      const progress = events
+        .filter((e) => e.event === 'diffusion:video-progress')
+        .map((e) => e.data['progress'] as Progress)
+      const decoding = progress.filter((p) => p.phase === 'decoding')
+      expect(decoding.map((p) => p.decodeTiles)).toContainEqual({ done: 0, total: 4 })
+      // After the first tile the countdown comes from the measured tiles, not from a spent forecast.
+      const measured = decoding.filter(
+        (p) => (p.decodeTiles?.done ?? 0) >= 1 && (p.decodeTiles?.done ?? 0) < 3
+      )
+      expect(measured.length).toBeGreaterThan(0)
+      expect(measured.some((p) => (p.etaSeconds ?? 0) > 0)).toBe(true)
+      expect(progress.filter((p) => p.phase !== 'decoding').every((p) => p.decodeTiles === undefined)).toBe(
+        true
+      )
+    }, 60_000)
   }
 )

@@ -149,7 +149,7 @@ export async function prepareVideoJob(
 
 /**
  * The wire progress of a clip: the tracker's snapshot without the batch fields, with the ETA,
- * fraction and slowdown of `VideoEta` over the whole job.
+ * fraction and slowdown of `VideoEta` over the whole job and the decode's tiles.
  */
 export function videoProgressModel(record: JobRecord, startedAt: number): ProgressModel<VideoJobProgress> {
   const estimate = (record.job as VideoJob).estimate
@@ -158,7 +158,7 @@ export function videoProgressModel(record: JobRecord, startedAt: number): Progre
     ...(record.forecast ? { forecast: record.forecast } : {}),
     estimated: estimate?.seconds != null,
   })
-  return (snapshot, now) => eta.progress(snapshot, now)
+  return (snapshot, now, decodeTiles) => eta.progress(snapshot, now, decodeTiles)
 }
 
 /** A build without libwebm cannot write the one container the app plays; say so before submitting. */
@@ -202,7 +202,15 @@ export const VIDEO_JOB_KIND: JobKind<
     ...(plan?.estimate ? { estimate: plan.estimate } : {}),
   }),
   resolveInputs: resolveVideoInputs,
-  buildBody: (request, spec, seed, inputs) => buildVidGenRequest(request, spec.defaults, seed, inputs),
+  // The plan tiled the decode for the device; on the CPU fallback the threshold decides again.
+  buildBody: (request, spec, seed, inputs, plan) =>
+    buildVidGenRequest(
+      request,
+      spec.defaults,
+      seed,
+      inputs,
+      spec.cpuFallback ? undefined : plan?.decodeTiling
+    ),
   trackerShape: (request) => ({ steps: Math.max(request.steps, 1), batch: 1 }),
   progressModel: videoProgressModel,
   heartbeatMs: VIDEO_PROGRESS_HEARTBEAT_MS,

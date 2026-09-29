@@ -14,9 +14,10 @@ import type {
 import type { JobDeps } from './jobs.js'
 import type { DiffusionEmitter } from './session.js'
 import type { JobKindId, JobRecord } from './state.js'
+import type { DecodeTiles } from './tracker.js'
 import type { ResolvedInputs, ServerCapabilities, ServerSpec } from './types.js'
 import type { ValidateDeps } from './validate.js'
-import type { VideoForecast } from './video-estimate.js'
+import type { VideoDecodeTiling, VideoForecast } from './video-estimate.js'
 
 /** The fields the runner reads and writes on any job record, whatever its kind. */
 export interface JobCommon<Item, Progress> {
@@ -43,16 +44,28 @@ export interface SaveContext<Req> {
 
 export type Emit = DiffusionEmitter
 
-/** What a kind works out before its job starts: the video estimate, and the forecast behind it. */
+/**
+ * What a kind works out before its job starts: the video estimate, the forecast behind it, and how
+ * the clip's VAE decode is tiled.
+ */
 export interface JobPlan {
   /** On the record from the first event. */
   estimate?: VideoEstimate
   /** Kept on the record for the live progress; never sent. */
   forecast?: VideoForecast
+  /** Kept on the record for the request body; absent: the pixel-frame threshold decides. */
+  decodeTiling?: VideoDecodeTiling
 }
 
-/** Turns the tracker's snapshot into the wire progress at `now`; one per job, so it may keep state. */
-export type ProgressModel<Progress> = (snapshot: ImageJobProgress, now: number) => Progress
+/**
+ * Turns the tracker's snapshot, and the decode's tile pass when there is one, into the wire progress
+ * at `now`; one per job, so it may keep state.
+ */
+export type ProgressModel<Progress> = (
+  snapshot: ImageJobProgress,
+  now: number,
+  decodeTiles?: DecodeTiles
+) => Progress
 
 export interface JobKind<Req, Job extends JobCommon<Item, Progress>, Item, Progress, Decoded> {
   id: JobKindId
@@ -76,7 +89,14 @@ export interface JobKind<Req, Job extends JobCommon<Item, Progress>, Item, Progr
   /** The record as it is inserted: inline bytes blanked, nothing started, the plan's estimate on it. */
   newJob(id: string, spec: ServerSpec, request: Req, now: number, plan?: JobPlan): Job
   resolveInputs(request: Req, deps: Pick<JobDeps, 'readSource'>): Promise<ResolvedInputs>
-  buildBody(request: Req, spec: ServerSpec, seed: number, inputs: ResolvedInputs): Record<string, unknown>
+  /** The engine's request body; `plan` is what the job's record kept of its plan. */
+  buildBody(
+    request: Req,
+    spec: ServerSpec,
+    seed: number,
+    inputs: ResolvedInputs,
+    plan?: Pick<JobPlan, 'decodeTiling'>
+  ): Record<string, unknown>
   /** Steps and images the progress tracker counts. */
   trackerShape(request: Req): { steps: number; batch: number }
   /** The job's progress model, made when the runner starts it (`startedAt`), across every attempt. */

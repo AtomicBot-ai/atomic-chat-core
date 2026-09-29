@@ -104,6 +104,90 @@ describe('the ETA while decoding and saving', () => {
   })
 })
 
+describe('a tiled decode', () => {
+  /** Eight 60-second steps as forecast; the decode starts at 490 s. */
+  function sampled(): VideoEta {
+    const eta = new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: true })
+    for (let step = 1; step <= 7; step++) eta.progress(snap('sampling', step), (10 + step * 60) * S)
+    return eta
+  }
+  const tiles = (done: number, total = 8) => ({ done, total })
+
+  it('counts down from the measured time per tile once a tile finished, and reports the tiles', () => {
+    const eta = sampled()
+    // The pass is announced: no tile measured, the forecast speaks until it is spent.
+    const start = eta.progress(snap('decoding', 8), 490 * S, tiles(0))
+    expect(start.decodeTiles).toEqual({ done: 0, total: 8 })
+    expect(start.etaSeconds).toBeCloseTo(110, 9)
+    expect(eta.progress(snap('decoding', 8), 650 * S, tiles(0)).etaSeconds).toBeNull()
+    // The first tile took 250 s: seven to go at that pace.
+    const first = eta.progress(snap('decoding', 8), 740 * S, tiles(1))
+    expect(first.decodeTiles).toEqual({ done: 1, total: 8 })
+    expect(first.etaSeconds).toBeCloseTo(7 * 250, 9)
+    expect(eta.progress(snap('decoding', 8), 840 * S, tiles(1)).etaSeconds).toBeCloseTo(150 + 6 * 250, 9)
+    expect(eta.progress(snap('decoding', 8), 990 * S, tiles(2)).etaSeconds).toBeCloseTo(6 * 250, 9)
+    // A tile running past the pace stretches it instead of freezing the countdown.
+    expect(eta.progress(snap('decoding', 8), 1340 * S, tiles(2)).etaSeconds).toBeCloseTo(
+      5 * ((1340 - 490) / 3),
+      9
+    )
+    // Every tile done: the clip is being assembled and encoded, the time left is unknown.
+    expect(eta.progress(snap('decoding', 8), 2500 * S, tiles(8)).etaSeconds).toBeNull()
+    const saving = eta.progress(snap('saving', 8), 2510 * S)
+    expect(saving).not.toHaveProperty('decodeTiles')
+    expect(saving.etaSeconds).toBeNull()
+  })
+
+  it('starts over on a retried pass, and forgets the pass when the decode has none', () => {
+    const eta = sampled()
+    eta.progress(snap('decoding', 8), 490 * S, tiles(0))
+    eta.progress(snap('decoding', 8), 590 * S, tiles(3))
+    // sd.cpp retried the decode with finer tiling: nothing measured in the new pass yet.
+    const retry = eta.progress(snap('decoding', 8), 700 * S, tiles(0, 12))
+    expect(retry.decodeTiles).toEqual({ done: 0, total: 12 })
+    expect(retry.etaSeconds).toBeNull()
+    expect(eta.progress(snap('decoding', 8), 760 * S, tiles(1, 12)).etaSeconds).toBeCloseTo(11 * 60, 9)
+    // The same count again from zero is a new pass too.
+    eta.progress(snap('decoding', 8), 800 * S, tiles(0, 12))
+    expect(eta.progress(snap('decoding', 8), 810 * S, tiles(1, 12)).etaSeconds).toBeCloseTo(11 * 10, 9)
+    // A later attempt that decodes in one graph falls back to the forecast.
+    const plain = eta.progress(snap('decoding', 8), 820 * S)
+    expect(plain).not.toHaveProperty('decodeTiles')
+    expect(plain.etaSeconds).toBeNull()
+  })
+
+  it('flags a tile running past three medians of the finished ones and twenty seconds', () => {
+    const eta = sampled()
+    eta.progress(snap('decoding', 8), 490 * S, tiles(0))
+    for (let done = 1; done <= 3; done++)
+      expect(eta.progress(snap('decoding', 8), (490 + done * 60) * S, tiles(done)).slowdown).toBe(false)
+    expect(eta.progress(snap('decoding', 8), (670 + 180) * S, tiles(3)).slowdown, 'three medians').toBe(false)
+    expect(eta.progress(snap('decoding', 8), (670 + 181) * S, tiles(3)).slowdown).toBe(true)
+    expect(eta.progress(snap('saving', 8), 2000 * S).slowdown, 'and it stays set').toBe(true)
+  })
+
+  it('needs two finished tiles, the floor, and a tile still running', () => {
+    const one = sampled()
+    one.progress(snap('decoding', 8), 490 * S, tiles(0))
+    one.progress(snap('decoding', 8), 500 * S, tiles(1))
+    expect(one.progress(snap('decoding', 8), 900 * S, tiles(1)).slowdown, 'one finished tile').toBe(false)
+
+    const quick = sampled()
+    quick.progress(snap('decoding', 8), 490 * S, tiles(0))
+    for (let done = 1; done <= 3; done++)
+      quick.progress(snap('decoding', 8), (490 + done * 2) * S, tiles(done))
+    expect(quick.progress(snap('decoding', 8), 496 * S + 19 * S, tiles(3)).slowdown, 'under the floor').toBe(
+      false
+    )
+
+    const done = sampled()
+    done.progress(snap('decoding', 8), 490 * S, tiles(0))
+    for (let tile = 1; tile <= 8; tile++)
+      done.progress(snap('decoding', 8), (490 + tile * 5) * S, tiles(tile))
+    expect(done.progress(snap('decoding', 8), 900 * S, tiles(8)).slowdown, 'every tile done').toBe(false)
+  })
+})
+
 describe('the fraction', () => {
   it('follows the time when the ETA is known, so a long decode does not park the bar at 0.98', () => {
     // Sampling took five minutes; the decode forecast is five minutes at the measured pace.

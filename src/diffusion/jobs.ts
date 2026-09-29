@@ -125,7 +125,7 @@ function setProgress(
   tracker: ProgressTracker,
   model: ProgressModel<unknown>
 ): void {
-  const progress = model(tracker.snapshot(), deps.now())
+  const progress = model(tracker.snapshot(), deps.now(), tracker.decodeTiles())
   deps.state.updateJob(id, (record) => ((record.job as JobCommon<unknown, unknown>).progress = progress))
   kind.emitProgress(deps.emit, id, progress)
 }
@@ -191,6 +191,7 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
     job: kind.newJob(id, spec, request, deps.now(), plan) as unknown as ImageJob | VideoJob,
     cancel: { requested: false },
     ...(plan?.forecast ? { forecast: plan.forecast } : {}),
+    ...(plan?.decodeTiling ? { decodeTiling: plan.decodeTiling } : {}),
   }
   state.insertJob(record)
   emitJob(deps, id)
@@ -324,7 +325,7 @@ async function execute<Req, Job extends JobCommon<Item, Progress>, Item, Progres
   for (let attempts = 1; ; attempts++) {
     const view = await ensureSession(deps, cancel)
     kind.preflight?.(deps.state.session?.server.capabilities)
-    const body = kind.buildBody(request, view.spec, seed, inputs)
+    const body = kind.buildBody(request, view.spec, seed, inputs, record)
     const attempt = await runAttempt(deps, kind, id, request, view, body, seed, cancel, started, model)
     if (attempt.kind === 'done') return attempt.outcome
     if (attempts > 1) throw diffusionError('ENGINE_CRASHED', 'sd-server crashed again on the CPU backend.')

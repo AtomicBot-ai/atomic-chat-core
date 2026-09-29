@@ -676,6 +676,39 @@ describe.skipIf(!posix)('generating video', () => {
     )
   })
 
+  it('tiles the decode by the machine’s memory, and reports the decode’s tiles', async () => {
+    const bodyFile = join(dataFolder, 'vid-body.json')
+    const h = await loadedVideoService({ bodyFile, decodeTiles: 3, tileMs: 60 }, MAC_16)
+    const body = async () => JSON.parse(await readFile(bodyFile, 'utf8')) as Record<string, unknown>
+    // 1024² × 9 is past the old eight-megapixel-frame threshold, but one graph (2.4 GB) fits in 16 GB.
+    const fits = await h.service.runVideoJob(
+      sampleVideoRequest({ width: 1024, height: 1024, frames: 9, steps: 1 })
+    )
+    expect(fits.job.state).toBe('completed')
+    expect(await body()).not.toHaveProperty('vae_tiling_params')
+    // 2048² × 17 does not (17.8 GB); three full-width strips are the least work that fits.
+    await h.service.runVideoJob(sampleVideoRequest({ width: 2048, height: 2048, frames: 17, steps: 1 }))
+    expect((await body())['vae_tiling_params']).toEqual({
+      enabled: true,
+      rel_size_x: 1,
+      rel_size_y: 3,
+      rel_size_w: 1,
+      rel_size_h: 3,
+    })
+    const decoding = h.events
+      .filter((e) => e.name === 'diffusion:video-progress')
+      .map((e) => (e.payload as CoreEvents['diffusion:video-progress']).progress)
+      .filter((p) => p.phase === 'decoding')
+    expect(decoding.map((p) => p.decodeTiles)).toContainEqual({ done: 3, total: 3 })
+
+    // Under model offload the engine tiles by its own flag: no plan, the threshold as before.
+    await h.service.loadModel({ ...h.request, offload: 'model' })
+    const offloaded = sampleVideoRequest({ width: 1024, height: 1024, frames: 9, steps: 1 })
+    expect((await h.service.estimateVideo(offloaded)).seconds).not.toBeNull()
+    await h.service.runVideoJob(offloaded)
+    expect((await body())['vae_tiling_params']).toEqual({ enabled: true })
+  })
+
   it('cancels a running clip by stopping the engine, and cancelVideoJob knows only video jobs', async () => {
     const h = await loadedVideoService({ stepMs: 400 })
     await expect(h.service.cancelVideoJob('nope')).rejects.toMatchObject({ code: 'JOB_NOT_FOUND' })
