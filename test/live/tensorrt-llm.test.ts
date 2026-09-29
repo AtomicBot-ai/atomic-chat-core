@@ -6,9 +6,12 @@
  * The rest of the suite proves the provider against a fake Docker and a fake engine. This file is
  * the only proof that a real `trtllm-serve` container, pinned to one real card through the provider's
  * stored `gpu_id` setting (in the run's own data folder), loads a curated model
- * of that card's memory tier, streams through the public server, starts faster the second time from
- * its engine cache, calls a tool through the parser the descriptor names, and — when the core dies
- * with `kill -9` — is stopped by its own watchdog and gives the card's memory back.
+ * of that card's memory tier, runs as the core's own user, streams through the public server, starts
+ * faster the second time from its engine cache, calls a tool through the parser the descriptor names,
+ * answers a JSON schema where the family declares structured output (and is refused where it does
+ * not), and — when the core dies with `kill -9` — is stopped by its own watchdog and gives the card's
+ * memory back. With a llama.cpp build at hand it also races a TensorRT-LLM reload against a llama.cpp
+ * GPU load, for the one-model-per-card rule (spec `gpu-residency`).
  *
  * It also measures what the design left open (design, open questions: the heartbeat interval, the
  * watchdog limit, `--shm-size` and the load timeout coefficients). It does not decide them: every
@@ -25,26 +28,29 @@
  * the conf fixture copy in this repo), ATOMIC_LIVE_MANAGED_ROOT (the managed root the engine was set
  * up in; default the per-user one), ATOMIC_LIVE_OUT, ATOMIC_LIVE_MODEL_CACHE, ATOMIC_LIVE_TRT_MODEL,
  * ATOMIC_LIVE_TRT_CONTEXT_LENGTH, ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB, ATOMIC_LIVE_PUBLIC_PORT,
- * HF_ENDPOINT, HF_TOKEN. The core runs with DO_NOT_TRACK=1: a test run sends no error reports.
+ * ATOMIC_LIVE_UPSTREAM_BIN and ATOMIC_LIVE_UPSTREAM_MODEL (the residency race), HF_ENDPOINT, HF_TOKEN. The core runs with DO_NOT_TRACK=1: a test run sends no error reports.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { httpRequest, startLiveCore, streamChat } from '../helpers/live-core.js'
+import { contextLengthSettings, httpRequest, startLiveCore, streamChat } from '../helpers/live-core.js'
 import type { HttpAnswer, LiveCore, StreamedChat } from '../helpers/live-core.js'
 import {
   dirStats,
   dockerTimeMs,
   findEngineCache,
+  firstForeignOwner,
   heartbeatGaps,
   inspectContainer,
   ownContainers,
   readinessTimeoutMs,
   readSourceConstants,
+  residentGpuSessions,
   sampleMtimes,
+  schemaViolations,
   shmUsedBytes,
   startSampler,
   summarize,
@@ -52,7 +58,13 @@ import {
   watchdogTiming,
   WATCHDOG_EXIT_STALE_HEARTBEAT,
 } from '../helpers/live-engine.js'
-import type { CitedConstant, ContainerFacts, LoadSamples, Summary } from '../helpers/live-engine.js'
+import type {
+  CitedConstant,
+  ContainerFacts,
+  LoadSamples,
+  SmallSchema,
+  Summary,
+} from '../helpers/live-engine.js'
 import {
   fetchJson,
   fittingCuratedModels,
@@ -96,6 +108,12 @@ const PUBLIC_PORT = Number(process.env['ATOMIC_LIVE_PUBLIC_PORT'] ?? 1337)
 const CONTEXT_LENGTH = process.env['ATOMIC_LIVE_TRT_CONTEXT_LENGTH']
   ? Number(process.env['ATOMIC_LIVE_TRT_CONTEXT_LENGTH'])
   : null
+/** A llama.cpp build and GGUF for the residency race, the same variables `llamacpp.test.ts` reads. */
+const LLAMA_BIN = process.env['ATOMIC_LIVE_UPSTREAM_BIN'] ?? ''
+const LLAMA_MODEL = process.env['ATOMIC_LIVE_UPSTREAM_MODEL'] ?? ''
+const LLAMA_MODEL_ID = 'live-llama'
+/** How long either load of the residency race may take before it counts as hung. */
+const RACE_BOUND_MS = 30 * 60_000
 const MIB = 1024 * 1024
 /** How far above its pre-load level a card's used memory may settle after the engine exits. */
 const VRAM_TOLERANCE_BYTES = Number(process.env['ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB'] ?? 512) * MIB
@@ -130,11 +148,23 @@ const CARD_SCENARIOS = [
     "the curated model of the card's memory tier loads pinned to this card (gpu_id), with stages and timings",
   ],
   [
+    'container-user',
+    "the engine container runs as the core's own uid:gid, and every file it wrote to the engine cache is the user's",
+  ],
+  [
     'stream',
     'a chat streams through the public server; the session gateway refuses a request without its key',
   ],
   ['reload-cached', 'unload with a confirmed stop, load again: the second load is faster (engine cache)'],
   ['tool-call', 'a model whose family has a tool parser answers a tool call through the parser'],
+  [
+    'structured-output',
+    'a model whose family declares structured output answers a json_schema response_format with conforming JSON',
+  ],
+  [
+    'structured-output-refused',
+    'a model whose family does not declare structured output: the core refuses response_format, the engine never sees it',
+  ],
   [
     'kill-core',
     'kill -9 of the core: the watchdog stops the container in its bound, and the card returns to its pre-load memory',
@@ -165,6 +195,10 @@ const SCENARIOS: Array<[string, string]> = [
       `${cardLabel(index)}: ${title}`,
     ])
   ).flat(),
+  [
+    'reload-while-other-loads',
+    'a tensorrt-llm reload with a new context length races a llama.cpp GPU load: both settle, one GPU model stays resident',
+  ],
 ]
 
 interface Descriptor {
@@ -173,7 +207,10 @@ interface Descriptor {
   minimum_compute_capability: string
   image: Record<string, { repository: string; digest: string }>
   curated_models: CuratedModel[]
-  model_families: Record<string, { tool_parser: string | null; reasoning_parser: string | null }>
+  model_families: Record<
+    string,
+    { tool_parser: string | null; reasoning_parser: string | null; structured_output: boolean }
+  >
   recipes: Array<{
     recipe_id: string
     distributions: Array<{ id: string; version_id: string; arch: string }>
@@ -224,8 +261,13 @@ interface CardRun {
   reload: LoadRecord | null
   unload_ms: number | null
   engine_cache: { path: string | null; files: number; bytes: number; unreadable: number } | null
+  /** Loads the core refused or the engine did not survive, with the engine's log tail. */
+  failed_loads: Array<Record<string, unknown>>
+  container_user: Record<string, unknown> | null
   stream: Record<string, unknown> | null
   tool: Record<string, unknown> | null
+  structured: Record<string, unknown> | null
+  structured_refused: Record<string, unknown> | null
   kill: Record<string, unknown> | null
 }
 
@@ -251,6 +293,8 @@ const S: {
     session: SessionInfo
   } | null
   cards: CardRun[]
+  /** Every model this run prepared, by the id the core knows it by. */
+  prepared: Map<string, PreparedModel>
 } = {
   descriptor: undefined as unknown as Descriptor,
   facts: undefined as unknown as HostFacts,
@@ -266,6 +310,7 @@ const S: {
   progress: [],
   loaded: null,
   cards: [],
+  prepared: new Map(),
 }
 let report: LiveReport
 
@@ -288,21 +333,68 @@ const core = (): LiveCore => {
  * (weights plus the reserve for the context length) otherwise.
  */
 async function pinCard(gpuId: string): Promise<void> {
-  const values: Record<string, unknown> = {
-    gpu_id: gpuId,
-    ...(CONTEXT_LENGTH === null
-      ? {}
-      : {
-          context_length: CONTEXT_LENGTH,
-          max_output_tokens: Math.min(4096, Math.floor(CONTEXT_LENGTH / 2)),
-        }),
-  }
-  const answer = await core().api.call('PATCH', '/settings/tensorrt-llm', { values })
+  const values = { gpu_id: gpuId, ...contextLengthSettings(CONTEXT_LENGTH) }
+  const answer = await core().api.patch('/settings/tensorrt-llm', { values })
   expect(answer.status, answer.text).toBe(200)
 }
+type Family = Descriptor['model_families'][string]
+/** The descriptor's `model_families` entry for a checkpoint's architectures (the first one it names). */
+const familyOf = (architectures: readonly string[]): Family | null =>
+  architectures.map((a) => S.descriptor.model_families[a]).find((f) => f !== undefined) ?? null
 const toolParserOf = (architectures: readonly string[]): string | null =>
-  architectures.map((a) => S.descriptor.model_families[a]?.tool_parser ?? null).find((p) => p !== null) ??
-  null
+  familyOf(architectures)?.tool_parser ?? null
+
+/**
+ * A model for a capability scenario on `card`: the one loaded there now when its family qualifies,
+ * else the smallest curated model the card runs whose family does (its `config.json` fetched to find
+ * out), prepared for loading. Null, with every model it looked at, when none qualifies.
+ */
+async function modelWhoseFamily(
+  card: CardRun,
+  qualifies: (family: Family | null) => boolean
+): Promise<{ prepared: PreparedModel | null; checked: string[] }> {
+  const checked: string[] = []
+  const current = S.loaded?.card === card.index ? S.prepared.get(S.loaded.modelId) : undefined
+  if (current !== undefined) {
+    checked.push(`${current.model.repository} (${current.architectures.join(', ')})`)
+    if (qualifies(familyOf(current.architectures))) return { prepared: current, checked }
+  }
+  for (const candidate of fittingCuratedModels(S.descriptor.curated_models, cardShape(card.gpu))) {
+    if (candidate.repository === current?.model.repository) continue
+    const known = [...S.prepared.values()].find((p) => p.model.repository === candidate.repository)
+    const architectures =
+      known?.architectures ??
+      ((await fetchJson(candidate.repository, candidate.revision, 'config.json'))['architectures'] as
+        string[] | undefined) ??
+      []
+    checked.push(`${candidate.repository} (${architectures.join(', ')})`)
+    if (!qualifies(familyOf(architectures))) continue
+    return { prepared: known ?? (await prepare(card, candidate)), checked }
+  }
+  return { prepared: null, checked }
+}
+
+/** `prepareCuratedModel` for `card`, remembered for later scenarios. */
+async function prepare(card: CardRun, model: CuratedModel): Promise<PreparedModel> {
+  const prepared = await prepareCuratedModel({
+    api: (await ensureCore()).api,
+    model,
+    gpuId: card.gpu.uuid,
+    dataFolder: S.dataFolder,
+    cacheRoot: MODEL_CACHE,
+    log: (line) => report.log(line),
+  })
+  S.prepared.set(prepared.id, prepared)
+  return prepared
+}
+
+/** Makes `prepared` the model loaded on `card` (pinning the card first), unless it already is. */
+async function ensureLoadedOn(card: CardRun, prepared: PreparedModel): Promise<LoadRecord | null> {
+  await ensureCore()
+  await pinCard(card.gpu.uuid)
+  if (S.loaded?.modelId === prepared.id && S.loaded.card === card.index) return null
+  return loadOnCard(card, prepared)
+}
 const cardShape = (gpu: LiveGpu): { total_bytes: number; compute_capability: string } => ({
   total_bytes: cardBytes(gpu),
   compute_capability: gpu.compute_capability,
@@ -365,8 +457,15 @@ async function containerOf(generation: string): Promise<ContainerFacts | null> {
   return null
 }
 
-/** Loads `prepared` on the pinned card (`pinCard` first), sampling the card and the container while it loads. */
-async function loadOnCard(card: CardRun, prepared: PreparedModel): Promise<LoadRecord> {
+/**
+ * Loads `prepared` on the pinned card (`pinCard` first), sampling the card and the container while it
+ * loads. `overrides` are the load request's own (the residency race changes the context length).
+ */
+async function loadOnCard(
+  card: CardRun,
+  prepared: PreparedModel,
+  overrides: Record<string, unknown> = {}
+): Promise<LoadRecord> {
   const api = core().api
   const sampler = startSampler({
     gpuUuid: card.gpu.uuid,
@@ -380,7 +479,7 @@ async function loadOnCard(card: CardRun, prepared: PreparedModel): Promise<LoadR
   try {
     answer = await api.post<{ session: SessionInfo }>(
       `/models/tensorrt-llm/${prepared.id}/load`,
-      {},
+      Object.keys(overrides).length === 0 ? {} : { overrides },
       2 * HOUR
     )
   } finally {
@@ -394,11 +493,21 @@ async function loadOnCard(card: CardRun, prepared: PreparedModel): Promise<LoadR
   if (answer.status !== 200) {
     // Whatever ran before was stopped by this load's `stopping-previous`: nothing of ours is loaded now.
     S.loaded = null
+    // The engine's own last words go into the report, not only the failure message: an engine that
+    // cannot start (as a non-root user, for one) is diagnosed from them.
     const logs = await api
-      .get<{ log_tail?: string }>(`/models/tensorrt-llm/${prepared.id}/logs`)
+      .get<{ log_tail?: string; error?: unknown }>(`/models/tensorrt-llm/${prepared.id}/logs`)
       .catch(() => null)
+    const logTail = (logs?.body?.log_tail ?? '').slice(-8000)
+    card.failed_loads.push({
+      model_id: prepared.id,
+      status: answer.status,
+      error: answer.body ?? answer.text.slice(0, 2000),
+      log_error: logs?.body?.error ?? null,
+      log_tail: logTail,
+    })
     throw new Error(
-      `load answered ${answer.status}: ${answer.text.slice(0, 2000)}\n--- engine log tail ---\n${(logs?.body?.log_tail ?? '').slice(-4000)}`
+      `load answered ${answer.status}: ${answer.text.slice(0, 2000)}\n--- engine log tail ---\n${logTail.slice(-4000)}`
     )
   }
   const session = answer.body.session
@@ -457,6 +566,73 @@ async function waitFor(check: () => Promise<boolean>, ms: number, everyMs = 1000
   }
 }
 
+/**
+ * The llama.cpp build and GGUF of the residency race, put where the core finds them in this run's own
+ * data folder, the way `llamacpp.test.ts` does: the whole build folder as a backend pack (llama-server
+ * links against the ggml libraries beside it), and a `model.yml` pointing at the GGUF where it is.
+ */
+function installLlamaCpp(): void {
+  const packDir = join(S.dataFolder, 'llamacpp-upstream', 'backends', 'b6325', 'live', 'build', 'bin')
+  if (!existsSync(join(packDir, 'llama-server'))) {
+    mkdirSync(packDir, { recursive: true })
+    cpSync(dirname(LLAMA_BIN), packDir, { recursive: true })
+    chmodSync(join(packDir, 'llama-server'), 0o755)
+  }
+  const modelDir = join(S.dataFolder, 'llamacpp', 'models', LLAMA_MODEL_ID)
+  mkdirSync(modelDir, { recursive: true })
+  const size = statSync(LLAMA_MODEL).size
+  writeFileSync(
+    join(modelDir, 'model.yml'),
+    `model_path: ${LLAMA_MODEL}\nname: ${LLAMA_MODEL_ID}\nsize_bytes: ${size}\nmodel_size_bytes: ${size}\n`
+  )
+}
+
+interface ChatAnswer {
+  status: number
+  text: string
+  /** The body parsed; null when it was not JSON. */
+  json: {
+    choices?: Array<{
+      finish_reason?: string
+      message?: {
+        content?: string | null
+        tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>
+      }
+    }>
+    error?: { code?: string; message?: string; type?: string }
+  } | null
+}
+
+/** One non-streamed `POST /v1/chat/completions` on `port` (the public server, or a session gateway with its key). */
+async function chat(port: number, body: Record<string, unknown>, apiKey?: string): Promise<ChatAnswer> {
+  const answer = await httpRequest({
+    url: `http://127.0.0.1:${port}/v1/chat/completions`,
+    method: 'POST',
+    ...(apiKey === undefined ? {} : { headers: { authorization: `Bearer ${apiKey}` } }),
+    body: JSON.stringify(body),
+    timeoutMs: 10 * MIN,
+  })
+  let json: ChatAnswer['json'] = null
+  try {
+    json = JSON.parse(answer.text) as ChatAnswer['json']
+  } catch {
+    json = null
+  }
+  return { status: answer.status, text: answer.text, json }
+}
+
+/** The structured-output scenarios' schema: small, and every key required. */
+const CAPITAL_SCHEMA: SmallSchema = {
+  type: 'object',
+  properties: {
+    city: { type: 'string' },
+    country: { type: 'string' },
+    population_millions: { type: 'number' },
+  },
+  required: ['city', 'country', 'population_millions'],
+  additionalProperties: false,
+}
+
 /** What a card's run contributes to `summary.json`: its facts, statuses, durations and measurements. */
 function cardSummary(card: CardRun): Record<string, unknown> {
   const loadView = (load: LoadRecord | null): Record<string, unknown> | null =>
@@ -508,8 +684,12 @@ function cardSummary(card: CardRun): Record<string, unknown> {
     reload: loadView(card.reload),
     reload_to_first_load:
       card.first_load === null || card.reload === null ? null : card.reload.load_ms / card.first_load.load_ms,
+    failed_loads: card.failed_loads,
+    container_user: card.container_user,
     stream: card.stream,
     tool: card.tool,
+    structured: card.structured,
+    structured_refused: card.structured_refused,
     kill: card.kill,
   }
 }
@@ -645,8 +825,12 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         reload: null,
         unload_ms: null,
         engine_cache: null,
+        failed_loads: [],
+        container_user: null,
         stream: null,
         tool: null,
+        structured: null,
+        structured_refused: null,
         kill: null,
       }
     })
@@ -743,17 +927,10 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
       async () => {
         const card = S.cards[index] as CardRun
         const model = card.model as CuratedModel
-        const api = (await ensureCore()).api
+        await ensureCore()
         await pinCard(card.gpu.uuid)
         report.log(`gpu${index} model: ${model.repository}@${model.revision} (${model.note})`)
-        card.prepared = await prepareCuratedModel({
-          api,
-          model,
-          gpuId: card.gpu.uuid,
-          dataFolder: S.dataFolder,
-          cacheRoot: MODEL_CACHE,
-          log: (line) => report.log(line),
-        })
+        card.prepared = await prepare(card, model)
         if (card.prepared.check !== null) expect(card.prepared.check.checked_gpu_id).toBe(card.gpu.uuid)
         // Before anything of ours is on this card: the level its memory must come back to.
         card.vram_baseline_bytes = (await gpuMemoryUsed()).get(card.gpu.uuid) ?? null
@@ -763,6 +940,45 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
             .map((s) => `${s.stage}@${s.elapsed_ms}`)
             .join(' ')}`
         )
+      }
+    )
+
+    scenario(
+      scenarioId(index, 'container-user'),
+      10 * MIN,
+      () => needsLoadedHere(index),
+      async () => {
+        const card = S.cards[index] as CardRun
+        const loaded = S.loaded as NonNullable<typeof S.loaded>
+        const uid = process.getuid?.() ?? -1
+        const gid = process.getgid?.() ?? -1
+        const container = loaded.containerId === null ? null : await inspectContainer(loaded.containerId)
+        const cache = findEngineCache(
+          join(S.dataFolder, 'atomic-core', 'managed-runtimes', 'caches'),
+          S.descriptor.descriptor_id,
+          loaded.modelId
+        )
+        const offender = cache === null ? null : firstForeignOwner(cache, uid)
+        card.container_user = {
+          expected: `${uid}:${gid}`,
+          config_user: container?.user ?? null,
+          engine_cache: cache,
+          engine_cache_files: cache === null ? null : dirStats(cache),
+          first_foreign_owner: offender,
+        }
+        report.log(
+          `gpu${index}: container user ${container?.user ?? '(image default)'}, expected ${uid}:${gid}; ` +
+            `engine cache ${offender === null ? 'all yours' : `${offender.path} is owned by uid ${offender.uid}`}`
+        )
+        expect(container, `container ${loaded.containerId} is not there to inspect`).not.toBeNull()
+        expect(container?.user, "the engine container does not run as the core's own uid:gid").toBe(
+          `${uid}:${gid}`
+        )
+        expect(cache, 'the load left no engine cache directory for the model').not.toBeNull()
+        expect(
+          offender,
+          `${offender?.path} in the engine cache is owned by uid ${offender?.uid}, not ${uid}`
+        ).toBeNull()
       }
     )
 
@@ -879,91 +1095,48 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
       () => needsFirstLoad(index),
       async () => {
         const card = S.cards[index] as CardRun
-        const tier = card.prepared as PreparedModel
-        let prepared: PreparedModel = tier
-        let parser = toolParserOf(tier.architectures)
-        const checked: string[] = [`${tier.model.repository} (${tier.architectures.join(', ')})`]
-        if (parser === null) {
-          // The tier model's family has no parser: the smallest other curated model this card runs that has one.
-          for (const candidate of fittingCuratedModels(S.descriptor.curated_models, cardShape(card.gpu))) {
-            if (candidate.repository === tier.model.repository) continue
-            const config = await fetchJson(candidate.repository, candidate.revision, 'config.json')
-            const architectures = (config['architectures'] as string[] | undefined) ?? []
-            checked.push(`${candidate.repository} (${architectures.join(', ')})`)
-            if (toolParserOf(architectures) === null) continue
-            prepared = await prepareCuratedModel({
-              api: (await ensureCore()).api,
-              model: candidate,
-              gpuId: card.gpu.uuid,
-              dataFolder: S.dataFolder,
-              cacheRoot: MODEL_CACHE,
-              log: (line) => report.log(line),
-            })
-            parser = toolParserOf(architectures)
-            break
-          }
-        }
-        if (parser === null)
+        // The model loaded here when its family has a parser, else the smallest curated one that has.
+        const found = await modelWhoseFamily(card, (family) => family?.tool_parser != null)
+        if (found.prepared === null)
           throw new ScenarioSkip(
-            `no curated model that fits ${card.gpu.name} has a tool parser in the descriptor's model_families (checked ${checked.join('; ')})`
+            `no curated model that fits ${card.gpu.name} has a tool parser in the descriptor's model_families (checked ${found.checked.join('; ')})`
           )
-        await ensureCore()
-        await pinCard(card.gpu.uuid)
-        let load: LoadRecord | null = null
-        if (S.loaded?.modelId !== prepared.id || S.loaded.card !== index)
-          load = await loadOnCard(card, prepared)
+        const prepared = found.prepared
+        const parser = toolParserOf(prepared.architectures) as string
+        const load = await ensureLoadedOn(card, prepared)
         const loaded = S.loaded as NonNullable<typeof S.loaded>
         const container = load?.container ?? (await containerOf(loaded.generation))
         const capabilities = await core().api.get<{ tools?: boolean }>(
           `/models/tensorrt-llm/${prepared.id}/capabilities`
         )
-        const port = await publicPort()
         const started = Date.now()
-        const answer = await httpRequest({
-          url: `http://127.0.0.1:${port}/v1/chat/completions`,
-          method: 'POST',
-          body: JSON.stringify({
-            model: prepared.id,
-            stream: false,
-            max_tokens: 1024,
-            tool_choice: 'auto',
-            tools: [
-              {
-                type: 'function',
-                function: {
-                  name: 'get_weather',
-                  description: 'The current weather in a city.',
-                  parameters: {
-                    type: 'object',
-                    properties: { city: { type: 'string', description: 'The city name, e.g. Berlin' } },
-                    required: ['city'],
-                  },
+        const answer = await chat(await publicPort(), {
+          model: prepared.id,
+          stream: false,
+          max_tokens: 1024,
+          tool_choice: 'auto',
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                description: 'The current weather in a city.',
+                parameters: {
+                  type: 'object',
+                  properties: { city: { type: 'string', description: 'The city name, e.g. Berlin' } },
+                  required: ['city'],
                 },
               },
-            ],
-            messages: [
-              {
-                role: 'user',
-                content: 'What is the weather in Paris right now? Use the get_weather tool. /no_think',
-              },
-            ],
-          }),
-          timeoutMs: 10 * MIN,
+            },
+          ],
+          messages: [
+            {
+              role: 'user',
+              content: 'What is the weather in Paris right now? Use the get_weather tool. /no_think',
+            },
+          ],
         })
-        let body: {
-          choices?: Array<{
-            finish_reason?: string
-            message?: {
-              content?: string | null
-              tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>
-            }
-          }>
-        } = {}
-        try {
-          body = JSON.parse(answer.text) as typeof body
-        } catch {
-          // Recorded as text below; the status assertion says what went wrong.
-        }
+        const body = answer.json ?? {}
         const choice = body.choices?.[0]
         const call = choice?.message?.tool_calls?.[0]?.function
         let args: Record<string, unknown> | null = null
@@ -999,6 +1172,122 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         expect(answer.status, answer.text.slice(0, 2000)).toBe(200)
         expect(call?.name, `no get_weather call in ${answer.text.slice(0, 2000)}`).toBe('get_weather')
         expect(String(args?.['city'] ?? ''), `arguments ${call?.arguments}`).toMatch(/paris/i)
+      }
+    )
+
+    scenario(
+      scenarioId(index, 'structured-output'),
+      3 * HOUR,
+      () => needsFirstLoad(index),
+      async () => {
+        const card = S.cards[index] as CardRun
+        const found = await modelWhoseFamily(card, (family) => family?.structured_output === true)
+        if (found.prepared === null)
+          throw new ScenarioSkip(
+            `no curated model that fits ${card.gpu.name} has a family with structured_output: true (checked ${found.checked.join('; ')})`
+          )
+        const prepared = found.prepared
+        const load = await ensureLoadedOn(card, prepared)
+        const capabilities = await core().api.get<{ structured_output?: boolean }>(
+          `/models/tensorrt-llm/${prepared.id}/capabilities`
+        )
+        const answer = await chat(await publicPort(), {
+          model: prepared.id,
+          stream: false,
+          max_tokens: 512,
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: 'capital', strict: true, schema: CAPITAL_SCHEMA },
+          },
+          messages: [
+            {
+              role: 'user',
+              content:
+                'What is the capital of France? Answer with its city, country and population in millions. /no_think',
+            },
+          ],
+        })
+        const content = answer.json?.choices?.[0]?.message?.content ?? ''
+        let parsed: unknown
+        let parseError: string | null = null
+        try {
+          parsed = JSON.parse(content.trim())
+        } catch (error) {
+          parseError = describeError(error)
+        }
+        const violations = parseError === null ? schemaViolations(parsed, CAPITAL_SCHEMA) : []
+        card.structured = {
+          model_id: prepared.id,
+          repository: prepared.model.repository,
+          architectures: prepared.architectures,
+          loaded_for_this_scenario: load === null ? null : load.load_ms,
+          capabilities_structured_output: capabilities.body?.structured_output ?? null,
+          status: answer.status,
+          content: content.slice(0, 2000),
+          parse_error: parseError,
+          violations,
+          raw: answer.json === null ? answer.text.slice(0, 2000) : undefined,
+        }
+        report.log(`gpu${index} structured output ${answer.status}: ${JSON.stringify(content.slice(0, 300))}`)
+        expect(capabilities.body?.structured_output, 'capabilities do not declare structured output').toBe(
+          true
+        )
+        expect(answer.status, answer.text.slice(0, 2000)).toBe(200)
+        expect(parseError, `the content is not JSON: ${content.slice(0, 500)}`).toBeNull()
+        expect(violations, `the content breaks the schema: ${content.slice(0, 500)}`).toEqual([])
+      }
+    )
+
+    scenario(
+      scenarioId(index, 'structured-output-refused'),
+      3 * HOUR,
+      () => needsFirstLoad(index),
+      async () => {
+        const card = S.cards[index] as CardRun
+        const found = await modelWhoseFamily(
+          card,
+          (family) => family !== null && family.structured_output === false
+        )
+        if (found.prepared === null)
+          throw new ScenarioSkip(
+            `no curated model that fits ${card.gpu.name} has a family with structured_output: false (checked ${found.checked.join('; ')})`
+          )
+        const prepared = found.prepared
+        const load = await ensureLoadedOn(card, prepared)
+        const loaded = S.loaded as NonNullable<typeof S.loaded>
+        const body = {
+          model: prepared.id,
+          stream: false,
+          max_tokens: 64,
+          response_format: { type: 'json_schema', json_schema: { name: 'capital', schema: CAPITAL_SCHEMA } },
+          messages: [{ role: 'user', content: 'What is the capital of France?' }],
+        }
+        // Both doors refuse it: the public server, and the session gateway in front of the engine.
+        const publicAnswer = await chat(await publicPort(), body)
+        const gatewayAnswer = await chat(loaded.session.port, body, loaded.session.api_key ?? '')
+        card.structured_refused = {
+          model_id: prepared.id,
+          repository: prepared.model.repository,
+          architectures: prepared.architectures,
+          loaded_for_this_scenario: load === null ? null : load.load_ms,
+          public: {
+            status: publicAnswer.status,
+            error: publicAnswer.json?.error ?? publicAnswer.text.slice(0, 500),
+          },
+          gateway: {
+            status: gatewayAnswer.status,
+            error: gatewayAnswer.json?.error ?? gatewayAnswer.text.slice(0, 500),
+          },
+        }
+        report.log(
+          `gpu${index} structured output refused: public ${publicAnswer.status} ${publicAnswer.json?.error?.code ?? ''}, ` +
+            `gateway ${gatewayAnswer.status} ${gatewayAnswer.json?.error?.code ?? ''}`
+        )
+        // `unsupported_capability` is the core's own code; the engine answering would not use it.
+        for (const answer of [publicAnswer, gatewayAnswer]) {
+          expect(answer.status, answer.text.slice(0, 500)).toBe(400)
+          expect(answer.json?.error?.code, answer.text.slice(0, 500)).toBe('unsupported_capability')
+        }
       }
     )
 
@@ -1145,4 +1434,116 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
       }
     )
   }
+
+  scenario(
+    'reload-while-other-loads',
+    2 * HOUR,
+    () => {
+      if (LLAMA_BIN === '' || LLAMA_MODEL === '')
+        return (
+          'llama.cpp is not available to the core: set ATOMIC_LIVE_UPSTREAM_BIN (a CUDA build of llama-server; ' +
+          'its whole folder is copied) and ATOMIC_LIVE_UPSTREAM_MODEL (a small GGUF)'
+        )
+      if (!existsSync(LLAMA_BIN) || !existsSync(LLAMA_MODEL))
+        return `ATOMIC_LIVE_UPSTREAM_BIN or ATOMIC_LIVE_UPSTREAM_MODEL names a missing file (${LLAMA_BIN}, ${LLAMA_MODEL})`
+      return S.cards.some((c) => c.first_load !== null)
+        ? null
+        : 'no card loaded its tier model (see the gpu<N>-load scenarios)'
+    },
+    async () => {
+      const card = S.cards.find((c) => c.first_load !== null) as CardRun
+      const prepared = card.prepared as PreparedModel
+      installLlamaCpp()
+      await ensureLoadedOn(card, prepared)
+      const api = core().api
+      const context = (CONTEXT_LENGTH ?? 8192) === 4096 ? 2048 : 4096
+      const settle = async (
+        label: string,
+        call: Promise<HttpAnswer<unknown>>
+      ): Promise<Record<string, unknown>> => {
+        const started = Date.now()
+        try {
+          const answer = await call
+          return {
+            label,
+            status: answer.status,
+            ms: Date.now() - started,
+            body: answer.body ?? answer.text.slice(0, 1000),
+          }
+        } catch (error) {
+          return { label, status: null, ms: Date.now() - started, error: describeError(error) }
+        }
+      }
+      // The llama.cpp load goes first, so its claim on every card is in place when the reload asks.
+      const llama = settle(
+        'llamacpp-upstream',
+        api.post(
+          `/models/llamacpp-upstream/${LLAMA_MODEL_ID}/load`,
+          { overrides: { ctx_size: 2048 } },
+          RACE_BOUND_MS
+        )
+      )
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const trt = settle(
+        'tensorrt-llm',
+        api.post(
+          `/models/tensorrt-llm/${prepared.id}/load`,
+          { overrides: contextLengthSettings(context) },
+          RACE_BOUND_MS
+        )
+      )
+      const results = await Promise.all([llama, trt])
+      // Settled means answered, either way: a hung call is the deadlock this scenario is about.
+      const sessions = await api.get<{
+        sessions: Array<
+          SessionInfo & { provider: string; model_id: string; is_embedding: boolean; pid: number | null }
+        >
+      }>('/sessions')
+      const resident = residentGpuSessions(sessions.body?.sessions ?? [])
+      const containers = ownContainers(core().ready.instance_id)
+      const race = {
+        card: card.index,
+        trt_model: prepared.id,
+        trt_context_length: context,
+        calls: results,
+        resident: resident.map((r) => ({ provider: r.provider, model_id: r.model_id, pid: r.pid })),
+        running_trt_containers: containers,
+      }
+      report.section('reload_while_other_loads', race)
+      report.log(
+        `race: ${results.map((r) => `${String(r['label'])} ${String(r['status'])} in ${String(r['ms'])} ms`).join(', ')}; ` +
+          `resident ${resident.map((r) => `${r.provider}/${r.model_id}`).join(', ') || 'none'}`
+      )
+      // What the core now holds decides what the rest of the run can assume.
+      const trtSession = resident.find((r) => r.provider === 'tensorrt-llm')
+      S.loaded =
+        trtSession === undefined
+          ? null
+          : {
+              card: card.index,
+              modelId: trtSession.model_id,
+              generation: trtSession.generation ?? '',
+              containerId: containers[0] ?? null,
+              session: trtSession,
+            }
+      const llamaSession = resident.find((r) => r.provider === 'llamacpp-upstream')
+      if (llamaSession !== undefined)
+        await api
+          .post(`/models/llamacpp-upstream/${LLAMA_MODEL_ID}/unload`, {}, 5 * MIN)
+          .catch(() => undefined)
+
+      for (const result of results)
+        expect(
+          result['error'],
+          `${String(result['label'])} did not answer (bound ${RACE_BOUND_MS} ms): ${String(result['error'])}`
+        ).toBeUndefined()
+      expect(
+        resident.map((r) => `${r.provider}/${r.model_id}`),
+        'exactly one GPU model may stay resident: the llama.cpp session holds every card'
+      ).toHaveLength(1)
+      expect(containers.length, 'running tensorrt-llm containers vs a resident tensorrt-llm session').toBe(
+        trtSession === undefined ? 0 : 1
+      )
+    }
+  )
 })

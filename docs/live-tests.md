@@ -43,6 +43,7 @@ exercise. The others are skipped, and each skip gives its reason.
 | `recipe-rerun-noop` | after a privileged step: the same request run again reports every step `satisfied`, and packages, `daemon.json` and Docker's PID stay the same |
 | `model-chat` | after `ready`: smallest curated model for the GPU tier (inventory digest verified), `POST /models/tensorrt-llm/check` when the build has it, load, streamed chat on `:1337` |
 | `selinux-no-permission-denied` | host SELinux enforcing (Fedora), with a model loaded. The snapshot's `selinux` must equal the **daemon's** (`docker info` `SecurityOptions` has `name=selinux`). Only when the daemon labels containers must bind mounts carry `z`. Always required: no `Permission denied` on a mounted path in `docker logs` or the core's log tail, and no `container_t` AVC denial since the load |
+| `remove-after-load` | after `model-chat`, unless `ATOMIC_LIVE_MANAGED_KEEP_ENGINE=1`: with the model still loaded, a `remove` operation (consented, `retain_models: true`) must end in `removed`, the model container must no longer run, and the engine cache folder, the installation record (`managed/installations/tensorrt-llm/installation.json` and the snapshot's installation) and the engine image (`docker images --digests`) must all be gone. A failure records the operation's error code |
 
 **How the relogin is tested.** A test cannot log out, so it emulates the new session. The first core
 runs in the test's own session. That session predates the `docker` group, so the core must stop at
@@ -178,7 +179,8 @@ Optional variables:
 | `ATOMIC_LIVE_OUT` | `test/tmp/live-managed-install/<id>-<version>-<arch>-<time>/` | output folder |
 | `ATOMIC_LIVE_MODEL_CACHE` | `~/.cache/atomic-chat-live/hf` | downloaded checkpoints, kept across runs |
 | `ATOMIC_LIVE_TRT_MODEL` | smallest curated model the card holds | a curated `repository` to load instead (anything not in `curated_models` fails with that message) |
-| `ATOMIC_LIVE_TRT_CONTEXT_LENGTH` | unset (the provider's 8192) | the load's `context_length` override, for 8 GB cards; `max_output_tokens` becomes half of it, at most 4096 |
+| `ATOMIC_LIVE_TRT_CONTEXT_LENGTH` | unset (the provider's 8192) | stored as the run's `context_length` setting before the model check, so `POST /models/tensorrt-llm/check` and the load both reserve KV cache for it (the check reads stored settings only); for 8 GB cards. `max_output_tokens` becomes half of it, at most 4096 |
+| `ATOMIC_LIVE_MANAGED_KEEP_ENGINE` | unset | `1` skips `remove-after-load`, so the engine stays installed for the [engine test](#engine-test-task-219) |
 | `ATOMIC_LIVE_PUBLIC_PORT` | `1337` | public server port |
 | `ATOMIC_LIVE_SENTINELS` / `ATOMIC_LIVE_SENTINEL_IMAGE` | `2` / `busybox:1.36` | containers a Docker restart must stop |
 | `HF_ENDPOINT`, `HF_TOKEN` | huggingface.co, none | a mirror; curated models are ungated |
@@ -197,8 +199,10 @@ Both cores run with `DO_NOT_TRACK=1`, so a test run sends no error reports, and 
 `XDG_RUNTIME_DIR`. The relogin core goes through sudo's `env_reset`, so everything it needs is passed
 explicitly, the same for both.
 
-The run leaves Docker, the toolkit, the group and the engine image installed. It unloads the model,
-stops the core and removes the sentinel containers. To reset, go back to the snapshot.
+The run leaves Docker, the toolkit and the group installed. Unless `ATOMIC_LIVE_MANAGED_KEEP_ENGINE=1`, its
+last scenario removes the engine itself (image, engine caches, installation record) through the core. It
+stops the core and removes the sentinel containers. To reset, go back to the snapshot. To run the engine
+test next on the same VM, set `ATOMIC_LIVE_MANAGED_KEEP_ENGINE=1` here.
 
 ### What to attach to the PR
 
@@ -235,18 +239,24 @@ sends `SIGKILL` only to the core process it started itself.
 
 ### What a run does
 
-Each card gets five named scenarios, `gpu<N>-<scenario>`, where `N` is the card's `nvidia-smi` index. A
+Each card gets eight named scenarios, `gpu<N>-<scenario>`, where `N` is the card's `nvidia-smi` index. A
 card below the descriptor's minimum compute capability, or with no curated model that fits, has its
-scenarios skipped with that reason.
+scenarios skipped with that reason. One scenario for the whole host, `reload-while-other-loads`, runs
+after the cards.
 
 | Scenario | What it checks |
 | --- | --- |
 | `preconditions` | Checked once. Fails with every problem listed: no binary, no GPU, a driver older than the descriptor's minimum, no passwordless sudo, or a session that cannot reach Docker. It then starts the core and reads `/snapshot`, and **fails unless the engine installation is `ready`** and pinned to the same descriptor the test reads. |
 | `gpu<N>-load` | Loads the curated model of the card's memory tier, pinned to this card. The download goes through the documented flow (inventory digest, `POST /models/tensorrt-llm/check` with this card's `gpu_id`, sizes and sha256). The check: the container got exactly this card (`DeviceRequests`), the core substituted no other card, and `session:load-progress` reached `ready`. Records the load time, each stage's elapsed time, peak VRAM and peak `/dev/shm`. |
+| `gpu<N>-container-user` | The running engine container's `Config.User` is the `uid:gid` of the user running the core, and every file and folder the load wrote under the model's engine cache is owned by that uid. The report names the first file that is not. If the engine cannot start as that user, `gpu<N>-load` fails, and the engine's log tail is in `cards[].failed_loads`. |
 | `gpu<N>-stream` | Streams a chat through the public server (`POST /v1/chat/completions` on `:1337`, which routes to the session gateway). The session's own gateway port answers `401` without the session key and `200` with it. Records the time to the first token. |
 | `gpu<N>-reload-cached` | Unloads (the container must no longer run once the unload answers), records what the engine cache holds, and loads the same model again. **The second load must be faster than the first.** Both durations are recorded. |
 | `gpu<N>-tool-call` | Sends one tool call (`get_weather`) through `:1337` to a model whose family has a `tool_parser` in the descriptor's `model_families`. If the tier model's family has no parser, the test uses the smallest other curated model that fits the card and has one. With no such model the scenario is skipped. The check: `capabilities` declares `tools: true`, the engine was started with `--tool_parser <name>`, and the answer carries a `get_weather` call whose arguments name Paris. |
+| `gpu<N>-structured-output` | Sends a chat with `response_format: {type: "json_schema", …}` (city, country and population, all required, no other keys) through `:1337`. The model is the one loaded if its family declares `structured_output: true`, else the smallest curated model the card runs that does. The check: `capabilities` declares structured output, and the answer's content parses as JSON that satisfies the schema (checked by hand: required keys, types, no extra keys). |
+| `gpu<N>-structured-output-refused` | For a curated model the card runs whose family has `structured_output: false`: the same request is refused by the core with `400` `unsupported_capability`, both on `:1337` and on the session's own gateway port, so it never reaches the engine. Skipped with the models it checked when no curated family has `structured_output: false` (none in `tensorrt-llm-1.2.1-r1`). |
 | `gpu<N>-kill-core` | Measures the heartbeat for 20 s, then sends `kill -9` to the core. The engine container must exit through its watchdog: the exit code is 97, and it exits within the watchdog's own bound (computed from the container's `ATOMIC_WATCHDOG_*` env) plus 30 s. The card's `memory.used` must return to its level before the first load, within `ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB`, within 60 s. A new core then starts on the same data folder. The run records whether that core removed the killed core's container, and the next card runs on the new core. |
+
+| `reload-while-other-loads` | Needs a llama.cpp build: `ATOMIC_LIVE_UPSTREAM_BIN` (a CUDA `llama-server`; its whole folder is copied into the run's data folder as a backend pack) and `ATOMIC_LIVE_UPSTREAM_MODEL` (a small GGUF), the same variables as `test/live/llamacpp.test.ts`. Skipped without them. With the first card's tier model loaded, it starts a llama.cpp GPU load, and 250 ms later a TensorRT-LLM reload of the same model with a different context length. Both requests must answer within 30 minutes, whether they succeed or fail. Afterwards `GET /sessions` must hold exactly one GPU chat session, because a llama.cpp session holds every card, and the running TensorRT-LLM containers must match it. The run records both answers and what stayed resident. |
 
 The tier model is the curated model with the largest `vram_tier_bytes` the card holds, among the formats
 the card runs. Within that tier the test takes the format that needs the newest card: NVFP4 on Blackwell,
@@ -258,7 +268,8 @@ FP8 on Ada and Hopper, BF16 on Ampere. This follows the `note` of each curated e
 ### Prerequisites
 
 - **The engine is `ready` for your user.** Either the [install test](#install-test-task-218) passed on this
-  host, or the app or `atc` set the engine up. The install test keeps its state in its own output folder, so
+  host with `ATOMIC_LIVE_MANAGED_KEEP_ENGINE=1` (without it, its last scenario removes the engine again), or
+  the app or `atc` set the engine up. The install test keeps its state in its own output folder, so
   point this test at it with `ATOMIC_LIVE_MANAGED_ROOT=<install test output folder>/managed`. Without the
   variable, the core uses your normal per-user managed root (`<dataDir>/atomic-managed-runtimes`), which is
   where the app and `atc` keep it.
@@ -312,6 +323,7 @@ Optional variables:
 | `ATOMIC_LIVE_TRT_MODEL` | each card's tier model | one curated `repository` to load on every card |
 | `ATOMIC_LIVE_TRT_CONTEXT_LENGTH` | unset (the provider's 8192) | stored as the run's `context_length` setting (`max_output_tokens` half of it, at most 4096), so the check route and every load reserve KV cache for it; for 8 GB cards |
 | `ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB` | `512` | how far above its pre-load level a card's memory may settle after the kill |
+| `ATOMIC_LIVE_UPSTREAM_BIN`, `ATOMIC_LIVE_UPSTREAM_MODEL` | unset | a CUDA `llama-server` and a GGUF for `reload-while-other-loads`; skipped without them |
 | `ATOMIC_LIVE_PUBLIC_PORT` | `1337` | public server port |
 | `HF_ENDPOINT`, `HF_TOKEN` | huggingface.co, none | a mirror; curated models are ungated |
 
@@ -338,7 +350,9 @@ In the output folder the test prints on its first log line (`output folder …`)
     `scenarios` (passed, failed or skipped per scenario);
   - per card, `first_load` and `reload` (`load_ms`, `stages`, `weight_bytes`, `readiness_timeout_ms`,
     `load_to_timeout`, `vram_peak_bytes`, `shm_peak_bytes`, `command`), plus `reload_to_first_load`,
-    `engine_cache`, `stream` (`first_token_ms`), `tool` and `kill`;
+    `engine_cache`, `container_user`, `failed_loads` (with each failed load's engine log tail), `stream`
+    (`first_token_ms`), `tool`, `structured`, `structured_refused` and `kill`;
+  - `reload_while_other_loads`: both answers of the residency race and what stayed resident;
 - `run.log` (the same lines the console shows, prefixed `[tensorrt-llm …]`) and `core.log` (every core's
   stdout and stderr);
 - the `tee`'d console log.
@@ -375,5 +389,8 @@ Each card's `model` and `scenarios` in `summary.json` are the input for `curated
 - Write the cards it passed on into its `note`, for example "verified on RTX 4090 (8.9) and L40S (8.9)".
 - A `tool-call` failure on a family whose `model_families` entry names a `tool_parser` means that parser
   name is wrong for this engine release. Fix `model_families`, not the model list.
+- A `structured-output` failure on a family with `structured_output: true` (a refusal, content that is not
+  JSON, or JSON that breaks the schema) means this engine release does not honour `response_format` for
+  that family. Set its `structured_output` to `false` in `model_families`.
 - Put the table of hosts and cards (name, compute capability, driver, model, pass or fail per scenario,
   load, reload and first-token times) in the conf PR that changes the list.

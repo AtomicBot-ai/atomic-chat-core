@@ -38,9 +38,11 @@ engine, loads a curated model and streams a chat on `:1337`, then writes `summar
 exact command and what to attach: [`docs/live-tests.md`](../../docs/live-tests.md).
 
 TensorRT-LLM engine on every NVIDIA card (`test/live/tensorrt-llm.test.ts`, task 2.19): `ATOMIC_LIVE=1` on Linux with
-`/usr/bin/nvidia-smi` and the engine already `ready` (after the install test, pass its `managed/` folder as
-`ATOMIC_LIVE_MANAGED_ROOT`). It changes nothing on the host. Per card, pinned through the stored `gpu_id` setting: the
-tier's curated model loads, streams on `:1337`, reloads faster from its engine cache, answers a tool call, and after
-`kill -9` of the core its container exits through the watchdog and the card's memory comes back. It writes the measured
+`/usr/bin/nvidia-smi` and the engine already `ready` (after the install test run with
+`ATOMIC_LIVE_MANAGED_KEEP_ENGINE=1`, pass its `managed/` folder as `ATOMIC_LIVE_MANAGED_ROOT`). It changes nothing on the host. Per card, pinned through the stored `gpu_id` setting: the
+tier's curated model loads as the core's own user, streams on `:1337`, reloads faster from its engine cache, answers
+a tool call and a JSON schema, and after `kill -9` of the core its container exits through the watchdog and the card's
+memory comes back. With `ATOMIC_LIVE_UPSTREAM_BIN`/`ATOMIC_LIVE_UPSTREAM_MODEL` it also races a reload against a
+llama.cpp GPU load. It writes the measured
 heartbeat, watchdog, `--shm-size`, memory-limit and load-timeout values into `summary.json` for an ADR. Prerequisites,
 exact command and how to carry the results into an ADR and conf: [`docs/live-tests.md`](../../docs/live-tests.md).

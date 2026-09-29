@@ -147,6 +147,16 @@ export async function streamChat(options: {
   }
 }
 
+/**
+ * The `tensorrt-llm` settings a context-length override needs: `context_length`, and
+ * `max_output_tokens` at half of it (at most 4096, the provider's default) so the output cap stays
+ * below the context. Empty without an override.
+ */
+export function contextLengthSettings(contextLength: number | null): Record<string, number> {
+  if (contextLength === null) return {}
+  return { context_length: contextLength, max_output_tokens: Math.min(4096, Math.floor(contextLength / 2)) }
+}
+
 export class ControlApi {
   constructor(
     private readonly dataFolder: string,
@@ -184,6 +194,10 @@ export class ControlApi {
 
   post<T>(path: string, body: unknown = {}, timeoutMs?: number): Promise<HttpAnswer<T>> {
     return this.call<T>('POST', path, body, timeoutMs)
+  }
+
+  patch<T>(path: string, body: unknown, timeoutMs?: number): Promise<HttpAnswer<T>> {
+    return this.call<T>('PATCH', path, body, timeoutMs)
   }
 
   /**

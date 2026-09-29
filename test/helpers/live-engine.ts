@@ -10,7 +10,7 @@
  *
  * No imports from `src/`: the live test drives the compiled binary only.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { gpuMemoryUsed, sudoDocker, sudoDockerAsync } from './live-linux-host.js'
 
@@ -37,6 +37,8 @@ export interface ContainerFacts {
   watchdog_env: Record<string, string>
   /** `Config.Cmd`: the engine argv after the watchdog's `--` (parsers, context length, ...). */
   command: string[]
+  /** `Config.User` (`uid:gid`); null when the image's default user runs it. */
+  user: string | null
   labels: Record<string, string>
   /** The host directory mounted at `/atomic/heartbeat`: the core writes `heartbeat` in it. */
   heartbeat_source: string | null
@@ -53,7 +55,12 @@ interface InspectEntry {
     ShmSize?: number
     DeviceRequests?: Array<{ DeviceIDs?: string[] | null }> | null
   }
-  Config?: { Env?: string[] | null; Cmd?: string[] | null; Labels?: Record<string, string> | null }
+  Config?: {
+    Env?: string[] | null
+    Cmd?: string[] | null
+    Labels?: Record<string, string> | null
+    User?: string
+  }
   Mounts?: Array<{ Source?: string; Destination?: string }> | null
 }
 
@@ -109,6 +116,7 @@ export function containerFacts(inspectJson: string): ContainerFacts | null {
     gpu_device_ids: (entry.HostConfig?.DeviceRequests ?? []).flatMap((r) => r.DeviceIDs ?? []),
     watchdog_env: env,
     command: entry.Config?.Cmd ?? [],
+    user: entry.Config?.User === undefined || entry.Config.User === '' ? null : entry.Config.User,
     labels: entry.Config?.Labels ?? {},
     heartbeat_source: heartbeat?.Source === undefined || heartbeat.Source === '' ? null : heartbeat.Source,
     generation:
@@ -346,10 +354,11 @@ export function dirStats(dir: string): { files: number; bytes: number; unreadabl
 }
 
 /**
- * A model's engine cache under `<data>/atomic-core/managed-runtimes/caches/<descriptor>/<model>`
- * (both names percent-encoded by the core), found by decoding the names rather than re-encoding ours.
+ * A model's engine cache under `<data>/atomic-core/managed-runtimes/caches/<descriptor>/<model>`, or
+ * the whole descriptor's without `modelId` (both names percent-encoded by the core), found by decoding
+ * the names rather than re-encoding ours.
  */
-export function findEngineCache(cachesDir: string, descriptorId: string, modelId: string): string | null {
+export function findEngineCache(cachesDir: string, descriptorId: string, modelId?: string): string | null {
   const list = (dir: string): string[] => {
     try {
       return readdirSync(dir)
@@ -359,8 +368,86 @@ export function findEngineCache(cachesDir: string, descriptorId: string, modelId
   }
   const descriptorDir = list(cachesDir).find((name) => decodeName(name) === descriptorId)
   if (descriptorDir === undefined) return null
+  if (modelId === undefined) return join(cachesDir, descriptorDir)
   const modelDir = list(join(cachesDir, descriptorDir)).find((name) => decodeName(name) === modelId)
   return modelDir === undefined ? null : join(cachesDir, descriptorDir, modelDir)
+}
+
+/**
+ * The first file or directory under `dir` (depth first, `dir` itself excluded) that `uid` does not own:
+ * what a container running as root leaves behind in a cache the user must be able to delete. Null when
+ * everything is the user's, or `dir` cannot be read.
+ */
+export function firstForeignOwner(dir: string, uid: number): { path: string; uid: number } | null {
+  let entries: string[]
+  try {
+    entries = readdirSync(dir).sort()
+  } catch {
+    return null
+  }
+  for (const name of entries) {
+    const child = join(dir, name)
+    let info: ReturnType<typeof lstatSync>
+    try {
+      info = lstatSync(child)
+    } catch {
+      continue
+    }
+    if (info.uid !== uid) return { path: child, uid: info.uid }
+    if (info.isDirectory()) {
+      const nested = firstForeignOwner(child, uid)
+      if (nested !== null) return nested
+    }
+  }
+  return null
+}
+
+/** One JSON Schema keyword set this test uses: `type`, `properties`, `required`, `additionalProperties: false`, `items`. */
+export interface SmallSchema {
+  type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean'
+  properties?: Record<string, SmallSchema>
+  required?: string[]
+  additionalProperties?: boolean
+  items?: SmallSchema
+}
+
+const jsonType = (value: unknown): string =>
+  value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+
+/**
+ * Where `value` breaks `schema`, as `$.path` messages; empty when it conforms. Checked by hand for the
+ * structured-output scenario (no schema library in this repo).
+ */
+export function schemaViolations(value: unknown, schema: SmallSchema, path = '$'): string[] {
+  const actual = jsonType(value)
+  const typeOk = schema.type === 'integer' ? Number.isInteger(value) : schema.type === actual
+  if (!typeOk) return [`${path} should be ${schema.type}, is ${actual}`]
+  if (schema.type === 'array') {
+    const items = schema.items
+    return items === undefined
+      ? []
+      : (value as unknown[]).flatMap((item, index) => schemaViolations(item, items, `${path}[${index}]`))
+  }
+  if (schema.type !== 'object') return []
+  const object = value as Record<string, unknown>
+  const problems: string[] = []
+  for (const key of schema.required ?? []) if (!(key in object)) problems.push(`${path}.${key} is required`)
+  for (const [key, field] of Object.entries(object)) {
+    const property = schema.properties?.[key]
+    if (property !== undefined) problems.push(...schemaViolations(field, property, `${path}.${key}`))
+    else if (schema.additionalProperties === false) problems.push(`${path}.${key} is not allowed`)
+  }
+  return problems
+}
+
+/** The providers whose non-embedding sessions hold a GPU (llama.cpp on a GPU backend, MLX, TensorRT-LLM). */
+const GPU_PROVIDERS = new Set(['llamacpp', 'llamacpp-upstream', 'mlx', 'tensorrt-llm'])
+
+/** The chat sessions in `GET /sessions` that hold a GPU, per the core's residency rule (spec `gpu-residency`). */
+export function residentGpuSessions<T extends { provider: string; is_embedding: boolean }>(
+  sessions: readonly T[]
+): T[] {
+  return sessions.filter((s) => GPU_PROVIDERS.has(s.provider) && !s.is_embedding)
 }
 
 export interface LoadSamples {

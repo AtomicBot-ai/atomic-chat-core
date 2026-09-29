@@ -31,7 +31,9 @@
  * sudo, so `npm run test:live` alone never starts it). Optional: ATOMIC_LIVE_CORE_BIN,
  * ATOMIC_RUNTIME_DESCRIPTOR_URL (default: the conf fixture copy in this repo), ATOMIC_LIVE_OUT,
  * ATOMIC_LIVE_MODEL_CACHE, ATOMIC_LIVE_TRT_MODEL, ATOMIC_LIVE_TRT_CONTEXT_LENGTH,
- * ATOMIC_LIVE_PUBLIC_PORT, ATOMIC_LIVE_SENTINELS, ATOMIC_LIVE_SENTINEL_IMAGE, HF_ENDPOINT, HF_TOKEN.
+ * ATOMIC_LIVE_PUBLIC_PORT, ATOMIC_LIVE_SENTINELS, ATOMIC_LIVE_SENTINEL_IMAGE,
+ * ATOMIC_LIVE_MANAGED_KEEP_ENGINE (skip the final removal, to run the engine test next), HF_ENDPOINT,
+ * HF_TOKEN.
  * Both cores run with DO_NOT_TRACK=1: a test run sends no error reports.
  */
 import { createHash, randomUUID } from 'node:crypto'
@@ -40,7 +42,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { pollOperation, startLiveCore, streamChat } from '../helpers/live-core.js'
+import { contextLengthSettings, pollOperation, startLiveCore, streamChat } from '../helpers/live-core.js'
 import type { LiveCore, OperationView, PendingHostStep } from '../helpers/live-core.js'
 import { pickCuratedModel, prepareCuratedModel, readDescriptor } from '../helpers/live-hf-model.js'
 import type { CuratedModel } from '../helpers/live-hf-model.js'
@@ -58,6 +60,7 @@ import {
   sudoDocker,
 } from '../helpers/live-linux-host.js'
 import type { HostFacts, SetupPath } from '../helpers/live-linux-host.js'
+import { findEngineCache } from '../helpers/live-engine.js'
 import { LiveReport } from '../helpers/live-report.js'
 
 const ENABLED =
@@ -78,6 +81,8 @@ const CONTEXT_LENGTH = process.env['ATOMIC_LIVE_TRT_CONTEXT_LENGTH']
   : null
 const SENTINELS = Number(process.env['ATOMIC_LIVE_SENTINELS'] ?? 2)
 const SENTINEL_IMAGE = process.env['ATOMIC_LIVE_SENTINEL_IMAGE'] ?? 'busybox:1.36'
+/** Keeps the engine installed at the end, for the engine test (task 2.19) on the same VM. */
+const KEEP_ENGINE = process.env['ATOMIC_LIVE_MANAGED_KEEP_ENGINE'] === '1'
 const RECIPE_ID = 'linux.install-container-runtime'
 const TARGET = { kind: 'runtime', installation_id: 'tensorrt-llm', engine_id: 'tensorrt-llm' } as const
 const MIN = 60_000
@@ -145,6 +150,10 @@ const SCENARIOS = [
   [
     'selinux-no-permission-denied',
     "SELinux enforcing: the core reports the daemon's SELinux, labels mounts :z when it does, and nothing is denied",
+  ],
+  [
+    'remove-after-load',
+    'after a real model load, removing the engine deletes its engine caches, its installation record and its image',
   ],
 ] as const
 type ScenarioId = (typeof SCENARIOS)[number][0]
@@ -1012,6 +1021,15 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       `no curated model fits ${gpu?.name} (${cardBytes(gpu as NonNullable<typeof gpu>)} bytes, cc ${gpu?.compute_capability})`
     ).not.toBeNull()
     const model = curated as CuratedModel
+    // A small card can be refused by the memory check (weights plus the KV reserve for the context
+    // length). ATOMIC_LIVE_TRT_CONTEXT_LENGTH goes into the provider's stored settings in this run's
+    // own data folder, so the check route below and the load size that reserve alike: the check
+    // reads stored settings only, and a load-only override would leave it refusing the card.
+    const storedSettings = contextLengthSettings(CONTEXT_LENGTH)
+    if (Object.keys(storedSettings).length > 0) {
+      const stored = await api.patch('/settings/tensorrt-llm', { values: storedSettings })
+      expect(stored.status, stored.text).toBe(200)
+    }
     report.log(`model: ${model.repository}@${model.revision} (${model.note})`)
     // The documented flow: the exact revision's listing must be the one the descriptor pinned, and
     // the core's check route (when this build has it) must say it runs on this card.
@@ -1029,20 +1047,11 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     const downloadMs = prepared.download_ms
     report.log(`model installed at ${prepared.dir}`)
 
-    // A small card can be refused by the pre-launch memory check (weights plus the KV reserve for
-    // the context length); ATOMIC_LIVE_TRT_CONTEXT_LENGTH shrinks that reserve for this load only.
-    const overrides =
-      CONTEXT_LENGTH === null
-        ? {}
-        : {
-            context_length: CONTEXT_LENGTH,
-            max_output_tokens: Math.min(4096, Math.floor(CONTEXT_LENGTH / 2)),
-          }
     S.modelLoadStartedAt = Date.now()
     const loadStarted = S.modelLoadStartedAt
     const load = await api.post<{ session: { execution?: string; port: number } }>(
       `/models/tensorrt-llm/${id}/load`,
-      Object.keys(overrides).length === 0 ? {} : { overrides },
+      {},
       HOUR
     )
     const loadMs = Date.now() - loadStarted
@@ -1073,7 +1082,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       revision: model.revision,
       id,
       quantization,
-      overrides,
+      stored_settings: storedSettings,
       bytes: files.reduce((sum, f) => sum + f.size, 0),
       download_ms: downloadMs,
       load_ms: loadMs,
@@ -1158,6 +1167,90 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       expect(deniedOnOurMounts, 'Permission denied on a mounted path').toEqual([])
       // ausearch answers 1 with "<no matches>" when there is nothing; anything else is recorded above.
       expect(avc, 'SELinux denied a container access since the model load').toEqual([])
+    }
+  )
+
+  scenario(
+    'remove-after-load',
+    45 * MIN,
+    () =>
+      KEEP_ENGINE
+        ? 'ATOMIC_LIVE_MANAGED_KEEP_ENGINE=1: the engine stays installed for the engine test'
+        : S.modelId === null
+          ? 'no model was loaded (see model-chat)'
+          : null,
+    async () => {
+      const api = core().api
+      const cachesDir = join(S.dataFolder, 'atomic-core', 'managed-runtimes', 'caches')
+      const installationFile = join(S.out, 'managed', 'installations', 'tensorrt-llm', 'installation.json')
+      const imageListed = (): boolean =>
+        sudoDocker(['images', '--digests', '--format', '{{.Repository}}@{{.Digest}}'])
+          .stdout.split('\n')
+          .map((line) => line.trim())
+          .includes(engineRef())
+      const state = (): Record<string, unknown> => ({
+        engine_cache: findEngineCache(cachesDir, S.descriptor.descriptor_id),
+        installation_record: existsSync(installationFile),
+        image_listed: imageListed(),
+        image_inspect_exit: sudoDocker(['image', 'inspect', engineRef()]).code,
+        model_container_running: S.containerId === null ? null : containerRunning(S.containerId),
+      })
+      const before = state()
+      report.detail('remove-after-load', 'before', before)
+      expect(before['engine_cache'], 'the model load left no engine cache to remove').not.toBeNull()
+
+      // The model stays loaded: removal itself must stop what runs on the engine first.
+      const begin = await api.post<OperationView>('/environments/default/operations', {
+        request_id: `live-${randomUUID()}`,
+        target: TARGET,
+        kind: 'remove',
+        retain_models: true,
+      })
+      expect([200, 201, 202], begin.text).toContain(begin.status)
+      const operationId = begin.body.operation_id
+      const asking = await pollOperation(
+        api,
+        operationId,
+        (o) => ['awaiting-consent', 'removed', 'failed', 'cancelled'].includes(o.phase),
+        15 * MIN
+      )
+      if (asking.phase === 'awaiting-consent') {
+        const approval = await api.post(`/environments/operations/${operationId}/resume`, {
+          expected_revision: asking.revision,
+          approved_plan_digest: asking.plan_digest,
+        })
+        expect(approval.status, approval.text).toBe(200)
+      }
+      const done = await pollOperation(
+        api,
+        operationId,
+        (o) => ['removed', 'failed', 'cancelled'].includes(o.phase),
+        30 * MIN
+      )
+      const after = state()
+      const snapshot = await api.get<{
+        environments: Array<{ installations: Array<{ engine_id: string; status: string }> }>
+      }>('/snapshot')
+      const installations = snapshot.body.environments[0]?.installations ?? []
+      report.detail('remove-after-load', 'operation', done)
+      report.detail('remove-after-load', 'error_code', done.error?.code ?? null)
+      report.detail('remove-after-load', 'after', after)
+      report.detail('remove-after-load', 'installations_after', installations)
+      report.log(
+        `removal ended in ${done.phase}${done.error ? ` (${done.error.code}: ${done.error.message})` : ''}; ` +
+          `cache ${String(after['engine_cache'])}, record ${String(after['installation_record'])}, image listed ${String(after['image_listed'])}`
+      )
+      expect(done.phase, `removal ended in ${done.phase}: ${done.error?.code} ${done.error?.message}`).toBe(
+        'removed'
+      )
+      S.modelId = null
+      expect(after['model_container_running'], 'the model container still runs after the removal').not.toBe(
+        true
+      )
+      expect(after['engine_cache'], 'the engine caches are still there').toBeNull()
+      expect(after['installation_record'], `${installationFile} is still there`).toBe(false)
+      expect(installations.filter((i) => i.engine_id === 'tensorrt-llm')).toEqual([])
+      expect(after['image_listed'], `docker images still lists ${engineRef()}`).toBe(false)
     }
   )
 })
