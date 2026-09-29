@@ -9,7 +9,6 @@ import {
   mapTensorrtLlmContextLengthError,
   tensorrtLlmRewriteRequestBody,
   TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
-  TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
   TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS,
   TENSORRT_LLM_MAX_CONTEXT_LENGTH,
   TENSORRT_LLM_MAX_KV_CACHE_FREE_FRACTION,
@@ -19,11 +18,10 @@ import {
   TENSORRT_LLM_READINESS_BASE_MS,
   TENSORRT_LLM_REWRITABLE_ROUTES,
   TENSORRT_LLM_ROUTES,
-  TENSORRT_LLM_UNIFIED_KV_CONTEXTS,
   tensorrtLlmAdapter,
-  tensorrtLlmUnifiedKvMaxTokens,
   type TensorrtLlmSettings,
 } from './adapter.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './kv-cache.js'
 
 const GiB = 1024 ** 3
 
@@ -109,9 +107,8 @@ describe('tensorrtLlmAdapter shape', () => {
   })
 })
 
-describe('TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION', () => {
-  it("is 0.8, not trtllm-serve's own 0.9: 0.9 ran an 8 GB card out of memory in the live run", () => {
-    expect(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION).toBe(0.8)
+describe('the default KV-cache fraction in the launch', () => {
+  it('passes 0.8 (TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION) when nothing is stored', () => {
     const launch = tensorrtLlmAdapter.buildLaunch(baseContext())
     expect(flagValue(launch.argv, '--kv_cache_free_gpu_memory_fraction')).toBe('0.8')
   })
@@ -394,17 +391,6 @@ describe('buildLaunch', () => {
   })
 })
 
-describe('tensorrtLlmUnifiedKvMaxTokens', () => {
-  it.each([
-    [512, 1024],
-    [8192, 16384],
-    [TENSORRT_LLM_MAX_CONTEXT_LENGTH, 2 * TENSORRT_LLM_MAX_CONTEXT_LENGTH],
-  ])('context %i -> %i tokens: one full-context request plus a concurrent one', (context, tokens) => {
-    expect(tensorrtLlmUnifiedKvMaxTokens(context)).toBe(tokens)
-    expect(TENSORRT_LLM_UNIFIED_KV_CONTEXTS).toBe(2)
-  })
-})
-
 describe('readinessTimeoutMs', () => {
   it('grows with weight size and always includes the base', () => {
     const settings = tensorrtLlmAdapter.validateSettings({})
@@ -644,6 +630,48 @@ describe('classifyExit: review minors on the whole-log classification', () => {
     const result = tensorrtLlmAdapter.classifyExit(log, 1)
     expect(result.kind).toBe('out-of-memory')
     expect(result.numbers).toEqual({ requested_gib: 48 / 1024, free_gib: 42.69 / 1024 })
+  })
+
+  it.each<[string, string[], Record<string, number>]>([
+    [
+      'a later failure without a "free" clause: both from the last failure that reports both, never 64 MiB paired with 3 GiB',
+      [
+        'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.00 GiB. GPU 0 has a total capacity of 7.70 GiB of which 3.00 GiB is free.',
+        'RuntimeError: CUDA out of memory. Tried to allocate 64.00 MiB',
+      ],
+      { requested_gib: 1, free_gib: 3 },
+    ],
+    [
+      'no failure reports both: the last request alone',
+      [
+        'RuntimeError: CUDA out of memory. Tried to allocate 1.00 GiB',
+        'RuntimeError: CUDA out of memory. Tried to allocate 64.00 MiB',
+      ],
+      { requested_gib: 64 / 1024 },
+    ],
+    [
+      'the last complete failure wins over an earlier complete one',
+      [
+        'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.00 GiB. GPU 0 has a total capacity of 7.70 GiB of which 3.00 GiB is free.',
+        'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 0 has a total capacity of 7.70 GiB of which 42.69 MiB is free.',
+      ],
+      { requested_gib: 48 / 1024, free_gib: 42.69 / 1024 },
+    ],
+    [
+      'a later "free" line with no request (another rank) never pairs with an earlier request',
+      [
+        'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.00 GiB. GPU 0 has a total capacity of 7.70 GiB of which 3.00 GiB is free.',
+        'rank 1: GPU 1 has a total capacity of 7.70 GiB of which 10.00 MiB is free.',
+      ],
+      { requested_gib: 1, free_gib: 3 },
+    ],
+  ])('pairs the numbers from one failure: %s', (_label, lines, numbers) => {
+    const result = tensorrtLlmAdapter.classifyExit(
+      [...lines, 'RuntimeError: Executor worker returned error'].join('\n'),
+      1
+    )
+    expect(result.kind).toBe('out-of-memory')
+    expect(result.numbers).toEqual(numbers)
   })
 
   it.each([

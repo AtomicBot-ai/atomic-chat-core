@@ -121,6 +121,7 @@
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
 import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION, ManagedRequestRefusal } from '../managed-text/index.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION, tensorrtLlmUnifiedKvMaxTokens } from './kv-cache.js'
 import type {
   ManagedEngineLaunch,
   ManagedExitClassification,
@@ -154,13 +155,6 @@ export const TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS = 4096
  *  the whole of free memory (nothing left for the engine's own workspace) and never a sliver. */
 export const TENSORRT_LLM_MIN_KV_CACHE_FREE_FRACTION = 0.1
 export const TENSORRT_LLM_MAX_KV_CACHE_FREE_FRACTION = 0.95
-/** The one default KV-cache fraction: the launch passes it (`buildTensorrtLlmLaunch`), the model check
- *  and the pre-launch check size their reserve with it (`compatibility.ts`'s `kvCacheReserveBytes`,
- *  through the same validated settings), and `src/settings/schema/tensorrt-llm.json` stores it
- *  (pinned equal by `settings.test.ts`). Below `trtllm-serve`'s own 0.9 on purpose: at 0.9 an 8 GB
- *  card ran out of memory on the engine's non-KV allocations after the KV cache took its share
- *  (budget table `_no_capture_init_kv_cache: 3.50 / 0.35`); 0.85 failed too, 0.8 loaded (docs/decisions/2026-09-29-tensorrt-llm-kv-cache-fraction-0-8-and-oom-read-from-the-whole-log.md). */
-export const TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION = 0.8
 
 export const TENSORRT_LLM_MIN_LOAD_TIMEOUT_SECONDS = 1
 export const TENSORRT_LLM_MAX_LOAD_TIMEOUT_SECONDS = 3600
@@ -278,7 +272,8 @@ export const TENSORRT_LLM_CONTAINER_PORT = 8000
  *   default `None`). Without it, `openai_protocol.py` still turns `response_format` into
  *   guided-decoding parameters, but no backend exists to enforce them. `xgrammar` is the backend both
  *   the PyTorch and TensorRT backends implement.
- * - `kv_cache_config: {max_tokens: N}`, on a unified-memory card (`tensorrtLlmUnifiedKvMaxTokens`).
+ * - `kv_cache_config: {max_tokens: N}`, on a unified-memory card (`tensorrtLlmUnifiedKvMaxTokens`,
+ *   `kv-cache.ts`).
  *   `llm_args.py` `KvCacheConfig.max_tokens` (1.2.1, line 1636): "If both `max_tokens` and
  *   `free_gpu_memory_fraction` are specified, memory corresponding to the minimum will be used."
  *   The fraction the argv passes survives the YAML: `serve.py`'s `get_llm_args` builds
@@ -288,23 +283,6 @@ export const TENSORRT_LLM_CONTAINER_PORT = 8000
  */
 export const TENSORRT_LLM_API_OPTIONS_FILE = 'llm-api-options.yaml'
 export const TENSORRT_LLM_GUIDED_DECODING_OPTIONS = 'guided_decoding_backend: xgrammar\n'
-
-/**
- * How many full contexts the KV cache holds on a unified-memory card: one full-context request plus
- * a concurrent one. A starting value, not a measurement (docs/decisions/2026-09-29-tensorrt-llm-
- * unified-memory-kv-cache-bounded-by-tokens.md).
- */
-export const TENSORRT_LLM_UNIFIED_KV_CONTEXTS = 2
-
-/**
- * The `kv_cache_config.max_tokens` a unified-memory launch writes, and the token count its memory
- * check reserves KV for. On a unified-memory card (GB10/DGX Spark) "free GPU memory" is the system's
- * free RAM, so `--kv_cache_free_gpu_memory_fraction` alone would hand most of the machine's memory to
- * the KV cache whatever the context length; this bounds it to what the configured context needs.
- */
-export function tensorrtLlmUnifiedKvMaxTokens(contextLength: number): number {
-  return contextLength * TENSORRT_LLM_UNIFIED_KV_CONTEXTS
-}
 
 /** The option file's text, or `null` when neither key applies (no file, no flag). */
 function llmApiOptions(guided: boolean, kvMaxTokens: number | null): string | null {
@@ -359,7 +337,7 @@ export function buildTensorrtLlmLaunch(
   // Guided decoding is off in trtllm-serve unless an LLM API option turns it on (final review I-2):
   // `response_format` is otherwise ignored or refused, so a family that declares structured output
   // gets `guided_decoding_backend: xgrammar` through the option file, written read-only per generation.
-  // On a unified-memory card the same file bounds the KV cache by tokens (see the constants above).
+  // On a unified-memory card the same file bounds the KV cache by tokens (`kv-cache.ts`).
   const options = llmApiOptions(
     family?.structured_output === true,
     context.unifiedMemory ? tensorrtLlmUnifiedKvMaxTokens(settings.context_length) : null
@@ -444,14 +422,28 @@ const OOM_MARKER = new RegExp(
 /** How much of the log an out-of-memory classification carries as its `excerpt`. */
 const OOM_EXCERPT_MAX_LINES = 8
 const OOM_EXCERPT_MAX_LINE_CHARS = 500
-const OOM_TRIED_TO_ALLOCATE = /Tried to allocate ([\d.]+)\s*(GiB|MiB|KiB)/g
-const OOM_FREE = /of which ([\d.]+)\s*(GiB|MiB|KiB|bytes) is free/g
+const OOM_TRIED_TO_ALLOCATE = /Tried to allocate ([\d.]+)\s*(GiB|MiB|KiB)/
+const OOM_FREE = /of which ([\d.]+)\s*(GiB|MiB|KiB|bytes) is free/
 
-/** The last match in the log: the allocation failure that ended the run, the one the excerpt ends on. */
-function lastMatch(pattern: RegExp, log: string): RegExpExecArray | null {
-  let last: RegExpExecArray | null = null
-  for (const match of log.matchAll(pattern)) last = match as RegExpExecArray
-  return last
+/**
+ * The numbers of one allocation failure, never mixed across two: `torch`'s message carries "Tried to
+ * allocate X" and "of which Y is free" on one line. The last line that reports both wins — the most
+ * recent complete account of a failure; failing that, the last request alone (no free figure borrowed
+ * from another failure); failing that, the last free figure alone.
+ */
+function oomNumbers(log: string): { tried: RegExpExecArray | null; free: RegExpExecArray | null } {
+  let complete: { tried: RegExpExecArray; free: RegExpExecArray } | null = null
+  let lastTried: RegExpExecArray | null = null
+  let lastFree: RegExpExecArray | null = null
+  for (const line of log.split('\n')) {
+    const tried = OOM_TRIED_TO_ALLOCATE.exec(line)
+    const free = OOM_FREE.exec(line)
+    if (tried && free) complete = { tried, free }
+    if (tried) lastTried = tried
+    if (free) lastFree = free
+  }
+  if (complete !== null) return complete
+  return lastTried !== null ? { tried: lastTried, free: null } : { tried: null, free: lastFree }
 }
 
 /** `tensorrt_llm/_torch/models/modeling_auto.py`'s `AutoModelForCausalLM.from_config` — the
@@ -491,10 +483,9 @@ function oomExcerpt(log: string): string {
 
 function classifyOom(log: string): ManagedExitClassification | null {
   if (!OOM_MARKER.test(log)) return null
-  // The last numbers, not the first: with the whole log in play an earlier, handled allocation
-  // failure would otherwise supply numbers the excerpt does not end on.
-  const tried = lastMatch(OOM_TRIED_TO_ALLOCATE, log)
-  const free = lastMatch(OOM_FREE, log)
+  // One failure's numbers, the last complete one: with the whole log in play the first match could be
+  // an earlier, handled failure, and two independent last matches could mix two failures.
+  const { tried, free } = oomNumbers(log)
   const numbers: Record<string, number> = {}
   let requestedText = 'an unknown amount of'
   let freeText = ''

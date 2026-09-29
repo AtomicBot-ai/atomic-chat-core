@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -45,6 +45,23 @@ describe('realLinuxHost', () => {
     expect(await host.probeDeps.readFile(join(dir, 'here'))).toBe('text')
     // A directory where a file is expected is EISDIR, not "not configured".
     await expect(host.probeDeps.readFile(dir)).rejects.toThrow()
+  })
+
+  it('reads a missing path as absent, but refuses to read a path it could not check as absent', async () => {
+    const host = realLinuxHost({}, answer)
+    await writeFile(join(dir, 'file'), 'text')
+    expect(await host.probeDeps.pathExists(join(dir, 'nope'))).toBe(false)
+    // A file where a directory is expected (ENOTDIR): the path does not exist either.
+    expect(await host.probeDeps.pathExists(join(dir, 'file', 'child'))).toBe(false)
+    if (process.getuid?.() === 0) return // root reads through any mode
+    const locked = join(dir, 'locked')
+    await mkdir(join(locked, 'inside'), { recursive: true })
+    await chmod(locked, 0o000)
+    try {
+      await expect(host.probeDeps.pathExists(join(locked, 'inside'))).rejects.toThrow(/EACCES/)
+    } finally {
+      await chmod(locked, 0o700)
+    }
   })
 
   it('checks existence and free space on the real filesystem', async () => {

@@ -36,7 +36,7 @@
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../contracts/index.js'
 import { inventoryDigest } from '../environment/index.js'
-import { tensorrtLlmUnifiedKvMaxTokens } from './adapter.js'
+import { tensorrtLlmUnifiedKvMaxTokens } from './kv-cache.js'
 import {
   describeUnrecognizedQuantization,
   isGgufCheckpoint,
@@ -221,7 +221,7 @@ export interface MemoryReserve {
  * division in full.
  *
  * On a unified-memory card (`unifiedMemory`, design D13) the launch bounds the KV cache by tokens,
- * `kv_cache_config.max_tokens = tensorrtLlmUnifiedKvMaxTokens(contextLength)` (`adapter.ts`), and
+ * `kv_cache_config.max_tokens = tensorrtLlmUnifiedKvMaxTokens(contextLength)` (`kv-cache.ts`), and
  * TensorRT-LLM uses the smaller of that bound and the fraction; the reserve is therefore the KV for
  * exactly that many tokens, not divided by the fraction, so the check and the launch agree
  * (docs/decisions/2026-09-29-tensorrt-llm-unified-memory-kv-cache-bounded-by-tokens.md).

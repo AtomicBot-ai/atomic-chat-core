@@ -23,7 +23,7 @@ import {
   type CheckpointFile,
   type ModelCheckInput,
 } from './compatibility.js'
-import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './adapter.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './kv-cache.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
 

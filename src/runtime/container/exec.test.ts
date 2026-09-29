@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createDockerExec, runDockerCommand } from './exec.js'
+import { containerLogs } from './operations.js'
 
 // Same fake-binary convention as `src/runtime/llamacpp/probe.test.ts` and `src/hardware/probe.test.ts`:
 // node itself, running an inline `-e` script, stands in for a real `docker` binary on every platform
@@ -97,17 +98,60 @@ describe('runDockerCommand', () => {
     expect(result.code).toBeNull()
   })
 
-  it('keeps the start and the end of an output past maxOutputBytes, per stream, without hanging the child', async () => {
-    const fake = fakeDocker(
-      'process.stdout.write("HEAD" + "x".repeat(10_000) + "TAIL"); process.stderr.write("head" + "y".repeat(10_000) + "tail"); setTimeout(() => process.exit(0), 50)'
-    )
+  /** A child that prints `count` numbered lines per stream in `batches` writes spaced over time, so
+   *  the pipe hands them over as many chunks and the cap's sliding window really slides. */
+  const linesScript = (count: number, batches: number, stamp: boolean) => `
+    const per = ${count} / ${batches}
+    const line = (s, i) => (${stamp} ? '2026-09-29T10:00:' + String(i).padStart(6, '0') + 'Z ' : '') +
+      s + ' ' + String(i).padStart(4, '0') + ' ' + 'x'.repeat(20) + '\\n'
+    let b = 0
+    const next = () => {
+      let out = '', err = ''
+      for (let i = b * per; i < (b + 1) * per; i++) { out += line('out', i * 2); err += line('err', i * 2 + 1) }
+      process.stdout.write(out); process.stderr.write(err)
+      if (++b < ${batches}) setTimeout(next, 5); else setTimeout(() => process.exit(0), 20)
+    }
+    next()`
+
+  it('keeps whole lines from the start and the end of an output past maxOutputBytes, per stream, in order', async () => {
+    const fake = fakeDocker(linesScript(400, 40, false))
     const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], {
       dockerConfigDir: await tempDockerConfigDir(),
-      maxOutputBytes: 10,
+      maxOutputBytes: 2_000,
     })
     expect(result.code).toBe(0)
-    expect(result.stdout).toBe('HEADx\nxTAIL')
-    expect(result.stderr).toBe('heady\nytail')
+    for (const [stream, name, first, last] of [
+      [result.stdout, 'out', 0, 798],
+      [result.stderr, 'err', 1, 799],
+    ] as const) {
+      expect(Buffer.byteLength(stream)).toBeLessThanOrEqual(2_000)
+      expect(stream.endsWith('\n')).toBe(true)
+      const lines = stream.slice(0, -1).split('\n')
+      for (const line of lines) expect(line).toMatch(new RegExp(`^${name} \\d{4} x{20}$`))
+      const numbers = lines.map((line) => Number(line.split(' ')[1]))
+      expect(numbers[0]).toBe(first)
+      expect(numbers.at(-1)).toBe(last)
+      expect(numbers.every((n, k) => k === 0 || n > (numbers[k - 1] as number))).toBe(true)
+      expect(numbers.length).toBeLessThan(400) // the middle really was dropped
+    }
+  })
+
+  it('an over-cap docker logs still merges both streams in timestamp order: every kept line is whole and stamped', async () => {
+    const fake = fakeDocker(linesScript(400, 40, true))
+    const exec = createDockerExec({
+      dockerPath: fake.exe,
+      dockerConfigDir: await tempDockerConfigDir(),
+      maxOutputBytes: 3_000,
+    })
+    const prefixed: typeof exec = (args, options) => exec([...fake.prefixArgs, ...args], options)
+    const log = await containerLogs(prefixed, 'abc', 'all')
+    const lines = log.slice(0, -1).split('\n')
+    const stamps = lines.map((line) => /^2026-09-29T10:00:(\d{6})Z /.exec(line)?.[1])
+    expect(stamps.every((stamp) => stamp !== undefined)).toBe(true)
+    const order = stamps.map(Number)
+    expect(order.every((n, k) => k === 0 || n > (order[k - 1] as number))).toBe(true)
+    expect(order[0]).toBe(0)
+    expect(order.at(-1)).toBe(799)
   })
 
   it('returns an output within maxOutputBytes untouched', async () => {

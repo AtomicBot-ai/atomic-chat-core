@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { canonicalizeSettingValues, defaultSettingValues } from '../../settings/index.js'
-import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './adapter.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './kv-cache.js'
 import { tensorrtLlmSettings } from './settings.js'
 
 const stored = () => canonicalizeSettingValues('tensorrt-llm', defaultSettingValues('tensorrt-llm'))

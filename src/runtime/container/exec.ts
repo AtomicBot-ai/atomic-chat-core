@@ -18,9 +18,9 @@ export interface DockerCommandOptions {
   /** How long one docker call may take before it counts as unanswered. Default 30 s; a per-call `timeoutMs` overrides it for just that call. */
   timeoutMs?: number
   /**
-   * Per stream (so stdout and stderr together hold up to twice this). Past it the first half and the
-   * last half are kept, joined by a newline, and the middle is dropped; the command still counts as
-   * answered. Default 4 MiB.
+   * Per stream (so stdout and stderr together hold up to twice this). Past it the whole lines within
+   * the first half and within the last half are kept and the middle is dropped; the command still
+   * counts as answered. Default 4 MiB.
    */
   maxOutputBytes?: number
   env?: NodeJS.ProcessEnv
@@ -33,8 +33,8 @@ const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 /**
  * One output stream, bounded to `limit` bytes: the first half as it arrives, then a sliding window
- * over the last half. A log longer than the cap keeps its start and its end, where a decisive last
- * line sits (review of the whole-log read: head-only kept the start and lost the end).
+ * over the last half. A log longer than the cap keeps the whole lines of its start and its end, where
+ * a decisive last line sits (review of the whole-log read: head-only kept the start and lost the end).
  */
 class HeadAndTail {
   private readonly headLimit: number
@@ -68,14 +68,21 @@ class HeadAndTail {
   }
 
   text(): string {
-    const head = Buffer.concat(this.head)
+    let head = Buffer.concat(this.head)
     let tail = Buffer.concat(this.tail)
     if (tail.length > this.tailLimit) {
       tail = tail.subarray(tail.length - this.tailLimit)
       this.dropped = true
     }
     if (!this.dropped) return Buffer.concat([head, tail]).toString('utf8')
-    return `${head.toString('utf8')}\n${tail.toString('utf8')}`
+    // Something in the middle was dropped: cut both halves at line boundaries, so every line kept is
+    // whole. `docker logs --timestamps` output is merged across stdout and stderr by each line's
+    // leading timestamp (`operations.ts`), and a fragment with no timestamp would sort out of place.
+    const headEnd = head.lastIndexOf(0x0a)
+    head = headEnd === -1 ? Buffer.alloc(0) : head.subarray(0, headEnd + 1)
+    const tailStart = tail.indexOf(0x0a)
+    tail = tailStart === -1 ? Buffer.alloc(0) : tail.subarray(tailStart + 1)
+    return Buffer.concat([head, tail]).toString('utf8')
   }
 }
 

@@ -58,7 +58,12 @@ export interface LinuxProbeDeps {
    * caller that wires `probeLinux` to the real filesystem owns this contract.
    */
   readFile: (path: string) => Promise<string | null>
-  /** For a socket, a directory, or a flag file such as `/run/ostree-booted`; never its contents. */
+  /**
+   * For a socket, a directory, or a flag file such as `/run/ostree-booted`; never its contents.
+   * Resolves `false` only when the path is not there (`ENOENT`/`ENOTDIR`) and rejects on every other
+   * failure (`EACCES`, `EIO`, ...), the same contract as `readFile`: a check that could not run is an
+   * unread fact, not an absent path.
+   */
   pathExists: (path: string) => Promise<boolean>
   /**
    * Free space at one path, computed however the caller likes (`statfs`, a platform API, ...).
@@ -158,9 +163,10 @@ export interface LinuxFacts {
   immutable_os: boolean
   /**
    * The host runs systemd: `/run/systemd/system` exists, the `sd_booted()` test. `false` on a
-   * container whose PID 1 is not an init system; `'unknown'` when the check itself failed.
+   * container whose PID 1 is not an init system; null when the check itself failed, which is then
+   * the unread fact `init-system` in `unknown`.
    */
-  systemd: boolean | 'unknown'
+  systemd: boolean | null
   driver_version: string | null
   gpus: GpuFacts[]
   docker: DockerFacts
@@ -425,7 +431,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       : Promise.resolve(null),
     deps.exec('snap', ['list', 'docker']),
     deps.pathExists('/run/ostree-booted').catch(() => false),
-    deps.pathExists('/run/systemd/system').catch((): 'unknown' => 'unknown'),
+    deps.pathExists('/run/systemd/system').catch(() => null),
     deps.exec('id', ['-nG']),
     deps.exec('getent', ['group', 'docker']),
     deps.exec('systemctl', ['is-active', 'docker']),
@@ -433,6 +439,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
   ])
 
   if (unameM.code !== 0) unknown.push('architecture')
+  if (systemd === null) unknown.push('init-system')
   const architecture = unameM.code === 0 ? normalizeArchitecture(unameM.stdout) : null
 
   const nvidia = parseNvidiaSmi(smi)

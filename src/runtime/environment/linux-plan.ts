@@ -51,7 +51,7 @@
  *    uses): immutable base with a package missing, Arch, unrecognised docker, not on the recipe; an
  *    immutable base with its packages layered gets the remaining steps one by one instead.
  * 5. An unreadable `daemon.json` when the runtime is not already known to be configured.
- * 6. No systemd (`/run/systemd/system` absent or unreadable): the recipe's service steps need it.
+ * 6. No systemd (`/run/systemd/system` absent): the recipe's service steps need it.
  * 7. The install plan.
  */
 
@@ -390,7 +390,8 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   // The recipe enables, starts and restarts Docker through systemd: without it the plan would fail
   // only at the privileged step, after consent (the GB10 vast.ai container, PID 1 a shell). A host
   // that already answers with a GPU runtime adopted above and never needs it.
-  if (facts.systemd !== true) return blocked([initNotSystemdBlocker(facts.systemd)])
+  // (A systemd check that could not run is the unread fact `init-system`, blocked above.)
+  if (facts.systemd === false) return blocked([initNotSystemdBlocker()])
 
   return {
     availability: 'setup-required',

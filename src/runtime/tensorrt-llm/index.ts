@@ -18,6 +18,7 @@
 export * from './compatibility.js'
 export * from './quant-format.js'
 export * from './adapter.js'
+export * from './kv-cache.js'
 export * from './settings.js'
 export * from './route-policy.js'
 export * from './installation.js'

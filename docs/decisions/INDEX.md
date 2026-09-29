@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [Hardening review minors: the capped log keeps whole lines, an unreadable init system is an unread fact, and OOM numbers come from one failure](2026-09-29-hardening-review-minors-whole-lines-unread-init-and-paired-oom-numbers.md) — amends the whole-log (both ends) and the systemd records below.
 - **2026-09-29** — [tensorrt-llm: the whole-log read keeps both ends, numbers come from the last failure, and an unsupported architecture is named before OOM](2026-09-29-tensorrt-llm-whole-log-read-keeps-both-ends-and-architecture-comes-first.md) — amends the cap wording and check order of the KV-fraction-0.8 / whole-log record below.
 - **2026-09-29** — [Linux setup: an install plan needs systemd, and a host without it is blocked before consent](2026-09-29-linux-setup-needs-systemd-for-an-install-plan.md)
 - **2026-09-29** — [tensorrt-llm: on a unified-memory card the KV cache is bounded by tokens, and the memory check reserves exactly that](2026-09-29-tensorrt-llm-unified-memory-kv-cache-bounded-by-tokens.md) — amends the unified-memory branch of the real-formula KV-reserve record below.

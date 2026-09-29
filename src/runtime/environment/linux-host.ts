@@ -44,11 +44,18 @@ async function readIfPresent(path: string): Promise<string | null> {
   }
 }
 
-const exists = async (path: string): Promise<boolean> =>
-  stat(path).then(
-    () => true,
-    () => false
-  )
+/** `pathExists` per `LinuxProbeDeps`' contract: false only when the path is not there (`ENOENT`, or
+ *  `ENOTDIR` for a file standing where a directory would be), a rejection for anything else. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false
+    throw error
+  }
+}
 
 async function freeBytesAt(path: string): Promise<number | null> {
   const info = await statfs(path)

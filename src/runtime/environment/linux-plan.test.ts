@@ -1286,7 +1286,9 @@ describe('a host that does not run systemd (the GB10 vast.ai container: PID 1 is
   it('reads the init system from /run/systemd/system, the sd_booted() test', async () => {
     expect((await run({})).facts.systemd).toBe(true)
     expect((await run({ pathMissing: NO_SYSTEMD })).facts.systemd).toBe(false)
-    expect((await run({ pathUnreadable: NO_SYSTEMD })).facts.systemd).toBe('unknown')
+    const unread = (await run({ pathUnreadable: NO_SYSTEMD })).facts
+    expect(unread.systemd).toBeNull()
+    expect(unread.unknown).toContain('init-system')
   })
 
   it.each<[string, Machine]>([
@@ -1307,7 +1309,7 @@ describe('a host that does not run systemd (the GB10 vast.ai container: PID 1 is
         availability: 'prerequisite-blocked',
         adopts_existing_engine: false,
         install_plan: null,
-        blockers: [initNotSystemdBlocker(false)],
+        blockers: [initNotSystemdBlocker()],
       })
       expect(assessment.blockers[0]?.message).toBe(
         'This system does not run systemd, which the Docker install needs.'
@@ -1315,10 +1317,23 @@ describe('a host that does not run systemd (the GB10 vast.ai container: PID 1 is
     }
   )
 
-  it('blocks the same way, with its own wording, when whether systemd runs could not be read', async () => {
-    const { assessment } = await run({ dpkgQuery: dpkgNoneFound(), pathUnreadable: NO_SYSTEMD })
-    expect(assessment.install_plan).toBeNull()
-    expect(assessment.blockers).toEqual([initNotSystemdBlocker('unknown')])
+  it('an init system that could not be read is an unknown fact, like every other unread fact: blocked, adopt or not', async () => {
+    const unknownFact = {
+      reason: 'unknown-fact',
+      message: 'Could not determine init-system on this system.',
+      params: { fact: 'init-system' },
+    }
+    const clean = await run({ dpkgQuery: dpkgNoneFound(), pathUnreadable: NO_SYSTEMD })
+    expect(clean.assessment.install_plan).toBeNull()
+    expect(clean.assessment.blockers).toEqual([unknownFact])
+    const ready = await run({
+      pathUnreadable: NO_SYSTEMD,
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+    })
+    expect(ready.assessment.adopts_existing_engine).toBe(false)
+    expect(ready.assessment.blockers).toEqual([unknownFact])
   })
 
   it('still adopts a host whose Docker already answers with a GPU runtime: nothing needs systemd then', async () => {

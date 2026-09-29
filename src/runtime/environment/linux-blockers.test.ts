@@ -124,18 +124,10 @@ describe('archCommands', () => {
 })
 
 describe('initNotSystemdBlocker', () => {
-  it.each([
-    [false, 'This system does not run systemd, which the Docker install needs.', 'absent'],
-    [
-      'unknown',
-      'Could not tell whether this system runs systemd, which the Docker install needs.',
-      'unknown',
-    ],
-  ] as const)('systemd %s', (systemd, message, observed) => {
-    expect(initNotSystemdBlocker(systemd)).toEqual({
+  it('says the Docker install needs systemd, which this system does not run', () => {
+    expect(initNotSystemdBlocker()).toEqual({
       reason: 'init-not-systemd',
-      message,
-      params: { systemd: observed },
+      message: 'This system does not run systemd, which the Docker install needs.',
     })
   })
 })
