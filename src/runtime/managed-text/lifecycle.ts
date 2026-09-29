@@ -463,8 +463,9 @@ export class ManagedTextLifecycle {
     this.assertOpen()
     let existing = this.entries.get(request.modelId)
     if (existing?.state === 'stopping') {
-      // Wait for the teardown in flight; only a confirmed stop frees the model for a fresh load.
-      await existing.ending
+      // Wait for the teardown in flight; only a confirmed stop frees the model for a fresh load. A
+      // cancel of this load ends the wait at once (final review M-7), and the teardown goes on.
+      await raceLoadCancel(existing.ending ?? Promise.resolve(null), request.signal)
       // A shutdown that began while this load waited must not be followed by a new container.
       this.assertOpen()
       existing = this.entries.get(request.modelId)
@@ -939,14 +940,6 @@ export class ManagedTextLifecycle {
   }
 
   /**
-   * Gateway closed, heartbeat stopped, container stopped (confirmed) and removed, journal record
-   * dropped. `null` when there was no container to stop. An unconfirmed stop leaves the entry in
-   * `stop-unconfirmed` with its container id, for a later retry and for residency to see.
-   *
-   * The heartbeat stops either way: if Docker merely lost track of an engine that is still running,
-   * the watchdog inside then ends it within its stale limit.
-   */
-  /**
    * The one way an entry is stopped: `stopping` while the teardown runs, then gone (confirmed, or no
    * container at all) or `stop-unconfirmed`. Concurrent callers share the same promise. A teardown
    * that throws counts as unconfirmed — nothing proved the container stopped. The entry leaves the
@@ -973,6 +966,14 @@ export class ManagedTextLifecycle {
     return entry.ending
   }
 
+  /**
+   * Gateway closed, heartbeat stopped, container stopped (confirmed) and removed, journal record
+   * dropped. `null` when there was no container to stop. An unconfirmed stop leaves the entry in
+   * `stop-unconfirmed` with its container id, for a later retry and for residency to see.
+   *
+   * The heartbeat stops either way: if Docker merely lost track of an engine that is still running,
+   * the watchdog inside then ends it within its stale limit.
+   */
   private async teardown(entry: Entry, beforeStop?: () => Promise<void>): Promise<StopOutcome | null> {
     entry.monitor?.abort()
     entry.monitor = undefined

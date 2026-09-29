@@ -226,9 +226,14 @@ function assertWithinDataRoot(source: string, dataRoot: string, what: string): v
   const normalizedSource = normalizeMountPath(source)
   const prefix = normalizedRoot === '/' ? '/' : `${normalizedRoot}/`
   if (normalizedSource !== normalizedRoot && !normalizedSource.startsWith(prefix)) {
+    // Says what to do (final review M-6): typically a models folder that is a symlink to another
+    // disk, which resolves outside the data folder — the only place this core relabels (design D15).
     throw new AtomicCoreError(
       'INVALID_ARGUMENT',
-      `${what} is outside the SELinux data root and must not be :z-relabeled.`,
+      `The ${what} is outside the data folder (${normalizedRoot}), and under SELinux this core only ` +
+        'relabels its own data folder for containers. A symlink to another disk resolves outside it: ' +
+        'move the model folder into the data folder, or bind-mount the other disk at that path ' +
+        'instead of linking it (mount --bind), so it resolves inside the data folder.',
       source
     )
   }

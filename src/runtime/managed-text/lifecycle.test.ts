@@ -839,6 +839,25 @@ describe('ManagedTextLifecycle: teardown races (review round 1)', () => {
     expect(tickers.map((t) => t.stopped)).toEqual([true, false])
   })
 
+  it('a load waiting for a teardown gives up at once when its own signal aborts; the stop goes on (final review M-7)', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const release = gateStops()
+    const unloading = lifecycle.unload('org/model-a')
+    await settle()
+    const controller = new AbortController()
+    const loading = rejection(lifecycle.load(request_({ signal: controller.signal })))
+    await settle()
+    controller.abort()
+    expect((await loading).code).toBe('MODEL_LOAD_CANCELLED')
+    // Still stopping: the cancelled load neither waited for the stop nor interfered with it.
+    expect(lifecycle.reservations()).toEqual([expect.objectContaining({ state: 'stopping' })])
+    release()
+    await unloading
+    expect(lifecycle.reservations()).toEqual([])
+    expect(docker.containers.size).toBe(0)
+  })
+
   it('a load while a stop is pending, and that stop is unconfirmed, is refused and keeps the reservation', async () => {
     await build()
     await lifecycle.load(request_())

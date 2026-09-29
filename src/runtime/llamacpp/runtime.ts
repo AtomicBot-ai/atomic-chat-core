@@ -679,9 +679,13 @@ export class LlamacppRuntime implements LocalRuntime {
     const done = this.terminateSession(modelId, session)
     const entry = { session, done }
     this.stopping.set(modelId, entry)
-    void done.finally(() => {
-      if (this.stopping.get(modelId) === entry) this.stopping.delete(modelId)
-    })
+    // `.catch`: `done` goes back to the caller, who handles its rejection; this derived promise would
+    // otherwise be a second, unhandled one (final review M-8).
+    void done
+      .finally(() => {
+        if (this.stopping.get(modelId) === entry) this.stopping.delete(modelId)
+      })
+      .catch(() => {})
     return done
   }
 

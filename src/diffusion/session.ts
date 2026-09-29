@@ -183,7 +183,9 @@ export function videoCapabilities(state: DiffusionState): VideoCapabilities {
 
 /**
  * Spawn the server for `spec` and make it the resident session. The caller holds the load lock,
- * and any previous session is already gone.
+ * and any previous session is already gone — or still exiting: a crash or cancel teardown that began
+ * outside the lock may not have seen its exit yet, so its `stopping` is awaited before the claim and
+ * the spawn (final review M-9); otherwise two `sd-server`s of this service would share the GPU.
  */
 export async function loadFromSpec(
   deps: SessionDeps,
@@ -199,6 +201,8 @@ export async function loadFromSpec(
   try {
     // A retained spec can name an engine build that an update has since made too old for it.
     checkEngineCompatibility(spec.family, spec.tag)
+    // `done` never rejects: an unconfirmed exit puts the server back as the session instead.
+    await state.stopping?.done
     // Every other engine is off the GPU, its exit confirmed, before this server starts; from the
     // moment the claim is granted this server holds the GPU as starting.
     const hold = () => {

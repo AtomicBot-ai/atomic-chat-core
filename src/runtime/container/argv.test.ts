@@ -339,6 +339,19 @@ describe('buildCreateModelContainerArgv', () => {
       mounts: { ...baseSpec.mounts, model: { source: '/somewhere/else/models/qwen3' } },
     }
     expect(() => buildCreateModelContainerArgv(spec)).toThrow(AtomicCoreError)
+    // Says what to do about it (final review M-6): a models folder that is a symlink to another disk
+    // resolves outside the data folder, which is all SELinux relabeling may touch.
+    let refusal: AtomicCoreError | undefined
+    try {
+      buildCreateModelContainerArgv(spec)
+    } catch (error) {
+      refusal = error as AtomicCoreError
+    }
+    expect(refusal?.code).toBe('INVALID_ARGUMENT')
+    expect(refusal?.details).toBe('/somewhere/else/models/qwen3')
+    expect(refusal?.message).toContain('/daemon/view')
+    expect(refusal?.message).toContain('move the model folder into the data folder')
+    expect(refusal?.message).toContain('mount --bind')
   })
 
   it('refuses a mount source that is a sibling of the data root sharing its name as a prefix (not a real ancestor check bypass)', () => {

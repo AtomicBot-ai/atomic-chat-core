@@ -461,6 +461,26 @@ describe.skipIf(!posix)('GPU residency', () => {
     expect(finished).toBe(true)
   })
 
+  it('a load waits for a server still being taken down outside the lock before it spawns another (final review M-9)', async () => {
+    const h = harness()
+    await installFakeSdEngine(layout)
+    await h.service.configure({ dataFolder })
+    // A crash or cancel teardown that began outside the load lock and has not seen its exit yet.
+    let release!: () => void
+    const done = new Promise<void>((resolve) => (release = resolve))
+    h.service.state.stopping = {
+      spec: { modelId: 'z-image:q4_k_m', backend: 'cpu', cpuFallback: false },
+      done,
+    } as unknown as typeof h.service.state.stopping
+    const loading = h.service.loadModel(await loadRequest())
+    await sleep(100)
+    expect(h.journal.filter((j) => j.op === 'add')).toEqual([])
+    h.service.state.stopping = undefined
+    release()
+    await loading
+    expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(1)
+  })
+
   it('an unload aborts a load still waiting for its GPU claim, so the load lock is never held hostage', async () => {
     let waiting = false
     const h = harness({
@@ -560,6 +580,46 @@ describe.skipIf(!posix)('generating', () => {
     expect(status.model.state).toBe('loaded')
     expect(status.model.loaded?.pid).not.toBe(h.loaded.pid)
     expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(2)
+  })
+
+  it('an unload asked for while a respawn waits for a teardown aborts the GPU claim that respawn then starts (final review M-9)', async () => {
+    const aborted: boolean[] = []
+    const h = harness({
+      claimGpu: (_claim, signal, granted) => {
+        aborted.push(signal?.aborted === true)
+        if (signal?.aborted) return Promise.reject(loadCancelledError())
+        granted?.()
+        return Promise.resolve()
+      },
+    })
+    await h.service.configure({ dataFolder })
+    await installFakeSdEngine(layout, { stepMs: 400 })
+    const loaded = await h.service.loadModel(await loadRequest())
+    // A cancel stops the engine and keeps the spec: the next job respawns it.
+    const first = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    await waitFor(() => h.service.getJob(first.jobId)?.state === 'generating')
+    await h.service.cancelJob(first.jobId)
+    expect(isProcessAlive(loaded.pid)).toBe(false)
+
+    // A teardown still in flight outside the lock holds the respawn before its claim.
+    let release!: () => void
+    const done = new Promise<void>((resolve) => (release = resolve))
+    h.service.state.stopping = {
+      spec: { modelId: 'z-image:q4_k_m', backend: 'cpu', cpuFallback: false },
+      done,
+    } as unknown as typeof h.service.state.stopping
+    const next = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32, steps: 1 }))
+    await sleep(100)
+    // No load is in flight for `unloadModel` to abort: only its pending-unload count reaches the respawn.
+    const unloading = h.service.unloadModel()
+    h.service.state.stopping = undefined
+    release()
+    await unloading
+    await waitFor(() => ['failed', 'cancelled'].includes(h.service.getJob(next.jobId)?.state ?? ''))
+    expect(aborted).toEqual([false, true])
+    expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(1)
+    expect(h.service.gpuOccupancy()).toEqual([])
+    expect((await h.service.getStatus()).model.state).toBe('unloaded')
   })
 
   // `finalize_backend_install` + `activate_install` (`commands.rs`/`session.rs`, app commit ec1fd3ea7).

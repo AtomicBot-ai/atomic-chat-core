@@ -25,16 +25,21 @@ export interface WireManagedContainersOptions {
   dockerPath?: string | null
   /** The Docker Engine API socket image pulls stream from. Default `DOCKER_SOCKET_PATH`; a test seam. */
   dockerSocketPath?: string
-  /** Deadline of each docker call the startup reconcile makes. Default `RECONCILE_CALL_TIMEOUT_MS`. */
+  /**
+   * Deadline of each `docker inspect`/`docker rm` the startup reconcile makes. Default
+   * `RECONCILE_CALL_TIMEOUT_MS`. Not the stop's: `stopContainer` gives its own call `--time` plus 5 s.
+   */
   reconcileCallTimeoutMs?: number
   /** Past this, reconcile starts no further record. Default `RECONCILE_BUDGET_MS`. */
   reconcileBudgetMs?: number
 }
 
 /**
- * Startup must not wait on a hung daemon (task 2.12 review round 1, item 5): every reconcile call gets
- * this short deadline instead of the executor's usual 30 s, and `docker stop --time` is shortened to
- * match (`stopContainer` allows `--time` plus 5 s for its own call).
+ * Startup must not wait on a hung daemon (task 2.12 review round 1, item 5): each `docker inspect` and
+ * `docker rm` of the reconcile gets this short deadline instead of the executor's usual 30 s. The stop
+ * is bounded separately: `docker stop --time RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS`, whose own call
+ * deadline `stopContainer` sets to that plus 5 s. That shorter `--time` also halves the grace a
+ * leftover engine gets between SIGTERM and SIGKILL (5 s instead of an unload's 10 s).
  */
 export const RECONCILE_CALL_TIMEOUT_MS = 10_000
 export const RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS = 5

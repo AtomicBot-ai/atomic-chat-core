@@ -100,6 +100,10 @@ output, ADR 2026-09-29-tensorrt-llm-guided-decoding-is-enabled-per-family), `cac
 loads, removed with its model or installation), `docker-config/` (the empty `config.json` every docker
 CLI call reads as `$DOCKER_CONFIG`) and `watchdog/atomic-watchdog-entrypoint.sh` (mode 0555, the
 model container's read-only entrypoint); ids are one directory each through percent-encoding.
+Under SELinux every mount source must resolve (after symlinks) inside the data folder, the only tree
+this core `:z`-relabels (design D15): a `<data>/<provider>/models` that is a symlink to another disk is
+refused with `INVALID_ARGUMENT` saying so — move the models into the data folder, or bind-mount the
+other disk at that path instead of linking it.
 The setup operation (task 2.6, ADR 2026-09-29-linux-setup-operation-and-engine-removal) writes
 `installations/<id>/installation.json` under the shared root (the installation pinned to its
 `descriptor_id`, plus the platform image it pulled) on activation; a removal deletes it, this scope's

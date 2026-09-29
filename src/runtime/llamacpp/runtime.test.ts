@@ -486,6 +486,46 @@ describe('unload', () => {
     expect(runtime.gpuOccupancy()).toEqual([])
   })
 
+  it('a stop whose cleanup itself throws answers the caller, and leaves no unhandled rejection behind (final review M-8)', async () => {
+    await data.writeModel('chat')
+    const baseSpawn = fakeLlamaSpawn()
+    let restore: (() => Promise<void>) | undefined
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        const started = await baseSpawn(spec, opts)
+        const { terminate } = started.process
+        const child = started.process.child
+        restore = async () => {
+          Object.defineProperty(started.process, 'child', { value: child, configurable: true })
+          await terminate(0)
+        }
+        started.process.terminate = async () => {
+          // The stop fails, and so does reading whether the process is still there.
+          Object.defineProperty(started.process, 'child', {
+            configurable: true,
+            get: () => {
+              throw new Error('child handle gone')
+            },
+          })
+          throw new Error('terminate failed')
+        }
+        return started
+      },
+    })
+    await runtime.load('chat')
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      await expect(runtime.unload('chat')).rejects.toThrow('child handle gone')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      await restore?.()
+    }
+  })
+
   it('starts nothing when core refuses the GPU, and holds nothing afterwards', async () => {
     await data.writeModel('chat')
     let spawned = false
