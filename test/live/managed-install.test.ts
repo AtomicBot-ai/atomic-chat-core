@@ -1228,10 +1228,18 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
         30 * MIN
       )
       const after = state()
-      const snapshot = await api.get<{
-        environments: Array<{ installations: Array<{ engine_id: string; status: string }> }>
-      }>('/snapshot')
-      const installations = snapshot.body.environments[0]?.installations ?? []
+      // The snapshot's installation list is refreshed after the operation turns terminal, not with it:
+      // read it until it no longer lists the engine, for at most a minute.
+      let installations: Array<{ engine_id: string; status: string }> = []
+      const listedUntil = Date.now() + MIN
+      for (;;) {
+        const snapshot = await api.get<{
+          environments: Array<{ installations: Array<{ engine_id: string; status: string }> }>
+        }>('/snapshot')
+        installations = snapshot.body.environments[0]?.installations ?? []
+        if (!installations.some((i) => i.engine_id === 'tensorrt-llm') || Date.now() > listedUntil) break
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+      }
       report.detail('remove-after-load', 'operation', done)
       report.detail('remove-after-load', 'error_code', done.error?.code ?? null)
       report.detail('remove-after-load', 'after', after)

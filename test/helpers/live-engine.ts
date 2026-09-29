@@ -16,6 +16,8 @@ import { gpuMemoryUsed, sudoDocker, sudoDockerAsync } from './live-linux-host.js
 
 /** Where the core mounts the heartbeat directory inside the container (`CONTAINER_HEARTBEAT_PATH`). */
 export const CONTAINER_HEARTBEAT_PATH = '/atomic/heartbeat'
+/** Where the core mounts the model's engine cache inside the container (`CONTAINER_ENGINE_CACHE_PATH`). */
+export const CONTAINER_ENGINE_CACHE_PATH = '/atomic/engine-cache'
 /** The exit code the watchdog script ends with when it stopped the engine over a stale heartbeat. */
 export const WATCHDOG_EXIT_STALE_HEARTBEAT = 97
 
@@ -40,6 +42,8 @@ export interface ContainerFacts {
   /** `Config.User` (`uid:gid`); null when the image's default user runs it. */
   user: string | null
   labels: Record<string, string>
+  /** The host directory mounted at `/atomic/engine-cache`: the model's engine cache. */
+  engine_cache_source: string | null
   /** The host directory mounted at `/atomic/heartbeat`: the core writes `heartbeat` in it. */
   heartbeat_source: string | null
   /** The load generation, read off the heartbeat mount (`.../heartbeats/<generation>`). */
@@ -104,6 +108,7 @@ export function containerFacts(inspectJson: string): ContainerFacts | null {
     if (at > 0 && pair.startsWith('ATOMIC_WATCHDOG_')) env[pair.slice(0, at)] = pair.slice(at + 1)
   }
   const heartbeat = (entry.Mounts ?? []).find((m) => m.Destination === CONTAINER_HEARTBEAT_PATH)
+  const engineCache = (entry.Mounts ?? []).find((m) => m.Destination === CONTAINER_ENGINE_CACHE_PATH)
   return {
     id: entry.Id,
     running,
@@ -118,6 +123,8 @@ export function containerFacts(inspectJson: string): ContainerFacts | null {
     command: entry.Config?.Cmd ?? [],
     user: entry.Config?.User === undefined || entry.Config.User === '' ? null : entry.Config.User,
     labels: entry.Config?.Labels ?? {},
+    engine_cache_source:
+      engineCache?.Source === undefined || engineCache.Source === '' ? null : engineCache.Source,
     heartbeat_source: heartbeat?.Source === undefined || heartbeat.Source === '' ? null : heartbeat.Source,
     generation:
       heartbeat?.Source === undefined || heartbeat.Source === ''
@@ -459,14 +466,20 @@ export interface LoadSamples {
 }
 
 /**
- * Samples the card's memory and the new container's `/dev/shm` every `everyMs` until `stop()`, while a
- * load (or a chat) is in flight. Containers of this core already running when it starts are ignored,
- * so the one a load is replacing never counts towards the new one's peak.
+ * Samples the card's memory and a container's `/dev/shm` every `everyMs` until `stop()`, while a load or
+ * a request is in flight. For a load, containers of this core already running when it starts are
+ * ignored, so the one a load is replacing never counts towards the new one's peak; `includeRunning`
+ * samples the running one instead, for a request to a model that is already loaded.
  */
-export function startSampler(options: { gpuUuid: string; instanceId: string; everyMs: number }): {
+export function startSampler(options: {
+  gpuUuid: string
+  instanceId: string
+  everyMs: number
+  includeRunning?: boolean
+}): {
   stop: () => Promise<LoadSamples>
 } {
-  const ignore = new Set(ownContainers(options.instanceId))
+  const ignore = new Set(options.includeRunning === true ? [] : ownContainers(options.instanceId))
   const result: LoadSamples = { samples: 0, vram_peak_bytes: null, shm_peak_bytes: null }
   let stopped = false
   const max = (a: number | null, b: number | null): number | null =>

@@ -466,6 +466,8 @@ export interface PreparedModel {
   id: string
   files: RepoFile[]
   config: Record<string, unknown>
+  /** `hf_quant_config.json` when the revision has one. */
+  hf_quant_config: Record<string, unknown> | null
   architectures: string[]
   quantization: string
   /** The core's verdict; null when this core build has no check route (it answered 404). */
@@ -475,6 +477,34 @@ export interface PreparedModel {
   download_ms: number
   /** `<data>/tensorrt-llm/models/<id>/`. */
   dir: string
+}
+
+/**
+ * `POST /models/tensorrt-llm/check` for one curated revision on `gpuId`: the verdict, null when the build
+ * has no such route (404), and a throw with the answer when the core refuses it or does not call it
+ * curated.
+ */
+export async function checkModel(options: {
+  api: Pick<ControlApi, 'post'>
+  model: CuratedModel
+  config: Record<string, unknown>
+  hfQuant: Record<string, unknown> | null
+  files: readonly RepoFile[]
+  gpuId: string | undefined
+}): Promise<ModelCheck | null> {
+  const { api, model } = options
+  const answer = await api.post<ModelCheck>('/models/tensorrt-llm/check', {
+    repository: model.repository,
+    revision: model.revision,
+    config_json: options.config,
+    hf_quant_config_json: options.hfQuant,
+    files: options.files,
+    ...(options.gpuId === undefined ? {} : { gpu_id: options.gpuId }),
+  })
+  if (answer.status === 404) return null
+  if (answer.status !== 200 || !answer.body.verdict.ok || !answer.body.curated)
+    throw new Error(`the core's check refused ${model.repository}: ${answer.status} ${answer.text}`)
+  return answer.body
 }
 
 /**
@@ -505,20 +535,8 @@ export async function prepareCuratedModel(options: {
     ? await fetchJson(model.repository, model.revision, 'hf_quant_config.json', log)
     : null
   let quantization = quantizationOf(config, hfQuant)
-  const answer = await api.post<ModelCheck>('/models/tensorrt-llm/check', {
-    repository: model.repository,
-    revision: model.revision,
-    config_json: config,
-    hf_quant_config_json: hfQuant,
-    files,
-    ...(options.gpuId === undefined ? {} : { gpu_id: options.gpuId }),
-  })
-  const check = answer.status === 404 ? null : answer.body
-  if (check !== null) {
-    if (answer.status !== 200 || !check.verdict.ok || !check.curated)
-      throw new Error(`the core's check refused ${model.repository}: ${answer.status} ${answer.text}`)
-    quantization = check.quantization_format ?? quantization
-  }
+  const check = await checkModel({ api, model, config, hfQuant, files, gpuId: options.gpuId })
+  if (check !== null) quantization = check.quantization_format ?? quantization
   const cache = join(options.cacheRoot, ...model.repository.split('/'), model.revision)
   const started = Date.now()
   await downloadRevision(model.repository, model.revision, files, cache, log)
@@ -539,6 +557,7 @@ export async function prepareCuratedModel(options: {
     id,
     files,
     config,
+    hf_quant_config: hfQuant,
     architectures,
     quantization,
     check,

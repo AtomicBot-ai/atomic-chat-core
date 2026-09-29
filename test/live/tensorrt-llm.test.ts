@@ -31,9 +31,18 @@
  * ATOMIC_LIVE_UPSTREAM_BIN and ATOMIC_LIVE_UPSTREAM_MODEL (the residency race), HF_ENDPOINT, HF_TOKEN. The core runs with DO_NOT_TRACK=1: a test run sends no error reports.
  */
 import { createHash } from 'node:crypto'
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { contextLengthSettings, httpRequest, startLiveCore, streamChat } from '../helpers/live-core.js'
@@ -66,6 +75,7 @@ import type {
   Summary,
 } from '../helpers/live-engine.js'
 import {
+  checkModel,
   fetchJson,
   fittingCuratedModels,
   pickTierModel,
@@ -261,6 +271,13 @@ interface CardRun {
   reload: LoadRecord | null
   unload_ms: number | null
   engine_cache: { path: string | null; files: number; bytes: number; unreadable: number } | null
+  /**
+   * An engine cache for this card's tier model was already in the run's data folder (an earlier card
+   * of the same tier filled it) and was deleted before the first load, so every first load is cold.
+   */
+  engine_cache_warm: boolean | null
+  /** The highest `/dev/shm` use seen in this card's engine containers: loads, chats, tool and JSON calls. */
+  shm_peak_bytes: number | null
   /** Loads the core refused or the engine did not survive, with the engine's log tail. */
   failed_loads: Array<Record<string, unknown>>
   container_user: Record<string, unknown> | null
@@ -374,10 +391,27 @@ async function modelWhoseFamily(
   return { prepared: null, checked }
 }
 
-/** `prepareCuratedModel` for `card`, remembered for later scenarios. */
+/**
+ * `prepareCuratedModel` for `card`, once per model per run: a model an earlier card already prepared
+ * is only checked again for this card's `gpu_id` (the verdict is per card), never re-listed,
+ * re-hashed or re-linked.
+ */
 async function prepare(card: CardRun, model: CuratedModel): Promise<PreparedModel> {
+  const api = (await ensureCore()).api
+  const known = [...S.prepared.values()].find((p) => p.model.repository === model.repository)
+  if (known !== undefined) {
+    const check = await checkModel({
+      api,
+      model,
+      config: known.config,
+      hfQuant: known.hf_quant_config,
+      files: known.files,
+      gpuId: card.gpu.uuid,
+    })
+    return { ...known, check }
+  }
   const prepared = await prepareCuratedModel({
-    api: (await ensureCore()).api,
+    api,
     model,
     gpuId: card.gpu.uuid,
     dataFolder: S.dataFolder,
@@ -386,6 +420,41 @@ async function prepare(card: CardRun, model: CuratedModel): Promise<PreparedMode
   })
   S.prepared.set(prepared.id, prepared)
   return prepared
+}
+
+/** This run's engine caches: `<data>/atomic-core/managed-runtimes/caches`. */
+const cachesDir = (): string => join(S.dataFolder, 'atomic-core', 'managed-runtimes', 'caches')
+
+/**
+ * Makes the card's first load of `modelId` cold. The engine cache is keyed by descriptor and model,
+ * not by card, so a second card of the same tier would otherwise start from what the first card's
+ * engine wrote, and its "first" load would be neither cold nor comparable. A cache found here is in
+ * this run's own data folder: it is recorded (`engine_cache_warm`) and deleted, after unloading
+ * whatever of ours might still mount it. One this user cannot delete means the engine wrote files as
+ * someone else, and the card fails on that instead of comparing a warm load against a warm one.
+ */
+async function coldEngineCache(card: CardRun, modelId: string): Promise<void> {
+  const cache = findEngineCache(cachesDir(), S.descriptor.descriptor_id, modelId)
+  card.engine_cache_warm = cache !== null
+  if (cache === null) return
+  if (!cache.startsWith(`${S.dataFolder}${sep}`))
+    throw new Error(`refusing to delete ${cache}: it is outside this run's data folder ${S.dataFolder}`)
+  if (S.loaded !== null) {
+    const unload = await core().api.post(`/models/tensorrt-llm/${S.loaded.modelId}/unload`, {}, 10 * MIN)
+    expect(unload.status, unload.text).toBe(200)
+    S.loaded = null
+  }
+  try {
+    rmSync(cache, { recursive: true })
+  } catch (error) {
+    throw new Error(
+      `the engine cache ${cache} an earlier card left could not be deleted (${(error as NodeJS.ErrnoException).code ?? describeError(error)}): ` +
+        "the engine wrote files this user does not own, so this card's first load would not be cold"
+    )
+  }
+  report.log(
+    `gpu${card.index}: deleted the engine cache an earlier card left (${cache}), so this first load is cold`
+  )
 }
 
 /** Makes `prepared` the model loaded on `card` (pinning the card first), unless it already is. */
@@ -486,6 +555,7 @@ async function loadOnCard(
     loadMs = Date.now() - started
     // Stopped however the request ended, so no sampler keeps polling Docker behind a failed load.
     samples = await sampler.stop()
+    noteShm(card, samples.shm_peak_bytes)
   }
   report.log(
     `load of ${prepared.id} on gpu${card.index} answered ${answer.status} after ${(loadMs / 1000).toFixed(1)} s`
@@ -587,6 +657,26 @@ function installLlamaCpp(): void {
   )
 }
 
+/** Folds one `/dev/shm` reading into the card's peak. */
+function noteShm(card: CardRun, bytes: number | null): void {
+  if (bytes !== null) card.shm_peak_bytes = Math.max(card.shm_peak_bytes ?? 0, bytes)
+}
+
+/** Runs `work` with the card's memory and the running container's `/dev/shm` sampled, folding the shm peak into the card. */
+async function sampledOn<T>(card: CardRun, work: () => Promise<T>): Promise<T> {
+  const sampler = startSampler({
+    gpuUuid: card.gpu.uuid,
+    instanceId: core().ready.instance_id,
+    everyMs: 1000,
+    includeRunning: true,
+  })
+  try {
+    return await work()
+  } finally {
+    noteShm(card, (await sampler.stop()).shm_peak_bytes)
+  }
+}
+
 interface ChatAnswer {
   status: number
   text: string
@@ -596,6 +686,7 @@ interface ChatAnswer {
       finish_reason?: string
       message?: {
         content?: string | null
+        reasoning_content?: string | null
         tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>
       }
     }>
@@ -681,6 +772,8 @@ function cardSummary(card: CardRun): Record<string, unknown> {
     first_load: loadView(card.first_load),
     unload_ms: card.unload_ms,
     engine_cache: card.engine_cache,
+    engine_cache_warm: card.engine_cache_warm,
+    shm_peak_bytes: card.shm_peak_bytes,
     reload: loadView(card.reload),
     reload_to_first_load:
       card.first_load === null || card.reload === null ? null : card.reload.load_ms / card.first_load.load_ms,
@@ -825,6 +918,8 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         reload: null,
         unload_ms: null,
         engine_cache: null,
+        engine_cache_warm: null,
+        shm_peak_bytes: null,
         failed_loads: [],
         container_user: null,
         stream: null,
@@ -932,6 +1027,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         report.log(`gpu${index} model: ${model.repository}@${model.revision} (${model.note})`)
         card.prepared = await prepare(card, model)
         if (card.prepared.check !== null) expect(card.prepared.check.checked_gpu_id).toBe(card.gpu.uuid)
+        await coldEngineCache(card, card.prepared.id)
         // Before anything of ours is on this card: the level its memory must come back to.
         card.vram_baseline_bytes = (await gpuMemoryUsed()).get(card.gpu.uuid) ?? null
         card.first_load = await loadOnCard(card, card.prepared)
@@ -953,11 +1049,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         const uid = process.getuid?.() ?? -1
         const gid = process.getgid?.() ?? -1
         const container = loaded.containerId === null ? null : await inspectContainer(loaded.containerId)
-        const cache = findEngineCache(
-          join(S.dataFolder, 'atomic-core', 'managed-runtimes', 'caches'),
-          S.descriptor.descriptor_id,
-          loaded.modelId
-        )
+        const cache = findEngineCache(cachesDir(), S.descriptor.descriptor_id, loaded.modelId)
         const offender = cache === null ? null : firstForeignOwner(cache, uid)
         card.container_user = {
           expected: `${uid}:${gid}`,
@@ -994,6 +1086,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           gpuUuid: card.gpu.uuid,
           instanceId: core().ready.instance_id,
           everyMs: 1000,
+          includeRunning: true,
         })
         let chat: StreamedChat
         let samples: LoadSamples
@@ -1010,6 +1103,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           })
         } finally {
           samples = await sampler.stop()
+          noteShm(card, samples.shm_peak_bytes)
         }
         // The session gateway (design D11): the session's own port refuses a request without its key.
         const gateway = `http://127.0.0.1:${loaded.session.port}/v1/models`
@@ -1063,11 +1157,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           const after = await inspectContainer(loaded.containerId)
           expect(after?.running ?? false, 'the container still runs after the unload answered').toBe(false)
         }
-        const cachePath = findEngineCache(
-          join(S.dataFolder, 'atomic-core', 'managed-runtimes', 'caches'),
-          S.descriptor.descriptor_id,
-          loaded.modelId
-        )
+        const cachePath = findEngineCache(cachesDir(), S.descriptor.descriptor_id, loaded.modelId)
         card.engine_cache = {
           path: cachePath,
           ...(cachePath === null ? { files: 0, bytes: 0, unreadable: 0 } : dirStats(cachePath)),
@@ -1082,6 +1172,18 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
             card.reload.load_ms / first.load_ms
           ).toFixed(2)}×)`
         )
+        // The spec's own scenario ("Повторная загрузка той же модели"): the reload mounts the same cache
+        // folder, and what the engine wrote there on the first start is still in it.
+        expect(cachePath, 'the first load left no engine cache folder for the model').not.toBeNull()
+        expect(
+          card.engine_cache.files,
+          `the engine cache ${cachePath} is empty after the first load`
+        ).toBeGreaterThan(0)
+        expect(
+          card.reload.container?.engine_cache_source,
+          'the reload did not mount the engine cache folder the first load used'
+        ).toBe(first.container?.engine_cache_source)
+        // The first load was cold (`coldEngineCache`), so this compares a cold start with a cached one.
         expect(
           card.reload.load_ms,
           `the second load (${card.reload.load_ms} ms) was not faster than the first (${first.load_ms} ms)`
@@ -1109,33 +1211,37 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         const capabilities = await core().api.get<{ tools?: boolean }>(
           `/models/tensorrt-llm/${prepared.id}/capabilities`
         )
+        const port = await publicPort()
         const started = Date.now()
-        const answer = await chat(await publicPort(), {
-          model: prepared.id,
-          stream: false,
-          max_tokens: 1024,
-          tool_choice: 'auto',
-          tools: [
-            {
-              type: 'function',
-              function: {
-                name: 'get_weather',
-                description: 'The current weather in a city.',
-                parameters: {
-                  type: 'object',
-                  properties: { city: { type: 'string', description: 'The city name, e.g. Berlin' } },
-                  required: ['city'],
+        // Room for a reasoning model's thinking before the call; `finish_reason` shows a truncation.
+        const answer = await sampledOn(card, () =>
+          chat(port, {
+            model: prepared.id,
+            stream: false,
+            max_tokens: 2048,
+            tool_choice: 'auto',
+            tools: [
+              {
+                type: 'function',
+                function: {
+                  name: 'get_weather',
+                  description: 'The current weather in a city.',
+                  parameters: {
+                    type: 'object',
+                    properties: { city: { type: 'string', description: 'The city name, e.g. Berlin' } },
+                    required: ['city'],
+                  },
                 },
               },
-            },
-          ],
-          messages: [
-            {
-              role: 'user',
-              content: 'What is the weather in Paris right now? Use the get_weather tool. /no_think',
-            },
-          ],
-        })
+            ],
+            messages: [
+              {
+                role: 'user',
+                content: 'What is the weather in Paris right now? Use the get_weather tool. /no_think',
+              },
+            ],
+          })
+        )
         const body = answer.json ?? {}
         const choice = body.choices?.[0]
         const call = choice?.message?.tool_calls?.[0]?.function
@@ -1158,6 +1264,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           finish_reason: choice?.finish_reason ?? null,
           tool_calls: choice?.message?.tool_calls ?? null,
           content: (choice?.message?.content ?? '').slice(0, 2000),
+          reasoning_content: (choice?.message?.reasoning_content ?? '').slice(0, 4000),
           raw: body.choices === undefined ? answer.text.slice(0, 2000) : undefined,
         }
         report.log(
@@ -1170,7 +1277,10 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           expect.arrayContaining(['--tool_parser', parser])
         )
         expect(answer.status, answer.text.slice(0, 2000)).toBe(200)
-        expect(call?.name, `no get_weather call in ${answer.text.slice(0, 2000)}`).toBe('get_weather')
+        expect(
+          call?.name,
+          `no get_weather call (finish_reason ${choice?.finish_reason ?? '-'}) in ${answer.text.slice(0, 2000)}`
+        ).toBe('get_weather')
         expect(String(args?.['city'] ?? ''), `arguments ${call?.arguments}`).toMatch(/paris/i)
       }
     )
@@ -1191,23 +1301,28 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         const capabilities = await core().api.get<{ structured_output?: boolean }>(
           `/models/tensorrt-llm/${prepared.id}/capabilities`
         )
-        const answer = await chat(await publicPort(), {
-          model: prepared.id,
-          stream: false,
-          max_tokens: 512,
-          response_format: {
-            type: 'json_schema',
-            json_schema: { name: 'capital', strict: true, schema: CAPITAL_SCHEMA },
-          },
-          messages: [
-            {
-              role: 'user',
-              content:
-                'What is the capital of France? Answer with its city, country and population in millions. /no_think',
+        const port = await publicPort()
+        const answer = await sampledOn(card, () =>
+          chat(port, {
+            model: prepared.id,
+            stream: false,
+            max_tokens: 2048,
+            response_format: {
+              type: 'json_schema',
+              json_schema: { name: 'capital', strict: true, schema: CAPITAL_SCHEMA },
             },
-          ],
-        })
-        const content = answer.json?.choices?.[0]?.message?.content ?? ''
+            messages: [
+              {
+                role: 'user',
+                content:
+                  'What is the capital of France? Answer with its city, country and population in millions. /no_think',
+              },
+            ],
+          })
+        )
+        const choice = answer.json?.choices?.[0]
+        const content = choice?.message?.content ?? ''
+        const reasoning = choice?.message?.reasoning_content ?? ''
         let parsed: unknown
         let parseError: string | null = null
         try {
@@ -1223,7 +1338,11 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           loaded_for_this_scenario: load === null ? null : load.load_ms,
           capabilities_structured_output: capabilities.body?.structured_output ?? null,
           status: answer.status,
+          // Both, so a reader can tell a JSON answer the reasoning parser filed as thinking, or one cut
+          // off by the token limit, from an engine that ignored response_format.
+          finish_reason: choice?.finish_reason ?? null,
           content: content.slice(0, 2000),
+          reasoning_content: reasoning.slice(0, 4000),
           parse_error: parseError,
           violations,
           raw: answer.json === null ? answer.text.slice(0, 2000) : undefined,
@@ -1233,7 +1352,11 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
           true
         )
         expect(answer.status, answer.text.slice(0, 2000)).toBe(200)
-        expect(parseError, `the content is not JSON: ${content.slice(0, 500)}`).toBeNull()
+        expect(
+          parseError,
+          `the content is not JSON (finish_reason ${choice?.finish_reason ?? '-'}): ${content.slice(0, 500)}` +
+            (reasoning === '' ? '' : `; reasoning_content: ${reasoning.slice(0, 500)}`)
+        ).toBeNull()
         expect(violations, `the content breaks the schema: ${content.slice(0, 500)}`).toEqual([])
       }
     )
@@ -1293,10 +1416,13 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
 
     scenario(
       scenarioId(index, 'kill-core'),
-      30 * MIN,
-      () => needsLoadedHere(index),
+      2 * HOUR,
+      () => needsFirstLoad(index),
       async () => {
         const card = S.cards[index] as CardRun
+        // A capability scenario's own load may have failed and left nothing here: load the tier model
+        // again rather than lose this card's watchdog measurement.
+        if (S.loaded?.card !== index) await ensureLoadedOn(card, card.prepared as PreparedModel)
         const loaded = S.loaded as NonNullable<typeof S.loaded>
         const victim = core()
         // Only ever the process this test spawned: startLiveCore runs the binary itself, not through sudo.
@@ -1320,12 +1446,8 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         // How often the core really writes the heartbeat, and what /dev/shm holds after inference.
         const gaps = heartbeatGaps(await sampleMtimes(heartbeatFile, HEARTBEAT_SAMPLE_MS, 100))
         const shmNow = await shmUsedBytes(id)
-        const shmPeak = [
-          card.first_load?.samples.shm_peak_bytes,
-          card.reload?.samples.shm_peak_bytes,
-          card.stream?.['shm_peak_bytes'] as number | null | undefined,
-          shmNow,
-        ].reduce<number | null>((peak, v) => (typeof v === 'number' ? Math.max(peak ?? 0, v) : peak), null)
+        noteShm(card, shmNow)
+        const shmPeak = card.shm_peak_bytes
 
         const killedAt = Date.now()
         process.kill(victim.ready.pid, 'SIGKILL')
@@ -1454,8 +1576,24 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
       const card = S.cards.find((c) => c.first_load !== null) as CardRun
       const prepared = card.prepared as PreparedModel
       installLlamaCpp()
+      const api = (await ensureCore()).api
+      // Alone first: a llama.cpp that cannot load here at all (a CPU or mismatched build, a broken GGUF)
+      // would make the race below pass without any contention. That is this host, not the core, so the
+      // scenario is skipped with the answer instead.
+      const alone = await api.post<{ session?: { pid?: number | null } }>(
+        `/models/llamacpp-upstream/${LLAMA_MODEL_ID}/load`,
+        { overrides: { ctx_size: 2048 } },
+        RACE_BOUND_MS
+      )
+      // Loading it evicted whatever of ours held the cards.
+      S.loaded = null
+      if (alone.status !== 200)
+        throw new ScenarioSkip(
+          `llama.cpp does not load on this host on its own (${alone.status}: ${alone.text.slice(0, 500)}), so there is nothing to race`
+        )
+      const unloaded = await api.post(`/models/llamacpp-upstream/${LLAMA_MODEL_ID}/unload`, {}, 5 * MIN)
+      expect(unloaded.status, unloaded.text).toBe(200)
       await ensureLoadedOn(card, prepared)
-      const api = core().api
       const context = (CONTEXT_LENGTH ?? 8192) === 4096 ? 2048 : 4096
       const settle = async (
         label: string,
@@ -1508,8 +1646,15 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         calls: results,
         resident: resident.map((r) => ({ provider: r.provider, model_id: r.model_id, pid: r.pid })),
         running_trt_containers: containers,
+        llama_alone_status: alone.status,
       }
       report.section('reload_while_other_loads', race)
+      // It loaded alone a moment ago, so a refusal now is the residency rule answering, not the host.
+      const llamaRefused = results.find((r) => r['label'] === 'llamacpp-upstream' && r['status'] !== 200)
+      if (llamaRefused !== undefined)
+        report.log(
+          `race: the llama.cpp load was answered ${String(llamaRefused['status'])} under contention: ${JSON.stringify(llamaRefused['body'] ?? llamaRefused['error'])}`
+        )
       report.log(
         `race: ${results.map((r) => `${String(r['label'])} ${String(r['status'])} in ${String(r['ms'])} ms`).join(', ')}; ` +
           `resident ${resident.map((r) => `${r.provider}/${r.model_id}`).join(', ') || 'none'}`

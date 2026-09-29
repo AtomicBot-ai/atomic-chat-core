@@ -247,15 +247,14 @@ after the cards.
 | Scenario | What it checks |
 | --- | --- |
 | `preconditions` | Checked once. Fails with every problem listed: no binary, no GPU, a driver older than the descriptor's minimum, no passwordless sudo, or a session that cannot reach Docker. It then starts the core and reads `/snapshot`, and **fails unless the engine installation is `ready`** and pinned to the same descriptor the test reads. |
-| `gpu<N>-load` | Loads the curated model of the card's memory tier, pinned to this card. The download goes through the documented flow (inventory digest, `POST /models/tensorrt-llm/check` with this card's `gpu_id`, sizes and sha256). The check: the container got exactly this card (`DeviceRequests`), the core substituted no other card, and `session:load-progress` reached `ready`. Records the load time, each stage's elapsed time, peak VRAM and peak `/dev/shm`. |
+| `gpu<N>-load` | Loads the curated model of the card's memory tier, pinned to this card. The download goes through the documented flow (inventory digest, `POST /models/tensorrt-llm/check` with this card's `gpu_id`, sizes and sha256). The check: the container got exactly this card (`DeviceRequests`), the core substituted no other card, and `session:load-progress` reached `ready`. Records the load time, each stage's elapsed time, peak VRAM and peak `/dev/shm`. Every first load is cold: the engine cache is keyed by descriptor and model, not by card, so when an earlier card of the same tier already filled it, the test deletes that folder in the run's own data folder first and records `engine_cache_warm: true`. If this user cannot delete it (the engine wrote files as someone else), the scenario fails with that. Each model is downloaded, hashed and linked once per run; later cards only run the check for their own `gpu_id`. |
 | `gpu<N>-container-user` | The running engine container's `Config.User` is the `uid:gid` of the user running the core, and every file and folder the load wrote under the model's engine cache is owned by that uid. The report names the first file that is not. If the engine cannot start as that user, `gpu<N>-load` fails, and the engine's log tail is in `cards[].failed_loads`. |
 | `gpu<N>-stream` | Streams a chat through the public server (`POST /v1/chat/completions` on `:1337`, which routes to the session gateway). The session's own gateway port answers `401` without the session key and `200` with it. Records the time to the first token. |
-| `gpu<N>-reload-cached` | Unloads (the container must no longer run once the unload answers), records what the engine cache holds, and loads the same model again. **The second load must be faster than the first.** Both durations are recorded. |
+| `gpu<N>-reload-cached` | Unloads (the container must no longer run once the unload answers), records what the engine cache holds, and loads the same model again. The spec's own check comes first: the engine cache holds files after the first load, and the reload's container mounts the same cache folder as the first one. **Then the second load must be faster than the cold first one.** Both durations are recorded. The model files are in the page cache by then too, so the speed-up is not the engine cache's alone. |
 | `gpu<N>-tool-call` | Sends one tool call (`get_weather`) through `:1337` to a model whose family has a `tool_parser` in the descriptor's `model_families`. If the tier model's family has no parser, the test uses the smallest other curated model that fits the card and has one. With no such model the scenario is skipped. The check: `capabilities` declares `tools: true`, the engine was started with `--tool_parser <name>`, and the answer carries a `get_weather` call whose arguments name Paris. |
 | `gpu<N>-structured-output` | Sends a chat with `response_format: {type: "json_schema", …}` (city, country and population, all required, no other keys) through `:1337`. The model is the one loaded if its family declares `structured_output: true`, else the smallest curated model the card runs that does. The check: `capabilities` declares structured output, and the answer's content parses as JSON that satisfies the schema (checked by hand: required keys, types, no extra keys). |
 | `gpu<N>-structured-output-refused` | For a curated model the card runs whose family has `structured_output: false`: the same request is refused by the core with `400` `unsupported_capability`, both on `:1337` and on the session's own gateway port, so it never reaches the engine. Skipped with the models it checked when no curated family has `structured_output: false` (none in `tensorrt-llm-1.2.1-r1`). |
-| `gpu<N>-kill-core` | Measures the heartbeat for 20 s, then sends `kill -9` to the core. The engine container must exit through its watchdog: the exit code is 97, and it exits within the watchdog's own bound (computed from the container's `ATOMIC_WATCHDOG_*` env) plus 30 s. The card's `memory.used` must return to its level before the first load, within `ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB`, within 60 s. A new core then starts on the same data folder. The run records whether that core removed the killed core's container, and the next card runs on the new core. |
-
+| `gpu<N>-kill-core` | Loads the tier model again if a capability scenario's load left nothing on the card, so the watchdog measurement is not lost. Measures the heartbeat for 20 s, then sends `kill -9` to the core. The engine container must exit through its watchdog: the exit code is 97, and it exits within the watchdog's own bound (computed from the container's `ATOMIC_WATCHDOG_*` env) plus 30 s. The card's `memory.used` must return to its level before the first load, within `ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB`, within 60 s. A new core then starts on the same data folder. The run records whether that core removed the killed core's container, and the next card runs on the new core. |
 | `reload-while-other-loads` | Needs a llama.cpp build: `ATOMIC_LIVE_UPSTREAM_BIN` (a CUDA `llama-server`; its whole folder is copied into the run's data folder as a backend pack) and `ATOMIC_LIVE_UPSTREAM_MODEL` (a small GGUF), the same variables as `test/live/llamacpp.test.ts`. Skipped without them. With the first card's tier model loaded, it starts a llama.cpp GPU load, and 250 ms later a TensorRT-LLM reload of the same model with a different context length. Both requests must answer within 30 minutes, whether they succeed or fail. Afterwards `GET /sessions` must hold exactly one GPU chat session, because a llama.cpp session holds every card, and the running TensorRT-LLM containers must match it. The run records both answers and what stayed resident. |
 
 The tier model is the curated model with the largest `vram_tier_bytes` the card holds, among the formats
@@ -292,9 +291,12 @@ FP8 on Ada and Hopper, BF16 on Ampere. This follows the `note` of each curated e
 
 ### Run
 
-From a fresh login on the host, in the checkout that holds the binary:
+From a fresh login on the host, in the checkout that holds the binary. A run takes hours on a multi-card
+host, so start `tmux` **inside that login** first: an ssh drop then does not kill it half-way. Do not
+attach to a tmux server an older login started, because its sessions may predate your `docker` group.
 
 ```sh
+tmux new -s engine
 cd ~/atomic-chat-core
 ATOMIC_LIVE=1 \
 ATOMIC_RUNTIME_DESCRIPTOR_URL="file://$HOME/tensorrt-llm.json" \
@@ -350,7 +352,7 @@ In the output folder the test prints on its first log line (`output folder …`)
     `scenarios` (passed, failed or skipped per scenario);
   - per card, `first_load` and `reload` (`load_ms`, `stages`, `weight_bytes`, `readiness_timeout_ms`,
     `load_to_timeout`, `vram_peak_bytes`, `shm_peak_bytes`, `command`), plus `reload_to_first_load`,
-    `engine_cache`, `container_user`, `failed_loads` (with each failed load's engine log tail), `stream`
+    `engine_cache`, `engine_cache_warm`, `shm_peak_bytes`, `container_user`, `failed_loads` (with each failed load's engine log tail), `stream`
     (`first_token_ms`), `tool`, `structured`, `structured_refused` and `kill`;
   - `reload_while_other_loads`: both answers of the residency race and what stayed resident;
 - `run.log` (the same lines the console shows, prefixed `[tensorrt-llm …]`) and `core.log` (every core's
@@ -371,9 +373,9 @@ that file and line in the same change, and reference the ADR there:
 | --- | --- | --- |
 | Heartbeat interval | `DEFAULT_HEARTBEAT_INTERVAL_SECS` (and the watchdog poll, which follows it) | `cards[].kill.heartbeat_gaps_ms`: min, median and max of how often the core really wrote the file |
 | Watchdog stale limit and kill grace | `DEFAULT_WATCHDOG_STALE_LIMIT_SECS`, `DEFAULT_WATCHDOG_KILL_GRACE_SECS` | `cards[].kill.watchdog_env` (what the container got), `observed_staleness_ms` (last heartbeat to container exit), `kill_to_exit_ms`, `watchdog_exit_bound_ms`, and `exit_code` 97 |
-| `--shm-size` | `MODEL_CONTAINER_SHM_SIZE` | `cards[].kill.shm_size_bytes` (what the container got) against `shm_peak_bytes` (the highest `/dev/shm` use seen during load, chat and tool call) |
+| `--shm-size` | `MODEL_CONTAINER_SHM_SIZE` | `cards[].kill.shm_size_bytes` (what the container got) against `cards[].shm_peak_bytes` (the highest `/dev/shm` use sampled during every load, the streamed chat, the tool call and the structured-output call, plus one reading before the kill) |
 | Container memory limit | none: the core sets no `--memory` | `cards[].kill.container_memory_limit_bytes` (`0` means Docker sets no limit) |
-| Load timeout coefficients | `TENSORRT_LLM_READINESS_BASE_MS`, `TENSORRT_LLM_READINESS_PER_GIB_MS`, `TENSORRT_LLM_READINESS_MARGIN` | `cards[].first_load.load_ms` against `weight_bytes`. A line through the cold first loads gives the base (intercept) and the per-GiB cost (slope). The margin must cover the slowest card's first load, which `load_to_timeout` shows as a fraction of today's timeout. `reload.load_ms` shows what the engine cache saves. |
+| Load timeout coefficients | `TENSORRT_LLM_READINESS_BASE_MS`, `TENSORRT_LLM_READINESS_PER_GIB_MS`, `TENSORRT_LLM_READINESS_MARGIN` | `cards[].first_load.load_ms` against `weight_bytes`. A line through the first loads gives the base (intercept) and the per-GiB cost (slope). Every first load is cold as far as the engine cache goes (`engine_cache_warm: true` only says an earlier card's cache was deleted first), but a second card of the same model starts with its files in the page cache, so fit on each model's first card when they differ. The margin must cover the slowest card's first load, which `load_to_timeout` shows as a fraction of today's timeout. `reload.load_ms` shows what the engine cache saves. |
 
 Also note in the ADR the `stages` split (`starting-container` against `initializing-engine`) and the time
 to the first token, because they tell users what to expect.
@@ -389,8 +391,13 @@ Each card's `model` and `scenarios` in `summary.json` are the input for `curated
 - Write the cards it passed on into its `note`, for example "verified on RTX 4090 (8.9) and L40S (8.9)".
 - A `tool-call` failure on a family whose `model_families` entry names a `tool_parser` means that parser
   name is wrong for this engine release. Fix `model_families`, not the model list.
-- A `structured-output` failure on a family with `structured_output: true` (a refusal, content that is not
-  JSON, or JSON that breaks the schema) means this engine release does not honour `response_format` for
-  that family. Set its `structured_output` to `false` in `model_families`.
+- A `structured-output` failure on a family with `structured_output: true` needs a look at
+  `cards[].structured` before any change. Set that family's `structured_output` to `false` in
+  `model_families` only when `finish_reason` is `stop`, `content` is present, and it is not JSON that fits
+  the schema (or the core refused the request): then this engine release does not honour
+  `response_format` for that family. When the JSON sits in `reasoning_content` instead, the reasoning
+  parser filed it as thinking. When `finish_reason` is `length`, the answer was cut off. Neither says
+  anything about `response_format`: take those to the adapter, not to conf. `cards[].tool` records the
+  same two fields for a tool call.
 - Put the table of hosts and cards (name, compute capability, driver, model, pass or fail per scenario,
   load, reload and first-token times) in the conf PR that changes the list.
