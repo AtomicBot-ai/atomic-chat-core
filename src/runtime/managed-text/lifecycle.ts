@@ -207,6 +207,8 @@ export interface ManagedLoadRequest {
   /** The descriptor's `model_families` entry for this model's architecture, or null. */
   family: ModelFamilySupport | null
   gpuUuid: string
+  /** `gpuUuid` names a unified-memory card (`ManagedLaunchContext.unifiedMemory`); absent, a discrete one. */
+  unifiedMemory?: boolean
   /** Whether Docker runs with SELinux (probe snapshot): mounts then get the shared `:z` label. */
   selinux: boolean
   /** Raw provider settings; the adapter validates them. */
@@ -643,6 +645,7 @@ export class ManagedTextLifecycle {
         generationFilesPath: CONTAINER_HEARTBEAT_PATH,
         weightBytes: request.weightBytes,
         family: request.family,
+        unifiedMemory: request.unifiedMemory === true,
       })
       await writeWatchdogScript(this.deps.paths.watchdogScript)
       await mkdir(entry.heartbeatDir, { recursive: true })

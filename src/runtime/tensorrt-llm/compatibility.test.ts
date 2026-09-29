@@ -754,34 +754,53 @@ describe('kvCacheReserveBytes', () => {
       { ...LLAMA_3_8B_SHAPE, dtype: 'bfloat16' },
       null,
       8192,
-      0.9
+      0.9,
+      false
     )
     expect(basis).toBe('config')
     expect(reserveBytes).toBe(1_193_046_472)
   })
 
   it('falls back to weights x (1 - fraction) when config.json lacks a KV-cache shape ("weight_fraction" basis)', () => {
-    const { reserveBytes, basis } = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.9)
+    const { reserveBytes, basis } = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.9, false)
     expect(basis).toBe('weight_fraction')
     expect(reserveBytes).toBe(10_000_000_000)
   })
 
   it('a higher configured fraction shrinks the fallback reserve; a lower one grows it', () => {
-    const low = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.1).reserveBytes // MIN fraction
-    const high = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.95).reserveBytes // MAX fraction
+    const low = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.1, false).reserveBytes // MIN fraction
+    const high = kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.95, false).reserveBytes // MAX fraction
     expect(high).toBeLessThan(low)
   })
 
   it('a higher configured fraction shrinks the config-basis reserve too (more of what is left spent on KV)', () => {
-    const low = kvCacheReserveBytes(16_000_000_000, LLAMA_3_8B_SHAPE, null, 8192, 0.1).reserveBytes
-    const high = kvCacheReserveBytes(16_000_000_000, LLAMA_3_8B_SHAPE, null, 8192, 0.95).reserveBytes
+    const low = kvCacheReserveBytes(16_000_000_000, LLAMA_3_8B_SHAPE, null, 8192, 0.1, false).reserveBytes
+    const high = kvCacheReserveBytes(16_000_000_000, LLAMA_3_8B_SHAPE, null, 8192, 0.95, false).reserveBytes
     expect(high).toBeLessThan(low)
   })
 
   it('rounds up so a reserve is never under-counted, on both bases', () => {
-    expect(kvCacheReserveBytes(1, {}, null, 8192, 0.9).reserveBytes).toBe(1)
-    expect(kvCacheReserveBytes(1, LLAMA_3_8B_SHAPE, null, 1, 0.9999999).reserveBytes).toBeGreaterThanOrEqual(
-      1
+    expect(kvCacheReserveBytes(1, {}, null, 8192, 0.9, false).reserveBytes).toBe(1)
+    expect(
+      kvCacheReserveBytes(1, LLAMA_3_8B_SHAPE, null, 1, 0.9999999, false).reserveBytes
+    ).toBeGreaterThanOrEqual(1)
+  })
+
+  it('on a unified-memory card is the KV for two full contexts, never divided by the fraction (the launch bounds it by tokens)', () => {
+    const shape = { ...LLAMA_3_8B_SHAPE, dtype: 'bfloat16' }
+    const expected = kvCacheBytes(shape, null, 2 * 8192) as number
+    for (const fraction of [0.1, 0.8, 0.95]) {
+      expect(kvCacheReserveBytes(16_000_000_000, shape, null, 8192, fraction, true)).toEqual({
+        reserveBytes: expected,
+        basis: 'config',
+      })
+    }
+    expect(expected).toBe(2_147_483_648)
+  })
+
+  it('on a unified-memory card without a KV shape falls back exactly as a discrete card does', () => {
+    expect(kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.8, true)).toEqual(
+      kvCacheReserveBytes(100_000_000_000, {}, null, 8192, 0.8, false)
     )
   })
 })
@@ -814,7 +833,7 @@ describe('the 2026-09-29 VM run: Qwen3-1.7B bf16 on an RTX 4070 Laptop (7.70 GiB
     // What the core launched with in the live run: the load ran out of memory on this card.
     ['the old 0.9', 0.9, 521_957_832],
   ])('%s', (_label, fraction, reserve) => {
-    expect(kvCacheReserveBytes(WEIGHTS, QWEN3_1_7B_SHAPE, null, 4096, fraction)).toEqual({
+    expect(kvCacheReserveBytes(WEIGHTS, QWEN3_1_7B_SHAPE, null, 4096, fraction, false)).toEqual({
       reserveBytes: reserve,
       basis: 'config',
     })
@@ -834,12 +853,12 @@ describe('the 2026-09-29 VM run: Qwen3-1.7B bf16 on an RTX 4070 Laptop (7.70 GiB
   })
 
   it('the weight-fraction fallback follows the same default: 20% of the weights at 0.8', () => {
-    expect(kvCacheReserveBytes(WEIGHTS, {}, null, 4096, TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION)).toEqual(
-      {
-        reserveBytes: Math.ceil(WEIGHTS * (1 - 0.8)),
-        basis: 'weight_fraction',
-      }
-    )
+    expect(
+      kvCacheReserveBytes(WEIGHTS, {}, null, 4096, TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION, false)
+    ).toEqual({
+      reserveBytes: Math.ceil(WEIGHTS * (1 - 0.8)),
+      basis: 'weight_fraction',
+    })
   })
 })
 
@@ -1130,5 +1149,53 @@ describe('target hosts: format rules and the curated tier model, on the publishe
       quantization_format: 'nvfp4',
       verdict: { ok: true },
     })
+  })
+})
+
+describe('checkModelMemory on a unified-memory card: the same bound the launch writes (weights + KV for two contexts)', () => {
+  const descriptor = baseDescriptor()
+  const shape = { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16', ...LLAMA_3_8B_SHAPE }
+  const weights = 16_000_000_000
+  const kv = kvCacheBytes(shape, null, 2 * 8192) as number
+  const memory = {
+    contextLength: 8192,
+    kvCacheFreeGpuMemoryFraction: TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
+  }
+  const gb10 = gpu({
+    gpu_id: 'GPU-gb10',
+    compute_capability: '12.1',
+    total_vram_bytes: null,
+    free_vram_bytes: null,
+  })
+  const input = baseInput({ config_json: shape, files: weightFiles(weights) })
+
+  it('fits at exactly weights + KV(2 x context) of MemAvailable, and is refused one byte below', () => {
+    const files = checkModelCompatibilityFiles(input, descriptor, [gb10], 0, memory)
+    if (!files.ok) throw new Error('expected the files check to pass')
+    expect(checkModelMemory(files.resolved, descriptor, [gb10], weights + kv, memory).verdict).toEqual({
+      ok: true,
+    })
+    const short = checkModelMemory(files.resolved, descriptor, [gb10], weights + kv - 1, memory)
+    expect(short.verdict.ok).toBe(false)
+    if (!short.verdict.ok) {
+      expect(short.verdict.error.details).toBe(
+        `weight_bytes=${weights} kv_reserve_bytes=${kv} kv_reserve_basis=config kv_max_tokens=16384 ` +
+          `needed_bytes=${weights + kv} free_bytes=${weights + kv - 1}`
+      )
+    }
+  })
+
+  it('reports a unified-memory card among the other cards by its own rule, a discrete one by the fraction', () => {
+    const tooSmall = gpu({
+      gpu_id: 'GPU-small',
+      total_vram_bytes: 8_000_000_000,
+      free_vram_bytes: 8_000_000_000,
+    })
+    const pinned = baseInput({ config_json: shape, files: weightFiles(weights), gpu_id: 'GPU-small' })
+    const fits = checkModelCompatibility(pinned, descriptor, [tooSmall, gb10], weights + kv, memory)
+    expect(fits.checked_gpu_id).toBe('GPU-small')
+    expect(fits.fits_other_gpus).toEqual(['GPU-gb10'])
+    const short = checkModelCompatibility(pinned, descriptor, [tooSmall, gb10], weights + kv - 1, memory)
+    expect(short.fits_other_gpus).toEqual([])
   })
 })

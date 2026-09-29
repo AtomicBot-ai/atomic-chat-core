@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { parse as parseYaml } from 'yaml'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
 import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION } from '../managed-text/index.js'
@@ -18,7 +19,9 @@ import {
   TENSORRT_LLM_READINESS_BASE_MS,
   TENSORRT_LLM_REWRITABLE_ROUTES,
   TENSORRT_LLM_ROUTES,
+  TENSORRT_LLM_UNIFIED_KV_CONTEXTS,
   tensorrtLlmAdapter,
+  tensorrtLlmUnifiedKvMaxTokens,
   type TensorrtLlmSettings,
 } from './adapter.js'
 
@@ -40,6 +43,7 @@ function baseContext(overrides: Partial<ManagedLaunchContext<TensorrtLlmSettings
     generationFilesPath: '/atomic/heartbeat',
     weightBytes: 4 * GiB,
     family: null,
+    unifiedMemory: false,
     ...overrides,
   }
   return context
@@ -347,6 +351,39 @@ describe('buildLaunch', () => {
     }
   })
 
+  it('bounds the KV cache to two full contexts on a unified-memory card, merged with guided decoding, keeping the fraction flag', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({ context_length: 8192 })
+    const launch = tensorrtLlmAdapter.buildLaunch(
+      baseContext({ settings, unifiedMemory: true, family: family({ structured_output: true }) })
+    )
+    expect(flagValue(launch.argv, '--extra_llm_api_options')).toBe('/atomic/heartbeat/llm-api-options.yaml')
+    expect(flagValue(launch.argv, '--kv_cache_free_gpu_memory_fraction')).toBe(
+      String(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION)
+    )
+    const yaml = launch.files?.['llm-api-options.yaml'] ?? ''
+    expect(yaml).toBe('guided_decoding_backend: xgrammar\nkv_cache_config:\n  max_tokens: 16384\n')
+    expect(parseYaml(yaml)).toEqual({
+      guided_decoding_backend: 'xgrammar',
+      kv_cache_config: { max_tokens: 16384 },
+    })
+  })
+
+  it('writes the option file with only the KV bound on a unified-memory card whose family has no structured output', () => {
+    for (const f of [family(), null]) {
+      const settings = tensorrtLlmAdapter.validateSettings({ context_length: 4096, max_output_tokens: 1024 })
+      const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ settings, unifiedMemory: true, family: f }))
+      expect(flagValue(launch.argv, '--extra_llm_api_options')).toBe('/atomic/heartbeat/llm-api-options.yaml')
+      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 8192\n' })
+    }
+  })
+
+  it('never bounds the KV cache by tokens on a discrete card: the fraction alone sizes it, as live-verified', () => {
+    const launch = tensorrtLlmAdapter.buildLaunch(
+      baseContext({ unifiedMemory: false, family: family({ structured_output: true }) })
+    )
+    expect(launch.files).toEqual({ 'llm-api-options.yaml': 'guided_decoding_backend: xgrammar\n' })
+  })
+
   it('points the engine cache env vars at the mounted engine cache directory', () => {
     const context = baseContext({ engineCachePath: '/atomic/engine-cache' })
     const launch = tensorrtLlmAdapter.buildLaunch(context)
@@ -354,6 +391,17 @@ describe('buildLaunch', () => {
       expect(value.startsWith('/atomic/engine-cache/')).toBe(true)
     }
     expect(Object.keys(launch.env ?? {}).length).toBeGreaterThan(0)
+  })
+})
+
+describe('tensorrtLlmUnifiedKvMaxTokens', () => {
+  it.each([
+    [512, 1024],
+    [8192, 16384],
+    [TENSORRT_LLM_MAX_CONTEXT_LENGTH, 2 * TENSORRT_LLM_MAX_CONTEXT_LENGTH],
+  ])('context %i -> %i tokens: one full-context request plus a concurrent one', (context, tokens) => {
+    expect(tensorrtLlmUnifiedKvMaxTokens(context)).toBe(tokens)
+    expect(TENSORRT_LLM_UNIFIED_KV_CONTEXTS).toBe(2)
   })
 })
 

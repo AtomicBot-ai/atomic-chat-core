@@ -269,16 +269,50 @@ export function validateTensorrtLlmSettings(raw: unknown): TensorrtLlmSettings {
 export const TENSORRT_LLM_CONTAINER_PORT = 8000
 
 /**
- * The LLM API option file a structured-output launch passes to `trtllm-serve serve
- * --extra_llm_api_options` (`commands/serve.py` in v1.2.1: `--config`/`--extra_llm_api_options`, a
- * YAML file whose keys overwrite the LLM API arguments; `llmapi/llm_args.py`'s
- * `guided_decoding_backend: Optional[Literal["xgrammar", "llguidance"]]`, default `None`). Without
- * it, `openai_protocol.py` still turns `response_format` into guided-decoding parameters, but no
- * backend exists to enforce them. `xgrammar` is the backend both the PyTorch and TensorRT backends
- * implement; whether it enforces a real schema on a real model is confirmed in live test 2.19.
+ * The LLM API option file a launch passes to `trtllm-serve serve --extra_llm_api_options`
+ * (`commands/serve.py` in v1.2.1: `--config`/`--extra_llm_api_options`, a YAML file whose keys
+ * overwrite the LLM API arguments), written when either of two keys applies:
+ *
+ * - `guided_decoding_backend: xgrammar`, for a family that declares structured output
+ *   (`llmapi/llm_args.py`'s `guided_decoding_backend: Optional[Literal["xgrammar", "llguidance"]]`,
+ *   default `None`). Without it, `openai_protocol.py` still turns `response_format` into
+ *   guided-decoding parameters, but no backend exists to enforce them. `xgrammar` is the backend both
+ *   the PyTorch and TensorRT backends implement.
+ * - `kv_cache_config: {max_tokens: N}`, on a unified-memory card (`tensorrtLlmUnifiedKvMaxTokens`).
+ *   `llm_args.py` `KvCacheConfig.max_tokens` (1.2.1, line 1636): "If both `max_tokens` and
+ *   `free_gpu_memory_fraction` are specified, memory corresponding to the minimum will be used."
+ *   The fraction the argv passes survives the YAML: `serve.py`'s `get_llm_args` builds
+ *   `KvCacheConfig(free_gpu_memory_fraction=...)` (line 125), and `update_llm_args_with_extra_dict`
+ *   (`llm_args.py` line 3312) deep-merges a YAML `kv_cache_config` over it
+ *   (`model_dump(exclude_unset=True) | yaml`), so the fraction stays the upper bound.
  */
 export const TENSORRT_LLM_API_OPTIONS_FILE = 'llm-api-options.yaml'
 export const TENSORRT_LLM_GUIDED_DECODING_OPTIONS = 'guided_decoding_backend: xgrammar\n'
+
+/**
+ * How many full contexts the KV cache holds on a unified-memory card: one full-context request plus
+ * a concurrent one. A starting value, not a measurement (docs/decisions/2026-09-29-tensorrt-llm-
+ * unified-memory-kv-cache-bounded-by-tokens.md).
+ */
+export const TENSORRT_LLM_UNIFIED_KV_CONTEXTS = 2
+
+/**
+ * The `kv_cache_config.max_tokens` a unified-memory launch writes, and the token count its memory
+ * check reserves KV for. On a unified-memory card (GB10/DGX Spark) "free GPU memory" is the system's
+ * free RAM, so `--kv_cache_free_gpu_memory_fraction` alone would hand most of the machine's memory to
+ * the KV cache whatever the context length; this bounds it to what the configured context needs.
+ */
+export function tensorrtLlmUnifiedKvMaxTokens(contextLength: number): number {
+  return contextLength * TENSORRT_LLM_UNIFIED_KV_CONTEXTS
+}
+
+/** The option file's text, or `null` when neither key applies (no file, no flag). */
+function llmApiOptions(guided: boolean, kvMaxTokens: number | null): string | null {
+  const lines: string[] = []
+  if (guided) lines.push(TENSORRT_LLM_GUIDED_DECODING_OPTIONS.trimEnd())
+  if (kvMaxTokens !== null) lines.push('kv_cache_config:', `  max_tokens: ${kvMaxTokens}`)
+  return lines.length === 0 ? null : `${lines.join('\n')}\n`
+}
 
 /** The container binds every interface; only the host-side publication (design D1/D11) is
  *  loopback-restricted, by the executor, not by the engine's own bind address. */
@@ -325,15 +359,19 @@ export function buildTensorrtLlmLaunch(
   // Guided decoding is off in trtllm-serve unless an LLM API option turns it on (final review I-2):
   // `response_format` is otherwise ignored or refused, so a family that declares structured output
   // gets `guided_decoding_backend: xgrammar` through the option file, written read-only per generation.
-  const guided = family?.structured_output === true
-  if (guided) {
+  // On a unified-memory card the same file bounds the KV cache by tokens (see the constants above).
+  const options = llmApiOptions(
+    family?.structured_output === true,
+    context.unifiedMemory ? tensorrtLlmUnifiedKvMaxTokens(settings.context_length) : null
+  )
+  if (options !== null) {
     argv.push('--extra_llm_api_options', `${generationFilesPath}/${TENSORRT_LLM_API_OPTIONS_FILE}`)
   }
 
   return {
     engine: { container_port: TENSORRT_LLM_CONTAINER_PORT },
     argv,
-    ...(guided ? { files: { [TENSORRT_LLM_API_OPTIONS_FILE]: TENSORRT_LLM_GUIDED_DECODING_OPTIONS } } : {}),
+    ...(options !== null ? { files: { [TENSORRT_LLM_API_OPTIONS_FILE]: options } } : {}),
     // No `--cache_dir`/`TRTLLM_CACHE_DIR` in this pinned tag (file header) — these are the
     // individual upstream PyTorch/Triton/CUDA JIT caches whose warm state make a repeat start on
     // the same model faster, redirected onto the read-write engine cache mount (design D8) so they

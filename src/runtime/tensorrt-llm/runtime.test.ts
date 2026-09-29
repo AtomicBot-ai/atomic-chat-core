@@ -5,7 +5,7 @@
  * what refuses a load before any container exists, one session at a time, cancel, logs and
  * capabilities — the lifecycle's own behaviour is `../managed-text/lifecycle.test.ts`'s.
  */
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
@@ -234,6 +234,38 @@ describe('TensorrtLlmRuntime: which card', () => {
     facts = { gpus: [LARGE], selinux: true, memAvailableBytes: 0 }
     await runtime.load('qwen3')
     expect(docker.last().createArgv.join(' ')).toMatch(/,z\b|:z\b/)
+  })
+})
+
+describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
+  const GB10: GpuFacts = {
+    gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32',
+    name: 'NVIDIA GB10',
+    compute_capability: '12.1',
+    total_vram_bytes: null,
+    free_vram_bytes: null,
+    driver_version: '595.71.05',
+  }
+  const optionsFile = () => join(data.layout.managed.heartbeatDir('gen-1'), 'llm-api-options.yaml')
+
+  it('launches with the KV cache bounded to two contexts beside guided decoding, and the fraction still passed', async () => {
+    build()
+    facts = { gpus: [GB10], selinux: false, memAvailableBytes: 83_317_108 * 1024 }
+    await runtime.load('qwen3')
+    const argv = docker.last().createArgv
+    expect(gpusArg(argv)).toBe(`device=${GB10.gpu_id}`)
+    expect(argv[argv.indexOf('--kv_cache_free_gpu_memory_fraction') + 1]).toBe('0.9')
+    expect(argv[argv.indexOf('--extra_llm_api_options') + 1]).toBe('/atomic/heartbeat/llm-api-options.yaml')
+    expect(await readFile(optionsFile(), 'utf8')).toBe(
+      'guided_decoding_backend: xgrammar\nkv_cache_config:\n  max_tokens: 16384\n'
+    )
+  })
+
+  it('launches a discrete card exactly as before: no token bound', async () => {
+    build()
+    facts = { gpus: [LARGE], selinux: false, memAvailableBytes: 0 }
+    await runtime.load('qwen3')
+    expect(await readFile(optionsFile(), 'utf8')).toBe('guided_decoding_backend: xgrammar\n')
   })
 })
 

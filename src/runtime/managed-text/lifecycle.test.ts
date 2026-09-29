@@ -536,6 +536,23 @@ describe('ManagedTextLifecycle: container, cache, journal, heartbeat', () => {
     expect(existsSync(dir)).toBe(false)
   })
 
+  it('tells the adapter whether the card is unified memory, a discrete card when the request does not say', async () => {
+    const seen: boolean[] = []
+    const probe: ManagedTextAdapter<Record<string, never>> = {
+      ...beta,
+      id: 'delta-engine',
+      buildLaunch: (c) => {
+        seen.push(c.unifiedMemory)
+        return { engine: { container_port: 9000 }, argv: ['delta'] }
+      },
+    }
+    await build({}, [probe])
+    await lifecycle.load(request_({ installation: deltaInstallation }))
+    await lifecycle.unload('org/model-a')
+    await lifecycle.load(request_({ installation: deltaInstallation, unifiedMemory: true }))
+    expect(seen).toEqual([false, true])
+  })
+
   it.each(['heartbeat', '../escape', 'a/b', '', '.', '..'])(
     'refuses a launch file named %j before any docker call',
     async (name) => {

@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [tensorrt-llm: on a unified-memory card the KV cache is bounded by tokens, and the memory check reserves exactly that](2026-09-29-tensorrt-llm-unified-memory-kv-cache-bounded-by-tokens.md) — amends the unified-memory branch of the real-formula KV-reserve record below.
 - **2026-09-29** — [tensorrt-llm: the default KV-cache fraction is 0.8, and an early exit is classified from the whole log](2026-09-29-tensorrt-llm-kv-cache-fraction-0-8-and-oom-read-from-the-whole-log.md) — amends the default fraction in the two KV-reserve records and the tail-only classification in the managed-text lifecycle record below.
 - **2026-09-29** — [Live-fix review minors: a wrapper without a schema is refused, and the journal record's caveats](2026-09-29-live-fix-review-minors-wrapper-without-schema-refused-and-journal-caveats.md) — amends the two entries below (json_schema wrapper, docker journal).
 - **2026-09-29** — [The host step reads docker.service's journal when Docker does not start](2026-09-29-host-step-reads-the-docker-journal-when-docker-does-not-start.md)

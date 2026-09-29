@@ -56,6 +56,12 @@ export interface ManagedLaunchContext<S> {
   weightBytes: number
   /** The pinned descriptor's `model_families` entry for this model's architecture, or null. */
   family: ModelFamilySupport | null
+  /**
+   * The card has no memory of its own (GB10/DGX Spark): what an engine sees as free GPU memory is the
+   * host's free RAM, so a launch that sizes a cache as a share of it takes the operating system's
+   * memory too.
+   */
+  unifiedMemory: boolean
 }
 
 export interface ManagedEngineLaunch {

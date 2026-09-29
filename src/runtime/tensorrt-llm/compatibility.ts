@@ -36,6 +36,7 @@
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../contracts/index.js'
 import { inventoryDigest } from '../environment/index.js'
+import { tensorrtLlmUnifiedKvMaxTokens } from './adapter.js'
 import {
   describeUnrecognizedQuantization,
   isGgufCheckpoint,
@@ -210,27 +211,42 @@ export interface MemoryReserve {
 }
 
 /**
- * Bytes reserved on top of the weights when checking whether a checkpoint fits a card's free memory,
- * as `KV_bytes / kv_cache_free_gpu_memory_fraction` (task 2.16w round 1, finding 6 (RULING),
- * superseding the placeholder `weights × (1 − fraction)` rule): `trtllm-serve` spends only that
- * fraction of whatever memory remains free *after* weights load on the KV cache, keeping the rest as
- * headroom, so guaranteeing `KV_bytes` of real cache capacity needs `KV_bytes / fraction` of free
- * memory left over once weights are loaded — the ADR this formula documents derives that division in
- * full. `basis: 'config'` when `kvCacheBytes` had what it needed; `basis: 'weight_fraction'` — the
- * older, cruder `weights × (1 − fraction)` rule — only when `config.json` lacked the architecture
- * fields the real formula needs, and the returned `basis` says so, so a verdict computed from the
- * fallback is never silently indistinguishable from one computed from the checkpoint's real shape.
+ * Bytes reserved on top of the weights when checking whether a checkpoint fits a card's free memory.
+ *
+ * On a discrete card, `KV_bytes / kv_cache_free_gpu_memory_fraction` (task 2.16w round 1, finding 6
+ * (RULING), superseding the placeholder `weights × (1 − fraction)` rule): `trtllm-serve` spends only
+ * that fraction of whatever memory remains free *after* weights load on the KV cache, keeping the
+ * rest as headroom, so guaranteeing `KV_bytes` of real cache capacity needs `KV_bytes / fraction` of
+ * free memory left over once weights are loaded — the ADR this formula documents derives that
+ * division in full.
+ *
+ * On a unified-memory card (`unifiedMemory`, design D13) the launch bounds the KV cache by tokens,
+ * `kv_cache_config.max_tokens = tensorrtLlmUnifiedKvMaxTokens(contextLength)` (`adapter.ts`), and
+ * TensorRT-LLM uses the smaller of that bound and the fraction; the reserve is therefore the KV for
+ * exactly that many tokens, not divided by the fraction, so the check and the launch agree
+ * (docs/decisions/2026-09-29-tensorrt-llm-unified-memory-kv-cache-bounded-by-tokens.md).
+ *
+ * `basis: 'config'` when `kvCacheBytes` had what it needed; `basis: 'weight_fraction'` — the older,
+ * cruder `weights × (1 − fraction)` rule, the same on either kind of card — only when `config.json`
+ * lacked the architecture fields the real formula needs, and the returned `basis` says so, so a
+ * verdict computed from the fallback is never silently indistinguishable from one computed from the
+ * checkpoint's real shape.
  */
 export function kvCacheReserveBytes(
   weightBytesTotal: number,
   configJson: JsonObject,
   hfQuantConfigJson: JsonObject | null,
   contextLength: number,
-  kvCacheFreeGpuMemoryFraction: number
+  kvCacheFreeGpuMemoryFraction: number,
+  unifiedMemory: boolean
 ): MemoryReserve {
-  const kvBytes = kvCacheBytes(configJson, hfQuantConfigJson, contextLength)
+  const kvTokens = unifiedMemory ? tensorrtLlmUnifiedKvMaxTokens(contextLength) : contextLength
+  const kvBytes = kvCacheBytes(configJson, hfQuantConfigJson, kvTokens)
   if (kvBytes !== undefined) {
-    return { reserveBytes: Math.ceil(kvBytes / kvCacheFreeGpuMemoryFraction), basis: 'config' }
+    return {
+      reserveBytes: unifiedMemory ? kvBytes : Math.ceil(kvBytes / kvCacheFreeGpuMemoryFraction),
+      basis: 'config',
+    }
   }
   return {
     reserveBytes: Math.ceil(weightBytesTotal * (1 - kvCacheFreeGpuMemoryFraction)),
@@ -238,9 +254,37 @@ export function kvCacheReserveBytes(
   }
 }
 
+/** A card with no VRAM figure of its own (GB10/DGX Spark, design D13): its memory is the host's. */
+function isUnifiedMemory(gpu: GpuFacts): boolean {
+  return gpu.total_vram_bytes === null
+}
+
 /** Free memory to compare against for one card: `MemAvailable` for a unified-memory card (design D13). */
 function freeMemoryBytes(gpu: GpuFacts, hostMemAvailableBytes: number): number {
-  return gpu.total_vram_bytes === null ? hostMemAvailableBytes : (gpu.free_vram_bytes ?? 0)
+  return isUnifiedMemory(gpu) ? hostMemAvailableBytes : (gpu.free_vram_bytes ?? 0)
+}
+
+/** What the checkpoint needs on `gpu`: its weights plus that card's own kind of KV reserve. */
+interface MemoryNeed extends MemoryReserve {
+  neededBytes: number
+}
+
+function memoryNeedOn(
+  gpu: GpuFacts,
+  weightBytesTotal: number,
+  configJson: JsonObject,
+  hfQuantConfigJson: JsonObject | null,
+  memory: MemorySizingInputs
+): MemoryNeed {
+  const reserve = kvCacheReserveBytes(
+    weightBytesTotal,
+    configJson,
+    hfQuantConfigJson,
+    memory.contextLength,
+    memory.kvCacheFreeGpuMemoryFraction,
+    isUnifiedMemory(gpu)
+  )
+  return { ...reserve, neededBytes: weightBytesTotal + reserve.reserveBytes }
 }
 
 /**
@@ -278,19 +322,22 @@ function formatAllowedOnGpu(descriptor: RuntimeDescriptor, format: string, gpu: 
   return !support.excluded_compute_capabilities.includes(gpu.compute_capability)
 }
 
-/** Every other GPU (not `selected`) the checkpoint would fit on: architecture-independent, format's CC rule plus free memory. */
+/**
+ * Every other GPU (not `selected`) the checkpoint would fit on: architecture-independent, the
+ * format's CC rule plus free memory, each card measured by its own kind of reserve (`needOn`).
+ */
 function fitsOtherGpus(
   gpus: readonly GpuFacts[],
   selected: GpuFacts,
   descriptor: RuntimeDescriptor,
   format: string,
-  neededBytes: number,
+  needOn: (gpu: GpuFacts) => number,
   hostMemAvailableBytes: number
 ): string[] {
   return gpus
     .filter((gpu) => gpu.gpu_id !== selected.gpu_id)
     .filter((gpu) => formatAllowedOnGpu(descriptor, format, gpu))
-    .filter((gpu) => neededBytes <= freeMemoryBytes(gpu, hostMemAvailableBytes))
+    .filter((gpu) => needOn(gpu) <= freeMemoryBytes(gpu, hostMemAvailableBytes))
     .map((gpu) => gpu.gpu_id)
 }
 
@@ -326,7 +373,7 @@ function buildCompatibility(
     weight_bytes: context.weightBytesTotal,
     checked_gpu_id: context.selected.gpu_id,
     curated: context.curated,
-    unified_memory: context.selected.total_vram_bytes === null,
+    unified_memory: isUnifiedMemory(context.selected),
     fits_other_gpus: fitsOther,
     ...(kvReserveBasis === undefined ? {} : { kv_reserve_basis: kvReserveBasis }),
     verdict,
@@ -552,15 +599,17 @@ export function checkModelCompatibilityFiles(
   // this format and has room is a real alternative — compute it once and reuse it in both CC-failure
   // branches below, so a caller whose selected card fails on CC still sees a card that would work
   // (spec: "report which other host cards it would fit").
-  const { reserveBytes, basis } = kvCacheReserveBytes(
-    weightBytesTotal,
-    input.config_json,
-    input.hf_quant_config_json,
-    memory.contextLength,
-    memory.kvCacheFreeGpuMemoryFraction
+  const needOn = (gpu: GpuFacts): MemoryNeed =>
+    memoryNeedOn(gpu, weightBytesTotal, input.config_json, input.hf_quant_config_json, memory)
+  const { basis } = needOn(selected)
+  const fitsOther = fitsOtherGpus(
+    gpus,
+    selected,
+    descriptor,
+    format,
+    (gpu) => needOn(gpu).neededBytes,
+    hostMemAvailableBytes
   )
-  const neededBytes = weightBytesTotal + reserveBytes
-  const fitsOther = fitsOtherGpus(gpus, selected, descriptor, format, neededBytes, hostMemAvailableBytes)
 
   if (!computeCapabilityAtLeast(selected.compute_capability, formatSupport.min_compute_capability)) {
     return {
@@ -641,23 +690,23 @@ export function checkModelMemory(
     selected,
     curated: resolved.curated,
   }
-  const { reserveBytes, basis } = kvCacheReserveBytes(
-    resolved.weightBytesTotal,
-    resolved.configJson,
-    resolved.hfQuantConfigJson,
-    memory.contextLength,
-    memory.kvCacheFreeGpuMemoryFraction
-  )
-  const neededBytes = resolved.weightBytesTotal + reserveBytes
+  const needOn = (gpu: GpuFacts): MemoryNeed =>
+    memoryNeedOn(gpu, resolved.weightBytesTotal, resolved.configJson, resolved.hfQuantConfigJson, memory)
+  const { reserveBytes, basis, neededBytes } = needOn(selected)
   const freeBytes = freeMemoryBytes(selected, hostMemAvailableBytes)
   const fitsOther = fitsOtherGpus(
     gpus,
     selected,
     descriptor,
     resolved.quantizationFormat,
-    neededBytes,
+    (gpu) => needOn(gpu).neededBytes,
     hostMemAvailableBytes
   )
+  // The token bound the launch writes, on a card where it writes one (adapter.ts).
+  const kvTokens =
+    isUnifiedMemory(selected) && basis === 'config'
+      ? ` kv_max_tokens=${tensorrtLlmUnifiedKvMaxTokens(memory.contextLength)}`
+      : ''
 
   if (neededBytes > freeBytes) {
     return buildCompatibility(
@@ -667,7 +716,7 @@ export function checkModelMemory(
         error: {
           code: 'MODEL_INCOMPATIBLE',
           message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
-          details: `weight_bytes=${resolved.weightBytesTotal} kv_reserve_bytes=${reserveBytes} kv_reserve_basis=${basis} needed_bytes=${neededBytes} free_bytes=${freeBytes}`,
+          details: `weight_bytes=${resolved.weightBytesTotal} kv_reserve_bytes=${reserveBytes} kv_reserve_basis=${basis}${kvTokens} needed_bytes=${neededBytes} free_bytes=${freeBytes}`,
         },
       },
       fitsOther,
