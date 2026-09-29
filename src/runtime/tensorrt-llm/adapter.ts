@@ -154,8 +154,13 @@ export const TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS = 4096
  *  the whole of free memory (nothing left for the engine's own workspace) and never a sliver. */
 export const TENSORRT_LLM_MIN_KV_CACHE_FREE_FRACTION = 0.1
 export const TENSORRT_LLM_MAX_KV_CACHE_FREE_FRACTION = 0.95
-/** `trtllm-serve serve --kv_cache_free_gpu_memory_fraction`'s own default. */
-export const TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION = 0.9
+/** The one default KV-cache fraction: the launch passes it (`buildTensorrtLlmLaunch`), the model check
+ *  and the pre-launch check size their reserve with it (`compatibility.ts`'s `kvCacheReserveBytes`,
+ *  through the same validated settings), and `src/settings/schema/tensorrt-llm.json` stores it
+ *  (pinned equal by `settings.test.ts`). Below `trtllm-serve`'s own 0.9 on purpose: at 0.9 an 8 GB
+ *  card ran out of memory on the engine's non-KV allocations after the KV cache took its share
+ *  (budget table `_no_capture_init_kv_cache: 3.50 / 0.35`); 0.85 failed too, 0.8 loaded (docs/decisions/2026-09-29-tensorrt-llm-kv-cache-fraction-0-8-and-oom-read-from-the-whole-log.md). */
+export const TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION = 0.8
 
 export const TENSORRT_LLM_MIN_LOAD_TIMEOUT_SECONDS = 1
 export const TENSORRT_LLM_MAX_LOAD_TIMEOUT_SECONDS = 3600
@@ -380,9 +385,27 @@ export function tensorrtLlmReadinessTimeoutMs(weightBytes: number, settings: Ten
  *  raise, plus the executor's own C++-side allocator failure — `py_executor_creator.py`'s
  *  `_maybe_explain_if_oom` treats any exception whose text contains `"out of memory"` (lowercase)
  *  as OOM regardless of its own wording, which is why this also matches a generic `CUDA runtime
- *  error in ...: out of memory` shape rather than only `torch`'s own message (file header). */
-const OOM_MARKER =
-  /torch\.(?:cuda\.)?OutOfMemoryError|CUDA out of memory|CUDA runtime error in .*: out of memory/
+ *  error in ...: out of memory` shape rather than only `torch`'s own message (file header).
+ *
+ *  Added after the 2026-09-29 VM run (docs/decisions/2026-09-29-tensorrt-llm-kv-cache-fraction-0-8-
+ *  and-oom-read-from-the-whole-log.md), whose log carried these alongside `CUDA out of memory`:
+ *  `torch.AcceleratorError: CUDA error: out of memory` (a CUDA call's own error string, raised
+ *  through torch's CUDA check rather than its allocator); `_maybe_explain_if_oom`'s own "Executor
+ *  creation failed due to insufficient GPU memory." (v1.2.1 `py_executor_creator.py`); and "The GPU
+ *  ran out of memory", as the run reported it, source not pinned. */
+const OOM_MARKER = new RegExp(
+  [
+    /torch\.(?:cuda\.)?OutOfMemoryError/.source,
+    /CUDA out of memory/.source,
+    /CUDA runtime error in .*: out of memory/.source,
+    /CUDA error: out of memory/.source,
+    /Executor creation failed due to insufficient GPU memory/.source,
+    /The GPU ran out of memory/.source,
+  ].join('|')
+)
+/** How much of the log an out-of-memory classification carries as its `excerpt`. */
+const OOM_EXCERPT_MAX_LINES = 8
+const OOM_EXCERPT_MAX_LINE_CHARS = 500
 const OOM_TRIED_TO_ALLOCATE = /Tried to allocate ([\d.]+)\s*(GiB|MiB|KiB)/
 const OOM_FREE = /of which ([\d.]+)\s*(GiB|MiB|KiB|bytes) is free/
 
@@ -402,10 +425,29 @@ function toGiB(amount: number, unit: string): number {
   return amount / GiB // 'bytes'
 }
 
-function classifyOom(logTail: string): ManagedExitClassification | null {
-  if (!OOM_MARKER.test(logTail)) return null
-  const tried = OOM_TRIED_TO_ALLOCATE.exec(logTail)
-  const free = OOM_FREE.exec(logTail)
+/** Every line naming the out-of-memory failure, once each, in log order, bounded in count and width
+ *  (a tqdm progress line can run to kilobytes): the lines a user needs, kept even after a long
+ *  traceback has pushed them out of the log tail the error details otherwise show. */
+function oomExcerpt(log: string): string {
+  const lines: string[] = []
+  for (const raw of log.split('\n')) {
+    if (!OOM_MARKER.test(raw)) continue
+    const trimmed = raw.trim()
+    const line =
+      trimmed.length > OOM_EXCERPT_MAX_LINE_CHARS
+        ? `${trimmed.slice(0, OOM_EXCERPT_MAX_LINE_CHARS - 1)}…`
+        : trimmed
+    if (lines.includes(line)) continue
+    lines.push(line)
+    if (lines.length === OOM_EXCERPT_MAX_LINES) break
+  }
+  return lines.join('\n')
+}
+
+function classifyOom(log: string): ManagedExitClassification | null {
+  if (!OOM_MARKER.test(log)) return null
+  const tried = OOM_TRIED_TO_ALLOCATE.exec(log)
+  const free = OOM_FREE.exec(log)
   const numbers: Record<string, number> = {}
   let requestedText = 'an unknown amount of'
   let freeText = ''
@@ -423,6 +465,7 @@ function classifyOom(logTail: string): ManagedExitClassification | null {
     kind: 'out-of-memory',
     message: `The GPU ran out of memory: trtllm-serve tried to allocate ${requestedText} memory${freeText}.`,
     ...(Object.keys(numbers).length > 0 ? { numbers } : {}),
+    excerpt: oomExcerpt(log),
   }
 }
 
@@ -443,15 +486,18 @@ function classifyUnsupported(logTail: string): ManagedExitClassification | null 
   return null
 }
 
-/** Reads a container's log tail and exit code into why it exited (spec "Этапы и таймаут загрузки":
- *  a container that exits before readiness fails the load immediately with this classification and
- *  the log tail, instead of waiting out the full timeout). Checked in order: an out-of-memory
- *  allocator message first (it can appear alongside an unrelated traceback line further up the same
- *  tail), then an unsupported-architecture/quantization message, otherwise `other`. */
-export function classifyTensorrtLlmExit(logTail: string, exitCode: number | null): ManagedExitClassification {
-  const oom = classifyOom(logTail)
+/** Reads a container's log and exit code into why it exited (spec "Этапы и таймаут загрузки": a
+ *  container that exits before readiness fails the load immediately with this classification and
+ *  the log tail, instead of waiting out the full timeout). Before readiness the lifecycle hands over
+ *  the container's whole log, not its tail, and every line of it is searched: the out-of-memory line
+ *  can sit above a worker traceback longer than the tail, ending in "RuntimeError: Executor worker
+ *  returned error" (2026-09-29 VM run). Checked in order: an out-of-memory message first, with the
+ *  lines that said so as `excerpt`, then an unsupported-architecture/quantization message, otherwise
+ *  `other`. */
+export function classifyTensorrtLlmExit(log: string, exitCode: number | null): ManagedExitClassification {
+  const oom = classifyOom(log)
   if (oom) return oom
-  const unsupported = classifyUnsupported(logTail)
+  const unsupported = classifyUnsupported(log)
   if (unsupported) return unsupported
   const codeText = exitCode === null ? 'with no exit code' : `with exit code ${exitCode}`
   return { kind: 'other', message: `trtllm-serve exited unexpectedly ${codeText} before it became ready.` }

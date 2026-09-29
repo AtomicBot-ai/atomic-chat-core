@@ -128,7 +128,7 @@ describe('defaultSettingValues', () => {
       gpu_id: '',
       context_length: 8192,
       max_output_tokens: 4096,
-      kv_cache_free_gpu_memory_fraction: 0.9,
+      kv_cache_free_gpu_memory_fraction: 0.8,
       load_timeout_seconds: 0,
     })
   })

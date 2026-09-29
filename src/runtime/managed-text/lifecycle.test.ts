@@ -61,6 +61,7 @@ const alpha: ManagedTextAdapter<{ ctx: number }> = {
         kind: 'out-of-memory',
         message: `The GPU ran out of memory (tried to allocate ${oom[1]} GiB).`,
         numbers: { requested_gib: Number(oom[1]) },
+        excerpt: oom[0],
       }
     }
     return { kind: 'other', message: `alpha exited with ${String(exitCode)}` }
@@ -404,6 +405,34 @@ describe('ManagedTextLifecycle: early exit', () => {
     expect(clock - exitedAt).toBeLessThanOrEqual(2_000)
     expect(docker.containers.size).toBe(0)
     expect(journal.list()).toEqual([])
+  })
+
+  it('classifies from the whole log: an OOM line above a traceback longer than the tail is still OUT_OF_MEMORY, with the line in details', async () => {
+    await build()
+    readyAt = null
+    const traceback = Array.from({ length: 400 }, (_, i) => `  File "worker.py", line ${i}, in worker_main`)
+    onProbe = (now) => {
+      if (now === 5_000) {
+        docker.exit(docker.last().id, 1, [
+          'loading weights',
+          'CUDA out of memory. Tried to allocate 0.05 GiB',
+          'Traceback (most recent call last):',
+          ...traceback,
+          'RuntimeError: Executor worker returned error',
+        ])
+      }
+    }
+    const error = await rejection(lifecycle.load(request_()))
+    expect(error.code).toBe('OUT_OF_MEMORY')
+    expect((error as ManagedLoadError).classification?.numbers).toEqual({ requested_gib: 0.05 })
+    const details = error.details ?? ''
+    expect(
+      details.startsWith('CUDA out of memory. Tried to allocate 0.05 GiB\n[…] the end of the log:\n')
+    ).toBe(true)
+    expect(details.endsWith('RuntimeError: Executor worker returned error\n')).toBe(true)
+    expect(details).not.toContain('loading weights')
+    expect(docker.calls.some((argv) => argv.includes('logs') && argv.includes('all'))).toBe(true)
+    expect(lifecycle.lastAttempt('org/model-a')?.log_tail).toBe(details)
   })
 
   it("classifies with the engine's own adapter: the second engine maps its exit to MODEL_INCOMPATIBLE", async () => {

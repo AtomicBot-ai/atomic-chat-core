@@ -13,6 +13,7 @@ import {
   type CheckpointFile,
   type ModelCheckInput,
 } from './compatibility.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './adapter.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
 
@@ -771,6 +772,63 @@ describe('kvCacheReserveBytes', () => {
     expect(kvCacheReserveBytes(1, {}, null, 8192, 0.9).reserveBytes).toBe(1)
     expect(kvCacheReserveBytes(1, LLAMA_3_8B_SHAPE, null, 1, 0.9999999).reserveBytes).toBeGreaterThanOrEqual(
       1
+    )
+  })
+})
+
+describe('the 2026-09-29 VM run: Qwen3-1.7B bf16 on an RTX 4070 Laptop (7.70 GiB visible), context 4096', () => {
+  // Qwen3-1.7B's config.json: 28 layers, 8 KV heads, head_dim 128, bf16 KV cache. KV_bytes at 4096
+  // tokens = 2 x 28 x 8 x 128 x 2 x 4096 = 469,762,048. Weights: the Hugging Face listing's ~4.06 GB.
+  const QWEN3_1_7B_SHAPE = {
+    num_hidden_layers: 28,
+    num_attention_heads: 16,
+    num_key_value_heads: 8,
+    head_dim: 128,
+    hidden_size: 2048,
+  }
+  const WEIGHTS = 4_063_866_880
+  const card = gpu({
+    gpu_id: 'gpu-0',
+    compute_capability: '8.9',
+    total_vram_bytes: 8_267_812_045, // 7.70 GiB, what the guest saw
+    free_vram_bytes: 8_267_812_045,
+  })
+
+  it.each<[string, number, number]>([
+    // The default the launch now passes, and the reserve the check sizes with it.
+    [
+      'the default fraction (0.8, launched and checked alike)',
+      TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
+      587_202_560,
+    ],
+    // What the core launched with in the live run: the load ran out of memory on this card.
+    ['the old 0.9', 0.9, 521_957_832],
+  ])('%s', (_label, fraction, reserve) => {
+    expect(kvCacheReserveBytes(WEIGHTS, QWEN3_1_7B_SHAPE, null, 4096, fraction)).toEqual({
+      reserveBytes: reserve,
+      basis: 'config',
+    })
+    // The check says "fits" at both fractions: it sizes the KV cache the model needs, not the
+    // engine's own non-KV allocations, which is why the launch fraction itself had to leave more room.
+    const result = checkModelCompatibility(
+      baseInput({
+        config_json: { architectures: ['Qwen3ForCausalLM'], dtype: 'bfloat16', ...QWEN3_1_7B_SHAPE },
+        files: weightFiles(WEIGHTS),
+      }),
+      baseDescriptor(),
+      [card],
+      0,
+      { contextLength: 4096, kvCacheFreeGpuMemoryFraction: fraction }
+    )
+    expect(result.verdict).toEqual({ ok: true })
+  })
+
+  it('the weight-fraction fallback follows the same default: 20% of the weights at 0.8', () => {
+    expect(kvCacheReserveBytes(WEIGHTS, {}, null, 4096, TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION)).toEqual(
+      {
+        reserveBytes: Math.ceil(WEIGHTS * (1 - 0.8)),
+        basis: 'weight_fraction',
+      }
     )
   })
 })

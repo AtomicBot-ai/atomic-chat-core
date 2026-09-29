@@ -62,6 +62,18 @@ export function exitErrorCode(kind: ManagedExitKind): ErrorCode {
   return EXIT_CODES[kind]
 }
 
+/**
+ * The details a load that failed on an engine exit carries (and keeps as its last attempt's log): the
+ * log tail, led by the classification's `excerpt` when the tail no longer holds all of it — the case
+ * where the decisive line sits above a traceback longer than the tail.
+ */
+export function exitFailureDetails(tail: string, excerpt: string | undefined): string {
+  if (excerpt === undefined || excerpt.trim() === '') return tail
+  const lines = excerpt.split('\n').filter((line) => line.trim() !== '')
+  if (lines.every((line) => tail.includes(line))) return tail
+  return `${lines.join('\n')}\n[…] the end of the log:\n${tail}`
+}
+
 const PORT_CONFLICT = /port is already allocated|address already in use/i
 
 /**

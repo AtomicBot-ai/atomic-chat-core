@@ -4,6 +4,7 @@ import type { ManagedStageMarker } from './adapter.js'
 import {
   advanceStage,
   exitErrorCode,
+  exitFailureDetails,
   isPortBindConflict,
   readContainerState,
   resolveReadinessTimeoutMs,
@@ -67,6 +68,29 @@ describe('exitErrorCode', () => {
     ['other', 'MODEL_LOAD_FAILED'],
   ] as const)('maps %s to %s', (kind, code) => {
     expect(exitErrorCode(kind)).toBe(code)
+  })
+})
+
+describe('exitFailureDetails', () => {
+  const tail =
+    'Traceback (most recent call last):\n  File "worker.py"\nRuntimeError: Executor worker returned error\n'
+  it.each<[string, string | undefined, string]>([
+    ['the tail alone with no excerpt', undefined, tail],
+    ['the tail alone with an empty excerpt', '', tail],
+    [
+      'the tail alone when it already holds every excerpt line',
+      'RuntimeError: Executor worker returned error',
+      tail,
+    ],
+    [
+      'the excerpt first, then the tail, when the tail lost it',
+      'CUDA out of memory. Tried to allocate 48.00 MiB\ntorch.AcceleratorError: CUDA error: out of memory',
+      'CUDA out of memory. Tried to allocate 48.00 MiB\ntorch.AcceleratorError: CUDA error: out of memory\n' +
+        '[…] the end of the log:\n' +
+        tail,
+    ],
+  ])('is %s', (_case, excerpt, expected) => {
+    expect(exitFailureDetails(tail, excerpt)).toBe(expected)
   })
 })
 

@@ -131,8 +131,9 @@ export class FakeDocker {
       }
       case 'logs': {
         if (!c) return noSuch(id)
-        const tail = Number(argv[argv.indexOf('--tail') + 1])
-        return ok(c.logs.slice(-tail).join('\n') + (c.logs.length > 0 ? '\n' : ''))
+        const count = argv[argv.indexOf('--tail') + 1]
+        const lines = count === 'all' ? c.logs : c.logs.slice(-Number(count))
+        return ok(lines.join('\n') + (c.logs.length > 0 ? '\n' : ''))
       }
     }
     return { code: 1, stdout: '', stderr: `fake docker: unsupported ${argv.join(' ')}` }

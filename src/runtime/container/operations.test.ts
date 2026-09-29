@@ -369,6 +369,17 @@ describe('containerLogs', () => {
     const exec = fakeExec(failed(1, 'no such container'))
     await expect(containerLogs(exec, 'c1', 200)).rejects.toMatchObject({ code: 'IO_ERROR' })
   })
+
+  it("asks docker for a tail count, or for the whole log with 'all'", async () => {
+    const asked: string[][] = []
+    const exec = fakeExec((args) => {
+      asked.push(args)
+      return ok('line\n')
+    })
+    await containerLogs(exec, 'c1', 200)
+    await containerLogs(exec, 'c1', 'all')
+    expect(asked.map((args) => args[args.indexOf('--tail') + 1])).toEqual(['200', 'all'])
+  })
 })
 
 describe('runOnce', () => {

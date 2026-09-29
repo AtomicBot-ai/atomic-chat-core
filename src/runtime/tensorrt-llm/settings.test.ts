@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { canonicalizeSettingValues, defaultSettingValues } from '../../settings/index.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './adapter.js'
 import { tensorrtLlmSettings } from './settings.js'
 
 const stored = () => canonicalizeSettingValues('tensorrt-llm', defaultSettingValues('tensorrt-llm'))
@@ -10,9 +11,18 @@ describe('tensorrtLlmSettings', () => {
       gpu_id: null,
       context_length: 8192,
       max_output_tokens: 4096,
-      kv_cache_free_gpu_memory_fraction: 0.9,
+      kv_cache_free_gpu_memory_fraction: 0.8,
       load_timeout_seconds: null,
     })
+  })
+
+  it('stores the same KV fraction the adapter launches with when nothing is set, so the check and the launch agree', () => {
+    // The settings store persists the schema JSON's default; the adapter falls back to its own
+    // constant. Both must be one number (docs/decisions/2026-09-29-tensorrt-llm-kv-cache-fraction-0-8-and-oom-read-from-the-whole-log.md).
+    expect(stored()['kv_cache_free_gpu_memory_fraction']).toBe(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION)
+    expect(tensorrtLlmSettings({}).kv_cache_free_gpu_memory_fraction).toBe(
+      TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION
+    )
   })
 
   it.each<[string, Record<string, unknown>, Partial<ReturnType<typeof tensorrtLlmSettings>>]>([

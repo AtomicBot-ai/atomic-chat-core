@@ -105,6 +105,14 @@ describe('tensorrtLlmAdapter shape', () => {
   })
 })
 
+describe('TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION', () => {
+  it("is 0.8, not trtllm-serve's own 0.9: 0.9 ran an 8 GB card out of memory in the live run", () => {
+    expect(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION).toBe(0.8)
+    const launch = tensorrtLlmAdapter.buildLaunch(baseContext())
+    expect(flagValue(launch.argv, '--kv_cache_free_gpu_memory_fraction')).toBe('0.8')
+  })
+})
+
 describe('validateSettings', () => {
   const cases: Array<[string, unknown, Partial<TensorrtLlmSettings> | 'throws']> = [
     [
@@ -498,6 +506,77 @@ describe('classifyExit', () => {
   it('falls back to "other" for an empty log tail and a null exit code', () => {
     const result = tensorrtLlmAdapter.classifyExit('', null)
     expect(result.kind).toBe('other')
+  })
+
+  it('keeps no excerpt for a log it did not classify as out of memory', () => {
+    expect(
+      tensorrtLlmAdapter.classifyExit(readTensorrtLlmLogFixture('other-startup-crash.log'), 1).excerpt
+    ).toBeUndefined()
+  })
+})
+
+describe('classifyExit: the out-of-memory line anywhere in the log, not only at its end (2026-09-29 VM run)', () => {
+  /** A worker traceback long enough to push everything above it out of any tail, ending the way the
+   *  live run's log did. Frames are illustrative; the last line is what the run printed. */
+  const traceback = (frames: number): string[] => [
+    'Traceback (most recent call last):',
+    ...Array.from({ length: frames }, (_, i) => [
+      `  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/executor/worker.py", line ${100 + i}, in worker_main`,
+      '    raise error',
+    ]).flat(),
+    'RuntimeError: Executor worker returned error',
+  ]
+  const budget = [
+    '[TRT-LLM] [E] Executor creation failed due to insufficient GPU memory.',
+    '_no_capture_init_kv_cache: 3.50 / 0.35',
+    '_no_capture_init_extra_resources: 0.34 / 0.10',
+  ]
+
+  it.each<[string, string[], Record<string, number> | undefined]>([
+    [
+      "torch's allocator wording with numbers",
+      [
+        'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 0 has a total capacity of 7.70 GiB of which 42.69 MiB is free.',
+      ],
+      { requested_gib: 48 / 1024, free_gib: 42.69 / 1024 },
+    ],
+    [
+      'torch.AcceleratorError (CUDA error: out of memory)',
+      ['torch.AcceleratorError: CUDA error: out of memory'],
+      undefined,
+    ],
+    ["the executor's own explanation and budget table", budget, undefined],
+    ['the wording the live run reported alongside them', ['The GPU ran out of memory.'], undefined],
+  ])(
+    '%s, above a 300-frame traceback, is out-of-memory with the line in the excerpt',
+    (_label, oomLines, numbers) => {
+      const log = [
+        '[TRT-LLM] [I] Loading safetensors weights in parallel',
+        ...oomLines,
+        ...traceback(300),
+      ].join('\n')
+      const result = tensorrtLlmAdapter.classifyExit(log, 1)
+      expect(result.kind).toBe('out-of-memory')
+      expect(result.numbers).toEqual(numbers)
+      expect(result.excerpt).toContain(oomLines[0])
+      expect(result.excerpt).not.toContain('Executor worker returned error')
+      expect(result.excerpt).not.toContain('worker.py')
+    }
+  )
+
+  it('the excerpt is every out-of-memory line once, in log order, capped in count and width', () => {
+    const repeated = Array.from(
+      { length: 20 },
+      (_, i) => `rank ${i}: torch.AcceleratorError: CUDA error: out of memory`
+    )
+    const wide = `CUDA out of memory. ${'x'.repeat(5_000)}`
+    const log = [wide, ...repeated, ...repeated, ...traceback(10)].join('\n')
+    const lines = (tensorrtLlmAdapter.classifyExit(log, 1).excerpt ?? '').split('\n')
+    expect(lines.length).toBeLessThanOrEqual(8)
+    expect(lines[0]?.startsWith('CUDA out of memory.')).toBe(true)
+    expect(lines.every((line) => line.length <= 500)).toBe(true)
+    expect(new Set(lines).size).toBe(lines.length)
+    expect(lines[1]).toBe('rank 0: torch.AcceleratorError: CUDA error: out of memory')
   })
 })
 

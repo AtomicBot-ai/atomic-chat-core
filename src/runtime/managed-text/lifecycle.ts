@@ -84,6 +84,7 @@ import type { ManagedGateway, ManagedGatewayOptions } from './gateway.js'
 import {
   advanceStage,
   exitErrorCode,
+  exitFailureDetails,
   isPortBindConflict,
   readContainerState,
   resolveReadinessTimeoutMs,
@@ -896,11 +897,16 @@ export class ManagedTextLifecycle {
     exitCode: number | null
   ): Promise<ManagedLoadError> {
     const tail = await this.tail(containerId).catch(() => '')
-    const classification = adapter.classifyExit(tail, exitCode)
+    // The adapter reads the whole log, not the tail: a container that never got ready logged only its
+    // own start, and the line that says why it died can sit above a traceback longer than the tail
+    // (2026-09-29 VM run: an OOM surfaced as MODEL_LOAD_FAILED). The details stay the tail, led by
+    // whatever the adapter quoted from above it.
+    const whole = await this.wholeLog(containerId).catch(() => tail)
+    const classification = adapter.classifyExit(whole, exitCode)
     return new ManagedLoadError(
       exitErrorCode(classification.kind),
       classification.message,
-      tail,
+      exitFailureDetails(tail, classification.excerpt),
       classification,
       exitCode
     )
@@ -908,6 +914,11 @@ export class ManagedTextLifecycle {
 
   private async tail(containerId: string): Promise<string> {
     return stripDockerTimestamps(await containerLogs(this.deps.exec, containerId, this.timings.logTailLines))
+  }
+
+  /** Every line the container logged, bounded only by the docker exec's per-stream output cap. */
+  private async wholeLog(containerId: string): Promise<string> {
+    return stripDockerTimestamps(await containerLogs(this.deps.exec, containerId, 'all'))
   }
 
   private async failLoad(entry: Entry, failure: unknown): Promise<void> {

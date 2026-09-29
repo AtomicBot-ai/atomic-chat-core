@@ -171,6 +171,18 @@ describe('buildStartArgv / buildStopArgv / buildRmArgv / buildLogsArgv', () => {
     ])
   })
 
+  it("builds logs with --tail all for the container's whole log", () => {
+    expect(buildLogsArgv('c1', 'all')).toEqual([
+      '--host',
+      DOCKER_SYSTEM_SOCKET,
+      'logs',
+      '--timestamps',
+      '--tail',
+      'all',
+      'c1',
+    ])
+  })
+
   it('refuses a non-positive tail count', () => {
     expect(() => buildLogsArgv('c1', 0)).toThrow(AtomicCoreError)
   })

@@ -247,11 +247,12 @@ function mergeTimestampedLogs(stdout: string, stderr: string): string {
   return merged.length === 0 ? '' : merged.join('\n') + '\n'
 }
 
-/** The last `tailLines` lines of the container's combined, chronologically merged stdout+stderr log. */
+/** The last `tailLines` lines (or, with `'all'`, every line) of the container's combined,
+ *  chronologically merged stdout+stderr log. The exec's own per-stream output cap still bounds it. */
 export async function containerLogs(
   exec: DockerExec,
   containerId: string,
-  tailLines: number
+  tailLines: number | 'all'
 ): Promise<string> {
   const result = await exec(buildLogsArgv(containerId, tailLines))
   if (result.code !== 0) ioError('logs', result)

@@ -318,10 +318,11 @@ export function buildRemoveImageArgv(image: ImageRef): string[] {
 
 /**
  * `--timestamps` prefixes every line with its RFC3339Nano time so `operations.ts`'s `containerLogs`
- * can merge stdout and stderr back into one chronological log (review round 1, item 2).
+ * can merge stdout and stderr back into one chronological log (review round 1, item 2). `'all'` is
+ * docker's own spelling for the whole log.
  */
-export function buildLogsArgv(containerId: string, tailLines: number): string[] {
-  if (!Number.isInteger(tailLines) || tailLines < 1) {
+export function buildLogsArgv(containerId: string, tailLines: number | 'all'): string[] {
+  if (tailLines !== 'all' && (!Number.isInteger(tailLines) || tailLines < 1)) {
     throw new AtomicCoreError(
       'INVALID_ARGUMENT',
       'log tail length is not a positive integer.',

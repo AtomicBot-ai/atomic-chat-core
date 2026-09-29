@@ -75,13 +75,19 @@ export interface ManagedEngineLaunch {
 
 export type ManagedExitKind = 'out-of-memory' | 'unsupported-model' | 'other'
 
-/** What an engine's exit before readiness meant, read from its log tail and exit code. */
+/** What an engine's exit meant, read from its log (the whole log before readiness) and exit code. */
 export interface ManagedExitClassification {
   kind: ManagedExitKind
   /** Human wording, including whatever numbers the log gave (e.g. requested vs. free memory). */
   message: string
   /** The numbers behind `message`, for a caller that wants to render them itself. */
   numbers?: Record<string, number>
+  /**
+   * The log lines that decided this classification. The lifecycle puts them ahead of the log tail in
+   * the error's details when they are not already in it, so a line a long traceback pushed out of the
+   * tail still reaches the user.
+   */
+  excerpt?: string
 }
 
 /** What a loaded model can do through this engine (spec `tensorrt-llm-runtime`, design D9). */
@@ -148,7 +154,12 @@ export interface ManagedTextAdapter<S = unknown> {
   buildLaunch(context: ManagedLaunchContext<S>): ManagedEngineLaunch
   /** How long readiness may take for this much weight, with margin; a provider setting overrides it. */
   readinessTimeoutMs(weightBytes: number, settings: S): number
-  classifyExit(logTail: string, exitCode: number | null): ManagedExitClassification
+  /**
+   * Why the engine exited. Before readiness `log` is the container's whole log (bounded by the docker
+   * exec's output cap), so a decisive line far above the last one still counts; after a crash of a
+   * ready session it is the log tail.
+   */
+  classifyExit(log: string, exitCode: number | null): ManagedExitClassification
   capabilities(context: { settings: S; family: ModelFamilySupport | null }): ManagedTextCapabilities
   /**
    * Optional: rewrites a JSON POST request body before the session gateway forwards it upstream

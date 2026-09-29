@@ -42,8 +42,8 @@
     "description": "Share of the GPU memory still free after the weights load that the engine reserves for its KV cache. Applies from the next model load.",
     "controllerType": "input",
     "controllerProps": {
-      "value": 0.9,
-      "placeholder": "0.9",
+      "value": 0.8,
+      "placeholder": "0.8",
       "type": "number",
       "min": 0.1,
       "max": 0.95,

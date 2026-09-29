@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, RuntimeDescriptor, RuntimeInstallation, Sha256Digest } from '../../contracts/index.js'
 import type { DescriptorProviderResult, InstallationRecord } from '../environment/index.js'
+import { canonicalizeSettingValues, defaultSettingValues } from '../../settings/index.js'
 import { checkTensorrtLlmModel, parseModelCheckInput } from './check.js'
 import type { ModelCheckDeps } from './check.js'
 
@@ -195,12 +196,13 @@ describe('checkTensorrtLlmModel', () => {
   })
 
   it('reads the kv_cache_free_gpu_memory_fraction from stored settings and passes it to the pure check', async () => {
-    // 75 GB weights, an 80 GB card: ok at the default 0.9 fraction, a shortage at a much lower one.
+    // 70 GB weights with no KV shape in config.json (the weights x (1 - fraction) fallback), an 80 GB
+    // card: ok at the default 0.8 fraction (70 + 14 GB), a shortage at a much lower one (70 + 35 GB).
     const bigModelBody = body({
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
       files: [
-        { path: 'model-00001-of-00002.safetensors', size: 37_500_000_000, sha256: 'a'.repeat(64) },
-        { path: 'model-00002-of-00002.safetensors', size: 37_500_000_000, sha256: 'b'.repeat(64) },
+        { path: 'model-00001-of-00002.safetensors', size: 35_000_000_000, sha256: 'a'.repeat(64) },
+        { path: 'model-00002-of-00002.safetensors', size: 35_000_000_000, sha256: 'b'.repeat(64) },
       ],
     })
     const datacenterDescriptor = descriptor({
@@ -230,6 +232,44 @@ describe('checkTensorrtLlmModel', () => {
       deps({ ...commonDeps, settings: () => ({ kv_cache_free_gpu_memory_fraction: 0.5 }) })
     )
     expect(atLowerFraction.verdict.ok).toBe(false)
+  })
+})
+
+describe('checkTensorrtLlmModel: the stored default fraction is the one the launch passes', () => {
+  // A Qwen3-1.7B-shaped checkpoint (28 layers, 8 KV heads, head_dim 128, bf16 KV) at the stored
+  // default context of 8192: KV_bytes = 2 x 28 x 8 x 128 x 2 x 8192 = 939,524,096. At the default
+  // fraction 0.8 the reserve is exactly 1,174,405,120, so weights + reserve = 2,174,405,120 bytes; at
+  // the old 0.9 it would be 1,043,915,663 and a card 1 byte short of the 0.8 figure would still pass.
+  const NEEDED_AT_DEFAULT = 1_000_000_000 + 1_174_405_120
+  const qwen3Body = body({
+    config_json: {
+      architectures: ['LlamaForCausalLM'],
+      dtype: 'bfloat16',
+      num_hidden_layers: 28,
+      num_attention_heads: 16,
+      num_key_value_heads: 8,
+      head_dim: 128,
+      hidden_size: 2048,
+    },
+  })
+  const storedDefaults = () => canonicalizeSettingValues('tensorrt-llm', defaultSettingValues('tensorrt-llm'))
+
+  it.each<[string, number, boolean]>([
+    ['fits with exactly weights + KV / 0.8 free', NEEDED_AT_DEFAULT, true],
+    ['is a shortage one byte below that', NEEDED_AT_DEFAULT - 1, false],
+  ])('%s', async (_label, freeBytes, ok) => {
+    const result = await checkTensorrtLlmModel(
+      qwen3Body,
+      deps({
+        settings: storedDefaults,
+        hostFacts: async () => ({
+          gpus: [gpu({ gpu_id: 'gpu-0', free_vram_bytes: freeBytes })],
+          memAvailableBytes: 0,
+        }),
+      })
+    )
+    expect(result.kv_reserve_basis).toBe('config')
+    expect(result.verdict.ok).toBe(ok)
   })
 })
 
