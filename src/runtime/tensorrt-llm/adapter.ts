@@ -715,6 +715,39 @@ function invalidMaxTokens(field: string): never {
   throw new AtomicCoreError('INVALID_ARGUMENT', `${field} must be a positive integer.`)
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Same shape and reason as `invalidMaxTokens`: the gateway surfaces this message as a `400`. */
+function invalidJsonSchema(): never {
+  throw new AtomicCoreError(
+    'INVALID_ARGUMENT',
+    "response_format.json_schema must be an object when response_format.type is 'json_schema'."
+  )
+}
+
+/**
+ * Translates OpenAI's `json_schema` wrapper into what `trtllm-serve` 1.2.1 actually reads (ADR
+ * `docs/decisions/2026-09-29-tensorrt-llm-json-schema-wrapper-unwrapped-by-the-session-gateway.md`).
+ * `openai_protocol.py`'s `_response_format_to_guided_decoding_params` hands the WHOLE `json_schema`
+ * field to `GuidedDecodingParams(json=...)` as the schema, so an OpenAI client's
+ * `{"name", "strict", "schema": S}` becomes a grammar for a schema with no real constraint, and the
+ * model answers with any JSON value (a bare string, on the live run). Here `json_schema` becomes the
+ * inner `S`, dropping `name`/`strict`/`description`. A `json_schema` with no object `schema` key is
+ * taken to be the bare schema already and passes unchanged; one that is missing or not an object is
+ * refused (the engine would answer a `400` or a `500` of its own). Every other format type passes
+ * unchanged. Returns `format` itself when nothing changes.
+ */
+function unwrapJsonSchemaFormat(format: unknown): unknown {
+  if (!isPlainObject(format) || format['type'] !== 'json_schema') return format
+  const wrapper = format['json_schema']
+  if (!isPlainObject(wrapper)) invalidJsonSchema()
+  const inner = wrapper['schema']
+  if (!isPlainObject(inner)) return format
+  return { ...format, json_schema: inner }
+}
+
 /**
  * Enforces `settings.max_output_tokens` per request, since `trtllm-serve` 1.2.1 has no server-side
  * flag that does it (`buildTensorrtLlmLaunch`'s doc comment; ADR
@@ -749,6 +782,10 @@ function invalidMaxTokens(field: string): never {
  * With the session's `capabilities` (the lifecycle always passes them; task 2.14 fix round 1), a
  * request asking for what the model cannot do — tool calls without a parser, JSON output without
  * structured-output support — is refused first (`refuseUnsupported`), before anything is rewritten.
+ *
+ * On both routes (`CompletionRequest` and `ChatCompletionRequest` share one `ResponseFormat` in
+ * 1.2.1), an OpenAI `json_schema` wrapper in `response_format` is unwrapped to the bare schema the
+ * engine reads (`unwrapJsonSchemaFormat`).
  */
 export function tensorrtLlmRewriteRequestBody(
   route: string,
@@ -758,8 +795,12 @@ export function tensorrtLlmRewriteRequestBody(
 ): unknown {
   if (!OUTPUT_CAP_ROUTES.has(route)) return body
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return body
-  const obj = body as Record<string, unknown>
-  if (capabilities !== undefined) refuseUnsupported(obj, capabilities)
+  const client = body as Record<string, unknown>
+  if (capabilities !== undefined) refuseUnsupported(client, capabilities)
+  const obj =
+    'response_format' in client
+      ? { ...client, response_format: unwrapJsonSchemaFormat(client['response_format']) }
+      : client
   const cap = settings.max_output_tokens
 
   if (route === '/v1/completions') {

@@ -400,6 +400,36 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     )
     expect(structured.status, await structured.clone().text()).toBe(200)
 
+    // An OpenAI json_schema wrapper reaches the engine as the bare schema trtllm-serve 1.2.1 reads
+    // as `json_schema` (ADR 2026-09-29-tensorrt-llm-json-schema-wrapper-unwrapped-by-the-session-gateway).
+    const schema = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'] }
+    const wrapped = await publicPost(
+      session.port,
+      '/chat/completions',
+      {
+        ...chat,
+        response_format: { type: 'json_schema', json_schema: { name: 'r', strict: true, schema } },
+      },
+      session.api_key
+    )
+    expect(wrapped.status, await wrapped.clone().text()).toBe(200)
+    expect(
+      ((await wrapped.json()) as { received: { response_format: unknown } }).received.response_format
+    ).toEqual({ type: 'json_schema', json_schema: schema })
+    const noSchema = await publicPost(
+      session.port,
+      '/chat/completions',
+      { ...chat, response_format: { type: 'json_schema' } },
+      session.api_key
+    )
+    expect(noSchema.status).toBe(400)
+    expect(await noSchema.json()).toMatchObject({
+      error: {
+        message: "response_format.json_schema must be an object when response_format.type is 'json_schema'.",
+        type: 'invalid_request_error',
+      },
+    })
+
     const embeddings = await publicPost(
       session.port,
       '/embeddings',

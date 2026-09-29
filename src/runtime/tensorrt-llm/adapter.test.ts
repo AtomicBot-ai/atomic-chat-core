@@ -734,6 +734,114 @@ describe('rewriteRequestBody (output-length enforcement, findings-2.13-r1.md ite
   })
 })
 
+describe('rewriteRequestBody: an OpenAI json_schema wrapper is unwrapped to the bare schema trtllm-serve 1.2.1 expects', () => {
+  const settings = tensorrtLlmAdapter.validateSettings({ max_output_tokens: 512 })
+  const schema = {
+    type: 'object',
+    properties: { label: { type: 'string' } },
+    required: ['label'],
+    additionalProperties: false,
+  }
+  const formatOf = (route: string, body: Record<string, unknown>) =>
+    (tensorrtLlmRewriteRequestBody(route, body, settings) as Record<string, unknown>)['response_format']
+
+  it.each<[string, string, unknown, unknown]>([
+    [
+      'the OpenAI wrapper, name/strict/description dropped',
+      '/v1/chat/completions',
+      { type: 'json_schema', json_schema: { name: 'r', strict: true, description: 'd', schema } },
+      { type: 'json_schema', json_schema: schema },
+    ],
+    [
+      'the OpenAI wrapper with only a schema',
+      '/v1/chat/completions',
+      { type: 'json_schema', json_schema: { schema } },
+      { type: 'json_schema', json_schema: schema },
+    ],
+    [
+      'the OpenAI wrapper on /v1/completions (its CompletionRequest takes the same ResponseFormat)',
+      '/v1/completions',
+      { type: 'json_schema', json_schema: { name: 'r', schema } },
+      { type: 'json_schema', json_schema: schema },
+    ],
+    [
+      'a bare schema, already what the engine reads',
+      '/v1/chat/completions',
+      { type: 'json_schema', json_schema: schema },
+      { type: 'json_schema', json_schema: schema },
+    ],
+    [
+      'a wrapper whose schema is not an object (left for the engine to judge)',
+      '/v1/chat/completions',
+      { type: 'json_schema', json_schema: { name: 'r', schema: true } },
+      { type: 'json_schema', json_schema: { name: 'r', schema: true } },
+    ],
+    [
+      "TensorRT-LLM's own json type",
+      '/v1/chat/completions',
+      { type: 'json', schema },
+      { type: 'json', schema },
+    ],
+    ['json_object', '/v1/chat/completions', { type: 'json_object' }, { type: 'json_object' }],
+    ['text', '/v1/chat/completions', { type: 'text' }, { type: 'text' }],
+  ])('forwards %s', (_label, route, format, expected) => {
+    expect(formatOf(route, { model: 'm', response_format: format })).toEqual(expected)
+  })
+
+  it('leaves a body without response_format without one', () => {
+    const result = tensorrtLlmRewriteRequestBody('/v1/chat/completions', { model: 'm' }, settings)
+    expect('response_format' in (result as Record<string, unknown>)).toBe(false)
+  })
+
+  it('does not mutate the client body it was given', () => {
+    const format = { type: 'json_schema', json_schema: { name: 'r', schema } }
+    tensorrtLlmRewriteRequestBody('/v1/chat/completions', { response_format: format }, settings)
+    expect(format.json_schema).toEqual({ name: 'r', schema })
+  })
+
+  it.each<[string, unknown]>([
+    ['missing', { type: 'json_schema' }],
+    ['null', { type: 'json_schema', json_schema: null }],
+    ['a string', { type: 'json_schema', json_schema: 'schema' }],
+    ['an array', { type: 'json_schema', json_schema: [schema] }],
+  ])(
+    'refuses a json_schema format whose json_schema is %s with an INVALID_ARGUMENT the gateway surfaces',
+    (_label, format) => {
+      for (const route of ['/v1/chat/completions', '/v1/completions']) {
+        try {
+          tensorrtLlmRewriteRequestBody(route, { response_format: format }, settings)
+          expect.unreachable('expected a throw')
+        } catch (error) {
+          expect(error).toBeInstanceOf(AtomicCoreError)
+          expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+          expect((error as AtomicCoreError).message).toBe(
+            "response_format.json_schema must be an object when response_format.type is 'json_schema'."
+          )
+        }
+      }
+    }
+  )
+
+  it('refuses an unsupported structured-output request before looking at its shape', () => {
+    const caps = {
+      tools: false,
+      reasoning: false,
+      structured_output: false,
+      vision: false,
+      embeddings: false,
+      responses: false,
+    }
+    expect(() =>
+      tensorrtLlmRewriteRequestBody(
+        '/v1/chat/completions',
+        { response_format: { type: 'json_schema' } },
+        settings,
+        caps
+      )
+    ).toThrow(/does not support structured output/)
+  })
+})
+
 describe('tensorrtLlmAdapter: the session port refuses what the model cannot do (findings-2.14-r1.md item 1)', () => {
   const settings = tensorrtLlmAdapter.validateSettings({})
   const caps = (over: Partial<Record<'tools' | 'structured_output', boolean>> = {}) => ({
