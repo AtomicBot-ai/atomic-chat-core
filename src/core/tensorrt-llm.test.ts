@@ -414,6 +414,22 @@ describe('tensorrtLlmSessionUnloader', () => {
     removal.release?.()
   })
 
+  it('fails the removal, and lifts its hold, when the facade answers an unload that did not succeed', async () => {
+    const { runtime, sessions } = provider(() => true)
+    await sessions.acquire('tensorrt-llm', 'm', {})
+    const refusing = {
+      cancelLoad: () => false,
+      unload: async () => ({ success: false, error: 'the container would not stop' }),
+    }
+    await expect(
+      tensorrtLlmSessionUnloader(
+        () => runtime,
+        () => refusing
+      )('tensorrt-llm')
+    ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED', message: 'the container would not stop' })
+    await expect(sessions.acquire('tensorrt-llm', 'm', {})).resolves.toMatchObject({ created: false })
+  })
+
   it.each<[string, string, () => LocalRuntime | undefined]>([
     ['another engine', 'vllm', () => provider(() => true).runtime],
     ['a core that offers no tensorrt-llm provider', 'tensorrt-llm', () => undefined],

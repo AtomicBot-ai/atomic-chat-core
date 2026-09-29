@@ -89,6 +89,25 @@ describe('wireGpuResidency', () => {
     )
   })
 
+  it('names a failed unload by its model when the session gives no reason', async () => {
+    const residency = wireGpuResidency({
+      runtimes: new Map<LocalProviderId, LocalRuntime>([
+        [
+          'mlx',
+          runtime([{ model_id: 'chat', cards: 'all', auxiliary: false, state: 'ready' }] as GpuOccupancy[]),
+        ],
+      ]),
+      diffusion: () => undefined,
+      leftovers: () => [],
+      sessions: () => ({ cancelLoad: () => false, unload: async () => ({ success: false }) }),
+    })
+    const error = (await residency
+      .hook('tensorrt-llm')({ model_id: 'x', cards: 'all', auxiliary: false })
+      .catch((e: unknown) => e)) as AtomicCoreError
+    expect(error.code).toBe('GPU_BUSY')
+    expect(error.details).toContain('cause=The unload of chat failed.')
+  })
+
   it('counts the containers a previous core left unconfirmed as holding every card', async () => {
     const w = world()
     w.leftovers.push({

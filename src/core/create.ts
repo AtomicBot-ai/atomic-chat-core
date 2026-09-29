@@ -230,6 +230,9 @@ export async function createAtomicCore(
       [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
       ['llamacpp', llamacppRuntime('llamacpp')],
     ])
+    // The facade, constructed last: what GPU residency and an engine removal stop a session through,
+    // exactly as a client's unload would. Read when they act, never before.
+    const facade = (): AtomicCore => core as AtomicCore
     // GPU residency (task 2.15, spec `gpu-residency`): one resident model per card across every local
     // engine of this core. Every part is read at claim time — image generation, the Docker executor's
     // leftovers and the facade are wired further down.
@@ -237,7 +240,7 @@ export async function createAtomicCore(
       runtimes,
       diffusion: () => diffusion,
       leftovers: () => managedLeftovers(),
-      sessions: () => core as AtomicCore,
+      sessions: facade,
     })
 
     if (platform === 'darwin') {
@@ -379,10 +382,7 @@ export async function createAtomicCore(
       onWarn: (message) => log('warn', message),
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
-      unloadEngineSessions: tensorrtLlmSessionUnloader(
-        () => runtimes.get('tensorrt-llm'),
-        () => core as AtomicCore
-      ),
+      unloadEngineSessions: tensorrtLlmSessionUnloader(() => runtimes.get('tensorrt-llm'), facade),
     })
     // Containers a previous core left that startup reconcile could not confirm stopped: they hold every
     // card for GPU residency until a retried stop is confirmed.
