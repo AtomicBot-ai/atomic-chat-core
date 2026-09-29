@@ -17,7 +17,11 @@ import { dockerChildEnv, ensureDockerConfigDir } from './env.js'
 export interface DockerCommandOptions {
   /** How long one docker call may take before it counts as unanswered. Default 30 s; a per-call `timeoutMs` overrides it for just that call. */
   timeoutMs?: number
-  /** Per stream; anything past it is dropped and the command still counts as answered. Default 4 MiB. */
+  /**
+   * Per stream (so stdout and stderr together hold up to twice this). Past it the first half and the
+   * last half are kept, joined by a newline, and the middle is dropped; the command still counts as
+   * answered. Default 4 MiB.
+   */
   maxOutputBytes?: number
   env?: NodeJS.ProcessEnv
   /** An empty, core-owned directory the docker CLI reads as `$DOCKER_CONFIG` (review round 1, item 5 ruling). Created if missing before every call. */
@@ -26,6 +30,54 @@ export interface DockerCommandOptions {
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+
+/**
+ * One output stream, bounded to `limit` bytes: the first half as it arrives, then a sliding window
+ * over the last half. A log longer than the cap keeps its start and its end, where a decisive last
+ * line sits (review of the whole-log read: head-only kept the start and lost the end).
+ */
+class HeadAndTail {
+  private readonly headLimit: number
+  private readonly tailLimit: number
+  private readonly head: Buffer[] = []
+  private headBytes = 0
+  private tail: Buffer[] = []
+  private tailBytes = 0
+  private dropped = false
+
+  constructor(limit: number) {
+    this.headLimit = Math.ceil(limit / 2)
+    this.tailLimit = limit - this.headLimit
+  }
+
+  push(chunk: Buffer): void {
+    const room = this.headLimit - this.headBytes
+    if (room > 0) {
+      const take = chunk.subarray(0, room)
+      this.head.push(take)
+      this.headBytes += take.length
+      chunk = chunk.subarray(take.length)
+    }
+    if (chunk.length === 0) return
+    this.tail.push(chunk)
+    this.tailBytes += chunk.length
+    while (this.tail.length > 1 && this.tailBytes - (this.tail[0] as Buffer).length >= this.tailLimit) {
+      this.tailBytes -= (this.tail.shift() as Buffer).length
+      this.dropped = true
+    }
+  }
+
+  text(): string {
+    const head = Buffer.concat(this.head)
+    let tail = Buffer.concat(this.tail)
+    if (tail.length > this.tailLimit) {
+      tail = tail.subarray(tail.length - this.tailLimit)
+      this.dropped = true
+    }
+    if (!this.dropped) return Buffer.concat([head, tail]).toString('utf8')
+    return `${head.toString('utf8')}\n${tail.toString('utf8')}`
+  }
+}
 
 /** `spawn(exe, args)` with no shell, a sanitized environment (`env.ts`), a deadline and a bounded buffer. */
 export async function runDockerCommand(
@@ -41,10 +93,8 @@ export async function runDockerCommand(
 
   return new Promise((resolve) => {
     let settled = false
-    const stdout: Buffer[] = []
-    const stderr: Buffer[] = []
-    let stdoutBytes = 0
-    let stderrBytes = 0
+    const stdout = new HeadAndTail(limit)
+    const stderr = new HeadAndTail(limit)
     // Unset until spawn succeeds: a spawn that throws synchronously leaves nothing to kill.
     let child: ReturnType<typeof spawn> | undefined
 
@@ -75,26 +125,16 @@ export async function runDockerCommand(
       return
     }
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      if (stdoutBytes >= limit) return
-      const take = chunk.subarray(0, limit - stdoutBytes)
-      stdout.push(take)
-      stdoutBytes += take.length
-    })
-    child.stderr?.on('data', (chunk: Buffer) => {
-      if (stderrBytes >= limit) return
-      const take = chunk.subarray(0, limit - stderrBytes)
-      stderr.push(take)
-      stderrBytes += take.length
-    })
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk))
+    child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
 
     // A binary that is not on the machine arrives here as ENOENT, not as an exit code.
     child.on('error', (error) => finish({ code: null, stdout: '', stderr: error.message }))
     child.on('close', (code) => {
       finish({
         code,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
+        stdout: stdout.text(),
+        stderr: stderr.text(),
       })
     })
   })

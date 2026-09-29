@@ -162,8 +162,8 @@ export interface ManagedTextAdapter<S = unknown> {
   readinessTimeoutMs(weightBytes: number, settings: S): number
   /**
    * Why the engine exited. Before readiness `log` is the container's whole log (bounded by the docker
-   * exec's output cap), so a decisive line far above the last one still counts; after a crash of a
-   * ready session it is the log tail.
+   * exec's per-stream output cap, which keeps a longer log's start and end), so a decisive line far
+   * above the last one still counts; after a crash of a ready session it is the log tail.
    */
   classifyExit(log: string, exitCode: number | null): ManagedExitClassification
   capabilities(context: { settings: S; family: ModelFamilySupport | null }): ManagedTextCapabilities

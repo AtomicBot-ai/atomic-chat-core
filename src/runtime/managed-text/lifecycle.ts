@@ -85,6 +85,7 @@ import {
   advanceStage,
   exitErrorCode,
   exitFailureDetails,
+  lastLogLines,
   isPortBindConflict,
   readContainerState,
   resolveReadinessTimeoutMs,
@@ -899,12 +900,14 @@ export class ManagedTextLifecycle {
     adapter: ManagedTextAdapter,
     exitCode: number | null
   ): Promise<ManagedLoadError> {
-    const tail = await this.tail(containerId).catch(() => '')
+    const read = await this.tail(containerId).catch(() => '')
     // The adapter reads the whole log, not the tail: a container that never got ready logged only its
     // own start, and the line that says why it died can sit above a traceback longer than the tail
     // (2026-09-29 VM run: an OOM surfaced as MODEL_LOAD_FAILED). The details stay the tail, led by
-    // whatever the adapter quoted from above it.
-    const whole = await this.wholeLog(containerId).catch(() => tail)
+    // whatever the adapter quoted from above it; when only the tail read failed, the tail is the end
+    // of the whole log instead of nothing.
+    const whole = await this.wholeLog(containerId).catch(() => read)
+    const tail = read !== '' ? read : lastLogLines(whole, this.timings.logTailLines)
     const classification = adapter.classifyExit(whole, exitCode)
     return new ManagedLoadError(
       exitErrorCode(classification.kind),
@@ -919,7 +922,8 @@ export class ManagedTextLifecycle {
     return stripDockerTimestamps(await containerLogs(this.deps.exec, containerId, this.timings.logTailLines))
   }
 
-  /** Every line the container logged, bounded only by the docker exec's per-stream output cap. */
+  /** Every line the container logged, bounded only by the docker exec's per-stream output cap (a
+   *  longer log keeps its start and its end). */
   private async wholeLog(containerId: string): Promise<string> {
     return stripDockerTimestamps(await containerLogs(this.deps.exec, containerId, 'all'))
   }

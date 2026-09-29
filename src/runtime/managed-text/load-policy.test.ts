@@ -6,6 +6,7 @@ import {
   exitErrorCode,
   exitFailureDetails,
   isPortBindConflict,
+  lastLogLines,
   readContainerState,
   resolveReadinessTimeoutMs,
   stripDockerTimestamps,
@@ -91,6 +92,30 @@ describe('exitFailureDetails', () => {
     ],
   ])('is %s', (_case, excerpt, expected) => {
     expect(exitFailureDetails(tail, excerpt)).toBe(expected)
+  })
+  it('does not repeat a line the excerpt had to shorten (it ends in …) when the tail holds it in full', () => {
+    const wide = `CUDA out of memory. ${'x'.repeat(2_000)}`
+    const withWide = `${wide}\n${tail}`
+    const shortened = `${wide.slice(0, 499)}…`
+    expect(exitFailureDetails(withWide, shortened)).toBe(withWide)
+    // A shortened line the tail lost is still led with, shortened.
+    expect(exitFailureDetails(tail, shortened)).toBe(`${shortened}\n[…] the end of the log:\n${tail}`)
+  })
+
+  it('is the excerpt alone, with no dangling header, when there is no tail at all', () => {
+    expect(exitFailureDetails('', 'CUDA out of memory.')).toBe('CUDA out of memory.\n')
+    expect(exitFailureDetails('', undefined)).toBe('')
+  })
+})
+
+describe('lastLogLines', () => {
+  it.each<[string, string, number, string]>([
+    ['every line when there are fewer than asked for', 'a\nb\n', 5, 'a\nb\n'],
+    ['the last n lines, newline-terminated', 'a\nb\nc\nd\n', 2, 'c\nd\n'],
+    ['the last n lines of a log with no final newline', 'a\nb\nc', 2, 'b\nc\n'],
+    ['nothing for an empty log', '', 3, ''],
+  ])('is %s', (_case, log, n, expected) => {
+    expect(lastLogLines(log, n)).toBe(expected)
   })
 })
 

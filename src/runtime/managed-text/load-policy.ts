@@ -65,13 +65,25 @@ export function exitErrorCode(kind: ManagedExitKind): ErrorCode {
 /**
  * The details a load that failed on an engine exit carries (and keeps as its last attempt's log): the
  * log tail, led by the classification's `excerpt` when the tail no longer holds all of it — the case
- * where the decisive line sits above a traceback longer than the tail.
+ * where the decisive line sits above a traceback longer than the tail. An excerpt line an adapter had
+ * to shorten ends in `…`; it counts as held when the tail holds it up to that mark, so a wide line is
+ * never shown twice. With no tail at all, the excerpt stands alone, with no header over nothing.
  */
 export function exitFailureDetails(tail: string, excerpt: string | undefined): string {
   if (excerpt === undefined || excerpt.trim() === '') return tail
   const lines = excerpt.split('\n').filter((line) => line.trim() !== '')
-  if (lines.every((line) => tail.includes(line))) return tail
+  const held = (line: string): boolean => tail.includes(line.endsWith('…') ? line.slice(0, -1) : line)
+  if (tail.trim() === '') return `${lines.join('\n')}\n`
+  if (lines.every(held)) return tail
   return `${lines.join('\n')}\n[…] the end of the log:\n${tail}`
+}
+
+/** The last `count` lines of `log`, newline-terminated; `''` for an empty log. */
+export function lastLogLines(log: string, count: number): string {
+  const lines = log.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  if (lines.length === 0) return ''
+  return `${lines.slice(-count).join('\n')}\n`
 }
 
 const PORT_CONFLICT = /port is already allocated|address already in use/i

@@ -435,6 +435,46 @@ describe('ManagedTextLifecycle: early exit', () => {
     expect(lifecycle.lastAttempt('org/model-a')?.log_tail).toBe(details)
   })
 
+  it('still classifies from the tail when reading the whole log fails', async () => {
+    await build({
+      exec: async (args, options) =>
+        args.includes('logs') && args.includes('all')
+          ? { code: 1, stdout: '', stderr: 'Error response from daemon: context deadline exceeded' }
+          : docker.exec(args, options),
+    })
+    readyAt = null
+    onProbe = (now) => {
+      if (now === 3_000)
+        docker.exit(docker.last().id, 1, [
+          'loading weights',
+          'CUDA out of memory. Tried to allocate 2.00 GiB',
+        ])
+    }
+    const error = await rejection(lifecycle.load(request_()))
+    expect(error.code).toBe('OUT_OF_MEMORY')
+    expect(error.details).toBe('loading weights\nCUDA out of memory. Tried to allocate 2.00 GiB\n')
+  })
+
+  it('shows the end of the whole log when only the tail read failed, never an empty tail under a header', async () => {
+    await build({
+      exec: async (args, options) =>
+        args.includes('logs') && !args.includes('all')
+          ? { code: 1, stdout: '', stderr: 'Error response from daemon: context deadline exceeded' }
+          : docker.exec(args, options),
+    })
+    readyAt = null
+    onProbe = (now) => {
+      if (now === 3_000)
+        docker.exit(docker.last().id, 1, [
+          'loading weights',
+          'CUDA out of memory. Tried to allocate 2.00 GiB',
+        ])
+    }
+    const error = await rejection(lifecycle.load(request_()))
+    expect(error.code).toBe('OUT_OF_MEMORY')
+    expect(error.details).toBe('loading weights\nCUDA out of memory. Tried to allocate 2.00 GiB\n')
+  })
+
   it("classifies with the engine's own adapter: the second engine maps its exit to MODEL_INCOMPATIBLE", async () => {
     await build()
     readyAt = null
@@ -837,6 +877,34 @@ describe('ManagedTextLifecycle: crash after ready', () => {
     expect(journal.list()).toEqual([])
     expect(await lifecycle.logs('org/model-a')).toContain('CUDA out of memory')
     await expect(gatewayGet(info.port, { host: '127.0.0.1' })).rejects.toThrow()
+  })
+})
+
+describe('ManagedTextLifecycle: a crash after ready reads the tail, not the whole log', () => {
+  it("classifies from the tail: an out-of-memory line far above it does not decide a ready session's crash", async () => {
+    await build({
+      timings: {
+        pollIntervalMs: 1_000,
+        monitorIntervalMs: 1_000,
+        heartbeatReadyTimeoutMs: 2_000,
+        logTailLines: 3,
+      },
+    })
+    await lifecycle.load(request_())
+    const id = docker.last().id
+    docker.exit(id, 1, [
+      'CUDA out of memory. Tried to allocate 1.00 GiB',
+      'served 1000 requests',
+      'served 2000 requests',
+      'segfault',
+    ])
+    for (let i = 0; i < 500 && !emitted.some((e) => e.name === 'session:died'); i++) {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+    expect((emitted.find((e) => e.name === 'session:died')?.payload as { message: string }).message).toBe(
+      'alpha exited with 1'
+    )
+    expect(docker.calls.some((argv) => argv.includes('logs') && argv.includes('all'))).toBe(false)
   })
 })
 

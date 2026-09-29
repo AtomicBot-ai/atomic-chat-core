@@ -633,6 +633,42 @@ describe('classifyExit: the out-of-memory line anywhere in the log, not only at 
   })
 })
 
+describe('classifyExit: review minors on the whole-log classification', () => {
+  it('takes the numbers from the last allocation failure, the one the excerpt ends on, not an earlier one', () => {
+    const log = [
+      'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.00 GiB. GPU 0 has a total capacity of 7.70 GiB of which 3.00 GiB is free.',
+      'retrying with a smaller batch',
+      'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 0 has a total capacity of 7.70 GiB of which 42.69 MiB is free.',
+      'RuntimeError: Executor worker returned error',
+    ].join('\n')
+    const result = tensorrtLlmAdapter.classifyExit(log, 1)
+    expect(result.kind).toBe('out-of-memory')
+    expect(result.numbers).toEqual({ requested_gib: 48 / 1024, free_gib: 42.69 / 1024 })
+  })
+
+  it.each([
+    'Available memory: 3.5 GB',
+    '[TRT-LLM] [W] insufficient GPU memory for CUDA graphs, capturing fewer batch sizes',
+    'Memory usage when loading weights: 3.21 GiB',
+    '[MemUsageChange] Allocated 1.10 GiB for max tokens in paged KV cache (35840).',
+    'free_gpu_memory_fraction=0.8, out of 7.70 GiB total',
+  ])('keeps %j, a line that only mentions memory, as other', (line) => {
+    expect(
+      tensorrtLlmAdapter.classifyExit(`${line}\nRuntimeError: Executor worker returned error\n`, 1).kind
+    ).toBe('other')
+  })
+
+  it('names an unsupported architecture even when an out-of-memory line appears earlier in the log', () => {
+    const log = [
+      '[TRT-LLM] [W] CUDA out of memory. Tried to allocate 20.00 MiB (handled, retrying)',
+      'ValueError: Unknown architecture for AutoModelForCausalLM: ExoticForCausalLM',
+    ].join('\n')
+    const result = tensorrtLlmAdapter.classifyExit(log, 1)
+    expect(result.kind).toBe('unsupported-model')
+    expect(result.message).toMatch(/ExoticForCausalLM/)
+  })
+})
+
 describe('mapTensorrtLlmContextLengthError', () => {
   it('maps the pytorch-backend max_num_tokens overflow message to an OpenAI-shaped envelope', () => {
     const body = JSON.stringify({

@@ -444,8 +444,15 @@ const OOM_MARKER = new RegExp(
 /** How much of the log an out-of-memory classification carries as its `excerpt`. */
 const OOM_EXCERPT_MAX_LINES = 8
 const OOM_EXCERPT_MAX_LINE_CHARS = 500
-const OOM_TRIED_TO_ALLOCATE = /Tried to allocate ([\d.]+)\s*(GiB|MiB|KiB)/
-const OOM_FREE = /of which ([\d.]+)\s*(GiB|MiB|KiB|bytes) is free/
+const OOM_TRIED_TO_ALLOCATE = /Tried to allocate ([\d.]+)\s*(GiB|MiB|KiB)/g
+const OOM_FREE = /of which ([\d.]+)\s*(GiB|MiB|KiB|bytes) is free/g
+
+/** The last match in the log: the allocation failure that ended the run, the one the excerpt ends on. */
+function lastMatch(pattern: RegExp, log: string): RegExpExecArray | null {
+  let last: RegExpExecArray | null = null
+  for (const match of log.matchAll(pattern)) last = match as RegExpExecArray
+  return last
+}
 
 /** `tensorrt_llm/_torch/models/modeling_auto.py`'s `AutoModelForCausalLM.from_config` — the
  *  pytorch backend's model class lookup (file header); not the legacy `tensorrt`-backend loader's
@@ -484,8 +491,10 @@ function oomExcerpt(log: string): string {
 
 function classifyOom(log: string): ManagedExitClassification | null {
   if (!OOM_MARKER.test(log)) return null
-  const tried = OOM_TRIED_TO_ALLOCATE.exec(log)
-  const free = OOM_FREE.exec(log)
+  // The last numbers, not the first: with the whole log in play an earlier, handled allocation
+  // failure would otherwise supply numbers the excerpt does not end on.
+  const tried = lastMatch(OOM_TRIED_TO_ALLOCATE, log)
+  const free = lastMatch(OOM_FREE, log)
   const numbers: Record<string, number> = {}
   let requestedText = 'an unknown amount of'
   let freeText = ''
@@ -507,21 +516,23 @@ function classifyOom(log: string): ManagedExitClassification | null {
   }
 }
 
-function classifyUnsupported(logTail: string): ManagedExitClassification | null {
-  const arch = UNSUPPORTED_ARCHITECTURE.exec(logTail)
-  if (arch) {
-    return {
-      kind: 'unsupported-model',
-      message: `The model architecture ${arch[1]} is not supported by this TensorRT-LLM release.`,
-    }
-  }
-  if (UNSUPPORTED_QUANTIZATION.test(logTail)) {
-    return {
-      kind: 'unsupported-model',
-      message: 'This model is quantized in a format this TensorRT-LLM release does not load.',
-    }
-  }
-  return null
+function classifyUnsupportedArchitecture(log: string): ManagedExitClassification | null {
+  const arch = UNSUPPORTED_ARCHITECTURE.exec(log)
+  return arch
+    ? {
+        kind: 'unsupported-model',
+        message: `The model architecture ${arch[1]} is not supported by this TensorRT-LLM release.`,
+      }
+    : null
+}
+
+function classifyUnsupportedQuantization(log: string): ManagedExitClassification | null {
+  return UNSUPPORTED_QUANTIZATION.test(log)
+    ? {
+        kind: 'unsupported-model',
+        message: 'This model is quantized in a format this TensorRT-LLM release does not load.',
+      }
+    : null
 }
 
 /** Reads a container's log and exit code into why it exited (spec "Этапы и таймаут загрузки": a
@@ -529,14 +540,15 @@ function classifyUnsupported(logTail: string): ManagedExitClassification | null 
  *  the log tail, instead of waiting out the full timeout). Before readiness the lifecycle hands over
  *  the container's whole log, not its tail, and every line of it is searched: the out-of-memory line
  *  can sit above a worker traceback longer than the tail, ending in "RuntimeError: Executor worker
- *  returned error" (2026-09-29 VM run). Checked in order: an out-of-memory message first, with the
- *  lines that said so as `excerpt`, then an unsupported-architecture/quantization message, otherwise
- *  `other`. */
+ *  returned error" (2026-09-29 VM run). Checked in order: an unsupported architecture first — the
+ *  model class lookup raises it before anything is allocated, so it is decisive even when a handled
+ *  out-of-memory line appears earlier in the whole log — then an out-of-memory message, with the
+ *  lines that said so as `excerpt` and the numbers of the last allocation failure, then an
+ *  unsupported quantization, otherwise `other`. */
 export function classifyTensorrtLlmExit(log: string, exitCode: number | null): ManagedExitClassification {
-  const oom = classifyOom(log)
-  if (oom) return oom
-  const unsupported = classifyUnsupported(log)
-  if (unsupported) return unsupported
+  const classification =
+    classifyUnsupportedArchitecture(log) ?? classifyOom(log) ?? classifyUnsupportedQuantization(log)
+  if (classification) return classification
   const codeText = exitCode === null ? 'with no exit code' : `with exit code ${exitCode}`
   return { kind: 'other', message: `trtllm-serve exited unexpectedly ${codeText} before it became ready.` }
 }

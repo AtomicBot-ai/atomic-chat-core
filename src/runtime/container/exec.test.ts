@@ -97,13 +97,26 @@ describe('runDockerCommand', () => {
     expect(result.code).toBeNull()
   })
 
-  it('truncates output past maxOutputBytes without hanging the child', async () => {
-    const fake = fakeDocker('process.stdout.write("x".repeat(10_000)); process.exit(0)')
+  it('keeps the start and the end of an output past maxOutputBytes, per stream, without hanging the child', async () => {
+    const fake = fakeDocker(
+      'process.stdout.write("HEAD" + "x".repeat(10_000) + "TAIL"); process.stderr.write("head" + "y".repeat(10_000) + "tail"); setTimeout(() => process.exit(0), 50)'
+    )
     const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], {
       dockerConfigDir: await tempDockerConfigDir(),
       maxOutputBytes: 10,
     })
-    expect(result.stdout.length).toBe(10)
+    expect(result.code).toBe(0)
+    expect(result.stdout).toBe('HEADx\nxTAIL')
+    expect(result.stderr).toBe('heady\nytail')
+  })
+
+  it('returns an output within maxOutputBytes untouched', async () => {
+    const fake = fakeDocker('process.stdout.write("0123456789"); process.exit(0)')
+    const result = await runDockerCommand(fake.exe, [...fake.prefixArgs], {
+      dockerConfigDir: await tempDockerConfigDir(),
+      maxOutputBytes: 10,
+    })
+    expect(result.stdout).toBe('0123456789')
   })
 
   it('lets a per-call timeoutMs override the options default (review round 1, item 3)', async () => {
