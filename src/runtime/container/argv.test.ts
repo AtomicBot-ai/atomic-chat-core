@@ -262,6 +262,13 @@ describe('buildCreateModelContainerArgv', () => {
     expect(argv[i + 1]).toBe(`device=${baseSpec.gpuUuid}`)
   })
 
+  it('selects the GB10 by the UUID nvidia-smi printed for it (captured), with no platform flag: the image digest decides the arch', () => {
+    const gb10 = 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32'
+    const argv = buildCreateModelContainerArgv({ ...baseSpec, gpuUuid: gb10 })
+    expect(argv[argv.indexOf('--gpus') + 1]).toBe(`device=${gb10}`)
+    expect(argv.some((arg) => arg.startsWith('--platform'))).toBe(false)
+  })
+
   it('accepts a MIG-<uuid> gpu id too', () => {
     const argv = buildCreateModelContainerArgv({ ...baseSpec, gpuUuid: 'MIG-abc123' })
     const i = argv.indexOf('--gpus')

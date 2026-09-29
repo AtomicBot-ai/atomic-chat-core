@@ -14,4 +14,9 @@
   `https://download.docker.com/linux/{ubuntu,fedora}/gpg` (`docker-deb.asc`, `docker-rpm.asc`; Debian's URL
   serves the same file as Ubuntu's) and `https://nvidia.github.io/libnvidia-container/gpgkey`. The install
   recipe pins their fingerprints; `src/host/recipes/openpgp.test.ts` checks them against GnuPG's output.
+- `linux-probe/nvidia-smi/gb10-driver595-captured.csv` (core's own `noheader,nounits` query),
+  `gb10-driver595-captured-with-header.csv` (the same query with `--format=csv`) and
+  `linux-probe/meminfo/gb10-captured-head.txt` (the first five lines of `/proc/meminfo`) are verbatim captures from a
+  DGX Spark-class GB10 host (a vast.ai container, driver 595.71.05 injected by the host). `*-documented.csv` (GH200,
+  RTX 5090) are built from NVIDIA's published memory sizes and compute capabilities, not captured.
 - Everything else is hand-written test data owned by this repo.

@@ -602,7 +602,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
   it('a GB10 with no reported memory still adopts: compute capability, not vram, decides this check', async () => {
     const { facts, assessment } = await run({
       uname: ok('aarch64\n'),
-      nvidiaSmi: ok(readLinuxProbeFixture('nvidia-smi/gb10-driver590.csv')),
+      nvidiaSmi: ok(readLinuxProbeFixture('nvidia-smi/gb10-driver595-captured.csv')),
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
@@ -612,6 +612,26 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     expect(assessment.adopts_existing_engine).toBe(true)
     expect(assessment.blockers).toEqual([])
   })
+
+  // GB10 captured on a DGX Spark-class host (driver 595.71.05); GH200 and RTX 5090 documented.
+  it.each([
+    ['GB10', 'aarch64\n', 'nvidia-smi/gb10-driver595-captured.csv'],
+    ['GH200', 'aarch64\n', 'nvidia-smi/gh200-documented.csv'],
+    ['RTX 5090', 'x86_64\n', 'nvidia-smi/rtx5090-documented.csv'],
+  ])(
+    'a ready %s host adopts with no blocker: driver and compute capability pass, memory is never asked',
+    async (_label, arch, smi) => {
+      const { assessment } = await run({
+        uname: ok(arch),
+        nvidiaSmi: ok(readLinuxProbeFixture(smi)),
+        dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+        dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
+        nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      })
+      expect(assessment.blockers).toEqual([])
+      expect(assessment.adopts_existing_engine).toBe(true)
+    }
+  )
 })
 
 describe('review-round fixes (task 2.4 fix round 1)', () => {

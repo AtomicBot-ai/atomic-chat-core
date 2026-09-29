@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, RuntimeDescriptor, Sha256Digest } from '../../contracts/index.js'
-import { inventoryDigest } from '../environment/index.js'
+import { inventoryDigest, parseNvidiaSmi, parseRuntimeDescriptor } from '../environment/index.js'
+import {
+  filesFromHfSiblings,
+  hfListingFixtureName,
+  readHfListingFixture,
+  type HfListing,
+} from '../../../test/helpers/hf-listing-fixtures.js'
+import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
+import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
+import { parseMemAvailableBytes } from './host-facts.js'
+import type { JsonObject } from './quant-format.js'
 import {
   checkModelCompatibility,
   checkModelCompatibilityFiles,
@@ -487,7 +497,7 @@ describe('checkModelCompatibility', () => {
     const descriptor = baseDescriptor()
     const selected = gpu({
       gpu_id: 'gb10',
-      compute_capability: '10.0',
+      compute_capability: '12.1',
       total_vram_bytes: null,
       free_vram_bytes: null,
     })
@@ -955,5 +965,170 @@ describe('checkModelCompatibilityFiles / checkModelMemory: the pre-launch split 
     const split = checkModelMemory(files.resolved, descriptor, [selected], 0, memory)
 
     expect(combined).toEqual(split)
+  })
+})
+
+/**
+ * The three hardware targets that are not live-tested (GB10/DGX Spark, GH200, RTX 5090), walked
+ * through the published descriptor (`test/fixtures/runtimes/tensorrt-llm.json`) and the curated
+ * repositories' real Hugging Face listings. Card data: GB10 captured on a DGX Spark-class host
+ * (`nvidia-smi` with core's own query, `/proc/meminfo`'s head); GH200 and RTX 5090 documented, not
+ * captured. `config.json` shapes and `hf_quant_config.json` bodies are the repositories' published
+ * values, documented, not captured; the KV cache is sized at 2 bytes (no `kv_cache_quant_algo`), the
+ * conservative case.
+ */
+describe('target hosts: format rules and the curated tier model, on the published descriptor', () => {
+  const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
+  const cardFrom = (fixture: string): GpuFacts => {
+    const { gpus } = parseNvidiaSmi({ code: 0, stdout: readLinuxProbeFixture(fixture), stderr: '' })
+    return gpus[0] as GpuFacts
+  }
+  const GB10 = cardFrom('nvidia-smi/gb10-driver595-captured.csv')
+  const GH200 = cardFrom('nvidia-smi/gh200-documented.csv')
+  const RTX5090 = cardFrom('nvidia-smi/rtx5090-documented.csv')
+  const GB10_MEM_AVAILABLE = parseMemAvailableBytes(
+    readLinuxProbeFixture('meminfo/gb10-captured-head.txt')
+  ) as number
+  /** A discrete card's check never reads host memory; a large value proves it. */
+  const DISCRETE_HOST_MEM = 400 * 1024 ** 3
+  const sizing = {
+    contextLength: 8192,
+    kvCacheFreeGpuMemoryFraction: TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
+  }
+
+  const formatInput = (format: string): ModelCheckInput =>
+    format === 'bf16'
+      ? baseInput({ files: weightFiles(1_000_000_000) })
+      : baseInput({
+          config_json: { architectures: ['LlamaForCausalLM'] },
+          hf_quant_config_json: { quantization: { quant_algo: format.toUpperCase() } },
+          files: [...weightFiles(1_000_000_000), { path: 'hf_quant_config.json', size: 200, sha256: null }],
+        })
+
+  // [format, GB10 12.1, GH200 9.0, RTX 5090 12.0]
+  it.each<[string, boolean, boolean, boolean]>([
+    ['bf16', true, true, true],
+    ['fp16', true, true, true],
+    ['w4a16_awq', false, true, false],
+    ['fp8', true, true, true],
+    ['w4a8_awq', false, true, false],
+    ['fp8_block_scales', false, true, false],
+    ['fp8_per_channel_per_token', false, true, false],
+    ['nvfp4', true, false, true],
+    ['mxfp4', true, false, true],
+  ])('%s: GB10 %s, GH200 %s, RTX 5090 %s', (format, gb10, gh200, rtx5090) => {
+    for (const [card, expected, hostMem] of [
+      [GB10, gb10, GB10_MEM_AVAILABLE],
+      [GH200, gh200, DISCRETE_HOST_MEM],
+      [RTX5090, rtx5090, DISCRETE_HOST_MEM],
+    ] as const) {
+      const verdict = checkModelCompatibility(
+        formatInput(format),
+        descriptor,
+        [card],
+        hostMem,
+        sizing
+      ).verdict
+      expect({ card: card.name, ok: verdict.ok }).toEqual({ card: card.name, ok: expected })
+      if (!verdict.ok) expect(verdict.error.code).toBe('MODEL_INCOMPATIBLE')
+    }
+  })
+
+  const curatedInput = (
+    repository: string,
+    config: JsonObject,
+    hfQuantConfig: JsonObject | null
+  ): ModelCheckInput => {
+    const listing = readHfListingFixture(hfListingFixtureName(repository)) as HfListing
+    return {
+      repository,
+      revision: listing.sha,
+      config_json: config,
+      hf_quant_config_json: hfQuantConfig,
+      files: filesFromHfSiblings(listing.siblings).map((file) => ({
+        path: file.path,
+        size: file.bytes,
+        sha256: file.sha256 ?? null,
+      })),
+    }
+  }
+  const LLAMA_70B_NVFP4 = curatedInput(
+    'nvidia/Llama-3.3-70B-Instruct-NVFP4',
+    {
+      architectures: ['LlamaForCausalLM'],
+      num_hidden_layers: 80,
+      num_attention_heads: 64,
+      num_key_value_heads: 8,
+      hidden_size: 8192,
+      torch_dtype: 'bfloat16',
+    },
+    { quantization: { quant_algo: 'NVFP4', group_size: 16, exclude_modules: ['lm_head'] } }
+  )
+  const NEMOTRON_NANO_FP8 = curatedInput(
+    'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8',
+    {
+      architectures: ['NemotronHForCausalLM'],
+      num_hidden_layers: 52,
+      num_attention_heads: 32,
+      num_key_value_heads: 2,
+      head_dim: 128,
+      hidden_size: 2688,
+      torch_dtype: 'bfloat16',
+    },
+    { quantization: { quant_algo: 'FP8' } }
+  )
+  const QWEN3_32B_NVFP4 = curatedInput(
+    'nvidia/Qwen3-32B-NVFP4',
+    {
+      architectures: ['Qwen3ForCausalLM'],
+      num_hidden_layers: 64,
+      num_attention_heads: 64,
+      num_key_value_heads: 8,
+      head_dim: 128,
+      hidden_size: 5120,
+      torch_dtype: 'bfloat16',
+    },
+    { quantization: { quant_algo: 'NVFP4', group_size: 16, exclude_modules: ['lm_head'] } }
+  )
+
+  it('GB10: its tier model (80 GB tier, NVFP4) is curated, checked against MemAvailable, and fits', () => {
+    const result = checkModelCompatibility(LLAMA_70B_NVFP4, descriptor, [GB10], GB10_MEM_AVAILABLE, sizing)
+    expect(result).toMatchObject({
+      curated: true,
+      unified_memory: true,
+      quantization_format: 'nvfp4',
+      checked_gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32',
+      kv_reserve_basis: 'config',
+      verdict: { ok: true },
+    })
+  })
+
+  it('GB10: with less MemAvailable than the weights, the same model is refused with the host numbers', () => {
+    const result = checkModelCompatibility(LLAMA_70B_NVFP4, descriptor, [GB10], 30 * 1024 ** 3, sizing)
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok) expect(result.verdict.error.details).toContain(`free_bytes=${30 * 1024 ** 3}`)
+  })
+
+  it('GH200: the 80 GB tier (NVFP4) is refused on 9.0, its 48 GB tier model (FP8) fits in HBM', () => {
+    const nvfp4 = checkModelCompatibility(LLAMA_70B_NVFP4, descriptor, [GH200], DISCRETE_HOST_MEM, sizing)
+    expect(nvfp4.verdict.ok).toBe(false)
+    if (!nvfp4.verdict.ok) expect(nvfp4.verdict.error.details).toBe('required=10.0 actual=9.0')
+    const fp8 = checkModelCompatibility(NEMOTRON_NANO_FP8, descriptor, [GH200], DISCRETE_HOST_MEM, sizing)
+    expect(fp8).toMatchObject({
+      curated: true,
+      unified_memory: false,
+      quantization_format: 'fp8',
+      verdict: { ok: true },
+    })
+  })
+
+  it('RTX 5090: its tier model (32 GB tier, NVFP4) is curated and fits its 32 GB', () => {
+    const result = checkModelCompatibility(QWEN3_32B_NVFP4, descriptor, [RTX5090], DISCRETE_HOST_MEM, sizing)
+    expect(result).toMatchObject({
+      curated: true,
+      unified_memory: false,
+      quantization_format: 'nvfp4',
+      verdict: { ok: true },
+    })
   })
 })

@@ -4,7 +4,8 @@ export interface FakeLinuxHostState {
   /** Account name the fake group answers for; the real login name when omitted. */
   user?: string
   driver: string | null
-  gpus?: { uuid: string; name: string; cc: string; total_mib: number; free_mib: number }[]
+  /** Memory in MiB, or `'[N/A]'` as a unified-memory card (GB10) prints it. */
+  gpus?: { uuid: string; name: string; cc: string; total_mib: number | '[N/A]'; free_mib: number | '[N/A]' }[]
   docker: {
     installed: boolean
     reachable: boolean

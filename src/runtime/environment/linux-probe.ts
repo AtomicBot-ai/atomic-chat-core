@@ -221,12 +221,26 @@ export function normalizeArchitecture(raw: string): string {
 const MIB = 1024 * 1024
 
 /**
+ * One memory cell in MiB, as bytes: a plain number (`nounits`) or one followed by ` MiB` (a query
+ * without `nounits`). Anything else — `[N/A]`/`N/A` on a unified-memory card, `[Not Supported]`, an
+ * empty cell — is `null`, never `0`: `Number('')` is `0`, and a zero read as a size would refuse
+ * every model for "no memory" instead of taking the unified-memory branch (design D13), while a
+ * `NaN` from `Number('32607 MiB')` would turn a discrete card into a unified-memory one.
+ */
+function mibCellBytes(cell: string): number | null {
+  const match = /^(\d+(?:\.\d+)?)(?:\s*MiB)?$/.exec(cell)
+  return match === null ? null : Number(match[1]) * MIB
+}
+
+/**
  * `nvidia-smi --query-gpu=uuid,name,compute_cap,memory.total,memory.free,driver_version
  * --format=csv,noheader,nounits`: one line per device, memory in MiB.
  *
  * A unified-memory card (GB10/DGX Spark) reports `[N/A]` for both memory columns instead of a
- * number; `Number('[N/A]')` is `NaN`, so those fields come out `null` rather than a wrong number —
- * the model-compatibility check reads that as "compare against host memory instead" (design D13).
+ * number (captured on a DGX Spark-class host, driver 595.71.05), so those fields come out `null`
+ * rather than a wrong number — the model-compatibility check reads that as "compare against host
+ * memory instead" (design D13). A header line (`uuid, name, ...`, from a query without `noheader`)
+ * is not a card.
  */
 export function parseNvidiaSmi(output: CommandOutput | null): {
   driver_version: string | null
@@ -237,16 +251,14 @@ export function parseNvidiaSmi(output: CommandOutput | null): {
   let driver: string | null = null
   for (const line of output.stdout.split('\n')) {
     const cells = line.split(',').map((cell) => cell.trim())
-    if (cells.length < 6 || cells[0] === '') continue
-    const total = Number(cells[3])
-    const free = Number(cells[4])
+    if (cells.length < 6 || cells[0] === '' || cells[0] === 'uuid') continue
     driver = cells[5] as string
     gpus.push({
       gpu_id: cells[0] as string,
       name: cells[1] as string,
       compute_capability: cells[2] as string,
-      total_vram_bytes: Number.isFinite(total) ? total * MIB : null,
-      free_vram_bytes: Number.isFinite(free) ? free * MIB : null,
+      total_vram_bytes: mibCellBytes(cells[3] as string),
+      free_vram_bytes: mibCellBytes(cells[4] as string),
       driver_version: driver,
     })
   }

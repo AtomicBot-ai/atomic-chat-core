@@ -31,6 +31,7 @@ import {
   type HostView,
   type LinuxProvisionerDeps,
 } from './linux-provisioner.js'
+import { parseNvidiaSmi } from './linux-probe.js'
 import { startOperation } from './state.js'
 import type { PersistedOperation } from './store.js'
 
@@ -648,6 +649,26 @@ describe('the GPU check, the pull and the verification', () => {
     expect(old.dockerCalls).toEqual([])
   })
 
+  it('on an aarch64 GB10 (unified memory, captured shape) checks the arm64 probe image on the GB10 and pulls the arm64 engine image', async () => {
+    const GB10 = 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32'
+    const arm64 = DESCRIPTOR.image['linux/arm64']
+    const arm64Probe = DESCRIPTOR.probe_image['linux/arm64']
+    const h = harness({
+      ...readyHost(),
+      arch: 'aarch64',
+      driver: '595.71.05',
+      gpus: [{ uuid: GB10, name: 'NVIDIA GB10', cc: '12.1', total_mib: '[N/A]', free_mib: '[N/A]' }],
+    })
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.prepare(record(), signal, noOwn)
+    expect(h.pulls.map((pull) => pull.ref)).toEqual([`${arm64Probe.repository}@${arm64Probe.digest}`])
+    expect(h.dockerCalls.find((args) => args[2] === 'run')).toContain(`device=${GB10}`)
+    await provisioner.pull(record(), () => {}, signal)
+    expect(h.pulls.map((pull) => pull.ref)).toContain(`${arm64.repository}@${arm64.digest}`)
+    expect(h.pulls.map((pull) => pull.ref)).not.toContain(IMAGE_REF)
+    expect(h.pulls.map((pull) => pull.ref)).not.toContain(PROBE_REF)
+  })
+
   it('pulls the engine image by the digest for this platform with byte progress', async () => {
     const h = harness(readyHost())
     const progress: unknown[] = []
@@ -1101,6 +1122,16 @@ describe('helpers', () => {
     expect(pickGpu([gpu('a', '8.6', 10), gpu('b', '8.9', 20), gpu('c', '7.5', 99)], '8.0')?.gpu_id).toBe('b')
     expect(pickGpu([gpu('spark', '12.1', null)], '8.0')?.gpu_id).toBe('spark')
     expect(pickGpu([gpu('old', '7.5', 8)], '8.0')).toBeNull()
+  })
+
+  // GB10 captured on a DGX Spark-class host; GH200 and RTX 5090 documented, not captured.
+  it.each([
+    ['GB10 (12.1, unified memory: no size at all)', 'nvidia-smi/gb10-driver595-captured.csv'],
+    ['GH200 (9.0, 96 GB)', 'nvidia-smi/gh200-documented.csv'],
+    ['RTX 5090 (12.0, 32 GB)', 'nvidia-smi/rtx5090-documented.csv'],
+  ])('the %s qualifies for the 8.0 minimum, whatever its memory says', (_label, fixture) => {
+    const { gpus } = parseNvidiaSmi({ code: 0, stdout: readLinuxProbeFixture(fixture), stderr: '' })
+    expect(pickGpu(gpus, DESCRIPTOR.minimum_compute_capability)).toEqual(gpus[0])
   })
 
   it('matches an image by its repo digest only', () => {

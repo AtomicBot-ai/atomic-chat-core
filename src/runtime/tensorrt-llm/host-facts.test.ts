@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { DockerExec } from '../container/index.js'
 import type { HostExec } from '../environment/index.js'
+import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
 import {
   NVIDIA_SMI_GPU_QUERY,
   PROC_MEMINFO_PATH,
@@ -103,6 +104,29 @@ describe('probeTensorrtLlmGpusAndMemory', () => {
     const result = await probeTensorrtLlmGpusAndMemory({ exec, nvidiaSmi: 'nvidia-smi', readFile })
     expect(result.gpus.map((g) => g.gpu_id)).toEqual(['GPU-aaaa', 'GPU-bbbb'])
     expect(result.memAvailableBytes).toBe(65_536_000 * 1024)
+  })
+})
+
+describe('the GB10 (DGX Spark-class host), captured', () => {
+  it('is one unified-memory card with MemAvailable, not MemFree, as the memory to check against', async () => {
+    const smi = readLinuxProbeFixture('nvidia-smi/gb10-driver595-captured.csv')
+    const meminfo = readLinuxProbeFixture('meminfo/gb10-captured-head.txt')
+    const exec: HostExec = async () => ({ code: 0, stdout: smi, stderr: '' })
+    const readFile = async (path: string): Promise<string | null> =>
+      path === PROC_MEMINFO_PATH ? meminfo : null
+    const facts = await probeTensorrtLlmGpusAndMemory({ exec, nvidiaSmi: 'nvidia-smi', readFile })
+    expect(facts.gpus).toEqual([
+      {
+        gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32',
+        name: 'NVIDIA GB10',
+        compute_capability: '12.1',
+        total_vram_bytes: null,
+        free_vram_bytes: null,
+        driver_version: '595.71.05',
+      },
+    ])
+    // MemAvailable (83317108 kB), not MemFree (66008600 kB): page cache counts as reclaimable.
+    expect(facts.memAvailableBytes).toBe(83_317_108 * 1024)
   })
 })
 

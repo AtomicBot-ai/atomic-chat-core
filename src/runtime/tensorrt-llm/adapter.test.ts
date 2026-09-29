@@ -135,6 +135,11 @@ describe('validateSettings', () => {
       },
     ],
     [
+      'the GB10 gpu_id nvidia-smi printed on a DGX Spark-class host (captured) passes through',
+      { gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32' },
+      { gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32' },
+    ],
+    [
       'a valid MIG-<uuid> gpu_id passes through',
       { gpu_id: 'MIG-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
       {

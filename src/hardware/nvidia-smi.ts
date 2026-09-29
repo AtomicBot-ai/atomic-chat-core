@@ -45,16 +45,22 @@ const UNREPORTED = new Set([
   '[Insufficient Permissions]',
 ])
 
+/** A header cell is the field name, with ` [MiB]`-style units when the query asked for them. */
+function isHeaderLine(cells: readonly string[], fields: readonly string[]): boolean {
+  return cells.every((cell, i) => cell.replace(/\s*\[[^\]]*\]$/, '') === fields[i])
+}
+
 /**
  * Rows in `fields` order. Lines whose column count does not match (a warning the tool printed to
- * stdout, an empty trailing line) are dropped rather than mis-keyed.
+ * stdout, an empty trailing line) are dropped rather than mis-keyed, and so is a header line (a
+ * query without `noheader`), which would otherwise read as a card named `name`.
  */
 export function parseNvidiaSmiCsv(stdout: string, fields: readonly string[]): NvidiaSmiRow[] {
   const rows: NvidiaSmiRow[] = []
   for (const line of stdout.split(/\r?\n/)) {
     if (line.trim() === '') continue
     const cells = line.split(',').map((cell) => cell.trim())
-    if (cells.length !== fields.length) continue
+    if (cells.length !== fields.length || isHeaderLine(cells, fields)) continue
     const row: NvidiaSmiRow = {}
     fields.forEach((field, i) => {
       const cell = cells[i] ?? ''
@@ -65,10 +71,15 @@ export function parseNvidiaSmiCsv(stdout: string, fields: readonly string[]): Nv
   return rows
 }
 
-/** The plugin's `GpuInfo` for one nvidia-smi row: NVML's uuid without `GPU-`, MiB, `''` for an unknown compute capability. */
+/**
+ * The plugin's `GpuInfo` for one nvidia-smi row: NVML's uuid without `GPU-`, MiB (with or without the
+ * ` MiB` a query without `nounits` appends), `''` for an unknown compute capability. An unreported
+ * size — `[N/A]` on a unified-memory card such as the GB10 — is `total_memory: 0`, the app's own
+ * "unknown" in this contract, never `NaN`.
+ */
 export function nvidiaGpuFromRow(row: NvidiaSmiRow): GpuInfo {
   const index = Number(row['index'])
-  const memory = Number(row['memory.total'])
+  const memory = Number((row['memory.total'] ?? '').replace(/\s*MiB$/, ''))
   return {
     name: row['name'] ?? 'NVIDIA GPU',
     total_memory: Number.isFinite(memory) && memory > 0 ? Math.floor(memory) : 0,

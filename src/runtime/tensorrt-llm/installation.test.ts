@@ -50,6 +50,13 @@ describe('containerPlatformFor', () => {
     ['x64', 'linux/amd64'],
     ['arm64', 'linux/arm64'],
     ['ia32', null],
+    ['arm', null],
+    ['ppc64', null],
+    ['s390x', null],
+    ['riscv64', null],
+    // `uname -m` spellings are the setup's (`linux-provisioner.ts`), never `process.arch`'s.
+    ['aarch64', null],
+    ['x86_64', null],
   ])('%s → %s', (arch, platform) => {
     expect(containerPlatformFor(arch)).toBe(platform)
   })

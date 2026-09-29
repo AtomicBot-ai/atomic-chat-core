@@ -10,7 +10,11 @@ import {
   type CommandOutput,
   type LinuxProbeDeps,
 } from './linux-probe.js'
-import { DAEMON_DOWN_28_3, UNREACHABLE_28_3 } from '../../../test/helpers/linux-probe-fixtures.js'
+import {
+  DAEMON_DOWN_28_3,
+  UNREACHABLE_28_3,
+  readLinuxProbeFixture,
+} from '../../../test/helpers/linux-probe-fixtures.js'
 
 const ok = (stdout: string): CommandOutput => ({ code: 0, stdout, stderr: '' })
 const missing = (): CommandOutput => ({ code: null, stdout: '', stderr: '' })
@@ -90,17 +94,67 @@ describe('reading the machine', () => {
   })
 
   it('reports a unified-memory card (GB10/DGX Spark) with null vram instead of a bogus number', () => {
-    const answer = parseNvidiaSmi(ok('GPU-gb10, NVIDIA GB10, 12.1, [N/A], [N/A], 590.44.01\n'))
-    expect(answer.gpus).toEqual([
-      {
-        gpu_id: 'GPU-gb10',
-        name: 'NVIDIA GB10',
-        compute_capability: '12.1',
-        total_vram_bytes: null,
-        free_vram_bytes: null,
-        driver_version: '590.44.01',
-      },
-    ])
+    // Captured verbatim on a DGX Spark-class host with exactly the query core runs.
+    const answer = parseNvidiaSmi(ok(readLinuxProbeFixture('nvidia-smi/gb10-driver595-captured.csv')))
+    expect(answer).toEqual({
+      driver_version: '595.71.05',
+      gpus: [
+        {
+          gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32',
+          name: 'NVIDIA GB10',
+          compute_capability: '12.1',
+          total_vram_bytes: null,
+          free_vram_bytes: null,
+          driver_version: '595.71.05',
+        },
+      ],
+    })
+  })
+
+  const MiB = 1024 * 1024
+  // GB10 is captured (a DGX Spark-class host, driver 595.71.05). GH200 and RTX 5090 are documented,
+  // not captured: memory.total from NVIDIA's published sizes, memory.free a plausible idle value.
+  it.each<[string, string, { id: string; cc: string; total: number | null; free: number | null }]>([
+    [
+      "GB10, captured, core's own noheader,nounits query",
+      readLinuxProbeFixture('nvidia-smi/gb10-driver595-captured.csv'),
+      { id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32', cc: '12.1', total: null, free: null },
+    ],
+    [
+      'GB10, captured with the csv header and units (a query core never runs): the header is not a card',
+      readLinuxProbeFixture('nvidia-smi/gb10-driver595-captured-with-header.csv'),
+      { id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32', cc: '12.1', total: null, free: null },
+    ],
+    [
+      'GH200, documented (96 GB HBM3)',
+      readLinuxProbeFixture('nvidia-smi/gh200-documented.csv'),
+      { id: 'GPU-6b1e0c2a-4f3d-4c7e-9a51-0d2e8f7a9b33', cc: '9.0', total: 97871 * MiB, free: 97280 * MiB },
+    ],
+    [
+      'RTX 5090, documented (32 GB)',
+      readLinuxProbeFixture('nvidia-smi/rtx5090-documented.csv'),
+      { id: 'GPU-5a0f7d19-2c4b-4e8a-b6d3-91e2c0f4a7d8', cc: '12.0', total: 32607 * MiB, free: 31990 * MiB },
+    ],
+    [
+      'RTX 5090 without nounits: "32607 MiB" is still a size, never an unknown that reads as unified memory',
+      'uuid, name, compute_cap, memory.total [MiB], memory.free [MiB], driver_version\n' +
+        'GPU-5a0f7d19-2c4b-4e8a-b6d3-91e2c0f4a7d8, NVIDIA GeForce RTX 5090, 12.0, 32607 MiB, 31990 MiB, 595.71.05\n',
+      { id: 'GPU-5a0f7d19-2c4b-4e8a-b6d3-91e2c0f4a7d8', cc: '12.0', total: 32607 * MiB, free: 31990 * MiB },
+    ],
+    [
+      'bare N/A and an empty cell are unknown, never 0 bytes',
+      'GPU-x, NVIDIA GB10, 12.1, N/A, , 595.71.05\n',
+      { id: 'GPU-x', cc: '12.1', total: null, free: null },
+    ],
+  ])('reads %s', (_label, stdout, card) => {
+    const answer = parseNvidiaSmi(ok(stdout))
+    expect(answer.gpus).toHaveLength(1)
+    expect(answer.gpus[0]).toMatchObject({
+      gpu_id: card.id,
+      compute_capability: card.cc,
+      total_vram_bytes: card.total,
+      free_vram_bytes: card.free,
+    })
   })
 
   it('reports no driver rather than an empty one when nvidia-smi is not there', () => {
