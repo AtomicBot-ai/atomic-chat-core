@@ -93,7 +93,10 @@ the first load is served (ADR 2026-09-28-managed-runtime-orphans-are-any-instanc
 Also per scope, for the managed-text load lifecycle (task 2.12, ADR
 2026-09-28-managed-text-lifecycle-owns-load-stages-cache-and-stop): `heartbeats/<generation>/heartbeat`
 (the file core touches while a model container runs, its directory mounted read-only into that
-container), `caches/<descriptor_id>/<model id>/` (the engine cache, mounted read-write, kept between
+container at `/atomic/heartbeat`), `heartbeats/<generation>/llm-api-options.yaml` (the engine's
+per-generation option file an adapter's launch asks core to write there, read-only in the container;
+`tensorrt-llm` writes `guided_decoding_backend: xgrammar` for a family that declares structured
+output, ADR 2026-09-29-tensorrt-llm-guided-decoding-is-enabled-per-family), `caches/<descriptor_id>/<model id>/` (the engine cache, mounted read-write, kept between
 loads, removed with its model or installation), `docker-config/` (the empty `config.json` every docker
 CLI call reads as `$DOCKER_CONFIG`) and `watchdog/atomic-watchdog-entrypoint.sh` (mode 0555, the
 model container's read-only entrypoint); ids are one directory each through percent-encoding.

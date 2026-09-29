@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { JsonValue } from '../shims/index.js'
 import { policyRefusal } from './policy.js'
 import type { LocalTargetPolicy } from './types.js'
 
@@ -85,6 +86,27 @@ describe('policyRefusal', () => {
       })
     ).toBeUndefined()
   })
+
+  it.each<[string, { [key: string]: JsonValue }]>([
+    ['json_object', { type: 'json_object' }],
+    ['json (TensorRT-LLM)', { type: 'json', schema: {} }],
+    ['regex', { type: 'regex', regex: '[a-z]+' }],
+    ['ebnf', { type: 'ebnf', ebnf: 'root ::= "a"' }],
+    ['structural_tag', { type: 'structural_tag', structures: [] }],
+    ['a type this core does not know', { type: 'grammar' }],
+    ['a format with no type', {}],
+  ])(
+    'refuses response_format %s to a family without structured output (final review I-2)',
+    (_label, format) => {
+      const refusal = policyRefusal(policy(true), '/chat/completions', 'trt', { response_format: format })
+      expect(errorOf(refusal)).toMatchObject({ code: 'unsupported_capability' })
+      expect(
+        policyRefusal({ ...policy(true), structuredOutput: true }, '/chat/completions', 'trt', {
+          response_format: format,
+        })
+      ).toBeUndefined()
+    }
+  )
 
   it('refuses tools on the Anthropic route too', () => {
     expect(

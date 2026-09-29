@@ -30,7 +30,7 @@
  * There is no `engine_id` branch here: the engine id only travels into the journal record and the
  * container's discovery labels as data.
  */
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
@@ -290,6 +290,30 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms)
     signal?.addEventListener('abort', onAbort, { once: true })
   })
+}
+
+/** A bare file name: no separator, not `.`/`..`, nothing a shell or a path join could read as more. */
+const LAUNCH_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * Writes an adapter's `ManagedEngineLaunch.files` into this generation's directory, which the
+ * container mounts read-only (final review I-2: the engine's option file). A name that is not a bare
+ * file name, or that is the watchdog's own heartbeat file, fails the load before any container exists.
+ */
+async function writeLaunchFiles(
+  dir: string,
+  files: Readonly<Record<string, string>> | undefined
+): Promise<void> {
+  for (const [name, content] of Object.entries(files ?? {})) {
+    if (!LAUNCH_FILE_NAME.test(name) || name === HEARTBEAT_FILE) {
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        'An engine launch file must have a bare file name other than the heartbeat file.',
+        name
+      )
+    }
+    await writeFile(join(dir, name), content, { mode: 0o644 })
+  }
 }
 
 /** Rejects after `ms` of real time unless `settle` is called first; never keeps the process alive. */
@@ -581,11 +605,13 @@ export class ManagedTextLifecycle {
         settings,
         modelPath: CONTAINER_MODEL_PATH,
         engineCachePath: CONTAINER_ENGINE_CACHE_PATH,
+        generationFilesPath: CONTAINER_HEARTBEAT_PATH,
         weightBytes: request.weightBytes,
         family: request.family,
       })
       await writeWatchdogScript(this.deps.paths.watchdogScript)
       await mkdir(entry.heartbeatDir, { recursive: true })
+      await writeLaunchFiles(entry.heartbeatDir, launch.files)
       this.checkAborted(signal)
 
       entry.ticker = this.startHeartbeat({

@@ -483,6 +483,40 @@ describe('ManagedTextLifecycle: container, cache, journal, heartbeat', () => {
     expect(existsSync(join(data.layout.managed.heartbeatDir('gen-1'), 'heartbeat'))).toBe(true)
   })
 
+  /** An engine whose launch writes one file into its generation's read-only directory (final review I-2). */
+  const withFiles = (files: Record<string, string>): ManagedTextAdapter<Record<string, never>> => ({
+    ...beta,
+    id: 'delta-engine',
+    buildLaunch: (c) => ({
+      engine: { container_port: 9000 },
+      argv: ['delta', '--options', `${c.generationFilesPath}/options.yaml`],
+      files,
+    }),
+  })
+  const deltaInstallation = { ...betaInstallation, adapter_id: 'delta-engine' }
+
+  it("writes the launch's files into the generation directory mounted read-only, before docker create (final review I-2)", async () => {
+    await build({}, [withFiles({ 'options.yaml': 'guided_decoding_backend: xgrammar\n' })])
+    await lifecycle.load(request_({ installation: deltaInstallation }))
+    const dir = data.layout.managed.heartbeatDir('gen-1')
+    expect(await readFile(join(dir, 'options.yaml'), 'utf8')).toBe('guided_decoding_backend: xgrammar\n')
+    const argv = docker.last().createArgv
+    expect(argv).toContain(`${real(dir)}:/atomic/heartbeat:ro`)
+    expect(argv.at(-1)).toBe('/atomic/heartbeat/options.yaml')
+    await lifecycle.unload('org/model-a')
+    expect(existsSync(dir)).toBe(false)
+  })
+
+  it.each(['heartbeat', '../escape', 'a/b', '', '.', '..'])(
+    'refuses a launch file named %j before any docker call',
+    async (name) => {
+      await build({}, [withFiles({ [name]: 'x' })])
+      const error = await rejection(lifecycle.load(request_({ installation: deltaInstallation })))
+      expect(error.code).toBe('INVALID_ARGUMENT')
+      expect(docker.calls).toEqual([])
+    }
+  )
+
   it('journals the container right after create and drops the record only after a confirmed stop and rm', async () => {
     await build()
     await lifecycle.load(request_())

@@ -263,6 +263,18 @@ export function validateTensorrtLlmSettings(raw: unknown): TensorrtLlmSettings {
 /** `trtllm-serve serve`'s own default `--port`. */
 export const TENSORRT_LLM_CONTAINER_PORT = 8000
 
+/**
+ * The LLM API option file a structured-output launch passes to `trtllm-serve serve
+ * --extra_llm_api_options` (`commands/serve.py` in v1.2.1: `--config`/`--extra_llm_api_options`, a
+ * YAML file whose keys overwrite the LLM API arguments; `llmapi/llm_args.py`'s
+ * `guided_decoding_backend: Optional[Literal["xgrammar", "llguidance"]]`, default `None`). Without
+ * it, `openai_protocol.py` still turns `response_format` into guided-decoding parameters, but no
+ * backend exists to enforce them. `xgrammar` is the backend both the PyTorch and TensorRT backends
+ * implement; whether it enforces a real schema on a real model is confirmed in live test 2.19.
+ */
+export const TENSORRT_LLM_API_OPTIONS_FILE = 'llm-api-options.yaml'
+export const TENSORRT_LLM_GUIDED_DECODING_OPTIONS = 'guided_decoding_backend: xgrammar\n'
+
 /** The container binds every interface; only the host-side publication (design D1/D11) is
  *  loopback-restricted, by the executor, not by the engine's own bind address. */
 const CONTAINER_BIND_HOST = '0.0.0.0'
@@ -287,7 +299,7 @@ const CONTAINER_BIND_HOST = '0.0.0.0'
 export function buildTensorrtLlmLaunch(
   context: ManagedLaunchContext<TensorrtLlmSettings>
 ): ManagedEngineLaunch {
-  const { settings, modelPath, engineCachePath, family } = context
+  const { settings, modelPath, engineCachePath, generationFilesPath, family } = context
   const argv: string[] = [
     'trtllm-serve',
     'serve',
@@ -305,10 +317,18 @@ export function buildTensorrtLlmLaunch(
   ]
   if (family?.tool_parser != null) argv.push('--tool_parser', family.tool_parser)
   if (family?.reasoning_parser != null) argv.push('--reasoning_parser', family.reasoning_parser)
+  // Guided decoding is off in trtllm-serve unless an LLM API option turns it on (final review I-2):
+  // `response_format` is otherwise ignored or refused, so a family that declares structured output
+  // gets `guided_decoding_backend: xgrammar` through the option file, written read-only per generation.
+  const guided = family?.structured_output === true
+  if (guided) {
+    argv.push('--extra_llm_api_options', `${generationFilesPath}/${TENSORRT_LLM_API_OPTIONS_FILE}`)
+  }
 
   return {
     engine: { container_port: TENSORRT_LLM_CONTAINER_PORT },
     argv,
+    ...(guided ? { files: { [TENSORRT_LLM_API_OPTIONS_FILE]: TENSORRT_LLM_GUIDED_DECODING_OPTIONS } } : {}),
     // No `--cache_dir`/`TRTLLM_CACHE_DIR` in this pinned tag (file header) — these are the
     // individual upstream PyTorch/Triton/CUDA JIT caches whose warm state make a repeat start on
     // the same model faster, redirected onto the read-write engine cache mount (design D8) so they
@@ -657,12 +677,16 @@ function asksForTools(body: Record<string, unknown>): boolean {
   )
 }
 
-/** `response_format` asking for JSON (a schema or any object); `{"type": "text"}` asks for nothing. */
+/**
+ * `response_format` asking for constrained output: anything but `{"type": "text"}` — OpenAI's
+ * `json_schema`/`json_object`, `trtllm-serve`'s own `json`/`regex`/`ebnf`/`structural_tag`
+ * (`openai_protocol.py`'s `ResponseFormat`), and any type this core does not know (final review I-2).
+ * The same rule `:1337` applies (`server/public/policy.ts`).
+ */
 function asksForStructuredOutput(body: Record<string, unknown>): boolean {
   const format = body['response_format']
-  if (format === null || typeof format !== 'object') return false
-  const type = (format as { type?: unknown }).type
-  return type === 'json_schema' || type === 'json_object'
+  if (format === null || typeof format !== 'object' || Array.isArray(format)) return false
+  return (format as { type?: unknown }).type !== 'text'
 }
 
 /**

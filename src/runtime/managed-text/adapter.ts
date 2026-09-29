@@ -48,6 +48,11 @@ export interface ManagedLaunchContext<S> {
   modelPath: string
   /** The engine cache directory as the container sees it, mounted read-write and kept across loads. */
   engineCachePath: string
+  /**
+   * This generation's own directory as the container sees it, mounted read-only: where the launch's
+   * `files` land (beside the watchdog's heartbeat file), and gone with the generation.
+   */
+  generationFilesPath: string
   weightBytes: number
   /** The pinned descriptor's `model_families` entry for this model's architecture, or null. */
   family: ModelFamilySupport | null
@@ -59,6 +64,13 @@ export interface ManagedEngineLaunch {
   argv: string[]
   /** Engine env vars; the watchdog's own `ATOMIC_WATCHDOG_*` vars are the lifecycle's and win. */
   env?: Record<string, string>
+  /**
+   * Files the lifecycle writes, before the container is created, into this generation's read-only
+   * directory (`ManagedLaunchContext.generationFilesPath` inside the container), keyed by a bare file
+   * name — e.g. an engine's option file its argv points at. Core writes them, so nothing the
+   * container runs can change them; the name `heartbeat` is the watchdog's and is refused.
+   */
+  files?: Readonly<Record<string, string>>
 }
 
 export type ManagedExitKind = 'out-of-memory' | 'unsupported-model' | 'other'

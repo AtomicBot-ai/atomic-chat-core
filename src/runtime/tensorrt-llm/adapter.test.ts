@@ -37,6 +37,7 @@ function baseContext(overrides: Partial<ManagedLaunchContext<TensorrtLlmSettings
     settings,
     modelPath: '/atomic/model',
     engineCachePath: '/atomic/engine-cache',
+    generationFilesPath: '/atomic/heartbeat',
     weightBytes: 4 * GiB,
     family: null,
     ...overrides,
@@ -315,6 +316,22 @@ describe('buildLaunch', () => {
     expect(flagValue(launch.argv, '--max_seq_len')).toBe('32768')
     expect(flagValue(launch.argv, '--max_num_tokens')).toBe('32768')
     expect(flagValue(launch.argv, '--kv_cache_free_gpu_memory_fraction')).toBe('0.75')
+  })
+
+  it('enables guided decoding (xgrammar) through --extra_llm_api_options when the family declares structured output (final review I-2)', () => {
+    const launch = tensorrtLlmAdapter.buildLaunch(
+      baseContext({ family: family({ structured_output: true }) })
+    )
+    expect(flagValue(launch.argv, '--extra_llm_api_options')).toBe('/atomic/heartbeat/llm-api-options.yaml')
+    expect(launch.files).toEqual({ 'llm-api-options.yaml': 'guided_decoding_backend: xgrammar\n' })
+  })
+
+  it('writes no LLM API options file for a family without structured output, or no family at all', () => {
+    for (const f of [family(), null]) {
+      const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ family: f }))
+      expect(launch.argv).not.toContain('--extra_llm_api_options')
+      expect(launch.files).toBeUndefined()
+    }
   })
 
   it('points the engine cache env vars at the mounted engine cache directory', () => {
@@ -750,6 +767,13 @@ describe('tensorrtLlmAdapter: the session port refuses what the model cannot do 
       'structured output',
     ],
     ['a JSON object format', { response_format: { type: 'json_object' } }, 'structured output'],
+    // TensorRT-LLM's own guided-decoding types, and anything else but text (final review I-2).
+    ['a TensorRT-LLM json format', { response_format: { type: 'json', schema: {} } }, 'structured output'],
+    ['a regex format', { response_format: { type: 'regex', regex: 'a+' } }, 'structured output'],
+    ['an ebnf format', { response_format: { type: 'ebnf', ebnf: 'root ::= "a"' } }, 'structured output'],
+    ['a structural_tag format', { response_format: { type: 'structural_tag' } }, 'structured output'],
+    ['an unknown format type', { response_format: { type: 'grammar' } }, 'structured output'],
+    ['a format with no type', { response_format: {} }, 'structured output'],
   ])('refuses %s with unsupported_capability, worded like :1337', (_label, extra, what) => {
     const error = refusal(rewrite({ model: 'llama-3', ...extra }))
     expect(error.openaiCode).toBe('unsupported_capability')

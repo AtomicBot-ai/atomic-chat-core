@@ -73,9 +73,14 @@ function asksForTools(json: { [key: string]: JsonValue }): boolean {
   )
 }
 
-/** `response_format` asking for JSON: a schema or any object. `{"type": "text"}` asks for nothing. */
+/**
+ * `response_format` asking for constrained output: anything but `{"type": "text"}` — OpenAI's
+ * `json_schema`/`json_object`, TensorRT-LLM's own `json`/`regex`/`ebnf`/`structural_tag`, and any
+ * type this core does not know (final review I-2). The session gateway's rewriter
+ * (`runtime/tensorrt-llm/adapter.ts`) applies the same rule, so both ports agree.
+ */
 function asksForStructuredOutput(json: { [key: string]: JsonValue }): boolean {
   const format = json['response_format']
   if (!isJsonObject(format)) return false
-  return format['type'] === 'json_schema' || format['type'] === 'json_object'
+  return format['type'] !== 'text'
 }

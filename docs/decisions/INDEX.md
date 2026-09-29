@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [tensorrt-llm: guided decoding is enabled per family, and every non-text response_format is gated](2026-09-29-tensorrt-llm-guided-decoding-is-enabled-per-family.md)
 - **2026-09-29** — [tensorrt-llm: the KV-cache reserve uses the real per-token formula, and memory is checked only after eviction](2026-09-29-tensorrt-llm-kv-reserve-is-the-real-formula-and-memory-is-checked-after-eviction.md) — supersedes the record below in full, and (again) the KV-reserve half of the 2026-09-28 KV-reserve/GPU-selection record further down.
 - **2026-09-29** — [tensorrt-llm model check: the KV-cache reserve is weight bytes times (1 - kv_cache_free_gpu_memory_fraction)](2026-09-29-tensorrt-llm-model-check-kv-reserve-uses-the-configured-fraction.md) — superseded same day by the record above; supersedes the KV-reserve half of the 2026-09-28 KV-reserve/GPU-selection record below.
 - **2026-09-29** — [GPU residency holds stopping sessions until exit, grants inside the turn, and names a remedy](2026-09-29-gpu-residency-holds-stopping-sessions-and-grants-inside-the-turn.md) — amends the entry below (review r1).
