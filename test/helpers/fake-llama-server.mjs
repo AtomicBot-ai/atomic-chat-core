@@ -26,6 +26,8 @@
  *                     the inference-relevant environment. It is what a test reads instead of `ps`,
  *                     which only ever shows a process that is still alive. Written after the
  *                     `--list-devices` and `-h` probes, so the file holds starts, not probes.
+ *   FAKE_LLAMA_DEVICES  `;`-separated device lines for `--list-devices` (e.g.
+ *                     `MTL0: Apple M4 Pro (18186 MiB, 18185 MiB free)`); a CUDA + Vulkan pair by default
  *   FAKE_LLAMA_LABEL  free-form name of the pack that launched this fake; recorded verbatim
  *   FAKE_LLAMA_STDOUT text; printed as one stdout line among the startup log, which llama.cpp itself
  *                     writes to stderr, so a test can follow both of the engine's streams
@@ -48,8 +50,12 @@ const err = (line) => process.stderr.write(`${line}\n`)
 
 if (argv.includes('--list-devices')) {
   process.stdout.write('Available devices:\n')
-  process.stdout.write('  CUDA0: NVIDIA GeForce RTX 4090 (24564 MiB, 23875 MiB free)\n')
-  process.stdout.write('  Vulkan0: NVIDIA GeForce RTX 4090 (24564 MiB, 23875 MiB free)\n')
+  if (process.env.FAKE_LLAMA_DEVICES !== undefined) {
+    for (const line of process.env.FAKE_LLAMA_DEVICES.split(';')) process.stdout.write(`  ${line}\n`)
+  } else {
+    process.stdout.write('  CUDA0: NVIDIA GeForce RTX 4090 (24564 MiB, 23875 MiB free)\n')
+    process.stdout.write('  Vulkan0: NVIDIA GeForce RTX 4090 (24564 MiB, 23875 MiB free)\n')
+  }
   process.exit(0)
 }
 if (argv.includes('-h') || argv.includes('--help')) {

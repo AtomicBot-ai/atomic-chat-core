@@ -129,6 +129,7 @@ export interface LlamacppRuntimeOptions {
   ensureBackendReady?: LoadPlanDeps['ensureBackendReady'] | undefined
   resolveLatestBackend?: LoadPlanDeps['resolveLatestBackend'] | undefined
   cpuInfo?: LoadPlanDeps['cpuInfo'] | undefined
+  unifiedMemory?: LoadPlanDeps['unifiedMemory'] | undefined
   ensureGemmaMtpDraft?: LoadPlanDeps['ensureGemmaMtpDraft'] | undefined
   ensureDflashDraft?: LoadPlanDeps['ensureDflashDraft'] | undefined
   /** Model that must never be auto-unloaded. */
@@ -342,6 +343,8 @@ export class LlamacppRuntime implements LocalRuntime {
         )
       },
       cpuInfo: this.options.cpuInfo ?? (async () => undefined),
+      ...(this.options.unifiedMemory ? { unifiedMemory: this.options.unifiedMemory } : {}),
+      listDevices: (exePath) => this.getDevices(exePath),
       exists: async (path) => {
         const { stat } = await import('node:fs/promises')
         return stat(path).then(
