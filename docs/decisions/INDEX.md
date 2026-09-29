@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-29** — [Live-fix review minors: a wrapper without a schema is refused, and the journal record's caveats](2026-09-29-live-fix-review-minors-wrapper-without-schema-refused-and-journal-caveats.md) — amends the two entries below (json_schema wrapper, docker journal).
 - **2026-09-29** — [The host step reads docker.service's journal when Docker does not start](2026-09-29-host-step-reads-the-docker-journal-when-docker-does-not-start.md)
 - **2026-09-29** — [tensorrt-llm: the session gateway unwraps OpenAI's json_schema wrapper to the bare schema](2026-09-29-tensorrt-llm-json-schema-wrapper-unwrapped-by-the-session-gateway.md)
 - **2026-09-29** — [Plan digest after a re-ask, and what a resume may approve](2026-09-29-plan-digest-after-a-re-ask-and-what-a-resume-may-approve.md) — corrects the text of the resume-never-swaps-the-approval record below; no behaviour change.

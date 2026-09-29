@@ -295,6 +295,37 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(tools.status).toBe(400)
     expect(await tools.json()).toMatchObject({ error: { code: 'unsupported_capability' } })
 
+    // The json_schema unwrap and its 400s are the gateway's, so :1337 gets them too, not only the
+    // session port (ADR 2026-09-29-tensorrt-llm-json-schema-wrapper-unwrapped-by-the-session-gateway).
+    const schema = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'] }
+    const wrapped = await publicPost(port, '/chat/completions', {
+      model: 'llama-3',
+      messages: [{ role: 'user', content: 'hi' }],
+      response_format: { type: 'json_schema', json_schema: { name: 'r', strict: true, schema } },
+    })
+    expect(wrapped.status, await wrapped.clone().text()).toBe(200)
+    expect(
+      ((await wrapped.json()) as { received: { response_format: unknown } }).received.response_format
+    ).toEqual({ type: 'json_schema', json_schema: schema })
+    for (const [json_schema, message] of [
+      [
+        undefined,
+        "response_format.json_schema must be an object when response_format.type is 'json_schema'.",
+      ],
+      [
+        { name: 'r', strict: true },
+        'response_format.json_schema.schema must be an object when response_format.json_schema carries name or strict.',
+      ],
+    ] as const) {
+      const refused = await publicPost(port, '/chat/completions', {
+        model: 'llama-3',
+        messages: [{ role: 'user', content: 'hi' }],
+        response_format: { type: 'json_schema', json_schema },
+      })
+      expect(refused.status).toBe(400)
+      expect(await refused.json()).toMatchObject({ error: { message, type: 'invalid_request_error' } })
+    }
+
     // A context overflow is an honest error with both numbers, and the session stays loaded.
     const overflow = await publicPost(port, '/chat/completions', {
       model: 'llama-3',
@@ -426,6 +457,21 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(await noSchema.json()).toMatchObject({
       error: {
         message: "response_format.json_schema must be an object when response_format.type is 'json_schema'.",
+        type: 'invalid_request_error',
+      },
+    })
+
+    const noObjectSchema = await publicPost(
+      session.port,
+      '/chat/completions',
+      { ...chat, response_format: { type: 'json_schema', json_schema: { name: 'r', strict: true } } },
+      session.api_key
+    )
+    expect(noObjectSchema.status).toBe(400)
+    expect(await noObjectSchema.json()).toMatchObject({
+      error: {
+        message:
+          'response_format.json_schema.schema must be an object when response_format.json_schema carries name or strict.',
         type: 'invalid_request_error',
       },
     })

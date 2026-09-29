@@ -215,8 +215,11 @@ const S: {
   hostSteps: string
   coreEnv: Record<string, string>
   core: LiveCore | null
-  /** The supplementary gids of the first core this run started (`/proc/<pid>/status`); null before. */
-  firstCoreGroups: number[] | null
+  /**
+   * Every gid (primary and supplementary) the first core this run started held, from
+   * `/proc/<pid>/status`; undefined before a core started, null when that file could not be read.
+   */
+  firstCoreGroups: number[] | null | undefined
   closeEvents: (() => void) | null
   plan: Plan | null
   operationId: string | null
@@ -248,7 +251,7 @@ const S: {
   hostSteps: '',
   coreEnv: {},
   core: null,
-  firstCoreGroups: null,
+  firstCoreGroups: undefined,
   closeEvents: null,
   plan: null,
   operationId: null,
@@ -313,7 +316,7 @@ async function startCore(label: string, freshLoginAs?: string): Promise<LiveCore
   })
   S.closeEvents = events.close
   S.core = core
-  S.firstCoreGroups ??= processGroups(core.ready.pid)
+  if (S.firstCoreGroups === undefined) S.firstCoreGroups = processGroups(core.ready.pid)
   return core
 }
 
@@ -408,16 +411,23 @@ const needsOperation = (): string | null =>
       ? 'no core is running (an earlier scenario failed)'
       : null
 /**
- * The step added this user to `docker`, and the first core's process did not carry the group. By
- * number, not name: the gid is read now, after the step made sure the group exists, and compared with
- * the gids the first core's process holds. A login session can already hold a docker gid whose group
- * was deleted and then re-created with the same number by the step; `id -nG` taken before the step
- * cannot name that gid, yet the core reaches the daemon and rightly never asks for a relogin.
+ * Whether the first core's session lacked the docker group the step added: true (a relogin is
+ * expected), false (it carried it, or the step added nothing), or null when this test cannot tell —
+ * the first core's gids could not be read (`/proc` unreadable), or the gid of `docker` could not be.
+ * Unknown is not "expected": it would turn a failed read into a premise and then a failed scenario.
+ *
+ * By number, not name: the gid is read now, after the step made sure the group exists, and compared
+ * with the gids the first core's process holds, primary gid included. A login session can already hold
+ * a docker gid whose group was deleted and then re-created with the same number by the step; `id -nG`
+ * taken before the step cannot name that gid, yet the core reaches the daemon and rightly never asks
+ * for a relogin.
  */
-const reloginExpected = (): boolean => {
+const reloginExpected = (): boolean | null => {
   if (change('add-user-to-docker-group') === undefined) return false
   const gid = groupGid('docker')
-  return gid === null || !(S.firstCoreGroups ?? []).includes(gid)
+  const held = S.firstCoreGroups
+  if (gid === null || held === undefined || held === null || held.length === 0) return null
+  return !held.includes(gid)
 }
 const needsReady = (): string | null =>
   S.ready ? null : 'the setup did not reach ready (see gpu-pull-ready)'
@@ -825,9 +835,11 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     () =>
       S.afterStep === null
         ? 'the privileged step did not complete (see privileged-step)'
-        : S.afterStep.phase === 'relogin-required' || reloginExpected()
+        : S.afterStep.phase === 'relogin-required' || reloginExpected() === true
           ? null
-          : `${S.facts.user} already had Docker access in this session; the operation went on to ${S.afterStep.phase}`,
+          : reloginExpected() === null
+            ? `the premise check is unknown: the first core's gids (/proc/<pid>/status) or the docker gid could not be read, so a relogin is neither expected nor ruled out; the operation went on to ${S.afterStep.phase}`
+            : `${S.facts.user} already had Docker access in this session; the operation went on to ${S.afterStep.phase}`,
     async () => {
       const operationId = S.operationId as string
       const waiting = S.afterStep as OperationView
@@ -880,6 +892,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       const fresh = await startCore('relogin', S.facts.user)
       const groups = processGroups(fresh.ready.pid)
       report.detail('relogin', 'fresh_core_groups', groups)
+      expect(groups, `/proc/${fresh.ready.pid}/status of the new core could not be read`).not.toBeNull()
       expect(
         groups,
         'sudo -u did not give the new core the docker group; is `preserve_groups` set in sudoers?'

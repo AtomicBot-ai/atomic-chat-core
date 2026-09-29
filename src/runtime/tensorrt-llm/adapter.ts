@@ -727,6 +727,14 @@ function invalidJsonSchema(): never {
   )
 }
 
+/** A wrapper (`name`/`strict`) with no object `schema`: OpenAI refuses it too, and so must we. */
+function invalidJsonSchemaWrapper(): never {
+  throw new AtomicCoreError(
+    'INVALID_ARGUMENT',
+    'response_format.json_schema.schema must be an object when response_format.json_schema carries name or strict.'
+  )
+}
+
 /**
  * Translates OpenAI's `json_schema` wrapper into what `trtllm-serve` 1.2.1 actually reads (ADR
  * `docs/decisions/2026-09-29-tensorrt-llm-json-schema-wrapper-unwrapped-by-the-session-gateway.md`).
@@ -734,17 +742,21 @@ function invalidJsonSchema(): never {
  * field to `GuidedDecodingParams(json=...)` as the schema, so an OpenAI client's
  * `{"name", "strict", "schema": S}` becomes a grammar for a schema with no real constraint, and the
  * model answers with any JSON value (a bare string, on the live run). Here `json_schema` becomes the
- * inner `S`, dropping `name`/`strict`/`description`. A `json_schema` with no object `schema` key is
- * taken to be the bare schema already and passes unchanged; one that is missing or not an object is
- * refused (the engine would answer a `400` or a `500` of its own). Every other format type passes
- * unchanged. Returns `format` itself when nothing changes.
+ * inner `S`, dropping `name`/`strict`/`description`. A `json_schema` that looks like the wrapper (it
+ * has `name` or `strict`, which are not JSON Schema keywords) but has no object `schema` is refused,
+ * as OpenAI does; one without those keys and without an object `schema` is taken to be the bare
+ * schema already and passes unchanged. One that is missing or not an object is refused too (the
+ * engine would answer a `400` or a `500` of its own). Every other format type passes unchanged. Returns `format` itself when nothing changes.
  */
 function unwrapJsonSchemaFormat(format: unknown): unknown {
   if (!isPlainObject(format) || format['type'] !== 'json_schema') return format
   const wrapper = format['json_schema']
   if (!isPlainObject(wrapper)) invalidJsonSchema()
   const inner = wrapper['schema']
-  if (!isPlainObject(inner)) return format
+  if (!isPlainObject(inner)) {
+    if ('name' in wrapper || 'strict' in wrapper) invalidJsonSchemaWrapper()
+    return format
+  }
   return { ...format, json_schema: inner }
 }
 

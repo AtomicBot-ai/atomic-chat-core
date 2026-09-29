@@ -115,6 +115,8 @@ that gid, but the core reaches the daemon with it and rightly goes on without a 
     unused `/24`, for example `{"bip": "172.30.99.1/24"}`
     (`sudo mkdir -p /etc/docker && echo '{"bip": "172.30.99.1/24"}' | sudo tee /etc/docker/daemon.json`).
     The recipe's `nvidia-ctk runtime configure` merges the NVIDIA runtime into that file and keeps the
+    key. Verified on the real host: after the recipe, `/etc/docker/daemon.json` was
+    `{"bip":"172.30.99.1/24","runtimes":{"nvidia":{...}}}`, so `nvidia-ctk` kept the pre-existing `bip`
     key.
 - **Node.js 22+** (vitest runs on it) and **Bun 1.3.10**, the version CI pins (the repository's lockfile
   is `bun.lock`, and there is no `package-lock.json`, so `npm ci` cannot work):

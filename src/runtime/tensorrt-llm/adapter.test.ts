@@ -771,10 +771,10 @@ describe('rewriteRequestBody: an OpenAI json_schema wrapper is unwrapped to the 
       { type: 'json_schema', json_schema: schema },
     ],
     [
-      'a wrapper whose schema is not an object (left for the engine to judge)',
+      'a bare schema that has a schema-valued but non-object key and no name or strict',
       '/v1/chat/completions',
-      { type: 'json_schema', json_schema: { name: 'r', schema: true } },
-      { type: 'json_schema', json_schema: { name: 'r', schema: true } },
+      { type: 'json_schema', json_schema: { type: 'object', schema: true } },
+      { type: 'json_schema', json_schema: { type: 'object', schema: true } },
     ],
     [
       "TensorRT-LLM's own json type",
@@ -816,6 +816,36 @@ describe('rewriteRequestBody: an OpenAI json_schema wrapper is unwrapped to the 
           expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
           expect((error as AtomicCoreError).message).toBe(
             "response_format.json_schema must be an object when response_format.type is 'json_schema'."
+          )
+        }
+      }
+    }
+  )
+
+  it.each<[string, unknown]>([
+    ['name alone', { name: 'r' }],
+    ['strict alone', { strict: true }],
+    ['name and strict', { name: 'r', strict: true }],
+    ['name with a boolean schema', { name: 'r', schema: true }],
+    ['name with a string schema', { name: 'r', schema: '{}' }],
+    ['strict with a null schema', { strict: false, schema: null }],
+    ['name with an array schema', { name: 'r', schema: [schema] }],
+  ])(
+    'refuses an OpenAI-shaped wrapper (%s) with no object schema instead of building a grammar from name/strict',
+    (_label, wrapper) => {
+      for (const route of ['/v1/chat/completions', '/v1/completions']) {
+        try {
+          tensorrtLlmRewriteRequestBody(
+            route,
+            { response_format: { type: 'json_schema', json_schema: wrapper } },
+            settings
+          )
+          expect.unreachable('expected a throw')
+        } catch (error) {
+          expect(error).toBeInstanceOf(AtomicCoreError)
+          expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+          expect((error as AtomicCoreError).message).toBe(
+            'response_format.json_schema.schema must be an object when response_format.json_schema carries name or strict.'
           )
         }
       }

@@ -433,13 +433,29 @@ export function groupGid(name: string): number | null {
   return gid === undefined || !/^\d+$/.test(gid) ? null : Number(gid)
 }
 
-/** The supplementary gids of a running process, from `/proc/<pid>/status`. */
-export function processGroups(pid: number): number[] {
+/**
+ * Every gid a process holds, from the text of `/proc/<pid>/status`: the real and effective gids
+ * (`Gid:`) and the supplementary ones (`Groups:`, which never lists the primary gid). Null when the
+ * text has neither line, so an unreadable or foreign file is "unknown" and not "holds no group".
+ */
+export function parseProcessGroups(status: string): number[] | null {
+  const gids = /^Gid:[ \t]*(.*)$/m.exec(status)?.[1]
+  const groups = /^Groups:[ \t]*(.*)$/m.exec(status)?.[1]
+  if (gids === undefined && groups === undefined) return null
+  const numbers = (line: string | undefined): number[] =>
+    (line ?? '')
+      .split(/\s+/)
+      .filter((part) => /^\d+$/.test(part))
+      .map(Number)
+  // The real and effective gids only: the saved and filesystem ones are not what a client's session carries.
+  return [...new Set([...numbers(gids).slice(0, 2), ...numbers(groups)])]
+}
+
+/** The gids a running process holds (see `parseProcessGroups`); null when `/proc/<pid>/status` cannot be read. */
+export function processGroups(pid: number): number[] | null {
   try {
-    const status = readFileSync(`/proc/${pid}/status`, 'utf8')
-    const line = /^Groups:\s*(.*)$/m.exec(status)?.[1] ?? ''
-    return line.split(/\s+/).filter(Boolean).map(Number)
+    return parseProcessGroups(readFileSync(`/proc/${pid}/status`, 'utf8'))
   } catch {
-    return []
+    return null
   }
 }
