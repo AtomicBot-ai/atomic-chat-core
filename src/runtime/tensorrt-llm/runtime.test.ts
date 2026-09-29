@@ -5,7 +5,7 @@
  * what refuses a load before any container exists, one session at a time, cancel, logs and
  * capabilities — the lifecycle's own behaviour is `../managed-text/lifecycle.test.ts`'s.
  */
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
@@ -77,13 +77,24 @@ const ready = (): Promise<ReadyInstallation> =>
     image: descriptor.image['linux/amd64'],
   })
 
+/**
+ * A model with a real `config.json` and an actually-present weight file at its declared size: the
+ * pre-launch check (task 2.16) re-verifies both before any container is created, so a model that
+ * fails either would make every "loads fine" test below fail for a reason unrelated to what it is
+ * testing. `bfloat16` picks the fixture's `bf16` format, whose minimum compute capability (`8.0`,
+ * no exclusions) both `SMALL` (`8.9`) and `LARGE` (`12.0`) clear.
+ */
 async function installModel(id: string, architecture: string): Promise<void> {
   const dir = join(data.layout.provider('tensorrt-llm').modelsDir, id)
   await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, 'config.json'), '{}')
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ architectures: [architecture], dtype: 'bfloat16' })
+  )
+  await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(20, 1))
   await writeFile(
     join(dir, 'model.yml'),
-    `name: ${id}\narchitectures: [${architecture}]\nquantization: fp8\nfiles:\n  - path: model.safetensors\n    size: 2000000000\n    sha256: null\n`
+    `name: ${id}\nrepository: acme/${id}\nrevision: deadbeef\narchitectures: [${architecture}]\nquantization: bf16\nfiles:\n  - path: model.safetensors\n    size: 20\n    sha256: null\n`
   )
 }
 
@@ -170,7 +181,7 @@ beforeEach(async () => {
     kv_cache_free_gpu_memory_fraction: 0.9,
     load_timeout_seconds: 0,
   }
-  facts = { gpus: [SMALL, LARGE], selinux: false }
+  facts = { gpus: [SMALL, LARGE], selinux: false, memAvailableBytes: 0 }
   installation = ready
   await installModel('qwen3', 'Qwen3ForCausalLM')
   await installModel('llama', 'LlamaForCausalLM')
@@ -213,14 +224,14 @@ describe('TensorrtLlmRuntime: which card', () => {
 
   it('refuses with MANAGED_PREREQUISITE_BLOCKED on a host with no NVIDIA card, before any container', async () => {
     build()
-    facts = { gpus: [], selinux: false }
+    facts = { gpus: [], selinux: false, memAvailableBytes: 0 }
     expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_PREREQUISITE_BLOCKED')
     expect(docker.calls).toEqual([])
   })
 
   it('mounts under SELinux with the shared label when the probe says Docker enforces it', async () => {
     build()
-    facts = { gpus: [LARGE], selinux: true }
+    facts = { gpus: [LARGE], selinux: true, memAvailableBytes: 0 }
     await runtime.load('qwen3')
     expect(docker.last().createArgv.join(' ')).toMatch(/,z\b|:z\b/)
   })
@@ -280,6 +291,37 @@ describe('TensorrtLlmRuntime: refused before a container exists', () => {
   it('refuses to serve a model as an embedding model', async () => {
     build()
     expect((await rejection(runtime.load('qwen3', { isEmbedding: true }))).code).toBe('INVALID_ARGUMENT')
+    expect(docker.calls).toEqual([])
+  })
+})
+
+describe('TensorrtLlmRuntime: pre-launch check (task 2.16, spec "Проверка файлов при загрузке")', () => {
+  const modelDir = () => join(data.layout.provider('tensorrt-llm').modelsDir, 'qwen3')
+
+  it('refuses with MODEL_FILE_NOT_FOUND, naming the file, when a shard was deleted after download; no container is created', async () => {
+    build()
+    await rm(join(modelDir(), 'model.safetensors'))
+    const error = await rejection(runtime.load('qwen3'))
+    expect(error.code).toBe('MODEL_FILE_NOT_FOUND')
+    expect(error.message).toContain('model.safetensors')
+    expect(docker.calls).toEqual([])
+  })
+
+  it('refuses with MODEL_FILE_CORRUPT when a file on disk no longer matches the size model.yml recorded; no container is created', async () => {
+    build()
+    await writeFile(join(modelDir(), 'model.safetensors'), Buffer.alloc(5, 1))
+    expect((await rejection(runtime.load('qwen3'))).code).toBe('MODEL_FILE_CORRUPT')
+    expect(docker.calls).toEqual([])
+  })
+
+  it('refuses with MODEL_INCOMPATIBLE when config.json on disk no longer matches what model.yml recorded; no container is created', async () => {
+    build()
+    await writeFile(
+      join(modelDir(), 'config.json'),
+      JSON.stringify({ architectures: ['SomeOtherForCausalLM'] })
+    )
+    const error = await rejection(runtime.load('qwen3'))
+    expect(error.code).toBe('MODEL_INCOMPATIBLE')
     expect(docker.calls).toEqual([])
   })
 })

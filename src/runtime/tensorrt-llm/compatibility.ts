@@ -2,14 +2,16 @@
  * `POST /atomic/v1/models/tensorrt-llm/check` (spec `tensorrt-llm-models`, design D12/D13/D17/D18):
  * whether a Hugging Face checkpoint can run on TensorRT-LLM on this host, computed entirely from
  * what the caller already has — `config.json`, `hf_quant_config.json` when the repository carries
- * one, the revision's file listing, the pinned `RuntimeDescriptor`, the host's `GpuFacts[]` and its
- * `MemAvailable` — before a single byte of the checkpoint is downloaded.
+ * one, the revision's file listing, the pinned `RuntimeDescriptor`, the host's `GpuFacts[]`, its
+ * `MemAvailable` and the provider's `kv_cache_free_gpu_memory_fraction` setting — before a single
+ * byte of the checkpoint is downloaded.
  *
  * This is the pure verdict only. It does not read the pinned descriptor from disk, does not probe
- * the host for `GpuFacts`, does not read `<data>/tensorrt-llm/models/*`, and — like every file in
- * this module — never touches the network or the filesystem; those are the route handler's and the
- * `ModelRegistry`'s job, wired up once the provider (task 2.14) exists. `selectLaunchGpu` is
- * exported on its own because task 2.14's load path picks the same card the same way.
+ * the host for `GpuFacts`, does not read `<data>/tensorrt-llm/models/*`, does not read stored
+ * settings, and — like every file in this module — never touches the network or the filesystem;
+ * those are `check.ts`'s, `prelaunch.ts`'s and `registry.ts`'s job (task 2.16), wired up once the
+ * provider (task 2.14) exists. `selectLaunchGpu` is exported on its own because the load path
+ * (`runtime.ts`) picks the same card the same way.
  *
  * Check order: GGUF is rejected outright before anything else (spec: "for GGUF there is
  * llama.cpp"), then a curated match's `inventory_digest` is verified — an integrity gate that is
@@ -69,7 +71,6 @@ export function selectLaunchGpu(gpus: readonly GpuFacts[], gpuId?: string): GpuF
 }
 
 const SAFETENSORS_SUFFIX = '.safetensors'
-const CONSOLIDATED_PREFIX = 'consolidated'
 const LEGACY_WEIGHT_SUFFIXES = ['.bin', '.pth']
 /** `model.safetensors`, or a sharded `model-00001-of-00003.safetensors` (any digit width). */
 const MODEL_SHARD_PATTERN = /^model(-\d+-of-\d+)?\.safetensors$/i
@@ -77,21 +78,6 @@ const MODEL_SHARD_PATTERN = /^model(-\d+-of-\d+)?\.safetensors$/i
 /** A file at the root of the listing: a variant subfolder, an ONNX export, ... never counts as a weight. */
 function isRootLevel(path: string): boolean {
   return !path.includes('/')
-}
-
-/**
- * A root-level `*.safetensors` file that is not a `consolidated*` redundant export. Some
- * repositories (Mistral's own releases are the common case) ship both the standard HF
- * `model-NNNNN-of-MMMMM.safetensors` shards *and* a `consolidated.safetensors` covering the exact
- * same weights in one file, for their own inference stack; treating both as weights would
- * double-count the checkpoint's real size.
- */
-export function isWeightFile(path: string): boolean {
-  return (
-    isRootLevel(path) &&
-    path.toLowerCase().endsWith(SAFETENSORS_SUFFIX) &&
-    !path.toLowerCase().startsWith(CONSOLIDATED_PREFIX)
-  )
 }
 
 function isPreferredShard(path: string): boolean {
@@ -111,44 +97,77 @@ function isLegacyWeightFile(path: string): boolean {
 const sumSizes = (files: readonly CheckpointFile[]): number => files.reduce((sum, file) => sum + file.size, 0)
 
 /**
- * Weight bytes for the memory check. Root-level files only. Prefers the standard
+ * The files that count as checkpoint weights — the single rule `weightBytes` and `isWeightFile`
+ * both defer to, so the two can never disagree. Root-level files only. Prefers the standard
  * `model[-NNNNN-of-MMMMM].safetensors` shard naming when present — which also excludes a
- * `consolidated*.safetensors` sitting next to it (the Mistral double-count case above) — because
- * that naming alone identifies the checkpoint's real weights unambiguously. When no file matches
- * that preferred naming, every other root-level `*.safetensors` file is summed instead (covers a
- * repository that ships only `consolidated.safetensors`, or any other single-file naming). Only
- * when there is no safetensors file at all does a legacy `*.bin`/`*.pth` checkpoint count, so a
- * checkpoint this engine cannot load (it only reads safetensors) still gets an honest, non-zero
- * `weight_bytes` rather than a silent `0` that would let `checkModelCompatibility` report `ok` on
- * any card. A listing with no weight file under any of these rules yields `0`, which
- * `checkModelCompatibility` itself turns into `MODEL_INCOMPATIBLE`, never a false `ok`.
+ * `consolidated*.safetensors` sitting next to it (Mistral's own releases ship both, covering the
+ * exact same weights, for their own inference stack; counting both would double the checkpoint's
+ * real size) — because that naming alone identifies the checkpoint's real weights unambiguously.
+ * When no file matches that preferred naming, every other root-level `*.safetensors` file is
+ * selected instead, `consolidated*` included: this is the *only* branch a `consolidated`-only
+ * repository (no HF shard naming at all) ever reaches, so its `consolidated.safetensors` has to
+ * count here — the same file that the preferred-shard branch above deliberately excludes when a
+ * real shard set sits next to it. Only when there is no safetensors file at all does a legacy
+ * `*.bin`/`*.pth` checkpoint count, so a checkpoint this engine cannot load (it only reads
+ * safetensors) still gets an honest, non-zero total rather than a silent `0` that would let
+ * `checkModelCompatibility` report `ok` on any card. No file matches any of these rules for an
+ * empty selection, which `weightBytes` turns into `0` and `checkModelCompatibility` itself turns
+ * into `MODEL_INCOMPATIBLE`, never a false `ok`.
  */
-export function weightBytes(files: readonly CheckpointFile[]): number {
+function selectWeightFiles(files: readonly CheckpointFile[]): readonly CheckpointFile[] {
   const preferredShards = files.filter((file) => isPreferredShard(file.path))
-  if (preferredShards.length > 0) return sumSizes(preferredShards)
+  if (preferredShards.length > 0) return preferredShards
 
   const anySafetensors = files.filter((file) => isAnySafetensors(file.path))
-  if (anySafetensors.length > 0) return sumSizes(anySafetensors)
+  if (anySafetensors.length > 0) return anySafetensors
 
-  const legacy = files.filter((file) => isLegacyWeightFile(file.path))
-  return sumSizes(legacy)
+  return files.filter((file) => isLegacyWeightFile(file.path))
+}
+
+/** Weight bytes for the memory check: the sum of `selectWeightFiles(files)`. */
+export function weightBytes(files: readonly CheckpointFile[]): number {
+  return sumSizes(selectWeightFiles(files))
 }
 
 /**
- * Fraction of weight bytes reserved on top of them when checking whether a checkpoint fits a
- * card's free memory: headroom for the engine build step and a minimal KV cache. `trtllm-serve`'s
- * actual KV-cache budget is `kv_cache_free_gpu_memory_fraction` of memory still free *after*
- * weights load, applied once a session starts with a known context length (provider setting, task
- * 2.14); that fraction cannot be reused here because this check runs with no context length at all
- * — applying a large fraction to *remaining* free memory would make the check nearly always pass
- * regardless of card size, defeating its purpose. This is a documented, conservative placeholder
- * scaled to the checkpoint itself instead, refined once task 2.14 threads the real setting and a
- * context length through a pre-launch re-check.
+ * Whether `path` is one of the files `weightBytes(files)` actually sums, given the rest of the
+ * listing it sits in — the same `selectWeightFiles` rule, so the two can never disagree, including
+ * for a `consolidated`-only repository: `isWeightFile('consolidated.safetensors', files)` is `true`
+ * when no other shard sits next to it (the "any safetensors" branch above selects it) and `false`
+ * when a real shard set does (the preferred-shard branch selects those instead). A path's answer is
+ * therefore not a property of the path alone — it depends on which other files are present, which a
+ * single-argument version of this function could not have gotten right in both cases at once.
  */
-export const KV_CACHE_RESERVE_FRACTION_OF_WEIGHTS = 0.1
+export function isWeightFile(path: string, files: readonly CheckpointFile[]): boolean {
+  return selectWeightFiles(files).some((file) => file.path === path)
+}
 
-export function kvCacheReserveBytes(weightBytesTotal: number): number {
-  return Math.ceil(weightBytesTotal * KV_CACHE_RESERVE_FRACTION_OF_WEIGHTS)
+/**
+ * Bytes reserved on top of the weights when checking whether a checkpoint fits a card's free
+ * memory: headroom for the engine build step and a minimal KV cache, as
+ * `weightBytesTotal * (1 - kvCacheFreeGpuMemoryFraction)` — `kvCacheFreeGpuMemoryFraction` is the
+ * provider's own `kv_cache_free_gpu_memory_fraction` setting (spec `tensorrt-llm-runtime`, "доля
+ * свободной GPU-памяти под KV-cache"; task 2.14), passed in rather than read from anywhere here —
+ * this module stays settings-free (see the file banner).
+ *
+ * `trtllm-serve`'s real KV-cache budget is that fraction of whatever memory remains free *after*
+ * weights load, sized against a context length this check never has (design D12: there is no
+ * session yet to size a KV cache for). Reusing the real formula against *remaining* free memory
+ * would make the check nearly always pass — `weights + kv_fraction * (free - weights) <= free`
+ * reduces to `weights <= free`, true whenever the checkpoint fits at all, whatever the fraction is
+ * — which defeats the point of the check for exactly the case the spec calls out by name: "75 GB
+ * FP8 on an 80 GB card" has to come back as either `ok` or a real, numbered shortage, not always
+ * `ok` by construction (see the ADR this formula documents, which also derives this reduction in
+ * full). Scaling `1 - kv_cache_free_gpu_memory_fraction` — the share of *post-weight* memory the
+ * setting leaves unspent — against the checkpoint's own weight bytes instead keeps a real number
+ * for a card with no session on it yet, and keeps it tied to what the operator configured: raising
+ * `kv_cache_free_gpu_memory_fraction` (spend more of what is left on KV) shrinks this reserve, and
+ * lowering it (keep more headroom) grows it. At this setting's own default, `0.9`, the reserve is
+ * `10%` of weight bytes, matching the number this check used before the setting existed to derive
+ * it from.
+ */
+export function kvCacheReserveBytes(weightBytesTotal: number, kvCacheFreeGpuMemoryFraction: number): number {
+  return Math.ceil(weightBytesTotal * (1 - kvCacheFreeGpuMemoryFraction))
 }
 
 /** Free memory to compare against for one card: `MemAvailable` for a unified-memory card (design D13). */
@@ -255,12 +274,16 @@ function buildCompatibility(
  * chance to compare digests. Every other input, however incompatible, is a normal
  * `verdict.ok: false` answer, never a thrown error (design D12: the point of this check is to hand
  * back numbers, not to fail the request).
+ *
+ * `kvCacheFreeGpuMemoryFraction` is the provider's `kv_cache_free_gpu_memory_fraction` setting
+ * (see `kvCacheReserveBytes`); the caller reads it from stored settings, never this module.
  */
 export function checkModelCompatibility(
   input: ModelCheckInput,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
-  hostMemAvailableBytes: number
+  hostMemAvailableBytes: number,
+  kvCacheFreeGpuMemoryFraction: number
 ): ModelCompatibility {
   if (
     input.files.some((file) => file.path === 'hf_quant_config.json') &&
@@ -398,7 +421,7 @@ export function checkModelCompatibility(
   // remaining branch, including the two CC-failure branches below, so a caller whose selected card
   // fails on CC still sees a card that would work (spec: "report which other host cards it would
   // fit").
-  const reserveBytes = kvCacheReserveBytes(weightBytesTotal)
+  const reserveBytes = kvCacheReserveBytes(weightBytesTotal, kvCacheFreeGpuMemoryFraction)
   const neededBytes = weightBytesTotal + reserveBytes
   const freeBytes = freeMemoryBytes(selected, hostMemAvailableBytes)
   const fitsOther = fitsOtherGpus(gpus, selected, descriptor, format, neededBytes, hostMemAvailableBytes)

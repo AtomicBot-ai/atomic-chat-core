@@ -10,8 +10,14 @@
  * `ATOMIC_MANAGED_TEST_HOST` stand-in machine in the e2e suite, so that hook is read in one place),
  * and, the other way round, `unloadEngineSessions`: a removal of the engine unloads its loaded model
  * first, through `tensorrtLlmSessionUnloader`.
+ *
+ * `wireTensorrtLlmModelCheck` (task 2.16) composes `POST /models/tensorrt-llm/check`'s deps
+ * separately from the runtime above: it shares the installation records, the descriptor provider and
+ * `LinuxHost.probeDeps`, but deliberately never touches `containers`/Docker (`check.ts`'s own file
+ * banner explains why) and is offered even when the runtime itself would refuse every load.
  */
 import type { CoreEvents } from '../contracts/index.js'
+import type { ModelCompatibility } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import {
   RECONCILE_BUDGET_MS,
@@ -42,7 +48,9 @@ import {
 import type { GpuClaimHook, LocalRuntime } from '../runtime/shared/index.js'
 import {
   TensorrtLlmRuntime,
+  checkTensorrtLlmModel,
   containerPlatformFor,
+  probeTensorrtLlmGpusAndMemory,
   probeTensorrtLlmHost,
   readTensorrtLlmModel,
   resolveReadyInstallation,
@@ -117,19 +125,61 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
     // Probed fresh at every load, never read off the environment snapshot: that view is only as new
     // as the last setup or removal probe (and empty after a restart), while a card can disappear
     // between two loads (spec "Выбранная карта исчезла"). An unanswered `docker info` refuses the load.
-    hostFacts: async () =>
-      probeTensorrtLlmHost({
-        exec: options.host.probeDeps.exec,
-        // Only ever asked after the lifecycle resolved non-null, so the executor is there.
-        docker:
-          options.containers.current()?.exec ??
-          (async () => ({ code: null, stdout: '', stderr: 'no docker CLI' })),
-        nvidiaSmi: 'nvidia-smi',
-      }),
+    hostFacts: hostFactsProbe(options),
     model: (modelId) => readTensorrtLlmModel(options.layout.provider('tensorrt-llm').modelsDir, modelId),
     settings: options.settings,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
   })
+}
+
+/** The load path's own probe (`options.host`/`options.containers`), shared with `wireTensorrtLlm` above. */
+function hostFactsProbe(
+  options: Pick<WireTensorrtLlmOptions, 'host' | 'containers'>
+): () => ReturnType<typeof probeTensorrtLlmHost> {
+  return () =>
+    probeTensorrtLlmHost({
+      exec: options.host.probeDeps.exec,
+      // Only ever asked after the lifecycle resolved non-null, so the executor is there.
+      docker:
+        options.containers.current()?.exec ??
+        (async () => ({ code: null, stdout: '', stderr: 'no docker CLI' })),
+      nvidiaSmi: 'nvidia-smi',
+      readFile: options.host.probeDeps.readFile,
+    })
+}
+
+export interface WireTensorrtLlmModelCheckOptions {
+  descriptors: Pick<RuntimeDescriptorProvider, 'forInstallation' | 'cachedForNewSetup'>
+  /** The setup operation's installation records, under the shared per-user root. */
+  installations: Pick<InstallationStore, 'list'>
+  /** The machine `nvidia-smi`/`/proc/meminfo` are read through; never asked about Docker. */
+  host: Pick<LinuxHost, 'probeDeps'>
+  settings: () => Record<string, unknown>
+}
+
+/**
+ * `POST /models/tensorrt-llm/check` (task 2.16): `null` off Linux, where the provider is not offered
+ * at all. Available even when the engine is not installed yet — the check falls back to the latest
+ * cached descriptor itself (`check.ts`) — and never asks `options.containers`/Docker anything, unlike
+ * `wireTensorrtLlm`'s own `hostFacts` above.
+ */
+export function wireTensorrtLlmModelCheck(
+  platform: NodeJS.Platform,
+  options: WireTensorrtLlmModelCheckOptions
+): ((body: unknown) => Promise<ModelCompatibility>) | null {
+  if (platform !== 'linux') return null
+  return (body: unknown) =>
+    checkTensorrtLlmModel(body, {
+      installations: options.installations,
+      descriptors: options.descriptors,
+      hostFacts: () =>
+        probeTensorrtLlmGpusAndMemory({
+          exec: options.host.probeDeps.exec,
+          nvidiaSmi: 'nvidia-smi',
+          readFile: options.host.probeDeps.readFile,
+        }),
+      settings: options.settings,
+    })
 }
 
 /**

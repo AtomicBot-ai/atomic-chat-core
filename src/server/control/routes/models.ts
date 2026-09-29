@@ -85,6 +85,24 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
     sendJson(res, 200, await deps.models.validateGguf(body.path))
   })
 
+  // Whether a checkpoint the caller has not downloaded yet would run on tensorrt-llm (task 2.16,
+  // spec `tensorrt-llm-models`): no network, no filesystem read of any model directory. Absent off
+  // Linux, where the provider is not offered at all.
+  router.post(p('/models/tensorrt-llm/check'), async (req, res) => {
+    if (!deps.tensorrtLlmModelCheck) {
+      return sendError(
+        res,
+        new AtomicCoreError(
+          'PROVIDER_NOT_FOUND',
+          'tensorrt-llm is not available in this build.',
+          'tensorrt-llm'
+        )
+      )
+    }
+    const body = await readJsonBody(req)
+    sendJson(res, 200, await deps.tensorrtLlmModelCheck(body))
+  })
+
   router.get(p('/runtimes/foundation-models/availability'), async (req, res) => {
     const force = queryOf(req).get('force') === '1'
     const status = deps.foundationModelsAvailability

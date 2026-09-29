@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { readTensorrtLlmModel } from './model-dir.js'
+import { parseTensorrtLlmModelYml, readTensorrtLlmModel } from './model-dir.js'
 
 let data: TmpDataFolder
 let modelsDir: string
@@ -40,22 +40,32 @@ files:
 `
 
 describe('readTensorrtLlmModel', () => {
-  it('reads the directory, first architecture, quantization and weight bytes of an installed model', async () => {
+  it('reads the directory, repository, revision, first architecture, quantization, files and weight bytes of an installed model', async () => {
     const dir = await install('Qwen/Qwen3-8B-FP8', QWEN)
     expect(await readTensorrtLlmModel(modelsDir, 'Qwen/Qwen3-8B-FP8')).toEqual({
       id: 'Qwen/Qwen3-8B-FP8',
       dir,
+      repository: 'Qwen/Qwen3-8B-FP8',
+      revision: '0123456789abcdef',
       architecture: 'Qwen3ForCausalLM',
       quantization: 'fp8',
+      files: [
+        { path: 'model-00001-of-00002.safetensors', size: 4_000_000_000, sha256: 'a'.repeat(64) },
+        { path: 'model-00002-of-00002.safetensors', size: 4_500_000_000, sha256: 'b'.repeat(64) },
+        { path: 'config.json', size: 1_200, sha256: null },
+      ],
       weightBytes: 8_500_000_000,
     })
   })
 
-  it('tolerates a model.yml without architectures, quantization or files', async () => {
+  it('tolerates a model.yml without repository, revision, architectures, quantization or files', async () => {
     await install('bare', 'name: bare\n')
     expect(await readTensorrtLlmModel(modelsDir, 'bare')).toMatchObject({
+      repository: null,
+      revision: null,
       architecture: null,
       quantization: null,
+      files: [],
       weightBytes: 0,
     })
   })
@@ -93,4 +103,34 @@ describe('readTensorrtLlmModel', () => {
       await expect(readTensorrtLlmModel(modelsDir, id)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
     }
   )
+})
+
+describe('parseTensorrtLlmModelYml', () => {
+  it('parses every field readTensorrtLlmModel derives from, on its own', () => {
+    expect(parseTensorrtLlmModelYml(QWEN, '/x/model.yml')).toEqual({
+      repository: 'Qwen/Qwen3-8B-FP8',
+      revision: '0123456789abcdef',
+      architectures: ['Qwen3ForCausalLM'],
+      quantization: 'fp8',
+      files: [
+        { path: 'model-00001-of-00002.safetensors', size: 4_000_000_000, sha256: 'a'.repeat(64) },
+        { path: 'model-00002-of-00002.safetensors', size: 4_500_000_000, sha256: 'b'.repeat(64) },
+        { path: 'config.json', size: 1_200, sha256: null },
+      ],
+    })
+  })
+
+  it('drops non-string and empty-string entries from architectures', () => {
+    const yml = 'architectures:\n  - Qwen3ForCausalLM\n  - ""\n  - 42\n'
+    expect(parseTensorrtLlmModelYml(yml, '/x/model.yml').architectures).toEqual(['Qwen3ForCausalLM'])
+  })
+
+  it('throws MANAGED_METADATA_INVALID for invalid YAML or a non-mapping document', () => {
+    expect(() => parseTensorrtLlmModelYml('name: [unclosed\n', '/x/model.yml')).toThrow(
+      expect.objectContaining({ code: 'MANAGED_METADATA_INVALID' })
+    )
+    expect(() => parseTensorrtLlmModelYml('- a\n- list\n', '/x/model.yml')).toThrow(
+      expect.objectContaining({ code: 'MANAGED_METADATA_INVALID' })
+    )
+  })
 })

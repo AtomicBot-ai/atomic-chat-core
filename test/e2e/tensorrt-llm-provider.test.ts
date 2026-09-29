@@ -79,14 +79,49 @@ async function wrap(path: string, script: string, env: Record<string, string> = 
   await chmod(path, 0o755)
 }
 
+/**
+ * A real `config.json` and an actually-present weight file at its declared size (a small one — the
+ * pre-launch check, task 2.16, re-verifies both before any container is created, and this test does
+ * not need a realistic checkpoint size to exercise the provider). `dtype: bfloat16` picks the
+ * fixture's `bf16` format, whose minimum compute capability (`8.0`, no exclusions) the fake RTX 4090
+ * (`8.9`) clears.
+ */
 async function installModel(id: string, architecture: string): Promise<void> {
   const dir = join(dataFolder, 'tensorrt-llm', 'models', id)
   await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, 'config.json'), JSON.stringify({ architectures: [architecture] }))
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ architectures: [architecture], dtype: 'bfloat16' })
+  )
+  await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(20, 1))
   await writeFile(
     join(dir, 'model.yml'),
-    `name: ${id}\narchitectures:\n  - ${architecture}\nquantization: fp8\nfiles:\n` +
-      `  - path: model.safetensors\n    size: 1000000000\n    sha256: null\n`
+    `name: ${id}\nrepository: acme/${id}\nrevision: deadbeef\narchitectures:\n  - ${architecture}\nquantization: bf16\nfiles:\n` +
+      `  - path: model.safetensors\n    size: 20\n    sha256: null\n`
+  )
+}
+
+/**
+ * A model whose `config.json` on disk names a real, descriptor-supported architecture (so the
+ * pre-launch check, task 2.16, lets it load) but whose `model.yml` names none at all — `familyOf`
+ * looks the architecture up from `model.yml`, not `config.json`, so this session finds no
+ * `model_families` entry and every optional capability (tool calls, structured output) is refused.
+ * The real published descriptor's `model_families` and `supported_architectures` are the same set
+ * (every supported architecture has a family entry), so an architecture unsupported outright is no
+ * longer loadable at all now that the pre-launch check validates it — this is the only way left to
+ * exercise the "no family entry" capabilities path against a checkpoint that actually loads.
+ */
+async function installExoticModel(): Promise<void> {
+  const dir = join(dataFolder, 'tensorrt-llm', 'models', 'exotic')
+  await mkdir(dir, { recursive: true })
+  await writeFile(
+    join(dir, 'config.json'),
+    JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
+  )
+  await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(20, 1))
+  await writeFile(
+    join(dir, 'model.yml'),
+    'name: exotic\nquantization: bf16\nfiles:\n  - path: model.safetensors\n    size: 20\n    sha256: null\n'
   )
 }
 
@@ -127,8 +162,7 @@ beforeEach(async () => {
   await installModel('llama-3', 'LlamaForCausalLM')
   await installModel('qwen3', 'Qwen3ForCausalLM')
   await installModel('slow-model', 'LlamaForCausalLM')
-  // An architecture the descriptor has no family entry for: no tool calls, no structured output.
-  await installModel('exotic', 'ExoticForCausalLM')
+  await installExoticModel()
 })
 
 afterEach(async () => {

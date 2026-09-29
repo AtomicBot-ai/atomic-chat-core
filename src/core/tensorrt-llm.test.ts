@@ -14,8 +14,13 @@ import { FakeDocker } from '../../test/helpers/fake-docker-exec.js'
 import { readRuntimeFixture } from '../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { leftoverContainers, tensorrtLlmSessionUnloader, wireTensorrtLlm } from './tensorrt-llm.js'
-import type { WireTensorrtLlmOptions } from './tensorrt-llm.js'
+import {
+  leftoverContainers,
+  tensorrtLlmSessionUnloader,
+  wireTensorrtLlm,
+  wireTensorrtLlmModelCheck,
+} from './tensorrt-llm.js'
+import type { WireTensorrtLlmModelCheckOptions, WireTensorrtLlmOptions } from './tensorrt-llm.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
 
@@ -28,12 +33,13 @@ beforeEach(async () => {
 afterEach(() => data.cleanup())
 
 /** A Linux machine whose `nvidia-smi` finds no card: a load stops right before any container. */
-const cardless: Pick<{ probeDeps: Pick<LinuxProbeDeps, 'exec'> }, 'probeDeps'> = {
+const cardless: Pick<{ probeDeps: Pick<LinuxProbeDeps, 'exec' | 'readFile'> }, 'probeDeps'> = {
   probeDeps: {
     exec: async (command, args) => {
       hostCalls.push([command, ...args])
       return { code: 127, stdout: '', stderr: `${command}: command not found` }
     },
+    readFile: async () => null,
   },
 }
 
@@ -237,6 +243,24 @@ describe('wireTensorrtLlm: a container runtime that failed to initialise', () =>
 
 describe('tensorrtLlmSessionUnloader', () => {
   /**
+   * A real, on-disk model directory for `provider()`'s fake `model:` dep: `TensorrtLlmRuntime.load`
+   * now runs the pre-launch check (task 2.16) before `lifecycle.load`, which re-reads `config.json`
+   * and re-verifies the file listing from real disk — a `dir` that does not exist would refuse every
+   * `runtime.load('m')` call below with `MODEL_FILE_NOT_FOUND` before it ever reached the fake
+   * lifecycle these tests are actually about.
+   */
+  let modelDir: string
+  beforeEach(async () => {
+    modelDir = join(data.root, 'fake-model')
+    await mkdir(modelDir, { recursive: true })
+    await writeFile(
+      join(modelDir, 'config.json'),
+      JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
+    )
+    await writeFile(join(modelDir, 'model.safetensors'), Buffer.alloc(20, 1))
+  })
+
+  /**
    * A provider over a lifecycle that loads instantly and whose stop Docker confirms unless told not
    * to: the real lifecycle's confirmed stop is `runtime.test.ts`'s and `lifecycle.test.ts`'s.
    */
@@ -280,8 +304,18 @@ describe('tensorrtLlmSessionUnloader', () => {
           },
         ],
         selinux: false,
+        memAvailableBytes: 0,
       }),
-      model: async (modelId) => ({ id: modelId, dir: '/m', architecture: null, weightBytes: 1 }) as never,
+      model: async (modelId) => ({
+        id: modelId,
+        dir: modelDir,
+        repository: 'acme/model',
+        revision: 'deadbeef',
+        architecture: 'LlamaForCausalLM',
+        quantization: 'bf16',
+        files: [{ path: 'model.safetensors', size: 20, sha256: null }],
+        weightBytes: 20,
+      }),
       settings: () => ({}),
     })
     return { runtime, events }
@@ -452,5 +486,117 @@ describe('leftoverContainers', () => {
       dockerConfigDir: data.layout.managed.dockerConfigDir,
     })
     expect(leftovers()).toEqual([])
+  })
+})
+
+describe('wireTensorrtLlmModelCheck', () => {
+  const SMI = 'GPU-aaaa, NVIDIA RTX 4090, 8.9, 24564, 24000, 581.42\n'
+  const MEMINFO = 'MemAvailable: 65536000 kB\n'
+
+  function checkOptions(
+    over: Partial<WireTensorrtLlmModelCheckOptions> = {}
+  ): WireTensorrtLlmModelCheckOptions {
+    return {
+      descriptors: {
+        forInstallation: async () => ({ kind: 'available', descriptor }),
+        cachedForNewSetup: async () => ({ kind: 'available', descriptor }),
+      },
+      installations: { list: async () => [] },
+      host: {
+        probeDeps: {
+          exec: async (command, args) => {
+            hostCalls.push([command, ...args])
+            return { code: 0, stdout: SMI, stderr: '' }
+          },
+          readFile: async () => MEMINFO,
+          pathExists: async () => false,
+          freeDiskBytes: async () => 0,
+        },
+      },
+      settings: () => ({}),
+      ...over,
+    }
+  }
+
+  const checkBody = (overrides: Record<string, unknown> = {}) => ({
+    repository: 'acme/model',
+    revision: 'deadbeef',
+    config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+    hf_quant_config_json: null,
+    files: [{ path: 'model.safetensors', size: 20, sha256: null }],
+    ...overrides,
+  })
+
+  it.each<NodeJS.Platform>(['darwin', 'win32', 'freebsd'])('offers no check on %s', (platform) => {
+    expect(wireTensorrtLlmModelCheck(platform, checkOptions())).toBeNull()
+  })
+
+  it('checks against the latest cached descriptor when nothing is installed, using only nvidia-smi and /proc/meminfo', async () => {
+    const check = wireTensorrtLlmModelCheck('linux', checkOptions())
+    const result = await check?.(checkBody())
+    expect(result?.verdict).toEqual({ ok: true })
+    expect(result?.checked_gpu_id).toBe('GPU-aaaa')
+    // Never Docker: only the nvidia-smi exec call went through the injected host.
+    expect(hostCalls).toEqual([['nvidia-smi', ...NVIDIA_SMI_GPU_QUERY]])
+  })
+
+  it('checks against the pinned descriptor of a ready installation', async () => {
+    const installations = new InstallationStore(join(data.root, 'managed'))
+    await installations.write({
+      schema_version: 1,
+      installation: {
+        installation_id: 'trt-1',
+        engine_id: 'tensorrt-llm',
+        environment_id: 'default',
+        active_descriptor_id: descriptor.descriptor_id,
+        candidate_descriptor_id: null,
+        availability: 'supported',
+        status: 'ready',
+      },
+      image: descriptor.image['linux/amd64'],
+      platform: 'linux/amd64',
+      installed_at: '2026-09-29T00:00:00.000Z',
+    })
+    const check = wireTensorrtLlmModelCheck('linux', checkOptions({ installations }))
+    const result = await check?.(checkBody())
+    expect(result?.verdict).toEqual({ ok: true })
+  })
+
+  it('reads kv_cache_free_gpu_memory_fraction from stored settings', async () => {
+    const bigWeights = checkBody({
+      hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
+      config_json: { architectures: ['LlamaForCausalLM'] },
+      files: [{ path: 'model.safetensors', size: 20_000_000_000, sha256: null }],
+    })
+    const atDefault = wireTensorrtLlmModelCheck('linux', checkOptions())
+    expect((await atDefault?.(bigWeights))?.verdict).toEqual({ ok: true })
+
+    const atLowerFraction = wireTensorrtLlmModelCheck(
+      'linux',
+      checkOptions({ settings: () => ({ kv_cache_free_gpu_memory_fraction: 0.1 }) })
+    )
+    expect((await atLowerFraction?.(bigWeights))?.verdict.ok).toBe(false)
+  })
+
+  it('refuses a malformed body with INVALID_ARGUMENT before ever asking the host anything', async () => {
+    const check = wireTensorrtLlmModelCheck('linux', checkOptions())
+    await expect(check?.({})).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    expect(hostCalls).toEqual([])
+  })
+
+  it("answers the descriptor provider's own error when nothing is installed and nothing was ever cached", async () => {
+    const check = wireTensorrtLlmModelCheck(
+      'linux',
+      checkOptions({
+        descriptors: {
+          forInstallation: async () => ({ kind: 'available', descriptor }),
+          cachedForNewSetup: async () => ({
+            kind: 'unsupported',
+            error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'nothing cached'),
+          }),
+        },
+      })
+    )
+    await expect(check?.(checkBody())).rejects.toMatchObject({ code: 'MANAGED_METADATA_INVALID' })
   })
 })

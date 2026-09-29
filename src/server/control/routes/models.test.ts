@@ -184,6 +184,71 @@ describe('model capability routes', () => {
   })
 })
 
+describe('tensorrt-llm model check route', () => {
+  it('answers PROVIDER_NOT_FOUND when this build offers no tensorrt-llm provider (off Linux)', async () => {
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('passes the body through to the wired check and answers its verdict', async () => {
+    let seenBody: unknown
+    const withCheck = await start({
+      tensorrtLlmModelCheck: async (body) => {
+        seenBody = body
+        return {
+          architectures: ['LlamaForCausalLM'],
+          quantization_format: 'bf16',
+          weight_bytes: 20,
+          checked_gpu_id: 'gpu-0',
+          curated: false,
+          unified_memory: false,
+          fits_other_gpus: [],
+          verdict: { ok: true },
+        }
+      },
+    })
+    const body = {
+      repository: 'acme/model',
+      revision: 'deadbeef',
+      config_json: { architectures: ['LlamaForCausalLM'] },
+      hf_quant_config_json: null,
+      files: [{ path: 'model.safetensors', size: 20, sha256: null }],
+    }
+    const res = await withCheck.get('/atomic/v1/models/tensorrt-llm/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ verdict: { ok: true } })
+    expect(seenBody).toEqual(body)
+    await withCheck.server.close()
+  })
+
+  it('surfaces the error the wired check throws, e.g. an incompatible checkpoint', async () => {
+    const incompatible = await start({
+      tensorrtLlmModelCheck: async () => {
+        throw Object.assign(new Error('Unsupported architecture: GPT2LMHeadModel.'), {
+          code: 'MODEL_INCOMPATIBLE',
+        })
+      },
+    })
+    const res = await incompatible.get('/atomic/v1/models/tensorrt-llm/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({ error: { code: 'MODEL_INCOMPATIBLE' } })
+    await incompatible.server.close()
+  })
+})
+
 describe('foundation models availability', () => {
   it('answers the runtime token, forwarding force', async () => {
     const asked: boolean[] = []

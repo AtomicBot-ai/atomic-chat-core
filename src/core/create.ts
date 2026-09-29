@@ -58,7 +58,12 @@ import { wireManagedEnvironment } from './managed-environment.js'
 import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
-import { leftoverContainers, tensorrtLlmSessionUnloader, wireTensorrtLlm } from './tensorrt-llm.js'
+import {
+  leftoverContainers,
+  tensorrtLlmSessionUnloader,
+  wireTensorrtLlm,
+  wireTensorrtLlmModelCheck,
+} from './tensorrt-llm.js'
 import { LOCAL_PROVIDER } from './types.js'
 import type { AtomicCoreOptions, CoreLoadOptions } from './types.js'
 
@@ -386,6 +391,8 @@ export async function createAtomicCore(
     })
 
     // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").
+    // Shared by the runtime below and `wireTensorrtLlmModelCheck`: one settings reader, not two.
+    const tensorrtLlmSettingsOf = (): Record<string, unknown> => settings.get('tensorrt-llm')
     const tensorrtLlm = wireTensorrtLlm({
       platform: managedPlatform,
       arch: process.arch,
@@ -397,7 +404,7 @@ export async function createAtomicCore(
       containers: managedContainers,
       host: managedHost,
       trustedHosts: managedTrustedHosts,
-      settings: () => settings.get('tensorrt-llm'),
+      settings: tensorrtLlmSettingsOf,
       emit: (name, payload) => emitter.emit(name, payload),
       log,
       claimGpu: gpuResidency.hook('tensorrt-llm'),
@@ -409,6 +416,15 @@ export async function createAtomicCore(
       if (!(runtime instanceof TensorrtLlmRuntime)) throw unknownProvider(provider, runtimes.keys())
       return runtime
     }
+    // `POST /models/tensorrt-llm/check` (task 2.16): composed apart from the runtime above (its own
+    // deps, never Docker), so a compatibility question answers the same whether or not the engine is
+    // even installed yet. `null` off Linux, same gate as `wireTensorrtLlm`.
+    const tensorrtLlmModelCheck = wireTensorrtLlmModelCheck(managedPlatform, {
+      descriptors: managed.descriptors,
+      installations: managed.installations,
+      host: managedHost,
+      settings: tensorrtLlmSettingsOf,
+    })
 
     const control = await ControlServer.start(
       {
@@ -470,6 +486,7 @@ export async function createAtomicCore(
           embed: (provider, modelId, input, ubatchSize) =>
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
+        ...(tensorrtLlmModelCheck !== null ? { tensorrtLlmModelCheck } : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),
           install: (provider, version, backend, opts) =>

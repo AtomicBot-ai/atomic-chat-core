@@ -1,14 +1,15 @@
 /**
- * The smallest lookup a `tensorrt-llm` load needs (task 2.14): a model id to its directory under
- * `<data>/tensorrt-llm/models/`, and the few facts its `model.yml` gives — the architecture (for the
- * descriptor's `model_families` entry), the quantization and the weight bytes (for the readiness
- * timeout). The app and the CLI write that directory and its `model.yml` last (spec
- * `tensorrt-llm-models`); a directory without one is a download still in progress and is not a model.
+ * Reading an installed `tensorrt-llm` model's directory under `<data>/tensorrt-llm/models/`: its
+ * `model.yml` (`parseTensorrtLlmModelYml`, task 2.16 — the TRT-specific schema documented in
+ * `docs/contracts.md`: `repository`, `revision`, `architectures`, `quantization`, `files` with
+ * `path`/`size`/`sha256`) and the few derived facts a load needs — the first architecture (for the
+ * descriptor's `model_families` entry) and the weight bytes (for the readiness timeout). The app and
+ * the CLI write the directory and its `model.yml` last (spec `tensorrt-llm-models`); a directory
+ * without one is a download still in progress and is not a model.
  *
- * Task 2.16 builds the full `ModelRegistry` for this provider and the pre-launch check (every file
- * present at its size, compatibility re-checked against `config.json` on disk) on top of this; the
- * `model.yml` keys read here are the ones that spec names: `architectures`, `quantization`, `files`
- * (`path`, `size`, `sha256`), plus `repository`/`revision` which this lookup does not need.
+ * `readTensorrtLlmModel` is the single-id lookup `TensorrtLlmRuntime.load` uses (task 2.14); the full
+ * `ModelRegistry` scan across every installed model (`registry.ts`, task 2.16) shares
+ * `parseTensorrtLlmModelYml` with it, so both agree about what `model.yml` means.
  */
 import { readFile } from 'node:fs/promises'
 import { join, relative, isAbsolute } from 'node:path'
@@ -18,14 +19,28 @@ import { MODEL_YML, modelDirFromId } from '../../config/index.js'
 import { weightBytes } from './compatibility.js'
 import type { CheckpointFile } from './compatibility.js'
 
+/** `model.yml`'s own fields, parsed and typed; nothing here is derived. */
+export interface TensorrtLlmModelYmlDocument {
+  /** `null` when `model.yml` does not carry one (tolerated: `readTensorrtLlmModel`'s own contract). */
+  repository: string | null
+  revision: string | null
+  architectures: string[]
+  quantization: string | null
+  files: CheckpointFile[]
+}
+
 export interface TensorrtLlmModel {
   id: string
   /** The checkpoint directory as core sees it; mounted read-only into the container. */
   dir: string
+  repository: string | null
+  revision: string | null
   /** `architectures[0]`: the Hugging Face class name the descriptor's `model_families` is keyed by. */
   architecture: string | null
   quantization: string | null
-  /** Weight bytes of the listed checkpoint files (`weightBytes`), 0 when `model.yml` lists none. */
+  /** The revision's file listing exactly as `model.yml` recorded it (the pre-launch check's input). */
+  files: CheckpointFile[]
+  /** Weight bytes of `files` (`weightBytes`), 0 when `model.yml` lists none. */
   weightBytes: number
 }
 
@@ -55,6 +70,36 @@ function fileList(raw: unknown): CheckpointFile[] {
   })
 }
 
+/**
+ * `model.yml`'s codec (`parse` only — the app and the CLI write it, core never does, spec
+ * `tensorrt-llm-models`): `MANAGED_METADATA_INVALID` when `text` is not valid YAML or not a mapping.
+ * Every other field tolerates absence or the wrong type by reading as `null`/`[]`/empty, the same way
+ * `readTensorrtLlmModel`'s own tests already expect for a bare `model.yml` — a model missing optional
+ * metadata is still a model, not a broken one.
+ */
+export function parseTensorrtLlmModelYml(text: string, path: string): TensorrtLlmModelYmlDocument {
+  let yml: unknown
+  try {
+    yml = parse(text)
+  } catch (error) {
+    throw new AtomicCoreError('MANAGED_METADATA_INVALID', `${path} is not valid YAML.`, String(error))
+  }
+  if (yml === null || typeof yml !== 'object' || Array.isArray(yml)) {
+    throw new AtomicCoreError('MANAGED_METADATA_INVALID', `${path} does not describe a model.`, path)
+  }
+  const doc = yml as Record<string, unknown>
+  const architectures = Array.isArray(doc['architectures'])
+    ? doc['architectures'].filter((entry): entry is string => typeof entry === 'string' && entry !== '')
+    : []
+  return {
+    repository: typeof doc['repository'] === 'string' ? doc['repository'] : null,
+    revision: typeof doc['revision'] === 'string' ? doc['revision'] : null,
+    architectures,
+    quantization: typeof doc['quantization'] === 'string' ? doc['quantization'] : null,
+    files: fileList(doc['files']),
+  }
+}
+
 /** `MODEL_NOT_FOUND` without a readable `model.yml`; `MANAGED_METADATA_INVALID` when it is not a mapping. */
 export async function readTensorrtLlmModel(modelsDir: string, modelId: string): Promise<TensorrtLlmModel> {
   const dir = assertModelId(modelsDir, modelId)
@@ -69,23 +114,15 @@ export async function readTensorrtLlmModel(modelsDir: string, modelId: string): 
       path
     )
   }
-  let yml: unknown
-  try {
-    yml = parse(text)
-  } catch (error) {
-    throw new AtomicCoreError('MANAGED_METADATA_INVALID', `${path} is not valid YAML.`, String(error))
-  }
-  if (yml === null || typeof yml !== 'object' || Array.isArray(yml)) {
-    throw new AtomicCoreError('MANAGED_METADATA_INVALID', `${path} does not describe a model.`, path)
-  }
-  const doc = yml as Record<string, unknown>
-  const architectures = Array.isArray(doc['architectures']) ? doc['architectures'] : []
-  const first = architectures[0]
+  const yml = parseTensorrtLlmModelYml(text, path)
   return {
     id: modelId,
     dir,
-    architecture: typeof first === 'string' && first !== '' ? first : null,
-    quantization: typeof doc['quantization'] === 'string' ? doc['quantization'] : null,
-    weightBytes: weightBytes(fileList(doc['files'])),
+    repository: yml.repository,
+    revision: yml.revision,
+    architecture: yml.architectures[0] ?? null,
+    quantization: yml.quantization,
+    files: yml.files,
+    weightBytes: weightBytes(yml.files),
   }
 }

@@ -1,0 +1,238 @@
+import { describe, expect, it, vi } from 'vitest'
+import { AtomicCoreError } from '../../contracts/index.js'
+import type { GpuFacts, RuntimeDescriptor, RuntimeInstallation, Sha256Digest } from '../../contracts/index.js'
+import type { DescriptorProviderResult, InstallationRecord } from '../environment/index.js'
+import { checkTensorrtLlmModel, parseModelCheckInput } from './check.js'
+import type { ModelCheckDeps } from './check.js'
+
+const digest = (hex: string): Sha256Digest => `sha256:${hex}`
+
+function descriptor(overrides: Partial<RuntimeDescriptor> = {}): RuntimeDescriptor {
+  const image = { repository: 'nvcr.io/nvidia/tensorrt-llm/release', digest: digest('a'.repeat(64)) }
+  return {
+    schema_version: 1,
+    descriptor_id: 'tensorrt-llm-1.2.1-r1',
+    engine_id: 'tensorrt-llm',
+    adapter_id: 'tensorrt-llm',
+    adapter_contract_version: 1,
+    image: { 'linux/amd64': image, 'linux/arm64': image },
+    probe_image: { 'linux/amd64': image, 'linux/arm64': image },
+    minimum_core_version: '0.7.0',
+    minimum_app_version: '2.0.49',
+    minimum_driver_version: '590.44.01',
+    minimum_compute_capability: '8.0',
+    supported_architectures: ['LlamaForCausalLM'],
+    quantization: [{ format: 'bf16', min_compute_capability: '8.0', excluded_compute_capabilities: [] }],
+    model_families: {},
+    curated_models: [],
+    recipes: [],
+    download_bytes: 0,
+    required_disk_bytes: 0,
+    notices: [],
+    exclusions: [],
+    ...overrides,
+  }
+}
+
+function gpu(overrides: Partial<GpuFacts> & Pick<GpuFacts, 'gpu_id'>): GpuFacts {
+  return {
+    name: 'Test GPU',
+    compute_capability: '8.9',
+    total_vram_bytes: 24_000_000_000,
+    free_vram_bytes: 24_000_000_000,
+    driver_version: '581.42',
+    ...overrides,
+  }
+}
+
+function installation(overrides: Partial<RuntimeInstallation> = {}): RuntimeInstallation {
+  return {
+    installation_id: 'trt-1',
+    engine_id: 'tensorrt-llm',
+    environment_id: 'default',
+    active_descriptor_id: 'tensorrt-llm-1.2.1-r1',
+    candidate_descriptor_id: null,
+    availability: 'supported',
+    status: 'ready',
+    ...overrides,
+  }
+}
+
+function record(installationOverrides: Partial<RuntimeInstallation> = {}): InstallationRecord {
+  return {
+    schema_version: 1,
+    installation: installation(installationOverrides),
+    image: { repository: 'nvcr.io/nvidia/tensorrt-llm/release', digest: digest('a'.repeat(64)) },
+    platform: 'linux/amd64',
+    installed_at: '2026-09-29T00:00:00.000Z',
+  }
+}
+
+const AVAILABLE = (d: RuntimeDescriptor): DescriptorProviderResult => ({ kind: 'available', descriptor: d })
+const UNSUPPORTED: DescriptorProviderResult = {
+  kind: 'unsupported',
+  error: new AtomicCoreError(
+    'MANAGED_METADATA_INVALID',
+    'No TensorRT-LLM runtime descriptor has been cached yet.'
+  ),
+}
+
+function deps(overrides: Partial<ModelCheckDeps> = {}): ModelCheckDeps {
+  return {
+    installations: { list: async () => [record()] },
+    descriptors: {
+      forInstallation: async () => AVAILABLE(descriptor()),
+      cachedForNewSetup: async () => UNSUPPORTED,
+    },
+    hostFacts: async () => ({ gpus: [gpu({ gpu_id: 'gpu-0' })], memAvailableBytes: 0 }),
+    settings: () => ({}),
+    ...overrides,
+  }
+}
+
+const files = () => [
+  { path: 'model.safetensors', size: 1_000_000_000, sha256: 'a'.repeat(64) },
+  { path: 'config.json', size: 100, sha256: null },
+]
+
+const body = (overrides: Record<string, unknown> = {}) => ({
+  repository: 'acme/model',
+  revision: 'deadbeef',
+  config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+  hf_quant_config_json: null,
+  files: files(),
+  ...overrides,
+})
+
+describe('checkTensorrtLlmModel', () => {
+  it("checks against the ready installation's pinned descriptor, over forInstallation, never cachedForNewSetup", async () => {
+    const forInstallation = vi.fn(async () => AVAILABLE(descriptor()))
+    const cachedForNewSetup = vi.fn(async () => UNSUPPORTED)
+    const result = await checkTensorrtLlmModel(
+      body(),
+      deps({ descriptors: { forInstallation, cachedForNewSetup } })
+    )
+    expect(result.verdict).toEqual({ ok: true })
+    expect(forInstallation).toHaveBeenCalledWith('tensorrt-llm-1.2.1-r1')
+    expect(cachedForNewSetup).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the latest cached descriptor when the engine is not installed', async () => {
+    const cachedForNewSetup = vi.fn(async () => AVAILABLE(descriptor()))
+    const result = await checkTensorrtLlmModel(
+      body(),
+      deps({
+        installations: { list: async () => [] },
+        descriptors: { forInstallation: async () => UNSUPPORTED, cachedForNewSetup },
+      })
+    )
+    expect(result.verdict).toEqual({ ok: true })
+    expect(cachedForNewSetup).toHaveBeenCalledOnce()
+  })
+
+  it('falls back to the cached descriptor when the installation exists but is not ready', async () => {
+    const cachedForNewSetup = vi.fn(async () => AVAILABLE(descriptor()))
+    const result = await checkTensorrtLlmModel(
+      body(),
+      deps({
+        installations: { list: async () => [record({ status: 'installing' })] },
+        descriptors: { forInstallation: async () => UNSUPPORTED, cachedForNewSetup },
+      })
+    )
+    expect(result.verdict).toEqual({ ok: true })
+    expect(cachedForNewSetup).toHaveBeenCalledOnce()
+  })
+
+  it("throws the descriptor provider's own error when nothing is installed and nothing was ever cached", async () => {
+    await expect(
+      checkTensorrtLlmModel(body(), deps({ installations: { list: async () => [] } }))
+    ).rejects.toMatchObject({ code: 'MANAGED_METADATA_INVALID' })
+  })
+
+  it('never calls fetch or touches the network: the deps it is given are the only I/O surface', async () => {
+    // No `fetch` dependency exists anywhere in `ModelCheckDeps` for this route to call.
+    const result = await checkTensorrtLlmModel(body(), deps())
+    expect(result.verdict).toEqual({ ok: true })
+  })
+
+  it('reads the kv_cache_free_gpu_memory_fraction from stored settings and passes it to the pure check', async () => {
+    // 75 GB weights, an 80 GB card: ok at the default 0.9 fraction, a shortage at a much lower one.
+    const bigModelBody = body({
+      hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
+      files: [
+        { path: 'model-00001-of-00002.safetensors', size: 37_500_000_000, sha256: 'a'.repeat(64) },
+        { path: 'model-00002-of-00002.safetensors', size: 37_500_000_000, sha256: 'b'.repeat(64) },
+      ],
+    })
+    const datacenterDescriptor = descriptor({
+      supported_architectures: ['LlamaForCausalLM'],
+      quantization: [{ format: 'fp8', min_compute_capability: '8.9', excluded_compute_capabilities: [] }],
+    })
+    const datacenterGpu = gpu({
+      gpu_id: 'gpu-0',
+      compute_capability: '9.0',
+      total_vram_bytes: 85_899_345_920,
+      free_vram_bytes: 85_532_850_176,
+    })
+    const commonDeps = {
+      installations: { list: async () => [record()] },
+      descriptors: {
+        forInstallation: async () => AVAILABLE(datacenterDescriptor),
+        cachedForNewSetup: async () => UNSUPPORTED,
+      },
+      hostFacts: async () => ({ gpus: [datacenterGpu], memAvailableBytes: 0 }),
+    }
+
+    const atDefault = await checkTensorrtLlmModel(bigModelBody, deps({ ...commonDeps, settings: () => ({}) }))
+    expect(atDefault.verdict).toEqual({ ok: true })
+
+    const atLowerFraction = await checkTensorrtLlmModel(
+      bigModelBody,
+      deps({ ...commonDeps, settings: () => ({ kv_cache_free_gpu_memory_fraction: 0.5 }) })
+    )
+    expect(atLowerFraction.verdict.ok).toBe(false)
+  })
+})
+
+describe('parseModelCheckInput', () => {
+  it('parses a well-formed request', () => {
+    expect(parseModelCheckInput(body())).toEqual({
+      repository: 'acme/model',
+      revision: 'deadbeef',
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+      hf_quant_config_json: null,
+      files: files(),
+    })
+  })
+
+  it('carries gpu_id through only when it was given', () => {
+    expect(parseModelCheckInput(body({ gpu_id: 'GPU-abc' }))).toMatchObject({ gpu_id: 'GPU-abc' })
+    expect(parseModelCheckInput(body())).not.toHaveProperty('gpu_id')
+  })
+
+  it('accepts hf_quant_config_json as an object', () => {
+    expect(
+      parseModelCheckInput(body({ hf_quant_config_json: { quantization: { quant_algo: 'FP8' } } }))
+        .hf_quant_config_json
+    ).toEqual({ quantization: { quant_algo: 'FP8' } })
+  })
+
+  it.each<[unknown, string]>([
+    [{}, 'not an object'],
+    [{ ...body(), repository: '' }, 'empty repository'],
+    [{ ...body(), repository: 42 }, 'non-string repository'],
+    [{ ...body(), revision: undefined }, 'missing revision'],
+    [{ ...body(), config_json: 'nope' }, 'config_json not an object'],
+    [{ ...body(), config_json: null }, 'config_json null'],
+    [{ ...body(), hf_quant_config_json: 'nope' }, 'hf_quant_config_json neither null nor object'],
+    [{ ...body(), files: 'nope' }, 'files not an array'],
+    [{ ...body(), files: [{ size: 1 }] }, 'file missing path'],
+    [{ ...body(), files: [{ path: 'a', size: '1' }] }, 'file size not a number'],
+    [{ ...body(), files: [{ path: 'a', size: -1 }] }, 'file size negative'],
+    [{ ...body(), files: [{ path: 'a', size: 1, sha256: 42 }] }, 'file sha256 not string or null'],
+    [{ ...body(), gpu_id: 42 }, 'gpu_id not a string'],
+    [{ ...body(), extra_field: true }, 'unknown top-level field'],
+  ])('rejects %#: %s', (input) => {
+    expect(() => parseModelCheckInput(input)).toThrow(AtomicCoreError)
+  })
+})

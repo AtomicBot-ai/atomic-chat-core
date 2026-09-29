@@ -36,6 +36,7 @@ import type {
   LocalApiServerState,
   LocalProviderId,
   ManagedHostReceipt,
+  ModelCompatibility,
   ProbeEnvironmentInput,
   RemoteAccessStatus,
   RequirementPlan,
@@ -338,6 +339,12 @@ export interface ControlServerDeps {
   diffusion: DiffusionControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
+  /**
+   * `POST /models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`): whether a Hugging
+   * Face checkpoint the caller has not downloaded yet would run, computed without touching the
+   * network. Absent off Linux, where the `tensorrt-llm` provider is not offered at all.
+   */
+  tensorrtLlmModelCheck?: (body: unknown) => Promise<ModelCompatibility>
   /**
    * Whether Apple's on-device model can run here: the server's own `--check` token (`available`,
    * `notEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, `unavailable`, `binaryNotFound`).

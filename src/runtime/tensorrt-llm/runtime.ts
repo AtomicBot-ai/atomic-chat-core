@@ -15,7 +15,11 @@
  *  - what a session can do (`routePolicy`, `capabilities`), read off the pinned descriptor's
  *    `model_families` entry for the model's architecture — never guessed (design D9);
  *  - never growing a context or recreating a session: a restart of a multi-minute container in the
- *    middle of a conversation is worse than an honest `context_length_exceeded` (design D9).
+ *    middle of a conversation is worse than an honest `context_length_exceeded` (design D9);
+ *  - the pre-launch check (task 2.16, `prelaunch.ts`): between the card just picked and the
+ *    container that would use it, every file `model.yml` recorded is re-verified present on disk at
+ *    its size, and compatibility is recomputed against `config.json`/`hf_quant_config.json` as they
+ *    sit in the model's directory right now, not as `model.yml` last recorded them.
  *
  * Everything that touches the machine arrives injected: the lifecycle over the core's one Docker
  * executor, the ready installation, the host facts, the model lookup and the stored settings.
@@ -43,6 +47,7 @@ import { selectLaunchGpu } from './compatibility.js'
 import type { TensorrtLlmHostFacts } from './host-facts.js'
 import type { ReadyInstallation } from './installation.js'
 import type { TensorrtLlmModel } from './model-dir.js'
+import { verifyModelBeforeLaunch } from './prelaunch.js'
 import { tensorrtLlmRoutePolicy } from './route-policy.js'
 import { tensorrtLlmSettings } from './settings.js'
 
@@ -184,6 +189,18 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       settings.gpu_id !== null && gpu.gpu_id !== settings.gpu_id
         ? { requested_gpu_id: settings.gpu_id, gpu_id: gpu.gpu_id }
         : undefined
+
+    // Pre-launch check (task 2.16, spec "Проверка файлов при загрузке"): every file model.yml
+    // recorded is still on disk at its size, and the compatibility verdict is recomputed against
+    // config.json/hf_quant_config.json as they sit on disk right now and the card just picked above
+    // — never model.yml's or the descriptor's word for it from whenever the model finished
+    // downloading. No container exists yet; a failure here never creates one.
+    await verifyModelBeforeLaunch(model, ready.descriptor, facts.gpus, facts.memAvailableBytes, {
+      gpuId: gpu.gpu_id,
+      kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,
+    })
+    throwIfLoadCancelled(signal)
+    this.assertOpen()
 
     const { descriptor } = ready
     const session = await lifecycle.load({
