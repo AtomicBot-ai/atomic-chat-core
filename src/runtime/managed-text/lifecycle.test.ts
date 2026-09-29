@@ -517,6 +517,32 @@ describe('ManagedTextLifecycle: container, cache, journal, heartbeat', () => {
     }
   )
 
+  it('runs the container as the core user, with a home, a cache home and a login name inside the engine cache (final review I-1)', async () => {
+    await build({ containerUser: { uid: 1234, gid: 5678 } })
+    await lifecycle.load(request_())
+    const argv = docker.last().createArgv
+    expect(argv.slice(argv.indexOf('--user'), argv.indexOf('--user') + 2)).toEqual(['--user', '1234:5678'])
+    expect(argv).toEqual(
+      expect.arrayContaining([
+        'HOME=/atomic/engine-cache/home',
+        'XDG_CACHE_HOME=/atomic/engine-cache/xdg-cache',
+        'USER=atomic',
+        'LOGNAME=atomic',
+      ])
+    )
+    const cacheDir = data.layout.managed.engineCacheDir('engine-1.0-r1', 'org/model-a')
+    expect((await stat(join(cacheDir, 'home'))).isDirectory()).toBe(true)
+    expect((await stat(join(cacheDir, 'xdg-cache'))).isDirectory()).toBe(true)
+  })
+
+  it('leaves the image user alone, and sets no identity env, when no container user is wired', async () => {
+    await build()
+    await lifecycle.load(request_())
+    const argv = docker.last().createArgv
+    expect(argv).not.toContain('--user')
+    expect(argv.some((a) => a.startsWith('HOME=') || a.startsWith('LOGNAME='))).toBe(false)
+  })
+
   it('journals the container right after create and drops the record only after a confirmed stop and rm', async () => {
     await build()
     await lifecycle.load(request_())

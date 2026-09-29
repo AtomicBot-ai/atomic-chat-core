@@ -40,6 +40,17 @@ export interface ModelContainerLabels {
   instance_id: string
 }
 
+/**
+ * The numeric user and group a model container runs as (`--user <uid>:<gid>`): the core's own, so
+ * everything the engine writes into the read-write engine cache stays owned by — and removable by —
+ * the user who owns the data folder (final review I-1). Numeric only: the image has no passwd entry
+ * for this user, which is why the lifecycle also sets `HOME`/`USER`/`LOGNAME` for it.
+ */
+export interface ContainerUser {
+  uid: number
+  gid: number
+}
+
 /** Everything `buildCreateModelContainerArgv` needs to build one model container's `docker create` argv. */
 export interface ModelContainerCreateSpec {
   image: ImageRef
@@ -58,6 +69,8 @@ export interface ModelContainerCreateSpec {
   labels: ModelContainerLabels
   /** Defaults to `MODEL_CONTAINER_SHM_SIZE`; overridable for tests and for the eventual live-measured value. */
   shmSize?: string
+  /** `--user <uid>:<gid>`; absent, the image's own user (root for the NGC TensorRT-LLM release image). */
+  user?: ContainerUser
   env?: Record<string, string>
   command?: string[]
 }

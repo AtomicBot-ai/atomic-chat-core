@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -13,7 +14,9 @@ import {
 import { answer, type FakeLinuxHostState } from '../../../test/helpers/fake-linux-host.mjs'
 import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
+import { dataLayout } from '../../config/index.js'
 import type { ExecutionRecord } from '../container/index.js'
+import { removeEngineCaches } from '../managed-text/index.js'
 import { parseRuntimeDescriptor } from './descriptor.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { InstallationStore } from './installations.js'
@@ -962,6 +965,34 @@ describe('removing the installation', () => {
     await provisioner.remove(removal({ retain_models: false }), signal)
     expect(h.calls).toContain('models:tensorrt-llm')
   })
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'never leaves a ready record behind a removal that failed part-way, and a retry finishes it (final review I-1)',
+    async () => {
+      const { h, provisioner } = await installed(readyHost())
+      // A cache subtree the user cannot delete: what an engine running as root would leave behind.
+      const paths = dataLayout(data).managed
+      const stuck = join(paths.engineCacheDir(DESCRIPTOR.descriptor_id, 'org/model'), 'inductor')
+      await mkdir(join(stuck, 'kernels'), { recursive: true })
+      await writeFile(join(stuck, 'kernels', 'k.so'), 'x')
+      await chmod(stuck, 0o555)
+      h.deps.removeEngineCaches = async (descriptorId) => {
+        await removeEngineCaches(paths, { descriptorId })
+      }
+      try {
+        await expect(provisioner.remove(removal(), signal)).rejects.toMatchObject({ code: 'EACCES' })
+        // The image is gone, so the record must not say `ready`: a load is refused as not ready,
+        // never sent to `docker create` for an image that no longer exists.
+        expect(h.machine.state.images).not.toContain(IMAGE_REF)
+        expect((await h.installations.read('tensorrt-llm'))?.installation.status).toBe('removing')
+      } finally {
+        await chmod(stuck, 0o755)
+      }
+      await provisioner.remove(removal(), signal)
+      expect(await h.installations.read('tensorrt-llm')).toBeNull()
+      expect(existsSync(paths.descriptorCachesDir(DESCRIPTOR.descriptor_id))).toBe(false)
+    }
+  )
 
   it('stops when a loaded model cannot be confirmed stopped, and removes nothing', async () => {
     const { h, provisioner } = await installed(readyHost())

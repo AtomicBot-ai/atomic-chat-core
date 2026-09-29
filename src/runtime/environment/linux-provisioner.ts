@@ -801,6 +801,16 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
           await docker.journal.remove(container.container_id)
         }
         if (existing !== null) {
+          // No longer `ready` from here on (final review I-1): once the image may be gone, a record
+          // that still said `ready` would send every load to `docker create` for a missing image,
+          // and a step that fails below (a cache the user cannot delete) would leave it that way.
+          // `removing` refuses loads as "not ready" and keeps the removal retryable.
+          if (existing.installation.status !== 'removing') {
+            await deps.installations.write({
+              ...existing,
+              installation: { ...existing.installation, status: 'removing' },
+            })
+          }
           // Only the digest this installation pulled, and only when nobody else's container uses
           // it — a foreign container keeps the image, and Docker would refuse anyway.
           const users = await containersUsingImage(docker.exec, existing.image)

@@ -73,6 +73,7 @@ const options = (over: Partial<WireTensorrtLlmOptions> = {}): WireTensorrtLlmOpt
   settings: () => ({}),
   emit: () => {},
   log: () => {},
+  containerUser: null,
   ...over,
 })
 

@@ -25,7 +25,13 @@
  */
 import path from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { ImageRef, ModelContainerCreateSpec, ModelContainerLabels, OneShotRunSpec } from './types.js'
+import type {
+  ContainerUser,
+  ImageRef,
+  ModelContainerCreateSpec,
+  ModelContainerLabels,
+  OneShotRunSpec,
+} from './types.js'
 
 /**
  * The one path to the Docker daemon's system socket, in its two textual forms `argv.ts` and
@@ -160,6 +166,20 @@ function assertShmSize(value: string): string {
     )
   }
   return value
+}
+
+/** A uid or gid: a non-negative safe integer, so `--user` only ever carries `<digits>:<digits>`. */
+function assertUserId(value: number, what: string): string {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new AtomicCoreError('INVALID_ARGUMENT', `${what} is not a non-negative integer id.`, String(value))
+  }
+  return String(value)
+}
+
+/** `--user <uid>:<gid>`, or nothing: the image's own user. */
+function userFlags(user: ContainerUser | undefined): string[] {
+  if (user === undefined) return []
+  return ['--user', `${assertUserId(user.uid, 'container uid')}:${assertUserId(user.gid, 'container gid')}`]
 }
 
 /** Normalizes a POSIX (Docker-daemon-side) path: no trailing slash, `.`/`..` resolved, for exact/prefix comparison. */
@@ -374,7 +394,9 @@ function commandWords(command: string[] | undefined): string[] {
  * `pull.ts` fetches image bytes), and the port published only on `127.0.0.1`. Every option comes
  * before the positional image reference and command, so nothing derived from a descriptor or a probe
  * can land where Docker would read it as the start of a new flag. `spec.selinuxDataRoot` is required
- * whenever `spec.selinux` is true — see `assertWithinDataRoot`.
+ * whenever `spec.selinux` is true — see `assertWithinDataRoot`. `spec.user` runs the engine as the
+ * core's own uid:gid rather than the image's root (final review I-1, ADR
+ * 2026-09-29-the-engine-container-runs-as-the-invoking-user).
  */
 export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): string[] {
   const ref = imageReference(spec.image)
@@ -397,6 +419,7 @@ export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): s
     '--restart=no',
     '--pull=never',
     `--shm-size=${shmSize}`,
+    ...userFlags(spec.user),
     '--gpus',
     `device=${gpuUuid}`,
     ...mountFlag(

@@ -46,6 +46,7 @@ interface FakeContainer {
   status: string
   pid: number | null
   gpus: string
+  user: string | null
 }
 interface FakeDockerState {
   containers: Record<string, FakeContainer>
@@ -242,7 +243,12 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(session.generation).toEqual(expect.any(String))
     const first = Object.entries(dockerState().containers)
     expect(first).toHaveLength(1)
-    expect(first[0]?.[1]).toMatchObject({ status: 'running', gpus: `device=${GPU}` })
+    // Run as the core's own uid:gid, so the engine cache it writes stays removable (final review I-1).
+    expect(first[0]?.[1]).toMatchObject({
+      status: 'running',
+      gpus: `device=${GPU}`,
+      user: `${process.getuid?.()}:${process.getgid?.()}`,
+    })
 
     const serverRes = await post(ready, '/server/start', { port: 0 })
     expect(serverRes.status, await serverRes.clone().text()).toBe(200)

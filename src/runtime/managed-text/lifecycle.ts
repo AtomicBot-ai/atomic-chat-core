@@ -57,6 +57,7 @@ import {
   writeWatchdogScript,
 } from '../container/index.js'
 import type {
+  ContainerUser,
   CreateContainerDeps,
   DockerExec,
   ExecutionJournal,
@@ -156,6 +157,34 @@ export interface ManagedTextLifecycleDeps {
   startHeartbeat?: (options: HeartbeatTickerOptions) => HeartbeatTicker
   startGateway?: (options: ManagedGatewayOptions) => Promise<ManagedGateway>
   createContainerDeps?: CreateContainerDeps
+  /**
+   * The uid:gid every container runs as — the core's own (final review I-1): the engine then writes
+   * its cache as the user who can remove it again. Absent, the image's own user. With a user, the
+   * container also gets a home, a cache home and a login name inside the engine cache
+   * (`containerUserEnv`), since the image has no passwd entry for it.
+   */
+  containerUser?: ContainerUser
+}
+
+/** The login name a container user without a passwd entry is given (`USER`/`LOGNAME`). */
+export const CONTAINER_USER_NAME = 'atomic'
+/** Inside the engine cache: the container user's `HOME` and `XDG_CACHE_HOME`, created by core before start. */
+const CONTAINER_HOME_DIR = 'home'
+const CONTAINER_XDG_CACHE_DIR = 'xdg-cache'
+
+/**
+ * What a non-root user with no passwd entry in the image needs to run a Python engine: `getpass`
+ * (which torch's inductor calls) reads `LOGNAME`/`USER` before the passwd database and raises for an
+ * unknown uid without them, and `HOME`/`XDG_CACHE_HOME` must point somewhere that user can write —
+ * the read-write engine cache, so whatever lands there persists with the cache and goes with it.
+ */
+function containerUserEnv(): Record<string, string> {
+  return {
+    HOME: `${CONTAINER_ENGINE_CACHE_PATH}/${CONTAINER_HOME_DIR}`,
+    XDG_CACHE_HOME: `${CONTAINER_ENGINE_CACHE_PATH}/${CONTAINER_XDG_CACHE_DIR}`,
+    USER: CONTAINER_USER_NAME,
+    LOGNAME: CONTAINER_USER_NAME,
+  }
 }
 
 /** The pinned installation a load runs: which descriptor, image and adapter. */
@@ -600,6 +629,10 @@ export class ManagedTextLifecycle {
         request.installation.descriptor_id,
         entry.modelId
       )
+      if (this.deps.containerUser !== undefined) {
+        await mkdir(join(cacheDir, CONTAINER_HOME_DIR), { recursive: true })
+        await mkdir(join(cacheDir, CONTAINER_XDG_CACHE_DIR), { recursive: true })
+      }
       const launch = entry.adapter.buildLaunch({
         modelId: entry.modelId,
         settings,
@@ -720,14 +753,18 @@ export class ManagedTextLifecycle {
         heartbeat: { source: prepared.heartbeat.mount_source },
       },
       publication: prepared.publication,
+      ...(this.deps.containerUser === undefined ? {} : { user: this.deps.containerUser }),
       labels: {
         engine_id: request.installation.engine_id,
         scope: this.deps.scope,
         instance_id: this.deps.instanceId,
       },
-      // The watchdog's own settings come last: an adapter can never switch it off or retime it.
+      // The container user's identity after the adapter's env, so no adapter can point `HOME` at a
+      // place that user cannot write; the watchdog's own settings come last: an adapter can never
+      // switch it off or retime it.
       env: {
         ...launch.env,
+        ...(this.deps.containerUser === undefined ? {} : containerUserEnv()),
         ...watchdogEnv({ heartbeatFile: `${CONTAINER_HEARTBEAT_PATH}/${HEARTBEAT_FILE}` }),
       },
       command: ['--', ...launch.argv],

@@ -53,6 +53,8 @@ if (sub === 'create') {
   const [, hostPort] = args[args.indexOf('-p') + 1].split(':')
   const model = args.find((a) => a.endsWith(':/atomic/model:ro')) ?? ''
   const gpus = args[args.indexOf('--gpus') + 1]
+  // The `--user` the core ran the container as (final review I-1), or null for the image's own.
+  const user = args.includes('--user') ? args[args.indexOf('--user') + 1] : null
   const newId = `fakectr${String(++db.n).padStart(8, '0')}`
   db.containers[newId] = {
     status: 'created',
@@ -60,6 +62,7 @@ if (sub === 'create') {
     slow: /slow/.test(model),
     stuck: /stuck/.test(model),
     gpus,
+    user,
     pid: null,
     exitCode: 0,
     logs: [],

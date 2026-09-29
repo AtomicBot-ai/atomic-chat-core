@@ -408,6 +408,12 @@ export async function createAtomicCore(
       emit: (name, payload) => emitter.emit(name, payload),
       log,
       claimGpu: gpuResidency.hook('tensorrt-llm'),
+      // The engine container runs as this core's own user (final review I-1, ADR
+      // 2026-09-29-the-engine-container-runs-as-the-invoking-user).
+      containerUser:
+        process.getuid !== undefined && process.getgid !== undefined
+          ? { uid: process.getuid(), gid: process.getgid() }
+          : null,
     })
     if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
     // `core.registry('tensorrt-llm')` (task 2.16w round 1, finding 2): the same Linux-only gate as

@@ -225,6 +225,24 @@ describe('buildCreateModelContainerArgv', () => {
     ).toContain(`--shm-size=${MODEL_CONTAINER_SHM_SIZE_CEILING_GB * 1024}m`)
   })
 
+  it('runs the container as the given uid:gid, so the engine cache it writes stays removable (final review I-1)', () => {
+    const argv = buildCreateModelContainerArgv({ ...baseSpec, user: { uid: 1000, gid: 1001 } })
+    expect(argv.slice(argv.indexOf('--user'), argv.indexOf('--user') + 2)).toEqual(['--user', '1000:1001'])
+    // Before the image reference, like every other option.
+    expect(argv.indexOf('--user')).toBeLessThan(argv.indexOf(imageReference(image)))
+    expect(buildCreateModelContainerArgv({ ...baseSpec, user: { uid: 0, gid: 0 } })).toContain('0:0')
+    expect(buildCreateModelContainerArgv(baseSpec)).not.toContain('--user')
+  })
+
+  it.each<[string, { uid: number; gid: number }]>([
+    ['a negative uid', { uid: -1, gid: 1000 }],
+    ['a fractional gid', { uid: 1000, gid: 1.5 }],
+    ['a NaN uid', { uid: Number.NaN, gid: 1000 }],
+    ['an unsafe integer', { uid: 2 ** 53, gid: 1000 }],
+  ])('refuses %s as the container user', (_label, user) => {
+    expect(() => buildCreateModelContainerArgv({ ...baseSpec, user })).toThrow(AtomicCoreError)
+  })
+
   it('selects exactly one GPU by UUID', () => {
     const argv = buildCreateModelContainerArgv(baseSpec)
     const i = argv.indexOf('--gpus')

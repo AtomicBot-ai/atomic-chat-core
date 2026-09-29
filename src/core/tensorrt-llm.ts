@@ -27,6 +27,7 @@ import {
   reconcileExecutions,
 } from '../runtime/container/index.js'
 import type {
+  ContainerUser,
   DockerExec,
   ExecutionReconcileResult,
   ManagedContainers,
@@ -81,6 +82,12 @@ export interface WireTensorrtLlmOptions {
   log: CoreLogger
   /** Core's GPU residency (task 2.15): the provider's `stopping-previous` stage. */
   claimGpu?: GpuClaimHook
+  /**
+   * The uid:gid this core runs as (`process.getuid`/`getgid`, read by `create.ts`, never here): every
+   * model container runs as it, so the engine cache stays removable (final review I-1). Null where the
+   * platform has no numeric user, which leaves the image's own user.
+   */
+  containerUser: ContainerUser | null
 }
 
 /** The provider, or null where it is not offered: everywhere but Linux. */
@@ -110,6 +117,7 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
       selinuxDataRoot: options.layout.root,
       emit: options.emit,
       log: options.log,
+      ...(options.containerUser === null ? {} : { containerUser: options.containerUser }),
     })
     return built
   }
