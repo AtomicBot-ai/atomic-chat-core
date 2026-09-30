@@ -40,6 +40,7 @@ import type {
   ProbeEnvironmentInput,
   RemoteAccessStatus,
   RequirementPlan,
+  RuntimeDescriptorSummary,
   ResumeOperation,
   SessionInfo,
   UnloadResult,
@@ -88,6 +89,8 @@ export interface SessionSummary extends SessionInfo {
 export interface ManagedEnvironmentControl {
   list(): Promise<EnvironmentSnapshot[]>
   probe(input: ProbeEnvironmentInput): Promise<RequirementPlan>
+  /** One cached runtime descriptor, read from the core's cache only, never fetched (task 2.22). */
+  descriptor(descriptorId: string): Promise<RuntimeDescriptorSummary>
   begin(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation>
   get(operationId: string): Promise<EnvironmentOperation>
   cancel(operationId: string): Promise<EnvironmentOperation>

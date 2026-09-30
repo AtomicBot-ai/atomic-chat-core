@@ -132,6 +132,16 @@ beforeEach(async () => {
         environmentCalls.push(`probe:${input.descriptor_id}`)
         return { plan_digest: OPERATION.plan_digest } as RequirementPlan
       },
+      descriptor: async (descriptorId) => {
+        environmentCalls.push(`descriptor:${descriptorId}`)
+        return {
+          descriptor_id: descriptorId,
+          engine_id: 'tensorrt-llm',
+          notices: ['NVIDIA terms'],
+          curated_models: [],
+          supported_architectures: ['LlamaForCausalLM'],
+        }
+      },
       begin: async (environmentId, input) => {
         environmentCalls.push(`begin:${environmentId}:${input.request_id}`)
         return OPERATION
@@ -738,6 +748,8 @@ describe('managed environments (task 2.6)', () => {
     })
     expect(receipted.phase).toBe('preparing-environment')
     expect((await client.cancelEnvironmentOperation('op-1')).phase).toBe('cancelled')
+    const descriptor = await client.environmentDescriptor('tensorrt-llm-1.2.1-r1')
+    expect(descriptor).toMatchObject({ descriptor_id: 'tensorrt-llm-1.2.1-r1', notices: ['NVIDIA terms'] })
     expect(environmentCalls).toEqual([
       'list',
       'probe:tensorrt-llm-1.2.1-r1',
@@ -746,6 +758,7 @@ describe('managed environments (task 2.6)', () => {
       `resume:op-1:3:${OPERATION.plan_digest}`,
       'receipt:op-1:completed',
       'cancel:op-1',
+      'descriptor:tensorrt-llm-1.2.1-r1',
     ])
 
     const snapshot = await client.snapshot()

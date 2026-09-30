@@ -21,7 +21,7 @@ import type {
   ResumeOperation,
   Sha256Digest,
 } from '../../../contracts/index.js'
-import { readJsonBody, sendJson } from '../../http.js'
+import { readJsonBody, sendError, sendJson } from '../../http.js'
 import type { Router } from '../../http.js'
 import type { ControlRouteContext, ControlServerDeps } from '../types.js'
 
@@ -184,6 +184,25 @@ export function registerEnvironmentRoutes(
   router.post(p('/environments/probe'), async (req, res) => {
     const body = await readJsonBody<unknown>(req)
     sendJson(res, 200, await service().probe(probeBody(body)))
+  })
+
+  // One cached runtime descriptor, from the cache only (task 2.22): the id an installation pins or a
+  // plan names. An id the cache does not hold is 404 here, although `MANAGED_METADATA_INVALID` is 400
+  // everywhere else (`statusForCode`): the caller asked for something that is not there, rather than
+  // sending a malformed descriptor. Registered with the other fixed segments, ahead of any
+  // `/environments/:environmentId/...` pattern.
+  router.get(p('/environments/descriptors/:descriptorId'), async (_req, res, { params }) => {
+    const environments = service()
+    const descriptorId = id(params['descriptorId'], 'descriptorId')
+    try {
+      sendJson(res, 200, await environments.descriptor(descriptorId))
+    } catch (error) {
+      if (error instanceof AtomicCoreError && error.code === 'MANAGED_METADATA_INVALID') {
+        sendError(res, error, 404)
+        return
+      }
+      throw error
+    }
   })
 
   // Registered before the `:operationId` family so neither pattern can swallow the other.

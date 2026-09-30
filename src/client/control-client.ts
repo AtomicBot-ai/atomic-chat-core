@@ -25,6 +25,7 @@ import type {
   ManagedHostReceipt,
   ProbeEnvironmentInput,
   RequirementPlan,
+  RuntimeDescriptorSummary,
   ResumeOperation,
   LlamacppProviderId,
   DiffusionBackendInstallRecord,
@@ -550,6 +551,17 @@ export class CoreClient {
   /** What setting this up would involve. Reads the machine; changes nothing on it. */
   probeEnvironment(input: ProbeEnvironmentInput): Promise<RequirementPlan> {
     return this.call('/environments/probe', { method: 'POST', body: JSON.stringify(input) })
+  }
+
+  /**
+   * One runtime descriptor the core has cached, as a client shows it: NVIDIA notices, curated models,
+   * supported architectures. Pass the id an installation pins (`active_descriptor_id`) or a plan
+   * names (`descriptor_id`). The core reads its cache only, never the network; an id it has not
+   * cached is 404 `MANAGED_METADATA_INVALID`, and off Linux the answer is 422
+   * `MANAGED_ADAPTER_UNAVAILABLE`.
+   */
+  environmentDescriptor(descriptorId: string): Promise<RuntimeDescriptorSummary> {
+    return this.call(`/environments/descriptors/${encodeURIComponent(descriptorId)}`)
   }
 
   /**

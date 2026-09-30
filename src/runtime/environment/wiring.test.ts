@@ -385,6 +385,25 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
 
     expect(managed.environments()[0]?.minimum_app_version).toBe('2.0.49')
   })
+
+  it('lets the service read a cached descriptor back by id (task 2.22), and nothing it has not cached', async () => {
+    const managed = wireManagedRuntimes({
+      env: env('linux', { [RUNTIME_DESCRIPTOR_URL_ENV]: fixtureUrl }),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: () => undefined,
+      newId: () => 'id-1',
+      provisioner: fakeProvisioner(),
+    })
+    wired.push(managed)
+    await expect(managed.service.descriptor('tensorrt-llm-1.2.1-r1')).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+    })
+    await managed.descriptors.forNewSetup()
+    const summary = await managed.service.descriptor('tensorrt-llm-1.2.1-r1')
+    expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r1')
+    expect(summary.notices.length).toBeGreaterThan(0)
+  })
 })
 
 describe('resolveMinimumAppVersion', () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   BeginOperation,
@@ -11,6 +11,9 @@ import type {
 } from '../../contracts/index.js'
 import type { IdentityDeps } from '../../lock/index.js'
 import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
+import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
+import { parseRuntimeDescriptor } from './descriptor.js'
+import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
 import { OperationStore } from './store.js'
 
@@ -194,6 +197,8 @@ interface HarnessIdentity {
   /** Operation ids; every operation is `op-1` unless a test needs two of them. */
   newOperationId?: () => string
   now?: () => number
+  /** The descriptor cache the descriptor read answers from (task 2.22); none when omitted. */
+  descriptors?: Pick<RuntimeDescriptorProvider, 'forInstallation'>
 }
 
 const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessIdentity = {}) => {
@@ -227,6 +232,7 @@ const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessId
     // handoff between two cores. The "a live owner" tests below pass their own `identityDeps`.
     identityDeps: identity.identityDeps ?? { alive: () => false },
     ...(identity.now === undefined ? {} : { now: identity.now }),
+    ...(identity.descriptors === undefined ? {} : { descriptors: identity.descriptors }),
   })
   return { service, store, events, fs }
 }
@@ -944,5 +950,56 @@ describe('ordinary running', () => {
     // The operation is still there, mid-flight, for the next core to reconcile.
     expect(left).toHaveLength(1)
     expect(left[0]?.machine.operation.phase).toBe('preparing-host')
+  })
+})
+
+describe('reading a cached runtime descriptor (task 2.22)', () => {
+  const DESCRIPTOR = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
+  const cache = () => ({
+    forInstallation: vi.fn(async (id: string) =>
+      id === DESCRIPTOR.descriptor_id
+        ? { kind: 'available' as const, descriptor: DESCRIPTOR }
+        : {
+            kind: 'unsupported' as const,
+            error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'not cached', id),
+          }
+    ),
+  })
+
+  it('answers what the cache holds under that id: notices, curated models, architectures', async () => {
+    const descriptors = cache()
+    const { service } = harness(new FakeProvisioner({ plan: plan(PLAN_A), host_step: null }), { descriptors })
+    expect(await service.descriptor(DESCRIPTOR.descriptor_id)).toEqual({
+      descriptor_id: DESCRIPTOR.descriptor_id,
+      engine_id: DESCRIPTOR.engine_id,
+      notices: DESCRIPTOR.notices,
+      curated_models: DESCRIPTOR.curated_models,
+      supported_architectures: DESCRIPTOR.supported_architectures,
+    })
+    expect(descriptors.forInstallation).toHaveBeenCalledWith(DESCRIPTOR.descriptor_id)
+  })
+
+  it('says MANAGED_METADATA_INVALID, naming the id, for one the cache does not hold', async () => {
+    const { service } = harness(new FakeProvisioner({ plan: plan(PLAN_A), host_step: null }), {
+      descriptors: cache(),
+    })
+    await expect(service.descriptor('tensorrt-llm-9.9.9-r1')).rejects.toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+      details: 'tensorrt-llm-9.9.9-r1',
+    })
+  })
+
+  it('says MANAGED_ADAPTER_UNAVAILABLE where no host recipe applies, without reading the cache', async () => {
+    const descriptors = cache()
+    const { service } = harness(null, { descriptors })
+    await expect(service.descriptor(DESCRIPTOR.descriptor_id)).rejects.toMatchObject({
+      code: 'MANAGED_ADAPTER_UNAVAILABLE',
+    })
+    expect(descriptors.forInstallation).not.toHaveBeenCalled()
+    // A recipe with no descriptor cache wired is no better.
+    const bare = harness(new FakeProvisioner({ plan: plan(PLAN_A), host_step: null }))
+    await expect(bare.service.descriptor(DESCRIPTOR.descriptor_id)).rejects.toMatchObject({
+      code: 'MANAGED_ADAPTER_UNAVAILABLE',
+    })
   })
 })

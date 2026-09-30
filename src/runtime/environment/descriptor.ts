@@ -29,6 +29,7 @@ import type {
   QuantizationSupport,
   RecipeDistribution,
   RuntimeDescriptor,
+  RuntimeDescriptorSummary,
   Sha256Digest,
 } from '../../contracts/index.js'
 
@@ -370,5 +371,20 @@ export function parseRuntimeDescriptor(input: unknown): RuntimeDescriptor {
     required_disk_bytes: bytes(raw['required_disk_bytes'], 'required_disk_bytes'),
     notices: strings(raw['notices'], 'notices'),
     exclusions: strings(raw['exclusions'], 'exclusions'),
+  }
+}
+
+/**
+ * The client-facing part of a descriptor (task 2.22): its id and engine, the notices exactly as
+ * published, the curated checkpoints and the supported architectures. Fresh copies, so nothing that
+ * holds the summary can reach into the descriptor it came from.
+ */
+export function summarizeRuntimeDescriptor(descriptor: RuntimeDescriptor): RuntimeDescriptorSummary {
+  return {
+    descriptor_id: descriptor.descriptor_id,
+    engine_id: descriptor.engine_id,
+    notices: [...descriptor.notices],
+    curated_models: descriptor.curated_models.map((model) => ({ ...model })),
+    supported_architectures: [...descriptor.supported_architectures],
   }
 }

@@ -279,6 +279,8 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     instanceId: options.instanceId,
     newEffectId: options.newId,
     provisioner,
+    // `GET …/environments/descriptors/:id` (task 2.22) reads this cache, never the network.
+    descriptors,
     readSnapshot: async () => view,
     emit: (name, payload) => {
       // Keep the snapshot and the event stream describing the same thing: a client that reconnects

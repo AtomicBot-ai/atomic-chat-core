@@ -17,16 +17,19 @@
  * No imports from `src/`: a packaging change that breaks a route cannot pass by type-checking.
  */
 import type { ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { createServer, type AddressInfo, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import {
   cleanState,
   DESCRIPTOR_ID,
+  DESCRIPTOR_URL,
   ENGINE_IMAGE,
   fakeManagedHost,
   GPU_UUID,
@@ -656,4 +659,137 @@ describe('without a Linux host', () => {
     const { ready } = await start()
     expect((await control(ready, '/environments/operations/op-nobody')).status).toBe(404)
   })
+})
+
+/**
+ * A descriptor source that records every connection and answers none: pointed at by
+ * `ATOMIC_RUNTIME_DESCRIPTOR_URL`, it shows whether the core reached for the network at all. An
+ * `https://` URL is the one scheme the provider fetches, so any attempt lands here as a connection.
+ */
+async function networkRecorder(): Promise<{
+  url: string
+  connections: () => number
+  close: () => Promise<void>
+}> {
+  let connections = 0
+  const server: Server = createServer((socket) => {
+    connections += 1
+    socket.destroy()
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  return {
+    url: `https://127.0.0.1:${port}/runtimes/tensorrt-llm.json`,
+    connections: () => connections,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  }
+}
+
+interface DescriptorSummary {
+  descriptor_id: string
+  engine_id: string
+  notices: string[]
+  curated_models: unknown[]
+  supported_architectures: string[]
+}
+
+/** What the route should answer for the fixture descriptor: its fields as published. */
+const expectedSummary = (): DescriptorSummary => {
+  const published = JSON.parse(readFileSync(fileURLToPath(DESCRIPTOR_URL), 'utf8')) as DescriptorSummary
+  return {
+    descriptor_id: published.descriptor_id,
+    engine_id: published.engine_id,
+    notices: published.notices,
+    curated_models: published.curated_models,
+    supported_architectures: published.supported_architectures,
+  }
+}
+
+interface ProbedPlan {
+  descriptor_id: string | null
+  docker_root_dir: string | null
+  free_disk_bytes: number | null
+  required_disk_bytes: number | null
+}
+
+describe('what the app shows before consent (task 2.22)', () => {
+  it('after a probe: the plan says where and how much space it measured, and the route answers its descriptor from the cache with no network', async () => {
+    host = await fakeManagedHost(cleanState())
+    const first = await start()
+    const plan = (await (
+      await post(first.ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+    ).json()) as ProbedPlan
+    // No Docker yet: the path the core measured for is Docker's default, with the free space there.
+    expect(plan.descriptor_id).toBe(DESCRIPTOR_ID)
+    expect(plan.docker_root_dir).toBe('/var/lib/docker')
+    expect(plan.free_disk_bytes).toBe(Number(await readFile(join(host.dir, 'free-disk-bytes'), 'utf8')))
+    expect(plan.required_disk_bytes).toBe(REQUIRED_DISK_BYTES)
+
+    const answered = await control(first.ready, `/environments/descriptors/${plan.descriptor_id}`)
+    expect(answered.status).toBe(200)
+    expect(await answered.json()).toEqual(expectedSummary())
+
+    // The next core has a descriptor source that records any attempt to reach it: reading the
+    // cached descriptor, and asking for one never cached, both stay off the network.
+    await crash()
+    const recorder = await networkRecorder()
+    try {
+      const second = await start({ ATOMIC_RUNTIME_DESCRIPTOR_URL: recorder.url })
+      const again = await control(second.ready, `/environments/descriptors/${DESCRIPTOR_ID}`)
+      expect(again.status).toBe(200)
+      expect(await again.json()).toEqual(expectedSummary())
+
+      const unknown = await control(second.ready, '/environments/descriptors/tensorrt-llm-0.0.1-r9')
+      expect(unknown.status).toBe(404)
+      expect(((await unknown.json()) as { error: { code: string } }).error.code).toBe(
+        'MANAGED_METADATA_INVALID'
+      )
+      expect(recorder.connections()).toBe(0)
+      // The recorder does see the network when the core really reaches for it: a probe for a
+      // descriptor this core has not cached asks the source for a new one.
+      await post(second.ready, '/environments/probe', {
+        descriptor_id: 'tensorrt-llm-0.0.1-r9',
+        target: TARGET,
+      })
+      expect(recorder.connections()).toBeGreaterThan(0)
+    } finally {
+      await recorder.close()
+    }
+  })
+
+  it('an installed engine: the route answers the descriptor its installation pins; the plan names Docker’s own root', async () => {
+    host = await fakeManagedHost({
+      ...readyState(),
+      docker: { ...readyState().docker, root_dir: '/srv/docker' },
+    })
+    const { ready } = await start()
+    const plan = (await (
+      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+    ).json()) as ProbedPlan
+    expect(plan.docker_root_dir).toBe('/srv/docker')
+    expect(typeof plan.free_disk_bytes).toBe('number')
+
+    const asking = await beginAndApprove(ready)
+    expect(
+      (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+    ).toBe('ready')
+    const installation = (await snapshot(ready)).environments[0]?.installations[0]
+    expect(installation?.active_descriptor_id).toBe(DESCRIPTOR_ID)
+
+    const answered = await control(ready, `/environments/descriptors/${installation?.active_descriptor_id}`)
+    expect(answered.status).toBe(200)
+    expect(await answered.json()).toEqual(expectedSummary())
+  })
+
+  it.skipIf(process.platform === 'linux')(
+    'off Linux, the descriptor route answers 422 MANAGED_ADAPTER_UNAVAILABLE',
+    async () => {
+      const { ready } = await start()
+      const res = await control(ready, `/environments/descriptors/${DESCRIPTOR_ID}`)
+      expect(res.status).toBe(422)
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        'MANAGED_ADAPTER_UNAVAILABLE'
+      )
+    }
+  )
 })

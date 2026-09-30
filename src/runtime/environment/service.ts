@@ -26,10 +26,13 @@ import type {
   ProbeEnvironmentInput,
   RequirementPlan,
   ResumeOperation,
+  RuntimeDescriptorSummary,
 } from '../../contracts/index.js'
 import { identityPermitsTakeover, verifyProcessIdentity } from '../../lock/index.js'
 import type { IdentityDeps } from '../../lock/index.js'
 import { beginFingerprint } from './canonical-json.js'
+import { summarizeRuntimeDescriptor } from './descriptor.js'
+import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { recoverOperation, type EffectInventory } from './recovery.js'
 import { reduceOperation, type EffectIntent, type OperationEvent } from './state.js'
 import { classifyReceipt, withReceipt, type OperationStore, type PersistedOperation } from './store.js'
@@ -103,6 +106,11 @@ export interface EnvironmentServiceOptions {
   identityDeps?: IdentityDeps
   /** The clock progress ticks are throttled by; `Date.now` by default. */
   now?: () => number
+  /**
+   * The descriptor cache `descriptor()` answers from (task 2.22). Only `forInstallation`, the
+   * cache-only read: this service is never handed a way to fetch a descriptor for that call.
+   */
+  descriptors?: Pick<RuntimeDescriptorProvider, 'forInstallation'>
 }
 
 const unsupported = (input: {
@@ -194,6 +202,30 @@ export class EnvironmentService {
     const controller = new AbortController()
     const { plan } = await this.options.provisioner.probe(record, controller.signal)
     return plan
+  }
+
+  /**
+   * One cached runtime descriptor, as a client shows it (task 2.22): read from the cache by id, never
+   * fetched, so asking cannot change which descriptor an installation or a plan names.
+   * `MANAGED_ADAPTER_UNAVAILABLE` where no host recipe applies (off Linux), like a probe answering
+   * `unsupported` there; `MANAGED_METADATA_INVALID` for an id this core has not cached.
+   */
+  async descriptor(descriptorId: string): Promise<RuntimeDescriptorSummary> {
+    if (this.options.provisioner === null || this.options.descriptors === undefined) {
+      throw new AtomicCoreError(
+        'MANAGED_ADAPTER_UNAVAILABLE',
+        'Managed runtimes are not available on this system.'
+      )
+    }
+    const cached = await this.options.descriptors.forInstallation(descriptorId)
+    if (cached.kind !== 'available') {
+      throw new AtomicCoreError(
+        'MANAGED_METADATA_INVALID',
+        'This core has no cached runtime descriptor with that id.',
+        descriptorId
+      )
+    }
+    return summarizeRuntimeDescriptor(cached.descriptor)
   }
 
   /**

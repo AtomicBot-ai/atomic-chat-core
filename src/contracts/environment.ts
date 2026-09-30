@@ -513,6 +513,22 @@ export interface RuntimeDescriptor {
 }
 
 /**
+ * What `GET /atomic/v1/environments/descriptors/:descriptorId` answers (task 2.22, app gap G-app-2):
+ * the part of one cached runtime descriptor a client shows the user — the NVIDIA terms and notices
+ * before consent, the curated checkpoints and the architectures on the model screen. Copied from the
+ * descriptor as published: `notices` verbatim and in order. The core answers from its own cache,
+ * never the network, for the id an installation pins (`RuntimeInstallation.active_descriptor_id`) or
+ * a plan names (`RequirementPlan.descriptor_id`).
+ */
+export interface RuntimeDescriptorSummary {
+  descriptor_id: string
+  engine_id: string
+  notices: string[]
+  curated_models: CuratedModel[]
+  supported_architectures: string[]
+}
+
+/**
  * The verdict of `POST /atomic/v1/models/tensorrt-llm/check` (spec `tensorrt-llm-models`): what the
  * core found out about a checkpoint from its `config.json`/`hf_quant_config.json` and file listing,
  * without downloading a single weight or reaching the network. `architectures`, `quantization_format`

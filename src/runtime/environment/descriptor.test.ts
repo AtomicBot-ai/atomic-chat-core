@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { AtomicCoreError } from '../../contracts/index.js'
-import { parseRuntimeDescriptor } from './descriptor.js'
+import { parseRuntimeDescriptor, summarizeRuntimeDescriptor } from './descriptor.js'
 
 /** Deep-clones the real fixture and applies a mutation, for one-field-at-a-time rejection tests. */
 const broken = (mutate: (doc: Record<string, unknown>) => void): unknown => {
@@ -208,5 +208,34 @@ describe('parseRuntimeDescriptor', () => {
     expect(() => parseRuntimeDescriptor(null)).toThrow(AtomicCoreError)
     expect(() => parseRuntimeDescriptor('tensorrt-llm-1.2.1-r1')).toThrow(AtomicCoreError)
     expect(() => parseRuntimeDescriptor([])).toThrow(AtomicCoreError)
+  })
+})
+
+describe('summarizeRuntimeDescriptor', () => {
+  it('keeps exactly what a client shows before consent: id, engine, notices, curated models, architectures (task 2.22)', () => {
+    const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
+    const summary = summarizeRuntimeDescriptor(descriptor)
+
+    expect(Object.keys(summary).sort()).toEqual([
+      'curated_models',
+      'descriptor_id',
+      'engine_id',
+      'notices',
+      'supported_architectures',
+    ])
+    expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r1')
+    expect(summary.engine_id).toBe('tensorrt-llm')
+    // Notices verbatim and in order: they are the NVIDIA terms the user reads before consenting.
+    expect(summary.notices).toEqual(descriptor.notices)
+    expect(summary.notices.length).toBeGreaterThan(0)
+    expect(summary.curated_models).toEqual(descriptor.curated_models)
+    expect(summary.curated_models).toHaveLength(11)
+    expect(summary.supported_architectures).toEqual(descriptor.supported_architectures)
+
+    // Copies: whoever serializes or edits the summary never reaches into the descriptor it came from.
+    summary.notices.push('extra')
+    summary.curated_models[0]!.note = 'edited'
+    expect(descriptor.notices).not.toContain('extra')
+    expect(descriptor.curated_models[0]?.note).not.toBe('edited')
   })
 })

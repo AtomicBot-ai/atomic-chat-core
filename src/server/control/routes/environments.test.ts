@@ -5,6 +5,7 @@ import type {
   EnvironmentOperation,
   ManagedHostReceipt,
   RequirementPlan,
+  RuntimeDescriptorSummary,
   Sha256Digest,
 } from '../../../contracts/index.js'
 import { startControlHarness as start } from '../../../../test/helpers/control-harness.js'
@@ -55,6 +56,14 @@ const plan: RequirementPlan = {
   blockers: [],
 }
 
+const summary: RuntimeDescriptorSummary = {
+  descriptor_id: 'tensorrt-llm-1.2.1-r1',
+  engine_id: 'tensorrt-llm',
+  notices: ['NVIDIA Software License Agreement applies.'],
+  curated_models: [],
+  supported_architectures: ['LlamaForCausalLM'],
+}
+
 const receipt = (over: Partial<ManagedHostReceipt> = {}): ManagedHostReceipt => ({
   step_id: 'step-1',
   nonce: 'once-1',
@@ -92,6 +101,9 @@ class FakeEnvironments implements ManagedEnvironmentControl {
   }
   async probe() {
     return this.record('probe', plan)
+  }
+  async descriptor(descriptorId: string) {
+    return this.record(`descriptor ${descriptorId}`, summary)
   }
   async begin(environmentId: string, input: BeginOperation) {
     return this.record(`begin ${environmentId} ${input.request_id} ${input.kind}`, operation())
@@ -169,6 +181,53 @@ describe('reaching the managed runtime', () => {
     await h.get('/atomic/v1/environments/operations/op-1')
     await post('/environments/env-1/operations', begin())
     expect(environments.calls).toEqual(['get op-1', 'begin env-1 req-1 setup'])
+  })
+})
+
+describe('reading a cached runtime descriptor (task 2.22)', () => {
+  it('answers the summary of the descriptor the service has under that id', async () => {
+    const res = await h.get('/atomic/v1/environments/descriptors/tensorrt-llm-1.2.1-r1')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual(summary)
+    expect(environments.calls).toEqual(['descriptor tensorrt-llm-1.2.1-r1'])
+  })
+
+  it('is told apart from the operation routes and from an environment id', async () => {
+    await h.get('/atomic/v1/environments/descriptors/op-1')
+    await h.get('/atomic/v1/environments/operations/op-1')
+    await post('/environments/descriptors/operations', begin())
+    // The POST is an operation begun on an environment called "descriptors", as before: the
+    // descriptor route is a GET only, and the begin route's shape is unchanged.
+    expect(environments.calls).toEqual(['descriptor op-1', 'get op-1', 'begin descriptors req-1 setup'])
+  })
+
+  it('answers 404 MANAGED_METADATA_INVALID for an id this core has not cached', async () => {
+    environments.failWith = new AtomicCoreError('MANAGED_METADATA_INVALID', 'not cached', 'nope-1')
+    const res = await h.get('/atomic/v1/environments/descriptors/nope-1')
+    expect(res.status).toBe(404)
+    expect(await errorOf(res)).toMatchObject({ code: 'MANAGED_METADATA_INVALID', details: 'nope-1' })
+  })
+
+  it('answers 422 MANAGED_ADAPTER_UNAVAILABLE where no managed runtime applies, like every /environments route', async () => {
+    environments.failWith = new AtomicCoreError('MANAGED_ADAPTER_UNAVAILABLE', 'not on this system')
+    expect((await h.get('/atomic/v1/environments/descriptors/tensorrt-llm-1.2.1-r1')).status).toBe(422)
+    const bare = await start()
+    try {
+      const res = await bare.get('/atomic/v1/environments/descriptors/tensorrt-llm-1.2.1-r1')
+      expect(res.status).toBe(422)
+      expect((await errorOf(res)).code).toBe('MANAGED_ADAPTER_UNAVAILABLE')
+    } finally {
+      bare.server.close()
+    }
+  })
+
+  it('refuses an id that is not one before the service sees it', async () => {
+    for (const bad of ['x'.repeat(201), 'a%5Cb', 'a%01b']) {
+      const res = await h.get(`/atomic/v1/environments/descriptors/${bad}`)
+      expect(res.status).toBe(400)
+      expect((await errorOf(res)).code).toBe('INVALID_ARGUMENT')
+    }
+    expect(environments.calls).toEqual([])
   })
 })
 
