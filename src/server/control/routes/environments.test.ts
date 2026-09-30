@@ -208,7 +208,7 @@ describe('reading a cached runtime descriptor (task 2.22)', () => {
     expect(await errorOf(res)).toMatchObject({ code: 'MANAGED_METADATA_INVALID', details: 'nope-1' })
   })
 
-  it('answers 422 MANAGED_ADAPTER_UNAVAILABLE where no managed runtime applies, like every /environments route', async () => {
+  it('answers 422 MANAGED_ADAPTER_UNAVAILABLE where no managed runtime applies (no host recipe in this build)', async () => {
     environments.failWith = new AtomicCoreError('MANAGED_ADAPTER_UNAVAILABLE', 'not on this system')
     expect((await h.get('/atomic/v1/environments/descriptors/tensorrt-llm-1.2.1-r1')).status).toBe(422)
     const bare = await start()
