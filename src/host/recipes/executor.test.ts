@@ -968,6 +968,31 @@ describe('the runtime configuration and the Docker restart', () => {
     expect(host.mutations()).toEqual([RESET, 'systemctl restart docker'])
   })
 
+  it('a running Docker that cannot say which runtimes it loaded counts as not loaded: the approved restart runs', async () => {
+    const host = new FakeHost()
+    host.dockerActive = true
+    host.files.set('/etc/docker/daemon.json', {
+      data: Buffer.from('{"runtimes":{"nvidia":{}}}'),
+      mode: 0o644,
+    })
+    host.failures['docker info'] = { code: 1, stderr: 'Cannot connect to the Docker daemon' }
+    await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-restart'])))
+    expect(host.mutations()).toEqual([RESET, 'systemctl restart docker'])
+  })
+
+  it('registered on disk, not loaded, and no restart approved: satisfied, and Docker is left running', async () => {
+    const host = new FakeHost()
+    host.dockerActive = true
+    host.files.set('/etc/docker/daemon.json', {
+      data: Buffer.from('{"runtimes":{"nvidia":{}}}'),
+      mode: 0o644,
+    })
+    const result = await run(host, requestFor(ubuntu(['nvidia-runtime'])))
+    expect(result.steps[0]).toMatchObject({ status: 'satisfied' })
+    expect(result.steps[0]!.detail).toMatch(/approved plan did not include a restart/)
+    expect(host.mutations()).toEqual([])
+  })
+
   it('a failed nvidia-ctk fails the step with its exit code', async () => {
     const host = new FakeHost()
     host.failures['nvidia-ctk'] = { code: 1, stderr: 'unable to load config' }
@@ -1249,6 +1274,36 @@ describe('the NVIDIA CDI spec (task 2.23, F-5)', () => {
     const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
     expect(result.steps[0]).toMatchObject({ status: 'failed' })
     expect(result.steps[0]!.detail).toMatch(/could not read the mode/)
+  })
+
+  it('an is-enabled that prints nothing leaves the unit alone and says its state is unknown', async () => {
+    const host = new FakeHost()
+    host.cdiElsewhere = true
+    host.failures['systemctl is-enabled nvidia-cdi-refresh.path'] = { code: null, stderr: '' }
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.steps[0]).toMatchObject({ status: 'satisfied' })
+    expect(result.steps[0]!.detail).toContain('nvidia-cdi-refresh.path is in an unknown state; left as it is')
+    expect(host.mutations()).toEqual([])
+  })
+
+  it('an is-enabled answer on several lines is read by its first word', async () => {
+    const host = new FakeHost()
+    host.cdiElsewhere = true
+    host.failures['systemctl is-enabled nvidia-cdi-refresh.path'] = {
+      code: 0,
+      stdout: 'static\nextra\n',
+      stderr: '',
+    }
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.steps[0]!.detail).toContain('nvidia-cdi-refresh.path is already static')
+  })
+
+  it('a refresh unit whose enable fails silently says there was no output, and fails nothing', async () => {
+    const host = new FakeHost()
+    host.failures[ENABLE_REFRESH] = { code: 1, stderr: '' }
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.outcome).toBe('completed')
+    expect(result.steps[0]!.detail).toMatch(/could not be enabled \(exit 1\): no output/)
   })
 
   it('a refresh unit that will not enable is reported in the detail, never a failed install', async () => {

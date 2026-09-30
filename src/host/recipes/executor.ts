@@ -486,7 +486,8 @@ async function enableCdiRefresh(
   const present = await run(context, step.refresh_present)
   if (present.code !== 0 || !present.stdout.includes(unit))
     return { changed: false, detail: `${unit} is not installed, so the spec is not refreshed automatically` }
-  const state = (await run(context, step.refresh_enabled)).stdout.trim().split('\n')[0]?.trim() ?? ''
+  // The first word systemd prints (its state), or '' when it printed nothing.
+  const state = (await run(context, step.refresh_enabled)).stdout.trim().replace(/\s[\s\S]*$/, '')
   if (REFRESH_LEAVE.has(state)) return { changed: false, detail: `${unit} is already ${state}` }
   if (!REFRESH_ENABLE.has(state))
     return { changed: false, detail: `${unit} is ${state || 'in an unknown state'}; left as it is` }
