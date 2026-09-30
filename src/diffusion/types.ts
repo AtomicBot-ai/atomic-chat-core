@@ -32,6 +32,8 @@ export interface ServerSpec {
   defaults: DiffusionFamilyDefaults
   ranges: DiffusionFamilyRanges
   offload: DiffusionOffloadPolicy
+  /** Where to go after running out of memory under `offload`; dropped once taken. */
+  offloadFallback?: DiffusionOffloadPolicy
   threads?: number
   /** Appended last: sd.cpp's argument parser is last-wins. */
   extraArgs: string[]

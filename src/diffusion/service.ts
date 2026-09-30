@@ -357,6 +357,9 @@ export class DiffusionService {
         defaults: structuredClone(request.defaults),
         ranges: structuredClone(request.ranges),
         offload: request.offload,
+        ...(request.offloadFallback !== undefined && request.offloadFallback !== request.offload
+          ? { offloadFallback: request.offloadFallback }
+          : {}),
         ...(request.threads !== undefined ? { threads: request.threads } : {}),
         extraArgs: [],
         startupTimeoutMs:

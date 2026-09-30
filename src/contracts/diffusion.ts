@@ -94,6 +94,12 @@ export interface LoadDiffusionModelRequest {
   defaults: DiffusionFamilyDefaults
   ranges: DiffusionFamilyRanges
   offload: DiffusionOffloadPolicy
+  /**
+   * The policy to move to when the model runs out of memory under `offload`: the load, or the job,
+   * that ran out is retried once with it, and the session keeps it until the next load. Ignored when
+   * it equals `offload`.
+   */
+  offloadFallback?: DiffusionOffloadPolicy
   engine?: DiffusionEngineId
   /** `--threads`, for CPU backends. */
   threads?: number
