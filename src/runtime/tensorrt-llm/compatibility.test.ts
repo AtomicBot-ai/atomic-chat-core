@@ -21,6 +21,7 @@ import {
   selectLaunchGpu,
   weightBytes,
   type CheckpointFile,
+  type HostMemory,
   type ModelCheckInput,
 } from './compatibility.js'
 import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './kv-cache.js'
@@ -83,6 +84,9 @@ function gpu(overrides: Partial<GpuFacts> & Pick<GpuFacts, 'gpu_id'>): GpuFacts 
   }
 }
 
+/** The host's memory with `MemAvailable` = `bytes`; `MemTotal` only ranks cards, it never sizes a check. */
+const memAvailable = (bytes: number): HostMemory => ({ availableBytes: bytes, totalBytes: bytes })
+
 /** Mirrors `compatibility.ts`'s own `toInventoryFile`: `exactOptionalPropertyTypes` needs `sha256` omitted, not `undefined`. */
 function toInventoryFile(file: CheckpointFile): { path: string; bytes: number; sha256?: string } {
   return file.sha256 === null
@@ -134,7 +138,7 @@ describe('checkModelCompatibility', () => {
       files: weightFiles(75_000_000_000),
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -155,7 +159,7 @@ describe('checkModelCompatibility', () => {
       files: weightFiles(79_000_000_000),
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -184,7 +188,7 @@ describe('checkModelCompatibility', () => {
       files: weightFiles(75_000_000_000),
     })
 
-    const atDefault = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const atDefault = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -192,7 +196,7 @@ describe('checkModelCompatibility', () => {
 
     // 0.5 leaves half of post-weight memory unspent as headroom: reserve becomes 50% of weights
     // (37,500,000,000), so 75,000,000,000 + 37,500,000,000 = 112,500,000,000 > 85,532,850,176 free.
-    const atLowerFraction = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const atLowerFraction = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.5,
     })
@@ -209,7 +213,7 @@ describe('checkModelCompatibility', () => {
     const other = gpu({ gpu_id: 'gpu-b', total_vram_bytes: 46_000_000_000, free_vram_bytes: 46_000_000_000 })
     const input = baseInput({ files: weightFiles(40_000_000_000), gpu_id: 'gpu-a' })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected, other], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -236,7 +240,7 @@ describe('checkModelCompatibility', () => {
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -263,7 +267,7 @@ describe('checkModelCompatibility', () => {
       gpu_id: 'gpu-0',
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected, other], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -297,7 +301,7 @@ describe('checkModelCompatibility', () => {
       gpu_id: 'gpu-0',
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, other], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected, other], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -318,7 +322,7 @@ describe('checkModelCompatibility', () => {
       config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -337,7 +341,7 @@ describe('checkModelCompatibility', () => {
     // Too small to fit regardless, so only the CC parsing bug could wrongly list it.
     const input = baseInput({ files: weightFiles(40_000_000_000) })
 
-    const result = checkModelCompatibility(input, descriptor, [selected, brokenReport], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected, brokenReport], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -355,7 +359,7 @@ describe('checkModelCompatibility', () => {
       ],
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -375,7 +379,7 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ config_json: { architectures: ['LlamaForCausalLM'], dtype: 'float32' } })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -400,7 +404,7 @@ describe('checkModelCompatibility', () => {
       hf_quant_config_json: { quantization: { quant_algo: 'w4a16_awq' } },
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -422,13 +426,13 @@ describe('checkModelCompatibility', () => {
     })
 
     expect(() =>
-      checkModelCompatibility(input, descriptor, [selected], 0, {
+      checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
         contextLength: 8192,
         kvCacheFreeGpuMemoryFraction: 0.9,
       })
     ).toThrow(AtomicCoreError)
     try {
-      checkModelCompatibility(input, descriptor, [selected], 0, {
+      checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
         contextLength: 8192,
         kvCacheFreeGpuMemoryFraction: 0.9,
       })
@@ -444,7 +448,7 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ config_json: { architectures: ['GPT2LMHeadModel'], dtype: 'bfloat16' } })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -467,7 +471,7 @@ describe('checkModelCompatibility', () => {
       ],
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -485,7 +489,7 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ files: [{ path: 'model.gguf', size: 5_000_000_000, sha256: null }] })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -503,17 +507,23 @@ describe('checkModelCompatibility', () => {
     })
     const input = baseInput({ files: weightFiles(4_000_000_000) })
 
-    const fitsHost = checkModelCompatibility(input, descriptor, [selected], 20_000_000_000, {
+    const fitsHost = checkModelCompatibility(input, descriptor, [selected], memAvailable(20_000_000_000), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
     expect(fitsHost.unified_memory).toBe(true)
     expect(fitsHost.verdict).toEqual({ ok: true })
 
-    const tooTightOnHost = checkModelCompatibility(input, descriptor, [selected], 1_000_000_000, {
-      contextLength: 8192,
-      kvCacheFreeGpuMemoryFraction: 0.9,
-    })
+    const tooTightOnHost = checkModelCompatibility(
+      input,
+      descriptor,
+      [selected],
+      memAvailable(1_000_000_000),
+      {
+        contextLength: 8192,
+        kvCacheFreeGpuMemoryFraction: 0.9,
+      }
+    )
     expect(tooTightOnHost.unified_memory).toBe(true)
     expect(tooTightOnHost.verdict.ok).toBe(false)
     if (!tooTightOnHost.verdict.ok) {
@@ -538,7 +548,7 @@ describe('checkModelCompatibility', () => {
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ repository: 'acme/curated-model', revision: 'c0ffee', files })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -566,7 +576,7 @@ describe('checkModelCompatibility', () => {
     const rewrittenFiles = weightFiles(5_000_000_000)
     const input = baseInput({ repository: 'acme/curated-model', revision: 'c0ffee', files: rewrittenFiles })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -583,7 +593,7 @@ describe('checkModelCompatibility', () => {
   it('throws MANAGED_PREREQUISITE_BLOCKED when the host has no GPU at all (an absent/failing nvidia-smi is a missing prerequisite, not a bad request)', () => {
     const descriptor = baseDescriptor()
     try {
-      checkModelCompatibility(baseInput(), descriptor, [], 0, {
+      checkModelCompatibility(baseInput(), descriptor, [], memAvailable(0), {
         contextLength: 8192,
         kvCacheFreeGpuMemoryFraction: 0.9,
       })
@@ -596,39 +606,109 @@ describe('checkModelCompatibility', () => {
 })
 
 describe('selectLaunchGpu', () => {
-  const a = gpu({ gpu_id: 'a', total_vram_bytes: 24_000_000_000 })
-  const b = gpu({ gpu_id: 'b', total_vram_bytes: 80_000_000_000 })
-  const unified = gpu({ gpu_id: 'u', total_vram_bytes: null, free_vram_bytes: null })
-
-  it('picks gpu_id when given and present on the host', () => {
-    expect(selectLaunchGpu([a, b], 'a')?.gpu_id).toBe('a')
+  const GiB = 1024 ** 3
+  const card = (gpu_id: string, totalGiB: number | null, freeGiB: number | null): GpuFacts =>
+    gpu({
+      gpu_id,
+      total_vram_bytes: totalGiB === null ? null : totalGiB * GiB,
+      free_vram_bytes: freeGiB === null ? null : freeGiB * GiB,
+    })
+  const NO_HOST_MEMORY: HostMemory = { availableBytes: 0, totalBytes: 0 }
+  const host = (availableGiB: number, totalGiB: number): HostMemory => ({
+    availableBytes: availableGiB * GiB,
+    totalBytes: totalGiB * GiB,
   })
 
-  it('breaks a tie in total memory by keeping the earlier candidate, deterministically', () => {
-    const tiedA = gpu({ gpu_id: 'tied-a', total_vram_bytes: 24_000_000_000 })
-    const tiedB = gpu({ gpu_id: 'tied-b', total_vram_bytes: 24_000_000_000 })
-    expect(selectLaunchGpu([tiedA, tiedB])?.gpu_id).toBe('tied-a')
-    expect(selectLaunchGpu([tiedB, tiedA])?.gpu_id).toBe('tied-b')
-  })
+  // Spec "Выбор карты и настройки провайдера" / design D12b: the most FREE memory, ties by the most
+  // TOTAL memory, a full tie by the order nvidia-smi lists the cards in (its index).
+  const cases: Array<{
+    name: string
+    gpus: GpuFacts[]
+    host?: HostMemory
+    gpuId?: string
+    expected: string | null
+  }> = [
+    {
+      name: 'spec scenario: two 24 GB cards, the desktop one with 19 GB free, the other 23.5 GB free',
+      gpus: [card('desktop', 24, 19), card('idle', 24, 23.5)],
+      expected: 'idle',
+    },
+    {
+      name: 'the most free memory wins over the most total memory',
+      gpus: [card('big-busy', 80, 10), card('small-idle', 24, 23)],
+      expected: 'small-idle',
+    },
+    {
+      name: 'equal free memory: the most total memory wins',
+      gpus: [card('small', 24, 20), card('big', 48, 20)],
+      expected: 'big',
+    },
+    {
+      name: 'equal free memory, listed the other way round: still the most total memory',
+      gpus: [card('big', 48, 20), card('small', 24, 20)],
+      expected: 'big',
+    },
+    {
+      name: 'a full tie resolves to the card nvidia-smi lists first',
+      gpus: [card('first', 24, 20), card('second', 24, 20)],
+      expected: 'first',
+    },
+    {
+      name: 'a full tie, listed the other way round: again the first listed',
+      gpus: [card('second', 24, 20), card('first', 24, 20)],
+      expected: 'second',
+    },
+    { name: 'a single card is selected', gpus: [card('only', 24, 1)], expected: 'only' },
+    { name: 'no card at all: null', gpus: [], expected: null },
+    {
+      name: 'a discrete card whose free memory is unreported ranks as 0 free',
+      gpus: [card('unreported', 80, null), card('reported', 24, 1)],
+      expected: 'reported',
+    },
+    {
+      name: 'a unified-memory card ranks by MemAvailable: more than a discrete card has free',
+      gpus: [card('discrete', 24, 20), card('unified', null, null)],
+      host: host(100, 120),
+      expected: 'unified',
+    },
+    {
+      name: 'a unified-memory card ranks by MemAvailable: less than a discrete card has free',
+      gpus: [card('unified', null, null), card('discrete', 24, 20)],
+      host: host(10, 120),
+      expected: 'discrete',
+    },
+    {
+      name: 'a unified-memory card tied on free memory ranks by MemTotal',
+      gpus: [card('discrete', 24, 20), card('unified', null, null)],
+      host: host(20, 120),
+      expected: 'unified',
+    },
+    {
+      name: 'a unified-memory card on a host whose /proc/meminfo could not be read ranks as 0',
+      gpus: [card('unified', null, null), card('discrete', 24, 1)],
+      expected: 'discrete',
+    },
+    {
+      name: 'a lone unified-memory card is selected even with no host memory figures',
+      gpus: [card('unified', null, null)],
+      expected: 'unified',
+    },
+    {
+      name: 'gpu_id present on the host wins over the rule',
+      gpus: [card('desktop', 24, 19), card('idle', 24, 23.5)],
+      gpuId: 'desktop',
+      expected: 'desktop',
+    },
+    {
+      name: 'gpu_id no longer on the host falls back to the rule',
+      gpus: [card('desktop', 24, 19), card('idle', 24, 23.5)],
+      gpuId: 'gone',
+      expected: 'idle',
+    },
+  ]
 
-  it('falls back to the most total memory when gpu_id is omitted', () => {
-    expect(selectLaunchGpu([a, b])?.gpu_id).toBe('b')
-  })
-
-  it('falls back to the most total memory when gpu_id is given but not found on the host', () => {
-    expect(selectLaunchGpu([a, b], 'missing')?.gpu_id).toBe('b')
-  })
-
-  it('returns null when the host has no GPU', () => {
-    expect(selectLaunchGpu([])).toBeNull()
-  })
-
-  it('a unified-memory card ranks like a 0-byte card, not an infinite one', () => {
-    expect(selectLaunchGpu([unified, a])?.gpu_id).toBe('a')
-  })
-
-  it('a lone unified-memory card is still selected as the only candidate', () => {
-    expect(selectLaunchGpu([unified])?.gpu_id).toBe('u')
+  it.each(cases)('$name', ({ gpus, host: hostMemory, gpuId, expected }) => {
+    expect(selectLaunchGpu(gpus, hostMemory ?? NO_HOST_MEMORY, gpuId)?.gpu_id ?? null).toBe(expected)
   })
 })
 
@@ -846,7 +926,7 @@ describe('the 2026-09-29 VM run: Qwen3-1.7B bf16 on an RTX 4070 Laptop (7.70 GiB
       }),
       baseDescriptor(),
       [card],
-      0,
+      memAvailable(0),
       { contextLength: 4096, kvCacheFreeGpuMemoryFraction: fraction }
     )
     expect(result.verdict).toEqual({ ok: true })
@@ -877,7 +957,7 @@ describe('checkModelCompatibility: the real KV-cache formula (finding 6)', () =>
       files: weightFiles(75_000_000_000),
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -894,7 +974,7 @@ describe('checkModelCompatibility: the real KV-cache formula (finding 6)', () =>
       files: weightFiles(16_000_000_000), // ~8B params at bf16 (2 bytes/param)
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 131_072,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -912,7 +992,7 @@ describe('checkModelCompatibility: the real KV-cache formula (finding 6)', () =>
       files: weightFiles(16_000_000_000),
     })
 
-    const result = checkModelCompatibility(input, descriptor, [selected], 0, {
+    const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.9,
     })
@@ -930,7 +1010,7 @@ describe('checkModelCompatibilityFiles / checkModelMemory: the pre-launch split 
     const starved = gpu({ gpu_id: 'gpu-0', free_vram_bytes: 0 })
     const input = baseInput({ files: weightFiles(75_000_000_000) })
 
-    const result = checkModelCompatibilityFiles(input, descriptor, [starved], 0, memory)
+    const result = checkModelCompatibilityFiles(input, descriptor, [starved], memAvailable(0), memory)
 
     expect(result.ok).toBe(true)
   })
@@ -940,7 +1020,7 @@ describe('checkModelCompatibilityFiles / checkModelMemory: the pre-launch split 
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ config_json: { architectures: ['GPT2LMHeadModel'], dtype: 'bfloat16' } })
 
-    const result = checkModelCompatibilityFiles(input, descriptor, [selected], 0, memory)
+    const result = checkModelCompatibilityFiles(input, descriptor, [selected], memAvailable(0), memory)
 
     expect(result.ok).toBe(false)
     if (!result.ok) {
@@ -959,16 +1039,28 @@ describe('checkModelCompatibilityFiles / checkModelMemory: the pre-launch split 
 
     // A stale snapshot, taken while a previous model still holds the card: not enough free memory.
     const staleGpu = gpu({ gpu_id: 'gpu-0', free_vram_bytes: 1_000_000_000 })
-    const filesResult = checkModelCompatibilityFiles(input, descriptor, [staleGpu], 0, memory)
+    const filesResult = checkModelCompatibilityFiles(input, descriptor, [staleGpu], memAvailable(0), memory)
     expect(filesResult.ok).toBe(true)
     if (!filesResult.ok) throw new Error('unreachable')
 
-    const staleMemory = checkModelMemory(filesResult.resolved, descriptor, [staleGpu], 0, memory)
+    const staleMemory = checkModelMemory(
+      filesResult.resolved,
+      descriptor,
+      [staleGpu],
+      memAvailable(0),
+      memory
+    )
     expect(staleMemory.verdict.ok).toBe(false)
 
     // The previous model was stopped: a fresh probe of the same card reports it free now.
     const freedGpu = gpu({ gpu_id: 'gpu-0', free_vram_bytes: 24_000_000_000 })
-    const freshMemory = checkModelMemory(filesResult.resolved, descriptor, [freedGpu], 0, memory)
+    const freshMemory = checkModelMemory(
+      filesResult.resolved,
+      descriptor,
+      [freedGpu],
+      memAvailable(0),
+      memory
+    )
     expect(freshMemory.verdict).toEqual({ ok: true })
   })
 
@@ -977,11 +1069,11 @@ describe('checkModelCompatibilityFiles / checkModelMemory: the pre-launch split 
     const selected = gpu({ gpu_id: 'gpu-0' })
     const input = baseInput({ files: weightFiles(75_000_000_000) })
 
-    const combined = checkModelCompatibility(input, descriptor, [selected], 0, memory)
-    const files = checkModelCompatibilityFiles(input, descriptor, [selected], 0, memory)
+    const combined = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), memory)
+    const files = checkModelCompatibilityFiles(input, descriptor, [selected], memAvailable(0), memory)
     expect(files.ok).toBe(true)
     if (!files.ok) throw new Error('unreachable')
-    const split = checkModelMemory(files.resolved, descriptor, [selected], 0, memory)
+    const split = checkModelMemory(files.resolved, descriptor, [selected], memAvailable(0), memory)
 
     expect(combined).toEqual(split)
   })
@@ -1045,7 +1137,7 @@ describe('target hosts: format rules and the curated tier model, on the publishe
         formatInput(format),
         descriptor,
         [card],
-        hostMem,
+        memAvailable(hostMem),
         sizing
       ).verdict
       expect({ card: card.name, ok: verdict.ok }).toEqual({ card: card.name, ok: expected })
@@ -1111,7 +1203,13 @@ describe('target hosts: format rules and the curated tier model, on the publishe
   )
 
   it('GB10: its tier model (80 GB tier, NVFP4) is curated, checked against MemAvailable, and fits', () => {
-    const result = checkModelCompatibility(LLAMA_70B_NVFP4, descriptor, [GB10], GB10_MEM_AVAILABLE, sizing)
+    const result = checkModelCompatibility(
+      LLAMA_70B_NVFP4,
+      descriptor,
+      [GB10],
+      memAvailable(GB10_MEM_AVAILABLE),
+      sizing
+    )
     expect(result).toMatchObject({
       curated: true,
       unified_memory: true,
@@ -1123,16 +1221,34 @@ describe('target hosts: format rules and the curated tier model, on the publishe
   })
 
   it('GB10: with less MemAvailable than the weights, the same model is refused with the host numbers', () => {
-    const result = checkModelCompatibility(LLAMA_70B_NVFP4, descriptor, [GB10], 30 * 1024 ** 3, sizing)
+    const result = checkModelCompatibility(
+      LLAMA_70B_NVFP4,
+      descriptor,
+      [GB10],
+      memAvailable(30 * 1024 ** 3),
+      sizing
+    )
     expect(result.verdict.ok).toBe(false)
     if (!result.verdict.ok) expect(result.verdict.error.details).toContain(`free_bytes=${30 * 1024 ** 3}`)
   })
 
   it('GH200: the 80 GB tier (NVFP4) is refused on 9.0, its 48 GB tier model (FP8) fits in HBM', () => {
-    const nvfp4 = checkModelCompatibility(LLAMA_70B_NVFP4, descriptor, [GH200], DISCRETE_HOST_MEM, sizing)
+    const nvfp4 = checkModelCompatibility(
+      LLAMA_70B_NVFP4,
+      descriptor,
+      [GH200],
+      memAvailable(DISCRETE_HOST_MEM),
+      sizing
+    )
     expect(nvfp4.verdict.ok).toBe(false)
     if (!nvfp4.verdict.ok) expect(nvfp4.verdict.error.details).toBe('required=10.0 actual=9.0')
-    const fp8 = checkModelCompatibility(NEMOTRON_NANO_FP8, descriptor, [GH200], DISCRETE_HOST_MEM, sizing)
+    const fp8 = checkModelCompatibility(
+      NEMOTRON_NANO_FP8,
+      descriptor,
+      [GH200],
+      memAvailable(DISCRETE_HOST_MEM),
+      sizing
+    )
     expect(fp8).toMatchObject({
       curated: true,
       unified_memory: false,
@@ -1142,7 +1258,13 @@ describe('target hosts: format rules and the curated tier model, on the publishe
   })
 
   it('RTX 5090: its tier model (32 GB tier, NVFP4) is curated and fits its 32 GB', () => {
-    const result = checkModelCompatibility(QWEN3_32B_NVFP4, descriptor, [RTX5090], DISCRETE_HOST_MEM, sizing)
+    const result = checkModelCompatibility(
+      QWEN3_32B_NVFP4,
+      descriptor,
+      [RTX5090],
+      memAvailable(DISCRETE_HOST_MEM),
+      sizing
+    )
     expect(result).toMatchObject({
       curated: true,
       unified_memory: false,
@@ -1170,12 +1292,14 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
   const input = baseInput({ config_json: shape, files: weightFiles(weights) })
 
   it('fits at exactly weights + KV(2 x context) of MemAvailable, and is refused one byte below', () => {
-    const files = checkModelCompatibilityFiles(input, descriptor, [gb10], 0, memory)
+    const files = checkModelCompatibilityFiles(input, descriptor, [gb10], memAvailable(0), memory)
     if (!files.ok) throw new Error('expected the files check to pass')
-    expect(checkModelMemory(files.resolved, descriptor, [gb10], weights + kv, memory).verdict).toEqual({
+    expect(
+      checkModelMemory(files.resolved, descriptor, [gb10], memAvailable(weights + kv), memory).verdict
+    ).toEqual({
       ok: true,
     })
-    const short = checkModelMemory(files.resolved, descriptor, [gb10], weights + kv - 1, memory)
+    const short = checkModelMemory(files.resolved, descriptor, [gb10], memAvailable(weights + kv - 1), memory)
     expect(short.verdict.ok).toBe(false)
     if (!short.verdict.ok) {
       expect(short.verdict.error.details).toBe(
@@ -1192,10 +1316,22 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
       free_vram_bytes: 8_000_000_000,
     })
     const pinned = baseInput({ config_json: shape, files: weightFiles(weights), gpu_id: 'GPU-small' })
-    const fits = checkModelCompatibility(pinned, descriptor, [tooSmall, gb10], weights + kv, memory)
+    const fits = checkModelCompatibility(
+      pinned,
+      descriptor,
+      [tooSmall, gb10],
+      memAvailable(weights + kv),
+      memory
+    )
     expect(fits.checked_gpu_id).toBe('GPU-small')
     expect(fits.fits_other_gpus).toEqual(['GPU-gb10'])
-    const short = checkModelCompatibility(pinned, descriptor, [tooSmall, gb10], weights + kv - 1, memory)
+    const short = checkModelCompatibility(
+      pinned,
+      descriptor,
+      [tooSmall, gb10],
+      memAvailable(weights + kv - 1),
+      memory
+    )
     expect(short.fits_other_gpus).toEqual([])
   })
 })

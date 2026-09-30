@@ -25,12 +25,15 @@ import { tensorrtLlmAdapter } from './adapter.js'
 import type { TensorrtLlmHostFacts } from './host-facts.js'
 import type { ReadyInstallation } from './installation.js'
 import { readTensorrtLlmModel } from './model-dir.js'
+import { checkTensorrtLlmModel } from './check.js'
+import type { HostMemory } from './compatibility.js'
 import { TensorrtLlmRuntime } from './runtime.js'
 import type { TensorrtLlmRuntimeDeps } from './runtime.js'
 import type { GpuClaim } from '../shared/index.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
 const MiB = 1024 * 1024
+const NO_HOST_MEMORY = { availableBytes: 0, totalBytes: 0 }
 const SMALL: GpuFacts = {
   gpu_id: 'GPU-11111111-aaaa-bbbb-cccc-000000000001',
   name: 'NVIDIA RTX 4090',
@@ -181,7 +184,7 @@ beforeEach(async () => {
     kv_cache_free_gpu_memory_fraction: 0.9,
     load_timeout_seconds: 0,
   }
-  facts = { gpus: [SMALL, LARGE], selinux: false, memAvailableBytes: 0 }
+  facts = { gpus: [SMALL, LARGE], selinux: false, memory: NO_HOST_MEMORY }
   installation = ready
   await installModel('qwen3', 'Qwen3ForCausalLM')
   await installModel('llama', 'LlamaForCausalLM')
@@ -201,14 +204,14 @@ describe('TensorrtLlmRuntime: which card', () => {
     expect(progress().every((p) => p.gpu_substituted === undefined)).toBe(true)
   })
 
-  it('runs on the card with the most memory when none is saved', async () => {
+  it('runs on the card with the most free memory, then the most total memory, when none is saved', async () => {
     build()
     await runtime.load('qwen3')
     expect(gpusArg(docker.last().createArgv)).toBe(`device=${LARGE.gpu_id}`)
     expect(progress().every((p) => p.gpu_substituted === undefined)).toBe(true)
   })
 
-  it('falls back to the card with the most memory when the saved one is gone, and says so in the load events', async () => {
+  it('falls back to the card with the most free memory when the saved one is gone, and says so in the load events', async () => {
     build()
     stored.gpu_id = 'GPU-99999999-aaaa-bbbb-cccc-000000000009'
     await runtime.load('qwen3')
@@ -222,16 +225,92 @@ describe('TensorrtLlmRuntime: which card', () => {
     }
   })
 
+  // Spec "Выбор карты и настройки провайдера", design D12b: the load and `POST /check` without a
+  // gpu_id pick the same card from the same host facts — one rule (`selectLaunchGpu`), two callers.
+  const GiB = 1024 ** 3
+  const card = (gpu_id: string, totalGiB: number | null, freeGiB: number | null): GpuFacts => ({
+    ...SMALL,
+    gpu_id,
+    total_vram_bytes: totalGiB === null ? null : totalGiB * GiB,
+    free_vram_bytes: freeGiB === null ? null : freeGiB * GiB,
+  })
+  const DESKTOP = card('GPU-33333333-aaaa-bbbb-cccc-000000000003', 24, 19)
+  const IDLE = card('GPU-44444444-aaaa-bbbb-cccc-000000000004', 24, 23.5)
+  const UNIFIED = {
+    ...card('GPU-55555555-aaaa-bbbb-cccc-000000000005', null, null),
+    compute_capability: '12.1',
+  }
+  const checkDeps = (gpus: GpuFacts[], memory: HostMemory) => ({
+    installations: { list: async () => [] },
+    descriptors: {
+      forInstallation: async () => ({ kind: 'available' as const, descriptor }),
+      cachedForNewSetup: async () => ({ kind: 'available' as const, descriptor }),
+    },
+    hostFacts: async () => ({ gpus, memory }),
+    settings: () => stored,
+  })
+  const checkBody = {
+    repository: 'acme/qwen3',
+    revision: 'deadbeef',
+    config_json: { architectures: ['Qwen3ForCausalLM'], dtype: 'bfloat16' },
+    hf_quant_config_json: null,
+    files: [{ path: 'model.safetensors', size: 20, sha256: null }],
+  }
+
+  it.each<{ name: string; gpus: GpuFacts[]; memory?: HostMemory; savedGpuId?: string; expected: string }>([
+    {
+      name: 'two 24 GB cards, the first holding the desktop (19 GB free), the second 23.5 GB free',
+      gpus: [DESKTOP, IDLE],
+      expected: IDLE.gpu_id,
+    },
+    {
+      name: 'the saved card is gone: the most free card',
+      gpus: [DESKTOP, IDLE],
+      savedGpuId: 'GPU-99999999-aaaa-bbbb-cccc-000000000009',
+      expected: IDLE.gpu_id,
+    },
+    {
+      name: 'equal free memory: the most total memory',
+      gpus: [card(SMALL.gpu_id, 24, 20), card(LARGE.gpu_id, 48, 20)],
+      expected: LARGE.gpu_id,
+    },
+    {
+      name: 'a full tie: the card nvidia-smi lists first',
+      gpus: [card(LARGE.gpu_id, 24, 20), card(SMALL.gpu_id, 24, 20)],
+      expected: LARGE.gpu_id,
+    },
+    {
+      name: "a unified-memory card ranks by the host's MemAvailable, then MemTotal",
+      gpus: [card(SMALL.gpu_id, 24, 20), UNIFIED],
+      memory: { availableBytes: 80 * GiB, totalBytes: 120 * GiB },
+      expected: UNIFIED.gpu_id,
+    },
+  ])(
+    'the load and /check without gpu_id pick the same card: $name',
+    async ({ gpus, memory, savedGpuId, expected }) => {
+      build()
+      const hostMemory = memory ?? NO_HOST_MEMORY
+      facts = { gpus, selinux: false, memory: hostMemory }
+      if (savedGpuId !== undefined) stored.gpu_id = savedGpuId
+
+      const checked = await checkTensorrtLlmModel(checkBody, checkDeps(gpus, hostMemory))
+      await runtime.load('qwen3')
+
+      expect(checked.checked_gpu_id).toBe(expected)
+      expect(gpusArg(docker.last().createArgv)).toBe(`device=${expected}`)
+    }
+  )
+
   it('refuses with MANAGED_PREREQUISITE_BLOCKED on a host with no NVIDIA card, before any container', async () => {
     build()
-    facts = { gpus: [], selinux: false, memAvailableBytes: 0 }
+    facts = { gpus: [], selinux: false, memory: NO_HOST_MEMORY }
     expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_PREREQUISITE_BLOCKED')
     expect(docker.calls).toEqual([])
   })
 
   it('mounts under SELinux with the shared label when the probe says Docker enforces it', async () => {
     build()
-    facts = { gpus: [LARGE], selinux: true, memAvailableBytes: 0 }
+    facts = { gpus: [LARGE], selinux: true, memory: NO_HOST_MEMORY }
     await runtime.load('qwen3')
     expect(docker.last().createArgv.join(' ')).toMatch(/,z\b|:z\b/)
   })
@@ -250,7 +329,11 @@ describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
 
   it('launches with the KV cache bounded to two contexts beside guided decoding, and the fraction still passed', async () => {
     build()
-    facts = { gpus: [GB10], selinux: false, memAvailableBytes: 83_317_108 * 1024 }
+    facts = {
+      gpus: [GB10],
+      selinux: false,
+      memory: { availableBytes: 83_317_108 * 1024, totalBytes: 127_600_752 * 1024 },
+    }
     await runtime.load('qwen3')
     const argv = docker.last().createArgv
     expect(gpusArg(argv)).toBe(`device=${GB10.gpu_id}`)
@@ -263,7 +346,7 @@ describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
 
   it('launches a discrete card exactly as before: no token bound', async () => {
     build()
-    facts = { gpus: [LARGE], selinux: false, memAvailableBytes: 0 }
+    facts = { gpus: [LARGE], selinux: false, memory: NO_HOST_MEMORY }
     await runtime.load('qwen3')
     expect(await readFile(optionsFile(), 'utf8')).toBe('guided_decoding_backend: xgrammar\n')
   })
@@ -387,7 +470,7 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
       hostFacts: async () => ({
         gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 1_000_000_000 }],
         selinux: false,
-        memAvailableBytes: 0,
+        memory: NO_HOST_MEMORY,
       }),
     })
 
@@ -412,7 +495,7 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
         return {
           gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 1_000_000_000 }],
           selinux: false,
-          memAvailableBytes: 0,
+          memory: NO_HOST_MEMORY,
         }
       },
       // A stand-in for core's `GpuResidency.claim` (task 2.15): evict every other occupant of the
@@ -452,7 +535,7 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
       hostFacts: async () => ({
         gpus: [{ ...SMALL, free_vram_bytes: 2_000 }],
         selinux: false,
-        memAvailableBytes: 0,
+        memory: NO_HOST_MEMORY,
       }),
     })
 
@@ -479,8 +562,8 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
         // the time the beforeCreate hook re-probes it (call 2, after stopPrevious — nothing to stop
         // here, but the hook still runs).
         return calls === 1
-          ? { gpus: [SMALL], selinux: false, memAvailableBytes: 0 }
-          : { gpus: [], selinux: false, memAvailableBytes: 0 }
+          ? { gpus: [SMALL], selinux: false, memory: NO_HOST_MEMORY }
+          : { gpus: [], selinux: false, memory: NO_HOST_MEMORY }
       },
     })
 

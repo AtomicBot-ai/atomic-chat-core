@@ -574,3 +574,112 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(dockerState().calls).not.toContain('create')
   })
 })
+
+/**
+ * The default card (task 2.21, spec `tensorrt-llm-runtime` "Выбор карты и настройки провайдера",
+ * design D12b): two 24 GB cards, the first holding the desktop (19 GiB free), the second idle
+ * (23.5 GiB free). With no `gpu_id`, `POST /models/tensorrt-llm/check` and the load must both pick
+ * the second card — the check's `checked_gpu_id` and the container's `--gpus device=<uuid>`.
+ */
+describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')(
+  'the tensorrt-llm default card: the most free memory, for the check and the load alike',
+  () => {
+    const DESKTOP_GPU = GPU
+    const IDLE_GPU = 'GPU-7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f'
+    const GONE_GPU = 'GPU-99999999-aaaa-bbbb-cccc-000000000009'
+    const streams: AbortController[] = []
+
+    beforeEach(async () => {
+      await wrap(join(host, 'bin', 'nvidia-smi'), FAKE_NVIDIA_SMI, {
+        FAKE_NVIDIA_SMI_GPUS: JSON.stringify([
+          { 'uuid': DESKTOP_GPU, 'memory.total': '24564', 'memory.free': '19456' },
+          {
+            'uuid': IDLE_GPU,
+            'memory.total': '24564',
+            'memory.free': '24064',
+            'pci.bus_id': '00000000:02:00.0',
+          },
+        ]),
+      })
+    })
+
+    afterEach(() => {
+      for (const stream of streams.splice(0)) stream.abort()
+    })
+
+    const checkBody = {
+      repository: 'acme/llama-3',
+      revision: 'deadbeef',
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+      hf_quant_config_json: null,
+      files: [{ path: 'model.safetensors', size: 20, sha256: null }],
+    }
+
+    /** `session:load-progress` frames as they arrive on `/events`, the way the app's relay reads them. */
+    async function loadProgress(ready: ReadyLine): Promise<Array<Record<string, unknown>>> {
+      const controller = new AbortController()
+      streams.push(controller)
+      const res = await control(ready, '/events', { signal: controller.signal })
+      const seen: Array<Record<string, unknown>> = []
+      void (async () => {
+        const reader = (res.body as ReadableStream<Uint8Array>).getReader()
+        const decoder = new TextDecoder()
+        let pending = ''
+        try {
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) return
+            pending += decoder.decode(value, { stream: true })
+            const frames = pending.split('\n\n')
+            pending = frames.pop() ?? ''
+            for (const frame of frames) {
+              const data = /^data: (.*)$/m.exec(frame)?.[1]
+              if (/^event: session:load-progress$/m.test(frame) && data) seen.push(JSON.parse(data))
+            }
+          }
+        } catch {
+          // Aborted in afterEach; that is how the stream ends.
+        }
+      })()
+      return seen
+    }
+
+    it('checks and loads on the idle card when no gpu_id is set', async () => {
+      const { ready } = await start()
+
+      const checked = await post(ready, '/models/tensorrt-llm/check', checkBody)
+      expect(checked.status, await checked.clone().text()).toBe(200)
+      expect(((await checked.json()) as { checked_gpu_id: string }).checked_gpu_id).toBe(IDLE_GPU)
+
+      await load(ready, 'llama-3')
+      const containers = Object.values(dockerState().containers)
+      expect(containers).toHaveLength(1)
+      expect(containers[0]?.gpus).toBe(`device=${IDLE_GPU}`)
+    })
+
+    it('replaces a stored card that is gone with the idle card in both, and reports it in the load events', async () => {
+      const { ready } = await start()
+      const saved = await control(ready, '/settings/tensorrt-llm', {
+        method: 'PATCH',
+        body: JSON.stringify({ values: { gpu_id: GONE_GPU } }),
+      })
+      expect(saved.status, await saved.clone().text()).toBe(200)
+
+      const checked = await post(ready, '/models/tensorrt-llm/check', checkBody)
+      expect(checked.status, await checked.clone().text()).toBe(200)
+      expect(((await checked.json()) as { checked_gpu_id: string }).checked_gpu_id).toBe(IDLE_GPU)
+
+      const progress = await loadProgress(ready)
+      await load(ready, 'llama-3')
+      expect(Object.values(dockerState().containers)[0]?.gpus).toBe(`device=${IDLE_GPU}`)
+      const deadline = Date.now() + 5_000
+      while (!progress.some((p) => p['stage'] === 'ready') && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      expect(progress.length).toBeGreaterThan(0)
+      for (const event of progress) {
+        expect(event['gpu_substituted']).toEqual({ requested_gpu_id: GONE_GPU, gpu_id: IDLE_GPU })
+      }
+    })
+  }
+)

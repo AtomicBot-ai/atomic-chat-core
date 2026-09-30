@@ -7,6 +7,7 @@ import { checkTensorrtLlmModel, parseModelCheckInput } from './check.js'
 import type { ModelCheckDeps } from './check.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
+const NO_HOST_MEMORY = { availableBytes: 0, totalBytes: 0 }
 
 function descriptor(overrides: Partial<RuntimeDescriptor> = {}): RuntimeDescriptor {
   const image = { repository: 'nvcr.io/nvidia/tensorrt-llm/release', digest: digest('a'.repeat(64)) }
@@ -85,7 +86,7 @@ function deps(overrides: Partial<ModelCheckDeps> = {}): ModelCheckDeps {
       forInstallation: async () => AVAILABLE(descriptor()),
       cachedForNewSetup: async () => UNSUPPORTED,
     },
-    hostFacts: async () => ({ gpus: [gpu({ gpu_id: 'gpu-0' })], memAvailableBytes: 0 }),
+    hostFacts: async () => ({ gpus: [gpu({ gpu_id: 'gpu-0' })], memory: NO_HOST_MEMORY }),
     settings: () => ({}),
     ...overrides,
   }
@@ -152,7 +153,7 @@ describe('checkTensorrtLlmModel', () => {
 
   it('never touches the network: global fetch is never called, only the injected deps (finding 9)', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
-    const hostFacts = vi.fn(async () => ({ gpus: [gpu({ gpu_id: 'gpu-0' })], memAvailableBytes: 0 }))
+    const hostFacts = vi.fn(async () => ({ gpus: [gpu({ gpu_id: 'gpu-0' })], memory: NO_HOST_MEMORY }))
     try {
       const result = await checkTensorrtLlmModel(body(), deps({ hostFacts }))
       expect(result.verdict).toEqual({ ok: true })
@@ -168,9 +169,9 @@ describe('checkTensorrtLlmModel', () => {
     const LARGE_ID = 'GPU-00000000-0000-0000-0000-000000000002'
     const small = gpu({ gpu_id: SMALL_ID, total_vram_bytes: 8_000_000_000, free_vram_bytes: 8_000_000_000 })
     const large = gpu({ gpu_id: LARGE_ID, total_vram_bytes: 40_000_000_000, free_vram_bytes: 40_000_000_000 })
-    const hostFacts = async () => ({ gpus: [small, large], memAvailableBytes: 0 })
+    const hostFacts = async () => ({ gpus: [small, large], memory: NO_HOST_MEMORY })
 
-    // No gpu_id anywhere: falls back to "most memory" (the large card), same as a load with nothing saved.
+    // No gpu_id anywhere: falls back to "most free memory" (the large card), same as a load with nothing saved.
     const noSetting = await checkTensorrtLlmModel(body(), deps({ hostFacts, settings: () => ({}) }))
     expect(noSetting.checked_gpu_id).toBe(LARGE_ID)
 
@@ -189,9 +190,27 @@ describe('checkTensorrtLlmModel', () => {
     expect(withBoth.checked_gpu_id).toBe(LARGE_ID)
   })
 
+  it('without any gpu_id checks the card with the most free memory, not the biggest one (design D12b)', async () => {
+    const GiB = 1024 ** 3
+    const DESKTOP_ID = 'GPU-00000000-0000-0000-0000-000000000003'
+    const IDLE_ID = 'GPU-00000000-0000-0000-0000-000000000004'
+    // Two 24 GB cards: the first holds the desktop and a browser (19 GB free), the second 23.5 GB free.
+    const desktop = gpu({ gpu_id: DESKTOP_ID, total_vram_bytes: 24 * GiB, free_vram_bytes: 19 * GiB })
+    const idle = gpu({ gpu_id: IDLE_ID, total_vram_bytes: 24 * GiB, free_vram_bytes: 23.5 * GiB })
+    const hostFacts = async () => ({ gpus: [desktop, idle], memory: NO_HOST_MEMORY })
+
+    expect((await checkTensorrtLlmModel(body(), deps({ hostFacts }))).checked_gpu_id).toBe(IDLE_ID)
+    // A stored card that is gone: the same rule, as the load's substitution uses.
+    const gone = await checkTensorrtLlmModel(
+      body(),
+      deps({ hostFacts, settings: () => ({ gpu_id: 'GPU-00000000-0000-0000-0000-000000000009' }) })
+    )
+    expect(gone.checked_gpu_id).toBe(IDLE_ID)
+  })
+
   it('nvidia-smi absent/failing (no candidate GPU at all) answers MANAGED_PREREQUISITE_BLOCKED, not INVALID_ARGUMENT (finding 11)', async () => {
     await expect(
-      checkTensorrtLlmModel(body(), deps({ hostFacts: async () => ({ gpus: [], memAvailableBytes: 0 }) }))
+      checkTensorrtLlmModel(body(), deps({ hostFacts: async () => ({ gpus: [], memory: NO_HOST_MEMORY }) }))
     ).rejects.toMatchObject({ code: 'MANAGED_PREREQUISITE_BLOCKED' })
   })
 
@@ -221,7 +240,7 @@ describe('checkTensorrtLlmModel', () => {
         forInstallation: async () => AVAILABLE(datacenterDescriptor),
         cachedForNewSetup: async () => UNSUPPORTED,
       },
-      hostFacts: async () => ({ gpus: [datacenterGpu], memAvailableBytes: 0 }),
+      hostFacts: async () => ({ gpus: [datacenterGpu], memory: NO_HOST_MEMORY }),
     }
 
     const atDefault = await checkTensorrtLlmModel(bigModelBody, deps({ ...commonDeps, settings: () => ({}) }))
@@ -264,7 +283,7 @@ describe('checkTensorrtLlmModel: the stored default fraction is the one the laun
         settings: storedDefaults,
         hostFacts: async () => ({
           gpus: [gpu({ gpu_id: 'gpu-0', free_vram_bytes: freeBytes })],
-          memAvailableBytes: 0,
+          memory: NO_HOST_MEMORY,
         }),
       })
     )

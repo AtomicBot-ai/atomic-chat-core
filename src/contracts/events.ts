@@ -120,7 +120,7 @@ export interface CoreEvents {
     elapsed_ms: number
     /**
      * Present on every progress event of a load whose saved card was not found by the probe, so it
-     * runs on the card with the most memory instead (spec `tensorrt-llm-runtime`, "Выбранная карта
+     * runs on the card with the most free memory instead (spec `tensorrt-llm-runtime`, "Выбранная карта
      * исчезла"). Absent when the load runs where it was asked to.
      */
     gpu_substituted?: { requested_gpu_id: string; gpu_id: string }

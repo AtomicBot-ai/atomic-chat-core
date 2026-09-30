@@ -122,7 +122,7 @@ describe('defaultSettingValues', () => {
       auto_unload: true,
     })
     expect(defaultSettingValues('foundation-models')).toEqual({})
-    // `gpu_id: ''` picks the card with the most memory; `load_timeout_seconds: 0` keeps the adapter's
+    // `gpu_id: ''` picks the card with the most free memory; `load_timeout_seconds: 0` keeps the adapter's
     // own weight-based estimate. Both mean "not set", which is what the adapter's `null` means.
     expect(defaultSettingValues('tensorrt-llm')).toEqual({
       gpu_id: '',

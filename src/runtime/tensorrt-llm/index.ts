@@ -8,8 +8,8 @@
  * itself: `runtime.ts` (the `LocalRuntime`), `settings.ts` (stored settings → adapter settings),
  * `route-policy.ts` (what the public server must refuse or map for a session), `installation.ts`
  * (the ready installation and its pinned descriptor), `host-facts.ts` (cards, SELinux and
- * `MemAvailable`, per load) and `model-dir.ts` (the single-model lookup `runtime.ts`'s load path
- * uses). Task 2.16 wires the pure check in: `registry.ts` (the full model listing scan),
+ * `MemAvailable`/`MemTotal`, per load) and `model-dir.ts` (the single-model lookup `runtime.ts`'s
+ * load path uses). Task 2.16 wires the pure check in: `registry.ts` (the full model listing scan),
  * `check.ts` (the route handler behind `compatibility.ts`'s pure verdict) and `prelaunch.ts` (the
  * file-and-compatibility re-check `runtime.ts`'s load path runs before a container is created).
  *

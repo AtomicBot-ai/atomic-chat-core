@@ -34,6 +34,7 @@ import type { ErrorBody, GpuFacts, RuntimeDescriptor } from '../../contracts/ind
 import { checkModelCompatibilityFiles } from './compatibility.js'
 import type {
   CheckpointFile,
+  HostMemory,
   MemorySizingInputs,
   ModelCheckInput,
   ResolvedCheckpoint,
@@ -127,7 +128,7 @@ export async function verifyModelFilesAndCompatibility(
   model: Pick<TensorrtLlmModel, 'dir' | 'repository' | 'revision' | 'files'>,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
-  hostMemAvailableBytes: number,
+  hostMemory: HostMemory,
   options: VerifyModelFilesOptions
 ): Promise<ResolvedCheckpoint> {
   await assertFilesOnDisk(model.dir, model.files)
@@ -151,7 +152,7 @@ export async function verifyModelFilesAndCompatibility(
     files: model.files,
     gpu_id: options.gpuId,
   }
-  const result = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemAvailableBytes, options.memory)
+  const result = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemory, options.memory)
   if (!result.ok) {
     // `FilesCheckResult`'s own type guarantees `result.verdict.verdict` is the failed branch here.
     const { code, message, details } = (result.verdict.verdict as { ok: false; error: ErrorBody }).error

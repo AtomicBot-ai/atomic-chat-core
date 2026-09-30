@@ -2,7 +2,7 @@
  * `POST /atomic/v1/models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`, "Проверка
  * совместимости без сети"): wires the pure `checkModelCompatibility` (`compatibility.ts`) to the
  * pinned descriptor of the ready installation — or, "если движок не установлен", the latest accepted
- * cached descriptor (`descriptors.cachedForNewSetup()`) — and to the host's GPUs and `MemAvailable`.
+ * cached descriptor (`descriptors.cachedForNewSetup()`) — and to the host's GPUs and memory.
  * Never fetches: `descriptorForCheck` below only ever reads `forInstallation`/`cachedForNewSetup`,
  * both cache-only (`descriptor-provider.ts`), and `hostFacts` is the check route's own Docker-free
  * probe (`probeTensorrtLlmGpusAndMemory`, `host-facts.ts`) — matching the spec's "Core MUST NOT
@@ -18,13 +18,13 @@ import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../cont
 import { TENSORRT_LLM_ENGINE_ID } from '../environment/index.js'
 import type { InstallationStore, RuntimeDescriptorProvider } from '../environment/index.js'
 import { checkModelCompatibility } from './compatibility.js'
-import type { CheckpointFile, ModelCheckInput } from './compatibility.js'
+import type { CheckpointFile, HostMemory, ModelCheckInput } from './compatibility.js'
 import type { JsonObject } from './quant-format.js'
 import { tensorrtLlmSettings } from './settings.js'
 
 export interface ModelCheckHostFacts {
   gpus: GpuFacts[]
-  memAvailableBytes: number
+  memory: HostMemory
 }
 
 export interface ModelCheckDeps {
@@ -138,9 +138,10 @@ async function descriptorForCheck(
 /**
  * The full route: validate, resolve the descriptor and host facts (in parallel), then the pure
  * check. Without an explicit `gpu_id` in the request, checks against the card a real load would
- * pick — the provider's own stored `gpu_id` setting, falling back to `selectLaunchGpu`'s "most
- * memory" rule only when nothing is saved either (task 2.16w round 1, finding 3) — never just
- * "most memory" outright, which could silently check a different card than the one that would load.
+ * pick — the provider's own stored `gpu_id` setting, falling back to `selectLaunchGpu`'s "most free
+ * memory, then most total memory" rule only when nothing is saved or the saved card is gone (task
+ * 2.16w round 1, finding 3; design D12b) — the very function and inputs `runtime.ts`'s load uses,
+ * so the verdict and the launch cannot be about different cards.
  */
 export async function checkTensorrtLlmModel(
   body: unknown,
@@ -154,7 +155,7 @@ export async function checkTensorrtLlmModel(
     { ...input, ...(gpuId === undefined ? {} : { gpu_id: gpuId }) },
     descriptor,
     facts.gpus,
-    facts.memAvailableBytes,
+    facts.memory,
     {
       contextLength: settings.context_length,
       kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,

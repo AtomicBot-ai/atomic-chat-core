@@ -162,7 +162,7 @@ export const TENSORRT_LLM_MAX_LOAD_TIMEOUT_SECONDS = 3600
 /** The adapter's own validated settings shape (spec `tensorrt-llm-runtime`, "Выбор карты и настройки
  *  провайдера"). The JSON settings schema this validates against on the wire is task 2.14's. */
 export interface TensorrtLlmSettings {
-  /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most memory. */
+  /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */
   gpu_id: string | null
   context_length: number
   max_output_tokens: number

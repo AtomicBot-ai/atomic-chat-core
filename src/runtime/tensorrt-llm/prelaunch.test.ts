@@ -4,10 +4,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, RuntimeDescriptor, Sha256Digest } from '../../contracts/index.js'
-import type { CheckpointFile } from './compatibility.js'
+import type { CheckpointFile, HostMemory } from './compatibility.js'
 import { verifyModelFilesAndCompatibility } from './prelaunch.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
+/** The host's memory with `MemAvailable` = `bytes` (none of these cards is unified-memory, so it never matters). */
+const memAvailable = (bytes: number): HostMemory => ({ availableBytes: bytes, totalBytes: bytes })
 
 function baseDescriptor(overrides: Partial<RuntimeDescriptor> = {}): RuntimeDescriptor {
   const image = { repository: 'nvcr.io/nvidia/tensorrt-llm/release', digest: digest('a'.repeat(64)) }
@@ -73,7 +75,13 @@ const options = { gpuId: 'gpu-0', memory }
 describe('verifyModelFilesAndCompatibility', () => {
   it('passes and returns the resolved checkpoint when every file matches and config.json checks out', async () => {
     await writeCheckpoint()
-    const resolved = await verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+    const resolved = await verifyModelFilesAndCompatibility(
+      model(),
+      baseDescriptor(),
+      gpus,
+      memAvailable(0),
+      options
+    )
     expect(resolved.architectures).toEqual(['LlamaForCausalLM'])
     expect(resolved.quantizationFormat).toBe('bf16')
     expect(resolved.weightBytesTotal).toBe(WEIGHT_BYTES)
@@ -82,7 +90,13 @@ describe('verifyModelFilesAndCompatibility', () => {
   it("never checks the selected card's free memory (task 2.16w round 1, finding 1, Critical): a starved card still passes", async () => {
     await writeCheckpoint()
     const starved = [gpu({ gpu_id: 'gpu-0', free_vram_bytes: 0 })]
-    const resolved = await verifyModelFilesAndCompatibility(model(), baseDescriptor(), starved, 0, options)
+    const resolved = await verifyModelFilesAndCompatibility(
+      model(),
+      baseDescriptor(),
+      starved,
+      memAvailable(0),
+      options
+    )
     expect(resolved.weightBytesTotal).toBe(WEIGHT_BYTES)
   })
 
@@ -90,7 +104,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     await writeCheckpoint()
     await rm(join(dir, 'model.safetensors'))
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('model.safetensors') as unknown as string,
@@ -101,7 +115,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     await writeCheckpoint()
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES - 1, 1))
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MODEL_FILE_CORRUPT',
     })
@@ -112,7 +126,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     // error must win, naming the checkpoint file, not a generic "config.json missing" error.
     await mkdir(dir, { recursive: true })
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('model.safetensors') as unknown as string,
@@ -123,7 +137,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES, 1))
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('config.json') as unknown as string,
@@ -135,7 +149,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES, 1))
     await writeFile(join(dir, 'config.json'), '{not json')
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
       message: expect.stringContaining('config.json') as unknown as string,
@@ -147,7 +161,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(WEIGHT_BYTES, 1))
     await writeFile(join(dir, 'config.json'), '[1, 2, 3]')
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
       message: expect.stringContaining('config.json') as unknown as string,
@@ -158,7 +172,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     // On disk the architecture no longer matches the descriptor's supported list.
     await writeCheckpoint({ architectures: ['SomeOtherForCausalLM'] })
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MODEL_INCOMPATIBLE',
     })
@@ -168,7 +182,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     await writeCheckpoint()
     const tooOld = [gpu({ gpu_id: 'gpu-0', compute_capability: '7.5' })]
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), tooOld, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), tooOld, memAvailable(0), options)
     ).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
   })
 
@@ -182,7 +196,13 @@ describe('verifyModelFilesAndCompatibility', () => {
     const fp8Descriptor = baseDescriptor({
       quantization: [{ format: 'fp8', min_compute_capability: '8.0', excluded_compute_capabilities: [] }],
     })
-    const resolved = await verifyModelFilesAndCompatibility(model(), fp8Descriptor, gpus, 0, options)
+    const resolved = await verifyModelFilesAndCompatibility(
+      model(),
+      fp8Descriptor,
+      gpus,
+      memAvailable(0),
+      options
+    )
     expect(resolved.quantizationFormat).toBe('fp8')
   })
 
@@ -204,7 +224,7 @@ describe('verifyModelFilesAndCompatibility', () => {
       withHfQuantConfig,
       fp8Descriptor,
       gpus,
-      0,
+      memAvailable(0),
       options
     )
     expect(resolved.quantizationFormat).toBe('fp8')
@@ -219,7 +239,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     // The checkpoint file-presence loop only walks model.yml's own list, which now includes
     // hf_quant_config.json at a declared size, so it fails there first, still by name.
     await expect(
-      verifyModelFilesAndCompatibility(withHfQuantConfig, baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(withHfQuantConfig, baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('hf_quant_config.json') as unknown as string,
@@ -230,7 +250,7 @@ describe('verifyModelFilesAndCompatibility', () => {
     await writeCheckpoint()
     const escaping = { ...model(), files: [{ path: '../../etc/passwd', size: 1, sha256: null }] }
     await expect(
-      verifyModelFilesAndCompatibility(escaping, baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(escaping, baseDescriptor(), gpus, memAvailable(0), options)
     ).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
     })
@@ -239,14 +259,14 @@ describe('verifyModelFilesAndCompatibility', () => {
   it('creates no container: it only ever throws or returns the resolved checkpoint, never touches Docker', async () => {
     await writeCheckpoint()
     await expect(
-      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
     ).resolves.toBeDefined()
   })
 
   it('is an AtomicCoreError with the code both a missing file and an incompatible checkpoint would carry over HTTP', async () => {
     await writeCheckpoint({ architectures: ['SomeOtherForCausalLM'] })
     try {
-      await verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, 0, options)
+      await verifyModelFilesAndCompatibility(model(), baseDescriptor(), gpus, memAvailable(0), options)
       expect.unreachable()
     } catch (error) {
       expect(error).toBeInstanceOf(AtomicCoreError)

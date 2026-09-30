@@ -101,7 +101,7 @@ export interface FoundationModelsConfig {
 
 /**
  * `tensorrt-llm` as the settings store holds it (`src/settings/schema/tensorrt-llm.json`). `gpu_id: ''`
- * lets a load pick the card with the most memory and `load_timeout_seconds: 0` keeps the engine's own
+ * lets a load pick the card with the most free memory and `load_timeout_seconds: 0` keeps the engine's own
  * weight-based estimate; every value applies from the next load, never to a running container.
  */
 export interface TensorrtLlmProviderConfig {

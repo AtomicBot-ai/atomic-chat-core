@@ -6,10 +6,11 @@ import {
   NVIDIA_SMI_GPU_QUERY,
   PROC_MEMINFO_PATH,
   parseMemAvailableBytes,
+  parseMemTotalBytes,
   probeTensorrtLlmGpus,
   probeTensorrtLlmGpusAndMemory,
   probeTensorrtLlmHost,
-  readMemAvailableBytes,
+  readHostMemory,
 } from './host-facts.js'
 
 const SMI =
@@ -17,6 +18,7 @@ const SMI =
   'GPU-bbbb, NVIDIA RTX PRO 6000, 12.0, 97887, 97000, 581.42\n'
 
 const MEMINFO = 'MemTotal:       132000000 kB\nMemFree:        20000000 kB\nMemAvailable:   65536000 kB\n'
+const MEMORY = { availableBytes: 65_536_000 * 1024, totalBytes: 132_000_000 * 1024 }
 
 function fakes(info: { code: number | null; stdout: string }, meminfo: string | null = MEMINFO) {
   const calls: Array<{ command: string; args: string[] }> = []
@@ -34,14 +36,14 @@ function fakes(info: { code: number | null; stdout: string }, meminfo: string | 
 }
 
 describe('probeTensorrtLlmHost', () => {
-  it('reads the cards from nvidia-smi, SELinux from docker info over the system socket, and MemAvailable', async () => {
+  it('reads the cards from nvidia-smi, SELinux from docker info over the system socket, and MemAvailable/MemTotal', async () => {
     const { calls, exec, docker, readFile } = fakes({
       code: 0,
       stdout: JSON.stringify({ ServerVersion: '28.1.1', SecurityOptions: ['name=seccomp', 'name=selinux'] }),
     })
     const facts = await probeTensorrtLlmHost({ exec, docker, nvidiaSmi: '/opt/bin/nvidia-smi', readFile })
     expect(facts.selinux).toBe(true)
-    expect(facts.memAvailableBytes).toBe(65_536_000 * 1024)
+    expect(facts.memory).toEqual(MEMORY)
     expect(facts.gpus.map((g) => [g.gpu_id, g.total_vram_bytes])).toEqual([
       ['GPU-aaaa', 24564 * 1024 * 1024],
       ['GPU-bbbb', 97887 * 1024 * 1024],
@@ -80,13 +82,13 @@ describe('probeTensorrtLlmHost', () => {
     )
   })
 
-  it('reports memAvailableBytes as 0 when /proc/meminfo cannot be read, without failing the whole probe', async () => {
+  it('reports host memory as 0 when /proc/meminfo cannot be read, without failing the whole probe', async () => {
     const { exec, docker, readFile } = fakes(
       { code: 0, stdout: JSON.stringify({ ServerVersion: '28.1.1', SecurityOptions: [] }) },
       null
     )
     const facts = await probeTensorrtLlmHost({ exec, docker, nvidiaSmi: 'nvidia-smi', readFile })
-    expect(facts.memAvailableBytes).toBe(0)
+    expect(facts.memory).toEqual({ availableBytes: 0, totalBytes: 0 })
   })
 })
 
@@ -99,11 +101,11 @@ describe('probeTensorrtLlmGpus', () => {
 })
 
 describe('probeTensorrtLlmGpusAndMemory', () => {
-  it('answers gpus and memAvailableBytes without ever calling Docker, even when docker info would refuse', async () => {
+  it('answers gpus and host memory without ever calling Docker, even when docker info would refuse', async () => {
     const { exec, readFile } = fakes({ code: null, stdout: '' })
     const result = await probeTensorrtLlmGpusAndMemory({ exec, nvidiaSmi: 'nvidia-smi', readFile })
     expect(result.gpus.map((g) => g.gpu_id)).toEqual(['GPU-aaaa', 'GPU-bbbb'])
-    expect(result.memAvailableBytes).toBe(65_536_000 * 1024)
+    expect(result.memory).toEqual(MEMORY)
   })
 })
 
@@ -126,21 +128,28 @@ describe('the GB10 (DGX Spark-class host), captured', () => {
       },
     ])
     // MemAvailable (83317108 kB), not MemFree (66008600 kB): page cache counts as reclaimable.
-    expect(facts.memAvailableBytes).toBe(83_317_108 * 1024)
+    expect(facts.memory).toEqual({ availableBytes: 83_317_108 * 1024, totalBytes: 127_600_752 * 1024 })
   })
 })
 
-describe('readMemAvailableBytes', () => {
-  it('reads MemAvailable in bytes', async () => {
-    expect(await readMemAvailableBytes({ readFile: async () => MEMINFO })).toBe(65_536_000 * 1024)
+describe('readHostMemory', () => {
+  it('reads MemAvailable and MemTotal in bytes', async () => {
+    expect(await readHostMemory({ readFile: async () => MEMINFO })).toEqual(MEMORY)
   })
 
-  it('is 0 when the file cannot be read', async () => {
-    expect(await readMemAvailableBytes({ readFile: async () => null })).toBe(0)
+  it('is 0 for both when /proc/meminfo cannot be read', async () => {
+    expect(await readHostMemory({ readFile: async () => null })).toEqual({ availableBytes: 0, totalBytes: 0 })
   })
 
-  it('is 0 when the file has no MemAvailable line', async () => {
-    expect(await readMemAvailableBytes({ readFile: async () => 'MemTotal: 100 kB\n' })).toBe(0)
+  it('is 0 for whichever line is missing, independently', async () => {
+    expect(await readHostMemory({ readFile: async () => 'MemTotal: 100 kB\n' })).toEqual({
+      availableBytes: 0,
+      totalBytes: 100 * 1024,
+    })
+    expect(await readHostMemory({ readFile: async () => 'MemAvailable: 50 kB\n' })).toEqual({
+      availableBytes: 50 * 1024,
+      totalBytes: 0,
+    })
   })
 })
 
@@ -163,5 +172,17 @@ describe('parseMemAvailableBytes', () => {
 
   it('is null for a value so large it parses to a non-finite number', () => {
     expect(parseMemAvailableBytes(`MemAvailable: ${'9'.repeat(400)} kB\n`)).toBeNull()
+  })
+})
+
+describe('parseMemTotalBytes', () => {
+  it.each<[string, string, number | null]>([
+    ['parses the MemTotal line into bytes', MEMINFO, 132_000_000 * 1024],
+    ['finds the line anywhere in the file', 'Foo: 1\nMemTotal:    12345   kB\nBar: 2\n', 12_345 * 1024],
+    ['is null when there is no MemTotal line', 'MemAvailable: 100 kB\n', null],
+    ['is null for an empty file', '', null],
+    ['is null for a number too large to be finite', `MemTotal: ${'9'.repeat(400)} kB\n`, null],
+  ])('%s', (_label, meminfo, expected) => {
+    expect(parseMemTotalBytes(meminfo)).toBe(expected)
   })
 })

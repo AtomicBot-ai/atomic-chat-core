@@ -2,11 +2,11 @@
   {
     "key": "gpu_id",
     "title": "GPU",
-    "description": "UUID of the NVIDIA GPU models run on (GPU-… or MIG-…). Leave empty to use the card with the most memory; if the saved card is gone, the load uses that card and says so. Applies from the next model load.",
+    "description": "UUID of the NVIDIA GPU models run on (GPU-… or MIG-…). Leave empty to use the card with the most free memory at load time; if the saved card is gone, the load uses that card and says so. Applies from the next model load.",
     "controllerType": "input",
     "controllerProps": {
       "value": "",
-      "placeholder": "Card with the most memory",
+      "placeholder": "Card with the most free memory",
       "type": "text"
     }
   },

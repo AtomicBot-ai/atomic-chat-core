@@ -320,7 +320,7 @@ describe('tensorrtLlmSessionUnloader', () => {
           },
         ],
         selinux: false,
-        memAvailableBytes: 0,
+        memory: { availableBytes: 0, totalBytes: 0 },
       }),
       model: async (modelId) => ({
         id: modelId,

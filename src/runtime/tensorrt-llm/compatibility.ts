@@ -3,8 +3,8 @@
  * whether a Hugging Face checkpoint can run on TensorRT-LLM on this host, computed entirely from
  * what the caller already has — `config.json`, `hf_quant_config.json` when the repository carries
  * one, the revision's file listing, the pinned `RuntimeDescriptor`, the host's `GpuFacts[]`, its
- * `MemAvailable`, the provider's `kv_cache_free_gpu_memory_fraction` setting and a context length —
- * before a single byte of the checkpoint is downloaded.
+ * `MemAvailable`/`MemTotal` (`HostMemory`), the provider's `kv_cache_free_gpu_memory_fraction`
+ * setting and a context length — before a single byte of the checkpoint is downloaded.
  *
  * This is the pure verdict only. It does not read the pinned descriptor from disk, does not probe
  * the host for `GpuFacts`, does not read `<data>/tensorrt-llm/models/*`, does not read stored
@@ -62,28 +62,58 @@ export interface ModelCheckInput {
   /** `null` when the repository does not carry the file at all. */
   hf_quant_config_json: JsonObject | null
   files: CheckpointFile[]
-  /** Omitted or not found on this host falls back to `selectLaunchGpu`'s "most memory" rule. */
+  /** Omitted or not found on this host falls back to `selectLaunchGpu`'s "most free memory" rule. */
   gpu_id?: string
 }
 
 /**
- * The card a launch would pick (task 2.14 reuses this): `gpu_id` when given and present on the
- * host, otherwise the card with the most total memory. `null` only when the host has no GPU at all.
- *
- * "Most memory" ranks by `total_vram_bytes`, the card's own nominal size, not `free_vram_bytes` —
- * placement should not change moment to moment as other sessions load and unload. A unified-memory
- * card (`total_vram_bytes: null`, design D13) ranks alongside a `0`-byte card rather than an
- * infinite one: with no dedicated VRAM figure to compare, assuming it is host memory large would be
- * a guess this function has no evidence for; a host with exactly one GPU (the only case a
- * unified-memory descriptor covers today, GB10/DGX Spark) still selects it as the sole candidate.
+ * The host's own memory, from `/proc/meminfo`: what a unified-memory card (design D13, GB10/DGX
+ * Spark — `nvidia-smi` reports no memory of its own) has instead of VRAM. `availableBytes` is
+ * `MemAvailable`, what such a card has free; `totalBytes` is `MemTotal`, its size. Either is `0`
+ * when the file could not be read — the safe direction: a unified-memory card then under-reports.
  */
-export function selectLaunchGpu(gpus: readonly GpuFacts[], gpuId?: string): GpuFacts | null {
+export interface HostMemory {
+  availableBytes: number
+  totalBytes: number
+}
+
+/**
+ * The card a load runs on, and the card `POST /models/tensorrt-llm/check` computes against when the
+ * caller names none — one function for both, so a verdict and a launch can never be about different
+ * cards (spec `tensorrt-llm-runtime` "Выбор карты и настройки провайдера", design D12b). `gpu_id`
+ * when given and present on the host; otherwise the card with the most FREE memory right now, ties
+ * broken by the most TOTAL memory, and a full tie by the order `nvidia-smi` lists the cards in (its
+ * own index, stable on a host), so equal cards always resolve the same way. `null` only when the host
+ * has no GPU at all.
+ *
+ * Free memory, not total: on a desktop with two equal cards the first is usually holding the
+ * desktop and a browser, and "the biggest card" would send the model there to run out of memory
+ * while the second card sits idle. Placement may therefore change between loads as the cards' load
+ * changes; the engine cache is keyed by model, not by card, so that only moves where it runs.
+ * Compute capability is deliberately not a filter here: the spec's rule is memory only, and a card
+ * the checkpoint's format cannot run on gets an honest `MODEL_INCOMPATIBLE` naming the other cards
+ * it would fit on (`fits_other_gpus`).
+ *
+ * A unified-memory card (`total_vram_bytes: null`) ranks by the host's memory — `MemAvailable` as
+ * its free memory and `MemTotal` as its total — the same figure `freeMemoryBytes` compares its
+ * memory need against.
+ */
+export function selectLaunchGpu(
+  gpus: readonly GpuFacts[],
+  host: HostMemory,
+  gpuId?: string
+): GpuFacts | null {
   if (gpuId !== undefined) {
     const requested = gpus.find((gpu) => gpu.gpu_id === gpuId)
     if (requested !== undefined) return requested
   }
   if (gpus.length === 0) return null
-  return gpus.reduce((best, gpu) => ((gpu.total_vram_bytes ?? 0) > (best.total_vram_bytes ?? 0) ? gpu : best))
+  // Strictly greater only: on a full tie the earlier card stays, i.e. nvidia-smi's own order.
+  const ranksAbove = (gpu: GpuFacts, best: GpuFacts): boolean => {
+    const free = freeMemoryBytes(gpu, host) - freeMemoryBytes(best, host)
+    return free !== 0 ? free > 0 : totalMemoryBytes(gpu, host) > totalMemoryBytes(best, host)
+  }
+  return gpus.reduce((best, gpu) => (ranksAbove(gpu, best) ? gpu : best))
 }
 
 const SAFETENSORS_SUFFIX = '.safetensors'
@@ -260,8 +290,13 @@ function isUnifiedMemory(gpu: GpuFacts): boolean {
 }
 
 /** Free memory to compare against for one card: `MemAvailable` for a unified-memory card (design D13). */
-function freeMemoryBytes(gpu: GpuFacts, hostMemAvailableBytes: number): number {
-  return isUnifiedMemory(gpu) ? hostMemAvailableBytes : (gpu.free_vram_bytes ?? 0)
+function freeMemoryBytes(gpu: GpuFacts, host: HostMemory): number {
+  return isUnifiedMemory(gpu) ? host.availableBytes : (gpu.free_vram_bytes ?? 0)
+}
+
+/** A card's size, for ranking only: `MemTotal` for a unified-memory card (design D13). */
+function totalMemoryBytes(gpu: GpuFacts, host: HostMemory): number {
+  return isUnifiedMemory(gpu) ? host.totalBytes : (gpu.total_vram_bytes ?? 0)
 }
 
 /** What the checkpoint needs on `gpu`: its weights plus that card's own kind of KV reserve. */
@@ -332,12 +367,12 @@ function fitsOtherGpus(
   descriptor: RuntimeDescriptor,
   format: string,
   needOn: (gpu: GpuFacts) => number,
-  hostMemAvailableBytes: number
+  hostMemory: HostMemory
 ): string[] {
   return gpus
     .filter((gpu) => gpu.gpu_id !== selected.gpu_id)
     .filter((gpu) => formatAllowedOnGpu(descriptor, format, gpu))
-    .filter((gpu) => needOn(gpu) <= freeMemoryBytes(gpu, hostMemAvailableBytes))
+    .filter((gpu) => needOn(gpu) <= freeMemoryBytes(gpu, hostMemory))
     .map((gpu) => gpu.gpu_id)
 }
 
@@ -432,14 +467,14 @@ export type FilesCheckResult =
  * these can change by evicting whatever session currently holds the selected card, so all of them
  * run before `stopPrevious` on the load path (task 2.16w round 1, finding 1). `fits_other_gpus` on a
  * compute-capability failure is still computed here (`memory` sizes the reserve needed to report it),
- * using whichever `gpus`/`hostMemAvailableBytes` snapshot the caller passed in — informational only,
+ * using whichever `gpus`/`hostMemory` snapshot the caller passed in — informational only,
  * about *other* cards the eviction race does not touch.
  */
 export function checkModelCompatibilityFiles(
   input: ModelCheckInput,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
-  hostMemAvailableBytes: number,
+  hostMemory: HostMemory,
   memory: MemorySizingInputs
 ): FilesCheckResult {
   if (
@@ -452,7 +487,7 @@ export function checkModelCompatibilityFiles(
     )
   }
 
-  const selected = selectLaunchGpu(gpus, input.gpu_id)
+  const selected = selectLaunchGpu(gpus, hostMemory, input.gpu_id)
   if (selected === null) {
     throw new AtomicCoreError(
       'MANAGED_PREREQUISITE_BLOCKED',
@@ -608,7 +643,7 @@ export function checkModelCompatibilityFiles(
     descriptor,
     format,
     (gpu) => needOn(gpu).neededBytes,
-    hostMemAvailableBytes
+    hostMemory
   )
 
   if (!computeCapabilityAtLeast(selected.compute_capability, formatSupport.min_compute_capability)) {
@@ -666,7 +701,7 @@ export function checkModelCompatibilityFiles(
 /**
  * The memory line alone (task 2.16w round 1, finding 1): whether `resolved.weightBytesTotal` plus
  * the KV-cache reserve fits the selected card's free memory. Callers pass a fresh `gpus`/
- * `hostMemAvailableBytes` snapshot — the load path's `beforeCreate` hook re-probes the host after
+ * `hostMemory` snapshot — the load path's `beforeCreate` hook re-probes the host after
  * `stopPrevious` has run, so this sees whatever that freed, never a snapshot taken before it — and
  * this function re-reads the free-memory figure for `resolved.selected.gpu_id` from *that* fresh
  * `gpus`, rather than trusting `resolved.selected`'s own (possibly stale) copy: that stale copy is
@@ -679,7 +714,7 @@ export function checkModelMemory(
   resolved: ResolvedCheckpoint,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
-  hostMemAvailableBytes: number,
+  hostMemory: HostMemory,
   memory: MemorySizingInputs
 ): ModelCompatibility {
   const selected = gpus.find((gpu) => gpu.gpu_id === resolved.selected.gpu_id) ?? resolved.selected
@@ -693,14 +728,14 @@ export function checkModelMemory(
   const needOn = (gpu: GpuFacts): MemoryNeed =>
     memoryNeedOn(gpu, resolved.weightBytesTotal, resolved.configJson, resolved.hfQuantConfigJson, memory)
   const { reserveBytes, basis, neededBytes } = needOn(selected)
-  const freeBytes = freeMemoryBytes(selected, hostMemAvailableBytes)
+  const freeBytes = freeMemoryBytes(selected, hostMemory)
   const fitsOther = fitsOtherGpus(
     gpus,
     selected,
     descriptor,
     resolved.quantizationFormat,
     (gpu) => needOn(gpu).neededBytes,
-    hostMemAvailableBytes
+    hostMemory
   )
   // The token bound the launch writes, on a card where it writes one (adapter.ts).
   const kvTokens =
@@ -736,10 +771,10 @@ export function checkModelCompatibility(
   input: ModelCheckInput,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
-  hostMemAvailableBytes: number,
+  hostMemory: HostMemory,
   memory: MemorySizingInputs
 ): ModelCompatibility {
-  const files = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemAvailableBytes, memory)
+  const files = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemory, memory)
   if (!files.ok) return files.verdict
-  return checkModelMemory(files.resolved, descriptor, gpus, hostMemAvailableBytes, memory)
+  return checkModelMemory(files.resolved, descriptor, gpus, hostMemory, memory)
 }

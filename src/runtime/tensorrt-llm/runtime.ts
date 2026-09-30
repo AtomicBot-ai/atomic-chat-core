@@ -6,8 +6,9 @@
  *  - refusing it before any container exists — no Docker, no `ready` installation
  *    (`MANAGED_ADAPTER_UNAVAILABLE`), settings the adapter rejects (`INVALID_ARGUMENT`), a model that
  *    is not installed, a host with no NVIDIA card, an embedding request;
- *  - the card: the saved `gpu_id` when the probe still finds it, otherwise the one with the most
- *    memory (`selectLaunchGpu`), with the replacement reported on every load event;
+ *  - the card: the saved `gpu_id` when the probe still finds it, otherwise the one with the most free
+ *    memory, ties by the most total memory (`selectLaunchGpu`, the same rule `POST /check` uses,
+ *    design D12b), with the replacement reported on every load event;
  *  - one session at a time, and one resident model per card: the lifecycle's `stopping-previous`
  *    stage asks core's GPU residency (`claimGpu`, task 2.15) to stop every other `tensorrt-llm`
  *    model and every other engine on the chosen card, each with a confirmed exit, before this one's
@@ -209,7 +210,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     throwIfLoadCancelled(signal)
     this.assertOpen()
 
-    const gpu = selectLaunchGpu(facts.gpus, settings.gpu_id ?? undefined)
+    const gpu = selectLaunchGpu(facts.gpus, facts.memory, settings.gpu_id ?? undefined)
     if (gpu === null) {
       throw new AtomicCoreError(
         'MANAGED_PREREQUISITE_BLOCKED',
@@ -235,7 +236,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       model,
       ready.descriptor,
       facts.gpus,
-      facts.memAvailableBytes,
+      facts.memory,
       { gpuId: gpu.gpu_id, memory }
     )
     throwIfLoadCancelled(signal)
@@ -493,7 +494,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
         gpuId
       )
     }
-    const verdict = checkModelMemory(resolved, descriptor, facts.gpus, facts.memAvailableBytes, memory)
+    const verdict = checkModelMemory(resolved, descriptor, facts.gpus, facts.memory, memory)
     if (!verdict.verdict.ok) {
       const { code, message, details } = verdict.verdict.error
       throw new AtomicCoreError(code, message, details)
