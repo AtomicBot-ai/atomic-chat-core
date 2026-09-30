@@ -448,6 +448,18 @@ export function machineSpeed(
  */
 export const STEP_OVERHEAD_SECONDS = 0.3
 
+/**
+ * The VAE decode on the Metal device against the table's `decodeSeconds`. ggml's Metal backend has no
+ * `IM2COL_3D`, so every 3-D convolution of a video VAE runs the direct `kernel_conv_3d`. The one decode
+ * measured, a Wan 2.2 TI2V 5B clip at 704×1280 and 25 frames at 250 s per 32×32-latent tile, is about ten
+ * times the table on an M3 Pro to M4 Pro class Mac (ADR 2026-09-30-keep-the-video-eta-past-its-forecast).
+ */
+export const METAL_DECODE_FACTOR = 10
+
+/** Whether the decode runs on the Metal device: not on the CPU fallback, and not under `model` offload. */
+const decodesOnMetal = (input: Pick<VideoEstimateInput, 'backend' | 'cpuFallback' | 'offload'>): boolean =>
+  input.backend === 'metal' && !input.cpuFallback && input.offload !== 'model'
+
 /** Model passes per step: classifier-free guidance runs the model twice. */
 export const passesPerStep = (cfgScale: number): number => (cfgScale > 1 ? 2 : 1)
 
@@ -463,7 +475,9 @@ export function heuristicParts(input: VideoEstimateInput): {
   const tokens = latentTokens(profile, input.width, input.height, input.frames)
   const pass = profile.linearSeconds * tokens + profile.attentionSeconds * tokens * tokens
   const pixelFrames = input.width * input.height * input.frames
-  const decode = (profile.decodeSeconds * pixelFrames * decodeLayout(input, profile).work) / speed
+  const decode =
+    ((profile.decodeSeconds * pixelFrames * decodeLayout(input, profile).work) / speed) *
+    (decodesOnMetal(input) ? METAL_DECODE_FACTOR : 1)
   return {
     encodeSeconds: profile.encodeSeconds / speed,
     stepSeconds: (pass * passesPerStep(input.cfgScale)) / speed + STEP_OVERHEAD_SECONDS,

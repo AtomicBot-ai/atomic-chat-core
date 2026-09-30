@@ -442,8 +442,8 @@ export interface VideoJobProgress {
   /**
    * Seconds left for the whole job: encoding, the remaining steps and the VAE decode. Before the
    * first measured step it comes from `VideoJob.estimate`; once a tiled decode finished a tile, from
-   * the measured time per tile. `null` when unknown, when a decode without a finished tile ran past
-   * its forecast, and while saving.
+   * the measured time per tile. A forecast that is spent is doubled rather than dropped. `null` when
+   * unknown, once every tile of a tiled decode is done, and while saving.
    */
   etaSeconds: number | null
   /**

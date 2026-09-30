@@ -4,6 +4,7 @@ import { RESERVE_BYTES } from '../models/index.js'
 import { VIDEO_VAE_TILING_PIXEL_FRAMES } from './args.js'
 import {
   appleChip,
+  APPLE_SILICON_SPEED,
   BYTES_PER_PIXEL_FRAME,
   decodeTiled,
   discreteVramBytes,
@@ -16,6 +17,7 @@ import {
   latentTokens,
   machineSpeed,
   memoryPool,
+  METAL_DECODE_FACTOR,
   OUTPUT_BYTES_PER_PIXEL_FRAME,
   OVERHEAD_BYTES,
   passesPerStep,
@@ -316,6 +318,30 @@ describe('the time model', () => {
     // However small the request, a step costs its fixed overhead.
     expect(heuristicParts(wan({ width: 32, height: 32, frames: 5 })).stepSeconds).toBeGreaterThan(
       STEP_OVERHEAD_SECONDS
+    )
+  })
+
+  it('prices the decode on the Metal device at the measured factor over the table, and only there', () => {
+    // The feedback clip in one graph on a 24 GB M4 Pro.
+    const clip = wan({
+      width: 704,
+      height: 1280,
+      frames: 25,
+      offload: 'none',
+      decodeTiling: { tilesX: 1, tilesY: 1 },
+      system: mac(24, 'Apple M4 Pro'),
+    })
+    const table = (VIDEO_FAMILY_PROFILES['wan2.2-ti2v-5b']?.decodeSeconds as number) * 704 * 1280 * 25
+    const speed = APPLE_SILICON_SPEED['m4 pro'] as number
+    expect(heuristicParts(clip).decodeSeconds).toBeCloseTo((table * METAL_DECODE_FACTOR) / speed, 6)
+    // On the CPU fallback, and under `model` offload, the engine decodes on the CPU.
+    const cpu = heuristicParts({ ...clip, cpuFallback: true })
+    expect(cpu.decodeSeconds).toBeCloseTo(table / machineSpeed({ ...clip, cpuFallback: true }).speed, 6)
+    const { decodeTiling: _plan, ...unplanned } = clip
+    const offloaded: VideoEstimateInput = { ...unplanned, offload: 'model' }
+    expect(heuristicParts(offloaded).decodeSeconds).toBeCloseTo(
+      (table * decodeLayout(offloaded).work) / speed,
+      6
     )
   })
 
