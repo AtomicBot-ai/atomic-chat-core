@@ -13,4 +13,7 @@
 - `core-log/` — `sample.log` pins `core.log`'s on-disk format as a core → app contract: unlike `app/`, the
   core is the source of truth here, and the app copies this file into its own tests. Produced and replayed
   by `test/contract/core-log.test.ts`; see `core-log/README.md`.
+- `decision/engine-examples.json` — the examples of the fork's `DECISION.md` (API version 1: systemone and router
+  requests and answers, the error envelope, `/health`, `/v1/models`, `/props`), copied by hand with the source named
+  inside. The engine is the source of truth; `test/contract/decision.test.ts` holds the core's readers against them.
 - Everything else is hand-written test data owned by this repo.

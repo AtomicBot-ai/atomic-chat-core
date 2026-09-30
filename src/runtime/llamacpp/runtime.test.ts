@@ -139,7 +139,8 @@ describe('load', () => {
         headers: { Authorization: `Bearer ${info.api_key}` },
       })
       expect(models.status).toBe(200)
-      const unauthorized = await fetch(`http://127.0.0.1:${info.port}/v1/models`)
+      // `/v1/models` is public on the real server, like `/health`; `/props` is behind the key.
+      const unauthorized = await fetch(`http://127.0.0.1:${info.port}/props`)
       expect(unauthorized.status).toBe(401)
 
       expect(runtime.getLoadedModels()).toEqual(['demo'])

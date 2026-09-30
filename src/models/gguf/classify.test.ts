@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   classifyProjector,
+  DECISION_GGUF_ARCHITECTURES,
   effectiveCtxSize,
+  isDecisionGguf,
+  NON_TEXT_GGUF_ARCHITECTURES,
   hasEmbeddedMtp,
   isEmbeddingGguf,
   isMtpCapable,
@@ -62,6 +65,37 @@ describe('isEmbeddingGguf', () => {
     [{}, false],
     [undefined, false],
   ])('%j → %s', (m, e) => expect(isEmbeddingGguf(m)).toBe(e))
+})
+
+describe('isDecisionGguf', () => {
+  it.each([
+    [{ 'general.architecture': 'laya' }, true],
+    [{ 'general.architecture': ' LAYA ' }, true],
+    // A stamped Arbiter / JevK5 stays a Qwen underneath; the decision spec's mirror key gives it away.
+    [{ 'general.architecture': 'qwen35', 'decision.layout': 'semif-letters' }, true],
+    [{ 'general.architecture': 'modern-bert', 'decision.layout': 'laya' }, true],
+    [{ 'general.architecture': 'qwen35', 'decision.layout': '  ' }, false],
+    // A reader that keeps typed values may hand the key over as a non-string.
+    [{ 'general.architecture': 7, 'decision.layout': 1 }, true],
+    [{ 'general.architecture': 'qwen35', 'decision.layout': null }, false],
+    [{ 'general.architecture': 'qwen35' }, false],
+    [{ 'general.architecture': 'bert' }, false],
+    [{}, false],
+    [null, false],
+  ])('%j → %s', (m, e) => expect(isDecisionGguf(m)).toBe(e))
+
+  it('keeps laya out of the non-text list, which would load it as an embedding model', () => {
+    expect(DECISION_GGUF_ARCHITECTURES.has('laya')).toBe(true)
+    expect(NON_TEXT_GGUF_ARCHITECTURES.has('laya')).toBe(false)
+  })
+
+  it('wins over the embedding rules', () => {
+    expect(isEmbeddingGguf({ 'general.architecture': 'laya', 'laya.pooling_type': '1' })).toBe(false)
+    expect(isEmbeddingGguf({ 'general.architecture': 'bert', 'decision.layout': 'laya' })).toBe(false)
+    expect(
+      isEmbeddingGguf({ 'general.architecture': 'qwen3', 'qwen3.pooling_type': '2', 'decision.layout': 'x' })
+    ).toBe(false)
+  })
 })
 
 describe('effectiveCtxSize', () => {

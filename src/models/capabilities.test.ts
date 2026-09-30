@@ -48,6 +48,18 @@ describe('validateGguf', () => {
     expect(result.metadata, 'the caller still gets what was read').toBeDefined()
   })
 
+  it('rejects a decision model, which answers probabilities and runs only in the decision module', async () => {
+    const laya = { 'general.architecture': 'laya', 'laya.context_length': '1024' }
+    const stamped = { ...LLAMA, 'general.architecture': 'qwen35', 'decision.layout': 'semif-letters' }
+
+    const result = await service({ 'laya.gguf': laya, 'arbiter.gguf': stamped }).validateGguf('/x/laya.gguf')
+    const arbiter = await service({ 'arbiter.gguf': stamped }).validateGguf('/x/arbiter.gguf')
+
+    expect(result).toMatchObject({ isValid: false, error: expect.stringMatching(/decision model/) })
+    expect(result.metadata?.['general.architecture']).toBe('laya')
+    expect(arbiter.isValid).toBe(false)
+  })
+
   it('answers rather than throws for a file that is not a GGUF at all', async () => {
     // The user pointed at a file; "that is not a model" is the answer, not a core failure.
     const result = await service().validateGguf('/x/notes.txt')
@@ -99,6 +111,16 @@ describe('capabilities', () => {
     const caps = await service({ 'model.gguf': embedding }).capabilities('llamacpp-upstream', 'embedder')
 
     expect(caps.isEmbedding).toBe(true)
+    expect(caps.isDecision).toBe(false)
+  })
+
+  it('reports a decision model as one, and never as an embedding model', async () => {
+    await data.writeModel('router')
+    const laya = { 'general.architecture': 'laya', 'laya.context_length': '1024', 'laya.pooling_type': '1' }
+
+    const caps = await service({ 'model.gguf': laya }).capabilities('llamacpp-upstream', 'router')
+
+    expect(caps).toMatchObject({ isDecision: true, isEmbedding: false })
   })
 })
 

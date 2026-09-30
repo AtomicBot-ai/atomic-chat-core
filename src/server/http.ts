@@ -147,6 +147,8 @@ export function statusForCode(code: ErrorCode): number {
     case 'NOT_CONFIGURED':
     case 'CANCELLED':
     case 'ENGINE_UPDATE_REQUIRED':
+    case 'DECISION_NOT_CONFIGURED':
+    case 'DECISION_ENGINE_UNSUPPORTED':
       return 409
     case 'QUEUE_FULL':
       return 429
@@ -164,6 +166,7 @@ export function statusForCode(code: ErrorCode): number {
       return 400
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':
+    case 'DECISION_UNAVAILABLE':
       return 503
     case 'MODEL_LOAD_TIMED_OUT':
     case 'SERVER_START_TIMED_OUT':

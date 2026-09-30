@@ -171,6 +171,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
         modelId,
         mmprojExists: false,
         isEmbedding: false,
+        isDecision: false,
         vision: false,
         audio: false,
         gemmaMtp: false,

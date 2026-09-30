@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import type { DataLayout } from '../config/index.js'
 import type { LocalProviderId } from '../contracts/index.js'
 import { checkDflashSupport, checkGemmaMtpSupport, listDflashDrafts } from '../speculative/index.js'
-import { classifyProjector, ggufContextLength, isEmbeddingGguf } from './gguf/index.js'
+import { classifyProjector, ggufContextLength, isDecisionGguf, isEmbeddingGguf } from './gguf/index.js'
 import { readGgufMetadataFromFile } from './gguf/read-file.js'
 import type { ModelRegistry } from './registry.js'
 
@@ -33,6 +33,11 @@ export interface ModelCapabilities {
   /** A projector file exists, so this model can be given images. */
   mmprojExists: boolean
   isEmbedding: boolean
+  /**
+   * A decision model (`isDecisionGguf`): it runs in the decision module, never as a chat or embedding
+   * session, and `isEmbedding` is then `false`.
+   */
+  isDecision: boolean
   vision: boolean
   audio: boolean
   /** Speculative decoding this model id is known to support. */
@@ -73,6 +78,17 @@ export class ModelCapabilityService {
       return { isValid: false, error: (e as Error).message }
     }
     const architecture = metadata['general.architecture']
+    // Checked first: a decision GGUF parses as a perfectly good model (a stamped Arbiter is even a
+    // `qwen35`), but it answers probabilities, not text, and runs only in the decision module.
+    if (isDecisionGguf(metadata)) {
+      return {
+        isValid: false,
+        error:
+          'This is a decision model (a router or classifier) and cannot be imported as a text generation model. ' +
+          'Decision models run in the decision module (settings: decision.model_path).',
+        metadata,
+      }
+    }
     if (architecture === 'clip') {
       return {
         isValid: false,
@@ -98,6 +114,7 @@ export class ModelCapabilityService {
       modelId,
       mmprojExists: false,
       isEmbedding: false,
+      isDecision: false,
       vision: false,
       audio: false,
       gemmaMtp: checkGemmaMtpSupport(modelId),
@@ -134,6 +151,7 @@ export class ModelCapabilityService {
       ...base,
       ...(maxCtxTrain !== undefined ? { maxCtxTrain } : {}),
       isEmbedding: isEmbeddingGguf(metadata),
+      isDecision: isDecisionGguf(metadata),
     }
   }
 

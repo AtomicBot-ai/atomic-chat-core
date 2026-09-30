@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AtomicCoreError, DEFAULT_SERVER_SETTINGS } from '../contracts/index.js'
+import { AtomicCoreError, DEFAULT_DECISION_SETTINGS, DEFAULT_SERVER_SETTINGS } from '../contracts/index.js'
 import {
   EMPTY_PROVIDER_STATE,
   SETTINGS_FILE_VERSION,
@@ -411,5 +411,57 @@ describe('normalizeSettingsDocument', () => {
     expect(doc.state.migrations).toEqual({
       s: { baseline: null, legacy_hash: null, acknowledged_revision: null },
     })
+  })
+})
+
+describe('decision section', () => {
+  it('reads defaults and keeps a fresh file without the section', async () => {
+    const { fs, store } = await openFresh()
+    expect(store.decision).toEqual(DEFAULT_DECISION_SETTINGS)
+    expect(onDisk(fs)['decision']).toBeUndefined()
+  })
+
+  it('writes a checked patch in full, bumps the revision and reports it under the decision scope', async () => {
+    const { fs, store } = await openFresh()
+    const changes: SettingsChange[] = []
+    store.onChange((c) => changes.push(c))
+    const result = await store.updateDecision({ enabled: true, model_path: ' /m/laya.gguf ' })
+    expect(result).toEqual({ revision: 1, changed: ['enabled', 'model_path'] })
+    expect(store.decision).toMatchObject({ enabled: true, model_path: '/m/laya.gguf', timeout_ms: 500 })
+    expect(onDisk(fs)['decision']).toEqual({
+      ...DEFAULT_DECISION_SETTINGS,
+      enabled: true,
+      model_path: '/m/laya.gguf',
+    })
+    expect(changes.map((c) => [c.scope, c.key, c.value])).toEqual([
+      ['decision', 'enabled', true],
+      ['decision', 'model_path', '/m/laya.gguf'],
+    ])
+    expect(await store.updateDecision({ enabled: true })).toEqual({ revision: 1, changed: [] })
+  })
+
+  it('refuses unknown keys and bad values, and writes nothing', async () => {
+    const { fs, store } = await openFresh()
+    const writes = fs.ops.length
+    await expect(store.updateDecision({ timeout_ms: 0 })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    await expect(store.updateDecision({ model: 'x' })).rejects.toBeInstanceOf(AtomicCoreError)
+    expect(fs.ops.length).toBe(writes)
+    expect(store.revision).toBe(0)
+  })
+
+  it("keeps a newer core's keys and survives a hand-edited value", async () => {
+    const fs = new FakeFs()
+    fs.files.set(
+      PATH,
+      JSON.stringify({
+        version: 1,
+        revision: 3,
+        decision: { enabled: 'true', threads: 'many', from_the_future: 1 },
+      })
+    )
+    const store = await SettingsStore.open(PATH, { fs, now: () => NOW })
+    expect(store.decision).toMatchObject({ enabled: true, threads: 0 })
+    await store.updateDecision({ threads: 2 })
+    expect(onDisk(fs)['decision']).toMatchObject({ enabled: true, threads: 2, from_the_future: 1 })
   })
 })
