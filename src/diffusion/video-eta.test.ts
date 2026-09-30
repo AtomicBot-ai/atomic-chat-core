@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ImageJobPhase, ImageJobProgress } from '../contracts/index.js'
 import type { VideoForecast } from './video-estimate.js'
-import { MAX_FRACTION, SLOWDOWN_FLOOR_MS, VideoEta } from './video-eta.js'
+import { leftOf, MAX_FRACTION, SLOWDOWN_FLOOR_MS, VideoEta } from './video-eta.js'
 
 /** A forecast whose middle is 600 s: 10 s encoding, eight 60 s steps, 110 s decoding. */
 const FORECAST: VideoForecast = {
@@ -37,28 +37,37 @@ describe('the ETA before the first measured step', () => {
     expect(eta.progress(snap('sampling', 1), 100 * S).etaSeconds).toBeCloseTo(500, 9)
   })
 
-  it('is null without seconds in the estimate, without an estimate, or past the estimate', () => {
+  it('is null without seconds in the estimate or without an estimate', () => {
     expect(
       new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: false }).progress(snap('encoding'), S)
         .etaSeconds
     ).toBeNull()
     expect(new VideoEta({ startedAt: 0, estimated: false }).progress(snap('queued'), S).etaSeconds).toBeNull()
-    expect(
-      new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: true }).progress(snap('encoding'), 700 * S)
-        .etaSeconds
-    ).toBeNull()
+  })
+
+  it('starts over at twice the estimate once the estimate is spent, instead of going blank', () => {
+    const eta = new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: true })
+    expect(eta.progress(snap('encoding'), 700 * S).etaSeconds).toBeCloseTo(1200 - 700, 9)
+    expect(eta.progress(snap('encoding'), 1300 * S).etaSeconds).toBeCloseTo(2400 - 1300, 9)
   })
 })
 
 describe('the ETA while sampling', () => {
-  it('counts the remaining steps at the measured pace and the decode scaled by it', () => {
+  it('counts the remaining steps at the measured pace, and a faster pace leaves the decode whole', () => {
     const eta = new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: true })
     eta.progress(snap('sampling', 1), 70 * S)
-    // Steps at 30 s, half the forecast: the decode shrinks by the same ratio.
+    // Steps at 30 s, half the forecast: the decode's own error runs the other way, so it stays.
     const p = eta.progress(snap('sampling', 2), 100 * S)
-    expect(p.etaSeconds).toBeCloseTo(30 + 5 * 30 + 110 * 0.5, 9)
+    expect(p.etaSeconds).toBeCloseTo(30 + 5 * 30 + 110, 9)
     // Ten seconds into the next step, the countdown moves on.
-    expect(eta.progress(snap('sampling', 2), 110 * S).etaSeconds).toBeCloseTo(20 + 5 * 30 + 55, 9)
+    expect(eta.progress(snap('sampling', 2), 110 * S).etaSeconds).toBeCloseTo(20 + 5 * 30 + 110, 9)
+  })
+
+  it('stretches the decode by a slower pace', () => {
+    const eta = new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: true })
+    eta.progress(snap('sampling', 1), 70 * S)
+    // Steps at 120 s, twice the forecast: the decode doubles too.
+    expect(eta.progress(snap('sampling', 2), 190 * S).etaSeconds).toBeCloseTo(120 + 5 * 120 + 220, 9)
   })
 
   it('stretches the pace when a step runs past it, instead of freezing', () => {
@@ -87,15 +96,27 @@ describe('the ETA while sampling', () => {
 })
 
 describe('the ETA while decoding and saving', () => {
-  it('includes the decode, counts it down, and is null once the forecast is spent', () => {
+  it('includes the decode, counts it down, and starts over at twice the forecast once it is spent', () => {
     const eta = new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: true })
     for (let step = 1; step <= 7; step++) eta.progress(snap('sampling', step), (10 + step * 60) * S)
     const start = eta.progress(snap('decoding', 8), 490 * S)
     expect(start.etaSeconds).toBeGreaterThan(0)
     expect(start.etaSeconds).toBeLessThanOrEqual(110)
     expect(eta.progress(snap('decoding', 8), 550 * S).etaSeconds).toBeCloseTo(50, 9)
-    expect(eta.progress(snap('decoding', 8), 601 * S).etaSeconds).toBeNull()
-    expect(eta.progress(snap('saving', 8), 602 * S).etaSeconds).toBeNull()
+    // 111 s into a 110 s forecast: 220 s now, and 440 s past that.
+    expect(eta.progress(snap('decoding', 8), 601 * S).etaSeconds).toBeCloseTo(220 - 111, 9)
+    expect(eta.progress(snap('decoding', 8), 711 * S).etaSeconds).toBeCloseTo(440 - 221, 9)
+    expect(eta.progress(snap('saving', 8), 712 * S).etaSeconds).toBeNull()
+  })
+
+  it('keeps the fraction moving through a decode past its forecast', () => {
+    const eta = new VideoEta({ startedAt: 0, forecast: FORECAST, estimated: true })
+    for (let step = 1; step <= 7; step++) eta.progress(snap('sampling', step), (10 + step * 60) * S)
+    eta.progress(snap('decoding', 8), 490 * S)
+    const late = eta.progress(snap('decoding', 8), 1000 * S).fraction
+    const later = eta.progress(snap('decoding', 8), 1300 * S).fraction
+    expect(later).toBeGreaterThan(late)
+    expect(later).toBeLessThan(MAX_FRACTION)
   })
 
   it('has no decode forecast without an estimate', () => {
@@ -115,11 +136,11 @@ describe('a tiled decode', () => {
 
   it('counts down from the measured time per tile once a tile finished, and reports the tiles', () => {
     const eta = sampled()
-    // The pass is announced: no tile measured, the forecast speaks until it is spent.
+    // The pass is announced: no tile measured, the forecast speaks, doubled once it is spent.
     const start = eta.progress(snap('decoding', 8), 490 * S, tiles(0))
     expect(start.decodeTiles).toEqual({ done: 0, total: 8 })
     expect(start.etaSeconds).toBeCloseTo(110, 9)
-    expect(eta.progress(snap('decoding', 8), 650 * S, tiles(0)).etaSeconds).toBeNull()
+    expect(eta.progress(snap('decoding', 8), 650 * S, tiles(0)).etaSeconds).toBeCloseTo(220 - 160, 9)
     // The first tile took 250 s: seven to go at that pace.
     const first = eta.progress(snap('decoding', 8), 740 * S, tiles(1))
     expect(first.decodeTiles).toEqual({ done: 1, total: 8 })
@@ -145,7 +166,7 @@ describe('a tiled decode', () => {
     // sd.cpp retried the decode with finer tiling: nothing measured in the new pass yet.
     const retry = eta.progress(snap('decoding', 8), 700 * S, tiles(0, 12))
     expect(retry.decodeTiles).toEqual({ done: 0, total: 12 })
-    expect(retry.etaSeconds).toBeNull()
+    expect(retry.etaSeconds, 'the forecast again, 210 s into the decode').toBeCloseTo(220 - 210, 9)
     expect(eta.progress(snap('decoding', 8), 760 * S, tiles(1, 12)).etaSeconds).toBeCloseTo(11 * 60, 9)
     // The same count again from zero is a new pass too.
     eta.progress(snap('decoding', 8), 800 * S, tiles(0, 12))
@@ -153,7 +174,7 @@ describe('a tiled decode', () => {
     // A later attempt that decodes in one graph falls back to the forecast.
     const plain = eta.progress(snap('decoding', 8), 820 * S)
     expect(plain).not.toHaveProperty('decodeTiles')
-    expect(plain.etaSeconds).toBeNull()
+    expect(plain.etaSeconds).toBeCloseTo(440 - 330, 9)
   })
 
   it('flags a tile running past three medians of the finished ones and twenty seconds', () => {
@@ -185,6 +206,21 @@ describe('a tiled decode', () => {
     for (let tile = 1; tile <= 8; tile++)
       done.progress(snap('decoding', 8), (490 + tile * 5) * S, tiles(tile))
     expect(done.progress(snap('decoding', 8), 900 * S, tiles(8)).slowdown, 'every tile done').toBe(false)
+  })
+})
+
+describe('leftOf', () => {
+  it('is the forecast’s rest, then the rest of the forecast doubled until it is ahead again', () => {
+    expect(leftOf(100, 0)).toBe(100)
+    expect(leftOf(100, 40)).toBe(60)
+    expect(leftOf(100, 100), 'spent exactly: a whole new stretch').toBe(100)
+    expect(leftOf(100, 250)).toBe(150)
+    expect(leftOf(100, 400)).toBe(400)
+  })
+
+  it('is null without a forecast', () => {
+    expect(leftOf(0, 10)).toBeNull()
+    expect(leftOf(Number.NaN, 10)).toBeNull()
   })
 })
 

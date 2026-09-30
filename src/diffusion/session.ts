@@ -196,6 +196,41 @@ export function videoCapabilities(state: DiffusionState): VideoCapabilities {
 }
 
 /**
+ * The spec to run after `spec` ran out of memory: its offload fallback, dropped once taken so a second
+ * shortage is reported rather than retried. `undefined` when there is none.
+ */
+export function withOffloadFallback(spec: ServerSpec): ServerSpec | undefined {
+  const { offloadFallback, ...rest } = spec
+  if (offloadFallback === undefined || offloadFallback === spec.offload) return undefined
+  return { ...rest, offload: offloadFallback }
+}
+
+const settleGpu = async (deps: SessionDeps, spec: ServerSpec): Promise<void> => {
+  if (spec.backend === 'cuda' || spec.backend === 'rocm') await deps.sleep(GPU_SETTLE_MS)
+}
+
+/** Spawn `spec`; when it runs out of memory loading and has an offload fallback, spawn that instead. */
+async function spawnFallingBack(
+  deps: SessionDeps,
+  spec: ServerSpec,
+  signal?: AbortSignal
+): Promise<{ server: ServerHandle; spec: ServerSpec }> {
+  const scratchDir = deps.state.paths.scratchDir
+  try {
+    return { server: await deps.spawn(spec, scratchDir, signal), spec }
+  } catch (raw) {
+    const fallback = withOffloadFallback(spec)
+    if (!fallback || signal?.aborted || toDiffusionError(raw).code !== 'OUT_OF_MEMORY') throw raw
+    deps.log(
+      'warn',
+      `sd-server ran out of memory loading under ${spec.offload} offload; retrying under ${fallback.offload}`
+    )
+    await settleGpu(deps, fallback)
+    return { server: await deps.spawn(fallback, scratchDir, signal), spec: fallback }
+  }
+}
+
+/**
  * Spawn the server for `spec` and make it the resident session. The caller holds the load lock,
  * and any previous session is already gone.
  */
@@ -208,7 +243,7 @@ export async function loadFromSpec(
   const { state } = deps
   state.setModelState('loading')
   await emitState(deps, reason)
-  if (spec.backend === 'cuda' || spec.backend === 'rocm') await deps.sleep(GPU_SETTLE_MS)
+  await settleGpu(deps, spec)
 
   // A load reads the sizes the video estimate weighs, once; a respawn of the kept spec reuses them.
   const fileBytes =
@@ -216,11 +251,11 @@ export async function loadFromSpec(
       ? await modelFileBytes(spec.files, deps.fileSize)
       : state.modelFileBytes
 
-  let server: ServerHandle
+  let started: { server: ServerHandle; spec: ServerSpec }
   try {
     // A retained spec can name an engine build that an update has since made too old for it.
     checkEngineCompatibility(spec.family, spec.tag)
-    server = await deps.spawn(spec, state.paths.scratchDir, signal)
+    started = await spawnFallingBack(deps, spec, signal)
   } catch (raw) {
     const error = toDiffusionError(raw)
     const body = errorBody(error)
@@ -230,21 +265,23 @@ export async function loadFromSpec(
     throw error
   }
 
+  // What runs, which is `spec` unless loading it ran out of memory and its fallback took over.
+  const { server, spec: running } = started
   const info: LoadedDiffusionModel = {
-    modelId: spec.modelId,
-    family: spec.family,
-    modality: spec.modality,
-    displayName: spec.displayName,
-    engine: spec.engine,
-    backend: spec.backend,
-    offload: spec.offload,
-    cpuFallback: spec.cpuFallback,
+    modelId: running.modelId,
+    family: running.family,
+    modality: running.modality,
+    displayName: running.displayName,
+    engine: running.engine,
+    backend: running.backend,
+    offload: running.offload,
+    cpuFallback: running.cpuFallback,
     port: server.port,
     pid: server.pid,
     loadedAtMs: deps.now(),
   }
-  state.session = { server, info, spec, baseUrl: `http://127.0.0.1:${server.port}` }
-  state.spec = spec
+  state.session = { server, info, spec: running, baseUrl: `http://127.0.0.1:${server.port}` }
+  state.spec = running
   state.modelFileBytes = fileBytes
   state.setModelState('loaded')
   state.touchIdle()

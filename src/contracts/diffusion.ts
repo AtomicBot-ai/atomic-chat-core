@@ -94,6 +94,12 @@ export interface LoadDiffusionModelRequest {
   defaults: DiffusionFamilyDefaults
   ranges: DiffusionFamilyRanges
   offload: DiffusionOffloadPolicy
+  /**
+   * The policy to move to when the model runs out of memory under `offload`: the load, or the job,
+   * that ran out is retried once with it, and the session keeps it until the next load. Ignored when
+   * it equals `offload`.
+   */
+  offloadFallback?: DiffusionOffloadPolicy
   engine?: DiffusionEngineId
   /** `--threads`, for CPU backends. */
   threads?: number
@@ -442,8 +448,8 @@ export interface VideoJobProgress {
   /**
    * Seconds left for the whole job: encoding, the remaining steps and the VAE decode. Before the
    * first measured step it comes from `VideoJob.estimate`; once a tiled decode finished a tile, from
-   * the measured time per tile. `null` when unknown, when a decode without a finished tile ran past
-   * its forecast, and while saving.
+   * the measured time per tile. A forecast that is spent is doubled rather than dropped. `null` when
+   * unknown, once every tile of a tiled decode is done, and while saving.
    */
   etaSeconds: number | null
   /**

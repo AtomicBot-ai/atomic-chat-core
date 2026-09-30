@@ -6,7 +6,27 @@
 
 type Meta = Record<string, unknown> | undefined | null
 
-const EMBEDDED_MTP_ARCHITECTURES = new Set(['qwen35', 'qwen35moe'])
+/**
+ * `general.architecture` values whose llama.cpp graph builds the embedded MTP head
+ * (`LLM_GRAPH_TYPE_DECODER_MTP` in `src/models/*.cpp`), as of upstream b10809 (5266f24da).
+ * A GGUF still needs `{arch}.nextn_predict_layers` > 0: most conversions strip the head.
+ */
+const EMBEDDED_MTP_ARCHITECTURES = new Set([
+  'bailingmoe3',
+  'cohere2moe',
+  'deepseek2',
+  'deepseek32',
+  'deepseek4',
+  'glm-dsa',
+  'glm4moe',
+  'hy_v3',
+  'mimo2',
+  'nemotron_h_moe',
+  'qwen35',
+  'qwen35moe',
+  'qwen3next',
+  'step35',
+])
 
 /** True iff the load-error text is an MTP rejection (llama.cpp has no structured code for it). */
 export function matchesMtpLoadFailure(text: string): boolean {
@@ -18,7 +38,7 @@ export function matchesMtpLoadFailure(text: string): boolean {
   )
 }
 
-/** A combined Qwen GGUF whose MTP head is embedded (`{arch}.nextn_predict_layers` > 0). */
+/** A GGUF whose MTP head is embedded (`{arch}.nextn_predict_layers` > 0). */
 export function hasEmbeddedMtp(metadata: Meta): boolean {
   if (!metadata) return false
   const architecture = metadata['general.architecture']

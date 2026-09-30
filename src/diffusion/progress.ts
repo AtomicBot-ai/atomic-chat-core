@@ -204,6 +204,9 @@ export function classifyExit(tail: string, code: number | undefined): 'OUT_OF_ME
     lower.includes('out of memory') ||
     lower.includes('failed to allocate') ||
     lower.includes('cudaerrormemoryallocation') ||
+    lower.includes('cuda_error_out_of_memory') ||
+    // ggml-vulkan: `vk::Device::allocateMemory: ErrorOutOfDeviceMemory`, as the chat classifier knows it.
+    lower.includes('erroroutofdevicememory') ||
     lower.includes('insufficient memory') ||
     // sd.cpp's model manager, when a graph (the Wan VAE decoding a long clip on Metal, seen
     // 2026-09-23 at 27.6 GB against 14.9 GB) does not fit: the job fails, the server lives on.

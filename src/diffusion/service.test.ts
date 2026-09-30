@@ -500,6 +500,29 @@ describe.skipIf(!posix)('generating', () => {
     await expect(h.service.cancelJob(jobId)).resolves.toEqual({ cancelled: false, serverStopped: false })
   })
 
+  it('finishes a job that ran out of GPU memory under the offload fallback', async () => {
+    const h = harness()
+    await h.service.configure({ dataFolder })
+    const argvFile = join(dataFolder, 'argv.json')
+    await installFakeSdEngine(layout, {
+      mode: 'die-mid-job',
+      onceMarker: join(dataFolder, 'once'),
+      argvFile,
+      stepMs: 10,
+    })
+    const loaded = await h.service.loadModel({ ...(await loadRequest()), offloadFallback: 'group' })
+    expect(loaded.offload).toBe('none')
+    expect(JSON.parse(await readFile(argvFile, 'utf8'))).not.toContain('--offload-to-cpu')
+
+    const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    await waitFor(() => h.service.getJob(jobId)?.state === 'completed')
+    expect(h.service.getJob(jobId)?.outputs[0]?.recipe.engine.offload).toBe('group')
+    expect(JSON.parse(await readFile(argvFile, 'utf8'))).toContain('--offload-to-cpu')
+    expect((await h.service.getStatus()).model.loaded?.offload).toBe('group')
+    expect(h.reasons()).toContain('offload-fallback')
+    expect(h.events.filter((e) => e.name === 'diffusion:error')).toEqual([])
+  })
+
   it('shuts down: the server is gone and nothing loads any more', async () => {
     const h = await loadedService()
     await h.service.shutdown()

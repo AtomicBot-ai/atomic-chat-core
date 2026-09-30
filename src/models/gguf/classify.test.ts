@@ -48,6 +48,32 @@ describe('hasEmbeddedMtp / isMtpCapable', () => {
     expect(hasEmbeddedMtp({ 'general.architecture': 'qwen35', 'qwen35.block_count': '40' })).toBe(false)
     expect(hasEmbeddedMtp(null)).toBe(false)
   })
+  it.each([
+    ['qwen3next', true],
+    ['glm4moe', true],
+    ['glm-dsa', true],
+    ['deepseek2', true],
+    ['deepseek32', true],
+    ['deepseek4', true],
+    ['nemotron_h_moe', true],
+    ['step35', true],
+    ['mimo2', true],
+    ['bailingmoe3', true],
+    ['hy_v3', true],
+    ['cohere2moe', true],
+    // Upstream builds no MTP graph for these even when the metadata reports nextn layers.
+    ['nemotron_h', false],
+    ['gemma4', false],
+    ['granite-switch', false],
+  ])('%s with nextn layers → %s (upstream MTP graph)', (arch, expected) => {
+    expect(
+      hasEmbeddedMtp({
+        'general.architecture': arch,
+        [`${arch}.block_count`]: '48',
+        [`${arch}.nextn_predict_layers`]: '1',
+      })
+    ).toBe(expected)
+  })
   it('isMtpCapable is true with a draft path regardless of metadata', () => {
     expect(isMtpCapable(null, '/draft.gguf')).toBe(true)
     expect(isMtpCapable({ 'general.architecture': 'llama' }, '')).toBe(false)
