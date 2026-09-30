@@ -52,6 +52,7 @@ describe('parseLoadModelRequest', () => {
         qwen2vl: '/q',
       },
       defaults: { ...load().defaults, guidance: 3.5, samplingMethod: 'euler', flowShift: 3 },
+      offloadFallback: 'group',
       engine: 'sd-cpp',
       threads: 6,
       startupTimeoutSecs: 900,
@@ -82,6 +83,9 @@ describe('parseLoadModelRequest', () => {
     )
     expect(refusal(() => parseLoadModelRequest({ ...load(), offload: 'all' }))).toBe(
       'offload: expected one of none, group, model'
+    )
+    expect(refusal(() => parseLoadModelRequest({ ...load(), offloadFallback: 'cpu' }))).toBe(
+      'offloadFallback: expected one of none, group, model'
     )
     expect(refusal(() => parseLoadModelRequest({ ...load(), engine: 'comfy' }))).toBe(
       'engine: expected one of sd-cpp, diffusers'

@@ -148,6 +148,9 @@ describe('classifyExit', () => {
     )
     expect(classifyExit('CUDA error: Out Of Memory', 1)).toBe('OUT_OF_MEMORY')
     expect(classifyExit('cudaErrorMemoryAllocation', 1)).toBe('OUT_OF_MEMORY')
+    expect(classifyExit('CUDA_ERROR_OUT_OF_MEMORY', 1)).toBe('OUT_OF_MEMORY')
+    // The Vulkan fixture of the chat classifier (test/fixtures/app/errors/oom_vulkan_device_memory.json).
+    expect(classifyExit('vk::Device::allocateMemory: ErrorOutOfDeviceMemory\n', 1)).toBe('OUT_OF_MEMORY')
     expect(
       classifyExit('Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)', 1)
     ).toBe('OUT_OF_MEMORY')

@@ -790,6 +790,84 @@ describe('the server dying', () => {
     expect(error.message).toBe('sd-server exited during generation (signal SIGABRT).')
   })
 
+  /** A harness whose loaded spec keeps the model on the GPU and falls back to `group` offload. */
+  const onGpuFallingBack = (port: number): Harness => {
+    const h = harness(port)
+    const spec: ServerSpec = { ...sampleSpec(), offload: 'none', offloadFallback: 'group' }
+    h.state.spec = spec
+    if (h.state.session) h.state.session.spec = spec
+    return h
+  }
+
+  it('out of memory on the GPU is retried once under the offload fallback', async () => {
+    let submits = 0
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/img_gen') {
+        submits += 1
+        return json(202, { id: `job_${submits}`, status: 'queued' })
+      }
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_2')
+        return json(200, {
+          id: 'job_2',
+          status: 'completed',
+          result: { images: [{ index: 0, b64_json: pngB64 }] },
+        })
+      if (method === 'GET' && path.startsWith('/sdcpp/v1/jobs/job_'))
+        return json(200, { id: 'job', status: 'generating' })
+      return json(404, {})
+    })
+    const h = onGpuFallingBack(port)
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
+    await sleep(60)
+    h.server.say('CUDA error: out of memory')
+    h.server.exit({ code: 1, signal: null })
+    const result = await done
+    expect(result.ok).toBe(true)
+    expect(h.spawned.map((s) => s.offload)).toEqual(['group'])
+    expect(h.spawned[0]?.offloadFallback).toBeUndefined()
+    expect(h.state.spec?.offload).toBe('group')
+    expect(h.reasons()).toContain('offload-fallback')
+    expect(h.errors(), 'the retried shortage is not reported').toEqual([])
+    expect(h.log.some((line) => line.includes('restarting sd-server under group'))).toBe(true)
+    if (result.ok) expect(result.outcome.job.outputs[0]?.recipe.engine.offload).toBe('group')
+  })
+
+  it('a job the GPU could not fit is retried under the fallback, and failing there fails it', async () => {
+    let submits = 0
+    let failed = false
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/img_gen') {
+        submits += 1
+        return json(202, { id: `job_${submits}`, status: 'queued' })
+      }
+      if (method === 'GET' && path.startsWith('/sdcpp/v1/jobs/job_'))
+        return failed
+          ? json(200, {
+              id: path.slice(-5),
+              status: 'failed',
+              result: null,
+              error: { code: 'generation_failed', message: 'generate_image returned no results' },
+            })
+          : json(200, { id: path.slice(-5), status: 'generating' })
+      return json(404, {})
+    })
+    const h = onGpuFallingBack(port)
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
+    await sleep(60)
+    // The server outlives the shortage; what it printed is what makes the failure a shortage.
+    h.server.say(
+      'ggml_backend_cuda_buffer_type_alloc_buffer: allocating 13576.00 MiB on device 0: out of memory'
+    )
+    failed = true
+    const error = failure(await done)
+    expect(submits).toBe(2)
+    expect(h.spawned.map((s) => s.offload)).toEqual(['group'])
+    // The respawned server under `group` fails too, and nothing is left to fall back to.
+    expect(error.code).toBe('INTERNAL')
+    expect(h.state.spec?.offload).toBe('group')
+    expect(h.state.spec?.offloadFallback).toBeUndefined()
+  })
+
   it('before the submit is reported from its output, and a stopped server from its absence', async () => {
     // The submit never gets an answer: the connection drops after 60 ms, as it does when the server dies.
     const port = await stub((method, path) =>

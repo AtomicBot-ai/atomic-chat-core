@@ -29,9 +29,11 @@ import {
   takeDownSession,
   unload,
   videoCapabilities,
+  withOffloadFallback,
 } from './session.js'
 import type { SessionDeps } from './session.js'
 import { DiffusionState } from './state.js'
+import type { ServerSpec } from './types.js'
 
 let dataFolder: string
 beforeEach(async () => {
@@ -277,6 +279,59 @@ describe('loading', () => {
       code: 'INTERNAL',
       message: 'spawn EPERM',
     })
+  })
+
+  it('loads the offload fallback, once, when the spec runs out of memory loading', async () => {
+    const h = harness()
+    const spawned: ServerSpec[] = []
+    const spawn = h.deps.spawn
+    h.deps.spawn = (next, scratchDir, signal) => {
+      spawned.push(next)
+      return spawn(next, scratchDir, signal)
+    }
+    const outOfMemory = () =>
+      diffusionError('OUT_OF_MEMORY', 'The image model ran out of memory while loading.', 'tail')
+    const spec = sampleSpec({ backend: 'cuda', offload: 'none', offloadFallback: 'group' })
+
+    h.failNextSpawn(outOfMemory())
+    const info = await loadFromSpec(h.deps, spec, 'load')
+    expect(spawned.map((s) => s.offload)).toEqual(['none', 'group'])
+    expect(info.offload).toBe('group')
+    expect(h.state.session?.info.offload).toBe('group')
+    expect(h.state.spec, 'the session keeps the fallback and has none left').toEqual(
+      withOffloadFallback(spec)
+    )
+    expect(h.state.spec?.offloadFallback).toBeUndefined()
+    expect(h.slept, 'CUDA waits for the driver after the dead server too').toEqual([
+      GPU_SETTLE_MS,
+      GPU_SETTLE_MS,
+    ])
+    expect(h.reasons()).toEqual(['load', 'loaded'])
+    expect(h.events.some((e) => e.name === 'diffusion:error')).toBe(false)
+
+    // Under the fallback there is nowhere left to go: a second shortage is the load's failure.
+    h.failNextSpawn(outOfMemory())
+    await expect(loadFromSpec(h.deps, h.state.spec as ServerSpec, 'respawn')).rejects.toMatchObject({
+      code: 'OUT_OF_MEMORY',
+    })
+    // Nor is any other failure retried under the fallback, or a load that was called off meanwhile.
+    h.failNextSpawn(new Error('spawn EPERM'))
+    await expect(loadFromSpec(h.deps, spec, 'load')).rejects.toMatchObject({ code: 'INTERNAL' })
+    const calledOff = new AbortController()
+    calledOff.abort()
+    h.failNextSpawn(outOfMemory())
+    await expect(loadFromSpec(h.deps, spec, 'load', calledOff.signal)).rejects.toMatchObject({
+      code: 'OUT_OF_MEMORY',
+    })
+    expect(spawned.map((s) => s.offload)).toEqual(['none', 'group', 'group', 'none', 'none'])
+  })
+
+  it('has no offload fallback without one, or with one equal to the offload', () => {
+    expect(withOffloadFallback(sampleSpec({ offload: 'none' }))).toBeUndefined()
+    expect(withOffloadFallback(sampleSpec({ offload: 'group', offloadFallback: 'group' }))).toBeUndefined()
+    expect(withOffloadFallback(sampleSpec({ offload: 'none', offloadFallback: 'model' }))).toEqual(
+      sampleSpec({ offload: 'model' })
+    )
   })
 
   // Port of `incompatible_retained_spec_is_rejected_before_any_spawn_or_file_access`

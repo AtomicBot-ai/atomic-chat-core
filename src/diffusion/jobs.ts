@@ -33,7 +33,7 @@ import type { AnyJobKind, JobCommon, JobKind, JobPlan, ProgressModel } from './j
 import type { AsyncMutex } from './mutex.js'
 import { classifyExit, diagnosticTail, GpuFaultWatch } from './progress.js'
 import { describeExit, exitCodeOf } from './server-process.js'
-import { loadFromSpec, stopKeepingSpec, takeDownSession } from './session.js'
+import { loadFromSpec, stopKeepingSpec, takeDownSession, withOffloadFallback } from './session.js'
 import type { SessionDeps } from './session.js'
 import type { CancelFlag, DiffusionState, JobKindId, JobRecord } from './state.js'
 import { isTerminalJobState } from './state.js'
@@ -300,7 +300,8 @@ function liveness(state: DiffusionState): Liveness {
   return { kind: 'exited', exit, tail: session.server.tail() }
 }
 
-type Attempt<J> = { kind: 'done'; outcome: JobOutcome<J> } | { kind: 'retry-on-cpu' }
+type Attempt<J> =
+  { kind: 'done'; outcome: JobOutcome<J> } | { kind: 'retry-on-cpu' } | { kind: 'retry-with-offload' }
 
 /** A request's own seed when it has one, else a drawn one; the record and the recipe carry it. */
 function seedOf(request: unknown, deps: JobDeps): number {
@@ -320,18 +321,32 @@ async function execute<Req, Job extends JobCommon<Item, Progress>, Item, Progres
   const started = deps.now()
   const record = deps.state.record(id)
   if (!record) throw internalError('job record vanished')
-  // One model for the whole job, so a CPU-fallback retry keeps its fraction and its slowdown flag.
+  // One model for the whole job, so a fallback retry keeps its fraction and its slowdown flag.
   const model = kind.progressModel(record, started) as ProgressModel<unknown>
-  for (let attempts = 1; ; attempts++) {
+  let retriedOnCpu = false
+  for (;;) {
     const view = await ensureSession(deps, cancel)
     kind.preflight?.(deps.state.session?.server.capabilities)
     const body = kind.buildBody(request, view.spec, seed, inputs, record)
     const attempt = await runAttempt(deps, kind, id, request, view, body, seed, cancel, started, model)
     if (attempt.kind === 'done') return attempt.outcome
-    if (attempts > 1) throw diffusionError('ENGINE_CRASHED', 'sd-server crashed again on the CPU backend.')
+    if (attempt.kind === 'retry-with-offload') {
+      // Only returned while the spec has a fallback, and taking it drops it: this runs once per load.
+      const fallback = withOffloadFallback(view.spec) ?? view.spec
+      deps.log(
+        'warn',
+        `out of memory under ${view.spec.offload} offload; restarting sd-server under ${fallback.offload}`
+      )
+      await replaceSession(deps, () => fallback, 'offload-fallback', cancel)
+      continue
+    }
+    if (retriedOnCpu) throw diffusionError('ENGINE_CRASHED', 'sd-server crashed again on the CPU backend.')
+    retriedOnCpu = true
     deps.log('warn', 'ggml abort on the device backend; restarting sd-server on the CPU backend')
+    // On the CPU backend the offload flags move nothing, so there is no fallback left to take.
+    const { offloadFallback: _unused, ...device } = view.spec
     const spec: ServerSpec = {
-      ...view.spec,
+      ...device,
       extraArgs: cpuBackendExtraArgs(view.spec.extraArgs),
       cpuFallback: true,
     }
@@ -473,6 +488,7 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
       const text = diagnosticTail(live.tail)
       if (isGgmlUnsupportedOpAbort(text) && !view.spec.cpuFallback) return { kind: 'retry-on-cpu' }
       const code = classifyExit(text, exitCodeOf(live.exit))
+      if (code === 'OUT_OF_MEMORY' && withOffloadFallback(view.spec)) return { kind: 'retry-with-offload' }
       const error = diffusionError(
         code,
         code === 'OUT_OF_MEMORY'
@@ -550,6 +566,7 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
         const said = diagnosticTail(tracker.logLines(), 12, 1200)
         const outOfMemory = classifyExit(`${message}\n${said}`, undefined) === 'OUT_OF_MEMORY'
         deps.log('warn', `sd-server failed the job (${code}: ${message}):\n${said}`)
+        if (outOfMemory && withOffloadFallback(view.spec)) return { kind: 'retry-with-offload' }
         throw diffusionError(
           outOfMemory ? 'OUT_OF_MEMORY' : 'INTERNAL',
           outOfMemory ? kind.messages.outOfMemory : kind.messages.failed,
