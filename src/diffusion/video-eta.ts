@@ -5,15 +5,23 @@
  * tracker's snapshot and the decode's tile pass at every emit; it keeps the step and tile marks, the
  * phase it saw last, the fraction it reported and the sticky slowdown flag. Pure over the times it
  * is given. The rules are the `video-generation/progress` spec of the `add-video-generation-estimate`
- * change, and ADR 2026-09-29-report-the-tiled-decode-and-tile-it-by-memory for the decode.
+ * change, ADR 2026-09-29-report-the-tiled-decode-and-tile-it-by-memory for the decode, and ADR
+ * 2026-09-30-keep-the-video-eta-past-its-forecast for a job that outruns its forecast.
  */
 
 import type { ImageJobPhase, ImageJobProgress, VideoJobProgress } from '../contracts/index.js'
 import type { DecodeTiles } from './tracker.js'
 import type { VideoForecast } from './video-estimate.js'
 
-/** The step-time ratio (measured against forecast) the decode forecast is scaled by stays in here. */
-export const STEP_RATIO_RANGE: readonly [number, number] = [0.25, 20]
+/**
+ * The step-time ratio (measured against forecast) the decode forecast is scaled by stays in here. Steps
+ * faster than forecast never shrink the decode: its own error runs the other way (ADR
+ * 2026-09-30-keep-the-video-eta-past-its-forecast), and a history multiplier raised by slow decodes
+ * would otherwise be divided back out of it.
+ */
+export const STEP_RATIO_RANGE: readonly [number, number] = [1, 20]
+/** Past its forecast, a stretch of the job is forecast at this many times as long, again and again. */
+export const OVERRUN_GROWTH = 2
 /** Slowdown: the running step (or decode tile) took this many medians of the completed ones… */
 export const SLOWDOWN_MEDIANS = 3
 /** …and at least this long, so a slow first step (graph build, weights paged in) never trips it. */
@@ -46,6 +54,18 @@ function median(values: readonly number[]): number {
   return sorted.length % 2 === 1
     ? (sorted[mid] as number)
     : ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2
+}
+
+/**
+ * Seconds left of a stretch forecast at `forecast` seconds that has run for `spent`: the forecast's
+ * rest, and once that is spent, the rest of the forecast grown by `OVERRUN_GROWTH` until it is ahead
+ * again, so the countdown starts over instead of going blank. Null without a forecast.
+ */
+export function leftOf(forecast: number, spent: number): number | null {
+  if (!(forecast > 0)) return null
+  let horizon = forecast
+  while (horizon <= spent) horizon *= OVERRUN_GROWTH
+  return horizon - spent
 }
 
 /** The duration (ms) of every unit completed after the first mark, one entry per unit. */
@@ -169,8 +189,7 @@ export class VideoEta {
         const tiles = this.tileEta(now)
         if (tiles !== undefined) return tiles > 0 ? tiles : null
         if (!forecast) return null
-        const left = forecast.decodeSeconds * this.ratio(measured) - (now - this.phaseAt) / 1000
-        return left > 0 ? left : null
+        return leftOf(forecast.decodeSeconds * this.ratio(measured), (now - this.phaseAt) / 1000)
       }
       case 'sampling':
         if (measured !== undefined) return this.samplingEta(snapshot, now, measured)
@@ -181,8 +200,7 @@ export class VideoEta {
     }
     // Before the first measured step: the estimate's middle, less the time already spent.
     if (!forecast || !estimated) return null
-    const left = forecast.totalSeconds - elapsedMs / 1000
-    return left > 0 ? left : null
+    return leftOf(forecast.totalSeconds, elapsedMs / 1000)
   }
 
   /**
