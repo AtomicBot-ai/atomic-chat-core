@@ -14,7 +14,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { totalmem, userInfo } from 'node:os'
+import { freemem, totalmem, userInfo } from 'node:os'
 
 export interface CommandResult {
   /** Null when the command could not start (not installed) or timed out. */
@@ -132,6 +132,23 @@ const mib = (cell: string | undefined): number | null =>
 
 /** What a card offers a model: its own VRAM, or host memory for a unified-memory card (D13). */
 export const cardBytes = (gpu: Pick<LiveGpu, 'total_bytes'>): number => gpu.total_bytes ?? totalmem()
+
+/** What a card has free now: its own free VRAM, or free host memory for a unified-memory card (D13). */
+export const cardFreeBytes = (gpu: Pick<LiveGpu, 'free_bytes'>): number => gpu.free_bytes ?? freemem()
+
+/**
+ * The card a load without `gpu_id` gets (design D12b, core's `selectLaunchGpu`): the most free memory,
+ * then the most total memory, then the first in nvidia-smi's order.
+ */
+export function pickLaunchCard<T extends Pick<LiveGpu, 'total_bytes' | 'free_bytes'>>(
+  gpus: readonly T[]
+): T | undefined {
+  return gpus.reduce<T | undefined>((best, gpu) => {
+    if (best === undefined) return gpu
+    const free = cardFreeBytes(gpu) - cardFreeBytes(best)
+    return (free !== 0 ? free > 0 : cardBytes(gpu) > cardBytes(best)) ? gpu : best
+  }, undefined)
+}
 
 /** `nvidia-smi --query-gpu=uuid,name,compute_cap,memory.total,memory.free,driver_version --format=csv,noheader,nounits`. */
 export function parseNvidiaSmi(csv: string): LiveGpu[] {

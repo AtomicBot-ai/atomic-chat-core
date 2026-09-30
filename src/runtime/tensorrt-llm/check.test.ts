@@ -164,7 +164,7 @@ describe('checkTensorrtLlmModel', () => {
     }
   })
 
-  it('checks the stored gpu_id when the request names none, not just "most memory" (finding 3)', async () => {
+  it('checks the stored gpu_id when the request names none, not the default card (finding 3)', async () => {
     const SMALL_ID = 'GPU-00000000-0000-0000-0000-000000000001'
     const LARGE_ID = 'GPU-00000000-0000-0000-0000-000000000002'
     const small = gpu({ gpu_id: SMALL_ID, total_vram_bytes: 8_000_000_000, free_vram_bytes: 8_000_000_000 })

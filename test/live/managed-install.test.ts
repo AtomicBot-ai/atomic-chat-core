@@ -54,6 +54,7 @@ import { pickCuratedModel, prepareCuratedModel, readDescriptor } from '../helper
 import type { CuratedModel } from '../helpers/live-hf-model.js'
 import {
   cardBytes,
+  pickLaunchCard,
   daemonJsonDigest,
   detectHost,
   dockerCli,
@@ -1038,8 +1039,9 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
 
   scenario('model-chat', 4 * HOUR, needsReady, async () => {
     const api = core().api
-    // The card a launch picks: the most memory (unified memory counts as the host's).
-    const gpu = [...S.facts.gpus].sort((a, b) => cardBytes(b) - cardBytes(a))[0]
+    // The card a launch without gpu_id picks (D12b): the most free memory, then the most total
+    // (unified memory counts as the host's).
+    const gpu = pickLaunchCard(S.facts.gpus)
     expect(gpu).toBeDefined()
     const curated = pickCuratedModel(
       S.descriptor.curated_models,
