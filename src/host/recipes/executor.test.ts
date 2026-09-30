@@ -78,8 +78,13 @@ class FakeHost {
   cdiElsewhere = false
   /** `nvidia-ctk cdi generate` exits 0 and writes a spec, but one without a device (no driver it can read). */
   cdiGenerateEmpty = false
-  /** `nvidia-cdi-refresh.path`: not shipped (toolkit before 1.18), shipped but disabled, or enabled. */
-  cdiRefreshUnit: 'absent' | 'disabled' | 'enabled' = 'disabled'
+  /**
+   * `nvidia-cdi-refresh.path`: `absent` (not shipped, toolkit before 1.18), or what `systemctl
+   * is-enabled` prints for it (`disabled`, `enabled`, `static`, `masked`, ...).
+   */
+  cdiRefreshUnit = 'disabled'
+  /** The mode `nvidia-ctk cdi generate` leaves the spec with. */
+  cdiGenerateMode = 0o644
   /**
    * docker.service and docker.socket after a failed start (F-4, F-6): systemd refuses to start them
    * again (`start-limit-hit`) until `systemctl reset-failed`.
@@ -123,7 +128,21 @@ class FakeHost {
           : ok('INFO[0000] Found 0 CDI devices\n')
       // generate --output=/var/run/cdi/nvidia.yaml
       if (!this.cdiGenerateEmpty)
-        this.files.set('/var/run/cdi/nvidia.yaml', { data: Buffer.from('cdiVersion: 0.5.0\n'), mode: 0o644 })
+        this.files.set('/var/run/cdi/nvidia.yaml', {
+          data: Buffer.from('cdiVersion: 0.5.0\n'),
+          mode: this.cdiGenerateMode,
+        })
+      return ok()
+    }
+    if (program === 'stat') {
+      const file = this.files.get(argv.at(-1)!)
+      return file === undefined
+        ? { code: 1, stdout: '', stderr: `stat: cannot statx '${argv.at(-1)}': No such file or directory\n` }
+        : ok(`${file.mode.toString(8)}\n`)
+    }
+    if (program === 'chmod') {
+      const file = this.files.get(argv.at(-1)!)!
+      this.files.set(argv.at(-1)!, { ...file, mode: Number.parseInt(argv[1]!, 8) })
       return ok()
     }
     if (program === 'nvidia-ctk') {
@@ -147,10 +166,15 @@ class FakeHost {
       return this.cdiRefreshUnit === 'absent'
         ? no()
         : ok(`nvidia-cdi-refresh.path ${this.cdiRefreshUnit} enabled\n`)
-    if (program === 'systemctl' && sub === 'is-enabled' && refreshUnit)
-      return this.cdiRefreshUnit === 'enabled'
-        ? ok('enabled\n')
-        : { code: 1, stdout: 'disabled\n', stderr: '' }
+    if (program === 'systemctl' && sub === 'is-enabled' && refreshUnit) {
+      // systemd's own exit codes: 0 for an enabled, static, indirect, generated, transient or alias unit.
+      const zero = ['enabled', 'enabled-runtime', 'static', 'indirect', 'generated', 'transient', 'alias']
+      return {
+        code: zero.includes(this.cdiRefreshUnit) ? 0 : 1,
+        stdout: `${this.cdiRefreshUnit}\n`,
+        stderr: '',
+      }
+    }
     if (program === 'systemctl' && sub === 'enable' && refreshUnit) {
       this.cdiRefreshUnit = 'enabled'
       return ok()
@@ -208,7 +232,7 @@ class FakeHost {
   }
 
   mutations(): string[] {
-    const reads = ['dpkg-query', 'rpm', 'id', 'docker', 'journalctl']
+    const reads = ['dpkg-query', 'rpm', 'id', 'docker', 'journalctl', 'stat']
     return this.calls
       .filter(
         ([program, sub, third]) =>
@@ -1167,6 +1191,64 @@ describe('the NVIDIA CDI spec (task 2.23, F-5)', () => {
     expect(result.steps[0]).toMatchObject({ status: 'applied' })
     expect(result.steps[0]!.detail).toMatch(/nvidia-cdi-refresh\.path is not installed/)
     expect(host.mutations()).toEqual([GENERATE, RESET, 'systemctl enable --now docker'])
+  })
+
+  it.each<[string, string[], 'applied' | 'satisfied']>([
+    // systemd's is-enabled answers (systemctl(1)): only disabled and linked units are enabled.
+    ['disabled', [ENABLE_REFRESH], 'applied'],
+    ['linked', [ENABLE_REFRESH], 'applied'],
+    ['linked-runtime', [ENABLE_REFRESH], 'applied'],
+    ['enabled', [], 'satisfied'],
+    ['enabled-runtime', [], 'satisfied'],
+    ['static', [], 'satisfied'],
+    ['indirect', [], 'satisfied'],
+    ['generated', [], 'satisfied'],
+    ['alias', [], 'satisfied'],
+    // The administrator's choice: never undone, never a failure.
+    ['masked', [], 'satisfied'],
+    ['bad', [], 'satisfied'],
+  ])(
+    'a refresh unit that is-enabled calls %s: %j, with the spec already there',
+    async (state, mutations, status) => {
+      const host = new FakeHost()
+      host.cdiElsewhere = true
+      host.cdiRefreshUnit = state
+      const text = requestFor(ubuntu(['nvidia-cdi']))
+      const result = await run(host, text)
+      expect(result.steps[0]).toMatchObject({ status })
+      expect(result.steps[0]!.detail).toContain('nvidia-cdi-refresh.path')
+      expect(host.mutations()).toEqual(mutations)
+      // Whatever it was, a replay changes nothing and reports satisfied.
+      host.calls = []
+      const replay = await run(host, text)
+      expect(replay.steps[0]).toMatchObject({ status: 'satisfied' })
+      expect(host.mutations()).toEqual([])
+    }
+  )
+
+  it('a spec generate left unreadable to others is made 0644, once; a readable one is left alone', async () => {
+    const host = new FakeHost()
+    host.cdiGenerateMode = 0o600
+    host.cdiRefreshUnit = 'enabled'
+    const text = requestFor(ubuntu(['nvidia-cdi']))
+    const result = await run(host, text)
+    expect(result.steps[0]!.detail).toContain('made /var/run/cdi/nvidia.yaml readable (was 600)')
+    expect(host.mutations()).toEqual([GENERATE, 'chmod 0644 /var/run/cdi/nvidia.yaml'])
+    expect(host.files.get('/var/run/cdi/nvidia.yaml')?.mode).toBe(0o644)
+    host.calls = []
+    expect((await run(host, text)).steps[0]).toMatchObject({ status: 'satisfied' })
+    expect(host.mutations()).toEqual([])
+    // Listed only because root can read it: the step still fixes the mode, the probe's user needs it.
+    host.files.set('/var/run/cdi/nvidia.yaml', { data: Buffer.from('x'), mode: 0o640 })
+    expect((await run(host, text)).steps[0]).toMatchObject({ status: 'applied' })
+  })
+
+  it('a spec whose mode cannot be read fails the step', async () => {
+    const host = new FakeHost()
+    host.failures['stat'] = { code: 1, stderr: 'stat: Permission denied' }
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.steps[0]).toMatchObject({ status: 'failed' })
+    expect(result.steps[0]!.detail).toMatch(/could not read the mode/)
   })
 
   it('a refresh unit that will not enable is reported in the detail, never a failed install', async () => {

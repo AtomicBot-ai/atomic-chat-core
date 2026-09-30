@@ -614,6 +614,34 @@ describe('checking a host-step receipt against the machine', () => {
   })
 })
 
+describe('explaining a failed Docker start (task 2.23, review round 1)', () => {
+  it.each<[string, () => Promise<string | null>, boolean | 'unknown']>([
+    ['no daemon.json', async () => null, false],
+    ['only the NVIDIA runtime', async () => JSON.stringify({ runtimes: { nvidia: {} } }), false],
+    [
+      'default-address-pools set',
+      async () => JSON.stringify({ 'default-address-pools': [{ base: '10.200.0.0/16', size: 24 }] }),
+      true,
+    ],
+    ['a bip set', async () => JSON.stringify({ bip: '172.30.99.1/24' }), true],
+    ['a daemon.json that cannot be read', async () => Promise.reject(new Error('EACCES')), 'unknown'],
+  ])('reads whether daemon.json sets pools: %s', async (_label, daemonJson, expected) => {
+    const h = harness(cleanHost())
+    const readFile = h.deps.host.probeDeps.readFile
+    const provisioner = createLinuxProvisioner({
+      ...h.deps,
+      host: {
+        ...h.deps.host,
+        probeDeps: {
+          ...h.deps.host.probeDeps,
+          readFile: (path) => (path === '/etc/docker/daemon.json' ? daemonJson() : readFile(path)),
+        },
+      },
+    })
+    expect(await provisioner.addressPoolsConfigured?.()).toBe(expected)
+  })
+})
+
 describe('the GPU check, the pull and the verification', () => {
   it('records the GPU-check image as its own before pulling it, only when it was absent (review r2, item B)', async () => {
     const absent = harness(readyHost())

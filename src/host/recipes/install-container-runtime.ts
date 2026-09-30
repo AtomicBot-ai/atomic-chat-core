@@ -345,6 +345,14 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
     spec: CDI_SPEC,
     list: ['nvidia-ctk', 'cdi', 'list'],
     generate: ['nvidia-ctk', 'cdi', 'generate', `--output=${CDI_SPEC}`],
+    /**
+     * The core's probe runs `nvidia-ctk cdi list` as the user, so the spec must be world-readable.
+     * Whether `generate` leaves it `0644` differs across toolkit releases (the CDI library writes a
+     * `0600` temporary file and renames it), so the step reads the mode and fixes it only when the
+     * file is not readable by others (task 2.23, review round 1).
+     */
+    mode: ['stat', '--format=%a', CDI_SPEC],
+    make_readable: ['chmod', '0644', CDI_SPEC],
     refresh_unit: CDI_REFRESH_UNIT,
     refresh_present: ['systemctl', 'list-unit-files', '--no-legend', CDI_REFRESH_UNIT],
     refresh_enabled: ['systemctl', 'is-enabled', CDI_REFRESH_UNIT],
@@ -592,6 +600,10 @@ export type HostRecipeStep =
       /** Whether a `nvidia.com/gpu` device is defined: before (satisfied?) and after generating. */
       list: string[]
       generate: string[]
+      /** `stat --format=%a` of the spec: its octal mode, read before deciding to change it. */
+      mode: string[]
+      /** `chmod 0644` of the spec, only when `mode` shows it is not readable by others. */
+      make_readable: string[]
       refresh_unit: string
       refresh_present: string[]
       refresh_enabled: string[]
@@ -717,6 +729,8 @@ export function buildInstallContainerRuntimeSteps(
       spec: recipe.cdi.spec,
       list: [...recipe.cdi.list],
       generate: [...recipe.cdi.generate],
+      mode: [...recipe.cdi.mode],
+      make_readable: [...recipe.cdi.make_readable],
       refresh_unit: recipe.cdi.refresh_unit,
       refresh_present: [...recipe.cdi.refresh_present],
       refresh_enabled: [...recipe.cdi.refresh_enabled],
@@ -772,7 +786,15 @@ export function commandsOf(step: HostRecipeStep): string[][] {
     case 'configure-runtime':
       return [step.configure, step.docker_active, step.loaded, step.reset_failed, step.restart, step.journal]
     case 'generate-cdi':
-      return [step.list, step.generate, step.refresh_present, step.refresh_enabled, step.refresh_enable]
+      return [
+        step.list,
+        step.generate,
+        step.mode,
+        step.make_readable,
+        step.refresh_present,
+        step.refresh_enabled,
+        step.refresh_enable,
+      ]
     case 'enable-service':
       return [step.enabled, step.active, step.reset_failed, step.enable, step.journal]
     case 'add-to-docker-group':
@@ -821,25 +843,45 @@ export const FORBIDDEN_WORDS: readonly string[] = [
 ]
 
 const { runtime, cdi, service } = INSTALL_CONTAINER_RUNTIME_RECIPE
-/** Every `nvidia-ctk` command the recipe runs, whole. */
-const NVIDIA_CTK_COMMANDS: ReadonlySet<string> = new Set(
-  [runtime.configure, cdi.list, cdi.generate].map((command) => command.join(' '))
-)
-/** Every `systemctl` command the recipe runs, whole (task 2.23 added reset-failed and the CDI unit). */
-const SYSTEMCTL_COMMANDS: ReadonlySet<string> = new Set(
-  [
-    runtime.docker_active,
-    runtime.restart,
-    runtime.reset_failed,
-    service.enabled,
-    service.active,
-    service.enable,
-    service.reset_failed,
-    cdi.refresh_present,
-    cdi.refresh_enabled,
-    cdi.refresh_enable,
-  ].map((command) => command.join(' '))
-)
+/**
+ * Programs the recipe only ever runs in fixed shapes, with every such shape, whole. Compared element
+ * by element (`sameArgv`), never as joined text: `['enable', '--now docker']` is not
+ * `['enable', '--now', 'docker']` (task 2.23, review round 1).
+ */
+const EXACT_COMMANDS: Readonly<Record<string, { shapes: readonly (readonly string[])[]; why: string }>> = {
+  'docker': { shapes: [runtime.loaded], why: 'docker is only ever asked which runtimes it loaded' },
+  'journalctl': {
+    shapes: [DOCKER_JOURNAL],
+    why: 'journalctl only ever reads the last lines of docker.service',
+  },
+  'nvidia-ctk': {
+    shapes: [runtime.configure, cdi.list, cdi.generate],
+    why: 'nvidia-ctk only ever configures the docker runtime, lists CDI devices or writes the one CDI spec',
+  },
+  // systemctl only ever touches docker.service (and its socket) and the CDI refresh unit.
+  'systemctl': {
+    shapes: [
+      runtime.docker_active,
+      runtime.restart,
+      runtime.reset_failed,
+      service.enabled,
+      service.active,
+      service.enable,
+      service.reset_failed,
+      cdi.refresh_present,
+      cdi.refresh_enabled,
+      cdi.refresh_enable,
+    ],
+    why: 'systemctl is only ever run in the shapes this recipe builds',
+  },
+  'stat': { shapes: [cdi.mode], why: 'stat only ever reads the mode of the CDI spec' },
+  'chmod': { shapes: [cdi.make_readable], why: 'chmod only ever makes the CDI spec readable' },
+}
+
+/** The same argv: the same length, and every argument equal in its own position. */
+export function sameArgv(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((argument, index) => argument === b[index])
+}
 
 /** Program → the first argument it may be run with. Nothing else is ever run as root. */
 const PERMITTED: Record<string, readonly string[]> = {
@@ -853,6 +895,8 @@ const PERMITTED: Record<string, readonly string[]> = {
   'docker': ['info'],
   'usermod': ['-aG'],
   'journalctl': ['-u'],
+  'stat': ['--format=%a'],
+  'chmod': ['0644'],
 }
 
 /**
@@ -881,7 +925,7 @@ export function assertPermittedCommand(argv: readonly string[]): void {
     const target = rest[4]
     if (
       rest.length !== 5 ||
-      rest.slice(0, 4).join(' ') !== '--quiet -y --setopt=skip_if_unavailable=False --obsoletes' ||
+      !sameArgv(rest.slice(0, 4), ['--quiet', '-y', '--setopt=skip_if_unavailable=False', '--obsoletes']) ||
       target === undefined ||
       !RECIPE_PACKAGES.has(target)
     )
@@ -894,14 +938,6 @@ export function assertPermittedCommand(argv: readonly string[]): void {
     refuse('rpm is only ever asked whether a package of one exact name is installed')
   if (program === 'usermod' && (argv[2] !== 'docker' || argv.length !== 4 || argv[3] === 'root'))
     refuse('usermod only ever adds a non-root user to docker')
-  if (program === 'docker' && argv.join(' ') !== 'docker info --format {{json .Runtimes}}')
-    refuse('docker is only ever asked which runtimes it loaded')
-  if (program === 'nvidia-ctk' && !NVIDIA_CTK_COMMANDS.has(argv.join(' ')))
-    refuse('nvidia-ctk only ever configures the docker runtime, lists CDI devices or writes the one CDI spec')
-  // systemctl only ever touches docker.service (and its socket) and the CDI refresh unit, in the
-  // recipe's own shapes: `enable --now` of any other unit is not something root does here.
-  if (program === 'systemctl' && !SYSTEMCTL_COMMANDS.has(argv.join(' ')))
-    refuse('systemctl is only ever run in the shapes this recipe builds')
-  if (program === 'journalctl' && argv.join(' ') !== DOCKER_JOURNAL.join(' '))
-    refuse('journalctl only ever reads the last lines of docker.service')
+  const exact = own(EXACT_COMMANDS, program as string)
+  if (exact !== undefined && !exact.shapes.some((shape) => sameArgv(argv, shape))) refuse(exact.why)
 }

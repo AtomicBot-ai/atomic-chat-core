@@ -396,7 +396,7 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
     expect(plan.warnings).toEqual([
       expect.objectContaining({
         code: 'docker-address-pools-overlap-routes',
-        params: { routes: '128.0.0.0/1' },
+        params: { routes: '128.0.0.0/1', devices: 'tun2' },
       }),
     ])
 
@@ -423,7 +423,8 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
     const failed = await poll(ready, asking.operation_id, settled)
     expect(failed.phase).toBe('failed')
     expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
-    expect(failed.error?.message).toMatch(/full-tunnel VPN.*default-address-pools/s)
+    // daemon.json registers only the runtime, no pools: the host's routes are named as the cause.
+    expect(failed.error?.message).toMatch(/because the routes on this machine.*default-address-pools/s)
     expect(failed.error?.details).toBe(tail)
   })
 

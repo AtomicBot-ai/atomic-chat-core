@@ -407,10 +407,13 @@ async function configureRuntime(
  * exits 0 but leaves no device (no driver the toolkit can read) fails the step here, not at the GPU
  * check after the image pull.
  *
- * Then `nvidia-cdi-refresh.path`, only where the toolkit ships it: enabled so the spec is rewritten
- * after a driver update and on every boot (`/var/run` is a tmpfs). Its absence, or a failed enable,
- * never fails the step — the spec is there now, and a probe after a reboot that lost it plans it
- * again (ruling R-core-8); the detail says which it was.
+ * Then the spec's mode: the core's probe lists the devices as the user, so a spec this step's path
+ * holds must be readable by others. `stat` reads the mode and `chmod 0644` runs only when it is not
+ * (review round 1: whether `generate` leaves it `0644` differs across toolkit releases).
+ *
+ * Then `nvidia-cdi-refresh.path`, only where the toolkit ships it (see `enableCdiRefresh`). Its
+ * absence, or a failed enable, never fails the step — the spec is there now, and a probe after a
+ * reboot that lost it plans it again (ruling R-core-8); the detail says which it was.
  */
 async function generateCdi(
   context: RunContext,
@@ -429,32 +432,71 @@ async function generateCdi(
       )
     generated = true
   }
+  const readable = await makeSpecReadable(context, step)
   const refresh = await enableCdiRefresh(context, step)
   const spec = generated ? `generated ${step.spec}` : 'an NVIDIA CDI device is already defined'
   return {
-    status: generated || refresh.enabled ? 'applied' : 'satisfied',
-    detail: `${spec}; ${refresh.detail}`,
+    status: generated || readable.changed || refresh.changed ? 'applied' : 'satisfied',
+    detail: [spec, ...(readable.detail === null ? [] : [readable.detail]), refresh.detail].join('; '),
   }
 }
 
+/**
+ * `chmod 0644` of the spec at the step's path, only when `stat` shows it lacks the read bit for
+ * others. No file there (the device comes from another spec) is nothing to do; a mode `stat` cannot
+ * give, or a failed `chmod`, fails the step: the probe would not see the device the step just wrote.
+ */
+async function makeSpecReadable(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'generate-cdi' }>
+): Promise<{ changed: boolean; detail: string | null }> {
+  if ((await context.deps.readFile(step.spec)) === null) return { changed: false, detail: null }
+  const stat = await run(context, step.mode)
+  const mode = /^[0-7]{3,4}$/.test(stat.stdout.trim()) ? Number.parseInt(stat.stdout.trim(), 8) : null
+  if (stat.code !== 0 || mode === null)
+    throw new StepFailure(`could not read the mode of ${step.spec}`, stat.code, stat.stderr)
+  if ((mode & 0o004) !== 0) return { changed: false, detail: null }
+  await mustRun(context, step.make_readable)
+  return { changed: true, detail: `made ${step.spec} readable (was ${mode.toString(8)})` }
+}
+
+/**
+ * What `systemctl is-enabled` prints, by what it means here (systemd's own table). Enabled in any
+ * form — or a unit that cannot be enabled directly (`static`, `indirect`, `generated`, `transient`,
+ * an `alias`) — is left alone; only `disabled` and `linked` get `enable --now`; `masked` is the
+ * administrator's choice and is never undone; anything else is reported and left alone.
+ */
+const REFRESH_LEAVE: ReadonlySet<string> = new Set([
+  'enabled',
+  'enabled-runtime',
+  'static',
+  'indirect',
+  'generated',
+  'transient',
+  'alias',
+])
+const REFRESH_ENABLE: ReadonlySet<string> = new Set(['disabled', 'linked', 'linked-runtime'])
+
+/** `nvidia-cdi-refresh.path`, only where the toolkit (1.18+) ships it; never fails the step. */
 async function enableCdiRefresh(
   context: RunContext,
   step: Extract<HostRecipeStep, { kind: 'generate-cdi' }>
-): Promise<{ enabled: boolean; detail: string }> {
+): Promise<{ changed: boolean; detail: string }> {
   const unit = step.refresh_unit
   const present = await run(context, step.refresh_present)
   if (present.code !== 0 || !present.stdout.includes(unit))
-    return { enabled: false, detail: `${unit} is not installed, so the spec is not refreshed automatically` }
-  const enabled = await run(context, step.refresh_enabled)
-  if (enabled.code === 0 && enabled.stdout.trim() === 'enabled')
-    return { enabled: false, detail: `${unit} is already enabled` }
+    return { changed: false, detail: `${unit} is not installed, so the spec is not refreshed automatically` }
+  const state = (await run(context, step.refresh_enabled)).stdout.trim().split('\n')[0]?.trim() ?? ''
+  if (REFRESH_LEAVE.has(state)) return { changed: false, detail: `${unit} is already ${state}` }
+  if (!REFRESH_ENABLE.has(state))
+    return { changed: false, detail: `${unit} is ${state || 'in an unknown state'}; left as it is` }
   const enable = await run(context, step.refresh_enable)
   if (enable.code !== 0)
     return {
-      enabled: false,
+      changed: false,
       detail: `${unit} could not be enabled (exit ${String(enable.code)}): ${tail(enable.stderr) || 'no output'}`,
     }
-  return { enabled: true, detail: `enabled ${unit}` }
+  return { changed: true, detail: `enabled ${unit}` }
 }
 
 async function enableService(

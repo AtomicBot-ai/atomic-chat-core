@@ -55,6 +55,7 @@ import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { InstallationRecord, InstallationStore } from './installations.js'
 import type { LinuxHost } from './linux-host.js'
 import { assessLinux, compareDottedVersions, type LinuxAssessment, type LinuxBlocker } from './linux-plan.js'
+import { daemonJsonSetsAddressPools } from './linux-docker-network.js'
 import { probeLinux, type LinuxFacts } from './linux-probe.js'
 import type { EffectFinding, EffectInventory } from './recovery.js'
 import type { EnvironmentProvisioner, HostStepVerdict, ProvisionerProbe } from './service.js'
@@ -635,6 +636,15 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
 
   return {
     probe: (record) => probe(record),
+
+    async addressPoolsConfigured(): Promise<boolean | 'unknown'> {
+      // Read-only, the same contract as the probe's own read: null is "no file", a rejection "unreadable".
+      const read = await deps.host.probeDeps.readFile('/etc/docker/daemon.json').then(
+        (text) => ({ text, unreadable: false }),
+        () => ({ text: null, unreadable: true })
+      )
+      return daemonJsonSetsAddressPools(read)
+    },
 
     async verifyHostStep(record: PersistedOperation): Promise<HostStepVerdict> {
       const answer = await setupProbe(record)

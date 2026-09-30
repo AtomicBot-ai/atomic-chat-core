@@ -254,8 +254,9 @@ export interface HostFacts {
   /** Only `nvidia-container-toolkit-base` (state B′, task 2.23 F-5): `nvidia-ctk` is there, the full package is not. */
   toolkit_base_only: boolean
   /**
-   * `ip -4 route` destinations (the default route left out) that lie over Docker's default address
-   * pools, when they cover every one of them; null when some pool is free or the table was not read.
+   * The `/proc/net/route` destinations (the default route left out) that cause Docker's default
+   * address pools to be covered — the fewest that cover them all; null when some pool is free or the
+   * table was not read.
    */
   routes_covering_docker_pools: string[] | null
   docker: DockerFacts
@@ -340,38 +341,53 @@ export const DOCKER_POOLS: readonly string[] = [
   ...Array.from({ length: 16 }, (_, index) => `192.168.${index * 16}.0/20`),
 ]
 
-/** The destinations of `ip -4 route` output, the default route left out (a type word such as `blackhole` skipped). */
-export function parseIpRoute(text: string): string[] {
-  const types = new Set([
-    'unicast',
-    'local',
-    'broadcast',
-    'multicast',
-    'throw',
-    'unreachable',
-    'prohibit',
-    'blackhole',
-    'nat',
-    'anycast',
-  ])
-  return text
-    .split('\n')
-    .map((line) => line.trim().split(/\s+/))
-    .map((words) => (types.has(words[0] ?? '') ? words[1] : words[0]) ?? '')
-    .filter((destination) => destination !== '' && destination !== 'default' && destination !== '0.0.0.0/0')
+/**
+ * The destinations of `/proc/net/route` — the file the core reads too, decoded here on its own —
+ * in CIDR form (a host route as /32), the default route left out. The kernel prints each address as
+ * the host-order number of its network-order bytes; on a little-endian host (x86_64, aarch64) the
+ * two hex digits of the first octet come last.
+ */
+export function parseProcNetRoute(text: string): string[] {
+  const dotted = (hex: string): number[] =>
+    [6, 4, 2, 0].map((at) => Number.parseInt(hex.slice(at, at + 2), 16))
+  const routes: string[] = []
+  for (const line of text.split('\n').slice(1)) {
+    const [, destination, , , , , , mask] = line.trim().split(/\s+/)
+    if (!/^[0-9A-Fa-f]{8}$/.test(destination ?? '') || !/^[0-9A-Fa-f]{8}$/.test(mask ?? '')) continue
+    const prefix = dotted(mask as string).reduce(
+      (bits, octet) => bits + octet.toString(2).replace(/0/g, '').length,
+      0
+    )
+    if (prefix === 0) continue
+    routes.push(`${dotted(destination as string).join('.')}/${prefix}`)
+  }
+  return routes
 }
 
-/** The routes lying over Docker's pools when together they cover every pool; null when a pool is free. */
+/**
+ * The routes that leave Docker no default pool, or null when a pool is free: the fewest that cover
+ * every pool, picked by most pools still uncovered (the wider on a tie), listed in table order — the
+ * core's rule, re-implemented, so the live run can compare its warning's `params.routes` with this.
+ */
 export function routesCoveringDockerPools(routes: readonly string[]): string[] | null {
+  const pools = DOCKER_POOLS.map((pool) => cidr(pool) as { address: number; prefix: number })
   const parsed = routes.flatMap((text) => {
     const network = cidr(text)
     return network === null || network.prefix === 0 ? [] : [{ text, network }]
   })
-  const pools = DOCKER_POOLS.map((pool) => cidr(pool) as { address: number; prefix: number })
-  if (!pools.every((pool) => parsed.some((route) => overlap(route.network, pool)))) return null
-  return parsed
-    .filter((route) => pools.some((pool) => overlap(route.network, pool)))
-    .map((route) => route.text)
+  let left = pools
+  const picked = new Set<string>()
+  while (left.length > 0) {
+    const ranked = parsed
+      .map((route) => ({ route, hits: left.filter((pool) => overlap(route.network, pool)).length }))
+      .filter((entry) => entry.hits > 0)
+      .sort((a, b) => b.hits - a.hits || a.route.network.prefix - b.route.network.prefix)
+    const best = ranked[0]
+    if (best === undefined) return null
+    picked.add(best.route.text)
+    left = left.filter((pool) => !overlap(best.route.network, pool))
+  }
+  return parsed.filter((route) => picked.has(route.text)).map((route) => route.text)
 }
 
 function daemonJsonSetsPools(): boolean | null {
@@ -432,7 +448,7 @@ export function detectHost(descriptor: RecipeDescriptor): HostFacts {
   docker.package = dockerPackage(family)
   const me = userInfo()
   const toolkitInstalled = installedPackage(family, 'nvidia-container-toolkit')
-  const routes = run('ip', ['-4', 'route'])
+  const routeTable = existsSync('/proc/net/route') ? readFileSync('/proc/net/route', 'utf8') : null
   return {
     os,
     arch,
@@ -453,7 +469,7 @@ export function detectHost(descriptor: RecipeDescriptor): HostFacts {
     toolkit_installed: toolkitInstalled,
     toolkit_base_only: !toolkitInstalled && installedPackage(family, 'nvidia-container-toolkit-base'),
     routes_covering_docker_pools:
-      routes.code === 0 ? routesCoveringDockerPools(parseIpRoute(routes.stdout)) : null,
+      routeTable === null ? null : routesCoveringDockerPools(parseProcNetRoute(routeTable)),
     docker,
   }
 }

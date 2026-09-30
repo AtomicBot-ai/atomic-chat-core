@@ -669,6 +669,20 @@ describe('receipts are used once (OP03)', () => {
     expect(() => classifyReceipt(recorded, receipt({ receipt_id: 'receipt-2' }))).toThrow(/already recorded/)
   })
 
+  it('does not count the diagnostic log_tail in a receipt identity (task 2.23 review, minor 1)', () => {
+    // The same receipt re-posted with another tail, or none, is the same receipt: a duplicate, never
+    // "a different result" for the spent authorization.
+    const recorded = withReceipt(base, receipt({ log_tail: 'docker-service failed: first read' }))
+    expect(classifyReceipt(recorded, receipt())).toBe('duplicate')
+    expect(classifyReceipt(recorded, receipt({ log_tail: 'docker-service failed: another read' }))).toBe(
+      'duplicate'
+    )
+    // A receipt recorded before task 2.23 (no tail) keeps its digest.
+    expect(withReceipt(base, receipt({ log_tail: 'x' })).accepted_receipt_digests).toEqual(
+      withReceipt(base, receipt()).accepted_receipt_digests
+    )
+  })
+
   it('treats a receipt for another authorization as new, not as a replay', () => {
     const recorded = withReceipt(base, receipt())
     expect(classifyReceipt(recorded, receipt({ nonce: 'once-2' }))).toBe('fresh')

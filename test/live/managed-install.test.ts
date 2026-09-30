@@ -704,7 +704,8 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       report.detail('address-pool-warning', 'warning', warning)
       report.detail('address-pool-warning', 'routes_seen_by_the_test', S.facts.routes_covering_docker_pools)
       expect(warning, JSON.stringify(S.plan?.warnings)).toBeDefined()
-      expect(warning?.params?.['routes']?.split(',').length).toBeGreaterThan(0)
+      // The very routes this test works out from /proc/net/route on its own (review round 1).
+      expect(warning?.params?.['routes']?.split(',')).toEqual(S.facts.routes_covering_docker_pools)
       expect(warning?.text).toMatch(/default-address-pools/)
       expect(S.plan?.blockers).toEqual([])
     }

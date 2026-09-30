@@ -147,6 +147,12 @@ export type OperationEvent =
       needs_relogin?: boolean
       /** What the probe found missing, reported as the failure when the step did not take. */
       probe_error?: ErrorBody
+      /**
+       * For a `failed` receipt whose log shows Docker found no free address pool: whether
+       * `daemon.json` sets `bip` or `default-address-pools`, which picks the cause the error names
+       * (task 2.23, review round 1). Absent when nobody read it.
+       */
+      address_pools_configured?: boolean | 'unknown'
     } & EventIdentity)
   | ({ type: 'environment-verified' } & EventIdentity)
   | ({ type: 'image-pulled' } & EventIdentity)
@@ -604,7 +610,7 @@ export function reduceOperation(
       if (receipt.outcome === 'failed') {
         // The step's own log tail, when the app forwards it, names a cause the core recognises and
         // is kept as the details (task 2.23, F-4); without one, the receipt id, as before.
-        return failWith(state, hostStepFailureError(receipt))
+        return failWith(state, hostStepFailureError(receipt, event.address_pools_configured))
       }
       // A completed host step is kept whatever happens next: it changed the machine, and a later
       // cancellation does not un-install a package.

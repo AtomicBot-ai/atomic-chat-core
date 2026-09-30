@@ -631,6 +631,27 @@ describe('consent that was already acted on (task 2.6)', () => {
     expect(error?.details).toBe(tail)
   })
 
+  it('a failed pool start with pools set in daemon.json names the configured ranges, not the routes (review round 1)', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: {
+          ...RECEIPT,
+          outcome: 'failed',
+          log_tail: 'docker-service failed\nall predefined address pools have been fully subnetted',
+        },
+        prerequisites_met: false,
+        needs_relogin: false,
+        address_pools_configured: true,
+      })
+    )
+    expect(driver.machine.operation.error?.message).toMatch(
+      /address ranges set in \/etc\/docker\/daemon\.json/
+    )
+    expect(driver.machine.operation.error?.message).not.toMatch(/VPN/)
+  })
+
   it('a failed step without a log tail keeps the old message and the receipt id', () => {
     const driver = atReceipt()
     driver.apply(

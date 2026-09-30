@@ -317,6 +317,53 @@ describe('an authorization is used once (OP03)', () => {
     )
   })
 
+  it('explains a failed start with the Docker pools used up by what daemon.json says, read then (task 2.23)', async () => {
+    const tail = 'docker-service failed\nall predefined address pools have been fully subnetted'
+    for (const [configured, words] of [
+      [true, /address ranges set in \/etc\/docker\/daemon\.json/],
+      [false, /because the routes on this machine/],
+    ] as const) {
+      const { service, provisioner } = await authorized()
+      const asked: string[] = []
+      Object.assign(provisioner, {
+        addressPoolsConfigured: async () => {
+          asked.push('daemon.json')
+          return configured
+        },
+      })
+      await service.acceptHostReceipt('op-1', receipt({ outcome: 'failed', log_tail: tail }))
+      await settle(service)
+      const failed = await service.get('op-1')
+      expect(failed.phase).toBe('failed')
+      expect(failed.error?.message).toMatch(words)
+      expect(failed.error?.details).toBe(tail)
+      expect(asked).toEqual(['daemon.json'])
+    }
+  })
+
+  it('reads nothing for a failed step whose log names another cause, or a provisioner without the question', async () => {
+    const { service, provisioner } = await authorized()
+    const asked: string[] = []
+    Object.assign(provisioner, {
+      addressPoolsConfigured: async () => {
+        asked.push('daemon.json')
+        return false
+      },
+    })
+    await service.acceptHostReceipt('op-1', receipt({ outcome: 'failed', log_tail: 'packages failed' }))
+    await settle(service)
+    expect(asked).toEqual([])
+    expect((await service.get('op-1')).error?.message).toBe('Preparing the system did not finish.')
+
+    const bare = await authorized()
+    await bare.service.acceptHostReceipt(
+      'op-1',
+      receipt({ outcome: 'failed', log_tail: 'all predefined address pools have been fully subnetted' })
+    )
+    await settle(bare.service)
+    expect((await bare.service.get('op-1')).error?.message).toMatch(/most often because/)
+  })
+
   it('refuses a receipt for an authorization this operation is not waiting for', async () => {
     const { service } = await authorized()
     await expect(service.acceptHostReceipt('op-1', receipt({ nonce: 'other' }))).rejects.toThrow(

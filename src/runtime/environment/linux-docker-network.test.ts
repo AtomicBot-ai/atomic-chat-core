@@ -54,16 +54,16 @@ describe('Docker address pools against the routing table (F-4)', () => {
     expect(parseIpv4Cidr(text)).toEqual(expected)
   })
 
-  it('reads every route but the default one from /proc/net/route, in CIDR form', () => {
+  it('reads every route but the default one from /proc/net/route, in CIDR form, with its interface', () => {
     expect(parseProcNetRoute(FULL_TUNNEL)).toEqual([
-      '0.0.0.0/1',
-      '128.0.0.0/1',
-      '10.8.0.0/24',
-      '192.168.1.0/24',
+      { destination: '0.0.0.0/1', device: 'tun2' },
+      { destination: '128.0.0.0/1', device: 'tun2' },
+      { destination: '10.8.0.0/24', device: 'tun2' },
+      { destination: '192.168.1.0/24', device: 'wlp2s0' },
     ])
     // A host route (mask all ones) is a /32; a blank or header-only file has no routes at all.
     expect(parseProcNetRoute([HEADER, line('eth0', '0100000A', 'FFFFFFFF')].join('\n'))).toEqual([
-      '10.0.0.1/32',
+      { destination: '10.0.0.1/32', device: 'eth0' },
     ])
     expect(parseProcNetRoute(`${HEADER}\n`)).toEqual([])
     // Nothing read is not "no routes": the caller must not warn, and must not claim the table is clean.
@@ -71,23 +71,45 @@ describe('Docker address pools against the routing table (F-4)', () => {
     // A line that is not the kernel's shape is skipped, never guessed at.
     expect(
       parseProcNetRoute([HEADER, 'eth0\tzz\t00\t0001', line('tun0', '00000080', '00000080')].join('\n'))
-    ).toEqual(['128.0.0.0/1'])
+    ).toEqual([{ destination: '128.0.0.0/1', device: 'tun0' }])
   })
 
-  it.each<[string, string[], string[] | null]>([
+  const via = (device: string, ...destinations: string[]) =>
+    destinations.map((destination) => ({ destination, device }))
+  it.each<[string, ReturnType<typeof via>, string[] | null]>([
     // 0.0.0.0/1 ends at 127.255.255.255: only the upper half of the tunnel lies over Docker's pools.
-    ['a full-tunnel VPN covers every pool', ['0.0.0.0/1', '128.0.0.0/1', '10.8.0.0/24'], ['128.0.0.0/1']],
     [
-      'one broad route covering 172.16.0.0/12 and 192.168.0.0/16',
-      ['172.16.0.0/12', '192.168.0.0/16'],
+      'a full-tunnel VPN covers every pool',
+      via('tun2', '0.0.0.0/1', '128.0.0.0/1', '10.8.0.0/24'),
+      ['128.0.0.0/1'],
+    ],
+    // The LAN inside 192.168.0.0/20 lies over a pool too, but the tunnel covers that one already:
+    // only what causes the overlap is named (review round 1).
+    [
+      'the 3.10 laptop: the tunnel, not the home LAN beside it',
+      [...via('tun2', '0.0.0.0/1', '128.0.0.0/1'), ...via('wlp2s0', '192.168.1.0/24')],
+      ['128.0.0.0/1'],
+    ],
+    [
+      'two routes needed together: 172.16.0.0/12 and 192.168.0.0/16',
+      via('wg0', '172.16.0.0/12', '192.168.0.0/16'),
       ['172.16.0.0/12', '192.168.0.0/16'],
     ],
-    ['a home LAN inside 192.168.0.0/20 leaves the 172 pools free', ['192.168.1.0/24', '10.8.0.0/24'], null],
-    ['172.17.0.0/16 alone leaves the next pool free', ['172.17.0.0/16'], null],
+    [
+      'a narrower route whose pool a wider one already covers is not named',
+      via('wg0', '172.17.0.0/16', '172.16.0.0/12', '192.168.0.0/16'),
+      ['172.16.0.0/12', '192.168.0.0/16'],
+    ],
+    [
+      'a home LAN inside 192.168.0.0/20 leaves the 172 pools free',
+      via('eth0', '192.168.1.0/24', '10.8.0.0/24'),
+      null,
+    ],
+    ['172.17.0.0/16 alone leaves the next pool free', via('eth0', '172.17.0.0/16'), null],
     ['no routes at all', [], null],
-    ['an unparsable destination is ignored', ['nonsense', '10.0.0.0/8'], null],
+    ['an unparsable destination is ignored', via('eth0', 'nonsense', '10.0.0.0/8'), null],
   ])('%s', (_name, routes, expected) => {
-    expect(routesCoveringDockerPools(routes)).toEqual(expected)
+    expect(routesCoveringDockerPools(routes)?.map((route) => route.destination) ?? null).toEqual(expected)
   })
 
   it.each<[string, { text: string | null; unreadable: boolean }, boolean | 'unknown']>([
@@ -111,7 +133,11 @@ describe('Docker address pools against the routing table (F-4)', () => {
   })
 
   it('warns, naming the routes and the instruction, only when Docker is down, every pool is covered and daemon.json sets neither key', () => {
-    const covered = ['0.0.0.0/1', '128.0.0.0/1']
+    const covered = [
+      { destination: '0.0.0.0/1', device: 'tun2' },
+      { destination: '128.0.0.0/1', device: 'tun2' },
+      { destination: '192.168.1.0/24', device: 'wlp2s0' },
+    ]
     const warning = dockerAddressPoolWarning({
       dockerRunning: false,
       addressPoolsConfigured: false,
@@ -119,8 +145,8 @@ describe('Docker address pools against the routing table (F-4)', () => {
     })
     expect(warning).toEqual({
       code: 'docker-address-pools-overlap-routes',
-      text: expect.stringContaining('covered by the route 128.0.0.0/1 (often a full-tunnel VPN)'),
-      params: { routes: '128.0.0.0/1' },
+      text: expect.stringContaining('the route 128.0.0.0/1 via tun2 (often a full-tunnel VPN) covers every'),
+      params: { routes: '128.0.0.0/1', devices: 'tun2' },
     })
     expect(warning?.text).toContain(DOCKER_ADDRESS_POOLS_INSTRUCTION)
 
@@ -131,8 +157,29 @@ describe('Docker address pools against the routing table (F-4)', () => {
       { dockerRunning: false, addressPoolsConfigured: true as const, routes: covered },
       { dockerRunning: false, addressPoolsConfigured: 'unknown' as const, routes: covered },
       { dockerRunning: false, addressPoolsConfigured: false as const, routes: null },
-      { dockerRunning: false, addressPoolsConfigured: false as const, routes: ['192.168.1.0/24'] },
+      {
+        dockerRunning: false,
+        addressPoolsConfigured: false as const,
+        routes: [{ destination: '192.168.1.0/24', device: 'wlp2s0' }],
+      },
     ]
     for (const input of none) expect(dockerAddressPoolWarning(input), JSON.stringify(input)).toBeNull()
+  })
+})
+
+describe('the warning with several routes', () => {
+  it('names each route with its interface and the interfaces once', () => {
+    const warning = dockerAddressPoolWarning({
+      dockerRunning: false,
+      addressPoolsConfigured: false,
+      routes: [
+        { destination: '172.16.0.0/12', device: 'wg0' },
+        { destination: '192.168.0.0/16', device: 'wg0' },
+      ],
+    })
+    expect(warning?.text).toContain(
+      'the routes 172.16.0.0/12 via wg0, 192.168.0.0/16 via wg0 (often a full-tunnel VPN) cover every'
+    )
+    expect(warning?.params).toEqual({ routes: '172.16.0.0/12,192.168.0.0/16', devices: 'wg0' })
   })
 })

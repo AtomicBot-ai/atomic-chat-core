@@ -101,13 +101,19 @@ const prefixOf = (mask: number): number => {
   return bits
 }
 
+/** One route of the main IPv4 table: its destination in CIDR form and the interface it goes out of. */
+export interface LinuxRoute {
+  destination: string
+  device: string
+}
+
 /**
- * The destinations of `/proc/net/route` (main IPv4 table), in CIDR form, the default route left out.
- * Null when the file could not be read — an unread table is no evidence either way.
+ * The routes of `/proc/net/route` (main IPv4 table), the default route left out. Null when the file
+ * could not be read — an unread table is no evidence either way.
  */
-export function parseProcNetRoute(text: string | null): string[] | null {
+export function parseProcNetRoute(text: string | null): LinuxRoute[] | null {
   if (text === null) return null
-  const routes: string[] = []
+  const routes: LinuxRoute[] = []
   for (const raw of text.split('\n').slice(1)) {
     const fields = raw.trim().split(/\s+/)
     const destination = hexWord(fields[1])
@@ -115,26 +121,52 @@ export function parseProcNetRoute(text: string | null): string[] | null {
     if (destination === null || mask === null) continue
     const prefix = prefixOf(mask)
     if (prefix === 0) continue // the default route
-    routes.push(format({ address: (destination & maskOf(prefix)) >>> 0, prefix }))
+    routes.push({
+      destination: format({ address: (destination & maskOf(prefix)) >>> 0, prefix }),
+      device: fields[0] as string,
+    })
   }
   return routes
 }
 
 /**
- * The routes that leave Docker no default subnet: every one of the 31 overlaps at least one of
- * `routes`. Returns the routes that overlap any pool (what a person has to change), or null when
- * some default subnet is still free — Docker then just takes that one.
+ * The routes that leave Docker no default subnet, or null when some default subnet is still free —
+ * Docker then just takes that one.
+ *
+ * Only the routes that cause it are returned (task 2.23, review round 1): the smallest set, chosen
+ * greedily, that covers every pool — the route covering the most pools still uncovered first, a
+ * wider one first on a tie — returned in the table's order. A full-tunnel VPN's `128.0.0.0/1` alone covers all 31, so the home LAN
+ * inside `192.168.0.0/20` beside it is not named: it is not what a person has to change.
  */
-export function routesCoveringDockerPools(routes: readonly string[]): string[] | null {
-  const parsed = routes
-    .map((text) => ({ text, cidr: parseIpv4Cidr(text) }))
-    .filter(
-      (route): route is { text: string; cidr: Ipv4Cidr } => route.cidr !== null && route.cidr.prefix > 0
-    )
+export function routesCoveringDockerPools(routes: readonly LinuxRoute[]): LinuxRoute[] | null {
   const pools = DOCKER_DEFAULT_POOL_SUBNETS.map((subnet) => parseIpv4Cidr(subnet) as Ipv4Cidr)
-  if (!pools.every((pool) => parsed.some((route) => overlaps(route.cidr, pool)))) return null
-  const involved = parsed.filter((route) => pools.some((pool) => overlaps(route.cidr, pool)))
-  return [...new Set(involved.map((route) => route.text))]
+  const candidates = routes.flatMap((route) => {
+    const cidr = parseIpv4Cidr(route.destination)
+    if (cidr === null || cidr.prefix === 0) return []
+    const covers = pools.filter((pool) => overlaps(cidr, pool))
+    return covers.length === 0 ? [] : [{ route, cidr, covers }]
+  })
+  const uncovered = new Set(pools)
+  const chosen: LinuxRoute[] = []
+  while (uncovered.size > 0) {
+    let best: (typeof candidates)[number] | null = null
+    let bestCount = 0
+    for (const candidate of candidates) {
+      const count = candidate.covers.filter((pool) => uncovered.has(pool)).length
+      if (
+        count > bestCount ||
+        (count === bestCount && count > 0 && best !== null && candidate.cidr.prefix < best.cidr.prefix)
+      ) {
+        best = candidate
+        bestCount = count
+      }
+    }
+    if (best === null) return null
+    chosen.push(best.route)
+    for (const pool of best.covers) uncovered.delete(pool)
+  }
+  // In the table's own order, whichever order they were picked in.
+  return routes.filter((route) => chosen.includes(route))
 }
 
 /**
@@ -173,21 +205,27 @@ export const DOCKER_ADDRESS_POOLS_INSTRUCTION =
  * The F-4 warning: Docker is not running yet (not installed, or its service inactive), every default
  * subnet overlaps a non-default route, and `daemon.json` sets neither `bip` nor
  * `default-address-pools`. Anything this probe could not read suppresses it rather than guessing.
+ * `params.routes` and `params.devices` name only the routes that cause it (`routesCoveringDockerPools`).
  */
 export function dockerAddressPoolWarning(input: {
   dockerRunning: boolean
   addressPoolsConfigured: boolean | 'unknown'
-  routes: readonly string[] | null
+  routes: readonly LinuxRoute[] | null
 }): LinuxPlanWarning | null {
   if (input.dockerRunning || input.addressPoolsConfigured !== false || input.routes === null) return null
   const covering = routesCoveringDockerPools(input.routes)
   if (covering === null) return null
+  const named = covering.map((route) => `${route.destination} via ${route.device}`).join(', ')
+  const devices = [...new Set(covering.map((route) => route.device))]
   return {
     code: 'docker-address-pools-overlap-routes',
     text:
-      'Docker will not be able to start: every address range it uses for its networks by default is ' +
-      `covered by the route${covering.length > 1 ? 's' : ''} ${covering.join(', ')} (often a full-tunnel VPN). ` +
-      DOCKER_ADDRESS_POOLS_INSTRUCTION,
-    params: { routes: covering.join(',') },
+      `Docker will not be able to start: the route${covering.length > 1 ? 's' : ''} ${named} ` +
+      `(often a full-tunnel VPN) cover${covering.length > 1 ? '' : 's'} every address range Docker uses ` +
+      `for its networks by default. ${DOCKER_ADDRESS_POOLS_INSTRUCTION}`,
+    params: {
+      routes: covering.map((route) => route.destination).join(','),
+      devices: devices.join(','),
+    },
   }
 }

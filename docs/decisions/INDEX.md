@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-30** — [Task 2.23 review minors: no CDISpecDirs requirement, receipt identity without the log tail, exact argv, a readable spec, the causing routes](2026-09-30-task-2-23-review-minors-cdi-dirs-receipt-identity-exact-argv.md) — supersedes the CDISpecDirs requirement of the two 2026-09-28 round-2 records.
 - **2026-09-30** — [The recipe runs systemctl reset-failed before starting or restarting Docker](2026-09-30-recipe-resets-failed-docker-units-before-starting.md)
 - **2026-09-30** — [The plan warns when the host's routes cover Docker's default address pools; a failed start names the cause](2026-09-30-plan-warns-when-routes-cover-docker-address-pools.md)
 - **2026-09-30** — [The GPU runtime is ready only with an NVIDIA CDI device; the recipe installs the full toolkit and generates the spec](2026-09-30-gpu-runtime-ready-only-with-an-nvidia-cdi-device.md) — supersedes the CDI-default half of the 2026-09-28 round-3 record.

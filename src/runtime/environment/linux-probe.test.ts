@@ -488,7 +488,7 @@ describe('reading the machine', () => {
         },
         { user: 'u', xdgRuntimeDir: null }
       )
-    expect((await probe(table)).routes).toEqual(['128.0.0.0/1'])
+    expect((await probe(table)).routes).toEqual([{ destination: '128.0.0.0/1', device: 'tun0' }])
     // An unread table is no evidence either way, and never an unknown fact that would block.
     const unread = await probe(new Error('EACCES'))
     expect(unread.routes).toBeNull()

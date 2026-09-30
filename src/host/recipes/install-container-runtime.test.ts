@@ -12,6 +12,7 @@ import {
   buildInstallContainerRuntimeSteps,
   commandsOf,
   isPackageName,
+  sameArgv,
   installContainerRuntimeParametersDigest,
   parametersFromPlan,
   validateInstallContainerRuntimeParameters,
@@ -133,7 +134,7 @@ describe('the digests a request is bound to', () => {
     // Changing any command, path, URL, key pin or file body changes this. Update it deliberately:
     // every client holding an old plan will then be refused, which is the point.
     expect(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST).toMatchInlineSnapshot(
-      `"sha256:e2a55f4fcb40ade3d78e23e59cab1d7cbef84dbbfd522b4a4f9a8178fdddda96"`
+      `"sha256:1876dbc7ab7d2d06ccf4e6497c95f9d4ebd62a70b27b8f2e331a6b39100489ab"`
     )
   })
 
@@ -283,6 +284,8 @@ describe('apt steps', () => {
         spec: '/var/run/cdi/nvidia.yaml',
         list: ['nvidia-ctk', 'cdi', 'list'],
         generate: ['nvidia-ctk', 'cdi', 'generate', '--output=/var/run/cdi/nvidia.yaml'],
+        mode: ['stat', '--format=%a', '/var/run/cdi/nvidia.yaml'],
+        make_readable: ['chmod', '0644', '/var/run/cdi/nvidia.yaml'],
         refresh_unit: 'nvidia-cdi-refresh.path',
         refresh_present: ['systemctl', 'list-unit-files', '--no-legend', 'nvidia-cdi-refresh.path'],
         refresh_enabled: ['systemctl', 'is-enabled', 'nvidia-cdi-refresh.path'],
@@ -704,6 +707,19 @@ describe('what the recipe may never run', () => {
     [['systemctl', 'reset-failed', 'sshd.service']],
     [['systemctl', 'list-unit-files']],
     [['systemctl', 'is-enabled', 'sshd']],
+    // Compared element by element: the same words split differently are not the same command.
+    [['systemctl', 'enable', '--now docker']],
+    [['systemctl', 'reset-failed', 'docker.service docker.socket']],
+    [['nvidia-ctk', 'cdi', 'generate --output=/var/run/cdi/nvidia.yaml']],
+    [['nvidia-ctk', 'runtime', 'configure --runtime=docker']],
+    [['docker', 'info', '--format {{json .Runtimes}}']],
+    [['journalctl', '-u', 'docker.service -n 40', '--no-pager', '-o', 'cat']],
+    [['dnf', 'repoquery', '--quiet -y', '--setopt=skip_if_unavailable=False', '--obsoletes', 'docker-ce']],
+    // The spec's mode is only ever read, and only ever made 0644, at its one path.
+    [['chmod', '0644', '/etc/shadow']],
+    [['chmod', '0777', '/var/run/cdi/nvidia.yaml']],
+    [['chmod', '0644 /var/run/cdi/nvidia.yaml']],
+    [['stat', '--format=%a', '/etc/shadow']],
     // journalctl only ever reads docker.service's last lines; never rotates, vacuums or reads others.
     [['journalctl', '--rotate']],
     [['journalctl', '-u', 'docker.service', '--vacuum-time=1s']],
@@ -757,8 +773,22 @@ describe('what the recipe may never run', () => {
     [['systemctl', 'list-unit-files', '--no-legend', 'nvidia-cdi-refresh.path']],
     [['systemctl', 'enable', '--now', 'nvidia-cdi-refresh.path']],
     [['systemctl', 'reset-failed', 'docker.service', 'docker.socket']],
+    [['stat', '--format=%a', '/var/run/cdi/nvidia.yaml']],
+    [['chmod', '0644', '/var/run/cdi/nvidia.yaml']],
   ])('%j is permitted', (argv) => {
     expect(() => assertPermittedCommand(argv)).not.toThrow()
+  })
+})
+
+describe('sameArgv', () => {
+  it.each<[string[], string[], boolean]>([
+    [['systemctl', 'enable', '--now', 'docker'], ['systemctl', 'enable', '--now', 'docker'], true],
+    // Joined, these read the same; as argv they are not.
+    [['systemctl', 'enable', '--now docker'], ['systemctl', 'enable', '--now', 'docker'], false],
+    [['a', 'b'], ['a', 'b', 'c'], false],
+    [[], [], true],
+  ])('%j against %j: %s', (a, b, expected) => {
+    expect(sameArgv(a, b)).toBe(expected)
   })
 })
 

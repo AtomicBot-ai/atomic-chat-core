@@ -500,6 +500,16 @@ export class OperationStore {
 export type ReceiptVerdict = 'fresh' | 'duplicate'
 
 /**
+ * What identifies a receipt: every field but `log_tail` (task 2.23, review minor 1). The tail is a
+ * diagnostic the app forwards as it read it; the same receipt posted again with another tail, or
+ * without one, is the same receipt. A receipt without a tail digests exactly as before task 2.23.
+ */
+function receiptIdentity(receipt: ManagedHostReceipt): Sha256Digest {
+  const { log_tail: _tail, ...identity } = receipt
+  return canonicalDigest(identity)
+}
+
+/**
  * Whether a host receipt may be acted on. A receipt's nonce is single use: the identical one
  * arriving twice is a retry and its effect must not run again, and a different one for a nonce
  * already spent is either a confused client or a replay, and is refused.
@@ -507,7 +517,7 @@ export type ReceiptVerdict = 'fresh' | 'duplicate'
 export function classifyReceipt(record: PersistedOperation, receipt: ManagedHostReceipt): ReceiptVerdict {
   const seen = record.accepted_receipt_digests[receipt.nonce]
   if (seen === undefined) return 'fresh'
-  return seen === canonicalDigest(receipt)
+  return seen === receiptIdentity(receipt)
     ? 'duplicate'
     : (() => {
         throw new AtomicCoreError(
@@ -524,7 +534,7 @@ export function withReceipt(record: PersistedOperation, receipt: ManagedHostRece
     ...record,
     accepted_receipt_digests: {
       ...record.accepted_receipt_digests,
-      [receipt.nonce]: canonicalDigest(receipt),
+      [receipt.nonce]: receiptIdentity(receipt),
     },
   }
 }

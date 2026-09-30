@@ -28,7 +28,7 @@ import {
   parseDockerInfo,
   TOOLKIT_PACKAGE,
 } from './linux-docker-facts.js'
-import { daemonJsonSetsAddressPools, parseProcNetRoute } from './linux-docker-network.js'
+import { daemonJsonSetsAddressPools, parseProcNetRoute, type LinuxRoute } from './linux-docker-network.js'
 
 export interface CommandOutput {
   /** Null when the binary is not on the machine at all. */
@@ -191,10 +191,11 @@ export interface LinuxFacts {
    */
   toolkit_installed: boolean
   /**
-   * `/proc/net/route` (the main IPv4 table Docker checks its pools against), every destination but
-   * the default route, in CIDR form; null when the table could not be read (F-4). Never blocks.
+   * `/proc/net/route` (the main IPv4 table Docker checks its pools against), every route but the
+   * default one — destination in CIDR form and interface; null when the table could not be read
+   * (F-4). Never blocks.
    */
-  routes: string[] | null
+  routes: LinuxRoute[] | null
   free_disk_bytes: number | null
   /**
    * The path `free_disk_bytes` is for: `docker.docker_root_dir` when `docker info` answered,

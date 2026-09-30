@@ -36,6 +36,7 @@ import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { recoverOperation, type EffectInventory } from './recovery.js'
 import { reduceOperation, type EffectIntent, type OperationEvent } from './state.js'
 import { classifyReceipt, withReceipt, type OperationStore, type PersistedOperation } from './store.js'
+import { poolsExhaustedIn } from './host-step-failure.js'
 
 /** What the probe that follows a host-step receipt shows. The receipt itself is never believed. */
 export interface HostStepVerdict {
@@ -45,6 +46,11 @@ export interface HostStepVerdict {
   needs_relogin: boolean
   /** What is still missing, as the operation's failure when neither of the above holds. */
   error: ErrorBody | null
+  /**
+   * A failed step whose log shows Docker found no free address pool: whether `daemon.json` sets
+   * `bip` or `default-address-pools` (task 2.23, review round 1). Absent otherwise.
+   */
+  address_pools_configured?: boolean | 'unknown'
 }
 
 /** A probe's answer: the plan, the privileged step it needs if any, and whether the image is there. */
@@ -61,6 +67,12 @@ export interface EnvironmentProvisioner {
   probe(record: PersistedOperation, signal: AbortSignal): Promise<ProvisionerProbe>
   /** Re-probe after a host-step receipt that claims the step ran (task 2.6). Changes nothing. */
   verifyHostStep(record: PersistedOperation, signal: AbortSignal): Promise<HostStepVerdict>
+  /**
+   * Whether `/etc/docker/daemon.json` sets `bip` or `default-address-pools` — read-only, asked only
+   * to explain a failed step whose log shows Docker found no free address pool (task 2.23). Absent
+   * where the host has no such file (off Linux).
+   */
+  addressPoolsConfigured?(): Promise<boolean | 'unknown'>
   /**
    * `own` records, durably and at once, resources the step is about to create, before it creates
    * them (`OperationStore.recordOwned`): what the operation later removes is only what it made.
@@ -346,6 +358,9 @@ export class EnvironmentService {
           prerequisites_met: verdict.prerequisites_met,
           needs_relogin: verdict.needs_relogin,
           ...(verdict.error === null ? {} : { probe_error: verdict.error }),
+          ...(verdict.address_pools_configured === undefined
+            ? {}
+            : { address_pools_configured: verdict.address_pools_configured }),
         },
         { next_effect_id: this.options.newEffectId() }
       )
@@ -493,6 +508,20 @@ export class EnvironmentService {
     receipt: ManagedHostReceipt
   ): Promise<HostStepVerdict> {
     const provisioner = this.options.provisioner
+    if (
+      receipt.outcome === 'failed' &&
+      poolsExhaustedIn(receipt.log_tail) &&
+      provisioner?.addressPoolsConfigured
+    ) {
+      // Which of Docker's two pool failures it was is in daemon.json, read now (task 2.23).
+      const configured = await provisioner.addressPoolsConfigured().catch(() => 'unknown' as const)
+      return {
+        prerequisites_met: false,
+        needs_relogin: false,
+        error: null,
+        address_pools_configured: configured,
+      }
+    }
     if (receipt.outcome === 'declined' || receipt.outcome === 'failed' || provisioner === null) {
       return { prerequisites_met: false, needs_relogin: false, error: null }
     }

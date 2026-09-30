@@ -1563,16 +1563,22 @@ describe('the 3.10 acceptance host (task 2.23: F-5, F-4, F-6), driven through pr
 
   it('F-4: the plan warns that the VPN routes leave Docker no address pool, naming the route and the fix', async () => {
     const { facts, assessment } = await run(HOST, lex)
-    expect(facts.routes).toEqual(['0.0.0.0/1', '128.0.0.0/1', '10.8.0.0/24', '192.168.1.0/24'])
+    expect(facts.routes?.map((route) => `${route.destination} ${route.device}`)).toEqual([
+      '0.0.0.0/1 tun2',
+      '128.0.0.0/1 tun2',
+      '10.8.0.0/24 tun2',
+      '192.168.1.0/24 wlp2s0',
+    ])
     expect(facts.docker.address_pools_configured).toBe(false)
     expect(assessment.availability).toBe('setup-required')
     expect(assessment.blockers).toEqual([])
     expect(assessment.warnings).toEqual([
       {
         code: 'docker-address-pools-overlap-routes',
-        text: expect.stringMatching(/128\.0\.0\.0\/1.*default-address-pools.*daemon\.json/s),
-        // Every route that lies over a pool: the VPN's upper half, and the LAN inside 192.168.0.0/20.
-        params: { routes: '128.0.0.0/1,192.168.1.0/24' },
+        text: expect.stringMatching(/128\.0\.0\.0\/1 via tun2.*default-address-pools.*daemon\.json/s),
+        // Only the route that causes it: the tunnel's upper half covers all 31 pools, the home LAN
+        // inside 192.168.0.0/20 beside it is not something to change (review round 1).
+        params: { routes: '128.0.0.0/1', devices: 'tun2' },
       },
     ])
   })

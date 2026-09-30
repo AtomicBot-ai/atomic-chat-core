@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DOCKER_POOLS,
   addressPoolWarningExpected,
-  parseIpRoute,
+  parseProcNetRoute,
   parseProcessGroups,
   pickLaunchCard,
   processGroups,
@@ -73,17 +73,18 @@ describe('pickLaunchCard', () => {
   })
 })
 
-/** `ip -4 route` on the 3.10 acceptance laptop with its full-tunnel VPN up (task 2.23, F-4). */
+/** `/proc/net/route` on the 3.10 acceptance laptop with its full-tunnel VPN up (task 2.23, F-4). */
 const FULL_TUNNEL = [
-  'default via 192.168.1.1 dev wlp2s0 proto dhcp src 192.168.1.127 metric 600',
-  '0.0.0.0/1 via 10.8.0.1 dev tun2',
-  '10.8.0.0/24 dev tun2 proto kernel scope link src 10.8.0.2',
-  '128.0.0.0/1 via 10.8.0.1 dev tun2',
-  '192.168.1.0/24 dev wlp2s0 proto kernel scope link src 192.168.1.127 metric 600',
-  'blackhole 10.99.0.0/16',
+  'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
+  'wlp2s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0',
+  'tun2\t00000000\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+  'tun2\t0000080A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0',
+  'tun2\t00000080\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+  'wlp2s0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0',
+  'eth0\t0100000A\t00000000\t0005\t0\t0\t0\tFFFFFFFF\t0\t0\t0',
 ].join('\n')
 
-describe('Docker address pools against ip -4 route (task 2.23, F-4)', () => {
+describe('Docker address pools against /proc/net/route (task 2.23, F-4)', () => {
   it("lists Docker's 31 default subnets", () => {
     expect(DOCKER_POOLS).toHaveLength(31)
     expect(DOCKER_POOLS[0]).toBe('172.17.0.0/16')
@@ -91,18 +92,24 @@ describe('Docker address pools against ip -4 route (task 2.23, F-4)', () => {
     expect(DOCKER_POOLS.at(-1)).toBe('192.168.240.0/20')
   })
 
-  it('reads every destination but the default route, a route type word skipped', () => {
-    expect(parseIpRoute(FULL_TUNNEL)).toEqual([
+  it('reads every destination but the default route, a host route as /32', () => {
+    expect(parseProcNetRoute(FULL_TUNNEL)).toEqual([
       '0.0.0.0/1',
       '10.8.0.0/24',
       '128.0.0.0/1',
       '192.168.1.0/24',
-      '10.99.0.0/16',
+      '10.0.0.1/32',
     ])
   })
 
   it.each<[string, string[], string[] | null]>([
-    ['the full tunnel covers every pool', parseIpRoute(FULL_TUNNEL), ['128.0.0.0/1', '192.168.1.0/24']],
+    // Only what causes it: the tunnel covers all 31, the home LAN beside it is not named.
+    ['the full tunnel', parseProcNetRoute(FULL_TUNNEL), ['128.0.0.0/1']],
+    [
+      'two routes needed together, in table order',
+      ['192.168.0.0/16', '172.16.0.0/12'],
+      ['192.168.0.0/16', '172.16.0.0/12'],
+    ],
     ['the LAN alone leaves the 172 pools free', ['192.168.1.0/24'], null],
     ['nothing at all', [], null],
   ])('%s', (_label, routes, expected) => {
