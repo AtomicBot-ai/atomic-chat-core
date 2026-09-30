@@ -176,6 +176,13 @@ export interface LinuxFacts {
   docker_group: DockerGroupFacts
   toolkit_installed: boolean
   free_disk_bytes: number | null
+  /**
+   * The path `free_disk_bytes` is for: `docker.docker_root_dir` when `docker info` answered,
+   * otherwise `/var/lib/docker`, Docker's default. Always the path the image would land in, never
+   * the nearest existing ancestor the space was actually read at on a clean host (task 2.22,
+   * R-core-6). Set even when the read failed; `free_disk_bytes` is null then.
+   */
+  free_disk_path: string
   /** Named checks whose answer could not be read. Each one blocks, none is assumed. */
   unknown: string[]
 }
@@ -320,6 +327,9 @@ export function parseServiceActive(output: CommandOutput | null): boolean | 'unk
   if (output === null || output.code === null) return 'unknown'
   return output.code === 0 && output.stdout.trim() === 'active'
 }
+
+/** Where Docker Engine keeps images unless configured otherwise: the disk check's path before it answers. */
+const DEFAULT_DOCKER_ROOT_DIR = '/var/lib/docker'
 
 const DOCKER_SOCKET = 'unix:///var/run/docker.sock'
 // The forced-socket query must never be steered by a leftover remote/TLS context (item 17).
@@ -467,7 +477,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
 
   // Before anything is installed there is no DockerRootDir yet; check the nearest ancestor that
   // does exist instead of failing outright on a path that is not there yet (item 7).
-  const diskCheckTarget = info.docker_root_dir ?? '/var/lib/docker'
+  const diskCheckTarget = info.docker_root_dir ?? DEFAULT_DOCKER_ROOT_DIR
   const diskCheckPath = await nearestExistingAncestor(deps.pathExists, diskCheckTarget)
   const disk = await deps.freeDiskBytes(diskCheckPath).catch(() => null)
   if (disk === null) unknown.push('free-disk')
@@ -498,6 +508,7 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     docker_group: parseDockerGroup(sessionGroups, groupEntry, options.user),
     toolkit_installed: ctk.code === 0,
     free_disk_bytes: disk,
+    free_disk_path: diskCheckTarget,
     unknown,
   }
 }

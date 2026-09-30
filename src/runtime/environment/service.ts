@@ -121,6 +121,8 @@ const unsupported = (input: {
   system_changes: [],
   download_bytes: null,
   required_disk_bytes: null,
+  docker_root_dir: null,
+  free_disk_bytes: null,
   requires_elevation: false,
   may_require_relogin: false,
   may_require_reboot: false,

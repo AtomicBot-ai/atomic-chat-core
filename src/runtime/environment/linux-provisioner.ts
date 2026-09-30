@@ -185,6 +185,8 @@ const blockedPlan = (
   system_changes: [],
   download_bytes: null,
   required_disk_bytes: null,
+  docker_root_dir: null,
+  free_disk_bytes: null,
   requires_elevation: false,
   may_require_relogin: false,
   may_require_reboot: false,
@@ -376,6 +378,9 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       system_changes: changes,
       download_bytes: null,
       required_disk_bytes: null,
+      // A removal reads nothing off the disk.
+      docker_root_dir: null,
+      free_disk_bytes: null,
       requires_elevation: false,
       may_require_relogin: false,
       may_require_reboot: false,
@@ -533,6 +538,12 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       system_changes: systemChanges,
       download_bytes: descriptor.download_bytes,
       required_disk_bytes: descriptor.required_disk_bytes,
+      // Where and how much the probe measured — the numbers `insufficient-disk` was judged on — or
+      // neither when the read failed (task 2.22, R-core-6). Not in `plan_digest`: its `host` keeps
+      // `docker info`'s own `DockerRootDir` and `disk_sufficient`, exactly as before, so reporting
+      // them changes no digest and asks for no new consent.
+      docker_root_dir: machine.free_disk_bytes === null ? null : machine.free_disk_path,
+      free_disk_bytes: machine.free_disk_bytes,
       requires_elevation: installPlan?.requires_elevation ?? false,
       may_require_relogin: installPlan?.may_require_relogin ?? false,
       may_require_reboot: false,

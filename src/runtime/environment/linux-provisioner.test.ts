@@ -375,6 +375,71 @@ describe('probing a Linux host for a setup', () => {
     expect(answer.plan.blockers.map((blocker) => blocker.reason)).toEqual(['insufficient-disk'])
   })
 
+  it('reports the path and free space it measured, the same numbers its disk blocker uses (task 2.22, R-core-6)', async () => {
+    // Docker answers: its own DockerRootDir, and the free space there.
+    const custom = harness({ ...readyHost(), docker: { ...readyHost().docker, root_dir: '/srv/docker' } })
+    custom.machine.free = 321 * GIB
+    const answered = (await createLinuxProvisioner(custom.deps).probe(fresh(), signal)).plan
+    expect(answered.docker_root_dir).toBe('/srv/docker')
+    expect(answered.free_disk_bytes).toBe(321 * GIB)
+
+    // A clean host (no docker info at all): the path core measured for, /var/lib/docker, where
+    // Docker will put the image by default — not null, although Docker has not said so yet.
+    const clean = harness(cleanHost())
+    clean.machine.free = 123 * GIB
+    const cleanPlan = (await createLinuxProvisioner(clean.deps).probe(fresh(), signal)).plan
+    expect(cleanPlan.docker_root_dir).toBe('/var/lib/docker')
+    expect(cleanPlan.free_disk_bytes).toBe(123 * GIB)
+
+    // Not enough room: the blocker's `free` is exactly the plan's `free_disk_bytes`.
+    const tight = harness(readyHost())
+    tight.machine.free = DESCRIPTOR.required_disk_bytes - 1
+    const tightPlan = (await createLinuxProvisioner(tight.deps).probe(fresh(), signal)).plan
+    const disk = tightPlan.blockers.find((blocker) => blocker.reason === 'insufficient-disk')
+    expect(disk?.params).toEqual({
+      free: String(tightPlan.free_disk_bytes),
+      required: String(DESCRIPTOR.required_disk_bytes),
+    })
+    expect(tightPlan.docker_root_dir).toBe('/var/lib/docker')
+
+    // The free-space read failed: core measured nothing, so neither is reported — both null
+    // together, never a path without its number — and no disk blocker claims a number either.
+    const unread = harness(readyHost())
+    unread.deps.host = {
+      ...unread.deps.host,
+      probeDeps: {
+        ...unread.deps.host.probeDeps,
+        freeDiskBytes: async () => Promise.reject(new Error('EIO')),
+      },
+    }
+    const unreadPlan = (await createLinuxProvisioner(unread.deps).probe(fresh(), signal)).plan
+    expect(unreadPlan.docker_root_dir).toBeNull()
+    expect(unreadPlan.free_disk_bytes).toBeNull()
+    expect(unreadPlan.blockers.some((blocker) => blocker.reason === 'insufficient-disk')).toBe(false)
+  })
+
+  it('reports no measured path or free space on a plan that never read the machine', async () => {
+    // No descriptor to be had: blocked before the probe.
+    const h = harness(readyHost())
+    h.deps.descriptors = {
+      ...h.deps.descriptors,
+      forInstallation: async () => ({ kind: 'unsupported', error: new Error('x') as never }),
+      forNewSetup: async () => ({ kind: 'unsupported', error: new Error('none') as never }),
+    }
+    const blocked = (await createLinuxProvisioner(h.deps).probe(record(), signal)).plan
+    expect(blocked.docker_root_dir).toBeNull()
+    expect(blocked.free_disk_bytes).toBeNull()
+    // A removal plan asks nothing of the disk.
+    const removal = (
+      await createLinuxProvisioner(harness(readyHost()).deps).probe(
+        record({ kind: 'remove', descriptor_id: undefined as never }),
+        signal
+      )
+    ).plan
+    expect(removal.docker_root_dir).toBeNull()
+    expect(removal.free_disk_bytes).toBeNull()
+  })
+
   it('plans with the consented descriptor only once the user consented, never a newer one (review r1, item 2)', async () => {
     const h = harness(readyHost())
     const forNewSetup = vi.fn(h.deps.descriptors.forNewSetup)

@@ -39,6 +39,8 @@ const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): Requir
   system_changes: [{ code: 'install-packages', text: 'Install docker-ce' }],
   download_bytes: null,
   required_disk_bytes: null,
+  docker_root_dir: null,
+  free_disk_bytes: null,
   requires_elevation: true,
   may_require_relogin: true,
   may_require_reboot: false,

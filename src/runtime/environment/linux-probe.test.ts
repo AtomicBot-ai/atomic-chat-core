@@ -454,12 +454,15 @@ describe('reading the machine', () => {
         return 1
       },
     }
-    await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
+    const answered = await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
     expect(paths).toEqual(['/mnt/docker-data'])
+    // The facts say which path the free space is for (task 2.22): Docker's own DockerRootDir.
+    expect(answered.free_disk_path).toBe('/mnt/docker-data')
+    expect(answered.free_disk_bytes).toBe(1)
 
     // No Docker at all, and /var/lib/docker itself does not exist yet: walks up to /var/lib.
     paths.length = 0
-    await probeLinux(
+    const clean = await probeLinux(
       {
         ...deps,
         exec: async () => missing(),
@@ -468,5 +471,9 @@ describe('reading the machine', () => {
       { user: 'u', xdgRuntimeDir: null }
     )
     expect(paths).toEqual(['/var/lib'])
+    // Measured at the nearest ancestor, but reported for the path the image would land in:
+    // /var/lib/docker, Docker's default DockerRootDir (R-core-6).
+    expect(clean.free_disk_path).toBe('/var/lib/docker')
+    expect(clean.free_disk_bytes).toBe(1)
   })
 })

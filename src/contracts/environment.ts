@@ -354,6 +354,23 @@ export interface RequirementPlan {
   system_changes: ManagedSystemChange[]
   download_bytes: number | null
   required_disk_bytes: number | null
+  /**
+   * The path the core measured free space for when it computed this plan (task 2.22, owner ruling
+   * R-core-6): `DockerRootDir` from `docker info` when the daemon answered, otherwise
+   * `/var/lib/docker`, where Docker puts its images by default (on a clean host the space is read at
+   * that path's nearest existing ancestor). A client shows it next to `free_disk_bytes` and
+   * `required_disk_bytes`. If Docker is later set up with another root directory, the next probe
+   * reports that one. Null together with `free_disk_bytes` whenever the core measured nothing: the
+   * free-space read failed, or the plan never read the machine (a removal, or no descriptor).
+   */
+  docker_root_dir: string | null
+  /**
+   * Free bytes at `docker_root_dir` as of this probe — the very number an `insufficient-disk`
+   * blocker's `params.free` carries. Null when not measured (see `docker_root_dir`). Informational
+   * only: the consent (`plan_digest`) covers whether the space suffices, never this number, which
+   * moves on its own all the time.
+   */
+  free_disk_bytes: number | null
   requires_elevation: boolean
   may_require_relogin: boolean
   may_require_reboot: boolean
