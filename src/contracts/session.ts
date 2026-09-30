@@ -73,6 +73,12 @@ export type SessionLoadStage = (typeof SESSION_LOAD_STAGES)[number]
 export interface UnloadResult {
   success: boolean
   error?: string
+  /**
+   * Whether the provider had the model at all — loading, ready, or stopping — when the unload began.
+   * Set by `tensorrt-llm` only (task 2.24, spec `tensorrt-llm-runtime`), so a wrong id reads as
+   * `false` rather than as a stopped model; the other providers leave it out and stay idempotent.
+   */
+  was_loaded?: boolean
 }
 
 /** One line of `llama-server --list-devices`, memory in MiB (Rust `DeviceInfo`). */

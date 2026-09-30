@@ -1,6 +1,7 @@
 /**
  * Sessions and models: load, unload, recreate, context increase, capabilities, container logs,
- * embeddings, GGUF validation, Foundation Models availability, and the devices a backend reports.
+ * embeddings, the tensorrt-llm check and deletion, GGUF validation, Foundation Models availability,
+ * and the devices a backend reports.
  */
 
 import { AtomicCoreError } from '../../../contracts/index.js'
@@ -101,6 +102,23 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
     }
     const body = await readJsonBody(req)
     sendJson(res, 200, await deps.tensorrtLlmModelCheck(body))
+  })
+
+  // Deleting a downloaded tensorrt-llm model (task 2.24, spec `tensorrt-llm-models`): only core knows
+  // whether it is loaded and owns its engine caches, so clients never remove its folder themselves.
+  // The id is taken as sent, never percent-decoded: `Qwen%2FQwen3-1.7B` is not `Qwen/Qwen3-1.7B`.
+  router.delete(p('/models/tensorrt-llm/*modelId'), async (_req, res, { params }) => {
+    if (!deps.tensorrtLlmModelDelete) {
+      return sendError(
+        res,
+        new AtomicCoreError(
+          'PROVIDER_NOT_FOUND',
+          'tensorrt-llm is not available in this build.',
+          'tensorrt-llm'
+        )
+      )
+    }
+    sendJson(res, 200, await deps.tensorrtLlmModelDelete(params['modelId'] as string))
   })
 
   router.get(p('/runtimes/foundation-models/availability'), async (req, res) => {

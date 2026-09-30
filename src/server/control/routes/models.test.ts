@@ -249,6 +249,61 @@ describe('tensorrt-llm model check route', () => {
   })
 })
 
+describe('tensorrt-llm model deletion route', () => {
+  it('answers PROVIDER_NOT_FOUND when this build offers no tensorrt-llm provider (off Linux)', async () => {
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('passes the id exactly as sent — a nested id whole, a percent-encoded slash not decoded — and answers the deletion', async () => {
+    const seen: string[] = []
+    const withDelete = await start({
+      tensorrtLlmModelDelete: async (modelId) => {
+        seen.push(modelId)
+        return { model_id: modelId, was_loaded: true, freed_bytes: 1500, engine_caches_removed: 2 }
+      },
+    })
+    const res = await withDelete.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      model_id: 'acme/m',
+      was_loaded: true,
+      freed_bytes: 1500,
+      engine_caches_removed: 2,
+    })
+    await withDelete.get('/atomic/v1/models/tensorrt-llm/acme%2Fm', { method: 'DELETE' })
+    expect(seen).toEqual(['acme/m', 'acme%2Fm'])
+    await withDelete.server.close()
+  })
+
+  it.each([
+    ['MODEL_NOT_FOUND', 404],
+    ['MANAGED_STOP_UNCONFIRMED', 409],
+  ])('surfaces %s from the wired deletion as %i', async (code, status) => {
+    const failing = await start({
+      tensorrtLlmModelDelete: async () => {
+        throw Object.assign(new Error('refused'), { code })
+      },
+    })
+    const res = await failing.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    expect(res.status).toBe(status)
+    expect(await res.json()).toMatchObject({ error: { code } })
+    await failing.server.close()
+  })
+
+  it('is not offered for another provider', async () => {
+    const withDelete = await start({
+      tensorrtLlmModelDelete: async () => {
+        throw new Error('never asked')
+      },
+    })
+    const res = await withDelete.get('/atomic/v1/models/llamacpp-upstream/acme/m', { method: 'DELETE' })
+    expect([404, 405]).toContain(res.status)
+    await withDelete.server.close()
+  })
+})
+
 describe('foundation models availability', () => {
   it('answers the runtime token, forwarding force', async () => {
     const asked: boolean[] = []

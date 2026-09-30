@@ -596,3 +596,17 @@ export interface ModelCompatibility {
   kv_reserve_basis?: 'config' | 'weight_fraction'
   verdict: { ok: true } | { ok: false; error: ErrorBody }
 }
+
+/**
+ * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a, spec `tensorrt-llm-models` "Модель
+ * удаляется через core"): what the deletion removed, once the model's container stop was confirmed.
+ */
+export interface TensorrtLlmModelDeletion {
+  model_id: string
+  /** Whether a session or a load of the model had to be stopped first. */
+  was_loaded: boolean
+  /** Bytes of the model folder and of every engine cache of the model, measured just before removal. */
+  freed_bytes: number
+  /** Engine cache folders removed: one per engine release (descriptor) the model was ever loaded with. */
+  engine_caches_removed: number
+}

@@ -38,6 +38,20 @@ async function descriptorDirs(cachesDir: string): Promise<string[]> {
   return entries.filter((entry) => entry.isDirectory()).map((entry) => join(cachesDir, entry.name))
 }
 
+/** Every existing cache folder of one model, one per descriptor it was loaded with (task 2.24). */
+export async function engineCacheDirsOf(paths: ManagedScopePaths, modelId: string): Promise<string[]> {
+  const candidates = (await descriptorDirs(paths.cachesDir)).map((dir) => join(dir, encodeManagedId(modelId)))
+  const present = await Promise.all(
+    candidates.map((dir) =>
+      readdir(dir).then(
+        () => true,
+        () => false
+      )
+    )
+  )
+  return candidates.filter((_, i) => present[i])
+}
+
 async function removeIfPresent(path: string): Promise<boolean> {
   const existed = await readdir(path).then(
     () => true,

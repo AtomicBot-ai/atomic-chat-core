@@ -60,6 +60,7 @@ import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
 import {
   leftoverContainers,
+  tensorrtLlmModelDeleter,
   tensorrtLlmSessionUnloader,
   wireTensorrtLlm,
   wireTensorrtLlmModelCheck,
@@ -421,9 +422,8 @@ export async function createAtomicCore(
     if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
     // `core.registry('tensorrt-llm')` (task 2.16w round 1, finding 2): the same Linux-only gate as
     // the runtime above, so the two are never offered one without the other.
-    if (managedPlatform === 'linux') {
-      registries.set('tensorrt-llm', new TensorrtLlmModelRegistry(layout.provider('tensorrt-llm').modelsDir))
-    }
+    const tensorrtLlmRegistry = new TensorrtLlmModelRegistry(layout.provider('tensorrt-llm').modelsDir)
+    if (managedPlatform === 'linux') registries.set('tensorrt-llm', tensorrtLlmRegistry)
     /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
     const tensorrtLlmOr = (provider: string): TensorrtLlmRuntime => {
       const runtime = runtimes.get('tensorrt-llm')
@@ -433,6 +433,16 @@ export async function createAtomicCore(
     // `POST /models/tensorrt-llm/check` (task 2.16): composed apart from the runtime above (its own
     // deps, never Docker), so a compatibility question answers the same whether or not the engine is
     // even installed yet. `null` off Linux, same gate as `wireTensorrtLlm`.
+    // `DELETE /models/tensorrt-llm/:id` (task 2.24): wherever the provider itself is offered.
+    const tensorrtLlmModelDelete =
+      tensorrtLlm === null
+        ? null
+        : tensorrtLlmModelDeleter({
+            runtime: () => runtimes.get('tensorrt-llm'),
+            sessions: facade,
+            registry: tensorrtLlmRegistry,
+            paths: layout.managed,
+          })
     const tensorrtLlmModelCheck = wireTensorrtLlmModelCheck(managedPlatform, {
       descriptors: managed.descriptors,
       installations: managed.installations,
@@ -501,6 +511,7 @@ export async function createAtomicCore(
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
         ...(tensorrtLlmModelCheck !== null ? { tensorrtLlmModelCheck } : {}),
+        ...(tensorrtLlmModelDelete !== null ? { tensorrtLlmModelDelete } : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),
           install: (provider, version, backend, opts) =>

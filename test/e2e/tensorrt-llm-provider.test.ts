@@ -2,7 +2,7 @@
  * The `tensorrt-llm` provider through the compiled binary (task 2.14): a model loads into a fake
  * container, is served on `:1337/v1/chat/completions` through its session gateway, refuses
  * `/v1/embeddings` with a clear error, keeps one session at a time, cancels, and unloads with the
- * container stopped.
+ * container stopped, and deletes a model through core (task 2.24).
  *
  * The machine is the test host (`ATOMIC_MANAGED_TEST_HOST`, the same hook the managed environment's
  * own probe reads): `bin/docker` is `test/helpers/fake-model-docker.mjs`, `bin/nvidia-smi` is
@@ -357,7 +357,7 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(alive(first[0]?.[1].pid ?? null)).toBe(false)
 
     const unload = await post(ready, '/models/tensorrt-llm/qwen3/unload')
-    expect(await unload.json()).toEqual({ success: true })
+    expect(await unload.json()).toEqual({ success: true, was_loaded: true })
     expect(Object.keys(dockerState().containers)).toEqual([])
     const gone = await publicPost(port, '/chat/completions', { model: 'qwen3', messages: [] })
     expect(gone.status).toBe(503)
@@ -572,6 +572,75 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     const res = await post(ready, '/models/tensorrt-llm/llama-3/load')
     expect(await res.json()).toMatchObject({ error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } })
     expect(dockerState().calls).not.toContain('create')
+  })
+
+  /** `<data>/atomic-core/managed-runtimes/caches/<descriptor>/<model>`: both ids are plain here. */
+  const cacheDir = (descriptorId: string, model: string) =>
+    join(dataFolder, 'atomic-core', 'managed-runtimes', 'caches', descriptorId, model)
+
+  it('deletes a loaded model (task 2.24): the container stops, the session goes, every engine cache and the folder are removed', async () => {
+    const { ready } = await start()
+    await load(ready, 'llama-3')
+    expect(existsSync(cacheDir(DESCRIPTOR_ID, 'llama-3'))).toBe(true)
+    // A cache an earlier engine release left for the same model, and another model's cache.
+    const older = cacheDir('tensorrt-llm-1.2.0-r1', 'llama-3')
+    await mkdir(older, { recursive: true })
+    await writeFile(join(older, 'engine.bin'), Buffer.alloc(4096, 3))
+    await mkdir(cacheDir(DESCRIPTOR_ID, 'qwen3'), { recursive: true })
+
+    const res = await control(ready, '/models/tensorrt-llm/llama-3', { method: 'DELETE' })
+    expect(res.status, await res.clone().text()).toBe(200)
+    const deleted = (await res.json()) as { freed_bytes: number }
+    expect(deleted).toMatchObject({ model_id: 'llama-3', was_loaded: true, engine_caches_removed: 2 })
+    // The 20-byte weights, config.json, model.yml and the older cache's 4096 bytes at least.
+    expect(deleted.freed_bytes).toBeGreaterThanOrEqual(4096 + 20)
+
+    expect(Object.keys(dockerState().containers)).toEqual([])
+    const sessions = (await (await control(ready, '/sessions')).json()) as {
+      sessions: Array<{ provider: string }>
+    }
+    expect(sessions.sessions.filter((s) => s.provider === 'tensorrt-llm')).toEqual([])
+    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'llama-3'))).toBe(false)
+    expect(existsSync(cacheDir(DESCRIPTOR_ID, 'llama-3'))).toBe(false)
+    expect(existsSync(older)).toBe(false)
+    expect(existsSync(cacheDir(DESCRIPTOR_ID, 'qwen3'))).toBe(true)
+    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'qwen3', 'model.yml'))).toBe(true)
+
+    const again = await control(ready, '/models/tensorrt-llm/llama-3', { method: 'DELETE' })
+    expect(again.status).toBe(404)
+    expect(await again.json()).toMatchObject({ error: { code: 'MODEL_NOT_FOUND' } })
+  })
+
+  it('deletes nothing and answers MANAGED_STOP_UNCONFIRMED when the model’s container will not stop', async () => {
+    await installModel('stuck-model', 'LlamaForCausalLM')
+    const { ready } = await start()
+    await load(ready, 'stuck-model')
+
+    const res = await control(ready, '/models/tensorrt-llm/stuck-model', { method: 'DELETE' })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toMatchObject({ error: { code: 'MANAGED_STOP_UNCONFIRMED' } })
+    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'stuck-model', 'model.safetensors'))).toBe(
+      true
+    )
+    expect(existsSync(cacheDir(DESCRIPTOR_ID, 'stuck-model'))).toBe(true)
+  })
+
+  it('answers MODEL_NOT_FOUND for an unknown, a percent-encoded or an owner-less id, deleting nothing; an unload of such an id is was_loaded: false', async () => {
+    await installModel('acme/nested', 'LlamaForCausalLM')
+    const { ready } = await start()
+    for (const id of ['no-such-model', 'acme%2Fnested', 'nested']) {
+      const res = await control(ready, `/models/tensorrt-llm/${id}`, { method: 'DELETE' })
+      expect(res.status, id).toBe(404)
+      expect(await res.json()).toMatchObject({ error: { code: 'MODEL_NOT_FOUND' } })
+      const unload = await post(ready, `/models/tensorrt-llm/${id}/unload`)
+      expect(await unload.json()).toEqual({ success: true, was_loaded: false })
+    }
+    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'acme', 'nested', 'model.yml'))).toBe(true)
+
+    const nested = await control(ready, '/models/tensorrt-llm/acme/nested', { method: 'DELETE' })
+    expect(nested.status, await nested.clone().text()).toBe(200)
+    expect(await nested.json()).toMatchObject({ model_id: 'acme/nested', was_loaded: false })
+    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'acme', 'nested'))).toBe(false)
   })
 })
 

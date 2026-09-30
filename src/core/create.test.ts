@@ -256,6 +256,7 @@ describe('taking ownership', () => {
       ['/models/tensorrt-llm/m/load/cancel', 'POST'],
       ['/models/tensorrt-llm/m/capabilities', 'GET'],
       ['/models/tensorrt-llm/m/logs', 'GET'],
+      ['/models/tensorrt-llm/m', 'DELETE'],
     ] as const) {
       expect(await call(mac, path, method)).toMatchObject({
         status: 404,
@@ -264,7 +265,7 @@ describe('taking ownership', () => {
     }
   })
 
-  it("exposes the tensorrt-llm model registry through core.registry('tensorrt-llm') on Linux only, a fresh scan on every list() (task 2.16w round 1, finding 2)", async () => {
+  it("exposes the tensorrt-llm model registry through core.registry('tensorrt-llm') on Linux only, a fresh scan on every list() (task 2.16w round 1, finding 2), and deletes through core (task 2.24)", async () => {
     const linux = await AtomicCore.create({
       dataFolder: data.root,
       controlPort: 0,
@@ -284,6 +285,21 @@ describe('taking ownership', () => {
       'repository: acme/model\nrevision: deadbeef\narchitectures:\n  - LlamaForCausalLM\nquantization: bf16\nfiles: []\n'
     )
     expect((await linux.registry('tensorrt-llm').list()).map((m) => m.id)).toEqual(['downloading'])
+
+    // Deleted through core only (task 2.24): an id the registry does not list is an error, a listed
+    // one that never loaded goes with its folder, and an unload of an unknown id is not a stop.
+    const del = (id: string) =>
+      fetch(`${linux.control.url}/atomic/v1/models/tensorrt-llm/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${linux.controlToken}` },
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }))
+    expect(await del('missing')).toMatchObject({ status: 404, body: { error: { code: 'MODEL_NOT_FOUND' } } })
+    expect(await linux.unload('tensorrt-llm', 'missing')).toEqual({ success: true, was_loaded: false })
+    expect(await del('downloading')).toMatchObject({
+      status: 200,
+      body: { model_id: 'downloading', was_loaded: false, engine_caches_removed: 0 },
+    })
+    expect((await linux.registry('tensorrt-llm').list()).map((m) => m.id)).toEqual([])
     await linux.shutdown()
 
     const mac = await AtomicCore.create({

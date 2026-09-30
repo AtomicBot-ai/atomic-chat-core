@@ -37,6 +37,7 @@ import type {
   LocalProviderId,
   ManagedHostReceipt,
   ModelCompatibility,
+  TensorrtLlmModelDeletion,
   ProbeEnvironmentInput,
   RemoteAccessStatus,
   RequirementPlan,
@@ -348,6 +349,11 @@ export interface ControlServerDeps {
    * network. Absent off Linux, where the `tensorrt-llm` provider is not offered at all.
    */
   tensorrtLlmModelCheck?: (body: unknown) => Promise<ModelCompatibility>
+  /**
+   * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a): stop the model with Docker's
+   * confirmation, then remove every engine cache of it and its folder. Absent off Linux.
+   */
+  tensorrtLlmModelDelete?: (modelId: string) => Promise<TensorrtLlmModelDeletion>
   /**
    * Whether Apple's on-device model can run here: the server's own `--check` token (`available`,
    * `notEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, `unavailable`, `binaryNotFound`).

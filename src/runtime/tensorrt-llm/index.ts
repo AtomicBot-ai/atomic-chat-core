@@ -12,6 +12,7 @@
  * load path uses). Task 2.16 wires the pure check in: `registry.ts` (the full model listing scan),
  * `check.ts` (the route handler behind `compatibility.ts`'s pure verdict) and `prelaunch.ts` (the
  * file-and-compatibility re-check `runtime.ts`'s load path runs before a container is created).
+ * Task 2.24 adds `delete.ts`: a deleted model's engine caches and folder, with the bytes freed.
  *
  * Public API of this module is exported from this file only.
  */
@@ -28,3 +29,4 @@ export * from './registry.js'
 export * from './check.js'
 export * from './prelaunch.js'
 export * from './runtime.js'
+export * from './delete.js'

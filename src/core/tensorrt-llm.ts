@@ -15,11 +15,14 @@
  * separately from the runtime above: it shares the installation records, the descriptor provider and
  * `LinuxHost.probeDeps`, but deliberately never touches `containers`/Docker (`check.ts`'s own file
  * banner explains why) and is offered even when the runtime itself would refuse every load.
+ *
+ * `tensorrtLlmModelDeleter` (task 2.24) is `DELETE /models/tensorrt-llm/:id`: the same hold-and-unload
+ * through the facade as the engine removal's unloader, for one model, then its files.
  */
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreEvents } from '../contracts/index.js'
-import type { ModelCompatibility } from '../contracts/index.js'
-import type { DataLayout } from '../config/index.js'
+import type { ModelCompatibility, TensorrtLlmModelDeletion } from '../contracts/index.js'
+import type { DataLayout, ManagedScopePaths } from '../config/index.js'
 import {
   RECONCILE_BUDGET_MS,
   RECONCILE_CALL_TIMEOUT_MS,
@@ -52,12 +55,14 @@ import {
   TensorrtLlmRuntime,
   checkTensorrtLlmModel,
   containerPlatformFor,
+  deleteTensorrtLlmModelFiles,
   probeTensorrtLlmGpusAndMemory,
   probeTensorrtLlmHost,
   readTensorrtLlmModel,
   resolveReadyInstallation,
   tensorrtLlmAdapter,
 } from '../runtime/tensorrt-llm/index.js'
+import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
 import type { AtomicCore } from './atomic-core.js'
 import type { ResidencyOccupant } from './gpu/index.js'
 import type { CoreLogger } from './types.js'
@@ -301,6 +306,65 @@ export function tensorrtLlmSessionUnloader(
     } catch (error) {
       release()
       throw error
+    }
+  }
+}
+
+export interface TensorrtLlmModelDeleterOptions {
+  /** Read at deletion time, like `tensorrtLlmSessionUnloader`'s: the provider is registered late. */
+  runtime: () => LocalRuntime | undefined
+  sessions: () => Pick<AtomicCore, 'cancelLoad' | 'unload'>
+  registry: Pick<TensorrtLlmModelRegistry, 'list'>
+  /** This scope's managed paths: where the model's engine caches live. */
+  paths: ManagedScopePaths
+}
+
+/**
+ * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a, spec `tensorrt-llm-models` "Модель
+ * удаляется через core"). The id must be one the registry lists — exactly, never percent-decoded or
+ * resolved as a path — else `MODEL_NOT_FOUND`: a client's wrong id is an error, not a success. Loads
+ * of that model are held off for the whole deletion; a load in flight is cancelled and the model
+ * unloaded through the facade, as a client's unload would be, so its cross-process claim is released.
+ * Only once Docker confirmed the stop are the files touched; an unconfirmed stop rejects with
+ * `MANAGED_STOP_UNCONFIRMED` and removes nothing.
+ */
+export function tensorrtLlmModelDeleter(
+  options: TensorrtLlmModelDeleterOptions
+): (modelId: string) => Promise<TensorrtLlmModelDeletion> {
+  return async (modelId) => {
+    const provider = options.runtime()
+    if (!(provider instanceof TensorrtLlmRuntime)) {
+      throw new AtomicCoreError(
+        'PROVIDER_NOT_FOUND',
+        'tensorrt-llm is not available in this build.',
+        TENSORRT_LLM_ENGINE_ID
+      )
+    }
+    const model = (await options.registry.list()).find((entry) => entry.id === modelId)
+    if (model === undefined) {
+      throw new AtomicCoreError('MODEL_NOT_FOUND', `No tensorrt-llm model has the id '${modelId}'.`, modelId)
+    }
+    const release = provider.holdOffModel(modelId)
+    try {
+      const facade = options.sessions()
+      const cancelled = facade.cancelLoad(TENSORRT_LLM_ENGINE_ID, modelId)
+      const result = await facade.unload(TENSORRT_LLM_ENGINE_ID, modelId)
+      if (!result.success || provider.residentModels().includes(modelId)) {
+        throw new AtomicCoreError(
+          'MANAGED_STOP_UNCONFIRMED',
+          result.error ?? `The container of ${modelId} did not confirm its stop; nothing was deleted.`,
+          modelId
+        )
+      }
+      const files = await deleteTensorrtLlmModelFiles(options.paths, model)
+      return {
+        model_id: modelId,
+        was_loaded: cancelled || result.was_loaded === true,
+        freed_bytes: files.freedBytes,
+        engine_caches_removed: files.engineCachesRemoved,
+      }
+    } finally {
+      release()
     }
   }
 }

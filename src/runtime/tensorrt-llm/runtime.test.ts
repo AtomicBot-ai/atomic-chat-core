@@ -506,7 +506,7 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
         for (const other of runtime.gpuOccupancy()) {
           if (other.model_id === claim.model_id) continue
           for (let tick = 0; tick < 5; tick++) await new Promise((resolve) => setImmediate(resolve))
-          expect(await runtime.unload(other.model_id)).toEqual({ success: true })
+          expect(await runtime.unload(other.model_id)).toEqual({ success: true, was_loaded: true })
           order.push(`evicted ${other.model_id}`)
         }
         granted?.()
@@ -647,7 +647,7 @@ describe('TensorrtLlmRuntime: sessions', () => {
   it('unloads with a confirmed stop, and reports MANAGED_STOP_UNCONFIRMED when docker will not confirm', async () => {
     build()
     await runtime.load('qwen3')
-    expect(await runtime.unload('qwen3')).toEqual({ success: true })
+    expect(await runtime.unload('qwen3')).toEqual({ success: true, was_loaded: true })
     expect(runtime.list()).toEqual([])
     await runtime.load('llama')
     docker.stopConfirms = false
@@ -655,8 +655,36 @@ describe('TensorrtLlmRuntime: sessions', () => {
     // Still holding its card: a removal of the engine finds it and retries the stop.
     expect(runtime.residentModels()).toEqual(['llama'])
     docker.stopConfirms = true
-    expect(await runtime.unload('llama')).toEqual({ success: true })
+    expect(await runtime.unload('llama')).toEqual({ success: true, was_loaded: true })
     expect(runtime.residentModels()).toEqual([])
+  })
+
+  it('answers was_loaded: false for an id it does not have, before and after any load (spec `tensorrt-llm-runtime`, G-app-4)', async () => {
+    build()
+    expect(await runtime.unload('qwen3')).toEqual({ success: true, was_loaded: false })
+    await runtime.load('qwen3')
+    // The id as a client might wrongly send it: percent-encoded, or without its owner.
+    expect(await runtime.unload('Qwen%2Fqwen3')).toEqual({ success: true, was_loaded: false })
+    expect(runtime.residentModels()).toEqual(['qwen3'])
+    expect(docker.subcommands().filter((sub) => sub.includes('stop'))).toEqual([])
+  })
+
+  it('refuses loads of one model only while its deletion holds them off (task 2.24); holds nest', async () => {
+    build()
+    const release = runtime.holdOffModel('qwen3')
+    const refused = await rejection(runtime.load('qwen3'))
+    expect(refused).toMatchObject({
+      code: 'MANAGED_OPERATION_CONFLICT',
+      message: 'The model is being deleted.',
+    })
+    const second = runtime.holdOffModel('qwen3')
+    release()
+    release()
+    expect((await rejection(runtime.load('qwen3'))).code).toBe('MANAGED_OPERATION_CONFLICT')
+    await runtime.load('llama')
+    second()
+    await runtime.load('qwen3')
+    expect(runtime.residentModels()).toEqual(['qwen3'])
   })
 
   it('refuses every load with MANAGED_OPERATION_CONFLICT while an engine removal holds loads off (final review M-1)', async () => {

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { ensureEngineCacheDir, removeEngineCaches } from './engine-cache.js'
+import { engineCacheDirsOf, ensureEngineCacheDir, removeEngineCaches } from './engine-cache.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -34,6 +34,19 @@ describe('ensureEngineCacheDir', () => {
     const r2 = await ensureEngineCacheDir(data.layout.managed, 'trt-r2', 'm')
     expect(r2).not.toBe(r1)
     expect(await readdir(r2)).toEqual([])
+  })
+})
+
+describe('engineCacheDirsOf', () => {
+  it('lists the model’s cache under every descriptor that has one, and no other model’s', async () => {
+    const r1 = await seed('trt-r1', 'org/model')
+    const r2 = await seed('trt-r2', 'org/model')
+    await seed('trt-r3', 'org/other')
+    expect((await engineCacheDirsOf(data.layout.managed, 'org/model')).sort()).toEqual([r1, r2].sort())
+  })
+
+  it('is empty when no cache folder exists yet', async () => {
+    expect(await engineCacheDirsOf(data.layout.managed, 'org/model')).toEqual([])
   })
 })
 

@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
@@ -11,13 +12,18 @@ import type { LinuxProbeDeps } from '../runtime/environment/index.js'
 import type { ManagedTextLifecycle } from '../runtime/managed-text/index.js'
 import { raceLoadCancel } from '../runtime/shared/index.js'
 import type { ExternalSessions, LocalRuntime } from '../runtime/shared/index.js'
-import { NVIDIA_SMI_GPU_QUERY, TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
+import {
+  NVIDIA_SMI_GPU_QUERY,
+  TensorrtLlmModelRegistry,
+  TensorrtLlmRuntime,
+} from '../runtime/tensorrt-llm/index.js'
 import { FakeDocker } from '../../test/helpers/fake-docker-exec.js'
 import { readRuntimeFixture } from '../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
   leftoverContainers,
+  tensorrtLlmModelDeleter,
   tensorrtLlmSessionUnloader,
   wireTensorrtLlm,
   wireTensorrtLlmModelCheck,
@@ -244,121 +250,121 @@ describe('wireTensorrtLlm: a container runtime that failed to initialise', () =>
   })
 })
 
-describe('tensorrtLlmSessionUnloader', () => {
-  /**
-   * A real, on-disk model directory for `provider()`'s fake `model:` dep: `TensorrtLlmRuntime.load`
-   * now runs the pre-launch check (task 2.16) before `lifecycle.load`, which re-reads `config.json`
-   * and re-verifies the file listing from real disk — a `dir` that does not exist would refuse every
-   * `runtime.load('m')` call below with `MODEL_FILE_NOT_FOUND` before it ever reached the fake
-   * lifecycle these tests are actually about.
-   */
-  let modelDir: string
-  beforeEach(async () => {
-    modelDir = join(data.root, 'fake-model')
-    await mkdir(modelDir, { recursive: true })
-    await writeFile(
-      join(modelDir, 'config.json'),
-      JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
-    )
-    await writeFile(join(modelDir, 'model.safetensors'), Buffer.alloc(20, 1))
+/**
+ * A real, on-disk model directory for `provider()`'s fake `model:` dep: `TensorrtLlmRuntime.load`
+ * now runs the pre-launch check (task 2.16) before `lifecycle.load`, which re-reads `config.json`
+ * and re-verifies the file listing from real disk — a `dir` that does not exist would refuse every
+ * `runtime.load('m')` call below with `MODEL_FILE_NOT_FOUND` before it ever reached the fake
+ * lifecycle these tests are actually about.
+ */
+let modelDir: string
+beforeEach(async () => {
+  modelDir = join(data.root, 'fake-model')
+  await mkdir(modelDir, { recursive: true })
+  await writeFile(
+    join(modelDir, 'config.json'),
+    JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
+  )
+  await writeFile(join(modelDir, 'model.safetensors'), Buffer.alloc(20, 1))
+})
+
+/**
+ * A provider over a lifecycle that loads instantly and whose stop Docker confirms unless told not
+ * to: the real lifecycle's confirmed stop is `runtime.test.ts`'s and `lifecycle.test.ts`'s.
+ */
+function provider(stopConfirms: () => boolean) {
+  const loaded = new Set<string>()
+  const loading = new Set<string>()
+  const events: string[] = []
+  /** While set, a load waits for it (or for its own cancel) before it counts as loaded. */
+  const hold: { gate: Promise<void> | null } = { gate: null }
+  const lifecycle = {
+    load: async ({ modelId, signal }: { modelId: string; signal?: AbortSignal }) => {
+      if (hold.gate !== null) {
+        loading.add(modelId)
+        try {
+          await raceLoadCancel(hold.gate, signal ?? new AbortController().signal)
+        } finally {
+          loading.delete(modelId)
+        }
+      }
+      loaded.add(modelId)
+      return { model_id: modelId, generation: 'gen-1' } as unknown as SessionInfo
+    },
+    reservations: () => [...loaded, ...loading].map((model_id) => ({ model_id })),
+    list: () => [...loaded].map((model_id) => ({ model_id }) as unknown as SessionInfo),
+    findSession: (modelId: string) =>
+      loaded.has(modelId) ? ({ model_id: modelId } as unknown as SessionInfo) : undefined,
+    isLoading: (modelId: string) => loading.has(modelId),
+    unload: async (modelId: string) => {
+      if (!loaded.has(modelId)) return
+      if (!stopConfirms()) {
+        throw new AtomicCoreError('MANAGED_STOP_UNCONFIRMED', 'Docker did not confirm the stop.', modelId)
+      }
+      events.push(`stopped:${modelId}`)
+      loaded.delete(modelId)
+    },
+    shutdown: async () => undefined,
+  } as unknown as ManagedTextLifecycle
+  const runtime = new TensorrtLlmRuntime({
+    lifecycle: async () => lifecycle,
+    readyInstallation: async () => ({
+      installation: {} as never,
+      descriptor,
+      image: descriptor.image['linux/amd64'],
+    }),
+    hostFacts: async () => ({
+      gpus: [
+        {
+          gpu_id: 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11',
+          name: 'RTX 4090',
+          compute_capability: '8.9',
+          total_vram_bytes: 24 * 1024 ** 3,
+          free_vram_bytes: 24 * 1024 ** 3,
+          driver_version: '590.44.01',
+        },
+      ],
+      selinux: false,
+      memory: { availableBytes: 0, totalBytes: 0 },
+    }),
+    model: async (modelId) => ({
+      id: modelId,
+      dir: modelDir,
+      repository: 'acme/model',
+      revision: 'deadbeef',
+      architecture: 'LlamaForCausalLM',
+      quantization: 'bf16',
+      files: [{ path: 'model.safetensors', size: 20, sha256: null }],
+      weightBytes: 20,
+    }),
+    settings: () => ({}),
   })
+  // The facade's own per-model transitions and cross-process model claims, over this runtime.
+  const runtimes = new Map<LocalProviderId, LocalRuntime>([['tensorrt-llm', runtime]])
+  const sessions = new LocalSessions({
+    layout: data.layout,
+    instanceId: 'core-1',
+    runtimes,
+    externalSessions: {} as ExternalSessions,
+    runtime: (id) => runtimes.get(id) as LocalRuntime,
+    assertRunning: () => {},
+    increaseCtx: async () => ({ ok: false, reason: 'unsupported' }),
+    recreateSession: async () => ({ ok: false, reason: 'not-loaded' }),
+  })
+  return { runtime, events, sessions, hold }
+}
 
-  /**
-   * A provider over a lifecycle that loads instantly and whose stop Docker confirms unless told not
-   * to: the real lifecycle's confirmed stop is `runtime.test.ts`'s and `lifecycle.test.ts`'s.
-   */
-  function provider(stopConfirms: () => boolean) {
-    const loaded = new Set<string>()
-    const loading = new Set<string>()
-    const events: string[] = []
-    /** While set, a load waits for it (or for its own cancel) before it counts as loaded. */
-    const hold: { gate: Promise<void> | null } = { gate: null }
-    const lifecycle = {
-      load: async ({ modelId, signal }: { modelId: string; signal?: AbortSignal }) => {
-        if (hold.gate !== null) {
-          loading.add(modelId)
-          try {
-            await raceLoadCancel(hold.gate, signal ?? new AbortController().signal)
-          } finally {
-            loading.delete(modelId)
-          }
-        }
-        loaded.add(modelId)
-        return { model_id: modelId, generation: 'gen-1' } as unknown as SessionInfo
-      },
-      reservations: () => [...loaded, ...loading].map((model_id) => ({ model_id })),
-      list: () => [...loaded].map((model_id) => ({ model_id }) as unknown as SessionInfo),
-      findSession: (modelId: string) =>
-        loaded.has(modelId) ? ({ model_id: modelId } as unknown as SessionInfo) : undefined,
-      isLoading: (modelId: string) => loading.has(modelId),
-      unload: async (modelId: string) => {
-        if (!loaded.has(modelId)) return
-        if (!stopConfirms()) {
-          throw new AtomicCoreError('MANAGED_STOP_UNCONFIRMED', 'Docker did not confirm the stop.', modelId)
-        }
-        events.push(`stopped:${modelId}`)
-        loaded.delete(modelId)
-      },
-      shutdown: async () => undefined,
-    } as unknown as ManagedTextLifecycle
-    const runtime = new TensorrtLlmRuntime({
-      lifecycle: async () => lifecycle,
-      readyInstallation: async () => ({
-        installation: {} as never,
-        descriptor,
-        image: descriptor.image['linux/amd64'],
-      }),
-      hostFacts: async () => ({
-        gpus: [
-          {
-            gpu_id: 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11',
-            name: 'RTX 4090',
-            compute_capability: '8.9',
-            total_vram_bytes: 24 * 1024 ** 3,
-            free_vram_bytes: 24 * 1024 ** 3,
-            driver_version: '590.44.01',
-          },
-        ],
-        selinux: false,
-        memory: { availableBytes: 0, totalBytes: 0 },
-      }),
-      model: async (modelId) => ({
-        id: modelId,
-        dir: modelDir,
-        repository: 'acme/model',
-        revision: 'deadbeef',
-        architecture: 'LlamaForCausalLM',
-        quantization: 'bf16',
-        files: [{ path: 'model.safetensors', size: 20, sha256: null }],
-        weightBytes: 20,
-      }),
-      settings: () => ({}),
-    })
-    // The facade's own per-model transitions and cross-process model claims, over this runtime.
-    const runtimes = new Map<LocalProviderId, LocalRuntime>([['tensorrt-llm', runtime]])
-    const sessions = new LocalSessions({
-      layout: data.layout,
-      instanceId: 'core-1',
-      runtimes,
-      externalSessions: {} as ExternalSessions,
-      runtime: (id) => runtimes.get(id) as LocalRuntime,
-      assertRunning: () => {},
-      increaseCtx: async () => ({ ok: false, reason: 'unsupported' }),
-      recreateSession: async () => ({ ok: false, reason: 'not-loaded' }),
-    })
-    return { runtime, events, sessions, hold }
-  }
+/** Whether another core instance could claim model `m` now: only once this one released it. */
+const otherCoreCanClaim = async (modelId: string): Promise<boolean> =>
+  acquireModelClaim(data.layout, 'tensorrt-llm', modelId, 'core-2').then(
+    async (claim) => {
+      await claim.release()
+      return true
+    },
+    () => false
+  )
 
-  /** Whether another core instance could claim model `m` now: only once this one released it. */
-  const otherCoreCanClaim = async (modelId: string): Promise<boolean> =>
-    acquireModelClaim(data.layout, 'tensorrt-llm', modelId, 'core-2').then(
-      async (claim) => {
-        await claim.release()
-        return true
-      },
-      () => false
-    )
-
+describe('tensorrtLlmSessionUnloader', () => {
   it('unloads through the facade — stop confirmed, cross-process claim released — and holds loads off until released (final review M-1)', async () => {
     const { runtime, events, sessions } = provider(() => true)
     await sessions.acquire('tensorrt-llm', 'm', {})
@@ -439,6 +445,200 @@ describe('tensorrtLlmSessionUnloader', () => {
       throw new Error('never asked')
     }
     expect(await tensorrtLlmSessionUnloader(runtime, facade)(engineId)).toEqual({ unloaded: 0 })
+  })
+})
+
+describe('tensorrtLlmModelDeleter', () => {
+  const MODEL = 'acme/m'
+  const modelFolder = () => join(data.layout.provider('tensorrt-llm').modelsDir, 'acme', 'm')
+
+  /** A downloaded model as the registry lists it: `model.yml` plus 1000 bytes of weights. */
+  async function installModel(id: string): Promise<string> {
+    const dir = join(data.layout.provider('tensorrt-llm').modelsDir, ...id.split('/'))
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'model.safetensors'), Buffer.alloc(1000, 1))
+    await writeFile(
+      join(dir, 'model.yml'),
+      `name: ${id}\nrepository: ${id}\nrevision: deadbeef\narchitectures:\n  - LlamaForCausalLM\n` +
+        `quantization: bf16\nfiles:\n  - path: model.safetensors\n    size: 1000\n    sha256: null\n`
+    )
+    return dir
+  }
+
+  /** An engine cache of `id` under `descriptorId` holding `bytes` bytes. */
+  async function writeCache(descriptorId: string, id: string, bytes: number): Promise<string> {
+    const dir = data.layout.managed.engineCacheDir(descriptorId, id)
+    await mkdir(join(dir, 'nested'), { recursive: true })
+    await writeFile(join(dir, 'nested', 'engine.bin'), Buffer.alloc(bytes, 2))
+    return dir
+  }
+
+  function deleter(
+    runtime: () => LocalRuntime | undefined,
+    sessions: () => Pick<LocalSessions, 'cancelLoad' | 'unload'>
+  ) {
+    return tensorrtLlmModelDeleter({
+      runtime,
+      sessions: sessions as never,
+      registry: new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      paths: data.layout.managed,
+    })
+  }
+
+  it('stops a loaded model with a confirmed stop, then removes every engine cache of it and its folder', async () => {
+    const { runtime, events, sessions } = provider(() => true)
+    await installModel(MODEL)
+    await installModel('acme/other')
+    const first = await writeCache('tensorrt-llm-1.2.1-r1', MODEL, 300)
+    const second = await writeCache('tensorrt-llm-1.2.1-r2', MODEL, 200)
+    const other = await writeCache('tensorrt-llm-1.2.1-r1', 'acme/other', 50)
+    await sessions.acquire('tensorrt-llm', MODEL, {})
+
+    const deleted = await deleter(
+      () => runtime,
+      () => sessions
+    )(MODEL)
+
+    expect(deleted).toEqual({
+      model_id: MODEL,
+      was_loaded: true,
+      // weights 1000 + model.yml + both caches (300 + 200)
+      freed_bytes: expect.any(Number),
+      engine_caches_removed: 2,
+    })
+    expect(deleted.freed_bytes).toBeGreaterThan(1500)
+    expect(deleted.freed_bytes).toBeLessThan(1500 + 1000)
+    expect(events).toEqual([`stopped:${MODEL}`])
+    expect(runtime.residentModels()).toEqual([])
+    expect(await otherCoreCanClaim(MODEL)).toBe(true)
+    expect(existsSync(first)).toBe(false)
+    expect(existsSync(second)).toBe(false)
+    expect(existsSync(modelFolder())).toBe(false)
+    // Another model's cache and folder stay.
+    expect(existsSync(other)).toBe(true)
+    expect(await new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir).list()).toEqual(
+      [expect.objectContaining({ id: 'acme/other' })]
+    )
+    // The hold is lifted: the id can be downloaded and loaded again.
+    await installModel(MODEL)
+    await expect(sessions.acquire('tensorrt-llm', MODEL, {})).resolves.toMatchObject({ created: true })
+  })
+
+  it('deletes a model that is not loaded, with was_loaded false and no cache to remove', async () => {
+    const { runtime, events, sessions } = provider(() => true)
+    await installModel(MODEL)
+    const deleted = await deleter(
+      () => runtime,
+      () => sessions
+    )(MODEL)
+    expect(deleted).toMatchObject({ model_id: MODEL, was_loaded: false, engine_caches_removed: 0 })
+    expect(deleted.freed_bytes).toBeGreaterThanOrEqual(1000)
+    expect(events).toEqual([])
+    expect(existsSync(modelFolder())).toBe(false)
+  })
+
+  it('cancels a load still in flight, then deletes, reporting the model as loaded', async () => {
+    const { runtime, sessions, hold } = provider(() => true)
+    await installModel(MODEL)
+    hold.gate = new Promise(() => {})
+    const pending = sessions.acquire('tensorrt-llm', MODEL, {}).catch((e: unknown) => e)
+    await vi.waitFor(() => expect(runtime.isLoading(MODEL)).toBe(true))
+    const deleted = await deleter(
+      () => runtime,
+      () => sessions
+    )(MODEL)
+    expect(await pending).toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    expect(deleted.was_loaded).toBe(true)
+    expect(existsSync(modelFolder())).toBe(false)
+  })
+
+  it('removes nothing and answers MANAGED_STOP_UNCONFIRMED when Docker will not confirm the stop', async () => {
+    let confirms = false
+    const { runtime, sessions } = provider(() => confirms)
+    await installModel(MODEL)
+    const cache = await writeCache('tensorrt-llm-1.2.1-r1', MODEL, 300)
+    await sessions.acquire('tensorrt-llm', MODEL, {})
+    const remove = deleter(
+      () => runtime,
+      () => sessions
+    )
+    await expect(remove(MODEL)).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED' })
+    expect(existsSync(cache)).toBe(true)
+    expect(await readdir(modelFolder())).toEqual(expect.arrayContaining(['model.yml', 'model.safetensors']))
+    expect(runtime.getLoadedModels()).toEqual([MODEL])
+    // The failed deletion holds nothing off; a retry once the stop is confirmed goes through.
+    await expect(sessions.acquire('tensorrt-llm', MODEL, {})).resolves.toMatchObject({ created: false })
+    confirms = true
+    await expect(remove(MODEL)).resolves.toMatchObject({ was_loaded: true, engine_caches_removed: 1 })
+  })
+
+  it('removes nothing when the facade answers an unload that did not succeed', async () => {
+    const { runtime } = provider(() => true)
+    await installModel(MODEL)
+    const refusing = {
+      cancelLoad: () => false,
+      unload: async () => ({ success: false, error: 'the container would not stop' }),
+    }
+    await expect(
+      deleter(
+        () => runtime,
+        () => refusing
+      )(MODEL)
+    ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED', message: 'the container would not stop' })
+    expect(existsSync(modelFolder())).toBe(true)
+  })
+
+  it('refuses loads of the model being deleted, and only of it, while the deletion runs', async () => {
+    const { runtime, sessions } = provider(() => true)
+    await installModel(MODEL)
+    let finishUnload!: () => void
+    const slowFacade = {
+      cancelLoad: () => false,
+      unload: () =>
+        new Promise<{ success: boolean }>((resolve) => {
+          finishUnload = () => resolve({ success: true })
+        }),
+    }
+    const deletion = deleter(
+      () => runtime,
+      () => slowFacade
+    )(MODEL)
+    await vi.waitFor(() => expect(finishUnload).toBeTypeOf('function'))
+    await expect(sessions.acquire('tensorrt-llm', MODEL, {})).rejects.toMatchObject({
+      code: 'MANAGED_OPERATION_CONFLICT',
+      message: 'The model is being deleted.',
+    })
+    await expect(sessions.acquire('tensorrt-llm', 'acme/other', {})).resolves.toMatchObject({ created: true })
+    finishUnload()
+    await deletion
+  })
+
+  it.each([
+    ['a percent-encoded slash', 'acme%2Fm'],
+    ['a name without its owner', 'm'],
+    ['a folder that is not a model (no model.yml)', 'acme'],
+    ['an id that climbs out of the models folder', 'acme/../../x'],
+  ])('answers MODEL_NOT_FOUND for %s and deletes nothing', async (_label, id) => {
+    const { runtime, sessions } = provider(() => true)
+    await installModel(MODEL)
+    await expect(
+      deleter(
+        () => runtime,
+        () => sessions
+      )(id)
+    ).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
+    expect(existsSync(join(modelFolder(), 'model.yml'))).toBe(true)
+  })
+
+  it('answers PROVIDER_NOT_FOUND where the core offers no tensorrt-llm provider', async () => {
+    await installModel(MODEL)
+    const facade = () => {
+      throw new Error('never asked')
+    }
+    await expect(deleter(() => undefined, facade)(MODEL)).rejects.toMatchObject({
+      code: 'PROVIDER_NOT_FOUND',
+    })
+    expect(existsSync(modelFolder())).toBe(true)
   })
 })
 

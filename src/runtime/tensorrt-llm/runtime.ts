@@ -147,6 +147,8 @@ export class TensorrtLlmRuntime implements LocalRuntime {
   private closed = false
   /** Removals of the engine in progress: while any holds loads off, every load is refused (M-1). */
   private loadHolds = 0
+  /** Deletions of one model in progress (task 2.24): each refuses loads of that model only, counted. */
+  private readonly modelHolds = new Map<string, number>()
   /** Generations whose GPU claim succeeded: a load only holds its card from then on. */
   private readonly claimed = new Set<string>()
   /** What each loaded session can do, keyed by model and pinned to the generation it was computed for. */
@@ -292,9 +294,12 @@ export class TensorrtLlmRuntime implements LocalRuntime {
    * and the caller is told, rather than handed a success that is not one.
    */
   async unload(modelId: string): Promise<UnloadResult> {
+    // Read before the stop: an id this provider never had answers `was_loaded: false` (spec
+    // `tensorrt-llm-runtime`), so a client's wrong id never reads as a stopped model (G-app-4).
+    const wasLoaded = this.residentModels().includes(modelId)
     await this.current?.unload(modelId)
     this.sessionCapabilities.delete(modelId)
-    return { success: true }
+    return { success: true, was_loaded: wasLoaded }
   }
 
   /**
@@ -318,6 +323,23 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       if (released) return
       released = true
       this.loadHolds -= 1
+    }
+  }
+
+  /**
+   * Refuses loads of this one model with `MANAGED_OPERATION_CONFLICT` until the returned release is
+   * called (task 2.24): a deletion holds them off from before it stops the model until its files are
+   * gone, so no load mounts a folder being removed. Other models load as usual. Holds nest.
+   */
+  holdOffModel(modelId: string): () => void {
+    this.modelHolds.set(modelId, (this.modelHolds.get(modelId) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const left = (this.modelHolds.get(modelId) ?? 1) - 1
+      if (left > 0) this.modelHolds.set(modelId, left)
+      else this.modelHolds.delete(modelId)
     }
   }
 
@@ -413,6 +435,9 @@ export class TensorrtLlmRuntime implements LocalRuntime {
         'The TensorRT-LLM engine is being removed; load the model once the removal has finished.',
         modelId
       )
+    }
+    if (this.modelHolds.has(modelId)) {
+      throw new AtomicCoreError('MANAGED_OPERATION_CONFLICT', 'The model is being deleted.', modelId)
     }
   }
 
