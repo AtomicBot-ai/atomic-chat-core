@@ -50,6 +50,7 @@ const plan: RequirementPlan = {
   required_disk_bytes: null,
   docker_root_dir: null,
   free_disk_bytes: null,
+  warnings: [],
   requires_elevation: true,
   may_require_relogin: true,
   may_require_reboot: false,
@@ -87,6 +88,8 @@ const begin = (over: Partial<BeginOperation> = {}): BeginOperation => ({
 class FakeEnvironments implements ManagedEnvironmentControl {
   calls: string[] = []
   failWith: AtomicCoreError | undefined
+  /** Every receipt body that reached the service, as the route parsed it. */
+  receipts: ManagedHostReceipt[] = []
   /** Receipts already acted on, keyed by nonce, as the real service keeps them. */
   private consumed = new Set<string>()
 
@@ -118,6 +121,7 @@ class FakeEnvironments implements ManagedEnvironmentControl {
     return this.record(`resume ${operationId} @${input.expected_revision}`, operation())
   }
   async acceptHostReceipt(operationId: string, input: ManagedHostReceipt) {
+    this.receipts.push(input)
     // The real service answers a replay with the state as it stands, without acting again.
     if (this.consumed.has(input.nonce)) {
       return this.record(`receipt ${operationId} replay`, operation({ phase: 'preparing-environment' }))
@@ -309,6 +313,19 @@ describe('what the routes refuse', () => {
     })
     expect(res.status).toBe(400)
     expect(environments.calls).toEqual([])
+  })
+
+  it('takes the step log tail a receipt may carry, keeps its last 16 KiB, and refuses one that is not text (task 2.23)', async () => {
+    const long = `${'x'.repeat(20_000)}all predefined address pools have been fully subnetted`
+    expect(
+      (await post('/environments/operations/op-1/host-step-result', receipt({ log_tail: long }))).status
+    ).toBe(200)
+    const kept = environments.receipts.at(-1)?.log_tail ?? ''
+    expect(kept).toHaveLength(16 * 1024)
+    expect(kept.endsWith('fully subnetted')).toBe(true)
+
+    const bad = await post('/environments/operations/op-1/host-step-result', { ...receipt(), log_tail: 42 })
+    expect(bad.status).toBe(400)
   })
 
   it('passes an operation nobody has on as 404', async () => {

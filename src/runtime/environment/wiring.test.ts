@@ -81,6 +81,7 @@ const plan: RequirementPlan = {
   required_disk_bytes: null,
   docker_root_dir: null,
   free_disk_bytes: null,
+  warnings: [],
   requires_elevation: false,
   may_require_relogin: false,
   may_require_reboot: false,

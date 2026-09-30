@@ -23,8 +23,8 @@
  * under `newgrp` needs an interactive shell.
  *
  * The run reads the machine first and runs only the scenarios its starting state can exercise
- * (a clean recipe host, Docker with running containers, Fedora's `moby-engine`, a ready host,
- * Arch); the rest are skipped with the reason. Each scenario, the phase timings and the host facts
+ * (a clean recipe host, Docker with running containers, Docker with only `nvidia-container-toolkit-base`,
+ * Fedora's `moby-engine`, a ready host, Arch, a full-tunnel VPN); the rest are skipped with the reason. Each scenario, the phase timings and the host facts
  * go to `<out>/summary.json` and `<out>/run.log`. Instructions per distribution: `docs/live-tests.md`.
  *
  * Opt in with ATOMIC_LIVE=1 and ATOMIC_LIVE_MANAGED=1 on Linux (it installs system packages with
@@ -53,6 +53,7 @@ import type { LiveCore, OperationView, PendingHostStep } from '../helpers/live-c
 import { pickCuratedModel, prepareCuratedModel, readDescriptor } from '../helpers/live-hf-model.js'
 import type { CuratedModel } from '../helpers/live-hf-model.js'
 import {
+  addressPoolWarningExpected,
   cardBytes,
   pickLaunchCard,
   daemonJsonDigest,
@@ -101,6 +102,7 @@ const KNOWN_CHANGES = [
   'add-repository',
   'install-packages',
   'configure-nvidia-runtime',
+  'generate-cdi-spec',
   'enable-docker-service',
   'add-user-to-docker-group',
   'restart-docker',
@@ -119,6 +121,14 @@ const SCENARIOS = [
   [
     'toolkit-only-plan',
     "distribution Docker (Fedora's moby-engine, Debian/Ubuntu docker.io): the plan installs only nvidia-container-toolkit",
+  ],
+  [
+    'toolkit-base-plan',
+    'Docker installed and running, toolkit only -base (state B′, task 2.23 F-5): the plan installs nvidia-container-toolkit and generates the CDI spec',
+  ],
+  [
+    'address-pool-warning',
+    'routes cover every default Docker address pool and Docker is not running (task 2.23 F-4): the plan warns, naming the routes',
   ],
   [
     'arch-blocked',
@@ -196,6 +206,7 @@ interface Plan {
   requires_elevation: boolean
   may_require_relogin: boolean
   blockers: Array<{ code: string; message: string; reason?: string; commands?: string[] }>
+  warnings: Array<{ code: string; text: string; params?: Record<string, string> }>
 }
 
 interface HostStepResult {
@@ -288,9 +299,14 @@ const change = (code: string, vendor?: string): SystemChange | undefined =>
   S.plan?.system_changes.find(
     (c) => c.code === code && (vendor === undefined || c.params?.['vendor'] === vendor)
   )
-const gpuRuntimeBefore = (): boolean => S.facts.docker.nvidia_runtime_loaded || S.facts.docker.nvidia_cdi
+/** The GPU reaches a container: a listed CDI device, as the core decides it (task 2.23, F-5). */
+const gpuRuntimeBefore = (): boolean => S.facts.docker.nvidia_cdi
+/** The plan registers the runtime — and so restarts a running Docker — only when none is loaded yet. */
 const restartApplies = (): boolean =>
-  (S.path === 'complete' || S.path === 'install') && S.facts.docker.service_active && !gpuRuntimeBefore()
+  (S.path === 'complete' || S.path === 'install') &&
+  S.facts.docker.service_active &&
+  !gpuRuntimeBefore() &&
+  !S.facts.docker.nvidia_runtime_loaded
 const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /** A 0700 folder the invoking user owns — what `host-step exec` trusts (request-file.ts). */
@@ -498,8 +514,9 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     report.log(
       `docker: cli ${S.facts.docker.cli ?? 'none'}, package ${S.facts.docker.package ?? 'none'}, ` +
         `active ${S.facts.docker.service_active}, reachable by ${S.facts.user} ${S.facts.docker.user_reaches_daemon}, ` +
-        `running containers ${S.facts.docker.running_containers ?? '-'}, nvidia runtime ${gpuRuntimeBefore()}, ` +
-        `toolkit ${S.facts.toolkit_installed}; selinux ${S.facts.selinux ?? 'absent'}; in recipe ${S.facts.in_recipe}; path ${S.path}`
+        `running containers ${S.facts.docker.running_containers ?? '-'}, nvidia runtime ${S.facts.docker.nvidia_runtime_loaded}, ` +
+        `cdi ${gpuRuntimeBefore()}, toolkit ${S.facts.toolkit_installed ? 'full' : S.facts.toolkit_base_only ? '-base only' : 'none'}, ` +
+        `pools covered by ${S.facts.routes_covering_docker_pools?.join(' ') ?? 'nothing'}; selinux ${S.facts.selinux ?? 'absent'}; in recipe ${S.facts.in_recipe}; path ${S.path}`
     )
   }, 10 * MIN)
 
@@ -556,6 +573,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       )
       for (const c of plan.system_changes) report.log(`  change ${c.code}: ${c.text}`)
       for (const b of plan.blockers) report.log(`  blocker ${b.reason ?? b.code}: ${b.message}`)
+      for (const w of plan.warnings ?? []) report.log(`  warning ${w.code}: ${w.text}`)
 
       expect(plan.recipe_id).toBe(RECIPE_ID)
       expect(plan.descriptor_id).toBe(S.descriptor.descriptor_id)
@@ -611,6 +629,8 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
         ].join(',')
       )
       expect(change('configure-nvidia-runtime')).toBeDefined()
+      // Docker 28.2+ passes --gpus through CDI: the spec is always part of a fresh install (F-5).
+      expect(change('generate-cdi-spec')).toBeDefined()
       expect(change('enable-docker-service')).toBeDefined()
       // No Docker was running, so nothing is restarted and no container of the user's stops.
       expect(change('restart-docker')).toBeUndefined()
@@ -637,6 +657,56 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       expect(change('add-repository', 'docker')).toBeUndefined()
       expect(change('add-repository', 'nvidia')).toBeDefined()
       expect(change('configure-nvidia-runtime')).toBeDefined()
+      expect(change('generate-cdi-spec')).toBeDefined()
+    }
+  )
+
+  scenario(
+    'toolkit-base-plan',
+    5 * MIN,
+    () =>
+      S.path === 'complete' && S.facts.docker.service_active && S.facts.toolkit_base_only
+        ? null
+        : `needs Docker installed and running with only nvidia-container-toolkit-base (state B′); here Docker is ${S.facts.docker.service_active ? 'running' : 'not running'}, toolkit ${S.facts.toolkit_installed ? 'full' : S.facts.toolkit_base_only ? '-base only' : 'absent'}, path ${S.path}`,
+    async () => {
+      // The 3.10 acceptance host (F-5): nvidia-ctk is there from -base, so the old probe skipped the
+      // package and the GPU never reached a container. Now the full package and the spec are planned;
+      // gpu-pull-ready then shows the GPU check passing after the step.
+      report.detail('toolkit-base-plan', 'nvidia_runtime_loaded', S.facts.docker.nvidia_runtime_loaded)
+      expect(change('install-packages')?.params?.['packages']).toBe('nvidia-container-toolkit')
+      expect(change('add-repository', 'docker')).toBeUndefined()
+      expect(change('generate-cdi-spec')).toBeDefined()
+      // A runtime already loaded is not registered again, and so Docker is not restarted for it.
+      if (S.facts.docker.nvidia_runtime_loaded) {
+        expect(change('configure-nvidia-runtime')).toBeUndefined()
+        expect(change('restart-docker')).toBeUndefined()
+      } else expect(change('configure-nvidia-runtime')).toBeDefined()
+    }
+  )
+
+  scenario(
+    'address-pool-warning',
+    5 * MIN,
+    () =>
+      S.plan === null
+        ? 'no plan was read (see probe-plan)'
+        : addressPoolWarningExpected(S.facts)
+          ? null
+          : S.facts.routes_covering_docker_pools === null
+            ? "the host's routes leave a default Docker address pool free (connect a full-tunnel VPN to run this)"
+            : S.facts.docker.service_active
+              ? 'Docker is already running, so it already has its bridge network'
+              : '/etc/docker/daemon.json sets bip or default-address-pools, or could not be read',
+    async () => {
+      // F-4: a full-tunnel VPN leaves dockerd no pool and docker.service does not start; the plan says
+      // so before consent (a warning, not a blocker), naming the routes and the instruction.
+      const warning = S.plan?.warnings.find((w) => w.code === 'docker-address-pools-overlap-routes')
+      report.detail('address-pool-warning', 'warning', warning)
+      report.detail('address-pool-warning', 'routes_seen_by_the_test', S.facts.routes_covering_docker_pools)
+      expect(warning, JSON.stringify(S.plan?.warnings)).toBeDefined()
+      expect(warning?.params?.['routes']?.split(',').length).toBeGreaterThan(0)
+      expect(warning?.text).toMatch(/default-address-pools/)
+      expect(S.plan?.blockers).toEqual([])
     }
   )
 

@@ -212,10 +212,15 @@ export interface DockerFacts {
   user_reaches_daemon: boolean
   /** As root; null while there is no daemon to ask. */
   running_containers: number | null
-  /** A runtime named `nvidia` loaded by the daemon. */
+  /** A runtime named `nvidia` loaded by the daemon. Not a GPU runtime on its own (task 2.23, F-5). */
   nvidia_runtime_loaded: boolean
-  /** `nvidia-ctk cdi list` names an NVIDIA device and the daemon has CDI spec dirs. */
+  /**
+   * `nvidia-ctk cdi list` names an `nvidia.com/gpu` device: the one thing that makes the GPU runtime
+   * ready since task 2.23 (F-5, ruling R-core-8) — Docker 28.2+ passes `--gpus` through CDI.
+   */
   nvidia_cdi: boolean
+  /** `/etc/docker/daemon.json` (read as root) sets `bip` or `default-address-pools` (F-4); null when unread. */
+  address_pools_configured: boolean | null
   security_options: string[]
 }
 
@@ -244,7 +249,15 @@ export interface HostFacts {
   gpus: LiveGpu[]
   driver_version: string | null
   selinux: 'enforcing' | 'permissive' | 'disabled' | null
+  /** The full `nvidia-container-toolkit` package. */
   toolkit_installed: boolean
+  /** Only `nvidia-container-toolkit-base` (state B′, task 2.23 F-5): `nvidia-ctk` is there, the full package is not. */
+  toolkit_base_only: boolean
+  /**
+   * `ip -4 route` destinations (the default route left out) that lie over Docker's default address
+   * pools, when they cover every one of them; null when some pool is free or the table was not read.
+   */
+  routes_covering_docker_pools: string[] | null
   docker: DockerFacts
 }
 
@@ -285,7 +298,6 @@ interface DockerInfo {
   ContainersRunning?: number
   Runtimes?: Record<string, unknown>
   SecurityOptions?: string[]
-  CDISpecDirs?: string[]
 }
 
 /**
@@ -297,6 +309,78 @@ function dockerInfo(out: CommandResult): DockerInfo | null {
   try {
     const info = JSON.parse(out.stdout.trim().split('\n').pop() ?? '') as DockerInfo
     return typeof info.ServerVersion === 'string' && info.ServerVersion !== '' ? info : null
+  } catch {
+    return null
+  }
+}
+
+/** `a.b.c.d/n` (or a bare address, /32) as a 32-bit number and a prefix; null for anything else. */
+function cidr(text: string): { address: number; prefix: number } | null {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(text)
+  if (match === null) return null
+  const octets = match.slice(1, 5).map(Number)
+  const prefix = match[5] === undefined ? 32 : Number(match[5])
+  if (octets.some((octet) => octet > 255) || prefix > 32) return null
+  return { address: octets.reduce((sum, octet) => sum * 256 + octet, 0), prefix }
+}
+
+/** Two networks overlap when they agree on the shorter prefix. Division, not bit shifts: no sign trouble. */
+function overlap(a: { address: number; prefix: number }, b: { address: number; prefix: number }): boolean {
+  const block = 2 ** (32 - Math.min(a.prefix, b.prefix))
+  return Math.floor(a.address / block) === Math.floor(b.address / block)
+}
+
+/**
+ * Docker's default address pools as its daemon tries them (moby `libnetwork/ipamutils`,
+ * `localScopeDefaultNetworks`): 172.17.0.0/16 through 172.31.0.0/16, and 192.168.0.0/16 in /20s.
+ * Re-implemented here rather than imported, so the core's own list cannot hide a mistake in the check.
+ */
+export const DOCKER_POOLS: readonly string[] = [
+  ...Array.from({ length: 15 }, (_, index) => `172.${17 + index}.0.0/16`),
+  ...Array.from({ length: 16 }, (_, index) => `192.168.${index * 16}.0/20`),
+]
+
+/** The destinations of `ip -4 route` output, the default route left out (a type word such as `blackhole` skipped). */
+export function parseIpRoute(text: string): string[] {
+  const types = new Set([
+    'unicast',
+    'local',
+    'broadcast',
+    'multicast',
+    'throw',
+    'unreachable',
+    'prohibit',
+    'blackhole',
+    'nat',
+    'anycast',
+  ])
+  return text
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .map((words) => (types.has(words[0] ?? '') ? words[1] : words[0]) ?? '')
+    .filter((destination) => destination !== '' && destination !== 'default' && destination !== '0.0.0.0/0')
+}
+
+/** The routes lying over Docker's pools when together they cover every pool; null when a pool is free. */
+export function routesCoveringDockerPools(routes: readonly string[]): string[] | null {
+  const parsed = routes.flatMap((text) => {
+    const network = cidr(text)
+    return network === null || network.prefix === 0 ? [] : [{ text, network }]
+  })
+  const pools = DOCKER_POOLS.map((pool) => cidr(pool) as { address: number; prefix: number })
+  if (!pools.every((pool) => parsed.some((route) => overlap(route.network, pool)))) return null
+  return parsed
+    .filter((route) => pools.some((pool) => overlap(route.network, pool)))
+    .map((route) => route.text)
+}
+
+function daemonJsonSetsPools(): boolean | null {
+  const out = sudo(['cat', '/etc/docker/daemon.json'])
+  if (out.code !== 0) return /No such file/.test(out.stderr) ? false : null
+  try {
+    const parsed = JSON.parse(out.stdout) as { 'bip'?: unknown; 'default-address-pools'?: unknown }
+    const pools = parsed['default-address-pools']
+    return (typeof parsed.bip === 'string' && parsed.bip !== '') || (Array.isArray(pools) && pools.length > 0)
   } catch {
     return null
   }
@@ -320,8 +404,8 @@ function dockerFacts(): DockerFacts {
     user_reaches_daemon: asUser !== null && dockerInfo(asUser) !== null,
     running_containers: typeof info?.ContainersRunning === 'number' ? info.ContainersRunning : null,
     nvidia_runtime_loaded: info?.Runtimes !== undefined && 'nvidia' in info.Runtimes,
-    nvidia_cdi:
-      cdiList.code === 0 && /nvidia\.com\/gpu/.test(cdiList.stdout) && (info?.CDISpecDirs?.length ?? 0) > 0,
+    nvidia_cdi: cdiList.code === 0 && /nvidia\.com\/gpu/.test(cdiList.stdout),
+    address_pools_configured: daemonJsonSetsPools(),
     security_options: info?.SecurityOptions ?? [],
   }
 }
@@ -347,6 +431,8 @@ export function detectHost(descriptor: RecipeDescriptor): HostFacts {
   const docker = dockerFacts()
   docker.package = dockerPackage(family)
   const me = userInfo()
+  const toolkitInstalled = installedPackage(family, 'nvidia-container-toolkit')
+  const routes = run('ip', ['-4', 'route'])
   return {
     os,
     arch,
@@ -364,7 +450,10 @@ export function detectHost(descriptor: RecipeDescriptor): HostFacts {
     gpus,
     driver_version: gpus[0]?.driver_version ?? null,
     selinux,
-    toolkit_installed: installedPackage(family, 'nvidia-container-toolkit'),
+    toolkit_installed: toolkitInstalled,
+    toolkit_base_only: !toolkitInstalled && installedPackage(family, 'nvidia-container-toolkit-base'),
+    routes_covering_docker_pools:
+      routes.code === 0 ? routesCoveringDockerPools(parseIpRoute(routes.stdout)) : null,
     docker,
   }
 }
@@ -380,11 +469,25 @@ export function detectHost(descriptor: RecipeDescriptor): HostFacts {
 export type SetupPath = 'adopt' | 'install' | 'complete' | 'arch-blocked' | 'unsupported'
 
 export function setupPath(facts: HostFacts): SetupPath {
-  const gpuRuntime = facts.docker.nvidia_runtime_loaded || facts.docker.nvidia_cdi
-  if (facts.docker.user_reaches_daemon && gpuRuntime) return 'adopt'
+  // A listed CDI device alone, like the core (task 2.23, F-5): a loaded `nvidia` runtime without a
+  // spec is the 3.10 host, whose GPU never reached a container.
+  if (facts.docker.user_reaches_daemon && facts.docker.nvidia_cdi) return 'adopt'
   if (facts.family === 'pacman') return 'arch-blocked'
   if (!facts.in_recipe || facts.immutable) return 'unsupported'
   return facts.docker.cli === null ? 'install' : 'complete'
+}
+
+/**
+ * Whether the core's plan must carry the F-4 warning here (task 2.23): Docker not running yet, every
+ * default pool under a non-default route, and `daemon.json` setting neither `bip` nor
+ * `default-address-pools`. False whenever something could not be read.
+ */
+export function addressPoolWarningExpected(facts: HostFacts): boolean {
+  return (
+    !facts.docker.service_active &&
+    facts.routes_covering_docker_pools !== null &&
+    facts.docker.address_pools_configured === false
+  )
 }
 
 /** Why the VM cannot run this test at all; empty when it can. */

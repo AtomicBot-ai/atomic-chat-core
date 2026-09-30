@@ -150,6 +150,10 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
         daemonJson,
         JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } })
       )
+    if (state.proc_net_route !== undefined) {
+      mkdirSync(join(dir, 'root', 'proc', 'net'), { recursive: true })
+      writeFileSync(join(dir, 'root', 'proc', 'net', 'route'), state.proc_net_route)
+    }
   }
   write(initial)
 
@@ -197,6 +201,7 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
             reachable: state.docker.reachable && !components.includes('docker-group'),
           },
           toolkit: state.toolkit || components.includes('nvidia-container-toolkit'),
+          cdi: (state.cdi ?? state.docker.gpu_runtime) || components.includes('nvidia-cdi'),
           group: components.includes('docker-group')
             ? { configured: true, effective: false }
             : (state.group ?? { configured: false, effective: false }),

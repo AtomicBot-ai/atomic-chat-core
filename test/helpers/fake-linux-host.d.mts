@@ -15,7 +15,14 @@ export interface FakeLinuxHostState {
     selinux?: boolean
     root_dir?: string
   }
+  /** The full `nvidia-container-toolkit` package. */
   toolkit: boolean
+  /** Only `nvidia-container-toolkit-base`: `nvidia-ctk` answers, the package query does not (task 2.23, F-5). */
+  toolkit_base?: boolean
+  /** A generated NVIDIA CDI spec (`nvidia-ctk cdi list` names a device); defaults to `docker.gpu_runtime`. */
+  cdi?: boolean
+  /** `/proc/net/route` text the test host serves (task 2.23, F-4); none when omitted. */
+  proc_net_route?: string
   group?: { configured: boolean; effective: boolean }
   gpu_visible_in_container: boolean
   /** `repository@sha256:…` references Docker holds. */

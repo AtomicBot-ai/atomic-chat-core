@@ -140,6 +140,9 @@ const probeBody = (value: unknown): ProbeEnvironmentInput => {
   }
 }
 
+/** How much of a receipt's `log_tail` the core keeps (the executor's own is 2 000 characters). */
+const RECEIPT_LOG_TAIL_LIMIT = 16 * 1024
+
 const receiptBody = (value: unknown): ManagedHostReceipt => {
   const raw = object(value, 'the request')
   known(raw, 'the request', [
@@ -150,7 +153,10 @@ const receiptBody = (value: unknown): ManagedHostReceipt => {
     'parameters_digest',
     'outcome',
     'receipt_id',
+    'log_tail',
   ])
+  const logTail = raw['log_tail']
+  if (logTail !== undefined && typeof logTail !== 'string') invalid('log_tail must be a string.')
   return {
     step_id: id(raw['step_id'], 'step_id'),
     nonce: id(raw['nonce'], 'nonce'),
@@ -165,6 +171,9 @@ const receiptBody = (value: unknown): ManagedHostReceipt => {
       'failed',
     ] as const),
     receipt_id: id(raw['receipt_id'], 'receipt_id'),
+    // The step's own log tail (task 2.23, F-4), kept to its last 16 KiB: a diagnostic, never refused
+    // for its length — the receipt it rides on is what the operation is waiting for.
+    ...(logTail === undefined ? {} : { log_tail: (logTail as string).slice(-RECEIPT_LOG_TAIL_LIMIT) }),
   }
 }
 

@@ -1,7 +1,8 @@
 /**
  * The `linux.install-container-runtime` recipe (design D2/D3): Docker Engine and the NVIDIA
  * Container Toolkit from the vendors' own apt or dnf repositories, the NVIDIA runtime registered
- * with Docker, `docker.service` enabled, and the user added to the `docker` group. This is the one
+ * with Docker, the NVIDIA CDI spec generated (task 2.23, F-5: Docker 28.2+ passes `--gpus` through
+ * it), `docker.service` enabled, and the user added to the `docker` group. This is the one
  * piece of code in the product that runs as root on a user's machine, so its shape is deliberate:
  *
  * - **Data in, argv out.** `buildInstallContainerRuntimeSteps` is pure. Every command is an argv
@@ -59,12 +60,14 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE_ID = 'linux.install-container-runt
 /**
  * What a plan can ask the recipe for, in the order the recipe applies them. `docker-restart` is not
  * a step of its own: it is the user's consent (design D5) to restart a Docker that was already
- * running when `nvidia-runtime` changes its configuration.
+ * running when `nvidia-runtime` changes its configuration. `nvidia-cdi` (task 2.23, F-5) generates
+ * the CDI spec after the runtime is configured, and needs no restart.
  */
 export const CONTAINER_RUNTIME_COMPONENTS = [
   'docker-engine',
   'nvidia-container-toolkit',
   'nvidia-runtime',
+  'nvidia-cdi',
   'docker-restart',
   'docker-service',
   'docker-group',
@@ -104,6 +107,17 @@ const NVIDIA_KEY = 'C95B321B61E88C1809C4F759DDCAE044F796ECB0'
 
 const DOCKER_ACTIVE = ['systemctl', 'is-active', '--quiet', 'docker']
 /**
+ * Clears a failed or `start-limit-hit` docker.service and docker.socket before a start or restart
+ * (task 2.23, F-6): after a failed start systemd refuses further starts for a while, so a retry of
+ * the same step would fail on the leftover state rather than on the cause. Its exit status is ignored:
+ * on a unit that is not failed it does nothing.
+ */
+const DOCKER_RESET_FAILED = ['systemctl', 'reset-failed', 'docker.service', 'docker.socket']
+/** Where the spec goes (ruling R-core-8): the path `nvidia-cdi-refresh` regenerates. */
+const CDI_SPEC = '/var/run/cdi/nvidia.yaml'
+/** The toolkit's unit (1.18+) that regenerates the spec after a driver update and on boot. */
+const CDI_REFRESH_UNIT = 'nvidia-cdi-refresh.path'
+/**
  * Why docker.service did not start: `systemctl` itself only says "see journalctl". The last 40
  * lines, message text only; run solely after a start or restart failed, never as a step of its own.
  */
@@ -115,7 +129,7 @@ const DOCKER_JOURNAL = ['journalctl', '-u', 'docker.service', '-n', '40', '--no-
  */
 export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
   recipe_id: INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
-  revision: 1,
+  revision: 2,
   /**
    * The environment every command runs with, instead of the caller's. `sudo` and `pkexec` already
    * scrub most of it, but a variable like `APT_CONFIG` or `LD_PRELOAD` must never reach a root
@@ -316,11 +330,30 @@ export const INSTALL_CONTAINER_RUNTIME_RECIPE = frozen({
     /** Which runtimes the running daemon actually loaded, as opposed to what daemon.json says. */
     loaded: ['docker', 'info', '--format', '{{json .Runtimes}}'],
     restart: ['systemctl', 'restart', 'docker'],
+    reset_failed: DOCKER_RESET_FAILED,
     journal: DOCKER_JOURNAL,
+  },
+  /**
+   * The NVIDIA CDI spec (task 2.23, F-5; ruling R-core-8): `nvidia-ctk cdi list` says whether a
+   * `nvidia.com/gpu` device is already defined — the same check the core's probe makes — and only
+   * when none is does `generate` write the spec, to the fixed path, never another. Where the toolkit
+   * ships `nvidia-cdi-refresh.path` (NVIDIA Container Toolkit 1.18+), it is enabled so the spec is
+   * rewritten after a driver update or a reboot (`/var/run` is a tmpfs); where it does not, nothing
+   * fails, and the next probe after a reboot plans the spec again.
+   */
+  cdi: {
+    spec: CDI_SPEC,
+    list: ['nvidia-ctk', 'cdi', 'list'],
+    generate: ['nvidia-ctk', 'cdi', 'generate', `--output=${CDI_SPEC}`],
+    refresh_unit: CDI_REFRESH_UNIT,
+    refresh_present: ['systemctl', 'list-unit-files', '--no-legend', CDI_REFRESH_UNIT],
+    refresh_enabled: ['systemctl', 'is-enabled', CDI_REFRESH_UNIT],
+    refresh_enable: ['systemctl', 'enable', '--now', CDI_REFRESH_UNIT],
   },
   service: {
     enabled: ['systemctl', 'is-enabled', 'docker'],
     active: DOCKER_ACTIVE,
+    reset_failed: DOCKER_RESET_FAILED,
     enable: ['systemctl', 'enable', '--now', 'docker'],
     journal: DOCKER_JOURNAL,
   },
@@ -460,6 +493,9 @@ export function parametersFromPlan(
       case 'configure-nvidia-runtime':
         wanted.add('nvidia-runtime')
         break
+      case 'generate-cdi-spec':
+        wanted.add('nvidia-cdi')
+        break
       case 'restart-docker':
         wanted.add('docker-restart')
         break
@@ -542,6 +578,8 @@ export type HostRecipeStep =
       docker_active: string[]
       loaded: string[]
       restart: string[]
+      /** Run right before `restart`, its exit status ignored (F-6). */
+      reset_failed: string[]
       /** Read only when `restart` fails, to say why Docker did not come back. */
       journal: string[]
       /** The plan listed the restart and the user consented to it (design D5). */
@@ -549,9 +587,23 @@ export type HostRecipeStep =
     }
   | {
       id: string
+      kind: 'generate-cdi'
+      spec: string
+      /** Whether a `nvidia.com/gpu` device is defined: before (satisfied?) and after generating. */
+      list: string[]
+      generate: string[]
+      refresh_unit: string
+      refresh_present: string[]
+      refresh_enabled: string[]
+      refresh_enable: string[]
+    }
+  | {
+      id: string
       kind: 'enable-service'
       enabled: string[]
       active: string[]
+      /** Run right before `enable`, its exit status ignored (F-6). */
+      reset_failed: string[]
       enable: string[]
       /** Read only when `enable` fails, to say why Docker did not start. */
       journal: string[]
@@ -652,8 +704,23 @@ export function buildInstallContainerRuntimeSteps(
       docker_active: [...recipe.runtime.docker_active],
       loaded: [...recipe.runtime.loaded],
       restart: [...recipe.runtime.restart],
+      reset_failed: [...recipe.runtime.reset_failed],
       journal: [...recipe.runtime.journal],
       restart_approved: wants('docker-restart'),
+    })
+  }
+
+  if (wants('nvidia-cdi')) {
+    steps.push({
+      id: 'nvidia-cdi',
+      kind: 'generate-cdi',
+      spec: recipe.cdi.spec,
+      list: [...recipe.cdi.list],
+      generate: [...recipe.cdi.generate],
+      refresh_unit: recipe.cdi.refresh_unit,
+      refresh_present: [...recipe.cdi.refresh_present],
+      refresh_enabled: [...recipe.cdi.refresh_enabled],
+      refresh_enable: [...recipe.cdi.refresh_enable],
     })
   }
 
@@ -663,6 +730,7 @@ export function buildInstallContainerRuntimeSteps(
       kind: 'enable-service',
       enabled: [...recipe.service.enabled],
       active: [...recipe.service.active],
+      reset_failed: [...recipe.service.reset_failed],
       enable: [...recipe.service.enable],
       journal: [...recipe.service.journal],
     })
@@ -702,9 +770,11 @@ export function commandsOf(step: HostRecipeStep): string[][] {
         [...step.install, ...step.packages],
       ]
     case 'configure-runtime':
-      return [step.configure, step.docker_active, step.loaded, step.restart, step.journal]
+      return [step.configure, step.docker_active, step.loaded, step.reset_failed, step.restart, step.journal]
+    case 'generate-cdi':
+      return [step.list, step.generate, step.refresh_present, step.refresh_enabled, step.refresh_enable]
     case 'enable-service':
-      return [step.enabled, step.active, step.enable, step.journal]
+      return [step.enabled, step.active, step.reset_failed, step.enable, step.journal]
     case 'add-to-docker-group':
       return [step.uid, step.groups, step.add]
   }
@@ -750,14 +820,35 @@ export const FORBIDDEN_WORDS: readonly string[] = [
   '--autoremove',
 ]
 
+const { runtime, cdi, service } = INSTALL_CONTAINER_RUNTIME_RECIPE
+/** Every `nvidia-ctk` command the recipe runs, whole. */
+const NVIDIA_CTK_COMMANDS: ReadonlySet<string> = new Set(
+  [runtime.configure, cdi.list, cdi.generate].map((command) => command.join(' '))
+)
+/** Every `systemctl` command the recipe runs, whole (task 2.23 added reset-failed and the CDI unit). */
+const SYSTEMCTL_COMMANDS: ReadonlySet<string> = new Set(
+  [
+    runtime.docker_active,
+    runtime.restart,
+    runtime.reset_failed,
+    service.enabled,
+    service.active,
+    service.enable,
+    service.reset_failed,
+    cdi.refresh_present,
+    cdi.refresh_enabled,
+    cdi.refresh_enable,
+  ].map((command) => command.join(' '))
+)
+
 /** Program → the first argument it may be run with. Nothing else is ever run as root. */
 const PERMITTED: Record<string, readonly string[]> = {
   'apt-get': ['install', 'update'],
   'dpkg-query': ['--show'],
   'dnf': ['install', 'repoquery'],
   'rpm': ['--query'],
-  'nvidia-ctk': ['runtime'],
-  'systemctl': ['is-active', 'is-enabled', 'enable', 'restart'],
+  'nvidia-ctk': ['runtime', 'cdi'],
+  'systemctl': ['is-active', 'is-enabled', 'enable', 'restart', 'reset-failed', 'list-unit-files'],
   'id': ['-u', '-nG'],
   'docker': ['info'],
   'usermod': ['-aG'],
@@ -805,8 +896,12 @@ export function assertPermittedCommand(argv: readonly string[]): void {
     refuse('usermod only ever adds a non-root user to docker')
   if (program === 'docker' && argv.join(' ') !== 'docker info --format {{json .Runtimes}}')
     refuse('docker is only ever asked which runtimes it loaded')
-  if (program === 'nvidia-ctk' && argv.join(' ') !== 'nvidia-ctk runtime configure --runtime=docker')
-    refuse('nvidia-ctk only ever configures the docker runtime')
+  if (program === 'nvidia-ctk' && !NVIDIA_CTK_COMMANDS.has(argv.join(' ')))
+    refuse('nvidia-ctk only ever configures the docker runtime, lists CDI devices or writes the one CDI spec')
+  // systemctl only ever touches docker.service (and its socket) and the CDI refresh unit, in the
+  // recipe's own shapes: `enable --now` of any other unit is not something root does here.
+  if (program === 'systemctl' && !SYSTEMCTL_COMMANDS.has(argv.join(' ')))
+    refuse('systemctl is only ever run in the shapes this recipe builds')
   if (program === 'journalctl' && argv.join(' ') !== DOCKER_JOURNAL.join(' '))
     refuse('journalctl only ever reads the last lines of docker.service')
 }

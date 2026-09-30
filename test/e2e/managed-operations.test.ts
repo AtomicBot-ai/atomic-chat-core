@@ -303,6 +303,7 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
       'docker-engine',
       'nvidia-container-toolkit',
       'nvidia-runtime',
+      'nvidia-cdi',
       'docker-service',
       'docker-group',
     ])
@@ -357,6 +358,73 @@ describe('setting up the managed engine through the compiled core (task 2.6)', (
     expect(done.carried_plan_digest).not.toBe(done.plan_digest)
     expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
     expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
+  })
+
+  it('a Docker host with only toolkit -base behind a full-tunnel VPN (task 2.23): the plan installs the toolkit, generates the CDI spec, warns about the routes, and a failed start names the cause', async () => {
+    // The 3.10 acceptance host after its first attempt: docker-ce installed, docker.service down,
+    // the nvidia runtime registered in daemon.json, no CDI spec, not in the group, a VPN over tun2.
+    host = await fakeManagedHost({
+      ...cleanState(),
+      docker: { installed: true, reachable: false, service_active: false, gpu_runtime: true },
+      toolkit: false,
+      toolkit_base: true,
+      cdi: false,
+      proc_net_route: [
+        'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
+        'wlp2s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0',
+        'tun2\t00000000\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+        'tun2\t00000080\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+      ].join('\n'),
+    })
+    const { ready } = await start()
+    const plan = (await (
+      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+    ).json()) as {
+      system_changes: { code: string; params?: Record<string, string> }[]
+      blockers: unknown[]
+      warnings: { code: string; text: string; params?: Record<string, string> }[]
+    }
+    expect(plan.blockers).toEqual([])
+    expect(plan.system_changes.map((change) => change.code)).toEqual([
+      'add-repository',
+      'install-packages',
+      'generate-cdi-spec',
+      'enable-docker-service',
+      'add-user-to-docker-group',
+    ])
+    expect(plan.system_changes[1]?.params?.['packages']).toBe('nvidia-container-toolkit')
+    expect(plan.warnings).toEqual([
+      expect.objectContaining({
+        code: 'docker-address-pools-overlap-routes',
+        params: { routes: '128.0.0.0/1' },
+      }),
+    ])
+
+    const asking = await beginAndApprove(ready)
+    const waiting = await poll(ready, asking.operation_id, settled)
+    const step = waiting.pending_host_step as PendingHostStep
+    expect(step.parameters.components).toEqual([
+      'nvidia-container-toolkit',
+      'nvidia-cdi',
+      'docker-service',
+      'docker-group',
+    ])
+    // The privileged step fails at docker.service; the app forwards the result file's log tail.
+    const tail =
+      'docker-service failed: systemctl enable --now docker exited with 1\n' +
+      'failed to start daemon: Error initializing network controller: error creating default "bridge" ' +
+      'network: all predefined address pools have been fully subnetted'
+    const posted = await post(ready, `/environments/operations/${asking.operation_id}/host-step-result`, {
+      ...host.runHostStep(step, 'completed', 'none'),
+      outcome: 'failed',
+      log_tail: tail,
+    })
+    expect(posted.status).toBe(200)
+    const failed = await poll(ready, asking.operation_id, settled)
+    expect(failed.phase).toBe('failed')
+    expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(failed.error?.message).toMatch(/full-tunnel VPN.*default-address-pools/s)
+    expect(failed.error?.details).toBe(tail)
   })
 
   it('keeps a refused system prompt resumable, with nothing changed on the host', async () => {

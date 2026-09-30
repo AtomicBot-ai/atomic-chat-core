@@ -41,12 +41,14 @@ exercise. The others are skipped, and each skip gives its reason.
 | `probe-plan` | always; the plan fits the machine, and probing changes nothing (packages, `daemon.json` and Docker's PID are compared) |
 | `install-from-clean` | recipe distribution, no Docker |
 | `toolkit-only-plan` | Fedora with `moby-engine` (or Debian/Ubuntu with `docker.io`), no toolkit |
+| `toolkit-base-plan` | Docker installed and running, with only `nvidia-container-toolkit-base` (state B′): the plan installs `nvidia-container-toolkit` and generates the CDI spec (`generate-cdi-spec`); no runtime configure or restart when the daemon already loaded the `nvidia` runtime. `gpu-pull-ready` then shows the GPU check passing |
+| `address-pool-warning` | the host's routes (`ip -4 route`) cover every default Docker address pool, Docker is not running, and `/etc/docker/daemon.json` sets neither `bip` nor `default-address-pools`: the plan carries the `docker-address-pools-overlap-routes` warning naming the routes, and no blocker. Skipped with the reason otherwise |
 | `restart-with-consent` | Docker running without the NVIDIA runtime. The test starts 2 `busybox` sentinel containers first |
 | `consent-gates-work` | any setup: for 15 s at `awaiting-consent`, nothing is elevated, pulled or restarted |
 | `privileged-step` | install or complete path: request file `0600` in a `0700` folder, `sudo -n <core> host-step exec`, receipt |
 | `relogin` | the step added you to `docker` and the first core's process does not hold the `docker` gid (see below) |
 | `gpu-pull-ready` | any setup: `preparing-environment` → `pulling-image` (byte progress) → `verifying` → `activating` → `ready` |
-| `adopt-ready-host` | Docker already reachable by you, with the NVIDIA runtime |
+| `adopt-ready-host` | Docker already reachable by you, with an NVIDIA CDI device listed (`nvidia-ctk cdi list` shows `nvidia.com/gpu`); a registered `nvidia` runtime without the spec is not ready (task 2.23) |
 | `arch-blocked` | Arch without Docker or the toolkit: `prerequisite-blocked` with `pacman -Syu` commands |
 | `arch-adopt` | Arch with the packages installed by hand and configured |
 | `post-ready-probe-noop` | after `ready`: the plan adopts and lists no changes |
@@ -110,14 +112,19 @@ that gid, but the core reaches the daemon with it and rightly goes on without a 
     halfway fails the pull.
   - **A full-tunnel VPN** (routes `0.0.0.0/1` and `128.0.0.0/1`) leaves dockerd no private range it
     considers free, and Docker does not start: "all predefined address pools have been fully subnetted"
-    in `journalctl -u docker.service` (the privileged step's result now carries that journal tail). Before
-    the run, and before Docker is installed, create `/etc/docker/daemon.json` with a bridge address in any
-    unused `/24`, for example `{"bip": "172.30.99.1/24"}`
+    in `journalctl -u docker.service`. The plan now warns about it before consent (task 2.23): a
+    `docker-address-pools-overlap-routes` warning naming the routes, which `address-pool-warning` checks
+    on a host in that state. The recipe never edits Docker's network configuration, so the workaround is
+    still yours: before continuing (and before Docker is installed), exclude Docker's ranges from the VPN,
+    or create `/etc/docker/daemon.json` with a bridge address in any unused `/24`, for example
+    `{"bip": "172.30.99.1/24"}`
     (`sudo mkdir -p /etc/docker && echo '{"bip": "172.30.99.1/24"}' | sudo tee /etc/docker/daemon.json`).
     The recipe's `nvidia-ctk runtime configure` merges the NVIDIA runtime into that file and keeps the
     key. Verified on the real host: after the recipe, `/etc/docker/daemon.json` was
     `{"bip":"172.30.99.1/24","runtimes":{"nvidia":{...}}}`, so `nvidia-ctk` kept the pre-existing `bip`
-    key.
+    key. If the step fails on it anyway, the operation's error names this cause (when the app forwards
+    the step's log tail with its receipt), and a retry after the fix starts Docker again: the recipe
+    clears systemd's `start-limit-hit` with `systemctl reset-failed` first.
 - **Node.js 22+** (vitest runs on it) and **Bun 1.3.10**, the version CI pins (the repository's lockfile
   is `bun.lock`, and there is no `package-lock.json`, so `npm ci` cannot work):
   `curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.10"`, then open a new shell.
@@ -137,9 +144,11 @@ Snapshot each state so you can run it again.
 | **A. Clean** (every distribution) | fresh install + NVIDIA driver, nothing else | `install-from-clean`, `privileged-step`, `relogin`, `gpu-pull-ready`, `recipe-rerun-noop`, `model-chat`. On Fedora also `selinux-no-permission-denied` with a daemon that does **not** label containers: Docker CE's `dockerd` runs without `--selinux-enabled`, so the core must report `selinux: false` and mount without `:z` |
 | **A′. Ready** | state A after a passing run, then **log out and back in** | `adopt-ready-host` |
 | **B. Docker with containers** (one apt and one dnf distribution) | Docker CE from Docker's repository (`docker-ce`), `sudo usermod -aG docker $USER`, log in again, no toolkit | `restart-with-consent` (exact container count), `privileged-step` without relogin |
+| **B′. Docker, toolkit `-base` only** (at least Ubuntu 26.04, the 3.10 acceptance host) | state B, then add NVIDIA's apt repository and `sudo apt-get install nvidia-container-toolkit-base` only (not `nvidia-container-toolkit`); optionally `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` to also have the `nvidia` runtime loaded, as on that host. Check that `nvidia-ctk cdi list` shows no `nvidia.com/gpu` | `toolkit-base-plan`, `privileged-step` (the full toolkit and `nvidia-cdi`), `gpu-pull-ready` (the GPU check passes through CDI), `recipe-rerun-noop` |
+| **V. Full-tunnel VPN** (any state where Docker is not running, e.g. A) | connect a VPN that routes `0.0.0.0/1` and `128.0.0.0/1`, and leave `/etc/docker/daemon.json` without `bip`/`default-address-pools`; `ip -4 route` should list both | `address-pool-warning`. Consent and the step would then fail at `docker-service`; disconnect the VPN (or set `bip`) before consenting if you want the rest of the run |
 | **C. Fedora moby-engine** (Fedora 43 and 44) | `sudo dnf install moby-engine && sudo systemctl enable --now docker`, no toolkit | `toolkit-only-plan`, and `restart-with-consent` (the count shows as `unknown` unless you are also in `docker`). This is **the run that covers `:z`**: Fedora's `moby-engine` runs with `--selinux-enabled`, so `selinux-no-permission-denied` requires `selinux: true` and `z` on every bind mount |
 | **D. Arch, missing** | Arch + NVIDIA driver, no Docker | `arch-blocked` |
-| **D′. Arch, by hand** | `sudo pacman -Syu --needed docker nvidia-container-toolkit`, `sudo nvidia-ctk runtime configure --runtime=docker`, `sudo systemctl enable --now docker`, `sudo usermod -aG docker $USER`, reboot or log in again | `arch-adopt`, `gpu-pull-ready`, `model-chat` |
+| **D′. Arch, by hand** | `sudo pacman -Syu --needed docker nvidia-container-toolkit`, `sudo nvidia-ctk runtime configure --runtime=docker`, `sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml` (and `sudo systemctl enable --now nvidia-cdi-refresh.path` where the package ships it: `/var/run` does not survive a reboot), `sudo systemctl enable --now docker`, `sudo usermod -aG docker $USER`, reboot or log in again | `arch-adopt`, `gpu-pull-ready`, `model-chat` |
 
 ### Build and copy
 

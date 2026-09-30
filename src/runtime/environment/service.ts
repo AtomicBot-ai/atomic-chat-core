@@ -140,6 +140,7 @@ const unsupported = (input: {
       message: 'Managed runtimes are not available on this system yet.',
     },
   ],
+  warnings: [],
 })
 
 const notFound = (operationId: string): AtomicCoreError =>

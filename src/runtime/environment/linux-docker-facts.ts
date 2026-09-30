@@ -22,8 +22,17 @@
  * The installed *engine version* (round 3, ruling 5) is a separate signal from any of the above: it
  * comes from the package database alone (`dpkg-query`'s `${Version}` field, `rpm -q`'s own
  * name-version-release string, or `pacman -Q docker`), so it is available even when the daemon
- * cannot be reached at all — which is exactly when it is needed, to decide whether CDI is on by
- * Docker's own default (28.2+) without daemon.json saying so explicitly.
+ * cannot be reached at all. Since task 2.23 it is diagnostic only: whether the GPU reaches a
+ * container no longer depends on Docker's CDI-on-by-default version (see `cdiListsNvidiaGpu`).
+ *
+ * The GPU runtime counts as ready only when `nvidia-ctk cdi list` names an `nvidia.com/gpu` device
+ * (task 2.23, finding F-5, ruling R-core-8). Docker 28.2+ serves `--gpus` through CDI, so without a
+ * spec the card never reaches the container — even with a runtime named `nvidia` registered, which
+ * is what this probe used to accept (the 3.10 host: `nvidia-container-toolkit-base` only, `--gpus`
+ * failed with "unresolvable CDI devices"). An older Docker without CDI serves `--gpus` through the
+ * full toolkit's `nvidia-container-runtime-hook` instead; the recipe installs the full toolkit and
+ * generates the spec, so a host it set up passes on either path. A runtime named `nvidia` is still
+ * read (`nvidia_runtime`), but only to decide whether `nvidia-ctk runtime configure` is needed.
  */
 
 import type { CommandOutput } from './linux-probe.js'
@@ -37,8 +46,10 @@ export interface DockerInfoFacts {
   daemon_reachable: boolean
   engine_identity: string | null
   version: string | null
-  /** A runtime named `nvidia`, or an NVIDIA CDI spec: either can carry `--gpus`. */
+  /** `nvidia-ctk cdi list` names an `nvidia.com/gpu` device: `--gpus` can reach the card (F-5). */
   gpu_runtime: boolean
+  /** The daemon that answered loaded a runtime named `nvidia` (`Runtimes`). Not readiness on its own. */
+  nvidia_runtime: boolean
   /**
    * `SecurityOptions` names `selinux`. Docker is enforcing for containers, so a mount of our own
    * directories (model, engine cache, entrypoint, heartbeat) needs the shared `:z` label — never
@@ -66,6 +77,7 @@ const ABSENT: DockerInfoFacts = {
   engine_identity: null,
   version: null,
   gpu_runtime: false,
+  nvidia_runtime: false,
   selinux: false,
   docker_root_dir: null,
   containers_running: 0,
@@ -74,7 +86,11 @@ const ABSENT: DockerInfoFacts = {
   server_errors: [],
 }
 
-/** `nvidia-ctk cdi list`: read-only, and the only way this probe confirms an NVIDIA CDI device actually exists. */
+/**
+ * `nvidia-ctk cdi list`: read-only, and the only way this probe confirms an NVIDIA CDI device actually
+ * exists — the one readiness signal for the GPU runtime (F-5). It reads the spec directories
+ * (`/etc/cdi`, `/var/run/cdi`) itself, so it answers whether or not the daemon does.
+ */
 export function cdiListsNvidiaGpu(cdiList: CommandOutput | null): boolean {
   return cdiList !== null && cdiList.code === 0 && /nvidia\.com\/gpu/i.test(cdiList.stdout)
 }
@@ -111,46 +127,10 @@ export function daemonJsonNvidiaRuntimeEvidence(read: {
   }
 }
 
-/**
- * `/etc/docker/daemon.json`'s `features.cdi`: `true`/`false` when the file says so explicitly,
- * `undefined` when it genuinely does not (no file, or a file without the key) — the only case that
- * lets {@link cdiEnabledByDefault} fall back to Docker's own version-based default (round 3, ruling
- * 5). A file that exists but could not be read or parsed is `'unreadable'`, not `undefined`: it may
- * well say `features.cdi: false`, so silence cannot be assumed behind it (round 4, item A).
- */
-export function daemonJsonFeaturesCdi(read: {
-  text: string | null
-  unreadable: boolean
-}): boolean | undefined | 'unreadable' {
-  if (read.unreadable) return 'unreadable'
-  if (read.text === null) return undefined
-  try {
-    const parsed = JSON.parse(read.text) as { features?: { cdi?: unknown } }
-    const value = parsed.features?.cdi
-    return typeof value === 'boolean' ? value : undefined
-  } catch {
-    return 'unreadable'
-  }
-}
-
 /** First `X.Y.Z` substring, ignoring any epoch prefix (`5:`) or distro suffix (`-1~noble1`, `.fc41`). */
 function firstSemverLike(text: string): string | null {
   const match = /(\d+\.\d+\.\d+)/.exec(text)
   return match === null ? null : (match[1] as string)
-}
-
-/** Segment-by-segment numeric comparison, duplicated from `linux-plan.ts`'s `compareDottedVersions`
- *  rather than imported, so this module stays independent of the assessment layer that consumes it. */
-function compareVersions(a: string, b: string): number {
-  const left = a.split('.').map((segment) => Number(segment) || 0)
-  const right = b.split('.').map((segment) => Number(segment) || 0)
-  const length = Math.max(left.length, right.length)
-  for (let index = 0; index < length; index++) {
-    const leftValue = left[index] ?? 0
-    const rightValue = right[index] ?? 0
-    if (leftValue !== rightValue) return leftValue < rightValue ? -1 : 1
-  }
-  return 0
 }
 
 const ENGINE_PACKAGE_NAMES = ['docker-ce', 'docker.io', 'moby-engine']
@@ -203,28 +183,6 @@ export function detectEngineVersion(
   return dpkgEngineVersion(dpkgQuery) ?? rpmEngineVersion(rpmQuery) ?? pacmanEngineVersion(pacmanQuery)
 }
 
-const CDI_DEFAULT_SINCE = '28.2.0'
-
-/**
- * Whether CDI counts as enabled: `daemon.json`'s own `features.cdi` when it says so explicitly
- * (`false` always wins, even on a new-enough engine — an explicit opt-out is not overridden by a
- * default); otherwise, Docker Engine 28.2+ turns CDI on by default, so a *known* engine version at
- * or above that counts as enabled on its own. An engine version this probe could not determine keeps
- * requiring the explicit `daemon.json` setting — silence is never read as "recent enough" (round 3,
- * ruling 5). A `daemon.json` that exists but could not be read or parsed counts as not enabled
- * whatever the version: it may hold an explicit opt-out this probe cannot see (round 4, item A).
- */
-export function cdiEnabledByDefault(
-  engineVersion: string | null,
-  explicitFeaturesCdi: boolean | undefined | 'unreadable'
-): boolean {
-  // Unreadable is unknown, and unknown is never read as enabled (round 4, item A).
-  if (explicitFeaturesCdi === 'unreadable') return false
-  if (explicitFeaturesCdi !== undefined) return explicitFeaturesCdi
-  if (engineVersion === null) return false
-  return compareVersions(engineVersion, CDI_DEFAULT_SINCE) >= 0
-}
-
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value !== ''
 
 function stringEntries(value: unknown): string[] {
@@ -264,7 +222,6 @@ export function parseDockerInfo(
       ID?: unknown
       ServerVersion?: unknown
       Runtimes?: Record<string, unknown>
-      CDISpecDirs?: unknown[]
       SecurityOptions?: unknown[]
       DockerRootDir?: unknown
       ContainersRunning?: unknown
@@ -284,8 +241,6 @@ export function parseDockerInfo(
     }
 
     const runtimes = Object.keys(info.Runtimes ?? {})
-    const specDirs = Array.isArray(info.CDISpecDirs) ? info.CDISpecDirs : []
-    const hasCdiGpu = specDirs.length > 0 && cdiListsNvidiaGpu(cdiList)
     const securityOptions = stringEntries(info.SecurityOptions)
     const nameAndOs = `${typeof info.Name === 'string' ? info.Name : ''} ${
       typeof info.OperatingSystem === 'string' ? info.OperatingSystem : ''
@@ -294,7 +249,11 @@ export function parseDockerInfo(
       daemon_reachable: true,
       engine_identity: isNonEmptyString(info.ID) ? info.ID : null,
       version: serverVersion,
-      gpu_runtime: runtimes.includes('nvidia') || hasCdiGpu,
+      // CDI alone decides (F-5): a registered `nvidia` runtime without a spec left the card outside
+      // the container on Docker 29. `CDISpecDirs` is not required either — an older daemon with CDI
+      // off serves `--gpus` through the full toolkit's hook, which the recipe installs too.
+      gpu_runtime: cdiListsNvidiaGpu(cdiList),
+      nvidia_runtime: runtimes.includes('nvidia'),
       selinux: securityOptions.some(
         (option) => option === 'name=selinux' || option.startsWith('name=selinux')
       ),
@@ -361,6 +320,35 @@ export function installedPacmanPackages(output: CommandOutput | null, candidates
     if (match !== null) installed.add(match[1] as string)
   }
   return candidates.filter((name) => installed.has(name))
+}
+
+/** The package the recipe installs, and the only one that counts as the toolkit (F-5). */
+export const TOOLKIT_PACKAGE = 'nvidia-container-toolkit'
+
+/**
+ * Whether the full NVIDIA Container Toolkit is installed — the `nvidia-container-toolkit` package,
+ * not `nvidia-container-toolkit-base` alone (F-5). `-base` ships `nvidia-ctk` and
+ * `nvidia-container-runtime`, so `nvidia-ctk --version` answers either way; the package database is
+ * what tells them apart. `query` is the family's own single-package query (`dpkg-query -W -f
+ * '${db:Status-Abbrev} ${Package}\n' nvidia-container-toolkit`, `rpm -q nvidia-container-toolkit` or
+ * `pacman -Q nvidia-container-toolkit`), or null on a family without one, where the CLI answering is
+ * all there is to go by.
+ */
+export function fullToolkitInstalled(
+  family: 'apt' | 'dnf' | 'pacman' | 'other' | null,
+  ctkVersion: CommandOutput,
+  query: CommandOutput | null
+): boolean {
+  if (ctkVersion.code !== 0) return false
+  if (family === null || family === 'other') return true
+  const candidates = [TOOLKIT_PACKAGE]
+  const found =
+    family === 'apt'
+      ? installedDpkgPackages(query, candidates)
+      : family === 'dnf'
+        ? installedRpmPackages(query, candidates)
+        : installedPacmanPackages(query, candidates)
+  return found.includes(TOOLKIT_PACKAGE)
 }
 
 /** Arch's own engine package, and Docker Desktop's package on Arch (round 4, item E). */

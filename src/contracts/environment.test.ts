@@ -237,6 +237,7 @@ describe('managed environment wire shapes', () => {
       may_require_relogin: false,
       may_require_reboot: false,
       blockers: [],
+      warnings: [],
     }
 
     const back = roundTrip(adopt)
@@ -268,9 +269,18 @@ describe('managed environment wire shapes', () => {
       may_require_relogin: true,
       may_require_reboot: false,
       blockers: [{ code: 'MANAGED_PREREQUISITE_BLOCKED', message: 'No NVIDIA driver was found.' }],
+      warnings: [
+        {
+          code: 'docker-address-pools-overlap-routes',
+          text: 'Docker will not be able to start: every address range it uses is covered by the route 128.0.0.0/1.',
+          params: { routes: '128.0.0.0/1' },
+        },
+      ],
     })
 
     expect(blocked.availability).toBe('prerequisite-blocked')
+    // A warning rides along with the plan and survives the wire as it is (task 2.23, F-4).
+    expect(blocked.warnings[0]?.params).toEqual({ routes: '128.0.0.0/1' })
     expect(blocked.blockers).toHaveLength(1)
     expect(blocked.blockers[0]?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
     expect(blocked.may_require_relogin).toBe(true)

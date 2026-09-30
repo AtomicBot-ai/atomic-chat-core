@@ -48,6 +48,7 @@ const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): Requir
   required_disk_bytes: null,
   docker_root_dir: null,
   free_disk_bytes: null,
+  warnings: [],
   requires_elevation: true,
   may_require_relogin: true,
   may_require_reboot: false,
@@ -607,6 +608,44 @@ describe('consent that was already acted on (task 2.6)', () => {
     expect(driver.machine.operation.error?.code).toBe('MANAGED_RELOGIN_REQUIRED')
     expect(driver.machine.operation.completed_step_ids).toEqual(['step-1'])
     expect(driver.pending).toBeNull()
+  })
+
+  it('a failed step says why when its log tail shows Docker had no address pool left, and keeps the tail (task 2.23, F-4)', () => {
+    const tail =
+      'docker-service failed: systemctl enable --now docker exited with 1\n' +
+      'failed to start daemon: Error initializing network controller: error creating default "bridge" ' +
+      'network: all predefined address pools have been fully subnetted'
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'failed', log_tail: tail },
+        prerequisites_met: false,
+        needs_relogin: false,
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    const error = driver.machine.operation.error
+    expect(error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(error?.message).toMatch(/full-tunnel VPN.*default-address-pools/s)
+    expect(error?.details).toBe(tail)
+  })
+
+  it('a failed step without a log tail keeps the old message and the receipt id', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'failed' },
+        prerequisites_met: false,
+        needs_relogin: false,
+      })
+    )
+    expect(driver.machine.operation.error).toEqual({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      message: 'Preparing the system did not finish.',
+      details: RECEIPT.receipt_id,
+    })
   })
 
   it('fails with what the probe found when the helper says done and the machine disagrees', () => {

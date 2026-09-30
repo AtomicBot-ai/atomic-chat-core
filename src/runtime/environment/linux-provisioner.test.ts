@@ -111,7 +111,9 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
       readFile: async (path) =>
         path === '/etc/docker/daemon.json' && machine.state.docker.gpu_runtime
           ? JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } })
-          : (files[path] ?? null),
+          : path === '/proc/net/route'
+            ? (machine.state.proc_net_route ?? null)
+            : (files[path] ?? null),
       // An ordinary systemd host: `/run/systemd/system` is the `sd_booted()` test.
       pathExists: async (path) =>
         path in files || ['/', '/var', '/var/lib', '/run/systemd/system'].includes(path),
@@ -270,6 +272,7 @@ describe('probing a Linux host for a setup', () => {
       'add-repository',
       'install-packages',
       'configure-nvidia-runtime',
+      'generate-cdi-spec',
       'enable-docker-service',
       'add-user-to-docker-group',
     ])
@@ -286,6 +289,7 @@ describe('probing a Linux host for a setup', () => {
         'docker-engine',
         'nvidia-container-toolkit',
         'nvidia-runtime',
+        'nvidia-cdi',
         'docker-service',
         'docker-group',
       ],

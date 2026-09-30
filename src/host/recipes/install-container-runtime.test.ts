@@ -133,7 +133,7 @@ describe('the digests a request is bound to', () => {
     // Changing any command, path, URL, key pin or file body changes this. Update it deliberately:
     // every client holding an old plan will then be refused, which is the point.
     expect(INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST).toMatchInlineSnapshot(
-      `"sha256:852ceac8b172a4f9c9ddb6b60d20ead2280a2dc763c9e6f61bd930ffe615e030"`
+      `"sha256:e2a55f4fcb40ade3d78e23e59cab1d7cbef84dbbfd522b4a4f9a8178fdddda96"`
     )
   })
 
@@ -265,6 +265,7 @@ describe('apt steps', () => {
         docker_active: ['systemctl', 'is-active', '--quiet', 'docker'],
         loaded: ['docker', 'info', '--format', '{{json .Runtimes}}'],
         restart: ['systemctl', 'restart', 'docker'],
+        reset_failed: ['systemctl', 'reset-failed', 'docker.service', 'docker.socket'],
         journal: ['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat'],
         restart_approved: false,
       },
@@ -272,6 +273,22 @@ describe('apt steps', () => {
     expect(
       step(build(ubuntu, ['nvidia-runtime', 'docker-restart']), 'configure-runtime').restart_approved
     ).toBe(true)
+  })
+
+  it('the CDI spec only (task 2.23, F-5): list, generate to the one fixed path, and the refresh unit', () => {
+    expect(build(ubuntu, ['nvidia-cdi'])).toEqual([
+      {
+        id: 'nvidia-cdi',
+        kind: 'generate-cdi',
+        spec: '/var/run/cdi/nvidia.yaml',
+        list: ['nvidia-ctk', 'cdi', 'list'],
+        generate: ['nvidia-ctk', 'cdi', 'generate', '--output=/var/run/cdi/nvidia.yaml'],
+        refresh_unit: 'nvidia-cdi-refresh.path',
+        refresh_present: ['systemctl', 'list-unit-files', '--no-legend', 'nvidia-cdi-refresh.path'],
+        refresh_enabled: ['systemctl', 'is-enabled', 'nvidia-cdi-refresh.path'],
+        refresh_enable: ['systemctl', 'enable', '--now', 'nvidia-cdi-refresh.path'],
+      },
+    ])
   })
 
   it('a restart alone has nothing to restart for', () => {
@@ -285,6 +302,7 @@ describe('apt steps', () => {
         kind: 'enable-service',
         enabled: ['systemctl', 'is-enabled', 'docker'],
         active: ['systemctl', 'is-active', '--quiet', 'docker'],
+        reset_failed: ['systemctl', 'reset-failed', 'docker.service', 'docker.socket'],
         enable: ['systemctl', 'enable', '--now', 'docker'],
         journal: ['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat'],
       },
@@ -312,6 +330,7 @@ describe('apt steps', () => {
       'nvidia-source',
       'packages',
       'nvidia-runtime',
+      'nvidia-cdi',
       'docker-service',
       'docker-group',
     ])
@@ -491,6 +510,7 @@ describe('from an install plan', () => {
           params: { packages: 'docker-ce,docker-ce-cli,containerd.io,nvidia-container-toolkit' },
         },
         { code: 'configure-nvidia-runtime', text: '' },
+        { code: 'generate-cdi-spec', text: '' },
         { code: 'enable-docker-service', text: '' },
         { code: 'add-user-to-docker-group', text: '', params: { user: 'alice' } },
       ]),
@@ -502,10 +522,38 @@ describe('from an install plan', () => {
         'docker-engine',
         'nvidia-container-toolkit',
         'nvidia-runtime',
+        'nvidia-cdi',
         'docker-service',
         'docker-group',
       ],
     })
+  })
+
+  it('Docker there, only the toolkit -base, the runtime registered (task 2.23, F-5/F-6): the toolkit and the spec, no runtime step', () => {
+    const parameters = parametersFromPlan(
+      plan([
+        { code: 'add-repository', text: '', params: { vendor: 'nvidia', family: 'dnf' } },
+        { code: 'install-packages', text: '', params: { packages: 'nvidia-container-toolkit' } },
+        { code: 'generate-cdi-spec', text: '' },
+        { code: 'enable-docker-service', text: '' },
+        { code: 'add-user-to-docker-group', text: '', params: { user: 'alice' } },
+      ]),
+      host
+    )
+    expect(parameters.components).toEqual([
+      'nvidia-container-toolkit',
+      'nvidia-cdi',
+      'docker-service',
+      'docker-group',
+    ])
+    expect(ids(buildInstallContainerRuntimeSteps(parameters))).toEqual([
+      'nvidia-key',
+      'nvidia-source',
+      'packages',
+      'nvidia-cdi',
+      'docker-service',
+      'docker-group',
+    ])
   })
 
   it('refuses a plan whose group line names someone other than the host user', () => {
@@ -644,6 +692,18 @@ describe('what the recipe may never run', () => {
     [['docker', 'rm', '-f', 'x']],
     [['docker', 'info']],
     [['nvidia-ctk', 'runtime', 'configure', '--runtime=docker', '--set-as-default']],
+    // The CDI spec goes to the one path, never another; nothing else of nvidia-ctk cdi (task 2.23).
+    [['nvidia-ctk', 'cdi', 'generate', '--output=/etc/cdi/nvidia.yaml']],
+    [['nvidia-ctk', 'cdi', 'generate']],
+    [['nvidia-ctk', 'cdi', 'transform', 'root']],
+    // systemctl only in the recipe's shapes: no other unit, no stop, no bare reset-failed.
+    [['systemctl', 'enable', '--now', 'sshd']],
+    [['systemctl', 'restart', 'sshd']],
+    [['systemctl', 'stop', 'docker']],
+    [['systemctl', 'reset-failed']],
+    [['systemctl', 'reset-failed', 'sshd.service']],
+    [['systemctl', 'list-unit-files']],
+    [['systemctl', 'is-enabled', 'sshd']],
     // journalctl only ever reads docker.service's last lines; never rotates, vacuums or reads others.
     [['journalctl', '--rotate']],
     [['journalctl', '-u', 'docker.service', '--vacuum-time=1s']],
@@ -691,6 +751,12 @@ describe('what the recipe may never run', () => {
     [['rpm', '--query', '--queryformat=%{NAME}\\n', 'moby-engine']],
     // Why Docker did not start, when systemctl only says "see journalctl".
     [['journalctl', '-u', 'docker.service', '-n', '40', '--no-pager', '-o', 'cat']],
+    // Task 2.23: the CDI spec and its refresh unit (F-5), and clearing a failed Docker start (F-6).
+    [['nvidia-ctk', 'cdi', 'list']],
+    [['nvidia-ctk', 'cdi', 'generate', '--output=/var/run/cdi/nvidia.yaml']],
+    [['systemctl', 'list-unit-files', '--no-legend', 'nvidia-cdi-refresh.path']],
+    [['systemctl', 'enable', '--now', 'nvidia-cdi-refresh.path']],
+    [['systemctl', 'reset-failed', 'docker.service', 'docker.socket']],
   ])('%j is permitted', (argv) => {
     expect(() => assertPermittedCommand(argv)).not.toThrow()
   })

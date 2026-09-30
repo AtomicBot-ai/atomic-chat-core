@@ -110,7 +110,10 @@ export function installMethodBlocker(method: LinuxFacts['docker']['install_metho
   }
 }
 
-/** `docker info` when reachable, the read-only daemon.json/CDI evidence when it is not (item 3). */
+/**
+ * Whether the GPU reaches a container: a listed NVIDIA CDI device (task 2.23, F-5), from `docker
+ * info`'s side when the daemon answered, from `nvidia-ctk cdi list` alone when it did not (item 3).
+ */
 export function effectiveGpuRuntime(facts: LinuxFacts): boolean {
   return facts.docker.daemon_reachable ? facts.docker.gpu_runtime : facts.docker.gpu_runtime_from_config
 }
@@ -133,11 +136,15 @@ export function groupOnlyCommands(immutableOs: boolean, user: string): string[] 
   ]
 }
 
+/** The CDI spec the recipe generates, as a person runs it (task 2.23, F-5; ruling R-core-8). */
+const GENERATE_CDI_COMMAND = 'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml'
+
 /**
  * Arch never supports a partial `pacman -S` of just these two packages (design D2): installing a
  * package without syncing the whole system can leave it inconsistent, so the commands run a full
  * `-Syu` instead — which may itself bring in a newer kernel and NVIDIA driver, hence the reboot
- * note. `nvidia-ctk runtime configure` changes `/etc/docker/daemon.json`, so Docker is explicitly
+ * note. The CDI spec is generated too (task 2.23, F-5: Docker 28.2+ passes `--gpus` through it).
+ * `nvidia-ctk runtime configure` changes `/etc/docker/daemon.json`, so Docker is explicitly
  * restarted afterward rather than relying on `enable --now` to notice the new config on its own
  * (item 12). The `usermod` line uses the actual probed account, never the literal `$USER`, and is
  * omitted entirely for root, which needs no group membership at all (round 3, ruling 8), and for an
@@ -147,6 +154,7 @@ export function archCommands(user: string, groupNeeded = user !== 'root'): strin
   const commands = [
     'sudo pacman -Syu --needed docker nvidia-container-toolkit',
     'sudo nvidia-ctk runtime configure --runtime=docker',
+    GENERATE_CDI_COMMAND,
     'sudo systemctl restart docker',
     'sudo systemctl enable --now docker',
   ]
@@ -300,6 +308,7 @@ export function daemonJsonUnreadableBlocker(): LinuxBlocker {
 
 const CONFIGURE_RUNTIME_COMMANDS = [
   'sudo nvidia-ctk runtime configure --runtime=docker',
+  GENERATE_CDI_COMMAND,
   'sudo systemctl restart docker',
 ]
 const ENABLE_SERVICE_COMMANDS = ['sudo systemctl enable --now docker']
@@ -340,16 +349,20 @@ export function missingComponentBlockers(facts: LinuxFacts, gate: InstallGate): 
     blockers.push(packageStep('toolkit-missing', 'The NVIDIA Container Toolkit', 'nvidia-container-toolkit'))
   }
   if (!effectiveGpuRuntime(facts)) {
+    // A registered `nvidia` runtime without a CDI spec needs only the spec, and no restart (F-5).
+    const specOnly = facts.docker.nvidia_runtime
     blockers.push(
-      facts.docker.daemon_json_unreadable
+      facts.docker.daemon_json_unreadable && !specOnly
         ? daemonJsonUnreadableBlocker()
         : blocker(
             'gpu-runtime-not-configured',
-            'Docker is not configured with the NVIDIA runtime. Configuring it restarts Docker, which ' +
-              'stops any running containers.' +
+            (specOnly
+              ? 'Docker has no NVIDIA CDI specification, so it cannot pass the GPU into a container.'
+              : 'Docker is not configured with the NVIDIA runtime and has no NVIDIA CDI specification. ' +
+                'Configuring it restarts Docker, which stops any running containers.') +
               (recipe ? later('configure it') : ' Configure it yourself with the commands below.'),
             undefined,
-            recipe ? [] : CONFIGURE_RUNTIME_COMMANDS
+            recipe ? [] : specOnly ? [GENERATE_CDI_COMMAND] : CONFIGURE_RUNTIME_COMMANDS
           )
     )
   }

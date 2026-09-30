@@ -55,6 +55,9 @@ const rpmNoneFound = (): CommandOutput => ({
   stderr: '',
 })
 
+/** `nvidia-ctk cdi list` on a host with a generated spec: the GPU runtime is ready (task 2.23, F-5). */
+const CDI_GPU = ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt'))
+
 const RECIPE_DISTRIBUTIONS: RecipeDistribution[] = [
   { id: 'ubuntu', version_id: '24.04', arch: 'x86_64' },
   { id: 'ubuntu', version_id: '24.04', arch: 'aarch64' },
@@ -88,6 +91,12 @@ interface Machine {
   dockerVersion?: CommandOutput
   dockerInfo?: CommandOutput
   nvidiaCtkVersion?: CommandOutput
+  /**
+   * The full `nvidia-container-toolkit` package in the distribution's package database (task 2.23,
+   * F-5). Defaults to "installed exactly when `nvidia-ctk --version` answers", the machines these
+   * scenarios were written for; `false` with a working `nvidia-ctk` is the `-base`-only host.
+   */
+  toolkitPackage?: boolean
   cdiList?: CommandOutput
   dpkgQuery?: CommandOutput
   rpmQuery?: CommandOutput
@@ -102,6 +111,8 @@ interface Machine {
   systemctlIsActive?: CommandOutput
   ostreeBooted?: boolean
   daemonJson?: string | null
+  /** `/proc/net/route`'s text (task 2.23, F-4); unread (null) by default. */
+  procNetRoute?: string | null
   /** Simulates `readFile` rejecting (e.g. `EACCES` on a `0600` daemon.json) rather than resolving
    *  `null` — the "genuinely unreadable" case `daemonJson: null` cannot express (round 3, item 2). */
   daemonJsonUnreadable?: boolean
@@ -124,6 +135,22 @@ function pacmanQ(installed: Record<string, string>, args: string[]): CommandOutp
 
 function depsFor(machine: Machine): LinuxProbeDeps {
   const exec: LinuxProbeDeps['exec'] = async (command, args) => {
+    if (args.includes('nvidia-container-toolkit')) {
+      // The per-family single-package query for the full toolkit (F-5), in each tool's own words.
+      const installed = machine.toolkitPackage ?? machine.nvidiaCtkVersion?.code === 0
+      if (command === 'dpkg-query')
+        return installed
+          ? ok('ii  nvidia-container-toolkit\n')
+          : failed('dpkg-query: no packages found matching nvidia-container-toolkit')
+      if (command === 'rpm')
+        return installed
+          ? ok('nvidia-container-toolkit-1.17.8-1.x86_64\n')
+          : { code: 1, stdout: 'package nvidia-container-toolkit is not installed\n', stderr: '' }
+      if (command === 'pacman')
+        return installed
+          ? ok('nvidia-container-toolkit 1.17.8-1\n')
+          : failed("error: package 'nvidia-container-toolkit' was not found")
+    }
     if (command === 'uname') return machine.uname ?? ok('x86_64\n')
     if (command === 'nvidia-smi') {
       return machine.nvidiaSmi ?? ok(readLinuxProbeFixture('nvidia-smi/rtx4070-driver590.csv'))
@@ -159,6 +186,7 @@ function depsFor(machine: Machine): LinuxProbeDeps {
         if (machine.daemonJsonUnreadable === true) throw new Error('EACCES: permission denied')
         return machine.daemonJson ?? null
       }
+      if (path === '/proc/net/route') return machine.procNetRoute ?? null
       return null
     },
     pathExists: async (path) => {
@@ -222,6 +250,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       idNG: ok('root\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
     })
@@ -240,6 +269,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       dockerInfo: UNREACHABLE_28_3,
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
       // Read-only evidence the runtime is already configured, since the daemon cannot be asked
@@ -304,6 +334,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       dockerInfo: UNREACHABLE_28_3,
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: ok('docker:x:999:ana\n'),
       idNG: ok('ana sudo\n'),
@@ -347,6 +378,8 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     expect(assessment.blockers.map((b) => b.reason)).toEqual([
       'relogin-required',
       'toolkit-missing',
+      // No toolkit, so no nvidia-ctk and no CDI spec: the registered runtime alone is not ready (F-5).
+      'gpu-runtime-not-configured',
       'distribution-not-in-recipe',
     ])
     // Not a recipe distribution: nothing may promise that setup will install it later.
@@ -376,6 +409,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
         dockerInfo: UNREACHABLE_28_3,
         dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
         nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+        cdiList: CDI_GPU,
         systemctlIsActive: ok('active\n'),
         getentGroup: ok('docker:x:999:root\n'),
         idNG: ok('root\n'),
@@ -394,6 +428,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       dockerInfo: UNREACHABLE_28_3,
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: ok('docker:x:999:ana\n'),
       idNG: ok('ana docker sudo\n'), // this session already has it too
@@ -411,6 +446,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
     })
     expect(facts.distribution).toEqual({ id: 'arch', version_id: 'rolling', id_like: [], family: 'pacman' })
     expect(assessment.availability).toBe('setup-required')
@@ -426,6 +462,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
     expect(assessment.blockers[0]?.commands).toEqual([
       'sudo pacman -Syu --needed docker nvidia-container-toolkit',
       'sudo nvidia-ctk runtime configure --runtime=docker',
+      'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
       'sudo systemctl restart docker',
       'sudo systemctl enable --now docker',
       'sudo usermod -aG docker ana',
@@ -446,6 +483,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       'add-repository',
       'install-packages',
       'configure-nvidia-runtime',
+      'generate-cdi-spec',
       'enable-docker-service',
       'add-user-to-docker-group',
     ])
@@ -466,6 +504,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       'add-repository',
       'install-packages',
       'configure-nvidia-runtime',
+      'generate-cdi-spec',
       'enable-docker-service',
       'add-user-to-docker-group',
     ])
@@ -484,6 +523,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       'add-repository',
       'install-packages',
       'configure-nvidia-runtime',
+      'generate-cdi-spec',
       'restart-docker',
     ])
     const packages = assessment.install_plan?.system_changes.find((c) => c.code === 'install-packages')
@@ -502,6 +542,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       dockerVersion: ok('Docker version 27.1.1, build 30da79c\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/moby-engine-selinux-ready.json')),
       rpmQuery: rpmFound('rpm/moby-engine-installed.txt'),
+      cdiList: CDI_GPU,
     })
     expect(assessment.availability).toBe('setup-required')
     expect(assessment.adopts_existing_engine).toBe(true)
@@ -540,6 +581,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       'add-repository',
       'install-packages',
       'configure-nvidia-runtime',
+      'generate-cdi-spec',
       'restart-docker',
     ])
     const restart = assessment.install_plan?.system_changes.find((c) => c.code === 'restart-docker')
@@ -563,6 +605,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       'add-repository',
       'install-packages',
       'configure-nvidia-runtime',
+      'generate-cdi-spec',
       'add-user-to-docker-group',
       'restart-docker',
     ])
@@ -610,6 +653,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
     })
     expect(facts.gpus[0]?.total_vram_bytes).toBeNull()
     expect(assessment.availability).toBe('setup-required')
@@ -631,6 +675,7 @@ describe('brief scenarios (task 2.4), driven through probeLinux then assessLinux
         dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
         dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
         nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+        cdiList: CDI_GPU,
       })
       expect(assessment.blockers).toEqual([])
       expect(assessment.adopts_existing_engine).toBe(true)
@@ -668,6 +713,7 @@ describe('review-round fixes (task 2.4 fix round 1)', () => {
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+      cdiList: CDI_GPU,
       xdgRuntimeDir: '/run/user/1000',
       rootlessSocketExists: true, // leftover from an earlier, abandoned rootless attempt
     })
@@ -735,6 +781,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
       dockerInfo: ok(readLinuxProbeFixture('docker-info/legacy-cli-permission-denied-exit0.json')),
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
       daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
@@ -751,6 +798,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       dpkgQuery: { code: 0, stdout: 'ii  docker-desktop\nii  docker-ce\n', stderr: '' },
+      cdiList: CDI_GPU,
     })
     expect(facts.docker.install_method).toBe('docker-ce')
     expect(assessment.adopts_existing_engine).toBe(true)
@@ -765,6 +813,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
       dpkgQuery: missing(),
       rpmQuery: missing(),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' }, // "no such key": not configured (ruling 7)
       daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
@@ -795,6 +844,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
     expect(assessment.blockers[0]?.commands).toEqual([
       'sudo pacman -Syu --needed docker nvidia-container-toolkit',
       'sudo nvidia-ctk runtime configure --runtime=docker',
+      'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
       'sudo systemctl restart docker',
       'sudo systemctl enable --now docker',
     ])
@@ -809,6 +859,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
       dockerInfo: UNREACHABLE_28_3,
       rpmQuery: rpmFound('rpm/moby-engine-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
       daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
@@ -832,6 +883,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
       dockerInfo: UNREACHABLE_28_3,
       rpmQuery: rpmFound('rpm/moby-engine-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
       daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
@@ -854,36 +906,37 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
     expect(assessment.install_plan).toBeNull()
   })
 
-  it('offline CDI evidence requires features.cdi as well as a listed device, mirroring the live path (round 2, item 7)', async () => {
-    // A device nvidia-ctk can see, but Docker itself is not configured to consume CDI specs: not
-    // enough evidence on its own.
-    const notEnabled = await run({
+  it('a listed CDI device is the GPU runtime offline too, whatever daemon.json says about CDI (task 2.23, F-5; replaces round 2 item 7)', async () => {
+    // nvidia-ctk reads the spec directories itself: a listed device needs no daemon.json setting.
+    // Docker 28.2+ has CDI on by default; an older one with CDI off passes --gpus through the full
+    // toolkit's hook instead, and the recipe installs that toolkit too.
+    const listed = await run({
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: DAEMON_DOWN_28_3,
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
-      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
     })
-    expect(notEnabled.facts.docker.gpu_runtime_from_config).toBe(false)
-    expect(changeCodes(notEnabled.assessment)).toContain('configure-nvidia-runtime')
+    expect(listed.facts.docker.gpu_runtime_from_config).toBe(true)
+    expect(changeCodes(listed.assessment)).toEqual(['add-user-to-docker-group'])
 
-    // The same device, but daemon.json also turns CDI on: now it counts.
-    const enabled = await run({
+    // A runtime registered in daemon.json but no spec: not ready — the spec is planned, the runtime
+    // configure is not (it is already there).
+    const runtimeOnly = await run({
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: DAEMON_DOWN_28_3,
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
-      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
-      daemonJson: JSON.stringify({ features: { cdi: true } }),
+      daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
     })
-    expect(enabled.facts.docker.gpu_runtime_from_config).toBe(true)
-    expect(changeCodes(enabled.assessment)).toEqual(['add-user-to-docker-group'])
+    expect(runtimeOnly.facts.docker.gpu_runtime_from_config).toBe(false)
+    expect(runtimeOnly.facts.docker.nvidia_runtime).toBe(true)
+    expect(changeCodes(runtimeOnly.assessment)).toEqual(['generate-cdi-spec', 'add-user-to-docker-group'])
   })
-
   it('root with an active but unreachable daemon is never told to join the docker group (design D4, round 2 item 9)', async () => {
     const { assessment } = await run(
       {
@@ -892,6 +945,7 @@ describe('review-round fixes (task 2.4 fix round 2)', () => {
         dockerInfo: DAEMON_DOWN_28_3,
         dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
         nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+        cdiList: CDI_GPU,
         systemctlIsActive: ok('active\n'),
         idNG: ok('root\n'),
         getentGroup: { code: 2, stdout: '', stderr: '' },
@@ -931,7 +985,11 @@ describe('review-round fixes (task 2.4 fix round 3)', () => {
       }),
       expect.objectContaining({
         reason: 'gpu-runtime-not-configured',
-        commands: ['sudo nvidia-ctk runtime configure --runtime=docker', 'sudo systemctl restart docker'],
+        commands: [
+          'sudo nvidia-ctk runtime configure --runtime=docker',
+          'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
+          'sudo systemctl restart docker',
+        ],
       }),
       expect.objectContaining({
         reason: 'docker-service-inactive',
@@ -963,55 +1021,41 @@ describe('review-round fixes (task 2.4 fix round 3)', () => {
     expect(assessment.blockers[1]?.commands).toEqual([])
   })
 
-  // Ruling 5: Docker Engine 28.2+ turns CDI on by default; below that, or when the version cannot
-  // be determined, daemon.json's explicit features.cdi is still required.
-  it('engine 28.1 (below the CDI default threshold): a listed CDI device is not enough on its own (ruling 5)', async () => {
+  // Ruling 5 made CDI count only on Docker 28.2+ or with daemon.json's features.cdi; task 2.23 (F-5)
+  // replaced that: a listed device counts on any engine version, and the version is diagnostic.
+  it('engine 28.1 with a listed CDI device: ready offline, the version only reported (F-5, replaces ruling 5)', async () => {
     const { facts, assessment } = await run({
       dockerVersion: ok('Docker version 28.1.1, build afdd53b\n'),
       dpkgQuery: { code: 1, stdout: 'ii  docker-ce 28.1.1-1\n', stderr: '' },
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
-      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
     })
     expect(facts.docker.engine_version).toBe('28.1.1')
-    expect(facts.docker.gpu_runtime_from_config).toBe(false)
-    expect(changeCodes(assessment)).toContain('configure-nvidia-runtime')
-  })
-
-  it('engine 28.2 (at the CDI default threshold): a listed CDI device is enough, daemon.json silent (ruling 5)', async () => {
-    const { facts, assessment } = await run({
-      dockerVersion: ok('Docker version 28.2.0, build afdd53b\n'),
-      dpkgQuery: { code: 1, stdout: 'ii  docker-ce 28.2.0-1\n', stderr: '' },
-      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
-      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
-      systemctlIsActive: ok('active\n'),
-      getentGroup: { code: 2, stdout: '', stderr: '' },
-    })
-    expect(facts.docker.engine_version).toBe('28.2.0')
     expect(facts.docker.gpu_runtime_from_config).toBe(true)
-    // "Ready except access": the only step left is the group add.
     expect(changeCodes(assessment)).toEqual(['add-user-to-docker-group'])
   })
-
-  it('engine version unknown: keeps requiring the explicit daemon.json setting rather than assuming recent (ruling 5)', async () => {
+  it('engine version unknown, no listed CDI device: the spec and the runtime are both planned (F-5)', async () => {
     const { facts, assessment } = await run({
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       // install_method is recognised (so this reaches buildInstallPlan at all), but its *version*
-      // is not: the dpkg-query fixture here has no trailing ${Version} column, e.g. an older probe
-      // run's cached fixture shape — detectEngineVersion must not guess from that.
+      // is not: the dpkg-query fixture here has no trailing ${Version} column.
       dpkgQuery: { code: 1, stdout: 'ii  docker-ce\n', stderr: '' },
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
-      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
     })
     expect(facts.docker.install_method).toBe('docker-ce')
     expect(facts.docker.engine_version).toBeNull()
     expect(facts.docker.gpu_runtime_from_config).toBe(false)
-    expect(changeCodes(assessment)).toContain('configure-nvidia-runtime')
+    expect(changeCodes(assessment)).toEqual([
+      'configure-nvidia-runtime',
+      'generate-cdi-spec',
+      'add-user-to-docker-group',
+      'restart-docker',
+    ])
   })
-
   // Item 2: a daemon.json EACCES read error must block, even when the daemon is directly reachable
   // and docker info itself already says the runtime is unconfigured.
   it('a reachable daemon whose daemon.json is unreadable (EACCES) still blocks instead of planning a blind reconfigure (item 2)', async () => {
@@ -1043,23 +1087,35 @@ describe('review-round fixes (task 2.4 fix round 3)', () => {
 })
 
 describe('review-round fixes (task 2.4 fix round 4)', () => {
-  it('a daemon.json that cannot be read leaves the CDI default unknown: no group-only plan on a 28.2+ engine (item A)', async () => {
+  it('a daemon.json that cannot be read, with a listed CDI device: nothing about the runtime is asked of it (F-5, replaces item A)', async () => {
+    // The spec is what decides; the unreadable file would only matter for a runtime configure, and
+    // with the GPU runtime ready none is planned.
     const { facts, assessment } = await run({
       dockerVersion: ok('Docker version 28.2.0, build afdd53b\n'),
       dockerInfo: UNREACHABLE_28_3,
       dpkgQuery: { code: 1, stdout: 'ii  docker-ce 5:28.2.0-1~ubuntu.24.04~noble\n', stderr: '' },
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
-      cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-nvidia-gpu.txt')),
+      cdiList: CDI_GPU,
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
-      daemonJsonUnreadable: true, // it may say features.cdi: false; this probe cannot tell
+      daemonJsonUnreadable: true,
     })
-    expect(facts.docker.engine_version).toBe('28.2.0')
-    expect(facts.docker.gpu_runtime_from_config).toBe(false)
-    expect(assessment.install_plan).toBeNull()
-    expect(assessment.blockers.map((b) => b.reason)).toEqual(['daemon-json-unreadable'])
+    expect(facts.docker.gpu_runtime_from_config).toBe(true)
+    expect(facts.docker.daemon_json_unreadable).toBe(true)
+    expect(changeCodes(assessment)).toEqual(['add-user-to-docker-group'])
+    // Without the device, the same file blocks: the runtime would be configured next to it.
+    const blind = await run({
+      dockerVersion: ok('Docker version 28.2.0, build afdd53b\n'),
+      dockerInfo: UNREACHABLE_28_3,
+      dpkgQuery: { code: 1, stdout: 'ii  docker-ce 5:28.2.0-1~ubuntu.24.04~noble\n', stderr: '' },
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      systemctlIsActive: ok('active\n'),
+      getentGroup: { code: 2, stdout: '', stderr: '' },
+      daemonJsonUnreadable: true,
+    })
+    expect(blind.assessment.install_plan).toBeNull()
+    expect(blind.assessment.blockers.map((b) => b.reason)).toEqual(['daemon-json-unreadable'])
   })
-
   it('Docker Desktop alone on Arch is detected from pacman -Q and gets the Desktop blocker, not arch-manual-install (item E)', async () => {
     const { facts, assessment } = await run({
       osRelease: readLinuxProbeFixture('os-release/arch.txt'),
@@ -1078,6 +1134,7 @@ describe('review-round fixes (task 2.4 fix round 4)', () => {
       dockerVersion: ok('Docker version 28.3.3, build 980b856\n'),
       dockerInfo: UNREACHABLE_28_3,
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       pacmanPackages: { 'docker': '1:28.3.3-1', 'docker-desktop': '4.43.2-1' },
       systemctlIsActive: ok('active\n'),
       getentGroup: { code: 2, stdout: '', stderr: '' },
@@ -1115,6 +1172,7 @@ describe('review-round fixes (task 2.4 fix round 5)', () => {
       'add-repository',
       'install-packages',
       'configure-nvidia-runtime',
+      'generate-cdi-spec',
       'enable-docker-service',
     ])
   })
@@ -1125,6 +1183,7 @@ describe('review-round fixes (task 2.4 fix round 5)', () => {
       dockerInfo: DAEMON_DOWN_28_3,
       dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
       daemonJson: NVIDIA_DAEMON_JSON,
       ...EFFECTIVE, // systemctl is-active: the harness default, inactive (exit 3)
     })
@@ -1154,7 +1213,8 @@ describe('review-round fixes (task 2.4 fix round 5)', () => {
     const delivers: Record<string, () => boolean> = {
       'docker-cli-missing': () => packages.includes('docker-ce'),
       'toolkit-missing': () => packages.includes('nvidia-container-toolkit'),
-      'gpu-runtime-not-configured': () => steps.includes('configure-nvidia-runtime'),
+      'gpu-runtime-not-configured': () =>
+        steps.includes('configure-nvidia-runtime') && steps.includes('generate-cdi-spec'),
       'docker-service-inactive': () => steps.includes('enable-docker-service'),
     }
     expect(promised.map((b) => b.reason)).toEqual(Object.keys(delivers))
@@ -1174,6 +1234,7 @@ describe('review-round fixes (task 2.4 fix round 5)', () => {
     expect(assessment.blockers[0]?.commands).toEqual([
       'sudo pacman -Syu --needed docker nvidia-container-toolkit',
       'sudo nvidia-ctk runtime configure --runtime=docker',
+      'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
       'sudo systemctl restart docker',
       'sudo systemctl enable --now docker',
     ])
@@ -1220,7 +1281,11 @@ describe('review-round fixes (task 2.4 fix round 5)', () => {
     expect(assessment.blockers).toEqual([
       expect.objectContaining({
         reason: 'gpu-runtime-not-configured',
-        commands: ['sudo nvidia-ctk runtime configure --runtime=docker', 'sudo systemctl restart docker'],
+        commands: [
+          'sudo nvidia-ctk runtime configure --runtime=docker',
+          'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
+          'sudo systemctl restart docker',
+        ],
       }),
       expect.objectContaining({
         reason: 'docker-service-inactive',
@@ -1310,6 +1375,7 @@ describe('a host that does not run systemd (the GB10 vast.ai container: PID 1 is
         adopts_existing_engine: false,
         install_plan: null,
         blockers: [initNotSystemdBlocker()],
+        warnings: [],
       })
       expect(assessment.blockers[0]?.message).toBe(
         'This system does not run systemd, which the Docker install needs.'
@@ -1331,6 +1397,7 @@ describe('a host that does not run systemd (the GB10 vast.ai container: PID 1 is
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
     })
     expect(ready.assessment.adopts_existing_engine).toBe(false)
     expect(ready.assessment.blockers).toEqual([unknownFact])
@@ -1343,6 +1410,7 @@ describe('a host that does not run systemd (the GB10 vast.ai container: PID 1 is
       dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
       dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
       nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
     })
     expect(assessment.adopts_existing_engine).toBe(true)
     expect(assessment.blockers).toEqual([])
@@ -1425,5 +1493,104 @@ describe('generic prerequisite blockers, also driven through probeLinux like eve
       ),
     })
     expect(desktop.assessment.blockers[0]?.reason).toBe('docker-desktop-only')
+  })
+})
+
+describe('the 3.10 acceptance host (task 2.23: F-5, F-4, F-6), driven through probeLinux then assessLinux', () => {
+  /** `/proc/net/route` with a full-tunnel VPN over tun2 next to the Wi-Fi LAN, as on the 3.10 laptop. */
+  const FULL_TUNNEL = [
+    'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
+    'wlp2s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0',
+    'tun2\t00000000\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+    'tun2\t00000080\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+    'tun2\t0000080A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0',
+    'wlp2s0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0',
+  ].join('\n')
+  const NVIDIA_RUNTIME = JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } })
+  /**
+   * docker-ce 29 installed but docker.service down, the user not in `docker`, only
+   * `nvidia-container-toolkit-base` (nvidia-ctk answers, no CDI device), a full-tunnel VPN.
+   */
+  const HOST: Machine = {
+    osRelease: readLinuxProbeFixture('os-release/ubuntu-26.04.txt'),
+    dockerVersion: ok('Docker version 29.8.1, build 1a2b3c4\n'),
+    dockerInfo: DAEMON_DOWN_28_3,
+    dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+    nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.8\n'),
+    toolkitPackage: false,
+    cdiList: ok(readLinuxProbeFixture('nvidia-ctk/cdi-list-empty.txt')),
+    systemctlIsActive: { code: 3, stdout: 'inactive\n', stderr: '' },
+    getentGroup: ok('docker:x:973:\n'),
+    idNG: ok('lex adm sudo\n'),
+    user: 'lex',
+    procNetRoute: FULL_TUNNEL,
+  }
+  const lex = { currentUser: 'lex' }
+
+  it('F-5: -base alone is not the toolkit, and a registered runtime without a CDI spec is not a GPU runtime', async () => {
+    const { facts, assessment } = await run(HOST, lex)
+    expect(facts.toolkit_installed).toBe(false)
+    expect(facts.docker.gpu_runtime_from_config).toBe(false)
+    expect(changeCodes(assessment)).toEqual([
+      'add-repository',
+      'install-packages',
+      'configure-nvidia-runtime',
+      'generate-cdi-spec',
+      'enable-docker-service',
+      'add-user-to-docker-group',
+    ])
+    expect(assessment.install_plan?.system_changes[0]?.params?.vendor).toBe('nvidia')
+    expect(
+      assessment.install_plan?.system_changes.find((c) => c.code === 'install-packages')?.params?.packages
+    ).toBe('nvidia-container-toolkit')
+    const cdi = assessment.install_plan?.system_changes.find((c) => c.code === 'generate-cdi-spec')
+    expect(cdi?.text).toContain('nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml')
+  })
+
+  it('F-6: the retry after the failed start (daemon.json already registers the runtime) plans the rest, no runtime configure and no restart', async () => {
+    const { assessment } = await run(
+      { ...HOST, daemonJson: NVIDIA_RUNTIME, systemctlIsActive: { code: 3, stdout: 'failed\n', stderr: '' } },
+      lex
+    )
+    expect(changeCodes(assessment)).toEqual([
+      'add-repository',
+      'install-packages',
+      'generate-cdi-spec',
+      'enable-docker-service',
+      'add-user-to-docker-group',
+    ])
+  })
+
+  it('F-4: the plan warns that the VPN routes leave Docker no address pool, naming the route and the fix', async () => {
+    const { facts, assessment } = await run(HOST, lex)
+    expect(facts.routes).toEqual(['0.0.0.0/1', '128.0.0.0/1', '10.8.0.0/24', '192.168.1.0/24'])
+    expect(facts.docker.address_pools_configured).toBe(false)
+    expect(assessment.availability).toBe('setup-required')
+    expect(assessment.blockers).toEqual([])
+    expect(assessment.warnings).toEqual([
+      {
+        code: 'docker-address-pools-overlap-routes',
+        text: expect.stringMatching(/128\.0\.0\.0\/1.*default-address-pools.*daemon\.json/s),
+        // Every route that lies over a pool: the VPN's upper half, and the LAN inside 192.168.0.0/20.
+        params: { routes: '128.0.0.0/1,192.168.1.0/24' },
+      },
+    ])
+  })
+
+  it.each<[string, Machine]>([
+    ['a bip already set in daemon.json', { ...HOST, daemonJson: JSON.stringify({ bip: '172.30.99.1/24' }) }],
+    ['Docker already running', { ...HOST, systemctlIsActive: ok('active\n') }],
+    [
+      'no VPN: the LAN leaves the 172 pools free',
+      {
+        ...HOST,
+        procNetRoute: FULL_TUNNEL.split('\n')
+          .filter((l) => !l.startsWith('tun2'))
+          .join('\n'),
+      },
+    ],
+    ['a routing table that could not be read', { ...HOST, procNetRoute: null }],
+  ])('F-4: no warning with %s', async (_label, machine) => {
+    expect((await run(machine, lex)).assessment.warnings).toEqual([])
   })
 })

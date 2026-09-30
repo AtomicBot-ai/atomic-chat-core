@@ -154,9 +154,19 @@ export function answer(state, command, args) {
     case 'docker':
       return docker(state, args)
     case 'nvidia-ctk':
-      if (!state.toolkit) return notFound('nvidia-ctk')
-      return args[0] === '--version' ? ok('NVIDIA Container Toolkit CLI version 1.17.4\n') : ok('')
+      // `-base` alone ships nvidia-ctk too (task 2.23, F-5).
+      if (!state.toolkit && !state.toolkit_base) return notFound('nvidia-ctk')
+      if (args[0] === '--version') return ok('NVIDIA Container Toolkit CLI version 1.17.4\n')
+      // `cdi list`: a device only once the spec exists — by default wherever the runtime is set up.
+      return (state.cdi ?? state.docker.gpu_runtime)
+        ? ok('INFO[0000] Found 1 CDI devices\nnvidia.com/gpu=all\n')
+        : ok('INFO[0000] Found 0 CDI devices\n')
     case 'dpkg-query':
+      // The full toolkit is its own single-package query (F-5); `-base` never answers for it.
+      if (args.includes('nvidia-container-toolkit'))
+        return state.toolkit
+          ? ok('ii  nvidia-container-toolkit\n')
+          : fail(1, 'dpkg-query: no packages found matching nvidia-container-toolkit\n')
       return state.docker.installed
         ? fail(1, '', 'ii  docker-ce\n')
         : fail(1, 'dpkg-query: no packages found matching docker-ce\n')

@@ -11,6 +11,9 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-30** — [The recipe runs systemctl reset-failed before starting or restarting Docker](2026-09-30-recipe-resets-failed-docker-units-before-starting.md)
+- **2026-09-30** — [The plan warns when the host's routes cover Docker's default address pools; a failed start names the cause](2026-09-30-plan-warns-when-routes-cover-docker-address-pools.md)
+- **2026-09-30** — [The GPU runtime is ready only with an NVIDIA CDI device; the recipe installs the full toolkit and generates the spec](2026-09-30-gpu-runtime-ready-only-with-an-nvidia-cdi-device.md) — supersedes the CDI-default half of the 2026-09-28 round-3 record.
 - **2026-09-30** — [GET /environments/descriptors/:id reads the descriptor cache only: 404 for an uncached id, 422 off Linux](2026-09-30-cached-runtime-descriptor-route.md)
 - **2026-09-30** — [RequirementPlan reports the disk path and free space the core measured, outside the plan digest](2026-09-30-requirement-plan-reports-the-measured-disk-path-and-free-space.md)
 - **2026-09-30** — [tensorrt-llm: the default card is the one with the most free memory, for the load and the check alike](2026-09-30-tensorrt-llm-default-card-is-the-one-with-the-most-free-memory.md) — supersedes the GPU-selection half of the 2026-09-28 KV-reserve/GPU-selection record.

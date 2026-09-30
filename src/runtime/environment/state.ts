@@ -27,6 +27,7 @@ import type {
   Sha256Digest,
 } from '../../contracts/index.js'
 import { err, ok, type Result } from '../../util/index.js'
+import { hostStepFailureError } from './host-step-failure.js'
 
 /** The external work an effect runner performs. The reducer only ever names one. */
 export type EffectKind =
@@ -601,11 +602,9 @@ export function reduceOperation(
         })
       }
       if (receipt.outcome === 'failed') {
-        return failWith(state, {
-          code: 'MANAGED_PREREQUISITE_BLOCKED',
-          message: 'Preparing the system did not finish.',
-          details: receipt.receipt_id,
-        })
+        // The step's own log tail, when the app forwards it, names a cause the core recognises and
+        // is kept as the details (task 2.23, F-4); without one, the receipt id, as before.
+        return failWith(state, hostStepFailureError(receipt))
       }
       // A completed host step is kept whatever happens next: it changed the machine, and a later
       // cancellation does not un-install a package.

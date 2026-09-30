@@ -25,6 +25,8 @@ const KEY_TEXT: Record<string, string> = {
 }
 
 const DOCKER = ['docker-ce', 'docker-ce-cli', 'containerd.io']
+/** Run before every start or restart of Docker (task 2.23, F-6). */
+const RESET = 'systemctl reset-failed docker.service docker.socket'
 const REQUEST = '/home/alice/.local/share/atomic/host-steps/step-1.request.json'
 const RESULT = '/home/alice/.local/share/atomic/host-steps/step-1.result.json'
 
@@ -69,6 +71,20 @@ class FakeHost {
   diagnostic: string[] = []
   /** What `journalctl -u docker.service` prints; null models a host without a journal to read. */
   journal: string | null = null
+  /**
+   * A spec defining `nvidia.com/gpu` somewhere other than the recipe's path (the user's own
+   * `/etc/cdi/nvidia.yaml`); the recipe's own spec is `files['/var/run/cdi/nvidia.yaml']`.
+   */
+  cdiElsewhere = false
+  /** `nvidia-ctk cdi generate` exits 0 and writes a spec, but one without a device (no driver it can read). */
+  cdiGenerateEmpty = false
+  /** `nvidia-cdi-refresh.path`: not shipped (toolkit before 1.18), shipped but disabled, or enabled. */
+  cdiRefreshUnit: 'absent' | 'disabled' | 'enabled' = 'disabled'
+  /**
+   * docker.service and docker.socket after a failed start (F-4, F-6): systemd refuses to start them
+   * again (`start-limit-hit`) until `systemctl reset-failed`.
+   */
+  startLimitHit = false
 
   exec = async (argv: string[], options?: { longRunning?: boolean; diagnostic?: boolean }) => {
     this.calls.push(argv)
@@ -100,6 +116,16 @@ class FakeHost {
       if (names.includes('docker-ce') && this.startsOnInstall) this.dockerActive = true
       return ok()
     }
+    if (program === 'nvidia-ctk' && sub === 'cdi') {
+      if (argv[2] === 'list')
+        return this.files.has('/var/run/cdi/nvidia.yaml') || this.cdiElsewhere
+          ? ok('INFO[0000] Found 1 CDI devices\nnvidia.com/gpu=all\n')
+          : ok('INFO[0000] Found 0 CDI devices\n')
+      // generate --output=/var/run/cdi/nvidia.yaml
+      if (!this.cdiGenerateEmpty)
+        this.files.set('/var/run/cdi/nvidia.yaml', { data: Buffer.from('cdiVersion: 0.5.0\n'), mode: 0o644 })
+      return ok()
+    }
     if (program === 'nvidia-ctk') {
       if (!this.ctkWrites) return ok()
       const current = this.files.get('/etc/docker/daemon.json')
@@ -116,16 +142,41 @@ class FakeHost {
       })
       return ok()
     }
+    const refreshUnit = argv.at(-1) === 'nvidia-cdi-refresh.path'
+    if (program === 'systemctl' && sub === 'list-unit-files')
+      return this.cdiRefreshUnit === 'absent'
+        ? no()
+        : ok(`nvidia-cdi-refresh.path ${this.cdiRefreshUnit} enabled\n`)
+    if (program === 'systemctl' && sub === 'is-enabled' && refreshUnit)
+      return this.cdiRefreshUnit === 'enabled'
+        ? ok('enabled\n')
+        : { code: 1, stdout: 'disabled\n', stderr: '' }
+    if (program === 'systemctl' && sub === 'enable' && refreshUnit) {
+      this.cdiRefreshUnit = 'enabled'
+      return ok()
+    }
+    if (program === 'systemctl' && sub === 'reset-failed') {
+      this.startLimitHit = false
+      return ok()
+    }
+    const startLimit = {
+      code: 1,
+      stdout: '',
+      stderr:
+        'Job for docker.service failed.\nSee "systemctl status docker.service" and "journalctl -xeu docker.service" for details.\n',
+    }
     if (program === 'systemctl' && sub === 'is-active') return this.dockerActive ? ok() : no(3)
     if (program === 'systemctl' && sub === 'is-enabled')
       return this.dockerEnabled ? ok('enabled\n') : { code: 1, stdout: 'disabled\n', stderr: '' }
     if (program === 'systemctl' && sub === 'enable') {
       this.dockerEnabled = true
+      if (this.startLimitHit) return startLimit
       this.dockerActive = true
       this.reload()
       return ok()
     }
     if (program === 'systemctl' && sub === 'restart') {
+      if (this.startLimitHit) return startLimit
       this.reload()
       return ok()
     }
@@ -160,9 +211,10 @@ class FakeHost {
     const reads = ['dpkg-query', 'rpm', 'id', 'docker', 'journalctl']
     return this.calls
       .filter(
-        ([program, sub]) =>
+        ([program, sub, third]) =>
           !reads.includes(program!) &&
-          !(program === 'systemctl' && sub!.startsWith('is-')) &&
+          !(program === 'systemctl' && (sub!.startsWith('is-') || sub === 'list-unit-files')) &&
+          !(program === 'nvidia-ctk' && sub === 'cdi' && third === 'list') &&
           !(program === 'dnf' && sub === 'repoquery')
       )
       .map((argv) => argv.join(' '))
@@ -240,6 +292,7 @@ const everything: ContainerRuntimeComponent[] = [
   'docker-engine',
   'nvidia-container-toolkit',
   'nvidia-runtime',
+  'nvidia-cdi',
   'docker-service',
   'docker-group',
 ]
@@ -276,6 +329,7 @@ describe('a clean Ubuntu host', () => {
       ['nvidia-source', 'applied'],
       ['packages', 'applied'],
       ['nvidia-runtime', 'applied'],
+      ['nvidia-cdi', 'applied'],
       ['docker-service', 'applied'],
       ['docker-group', 'applied'],
     ])
@@ -286,7 +340,12 @@ describe('a clean Ubuntu host', () => {
       'nvidia-ctk runtime configure --runtime=docker',
       // docker-ce's postinst started a daemon nobody had yet: restarting it stops nothing of the
       // user's, and without it the runtime would not load until the next boot.
+      RESET,
       'systemctl restart docker',
+      // The CDI spec after the runtime (F-5), kept current by the toolkit's refresh unit.
+      'nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
+      'systemctl enable --now nvidia-cdi-refresh.path',
+      RESET,
       'systemctl enable --now docker',
       'usermod -aG docker alice',
     ])
@@ -465,6 +524,7 @@ describe('a step that fails', () => {
       ['nvidia-source', 'applied'],
       ['packages', 'failed'],
       ['nvidia-runtime', 'not-run'],
+      ['nvidia-cdi', 'not-run'],
       ['docker-service', 'not-run'],
       ['docker-group', 'not-run'],
     ])
@@ -836,7 +896,7 @@ describe('the runtime configuration and the Docker restart', () => {
       mode: 0o644,
     })
     await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-restart'])))
-    expect(host.mutations()).toEqual(['systemctl restart docker'])
+    expect(host.mutations()).toEqual([RESET, 'systemctl restart docker'])
   })
 
   it('does not restart a Docker that is not running; enabling the service starts it with the new config', async () => {
@@ -845,6 +905,7 @@ describe('the runtime configuration and the Docker restart', () => {
     await run(host, requestFor(fedora(['nvidia-runtime', 'docker-service'])))
     expect(host.mutations()).toEqual([
       'nvidia-ctk runtime configure --runtime=docker',
+      RESET,
       'systemctl enable --now docker',
     ])
     expect(host.loadedRuntimes).toContain('nvidia')
@@ -880,7 +941,7 @@ describe('the runtime configuration and the Docker restart', () => {
     const garbled: typeof exec = async (argv, options) =>
       argv[0] === 'docker' ? { code: 0, stdout: 'not json', stderr: '' } : exec(argv, options)
     await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-restart'])), { exec: garbled })
-    expect(host.mutations()).toEqual(['systemctl restart docker'])
+    expect(host.mutations()).toEqual([RESET, 'systemctl restart docker'])
   })
 
   it('a failed nvidia-ctk fails the step with its exit code', async () => {
@@ -1000,7 +1061,7 @@ describe("why Docker did not start: the journal tail joins systemctl's own stder
     // The journal is read with the recipe's own argv, on the short diagnostic deadline, and changes nothing.
     expect(host.calls).toContainEqual(JOURNAL)
     expect(host.diagnostic).toEqual([JOURNAL.join(' ')])
-    expect(host.mutations()).toEqual(['systemctl enable --now docker'])
+    expect(host.mutations()).toEqual([RESET, 'systemctl enable --now docker'])
   })
 
   it('an approved restart that fails carries the reason too', async () => {
@@ -1069,5 +1130,121 @@ describe("why Docker did not start: the journal tail joins systemctl's own stder
     const result = await run(host, requestFor(ubuntu(['nvidia-runtime', 'docker-service'])))
     expect(result.outcome).toBe('completed')
     expect(host.calls.some(([program]) => program === 'journalctl')).toBe(false)
+  })
+})
+
+describe('the NVIDIA CDI spec (task 2.23, F-5)', () => {
+  const GENERATE = 'nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml'
+  const ENABLE_REFRESH = 'systemctl enable --now nvidia-cdi-refresh.path'
+
+  it('generates the spec when no device is defined, and enables the refresh unit the toolkit ships', async () => {
+    const host = new FakeHost()
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.outcome).toBe('completed')
+    expect(result.steps[0]).toMatchObject({
+      id: 'nvidia-cdi',
+      status: 'applied',
+      detail: 'generated /var/run/cdi/nvidia.yaml; enabled nvidia-cdi-refresh.path',
+    })
+    expect(host.mutations()).toEqual([GENERATE, ENABLE_REFRESH])
+    expect(host.files.has('/var/run/cdi/nvidia.yaml')).toBe(true)
+  })
+
+  it('a device already defined (by any spec) and the unit enabled: satisfied, nothing written', async () => {
+    const host = new FakeHost()
+    host.cdiElsewhere = true
+    host.cdiRefreshUnit = 'enabled'
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.steps[0]).toMatchObject({ status: 'satisfied' })
+    expect(host.mutations()).toEqual([])
+  })
+
+  it('a toolkit without nvidia-cdi-refresh.path: the spec is generated, and the missing unit fails nothing', async () => {
+    const host = new FakeHost()
+    host.cdiRefreshUnit = 'absent'
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi', 'docker-service'])))
+    expect(result.outcome).toBe('completed')
+    expect(result.steps[0]).toMatchObject({ status: 'applied' })
+    expect(result.steps[0]!.detail).toMatch(/nvidia-cdi-refresh\.path is not installed/)
+    expect(host.mutations()).toEqual([GENERATE, RESET, 'systemctl enable --now docker'])
+  })
+
+  it('a refresh unit that will not enable is reported in the detail, never a failed install', async () => {
+    const host = new FakeHost()
+    host.failures[ENABLE_REFRESH] = { code: 1, stderr: 'Failed to enable unit: Unit file is masked.' }
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.outcome).toBe('completed')
+    expect(result.steps[0]!.detail).toMatch(/could not be enabled \(exit 1\): Failed to enable unit/)
+  })
+
+  it('a generate that leaves no device fails the step here, not at the GPU check after the pull', async () => {
+    const host = new FakeHost()
+    host.cdiGenerateEmpty = true
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi', 'docker-service'])))
+    expect(result).toMatchObject({ outcome: 'failed' })
+    expect(result.steps[0]).toMatchObject({ id: 'nvidia-cdi', status: 'failed' })
+    expect(result.steps[0]!.detail).toMatch(/still names no nvidia\.com\/gpu device/)
+    expect(result.steps[1]).toMatchObject({ id: 'docker-service', status: 'not-run' })
+  })
+
+  it('a generate that fails carries its exit code and stderr', async () => {
+    const host = new FakeHost()
+    host.failures['nvidia-ctk cdi generate'] = {
+      code: 1,
+      stderr: 'failed to initialize NVML: Driver Not Loaded',
+    }
+    const result = await run(host, requestFor(ubuntu(['nvidia-cdi'])))
+    expect(result.steps[0]).toMatchObject({ status: 'failed', exit_code: 1 })
+    expect(result.log_tail).toContain('Driver Not Loaded')
+  })
+})
+
+describe('a retry on a half-configured host (task 2.23, F-6)', () => {
+  it('after docker.service failed to start (start-limit-hit), the same request completes: what was done is satisfied, reset-failed comes before the start', async () => {
+    // The 3.10 host: Docker installed but not started, nothing else yet. The first run gets as far as
+    // starting Docker, which fails (the full-tunnel VPN of F-4) and leaves the units start-limit-hit.
+    const host = new FakeHost()
+    host.startsOnInstall = false
+    const text = requestFor(ubuntu(everything))
+    host.failures['systemctl enable --now docker'] = { code: 1, stderr: 'Job for docker.service failed.' }
+    const first = await run(host, text)
+    expect(first.steps.map((s) => [s.id, s.status]).slice(-3)).toEqual([
+      ['nvidia-cdi', 'applied'],
+      ['docker-service', 'failed'],
+      ['docker-group', 'not-run'],
+    ])
+    // systemd enabled the unit before the start failed, and now refuses to start it again for a while.
+    delete host.failures['systemctl enable --now docker']
+    host.dockerEnabled = true
+    host.startLimitHit = true
+    expect(host.users['alice']!.groups).not.toContain('docker')
+    expect(Buffer.from(host.files.get('/etc/docker/daemon.json')!.data).toString('utf8')).toContain('nvidia')
+    host.calls = []
+
+    const retry = await run(host, text)
+    expect(retry.outcome).toBe('completed')
+    expect(retry.steps.map((s) => [s.id, s.status])).toEqual([
+      ['docker-key', 'satisfied'],
+      ['docker-source', 'satisfied'],
+      ['nvidia-key', 'satisfied'],
+      ['nvidia-source', 'satisfied'],
+      ['packages', 'satisfied'],
+      ['nvidia-runtime', 'satisfied'],
+      ['nvidia-cdi', 'satisfied'],
+      ['docker-service', 'applied'],
+      ['docker-group', 'applied'],
+    ])
+    expect(host.mutations()).toEqual([RESET, 'systemctl enable --now docker', 'usermod -aG docker alice'])
+    expect(host.dockerActive).toBe(true)
+  })
+
+  it('without the reset, the same start fails on start-limit-hit: the fake host models what reset-failed is for', async () => {
+    const host = new FakeHost()
+    host.dockerEnabled = true
+    host.startLimitHit = true
+    const skipReset: HostStepExecutorDeps['exec'] = async (argv, options) =>
+      argv[1] === 'reset-failed' ? { code: 0, stdout: '', stderr: '' } : host.exec(argv, options)
+    const result = await run(host, requestFor(ubuntu(['docker-service'])), { exec: skipReset })
+    expect(result.outcome).toBe('failed')
   })
 })

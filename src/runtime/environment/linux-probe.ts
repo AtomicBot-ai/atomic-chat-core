@@ -19,15 +19,16 @@
 
 import type { GpuFacts, LinuxDockerInstallMethod, LinuxPackageFamily } from '../../contracts/index.js'
 import {
-  cdiEnabledByDefault,
   cdiListsNvidiaGpu,
-  daemonJsonFeaturesCdi,
   daemonJsonNvidiaRuntimeEvidence,
   detectDockerInstallMethod,
   detectEngineVersion,
+  fullToolkitInstalled,
   PACMAN_PACKAGE_CANDIDATES,
   parseDockerInfo,
+  TOOLKIT_PACKAGE,
 } from './linux-docker-facts.js'
+import { daemonJsonSetsAddressPools, parseProcNetRoute } from './linux-docker-network.js'
 
 export interface CommandOutput {
   /** Null when the binary is not on the machine at all. */
@@ -116,26 +117,35 @@ export interface DockerFacts {
   /**
    * The installed engine package's version (`dpkg-query`'s `${Version}`, `rpm -q`'s own
    * name-version-release string, or `pacman -Q docker`), independent of whether the daemon can be
-   * reached — used only to decide whether Docker's CDI-on-by-default (28.2+) applies when
-   * `daemon.json` does not say so explicitly (round 3, ruling 5). Null when no package database
-   * confirms a version (including for `docker-desktop`/`snap`/`podman-docker`/rootless, which this
-   * never looks at — only `docker-ce`/`docker.io`/`moby-engine`).
+   * reached. Diagnostic only since task 2.23 (it used to decide Docker's CDI-on-by-default). Null
+   * when no package database confirms a version (including for `docker-desktop`/`snap`/
+   * `podman-docker`/rootless, which this never looks at — only `docker-ce`/`docker.io`/`moby-engine`).
    */
   engine_version: string | null
-  /** A runtime named `nvidia`, or an NVIDIA CDI spec: either can carry `--gpus`. Only meaningful
-   *  when `daemon_reachable` — otherwise this is `false` because there was no answer, not because
-   *  the runtime is missing; use `gpu_runtime_from_config` when the daemon could not be reached. */
+  /**
+   * The GPU can reach a container: `nvidia-ctk cdi list` names an `nvidia.com/gpu` device (task
+   * 2.23, F-5) — never a runtime named `nvidia` on its own. Only meaningful when `daemon_reachable`
+   * (it is `false` without an answer); `gpu_runtime_from_config` is the same signal read without
+   * the daemon.
+   */
   gpu_runtime: boolean
   /**
-   * Read-only evidence the GPU runtime is configured that does not require reaching the daemon
-   * (`/etc/docker/daemon.json`'s own `runtimes.nvidia`, or CDI counted as enabled — either
-   * `daemon.json`'s explicit `features.cdi: true`, or Docker's own 28.2+ default when
-   * `engine_version` is known and `daemon.json` does not say `false` (round 3, ruling 5) — next to a
-   * listed NVIDIA CDI device, mirroring the live path's own `CDISpecDirs` requirement, round 2 item
-   * 7) — the only signal available when `daemon_reachable` is false, so a plan never reconfigures a
-   * runtime it has no real evidence about (item 3).
+   * The same CDI evidence as `gpu_runtime`, independent of the daemon answering: `nvidia-ctk cdi
+   * list` reads the spec directories itself. What `effectiveGpuRuntime` uses when the daemon could
+   * not be reached, so a plan never skips the spec on a guess (item 3).
    */
   gpu_runtime_from_config: boolean
+  /**
+   * A runtime named `nvidia` is registered: loaded by the daemon when it answered (`Runtimes`),
+   * otherwise `daemon.json`'s own `runtimes.nvidia`. Decides only whether the plan runs `nvidia-ctk
+   * runtime configure`; it never makes the GPU runtime ready by itself (F-5).
+   */
+  nvidia_runtime: boolean
+  /**
+   * `/etc/docker/daemon.json` sets `bip` or `default-address-pools`, replacing Docker's own default
+   * address pools (F-4); `'unknown'` when the file exists but could not be read or parsed.
+   */
+  address_pools_configured: boolean | 'unknown'
   /**
    * `/etc/docker/daemon.json` exists but this probe could not use it: reading it failed (`readFile`
    * rejected — `EACCES` on a `0600` file, a directory at that path, ...) or its contents did not
@@ -174,7 +184,17 @@ export interface LinuxFacts {
    *  membership). 2.6 reads this to tell "daemon active, this session just needs to relogin" apart
    *  from "the daemon is not reachable at all" (item 2). */
   docker_group: DockerGroupFacts
+  /**
+   * The full `nvidia-container-toolkit` package is installed, by the distribution's package database
+   * (F-5) — `nvidia-container-toolkit-base` alone does not count, although it answers `nvidia-ctk
+   * --version` too. On a family without a known package database, the CLI answering is the signal.
+   */
   toolkit_installed: boolean
+  /**
+   * `/proc/net/route` (the main IPv4 table Docker checks its pools against), every destination but
+   * the default route, in CIDR form; null when the table could not be read (F-4). Never blocks.
+   */
+  routes: string[] | null
   free_disk_bytes: number | null
   /**
    * The path `free_disk_bytes` is for: `docker.docker_root_dir` when `docker info` answered,
@@ -404,6 +424,8 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     groupEntry,
     serviceActive,
     daemonJsonRead,
+    toolkitQuery,
+    routeTable,
   ] = await Promise.all([
     deps.exec('uname', ['-m']),
     deps.exec('nvidia-smi', [
@@ -446,6 +468,16 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
     deps.exec('getent', ['group', 'docker']),
     deps.exec('systemctl', ['is-active', 'docker']),
     readDaemonJson(deps.readFile),
+    // The full toolkit, by its own package (F-5): `nvidia-ctk --version` answers for `-base` alone.
+    // One package name per query, so `-base` can never match it as a prefix.
+    distribution?.family === 'apt'
+      ? deps.exec('dpkg-query', ['-W', '-f', '${db:Status-Abbrev} ${Package}\n', TOOLKIT_PACKAGE])
+      : distribution?.family === 'dnf'
+        ? deps.exec('rpm', ['-q', TOOLKIT_PACKAGE])
+        : distribution?.family === 'pacman'
+          ? deps.exec('pacman', ['-Q', TOOLKIT_PACKAGE])
+          : Promise.resolve(null),
+    deps.readFile('/proc/net/route').catch(() => null),
   ])
 
   if (unameM.code !== 0) unknown.push('architecture')
@@ -471,9 +503,6 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
   const engineVersion = detectEngineVersion(dpkgQuery, rpmQuery, pacmanQuery)
 
   const daemonJsonEvidence = daemonJsonNvidiaRuntimeEvidence(daemonJsonRead)
-  const cdiEnabled = cdiEnabledByDefault(engineVersion, daemonJsonFeaturesCdi(daemonJsonRead))
-  const gpuRuntimeFromConfig =
-    daemonJsonEvidence === 'configured' || (cdiEnabled && cdiListsNvidiaGpu(cdiList))
 
   // Before anything is installed there is no DockerRootDir yet; check the nearest ancestor that
   // does exist instead of failing outright on a path that is not there yet (item 7).
@@ -497,7 +526,9 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       install_method: installMethod,
       engine_version: engineVersion,
       gpu_runtime: info.gpu_runtime,
-      gpu_runtime_from_config: gpuRuntimeFromConfig,
+      gpu_runtime_from_config: cdiListsNvidiaGpu(cdiList),
+      nvidia_runtime: info.daemon_reachable ? info.nvidia_runtime : daemonJsonEvidence === 'configured',
+      address_pools_configured: daemonJsonSetsAddressPools(daemonJsonRead),
       daemon_json_unreadable: daemonJsonEvidence === 'unreadable',
       selinux: info.selinux,
       docker_root_dir: info.docker_root_dir,
@@ -506,7 +537,8 @@ export async function probeLinux(deps: LinuxProbeDeps, options: LinuxProbeOption
       server_errors: info.server_errors,
     },
     docker_group: parseDockerGroup(sessionGroups, groupEntry, options.user),
-    toolkit_installed: ctk.code === 0,
+    toolkit_installed: fullToolkitInstalled(distribution?.family ?? null, ctk, toolkitQuery),
+    routes: parseProcNetRoute(routeTable),
     free_disk_bytes: disk,
     free_disk_path: diskCheckTarget,
     unknown,

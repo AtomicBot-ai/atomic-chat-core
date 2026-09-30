@@ -53,6 +53,10 @@
  * 5. An unreadable `daemon.json` when the runtime is not already known to be configured.
  * 6. No systemd (`/run/systemd/system` absent): the recipe's service steps need it.
  * 7. The install plan.
+ *
+ * Next to every verdict, and never changing it: plan warnings (`LinuxAssessment.warnings`). One
+ * exists so far (task 2.23, F-4): Docker is not running yet and the host's routes cover every one
+ * of Docker's default address pools, so `docker.service` would not start (`linux-docker-network.ts`).
  */
 
 import type { ManagedAvailability, RecipeDistribution } from '../../contracts/index.js'
@@ -70,14 +74,17 @@ import {
   type InstallGate,
   type LinuxBlocker,
 } from './linux-blockers.js'
+import { dockerAddressPoolWarning, type LinuxPlanWarning } from './linux-docker-network.js'
 import type { LinuxDistribution, LinuxFacts } from './linux-probe.js'
 
 export type { InstallGate, LinuxBlocker, LinuxBlockerReason } from './linux-blockers.js'
+export type { LinuxPlanWarning } from './linux-docker-network.js'
 
 export type LinuxSystemChangeCode =
   | 'add-repository'
   | 'install-packages'
   | 'configure-nvidia-runtime'
+  | 'generate-cdi-spec'
   | 'enable-docker-service'
   | 'add-user-to-docker-group'
   | 'restart-docker'
@@ -113,6 +120,11 @@ export interface LinuxAssessment {
   adopts_existing_engine: boolean
   install_plan: LinuxInstallPlan | null
   blockers: LinuxBlocker[]
+  /**
+   * What may go wrong later that nothing here can fix (task 2.23, F-4): shown with the plan, never a
+   * blocker, never part of the consent. Empty when there is nothing to say.
+   */
+  warnings: LinuxPlanWarning[]
 }
 
 export interface LinuxAssessmentOptions {
@@ -180,7 +192,18 @@ function installGate(
 
 /** Turn the facts into a verdict: usable now, installable, waiting on a relogin, or not on this machine. */
 export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions): LinuxAssessment {
-  const blocked = (blockers: LinuxBlocker[]): LinuxAssessment => ({
+  const warning = dockerAddressPoolWarning({
+    dockerRunning: facts.docker.daemon_reachable || facts.docker.service_active === true,
+    addressPoolsConfigured: facts.docker.address_pools_configured,
+    routes: facts.routes,
+  })
+  return { ...verdict(facts, options), warnings: warning === null ? [] : [warning] }
+}
+
+type Verdict = Omit<LinuxAssessment, 'warnings'>
+
+function verdict(facts: LinuxFacts, options: LinuxAssessmentOptions): Verdict {
+  const blocked = (blockers: LinuxBlocker[]): Verdict => ({
     availability: 'prerequisite-blocked',
     adopts_existing_engine: false,
     install_plan: null,
@@ -382,8 +405,9 @@ export function assessLinux(facts: LinuxFacts, options: LinuxAssessmentOptions):
   }
 
   // A daemon.json this probe cannot read or parse is not a safe target for `nvidia-ctk runtime
-  // configure`, whether or not the daemon answered (round 2 item 6; round 3 item 2).
-  if (!effectiveGpuRuntime(facts) && facts.docker.daemon_json_unreadable) {
+  // configure`, whether or not the daemon answered (round 2 item 6; round 3 item 2) — asked only when
+  // the plan would run it: a runtime the daemon already loaded needs only the CDI spec (F-5).
+  if (!effectiveGpuRuntime(facts) && !facts.docker.nvidia_runtime && facts.docker.daemon_json_unreadable) {
     return blocked([daemonJsonUnreadableBlocker()])
   }
 
@@ -411,7 +435,10 @@ function buildInstallPlan(
   // `docker info` is authoritative when it answered; otherwise the only evidence available is the
   // read-only daemon.json/CDI check (item 3) — never guessed from silence.
   const liveEvidence = facts.docker.daemon_reachable
-  const runtimeConfigured = effectiveGpuRuntime(facts)
+  // The GPU reaches a container only through a CDI spec (task 2.23, F-5): without one the plan
+  // generates it, and registers the `nvidia` runtime too where no runtime of that name is there yet.
+  const gpuReady = effectiveGpuRuntime(facts)
+  const configureRuntime = !gpuReady && !facts.docker.nvidia_runtime
 
   // Never lay docker-ce over a working moby-engine/docker.io install (they conflict at the package
   // level, design D2) or over anything else this probe already recognised; only a genuinely absent
@@ -447,10 +474,19 @@ function buildInstallPlan(
       params: { packages: missingPackages.join(',') },
     })
   }
-  if (!runtimeConfigured) {
+  if (configureRuntime) {
     systemChanges.push({
       code: 'configure-nvidia-runtime',
       text: 'Configure the NVIDIA runtime for Docker (nvidia-ctk runtime configure --runtime=docker).',
+    })
+  }
+  if (!gpuReady) {
+    systemChanges.push({
+      code: 'generate-cdi-spec',
+      text:
+        'Generate the NVIDIA CDI specification Docker uses to pass the GPU into containers ' +
+        '(nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml), and keep it current after ' +
+        'driver updates and reboots with nvidia-cdi-refresh.path where the toolkit provides it.',
     })
   }
 
@@ -478,7 +514,7 @@ function buildInstallPlan(
   // would only load at Docker's next start, and the setup would need a second elevation after the
   // sign-in just to restart it. How many containers would stop cannot be asked of that daemon, so
   // the warning says so instead of guessing a number.
-  if (!runtimeConfigured && (liveEvidence || facts.docker.service_active === true)) {
+  if (configureRuntime && (liveEvidence || facts.docker.service_active === true)) {
     const count = liveEvidence ? facts.docker.containers_running : null
     systemChanges.push({
       code: 'restart-docker',

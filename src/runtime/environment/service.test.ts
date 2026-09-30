@@ -44,6 +44,7 @@ const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): Requir
   required_disk_bytes: null,
   docker_root_dir: null,
   free_disk_bytes: null,
+  warnings: [],
   requires_elevation: true,
   may_require_relogin: true,
   may_require_reboot: false,

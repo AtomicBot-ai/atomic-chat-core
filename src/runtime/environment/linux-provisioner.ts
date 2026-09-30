@@ -191,6 +191,7 @@ const blockedPlan = (
   may_require_relogin: false,
   may_require_reboot: false,
   blockers: [blocker],
+  warnings: [],
 })
 
 export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentProvisioner {
@@ -385,6 +386,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       may_require_relogin: false,
       may_require_reboot: false,
       blockers: [],
+      warnings: [],
     }
     return { plan, host_step: null }
   }
@@ -548,6 +550,14 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       may_require_relogin: installPlan?.may_require_relogin ?? false,
       may_require_reboot: false,
       blockers,
+      // What the plan's reader should know before consenting (task 2.23, F-4). Not in `plan_digest`:
+      // a warning asks for no new consent, and its input (the routing table, a VPN switched on or
+      // off) moves on its own; the consent covers what the plan changes, which a warning never does.
+      warnings: assessment.warnings.map((warning) => ({
+        code: warning.code,
+        text: warning.text,
+        ...(warning.params === undefined ? {} : { params: warning.params }),
+      })),
     }
     deps.onAssessment?.({
       availability,

@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   DOCKER_PACKAGE_CANDIDATES,
-  cdiEnabledByDefault,
   cdiListsNvidiaGpu,
-  daemonJsonFeaturesCdi,
   daemonJsonNvidiaRuntimeEvidence,
   detectDockerInstallMethod,
   detectEngineVersion,
   dpkgEngineVersion,
+  fullToolkitInstalled,
   pacmanEngineVersion,
   rpmEngineVersion,
   installedDpkgPackages,
@@ -67,6 +66,7 @@ const NO_INFO: DockerInfoFacts = {
   engine_identity: null,
   version: null,
   gpu_runtime: false,
+  nvidia_runtime: false,
   selinux: false,
   docker_root_dir: null,
   containers_running: 0,
@@ -76,18 +76,23 @@ const NO_INFO: DockerInfoFacts = {
 }
 
 describe('parseDockerInfo', () => {
-  it('counts the nvidia runtime as a GPU runtime', () => {
-    const parsed = parseDockerInfo(ok(info({ Runtimes: { runc: {}, nvidia: {} } })), null)
-    expect(parsed.gpu_runtime).toBe(true)
+  it('reads a runtime named nvidia, but never as a GPU runtime on its own (task 2.23, F-5)', () => {
+    // The 3.10 host: the nvidia runtime registered, no CDI spec — Docker 29 left the GPU outside.
+    const parsed = parseDockerInfo(ok(info({ Runtimes: { runc: {}, nvidia: {} } })), ok(''))
+    expect(parsed.nvidia_runtime).toBe(true)
+    expect(parsed.gpu_runtime).toBe(false)
   })
 
-  it('counts CDI only once nvidia-ctk cdi list actually lists an nvidia.com/gpu device', () => {
+  it('counts the GPU runtime only once nvidia-ctk cdi list actually lists an nvidia.com/gpu device (F-5)', () => {
     const withSpecDir = info({ CDISpecDirs: ['/etc/cdi'] })
     expect(parseDockerInfo(ok(withSpecDir), ok('nvidia.com/gpu=all\n')).gpu_runtime).toBe(true)
     // A spec directory that is configured but empty is not a working runtime.
     expect(parseDockerInfo(ok(withSpecDir), ok('')).gpu_runtime).toBe(false)
     expect(parseDockerInfo(ok(withSpecDir), null).gpu_runtime).toBe(false)
-    expect(parseDockerInfo(ok(info({ CDISpecDirs: [] })), ok('nvidia.com/gpu=all\n')).gpu_runtime).toBe(false)
+    // A daemon with CDI off (no spec dirs) still passes --gpus through the full toolkit's hook, and the
+    // recipe installs that toolkit: a listed device counts whatever CDISpecDirs says.
+    expect(parseDockerInfo(ok(info({ CDISpecDirs: [] })), ok('nvidia.com/gpu=all\n')).gpu_runtime).toBe(true)
+    expect(parseDockerInfo(ok(withSpecDir), ok('nvidia.com/gpu=all\n')).nvidia_runtime).toBe(false)
   })
 
   it('reads SELinux, DockerRootDir and the running-container count', () => {
@@ -175,17 +180,6 @@ describe('offline GPU-runtime evidence (item 3)', () => {
     expect(daemonJsonNvidiaRuntimeEvidence(unreadableFile())).toBe('unreadable')
   })
 
-  it('reads features.cdi from daemon.json, three-way (round 2 item 7; round 3 ruling 5)', () => {
-    expect(daemonJsonFeaturesCdi(read(JSON.stringify({ features: { cdi: true } })))).toBe(true)
-    expect(daemonJsonFeaturesCdi(read(JSON.stringify({ features: { cdi: false } })))).toBe(false)
-    expect(daemonJsonFeaturesCdi(read(JSON.stringify({})))).toBeUndefined()
-    expect(daemonJsonFeaturesCdi(read(null))).toBeUndefined()
-    // A file this probe could not read or parse may well say features.cdi: false — that is not the
-    // same as silence, so it must not fall through to the version default (round 4, item A).
-    expect(daemonJsonFeaturesCdi(read('not json'))).toBe('unreadable')
-    expect(daemonJsonFeaturesCdi(unreadableFile())).toBe('unreadable')
-  })
-
   it('reads nvidia-ctk cdi list the same way parseDockerInfo does', () => {
     expect(cdiListsNvidiaGpu(ok('nvidia.com/gpu=all\n'))).toBe(true)
     expect(cdiListsNvidiaGpu(ok('INFO[0000] Found 0 CDI devices\n'))).toBe(false)
@@ -194,7 +188,7 @@ describe('offline GPU-runtime evidence (item 3)', () => {
   })
 })
 
-describe('engine version and the CDI-on-by-default rule (round 3, ruling 5)', () => {
+describe('the engine version, diagnostic only since task 2.23 (round 3, ruling 5)', () => {
   it("reads the engine version from dpkg-query's trailing ${Version} column, for a recognised engine package only", () => {
     expect(dpkgEngineVersion(ok('ii  docker-ce 5:28.3.0-1~ubuntu.24.04~noble\n'))).toBe('28.3.0')
     expect(dpkgEngineVersion(ok('ii  moby-engine 27.1.1-1\n'))).toBe('27.1.1')
@@ -232,28 +226,35 @@ describe('engine version and the CDI-on-by-default rule (round 3, ruling 5)', ()
     expect(detectEngineVersion(missing(), missing(), ok('docker 28.2.0-1\n'))).toBe('28.2.0')
     expect(detectEngineVersion(missing(), missing(), missing())).toBeNull()
   })
+})
 
-  it("counts CDI as Docker's own default once the known engine version is 28.2 or newer", () => {
-    // 28.1: below the default-on threshold, daemon.json says nothing — not enabled.
-    expect(cdiEnabledByDefault('28.1.0', undefined)).toBe(false)
-    // 28.2: exactly the threshold — enabled by Docker's own default.
-    expect(cdiEnabledByDefault('28.2.0', undefined)).toBe(true)
-    // Newer still: also enabled.
-    expect(cdiEnabledByDefault('28.3.1', undefined)).toBe(true)
-    // Unknown version: keep requiring the explicit daemon.json setting rather than assuming recent.
-    expect(cdiEnabledByDefault(null, undefined)).toBe(false)
-  })
-
-  it('an explicit daemon.json features.cdi always wins over the version default', () => {
-    // Old engine, but daemon.json explicitly turns CDI on.
-    expect(cdiEnabledByDefault('27.1.1', true)).toBe(true)
-    // New engine, but daemon.json explicitly turns CDI off — the opt-out is not overridden.
-    expect(cdiEnabledByDefault('28.3.0', false)).toBe(false)
-  })
-
-  it('an unreadable daemon.json leaves CDI unknown, never assumed on by the version default (round 4, item A)', () => {
-    expect(cdiEnabledByDefault('28.3.0', 'unreadable')).toBe(false)
-    expect(cdiEnabledByDefault(null, 'unreadable')).toBe(false)
+describe('fullToolkitInstalled (task 2.23, F-5)', () => {
+  const ctk = ok('NVIDIA Container Toolkit CLI version 1.17.8\n')
+  it.each<[string, 'apt' | 'dnf' | 'pacman' | 'other' | null, CommandOutput, CommandOutput | null, boolean]>([
+    ['apt, the full package', 'apt', ctk, ok('ii  nvidia-container-toolkit\n'), true],
+    // The 3.10 host: nvidia-ctk answers from -base alone, and dpkg has never seen the full package.
+    [
+      'apt, -base only',
+      'apt',
+      ctk,
+      failed('dpkg-query: no packages found matching nvidia-container-toolkit'),
+      false,
+    ],
+    ['apt, removed with config left', 'apt', ctk, ok('rc  nvidia-container-toolkit\n'), false],
+    ['dnf, the full package', 'dnf', ctk, ok('nvidia-container-toolkit-1.17.8-1.x86_64\n'), true],
+    [
+      'dnf, -base only',
+      'dnf',
+      ctk,
+      { code: 1, stdout: 'package nvidia-container-toolkit is not installed\n', stderr: '' },
+      false,
+    ],
+    ['pacman', 'pacman', ctk, ok('nvidia-container-toolkit 1.17.8-1\n'), true],
+    ['no nvidia-ctk at all', 'apt', missing(), ok('ii  nvidia-container-toolkit\n'), false],
+    ['a family without a known package database: the CLI is all there is', 'other', ctk, null, true],
+    ['an unread distribution', null, ctk, null, true],
+  ])('%s', (_name, family, ctkVersion, query, expected) => {
+    expect(fullToolkitInstalled(family, ctkVersion, query)).toBe(expected)
   })
 })
 

@@ -139,6 +139,17 @@ async function mustStartDocker(context: RunContext, argv: string[], journal: str
   throw new StepFailure(`${argv.join(' ')} exited with ${String(output.code)}`, output.code, stderr)
 }
 
+/**
+ * `systemctl reset-failed docker.service docker.socket`, right before a start or restart (task 2.23,
+ * F-6): a start that failed before — the full-tunnel VPN of F-4 — leaves both units `failed` with
+ * `start-limit-hit`, and systemd refuses to start them again for a while, so the retry would fail on
+ * that leftover rather than on its cause. The exit status says nothing useful (a unit that is not
+ * failed is simply left alone) and is ignored.
+ */
+async function resetFailed(context: RunContext, argv: string[]): Promise<void> {
+  await run(context, argv)
+}
+
 const bytesEqual = (a: Uint8Array | null, b: Uint8Array | null): boolean =>
   a === null || b === null ? a === b : Buffer.from(a).equals(Buffer.from(b))
 
@@ -379,6 +390,7 @@ async function configureRuntime(
         'Docker was not restarted: the approved plan did not include a restart. The NVIDIA runtime loads at its next start.',
     }
   }
+  await resetFailed(context, step.reset_failed)
   await mustStartDocker(context, step.restart, step.journal)
   return {
     status: 'applied',
@@ -386,6 +398,63 @@ async function configureRuntime(
       ? 'registered the NVIDIA runtime and restarted Docker'
       : 'restarted Docker to load the registered NVIDIA runtime',
   }
+}
+
+/**
+ * The NVIDIA CDI spec (task 2.23, F-5). Satisfied when `nvidia-ctk cdi list` already names a
+ * `nvidia.com/gpu` device — whichever spec defines it — so a replay writes nothing. Otherwise
+ * `nvidia-ctk cdi generate` writes the one fixed path, and the list is asked again: a generate that
+ * exits 0 but leaves no device (no driver the toolkit can read) fails the step here, not at the GPU
+ * check after the image pull.
+ *
+ * Then `nvidia-cdi-refresh.path`, only where the toolkit ships it: enabled so the spec is rewritten
+ * after a driver update and on every boot (`/var/run` is a tmpfs). Its absence, or a failed enable,
+ * never fails the step — the spec is there now, and a probe after a reboot that lost it plans it
+ * again (ruling R-core-8); the detail says which it was.
+ */
+async function generateCdi(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'generate-cdi' }>
+): Promise<StepDone> {
+  const listsGpu = async (): Promise<boolean> => {
+    const listed = await run(context, step.list)
+    return listed.code === 0 && /nvidia\.com\/gpu/i.test(listed.stdout)
+  }
+  let generated = false
+  if (!(await listsGpu())) {
+    await mustRun(context, step.generate)
+    if (!(await listsGpu()))
+      throw new StepFailure(
+        `${step.generate.join(' ')} finished, but nvidia-ctk cdi list still names no nvidia.com/gpu device`
+      )
+    generated = true
+  }
+  const refresh = await enableCdiRefresh(context, step)
+  const spec = generated ? `generated ${step.spec}` : 'an NVIDIA CDI device is already defined'
+  return {
+    status: generated || refresh.enabled ? 'applied' : 'satisfied',
+    detail: `${spec}; ${refresh.detail}`,
+  }
+}
+
+async function enableCdiRefresh(
+  context: RunContext,
+  step: Extract<HostRecipeStep, { kind: 'generate-cdi' }>
+): Promise<{ enabled: boolean; detail: string }> {
+  const unit = step.refresh_unit
+  const present = await run(context, step.refresh_present)
+  if (present.code !== 0 || !present.stdout.includes(unit))
+    return { enabled: false, detail: `${unit} is not installed, so the spec is not refreshed automatically` }
+  const enabled = await run(context, step.refresh_enabled)
+  if (enabled.code === 0 && enabled.stdout.trim() === 'enabled')
+    return { enabled: false, detail: `${unit} is already enabled` }
+  const enable = await run(context, step.refresh_enable)
+  if (enable.code !== 0)
+    return {
+      enabled: false,
+      detail: `${unit} could not be enabled (exit ${String(enable.code)}): ${tail(enable.stderr) || 'no output'}`,
+    }
+  return { enabled: true, detail: `enabled ${unit}` }
 }
 
 async function enableService(
@@ -396,6 +465,7 @@ async function enableService(
   const active = await run(context, step.active)
   if (enabled.code === 0 && enabled.stdout.trim() === 'enabled' && active.code === 0)
     return { status: 'satisfied', detail: 'docker.service is already enabled and running' }
+  await resetFailed(context, step.reset_failed)
   await mustStartDocker(context, step.enable, step.journal)
   return { status: 'applied', detail: 'enabled and started docker.service' }
 }
@@ -429,6 +499,8 @@ async function runStep(context: RunContext, step: HostRecipeStep): Promise<StepD
       return installPackages(context, step)
     case 'configure-runtime':
       return configureRuntime(context, step)
+    case 'generate-cdi':
+      return generateCdi(context, step)
     case 'enable-service':
       return enableService(context, step)
     case 'add-to-docker-group':

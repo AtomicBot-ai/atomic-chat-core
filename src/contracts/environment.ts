@@ -192,8 +192,8 @@ export interface ContainerRuntimeStepParameters {
   distro_id: string
   version_id: string
   /**
-   * Subset of `docker-engine`, `nvidia-container-toolkit`, `nvidia-runtime`, `docker-restart`,
-   * `docker-service`, `docker-group`, in recipe order.
+   * Subset of `docker-engine`, `nvidia-container-toolkit`, `nvidia-runtime`, `nvidia-cdi` (task
+   * 2.23: the NVIDIA CDI spec), `docker-restart`, `docker-service`, `docker-group`, in recipe order.
    */
   components: string[]
 }
@@ -227,6 +227,14 @@ export interface ManagedHostReceipt {
   parameters_digest: Sha256Digest
   outcome: 'completed' | 'declined' | 'relogin-required' | 'reboot-required' | 'failed'
   receipt_id: string
+  /**
+   * The privileged step's own `log_tail` from its result file (task 2.23, F-4), forwarded as read;
+   * optional and additive. On a `failed` receipt it becomes the operation error's `details`, and a
+   * cause the core recognises in it (Docker's address pools exhausted by the host's routes) is named
+   * in the error's `message`. Never evidence of success: the core re-probes regardless. The core
+   * keeps at most its last 16 KiB.
+   */
+  log_tail?: string
 }
 
 /**
@@ -314,6 +322,19 @@ export interface ManagedSystemChange {
 }
 
 /**
+ * Something the plan's reader should know that does not block it and that the plan cannot fix
+ * (task 2.23, F-4): shaped like `ManagedSystemChange`. `code` is stable for a client to key off
+ * (`docker-address-pools-overlap-routes`: the host's routes cover every default Docker address pool,
+ * so Docker would not start — `params.routes` names them), `text` says what to do. Not part of
+ * `plan_digest`: a warning never asks for a new consent.
+ */
+export interface ManagedPlanWarning {
+  code: string
+  text: string
+  params?: Record<string, string>
+}
+
+/**
  * One reason the host cannot proceed. The `ErrorBody` part is what becomes the operation's `error`;
  * `reason` is a stable machine-readable cause (`driver-too-old`, `relogin-required`, ...), `params`
  * its specifics (required and actual versions, ...), and `commands` exact, copyable shell commands
@@ -375,6 +396,8 @@ export interface RequirementPlan {
   may_require_relogin: boolean
   may_require_reboot: boolean
   blockers: ManagedBlocker[]
+  /** Warnings shown next to the plan (task 2.23, F-4); empty when there are none. Outside `plan_digest`. */
+  warnings: ManagedPlanWarning[]
 }
 
 /** Ask what setting this target up would involve. Probing never installs or pulls anything. */

@@ -341,7 +341,7 @@ describe('reading the machine', () => {
     ])
   })
 
-  it('reports gpu_runtime_from_config and daemon_json_unreadable from the offline daemon.json evidence (round 2, items 6/7)', async () => {
+  it('reads the GPU runtime from a listed CDI device alone, and the nvidia runtime from daemon.json offline (task 2.23, F-5)', async () => {
     const deps: LinuxProbeDeps = {
       exec: async (command, args) => {
         if (command === 'uname') return ok('x86_64\n')
@@ -360,36 +360,41 @@ describe('reading the machine', () => {
     }
     const unreadable = await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
     expect(unreadable.docker.daemon_json_unreadable).toBe(true)
-    expect(unreadable.docker.gpu_runtime_from_config).toBe(false)
+    // nvidia-ctk reads the spec directories itself: the device counts whatever daemon.json holds.
+    expect(unreadable.docker.gpu_runtime_from_config).toBe(true)
+    expect(unreadable.docker.nvidia_runtime).toBe(false)
+    expect(unreadable.docker.address_pools_configured).toBe('unknown')
 
-    const configured = await probeLinux(
+    const registered = await probeLinux(
       {
         ...deps,
+        exec: async (command, args) =>
+          command === 'nvidia-ctk' && args.includes('cdi')
+            ? ok('INFO[0000] Found 0 CDI devices\n')
+            : deps.exec(command, args),
         readFile: async (path) => {
           if (path === '/etc/os-release') return 'ID=ubuntu\nVERSION_ID="24.04"\n'
-          if (path === '/etc/docker/daemon.json') return JSON.stringify({ features: { cdi: true } })
+          if (path === '/etc/docker/daemon.json')
+            return JSON.stringify({ runtimes: { nvidia: {} }, bip: '172.30.99.1/24' })
           return null
         },
       },
       { user: 'u', xdgRuntimeDir: null }
     )
-    expect(configured.docker.daemon_json_unreadable).toBe(false)
-    // features.cdi: true, plus nvidia-ctk cdi list showing a device: counts as configured.
-    expect(configured.docker.gpu_runtime_from_config).toBe(true)
+    // The 3.10 host after its first attempt: the runtime registered, no spec — not a GPU runtime.
+    expect(registered.docker.nvidia_runtime).toBe(true)
+    expect(registered.docker.gpu_runtime_from_config).toBe(false)
+    expect(registered.docker.address_pools_configured).toBe(true)
   })
 
-  it('reads a daemon.json read error (readFile rejecting, e.g. EACCES) as unreadable, not as absent, and assumes no CDI default behind it (round 3 item 2; round 4 item A)', async () => {
+  it('reads a daemon.json read error (readFile rejecting, e.g. EACCES) as unreadable, not as absent (round 3 item 2)', async () => {
     const deps: LinuxProbeDeps = {
       exec: async (command, args) => {
         if (command === 'uname') return ok('x86_64\n')
         if (command === 'docker' && args.includes('--version')) return ok('Docker version 28.3.0')
         if (command === 'docker') return UNREACHABLE_28_3
-        // A 28.2+ engine with a listed CDI device: were daemon.json readable and silent, CDI would
-        // count as on by Docker's own default. Unreadable, it may say features.cdi: false, so the
-        // default must stay unknown (round 4, item A).
-        if (command === 'dpkg-query')
+        if (command === 'dpkg-query' && !args.includes('nvidia-container-toolkit'))
           return { code: 1, stdout: 'ii  docker-ce 5:28.3.0-1~ubuntu.24.04~noble\n', stderr: '' }
-        if (command === 'nvidia-ctk' && args.includes('cdi')) return ok('nvidia.com/gpu=all\n')
         return missing()
       },
       readFile: async (path) => {
@@ -402,7 +407,8 @@ describe('reading the machine', () => {
     }
     const probed = await probeLinux(deps, { user: 'u', xdgRuntimeDir: null })
     expect(probed.docker.daemon_json_unreadable).toBe(true)
-    expect(probed.docker.gpu_runtime_from_config).toBe(false)
+    expect(probed.docker.nvidia_runtime).toBe(false)
+    expect(probed.docker.address_pools_configured).toBe('unknown')
 
     // Contrast: a daemon.json that genuinely does not exist (readFile resolving null) is a real
     // "not configured" fact, not an unreadable one — probeLinux must not conflate the two.
@@ -414,8 +420,79 @@ describe('reading the machine', () => {
       { user: 'u', xdgRuntimeDir: null }
     )
     expect(absent.docker.daemon_json_unreadable).toBe(false)
-    // ...and with no file at all, the 28.2+ default does apply: the listed device counts.
-    expect(absent.docker.gpu_runtime_from_config).toBe(true)
+    expect(absent.docker.address_pools_configured).toBe(false)
+  })
+
+  it('asks the package database for the full toolkit, one package per query, by family (task 2.23, F-5)', async () => {
+    const asked: string[] = []
+    const probeAs = async (osRelease: string, toolkitAnswer: CommandOutput) =>
+      probeLinux(
+        {
+          exec: async (command, args) => {
+            if (args.includes('nvidia-container-toolkit')) {
+              asked.push([command, ...args].join(' '))
+              return toolkitAnswer
+            }
+            if (command === 'nvidia-ctk') return ok('NVIDIA Container Toolkit CLI version 1.17.8\n')
+            return missing()
+          },
+          readFile: async (path) => (path === '/etc/os-release' ? osRelease : null),
+          pathExists: async () => true,
+          freeDiskBytes: async () => 1,
+        },
+        { user: 'u', xdgRuntimeDir: null }
+      )
+    // Ubuntu with -base only: nvidia-ctk answers, dpkg has never heard of the full package.
+    const base = await probeAs(
+      'ID=ubuntu\nVERSION_ID="26.04"\n',
+      failed('dpkg-query: no packages found matching nvidia-container-toolkit')
+    )
+    expect(base.toolkit_installed).toBe(false)
+    expect(
+      (await probeAs('ID=ubuntu\nVERSION_ID="26.04"\n', ok('ii  nvidia-container-toolkit\n')))
+        .toolkit_installed
+    ).toBe(true)
+    expect(
+      (await probeAs('ID=fedora\nVERSION_ID=43\n', ok('nvidia-container-toolkit-1.17.8-1.x86_64\n')))
+        .toolkit_installed
+    ).toBe(true)
+    expect(
+      (await probeAs('ID=arch\nBUILD_ID=rolling\n', ok('nvidia-container-toolkit 1.17.8-1\n')))
+        .toolkit_installed
+    ).toBe(true)
+    expect(asked).toEqual([
+      'dpkg-query -W -f ${db:Status-Abbrev} ${Package}\n nvidia-container-toolkit',
+      'dpkg-query -W -f ${db:Status-Abbrev} ${Package}\n nvidia-container-toolkit',
+      'rpm -q nvidia-container-toolkit',
+      'pacman -Q nvidia-container-toolkit',
+    ])
+  })
+
+  it('reads the routing table from /proc/net/route, the default route left out (task 2.23, F-4)', async () => {
+    const table = [
+      'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
+      'eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0',
+      'tun0\t00000080\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+    ].join('\n')
+    const probe = (routes: string | Error) =>
+      probeLinux(
+        {
+          exec: async () => missing(),
+          readFile: async (path) => {
+            if (path !== '/proc/net/route') return null
+            if (routes instanceof Error) throw routes
+            return routes
+          },
+          pathExists: async () => true,
+          freeDiskBytes: async () => 1,
+        },
+        { user: 'u', xdgRuntimeDir: null }
+      )
+    expect((await probe(table)).routes).toEqual(['128.0.0.0/1'])
+    // An unread table is no evidence either way, and never an unknown fact that would block.
+    const unread = await probe(new Error('EACCES'))
+    expect(unread.routes).toBeNull()
+    expect(unread.unknown).not.toContain('routes')
   })
 
   it('reads the installed engine version from whichever package manager answers, end to end (round 3, ruling 5)', async () => {

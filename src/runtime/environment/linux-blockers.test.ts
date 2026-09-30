@@ -65,6 +65,8 @@ const dockerFacts = (over: Partial<LinuxFacts['docker']> = {}): LinuxFacts['dock
   engine_version: null,
   gpu_runtime: false,
   gpu_runtime_from_config: false,
+  nvidia_runtime: false,
+  address_pools_configured: false,
   daemon_json_unreadable: false,
   selinux: false,
   docker_root_dir: null,
@@ -110,6 +112,8 @@ describe('archCommands', () => {
     expect(archCommands('ana')).toEqual([
       'sudo pacman -Syu --needed docker nvidia-container-toolkit',
       'sudo nvidia-ctk runtime configure --runtime=docker',
+      // Docker 28.2+ passes --gpus through CDI: without the spec the card stays outside (F-5).
+      'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
       'sudo systemctl restart docker',
       'sudo systemctl enable --now docker',
       'sudo usermod -aG docker ana',
@@ -119,7 +123,7 @@ describe('archCommands', () => {
   it('omits usermod entirely for root, which needs no group membership (ruling 8)', () => {
     const commands = archCommands('root')
     expect(commands.some((c) => c.includes('usermod'))).toBe(false)
-    expect(commands).toHaveLength(4)
+    expect(commands).toHaveLength(5)
   })
 })
 
@@ -213,17 +217,45 @@ describe('missingComponentBlockers (round 4, item 1)', () => {
 
     expect(missingComponentBlockers(facts, 'pacman').map((b) => b.commands)).toEqual([
       ['sudo pacman -Syu --needed nvidia-container-toolkit'],
-      ['sudo nvidia-ctk runtime configure --runtime=docker', 'sudo systemctl restart docker'],
+      [
+        'sudo nvidia-ctk runtime configure --runtime=docker',
+        'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
+        'sudo systemctl restart docker',
+      ],
       ['sudo systemctl enable --now docker'],
     ])
 
     const elsewhere = missingComponentBlockers(facts, 'unqualified')
     expect(elsewhere.map((b) => b.commands)).toEqual([
       [],
-      ['sudo nvidia-ctk runtime configure --runtime=docker', 'sudo systemctl restart docker'],
+      [
+        'sudo nvidia-ctk runtime configure --runtime=docker',
+        'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
+        'sudo systemctl restart docker',
+      ],
       ['sudo systemctl enable --now docker'],
     ])
     expect(elsewhere.some((b) => /after you log back in/i.test(b.message))).toBe(false)
+  })
+
+  it('asks only for the CDI spec, with no restart, when the nvidia runtime is already registered (task 2.23, F-5)', () => {
+    const facts = hostFacts({ gpu_runtime_from_config: false, nvidia_runtime: true })
+    const [recipe] = missingComponentBlockers(facts, 'recipe')
+    expect(recipe?.reason).toBe('gpu-runtime-not-configured')
+    expect(recipe?.message).toMatch(/no NVIDIA CDI specification/)
+    expect(recipe?.message).not.toMatch(/restarts Docker/)
+    expect(missingComponentBlockers(facts, 'unqualified')[0]?.commands).toEqual([
+      'sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml',
+    ])
+    // A registered runtime makes an unreadable daemon.json irrelevant: nothing is written to it.
+    const unreadable = hostFacts({
+      gpu_runtime_from_config: false,
+      nvidia_runtime: true,
+      daemon_json_unreadable: true,
+    })
+    expect(missingComponentBlockers(unreadable, 'recipe').map((b) => b.reason)).toEqual([
+      'gpu-runtime-not-configured',
+    ])
   })
 })
 

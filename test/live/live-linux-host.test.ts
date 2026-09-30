@@ -4,7 +4,17 @@
  * so an unreadable file must come out as "unknown" and never as "holds no group".
  */
 import { describe, expect, it } from 'vitest'
-import { parseProcessGroups, pickLaunchCard, processGroups } from '../helpers/live-linux-host.js'
+import {
+  DOCKER_POOLS,
+  addressPoolWarningExpected,
+  parseIpRoute,
+  parseProcessGroups,
+  pickLaunchCard,
+  processGroups,
+  routesCoveringDockerPools,
+  setupPath,
+} from '../helpers/live-linux-host.js'
+import type { HostFacts } from '../helpers/live-linux-host.js'
 
 const status = (gid: string, groups: string): string =>
   `Name:\tcore\nUid:\t1000\t1000\t1000\t1000\nGid:\t${gid}\nFDSize:\t64\nGroups:${groups}\nNStgid:\t42\n`
@@ -60,5 +70,76 @@ describe('pickLaunchCard', () => {
     ['no card', [], undefined],
   ])('picks %s', (_label, gpus, expected) => {
     expect(pickLaunchCard(gpus)?.id).toBe(expected)
+  })
+})
+
+/** `ip -4 route` on the 3.10 acceptance laptop with its full-tunnel VPN up (task 2.23, F-4). */
+const FULL_TUNNEL = [
+  'default via 192.168.1.1 dev wlp2s0 proto dhcp src 192.168.1.127 metric 600',
+  '0.0.0.0/1 via 10.8.0.1 dev tun2',
+  '10.8.0.0/24 dev tun2 proto kernel scope link src 10.8.0.2',
+  '128.0.0.0/1 via 10.8.0.1 dev tun2',
+  '192.168.1.0/24 dev wlp2s0 proto kernel scope link src 192.168.1.127 metric 600',
+  'blackhole 10.99.0.0/16',
+].join('\n')
+
+describe('Docker address pools against ip -4 route (task 2.23, F-4)', () => {
+  it("lists Docker's 31 default subnets", () => {
+    expect(DOCKER_POOLS).toHaveLength(31)
+    expect(DOCKER_POOLS[0]).toBe('172.17.0.0/16')
+    expect(DOCKER_POOLS[14]).toBe('172.31.0.0/16')
+    expect(DOCKER_POOLS.at(-1)).toBe('192.168.240.0/20')
+  })
+
+  it('reads every destination but the default route, a route type word skipped', () => {
+    expect(parseIpRoute(FULL_TUNNEL)).toEqual([
+      '0.0.0.0/1',
+      '10.8.0.0/24',
+      '128.0.0.0/1',
+      '192.168.1.0/24',
+      '10.99.0.0/16',
+    ])
+  })
+
+  it.each<[string, string[], string[] | null]>([
+    ['the full tunnel covers every pool', parseIpRoute(FULL_TUNNEL), ['128.0.0.0/1', '192.168.1.0/24']],
+    ['the LAN alone leaves the 172 pools free', ['192.168.1.0/24'], null],
+    ['nothing at all', [], null],
+  ])('%s', (_label, routes, expected) => {
+    expect(routesCoveringDockerPools(routes)).toEqual(expected)
+  })
+})
+
+describe('what the live install expects of a starting state (task 2.23)', () => {
+  const facts = (over: Partial<HostFacts>, docker: Partial<HostFacts['docker']> = {}): HostFacts =>
+    ({
+      family: 'apt',
+      in_recipe: true,
+      immutable: false,
+      routes_covering_docker_pools: null,
+      ...over,
+      docker: {
+        cli: '/usr/bin/docker',
+        service_active: false,
+        user_reaches_daemon: false,
+        nvidia_runtime_loaded: false,
+        nvidia_cdi: false,
+        address_pools_configured: false,
+        ...docker,
+      },
+    }) as HostFacts
+
+  it('adopts only with a listed CDI device, never on a loaded nvidia runtime alone (F-5)', () => {
+    expect(setupPath(facts({}, { user_reaches_daemon: true, nvidia_cdi: true }))).toBe('adopt')
+    expect(setupPath(facts({}, { user_reaches_daemon: true, nvidia_runtime_loaded: true }))).toBe('complete')
+  })
+
+  it('expects the address-pool warning only when Docker is down, the pools covered and daemon.json silent (F-4)', () => {
+    const covered = { routes_covering_docker_pools: ['128.0.0.0/1'] }
+    expect(addressPoolWarningExpected(facts(covered))).toBe(true)
+    expect(addressPoolWarningExpected(facts(covered, { service_active: true }))).toBe(false)
+    expect(addressPoolWarningExpected(facts(covered, { address_pools_configured: true }))).toBe(false)
+    expect(addressPoolWarningExpected(facts(covered, { address_pools_configured: null }))).toBe(false)
+    expect(addressPoolWarningExpected(facts({}))).toBe(false)
   })
 })
