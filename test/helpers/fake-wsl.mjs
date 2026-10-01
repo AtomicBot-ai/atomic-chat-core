@@ -74,6 +74,79 @@ function guestCommand(state, name, user, command, args, input) {
         ? result(1, '', 'df: cannot read\n')
         : result(0, `   Avail\n${free}\n`)
     }
+    case 'getent': {
+      if (args[0] !== 'passwd') break
+      const entry = (guest.users ?? []).find((u) => String(u.uid) === args[1] || u.name === args[1])
+      return entry === undefined
+        ? result(2)
+        : result(0, `${entry.name}:x:${entry.uid}:${entry.uid}::/home/${entry.name}:/bin/bash\n`)
+    }
+    case 'useradd': {
+      const uid = Number(args[args.indexOf('--uid') + 1])
+      const account = args[args.length - 1]
+      if ((guest.users ?? []).some((u) => u.uid === uid || u.name === account)) {
+        return result(9, '', `useradd: user '${account}' already exists\n`)
+      }
+      return result(0, '', '', {
+        next: withGuest(state, name, { ...guest, users: [...(guest.users ?? []), { name: account, uid }] }),
+      })
+    }
+    case 'tee': {
+      const path = args[args.length - 1]
+      const text = input === undefined ? '' : Buffer.from(input).toString('utf8')
+      return result(0, text, '', {
+        next: withGuest(state, name, { ...guest, files: { ...files, [path]: text } }),
+      })
+    }
+    case 'mkdir':
+      return result(0, '', '', {
+        next: withGuest(state, name, {
+          ...guest,
+          dirs: [...new Set([...(guest.dirs ?? []), ...args.filter((a) => !a.startsWith('-'))])],
+        }),
+      })
+    case 'chmod':
+      return result(0)
+    case 'mv': {
+      const [from, to] = args.filter((a) => !a.startsWith('-'))
+      if (!(from in files)) return result(1, '', `mv: cannot stat '${from}'\n`)
+      const next = { ...files, [to]: files[from] }
+      delete next[from]
+      return result(0, '', '', { next: withGuest(state, name, { ...guest, files: next }) })
+    }
+    case 'rm': {
+      const next = { ...files }
+      for (const path of args.filter((a) => !a.startsWith('-'))) delete next[path]
+      return result(0, '', '', { next: withGuest(state, name, { ...guest, files: next }) })
+    }
+    case 'curl': {
+      // The Engine API over the guest's socket: only `POST /images/create`, streaming NDJSON progress.
+      const url = args[args.length - 1]
+      const match = /\/images\/create\?fromImage=([^&]+)&tag=([^&]+)$/.exec(url)
+      const host = guest.host ?? {}
+      if (match === null || !host.docker?.reachable) {
+        return result(7, '', 'curl: (7) Failed to connect to the Docker socket\n')
+      }
+      if (guest.pull_error) {
+        return result(
+          0,
+          `${JSON.stringify({ error: guest.pull_error, errorDetail: { message: guest.pull_error } })}\n`
+        )
+      }
+      const ref = `${decodeURIComponent(match[1])}@${decodeURIComponent(match[2])}`
+      const lines = [
+        { status: 'Pulling from', id: 'x' },
+        { status: 'Downloading', id: 'layer-1', progressDetail: { current: 5, total: 10 } },
+        { status: 'Downloading', id: 'layer-1', progressDetail: { current: 10, total: 10 } },
+        { status: `Digest: ${decodeURIComponent(match[2])}` },
+      ]
+      return result(0, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, '', {
+        next: withGuest(state, name, {
+          ...guest,
+          host: { ...host, images: [...new Set([...(host.images ?? []), ref])] },
+        }),
+      })
+    }
     case 'nvidia-smi':
       if (args[0] === '--version') {
         return guest.nvml_version === undefined || guest.nvml_version === null
@@ -150,6 +223,63 @@ export function answerWsl(state, argv, input = undefined, utf8 = true) {
         (d) => `${d.is_default ? '*' : ' '} ${d.name.padEnd(16)}${d.state.padEnd(16)}${d.version}\r\n`
       )
       return result(0, own(`  NAME            STATE           VERSION\r\n${rows.join('')}`))
+    }
+    case '--import':
+    case '--install': {
+      // `--import <name> <dir> <file> --version 2`, or `--install --from-file <file> --name <name> --location <dir>`.
+      const fromFile = argv[0] === '--install'
+      if (fromFile && argv[1] !== '--from-file')
+        return result(1, own('fake wsl: only --install --from-file\r\n'))
+      const name = fromFile ? argv[argv.indexOf('--name') + 1] : argv[1]
+      if (state.import_fails?.includes(fromFile ? 'install' : 'import')) {
+        return result(1, own(`Wsl/Service/RegisterDistro/E_INVALIDARG\r\n`))
+      }
+      if ((state.distributions ?? []).some((d) => d.name === name)) {
+        return result(1, own('A distribution with the supplied name already exists.\r\n'))
+      }
+      const distributions = state.distributions ?? []
+      const takesDefault = distributions.length === 0 || state.import_takes_default === true
+      const template = state.import_guest ?? { files: {}, dirs: [], host: { docker: {}, toolkit: false } }
+      return result(0, own('The operation completed successfully.\r\n'), '', {
+        next: {
+          ...state,
+          distributions: [
+            ...distributions.map((d) => (takesDefault ? { ...d, is_default: false } : d)),
+            { name, state: 'Stopped', version: 2, is_default: takesDefault },
+          ],
+          guests: { ...(state.guests ?? {}), [name]: JSON.parse(JSON.stringify(template)) },
+        },
+      })
+    }
+    case '--set-default': {
+      const name = argv[1]
+      if (!(state.distributions ?? []).some((d) => d.name === name)) return result(255, own(NO_DISTRIBUTION))
+      return result(0, '', '', {
+        next: {
+          ...state,
+          distributions: state.distributions.map((d) => ({ ...d, is_default: d.name === name })),
+        },
+      })
+    }
+    case '--terminate': {
+      const name = argv[1]
+      if (!(state.distributions ?? []).some((d) => d.name === name)) return result(255, own(NO_DISTRIBUTION))
+      return result(0, own('The operation completed successfully.\r\n'), '', {
+        next: {
+          ...state,
+          distributions: state.distributions.map((d) => (d.name === name ? { ...d, state: 'Stopped' } : d)),
+          terminated: [...(state.terminated ?? []), name],
+        },
+      })
+    }
+    case '--unregister': {
+      const name = argv[1]
+      if (!(state.distributions ?? []).some((d) => d.name === name)) return result(255, own(NO_DISTRIBUTION))
+      const guests = { ...(state.guests ?? {}) }
+      delete guests[name]
+      return result(0, own('Unregistering.\r\nThe operation completed successfully.\r\n'), '', {
+        next: { ...state, distributions: state.distributions.filter((d) => d.name !== name), guests },
+      })
     }
     case '--shutdown':
       return result(0, '', '', {

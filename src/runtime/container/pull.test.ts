@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { DockerExec } from './types.js'
-import { pullImage } from './pull.js'
+import { pullImage, pullImageWithCurl } from './pull.js'
 
 const image = {
   repository: 'nvcr.io/nvidia/tensorrt-llm/release',
@@ -263,5 +263,85 @@ describe.skipIf(process.platform === 'win32')('pullImage', () => {
   it('refuses a digest that is not sha256:<64 hex>', async () => {
     const bad = { repository: image.repository, digest: 'sha256:short' as never }
     await expect(pullImage(bad, { socketPath: '/tmp/unused.sock' })).rejects.toThrow(AtomicCoreError)
+  })
+})
+
+describe('pullImageWithCurl (inside a WSL guest, design D4 of add-tensorrt-llm-windows)', () => {
+  const IMAGE_REF = { repository: 'nvcr.io/nvidia/cuda', digest: `sha256:${'f'.repeat(64)}` as const }
+  const lines = (...objects: object[]): string => objects.map((o) => `${JSON.stringify(o)}\n`).join('')
+
+  it('asks the guest’s Engine API over its socket with curl — never a shell — and streams byte progress', async () => {
+    const seen: { argv: string[] }[] = []
+    const progress: { current: number; total: number }[] = []
+    await pullImageWithCurl(IMAGE_REF, {
+      run: async (argv, call) => {
+        seen.push({ argv })
+        // Two chunks, the first ending mid-line: the reader joins them before parsing.
+        const text = lines(
+          { status: 'Downloading', id: 'a', progressDetail: { current: 5, total: 10 } },
+          { status: 'Downloading', id: 'a', progressDetail: { current: 10, total: 10 } }
+        )
+        call.onStdout(text.slice(0, 20))
+        call.onStdout(text.slice(20))
+        return { code: 0, stdout: text, stderr: '' }
+      },
+      onProgress: (p) => progress.push(p),
+    })
+    expect(seen[0]?.argv).toEqual([
+      'curl',
+      '--silent',
+      '--show-error',
+      '--no-buffer',
+      '--fail-with-body',
+      '--unix-socket',
+      '/var/run/docker.sock',
+      '-X',
+      'POST',
+      `http://localhost/images/create?fromImage=${encodeURIComponent('nvcr.io/nvidia/cuda')}&tag=${encodeURIComponent(IMAGE_REF.digest)}`,
+    ])
+    expect(progress).toEqual([
+      { current: 5, total: 10 },
+      { current: 10, total: 10 },
+    ])
+  })
+
+  it('fails on an error line, as the socket pull does', async () => {
+    await expect(
+      pullImageWithCurl(IMAGE_REF, {
+        run: async (_argv, call) => {
+          const text = lines({ error: 'manifest unknown', errorDetail: { message: 'manifest unknown' } })
+          call.onStdout(text)
+          return { code: 0, stdout: text, stderr: '' }
+        },
+      })
+    ).rejects.toMatchObject({ code: 'IO_ERROR', details: 'manifest unknown' })
+  })
+
+  it('fails when curl itself failed, with what it said', async () => {
+    await expect(
+      pullImageWithCurl(IMAGE_REF, {
+        run: async () => ({ code: 7, stdout: '', stderr: 'curl: (7) Failed to connect' }),
+      })
+    ).rejects.toMatchObject({ code: 'IO_ERROR', details: expect.stringContaining('Failed to connect') })
+  })
+
+  it('is cancelled by its signal', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      pullImageWithCurl(IMAGE_REF, {
+        run: async () => ({ code: null, stdout: '', stderr: 'aborted' }),
+        signal: controller.signal,
+      })
+    ).rejects.toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+  })
+
+  it('verifies the image is there afterwards, when asked', async () => {
+    await expect(
+      pullImageWithCurl(IMAGE_REF, {
+        run: async () => ({ code: 0, stdout: '', stderr: '' }),
+        verify: async () => ({ code: 1, stdout: '[]', stderr: 'Error: No such image' }),
+      })
+    ).rejects.toMatchObject({ code: 'IO_ERROR' })
   })
 })

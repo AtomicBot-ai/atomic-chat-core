@@ -15,8 +15,10 @@
  * elevated is blocked before anything is imported (`elevated-process`).
  */
 import { randomUUID } from 'node:crypto'
+import { win32 } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
+  ContainerRuntimeStepParameters,
   ErrorBody,
   ManagedAvailability,
   ManagedBlocker,
@@ -26,17 +28,18 @@ import type {
   RuntimeDescriptor,
   Sha256Digest,
   WindowsEnvironmentManifest,
+  WslRootfs,
 } from '../../contracts/index.js'
-import { inspectImage, type DockerExec } from '../container/index.js'
+import { inspectImage, pullImageWithCurl, runOnce, type DockerExec } from '../container/index.js'
 import type { WslDistributionTransport } from '../wsl/index.js'
 import { canonicalDigest } from './canonical-json.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { GUEST_DOCKER, GUEST_ROOT, guestLinuxHost, probeGuestExtras, type GuestExtras } from './guest-host.js'
 import type { InstallationStore } from './installations.js'
-import { imageMatchesDigest, type HostRecipeBinding, type HostView } from './linux-provisioner.js'
+import { imageMatchesDigest, pickGpu, type HostRecipeBinding, type HostView } from './linux-provisioner.js'
 import { probeLinux, type LinuxFacts } from './linux-probe.js'
-import { descriptorForProbe } from './provisioner-descriptors.js'
+import { descriptorForProbe, pinnedDescriptor } from './provisioner-descriptors.js'
 import type { EffectInventory } from './recovery.js'
 import type { EnvironmentProvisioner, HostStepVerdict, ProvisionerProbe } from './service.js'
 import type { PersistedOperation } from './store.js'
@@ -47,6 +50,7 @@ import {
   distributionDisk,
   type WindowsHost,
 } from './windows-host.js'
+import { importDistribution, restoreDefaultDistribution, setupGuest } from './windows-guest-setup.js'
 import { assessWindowsHost, type WindowsBlocker } from './windows-plan.js'
 import { probeWindowsHost, type WindowsHostFacts, type WslDistribution } from './windows-probe.js'
 
@@ -57,6 +61,25 @@ export interface EnableWslBinding {
   /** The digest of its (empty) parameters. */
   parameters_digest: Sha256Digest
 }
+
+/** What the guest recipe is run with: the Linux recipe's identity and its validated parameters. */
+export interface GuestRecipeRequest {
+  recipe_id: string
+  recipe_digest: Sha256Digest
+  parameters: ContainerRuntimeStepParameters
+  parameters_digest: Sha256Digest
+}
+
+/**
+ * Runs `linux.install-container-runtime` in the guest as its root (design D1, D3): the same executor
+ * the Linux host step runs, over the WSL transport. Built in `src/host/recipes` and injected, like the
+ * Linux recipe binding, so this module never imports the host module.
+ */
+export type GuestRecipeRunner = (
+  transport: WslDistributionTransport,
+  request: GuestRecipeRequest,
+  signal: AbortSignal
+) => Promise<{ outcome: 'completed' | 'reboot-required' | 'failed'; log_tail: string }>
 
 /** The environment record store, as far as the provisioner needs it. */
 export interface WindowsEnvironmentRecords {
@@ -77,6 +100,12 @@ export interface WindowsProvisionerDeps {
   enableWsl: EnableWslBinding
   installations: InstallationStore
   environmentId: string
+  /** Downloads the manifest's rootfs to `destination` and checks its sha256; on a mismatch deletes it and throws. */
+  downloadRootfs: (rootfs: WslRootfs, destination: string, signal: AbortSignal) => Promise<void>
+  /** Deletes one file core downloaded (the rootfs after the import). */
+  removeFile: (path: string) => Promise<void>
+  runGuestRecipe: GuestRecipeRunner
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>
   onAssessment?: (view: HostView) => void
   newId?: () => string
   now?: () => Date
@@ -118,6 +147,7 @@ export interface WindowsLook {
 
 export function createWindowsProvisioner(deps: WindowsProvisionerDeps): EnvironmentProvisioner {
   const newId = deps.newId ?? randomUUID
+  const now = deps.now ?? (() => new Date())
   const wsl = deps.host.probeDeps.wsl
 
   /** The guest's docker CLI, as root, by its absolute path, over the transport (design D3). */
@@ -356,6 +386,176 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     return facts.wsl.installed === true && facts.wsl.ready === true
   }
 
+  const blocked = (message: string, reason: string): AtomicCoreError =>
+    new AtomicCoreError('MANAGED_PREREQUISITE_BLOCKED', message, reason)
+
+  const sleep =
+    deps.sleep ??
+    ((ms: number, signal: AbortSignal) =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, ms)
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+      }))
+
+  /** The manifest the import uses: exactly the consented one, from the cache. */
+  const consentedManifest = async (record: PersistedOperation): Promise<WindowsEnvironmentManifest> => {
+    const id =
+      record.machine.consented?.environment_manifest_id ??
+      record.requirement_plan?.environment_manifest_id ??
+      null
+    if (id === null) {
+      throw new AtomicCoreError(
+        'MANAGED_METADATA_INVALID',
+        'This operation has no approved Windows environment manifest.'
+      )
+    }
+    const pinned = await deps.environmentManifests.pinned(id)
+    if (pinned.kind !== 'available')
+      throw new AtomicCoreError('MANAGED_METADATA_INVALID', pinned.error.message, id)
+    return pinned.manifest
+  }
+
+  /**
+   * Import Atomic Chat's own distribution (D9): the rootfs downloaded and checked against the manifest's
+   * sha256 before it is used, the record written before `wsl --import` — so a core that dies mid-import
+   * still knows the name is ours — the download deleted afterwards, the user's default put back.
+   */
+  const importOwn = async (
+    record: PersistedOperation,
+    seen: WindowsLook,
+    signal: AbortSignal
+  ): Promise<WindowsEnvironmentRecord> => {
+    const manifest = await consentedManifest(record)
+    const { name, path } = seen.distribution
+    const previousDefault = seen.facts.distributions.find((entry) => entry.is_default)?.name ?? null
+    const rootfs = win32.join(
+      deps.host.localAppData,
+      'AtomicChat',
+      'wsl',
+      'downloads',
+      `${manifest.rootfs.sha256}.wsl`
+    )
+    await deps.downloadRootfs(manifest.rootfs, rootfs, signal)
+    const environment: WindowsEnvironmentRecord = {
+      schema_version: 1,
+      executor: 'wsl-docker',
+      distribution: { name, path },
+      manifest_id: manifest.manifest_id,
+      imported_at: now().toISOString(),
+      marker: newId(),
+    }
+    await deps.records.write(environment)
+    try {
+      await importDistribution(wsl, { name, path, rootfs }, signal)
+    } finally {
+      await deps.removeFile(rootfs).catch(() => undefined)
+    }
+    await restoreDefaultDistribution(wsl, previousDefault, signal)
+    return environment
+  }
+
+  /** Docker and the toolkit in the guest by the Linux recipe, as guest root, when the guest still needs them. */
+  const provisionGuest = async (
+    transport: WslDistributionTransport,
+    manifest: WindowsEnvironmentManifest | null,
+    descriptor: RuntimeDescriptor,
+    signal: AbortSignal
+  ): Promise<void> => {
+    const seen = await look()
+    const assessment = assessWindowsHost({
+      facts: seen.facts,
+      manifest,
+      owned: seen.owned,
+      foreign: false,
+      distribution: seen.distribution,
+      volumeFreeBytes: null,
+      guest: seen.guest,
+      guestRecipeId: deps.guestRecipe.recipe_id,
+      minimumDriverVersion: descriptor.minimum_driver_version,
+      minimumComputeCapability: descriptor.minimum_compute_capability,
+      requiredDiskBytes: null,
+    })
+    if (assessment.blockers.length > 0) {
+      const first = assessment.blockers[0] as WindowsBlocker
+      throw blocked(assessment.blockers.map((entry) => entry.message).join(' '), first.reason)
+    }
+    const plan = assessment.guest_plan
+    if (plan === null) return
+    const distribution = seen.guest?.facts.distribution
+    if (distribution === null || distribution === undefined || distribution.family !== 'apt') {
+      throw blocked(
+        'The Atomic Chat distribution is not the Ubuntu it was imported as.',
+        'distribution-not-in-recipe'
+      )
+    }
+    const parameters = deps.guestRecipe.parameters(plan, {
+      user: GUEST_ROOT,
+      arch: 'x86_64',
+      family: 'apt',
+      distro_id: distribution.id,
+      version_id: distribution.version_id,
+    })
+    const ran = await deps.runGuestRecipe(
+      transport,
+      {
+        recipe_id: deps.guestRecipe.recipe_id,
+        recipe_digest: deps.guestRecipe.recipe_digest,
+        parameters,
+        parameters_digest: deps.guestRecipe.parametersDigest(parameters),
+      },
+      signal
+    )
+    if (ran.outcome !== 'completed') {
+      throw blocked(
+        `Installing Docker and the NVIDIA Container Toolkit in the distribution failed: ${ran.log_tail}`,
+        'guest-recipe-failed'
+      )
+    }
+  }
+
+  /** The GPU-check image through the guest's Engine API, then `nvidia-smi` in it on the chosen card (design D6). */
+  const checkGpu = async (
+    transport: WslDistributionTransport,
+    descriptor: RuntimeDescriptor,
+    seen: WindowsLook,
+    signal: AbortSignal
+  ): Promise<void> => {
+    const gpu = pickGpu(seen.facts.gpus, descriptor.minimum_compute_capability)
+    if (gpu === null) {
+      throw blocked(
+        `No GPU with compute capability ${descriptor.minimum_compute_capability} or newer was found.`,
+        'compute-capability-too-low'
+      )
+    }
+    const docker = guestDocker(transport)
+    const probeImage = descriptor.probe_image[GUEST_PLATFORM]
+    await pullImageWithCurl(probeImage, {
+      run: (argv, call) => transport.exec(argv, { user: GUEST_ROOT, ...call }),
+      signal,
+      verify: docker,
+    })
+    const result = await runOnce(docker, {
+      image: probeImage,
+      gpuUuid: gpu.gpu_id,
+      command: ['nvidia-smi', '--query-gpu=uuid', '--format=csv,noheader'],
+    })
+    if (result.code !== 0 || !result.stdout.includes(gpu.gpu_id)) {
+      throw new AtomicCoreError(
+        'MANAGED_PREREQUISITE_BLOCKED',
+        `The GPU ${gpu.name} is not visible inside a container in the Atomic Chat distribution: the NVIDIA Container Toolkit did not pass it through. The engine image was not downloaded.`,
+        [
+          `gpu=${gpu.gpu_id}`,
+          `exit=${String(result.code)}`,
+          `stdout=${result.stdout.trim().slice(-1000)}`,
+          `stderr=${result.stderr.trim().slice(-1000)}`,
+        ].join('\n')
+      )
+    }
+  }
+
   const notYet = (what: string): never => {
     throw new AtomicCoreError(
       'MANAGED_PREREQUISITE_BLOCKED',
@@ -406,7 +606,33 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       }
       return { prerequisites_met: true, needs_relogin: false, error: null }
     },
-    prepare: async () => notYet('prepare the environment'),
+    async prepare(record: PersistedOperation, signal: AbortSignal): Promise<void> {
+      const descriptor = await pinnedDescriptor(deps.descriptors, record)
+      const seen = await look()
+      if (seen.foreign) {
+        throw blocked(
+          `A WSL distribution named "${seen.distribution.name}" exists that Atomic Chat did not create; it is not used or changed.`,
+          'foreign-distribution'
+        )
+      }
+      if (seen.facts.wsl.installed !== true || seen.facts.wsl.ready !== true) {
+        throw blocked('WSL is not ready on this computer yet.', 'wsl-not-ready')
+      }
+      const environment =
+        seen.owned === null
+          ? await importOwn(record, seen, signal)
+          : (seen.record as WindowsEnvironmentRecord)
+      const transport = wsl.distribution(environment.distribution.name)
+      await setupGuest({ wsl, sleep }, transport, environment.marker, signal)
+      const manifest = await deps.environmentManifests.pinned(environment.manifest_id)
+      await provisionGuest(
+        transport,
+        manifest.kind === 'available' ? manifest.manifest : null,
+        descriptor,
+        signal
+      )
+      await checkGpu(transport, descriptor, seen, signal)
+    },
     pull: async () => notYet('pull the engine image'),
     verify: async () => notYet('verify the installation'),
     unloadResident: async () => undefined,

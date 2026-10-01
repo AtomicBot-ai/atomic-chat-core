@@ -30,6 +30,8 @@ export interface WindowsEnvironmentRecord {
   /** The Windows environment manifest it was imported by. */
   manifest_id: string
   imported_at: string
+  /** Written into the guest at the import (`/etc/atomic-chat/owner`): a second check that it is ours (D9). */
+  marker: string
 }
 
 export interface WindowsEnvironmentRecordFs {
@@ -67,12 +69,14 @@ export function parseWindowsEnvironmentRecord(input: unknown): WindowsEnvironmen
     throw invalid('manifest_id is not a Windows manifest id')
   }
   if (typeof raw.imported_at !== 'string') throw invalid('no imported_at')
+  if (typeof raw.marker !== 'string' || !/^[A-Za-z0-9-]{8,64}$/.test(raw.marker)) throw invalid('no marker')
   return {
     schema_version: 1,
     executor: 'wsl-docker',
     distribution: { name: distribution.name, path: distribution.path },
     manifest_id: raw.manifest_id,
     imported_at: raw.imported_at,
+    marker: raw.marker,
   }
 }
 

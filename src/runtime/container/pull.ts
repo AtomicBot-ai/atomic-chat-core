@@ -8,6 +8,11 @@
  * `.total` into a single running total and reports it after each update. See
  * `docs/decisions/2026-09-28-pull-the-model-image-over-the-docker-engine-api.md`.
  *
+ * On Windows the Engine API is inside Atomic Chat's WSL distribution, and its socket never leaves it
+ * (change `add-tensorrt-llm-windows`, design D4): `pullImageWithCurl` asks the same endpoint from
+ * inside the guest — `curl --unix-socket` as one argv through the WSL transport, its stdout streamed
+ * back — and reads the stream with the same tracker, so progress and failures mean the same thing.
+ *
  * This talks to the Engine API directly over its unix socket (`node:http`'s `socketPath`, injectable
  * for tests) rather than through `exec.ts`'s `DockerExec` — there is no docker CLI subcommand that
  * streams byte counts, so there is no argv to build for this one operation. The default socket path
@@ -130,6 +135,103 @@ class PullProgressTracker {
     // actually exceed `total` here, but this clamp is the property itself, stated directly, rather
     // than something that merely follows from the per-layer bookkeeping being correct.
     return { current: Math.min(current, total), total }
+  }
+}
+
+/** Runs one argv somewhere the Engine API socket is (a WSL guest), streaming its stdout as it comes. */
+export type EngineApiCommand = (
+  argv: string[],
+  call: { onStdout: (text: string) => void; signal?: AbortSignal; timeoutMs?: number }
+) => Promise<{ code: number | null; stdout: string; stderr: string }>
+
+export interface PullImageWithCurlOptions extends Omit<PullImageOptions, 'socketPath'> {
+  run: EngineApiCommand
+  /** How long the whole pull may take; generous by default, an engine image is tens of gigabytes. */
+  timeoutMs?: number
+}
+
+const CURL_PULL_TIMEOUT_MS = 12 * 60 * 60_000
+
+/**
+ * `pullImage` from inside a WSL guest: `curl --unix-socket /var/run/docker.sock -X POST
+ * http://localhost/images/create?…` streams the same NDJSON, which the same tracker reads. `--fail-with-body`
+ * turns a non-200 answer into a nonzero exit with the daemon's message on stdout.
+ */
+export async function pullImageWithCurl(image: ImageRef, options: PullImageWithCurlOptions): Promise<void> {
+  const repository = assertSafeArgvValue(image.repository, 'image repository')
+  const digest = assertDigest(image.digest, 'image digest')
+  const cancelled = (): boolean => options.signal?.aborted === true
+  if (cancelled()) throw new AtomicCoreError('MODEL_LOAD_CANCELLED', 'Image pull was cancelled.')
+  const path = `/images/create?fromImage=${encodeURIComponent(repository)}&tag=${encodeURIComponent(digest)}`
+  const tracker = new PullProgressTracker(options.knownTotalBytes)
+  let buffer = ''
+  let failure: AtomicCoreError | null = null
+  const handleLine = (line: string): void => {
+    if (failure !== null || line.trim() === '') return
+    let parsed: ProgressLine
+    try {
+      parsed = JSON.parse(line) as ProgressLine
+    } catch {
+      return // a partial/non-JSON line; one bad line should not fail the whole pull
+    }
+    if (parsed.error) {
+      failure = ioError('Docker image pull failed.', parsed.errorDetail?.message ?? parsed.error)
+      return
+    }
+    const progress = tracker.observe(parsed)
+    if (progress && options.onProgress) {
+      try {
+        options.onProgress(progress)
+      } catch {
+        // A misbehaving progress callback must not abort the pull (review round 1, item 11).
+      }
+    }
+  }
+  const answer = await options.run(
+    [
+      'curl',
+      '--silent',
+      '--show-error',
+      '--no-buffer',
+      '--fail-with-body',
+      '--unix-socket',
+      DOCKER_SOCKET_PATH,
+      '-X',
+      'POST',
+      `http://localhost${path}`,
+    ],
+    {
+      onStdout: (text) => {
+        buffer += text
+        let newline: number
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          handleLine(buffer.slice(0, newline))
+          buffer = buffer.slice(newline + 1)
+        }
+      },
+      timeoutMs: options.timeoutMs ?? CURL_PULL_TIMEOUT_MS,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    }
+  )
+  if (buffer.trim() !== '') handleLine(buffer)
+  if (cancelled()) throw new AtomicCoreError('MODEL_LOAD_CANCELLED', 'Image pull was cancelled.')
+  if (failure !== null) throw failure
+  if (answer.code !== 0) {
+    throw ioError(
+      answer.code === null
+        ? 'Could not reach the Docker daemon.'
+        : `Docker image pull failed (curl exited ${answer.code}).`,
+      `${answer.stderr.trim()}\n${answer.stdout.trim().slice(-2000)}`.trim()
+    )
+  }
+  if (options.verify) {
+    const { found } = await inspectImage(options.verify, image)
+    if (!found) {
+      throw ioError(
+        'Docker image pull completed but the image is not present locally.',
+        `${repository}@${digest}`
+      )
+    }
   }
 }
 

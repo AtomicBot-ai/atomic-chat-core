@@ -14,6 +14,7 @@ const RECORD: WindowsEnvironmentRecord = {
   distribution: { name: 'AtomicChat', path: 'C:\\Users\\ada\\AppData\\Local\\AtomicChat\\wsl\\AtomicChat' },
   manifest_id: 'windows-r1',
   imported_at: '2026-10-01T00:00:00.000Z',
+  marker: 'marker-0001',
 }
 
 let dir: string

@@ -92,6 +92,18 @@ const freshWindows = (): FakeWindowsMachine => ({
   vhdx_bytes: null,
 })
 
+/** What a freshly imported Ubuntu 24.04 rootfs is: systemd, the NVIDIA libraries WSL provides, nothing else. */
+const freshGuest = (): FakeWslGuest => {
+  const guest = readyGuest({ users: [] })
+  guest.host = {
+    ...guest.host,
+    docker: { installed: false, reachable: false, service_active: false, gpu_runtime: false },
+    toolkit: false,
+    cdi: false,
+  }
+  return guest
+}
+
 /** The same machine with WSL 2.4.4 and the user's own Ubuntu as default, before Atomic Chat's import. */
 const wslWindows = (): FakeWindowsMachine => ({
   ...freshWindows(),
@@ -101,6 +113,7 @@ const wslWindows = (): FakeWindowsMachine => ({
     ready: true,
     distributions: [{ name: 'Ubuntu', state: 'Stopped', version: 2, is_default: true }],
     guests: {},
+    import_guest: freshGuest(),
   },
   virtualization: { firmware: false, hypervisor: true },
 })
@@ -128,6 +141,7 @@ const RECORD: WindowsEnvironmentRecord = {
   distribution: { name: 'AtomicChat', path: DISTRO_DIR },
   manifest_id: 'windows-r1',
   imported_at: '2026-10-01T00:00:00.000Z',
+  marker: 'marker-0001',
 }
 
 const record = (request: Partial<BeginOperation> = {}): PersistedOperation => {
@@ -196,6 +210,10 @@ interface Harness {
   deps: WindowsProvisionerDeps
   views: HostView[]
   written: WindowsEnvironmentRecord[]
+  downloads: { url: string; destination: string }[]
+  removed: string[]
+  recipes: unknown[]
+  current: () => WindowsEnvironmentRecord | null
 }
 
 const harness = (
@@ -203,11 +221,15 @@ const harness = (
   options: {
     record?: WindowsEnvironmentRecord | null
     manifests?: EnvironmentManifestProvider<'windows'>
+    rootfsTampered?: boolean
   } = {}
 ): Harness => {
   const windows = fakeWindows(machine)
   const views: HostView[] = []
   const written: WindowsEnvironmentRecord[] = []
+  const downloads: { url: string; destination: string }[] = []
+  const removed: string[] = []
+  const recipes: unknown[] = []
   let current = options.record ?? null
   const descriptors: RuntimeDescriptorProvider = {
     forNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
@@ -239,6 +261,34 @@ const harness = (
     },
     installations: new InstallationStore(root),
     environmentId: 'default',
+    downloadRootfs: async (rootfs, destination) => {
+      downloads.push({ url: rootfs.url, destination })
+      if (options.rootfsTampered === true) {
+        throw new AtomicCoreError(
+          'MANAGED_IDENTITY_MISMATCH',
+          'The downloaded rootfs does not match its sha256.',
+          rootfs.sha256
+        )
+      }
+    },
+    removeFile: async (path) => {
+      removed.push(path)
+    },
+    runGuestRecipe: async (_transport, request) => {
+      recipes.push(request.parameters)
+      // What the recipe leaves behind in the guest: Docker running with the toolkit and a CDI spec.
+      const guest = machine.wsl.guests?.['AtomicChat']
+      if (guest !== undefined) {
+        guest.host = {
+          ...guest.host,
+          docker: { installed: true, reachable: true, service_active: true, gpu_runtime: true },
+          toolkit: true,
+          cdi: true,
+        }
+      }
+      return { outcome: 'completed', log_tail: 'linux.install-container-runtime: 5 step(s) applied' }
+    },
+    sleep: async () => undefined,
     onAssessment: (view) => views.push(view),
     newId: (() => {
       let n = 0
@@ -246,7 +296,7 @@ const harness = (
     })(),
     now: () => new Date('2026-10-01T00:00:00.000Z'),
   }
-  return { windows, deps, views, written }
+  return { windows, deps, views, written, downloads, removed, recipes, current: () => current }
 }
 
 const signal = new AbortController().signal
@@ -541,6 +591,22 @@ describe('enabling WSL — spec "Включение WSL — единственн
   })
 })
 
+/** The operation store two cores share, in memory. */
+const memoryStore = (): OperationStore => {
+  const fs = new FakeManagedFs()
+  let ids = 0
+  return new OperationStore({
+    root: '/shared',
+    instanceId: 'core-1',
+    newOperationId: () => 'op-1',
+    newEffectId: () => `store-effect-${(ids += 1)}`,
+    fs,
+    now: () => fs.clock,
+    sleep: async () => undefined,
+    ownerIdentity: async () => ({ pid: 4242, startId: 'harness:owner' }),
+  })
+}
+
 describe('UAC, a restart, and on without a new consent (state and recovery over the fake WSL)', () => {
   const serviceOn = (h: Harness, store: OperationStore, events: string[]) =>
     new EnvironmentService({
@@ -560,18 +626,7 @@ describe('UAC, a restart, and on without a new consent (state and recovery over 
   it('preparing-host → the app’s UAC → reboot-required → (still not restarted) reboot-required → restarted → on', async () => {
     const machine = freshWindows()
     const h = harness(machine)
-    const fs = new FakeManagedFs()
-    let ids = 0
-    const store = new OperationStore({
-      root: '/shared',
-      instanceId: 'core-1',
-      newOperationId: () => 'op-1',
-      newEffectId: () => `store-effect-${(ids += 1)}`,
-      fs,
-      now: () => fs.clock,
-      sleep: async () => undefined,
-      ownerIdentity: async () => ({ pid: 4242, startId: 'harness:owner' }),
-    })
+    const store = memoryStore()
     const events: string[] = []
     const first = serviceOn(h, store, events)
     await first.begin('default', {
@@ -623,5 +678,211 @@ describe('UAC, a restart, and on without a new consent (state and recovery over 
     expect(phasesAfterReboot).toContain('preparing-environment')
     expect(phasesAfterReboot).not.toContain('awaiting-consent')
     expect(h.windows.wslCalls.flat()).not.toContain('--install')
+  })
+})
+
+/** The record an import writes, as a test expects it. */
+const consented = (): PersistedOperation => {
+  const base = record()
+  return {
+    ...base,
+    machine: {
+      ...base.machine,
+      consented: {
+        plan_digest: `sha256:${'c'.repeat(64)}`,
+        descriptor_id: DESCRIPTOR.descriptor_id,
+        image_digest: DESCRIPTOR.image['linux/amd64'].digest,
+        environment_manifest_id: 'windows-r1',
+        target: TARGET,
+      },
+    },
+  }
+}
+const noOwn = async (): Promise<void> => undefined
+
+describe('import — spec "Собственный дистрибутив импортируется от имени пользователя и только он"', () => {
+  it('the user already has Ubuntu as default: a separate AtomicChat appears, Ubuntu stays default and untouched', async () => {
+    const machine = wslWindows()
+    machine.wsl.import_takes_default = true
+    const h = harness(machine)
+    await createWindowsProvisioner(h.deps).prepare(consented(), signal, noOwn)
+
+    expect(h.downloads).toEqual([{ url: MANIFEST.rootfs.url, destination: expect.stringMatching(/\.wsl$/) }])
+    const rootfs = h.downloads[0]?.destination as string
+    expect(h.windows.wslCalls).toContainEqual([
+      '--import',
+      'AtomicChat',
+      DISTRO_DIR,
+      rootfs,
+      '--version',
+      '2',
+    ])
+    expect(h.removed).toContain(rootfs)
+    const distributions = machine.wsl.distributions ?? []
+    expect(distributions.find((d) => d.is_default)?.name).toBe('Ubuntu')
+    expect(h.windows.wslCalls).toContainEqual(['--set-default', 'Ubuntu'])
+    expect(h.windows.wslCalls.some((argv) => argv[0] === '-d' && argv[1] === 'Ubuntu')).toBe(false)
+    expect(h.current()).toMatchObject({
+      distribution: { name: 'AtomicChat', path: DISTRO_DIR },
+      manifest_id: 'windows-r1',
+    })
+  })
+
+  it('no default before: the import is left as the default it became, nothing else set', async () => {
+    const machine = wslWindows()
+    machine.wsl.distributions = []
+    const h = harness(machine)
+    await createWindowsProvisioner(h.deps).prepare(consented(), signal, noOwn)
+    expect(h.windows.wslCalls.some((argv) => argv[0] === '--set-default')).toBe(false)
+  })
+
+  it('falls back to `wsl --install --from-file` when `--import` refuses the .wsl file (design D9)', async () => {
+    const machine = wslWindows()
+    machine.wsl.import_fails = ['import']
+    const h = harness(machine)
+    await createWindowsProvisioner(h.deps).prepare(consented(), signal, noOwn)
+    const rootfs = h.downloads[0]?.destination as string
+    expect(h.windows.wslCalls).toContainEqual([
+      '--install',
+      '--from-file',
+      rootfs,
+      '--name',
+      'AtomicChat',
+      '--location',
+      DISTRO_DIR,
+      '--no-launch',
+    ])
+    expect((machine.wsl.distributions ?? []).map((d) => d.name)).toContain('AtomicChat')
+  })
+
+  it('a tampered rootfs: the operation fails before any import, and nothing is recorded', async () => {
+    const h = harness(wslWindows(), { rootfsTampered: true })
+    await expect(createWindowsProvisioner(h.deps).prepare(consented(), signal, noOwn)).rejects.toMatchObject({
+      code: 'MANAGED_IDENTITY_MISMATCH',
+    })
+    expect(h.windows.wslCalls.some((argv) => argv[0] === '--import' || argv[0] === '--install')).toBe(false)
+    expect(h.current()).toBeNull()
+  })
+
+  it('a distribution with our name that we never recorded: refused, never entered, never imported over', async () => {
+    const h = harness(importedWindows(), { record: null })
+    await expect(createWindowsProvisioner(h.deps).prepare(consented(), signal, noOwn)).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      details: 'foreign-distribution',
+    })
+    expect(h.windows.wslCalls.some((argv) => argv[0] === '-d' || argv[0] === '--import')).toBe(false)
+  })
+
+  it('sets the guest up: uid 1000, wsl.conf with systemd and no Windows PATH, the ownership marker, a restart', async () => {
+    const machine = wslWindows()
+    const h = harness(machine)
+    await createWindowsProvisioner(h.deps).prepare(consented(), signal, noOwn)
+
+    const guest = machine.wsl.guests?.['AtomicChat']
+    expect(guest?.users).toEqual([{ name: 'atomic', uid: 1000 }])
+    const conf = guest?.files?.['/etc/wsl.conf'] ?? ''
+    expect(conf).toContain('[boot]\nsystemd=true')
+    expect(conf).toContain('[user]\ndefault=atomic')
+    expect(conf).toContain('[interop]\nappendWindowsPath=false')
+    expect(guest?.files?.['/etc/atomic-chat/owner']).toBe(`${h.current()?.marker}\n`)
+    expect(machine.wsl.terminated).toEqual(['AtomicChat'])
+    // Nothing but our own distribution was ever entered, and only as root.
+    for (const argv of h.windows.wslCalls.filter((call) => call[0] === '-d')) {
+      expect(argv.slice(0, 4)).toEqual(['-d', 'AtomicChat', '-u', 'root'])
+    }
+  })
+})
+
+describe('the pinned manifest — spec "Окружение Windows закрепляет свой манифест"', () => {
+  const R2: WindowsEnvironmentManifest = {
+    ...MANIFEST,
+    manifest_id: 'windows-r2',
+    rootfs: {
+      ...MANIFEST.rootfs,
+      url: 'https://releases.ubuntu.com/24.04.6/ubuntu-24.04.6-wsl-amd64.wsl',
+      sha256: 'a'.repeat(64),
+    },
+  }
+
+  it('a new rootfs in conf changes nothing for an imported environment: no download, no import, its manifest kept', async () => {
+    const manifests = manifestsOf(R2, [MANIFEST])
+    const h = harness(importedWindows(), { record: RECORD, manifests })
+    const provisioner = createWindowsProvisioner(h.deps)
+
+    const { plan } = await provisioner.probe(record(), signal)
+    expect(plan.environment_manifest_id).toBe('windows-r1')
+    expect(plan.blockers).toEqual([])
+    await provisioner.prepare(consented(), signal, noOwn)
+
+    expect(h.downloads).toEqual([])
+    expect(h.windows.wslCalls.some((argv) => argv[0] === '--import' || argv[0] === '--unregister')).toBe(
+      false
+    )
+    expect(manifests.latest).not.toHaveBeenCalled()
+  })
+})
+
+describe('the guest recipe — spec "Гость готовится тем же рецептом без повышения прав"', () => {
+  it('a fresh distribution: Docker and the toolkit by the Linux recipe as guest root, the GPU checked, on to the pull — no relogin', async () => {
+    const machine = wslWindows()
+    const h = harness(machine)
+    const store = memoryStore()
+    const phases: string[] = []
+    const service = new EnvironmentService({
+      store,
+      environmentId: 'default',
+      instanceId: 'core-1',
+      newEffectId: (() => {
+        let n = 0
+        return () => `effect-${(n += 1)}`
+      })(),
+      provisioner: createWindowsProvisioner(h.deps),
+      readSnapshot: async () => [],
+      emit: (_name, payload) => phases.push(payload.phase),
+      identityDeps: { alive: () => false },
+    })
+    await service.begin('default', {
+      request_id: 'req-1',
+      target: TARGET,
+      kind: 'setup',
+      descriptor_id: DESCRIPTOR.descriptor_id,
+    })
+    await service.idle()
+    const offered = await service.get('op-1')
+    expect(offered.phase).toBe('awaiting-consent')
+    await service.resume('op-1', {
+      expected_revision: offered.revision,
+      approved_plan_digest: offered.plan_digest!,
+    })
+    await service.idle()
+
+    expect(h.recipes).toEqual([
+      expect.objectContaining({
+        user: 'root',
+        arch: 'x86_64',
+        family: 'apt',
+        distro_id: 'ubuntu',
+        version_id: '24.04',
+        components: expect.arrayContaining(['docker-engine', 'nvidia-container-toolkit', 'nvidia-cdi']),
+      }),
+    ])
+    expect((h.recipes[0] as { components: string[] }).components).not.toContain('docker-group')
+    // The GPU check ran in the guest on the card, after the small image came in through the Engine API.
+    const runs = h.windows.wslCalls.filter((argv) => argv.includes('run') && argv.includes('--gpus'))
+    expect(runs[0]).toEqual(expect.arrayContaining([`device=${GPU}`, 'nvidia-smi']))
+    expect(h.windows.wslCalls.some((argv) => argv.includes('curl'))).toBe(true)
+    expect(phases).toContain('pulling-image')
+    expect(phases).not.toContain('relogin-required')
+  })
+
+  it('a GPU the container cannot see: the setup fails before the engine image, naming the card', async () => {
+    const machine = wslWindows()
+    const guest = machine.wsl.import_guest as FakeWslGuest
+    guest.host = { ...guest.host, gpu_visible_in_container: false }
+    const h = harness(machine)
+    await expect(createWindowsProvisioner(h.deps).prepare(consented(), signal, noOwn)).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      message: expect.stringContaining('RTX 4070'),
+    })
   })
 })

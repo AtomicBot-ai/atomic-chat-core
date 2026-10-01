@@ -20,6 +20,10 @@ export interface FakeWslGuest {
   nvml_version?: string | null
   /** The user `-d <name> --exec` runs as without `-u`. */
   default_user?: string
+  /** `/etc/passwd`, as far as `getent passwd` and `useradd` need it. */
+  users?: { name: string; uid: number }[]
+  /** An Engine API pull answers with this error line. */
+  pull_error?: string
   host?: Partial<FakeLinuxHostState>
 }
 
@@ -32,6 +36,14 @@ export interface FakeWslState {
   ready?: boolean
   distributions?: FakeWslDistribution[]
   guests?: Record<string, FakeWslGuest>
+  /** What a freshly imported distribution's guest looks like. */
+  import_guest?: FakeWslGuest
+  /** `--import` (and/or `--install --from-file`) fails. */
+  import_fails?: ('import' | 'install')[]
+  /** An import takes the default even though the user has one (real WSL does only when there is none). */
+  import_takes_default?: boolean
+  /** Distributions `--terminate` stopped, in order. */
+  terminated?: string[]
 }
 
 export interface FakeWslAnswer {
