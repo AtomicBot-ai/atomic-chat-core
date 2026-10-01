@@ -35,6 +35,12 @@ export interface FakeSdOptions {
   cancel?: boolean
   /** Print a tiled-VAE pass of this many tiles before sampling. */
   tiles?: number
+  /** Decode in a tiled-VAE pass of this many tiles after sampling, whatever the body asks. */
+  decodeTiles?: number
+  /** Milliseconds per decode tile; default `stepMs`. */
+  tileMs?: number
+  /** Where the fake writes the body of the last `img_gen` or `vid_gen` submit. */
+  bodyFile?: string
   /** A job with this seed returns all-black frames; other seeds paint. */
   blankSeed?: number
   /** The mode applies only to the first process that creates this file; later ones run `ready`. */
@@ -58,6 +64,9 @@ export function fakeSdEnv(options: FakeSdOptions): Record<string, string> {
   if (options.stepMs !== undefined) env['FAKE_SD_STEP_MS'] = String(options.stepMs)
   if (options.cancel) env['FAKE_SD_CANCEL'] = '1'
   if (options.tiles !== undefined) env['FAKE_SD_TILES'] = String(options.tiles)
+  if (options.decodeTiles !== undefined) env['FAKE_SD_DECODE_TILES'] = String(options.decodeTiles)
+  if (options.tileMs !== undefined) env['FAKE_SD_TILE_MS'] = String(options.tileMs)
+  if (options.bodyFile) env['FAKE_SD_BODY_FILE'] = options.bodyFile
   if (options.blankSeed !== undefined) env['FAKE_SD_BLANK_SEED'] = String(options.blankSeed)
   if (options.onceMarker) env['FAKE_SD_ONCE_MARKER'] = options.onceMarker
   if (options.exitCode !== undefined) env['FAKE_SD_EXIT_CODE'] = String(options.exitCode)

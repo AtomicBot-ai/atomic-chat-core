@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { failed, fakeProbeDeps, ok } from '../../test/helpers/fake-probe-deps.js'
-import { parseSwVers, probeDarwin } from './probe-darwin.js'
+import { parseSwVers, probeDarwin, probeUnifiedMemory } from './probe-darwin.js'
 
 const SW_VERS = 'ProductName:\t\tmacOS\nProductVersion:\t\t26.5.2\nBuildVersion:\t\t25F84\n'
 
@@ -127,4 +127,28 @@ describe('parseSwVers', () => {
     ['ProductVersion:\t13.0\n', 'macOS 13.0'],
     ['', 'macOS'],
   ])('%j → %s', (text, expected) => expect(parseSwVers(text)).toBe(expected))
+})
+
+describe('probeUnifiedMemory', () => {
+  const GiB = 2 ** 30
+
+  it('answers RAM on Apple silicon, without running a tool', () => {
+    const deps = fakeProbeDeps({ platform: 'darwin', arch: 'arm64', totalmem: 18 * GiB })
+    expect(probeUnifiedMemory(deps)).toEqual({ totalMemoryBytes: 18 * GiB })
+    expect(deps.calls).toEqual([])
+  })
+
+  it.each([
+    ['an Intel Mac', 'darwin', 'x64'],
+    ['Linux on arm64', 'linux', 'arm64'],
+    ['Windows', 'win32', 'x64'],
+  ])('says nothing on %s, whose GPU memory is its own', (_name, platform, arch) => {
+    expect(probeUnifiedMemory(fakeProbeDeps({ platform, arch, totalmem: 32 * GiB }))).toBeUndefined()
+  })
+
+  it('says nothing when RAM cannot be read', () => {
+    expect(
+      probeUnifiedMemory(fakeProbeDeps({ platform: 'darwin', arch: 'arm64', totalmem: 0 }))
+    ).toBeUndefined()
+  })
 })

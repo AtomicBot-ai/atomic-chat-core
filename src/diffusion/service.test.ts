@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
-import type { CoreEvents, LoadDiffusionModelRequest } from '../contracts/index.js'
+import type { CoreEvents, LoadDiffusionModelRequest, SystemInfo } from '../contracts/index.js'
 import { paintedPng, sampleRequest, sampleVideoRequest } from '../../test/helpers/diffusion-fixtures.js'
 import {
   installFakeSdEngine,
@@ -51,7 +51,17 @@ interface Harness {
   log: string[]
 }
 
-function harness(options: { idleTickMs?: number; claimGpu?: GpuClaimHook } = {}): Harness {
+const MAC_16: SystemInfo = {
+  cpu: { name: 'Apple M3 Pro', core_count: 12, arch: 'aarch64', extensions: [], extensions_known: true },
+  os_type: 'macos',
+  os_name: 'macOS 15',
+  total_memory: 16 * 1024,
+  gpus: [],
+}
+
+function harness(
+  options: { idleTickMs?: number; claimGpu?: GpuClaimHook; systemInfo?: SystemInfo } = {}
+): Harness {
   const events: Harness['events'] = []
   const journal: Harness['journal'] = []
   const log: string[] = []
@@ -71,6 +81,7 @@ function harness(options: { idleTickMs?: number; claimGpu?: GpuClaimHook } = {})
     timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 },
     idleTickMs: options.idleTickMs ?? 50,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
+    ...(options.systemInfo ? { systemInfo: async () => options.systemInfo as SystemInfo } : {}),
   })
   service.start()
   services.push(service)
@@ -690,6 +701,29 @@ describe.skipIf(!posix)('generating', () => {
     await expect(h.service.cancelJob(jobId)).resolves.toEqual({ cancelled: false, serverStopped: false })
   })
 
+  it('finishes a job that ran out of GPU memory under the offload fallback', async () => {
+    const h = harness()
+    await h.service.configure({ dataFolder })
+    const argvFile = join(dataFolder, 'argv.json')
+    await installFakeSdEngine(layout, {
+      mode: 'die-mid-job',
+      onceMarker: join(dataFolder, 'once'),
+      argvFile,
+      stepMs: 10,
+    })
+    const loaded = await h.service.loadModel({ ...(await loadRequest()), offloadFallback: 'group' })
+    expect(loaded.offload).toBe('none')
+    expect(JSON.parse(await readFile(argvFile, 'utf8'))).not.toContain('--offload-to-cpu')
+
+    const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    await waitFor(() => h.service.getJob(jobId)?.state === 'completed')
+    expect(h.service.getJob(jobId)?.outputs[0]?.recipe.engine.offload).toBe('group')
+    expect(JSON.parse(await readFile(argvFile, 'utf8'))).toContain('--offload-to-cpu')
+    expect((await h.service.getStatus()).model.loaded?.offload).toBe('group')
+    expect(h.reasons()).toContain('offload-fallback')
+    expect(h.events.filter((e) => e.name === 'diffusion:error')).toEqual([])
+  })
+
   it('shuts down: the server is gone and nothing loads any more', async () => {
     const h = await loadedService()
     await h.service.shutdown()
@@ -733,8 +767,8 @@ const webmFixture = () =>
   readFile(fileURLToPath(new URL('../../test/fixtures/webm/tiny.webm', import.meta.url)))
 
 describe.skipIf(!posix)('generating video', () => {
-  async function loadedVideoService(options: FakeSdOptions = {}) {
-    const h = harness()
+  async function loadedVideoService(options: FakeSdOptions = {}, systemInfo?: SystemInfo) {
+    const h = harness(systemInfo ? { systemInfo } : {})
     await h.service.configure({ dataFolder })
     await installFakeSdEngine(layout, { stepMs: 10, modes: ['img_gen', 'vid_gen'], ...options })
     const request = await videoLoadRequest()
@@ -810,6 +844,93 @@ describe.skipIf(!posix)('generating video', () => {
     expect(outcome.job.outputs[0]?.id).toBe(outcome.job.id)
     expect((await h.service.getStatus()).activeVideoJob).toBeNull()
     expect(h.events.filter((e) => e.name === 'diffusion:error')).toEqual([])
+  })
+
+  it('estimates a clip without starting anything, while another runs, and learns from the clips it made', async () => {
+    const h = harness({ systemInfo: MAC_16 })
+    await h.service.configure({ dataFolder })
+    const clip = sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 2 })
+    await expect(h.service.estimateVideo(clip)).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })
+    await installFakeSdEngine(layout, { stepMs: 150, modes: ['img_gen', 'vid_gen'] })
+    await h.service.loadModel(await loadRequest())
+    await expect(h.service.estimateVideo(clip)).rejects.toMatchObject({
+      code: 'MODEL_INCOMPATIBLE',
+      message: 'The loaded model generates images, not video. Load a video model first.',
+    })
+    await h.service.loadModel(await videoLoadRequest())
+    // The same refusal as the job route, for the same body.
+    const odd = { ...clip, frames: 10 }
+    const refused = await h.service.estimateVideo(odd).catch((error: unknown) => error)
+    const refusedJob = await h.service.generateVideo(odd).catch((error: unknown) => error)
+    expect(refused).toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(refused).toEqual(refusedJob)
+
+    const idle = await h.service.estimateVideo(clip)
+    expect(idle).toMatchObject({ memory: { verdict: 'fits' }, basis: 'heuristic' })
+    expect(idle.seconds?.low).toBeGreaterThan(0)
+
+    const { jobId } = await h.service.generateVideo({ ...clip, steps: 4 })
+    expect(h.service.getVideoJob(jobId)?.estimate).toMatchObject({ memory: { verdict: 'fits' } })
+    await waitFor(() => h.service.getVideoJob(jobId)?.state === 'generating')
+    const before = h.events.length
+    const during = await h.service.estimateVideo(clip)
+    expect(during).toEqual(idle)
+    expect(h.events.length, 'an estimate emits nothing').toBe(before)
+    expect((await h.service.getStatus()).activeVideoJob?.id).toBe(jobId)
+    await waitFor(() => h.service.getVideoJob(jobId)?.state === 'completed', 10_000)
+
+    // The finished clip calibrates the next estimate; deleting it takes the calibration away.
+    const learned = await h.service.estimateVideo(clip)
+    expect(learned.basis).toBe('history')
+    await h.service.deleteVideoGalleryItems([jobId])
+    expect((await h.service.estimateVideo(clip)).basis).toBe('heuristic')
+  })
+
+  it('cannot estimate without hardware facts, and still runs the clip without one', async () => {
+    const h = await loadedVideoService()
+    const clip = sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 1 })
+    await expect(h.service.estimateVideo(clip)).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: 'The core has no hardware facts to estimate the video with.',
+    })
+    const outcome = await h.service.runVideoJob(clip)
+    expect(outcome.job).not.toHaveProperty('estimate')
+    expect(h.log).toContain(
+      'warn: video estimate failed: The core has no hardware facts to estimate the video with.'
+    )
+  })
+
+  it('tiles the decode by the machine’s memory, and reports the decode’s tiles', async () => {
+    const bodyFile = join(dataFolder, 'vid-body.json')
+    const h = await loadedVideoService({ bodyFile, decodeTiles: 3, tileMs: 60 }, MAC_16)
+    const body = async () => JSON.parse(await readFile(bodyFile, 'utf8')) as Record<string, unknown>
+    // 1024² × 9 is past the old eight-megapixel-frame threshold, but one graph (2.4 GB) fits in 16 GB.
+    const fits = await h.service.runVideoJob(
+      sampleVideoRequest({ width: 1024, height: 1024, frames: 9, steps: 1 })
+    )
+    expect(fits.job.state).toBe('completed')
+    expect(await body()).not.toHaveProperty('vae_tiling_params')
+    // 2048² × 17 does not (17.8 GB); three full-width strips are the least work that fits.
+    await h.service.runVideoJob(sampleVideoRequest({ width: 2048, height: 2048, frames: 17, steps: 1 }))
+    expect((await body())['vae_tiling_params']).toEqual({
+      enabled: true,
+      rel_size_x: 1,
+      rel_size_y: 3,
+      rel_size_w: 1,
+      rel_size_h: 3,
+    })
+    const decoding = h.events
+      .filter((e) => e.name === 'diffusion:video-progress')
+      .map((e) => (e.payload as CoreEvents['diffusion:video-progress']).progress)
+      .filter((p) => p.phase === 'decoding')
+    expect(decoding.map((p) => p.decodeTiles)).toContainEqual({ done: 3, total: 3 })
+
+    // Under model offload the engine tiles by its own flag: no plan, the threshold as before.
+    await h.service.loadModel({ ...h.request, offload: 'model' })
+    const offloaded = sampleVideoRequest({ width: 1024, height: 1024, frames: 9, steps: 1 })
+    expect((await h.service.estimateVideo(offloaded)).seconds).not.toBeNull()
+    await h.service.runVideoJob(offloaded)
+    expect((await body())['vae_tiling_params']).toEqual({ enabled: true })
   })
 
   it('cancels a running clip by stopping the engine, and cancelVideoJob knows only video jobs', async () => {

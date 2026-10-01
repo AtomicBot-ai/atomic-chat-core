@@ -20,7 +20,7 @@
  */
 
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import type { DataLayout } from '../../config/index.js'
 import type { SessionInfo, UnloadResult } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
@@ -37,13 +37,16 @@ import type {
   RecreateResult,
 } from '../shared/index.js'
 import {
+  backendOutputReporter,
   closeLogStream,
   openLogStream,
   randomFreePort,
+  redactArgs,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
 } from '../shared/index.js'
+import type { BackendOutputSink } from '../shared/index.js'
 import { buildMlxServerArgs, normalizeMlxModelPath } from './args.js'
 import { asNumber, buildMlxConfig, selectMlxDraftSettings } from './config.js'
 import type { MlxDraftKind, MlxExtensionConfigInput } from './config.js'
@@ -81,6 +84,13 @@ export interface MlxRuntimeOptions {
   journal?: ProcessJournal | undefined
   emit?: EmitFn
   baseEnv?: NodeJS.ProcessEnv
+  /**
+   * Every stdout/stderr line the server prints, for the life of the session. A throwing sink is
+   * swallowed, with one `warn` through `log` per session.
+   */
+  backendOutput?: BackendOutputSink
+  /** The core's own logger: the one warning about a throwing `backendOutput` sink goes here. */
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /**
    * A drafter that is switched on but has no path. Defaults to one already on disk; a caller that
    * can download may do so here.
@@ -273,6 +283,11 @@ export class MlxRuntime implements LocalRuntime {
     const { exe, args, env, port, timeoutSecs, config, maxCtxTrain, overrides, modelPath } = launch
     const isEmbedding = opts.isEmbedding ?? false
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'MLX') : undefined
+    const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
+    this.options.log?.(
+      'info',
+      `starting ${win32.basename(exe)} for mlx/${modelId}: ${redactArgs(args).join(' ')}`
+    )
     let started
     try {
       started = await (this.options.spawn ?? spawnAndAwaitReady)(
@@ -290,6 +305,7 @@ export class MlxRuntime implements LocalRuntime {
             logStream?.write(`[${stream}] ${line}\n`)
             if (opts.verbose)
               this.emit('core:log', { level: 'debug', msg: `[mlx/${modelId}][${stream}] ${line}` })
+            reportOutput({ provider: 'mlx', model: modelId, stream, line })
           },
         }
       )

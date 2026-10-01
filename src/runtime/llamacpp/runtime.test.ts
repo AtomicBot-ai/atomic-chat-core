@@ -7,6 +7,7 @@ import {
   fakeLlamaSpawnRaw,
   FAKE_LLAMA_SCRIPT,
 } from '../../../test/helpers/fake-llama-server.js'
+import { scriptSpawn } from '../../../test/helpers/script-spawn.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { CoreEvents } from '../../contracts/index.js'
@@ -100,6 +101,14 @@ async function makeRuntime(over: Partial<LlamacppRuntimeOptions> = {}): Promise<
 }
 
 const payloads = (name: keyof CoreEvents) => events.filter((e) => e.name === name).map((e) => e.payload)
+
+/** A backend that prints while it loads, says it is ready, and keeps printing afterwards. */
+const PRINTS_BEFORE_AND_AFTER_READY = [
+  "console.error('before-ready: loading weights')",
+  "console.error('main: server is listening on http://127.0.0.1:1')",
+  "setTimeout(() => console.log('after-ready: still running'), 30)",
+  'setInterval(() => {}, 1000)',
+].join('; ')
 
 describe('load', () => {
   it('uses a no-op event sink when the embedding owner did not supply one', async () => {
@@ -220,6 +229,103 @@ describe('load', () => {
     )
   })
 
+  it('writes the redacted start line to log before spawning, args including --override-tensor', async () => {
+    await data.writeModel('override-tensor')
+    const logged: Array<{ level: string; message: string }> = []
+    const runtime = await makeRuntime({ log: (level, message) => logged.push({ level, message }) })
+    await runtime.load('override-tensor', { overrides: { override_tensor_buffer_t: 'exps=CPU' } })
+
+    const startLine = logged.find((entry) => entry.level === 'info')
+    // The resolved executable is `llama-server.exe` on Windows.
+    expect(startLine?.message).toMatch(
+      /^starting llama-server(\.exe)? for llamacpp-upstream\/override-tensor: /
+    )
+    expect(startLine?.message).toContain('--override-tensor exps=CPU')
+  })
+
+  // The start line uses a platform-appropriate basename: a Windows-style exe path (backslashes,
+  // drive letter) must still collapse to just the file name, even though this suite runs on
+  // whatever OS is native to the CI runner — proves the fix does not regress to `node:path`'s
+  // bare `basename`, which only splits on the host platform's own separator.
+  it('reduces a Windows-style executable path to its basename in the start line', async () => {
+    await data.writeModel('windows-exe')
+    const logged: Array<{ level: string; message: string }> = []
+    const runtime = await makeRuntime({ log: (level, message) => logged.push({ level, message }) })
+    // On Windows the engine starts in its executable's folder, so there the path must be a real
+    // folder (already drive-lettered and backslashed); elsewhere a made-up one does.
+    const exePath =
+      process.platform === 'win32'
+        ? join(data.root, 'llama-server.exe')
+        : 'C:\\Users\\me\\AppData\\Local\\atomic\\bin\\llama-server.exe'
+    await runtime.load('windows-exe', { exePath })
+
+    // Anchored: nothing of the folder may precede the file name. (The arguments after the colon
+    // carry the model's own path, which on Windows has a drive letter and backslashes too.)
+    const startLine = logged.find((entry) => entry.level === 'info')
+    expect(startLine?.message).toMatch(/^starting llama-server\.exe for llamacpp-upstream\/windows-exe: /)
+  })
+
+  it('relays every line to backendOutput before and after readiness, in addition to logPath and verbose', async () => {
+    await data.writeModel('backend-output')
+    const logPath = join(data.layout.core.logsDir, 'backend-output.log')
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const runtime = await makeRuntime({
+      backendOutput: (line) => received.push(line),
+      spawn: scriptSpawn(PRINTS_BEFORE_AND_AFTER_READY),
+    })
+
+    await runtime.load('backend-output', { verbose: true, logPath })
+    await waitFor(() => received.length === 3)
+
+    const tagged = { provider: 'llamacpp-upstream', model: 'backend-output' }
+    expect(received).toEqual([
+      { ...tagged, stream: 'stderr', line: 'before-ready: loading weights' },
+      { ...tagged, stream: 'stderr', line: 'main: server is listening on http://127.0.0.1:1' },
+      { ...tagged, stream: 'stdout', line: 'after-ready: still running' },
+    ])
+    // In addition to logPath and verbose, never instead of them: both get the late line too.
+    await waitFor(() => readFileSync(logPath, 'utf8').includes('[stdout] after-ready: still running'))
+    expect(readFileSync(logPath, 'utf8')).toContain('[stderr] before-ready: loading weights')
+    expect(payloads('core:log')).toContainEqual({
+      level: 'debug',
+      msg: '[llamacpp-upstream/backend-output][stdout] after-ready: still running',
+    })
+  })
+
+  it('keeps loading, serving and relaying when the backendOutput sink throws, and warns about it once', async () => {
+    await data.writeModel('throwing-sink')
+    const logPath = join(data.layout.core.logsDir, 'throwing-sink.log')
+    const seen: string[] = []
+    const logged: Array<{ level: string; message: string }> = []
+    const runtime = await makeRuntime({
+      backendOutput: ({ line }) => {
+        seen.push(line)
+        throw new Error('sink boom')
+      },
+      log: (level, message) => logged.push({ level, message }),
+      spawn: scriptSpawn(PRINTS_BEFORE_AND_AFTER_READY),
+    })
+
+    await runtime.load('throwing-sink', { logPath })
+    await waitFor(() => seen.length === 3)
+
+    expect(seen).toEqual([
+      'before-ready: loading weights',
+      'main: server is listening on http://127.0.0.1:1',
+      'after-ready: still running',
+    ])
+    expect(runtime.list().map((session) => session.model_id)).toEqual(['throwing-sink'])
+    await waitFor(() => readFileSync(logPath, 'utf8').includes('[stdout] after-ready: still running'))
+    // Three throws, one warning, and never the engine line itself.
+    expect(logged.filter((entry) => entry.level === 'warn')).toEqual([
+      {
+        level: 'warn',
+        message: 'backendOutput sink threw: sink boom; further sink errors for this session are ignored',
+      },
+    ])
+    expect(logged.some((entry) => /before-ready|after-ready|listening/.test(entry.message))).toBe(false)
+  })
+
   it('fails before spawning when the requested log cannot be opened', async () => {
     await data.writeModel('bad-log')
     const blocker = join(data.root, 'not-a-directory')
@@ -245,6 +351,25 @@ describe('failure paths', () => {
     await expect(runtime.load('oom')).rejects.toMatchObject({ code: 'OUT_OF_MEMORY' })
     expect(runtime.list()).toEqual([])
     expect(journal.list()).toEqual([])
+  })
+
+  it('delivers every line printed before an early exit to backendOutput, tagged with the runtime provider', async () => {
+    await data.writeModel('oom-output')
+    const received: Array<{ provider: string; model: string; stream: string; line: string }> = []
+    const runtime = await makeRuntime({
+      provider: 'llamacpp',
+      backendOutput: (line) => received.push(line),
+      spawn: fakeLlamaSpawn({ mode: 'oom' }),
+    })
+    await expect(runtime.load('oom-output')).rejects.toMatchObject({ code: 'OUT_OF_MEMORY' })
+
+    const tagged = { provider: 'llamacpp', model: 'oom-output', stream: 'stderr' }
+    expect(received).toEqual([
+      { ...tagged, line: expect.stringMatching(/^build: /) },
+      { ...tagged, line: expect.stringMatching(/^llama_model_loader: loaded meta data/) },
+      { ...tagged, line: expect.stringContaining('failed to allocate 4096.00 MiB') },
+      { ...tagged, line: expect.stringContaining('error loading model') },
+    ])
   })
 
   // `ps` only ever shows a process that is still alive, so the argv of a backend that failed to

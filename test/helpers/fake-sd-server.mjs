@@ -14,8 +14,14 @@
  *                       later one runs `ready` — so "the next job respawns it and completes" can be shown
  *   FAKE_SD_LOAD_MS     milliseconds before the port is bound (the model "loading")
  *   FAKE_SD_STEP_MS     milliseconds per sampling step (default 40)
+ *   FAKE_SD_SLOW_AFTER  n → every sampling step after the n-th takes FAKE_SD_SLOW_STEP_MS instead (a
+ *                       machine that started swapping)
+ *   FAKE_SD_SLOW_STEP_MS  milliseconds per step once slowed (default 10× FAKE_SD_STEP_MS)
  *   FAKE_SD_CANCEL      1 → advertise `cancel_generating` and honour a cancel while generating
  *   FAKE_SD_TILES       n → print a tiled-VAE pass of n tiles before sampling
+ *   FAKE_SD_DECODE_TILES  n → decode in a tiled-VAE pass of n tiles after sampling, whatever the body asks
+ *   FAKE_SD_TILE_MS     milliseconds per decode tile (default FAKE_SD_STEP_MS)
+ *   FAKE_SD_BODY_FILE   path; the body of the last `img_gen` or `vid_gen` submit is written there as JSON
  *   FAKE_SD_BLANK_SEED  n → a job whose seed is n returns all-black frames (the overflow sd.cpp can
  *                       finish with); other seeds paint as usual, so the same process recovers
  *   FAKE_SD_EXIT_CODE   exit code for `exit-early` (default 6)
@@ -58,6 +64,11 @@ function configuredMode() {
 }
 const port = Number(flag('--listen-port', '0'))
 const stepMs = Number(env.FAKE_SD_STEP_MS ?? '40')
+const slowAfter =
+  env.FAKE_SD_SLOW_AFTER === undefined ? Number.POSITIVE_INFINITY : Number(env.FAKE_SD_SLOW_AFTER)
+const slowStepMs = Number(env.FAKE_SD_SLOW_STEP_MS ?? String(stepMs * 10))
+const decodeTiles = Number(env.FAKE_SD_DECODE_TILES ?? '0')
+const tileMs = Number(env.FAKE_SD_TILE_MS ?? String(stepMs))
 const out = (text) => process.stdout.write(text)
 const err = (text) => process.stderr.write(text)
 const line = (text) => out(`${text}\n`)
@@ -203,13 +214,24 @@ async function run(job) {
     )
     for (let step = 1; step <= steps; step++) {
       if (job.status === 'cancelled') return
-      await sleep(stepMs)
+      await sleep(step > slowAfter ? slowStepMs : stepMs)
       const bar = `|${'='.repeat(step)}>${' '.repeat(Math.max(steps - step, 0))}|`
       out(`\r${bar} ${step}/${steps} - ${(stepMs / 1000).toFixed(2)}s/it\x1b[K`)
     }
     out('\n')
   }
   if (job.status === 'cancelled') return
+  if (decodeTiles > 0) {
+    // The decode's own tile pass, as sd.cpp prints it: the announcement, then one redraw per tile.
+    line(`[VERBOSE] tiling.cpp:203  - processing ${decodeTiles} tiles`)
+    for (let t = 1; t <= decodeTiles; t++) {
+      if (job.status === 'cancelled') return
+      await sleep(tileMs)
+      const bar = `|${'='.repeat(t)}${' '.repeat(decodeTiles - t)}|`
+      out(`\r${bar} ${t}/${decodeTiles} - ${(tileMs / 1000).toFixed(2)}s/it\x1b[K`)
+    }
+    out('\n')
+  }
   const width = Number(body.width ?? 64)
   const height = Number(body.height ?? 64)
   const blank = env.FAKE_SD_BLANK_SEED !== undefined && Number(body.seed) === Number(env.FAKE_SD_BLANK_SEED)
@@ -281,6 +303,7 @@ const server = createServer((req, res) => {
       }
       if (typeof body.prompt !== 'string' || body.prompt === '')
         return json(res, 400, { error: 'invalid generation parameters' })
+      if (env.FAKE_SD_BODY_FILE) writeFileSync(env.FAKE_SD_BODY_FILE, JSON.stringify(body))
       const id = `job_${nextJob++}`
       const job = { id, kind: 'img_gen', status: 'queued', body, result: null, error: null }
       jobs.set(id, job)
@@ -300,6 +323,7 @@ const server = createServer((req, res) => {
         return json(res, 400, { error: 'invalid generation parameters' })
       if ((body.output_format ?? 'webm') === 'webm' && vidFormats === 'no-webm')
         return json(res, 400, { error: 'webm output is not supported by this build' })
+      if (env.FAKE_SD_BODY_FILE) writeFileSync(env.FAKE_SD_BODY_FILE, JSON.stringify(body))
       const id = `job_${nextJob++}`
       const job = { id, kind: 'vid_gen', status: 'queued', body, result: null, error: null }
       jobs.set(id, job)

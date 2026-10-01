@@ -379,7 +379,7 @@
   },
   "src/diffusion/jobs.ts": {
     "statements": 98,
-    "branches": 87,
+    "branches": 89,
     "functions": 100,
     "lines": 98
   },
@@ -450,6 +450,30 @@
     "lines": 100
   },
   "src/diffusion/validate.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/video-estimate.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/video-eta.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/video-history.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/video-tiling.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
@@ -592,6 +616,18 @@
     "branches": 93,
     "functions": 100,
     "lines": 100
+  },
+  "src/host/app-daemon.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/host/log-file.ts": {
+    "statements": 89,
+    "branches": 91,
+    "functions": 81,
+    "lines": 89
   },
   "src/host/recipes/executor-io.ts": {
     "statements": 100,
@@ -1073,6 +1109,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/llamacpp/fit-margin.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/llamacpp/load-plan.ts": {
     "statements": 93,
     "branches": 91,
@@ -1169,6 +1211,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/shared/backend-output.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/shared/env.ts": {
     "statements": 97,
     "branches": 94,
@@ -1210,6 +1258,12 @@
     "branches": 90,
     "functions": 100,
     "lines": 95
+  },
+  "src/runtime/shared/redact-args.ts": {
+    "statements": 100,
+    "branches": 87,
+    "functions": 100,
+    "lines": 100
   },
   "src/runtime/shared/sidecar.ts": {
     "statements": 99,

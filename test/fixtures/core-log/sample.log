@@ -1,0 +1,7 @@
+[2026-09-28][12:00:00][core][INFO] atomic-chat-app-core 0.7.0 starting (pid 4242, darwin/arm64)
+[2026-09-28][12:00:05][core][WARN] backend catalog is stale
+[2026-09-28][12:00:10][core][ERROR] model load failed: qwen3-8b
+  cause: out of memory allocating KV cache
+  hint: reduce --ctx-size or use a smaller quant
+[2026-09-28][12:00:15][engine:llamacpp/qwen3-8b][INFO] [stderr] llama_model_loader: loaded meta data with 24 key-value pairs and 292 tensors from qwen3-8b.gguf
+[2026-09-28][12:00:20][engine:llamacpp/qwen3-8b][INFO] [stdout] main: server is listening on http://127.0.0.1:8080 - starting the main loop

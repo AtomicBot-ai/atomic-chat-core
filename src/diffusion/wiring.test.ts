@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { ChildProcessRecord } from '../lock/index.js'
 import { DiffusionService } from './service.js'
-import { diffusionJournal, wireDiffusion } from './wiring.js'
+import { diffusionJournal, hardwareSystemInfo, wireDiffusion } from './wiring.js'
 
 let dataFolder: string
 beforeEach(async () => {
@@ -52,6 +52,22 @@ describe('diffusionJournal', () => {
     expect(journal.records[1]?.process_start_id).toBeNull()
     await adapter.remove(process.pid)
     expect(journal.removed).toEqual([process.pid])
+  })
+})
+
+describe('hardwareSystemInfo', () => {
+  it('reads the facts out of the hardware service’s answer, the override applied', async () => {
+    const info = {
+      cpu: { name: 'Apple M4', core_count: 10, arch: 'aarch64', extensions: [], extensions_known: true },
+      os_type: 'macos' as const,
+      os_name: 'macOS',
+      total_memory: 16_384,
+      gpus: [],
+    }
+    const read = hardwareSystemInfo({
+      info: async () => ({ info, source: 'override', probed_at: 1, warnings: [] }),
+    })
+    expect(await read()).toBe(info)
   })
 })
 

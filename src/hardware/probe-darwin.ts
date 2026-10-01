@@ -54,6 +54,23 @@ export async function probeDarwin(deps: ProbeDeps): Promise<HardwareProbeResult>
   }
 }
 
+/** RAM the GPU shares with the system: half of it is what the llama.cpp fit margin leaves to the rest. */
+export interface UnifiedMemoryProbe {
+  totalMemoryBytes: number
+}
+
+/**
+ * Apple silicon only, where the GPU works out of system RAM; `undefined` on an Intel Mac and on
+ * every other platform. How much of that RAM Metal lets the GPU use is llama.cpp's to report
+ * (`--list-devices`): Apple's rule has changed across macOS releases, and `iogpu.wired_limit_mb`
+ * overrides it.
+ */
+export function probeUnifiedMemory(deps: ProbeDeps): UnifiedMemoryProbe | undefined {
+  const common = commonFacts(deps)
+  if (deps.platform !== 'darwin' || common.arch !== 'arm64' || common.totalMemoryMiB <= 0) return undefined
+  return { totalMemoryBytes: common.totalMemoryMiB * 2 ** 20 }
+}
+
 /** `ProductName:\t\tmacOS\nProductVersion:\t\t15.5\n…` → `macOS 15.5`. */
 export function parseSwVers(text: string): string {
   const pick = (key: string) => new RegExp(`^${key}:\\s*(.+)$`, 'm').exec(text)?.[1]?.trim()

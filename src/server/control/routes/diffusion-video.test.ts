@@ -3,6 +3,7 @@ import { startControlHarness as start } from '../../../../test/helpers/control-h
 import type { ControlHarness } from '../../../../test/helpers/control-harness.js'
 import {
   FAKE_VIDEO_CAPABILITIES,
+  FAKE_VIDEO_ESTIMATE,
   FAKE_VIDEO_ITEM,
   FAKE_VIDEO_JOB,
 } from '../../../../test/helpers/fake-diffusion-control.js'
@@ -55,6 +56,23 @@ describe('video capabilities and jobs', () => {
       'diffusion generateVideo a cat walking 768x512x25',
       `diffusion cancelVideoJob ${FAKE_VIDEO_JOB.id}`,
     ])
+  })
+})
+
+describe('the video estimate', () => {
+  it('answers the estimate for a job body, and refuses a body the job route would refuse', async () => {
+    const request = { prompt: 'a cat walking', width: 768, height: 512, frames: 121, steps: 8, cfgScale: 1 }
+    const answered = await h.get('/atomic/v1/diffusion/video/estimate', json(request))
+    expect(answered.status).toBe(200)
+    expect(await answered.json()).toEqual({ estimate: FAKE_VIDEO_ESTIMATE })
+    const bad = await h.get('/atomic/v1/diffusion/video/estimate', json({ ...request, frames: 24.5 }))
+    expect(bad.status).toBe(400)
+    expect(((await bad.json()) as ErrorBody).error.details).toBe(
+      'frames: expected a whole number, zero or more'
+    )
+    // Only a POST: the router names the method it takes.
+    expect((await h.get('/atomic/v1/diffusion/video/estimate')).status).toBe(405)
+    expect(diffusionCalls()).toEqual(['diffusion estimateVideo 768x512x121'])
   })
 })
 

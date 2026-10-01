@@ -94,6 +94,12 @@ export interface LoadDiffusionModelRequest {
   defaults: DiffusionFamilyDefaults
   ranges: DiffusionFamilyRanges
   offload: DiffusionOffloadPolicy
+  /**
+   * The policy to move to when the model runs out of memory under `offload`: the load, or the job,
+   * that ran out is retried once with it, and the session keeps it until the next load. Ignored when
+   * it equals `offload`.
+   */
+  offloadFallback?: DiffusionOffloadPolicy
   engine?: DiffusionEngineId
   /** `--threads`, for CPU backends. */
   threads?: number
@@ -400,15 +406,65 @@ export interface VideoGenerateRequest {
   endImage?: ImageSource
 }
 
+/** Which memory a video generation competes for: Apple's unified memory, a discrete GPU's, or system RAM. */
+export type VideoMemoryPool = 'unified' | 'vram' | 'system'
+
+/** `fits`: at most 80 % of the budget; `tight`: at most 100 %; `exceeds`: past it, into swap. */
+export type VideoMemoryVerdict = 'fits' | 'tight' | 'exceeds'
+
+/** `heuristic`: the core's model of the family and the machine; `history`: calibrated by this machine's clips. */
+export type VideoEstimateBasis = 'heuristic' | 'history'
+
+/**
+ * What a video request will cost on this machine with the loaded model, before it runs. Answered by
+ * `POST /atomic/v1/diffusion/video/estimate` and carried by `VideoJob.estimate`.
+ */
+export interface VideoEstimate {
+  memory: {
+    requiredBytes: number
+    budgetBytes: number
+    /** The pool that decided the verdict. */
+    pool: VideoMemoryPool
+    verdict: VideoMemoryVerdict
+  }
+  /** Whole seconds, `0 < low <= high`; `null` when the verdict is `exceeds`: time in swap is unpredictable. */
+  seconds: { low: number; high: number } | null
+  basis: VideoEstimateBasis
+}
+
+/** How far a tiled VAE decode got: tiles finished out of the pass the engine announced. */
+export interface VideoDecodeTiles {
+  done: number
+  total: number
+}
+
 /** One clip per job, so no batch fields. */
 export interface VideoJobProgress {
   phase: VideoJobPhase
   step: number
   totalSteps: number
-  /** 0..1 estimate for the whole job. */
+  /** 0..1 estimate for the whole job; never decreases and stays below 1 until the job is over. */
   fraction: number
+  /**
+   * Seconds left for the whole job: encoding, the remaining steps and the VAE decode. Before the
+   * first measured step it comes from `VideoJob.estimate`; once a tiled decode finished a tile, from
+   * the measured time per tile. A forecast that is spent is doubled rather than dropped. `null` when
+   * unknown, once every tile of a tiled decode is done, and while saving.
+   */
   etaSeconds: number | null
+  /**
+   * The decode's tiles while a tiled decode runs; absent in every other phase, for a decode in one
+   * graph, and from older cores. A retried decode starts a new pass from `done: 0`.
+   */
+  decodeTiles?: VideoDecodeTiles
+  /** Since the runner started the job. */
   elapsedMs: number
+  /**
+   * The steps, or the tiles of a tiled decode, slowed down sharply (a sign of swapping or a stalled
+   * engine); once set it stays set for the job. Always sent by this core; absent from older cores,
+   * which a client reads as `false`.
+   */
+  slowdown?: boolean
 }
 
 export interface VideoJob {
@@ -424,6 +480,8 @@ export interface VideoJob {
   /** Zero or one item. */
   outputs: GalleryVideoItem[]
   error?: DiffusionErrorBody
+  /** The estimate for this request, taken when the job started; absent when it could not be made. */
+  estimate?: VideoEstimate
 }
 
 /** Written as `<jobId>.json` beside the video (WebM has no text chunk). Enough to reproduce the clip. */

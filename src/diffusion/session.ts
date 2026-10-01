@@ -4,11 +4,13 @@
  * `diffusion:state`. Port of `session.rs` in `tauri-plugin-atomic-diffusion` (app commit `ec1fd3ea7`).
  */
 
+import { stat } from 'node:fs/promises'
 import type {
   CoreEvents,
   DiffusionBackendInstallRecord,
   DiffusionEngineInstall,
   DiffusionErrorBody,
+  DiffusionModelFiles,
   DiffusionStatus,
   ImageCapabilities,
   LoadedDiffusionModel,
@@ -19,8 +21,8 @@ import { samePath } from './containment.js'
 import { diffusionError, errorBody, modelNotLoadedError, toDiffusionError } from './errors.js'
 import { listInstalledBackends } from './install.js'
 import type { DiffusionState, ServerHandle } from './state.js'
-import { MAX_BATCH } from './types.js'
-import type { ServerSpec } from './types.js'
+import { MAX_BATCH, MODEL_FILE_KEYS } from './types.js'
+import type { ModelFileBytes, ServerSpec } from './types.js'
 import { videoWorkflowsForFamily, workflowsForSpec } from './workflow.js'
 import type { GpuCards } from '../runtime/shared/index.js'
 
@@ -55,6 +57,8 @@ export interface SessionDeps {
    * alike — to free the GPU of the other engines. Rejects (`GPU_BUSY`, a cancel) fail the load.
    */
   claimGpu?: (spec: ServerSpec, signal?: AbortSignal, granted?: () => void) => Promise<void>
+  /** A file's size in bytes, `undefined` when it cannot be read. Default: `statFileSize`. */
+  fileSize?: (path: string) => Promise<number | undefined>
 }
 
 /**
@@ -63,6 +67,30 @@ export interface SessionDeps {
  */
 export function diffusionGpuCards(spec: Pick<ServerSpec, 'backend' | 'cpuFallback'>): GpuCards {
   return spec.backend === 'cpu' || spec.cpuFallback ? [] : 'all'
+}
+
+/** A regular file's size, or `undefined` when it is missing or not a file. */
+export const statFileSize = (path: string): Promise<number | undefined> =>
+  stat(path).then(
+    (s) => (s.isFile() ? s.size : undefined),
+    () => undefined
+  )
+
+/** The size of every file `files` names; one that cannot be read is left out. */
+export async function modelFileBytes(
+  files: DiffusionModelFiles,
+  fileSize: (path: string) => Promise<number | undefined> = statFileSize
+): Promise<ModelFileBytes> {
+  const bytes: ModelFileBytes = {}
+  await Promise.all(
+    MODEL_FILE_KEYS.map(async (key) => {
+      const path = files[key]
+      if (path === undefined) return
+      const size = await fileSize(path)
+      if (size !== undefined) bytes[key] = size
+    })
+  )
+  return bytes
 }
 
 /** The install the status reports: the resident spec's tree when there is one, otherwise the newest. */
@@ -182,6 +210,41 @@ export function videoCapabilities(state: DiffusionState): VideoCapabilities {
 }
 
 /**
+ * The spec to run after `spec` ran out of memory: its offload fallback, dropped once taken so a second
+ * shortage is reported rather than retried. `undefined` when there is none.
+ */
+export function withOffloadFallback(spec: ServerSpec): ServerSpec | undefined {
+  const { offloadFallback, ...rest } = spec
+  if (offloadFallback === undefined || offloadFallback === spec.offload) return undefined
+  return { ...rest, offload: offloadFallback }
+}
+
+const settleGpu = async (deps: SessionDeps, spec: ServerSpec): Promise<void> => {
+  if (spec.backend === 'cuda' || spec.backend === 'rocm') await deps.sleep(GPU_SETTLE_MS)
+}
+
+/** Spawn `spec`; when it runs out of memory loading and has an offload fallback, spawn that instead. */
+async function spawnFallingBack(
+  deps: SessionDeps,
+  spec: ServerSpec,
+  signal?: AbortSignal
+): Promise<{ server: ServerHandle; spec: ServerSpec }> {
+  const scratchDir = deps.state.paths.scratchDir
+  try {
+    return { server: await deps.spawn(spec, scratchDir, signal), spec }
+  } catch (raw) {
+    const fallback = withOffloadFallback(spec)
+    if (!fallback || signal?.aborted || toDiffusionError(raw).code !== 'OUT_OF_MEMORY') throw raw
+    deps.log(
+      'warn',
+      `sd-server ran out of memory loading under ${spec.offload} offload; retrying under ${fallback.offload}`
+    )
+    await settleGpu(deps, fallback)
+    return { server: await deps.spawn(fallback, scratchDir, signal), spec: fallback }
+  }
+}
+
+/**
  * Spawn the server for `spec` and make it the resident session. The caller holds the load lock,
  * and any previous session is already gone — or still exiting: a crash or cancel teardown that began
  * outside the lock may not have seen its exit yet, so its `stopping` is awaited before the claim and
@@ -197,7 +260,13 @@ export async function loadFromSpec(
   state.setModelState('loading')
   await emitState(deps, reason)
 
-  let server: ServerHandle
+  // A load reads the sizes the video estimate weighs, once; a respawn of the kept spec reuses them.
+  const fileBytes =
+    reason === 'load' || state.modelFileBytes === undefined
+      ? await modelFileBytes(spec.files, deps.fileSize)
+      : state.modelFileBytes
+
+  let started: { server: ServerHandle; spec: ServerSpec }
   try {
     // A retained spec can name an engine build that an update has since made too old for it.
     checkEngineCompatibility(spec.family, spec.tag)
@@ -211,8 +280,8 @@ export async function loadFromSpec(
     if (deps.claimGpu) await deps.claimGpu(spec, signal, hold)
     hold()
     // After the claim, so the settle follows the exit of whatever the claim evicted as well as ours.
-    if (spec.backend === 'cuda' || spec.backend === 'rocm') await deps.sleep(GPU_SETTLE_MS)
-    server = await deps.spawn(spec, state.paths.scratchDir, signal)
+    await settleGpu(deps, spec)
+    started = await spawnFallingBack(deps, spec, signal)
   } catch (raw) {
     const error = toDiffusionError(raw)
     const body = errorBody(error)
@@ -224,21 +293,24 @@ export async function loadFromSpec(
     state.starting = undefined
   }
 
+  // What runs, which is `spec` unless loading it ran out of memory and its fallback took over.
+  const { server, spec: running } = started
   const info: LoadedDiffusionModel = {
-    modelId: spec.modelId,
-    family: spec.family,
-    modality: spec.modality,
-    displayName: spec.displayName,
-    engine: spec.engine,
-    backend: spec.backend,
-    offload: spec.offload,
-    cpuFallback: spec.cpuFallback,
+    modelId: running.modelId,
+    family: running.family,
+    modality: running.modality,
+    displayName: running.displayName,
+    engine: running.engine,
+    backend: running.backend,
+    offload: running.offload,
+    cpuFallback: running.cpuFallback,
     port: server.port,
     pid: server.pid,
     loadedAtMs: deps.now(),
   }
-  state.session = { server, info, spec, baseUrl: `http://127.0.0.1:${server.port}` }
-  state.spec = spec
+  state.session = { server, info, spec: running, baseUrl: `http://127.0.0.1:${server.port}` }
+  state.spec = running
+  state.modelFileBytes = fileBytes
   state.setModelState('loaded')
   state.touchIdle()
   await emitState(deps, 'loaded')
@@ -281,6 +353,7 @@ export async function unload(deps: SessionDeps, reason: string): Promise<void> {
   }
   await takeDownSession(deps)
   state.spec = undefined
+  state.modelFileBytes = undefined
   state.clearIdle()
   state.setModelState('unloaded')
   await emitState(deps, reason)

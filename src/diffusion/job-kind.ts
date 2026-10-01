@@ -9,12 +9,15 @@ import type {
   DiffusionModality,
   ImageJobProgress,
   ImageJobState,
+  VideoEstimate,
 } from '../contracts/index.js'
 import type { JobDeps } from './jobs.js'
 import type { DiffusionEmitter } from './session.js'
-import type { JobKindId } from './state.js'
+import type { JobKindId, JobRecord } from './state.js'
+import type { DecodeTiles } from './tracker.js'
 import type { ResolvedInputs, ServerCapabilities, ServerSpec } from './types.js'
 import type { ValidateDeps } from './validate.js'
+import type { VideoDecodeTiling, VideoForecast } from './video-estimate.js'
 
 /** The fields the runner reads and writes on any job record, whatever its kind. */
 export interface JobCommon<Item, Progress> {
@@ -41,6 +44,29 @@ export interface SaveContext<Req> {
 
 export type Emit = DiffusionEmitter
 
+/**
+ * What a kind works out before its job starts: the video estimate, the forecast behind it, and how
+ * the clip's VAE decode is tiled.
+ */
+export interface JobPlan {
+  /** On the record from the first event. */
+  estimate?: VideoEstimate
+  /** Kept on the record for the live progress; never sent. */
+  forecast?: VideoForecast
+  /** Kept on the record for the request body; absent: the pixel-frame threshold decides. */
+  decodeTiling?: VideoDecodeTiling
+}
+
+/**
+ * Turns the tracker's snapshot, and the decode's tile pass when there is one, into the wire progress
+ * at `now`; one per job, so it may keep state.
+ */
+export type ProgressModel<Progress> = (
+  snapshot: ImageJobProgress,
+  now: number,
+  decodeTiles?: DecodeTiles
+) => Progress
+
 export interface JobKind<Req, Job extends JobCommon<Item, Progress>, Item, Progress, Decoded> {
   id: JobKindId
   /** The loaded model must be of this modality, or the job is refused before anything runs. */
@@ -58,14 +84,25 @@ export interface JobKind<Req, Job extends JobCommon<Item, Progress>, Item, Progr
     failed: string
   }
   validate(request: Req, spec: ServerSpec, deps: ValidateDeps): Promise<void>
-  /** The record as it is inserted: inline bytes blanked, nothing started. */
-  newJob(id: string, spec: ServerSpec, request: Req, now: number): Job
+  /** What to know before the job starts, once the request is valid. Never rejects: a failure is no plan. */
+  prepare?(deps: JobDeps, request: Req, spec: ServerSpec): Promise<JobPlan | undefined>
+  /** The record as it is inserted: inline bytes blanked, nothing started, the plan's estimate on it. */
+  newJob(id: string, spec: ServerSpec, request: Req, now: number, plan?: JobPlan): Job
   resolveInputs(request: Req, deps: Pick<JobDeps, 'readSource'>): Promise<ResolvedInputs>
-  buildBody(request: Req, spec: ServerSpec, seed: number, inputs: ResolvedInputs): Record<string, unknown>
+  /** The engine's request body; `plan` is what the job's record kept of its plan. */
+  buildBody(
+    request: Req,
+    spec: ServerSpec,
+    seed: number,
+    inputs: ResolvedInputs,
+    plan?: Pick<JobPlan, 'decodeTiling'>
+  ): Record<string, unknown>
   /** Steps and images the progress tracker counts. */
   trackerShape(request: Req): { steps: number; batch: number }
-  /** The wire progress out of the tracker's snapshot. */
-  progress(snapshot: ImageJobProgress): Progress
+  /** The job's progress model, made when the runner starts it (`startedAt`), across every attempt. */
+  progressModel(record: JobRecord, startedAt: number): ProgressModel<Progress>
+  /** While generating, progress goes out at least this often (ms) besides every change; absent: on change only. */
+  heartbeatMs?: number
   emitJob(emit: Emit, job: Job): void
   emitProgress(emit: Emit, jobId: string, progress: Progress): void
   /** Whether the engine promised to interrupt a running generation of this kind. */

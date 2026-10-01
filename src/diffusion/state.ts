@@ -16,7 +16,8 @@ import type {
 import type { DiffusionPaths } from '../config/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import { DEFAULT_IDLE_UNLOAD_SECS } from './types.js'
-import type { ServerCapabilities, ServerSpec } from './types.js'
+import type { ModelFileBytes, ServerCapabilities, ServerSpec } from './types.js'
+import type { VideoDecodeTiling, VideoForecast } from './video-estimate.js'
 
 /** A running `sd-server`, as the session and the job runner see it; the real one wraps a child process. */
 export interface ServerHandle {
@@ -55,6 +56,10 @@ export interface JobRecord {
   cancel: CancelFlag
   /** The server-side job id once submitted. */
   serverJobId?: string
+  /** Video: the parts of the estimate the live ETA works from; never on the wire. */
+  forecast?: VideoForecast
+  /** Video: how the plan tiles the clip's VAE decode; never on the wire. */
+  decodeTiling?: VideoDecodeTiling
 }
 
 /** Jobs kept in memory for `getJob`; the gallery is the durable record. */
@@ -76,6 +81,8 @@ export class DiffusionState {
    * again).
    */
   stopping: { spec: ServerSpec; done: Promise<void> } | undefined
+  /** The sizes of `spec`'s files, read when it loaded; what the video estimate weighs. Cleared with it. */
+  modelFileBytes: ModelFileBytes | undefined
   modelState: DiffusionModelState = 'unloaded'
   modelError: DiffusionErrorBody | undefined
   activeJobId: string | undefined

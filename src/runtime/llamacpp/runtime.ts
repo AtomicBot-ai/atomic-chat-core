@@ -16,7 +16,7 @@
  */
 
 import type { WriteStream } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, win32 } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   CoreEvents,
@@ -41,6 +41,7 @@ import {
   nodeCudaProbeEnv,
   textMentionsCudaRuntime,
   randomFreePort,
+  backendOutputReporter,
   spawnAndAwaitReady,
   spawnManaged,
   LLAMA_READY_MARKERS,
@@ -48,10 +49,12 @@ import {
   openLogStream,
   isLoadCancelled,
   raceLoadCancel,
+  redactArgs,
   throwIfLoadCancelled,
   hostPid,
 } from '../shared/index.js'
 import type {
+  BackendOutputSink,
   ManagedProcess,
   SpawnSpec,
   CtxIncreaseResult,
@@ -116,12 +119,20 @@ export interface LlamacppRuntimeOptions {
   platform?: NodeJS.Platform
   baseEnv?: NodeJS.ProcessEnv
   fetch?: typeof fetch
+  /**
+   * Every stdout/stderr line the backend prints, for the life of the session. A throwing sink is
+   * swallowed, with one `warn` through `log` per session.
+   */
+  backendOutput?: BackendOutputSink
+  /** The core's own logger: the one warning about a throwing `backendOutput` sink goes here. */
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /** Provider settings for a load; re-read per load so a settings change lands on the next one. */
   readSettings: () => Promise<RuntimeSettings>
   /** Resolve `<version>/<backend>` to an installed executable (the backend service in a full core). */
   ensureBackendReady?: LoadPlanDeps['ensureBackendReady'] | undefined
   resolveLatestBackend?: LoadPlanDeps['resolveLatestBackend'] | undefined
   cpuInfo?: LoadPlanDeps['cpuInfo'] | undefined
+  unifiedMemory?: LoadPlanDeps['unifiedMemory'] | undefined
   ensureGemmaMtpDraft?: LoadPlanDeps['ensureGemmaMtpDraft'] | undefined
   ensureDflashDraft?: LoadPlanDeps['ensureDflashDraft'] | undefined
   /** Model that must never be auto-unloaded. */
@@ -390,6 +401,8 @@ export class LlamacppRuntime implements LocalRuntime {
         )
       },
       cpuInfo: this.options.cpuInfo ?? (async () => undefined),
+      ...(this.options.unifiedMemory ? { unifiedMemory: this.options.unifiedMemory } : {}),
+      listDevices: (exePath) => this.getDevices(exePath),
       exists: async (path) => {
         const { stat } = await import('node:fs/promises')
         return stat(path).then(
@@ -446,7 +459,12 @@ export class LlamacppRuntime implements LocalRuntime {
     const apiKey = plan.apiKey
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath) : undefined
+    const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
 
+    this.options.log?.(
+      'info',
+      `starting ${win32.basename(plan.exePath)} for ${plan.provider}/${plan.modelId}: ${redactArgs(args.argv).join(' ')}`
+    )
     let proc: ManagedProcess
     try {
       ;({ process: proc } = await spawn(
@@ -466,6 +484,7 @@ export class LlamacppRuntime implements LocalRuntime {
                 level: 'debug',
                 msg: `[${plan.provider}/${plan.modelId}][${stream}] ${line}`,
               })
+            reportOutput({ provider: plan.provider, model: plan.modelId, stream, line })
           },
           classifyExit: (exit, stderr, stdout) =>
             classifyProcessOutput(exit, stderr, stdout, this.platform, plan.provider),

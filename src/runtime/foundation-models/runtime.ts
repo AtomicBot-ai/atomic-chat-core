@@ -16,7 +16,7 @@
 
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
 import type { SessionInfo, UnloadResult } from '../../contracts/index.js'
@@ -28,14 +28,17 @@ import type {
   RecreateResult,
 } from '../shared/index.js'
 import {
+  backendOutputReporter,
   closeLogStream,
   generateApiKey,
   openLogStream,
   randomFreePort,
+  redactArgs,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
 } from '../shared/index.js'
+import type { BackendOutputSink } from '../shared/index.js'
 import {
   FOUNDATION_MODELS_ERROR_PREFIX,
   FOUNDATION_MODELS_READY_MARKERS,
@@ -69,6 +72,13 @@ export interface FoundationModelsRuntimeOptions {
   emit?: EmitFn
   baseEnv?: NodeJS.ProcessEnv
   now?: () => number
+  /**
+   * Every stdout/stderr line the server prints, for the life of the session. A throwing sink is
+   * swallowed, with one `warn` through `log` per session.
+   */
+  backendOutput?: BackendOutputSink
+  /** The core's own logger: the one warning about a throwing `backendOutput` sink goes here. */
+  log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /** Test seams. */
   spawn?: typeof spawnAndAwaitReady
   runCheck?: (exe: string) => Promise<string>
@@ -161,6 +171,11 @@ export class FoundationModelsRuntime implements LocalRuntime {
     const args = ['--port', String(port), '--api-key', apiKey]
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath, 'Foundation Models') : undefined
+    const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
+    this.options.log?.(
+      'info',
+      `starting ${win32.basename(exe)} for foundation-models/${modelId}: ${redactArgs(args).join(' ')}`
+    )
     const env = Object.fromEntries(
       Object.entries(this.options.baseEnv ?? process.env).filter(
         (entry): entry is [string, string] => entry[1] !== undefined
@@ -187,6 +202,7 @@ export class FoundationModelsRuntime implements LocalRuntime {
             logStream?.write(`[${stream}] ${line}\n`)
             if (opts.verbose)
               this.emit('core:log', { level: 'debug', msg: `[foundation-models][${stream}] ${line}` })
+            reportOutput({ provider: 'foundation-models', model: modelId, stream, line })
           },
         }
       )

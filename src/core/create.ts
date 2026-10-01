@@ -24,7 +24,7 @@ import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from '../cloud/index.js'
 import type { ChatGptBackend } from '../cloud/index.js'
-import { HardwareService, nodeProbeDeps, probeSystemInfo } from '../hardware/index.js'
+import { HardwareService, nodeProbeDeps, probeSystemInfo, probeUnifiedMemory } from '../hardware/index.js'
 import {
   BackendAdvisor,
   BackendService,
@@ -78,6 +78,11 @@ export async function createAtomicCore(
 ): Promise<AtomicCore> {
   const log = options.logger ?? (() => {})
   const warn = (message: string) => log('warn', message)
+  // The core logger as the local runtimes and diffusion take it: they may also say `debug`, which is
+  // dropped here, because the host's `logger` only understands three levels.
+  const runtimeLog = (level: 'debug' | 'info' | 'warn' | 'error', message: string): void => {
+    if (level !== 'debug') log(level, message)
+  }
   const scope = options.ownerScope ?? 'cli'
   const root =
     options.dataFolder ??
@@ -225,7 +230,13 @@ export async function createAtomicCore(
         // never auto-unloaded, never evicted by GPU residency, never evicting.
         transcriptionModelId: TRANSCRIPTION_MODEL_ID,
         claimGpu: (claim, signal) => gpuResidency.hook(provider)(claim, signal),
+        unifiedMemory: async () =>
+          probeUnifiedMemory(
+            nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+          ),
+        log: runtimeLog,
         ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
       })
     const runtimes = new Map<LocalProviderId, LocalRuntime>([
       [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
@@ -258,6 +269,8 @@ export async function createAtomicCore(
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
           claimGpu: gpuResidency.hook('mlx'),
+          log: runtimeLog,
+          ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
         })
       )
       runtimes.set(
@@ -267,6 +280,8 @@ export async function createAtomicCore(
           resourcesDir: options.resourcesDir,
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
+          log: runtimeLog,
+          ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
         })
       )
     }
@@ -355,12 +370,14 @@ export async function createAtomicCore(
       layout,
       journal,
       instanceId: lock.instanceId,
+      hardware,
       emit: (name, payload) => emitter.emit(name, payload),
-      log: (level, msg) => (level === 'debug' ? undefined : log(level, msg)),
+      log: runtimeLog,
       platform,
       env,
       claimGpu: gpuResidency.hook(DIFFUSION_GPU_PROVIDER),
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
+      ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
     // The managed container environment and the one Docker executor of this core (task 2.6). The

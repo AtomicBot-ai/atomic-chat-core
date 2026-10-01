@@ -191,6 +191,9 @@ export function parseLoadModelRequest(body: unknown): LoadDiffusionModelRequest 
     ranges: parseRanges(source['ranges']),
     offload: oneOf(source['offload'], OFFLOADS, 'offload'),
   }
+  copyOptional(request, 'offloadFallback', source, 'offloadFallback', (value, field) =>
+    oneOf(value, OFFLOADS, field)
+  )
   copyOptional(request, 'engine', source, 'engine', (value, field) => oneOf(value, ENGINES, field))
   copyOptional(request, 'threads', source, 'threads', u32)
   copyOptional(request, 'startupTimeoutSecs', source, 'startupTimeoutSecs', u64)

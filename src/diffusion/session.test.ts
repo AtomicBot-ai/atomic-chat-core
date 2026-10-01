@@ -23,15 +23,19 @@ import {
   emitState,
   GPU_SETTLE_MS,
   loadFromSpec,
+  modelFileBytes,
   SHUTDOWN_GRACE_MS,
   shutdownSession,
+  statFileSize,
   stopKeepingSpec,
   takeDownSession,
   unload,
   videoCapabilities,
+  withOffloadFallback,
 } from './session.js'
 import type { SessionDeps } from './session.js'
 import { DiffusionState } from './state.js'
+import type { ServerSpec } from './types.js'
 
 let dataFolder: string
 beforeEach(async () => {
@@ -279,6 +283,59 @@ describe('loading', () => {
     })
   })
 
+  it('loads the offload fallback, once, when the spec runs out of memory loading', async () => {
+    const h = harness()
+    const spawned: ServerSpec[] = []
+    const spawn = h.deps.spawn
+    h.deps.spawn = (next, scratchDir, signal) => {
+      spawned.push(next)
+      return spawn(next, scratchDir, signal)
+    }
+    const outOfMemory = () =>
+      diffusionError('OUT_OF_MEMORY', 'The image model ran out of memory while loading.', 'tail')
+    const spec = sampleSpec({ backend: 'cuda', offload: 'none', offloadFallback: 'group' })
+
+    h.failNextSpawn(outOfMemory())
+    const info = await loadFromSpec(h.deps, spec, 'load')
+    expect(spawned.map((s) => s.offload)).toEqual(['none', 'group'])
+    expect(info.offload).toBe('group')
+    expect(h.state.session?.info.offload).toBe('group')
+    expect(h.state.spec, 'the session keeps the fallback and has none left').toEqual(
+      withOffloadFallback(spec)
+    )
+    expect(h.state.spec?.offloadFallback).toBeUndefined()
+    expect(h.slept, 'CUDA waits for the driver after the dead server too').toEqual([
+      GPU_SETTLE_MS,
+      GPU_SETTLE_MS,
+    ])
+    expect(h.reasons()).toEqual(['load', 'loaded'])
+    expect(h.events.some((e) => e.name === 'diffusion:error')).toBe(false)
+
+    // Under the fallback there is nowhere left to go: a second shortage is the load's failure.
+    h.failNextSpawn(outOfMemory())
+    await expect(loadFromSpec(h.deps, h.state.spec as ServerSpec, 'respawn')).rejects.toMatchObject({
+      code: 'OUT_OF_MEMORY',
+    })
+    // Nor is any other failure retried under the fallback, or a load that was called off meanwhile.
+    h.failNextSpawn(new Error('spawn EPERM'))
+    await expect(loadFromSpec(h.deps, spec, 'load')).rejects.toMatchObject({ code: 'INTERNAL' })
+    const calledOff = new AbortController()
+    calledOff.abort()
+    h.failNextSpawn(outOfMemory())
+    await expect(loadFromSpec(h.deps, spec, 'load', calledOff.signal)).rejects.toMatchObject({
+      code: 'OUT_OF_MEMORY',
+    })
+    expect(spawned.map((s) => s.offload)).toEqual(['none', 'group', 'group', 'none', 'none'])
+  })
+
+  it('has no offload fallback without one, or with one equal to the offload', () => {
+    expect(withOffloadFallback(sampleSpec({ offload: 'none' }))).toBeUndefined()
+    expect(withOffloadFallback(sampleSpec({ offload: 'group', offloadFallback: 'group' }))).toBeUndefined()
+    expect(withOffloadFallback(sampleSpec({ offload: 'none', offloadFallback: 'model' }))).toEqual(
+      sampleSpec({ offload: 'model' })
+    )
+  })
+
   // Port of `incompatible_retained_spec_is_rejected_before_any_spawn_or_file_access`
   // (`session.rs`, app commit ec1fd3ea7): a spec kept across an engine update can name a build that
   // is now too old for it.
@@ -406,6 +463,52 @@ describe('GPU residency', () => {
     expect(h.state.modelState).toBe('failed')
     expect(h.state.starting).toBeUndefined()
     expect(h.reasons()).toEqual(['load', 'load-failed'])
+  })
+})
+
+describe('the model file sizes', () => {
+  it('are read once at load, kept across a respawn of the spec, and forgotten at unload', async () => {
+    const h = harness()
+    const sizes: Record<string, number> = { '/m/ltx.gguf': 14e9, '/m/vae.st': 1.4e9, '/m/gemma.gguf': 7.4e9 }
+    const asked: string[] = []
+    h.deps.fileSize = async (path) => {
+      asked.push(path)
+      return sizes[path]
+    }
+    const spec = sampleVideoSpec({
+      files: {
+        diffusionModel: '/m/ltx.gguf',
+        vae: '/m/vae.st',
+        llm: '/m/gemma.gguf',
+        audioVae: '/m/gone.st',
+        vaeFormat: 'flux2',
+      },
+    })
+    await loadFromSpec(h.deps, spec, 'load')
+    // A file that cannot be read is left out; the VAE format names no file.
+    expect(h.state.modelFileBytes).toEqual({ diffusionModel: 14e9, vae: 1.4e9, llm: 7.4e9 })
+    expect(asked.sort()).toEqual(['/m/gemma.gguf', '/m/gone.st', '/m/ltx.gguf', '/m/vae.st'])
+    await takeDownSession(h.deps)
+    await loadFromSpec(h.deps, spec, 'respawn')
+    await loadFromSpec(h.deps, { ...spec, cpuFallback: true }, 'cpu-fallback')
+    expect(asked, 'no second stat for the same spec').toHaveLength(4)
+    await unload(h.deps, 'unload')
+    expect(h.state.modelFileBytes).toBeUndefined()
+    // A failed load leaves the sizes as they were.
+    h.failNextSpawn(new Error('no'))
+    await expect(loadFromSpec(h.deps, spec, 'load')).rejects.toThrow()
+    expect(h.state.modelFileBytes).toBeUndefined()
+  })
+
+  it('come from the disk by default', async () => {
+    const path = join(dataFolder, 'model.gguf')
+    await writeFile(path, Buffer.alloc(1234))
+    expect(await statFileSize(path)).toBe(1234)
+    expect(await statFileSize(join(dataFolder, 'missing.gguf'))).toBeUndefined()
+    expect(await statFileSize(dataFolder), 'a folder is not a file').toBeUndefined()
+    expect(await modelFileBytes({ diffusionModel: path, vae: join(dataFolder, 'missing') })).toEqual({
+      diffusionModel: 1234,
+    })
   })
 })
 

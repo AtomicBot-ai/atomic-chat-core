@@ -19,4 +19,7 @@
   `linux-probe/meminfo/gb10-captured-head.txt` (the first five lines of `/proc/meminfo`) are verbatim captures from a
   DGX Spark-class GB10 host (a vast.ai container, driver 595.71.05 injected by the host). `*-documented.csv` (GH200,
   RTX 5090) are built from NVIDIA's published memory sizes and compute capabilities, not captured.
+- `core-log/` — `sample.log` pins `core.log`'s on-disk format as a core → app contract: unlike `app/`, the
+  core is the source of truth here, and the app copies this file into its own tests. Produced and replayed
+  by `test/contract/core-log.test.ts`; see `core-log/README.md`.
 - Everything else is hand-written test data owned by this repo.

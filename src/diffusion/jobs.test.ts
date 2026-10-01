@@ -790,6 +790,84 @@ describe('the server dying', () => {
     expect(error.message).toBe('sd-server exited during generation (signal SIGABRT).')
   })
 
+  /** A harness whose loaded spec keeps the model on the GPU and falls back to `group` offload. */
+  const onGpuFallingBack = (port: number): Harness => {
+    const h = harness(port)
+    const spec: ServerSpec = { ...sampleSpec(), offload: 'none', offloadFallback: 'group' }
+    h.state.spec = spec
+    if (h.state.session) h.state.session.spec = spec
+    return h
+  }
+
+  it('out of memory on the GPU is retried once under the offload fallback', async () => {
+    let submits = 0
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/img_gen') {
+        submits += 1
+        return json(202, { id: `job_${submits}`, status: 'queued' })
+      }
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_2')
+        return json(200, {
+          id: 'job_2',
+          status: 'completed',
+          result: { images: [{ index: 0, b64_json: pngB64 }] },
+        })
+      if (method === 'GET' && path.startsWith('/sdcpp/v1/jobs/job_'))
+        return json(200, { id: 'job', status: 'generating' })
+      return json(404, {})
+    })
+    const h = onGpuFallingBack(port)
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
+    await sleep(60)
+    h.server.say('CUDA error: out of memory')
+    h.server.exit({ code: 1, signal: null })
+    const result = await done
+    expect(result.ok).toBe(true)
+    expect(h.spawned.map((s) => s.offload)).toEqual(['group'])
+    expect(h.spawned[0]?.offloadFallback).toBeUndefined()
+    expect(h.state.spec?.offload).toBe('group')
+    expect(h.reasons()).toContain('offload-fallback')
+    expect(h.errors(), 'the retried shortage is not reported').toEqual([])
+    expect(h.log.some((line) => line.includes('restarting sd-server under group'))).toBe(true)
+    if (result.ok) expect(result.outcome.job.outputs[0]?.recipe.engine.offload).toBe('group')
+  })
+
+  it('a job the GPU could not fit is retried under the fallback, and failing there fails it', async () => {
+    let submits = 0
+    let failed = false
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/img_gen') {
+        submits += 1
+        return json(202, { id: `job_${submits}`, status: 'queued' })
+      }
+      if (method === 'GET' && path.startsWith('/sdcpp/v1/jobs/job_'))
+        return failed
+          ? json(200, {
+              id: path.slice(-5),
+              status: 'failed',
+              result: null,
+              error: { code: 'generation_failed', message: 'generate_image returned no results' },
+            })
+          : json(200, { id: path.slice(-5), status: 'generating' })
+      return json(404, {})
+    })
+    const h = onGpuFallingBack(port)
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
+    await sleep(60)
+    // The server outlives the shortage; what it printed is what makes the failure a shortage.
+    h.server.say(
+      'ggml_backend_cuda_buffer_type_alloc_buffer: allocating 13576.00 MiB on device 0: out of memory'
+    )
+    failed = true
+    const error = failure(await done)
+    expect(submits).toBe(2)
+    expect(h.spawned.map((s) => s.offload)).toEqual(['group'])
+    // The respawned server under `group` fails too, and nothing is left to fall back to.
+    expect(error.code).toBe('INTERNAL')
+    expect(h.state.spec?.offload).toBe('group')
+    expect(h.state.spec?.offloadFallback).toBeUndefined()
+  })
+
   it('before the submit is reported from its output, and a stopped server from its absence', async () => {
     // The submit never gets an answer: the connection drops after 60 ms, as it does when the server dies.
     const port = await stub((method, path) =>
@@ -1064,6 +1142,197 @@ describe('a video job', () => {
     expect(failure(await done).code).toBe('CANCELLED')
     expect(h.state.session, 'the server was not stopped').toBeDefined()
     expect(h.state.videoJob(id)?.state).toBe('cancelled')
+  })
+})
+
+/** A `vid_gen` stub that stays `generating` and lets `onPoll` script the run; completes when told to. */
+async function scriptedVideoStub(onPoll: (poll: number) => 'generating' | 'completed') {
+  const webm = await webmFixture()
+  let polls = 0
+  return stub((method, path) => {
+    if (method === 'POST' && path === '/sdcpp/v1/vid_gen') return json(202, { id: 'job_s', status: 'queued' })
+    if (method === 'GET' && path === '/sdcpp/v1/jobs/job_s') {
+      polls += 1
+      if (onPoll(polls) === 'generating') return json(200, { id: 'job_s', status: 'generating' })
+      return json(200, {
+        id: 'job_s',
+        status: 'completed',
+        result: { output_format: 'webm', fps: 24, frame_count: 25, b64_json: webm.toString('base64') },
+      })
+    }
+    return json(404, {})
+  })
+}
+
+const videoProgressEvents = (h: Harness) =>
+  h.events
+    .filter((e) => e.name === 'diffusion:video-progress')
+    .map((e) => (e.payload as CoreEvents['diffusion:video-progress']).progress)
+
+describe('a video job’s estimate', () => {
+  const estimate = {
+    memory: { requiredBytes: 9e9, budgetBytes: 14.6e9, pool: 'unified' as const, verdict: 'fits' as const },
+    seconds: { low: 100, high: 400 },
+    basis: 'heuristic' as const,
+  }
+  const forecast = {
+    encodeSeconds: 10,
+    stepSeconds: 20,
+    stepSecondsHigh: 40,
+    decodeSeconds: 30,
+    totalSeconds: 200,
+  }
+
+  it('is on the job from its first event, with the forecast kept off the wire', async () => {
+    const port = await scriptedVideoStub((poll) => (poll < 3 ? 'generating' : 'completed'))
+    const h = videoHarness(port)
+    const asked: string[] = []
+    h.deps.planVideo = async (request, spec) => {
+      asked.push(`${spec.modelId} ${request.width}x${request.height}x${request.frames}`)
+      return { estimate, forecast }
+    }
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    const first = h.events.find((e) => e.name === 'diffusion:video-job')
+      ?.payload as CoreEvents['diffusion:video-job']
+    expect(first.job.state).toBe('queued')
+    expect(first.job.estimate).toEqual(estimate)
+    expect(first.job).not.toHaveProperty('forecast')
+    expect(h.state.record(id)?.forecast).toEqual(forecast)
+    expect(asked).toEqual(['ltx-2:q4_k_m 768x512x25'])
+    const result = await done
+    expect(result.ok && result.outcome.job.estimate).toEqual(estimate)
+    // The progress counts from the estimate before any step was measured.
+    expect(videoProgressEvents(h).every((p) => p.slowdown === false)).toBe(true)
+  })
+
+  it('sends the plan’s decode tiling, and reports the decode’s tiles as the engine prints them', async () => {
+    const webm = await webmFixture()
+    const running: { h?: Harness } = {}
+    let submitted: Record<string, unknown> | undefined
+    let polls = 0
+    const port = await stub((method, path, body) => {
+      if (method === 'POST' && path === '/sdcpp/v1/vid_gen') {
+        submitted = JSON.parse(body) as Record<string, unknown>
+        return json(202, { id: 'job_t', status: 'queued' })
+      }
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_t') {
+        polls += 1
+        const say = (line: string) => running.h?.server.say(line)
+        if (polls === 2) for (let step = 1; step <= 8; step++) say(`|====>   | ${step}/8 - 1.00s/it`)
+        if (polls === 3) say('[VERBOSE] tiling.cpp:203  - processing 3 tiles')
+        if (polls === 4) say('|==>     | 1/3 - 250.00s/it')
+        if (polls < 6) return json(200, { id: 'job_t', status: 'generating' })
+        return json(200, {
+          id: 'job_t',
+          status: 'completed',
+          result: { output_format: 'webm', fps: 24, frame_count: 25, b64_json: webm.toString('base64') },
+        })
+      }
+      return json(404, {})
+    })
+    const h = videoHarness(port)
+    running.h = h
+    const decodeTiling = { tilesX: 1, tilesY: 3 }
+    h.deps.planVideo = async () => ({ estimate, forecast, decodeTiling })
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    expect(h.state.record(id)?.decodeTiling).toEqual(decodeTiling)
+    const result = await done
+    expect(result.ok).toBe(true)
+    expect(submitted?.['vae_tiling_params']).toEqual({
+      enabled: true,
+      rel_size_x: 1,
+      rel_size_y: 3,
+      rel_size_w: 1,
+      rel_size_h: 3,
+    })
+    expect(result.ok && result.outcome.job).not.toHaveProperty('decodeTiling')
+    const tiles = videoProgressEvents(h)
+      .filter((p) => p.phase === 'decoding')
+      .map((p) => p.decodeTiles)
+    expect(tiles).toContainEqual({ done: 0, total: 3 })
+    expect(tiles).toContainEqual({ done: 1, total: 3 })
+    expect(
+      videoProgressEvents(h)
+        .filter((p) => p.phase !== 'decoding')
+        .every((p) => !('decodeTiles' in p))
+    ).toBe(true)
+  })
+
+  it('does not stop the job when it cannot be made', async () => {
+    const port = await scriptedVideoStub((poll) => (poll < 3 ? 'generating' : 'completed'))
+    const h = videoHarness(port)
+    h.deps.planVideo = async () => {
+      throw new Error('no hardware facts')
+    }
+    const { done } = await startVideoJob(h.deps, sampleVideoRequest())
+    const result = await done
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.outcome.job).not.toHaveProperty('estimate')
+    expect(h.log).toContain('warn: video estimate failed: no hardware facts')
+  })
+})
+
+describe('progress heartbeat', () => {
+  it('sends a clip’s progress at least once a second through a ten-second step', async () => {
+    const running: { h?: Harness } = {}
+    const port = await scriptedVideoStub((poll) => {
+      if (poll === 3) running.h?.server.say('|=>      | 1/8 - 10.0s/it')
+      // 400 ms polls: 25 of them is the ten-second step.
+      if (poll === 28) running.h?.server.say('|==>     | 2/8 - 10.0s/it')
+      return poll < 31 ? 'generating' : 'completed'
+    })
+    const h = videoHarness(port)
+    running.h = h
+    h.deps.timings.pollIntervalMs = 400
+    const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
+    expect((await done).ok).toBe(true)
+    const duringStep = videoProgressEvents(h).filter((p) => p.step === 1 && p.phase === 'sampling')
+    expect(duringStep.length).toBeGreaterThanOrEqual(9)
+    const elapsed = duringStep.map((p) => p.elapsedMs)
+    expect(elapsed.every((ms, i) => i === 0 || ms > (elapsed[i - 1] as number))).toBe(true)
+    expect((elapsed.at(-1) as number) - (elapsed[0] as number)).toBeGreaterThanOrEqual(9_000)
+    // Consecutive events are never more than a second apart, and the record carries the latest.
+    expect(elapsed.every((ms, i) => i === 0 || ms - (elapsed[i - 1] as number) <= 1_000)).toBe(true)
+    expect(h.state.videoJob(id)?.progress?.phase).toBe('saving')
+  })
+
+  it('counts elapsed time from the job’s start, not from the submit', async () => {
+    const port = await scriptedVideoStub((poll) => (poll < 4 ? 'generating' : 'completed'))
+    const h = videoHarness(port)
+    h.deps.timings.pollIntervalMs = 400
+    const started = h.clock.now
+    const { done } = await startVideoJob(h.deps, sampleVideoRequest())
+    await done
+    const last = videoProgressEvents(h).at(-1)
+    expect(last?.elapsedMs).toBe(h.clock.now - started)
+  })
+
+  it('leaves image progress on change only', async () => {
+    const running: { h?: Harness } = {}
+    let polls = 0
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/img_gen')
+        return json(202, { id: 'job_i', status: 'queued' })
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_i') {
+        polls += 1
+        if (polls === 3) running.h?.server.say('|=>   | 1/4 - 10.0s/it')
+        if (polls < 30) return json(200, { id: 'job_i', status: 'generating' })
+        return json(200, {
+          id: 'job_i',
+          status: 'completed',
+          result: { images: [{ index: 0, b64_json: pngB64 }] },
+        })
+      }
+      return json(404, {})
+    })
+    const h = harness(port)
+    running.h = h
+    h.deps.timings.pollIntervalMs = 400
+    const { done } = await startImageJob(h.deps, sampleRequest({ batchSize: 1, steps: 4 }))
+    expect((await done).ok).toBe(true)
+    expect(h.progress().filter((p) => p.progress.step === 1 && p.progress.phase === 'sampling')).toHaveLength(
+      1
+    )
   })
 })
 
