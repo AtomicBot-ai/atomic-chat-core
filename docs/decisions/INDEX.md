@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-01** — [Bump core to 0.7.5 after merging main's 0.7.1-0.7.4](2026-10-01-bump-core-to-0-7-5-after-merging-main.md) — supersedes the version half of the 2026-09-28 0.7.0 bump record.
 - **2026-09-30** — [Gate embedded MTP on every upstream MTP architecture](2026-09-30-gate-embedded-mtp-on-every-upstream-mtp-architecture.md) — 2 → 14 architectures, matching llama.cpp b10809.
 - **2026-09-30** — [Fall back to offload when the GPU runs out of memory](2026-09-30-fall-back-to-offload-when-the-gpu-runs-out-of-memory.md) — adds `LoadDiffusionModelRequest.offloadFallback`.
 - **2026-09-30** — [Keep the video ETA past its forecast](2026-09-30-keep-the-video-eta-past-its-forecast.md) — prices the Metal decode ×10 and doubles a spent forecast instead of going `null`.
