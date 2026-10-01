@@ -9,3 +9,4 @@
 export * from './transport.js'
 export * from './guest-paths.js'
 export * from './guest-scope.js'
+export * from './keeper.js'

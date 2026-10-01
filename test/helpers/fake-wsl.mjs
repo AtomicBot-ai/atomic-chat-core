@@ -119,9 +119,25 @@ function guestCommand(state, name, user, command, args, input) {
       for (const path of args.filter((a) => !a.startsWith('-'))) delete next[path]
       return result(0, '', '', { next: withGuest(state, name, { ...guest, files: next }) })
     }
+    case 'timeout': {
+      // `timeout <s> python3 -m http.server --bind 127.0.0.1 <port>`: a test listener inside the guest.
+      if (!args.includes('http.server')) break
+      const port = Number(args[args.length - 1])
+      return result(0, '', '', {
+        next: withGuest(state, name, {
+          ...guest,
+          listening: [...new Set([...(guest.listening ?? []), port])],
+        }),
+      })
+    }
     case 'curl': {
-      // The Engine API over the guest's socket: only `POST /images/create`, streaming NDJSON progress.
       const url = args[args.length - 1]
+      const local = /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(url)
+      if (local !== null) {
+        // A probe of a port in the guest: 200 when something listens there.
+        return result(0, (guest.listening ?? []).includes(Number(local[1])) ? '200' : '000')
+      }
+      // The Engine API over the guest's socket: only `POST /images/create`, streaming NDJSON progress.
       const match = /\/images\/create\?fromImage=([^&]+)&tag=([^&]+)$/.exec(url)
       const host = guest.host ?? {}
       if (match === null || !host.docker?.reachable) {

@@ -42,7 +42,7 @@ import {
   type DockerExec,
   type ExecutionRecord,
 } from '../container/index.js'
-import type { WslDistributionTransport } from '../wsl/index.js'
+import type { DistributionKeeper, WslDistributionTransport } from '../wsl/index.js'
 import { canonicalDigest } from './canonical-json.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
@@ -70,6 +70,7 @@ import {
   distributionDisk,
   type WindowsHost,
 } from './windows-host.js'
+import { checkLocalhostForwarding } from './windows-forwarding.js'
 import { importDistribution, restoreDefaultDistribution, setupGuest } from './windows-guest-setup.js'
 import { assessWindowsHost, type WindowsBlocker } from './windows-plan.js'
 import { probeWindowsHost, type WindowsHostFacts, type WslDistribution } from './windows-probe.js'
@@ -133,6 +134,14 @@ export interface WindowsProvisionerDeps {
   /** Removes this scope's downloaded models of one engine, in the guest; only for `retain_models: false`. */
   removeModels: (engineId: string) => Promise<void>
   unloadEngineSessions?: UnloadEngineSessions
+  /** What the forwarding check reaches the guest's test listener from Windows with; the global `fetch` by default. */
+  fetch?: typeof fetch
+  /**
+   * Keeps Atomic Chat's distribution running while a step of an operation works in it (design D8):
+   * every effect below holds it, and lets go when done. Absent: nothing is held (tests, and a core
+   * that has no distribution yet keeps nothing).
+   */
+  keeper?: DistributionKeeper
   onAssessment?: (view: HostView) => void
   newId?: () => string
   now?: () => Date
@@ -599,6 +608,16 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
 
   const unload = deps.unloadEngineSessions ?? NOTHING_LOADED
 
+  /** Runs one step of an operation with the distribution held, and lets go whatever happens. */
+  const held = async <T>(what: string, step: () => Promise<T>): Promise<T> => {
+    const lease = deps.keeper?.acquire(what)
+    try {
+      return await step()
+    } finally {
+      lease?.release()
+    }
+  }
+
   const notYet = (what: string): never => {
     throw new AtomicCoreError(
       'MANAGED_PREREQUISITE_BLOCKED',
@@ -679,76 +698,92 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       signal: AbortSignal,
       own: (resourceIds: string[]) => Promise<void>
     ): Promise<void> {
-      const descriptor = await pinnedDescriptor(deps.descriptors, record)
-      const seen = await look()
-      if (seen.foreign) {
-        throw blocked(
-          `A WSL distribution named "${seen.distribution.name}" exists that Atomic Chat did not create; it is not used or changed.`,
-          'foreign-distribution'
+      return held('preparing the environment', async () => {
+        const descriptor = await pinnedDescriptor(deps.descriptors, record)
+        const seen = await look()
+        if (seen.foreign) {
+          throw blocked(
+            `A WSL distribution named "${seen.distribution.name}" exists that Atomic Chat did not create; it is not used or changed.`,
+            'foreign-distribution'
+          )
+        }
+        if (seen.facts.wsl.installed !== true || seen.facts.wsl.ready !== true) {
+          throw blocked('WSL is not ready on this computer yet.', 'wsl-not-ready')
+        }
+        const environment =
+          seen.owned === null
+            ? await importOwn(record, seen, signal)
+            : (seen.record as WindowsEnvironmentRecord)
+        const transport = wsl.distribution(environment.distribution.name)
+        await setupGuest({ wsl, sleep }, transport, environment.marker, signal)
+        const manifest = await deps.environmentManifests.pinned(environment.manifest_id)
+        await provisionGuest(
+          transport,
+          manifest.kind === 'available' ? manifest.manifest : null,
+          descriptor,
+          signal
         )
-      }
-      if (seen.facts.wsl.installed !== true || seen.facts.wsl.ready !== true) {
-        throw blocked('WSL is not ready on this computer yet.', 'wsl-not-ready')
-      }
-      const environment =
-        seen.owned === null
-          ? await importOwn(record, seen, signal)
-          : (seen.record as WindowsEnvironmentRecord)
-      const transport = wsl.distribution(environment.distribution.name)
-      await setupGuest({ wsl, sleep }, transport, environment.marker, signal)
-      const manifest = await deps.environmentManifests.pinned(environment.manifest_id)
-      await provisionGuest(
-        transport,
-        manifest.kind === 'available' ? manifest.manifest : null,
-        descriptor,
-        signal
-      )
-      await checkGpu(transport, descriptor, seen, signal, own)
+        await checkGpu(transport, descriptor, seen, signal, own)
+      })
     },
     async pull(
       record: PersistedOperation,
       onProgress: (progress: ManagedProgress) => void,
       signal: AbortSignal
     ): Promise<void> {
-      const descriptor = await pinnedDescriptor(deps.descriptors, record)
-      const image = descriptor.image[GUEST_PLATFORM]
-      const transport = await ownTransport()
-      const label = 'Downloading the engine image'
-      onProgress({ label, completed: 0, total: descriptor.download_bytes, unit: 'bytes' })
-      // Inside the guest, through its own socket: the Engine API never leaves the distribution (D4).
-      await pullImageWithCurl(image, {
-        run: (argv, call) => transport.exec(argv, { user: GUEST_ROOT, ...call }),
-        signal,
-        knownTotalBytes: descriptor.download_bytes,
-        verify: guestDocker(transport),
-        onProgress: (progress) =>
-          onProgress({ label, completed: progress.current, total: progress.total, unit: 'bytes' }),
+      return held('pulling the engine image', async () => {
+        const descriptor = await pinnedDescriptor(deps.descriptors, record)
+        const image = descriptor.image[GUEST_PLATFORM]
+        const transport = await ownTransport()
+        const label = 'Downloading the engine image'
+        onProgress({ label, completed: 0, total: descriptor.download_bytes, unit: 'bytes' })
+        // Inside the guest, through its own socket: the Engine API never leaves the distribution (D4).
+        await pullImageWithCurl(image, {
+          run: (argv, call) => transport.exec(argv, { user: GUEST_ROOT, ...call }),
+          signal,
+          knownTotalBytes: descriptor.download_bytes,
+          verify: guestDocker(transport),
+          onProgress: (progress) =>
+            onProgress({ label, completed: progress.current, total: progress.total, unit: 'bytes' }),
+        })
       })
     },
 
-    async verify(record: PersistedOperation): Promise<void> {
-      const target = record.machine.operation.target
-      if (target.kind === 'environment') {
-        const seen = await look()
-        const docker = seen.guest?.facts.docker
-        if (docker === undefined || !docker.daemon_reachable || !docker.gpu_runtime) {
-          throw blocked(
-            'Docker in the Atomic Chat distribution does not answer with a GPU runtime.',
-            'docker-unreachable'
+    async verify(record: PersistedOperation, signal: AbortSignal): Promise<void> {
+      return held('verifying the installation', async () => {
+        const target = record.machine.operation.target
+        if (target.kind === 'environment') {
+          const seen = await look()
+          const docker = seen.guest?.facts.docker
+          if (docker === undefined || !docker.daemon_reachable || !docker.gpu_runtime) {
+            throw blocked(
+              'Docker in the Atomic Chat distribution does not answer with a GPU runtime.',
+              'docker-unreachable'
+            )
+          }
+          return
+        }
+        const descriptor = await pinnedDescriptor(deps.descriptors, record)
+        const image = descriptor.image[GUEST_PLATFORM]
+        const transport = await ownTransport()
+        if (!(await imagePresent(transport, image))) {
+          throw new AtomicCoreError(
+            'MANAGED_IDENTITY_MISMATCH',
+            'The engine image in the Atomic Chat distribution does not carry the digest the descriptor pins.',
+            `${image.repository}@${image.digest}`
           )
         }
-        return
-      }
-      const descriptor = await pinnedDescriptor(deps.descriptors, record)
-      const image = descriptor.image[GUEST_PLATFORM]
-      const transport = await ownTransport()
-      if (!(await imagePresent(transport, image))) {
-        throw new AtomicCoreError(
-          'MANAGED_IDENTITY_MISMATCH',
-          'The engine image in the Atomic Chat distribution does not carry the digest the descriptor pins.',
-          `${image.repository}@${image.digest}`
-        )
-      }
+        // Windows must reach what the guest publishes on its loopback (design D7): checked here, before
+        // the installation is called ready, and again at every load.
+        const facts = await probeWindowsHost(deps.host.probeDeps)
+        await checkLocalhostForwarding({
+          transport,
+          fetch: deps.fetch ?? fetch,
+          sleep,
+          wslconfig: facts.wslconfig,
+          signal,
+        })
+      })
     },
 
     unloadResident: async () => undefined,
@@ -787,6 +822,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       const existing = await deps.installations.read(target.installation_id)
       // As on Linux: a loaded model first, its container confirmed stopped; loads held off till the end.
       const hold = await unload(target.engine_id)
+      const lease = deps.keeper?.acquire('removing an engine')
       try {
         const environment = await deps.records.read()
         if (environment !== null) {
@@ -832,6 +868,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
         if (record.request.retain_models === false) await deps.removeModels(target.engine_id)
         await deps.installations.remove(target.installation_id)
       } finally {
+        lease?.release()
         hold.release?.()
       }
     },

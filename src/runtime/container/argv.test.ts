@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
+  buildPortArgv,
   DOCKER_SOCKET_PATH,
   DOCKER_SYSTEM_SOCKET,
   MODEL_CONTAINER_SHM_SIZE,
@@ -538,5 +539,31 @@ describe('buildCreateModelContainerArgv on Windows (change add-tensorrt-llm-wind
         mounts: { ...baseSpec.mounts, model: { source: 'C:\\models\\qwen3' } },
       })
     ).toThrow(AtomicCoreError)
+  })
+})
+
+describe('a port Docker chooses (change add-tensorrt-llm-windows, task 2.7, design D7)', () => {
+  it('publishes 127.0.0.1::<container port> when the host port is left to Docker (0)', () => {
+    const argv = buildCreateModelContainerArgv({
+      ...baseSpec,
+      publication: { ...baseSpec.publication, host_port: 0 },
+    })
+    expect(argv[argv.indexOf('-p') + 1]).toBe('127.0.0.1::8000')
+  })
+
+  it('still refuses a negative or out-of-range host port', () => {
+    expect(() =>
+      buildCreateModelContainerArgv({ ...baseSpec, publication: { ...baseSpec.publication, host_port: -1 } })
+    ).toThrow(AtomicCoreError)
+  })
+
+  it('asks docker port for the one container port', () => {
+    expect(buildPortArgv('abc123', 8000)).toEqual([
+      '--host',
+      'unix:///var/run/docker.sock',
+      'port',
+      'abc123',
+      '8000/tcp',
+    ])
   })
 })

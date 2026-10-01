@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
+  publishedHostPort,
   containerLogs,
   containersUsingImage,
   createContainer,
@@ -426,5 +427,25 @@ describe('createContainer on Windows: mount sources resolved in the WSL guest (c
     expect(resolved.map((argv) => argv.slice(0, 3))).toEqual(Array(4).fill(['realpath', '-e', '--']))
     expect(capturedArgv.join(' ')).toContain(`${guest}/models/tensorrt-llm/m:/atomic/model:ro`)
     expect(capturedArgv.join(' ')).toContain('--user 1000:1000')
+  })
+})
+
+describe('publishedHostPort (change add-tensorrt-llm-windows, task 2.7)', () => {
+  it('reads the loopback port Docker chose', async () => {
+    expect(await publishedHostPort(fakeExec(ok('127.0.0.1:49153\n')), 'c1', 8000)).toBe(49153)
+  })
+
+  it('refuses a publication on anything but 127.0.0.1', async () => {
+    await expect(publishedHostPort(fakeExec(ok('0.0.0.0:49153\n')), 'c1', 8000)).rejects.toMatchObject({
+      code: 'FORBIDDEN_HOST',
+    })
+  })
+
+  it('fails when docker port did not answer', async () => {
+    await expect(
+      publishedHostPort(fakeExec(failed(1, 'Error: No public port')), 'c1', 8000)
+    ).rejects.toMatchObject({
+      code: 'IO_ERROR',
+    })
   })
 })

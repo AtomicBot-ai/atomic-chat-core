@@ -408,7 +408,9 @@ export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): s
   const ref = imageReference(spec.image)
   const gpuUuid = assertGpuUuid(spec.gpuUuid)
   const host = assertLoopbackHost(spec.publication.host)
-  const hostPort = assertPort(spec.publication.host_port, 'host port')
+  // 0: Docker picks a free port on the loopback of the machine it runs on (the WSL guest, design D7 of
+  // change `add-tensorrt-llm-windows`), read back afterwards with `docker port`.
+  const hostPort = spec.publication.host_port === 0 ? '' : assertPort(spec.publication.host_port, 'host port')
   const containerPort = assertPort(spec.publication.container_port, 'container port')
   const shmSize = assertShmSize(spec.shmSize ?? MODEL_CONTAINER_SHM_SIZE)
   if (spec.selinux && spec.selinuxDataRoot === undefined) {
@@ -470,6 +472,15 @@ export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): s
     ...commandWords(spec.command),
   ]
   return withSystemSocket(args)
+}
+
+/** `docker port <id> <port>/tcp`: where a running container's port was published. */
+export function buildPortArgv(containerId: string, containerPort: number): string[] {
+  return withSystemSocket([
+    'port',
+    assertSafeArgvValue(containerId, 'container id'),
+    `${assertPort(containerPort, 'container port')}/tcp`,
+  ])
 }
 
 /**

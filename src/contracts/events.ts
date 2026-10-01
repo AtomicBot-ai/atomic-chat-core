@@ -96,6 +96,12 @@ export interface CoreEvents {
     exit_code: number | null
     signal: string | null
     message: string
+    /**
+     * Why the session ended when it was not the engine's own exit (change `add-tensorrt-llm-windows`):
+     * `wsl-stopped` — the WSL distribution or VM stopped under it (`wsl --shutdown`). Absent otherwise;
+     * additive, a client that predates it ignores the key.
+     */
+    reason?: 'wsl-stopped'
   }
   'session:ctx-increased': {
     provider: LocalProviderId

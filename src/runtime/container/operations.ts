@@ -21,6 +21,7 @@ import {
   buildInspectImageArgv,
   buildListContainersByImageArgv,
   buildLogsArgv,
+  buildPortArgv,
   buildRemoveImageArgv,
   buildRmArgv,
   buildRunOnceArgv,
@@ -69,6 +70,36 @@ async function inspect(exec: DockerExec, argv: string[], operation: string): Pro
   }
   if (ABSENT_PATTERN.test(result.stderr)) return { found: false, value: null }
   ioError(operation, result)
+}
+
+/**
+ * The host port Docker published `containerPort` on, for a container created with a Docker-chosen
+ * port (`host_port: 0`). Only a `127.0.0.1` publication is accepted, whatever Docker answers.
+ */
+export async function publishedHostPort(
+  exec: DockerExec,
+  containerId: string,
+  containerPort: number
+): Promise<number> {
+  const result = await exec(buildPortArgv(containerId, containerPort))
+  if (result.code !== 0) ioError('port', result)
+  const line =
+    result.stdout
+      .split('\n')
+      .map((entry) => entry.trim())
+      .find((entry) => entry !== '') ?? ''
+  const match = /^(.+):(\d+)$/.exec(line)
+  if (match === null) {
+    throw new AtomicCoreError('IO_ERROR', 'docker port did not name a published port.', line)
+  }
+  if (match[1] !== '127.0.0.1') {
+    throw new AtomicCoreError(
+      'FORBIDDEN_HOST',
+      'The container port was published on something other than 127.0.0.1.',
+      line
+    )
+  }
+  return Number(match[2])
 }
 
 export function inspectImage(exec: DockerExec, image: ImageRef): Promise<InspectResult> {

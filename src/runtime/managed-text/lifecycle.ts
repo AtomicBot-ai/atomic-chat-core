@@ -116,6 +116,13 @@ export interface ManagedLifecycleTimings {
   portAttempts: number
   /** Between two liveness checks of a ready container. */
   monitorIntervalMs: number
+  /**
+   * WSL (change `add-tensorrt-llm-windows`, design D7): how many polls in a row the engine must answer
+   * inside the guest while Windows cannot reach it before that counts as a forwarding failure.
+   */
+  forwardingConfirmPolls: number
+  /** WSL: how many times a load publishes the port again when another program holds it on Windows. */
+  republishAttempts: number
 }
 
 export const DEFAULT_MANAGED_LIFECYCLE_TIMINGS: ManagedLifecycleTimings = {
@@ -126,6 +133,8 @@ export const DEFAULT_MANAGED_LIFECYCLE_TIMINGS: ManagedLifecycleTimings = {
   logTailLines: 200,
   portAttempts: 3,
   monitorIntervalMs: 5_000,
+  forwardingConfirmPolls: 3,
+  republishAttempts: 1,
 }
 
 export type ManagedLifecycleLogger = (level: 'info' | 'warn' | 'error', message: string) => void
@@ -166,7 +175,33 @@ export interface ManagedTextLifecycleDeps {
    * (`containerUserEnv`), since the image has no passwd entry for it.
    */
   containerUser?: ContainerUser
+  /**
+   * Windows (change `add-tensorrt-llm-windows`, design D8): what keeps Atomic Chat's WSL distribution
+   * running while a model loads or is loaded, and says when it stopped under one. Absent on Linux.
+   */
+  keeper?: SessionKeeper
 }
+
+/** The slice of `DistributionKeeper` (`runtime/wsl`) a lifecycle uses. */
+export interface SessionKeeper {
+  acquire(reason: string): { release(): void }
+  onStopped(listener: () => void): () => void
+}
+
+/** "The engine answers inside the guest, Windows cannot reach it": what a WSL load does about it. */
+class ForwardingFailure extends Error {
+  constructor(readonly kind: 'port-taken' | 'not-forwarded') {
+    super(`the engine answers in the WSL distribution but not on Windows (${kind})`)
+  }
+}
+
+/** A session (or a load) the WSL VM took with it. */
+const wslStoppedError = (): AtomicCoreError =>
+  new AtomicCoreError(
+    'MODEL_LOAD_FAILED',
+    'The Atomic Chat WSL distribution stopped (wsl --shutdown, or the WSL VM ended), and the model with it. Load it again to start it.',
+    'wsl-stopped'
+  )
 
 /** The login name a container user without a passwd entry is given (`USER`/`LOGNAME`). */
 export const CONTAINER_USER_NAME = 'atomic'
@@ -305,6 +340,10 @@ interface Entry {
   monitor?: AbortController | undefined
   /** The one teardown in flight for this entry, shared by every caller that wants it stopped. */
   ending?: Promise<StopOutcome | null> | undefined
+  /** Windows: this session's hold on the WSL distribution (`ManagedTextLifecycleDeps.keeper`). */
+  lease?: { release(): void } | undefined
+  /** Windows: the WSL VM stopped under it; nothing may touch Docker or the guest's files for it now. */
+  distributionStopped?: boolean
 }
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -406,6 +445,7 @@ export class ManagedTextLifecycle {
     this.newGeneration = deps.newGeneration ?? randomUUID
     this.startHeartbeat = deps.startHeartbeat ?? startHeartbeatTicker
     this.startGateway = deps.startGateway ?? startManagedGateway
+    deps.keeper?.onStopped(() => this.onDistributionStopped())
   }
 
   /** Ready sessions only: a loading or stop-unconfirmed model has none to offer. */
@@ -536,6 +576,7 @@ export class ManagedTextLifecycle {
       adapter,
       loadAbort,
       heartbeatDir: this.deps.paths.heartbeatDir(generation),
+      lease: this.deps.keeper?.acquire(`model ${request.modelId}`),
     }
     this.entries.set(request.modelId, entry)
     this.lastAttempts.delete(request.modelId)
@@ -660,8 +701,25 @@ export class ManagedTextLifecycle {
       })
       await this.firstHeartbeat(entry.ticker, signal)
 
-      const prepared = await this.createAndStart(entry, request, launch, cacheDir, signal)
-      await this.waitReady(entry, prepared.target, timeoutMs, progress, signal)
+      let prepared = await this.createAndStart(entry, request, launch, cacheDir, signal)
+      for (let republished = 0; ; republished++) {
+        try {
+          await this.waitReady(entry, prepared.target, timeoutMs, progress, signal)
+          break
+        } catch (error) {
+          if (!(error instanceof ForwardingFailure)) throw error
+          // Another program holds the port on Windows: publish once more, on a port Docker picks anew.
+          if (error.kind !== 'port-taken' || republished >= this.timings.republishAttempts) {
+            throw this.deps.deployment.forwardingError?.() ?? error
+          }
+          this.log(
+            'warn',
+            `managed-text: the Windows port of ${entry.modelId} is held by another program; publishing again`
+          )
+          await this.discardContainer(entry)
+          prepared = await this.createAndStart(entry, request, launch, cacheDir, signal)
+        }
+      }
 
       const apiKey = generateGatewayKey()
       const adapter = entry.adapter
@@ -712,7 +770,8 @@ export class ManagedTextLifecycle {
       this.startMonitor(entry)
       return entry.info
     } catch (error) {
-      const failure = signal.aborted ? loadCancelledError() : error
+      const failure =
+        entry.distributionStopped === true ? wslStoppedError() : signal.aborted ? loadCancelledError() : error
       await this.failLoad(entry, failure)
       throw failure
     }
@@ -824,7 +883,9 @@ export class ManagedTextLifecycle {
       this.checkAborted(signal)
       try {
         await startContainer(this.deps.exec, containerId)
-        return prepared
+        return this.deps.deployment.resolveTarget === undefined
+          ? prepared
+          : await this.deps.deployment.resolveTarget(containerId, prepared)
       } catch (error) {
         if (!isPortBindConflict(error) || attempt >= this.timings.portAttempts) throw error
         this.log(
@@ -850,6 +911,7 @@ export class ManagedTextLifecycle {
     const deadlineAt = this.now() + timeoutMs
     let stage: EngineLoadStage = advanceStage('starting-container', adapter.stageMarkers, '')
     let redirectWarned = false
+    let insideStreak = 0
     for (;;) {
       this.checkAborted(signal)
       const state = await inspectContainer(this.deps.exec, containerId)
@@ -876,6 +938,20 @@ export class ManagedTextLifecycle {
         this.timings.probeTimeoutMs
       )
       if (outcome === 'ready') return
+      // WSL: answering inside the guest while Windows cannot reach it is not "still starting".
+      const inGuest = this.deps.deployment.probeInGuest
+      if (inGuest !== undefined) {
+        insideStreak =
+          (await inGuest(target, adapter.readiness).catch(() => 'not-ready')) === 'ready'
+            ? insideStreak + 1
+            : 0
+        if (insideStreak >= this.timings.forwardingConfirmPolls) {
+          throw new ForwardingFailure(
+            (await this.deps.deployment.diagnoseForwarding?.(target).catch(() => 'not-forwarded' as const)) ??
+              'not-forwarded'
+          )
+        }
+      }
       if (outcome === 'redirect' && !redirectWarned) {
         redirectWarned = true
         this.log(
@@ -977,7 +1053,11 @@ export class ManagedTextLifecycle {
       })
       .then((outcome) => {
         if (outcome !== null && !outcome.confirmed) entry.state = 'stop-unconfirmed'
-        else if (this.entries.get(entry.modelId) === entry) this.entries.delete(entry.modelId)
+        else {
+          if (this.entries.get(entry.modelId) === entry) this.entries.delete(entry.modelId)
+          // Nothing of this session runs any more: the distribution need not be held for it.
+          entry.lease?.release()
+        }
         entry.ending = undefined
         return outcome
       })
@@ -1007,6 +1087,14 @@ export class ManagedTextLifecycle {
       this.log('warn', `managed-text: before stopping ${entry.modelId}: ${String(error)}`)
     )
 
+    if (entry.distributionStopped === true) {
+      // The VM took the container with it. Any docker call, or a touch of the guest's files through
+      // \\wsl.localhost, would start the VM again; the journal keeps the record, and the next start's
+      // reconcile removes the stopped container.
+      const hadContainer = entry.containerId !== undefined
+      entry.containerId = undefined
+      return hadContainer ? { confirmed: true, status: 'exited' } : null
+    }
     if (entry.containerId === undefined) {
       await rm(entry.heartbeatDir, { recursive: true, force: true }).catch(() => {})
       return null
@@ -1028,6 +1116,51 @@ export class ManagedTextLifecycle {
     entry.containerId = undefined
     await rm(entry.heartbeatDir, { recursive: true, force: true }).catch(() => {})
     return outcome
+  }
+
+  /** A started container this load gives up on before it was ready (a republication): stopped, removed, unjournalled. */
+  private async discardContainer(entry: Entry): Promise<void> {
+    const containerId = entry.containerId
+    if (containerId === undefined) return
+    const stopped = await stopContainer(this.deps.exec, containerId, this.timings.stopTimeoutSecs)
+    if (!stopped.confirmed) throw this.stopUnconfirmed(entry, stopped.reason)
+    await removeContainer(this.deps.exec, containerId)
+    await this.deps.journal.remove(containerId)
+    entry.containerId = undefined
+  }
+
+  /**
+   * The WSL distribution stopped under this core (design D8): every session and load ends at once,
+   * without a docker call, and a ready session is reported dead with `wsl-stopped`.
+   */
+  private onDistributionStopped(): void {
+    for (const entry of [...this.entries.values()]) {
+      if (entry.state !== 'ready' && entry.state !== 'loading') continue
+      entry.distributionStopped = true
+      if (entry.state === 'loading') {
+        entry.loadAbort.abort()
+        continue
+      }
+      const error = wslStoppedError()
+      this.lastAttempts.set(entry.modelId, {
+        model_id: entry.modelId,
+        generation: entry.generation,
+        log_tail: '',
+        error: { code: error.code, message: error.message },
+        at: this.now(),
+      })
+      void this.end(entry).then(() =>
+        this.deps.emit('session:died', {
+          provider: this.deps.provider,
+          pid: null,
+          model_id: entry.modelId,
+          exit_code: null,
+          signal: null,
+          message: error.message,
+          reason: 'wsl-stopped',
+        })
+      )
+    }
   }
 
   // ── crash after ready ─────────────────────────────────────────────────────────────────────────

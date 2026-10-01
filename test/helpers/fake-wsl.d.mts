@@ -24,6 +24,8 @@ export interface FakeWslGuest {
   users?: { name: string; uid: number }[]
   /** An Engine API pull answers with this error line. */
   pull_error?: string
+  /** Ports something listens on inside the guest (a test listener, an engine). */
+  listening?: number[]
   host?: Partial<FakeLinuxHostState>
 }
 

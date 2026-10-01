@@ -9,6 +9,10 @@
  * to fake just to satisfy this module's shape.
  */
 
+import type { AtomicCoreError } from '../../contracts/index.js'
+import type { ManagedReadinessProbe } from './adapter.js'
+import type { ReadinessOutcome } from './readiness.js'
+
 /**
  * What a containerized engine needs to run, in engine terms only. No host publication and no
  * heartbeat: those are desktop choices a `ManagedDeployment` adds on top, not something the engine
@@ -67,6 +71,21 @@ export interface PreparedLaunch {
  * this seam.
  */
 export interface ManagedDeployment {
+  /**
+   * After the container started: where it is actually reachable. A WSL deployment publishes
+   * `127.0.0.1::<port>` in the guest (Docker picks the port, design D7 of `add-tensorrt-llm-windows`)
+   * and reads it back here; absent, the prepared publication stands.
+   */
+  resolveTarget?(containerId: string, prepared: PreparedLaunch): Promise<PreparedLaunch>
+  /**
+   * WSL: whether the engine answers on the guest's own loopback — what tells "still starting" apart
+   * from "running, but Windows cannot reach it" while the Windows-side probe fails.
+   */
+  probeInGuest?(target: BackendTarget, probe: ManagedReadinessProbe): Promise<ReadinessOutcome>
+  /** WSL: why Windows does not reach a port the guest answers on: another program holds it, or no forwarding. */
+  diagnoseForwarding?(target: BackendTarget): Promise<'port-taken' | 'not-forwarded'>
+  /** WSL: the load's error for "answers in the guest, not on Windows", saying what to change. */
+  forwardingError?(): AtomicCoreError
   /**
    * The one resolver for every path this deployment's containers mount — model, engine cache,
    * watchdog script and heartbeat alike (task 2.12 review round 1, ruling 4). The lifecycle never

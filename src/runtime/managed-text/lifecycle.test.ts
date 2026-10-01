@@ -23,6 +23,7 @@ import { startManagedGateway } from './gateway.js'
 import type { ManagedGatewayOptions } from './gateway.js'
 import { ManagedLoadError, ManagedTextLifecycle } from './lifecycle.js'
 import type { ManagedLoadRequest, ManagedTextLifecycleDeps } from './lifecycle.js'
+import type { ManagedDeployment } from './types.js'
 
 const GiB = 1024 ** 3
 const DIGEST = `sha256:${'b'.repeat(64)}` as const
@@ -1418,5 +1419,148 @@ describe('ManagedTextLifecycle: task 2.14 fix round 1 (findings-2.14-r1.md items
     )
     expect(restarted.generation).toBe('gen-2')
     expect(docker.last().createArgv).toContain('8192')
+  })
+})
+
+describe('ManagedTextLifecycle on Windows: port, forwarding, the distribution held (change add-tensorrt-llm-windows, task 2.7)', () => {
+  /** A WSL-shaped deployment: Docker picks the guest port, the guest can be probed, forwarding diagnosed. */
+  const wslDeployment = (options: {
+    hostPort?: number
+    inside?: () => boolean
+    diagnose?: () => 'port-taken' | 'not-forwarded'
+  }) => {
+    const resolved: string[] = []
+    const deployment: ManagedDeployment = {
+      mountSource: (path) => path,
+      prepareLaunch: async (spec, heartbeat) => ({
+        publication: { host: '127.0.0.1', host_port: 0, container_port: spec.container_port },
+        target: { base_url: 'http://127.0.0.1:0' },
+        heartbeat: { core_path: heartbeat, mount_source: heartbeat },
+      }),
+      resolveTarget: async (containerId, prepared) => {
+        resolved.push(containerId)
+        const port = options.hostPort ?? 41_777
+        return {
+          ...prepared,
+          publication: { ...prepared.publication, host_port: port },
+          target: { base_url: `http://127.0.0.1:${port}` },
+        }
+      },
+      probeInGuest: async () => ((options.inside?.() ?? true) ? 'ready' : 'not-ready'),
+      diagnoseForwarding: async () => options.diagnose?.() ?? 'not-forwarded',
+      forwardingError: () =>
+        new AtomicCoreError(
+          'MANAGED_PREREQUISITE_BLOCKED',
+          'WSL does not forward the port.',
+          'wsl-localhost-forwarding'
+        ),
+    }
+    return { deployment, resolved }
+  }
+
+  /** A keeper whose holds are visible, and a VM a test can stop. */
+  const keeper = () => {
+    let leases = 0
+    const listeners: (() => void)[] = []
+    return {
+      acquire: () => {
+        leases += 1
+        let released = false
+        return {
+          release: () => {
+            if (released) return
+            released = true
+            leases -= 1
+          },
+        }
+      },
+      held: () => leases > 0,
+      onStopped: (listener: () => void) => {
+        listeners.push(listener)
+        return () => undefined
+      },
+      leases: () => leases,
+      stopVm: () => listeners.forEach((listener) => listener()),
+    }
+  }
+
+  it('publishes 127.0.0.1::<port>, reads the port Docker chose, and probes and serves through it', async () => {
+    const { deployment, resolved } = wslDeployment({ hostPort: 41_777 })
+    await build({ deployment })
+    await lifecycle.load(request_())
+    const argv = docker.last().createArgv
+    expect(argv[argv.indexOf('-p') + 1]).toBe('127.0.0.1::8000')
+    expect(resolved).toEqual([docker.last().id])
+    expect(probed.every((url) => url.startsWith('http://127.0.0.1:41777/'))).toBe(true)
+  })
+
+  it('answers inside the guest but not on Windows (forwarding off): the load fails with wsl-localhost-forwarding', async () => {
+    readyAt = null // Windows never reaches it
+    const { deployment } = wslDeployment({ diagnose: () => 'not-forwarded' })
+    await build({ deployment })
+    const error = await rejection(lifecycle.load(request_()))
+    expect(error).toMatchObject({ code: 'MANAGED_PREREQUISITE_BLOCKED', details: 'wsl-localhost-forwarding' })
+    expect(docker.containers.size).toBe(0)
+  })
+
+  it('the Windows port taken by another program: one new publication, then served', async () => {
+    let attempt = 0
+    const { deployment } = wslDeployment({
+      diagnose: () => {
+        attempt += 1
+        // The second container's port is free on Windows: from then on Windows reaches it.
+        readyAt = clock
+        return 'port-taken'
+      },
+    })
+    readyAt = null
+    await build({ deployment })
+    await lifecycle.load(request_())
+    expect(attempt).toBe(1)
+    expect(docker.calls.filter((argv) => argv[0] === 'create')).toHaveLength(2)
+    expect(docker.containers.size).toBe(1)
+  })
+
+  it('taken twice: no third publication, the forwarding error', async () => {
+    readyAt = null
+    const { deployment } = wslDeployment({ diagnose: () => 'port-taken' })
+    await build({ deployment })
+    const error = await rejection(lifecycle.load(request_()))
+    expect(error.details).toBe('wsl-localhost-forwarding')
+    expect(docker.calls.filter((argv) => argv[0] === 'create')).toHaveLength(2)
+  })
+
+  it('holds the distribution while the model loads and is loaded, and not after (spec "Простой")', async () => {
+    const k = keeper()
+    await build({ deployment: wslDeployment({}).deployment, keeper: k })
+    await lifecycle.load(request_())
+    expect(k.leases()).toBe(1)
+    await lifecycle.unload('org/model-a')
+    expect(k.leases()).toBe(0)
+  })
+
+  it('wsl --shutdown under a loaded model: the session ends with wsl-stopped, nothing asks Docker, a new load holds again', async () => {
+    const k = keeper()
+    await build({ deployment: wslDeployment({}).deployment, keeper: k })
+    await lifecycle.load(request_())
+    const callsBefore = docker.calls.length
+    const container = docker.last().id
+
+    k.stopVm()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    const died = emitted
+      .filter((e) => e.name === 'session:died')
+      .map((e) => e.payload as CoreEvents['session:died'])
+    expect(died).toEqual([expect.objectContaining({ model_id: 'org/model-a', reason: 'wsl-stopped' })])
+    expect(lifecycle.list()).toEqual([])
+    expect(k.leases()).toBe(0)
+    // The VM took the container with it: no docker call that would start the VM again.
+    expect(docker.calls.slice(callsBefore)).toEqual([])
+    // The journal keeps the record; the next start's reconcile removes the stopped container.
+    expect(journal.list().map((record) => record.container_id)).toContain(container)
+
+    await lifecycle.load(request_())
+    expect(k.leases()).toBe(1)
   })
 })

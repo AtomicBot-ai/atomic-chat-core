@@ -215,6 +215,7 @@ interface Harness {
   removed: string[]
   recipes: unknown[]
   current: () => WindowsEnvironmentRecord | null
+  leases: { count: number; peak: number }
 }
 
 const harness = (
@@ -232,6 +233,7 @@ const harness = (
   const removed: string[] = []
   const recipes: unknown[] = []
   const journal: ExecutionRecord[] = []
+  const leases = { count: 0, peak: 0 }
   let current = options.record ?? null
   const descriptors: RuntimeDescriptorProvider = {
     forNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
@@ -310,6 +312,30 @@ const harness = (
       removed.push(`unload:${engineId}`)
       return { unloaded: 0 }
     },
+    // Windows reaches a guest port through WSL's forwarding, unless the user's .wslconfig turned it off.
+    fetch: (async (url: string | URL | Request) => {
+      const port = Number(new URL(String(url)).port)
+      const guest = machine.wsl.guests?.['AtomicChat']
+      const forwarding = !/localhostForwarding\s*=\s*false/i.test(machine.wslconfig ?? '')
+      if (forwarding && (guest?.listening ?? []).includes(port)) return new Response('ok', { status: 200 })
+      throw new TypeError('fetch failed')
+    }) as typeof fetch,
+    keeper: {
+      acquire: () => {
+        leases.count += 1
+        leases.peak = Math.max(leases.peak, leases.count)
+        let released = false
+        return {
+          release: () => {
+            if (released) return
+            released = true
+            leases.count -= 1
+          },
+        }
+      },
+      held: () => leases.count > 0,
+      onStopped: () => () => undefined,
+    },
     onAssessment: (view) => views.push(view),
     newId: (() => {
       let n = 0
@@ -317,7 +343,7 @@ const harness = (
     })(),
     now: () => new Date('2026-10-01T00:00:00.000Z'),
   }
-  return { windows, deps, views, written, downloads, removed, recipes, current: () => current }
+  return { windows, deps, views, written, downloads, removed, recipes, current: () => current, leases }
 }
 
 const signal = new AbortController().signal
@@ -962,5 +988,45 @@ describe('the engine image through the guest’s Engine API (design D4)', () => 
     expect(await h.deps.installations.read('tensorrt-llm')).toBeNull()
     // The distribution itself stays: removing the engine is not removing the environment.
     expect((machine.wsl.distributions ?? []).map((d) => d.name)).toContain('AtomicChat')
+  })
+})
+
+describe('localhost forwarding — spec "Проброс localhost проверяется, а не предполагается"', () => {
+  const installed = async (machine: FakeWindowsMachine) => {
+    const h = harness(machine, { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.pull(consented(), () => undefined, signal)
+    return { h, provisioner }
+  }
+
+  it('forwarding turned off by the user: verifying fails with wsl-localhost-forwarding and the setting to restore; .wslconfig untouched', async () => {
+    const machine = importedWindows()
+    machine.wslconfig = '[wsl2]\nlocalhostForwarding=false\n'
+    const { provisioner } = await installed(machine)
+    await expect(provisioner.verify(consented(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      details: 'wsl-localhost-forwarding',
+      message: expect.stringContaining('localhostForwarding=true'),
+    })
+    expect(machine.wslconfig).toBe('[wsl2]\nlocalhostForwarding=false\n')
+  })
+
+  it('mirrored networking with the port reachable: verifying passes as usual', async () => {
+    const machine = importedWindows()
+    machine.wslconfig = '[wsl2]\nnetworkingMode=mirrored\n'
+    const { provisioner } = await installed(machine)
+    await expect(provisioner.verify(consented(), signal)).resolves.toBeUndefined()
+  })
+})
+
+describe('holding the distribution — spec "Дистрибутив удерживается, пока он нужен"', () => {
+  it('holds it for each step of an operation, and lets go after', async () => {
+    const h = harness(importedWindows(), { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.prepare(consented(), signal, noOwn)
+    await provisioner.pull(consented(), () => undefined, signal)
+    await provisioner.verify(consented(), signal)
+    expect(h.leases.peak).toBe(1)
+    expect(h.leases.count).toBe(0)
   })
 })
