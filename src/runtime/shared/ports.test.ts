@@ -13,6 +13,12 @@ describe('randomFreePort', () => {
     })
     expect(port).toBe(3003)
   })
+  it('never hands out a port fetch refuses to connect to', async () => {
+    const seq = [3659, 6000, 3660]
+    let i = 0
+    const port = await randomFreePort([], { random: () => seq[i++] as number, isAvailable: async () => true })
+    expect(port).toBe(3660)
+  })
   it('gives up with the Rust message after the attempt budget', async () => {
     await expect(
       randomFreePort([], { attempts: 3, random: () => 3000, isAvailable: async () => false })

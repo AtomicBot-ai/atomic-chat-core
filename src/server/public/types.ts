@@ -86,6 +86,29 @@ export interface VideosBackend {
   delete: (id: string) => Promise<void>
 }
 
+/** The running decision process as `/systemone` and `/router/score` need it: where to forward, with which key. */
+export type DecisionTarget =
+  | {
+      ok: true
+      port: number
+      /** The process's own bearer key; the client's key for this server never reaches it. */
+      apiKey: string
+      /** Called once the answer has been relayed (or abandoned): the idle unload counts from here. */
+      release: () => void
+    }
+  | { ok: false; reason: string; message: string }
+
+export interface DecisionBackend {
+  /**
+   * The running decision process. When the module is enabled but not running (never started, idle
+   * unloaded) it is started first; while it is starting or restarting this waits up to `waitMs` for
+   * it, and stops waiting when `signal` fires (the client left).
+   */
+  acquire: (waitMs: number, signal?: AbortSignal) => Promise<DecisionTarget>
+  /** The configured model's id for the request log, `null` when none is set. */
+  modelId?: () => string | null
+}
+
 export interface PublicServerDeps {
   /** The session `provider` serves for `modelId`, matched with the proxy's `.`/`_` rule. */
   findLocal: (provider: LocalProvider, modelId: string) => LocalTarget | undefined
@@ -117,6 +140,8 @@ export interface PublicServerDeps {
   images?: ImagesBackend
   /** The video counterpart, for `/videos`. */
   videos?: VideosBackend
+  /** The decision model, for `/systemone` and `/router/score`; without it those routes answer 503. */
+  decision?: DecisionBackend
   /** Where a request that failed on our side, or a failing local engine, is reported. */
   errors?: ErrorSink | undefined
 }

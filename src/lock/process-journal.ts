@@ -21,8 +21,11 @@ export interface ChildProcessRecord {
   pid: number
   process_start_id: string | null
   exe: string
-  /** `diffusion` for the image engine, which is not a provider (its `sd-server` is reaped all the same). */
-  provider: LocalProviderId | 'diffusion'
+  /**
+   * `diffusion` for the image engine and `decision` for the decision model, which are not providers
+   * (their processes are reaped all the same).
+   */
+  provider: LocalProviderId | 'diffusion' | 'decision'
   model_id: string
   port: number
   started_at: string

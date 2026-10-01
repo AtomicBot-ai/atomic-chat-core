@@ -6,6 +6,13 @@
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
+  DecisionDecideRequest,
+  DecisionOutcome,
+  DecisionScoreRequest,
+  DecisionSettings,
+  DecisionStatus,
+  RouterScoreResponse,
+  SystemoneResponse,
   DeviceInfo,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
@@ -235,6 +242,23 @@ export interface DiffusionControl {
   setVideoPoster: (id: string, pngBase64: string) => Promise<GalleryVideoItem>
 }
 
+/**
+ * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). Bodies snake_case,
+ * like the engine and `settings.json`. `score` and `decide` are fail-open: they answer an outcome,
+ * never an error, so the app's router sees exactly what an in-core caller sees.
+ */
+export interface DecisionControl {
+  status: () => DecisionStatus
+  config: () => DecisionSettings
+  /** A checked patch of the `decision` settings section; the process follows (start, restart or stop). */
+  configure: (patch: Record<string, unknown>) => Promise<DecisionStatus>
+  /** Start now and answer once ready; a failure is an error with the start's code. */
+  load: () => Promise<DecisionStatus>
+  unload: () => Promise<DecisionStatus>
+  score: (request: DecisionScoreRequest) => Promise<DecisionOutcome<RouterScoreResponse>>
+  decide: (request: DecisionDecideRequest) => Promise<DecisionOutcome<SystemoneResponse>>
+}
+
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
 export interface ExternalSessionControl {
   publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
@@ -305,6 +329,8 @@ export interface ControlServerDeps {
   disk: DiskControl
   remoteAccess: RemoteAccessControl
   diffusion: DiffusionControl
+  /** The decision model; without it the `/decision/*` routes answer `DECISION_UNAVAILABLE`. */
+  decision?: DecisionControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /**

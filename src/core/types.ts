@@ -1,6 +1,7 @@
 import type { LocalProviderId } from '../contracts/index.js'
 import type { LoadOptions } from '../runtime/llamacpp/index.js'
 import type { BackendOutputSink, LocalLoadOptions } from '../runtime/index.js'
+import type { WireDecisionOptions } from '../decision/index.js'
 import type { WireDiffusionOptions } from '../diffusion/index.js'
 import type { HardwareProbeResult } from '../hardware/index.js'
 import type { Prober, TunnelSpawner, TunnelTimings } from '../remote-access/index.js'
@@ -26,6 +27,8 @@ export interface AtomicCoreOptions {
   remoteAccess?: { spawner?: TunnelSpawner; prober?: Prober; timings?: Partial<TunnelTimings> }
   /** Test seams of the image-generation service (a fake engine, short timings). */
   diffusion?: WireDiffusionOptions['overrides']
+  /** Test seams of the decision module (a fake engine, installed packs, the `-h` probe). */
+  decision?: WireDecisionOptions['overrides']
   /** Test seam of the hardware probe: a canned answer instead of the shell tools and sysfs. */
   hardware?: { probe?: () => Promise<HardwareProbeResult> }
   /** The platform runtimes are offered for (macOS-only engines are not registered elsewhere). Test seam. */

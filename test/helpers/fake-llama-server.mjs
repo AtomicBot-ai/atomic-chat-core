@@ -31,10 +31,32 @@
  *   FAKE_LLAMA_LABEL  free-form name of the pack that launched this fake; recorded verbatim
  *   FAKE_LLAMA_STDOUT text; printed as one stdout line among the startup log, which llama.cpp itself
  *                     writes to stderr, so a test can follow both of the engine's streams
- *   LLAMA_API_KEY     when set, every route but `/health` demands `Authorization: Bearer <key>`
+ *   LLAMA_API_KEY     when set, every route but `/health`, `/v1/health`, `/models` and `/v1/models`
+ *                     demands `Authorization: Bearer <key>` (the real server's public endpoints)
+ *   FAKE_LLAMA_DECISION  1 → a TurboQuant build with the decision role (1.7.0+): `-h` lists `--decision`,
+ *                     and started with `--decision` the fake is a decision server (DECISION.md): no
+ *                     chat routes; `/health`, `/v1/models` (capabilities), `/props.decision`,
+ *                     `POST /v1/systemone`, `POST /v1/router/score`, with the engine's error envelope.
+ *                     Without it, `--decision` is an unknown argument (an older build): exit 1.
+ *                     Every decision answer carries `x-fake-body-sha256` / `x-fake-body-bytes` of the
+ *                     raw request body it received, so a test can prove a passthrough is byte-exact.
+ *   FAKE_DECISION_API_VERSION  `/props.decision.api_version` (default 1)
+ *   FAKE_DECISION_CALIBRATED   0 → no router calibration: `/v1/router/score` answers 501
+ *                     `ROUTER_NOT_CALIBRATED` unless started with `--decision-allow-uncalibrated`
+ *   FAKE_DECISION_DELAY_MS     milliseconds before each systemone / router answer
+ *   FAKE_DECISION_LOAD_MS      `/health` answers 503 for this long after the start (the engine loading)
+ *   FAKE_DECISION_NO_CAPABILITY  1 → `/v1/models` lists no `decision` capability (not a decision server)
+ *   FAKE_DECISION_NO_CONVERT   1 → a build from before the converter: `-h` does not list
+ *                     `--decision-convert-cache`, and `-m <folder>` fails the load with exit 1.
+ *                     Otherwise `-m <folder>` is a laya checkpoint (it needs `rl_agent_config.json`):
+ *                     "converted" into `<--decision-convert-cache>/<key>/<folder name>.gguf` once,
+ *                     a cache hit after that, and reported in `/props.decision` (`source`,
+ *                     `cache_path`, `checkpoint`).
  */
-import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { basename, join } from 'node:path'
 
 const argv = process.argv.slice(2)
 const flag = (name, fallback) => {
@@ -58,12 +80,28 @@ if (argv.includes('--list-devices')) {
   }
   process.exit(0)
 }
+const decisionBuild = process.env.FAKE_LLAMA_DECISION === '1'
 if (argv.includes('-h') || argv.includes('--help')) {
   process.stdout.write('usage: llama-server [options]\n')
   process.stdout.write(
     process.env.FAKE_LLAMA_SPEC_TYPES ?? '  --spec-type {draft-mtp}    speculative decoding type\n'
   )
+  if (decisionBuild) {
+    process.stdout.write(
+      '  --decision                  serve a decision model (/v1/systemone, /v1/router/score)\n'
+    )
+    process.stdout.write('  --decision-spec FILE        decision spec replacing the one in the GGUF\n')
+    if (process.env.FAKE_DECISION_NO_CONVERT !== '1') {
+      process.stdout.write('  --decision-convert-cache DIR  where a checkpoint directory is converted to\n')
+      process.stdout.write('  --decision-convert-type TYPE  f16 or f32\n')
+    }
+  }
   process.exit(0)
+}
+const decisionMode = argv.includes('--decision')
+if (decisionMode && !decisionBuild) {
+  err('error: invalid argument: --decision')
+  process.exit(1)
 }
 
 if (process.env.FAKE_LLAMA_PID_FILE) appendFileSync(process.env.FAKE_LLAMA_PID_FILE, `${process.pid}\n`)
@@ -125,6 +163,8 @@ if (mode === 'hang') {
 } else if (mode.startsWith('exit-')) {
   err('main: error: something went wrong')
   process.exit(Number(mode.slice('exit-'.length)) || 1)
+} else if (decisionMode) {
+  startDecisionServer()
 } else {
   startServer()
 }
@@ -143,7 +183,10 @@ function startServer() {
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(body))
     }
-    if (url.pathname === '/health') return json(ready ? 200 : 503, { status: ready ? 'ok' : 'loading' })
+    if (url.pathname === '/health' || url.pathname === '/v1/health')
+      return json(ready ? 200 : 503, { status: ready ? 'ok' : 'loading' })
+    if (url.pathname === '/v1/models' || url.pathname === '/models')
+      return json(200, { object: 'list', data: [{ id: modelAlias, object: 'model', owned_by: 'llamacpp' }] })
     if (unauthorized(req))
       return json(401, { error: { message: 'Invalid API key', type: 'authentication_error' } })
     if (url.pathname === '/props')
@@ -153,8 +196,6 @@ function startServer() {
         chat_template: '{{ messages }}',
         modalities: { vision: false, audio: false },
       })
-    if (url.pathname === '/v1/models')
-      return json(200, { object: 'list', data: [{ id: modelAlias, object: 'model', owned_by: 'llamacpp' }] })
     // Real llama-server serves Prometheus metrics at its root (with `--metrics`), behind the key.
     if (url.pathname === '/metrics') {
       res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' })
@@ -404,4 +445,300 @@ function answerWithText(body, res, content) {
     res.end()
   }
   tick()
+}
+
+// ── decision mode (DECISION.md, API version 1) ─────────────────────────────────
+
+/** `-m <folder>`: the conversion the real engine does, as files and `/props` fields; exits on a refusal. */
+function convertCheckpoint() {
+  const isDir = (() => {
+    try {
+      return statSync(modelPath).isDirectory()
+    } catch {
+      return false
+    }
+  })()
+  if (!isDir) return { source: 'gguf', cache_path: null, checkpoint: null }
+  if (process.env.FAKE_DECISION_NO_CONVERT === '1') {
+    err(`llama_model_load: error loading model: failed to open ${modelPath}: is a directory`)
+    process.exit(1)
+  }
+  if (!existsSync(join(modelPath, 'rl_agent_config.json'))) {
+    err(`decision: ${modelPath} is a directory but not a laya checkpoint`)
+    process.exit(1)
+  }
+  const outtype = flag('--decision-convert-type', 'f16')
+  const cacheDir = flag('--decision-convert-cache', join(modelPath, '..', '.fake-gguf-cache'))
+  const name = basename(modelPath)
+  const key = createHash('sha256').update(`${outtype}\0${name}`).digest('hex').slice(0, 32)
+  const cachePath = join(cacheDir, key, `${name}.gguf`)
+  const cacheHit = existsSync(cachePath)
+  if (!cacheHit) {
+    mkdirSync(join(cacheDir, key), { recursive: true })
+    writeFileSync(cachePath, 'GGUF')
+  }
+  err(`decision: ${cacheHit ? 'cache hit' : 'converted'}: ${cachePath}`)
+  return {
+    source: 'checkpoint-dir',
+    cache_path: cachePath,
+    checkpoint: {
+      dir: modelPath,
+      cache_dir: cacheDir,
+      key,
+      outtype,
+      cache_hit: cacheHit,
+      convert_ms: cacheHit ? 0 : 5,
+      converter: 1,
+    },
+  }
+}
+
+function startDecisionServer() {
+  const converted = convertCheckpoint()
+  const startedAt = Date.now()
+  const loadMs = Number(process.env.FAKE_DECISION_LOAD_MS ?? '0')
+  const delayMs = Number(process.env.FAKE_DECISION_DELAY_MS ?? '0')
+  const apiVersion = Number(process.env.FAKE_DECISION_API_VERSION ?? '1')
+  const calibrated = process.env.FAKE_DECISION_CALIBRATED !== '0'
+  const allowUncalibrated = argv.includes('--decision-allow-uncalibrated')
+  const routerServes = calibrated || allowUncalibrated
+  const alias = flag(
+    '-a',
+    flag('--alias', modelPath.replace(/^.*[\\/]/, '').replace(/\.gguf$/, '') || 'fake-decision')
+  )
+  const threads = Number(flag('-t', '4'))
+  const specSha = '0'.repeat(64)
+  const runtime = {
+    layout: 'laya',
+    format: 'laya-v1',
+    plan: 'sequential',
+    spec_sha256: specSha,
+    calibration: 'none',
+  }
+  const capabilities = ['decision', 'systemone', ...(calibrated ? ['router_score'] : [])]
+  const loaded = () => Date.now() - startedAt >= loadMs
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks)
+      const bodyHeaders = {
+        'x-fake-body-sha256': createHash('sha256').update(raw).digest('hex'),
+        'x-fake-body-bytes': String(raw.length),
+      }
+      const send = (status, body, extra = {}) => {
+        const text = JSON.stringify(body)
+        res.writeHead(status, {
+          'content-type': 'application/json; charset=utf-8',
+          ...(status >= 400 ? { connection: 'close' } : {}),
+          ...extra,
+        })
+        res.end(text)
+      }
+      const fail = (status, reason, message, param) =>
+        send(
+          status,
+          {
+            error: {
+              code: status,
+              type: status === 501 ? 'not_supported_error' : 'invalid_request_error',
+              reason,
+              message,
+              ...(param ? { param } : {}),
+            },
+          },
+          bodyHeaders
+        )
+      if (url.pathname === '/health' || url.pathname === '/v1/health')
+        return loaded()
+          ? send(200, { status: 'ok', ok: true, model: alias, layout: 'laya' })
+          : send(503, { error: { code: 503, message: 'Loading model', type: 'unavailable_error' } })
+      if (url.pathname === '/v1/models' || url.pathname === '/models')
+        return send(200, {
+          object: 'list',
+          data: [
+            {
+              id: alias,
+              object: 'model',
+              owned_by: 'llamacpp',
+              ...(process.env.FAKE_DECISION_NO_CAPABILITY === '1' ? {} : { capabilities }),
+              decision: { api_version: apiVersion, layout: 'laya', model_id: alias, model_version: '0.0.0' },
+            },
+          ],
+        })
+      if (!loaded())
+        return send(503, { error: { code: 503, message: 'Loading model', type: 'unavailable_error' } })
+      if (unauthorized(req))
+        return send(401, { error: { code: 401, message: 'Invalid API Key', type: 'authentication_error' } })
+      if (url.pathname === '/props' && req.method === 'GET')
+        return send(200, {
+          model_alias: alias,
+          model_path: modelPath,
+          build_info: 'b10269-fake',
+          decision: {
+            api_version: apiVersion,
+            endpoints: ['/v1/systemone', '/v1/router/score'],
+            layout: 'laya',
+            format: 'laya-v1',
+            model_id: alias,
+            model_version: '0.0.0',
+            spec_version: 1,
+            spec_sha256: specSha,
+            spec_source: argv.includes('--decision-spec') ? 'file' : 'default',
+            question_types: ['noul', 'choice', 'score'],
+            limits: {
+              max_questions: 16,
+              max_candidates: 16,
+              max_options: 20,
+              max_checks: 32,
+              max_tokens: 1024,
+            },
+            confidence: 'laya',
+            calibration: { method: 'none', calibrated: false, version: 'none' },
+            router: {
+              available: routerServes,
+              calibrated,
+              method: calibrated ? 'platt' : 'none',
+              card_schema: 'atomic.executor-card/1',
+              card_renderer: 'card-v1',
+            },
+            plan: { name: 'sequential', router: 'sequential', n_threads: threads },
+            device: 'cpu',
+            ...converted,
+            future_field: { added_by: 'a newer engine' },
+          },
+        })
+      const isSystemone = url.pathname === '/v1/systemone'
+      const isRouter = url.pathname === '/v1/router/score'
+      if (!(isSystemone || isRouter) || req.method !== 'POST')
+        return send(404, { error: { code: 404, message: 'File Not Found', type: 'not_found_error' } })
+      if (isRouter && !routerServes)
+        return fail(501, 'ROUTER_NOT_CALIBRATED', 'this model has no router calibration')
+      let body
+      try {
+        body = JSON.parse(raw.toString('utf8'))
+      } catch (e) {
+        return fail(400, 'MALFORMED_JSON', `malformed JSON: ${e.message}`)
+      }
+      if (typeof body !== 'object' || body === null || Array.isArray(body))
+        return fail(400, 'BODY_NOT_OBJECT', 'the body must be a JSON object')
+      const answer = () => (isSystemone ? systemone(body) : routerScore(body))
+      if (delayMs > 0) setTimeout(answer, delayMs)
+      else answer()
+
+      function systemone(b) {
+        if (b.state === undefined || b.state === null)
+          return fail(400, 'INVALID_REQUEST', 'state is required', 'state')
+        if (typeof b.questions !== 'object' || b.questions === null || Array.isArray(b.questions))
+          return fail(400, 'INVALID_REQUEST', 'questions must be an object', 'questions')
+        const answers = {}
+        for (const [id, q] of Object.entries(b.questions)) {
+          if (q?.type === 'noul') answers[id] = { type: 'noul', noul: 0.75, confidence: 0.75 }
+          else if (q?.type === 'choice' || q?.type === 'score') {
+            const labels = Array.isArray(q.criteria) ? q.criteria.map(String) : Object.keys(q.criteria ?? {})
+            if (labels.length === 0)
+              return fail(400, 'TOO_FEW_OPTIONS', 'no options', `questions.${id}.criteria`)
+            const rest = labels.length > 1 ? 0.3 / (labels.length - 1) : 0
+            const probabilities = Object.fromEntries(
+              labels.map((l, i) => [
+                q.type === 'score' ? String(i) : l,
+                i === 0 ? (labels.length > 1 ? 0.7 : 1) : rest,
+              ])
+            )
+            answers[id] =
+              q.type === 'choice'
+                ? {
+                    type: 'choice',
+                    choice: Array.isArray(q.criteria) ? q.criteria[0] : labels[0],
+                    probabilities,
+                    confidence: 0.5,
+                  }
+                : {
+                    type: 'score',
+                    score: labels.slice(1).reduce((s, _, i) => s + (i + 1) * rest, 0),
+                    probabilities,
+                    legend: Object.fromEntries(labels.map((l, i) => [String(i), q.criteria[i]])),
+                    confidence: 0.5,
+                  }
+          } else
+            return fail(
+              400,
+              'UNKNOWN_QUESTION_TYPE',
+              `unknown question type ${JSON.stringify(q?.type)}`,
+              `questions.${id}.type`
+            )
+        }
+        const n = raw.length
+        send(
+          200,
+          {
+            model: alias,
+            answers,
+            usage: { input_tokens: n, output_tokens: 0, evaluated_tokens: n },
+            latency_ms: 1.5,
+            timings: { queue_ms: 0, render_ms: 0.1, compute_ms: 1.4 },
+            warnings: [],
+            runtime,
+          },
+          bodyHeaders
+        )
+      }
+
+      function routerScore(b) {
+        for (const key of ['task', 'criterion', 'candidates'])
+          if (b[key] === undefined) return fail(400, 'INVALID_REQUEST', `${key} is required`, key)
+        if (!Array.isArray(b.candidates))
+          return fail(400, 'INVALID_REQUEST', 'candidates must be a list', 'candidates')
+        const seen = new Set()
+        const scores = []
+        for (const [i, c] of b.candidates.entries()) {
+          if (typeof c?.id !== 'string' || !/^[A-Za-z0-9._:/@+-]{1,128}$/.test(c.id))
+            return fail(400, 'INVALID_CANDIDATE_ID', 'bad candidate id', `candidates[${i}].id`)
+          if (seen.has(c.id))
+            return fail(400, 'DUPLICATE_CANDIDATE_ID', `duplicate id ${c.id}`, `candidates[${i}].id`)
+          seen.add(c.id)
+          if (
+            typeof c.card !== 'object' ||
+            c.card === null ||
+            typeof c.card.name !== 'string' ||
+            typeof c.card.kind !== 'string'
+          )
+            return fail(400, 'INVALID_CARD', 'card needs name and kind', `candidates[${i}].card`)
+          const measured = (c.card.checks ?? []).find((ch) => ch?.status === 'measured')
+          const p = measured ? Math.min(0.99, Math.max(0.01, measured.passed / measured.total)) : 0.5
+          scores.push({
+            id: c.id,
+            p_success: p,
+            logit: Math.log(p / (1 - p)),
+            calibrated,
+            input_tokens: 100,
+            truncated_tokens: 0,
+          })
+        }
+        send(
+          200,
+          {
+            object: 'router.scores',
+            model: alias,
+            scores,
+            usage: { input_tokens: 100 * scores.length, output_tokens: 0, passes: scores.length },
+            latency_ms: 2.5,
+            timings: { queue_ms: 0, render_ms: 0.2, compute_ms: 2.3 },
+            runtime,
+            warnings: [],
+          },
+          bodyHeaders
+        )
+      }
+    })
+  })
+  server.listen(port, '127.0.0.1', () => {
+    err(`main: server is listening on http://127.0.0.1:${server.address().port} - decision mode`)
+  })
+  process.on('SIGTERM', () => {
+    server.close()
+    process.exit(0)
+  })
 }

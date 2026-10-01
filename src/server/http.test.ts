@@ -112,6 +112,14 @@ describe('error envelope', () => {
     ]
     for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)
   })
+
+  it("maps the decision codes: configuration and engine are the caller's to fix, a stopped model is 503", () => {
+    expect(statusForCode('DECISION_NOT_CONFIGURED')).toBe(409)
+    expect(statusForCode('DECISION_ENGINE_UNSUPPORTED')).toBe(409)
+    expect(statusForCode('DECISION_CHECKPOINT_INCOMPLETE')).toBe(409)
+    expect(statusForCode('DECISION_MODEL_NOT_CHAT')).toBe(409)
+    expect(statusForCode('DECISION_UNAVAILABLE')).toBe(503)
+  })
 })
 
 describe('request helpers over a real socket', () => {

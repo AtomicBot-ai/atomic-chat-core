@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   fakeLlamaSpawn,
@@ -139,7 +139,8 @@ describe('load', () => {
         headers: { Authorization: `Bearer ${info.api_key}` },
       })
       expect(models.status).toBe(200)
-      const unauthorized = await fetch(`http://127.0.0.1:${info.port}/v1/models`)
+      // `/v1/models` is public on the real server, like `/health`; `/props` is behind the key.
+      const unauthorized = await fetch(`http://127.0.0.1:${info.port}/props`)
       expect(unauthorized.status).toBe(401)
 
       expect(runtime.getLoadedModels()).toEqual(['demo'])
@@ -338,6 +339,38 @@ describe('load', () => {
 })
 
 describe('failure paths', () => {
+  it('refuses a decision model before it unloads the chat model or spawns anything', async () => {
+    await data.writeModel('demo')
+    await data.writeModel('router', { model_path: 'llamacpp/models/router/laya.gguf' })
+    const folder = join(data.root, 'decision', 'models', 'laya-multilingual')
+    await mkdir(folder, { recursive: true })
+    await writeFile(join(folder, 'rl_agent_config.json'), '{}')
+    const folderYml = join(data.layout.provider('llamacpp-upstream').modelsDir, 'folder')
+    await mkdir(folderYml, { recursive: true })
+    await writeFile(
+      join(folderYml, 'model.yml'),
+      'model_path: decision/models/laya-multilingual\nname: folder\nsize_bytes: 1\n'
+    )
+    let spawned = 0
+    const spawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      readGgufMetadata: async (path) =>
+        path.endsWith('laya.gguf') ? { 'general.architecture': 'laya' } : { 'general.architecture': 'llama' },
+      spawn: (spec, opts) => {
+        spawned++
+        return spawn(spec, opts)
+      },
+    })
+    await runtime.load('demo')
+
+    for (const id of ['router', 'folder'])
+      await expect(runtime.load(id, { overrides: { auto_unload: true } })).rejects.toMatchObject({
+        code: 'DECISION_MODEL_NOT_CHAT',
+      })
+    expect(spawned).toBe(1)
+    expect(runtime.getLoadedModels()).toEqual(['demo'])
+  })
+
   it('classifies an out-of-memory crash and leaves no session or journal entry behind', async () => {
     await data.writeModel('oom')
     const runtime = await makeRuntime({ spawn: fakeLlamaSpawn({ mode: 'oom' }) })

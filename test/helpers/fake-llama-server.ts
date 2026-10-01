@@ -49,6 +49,26 @@ export interface FakeLlamaOptions {
   completionSteps?: string[]
   /** One scripted tool turn: call this tool when it is offered, then repeat its result after the reply. */
   toolCall?: { name: string; arguments?: Record<string, unknown> }
+  /**
+   * A build with the decision role: `-h` lists `--decision`, and started with it the fake is a
+   * decision server. `true` for the defaults (API version 1, router calibrated, no delays).
+   */
+  decision?: boolean | FakeDecisionOptions
+}
+
+export interface FakeDecisionOptions {
+  /** `/props.decision.api_version`; 1 by default. */
+  apiVersion?: number
+  /** `false`: no router calibration, `/v1/router/score` answers 501 unless allowed uncalibrated. */
+  calibrated?: boolean
+  /** Before each systemone / router answer. */
+  delayMs?: number
+  /** `/health` answers 503 this long after the start. */
+  loadMs?: number
+  /** `/v1/models` lists no `decision` capability. */
+  noCapability?: boolean
+  /** A build from before the converter: no `--decision-convert-cache`, `-m <folder>` fails. */
+  noConvert?: boolean
 }
 
 function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
@@ -64,6 +84,16 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
   if (options.label) env['FAKE_LLAMA_LABEL'] = options.label
   if (options.toolCall) env['FAKE_LLAMA_TOOL_CALL'] = JSON.stringify(options.toolCall)
   if (options.completionSteps) env['FAKE_LLAMA_COMPLETION_STEPS'] = JSON.stringify(options.completionSteps)
+  if (options.decision) {
+    const d = options.decision === true ? {} : options.decision
+    env['FAKE_LLAMA_DECISION'] = '1'
+    if (d.apiVersion !== undefined) env['FAKE_DECISION_API_VERSION'] = String(d.apiVersion)
+    if (d.calibrated === false) env['FAKE_DECISION_CALIBRATED'] = '0'
+    if (d.delayMs) env['FAKE_DECISION_DELAY_MS'] = String(d.delayMs)
+    if (d.loadMs) env['FAKE_DECISION_LOAD_MS'] = String(d.loadMs)
+    if (d.noCapability) env['FAKE_DECISION_NO_CAPABILITY'] = '1'
+    if (d.noConvert) env['FAKE_DECISION_NO_CONVERT'] = '1'
+  }
   return env
 }
 
@@ -82,4 +112,14 @@ export function fakeLlamaSpawn(options: FakeLlamaOptions = {}) {
 /** Drop-in for one-shot probes (`--list-devices`, `-h`). */
 export function fakeLlamaSpawnRaw(options: FakeLlamaOptions = {}) {
   return (spec: SpawnSpec): ManagedProcess => spawnManaged(rewrite(spec, options))
+}
+
+/**
+ * Drop-in for the decision module's `spawn` seam: the fake as a decision-capable build (unless the
+ * options say otherwise), started with the decision module's own argv and environment.
+ */
+export function fakeDecisionSpawn(options: FakeLlamaOptions = {}) {
+  const withDecision = { ...options, decision: options.decision ?? true }
+  return (spec: SpawnSpec, onLine: (stream: 'stdout' | 'stderr', line: string) => void): ManagedProcess =>
+    spawnManaged(rewrite(spec, withDecision), onLine, { captureOutput: false })
 }

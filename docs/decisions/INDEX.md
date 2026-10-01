@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-09-30** — [The decision model is its own core module, outside the sessions registry](2026-09-30-the-decision-model-is-its-own-core-module.md) — adds the `decision` settings section, `/atomic/v1/decision/*`, `decision:*` events and the `/v1/systemone`, `/v1/router/score` passthrough.
 - **2026-09-30** — [Gate embedded MTP on every upstream MTP architecture](2026-09-30-gate-embedded-mtp-on-every-upstream-mtp-architecture.md) — 2 → 14 architectures, matching llama.cpp b10809.
 - **2026-09-30** — [Fall back to offload when the GPU runs out of memory](2026-09-30-fall-back-to-offload-when-the-gpu-runs-out-of-memory.md) — adds `LoadDiffusionModelRequest.offloadFallback`.
 - **2026-09-30** — [Keep the video ETA past its forecast](2026-09-30-keep-the-video-eta-past-its-forecast.md) — prices the Metal decode ×10 and doubles a spent forecast instead of going `null`.

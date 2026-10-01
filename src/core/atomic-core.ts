@@ -20,6 +20,7 @@ import type {
   UnloadResult,
 } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
+import type { DecisionService } from '../decision/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
@@ -67,6 +68,8 @@ export interface AtomicCoreParts {
   remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
   /** Image generation (stage 7): its own module, not a runtime. */
   diffusion: DiffusionService
+  /** The decision model: its own module and process, outside the sessions registry. */
+  decision: DecisionService
   /** Where a failed load and the public server's failures are reported; absent, nothing is. */
   errors?: ErrorSink | undefined
   /** The same reporter, for a host that changes consent, user or tags at run time. */
@@ -120,6 +123,11 @@ export class AtomicCore {
   private readonly remoteAccess: RemoteAccessManager
   /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
   readonly diffusion: DiffusionService
+  /**
+   * The decision model (`llama-server --decision`): `scoreCandidates` and `decide` for the router,
+   * fail-open; it survives model switches and the chat auto-unload.
+   */
+  readonly decision: DecisionService
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -138,6 +146,7 @@ export class AtomicCore {
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
+    this.decision = parts.decision
     this.errors = parts.errors
     this.telemetry = parts.telemetry
     this.localSessions = new LocalSessions({
@@ -175,6 +184,7 @@ export class AtomicCore {
         dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
         images: this.diffusion.imagesBackend(),
         videos: this.diffusion.videosBackend(),
+        decision: this.decision.publicBackend(),
         errors: parts.errors,
       }),
     })
@@ -317,6 +327,8 @@ export class AtomicCore {
     if (this.appLeaseTimer) clearInterval(this.appLeaseTimer)
     this.shutdownPromise = (async () => {
       await this.publicServer.stop()
+      // The public server no longer forwards to it; the decision process goes next.
+      await this.decision.shutdown()
       // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
       await this.diffusion.shutdown()
       for (const runtime of this.runtimes.values()) await runtime.shutdown()

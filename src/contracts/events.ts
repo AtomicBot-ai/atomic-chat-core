@@ -12,6 +12,7 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.js'
 
@@ -84,7 +85,11 @@ export interface CoreEvents {
     optimal: unknown | null
   }
 
-  'settings:changed': { provider: LocalProviderId | 'server' | 'cloud'; key: string; value: unknown }
+  'settings:changed': {
+    provider: LocalProviderId | 'server' | 'cloud' | 'decision'
+    key: string
+    value: unknown
+  }
 
   'session:started': SessionInfo & { provider: LocalProviderId }
   'session:died': {
@@ -126,6 +131,14 @@ export interface CoreEvents {
   /** Video generation shares `state` and `error`; its jobs have their own two, so image consumers see no new shape. */
   'diffusion:video-progress': DiffusionVideoProgressEvent
   'diffusion:video-job': DiffusionVideoJobEvent
+
+  /**
+   * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). `state` on every
+   * status change (the payload is the whole `DecisionStatus`, like `GET /decision/status`); `error`
+   * for a failure nobody is awaiting: a crash, a failed restart, restarts given up.
+   */
+  'decision:state': DecisionStateEvent
+  'decision:error': DecisionErrorEvent
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen
