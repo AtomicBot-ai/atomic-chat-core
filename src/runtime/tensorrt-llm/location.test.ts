@@ -87,3 +87,27 @@ describe('windowsModelLocation', () => {
     expect(location.free_bytes).toBe(5)
   })
 })
+
+describe('windowsModelLocation: a distribution gone behind the app’s back', () => {
+  it('is MANAGED_ADAPTER_UNAVAILABLE, not an I/O error', async () => {
+    const gone: WslDistributionTransport = {
+      name: 'AtomicChat',
+      exec: async () => ({
+        code: 255,
+        stdout: 'There is no distribution with the supplied name.',
+        stderr: '',
+      }),
+      hold: () => {
+        throw new Error('no hold')
+      },
+    }
+    await expect(
+      windowsModelLocation({
+        records: { read: async () => RECORD },
+        scopeKey: async () => 'k1',
+        transport: () => gone,
+        volumeFreeBytes: async () => 1,
+      })
+    ).rejects.toMatchObject({ code: 'MANAGED_ADAPTER_UNAVAILABLE' })
+  })
+})

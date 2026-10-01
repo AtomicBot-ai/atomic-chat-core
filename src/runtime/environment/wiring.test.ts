@@ -725,3 +725,25 @@ describe('the Windows recipe wired (change add-tensorrt-llm-windows, task 2.10)'
     })
   })
 })
+
+describe('environmentAvailability before a probe', () => {
+  const ready = [
+    {
+      installation_id: 'i',
+      engine_id: 'tensorrt-llm',
+      environment_id: 'default',
+      active_descriptor_id: 'd',
+      candidate_descriptor_id: null,
+      availability: 'supported' as const,
+      status: 'ready' as const,
+    },
+  ]
+  it('is what the platform says before a probe (unsupported on Windows), supported once an engine is installed', () => {
+    expect(environmentAvailability(true, null, [], 'unsupported')).toBe('unsupported')
+    expect(environmentAvailability(true, null, ready, 'unsupported')).toBe('supported')
+    expect(environmentAvailability(true, 'prerequisite-blocked', ready, 'unsupported')).toBe(
+      'prerequisite-blocked'
+    )
+    expect(environmentAvailability(true, null, [])).toBe('setup-required')
+  })
+})

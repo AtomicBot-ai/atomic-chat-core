@@ -1503,6 +1503,21 @@ describe('ManagedTextLifecycle on Windows: port, forwarding, the distribution he
     expect(docker.containers.size).toBe(0)
   })
 
+  it('a slow start asks the guest only every few polls, not a wsl.exe per poll', async () => {
+    readyAt = 20_000 // twenty polls before Windows reaches the engine
+    let asked = 0
+    const { deployment } = wslDeployment({
+      inside: () => {
+        asked += 1
+        return false
+      },
+    })
+    await build({ deployment })
+    await lifecycle.load(request_())
+    expect(asked).toBeGreaterThan(0)
+    expect(asked).toBeLessThanOrEqual(5)
+  })
+
   it('the Windows port taken by another program: one new publication, then served', async () => {
     let attempt = 0
     const { deployment } = wslDeployment({

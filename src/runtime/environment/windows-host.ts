@@ -47,7 +47,7 @@ async function readIfPresent(path: string): Promise<string | null> {
 }
 
 /** Free space at the nearest ancestor of `path` that exists: the distribution's directory may not yet. */
-async function freeAt(path: string): Promise<number | null> {
+export async function freeBytesAtNearest(path: string): Promise<number | null> {
   let current = path
   for (;;) {
     try {
@@ -91,7 +91,7 @@ export function realWindowsHost(
       },
     },
     localAppData: env['LOCALAPPDATA'] ?? win32.join(profile, 'AppData', 'Local'),
-    freeDiskBytes: freeAt,
+    freeDiskBytes: freeBytesAtNearest,
     fileSize: async (path) => {
       try {
         return (await stat(path)).size

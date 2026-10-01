@@ -9,11 +9,9 @@
  * guest's disk can grow only as far as that volume lets it. Before the distribution exists there is no
  * such folder: `MANAGED_ADAPTER_UNAVAILABLE`, and no download starts.
  */
-import { statfs } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { TensorrtLlmModelLocation } from '../../contracts/index.js'
-import { parseDfAvail } from '../environment/index.js'
+import { freeBytesAtNearest, parseDfAvail } from '../environment/index.js'
 import type { WindowsEnvironmentRecord } from '../environment/index.js'
 import {
   ensureGuestScope,
@@ -23,21 +21,10 @@ import {
   type WslDistributionTransport,
 } from '../wsl/index.js'
 
-async function freeAtNearest(path: string): Promise<number | null> {
-  for (let current = path; ; current = dirname(current)) {
-    try {
-      const info = await statfs(current)
-      return Number(info.bavail) * Number(info.bsize)
-    } catch {
-      if (dirname(current) === current) return null
-    }
-  }
-}
-
 /** Linux: `<data>/tensorrt-llm/models`, with the free space of the volume it is (or will be) on. */
 export async function linuxModelLocation(
   root: string,
-  freeBytes: (path: string) => Promise<number | null> = freeAtNearest
+  freeBytes: (path: string) => Promise<number | null> = freeBytesAtNearest
 ): Promise<TensorrtLlmModelLocation> {
   return { root, free_bytes: await freeBytes(root).catch(() => null) }
 }
@@ -71,7 +58,14 @@ export async function windowsModelLocation(
   const key = await deps.scopeKey()
   const transport = deps.transport(record.distribution.name)
   const guestRoot = guestModelsRoot(key)
-  await ensureGuestScope(transport, key)
+  // A distribution unregistered behind the app's back is no environment at all for a client.
+  await ensureGuestScope(transport, key).catch((error: unknown) => {
+    throw new AtomicCoreError(
+      'MANAGED_ADAPTER_UNAVAILABLE',
+      'Atomic Chat’s WSL distribution does not answer; set the environment up again.',
+      error instanceof Error ? error.message : String(error)
+    )
+  })
   const [guest, volume] = await Promise.all([
     transport
       .exec(['df', '--output=avail', '-B1', guestRoot], { user: 'root', timeoutMs: 120_000 })

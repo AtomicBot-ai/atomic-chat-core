@@ -423,10 +423,10 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     return { plan, host_step: hostStep, image_present: present }
   }
 
-  /** WSL answers `--version` and `--status`: the elevated step's work is in effect. */
+  /** WSL answers `--version` and `--status`: the elevated step's work is in effect. Two calls, nothing else. */
   const wslReady = async (): Promise<boolean> => {
-    const facts = await probeWindowsHost(deps.host.probeDeps)
-    return facts.wsl.installed === true && facts.wsl.ready === true
+    if ((await wsl.command(['--version'], { timeoutMs: 30_000 })).code !== 0) return false
+    return (await wsl.command(['--status'], { timeoutMs: 30_000 })).code === 0
   }
 
   const blocked = (message: string, reason: string): AtomicCoreError =>

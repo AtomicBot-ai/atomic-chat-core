@@ -47,6 +47,18 @@ export async function readOrCreateGuestScopeKey(
   return key
 }
 
+/** One read (or creation) of the key shared by every caller: two first callers racing would each create one. */
+export function guestScopeKeyReader(file: string, newKey: () => string = randomUUID): () => Promise<string> {
+  let read: Promise<string> | null = null
+  return () => {
+    read ??= readOrCreateGuestScopeKey(file, newKey).catch((error: unknown) => {
+      read = null
+      throw error
+    })
+    return read
+  }
+}
+
 /** `models/tensorrt-llm`, `caches`, `heartbeats`, `watchdog` under the scope's guest root, owned by uid 1000. */
 export async function ensureGuestScope(transport: WslDistributionTransport, scopeKey: string): Promise<void> {
   const root = guestScopeRoot(scopeKey)

@@ -131,12 +131,14 @@ export async function resolveMinimumAppVersion(
 export function environmentAvailability(
   hasRecipe: boolean,
   assessed: ManagedAvailability | null,
-  installations: readonly RuntimeInstallation[]
+  installations: readonly RuntimeInstallation[],
+  unprobed: ManagedAvailability = 'setup-required'
 ): ManagedAvailability {
   if (!hasRecipe) return 'unsupported'
-  const base = assessed ?? 'setup-required'
+  const base = assessed ?? unprobed
   const ready = installations.some((installation) => installation.status === 'ready')
-  return base === 'setup-required' && ready ? 'supported' : base
+  // A ready installation was set up on this machine: supported, even before this core probed it.
+  return (base === 'setup-required' || assessed === null) && ready ? 'supported' : base
 }
 
 export interface WireManagedRuntimesOptions {
@@ -302,7 +304,11 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
                 newId: options.newId,
               }
         )
-  if (view[0] !== undefined) view[0].availability = environmentAvailability(provisioner !== null, null, [])
+  // Windows says nothing until a probe has seen the machine (change `add-tensorrt-llm-windows`, D14):
+  // without `windows.json` in conf the provider must stay hidden, and only a probe can tell.
+  const unprobed: ManagedAvailability = executor === 'wsl-docker' ? 'unsupported' : 'setup-required'
+  if (view[0] !== undefined)
+    view[0].availability = environmentAvailability(provisioner !== null, null, [], unprobed)
 
   /** Re-read the installations (shared with the other scope's core) and what they pin. */
   const refreshInstallations = async (): Promise<void> => {
@@ -321,7 +327,8 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     environment.availability = environmentAvailability(
       provisioner !== null,
       assessed,
-      environment.installations
+      environment.installations,
+      unprobed
     )
     environment.minimum_app_version = await resolveMinimumAppVersion(descriptors, environment.installations)
   }

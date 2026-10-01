@@ -179,7 +179,8 @@ describe('wireManagedEnvironment on Windows (change add-tensorrt-llm-windows, ta
     expect(wired.platform).toBe('win32')
     expect(wired.arch).toBe('x64')
     expect(wired.managed.environments()[0]?.executor).toBe('wsl-docker')
-    expect(wired.managed.environments()[0]?.availability).toBe('setup-required')
+    // Nothing is offered on Windows before a probe has seen the machine (D14).
+    expect(wired.managed.environments()[0]?.availability).toBe('unsupported')
     expect(await wired.containers.resolve()).toBeNull()
     expect(wired.windows).toBeDefined()
     expect(await wired.windows?.records.read()).toBeNull()

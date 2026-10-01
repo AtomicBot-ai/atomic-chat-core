@@ -121,6 +121,11 @@ export interface ManagedLifecycleTimings {
    * inside the guest while Windows cannot reach it before that counts as a forwarding failure.
    */
   forwardingConfirmPolls: number
+  /**
+   * WSL: the guest is asked once every this many polls (each ask is a `wsl.exe`), then every poll
+   * while it answers, until `forwardingConfirmPolls` confirm it.
+   */
+  guestProbeEveryPolls: number
   /** WSL: how many times a load publishes the port again when another program holds it on Windows. */
   republishAttempts: number
 }
@@ -134,6 +139,7 @@ export const DEFAULT_MANAGED_LIFECYCLE_TIMINGS: ManagedLifecycleTimings = {
   portAttempts: 3,
   monitorIntervalMs: 5_000,
   forwardingConfirmPolls: 3,
+  guestProbeEveryPolls: 5,
   republishAttempts: 1,
 }
 
@@ -912,6 +918,7 @@ export class ManagedTextLifecycle {
     let stage: EngineLoadStage = advanceStage('starting-container', adapter.stageMarkers, '')
     let redirectWarned = false
     let insideStreak = 0
+    let polls = 0
     for (;;) {
       this.checkAborted(signal)
       const state = await inspectContainer(this.deps.exec, containerId)
@@ -940,7 +947,8 @@ export class ManagedTextLifecycle {
       if (outcome === 'ready') return
       // WSL: answering inside the guest while Windows cannot reach it is not "still starting".
       const inGuest = this.deps.deployment.probeInGuest
-      if (inGuest !== undefined) {
+      polls += 1
+      if (inGuest !== undefined && (insideStreak > 0 || polls % this.timings.guestProbeEveryPolls === 0)) {
         insideStreak =
           (await inGuest(target, adapter.readiness).catch(() => 'not-ready')) === 'ready'
             ? insideStreak + 1
@@ -1137,6 +1145,8 @@ export class ManagedTextLifecycle {
     for (const entry of [...this.entries.values()]) {
       if (entry.state !== 'ready' && entry.state !== 'loading') continue
       entry.distributionStopped = true
+      // Let go at once: nothing of this session runs any more, and nothing may hold the VM up for it.
+      entry.lease?.release()
       if (entry.state === 'loading') {
         entry.loadAbort.abort()
         continue

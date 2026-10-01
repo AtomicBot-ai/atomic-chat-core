@@ -58,7 +58,7 @@ import {
   directoryGuestMount,
   guestScopePaths,
   guestScopeRoot,
-  readOrCreateGuestScopeKey,
+  guestScopeKeyReader,
   WSL_LOCALHOST_MOUNT,
   type DistributionKeeper,
   type GuestMount,
@@ -238,7 +238,7 @@ function wireWindowsEnvironment(
     }
     return existing
   }
-  const scopeKey = () => readOrCreateGuestScopeKey(options.layout.managed.guestScopeFile)
+  const scopeKey = guestScopeKeyReader(options.layout.managed.guestScopeFile)
   const guest = async () => {
     const record = await records.read().catch(() => null)
     return record === null ? null : wsl.distribution(record.distribution.name)

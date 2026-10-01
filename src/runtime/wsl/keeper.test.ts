@@ -59,7 +59,7 @@ describe('createDistributionKeeper', () => {
     expect(f.live).toHaveLength(1)
   })
 
-  it('tells every subscriber when the VM stops under a hold, and holds again for whoever still needs it', async () => {
+  it('tells every subscriber when the VM stops under a hold, and starts nothing again by itself', async () => {
     const f = fake()
     const keeper = createDistributionKeeper(f.transport)
     const stops: string[] = []
@@ -68,9 +68,12 @@ describe('createDistributionKeeper', () => {
     f.shutdown()
     await tick()
     expect(stops).toEqual(['stopped'])
-    // The lease was not released by its holder: the keeper starts a new hold (which starts the VM again).
+    // Restarting on its own would boot the VM the user stopped, or loop on a missing distribution.
+    expect(f.started()).toBe(1)
+    expect(keeper.held()).toBe(false)
+    // The next one who needs it holds it again.
+    keeper.acquire('load')
     expect(f.started()).toBe(2)
-    expect(f.live).toHaveLength(1)
   })
 
   it('does not report its own release as a stop', async () => {

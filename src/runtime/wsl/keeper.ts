@@ -7,9 +7,11 @@
  * model, a file operation on models — takes a lease, and one such process runs while any lease is held
  * and none when there is none, so WSL may stop the VM and give its memory back to Windows.
  *
- * When the holding process ends without being released — `wsl --shutdown`, the VM crashed — every
- * subscriber hears of it (a session then ends with `wsl-stopped`), and whoever still holds a lease gets
- * a new hold, which starts the distribution again for them.
+ * When the holding process ends without being released — `wsl --shutdown`, the VM crashed, a
+ * distribution not there (yet) — every subscriber hears of it (a session then ends with
+ * `wsl-stopped`), and nothing is started again on its own: a new hold would boot the VM the user just
+ * stopped, and against a distribution that does not exist it would end at once and be restarted in a
+ * loop. The next `acquire` holds again.
  */
 import type { WslDistributionTransport, WslHold } from './transport.js'
 
@@ -45,8 +47,6 @@ export function createDistributionKeeper(transport: WslDistributionTransport): D
           // One subscriber failing must not keep the others from hearing it.
         }
       }
-      // Whoever still needs the distribution gets it back.
-      if (leases.size > 0 && hold === null) start()
     })
   }
 

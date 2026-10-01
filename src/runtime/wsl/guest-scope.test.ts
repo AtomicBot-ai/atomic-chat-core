@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { WslDistributionTransport, WslExecOptions } from './transport.js'
-import { ensureGuestScope, readOrCreateGuestScopeKey } from './guest-scope.js'
+import { ensureGuestScope, guestScopeKeyReader, readOrCreateGuestScopeKey } from './guest-scope.js'
 
 let dir: string
 beforeEach(async () => {
@@ -68,5 +68,26 @@ describe('ensureGuestScope', () => {
       ],
     ])
     expect(calls.every((call) => call.options.user === 'root')).toBe(true)
+  })
+})
+
+describe('guestScopeKeyReader', () => {
+  it('two first callers racing get the same key, created once', async () => {
+    const file = join(dir, 'guest-scope.json')
+    let made = 0
+    const read = guestScopeKeyReader(file, () => `k-000${++made}`)
+    const [a, b] = await Promise.all([read(), read()])
+    expect(a).toBe('k-0001')
+    expect(b).toBe('k-0001')
+    expect(made).toBe(1)
+  })
+
+  it('a failed read is not remembered: the next call reads again', async () => {
+    const file = join(dir, 'guest-scope.json')
+    await writeFile(file, 'not json')
+    const read = guestScopeKeyReader(file, () => 'k-0001')
+    await expect(read()).rejects.toThrow()
+    await rm(file)
+    expect(await read()).toBe('k-0001')
   })
 })
