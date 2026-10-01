@@ -14,6 +14,7 @@ import {
   type ManagedPhase,
   type ModelCompatibility,
   type RequirementPlan,
+  type EnvironmentManifest,
   type RuntimeDescriptor,
 } from './environment.js'
 import { SESSION_LOAD_STAGES } from './session.js'
@@ -226,6 +227,7 @@ describe('managed environment wire shapes', () => {
       recipe_id: 'ubuntu-24.04-adopt',
       recipe_digest: 'sha256:ee',
       descriptor_id: null,
+      environment_manifest_id: null,
       image_digest: null,
       adopts_existing_engine: true,
       system_changes: [],
@@ -255,6 +257,7 @@ describe('managed environment wire shapes', () => {
       recipe_id: 'ubuntu-24.04-docker-ce',
       recipe_digest: 'sha256:ee',
       descriptor_id: null,
+      environment_manifest_id: null,
       image_digest: null,
       adopts_existing_engine: false,
       system_changes: [
@@ -416,12 +419,6 @@ describe('managed environment wire shapes', () => {
           note: 'BF16, 4.1 GB of weights.',
         },
       ],
-      recipes: [
-        {
-          recipe_id: 'linux.install-container-runtime',
-          distributions: [{ id: 'ubuntu', version_id: '24.04', arch: 'x86_64' }],
-        },
-      ],
       download_bytes: 21_122_819_324,
       required_disk_bytes: 67_645_734_912,
       notices: ['By pulling and using the TensorRT-LLM container image you accept the NVIDIA EULA.'],
@@ -439,12 +436,25 @@ describe('managed environment wire shapes', () => {
       reasoning_parser: null,
       structured_output: true,
     })
-    // A recipe carries only an id and the distributions it is qualified for, never a command.
-    expect(back.recipes[0]).toEqual({
-      recipe_id: 'linux.install-container-runtime',
-      distributions: [{ id: 'ubuntu', version_id: '24.04', arch: 'x86_64' }],
-    })
+    // Install recipes are the environment manifest's, never the descriptor's.
+    expect('recipes' in back).toBe(false)
     expect('entrypoint_digest' in back).toBe(false)
+  })
+
+  it('round-trips an environment manifest: a recipe is an id and its distributions, never a command', () => {
+    const manifest: EnvironmentManifest = {
+      schema_version: 1,
+      manifest_id: 'linux-r1',
+      platform: 'linux',
+      minimum_core_version: '0.7.5',
+      recipes: [
+        {
+          recipe_id: 'linux.install-container-runtime',
+          distributions: [{ id: 'ubuntu', version_id: '24.04', arch: 'x86_64' }],
+        },
+      ],
+    }
+    expect(roundTrip(manifest)).toEqual(manifest)
   })
 
   it('keeps the phases a setup can be in, including both waits that need the user to come back', () => {

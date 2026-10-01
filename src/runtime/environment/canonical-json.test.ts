@@ -126,6 +126,7 @@ describe('planDigest', () => {
       descriptor_id: 'trtllm-1.3.0rc27',
       image_digest: 'sha256:bb',
     },
+    environment_manifest_id: 'linux-r1',
     host: { gpu_ids: ['GPU-a', 'GPU-b'], disk_sufficient: true, docker_root_dir: '/var/lib/docker' },
   }
 
@@ -164,6 +165,11 @@ describe('planDigest', () => {
     )
   })
 
+  it('changes when the plan was judged against another environment manifest, or none (extract-environment-manifest D4)', () => {
+    expect(planDigest({ ...plan, environment_manifest_id: 'linux-r2' })).not.toBe(planDigest(plan))
+    expect(planDigest({ ...plan, environment_manifest_id: null })).not.toBe(planDigest(plan))
+  })
+
   it('separates a plan that installs nothing from one that installs the runtime', () => {
     // Adopting the host's working Docker asks for no privilege at all; consenting to that is not
     // consenting to a package install.
@@ -181,6 +187,7 @@ describe('planDigest', () => {
   it('is stable for the same plan, whatever order its fields were built in', () => {
     const rebuilt: PlanFingerprint = {
       host: plan.host,
+      environment_manifest_id: plan.environment_manifest_id,
       descriptor: plan.descriptor,
       may_require_reboot: plan.may_require_reboot,
       may_require_relogin: plan.may_require_relogin,

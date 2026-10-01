@@ -135,6 +135,12 @@ export interface PlanFingerprint {
     descriptor_id: string
     image_digest: Sha256Digest
   } | null
+  /**
+   * The environment manifest the host was judged against (change `extract-environment-manifest`,
+   * D4): which distributions the install recipe was qualified for. A newly published manifest is a
+   * new plan, approved again; null when no manifest was available.
+   */
+  environment_manifest_id: string | null
   host: PlanHostFingerprint | null
 }
 

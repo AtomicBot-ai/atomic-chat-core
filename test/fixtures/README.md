@@ -22,4 +22,8 @@
 - `core-log/` — `sample.log` pins `core.log`'s on-disk format as a core → app contract: unlike `app/`, the
   core is the source of truth here, and the app copies this file into its own tests. Produced and replayed
   by `test/contract/core-log.test.ts`; see `core-log/README.md`.
+- `runtimes/` — verbatim copies of published conf documents: `tensorrt-llm.json` is
+  `atomic-chat-conf/runtimes/tensorrt-llm.json` (`tensorrt-llm-1.2.1-r2`) and `environments/linux.json` is
+  `atomic-chat-conf/runtimes/environments/linux.json` (`linux-r1`), both as of conf commit `2676324`. Replace a file
+  with conf's, never edit it by hand: the parsers are tested against what conf CI accepted.
 - Everything else is hand-written test data owned by this repo.

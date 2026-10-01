@@ -13,7 +13,8 @@
  *   <data>/remote-access-tunnel.json  (the app's 2.0.40 tunnel journal: reaped once at startup, never written)
  *   <data>/atomic-core/  — the only new folder (settings, credentials, lock, journal, logs)
  *   <dataDir>/atomic-managed-runtimes/{environment.json, environment.lock, installations/, operations/,
- *                                       descriptors/<descriptor_id>.json, descriptors/latest.json}
+ *                                       descriptors/<descriptor_id>.json, descriptors/latest.json,
+ *                                       environment-manifests/<manifest_id>.json, environment-manifests/latest.json}
  *                                                        (managed text runtimes, shared by the app and CLI scopes)
  *   <data>/atomic-core/managed-runtimes/executions/  (task 2.10 execution journal: this scope's own
  *                                                      model containers, one file per container id)
@@ -354,12 +355,19 @@ export interface ManagedSharedPaths {
   descriptorFile(descriptorId: string): string
   /** Points at the `descriptor_id` of the newest descriptor a fresh setup would use. */
   descriptorLatestFile: string
+  /** Accepted environment manifests, cached by `manifest_id` (change `extract-environment-manifest`). */
+  environmentManifestsDir: string
+  /** `<environmentManifestsDir>/<encoded manifest_id>.json`: the bytes of one accepted manifest. */
+  environmentManifestFile(manifestId: string): string
+  /** Points at the `manifest_id` of the newest manifest a probe before consent would use. */
+  environmentManifestLatestFile: string
 }
 
 export function managedSharedPaths(root: string): ManagedSharedPaths {
   const installationsDir = join(root, 'installations')
   const operationsDir = join(root, 'operations')
   const descriptorsDir = join(root, 'descriptors')
+  const environmentManifestsDir = join(root, 'environment-manifests')
   return {
     root,
     environmentFile: join(root, 'environment.json'),
@@ -372,6 +380,10 @@ export function managedSharedPaths(root: string): ManagedSharedPaths {
     operationFile: (operationId) => join(operationsDir, `${encodeManagedId(operationId)}.json`),
     descriptorFile: (descriptorId) => join(descriptorsDir, `${encodeManagedId(descriptorId)}.json`),
     descriptorLatestFile: join(descriptorsDir, 'latest.json'),
+    environmentManifestsDir,
+    environmentManifestFile: (manifestId) =>
+      join(environmentManifestsDir, `${encodeManagedId(manifestId)}.json`),
+    environmentManifestLatestFile: join(environmentManifestsDir, 'latest.json'),
   }
 }
 

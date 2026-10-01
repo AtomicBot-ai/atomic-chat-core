@@ -64,7 +64,6 @@ function baseDescriptor(overrides: Partial<RuntimeDescriptor> = {}): RuntimeDesc
     ],
     model_families: {},
     curated_models: [],
-    recipes: [],
     download_bytes: 0,
     required_disk_bytes: 0,
     notices: [],

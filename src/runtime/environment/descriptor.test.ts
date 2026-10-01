@@ -11,11 +11,12 @@ const broken = (mutate: (doc: Record<string, unknown>) => void): unknown => {
 }
 
 describe('parseRuntimeDescriptor', () => {
-  it('accepts the published TensorRT-LLM descriptor verbatim (conf commit c21e520)', () => {
+  it('accepts the published TensorRT-LLM descriptor verbatim (conf commit 2676324)', () => {
     const fixture = readRuntimeFixture('tensorrt-llm.json')
     const descriptor = parseRuntimeDescriptor(fixture)
 
-    expect(descriptor.descriptor_id).toBe('tensorrt-llm-1.2.1-r1')
+    expect(descriptor.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
+    expect(descriptor.minimum_core_version).toBe('0.7.5')
     expect(descriptor.engine_id).toBe('tensorrt-llm')
     expect(descriptor.minimum_driver_version).toBe('590.44.01')
     expect(descriptor.image['linux/amd64'].repository).toBe('nvcr.io/nvidia/tensorrt-llm/release')
@@ -23,9 +24,7 @@ describe('parseRuntimeDescriptor', () => {
     expect(descriptor.probe_image['linux/amd64'].repository).toBe('nvcr.io/nvidia/cuda')
     expect(descriptor.supported_architectures).toContain('LlamaForCausalLM')
     expect(descriptor.curated_models).toHaveLength(11)
-    expect(descriptor.recipes).toHaveLength(1)
-    expect(descriptor.recipes[0]?.recipe_id).toBe('linux.install-container-runtime')
-    expect(descriptor.recipes[0]?.distributions.length).toBeGreaterThan(0)
+    expect('recipes' in descriptor).toBe(false)
   })
 
   it('reads a format only present via its exclusion list, keeping the excluded capabilities above the minimum', () => {
@@ -100,22 +99,6 @@ describe('parseRuntimeDescriptor', () => {
       },
     ],
     [
-      'a recipe distribution id with an uppercase letter (the distribution id pattern)',
-      (doc: Record<string, unknown>) => {
-        const recipes = doc['recipes'] as Array<Record<string, unknown>>
-        const distributions = recipes[0]?.['distributions'] as Array<Record<string, unknown>>
-        distributions[0] = { ...distributions[0], id: 'Ubuntu' }
-      },
-    ],
-    [
-      'a recipe distribution version_id that is not digits and dots',
-      (doc: Record<string, unknown>) => {
-        const recipes = doc['recipes'] as Array<Record<string, unknown>>
-        const distributions = recipes[0]?.['distributions'] as Array<Record<string, unknown>>
-        distributions[0] = { ...distributions[0], version_id: '24.04-lts' }
-      },
-    ],
-    [
       'a quantization format with an uppercase letter (the format pattern)',
       (doc: Record<string, unknown>) => {
         const quant = doc['quantization'] as Array<Record<string, unknown>>
@@ -145,13 +128,18 @@ describe('parseRuntimeDescriptor', () => {
     expect(() => parseRuntimeDescriptor(doc)).toThrow(/linux\/arm64/)
   })
 
-  it('rejects a recipe distribution carrying a command instead of a plain identity', () => {
+  it('rejects a descriptor with recipes: install recipes are the environment manifest’s (the r1 shape)', () => {
     const doc = broken((d) => {
-      const recipes = d['recipes'] as Array<Record<string, unknown>>
-      const first = recipes[0] as Record<string, unknown>
-      first['command'] = 'apt-get install -y docker-ce'
+      d['recipes'] = (readRuntimeFixture('environments/linux.json') as { recipes: unknown }).recipes
     })
-    expect(() => parseRuntimeDescriptor(doc)).toThrow(AtomicCoreError)
+    let caught: unknown
+    try {
+      parseRuntimeDescriptor(doc)
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(AtomicCoreError)
+    expect(caught).toMatchObject({ code: 'MANAGED_METADATA_INVALID', details: 'recipes' })
   })
 
   it('rejects a quantization entry whose excluded compute capability is not above its own minimum', () => {
@@ -223,7 +211,7 @@ describe('summarizeRuntimeDescriptor', () => {
       'notices',
       'supported_architectures',
     ])
-    expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r1')
+    expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
     expect(summary.engine_id).toBe('tensorrt-llm')
     // Notices verbatim and in order: they are the NVIDIA terms the user reads before consenting.
     expect(summary.notices).toEqual(descriptor.notices)

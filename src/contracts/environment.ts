@@ -365,6 +365,13 @@ export interface RequirementPlan {
    */
   descriptor_id: string | null
   /**
+   * The environment manifest this plan judged the host against — which distributions the install
+   * recipe is qualified for (`EnvironmentManifest.manifest_id`). Null when none is available: then
+   * a host that needs an install is blocked, and a ready one is adopted all the same. Part of what
+   * the consent covers, like the descriptor.
+   */
+  environment_manifest_id: string | null
+  /**
    * The engine image this plan pulls (or, for a removal, removes), by digest for this host's
    * platform. Null when there is none (no descriptor, or an environment-only target). A consent
    * carries over to a later plan only when this, the descriptor and the target are unchanged.
@@ -500,9 +507,26 @@ export interface CuratedModel {
 }
 
 /**
+ * The data about the foundation every managed engine runs on, kept apart from any engine's
+ * descriptor (openspec change `extract-environment-manifest`): which install recipes exist and on
+ * which distributions each is qualified. One document per platform, `runtimes/environments/<platform>.json`
+ * in conf; this build reads only Linux's. Immutable per `manifest_id` (`<platform>-r<N>`), like a
+ * descriptor per `descriptor_id`. Data only — the recipe body is compiled into core. Shape matches
+ * `atomic-chat-conf/runtimes/environments/linux.schema.json`.
+ */
+export interface EnvironmentManifest {
+  schema_version: 1
+  manifest_id: string
+  platform: 'linux'
+  minimum_core_version: string
+  recipes: InstallRecipe[]
+}
+
+/**
  * Immutable metadata for one engine release: which image to run, what the host needs, and what it
  * can load. Fetched over HTTPS from the release catalog and pinned by digest. It carries data only:
- * a descriptor can never contain a command, a shell recipe or code to load. Shape matches
+ * a descriptor can never contain a command, a shell recipe or code to load, and never an install
+ * recipe or a distribution list — those are the environment's (`EnvironmentManifest`). Shape matches
  * `atomic-chat-conf/runtimes/schema.json`, the source of truth for what a published descriptor
  * contains.
  */
@@ -528,7 +552,6 @@ export interface RuntimeDescriptor {
   model_families: Record<string, ModelFamilySupport>
   /** Checkpoints measured to work, offered as a shortcut. Never the limit of what may be loaded. */
   curated_models: CuratedModel[]
-  recipes: InstallRecipe[]
   download_bytes: number
   required_disk_bytes: number
   notices: string[]

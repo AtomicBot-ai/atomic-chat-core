@@ -29,6 +29,8 @@ export type LinuxBlockerReason =
   | 'docker-unrecognised'
   | 'immutable-os'
   | 'distribution-not-in-recipe'
+  /** The environment manifest — the recipe's distribution list — could not be had (change `extract-environment-manifest`, D5). */
+  | 'environment-manifest-unavailable'
   | 'arch-manual-install'
   | 'insufficient-disk'
   | 'daemon-json-unreadable'
@@ -175,12 +177,15 @@ export function reloginRequiredBlocker(): LinuxBlocker {
 
 /**
  * How far automatic setup can go on this host, decided in this order: an immutable base, Arch and its
- * derivatives, a `docker` command no package database recognises, a distribution/version/architecture
- * not on the descriptor's recipe — or `'recipe'` when none of those applies and a plan may be offered.
+ * derivatives, a `docker` command no package database recognises, no environment manifest to read the
+ * recipe's distributions from (`'manifest-unavailable'`, change `extract-environment-manifest` D5 — a
+ * different cause from `'unqualified'`, with a different fix), a distribution/version/architecture not
+ * on the manifest's recipe — or `'recipe'` when none of those applies and a plan may be offered.
  * `assessLinux` computes it once and uses it on every path (group-only, relogin, full install), so the
  * paths cannot drift apart (round 4).
  */
-export type InstallGate = 'recipe' | 'immutable' | 'pacman' | 'unrecognised' | 'unqualified'
+export type InstallGate =
+  'recipe' | 'immutable' | 'pacman' | 'unrecognised' | 'manifest-unavailable' | 'unqualified'
 
 /**
  * Whether the gate's own blocker applies to this host — one decision, read by the relogin path and the
@@ -276,6 +281,8 @@ export function gateBlocker(
           'recognises (not docker-ce, docker.io, moby-engine, snap, rootless, Docker Desktop, or the ' +
           'podman-docker shim). Nothing will be installed over it automatically.'
       )
+    case 'manifest-unavailable':
+      return environmentManifestUnavailableBlocker()
     case 'unqualified':
       return blocker(
         'distribution-not-in-recipe',
@@ -283,6 +290,20 @@ export function gateBlocker(
         { id: distribution.id, version_id: distribution.version_id, arch: facts.architecture ?? 'unknown' }
       )
   }
+}
+
+/**
+ * No environment manifest: which distributions the install recipe is qualified for is unknown, so no
+ * automatic setup is offered — not because this distribution is unsupported, but because the list
+ * could not be had (no network and nothing cached, or none this core accepts). Retrying with a
+ * network is the fix; a ready host never sees this (it is adopted before any gate).
+ */
+export function environmentManifestUnavailableBlocker(): LinuxBlocker {
+  return blocker(
+    'environment-manifest-unavailable',
+    'The list of systems where setup can install Docker and the NVIDIA Container Toolkit could not be ' +
+      'loaded, and none was saved before. Check the internet connection and try again.'
+  )
 }
 
 /** Refuses to write next to a daemon.json this probe could not read or parse (round 2, item 6). */

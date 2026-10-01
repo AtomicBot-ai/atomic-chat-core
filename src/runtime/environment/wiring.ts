@@ -15,8 +15,9 @@
  * and the environment reports itself unsupported: an operation started there fails with an
  * actionable blocker rather than appearing to install something.
  *
- * The descriptor provider (task 2.3) is built here too, over this same `env` and `fetch`, and
- * shared with the provisioner. `EnvironmentSnapshot.minimum_app_version` is resolved from it
+ * The descriptor provider (task 2.3) and the Linux environment manifest provider (change
+ * `extract-environment-manifest`) are built here too, over this same `env` and `fetch`, and shared
+ * with the provisioner. `EnvironmentSnapshot.minimum_app_version` is resolved from it
  * network-free (`resolveMinimumAppVersion`): the TensorRT-LLM installation's own pinned descriptor
  * where one exists, otherwise the latest descriptor ever accepted into the cache.
  */
@@ -39,6 +40,10 @@ import {
   TENSORRT_LLM_ENGINE_ID,
 } from './descriptor-provider.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import {
+  createEnvironmentManifestProvider,
+  environmentManifestFetchFromFetch,
+} from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
 import { createLinuxProvisioner, type HostView, type LinuxProvisionerDeps } from './linux-provisioner.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
@@ -65,7 +70,7 @@ export function executorFor(platform: NodeJS.Platform): ExecutorKind | null {
  */
 export type LinuxProvisionerParts = Omit<
   LinuxProvisionerDeps,
-  'descriptors' | 'installations' | 'environmentId' | 'onAssessment' | 'newId'
+  'descriptors' | 'environmentManifests' | 'installations' | 'environmentId' | 'onAssessment' | 'newId'
 >
 
 /**
@@ -138,9 +143,9 @@ export interface WireManagedRuntimesOptions {
    * core again (the ordinary case) needs nothing, since the real pid stays the real pid.
    */
   ownerPid?: number
-  /** What the runtime descriptor provider fetches with; defaults to the global `fetch`. */
+  /** What the descriptor and environment manifest providers fetch with; defaults to the global `fetch`. */
   fetch?: typeof fetch
-  /** Where the descriptor provider reports a rejected source or a non-fatal cache write failure. */
+  /** Where both providers report a rejected source or a non-fatal cache write failure. */
   onWarn?: (message: string) => void
 }
 
@@ -185,6 +190,15 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
   const descriptors = createRuntimeDescriptorProvider({
     env: options.env.env,
     fetch: descriptorFetchFromFetch(options.fetch ?? fetch),
+    readFile: (path) => nodeReadFile(path, 'utf8'),
+    root: managedRoot,
+    ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
+  })
+  // Linux's manifest only: the provisioner that reads it exists only on Linux, and this provider's
+  // source is `runtimes/environments/linux.json` — another platform's manifest is never fetched.
+  const environmentManifests = createEnvironmentManifestProvider({
+    env: options.env.env,
+    fetch: environmentManifestFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
     root: managedRoot,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
@@ -243,6 +257,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
             : {
                 ...options.linux,
                 descriptors,
+                environmentManifests,
                 installations,
                 environmentId: DEFAULT_ENVIRONMENT_ID,
                 onAssessment,

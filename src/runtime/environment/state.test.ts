@@ -41,6 +41,7 @@ const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): Requir
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: 'sha256:re',
   descriptor_id: 'tensorrt-llm-1',
+  environment_manifest_id: 'linux-r1',
   image_digest: 'sha256:img1',
   adopts_existing_engine: false,
   system_changes: [{ code: 'install-packages', text: 'Install docker-ce' }],
@@ -786,6 +787,92 @@ describe('consent that was already acted on (task 2.6)', () => {
     expect(driver.kinds('host-step')).toBe(1)
   })
 
+  /** The sign-in wait after the step, then the probe after the user is back: what it planned. */
+  const afterSignIn = (driver: Driver, next: RequirementPlan): Driver => {
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    expect(driver.phase).toBe('relogin-required')
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: next.plan_digest,
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: next, host_step: null }))
+    return driver
+  }
+
+  it('records the environment manifest the consent was given under (extract-environment-manifest D4)', () => {
+    const driver = atReceipt()
+    expect(driver.machine.consented?.environment_manifest_id).toBe('linux-r1')
+  })
+
+  it('a manifest published during the sign-in wait changes nothing: the consented one carries the work on', () => {
+    // The provisioner plans with the consented manifest from the cache after a consent; the plan
+    // after the sign-in names it, and the work continues without asking.
+    const driver = afterSignIn(
+      atReceipt(),
+      plan('sha256:C', { ...ADOPTED, environment_manifest_id: 'linux-r1' })
+    )
+    expect(driver.phase).toBe('preparing-environment')
+    expect(driver.machine.operation.error).toBeNull()
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+  })
+
+  it('never carries a consent over to a plan judged against another manifest', () => {
+    const driver = afterSignIn(
+      atReceipt(),
+      plan('sha256:C', { ...ADOPTED, environment_manifest_id: 'linux-r2' })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:C')
+  })
+
+  it('a record written before the field existed reads, and its consent carries over only to a plan with no manifest', () => {
+    const legacy = (): Driver => {
+      const driver = atReceipt()
+      const { environment_manifest_id: _absent, ...basis } = driver.machine.consented as NonNullable<
+        OperationMachine['consented']
+      >
+      driver.machine = { ...driver.machine, consented: basis }
+      return driver
+    }
+    const carried = afterSignIn(legacy(), plan('sha256:C', { ...ADOPTED, environment_manifest_id: null }))
+    expect(carried.phase).toBe('preparing-environment')
+    const asked = afterSignIn(legacy(), plan('sha256:C', { ...ADOPTED, environment_manifest_id: 'linux-r1' }))
+    expect(asked.phase).toBe('awaiting-consent')
+    expect(asked.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+  })
+
+  it('a manifest published between the probe and the consent: the old approval is refused with MANAGED_PLAN_CHANGED', () => {
+    // The user approved the plan built under linux-r1 (digest A); the probe the consent triggers was
+    // built under linux-r2, so its digest differs (the manifest id is in the digest).
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:B', { environment_manifest_id: 'linux-r2' }),
+        host_step: HOST_STEP,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:B')
+    expect(driver.kinds('host-step')).toBe(0)
+  })
+
   const midPull = (): Driver => {
     const driver = new Driver('setup', RUNTIME, 'sha256:A')
     driver.apply(
@@ -938,6 +1025,7 @@ describe('consent that was already acted on (task 2.6)', () => {
     expect(driver.machine.consented).toEqual({
       plan_digest: 'sha256:A',
       descriptor_id: 'tensorrt-llm-1',
+      environment_manifest_id: 'linux-r1',
       image_digest: 'sha256:img1',
       target: RUNTIME,
     })

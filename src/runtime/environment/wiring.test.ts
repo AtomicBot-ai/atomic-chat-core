@@ -14,6 +14,7 @@ import type {
 } from '../../contracts/index.js'
 import type { DataFolderEnv } from '../../config/index.js'
 import { RUNTIME_DESCRIPTOR_URL_ENV } from './descriptor-provider.js'
+import { ENVIRONMENT_MANIFEST_URL_ENV } from './environment-manifest-provider.js'
 import type { DescriptorProviderResult, RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentProvisioner } from './service.js'
 import {
@@ -74,6 +75,7 @@ const plan: RequirementPlan = {
   recipe_id: 'ubuntu-24.04-docker-ce',
   recipe_digest: DIGEST,
   descriptor_id: null,
+  environment_manifest_id: null,
   image_digest: null,
   adopts_existing_engine: true,
   system_changes: [],
@@ -320,7 +322,7 @@ describe('coming back to what a previous core left', () => {
 })
 
 describe('the descriptor provider this wiring builds (task 2.3)', () => {
-  /** The real fixture (`descriptor_id` `tensorrt-llm-1.2.1-r1`, `minimum_core_version` `0.7.0`). */
+  /** The real fixture (`descriptor_id` `tensorrt-llm-1.2.1-r2`, `minimum_core_version` `0.7.5`). */
   const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
 
   it('reads a file:// override end to end and caches it under the wired managed root', async () => {
@@ -336,12 +338,12 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     const result = await managed.descriptors.forNewSetup()
     expect(result.kind).toBe('available')
     if (result.kind === 'available') {
-      expect(result.descriptor.descriptor_id).toBe('tensorrt-llm-1.2.1-r1')
+      expect(result.descriptor.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
     }
 
     // A later installation pinned to this id resolves from the cache this wiring just wrote,
     // with no further reads of the file:// source.
-    const pinned = await managed.descriptors.forInstallation('tensorrt-llm-1.2.1-r1')
+    const pinned = await managed.descriptors.forInstallation('tensorrt-llm-1.2.1-r2')
     expect(pinned).toEqual(result)
   })
 
@@ -397,12 +399,12 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
       provisioner: fakeProvisioner(),
     })
     wired.push(managed)
-    await expect(managed.service.descriptor('tensorrt-llm-1.2.1-r1')).rejects.toMatchObject({
+    await expect(managed.service.descriptor('tensorrt-llm-1.2.1-r2')).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
     })
     await managed.descriptors.forNewSetup()
-    const summary = await managed.service.descriptor('tensorrt-llm-1.2.1-r1')
-    expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r1')
+    const summary = await managed.service.descriptor('tensorrt-llm-1.2.1-r2')
+    expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
     expect(summary.notices.length).toBeGreaterThan(0)
   })
 })
@@ -442,13 +444,13 @@ describe('resolveMinimumAppVersion', () => {
 
   it('pinned: a pinned installation wins, resolved without ever reaching the network fallback', async () => {
     const forInstallation = vi.fn(async (id: string) => {
-      expect(id).toBe('tensorrt-llm-1.2.1-r1')
+      expect(id).toBe('tensorrt-llm-1.2.1-r2')
       return available('2.0.49')
     })
     const cachedForNewSetup = vi.fn(async () => available('9.9.9'))
     const descriptors = fakeDescriptors({ forInstallation, cachedForNewSetup })
 
-    const result = await resolveMinimumAppVersion(descriptors, [installation('tensorrt-llm-1.2.1-r1')])
+    const result = await resolveMinimumAppVersion(descriptors, [installation('tensorrt-llm-1.2.1-r2')])
 
     expect(result).toBe('2.0.49')
     expect(cachedForNewSetup).not.toHaveBeenCalled()
@@ -512,6 +514,7 @@ describe('environmentAvailability', () => {
 
 describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () => {
   const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+  const manifestUrl = new URL('../../../test/fixtures/runtimes/environments/linux.json', import.meta.url).href
 
   it('probes, sets up, and shows the ready installation and the GPUs in the snapshot', async () => {
     let state: FakeLinuxHostState = {
@@ -562,7 +565,10 @@ describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () 
     }
     const changed: EnvironmentSnapshotLike[] = []
     const managed = wireManagedRuntimes({
-      env: env('linux', { [RUNTIME_DESCRIPTOR_URL_ENV]: fixtureUrl }),
+      env: env('linux', {
+        [RUNTIME_DESCRIPTOR_URL_ENV]: fixtureUrl,
+        [ENVIRONMENT_MANIFEST_URL_ENV]: manifestUrl,
+      }),
       instanceId: 'core-1',
       platform: 'linux',
       emit: ((name: string, payload: EnvironmentSnapshotLike) => {
@@ -595,7 +601,9 @@ describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () 
       platform: 'linux/amd64',
       installed_at: '2026-09-29T00:00:00.000Z',
     })
-    const plan = await managed.service.probe({ descriptor_id: 'tensorrt-llm-1.2.1-r1', target })
+    const plan = await managed.service.probe({ descriptor_id: 'tensorrt-llm-1.2.1-r2', target })
+    // The wired manifest provider read the override, and the plan names the manifest it was judged by.
+    expect(plan.environment_manifest_id).toBe('linux-r1')
     expect(managed.environments()[0]?.gpus.map((gpu) => gpu.gpu_id)).toEqual(['GPU-1'])
     for (let i = 0; i < 50 && managed.environments()[0]?.installations.length === 0; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10))
@@ -610,7 +618,7 @@ describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () 
       request_id: 'req-1',
       target,
       kind: 'setup',
-      descriptor_id: 'tensorrt-llm-1.2.1-r1',
+      descriptor_id: 'tensorrt-llm-1.2.1-r2',
       approved_plan_digest: plan.plan_digest,
     })
     await managed.service.idle()
@@ -621,7 +629,7 @@ describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () 
     expect(managed.operations()[0]?.phase).toBe('ready')
     expect(environment?.availability).toBe('supported')
     expect(environment?.installations.map((entry) => entry.active_descriptor_id)).toEqual([
-      'tensorrt-llm-1.2.1-r1',
+      'tensorrt-llm-1.2.1-r2',
     ])
     expect(environment?.minimum_app_version).toBe('2.0.49')
     expect(changed.at(-1)?.revision).toBe(environment?.revision)

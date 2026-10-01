@@ -128,10 +128,14 @@ export interface LinuxAssessment {
 }
 
 export interface LinuxAssessmentOptions {
-  /** `linux.install-container-runtime`, from the descriptor's own recipe id — not hardcoded here. */
+  /** `linux.install-container-runtime`, the host recipe's own id — not hardcoded here. */
   recipeId: string
-  /** This recipe's qualified distributions, from the descriptor. Arch never checks this list. */
-  recipeDistributions: RecipeDistribution[]
+  /**
+   * This recipe's qualified distributions, from the environment manifest; null when no manifest is
+   * available (change `extract-environment-manifest`, D5): then no automatic setup is offered, while
+   * a ready host is adopted as ever. Arch never checks this list.
+   */
+  recipeDistributions: RecipeDistribution[] | null
   minimumDriverVersion: string
   minimumComputeCapability: string
   requiredDiskBytes: number | null
@@ -181,6 +185,7 @@ function installGate(
   if (facts.immutable_os) return 'immutable'
   if (distribution.family === 'pacman') return 'pacman'
   if (facts.docker.cli && facts.docker.install_method === null) return 'unrecognised'
+  if (options.recipeDistributions === null) return 'manifest-unavailable'
   const qualified = options.recipeDistributions.some(
     (entry) =>
       entry.id === distribution.id &&
@@ -361,6 +366,10 @@ function verdict(facts: LinuxFacts, options: LinuxAssessmentOptions): Verdict {
             'integration has no further diagnosis to offer automatically.'
         ),
       ])
+    }
+    if (gate === 'manifest-unavailable') {
+      // Joining the group is the privileged step too: without the manifest it is not offered either.
+      return blocked([gateBlocker(gate, facts, distribution, options.currentUser)])
     }
     if (gate !== 'recipe') {
       return blocked([dockerGroupManualBlocker(facts.immutable_os, options.currentUser, true)])

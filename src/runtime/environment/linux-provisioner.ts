@@ -4,7 +4,8 @@
  * reducer (`state.ts`) can ask for.
  *
  * - **probe** reads the machine (`probeLinux`), judges it (`assessLinux`) against the descriptor the
- *   operation installs, and answers with a plan whose digest binds the consent: the system changes,
+ *   operation installs and the environment manifest (which distributions the install recipe is
+ *   qualified for; change `extract-environment-manifest`), and answers with a plan whose digest binds the consent: the system changes,
  *   the GPU set and whether the free space where the image lands suffices (carry item 1). When the plan needs the
  *   privileged step, the step carries the recipe's validated parameters and their digest, built by
  *   the recipe itself (`HostRecipeBinding`, task 2.5), plus a fresh single-use nonce.
@@ -27,6 +28,7 @@ import { randomUUID } from 'node:crypto'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   ContainerRuntimeStepParameters,
+  EnvironmentManifest,
   ErrorBody,
   GpuFacts,
   ManagedAvailability,
@@ -52,6 +54,7 @@ import {
 } from '../container/index.js'
 import { canonicalDigest, planDigest } from './canonical-json.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import type { InstallationRecord, InstallationStore } from './installations.js'
 import type { LinuxHost } from './linux-host.js'
 import { assessLinux, compareDottedVersions, type LinuxAssessment, type LinuxBlocker } from './linux-plan.js'
@@ -103,6 +106,8 @@ export const NOTHING_LOADED: UnloadEngineSessions = async () => ({ unloaded: 0 }
 export interface LinuxProvisionerDeps {
   host: LinuxHost
   descriptors: RuntimeDescriptorProvider
+  /** The Linux environment manifest: the install recipe's qualified distributions. */
+  environmentManifests: EnvironmentManifestProvider
   recipe: HostRecipeBinding
   /** The one executor of this core; null while this host has no docker CLI. */
   docker: () => Promise<ProvisionerDocker | null>
@@ -136,10 +141,19 @@ const tail = (text: string): string => (text.length > DIAGNOSTIC_TAIL ? text.sli
 /** How an image this operation pulled is named among its `owned_resource_ids`. */
 export const ownedImageId = (image: PlatformImage): string => `image:${image.repository}@${image.digest}`
 
-/** A structured `LinuxBlocker` on the wire. A relogin is its own code: the operation waits on it. */
+/**
+ * A structured `LinuxBlocker` on the wire. A relogin is its own code: the operation waits on it. A
+ * missing environment manifest is missing metadata, not a host prerequisite (spec
+ * `runtime-environment-manifest`, "Без манифеста не предлагается только автоматическая установка").
+ */
 export function toManagedBlocker(blocker: LinuxBlocker): ManagedBlocker {
   return {
-    code: blocker.reason === 'relogin-required' ? 'MANAGED_RELOGIN_REQUIRED' : 'MANAGED_PREREQUISITE_BLOCKED',
+    code:
+      blocker.reason === 'relogin-required'
+        ? 'MANAGED_RELOGIN_REQUIRED'
+        : blocker.reason === 'environment-manifest-unavailable'
+          ? 'MANAGED_METADATA_INVALID'
+          : 'MANAGED_PREREQUISITE_BLOCKED',
     message: blocker.message,
     details: blocker.reason,
     reason: blocker.reason,
@@ -181,6 +195,7 @@ const blockedPlan = (
   recipe_id: 'none',
   recipe_digest: ZERO_DIGEST,
   descriptor_id: null,
+  environment_manifest_id: null,
   image_digest: null,
   adopts_existing_engine: false,
   system_changes: [],
@@ -279,6 +294,28 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     return pinned.descriptor
   }
 
+  /**
+   * The environment manifest a probe judges the host against (design D4 of change
+   * `extract-environment-manifest`). Once work began under a consent, only the consented manifest,
+   * from the cache — a manifest published during a sign-in wait or across a core restart never
+   * changes what the user agreed to; a consent given with no manifest stays without one. Before
+   * that, the newest one: a plan offered now is judged against what conf says now, and a manifest
+   * published between the probe and the consent changes the plan's digest, so the consent is asked
+   * again. Null when none is available — never an error by itself: only a host that needs an
+   * install is blocked by it (`assessLinux`, gate `manifest-unavailable`).
+   */
+  const manifestForProbe = async (record: PersistedOperation): Promise<EnvironmentManifest | null> => {
+    const consented = record.machine.consented ?? null
+    if (consented !== null) {
+      const id = consented.environment_manifest_id ?? null
+      if (id === null) return null
+      const pinned = await deps.environmentManifests.pinned(id)
+      return pinned.kind === 'available' ? pinned.manifest : null
+    }
+    const latest = await deps.environmentManifests.latest()
+    return latest.kind === 'available' ? latest.manifest : null
+  }
+
   const hostPlatform = async (): Promise<Platform> => {
     const uname = await deps.host.probeDeps.exec('uname', ['-m'])
     const platform = uname.code === 0 ? platformFor(uname.stdout.trim().replace(/^arm64$/, 'aarch64')) : null
@@ -375,6 +412,8 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       recipe_id: 'none',
       recipe_digest: ZERO_DIGEST,
       descriptor_id: existing?.installation.active_descriptor_id ?? null,
+      // A removal judges nothing against the environment: no manifest is read or pinned.
+      environment_manifest_id: null,
       image_digest: existing?.image.digest ?? null,
       adopts_existing_engine: true,
       system_changes: changes,
@@ -428,10 +467,12 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       target.kind !== 'runtime' || present || pullStarted || presenceUnknown
         ? null
         : descriptor.required_disk_bytes
-    const recipe = descriptor.recipes.find((entry) => entry.recipe_id === deps.recipe.recipe_id)
+    const manifest = await manifestForProbe(record)
+    // A manifest without this recipe qualifies no distribution for it: `unqualified`, not unavailable.
+    const recipe = manifest?.recipes.find((entry) => entry.recipe_id === deps.recipe.recipe_id)
     const assessment = assessLinux(machine, {
       recipeId: deps.recipe.recipe_id,
-      recipeDistributions: recipe?.distributions ?? [],
+      recipeDistributions: manifest === null ? null : (recipe?.distributions ?? []),
       minimumDriverVersion: descriptor.minimum_driver_version,
       minimumComputeCapability: descriptor.minimum_compute_capability,
       requiredDiskBytes: stillNeeded,
@@ -519,6 +560,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
         may_require_reboot: false,
         descriptor:
           image === null ? null : { descriptor_id: descriptor.descriptor_id, image_digest: image.digest },
+        environment_manifest_id: manifest?.manifest_id ?? null,
         host: {
           gpu_ids: machine.gpus.map((gpu) => gpu.gpu_id).sort(),
           disk_sufficient:
@@ -536,6 +578,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       recipe_id: deps.recipe.recipe_id,
       recipe_digest: deps.recipe.recipe_digest,
       descriptor_id: descriptor.descriptor_id,
+      environment_manifest_id: manifest?.manifest_id ?? null,
       image_digest: target.kind === 'runtime' ? (image?.digest ?? null) : null,
       adopts_existing_engine: assessment.adopts_existing_engine,
       system_changes: systemChanges,

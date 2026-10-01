@@ -73,8 +73,9 @@ export interface OperationMachine {
   checkpoint?: ManagedPhase | null
   /**
    * What the user's consent was given for, recorded when work first starts under it: the approved
-   * digest and the descriptor, engine image and target that plan named. Consent carries over to a
-   * later plan only when that plan names the same three (review r1, item 2).
+   * digest and the descriptor, engine image, environment manifest and target that plan named.
+   * Consent carries over to a later plan only when that plan names the same ones (review r1, item 2;
+   * change `extract-environment-manifest`, D4).
    */
   consented?: ConsentBasis | null
 }
@@ -98,6 +99,13 @@ export interface ConsentBasis {
   plan_digest: Sha256Digest
   descriptor_id: string | null
   image_digest: Sha256Digest | null
+  /**
+   * The environment manifest the approved plan was judged against; after the consent the operation
+   * reads only this one, from the cache. Optional so a record written before the field existed still
+   * reads — absent counts as null (no manifest), so such a record's consent never carries over to a
+   * plan that names one.
+   */
+  environment_manifest_id?: string | null
   target: ManagedOperationTarget
 }
 
@@ -109,12 +117,15 @@ const sameTarget = (a: ManagedOperationTarget, b: ManagedOperationTarget): boole
 /**
  * Whether `plan` still asks for what the consent covered. A removal downloads nothing, so the
  * same target is enough; a setup must also name the same descriptor and the same image digest —
- * otherwise continuing would download something nobody approved.
+ * otherwise continuing would download something nobody approved — and the same environment manifest,
+ * the distribution list the approved system changes were judged against.
  */
 const consentCovers = (basis: ConsentBasis, plan: RequirementPlan, kind: ManagedOperationKind): boolean =>
   sameTarget(basis.target, plan.target) &&
   (kind === 'remove' ||
-    (basis.descriptor_id === plan.descriptor_id && basis.image_digest === plan.image_digest))
+    (basis.descriptor_id === plan.descriptor_id &&
+      basis.image_digest === plan.image_digest &&
+      (basis.environment_manifest_id ?? null) === plan.environment_manifest_id))
 
 export interface EventIdentity {
   effect_id: string
@@ -574,6 +585,7 @@ export function reduceOperation(
             plan_digest: plan.plan_digest,
             descriptor_id: plan.descriptor_id,
             image_digest: plan.image_digest,
+            environment_manifest_id: plan.environment_manifest_id,
             target: plan.target,
           },
           operation: { ...operation, plan_digest: plan.plan_digest, carried_plan_digest: null },

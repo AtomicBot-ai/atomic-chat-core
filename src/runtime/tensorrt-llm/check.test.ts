@@ -27,7 +27,6 @@ function descriptor(overrides: Partial<RuntimeDescriptor> = {}): RuntimeDescript
     quantization: [{ format: 'bf16', min_compute_capability: '8.0', excluded_compute_capabilities: [] }],
     model_families: {},
     curated_models: [],
-    recipes: [],
     download_bytes: 0,
     required_disk_bytes: 0,
     notices: [],

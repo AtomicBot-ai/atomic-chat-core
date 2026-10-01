@@ -198,6 +198,17 @@ describe('managed runtime paths', () => {
     expect(shared.descriptorLatestFile).toBe(native('/shared/descriptors/latest.json'))
   })
 
+  it('lays the accepted environment-manifest cache out in the shared root, apart from descriptors, keyed by manifest_id', () => {
+    const shared = managedSharedPaths('/shared')
+    expect(shared.environmentManifestsDir).toBe(native('/shared/environment-manifests'))
+    expect(shared.environmentManifestFile('linux-r1')).toBe(
+      native('/shared/environment-manifests/linux-r1.json')
+    )
+    expect(shared.environmentManifestLatestFile).toBe(native('/shared/environment-manifests/latest.json'))
+    const entry = relative('/shared/environment-manifests', shared.environmentManifestFile('a/b')).split(sep)
+    expect(entry).toHaveLength(1)
+  })
+
   it('writes a descriptor_id as one directory entry instead of nesting on its slash', () => {
     const dir = relative('/shared/descriptors', managedSharedPaths('/shared').descriptorFile('a/b')).split(
       sep

@@ -3,7 +3,13 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { BeginOperation, GpuFacts, RuntimeDescriptor } from '../../contracts/index.js'
+import { AtomicCoreError } from '../../contracts/index.js'
+import type {
+  BeginOperation,
+  EnvironmentManifest,
+  GpuFacts,
+  RuntimeDescriptor,
+} from '../../contracts/index.js'
 import {
   INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
   INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
@@ -19,6 +25,8 @@ import type { ExecutionRecord } from '../container/index.js'
 import { removeEngineCaches } from '../managed-text/index.js'
 import { parseRuntimeDescriptor } from './descriptor.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { parseEnvironmentManifest } from './environment-manifest.js'
+import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
 import type { LinuxHost } from './linux-host.js'
 import {
@@ -40,6 +48,7 @@ const IMAGE = DESCRIPTOR.image['linux/amd64']
 const IMAGE_REF = `${IMAGE.repository}@${IMAGE.digest}`
 const PROBE_IMAGE = DESCRIPTOR.probe_image['linux/amd64']
 const PROBE_REF = `${PROBE_IMAGE.repository}@${PROBE_IMAGE.digest}`
+const MANIFEST = parseEnvironmentManifest(readRuntimeFixture('environments/linux.json'))
 const GPU = 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11'
 const GIB = 1024 ** 3
 
@@ -135,9 +144,11 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
         : { kind: 'unsupported', error: new Error('not cached') as never },
     cachedForNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
   }
+  const environmentManifests: EnvironmentManifestProvider = manifestsOf(MANIFEST)
   const deps: LinuxProvisionerDeps = {
     host,
     descriptors,
+    environmentManifests,
     recipe: RECIPE,
     docker: async () =>
       machine.state.docker.installed
@@ -190,6 +201,40 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
   return { machine, deps, pulls, dockerCalls, journal, views, calls, installations }
 }
 
+/**
+ * A manifest provider whose latest is `latest` (null: none to be had) and whose cache holds `latest`
+ * plus `cached`. `latest` and `pinned` are spies, so a test can tell which one a probe asked.
+ */
+function manifestsOf(
+  latest: EnvironmentManifest | null,
+  cached: EnvironmentManifest[] = []
+): EnvironmentManifestProvider & { latest: ReturnType<typeof vi.fn>; pinned: ReturnType<typeof vi.fn> } {
+  const store = [...(latest === null ? [] : [latest]), ...cached]
+  const missing = (details?: string) => ({
+    kind: 'unavailable' as const,
+    error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'No environment manifest is available.', details),
+  })
+  return {
+    latest: vi.fn(async () =>
+      latest === null ? missing() : { kind: 'available' as const, manifest: latest }
+    ),
+    pinned: vi.fn(async (id: string) => {
+      const found = store.find((manifest) => manifest.manifest_id === id)
+      return found === undefined ? missing(id) : { kind: 'available' as const, manifest: found }
+    }),
+  }
+}
+
+/** The fixture manifest under another id with the recipe's distributions replaced. */
+const manifestWith = (
+  manifestId: string,
+  distributions: EnvironmentManifest['recipes'][number]['distributions']
+) => ({
+  ...MANIFEST,
+  manifest_id: manifestId,
+  recipes: [{ recipe_id: INSTALL_CONTAINER_RUNTIME_RECIPE_ID, distributions }],
+})
+
 const TARGET = { kind: 'runtime' as const, installation_id: 'tensorrt-llm', engine_id: 'tensorrt-llm' }
 
 const record = (
@@ -215,13 +260,15 @@ const record = (
     { next_effect_id: 'effect-1' }
   )
   return {
-    // As every effect sees it: work started under a consent to this descriptor, image and target.
+    // As every effect sees it: work started under a consent to this descriptor, image, environment
+    // manifest and target.
     machine: {
       ...started.state,
       consented: {
         plan_digest: `sha256:${'c'.repeat(64)}`,
         descriptor_id: DESCRIPTOR.descriptor_id,
         image_digest: IMAGE.digest,
+        environment_manifest_id: MANIFEST.manifest_id,
         target: input.target,
       },
     },
@@ -560,6 +607,148 @@ describe('probing a Linux host for a setup', () => {
     const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
     expect(answer.host_step).toBeNull()
     expect(answer.plan.blockers[0]?.code).toBe('MANAGED_HOST_STEP_INVALID')
+  })
+})
+
+describe('the environment manifest (change extract-environment-manifest)', () => {
+  const UBUNTU_24_04 = { id: 'ubuntu', version_id: '24.04', arch: 'x86_64' } as const
+  /** Conf before Ubuntu 24.04 was qualified, and the manifest that then added it. */
+  const WITHOUT_24_04 = manifestWith('linux-r1', [{ id: 'debian', version_id: '12', arch: 'x86_64' }])
+  const WITH_24_04 = manifestWith('linux-r2', [
+    { id: 'debian', version_id: '12', arch: 'x86_64' },
+    UBUNTU_24_04,
+  ])
+
+  it('names the manifest it judged the host against, read fresh before any consent', async () => {
+    const manifests = manifestsOf(MANIFEST)
+    const h = harness(cleanHost(), { environmentManifests: manifests })
+    const answer = await createLinuxProvisioner(h.deps).probe(fresh(), signal)
+    expect(answer.plan.environment_manifest_id).toBe('linux-r1')
+    expect(answer.host_step).not.toBeNull()
+    expect(manifests.latest).toHaveBeenCalled()
+    expect(manifests.pinned).not.toHaveBeenCalled()
+  })
+
+  it('takes the distribution list from the manifest: a distribution added there is installable with the same descriptor', async () => {
+    const before = await createLinuxProvisioner(
+      harness(cleanHost(), { environmentManifests: manifestsOf(WITHOUT_24_04) }).deps
+    ).probe(fresh(), signal)
+    expect(before.plan.blockers.map((b) => b.reason)).toEqual(['distribution-not-in-recipe'])
+    expect(before.host_step).toBeNull()
+
+    const after = await createLinuxProvisioner(
+      harness(cleanHost(), { environmentManifests: manifestsOf(WITH_24_04) }).deps
+    ).probe(fresh(), signal)
+    expect(after.plan.blockers).toEqual([])
+    expect(after.host_step?.action).toBe('linux.install-container-runtime')
+    expect(after.plan.environment_manifest_id).toBe('linux-r2')
+    expect(after.plan.descriptor_id).toBe(before.plan.descriptor_id)
+  })
+
+  it('without a manifest, a host that needs the install is blocked with MANAGED_METADATA_INVALID and gets no step', async () => {
+    const h = harness(cleanHost(), { environmentManifests: manifestsOf(null) })
+    const answer = await createLinuxProvisioner(h.deps).probe(fresh(), signal)
+    expect(answer.plan.availability).toBe('prerequisite-blocked')
+    expect(answer.plan.blockers).toHaveLength(1)
+    expect(answer.plan.blockers[0]).toMatchObject({
+      code: 'MANAGED_METADATA_INVALID',
+      reason: 'environment-manifest-unavailable',
+    })
+    expect(answer.host_step).toBeNull()
+    expect(answer.plan.requires_elevation).toBe(false)
+    expect(answer.plan.system_changes).toEqual([])
+    expect(answer.plan.environment_manifest_id).toBeNull()
+  })
+
+  it('without a manifest, a ready host is adopted: no blocker, no step, no manifest named', async () => {
+    const h = harness(readyHost(), { environmentManifests: manifestsOf(null) })
+    const answer = await createLinuxProvisioner(h.deps).probe(fresh(), signal)
+    expect(answer.plan.adopts_existing_engine).toBe(true)
+    expect(answer.plan.blockers).toEqual([])
+    expect(answer.host_step).toBeNull()
+    expect(answer.plan.environment_manifest_id).toBeNull()
+  })
+
+  it('a manifest published between the probe and the consent changes the plan digest', async () => {
+    const first = await createLinuxProvisioner(
+      harness(readyHost(), { environmentManifests: manifestsOf(MANIFEST) }).deps
+    ).probe(fresh(), signal)
+    const second = await createLinuxProvisioner(
+      harness(readyHost(), { environmentManifests: manifestsOf(WITH_24_04, [MANIFEST]) }).deps
+    ).probe(fresh(), signal)
+    expect(second.plan.environment_manifest_id).toBe('linux-r2')
+    expect(second.plan.plan_digest).not.toBe(first.plan.plan_digest)
+  })
+
+  it('after the consent, only the consented manifest from the cache: a newer one in conf is never asked for', async () => {
+    // Conf now says linux-r2 qualifies nothing for Ubuntu; the consent was given under linux-r1.
+    const manifests = manifestsOf(manifestWith('linux-r2', []), [MANIFEST])
+    const h = harness(cleanHost(), { environmentManifests: manifests })
+    const provisioner = createLinuxProvisioner(h.deps)
+    const answer = await provisioner.probe(record(), signal)
+    expect(answer.plan.environment_manifest_id).toBe('linux-r1')
+    expect(answer.host_step).not.toBeNull()
+    expect(manifests.pinned).toHaveBeenCalledWith('linux-r1')
+    expect(manifests.latest).not.toHaveBeenCalled()
+    // The receipt check after the privileged step reads the same pinned manifest.
+    await provisioner.verifyHostStep(record(), signal)
+    expect(manifests.latest).not.toHaveBeenCalled()
+  })
+
+  it('a consent given with no manifest stays without one, even once a manifest can be had', async () => {
+    const manifests = manifestsOf(MANIFEST)
+    const h = harness(readyHost(), { environmentManifests: manifests })
+    const base = record()
+    const consentedWithout: PersistedOperation = {
+      ...base,
+      machine: {
+        ...base.machine,
+        consented: {
+          ...(base.machine.consented as NonNullable<typeof base.machine.consented>),
+          environment_manifest_id: null,
+        },
+      },
+    }
+    const answer = await createLinuxProvisioner(h.deps).probe(consentedWithout, signal)
+    expect(answer.plan.environment_manifest_id).toBeNull()
+    expect(answer.plan.adopts_existing_engine).toBe(true)
+    expect(manifests.latest).not.toHaveBeenCalled()
+  })
+
+  it('reads an operation record written before the field existed: its consent names no manifest', async () => {
+    const manifests = manifestsOf(MANIFEST)
+    const h = harness(readyHost(), { environmentManifests: manifests })
+    const base = record()
+    const { environment_manifest_id: _dropped, ...legacy } = base.machine.consented as NonNullable<
+      typeof base.machine.consented
+    >
+    const answer = await createLinuxProvisioner(h.deps).probe(
+      { ...base, machine: { ...base.machine, consented: legacy } },
+      signal
+    )
+    expect(answer.plan.environment_manifest_id).toBeNull()
+    expect(manifests.latest).not.toHaveBeenCalled()
+    expect(manifests.pinned).not.toHaveBeenCalled()
+  })
+
+  it('a consented manifest that left the cache is unavailable, not replaced by the newest one', async () => {
+    const manifests = manifestsOf(WITH_24_04)
+    const h = harness(cleanHost(), { environmentManifests: manifests })
+    const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
+    expect(manifests.pinned).toHaveBeenCalledWith('linux-r1')
+    expect(manifests.latest).not.toHaveBeenCalled()
+    expect(answer.plan.environment_manifest_id).toBeNull()
+    expect(answer.plan.blockers.map((b) => b.reason)).toEqual(['environment-manifest-unavailable'])
+    expect(answer.host_step).toBeNull()
+  })
+
+  it('a removal reads no manifest and names none', async () => {
+    const manifests = manifestsOf(MANIFEST)
+    const h = harness(readyHost(), { environmentManifests: manifests })
+    const answer = await createLinuxProvisioner(h.deps).probe(fresh({ kind: 'remove' }), signal)
+    expect(answer.plan.environment_manifest_id).toBeNull()
+    expect(manifests.latest).not.toHaveBeenCalled()
+    expect(manifests.pinned).not.toHaveBeenCalled()
   })
 })
 

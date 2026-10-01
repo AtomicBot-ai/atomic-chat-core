@@ -16,9 +16,9 @@ import type { DescriptorFetch } from './descriptor-provider.js'
 
 const ROOT = '/shared'
 const PATHS = managedSharedPaths(ROOT)
-const CORE_VERSION = '0.7.0'
+const CORE_VERSION = '0.7.5'
 
-/** The real fixture, verbatim: `descriptor_id` `tensorrt-llm-1.2.1-r1`, `minimum_core_version` `0.7.0`. */
+/** The real fixture, verbatim: `descriptor_id` `tensorrt-llm-1.2.1-r2`, `minimum_core_version` `0.7.5`. */
 const FIXTURE_A = readRuntimeFixture('tensorrt-llm.json') as Record<string, unknown>
 const RAW_A = JSON.stringify(FIXTURE_A)
 const DESCRIPTOR_A = parseRuntimeDescriptor(FIXTURE_A)
@@ -81,11 +81,11 @@ describe('forNewSetup', () => {
 
     expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(fetch).toHaveBeenCalledWith(DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL, expect.any(Number))
-    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r1')) ?? 'null')).toEqual(
+    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')) ?? 'null')).toEqual(
       JSON.parse(RAW_A)
     )
     expect(JSON.parse(fs.files.get(PATHS.descriptorLatestFile) ?? 'null')).toEqual({
-      descriptor_id: 'tensorrt-llm-1.2.1-r1',
+      descriptor_id: 'tensorrt-llm-1.2.1-r2',
     })
   })
 
@@ -171,7 +171,7 @@ describe('forNewSetup', () => {
     expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(readFile).toHaveBeenCalledTimes(1)
     expect(unreachableFetch).not.toHaveBeenCalled()
-    expect(fs.files.has(PATHS.descriptorFile('tensorrt-llm-1.2.1-r1'))).toBe(true)
+    expect(fs.files.has(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2'))).toBe(true)
   })
 
   it('an ATOMIC_RUNTIME_DESCRIPTOR_URL https override replaces the default source', async () => {
@@ -190,12 +190,12 @@ describe('forNewSetup', () => {
     const fs = new FakeManagedFs()
     await provider({ fetch: okFetch(RAW_A), fs }).forNewSetup()
 
-    const finalPath = PATHS.descriptorFile('tensorrt-llm-1.2.1-r1')
+    const finalPath = PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')
     const rename = fs.renames.find(([, to]) => to === finalPath)
     expect(rename).toBeDefined()
     // Not a fixed `<path>.tmp`: this cache has no lock, so a shared name would let a second,
     // concurrent writer (the other scope's core) clobber it. `<path>.<uuid>.tmp` per call instead.
-    expect(rename?.[0]).toMatch(/^\/shared\/descriptors\/tensorrt-llm-1\.2\.1-r1\.json\.[0-9a-f-]{36}\.tmp$/)
+    expect(rename?.[0]).toMatch(/^\/shared\/descriptors\/tensorrt-llm-1\.2\.1-r2\.json\.[0-9a-f-]{36}\.tmp$/)
     // The temp file never lingers: the rename consumed it (FakeManagedFs.rename deletes the source).
     expect(fs.files.has(rename?.[0] ?? '')).toBe(false)
 
@@ -222,7 +222,7 @@ describe('forNewSetup', () => {
 
     expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(onWarn).toHaveBeenCalledTimes(1)
-    expect(onWarn.mock.calls[0]?.[0]).toContain('tensorrt-llm-1.2.1-r1')
+    expect(onWarn.mock.calls[0]?.[0]).toContain('tensorrt-llm-1.2.1-r2')
   })
 
   it('two concurrent accepts of different descriptor ids never clobber each other', async () => {
@@ -235,7 +235,7 @@ describe('forNewSetup', () => {
     expect(resultA).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(resultB).toEqual({ kind: 'available', descriptor: DESCRIPTOR_B })
     // Both landed on disk, uncorrupted, and no stray .tmp file was left behind by either.
-    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r1')) ?? 'null')).toEqual(
+    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')) ?? 'null')).toEqual(
       JSON.parse(RAW_A)
     )
     expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.3.0-r1')) ?? 'null')).toEqual(
@@ -247,7 +247,7 @@ describe('forNewSetup', () => {
     const latest = JSON.parse(fs.files.get(PATHS.descriptorLatestFile) ?? 'null') as {
       descriptor_id: string
     }
-    expect(['tensorrt-llm-1.2.1-r1', 'tensorrt-llm-1.3.0-r1']).toContain(latest.descriptor_id)
+    expect(['tensorrt-llm-1.2.1-r2', 'tensorrt-llm-1.3.0-r1']).toContain(latest.descriptor_id)
   })
 })
 
@@ -313,7 +313,7 @@ describe('forInstallation', () => {
   it('resolves a pinned descriptor from the cache alone: no fetch, no readFile', async () => {
     const fs = new FakeManagedFs()
     await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
-    const result = await provider({ fs }).forInstallation('tensorrt-llm-1.2.1-r1')
+    const result = await provider({ fs }).forInstallation('tensorrt-llm-1.2.1-r2')
 
     expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(unreachableFetch).not.toHaveBeenCalled()
@@ -332,12 +332,12 @@ describe('forInstallation', () => {
     const aFetch: DescriptorFetch = vi.fn(async () => {
       throw new Error('an installation pinned to A must never fetch')
     })
-    const pinned = await provider({ fetch: aFetch, fs }).forInstallation('tensorrt-llm-1.2.1-r1')
+    const pinned = await provider({ fetch: aFetch, fs }).forInstallation('tensorrt-llm-1.2.1-r2')
 
     expect(pinned).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(aFetch).not.toHaveBeenCalled()
     // A's own cache entry is untouched by B's arrival.
-    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r1')) ?? 'null')).toEqual(
+    expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')) ?? 'null')).toEqual(
       JSON.parse(RAW_A)
     )
   })

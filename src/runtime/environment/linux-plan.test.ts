@@ -1600,3 +1600,57 @@ describe('the 3.10 acceptance host (task 2.23: F-5, F-4, F-6), driven through pr
     expect((await run(machine, lex)).assessment.warnings).toEqual([])
   })
 })
+
+describe('no environment manifest (change extract-environment-manifest, design D5)', () => {
+  /** What the provisioner passes when the manifest could not be had: no distribution list at all. */
+  const NO_MANIFEST: Partial<LinuxAssessmentOptions> = { recipeDistributions: null }
+
+  it('Ubuntu 24.04 without Docker: blocked on the missing manifest, never offered a privileged plan', async () => {
+    const { assessment } = await run({}, NO_MANIFEST)
+    expect(assessment.availability).toBe('prerequisite-blocked')
+    expect(assessment.install_plan).toBeNull()
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['environment-manifest-unavailable'])
+  })
+
+  it('a ready Ubuntu (Docker with the NVIDIA CDI spec, this user can reach it) is adopted exactly as with a manifest', async () => {
+    const ready: Machine = {
+      dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+      dockerInfo: ok(readLinuxProbeFixture('docker-info/ready-nvidia-runtime.json')),
+      dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+      nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+      cdiList: CDI_GPU,
+    }
+    const without = (await run(ready, NO_MANIFEST)).assessment
+    expect(without.adopts_existing_engine).toBe(true)
+    expect(without.blockers).toEqual([])
+    expect(without).toEqual((await run(ready)).assessment)
+  })
+
+  it('ready but for group membership: the manifest blocker, not the group-only plan nor manual group commands', async () => {
+    const { assessment } = await run(
+      {
+        dockerVersion: ok('Docker version 26.1.3, build 26e224e\n'),
+        dockerInfo: ok(readLinuxProbeFixture('docker-info/legacy-cli-permission-denied-exit0.json')),
+        dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+        nvidiaCtkVersion: ok('NVIDIA Container Toolkit CLI version 1.17.4\n'),
+        cdiList: CDI_GPU,
+        systemctlIsActive: ok('active\n'),
+        getentGroup: { code: 2, stdout: '', stderr: '' },
+        daemonJson: JSON.stringify({ runtimes: { nvidia: { path: 'nvidia-container-runtime' } } }),
+      },
+      NO_MANIFEST
+    )
+    expect(assessment.install_plan).toBeNull()
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['environment-manifest-unavailable'])
+  })
+
+  it('Arch keeps its own manual-install blocker: Arch never reads the distribution list', async () => {
+    const { assessment } = await run({ osRelease: readLinuxProbeFixture('os-release/arch.txt') }, NO_MANIFEST)
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['arch-manual-install'])
+  })
+
+  it('a manifest that qualifies nothing for this recipe is "not in the recipe", not "unavailable" (conf ruling 1.1)', async () => {
+    const { assessment } = await run({}, { recipeDistributions: [] })
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['distribution-not-in-recipe'])
+  })
+})

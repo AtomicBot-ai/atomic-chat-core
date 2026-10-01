@@ -136,6 +136,7 @@ const unsupported = (input: {
   recipe_id: 'none',
   recipe_digest: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
   descriptor_id: null,
+  environment_manifest_id: null,
   image_digest: null,
   adopts_existing_engine: false,
   system_changes: [],

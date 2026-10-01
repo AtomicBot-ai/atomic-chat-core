@@ -995,6 +995,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/environment/cached-document.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 92,
+    "lines": 100
+  },
   "src/runtime/environment/canonical-json.ts": {
     "statements": 100,
     "branches": 91,
@@ -1006,6 +1012,24 @@
     "branches": 88,
     "functions": 100,
     "lines": 98
+  },
+  "src/runtime/environment/document-fields.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/environment-manifest-provider.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/environment-manifest.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/runtime/environment/host-exec.ts": {
     "statements": 96,
