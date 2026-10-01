@@ -28,7 +28,7 @@ beforeEach(() => {
       { name: 'Ubuntu', state: 'Stopped', version: 2, is_default: true },
       { name: 'AtomicChat', state: 'Running', version: 2, is_default: false },
     ],
-    guests: {},
+    guests: { AtomicChat: { files: {}, host: { driver: null, docker: {}, toolkit: false } } },
   })
   wsl = createWsl({ executable: process.execPath, executableArgs: [FAKE_WSL, dir] })
 })

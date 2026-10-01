@@ -28,6 +28,7 @@ import { randomUUID } from 'node:crypto'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   ContainerRuntimeStepParameters,
+  EnvironmentDistribution,
   LinuxEnvironmentManifest,
   ErrorBody,
   GpuFacts,
@@ -38,7 +39,6 @@ import type {
   ManagedSystemChange,
   PlatformImage,
   RequirementPlan,
-  RuntimeDescriptor,
   Sha256Digest,
 } from '../../contracts/index.js'
 import {
@@ -54,6 +54,10 @@ import {
 } from '../container/index.js'
 import { canonicalDigest, planDigest } from './canonical-json.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import {
+  descriptorForProbe as resolveProbeDescriptor,
+  pinnedDescriptor as resolvePinnedDescriptor,
+} from './provisioner-descriptors.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import type { InstallationRecord, InstallationStore } from './installations.js'
 import type { LinuxHost } from './linux-host.js'
@@ -90,6 +94,13 @@ export interface HostView {
   gpus: GpuFacts[]
   blockers: ManagedBlocker[]
   selinux: boolean | null
+  /** Windows only: Atomic Chat's own distribution, once imported (change `add-tensorrt-llm-windows`). */
+  distribution?: EnvironmentDistribution | null
+  /**
+   * Windows only: the WSL VM's memory as the guest reads it (`/proc/meminfo`), which the model check
+   * compares against instead of the host's (spec "Память и драйвер оцениваются по гостю"). Null when unread.
+   */
+  memory_bytes?: number | null
 }
 
 /**
@@ -240,59 +251,8 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     return docker
   }
 
-  const unavailable = (message: string, details?: string): ManagedBlocker => ({
-    code: 'MANAGED_METADATA_INVALID',
-    message,
-    ...(details === undefined ? {} : { details }),
-    reason: 'descriptor-unavailable',
-  })
-
-  /**
-   * The descriptor a probe plans with. Once the user consented, only the consented descriptor, from
-   * the cache (design D7) — never a newer one: a plan naming another descriptor is a new download
-   * and has to be approved again. Before that: the one the operation's last plan or its request
-   * named, when this core has it cached, otherwise the newest one it can get; the plan says which,
-   * so the consent covers the real one.
-   */
-  const descriptorForProbe = async (
-    record: PersistedOperation
-  ): Promise<{ descriptor: RuntimeDescriptor } | { blocker: ManagedBlocker }> => {
-    const consented = record.machine.consented?.descriptor_id ?? null
-    if (consented !== null) {
-      const pinned = await deps.descriptors.forInstallation(consented)
-      return pinned.kind === 'available'
-        ? { descriptor: pinned.descriptor }
-        : { blocker: unavailable(pinned.error.message, consented) }
-    }
-    const preferred = record.requirement_plan?.descriptor_id ?? record.request.descriptor_id ?? null
-    if (preferred !== null) {
-      const pinned = await deps.descriptors.forInstallation(preferred)
-      if (pinned.kind === 'available') return { descriptor: pinned.descriptor }
-    }
-    const latest = await deps.descriptors.forNewSetup()
-    if (latest.kind === 'available') return { descriptor: latest.descriptor }
-    return { blocker: unavailable(latest.error.message, latest.error.details) }
-  }
-
-  /**
-   * The descriptor every effect after the consent works with: exactly the one the approved (or
-   * carried) plan named, from the cache, and nothing else — no fallback to a newer descriptor
-   * (review r1, item 2). Missing from the cache is a failure, not a reason to pick another.
-   */
-  const pinnedDescriptor = async (record: PersistedOperation): Promise<RuntimeDescriptor> => {
-    const id = record.machine.consented?.descriptor_id ?? record.requirement_plan?.descriptor_id ?? null
-    if (id === null) {
-      throw new AtomicCoreError(
-        'MANAGED_METADATA_INVALID',
-        'This operation has no approved runtime descriptor.'
-      )
-    }
-    const pinned = await deps.descriptors.forInstallation(id)
-    if (pinned.kind !== 'available') {
-      throw new AtomicCoreError('MANAGED_METADATA_INVALID', pinned.error.message, id)
-    }
-    return pinned.descriptor
-  }
+  const descriptorForProbe = (record: PersistedOperation) => resolveProbeDescriptor(deps.descriptors, record)
+  const pinnedDescriptor = (record: PersistedOperation) => resolvePinnedDescriptor(deps.descriptors, record)
 
   /**
    * The environment manifest a probe judges the host against (design D4 of change

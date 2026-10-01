@@ -277,6 +277,8 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
       environment.gpus = seenHost.gpus
       environment.blockers = seenHost.blockers
       environment.selinux = seenHost.selinux
+      // Only a Windows probe says anything about a distribution (change `add-tensorrt-llm-windows`).
+      if (seenHost.distribution !== undefined) environment.distribution = seenHost.distribution
     }
     environment.installations = (await installations.list().catch(() => [])).map(
       (record) => record.installation

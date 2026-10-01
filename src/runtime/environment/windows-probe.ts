@@ -1,81 +1,95 @@
 /**
- * What a Windows machine can already do, read without changing any of it.
+ * What a Windows machine can already do, read without changing any of it (change
+ * `add-tensorrt-llm-windows`, task 2.3; spec `wsl-runtime-environment`, "Probe Windows-хоста без
+ * изменений на машине").
  *
- * Windows never adopts the user's own container setup. The runtime runs inside a distribution
- * Atomic Chat imports and owns, so what this probe answers is narrower: can the host support one,
- * what has to be turned on first, and is ours already there.
+ * Windows never adopts the user's own container setup: the engine runs inside a WSL distribution
+ * Atomic Chat imports and owns, so this probe answers a narrower question than Linux's — can this
+ * machine host one, what has to be turned on first, and is ours already there. What happens inside
+ * that distribution is the Linux probe's job, run in the guest (`guest-host.ts`, design D1).
  *
- * Two traps are handled here rather than anywhere downstream. `wsl.exe` writes UTF-16, so a caller
- * that decoded it as UTF-8 hands us a string with a NUL between every character; parsing that
- * naively finds no distributions on a machine that has several. And the account matters: when the
- * app is running elevated, the administrator is not the person whose distribution this is. The
- * invoking account is supplied by the app and is the only identity the import may use — deriving it
- * from the current process would register the guest to the wrong profile, where the user cannot
- * reach their own models.
+ * Every read here works for a standard user. `Get-WindowsOptionalFeature -Online` would say whether
+ * the WSL components are on, but it needs an administrator, and the core never runs elevated (design
+ * D2); `wsl.exe` itself says it instead — `--version` answers only once the WSL package is installed,
+ * `--status` only once its components can start a VM. The rest: firmware virtualization from CIM
+ * (`Win32_Processor`, or a hypervisor already running, which proves it), the driver and cards from the
+ * Windows `nvidia-smi`, this process's integrity level from `whoami /groups`, the network and memory
+ * settings from `%UserProfile%\.wslconfig` (read, never written).
+ *
+ * A fact that could not be read lands in `unknown` — never assumed present or absent — and the plan
+ * (`windows-plan.ts`) decides what that blocks. Every command `wsl.exe` writes may arrive as UTF-16;
+ * the transport decodes it (`decodeWslBytes`), and `decodeWslOutput` still copes with a caller that
+ * read it as UTF-8 and left a NUL between every character.
  */
 
-import type { ErrorBody, GpuFacts, ManagedAvailability } from '../../contracts/index.js'
+import type { GpuFacts } from '../../contracts/index.js'
+import type { Wsl, WslCommandOutput } from '../wsl/index.js'
 import { parseNvidiaSmi, type CommandOutput } from './linux-probe.js'
 
-export interface WindowsAccount {
-  name: string
-  sid: string
-}
-
+/** One row of `wsl --list --verbose`. */
 export interface WslDistribution {
   name: string
   state: string
   /** WSL 1 and WSL 2 are different machines; only 2 can carry this runtime. */
   version: number | null
   is_default: boolean
-  /** True only when this is the exact distribution this installation recorded as its own. */
-  owned: boolean
 }
 
-export interface WindowsFeatures {
-  wsl: boolean | null
-  virtual_machine_platform: boolean | null
-  virtualization_firmware: boolean | null
+/** `%UserProfile%\.wslconfig`'s `[wsl2]` settings this integration reads — and never writes. */
+export interface WslConfigFacts {
+  /** `networkingMode` (`nat`, `mirrored`, …), lowercase; null when not set (WSL's default is NAT). */
+  networking_mode: string | null
+  /** `localhostForwarding`; null when not set (WSL's default is on). */
+  localhost_forwarding: boolean | null
+  /** `memory` as written (`16GB`); null when not set (WSL's default is half of the RAM). */
+  memory: string | null
 }
 
-export interface WindowsFacts {
-  features: WindowsFeatures
-  wsl_default_version: number | null
-  wsl_kernel: string | null
-  distributions: WslDistribution[]
-  owned_distribution: WslDistribution | null
+export interface WslFacts {
+  /** The WSL package answers `--version`; false for the inbox stub of a machine without it. */
+  installed: boolean | null
+  /** `MAJOR.MINOR.PATCH` of the package (`--version`'s first line, its fourth part dropped). */
+  version: string | null
+  /** `--status` answers: the components are on and a WSL 2 VM can start. Null when not asked. */
+  ready: boolean | null
+}
+
+export interface WindowsHostFacts {
+  /** `x86_64`, `aarch64`, …: the machine's own architecture, not an emulated process's. */
+  architecture: string | null
+  /** The third part of the OS version (`10.0.22631` → 22631). */
+  windows_build: number | null
+  /** This process runs at high integrity (an administrator's elevated token). */
+  elevated: boolean | null
+  wsl: WslFacts
+  /** Firmware virtualization is on (or a hypervisor runs, which proves it). Null when unread or not asked. */
+  virtualization: boolean | null
+  /** The NVIDIA driver is installed: its `nvidia-smi.exe` is in System32. Null when that could not be told. */
+  driver_installed: boolean | null
+  /** The Windows driver's own version (`591.44`), from the Windows `nvidia-smi`; null without a card. */
   driver_version: string | null
   gpus: GpuFacts[]
-  /** The account that launched the app. Never the administrator an elevation switched to. */
-  original_user: WindowsAccount
-  /** Set only when the process is running as somebody else, so the difference is visible. */
-  elevated_user: WindowsAccount | null
-  free_disk_bytes: number | null
+  distributions: WslDistribution[]
+  wslconfig: WslConfigFacts
+  /** Named checks whose answer could not be read. */
   unknown: string[]
 }
 
-export type WindowsPrerequisite =
-  'virtualization' | 'wsl-feature' | 'virtual-machine-platform' | 'nvidia-driver' | 'owned-distribution'
-
-export interface WindowsAssessment {
-  availability: ManagedAvailability
-  /** Our distribution is already registered, so nothing has to be enabled or imported. */
-  adopts_existing_engine: boolean
-  needs_reboot: boolean
-  missing: WindowsPrerequisite[]
-  blockers: ErrorBody[]
-  /** The account the distribution must be imported under. */
-  import_as: WindowsAccount
-}
-
+/** What `probeWindowsHost` reads the machine through. */
 export interface WindowsProbeDeps {
+  wsl: Wsl
+  /** A read-only command on Windows (PowerShell, `whoami`, `nvidia-smi`): `hostExec` in production. */
   exec: (command: string, args: string[]) => Promise<CommandOutput>
-  /** Supplied by the app from the session that launched it, not read from this process. */
-  originalUser: WindowsAccount
-  elevatedUser?: WindowsAccount
-  /** The distribution name this installation recorded, if it has one yet. */
-  ownedDistribution: string | null
-  freeDiskBytes: () => Promise<number | null>
+  /** `%SystemRoot%`, where the system's own `nvidia-smi.exe`, `whoami.exe` and `powershell.exe` live. */
+  systemRoot: string
+  /** `os.machine()`. */
+  machine: () => string
+  /** `os.release()`: `10.0.<build>`. */
+  release: () => string
+  /** `%UserProfile%\.wslconfig`'s text; null when there is none. Rejects when it exists but cannot be read. */
+  readWslConfig: () => Promise<string | null>
+  /** Whether a file exists: false only when it is not there, a rejection when that cannot be told. */
+  pathExists: (path: string) => Promise<boolean>
 }
 
 const NUL = String.fromCharCode(0)
@@ -86,34 +100,48 @@ export function decodeWslOutput(text: string): string {
   return text.split(NUL).join('').split(BOM).join('')
 }
 
-/** `wsl --status`: the default version and the kernel, in whatever language Windows is set to. */
-export function parseWslStatus(output: CommandOutput | null): {
-  default_version: number | null
-  kernel: string | null
-} {
-  if (output === null || output.code !== 0) return { default_version: null, kernel: null }
-  const text = decodeWslOutput(output.stdout)
-  const version = /:\s*([12])\s*$/m.exec(text)
-  const kernel = /(\d+\.\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?)/.exec(text)
-  return {
-    default_version: version === null ? null : Number(version[1]),
-    kernel: kernel === null ? null : (kernel[1] as string),
-  }
+/** `os.machine()` in Linux's spelling: `x86_64` (Node may say `x86_64` or `AMD64`), `aarch64` for ARM. */
+export function normalizeWindowsArchitecture(machine: string): string {
+  const raw = machine.trim().toLowerCase()
+  if (raw === 'x86_64' || raw === 'amd64' || raw === 'x64') return 'x86_64'
+  if (raw === 'arm64' || raw === 'aarch64') return 'aarch64'
+  return raw
+}
+
+/** `os.release()` on Windows is `10.0.<build>`; the build is what minimum versions compare. */
+export function parseWindowsBuild(release: string): number | null {
+  const match = /^\d+\.\d+\.(\d+)/.exec(release.trim())
+  return match === null ? null : Number(match[1])
+}
+
+/**
+ * `wsl --version`: the package version is on the first line, whatever language its label is in
+ * (`WSL version: 2.4.4.0`, `Версия WSL: 2.4.4.0`). Four parts on the wire; the manifest compares three
+ * (conf ruling 1.1), so the build part is dropped here.
+ */
+export function parseWslVersion(output: WslCommandOutput | null): string | null {
+  if (output === null || output.code !== 0) return null
+  const first = decodeWslOutput(output.stdout)
+    .split(/\r?\n/)
+    .find((line) => line.trim() !== '')
+  const match = first === undefined ? null : /(\d+)\.(\d+)\.(\d+)(?:\.\d+)?\s*$/.exec(first.trim())
+  return match === null ? null : `${match[1]}.${match[2]}.${match[3]}`
 }
 
 /**
  * `wsl --list --verbose`: a header, then one line per distribution, the default marked with `*`.
  * The header's own words change with the display language, so a row is recognised by shape instead:
- * a real one ends in a version number.
+ * a real one ends in a version number. No distributions at all is a nonzero exit — an empty list.
  */
-export function parseWslDistributions(output: CommandOutput | null, owned: string | null): WslDistribution[] {
+export function parseWslDistributions(output: WslCommandOutput | null): WslDistribution[] {
   if (output === null || output.code !== 0) return []
   const rows: WslDistribution[] = []
   for (const raw of decodeWslOutput(output.stdout).split(/\r?\n/)) {
     const line = raw.trimEnd()
     if (line.trim() === '') continue
-    const isDefault = line.startsWith('*')
+    const isDefault = line.trimStart().startsWith('*')
     const cells = line
+      .trim()
       .replace(/^\*/, '')
       .trim()
       .split(/\s{2,}|\t+/)
@@ -121,179 +149,158 @@ export function parseWslDistributions(output: CommandOutput | null, owned: strin
     if (cells.length < 3) continue
     const version = Number(cells[cells.length - 1])
     if (!Number.isInteger(version)) continue
-    const name = cells[0] as string
     rows.push({
-      name,
+      name: cells[0] as string,
       state: cells[1] as string,
       version,
       is_default: isDefault,
-      // Ownership is the exact name this installation recorded, never a family resemblance.
-      owned: owned !== null && name === owned,
     })
   }
   return rows
 }
 
-/** `Get-WindowsOptionalFeature ... | ConvertTo-Json`: an object for one feature, an array for several. */
-export function parseOptionalFeatures(output: CommandOutput | null): Map<string, boolean> {
-  const states = new Map<string, boolean>()
-  if (output === null || output.code !== 0) return states
-  try {
-    const parsed = JSON.parse(output.stdout) as unknown
-    const entries = Array.isArray(parsed) ? parsed : [parsed]
-    for (const entry of entries) {
-      const feature = entry as { FeatureName?: unknown; State?: unknown }
-      if (typeof feature.FeatureName !== 'string') continue
-      // `State` is an enum: 2 over the wire, "Enabled" once formatted.
-      states.set(feature.FeatureName, feature.State === 2 || feature.State === 'Enabled')
-    }
-  } catch {
-    return states
-  }
-  return states
-}
-
-/** `Get-ComputerInfo -Property HyperVRequirementVirtualizationFirmwareEnabled | ConvertTo-Json`. */
+/**
+ * The CIM answer (`VirtualizationFirmwareEnabled`, `HypervisorPresent`): a running hypervisor proves
+ * virtualization is on — and then the processor reports the firmware flag as false, so it is checked
+ * first. Anything unreadable is null.
+ */
 export function parseVirtualization(output: CommandOutput | null): boolean | null {
   if (output === null || output.code !== 0) return null
   try {
     const parsed = JSON.parse(output.stdout) as Record<string, unknown>
-    const value =
-      parsed['HyperVRequirementVirtualizationFirmwareEnabled'] ?? parsed['VirtualizationFirmwareEnabled']
-    return typeof value === 'boolean' ? value : null
+    if (parsed['HypervisorPresent'] === true) return true
+    const firmware = parsed['VirtualizationFirmwareEnabled']
+    return typeof firmware === 'boolean' ? firmware : null
   } catch {
     return null
   }
 }
 
-const FEATURE_WSL = 'Microsoft-Windows-Subsystem-Linux'
-const FEATURE_VMP = 'VirtualMachinePlatform'
+const HIGH_INTEGRITY = 'S-1-16-12288'
+const SYSTEM_INTEGRITY = 'S-1-16-16384'
+const MEDIUM_INTEGRITY = 'S-1-16-8192'
 
-/** Read the machine. Nothing here enables a feature, imports a distribution or starts one. */
-export async function probeWindows(deps: WindowsProbeDeps): Promise<WindowsFacts> {
+/** `whoami /groups /fo csv /nh`: the mandatory label says whether this token is elevated. */
+export function parseElevation(output: CommandOutput | null): boolean | null {
+  if (output === null || output.code !== 0) return null
+  if (output.stdout.includes(HIGH_INTEGRITY) || output.stdout.includes(SYSTEM_INTEGRITY)) return true
+  return output.stdout.includes(MEDIUM_INTEGRITY) ? false : null
+}
+
+const truthy = (value: string): boolean | null => {
+  const lower = value.trim().toLowerCase()
+  if (lower === 'true') return true
+  if (lower === 'false') return false
+  return null
+}
+
+/** `.wslconfig` is INI; only `[wsl2]` matters, keys case-insensitive, `#`/`;` comments. */
+export function parseWslConfig(text: string | null): WslConfigFacts {
+  const facts: WslConfigFacts = { networking_mode: null, localhost_forwarding: null, memory: null }
+  if (text === null) return facts
+  let section = ''
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/[#;].*$/, '').trim()
+    if (line === '') continue
+    const header = /^\[(.+)\]$/.exec(line)
+    if (header !== null) {
+      section = (header[1] as string).trim().toLowerCase()
+      continue
+    }
+    if (section !== 'wsl2') continue
+    const pair = /^([^=]+)=(.*)$/.exec(line)
+    if (pair === null) continue
+    const key = (pair[1] as string).trim().toLowerCase()
+    const value = (pair[2] as string).trim().replace(/^"(.*)"$/, '$1')
+    if (key === 'networkingmode') facts.networking_mode = value.toLowerCase()
+    else if (key === 'localhostforwarding') facts.localhost_forwarding = truthy(value)
+    else if (key === 'memory') facts.memory = value
+  }
+  return facts
+}
+
+const VIRTUALIZATION_QUERY =
+  '$p = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1; ' +
+  '$s = Get-CimInstance -ClassName Win32_ComputerSystem; ' +
+  '[pscustomobject]@{ VirtualizationFirmwareEnabled = $p.VirtualizationFirmwareEnabled; ' +
+  'HypervisorPresent = $s.HypervisorPresent } | ConvertTo-Json -Compress'
+
+/**
+ * Read the machine. Nothing here enables a component, imports, starts or stops a distribution, or
+ * writes a file. `wsl --status` and the firmware check are asked only when they can change the
+ * answer: a package that is not installed has no status, and a WSL that already starts VMs proves
+ * virtualization.
+ */
+export async function probeWindowsHost(deps: WindowsProbeDeps): Promise<WindowsHostFacts> {
   const unknown: string[] = []
-  const [status, list, features, virtualization, smi, disk] = await Promise.all([
-    deps.exec('wsl.exe', ['--status']),
-    deps.exec('wsl.exe', ['--list', '--verbose']),
-    deps.exec('powershell.exe', [
-      '-NoProfile',
-      '-Command',
-      `Get-WindowsOptionalFeature -Online -FeatureName ${FEATURE_WSL},${FEATURE_VMP} | ConvertTo-Json`,
-    ]),
-    deps.exec('powershell.exe', [
-      '-NoProfile',
-      '-Command',
-      'Get-ComputerInfo -Property HyperVRequirementVirtualizationFirmwareEnabled | ConvertTo-Json',
-    ]),
-    deps.exec('nvidia-smi', [
-      '--query-gpu=uuid,name,compute_cap,memory.total,memory.free,driver_version',
-      '--format=csv,noheader,nounits',
-    ]),
-    deps.freeDiskBytes().catch(() => null),
+  const system32 = `${deps.systemRoot.replace(/[\\/]+$/, '')}\\System32`
+  const smiPath = `${system32}\\nvidia-smi.exe`
+  // The driver installs `nvidia-smi.exe` into System32: no file there is no driver, not an unread fact.
+  const smiInstalled = await deps.pathExists(smiPath).catch(() => null)
+  const [version, smi, whoami, wslconfigText] = await Promise.all([
+    deps.wsl.command(['--version'], { timeoutMs: 30_000 }),
+    smiInstalled === false
+      ? Promise.resolve<CommandOutput>({ code: 127, stdout: '', stderr: 'no nvidia-smi.exe' })
+      : deps.exec(smiPath, [
+          '--query-gpu=uuid,name,compute_cap,memory.total,memory.free,driver_version',
+          '--format=csv,noheader,nounits',
+        ]),
+    deps.exec(`${system32}\\whoami.exe`, ['/groups', '/fo', 'csv', '/nh']),
+    deps.readWslConfig().then(
+      (text) => ({ text, unreadable: false }),
+      () => ({ text: null, unreadable: true })
+    ),
   ])
 
-  const featureStates = parseOptionalFeatures(features)
-  if (featureStates.size === 0) unknown.push('windows-features')
-  const virtualizationEnabled = parseVirtualization(virtualization)
-  if (virtualizationEnabled === null) unknown.push('virtualization')
-  if (smi.code === null) unknown.push('nvidia-driver')
-  if (disk === null) unknown.push('free-disk')
+  const installed = version.code === null ? null : version.code === 0
+  if (installed === null) unknown.push('wsl')
+  const wslVersion = parseWslVersion(version)
+  if (installed === true && wslVersion === null) unknown.push('wsl-version')
 
-  const distributions = parseWslDistributions(list, deps.ownedDistribution)
+  const [status, list] =
+    installed === true
+      ? await Promise.all([
+          deps.wsl.command(['--status'], { timeoutMs: 30_000 }),
+          deps.wsl.command(['--list', '--verbose'], { timeoutMs: 30_000 }),
+        ])
+      : [null, null]
+  const ready = status === null ? null : status.code === null ? null : status.code === 0
+  if (installed === true && ready === null) unknown.push('wsl-status')
+
+  // Only a WSL that cannot start a VM leaves the question of firmware virtualization open.
+  let virtualization: boolean | null = ready === true ? true : null
+  if (ready !== true) {
+    virtualization = parseVirtualization(
+      await deps.exec(`${system32}\\WindowsPowerShell\\v1.0\\powershell.exe`, [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        VIRTUALIZATION_QUERY,
+      ])
+    )
+  }
+
+  if (smiInstalled === null || (smiInstalled && smi.code === null)) unknown.push('nvidia-driver')
   const nvidia = parseNvidiaSmi(smi)
-  const { default_version, kernel } = parseWslStatus(status)
+  const elevated = parseElevation(whoami)
+  if (elevated === null) unknown.push('integrity-level')
+  if (wslconfigText.unreadable) unknown.push('wslconfig')
+
+  const architecture = normalizeWindowsArchitecture(deps.machine())
+  const windowsBuild = parseWindowsBuild(deps.release())
+  if (windowsBuild === null) unknown.push('windows-build')
 
   return {
-    features: {
-      wsl: featureStates.get(FEATURE_WSL) ?? null,
-      virtual_machine_platform: featureStates.get(FEATURE_VMP) ?? null,
-      virtualization_firmware: virtualizationEnabled,
-    },
-    wsl_default_version: default_version,
-    wsl_kernel: kernel,
-    distributions,
-    owned_distribution: distributions.find((entry) => entry.owned) ?? null,
+    architecture,
+    windows_build: windowsBuild,
+    elevated,
+    wsl: { installed, version: wslVersion, ready },
+    virtualization,
+    driver_installed: smiInstalled,
     driver_version: nvidia.driver_version,
     gpus: nvidia.gpus,
-    original_user: deps.originalUser,
-    elevated_user: deps.elevatedUser ?? null,
-    free_disk_bytes: disk,
+    distributions: parseWslDistributions(list),
+    wslconfig: parseWslConfig(wslconfigText.text),
     unknown,
-  }
-}
-
-const blocker = (message: string, details?: string): ErrorBody => ({
-  code: 'MANAGED_PREREQUISITE_BLOCKED',
-  message,
-  ...(details === undefined ? {} : { details }),
-})
-
-export interface WindowsAssessmentOptions {
-  requiredDiskBytes: number | null
-}
-
-export function assessWindows(facts: WindowsFacts, options: WindowsAssessmentOptions): WindowsAssessment {
-  const blockers: ErrorBody[] = []
-  const missing: WindowsPrerequisite[] = []
-
-  for (const name of facts.unknown) {
-    blockers.push(blocker(`Could not determine ${name} on this system.`, name))
-  }
-
-  if (facts.features.virtualization_firmware === false) {
-    missing.push('virtualization')
-    // Enabling this is a firmware setting; no installer can do it for the user.
-    blockers.push(
-      blocker('Virtualization is turned off in this computer’s firmware. Turn it on, then try again.')
-    )
-  }
-  if (facts.driver_version === null && !facts.unknown.includes('nvidia-driver')) {
-    missing.push('nvidia-driver')
-    blockers.push(blocker('No NVIDIA driver was found. Install the driver for your card, then try again.'))
-  } else if (facts.driver_version !== null && facts.gpus.length === 0) {
-    blockers.push(blocker('The NVIDIA driver is installed but reports no usable GPU.'))
-  }
-
-  if (facts.features.wsl !== true) missing.push('wsl-feature')
-  if (facts.features.virtual_machine_platform !== true) missing.push('virtual-machine-platform')
-  if (facts.owned_distribution === null) missing.push('owned-distribution')
-
-  if (
-    options.requiredDiskBytes !== null &&
-    facts.free_disk_bytes !== null &&
-    facts.free_disk_bytes < options.requiredDiskBytes
-  ) {
-    blockers.push(
-      blocker(
-        'There is not enough free disk space for the runtime image.',
-        `free=${facts.free_disk_bytes} required=${options.requiredDiskBytes}`
-      )
-    )
-  }
-
-  // A distribution registered as WSL 1 cannot run this runtime, and converting it is the user's call.
-  if (facts.owned_distribution !== null && facts.owned_distribution.version !== 2) {
-    blockers.push(
-      blocker(
-        'The Atomic Chat distribution is registered as WSL 1, which cannot run the runtime.',
-        facts.owned_distribution.name
-      )
-    )
-  }
-
-  const enablingFeatures = missing.includes('wsl-feature') || missing.includes('virtual-machine-platform')
-  const adopts = blockers.length === 0 && missing.length === 0
-  const availability: ManagedAvailability =
-    blockers.length > 0 ? 'prerequisite-blocked' : adopts ? 'supported' : 'setup-required'
-
-  return {
-    availability,
-    adopts_existing_engine: adopts,
-    // Turning a Windows feature on takes a restart before anything can use it.
-    needs_reboot: enablingFeatures && blockers.length === 0,
-    missing,
-    blockers,
-    // The elevation may be running as an administrator; the distribution is still the user's.
-    import_as: facts.original_user,
   }
 }
