@@ -435,12 +435,15 @@ function dockerFacts(): DockerFacts {
   }
 }
 
-/** Reads the machine. `manifest` decides whether this distribution is on the recipe's list. */
-export function detectHost(manifest: EnvironmentManifestDoc): HostFacts {
+/**
+ * Reads the machine. `manifest` decides whether this distribution is on the recipe's list; without
+ * one (a test that never installs, and could not read it) nothing is.
+ */
+export function detectHost(manifest: EnvironmentManifestDoc | null): HostFacts {
   const os = parseOsRelease(existsSync('/etc/os-release') ? readFileSync('/etc/os-release', 'utf8') : '')
   const arch = run('uname', ['-m']).stdout.trim()
   const family = packageFamily(os)
-  const recipe = manifest.recipes.find((r) => r.recipe_id === 'linux.install-container-runtime')
+  const recipe = manifest?.recipes.find((r) => r.recipe_id === 'linux.install-container-runtime')
   const inRecipe =
     recipe?.distributions.some((d) => d.id === os.id && d.version_id === os.version_id && d.arch === arch) ??
     false

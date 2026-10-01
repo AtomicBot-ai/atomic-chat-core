@@ -1644,6 +1644,26 @@ describe('no environment manifest (change extract-environment-manifest, design D
     expect(assessment.blockers.map((b) => b.reason)).toEqual(['environment-manifest-unavailable'])
   })
 
+  it('waiting on a sign-in with the toolkit missing: the component blocker does not tell the user to install it by hand (review)', async () => {
+    const { assessment } = await run(
+      {
+        dockerVersion: ok('Docker version 28.3.0, build afdd53b\n'),
+        dockerInfo: UNREACHABLE_28_3,
+        dpkgQuery: dpkgFound('dpkg/docker-ce-installed.txt'),
+        systemctlIsActive: ok('active\n'),
+        getentGroup: ok('docker:x:998:ana\n'),
+        idNG: ok('ana sudo\n'),
+      },
+      NO_MANIFEST
+    )
+    const reasons = assessment.blockers.map((b) => b.reason)
+    expect(reasons).toContain('relogin-required')
+    expect(reasons).toContain('environment-manifest-unavailable')
+    const toolkit = assessment.blockers.find((b) => b.reason === 'toolkit-missing')
+    expect(toolkit?.message).toMatch(/not known until the list of supported systems loads/)
+    expect(toolkit?.message).not.toMatch(/install it yourself/)
+  })
+
   it('Arch keeps its own manual-install blocker: Arch never reads the distribution list', async () => {
     const { assessment } = await run({ osRelease: readLinuxProbeFixture('os-release/arch.txt') }, NO_MANIFEST)
     expect(assessment.blockers.map((b) => b.reason)).toEqual(['arch-manual-install'])

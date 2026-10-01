@@ -303,6 +303,10 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
    * published between the probe and the consent changes the plan's digest, so the consent is asked
    * again. Null when none is available — never an error by itself: only a host that needs an
    * install is blocked by it (`assessLinux`, gate `manifest-unavailable`).
+   *
+   * A consented manifest missing from the cache (its write failed — `latest()` never fails on that)
+   * is fetched again and used only if conf still serves that very `manifest_id`: an id's content
+   * never changes, so this is the consented manifest, not a newer one.
    */
   const manifestForProbe = async (record: PersistedOperation): Promise<EnvironmentManifest | null> => {
     const consented = record.machine.consented ?? null
@@ -310,7 +314,9 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       const id = consented.environment_manifest_id ?? null
       if (id === null) return null
       const pinned = await deps.environmentManifests.pinned(id)
-      return pinned.kind === 'available' ? pinned.manifest : null
+      if (pinned.kind === 'available') return pinned.manifest
+      const again = await deps.environmentManifests.latest()
+      return again.kind === 'available' && again.manifest.manifest_id === id ? again.manifest : null
     }
     const latest = await deps.environmentManifests.latest()
     return latest.kind === 'available' ? latest.manifest : null
@@ -432,6 +438,10 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
   }
 
   const setupProbe = async (record: PersistedOperation): Promise<ProvisionerProbe> => {
+    // Fetched alongside the descriptor and the host probe, not after them: two conf documents with
+    // their own timeouts must not add up on a network that drops packets. Never rejects: a failure
+    // is "no manifest", which `assessLinux` handles.
+    const manifestPending = manifestForProbe(record).catch(() => null)
     const resolved = await descriptorForProbe(record)
     if ('blocker' in resolved) {
       const plan = blockedPlan(record, deps.environmentId, 'unsupported', resolved.blocker)
@@ -467,7 +477,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
       target.kind !== 'runtime' || present || pullStarted || presenceUnknown
         ? null
         : descriptor.required_disk_bytes
-    const manifest = await manifestForProbe(record)
+    const manifest = await manifestPending
     // A manifest without this recipe qualifies no distribution for it: `unqualified`, not unavailable.
     const recipe = manifest?.recipes.find((entry) => entry.recipe_id === deps.recipe.recipe_id)
     const assessment = assessLinux(machine, {

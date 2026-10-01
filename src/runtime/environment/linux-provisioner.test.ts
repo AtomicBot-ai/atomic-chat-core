@@ -736,10 +736,26 @@ describe('the environment manifest (change extract-environment-manifest)', () =>
     const h = harness(cleanHost(), { environmentManifests: manifests })
     const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
     expect(manifests.pinned).toHaveBeenCalledWith('linux-r1')
-    expect(manifests.latest).not.toHaveBeenCalled()
+    // conf is asked again, but it now serves linux-r2: never taken in place of the consented one.
+    expect(manifests.latest).toHaveBeenCalled()
     expect(answer.plan.environment_manifest_id).toBeNull()
     expect(answer.plan.blockers.map((b) => b.reason)).toEqual(['environment-manifest-unavailable'])
     expect(answer.host_step).toBeNull()
+  })
+
+  it('a consented manifest whose cache write failed is fetched again when conf still serves that id (review)', async () => {
+    // `latest()` accepted linux-r1 but could not cache it; the consent named it, so a later probe
+    // takes conf's linux-r1 again — the same immutable content — instead of blocking the install.
+    const manifests = manifestsOf(MANIFEST)
+    manifests.pinned.mockImplementation(async (id: string) => ({
+      kind: 'unavailable' as const,
+      error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'not cached', id),
+    }))
+    const h = harness(cleanHost(), { environmentManifests: manifests })
+    const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
+    expect(answer.plan.environment_manifest_id).toBe('linux-r1')
+    expect(answer.plan.blockers).toEqual([])
+    expect(answer.host_step).not.toBeNull()
   })
 
   it('a removal reads no manifest and names none', async () => {

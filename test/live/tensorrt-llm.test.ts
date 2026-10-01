@@ -298,7 +298,8 @@ interface CardRun {
 
 const S: {
   descriptor: Descriptor
-  manifest: EnvironmentManifestDoc
+  /** Null when it could not be read: an installed engine never needs it (design D4). */
+  manifest: EnvironmentManifestDoc | null
   facts: HostFacts
   problems: string[]
   constants: CitedConstant[]
@@ -323,7 +324,7 @@ const S: {
   prepared: Map<string, PreparedModel>
 } = {
   descriptor: undefined as unknown as Descriptor,
-  manifest: undefined as unknown as EnvironmentManifestDoc,
+  manifest: null,
   facts: undefined as unknown as HostFacts,
   problems: [],
   constants: [],
@@ -888,7 +889,10 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
   beforeAll(async () => {
     if (!ENABLED) return
     S.descriptor = await readDescriptor<Descriptor>(DESCRIPTOR_URL)
-    S.manifest = await readDescriptor<EnvironmentManifestDoc>(MANIFEST_URL, 'environment manifest')
+    // Best effort: this test never installs, so a manifest it cannot read must not stop the run.
+    S.manifest = await readDescriptor<EnvironmentManifestDoc>(MANIFEST_URL, 'environment manifest').catch(
+      () => null
+    )
     S.facts = detectHost(S.manifest)
     S.problems = hostProblems(S.facts, S.descriptor)
     S.constants = readSourceConstants(ROOT, SOURCE_CONSTANTS)
@@ -948,7 +952,10 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
       git_head: run('git', ['-C', ROOT, 'rev-parse', 'HEAD']).stdout.trim() || null,
       managed_root: MANAGED_ROOT ?? 'the per-user default (<dataDir>/atomic-managed-runtimes)',
     })
-    report.section('environment_manifest', { url: MANIFEST_URL, manifest_id: S.manifest.manifest_id })
+    report.section('environment_manifest', {
+      url: MANIFEST_URL,
+      manifest_id: S.manifest?.manifest_id ?? null,
+    })
     report.section('descriptor', {
       url: DESCRIPTOR_URL,
       descriptor_id: S.descriptor.descriptor_id,

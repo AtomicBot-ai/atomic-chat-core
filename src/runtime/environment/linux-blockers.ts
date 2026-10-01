@@ -359,7 +359,10 @@ export function missingComponentBlockers(facts: LinuxFacts, gate: InstallGate): 
           : gate === 'pacman'
             ? ' Install it with a full system sync (Arch does not support partial upgrades); reboot ' +
               'afterward if the kernel or NVIDIA driver was updated.'
-            : ' Automatic install is not offered on this system; install it yourself.'),
+            : gate === 'manifest-unavailable'
+              ? ' Whether setup can install it for you is not known until the list of supported ' +
+                'systems loads; try again with a working internet connection.'
+              : ' Automatic install is not offered on this system; install it yourself.'),
       undefined,
       gate === 'pacman' ? [`sudo pacman -Syu --needed ${pacmanPackage}`] : []
     )

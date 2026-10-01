@@ -30,7 +30,6 @@ import type { RuntimeDescriptor } from '../../contracts/index.js'
 import { managedSharedPaths } from '../../config/index.js'
 import {
   createCachedDocuments,
-  DOCUMENT_FETCH_TIMEOUT_MS,
   documentFetchFromFetch,
   meetsCoreVersion,
   type DocumentCacheFs,
@@ -51,9 +50,6 @@ export const TENSORRT_LLM_ENGINE_ID = 'tensorrt-llm'
 export const DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/tensorrt-llm.json'
 
-/** Matches `MANIFEST_FETCH_TIMEOUT_MS` (`src/backend/catalog/manifest.ts`): the house budget. */
-export const DESCRIPTOR_FETCH_TIMEOUT_MS = DOCUMENT_FETCH_TIMEOUT_MS
-
 /** One way of fetching the descriptor document; `timeoutMs` is the hard budget to honour. */
 export type DescriptorFetch = DocumentFetch
 
@@ -62,16 +58,13 @@ export function descriptorFetchFromFetch(fetchImpl: typeof fetch): DescriptorFet
   return documentFetchFromFetch(fetchImpl, 'Runtime descriptor')
 }
 
-/** The slice of `node:fs/promises` the cache needs; tests pass an in-memory fake. */
-export type DescriptorCacheFs = DocumentCacheFs
-
 export interface DescriptorProviderOptions {
   /** Where `ATOMIC_RUNTIME_DESCRIPTOR_URL` is read from; the real process env in production. */
   env: Record<string, string | undefined>
   fetch: DescriptorFetch
   /** Reads a `file://…` override; rejects when the file does not exist or cannot be read. */
   readFile: (path: string) => Promise<string>
-  fs?: DescriptorCacheFs
+  fs?: DocumentCacheFs
   /** The shared per-user managed root (`managedSharedRoot`); both scopes share one cache. */
   root: string
   /** This build's own version; defaults to `CORE_VERSION`. A test pins it to check the gate. */
