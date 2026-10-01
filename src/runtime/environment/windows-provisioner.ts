@@ -24,6 +24,7 @@ import type {
   ManagedBlocker,
   ManagedHostStep,
   ManagedProgress,
+  ManagedSystemChange,
   PlatformImage,
   RequirementPlan,
   RuntimeDescriptor,
@@ -42,7 +43,7 @@ import {
   type DockerExec,
   type ExecutionRecord,
 } from '../container/index.js'
-import type { DistributionKeeper, WslDistributionTransport } from '../wsl/index.js'
+import { GUEST_SCOPES_ROOT, type DistributionKeeper, type WslDistributionTransport } from '../wsl/index.js'
 import { canonicalDigest } from './canonical-json.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
@@ -73,7 +74,12 @@ import {
 import { checkLocalhostForwarding } from './windows-forwarding.js'
 import { importDistribution, restoreDefaultDistribution, setupGuest } from './windows-guest-setup.js'
 import { assessWindowsHost, type WindowsBlocker } from './windows-plan.js'
-import { probeWindowsHost, type WindowsHostFacts, type WslDistribution } from './windows-probe.js'
+import {
+  parseWslDistributions,
+  probeWindowsHost,
+  type WindowsHostFacts,
+  type WslDistribution,
+} from './windows-probe.js'
 
 /** The elevated recipe's identity: what a `windows.enable-wsl` step and its receipt are bound to. */
 export interface EnableWslBinding {
@@ -618,12 +624,136 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     }
   }
 
-  const notYet = (what: string): never => {
-    throw new AtomicCoreError(
-      'MANAGED_PREREQUISITE_BLOCKED',
-      `Managed runtimes on Windows cannot ${what} in this build yet.`
-    )
+  /** Engines installed in this environment: what an environment removal must refuse while any is. */
+  const installedEngines = async (): Promise<string[]> =>
+    [...new Set((await deps.installations.list()).map((entry) => entry.installation.engine_id))].sort()
+
+  /** Every model in the distribution, of every scope (app and CLI share it), with its size in the guest. */
+  const guestModels = async (
+    transport: WslDistributionTransport
+  ): Promise<{ ids: string[]; bytes: number | null }> => {
+    const found = await transport.exec(['find', GUEST_SCOPES_ROOT, '-name', 'model.yml', '-printf', '%h\n'], {
+      user: GUEST_ROOT,
+      timeoutMs: 120_000,
+    })
+    const dirs = found.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => /\/models\/[^/]+\/.+/.test(line))
+      .sort()
+    if (dirs.length === 0) return { ids: [], bytes: 0 }
+    const du = await transport.exec(['du', '-s', '-b', '--', ...dirs], {
+      user: GUEST_ROOT,
+      timeoutMs: 30 * 60_000,
+    })
+    const sizes = du.stdout
+      .split('\n')
+      .map((line) => /^(\d+)\t/.exec(line))
+      .filter((match): match is RegExpExecArray => match !== null)
+      .map((match) => Number(match[1]))
+    const ids = dirs.map((dir) => (/\/models\/[^/]+\/(.+)$/.exec(dir) as RegExpExecArray)[1] as string)
+    return { ids, bytes: sizes.length === dirs.length ? sizes.reduce((sum, value) => sum + value, 0) : null }
   }
+
+  /**
+   * The plan of an environment removal (design D12; spec "Окружение Windows удаляется целиком и только
+   * с согласием"): refused while an engine is installed; otherwise what goes — the distribution with
+   * its disk image and its size, and every model in it with their total — never another distribution.
+   */
+  const environmentRemovalProbe = async (record: PersistedOperation): Promise<ProvisionerProbe> => {
+    const target = record.machine.operation.target
+    const engines = await installedEngines()
+    if (engines.length > 0) {
+      return {
+        plan: blockedPlan(record, 'prerequisite-blocked', [
+          {
+            code: 'MANAGED_PREREQUISITE_BLOCKED',
+            message: `Remove ${engines.join(', ')} first: the environment is removed only once no engine is installed in it.`,
+            details: 'engines-installed',
+            reason: 'engines-installed',
+            params: { engines: engines.join(',') },
+          },
+        ]),
+        host_step: null,
+      }
+    }
+    const environment = await deps.records.read()
+    const changes: ManagedSystemChange[] = []
+    if (environment !== null) {
+      const transport = wsl.distribution(environment.distribution.name)
+      const models = await guestModels(transport)
+      const size = await deps.host.fileSize(distributionDisk(environment.distribution.path)).catch(() => null)
+      if (models.ids.length > 0) {
+        changes.push({
+          code: 'delete-models',
+          text: `Delete the ${models.ids.length} model(s) in it${models.bytes === null ? '' : ` (${models.bytes} bytes)`}: ${models.ids.join(', ')}.`,
+          params: { models: models.ids.join(','), bytes: models.bytes === null ? '' : String(models.bytes) },
+        })
+      }
+      changes.unshift({
+        code: 'unregister-distribution',
+        text: `Remove Atomic Chat’s WSL distribution "${environment.distribution.name}" (wsl --unregister) and everything in it, freeing its disk image in ${environment.distribution.path}. Your other distributions are not touched.`,
+        params: {
+          name: environment.distribution.name,
+          path: environment.distribution.path,
+          size_bytes: size === null ? '' : String(size),
+        },
+      })
+    }
+    const plan: RequirementPlan = {
+      plan_digest: canonicalDigest({ kind: 'remove', platform: 'windows', target, system_changes: changes }),
+      environment_id: deps.environmentId,
+      target,
+      availability: environment === null ? 'setup-required' : 'supported',
+      recipe_id: 'none',
+      recipe_digest: ZERO_DIGEST,
+      descriptor_id: null,
+      environment_manifest_id: null,
+      image_digest: null,
+      adopts_existing_engine: true,
+      system_changes: changes,
+      download_bytes: null,
+      required_disk_bytes: null,
+      docker_root_dir: null,
+      free_disk_bytes: null,
+      requires_elevation: false,
+      may_require_relogin: false,
+      may_require_reboot: false,
+      blockers: [],
+      warnings: [],
+    }
+    return { plan, host_step: null }
+  }
+
+  /** `wsl --unregister` of exactly the recorded distribution, then the record; refused while an engine is installed. */
+  const removeEnvironment = async (): Promise<void> => {
+    const engines = await installedEngines()
+    if (engines.length > 0) {
+      throw blocked(
+        `Remove ${engines.join(', ')} first: the environment is removed only once no engine is installed in it.`,
+        'engines-installed'
+      )
+    }
+    const environment = await deps.records.read()
+    if (environment === null) return
+    const name = environment.distribution.name
+    const registered = parseWslDistributions(await wsl.command(['--list', '--verbose'])).some(
+      (entry) => entry.name === name
+    )
+    if (registered) {
+      const unregistered = await wsl.command(['--unregister', name], { timeoutMs: 10 * 60_000 })
+      if (unregistered.code !== 0) {
+        throw new AtomicCoreError(
+          'IO_ERROR',
+          `WSL could not remove the distribution "${name}".`,
+          `${unregistered.stdout.trim()} ${unregistered.stderr.trim()}`.trim()
+        )
+      }
+    }
+    await deps.records.remove()
+  }
+
+
 
   const inventory: EffectInventory = {
     async inspect(effect: EffectIntent, record: PersistedOperation): Promise<EffectFinding> {
@@ -667,7 +797,10 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
   }
 
   return {
-    probe: (record) => setupProbe(record),
+    probe: (record) =>
+      record.request.kind === 'remove' && record.machine.operation.target.kind === 'environment'
+        ? environmentRemovalProbe(record)
+        : setupProbe(record),
     async verifyHostStep(record: PersistedOperation): Promise<HostStepVerdict> {
       // The receipt is an assertion; the machine is the evidence (task 2.6's rule, on Windows too).
       const answer = await setupProbe(record)
@@ -818,7 +951,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
 
     async remove(record: PersistedOperation): Promise<void> {
       const target = record.machine.operation.target
-      if (target.kind !== 'runtime') return notYet('remove the environment')
+      if (target.kind !== 'runtime') return removeEnvironment()
       const existing = await deps.installations.read(target.installation_id)
       // As on Linux: a loaded model first, its container confirmed stopped; loads held off till the end.
       const hold = await unload(target.engine_id)

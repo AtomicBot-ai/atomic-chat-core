@@ -108,6 +108,20 @@ function guestCommand(state, name, user, command, args, input) {
     case 'chmod':
     case 'chown':
       return result(0)
+    case 'find': {
+      // `find <root> -name model.yml -printf '%h\n'`: the folder of every model.yml under root.
+      const root = args[0]
+      const dirs = Object.keys(files)
+        .filter((path) => path.startsWith(`${root}/`) && path.endsWith('/model.yml'))
+        .map((path) => path.slice(0, -'/model.yml'.length))
+      return result(0, dirs.map((dir) => `${dir}\n`).join(''))
+    }
+    case 'du': {
+      // `du -s -b -- <path>...`: the sizes a test gave (`du_bytes`), 0 for anything else that exists.
+      const paths = args.slice(args.indexOf('--') + 1)
+      const sizes = guest.du_bytes ?? {}
+      return result(0, paths.map((path) => `${sizes[path] ?? 0}\t${path}\n`).join(''))
+    }
     case 'mv': {
       const [from, to] = args.filter((a) => !a.startsWith('-'))
       if (!(from in files)) return result(1, '', `mv: cannot stat '${from}'\n`)

@@ -1030,3 +1030,119 @@ describe('holding the distribution — spec "Дистрибутив удержи
     expect(h.leases.count).toBe(0)
   })
 })
+
+describe('removing the environment — spec "Окружение Windows удаляется целиком и только с согласием"', () => {
+  const GB = 1_000_000_000
+  const removal = (): PersistedOperation => {
+    const base = record({ kind: 'remove', target: { kind: 'environment' } })
+    return { ...base, request: { ...base.request, kind: 'remove', target: { kind: 'environment' } } }
+  }
+  const withModels = (): FakeWindowsMachine => {
+    const guest = readyGuest()
+    const scope = '/var/lib/atomic-chat/scopes'
+    guest.files = {
+      ...guest.files,
+      [`${scope}/k1/models/tensorrt-llm/Qwen/Qwen3-32B/model.yml`]: 'x',
+      [`${scope}/k2/models/tensorrt-llm/acme/m/model.yml`]: 'x',
+    }
+    guest.du_bytes = {
+      [`${scope}/k1/models/tensorrt-llm/Qwen/Qwen3-32B`]: 30 * GB,
+      [`${scope}/k2/models/tensorrt-llm/acme/m`]: 10 * GB,
+    }
+    return importedWindows(guest)
+  }
+
+  it('an engine still installed: refused, naming the engine to remove first; nothing unregistered', async () => {
+    const h = harness(withModels(), { record: RECORD })
+    await h.deps.installations.write({
+      schema_version: 1,
+      installation: {
+        installation_id: 'tensorrt-llm',
+        engine_id: 'tensorrt-llm',
+        environment_id: 'default',
+        active_descriptor_id: DESCRIPTOR.descriptor_id,
+        candidate_descriptor_id: null,
+        availability: 'supported',
+        status: 'ready',
+      },
+      image: DESCRIPTOR.image['linux/amd64'],
+      platform: 'linux/amd64',
+      installed_at: '2026-10-01T00:00:00.000Z',
+    })
+    const provisioner = createWindowsProvisioner(h.deps)
+    const { plan } = await provisioner.probe(removal(), signal)
+    expect(plan.availability).toBe('prerequisite-blocked')
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({ reason: 'engines-installed', params: { engines: 'tensorrt-llm' } }),
+    ])
+    await expect(provisioner.remove(removal(), signal)).rejects.toMatchObject({
+      details: 'engines-installed',
+    })
+    expect(h.windows.wslCalls.some((argv) => argv[0] === '--unregister')).toBe(false)
+  })
+
+  it('no engine, two models of 40 GB: the plan lists them and the space; after consent the distribution and the record are gone', async () => {
+    const machine = withModels()
+    const h = harness(machine, { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+
+    const { plan, host_step } = await provisioner.probe(removal(), signal)
+    expect(host_step).toBeNull()
+    expect(plan.requires_elevation).toBe(false)
+    expect(plan.blockers).toEqual([])
+    const models = plan.system_changes.find((change) => change.code === 'delete-models')
+    expect(models?.params).toEqual({ models: 'Qwen/Qwen3-32B,acme/m', bytes: String(40 * GB) })
+    const distribution = plan.system_changes.find((change) => change.code === 'unregister-distribution')
+    expect(distribution?.params).toEqual({
+      name: 'AtomicChat',
+      path: DISTRO_DIR,
+      size_bytes: String(30 * 1024 ** 3),
+    })
+
+    await provisioner.remove(removal(), signal)
+    expect(h.windows.wslCalls).toContainEqual(['--unregister', 'AtomicChat'])
+    expect((machine.wsl.distributions ?? []).map((d) => d.name)).toEqual(['Ubuntu'])
+    expect(h.current()).toBeNull()
+    // Only ours: the user's Ubuntu was never named.
+    expect(h.windows.wslCalls.some((argv) => argv.includes('Ubuntu'))).toBe(false)
+  })
+
+  it('after the removal the environment offers setup again', async () => {
+    const machine = withModels()
+    const h = harness(machine, { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.remove(removal(), signal)
+    const { plan } = await provisioner.probe(record(), signal)
+    expect(plan.availability).toBe('setup-required')
+    expect(plan.system_changes.map((change) => change.code)).toContain('import-distribution')
+  })
+})
+
+describe('removing the environment through the service', () => {
+  it('asks for consent with the plan, then removes the distribution: removed', async () => {
+    const h = harness(importedWindows(), { record: RECORD })
+    const service = new EnvironmentService({
+      store: memoryStore(),
+      environmentId: 'default',
+      instanceId: 'core-1',
+      newEffectId: (() => {
+        let n = 0
+        return () => `effect-${(n += 1)}`
+      })(),
+      provisioner: createWindowsProvisioner(h.deps),
+      readSnapshot: async () => [],
+      identityDeps: { alive: () => false },
+    })
+    await service.begin('default', { request_id: 'rm-1', target: { kind: 'environment' }, kind: 'remove' })
+    await service.idle()
+    const offered = await service.get('op-1')
+    expect(offered.phase).toBe('awaiting-consent')
+    await service.resume('op-1', {
+      expected_revision: offered.revision,
+      approved_plan_digest: offered.plan_digest!,
+    })
+    await service.idle()
+    expect((await service.get('op-1')).phase).toBe('removed')
+    expect(h.windows.wslCalls).toContainEqual(['--unregister', 'AtomicChat'])
+  })
+})

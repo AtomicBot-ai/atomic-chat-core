@@ -26,6 +26,8 @@ export interface FakeWslGuest {
   pull_error?: string
   /** Ports something listens on inside the guest (a test listener, an engine). */
   listening?: number[]
+  /** What `du -s -b` answers per guest path. */
+  du_bytes?: Record<string, number>
   host?: Partial<FakeLinuxHostState>
 }
 
