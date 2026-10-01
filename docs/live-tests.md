@@ -8,6 +8,10 @@ Two live tests cover the managed TensorRT-LLM engine on real Linux machines with
   engine on every NVIDIA card of a host and measures the values the design left open. It changes nothing
   on the host.
 
+Windows has no automated live test yet: the [Windows acceptance](#windows-acceptance-change-add-tensorrt-llm-windows)
+below is a manual run on a real PC, and the condition for publishing `runtimes/environments/windows.json`
+in conf main.
+
 **Thinking is off in every chat request.** Where a scenario wants a plain answer (the install test's
 `model-chat`; the engine test's `stream`, `tool-call`, `structured-output` and
 `structured-output-refused`), the request carries `chat_template_kwargs: {"enable_thinking": false}`
@@ -461,3 +465,67 @@ Each card's `model` and `scenarios` in `summary.json` are the input for `curated
   same two fields for a tool call.
 - Put the table of hosts and cards (name, compute capability, driver, model, pass or fail per scenario,
   load, reload and first-token times) in the conf PR that changes the list.
+
+## Windows acceptance (change `add-tensorrt-llm-windows`)
+
+TensorRT-LLM on Windows runs in Atomic Chat's own WSL2 distribution (ADR
+2026-10-01-tensorrt-llm-on-windows-runs-in-atomic-chats-own-wsl-distribution). Unit tests and the
+compiled core's e2e (`test/e2e/managed-windows.test.ts`, a fake `wsl.exe`) prove the core's logic; they
+prove nothing about real WSL, GPU passthrough or TensorRT-LLM on WSL, which NVIDIA does not officially
+support. This acceptance does, by hand, on real machines. **`runtimes/environments/windows.json`
+(`windows-r1`) is merged into conf main only after it passes** (design D14): until then every Windows
+client without a distribution sees the provider as unsupported, so shipping the code is safe.
+
+### Machines
+
+- Windows 11 x64, at least one Ada card (RTX 4070) and, if available, one Blackwell card; a current
+  NVIDIA Game Ready or Studio driver.
+- One machine **without WSL at all** (a fresh install, or `wsl --uninstall` and the Store package removed),
+  one with WSL and a distribution of the user's own as default (Ubuntu).
+- A standard user account; UAC on.
+
+### Run
+
+Build the core on the branch (`npm run build:bin`, on Windows: `atomic-chat-core.exe` and
+`atomic-chat-app-core.exe`), then the app with it (`ATOMIC_CORE_LOCAL=… ATOMIC_APP_CORE_LOCAL=… make
+download-core`). conf is not in main yet: start the app with
+`ATOMIC_ENVIRONMENT_MANIFEST_URL=file:///<atomic-chat-conf>/runtimes/environments/windows.json` and
+`ATOMIC_RUNTIME_DESCRIPTOR_URL=file:///<atomic-chat-conf>/runtimes/tensorrt-llm.json` in its environment.
+
+### What to check, and what to write down
+
+1. **Enable WSL with UAC and a restart**, on the machine without WSL: the plan lists enabling WSL,
+   the import with its path and the guest setup, `requires_elevation` and `may_require_reboot`; the UAC
+   prompt names the signed publisher; after the restart the setup goes on with no second consent. Record
+   the executor's result file (`completed` or `reboot-required`) and whether `wsl --status` answered
+   before the restart (ruling core 2.4).
+2. **The import**: whether `wsl --import` takes the `.wsl` file or the fallback `wsl --install
+   --from-file` ran (core 2.5, design D9); the user's default distribution unchanged; `/etc/wsl.conf`,
+   uid 1000 (whether Ubuntu's first-run setup interfered), `/etc/atomic-chat/owner`.
+3. **Docker and the toolkit in the guest**: the CDI spec in `wsl` mode, the GPU check (`nvidia-smi` in
+   the probe image on the card); the known `libdxcore.so` issue (NVIDIA/nvidia-container-toolkit#1739).
+4. **The driver floor**: the guest's `nvidia-smi --version` — the `NVML version` line exists, and its
+   version against the descriptor's `minimum_driver_version` (ruling core 2.3); the Windows driver's
+   number next to it.
+5. **The pull** of the engine image with byte progress; the disk estimate (`GUEST_BASE_BYTES`) against
+   what the import and the guest setup really took.
+6. **A curated model**: downloaded by the app into the root `GET /models/tensorrt-llm/location` names
+   (`\\wsl.localhost\AtomicChat\…`) — note the write speed; loaded; chat and streaming through
+   `:1337/v1`; load stages and logs.
+7. **Localhost forwarding**: default NAT; `networkingMode=mirrored`; `localhostForwarding=false` (the
+   setup fails at `verifying` with `wsl-localhost-forwarding` and the right instruction, `.wslconfig`
+   unchanged).
+8. **Keeping the distribution up**: idle with nothing loaded (`wsl --list --running` empties after
+   `instanceIdleTimeout`); `wsl --shutdown` while a model is loaded (the session ends with
+   `wsl-stopped`, the model shows unloaded, a new load starts the VM again).
+9. **The VM's memory**: a model whose weights exceed half of the RAM — the check warns
+   (`wsl-vm-memory`) and does not refuse; whether the load completes, and how long it takes.
+10. **Removal**: a model (space freed in the guest), the engine, then the environment
+    (`wsl --unregister`; the plan named the models and the space; `ext4.vhdx` gone); the user's own
+    distributions untouched.
+11. **Moving the data folder** with two models in the guest: both still listed and loadable afterwards.
+
+Attach the results to the conf PR that merges `windows.json` into main, with the machines (Windows build,
+WSL version, card, driver) and every value above that a ruling left to this acceptance
+(`atomic-chat-spec/openspec/changes/add-tensorrt-llm-windows/rulings/core.md`). A failure is fixed in
+core or in a new `windows-rN` before the merge, never after.
