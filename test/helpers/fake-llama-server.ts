@@ -67,6 +67,8 @@ export interface FakeDecisionOptions {
   loadMs?: number
   /** `/v1/models` lists no `decision` capability. */
   noCapability?: boolean
+  /** A build from before the converter: no `--decision-convert-cache`, `-m <folder>` fails. */
+  noConvert?: boolean
 }
 
 function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
@@ -90,6 +92,7 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
     if (d.delayMs) env['FAKE_DECISION_DELAY_MS'] = String(d.delayMs)
     if (d.loadMs) env['FAKE_DECISION_LOAD_MS'] = String(d.loadMs)
     if (d.noCapability) env['FAKE_DECISION_NO_CAPABILITY'] = '1'
+    if (d.noConvert) env['FAKE_DECISION_NO_CONVERT'] = '1'
   }
   return env
 }

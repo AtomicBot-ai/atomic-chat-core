@@ -8,19 +8,25 @@ describe('decisionSettingsOf', () => {
     expect(decisionSettingsOf([])).toEqual(DEFAULT_DECISION_SETTINGS)
   })
 
-  it('pins the defaults: off, a 500 ms budget, resident once started', () => {
+  it('pins the defaults: off, a 2 s budget, resident once started, f16 conversion', () => {
     expect(DEFAULT_DECISION_SETTINGS).toEqual({
       enabled: false,
       model_path: '',
       model_id: '',
       spec_path: '',
       threads: 0,
-      timeout_ms: 500,
+      timeout_ms: 2000,
       idle_unload_secs: 0,
       startup_timeout_secs: 60,
       allow_uncalibrated: false,
       engine_path: '',
+      convert_type: 'f16',
     })
+  })
+
+  it('keeps a known convert type in any case and drops an unknown one', () => {
+    expect(decisionSettingsOf({ convert_type: 'F32' }).convert_type).toBe('f32')
+    expect(decisionSettingsOf({ convert_type: 'q8_0' }).convert_type).toBe('f16')
   })
 
   it('coerces what a hand edit may leave and keeps the default for anything unusable', () => {
@@ -54,6 +60,7 @@ describe('parseDecisionSettingsPatch', () => {
     [{ threads: 1.5 }, 'an integer from 0 to 256'],
     [{ enabled: 'yes' }, 'a boolean'],
     [{ model_path: 7 }, 'a string'],
+    [{ convert_type: 'q8_0' }, 'one of f16, f32'],
   ])('refuses %j', (patch, message) => {
     expect(() => parseDecisionSettingsPatch(patch)).toThrow(message)
   })

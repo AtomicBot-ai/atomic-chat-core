@@ -229,8 +229,32 @@ export interface DecisionProps {
     [extra: string]: unknown
   }
   plan?: Record<string, unknown>
+  /** `gguf` for `-m FILE`, `checkpoint-dir` for `-m DIR`. */
+  source?: 'gguf' | 'checkpoint-dir' | (string & {})
+  /** The cached GGUF a checkpoint folder was loaded from; `null` for `gguf`. */
+  cache_path?: string | null
+  /** How a checkpoint folder was loaded; `null` for `gguf`. */
+  checkpoint?: DecisionCheckpointInfo | null
   [extra: string]: unknown
 }
+
+/** `/props.decision.checkpoint`: the conversion of a checkpoint folder into the GGUF cache. */
+export interface DecisionCheckpointInfo {
+  dir?: string
+  cache_dir?: string
+  key?: string
+  outtype?: DecisionConvertType | (string & {})
+  /** The cached GGUF was reused; `convert_ms` is then 0. */
+  cache_hit?: boolean
+  convert_ms?: number
+  /** `LAYA_CONVERT_VERSION` of the engine's converter. */
+  converter?: number
+  [extra: string]: unknown
+}
+
+/** `--decision-convert-type`: what a checkpoint folder is converted to. */
+export type DecisionConvertType = 'f16' | 'f32'
+export const DECISION_CONVERT_TYPES: readonly DecisionConvertType[] = ['f16', 'f32']
 
 /** `capabilities` values `GET /v1/models` lists for a decision process. */
 export type DecisionCapability = 'decision' | 'systemone' | 'router_score' | (string & {})
@@ -240,15 +264,19 @@ export type DecisionCapability = 'decision' | 'systemone' | 'router_score' | (st
 // ---------------------------------------------------------------------------------------------
 
 /**
- * `settings.json` → `decision`. The model is a file the app downloaded (its registry is the app's);
- * the core only runs it. A relative `model_path` / `spec_path` is resolved against the data folder.
+ * `settings.json` → `decision`. The model is a file or folder the app downloaded (its registry is the
+ * app's); the core only runs it. A relative `model_path` / `spec_path` is resolved against the data
+ * folder.
  */
 export interface DecisionSettings {
   /** Off by default: nothing is spawned until the app turns it on and names a model. */
   enabled: boolean
-  /** The decision GGUF (a laya model, or any GGUF stamped with `decision.spec`). */
+  /**
+   * The decision GGUF (a laya model, or any GGUF stamped with `decision.spec`), or a laya Hugging Face
+   * checkpoint folder, which the engine converts once into `<data>/decision/gguf-cache`.
+   */
   model_path: string
-  /** `-a`: the name the engine answers with; empty = the engine's default (the file name). */
+  /** `-a`: the name the engine answers with; empty = the file name, or the folder name for a checkpoint. */
   model_id: string
   /** `--decision-spec`: a spec or a bare `calibration.json` replacing the embedded one; empty = none. */
   spec_path: string
@@ -264,6 +292,8 @@ export interface DecisionSettings {
   allow_uncalibrated: boolean
   /** An explicit `llama-server` to run instead of the installed fork build; empty = resolve one. */
   engine_path: string
+  /** `--decision-convert-type` for a checkpoint folder; ignored for a GGUF. */
+  convert_type: DecisionConvertType
 }
 
 export const DEFAULT_DECISION_SETTINGS: DecisionSettings = {
@@ -272,12 +302,15 @@ export const DEFAULT_DECISION_SETTINGS: DecisionSettings = {
   model_id: '',
   spec_path: '',
   threads: 0,
-  // The one-pager's hard budget: routing must never cost a chat turn more than this.
-  timeout_ms: 500,
+  // One systemone question takes 0.1-0.3 s on a CPU and a router pass per candidate 0.1-0.8 s
+  // (DECISION.md); 500 ms timed out on ordinary x86 machines. A caller with a tighter budget passes
+  // its own `timeout_ms`.
+  timeout_ms: 2000,
   idle_unload_secs: 0,
   startup_timeout_secs: 60,
   allow_uncalibrated: false,
   engine_path: '',
+  convert_type: 'f16',
 }
 
 export type DecisionState =

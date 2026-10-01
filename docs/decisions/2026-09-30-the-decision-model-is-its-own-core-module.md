@@ -22,8 +22,9 @@ title: "The decision model is its own core module, outside the sessions registry
   never in `runtimes`, `/sessions`, the snapshot, `/v1/models` or the router. From the runtimes it borrows only
   process mechanics (`spawnManaged`, `randomFreePort`, `buildProcessEnv`, the backend-output sink) and the
   process journal, where its record carries `provider: 'decision'`.
-  - *Launch:* its own pure argv builder, `--decision -m <gguf> [--decision-spec <file>] [-a <id>] --device none
-    -t <n> --host 127.0.0.1 --port <free> --no-webui [--decision-allow-uncalibrated]`, the key in
+  - *Launch:* its own pure argv builder, `--decision -m <gguf|folder> [--decision-spec <file>] [-a <id>]
+    [--decision-convert-cache <dir> --decision-convert-type f16|f32] --device none -t <n> --host 127.0.0.1
+    --port <free> --no-webui [--decision-allow-uncalibrated]`, the key in
     `LLAMA_API_KEY` (a random one per start, never in argv). `LLAMA_ARG_DECISION_*` is removed from the inherited
     environment, since the engine reads its `--decision-*` flags from those variables too (a stray `…_DEBUG`
     would log requests and return raw logits). `-t` is always passed: the setting, or the physical cores capped
@@ -34,11 +35,23 @@ title: "The decision model is its own core module, outside the sessions registry
     runs with `-t`, or without it llama.cpp's own default (`common_cpu_get_num_math`, uncapped); a spec's
     `plan.n_threads` is never applied, only compared, with a warning when it differs. Leaving `-t` out would
     hand the choice to llama.cpp, not to the spec, so the core keeps it.
+  - *Checkpoint folder:* `model_path` may name a laya checkpoint folder (`rl_agent_config.json`,
+    `encoder/config.json`, `tokenizer/`, `model*.safetensors`) as the app downloads it from Hugging Face; the
+    engine (dev after PR #85, release 1.7.0) converts it to a GGUF once and loads the cached file after that.
+    The core checks the four files it can name (`rl_agent_config.json`, `encoder/config.json`,
+    `tokenizer/tokenizer.json`, `model.safetensors`) before the spawn, else `DECISION_CHECKPOINT_INCOMPLETE`
+    with the missing ones, and passes `--decision-convert-cache <data>/decision/gguf-cache` and
+    `--decision-convert-type` (`convert_type`, `f16` by default; part of the launch key), so the cache lives
+    in the data folder, not in `LLAMA_CACHE`. `-a` is the folder name unless `model_id` says otherwise. The
+    engine never deletes cache entries, so the core does: once the process is ready, every key directory but
+    the one `/props.decision.cache_path` points into is removed (after the start, since Windows cannot delete
+    a mapped file), and all of them when `model_path` is cleared. A missing path is `MODEL_FILE_NOT_FOUND`.
   - *Engine gate:* the installed packs are read from `<data>/llamacpp/backends` directly, whichever provider
     runs chat. They are ordered by their tag (`b<build>-<semver>` at or above 1.7.0 first, tags without semver
     next, older tags last, because a `dev` build serves `--decision` under the branch's old number), CPU packs
     first inside a version; the first whose `-h` lists `--decision` (`checkSpecTypeSupport`, cached per
-    executable and mtime) is used; an explicit `engine_path` passes the same probe. Once running, the readiness
+    executable, mtime and flag), and `--decision-convert-cache` too when the model is a folder, is used; an
+    explicit `engine_path` passes the same probe. Once running, the readiness
     chain of DECISION.md must hold: `/health` 200 (polled; 503 while loading), `/v1/models` lists `decision`,
     `/props.decision.api_version == 1`. Only a clear verdict from a 200 answer refuses a build (no `decision`
     capability, no decision block, another API version); a transport error, a request timeout, a 5xx or any
@@ -66,7 +79,8 @@ title: "The decision model is its own core module, outside the sessions registry
     alone; the launch key is taken when the start reads the settings. Idle unload is optional
     (`idle_unload_secs`, 0 by default) and a new value re-arms the timer at once.
   - *Calls:* `scoreCandidates(task, criterion, candidates)` and `decide(state, questions)` never throw: every
-    way of not answering (off, not configured, unsupported, starting, failed, a 500 ms budget spent, the queue
+    way of not answering (off, not configured, unsupported, starting, failed, a 2 s budget spent (`timeout_ms`;
+    500 ms timed out on ordinary x86 machines, where a router pass takes up to 0.8 s per candidate), the queue
     full, the router without calibration (`not_calibrated`), the engine refusing the request, a body that cannot
     be serialized, a transport error, a malformed answer, router scores whose ids do not match the candidates in
     order) is `{unavailable: true, reason, message}`, and the caller keeps its default policy. An idle but
@@ -80,26 +94,34 @@ title: "The decision model is its own core module, outside the sessions registry
     `ROUTER_NOT_CALIBRATED`. `/v1/systemone` does not need it and works. `not_calibrated` is a configuration
     state the app can show, unlike `rejected`, which is a caller bug.
   - *Settings:* a `decision` section in `settings.json` (`enabled`, `model_path`, `model_id`, `spec_path`,
-    `threads`, `timeout_ms`, `idle_unload_secs`, `startup_timeout_secs`, `allow_uncalibrated`, `engine_path`),
-    absent from the file until the first write, checked on write, lenient on read; changes are
-    `settings:changed` events with `provider: 'decision'`. The model file lives wherever the app put it; a
-    relative path is resolved against the data folder. No new data path.
+    `threads`, `timeout_ms`, `idle_unload_secs`, `startup_timeout_secs`, `allow_uncalibrated`, `engine_path`,
+    `convert_type`), absent from the file until the first write, checked on write, lenient on read; changes are
+    `settings:changed` events with `provider: 'decision'`. The model file or folder lives wherever the app put
+    it; a relative path is resolved against the data folder. One new data path: `<data>/decision/gguf-cache`,
+    the conversions of checkpoint folders, owned by the core.
   - *Surface:* `/atomic/v1/decision/{status,config,load,unload,score,decide}` (snake_case like the engine; score
     and decide answer the fail-open outcome with 200 once the body parses, a malformed body 400
     `INVALID_ARGUMENT`), events `decision:state` (the whole status) and
     `decision:error` (failures nobody awaits), codes `DECISION_NOT_CONFIGURED` (409), `DECISION_ENGINE_UNSUPPORTED`
-    (409), `DECISION_UNAVAILABLE` (503). The public server passes `POST /v1/systemone` and
+    (409), `DECISION_CHECKPOINT_INCOMPLETE` (409), `DECISION_MODEL_NOT_CHAT` (409), `DECISION_UNAVAILABLE`
+    (503). `/props.decision` in the status carries the engine's `source` (`gguf` or `checkpoint-dir`),
+    `cache_path` and `checkpoint {dir, cache_dir, key, outtype, cache_hit, convert_ms, converter}`. The public server passes `POST /v1/systemone` and
     `POST /v1/router/score` to the process byte for byte (the client's body, the process's key, the engine's
     answer and error envelope unchanged; `model` optional), starting an idle enabled module and waiting up to
     30 s for it while it is starting or restarting (the wait ends early when the client leaves, or when the
     module lands in `failed`, `unsupported` or `disabled`), else 503 in the engine's envelope with
     `reason: UNAVAILABLE`. A start this route triggers reports its failure as a `decision:error`, like a call's. Not through `serveForward`, which
     needs a string `model` and a chat session, and never re-serialized, which would lose `1.0` vs `1`, integers
-    past 2^53 and the order of number-like keys.
+    past 2^53 and the order of number-like keys. The request log names the configured `model_id`; while the
+    API screen is open it also gets a prompt preview (the `state`, then the question or candidate names) and a
+    reply preview (one line per answer or score) from a parse of a copy, the relayed bytes untouched.
   - *Classification:* `isDecisionGguf` (architecture `laya`, or any GGUF carrying `decision.layout`, the mirror
     key of `decision.spec`) is checked before `isEmbeddingGguf`, which then answers `false`;
-    `ModelCapabilities.isDecision` reports it and `validateGguf` refuses such a file as a text model.
-    `laya` stays out of `NON_TEXT_GGUF_ARCHITECTURES`.
+    `ModelCapabilities.isDecision` reports it and `validateGguf` refuses such a file as a text model; a
+    checkpoint folder is reported and refused the same way, without being read as a GGUF.
+    `laya` stays out of `NON_TEXT_GGUF_ARCHITECTURES`. A chat load (`LlamacppRuntime.load`, the path every llama.cpp
+    session load takes) of a registered model whose path is a decision GGUF or a checkpoint folder is
+    `DECISION_MODEL_NOT_CHAT`, before the chat auto-unload, so a refused load never costs the loaded chat model.
   - *Security note:* `engine_path` runs whatever file it names: once for the `-h` probe, then as the server.
     It is writable only through `PUT /atomic/v1/decision/config` (control token) or `settings.json` in the
     data folder, both already able to run code as the user (the backend install routes, the chat providers'
@@ -110,7 +132,7 @@ title: "The decision model is its own core module, outside the sessions registry
   public server, decision process, image engine, chat runtimes. The module needs a fork build of 1.7.0 or newer
   on disk: apps bundled before it, and platforms without fork builds (macOS x64, Windows arm64), report
   `unsupported` and the app keeps its default policy. The fake `llama-server` in `test/helpers` gained a decision
-  mode, and now exempts `/v1/health`, `/models` and `/v1/models` from its key gate as the real server does (one
+  mode (with `-m <folder>`: a conversion into the given cache, a cache hit on the next start), and now exempts `/v1/health`, `/models` and `/v1/models` from its key gate as the real server does (one
   runtime test moved its unauthorized probe to `/props`). Left to the app: the UI, the pinned model registry
   (URL, size, sha, `min_app_version`), the relay of the two events, the memory budget across chat, decision,
   embeddings and voice, and the routing policy's use of the scores. The app's side of the pair of PRs

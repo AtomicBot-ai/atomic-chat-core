@@ -9,10 +9,10 @@
  * values with `INVALID_ARGUMENT`.
  */
 
-import { AtomicCoreError, DEFAULT_DECISION_SETTINGS } from '../contracts/index.js'
+import { AtomicCoreError, DECISION_CONVERT_TYPES, DEFAULT_DECISION_SETTINGS } from '../contracts/index.js'
 import type { DecisionSettings } from '../contracts/index.js'
 
-type Kind = 'boolean' | 'string' | { min: number; max: number }
+type Kind = 'boolean' | 'string' | { min: number; max: number } | { oneOf: readonly string[] }
 
 /** The keys, their types and their ranges. Ranges pin what the engine and the fail-open budget can take. */
 const SCHEMA: Record<keyof DecisionSettings, Kind> = {
@@ -27,6 +27,7 @@ const SCHEMA: Record<keyof DecisionSettings, Kind> = {
   startup_timeout_secs: { min: 1, max: 3600 },
   allow_uncalibrated: 'boolean',
   engine_path: 'string',
+  convert_type: { oneOf: DECISION_CONVERT_TYPES },
 }
 
 const KEYS = Object.keys(SCHEMA) as Array<keyof DecisionSettings>
@@ -38,6 +39,10 @@ function coerce(kind: Kind, value: unknown): unknown {
     return undefined
   }
   if (kind === 'string') return typeof value === 'string' ? value.trim() : undefined
+  if ('oneOf' in kind) {
+    const s = typeof value === 'string' ? value.trim().toLowerCase() : undefined
+    return s !== undefined && kind.oneOf.includes(s) ? s : undefined
+  }
   const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value
   if (typeof n !== 'number' || !Number.isInteger(n) || n < kind.min || n > kind.max) return undefined
   return n
@@ -46,6 +51,7 @@ function coerce(kind: Kind, value: unknown): unknown {
 function describe(kind: Kind): string {
   if (kind === 'boolean') return 'a boolean'
   if (kind === 'string') return 'a string'
+  if ('oneOf' in kind) return `one of ${kind.oneOf.join(', ')}`
   return `an integer from ${kind.min} to ${kind.max}`
 }
 

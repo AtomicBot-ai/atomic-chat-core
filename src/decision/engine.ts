@@ -14,8 +14,12 @@
  *
  * The packs are read from the TurboQuant provider's folder directly, not through the provider's
  * settings: which provider runs chat has nothing to do with which binary can run the decision model.
- * Probe results are remembered per executable and modification time, so a start after an idle unload
- * does not pay for `-h` again, and a pack replaced by an update is probed afresh.
+ * Probe results are remembered per executable, modification time and flag, so a start after an idle
+ * unload does not pay for `-h` again, and a pack replaced by an update is probed afresh.
+ *
+ * A checkpoint folder needs one more flag, `--decision-convert-cache`: a build from before the
+ * converter lists `--decision` but fails the load of a folder with `MODEL_LOAD_FAILED`, and the
+ * search would never reach a build that can run it.
  */
 
 import { stat } from 'node:fs/promises'
@@ -31,6 +35,13 @@ import type { InstalledEnginePack } from './engine-candidates.js'
 
 /** The flag the `-h` output must contain. */
 export const DECISION_FLAG = '--decision'
+/** The flag a build that can convert a checkpoint folder (`-m DIR`) lists as well. */
+export const DECISION_CONVERT_FLAG = '--decision-convert-cache'
+
+export interface EngineRequirements {
+  /** The model is a checkpoint folder: the build must also list `DECISION_CONVERT_FLAG`. */
+  checkpointDir?: boolean
+}
 
 const REFUSED_AT_READINESS = 'refused at readiness'
 
@@ -43,8 +54,8 @@ export interface EngineResolverDeps {
   env?: NodeJS.ProcessEnv
   /** Every installed pack with its executable. Default: a scan of `<data>/llamacpp/backends`. */
   listPacks?: () => Promise<InstalledEnginePack[]>
-  /** Whether `exe -h` lists `--decision`; rejects when the probe could not run. */
-  probe?: (exe: string) => Promise<boolean>
+  /** Whether `exe -h` lists `flag` (`DECISION_FLAG`, `DECISION_CONVERT_FLAG`); rejects when the probe could not run. */
+  probe?: (exe: string, flag: string) => Promise<boolean>
   /** Modification time of a file, `undefined` when it does not exist. */
   mtime?: (path: string) => Promise<number | undefined>
   log?: (level: 'info' | 'warn' | 'debug', msg: string) => void
@@ -72,9 +83,10 @@ export class DecisionEngineResolver {
    * The engine to run: `enginePath` when given (it must still pass the probe), otherwise the first
    * installed pack that does. `DECISION_ENGINE_UNSUPPORTED` names every pack it tried and why.
    */
-  async resolve(enginePath = ''): Promise<DecisionEngineInfo> {
+  async resolve(enginePath = '', needs: EngineRequirements = {}): Promise<DecisionEngineInfo> {
+    const flags = needs.checkpointDir ? [DECISION_FLAG, DECISION_CONVERT_FLAG] : [DECISION_FLAG]
     if (enginePath !== '') {
-      const reason = await this.check(enginePath)
+      const reason = await this.check(enginePath, flags)
       if (reason === undefined)
         return { path: enginePath, version_backend: null, fork_version: null, version_gate: null }
       throw new AtomicCoreError(
@@ -87,7 +99,7 @@ export class DecisionEngineResolver {
     const tried: string[] = []
     let refusedAtReadiness = 0
     for (const candidate of orderEngineCandidates(packs)) {
-      const reason = await this.check(candidate.path)
+      const reason = await this.check(candidate.path, flags)
       if (reason === undefined) return candidate.info
       if (reason.startsWith(REFUSED_AT_READINESS)) refusedAtReadiness++
       tried.push(`${candidate.info.version_backend}: ${reason}`)
@@ -123,28 +135,33 @@ export class DecisionEngineResolver {
     this.deps.log?.('debug', 'decision engines refused at readiness will be tried again')
   }
 
-  /** `undefined` when `exe` passes, otherwise why not. */
-  private async check(exe: string): Promise<string | undefined> {
+  /** `undefined` when `exe` lists every one of `flags`, otherwise why not. */
+  private async check(exe: string, flags: readonly string[]): Promise<string | undefined> {
     const mtime = await (this.deps.mtime ?? defaultMtime)(exe)
     if (mtime === undefined) return 'no such file'
     const key = `${exe}\u0000${mtime}`
     const refused = this.rejected.get(key)
     if (refused !== undefined) return `${REFUSED_AT_READINESS}: ${refused}`
-    let supported = this.probed.get(key)
-    if (supported === undefined) {
-      try {
-        supported = await (this.deps.probe ?? ((path: string) => this.probeHelp(path)))(exe)
-      } catch (error) {
-        // A probe that could not run is not remembered: the next start tries again.
-        return `probe failed: ${error instanceof Error ? error.message : String(error)}`
+    const probe = this.deps.probe ?? ((path: string, flag: string) => this.probeHelp(path, flag))
+    for (const flag of flags) {
+      const flagKey = `${key}\u0000${flag}`
+      let supported = this.probed.get(flagKey)
+      if (supported === undefined) {
+        try {
+          supported = await probe(exe, flag)
+        } catch (error) {
+          // A probe that could not run is not remembered: the next start tries again.
+          return `probe failed: ${error instanceof Error ? error.message : String(error)}`
+        }
+        this.probed.set(flagKey, supported)
+        this.deps.log?.('debug', `decision probe ${exe}: ${supported ? 'lists' : 'no'} ${flag}`)
       }
-      this.probed.set(key, supported)
-      this.deps.log?.('debug', `decision probe ${exe}: ${supported ? 'supported' : 'no --decision'}`)
+      if (!supported) return `${flag} is not in its -h output`
     }
-    return supported ? undefined : `${DECISION_FLAG} is not in its -h output`
+    return undefined
   }
 
-  private async probeHelp(exe: string): Promise<boolean> {
+  private async probeHelp(exe: string, flag: string): Promise<boolean> {
     const { env, cwd } = buildProcessEnv({
       platform: this.platform,
       baseEnv: this.env,
@@ -152,7 +169,7 @@ export class DecisionEngineResolver {
       cuda: discoverCudaPaths(nodeCudaProbeEnv(this.platform, this.env)),
       userEnv: {},
     })
-    return checkSpecTypeSupport(exe, DECISION_FLAG, env, cwd)
+    return checkSpecTypeSupport(exe, flag, env, cwd)
   }
 
   private async scan(): Promise<InstalledEnginePack[]> {

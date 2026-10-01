@@ -6,7 +6,7 @@ import { checkSpecTypeSupport } from '../runtime/llamacpp/index.js'
 import { fakeLlamaSpawnRaw } from '../../test/helpers/fake-llama-server.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { DECISION_FLAG, DecisionEngineResolver } from './engine.js'
+import { DECISION_CONVERT_FLAG, DECISION_FLAG, DecisionEngineResolver } from './engine.js'
 import type { InstalledEnginePack } from './engine-candidates.js'
 
 let data: TmpDataFolder
@@ -69,6 +69,58 @@ describe('DecisionEngineResolver', () => {
     expect(error).toMatchObject({ code: 'DECISION_ENGINE_UNSUPPORTED' })
     expect(error.details).toContain(`b10269-1.6.0/linux-x64-cpu: ${DECISION_FLAG} is not in its -h output`)
   })
+
+  it('requires --decision-convert-cache for a checkpoint folder, and passes over a build without it', async () => {
+    const packs = [pack('b10300-1.7.1', 'macos-arm64'), pack('b10300-1.7.0', 'macos-arm64')]
+    const asked: string[] = []
+    const r = new DecisionEngineResolver({
+      layout: dataLayout(data.root),
+      listPacks: async () => packs,
+      mtime: async () => 1,
+      probe: async (exe, flag) => {
+        asked.push(`${exe} ${flag}`)
+        return flag === DECISION_FLAG || exe === packs[1]!.path
+      },
+    })
+    expect(await r.resolve('', { checkpointDir: true })).toMatchObject({ path: packs[1]!.path })
+    // A GGUF needs only --decision: the first build serves it, from the remembered probe.
+    expect(await r.resolve('')).toMatchObject({ path: packs[0]!.path })
+    expect(asked).toEqual([
+      `${packs[0]!.path} ${DECISION_FLAG}`,
+      `${packs[0]!.path} ${DECISION_CONVERT_FLAG}`,
+      `${packs[1]!.path} ${DECISION_FLAG}`,
+      `${packs[1]!.path} ${DECISION_CONVERT_FLAG}`,
+    ])
+    const error = await rejection<{ details: string }>(
+      new DecisionEngineResolver({
+        layout: dataLayout(data.root),
+        listPacks: async () => [packs[0]!],
+        mtime: async () => 1,
+        probe: async (_exe, flag) => flag === DECISION_FLAG,
+      }).resolve('', { checkpointDir: true })
+    )
+    expect(error.details).toContain(`${DECISION_CONVERT_FLAG} is not in its -h output`)
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'runs the real -h of an executable for each flag it needs',
+    async () => {
+      const help = (lines: string[]) =>
+        data.writeBackend(
+          'llamacpp',
+          'b10269-1.7.0',
+          'macos-arm64',
+          `#!/bin/sh\necho '${lines.join("'\necho '")}'\n`
+        )
+      const r = () => new DecisionEngineResolver({ layout: dataLayout(data.root), platform: 'darwin' })
+      const exe = await help([`  ${DECISION_FLAG}`, `  ${DECISION_CONVERT_FLAG} DIR`])
+      expect(await r().resolve(exe, { checkpointDir: true })).toMatchObject({ path: exe })
+      await help([`  ${DECISION_FLAG}`])
+      await expect(r().resolve(exe, { checkpointDir: true })).rejects.toMatchObject({
+        details: `${exe}: ${DECISION_CONVERT_FLAG} is not in its -h output`,
+      })
+    }
+  )
 
   it('says where it looked when nothing is installed', async () => {
     const error = await rejection<{ details: string }>(resolver([], new Set()).resolve())

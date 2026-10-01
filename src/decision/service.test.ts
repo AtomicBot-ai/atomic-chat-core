@@ -76,6 +76,8 @@ function harness(over: Partial<DecisionServiceDeps> = {}, settings: Partial<Deci
       void events.push({ name, payload }),
     log: () => {},
     fileExists: async () => true,
+    inspectModel: async () => ({ kind: 'file' }),
+    pruneConvertCache: async () => {},
     schedule: (fn, ms) => {
       const timer = { fn, ms, cancelled: false }
       timers.push(timer)
@@ -347,7 +349,7 @@ describe('DecisionService lifecycle', () => {
   })
 
   it('fails a start on a missing model file and does not retry by itself', async () => {
-    const h = harness({ fileExists: async () => false })
+    const h = harness({ inspectModel: async () => ({ kind: 'none' }) })
     await expect(h.service.load()).rejects.toMatchObject({ code: 'MODEL_FILE_NOT_FOUND' })
     expect(h.service.getStatus()).toMatchObject({ state: 'failed', error: { code: 'MODEL_FILE_NOT_FOUND' } })
     expect(h.timers).toEqual([])
@@ -481,13 +483,18 @@ describe('DecisionService lifecycle', () => {
     expect(h.service.getStatus()).toMatchObject({ state: 'idle', pid: null })
   })
 
+  it('names the configured model for the public request log', () => {
+    expect(harness({}, { model_id: 'laya' }).service.publicBackend().modelId?.()).toBe('laya')
+    expect(harness({}, { model_id: '' }).service.publicBackend().modelId?.()).toBeNull()
+  })
+
   it('starts a module for a public request and refuses when it cannot', async () => {
     const h = harness({ spawn: async () => stubHandle(40) })
     const target = await h.service.publicBackend().acquire(2_000)
     expect(target).toMatchObject({ ok: true, port: 4040 })
     const off = harness({}, { enabled: false })
     expect(await off.service.publicBackend().acquire(2_000)).toMatchObject({ ok: false, reason: 'disabled' })
-    const broken = harness({ fileExists: async () => false })
+    const broken = harness({ inspectModel: async () => ({ kind: 'none' }) })
     const refused = await broken.service.publicBackend().acquire(2_000)
     expect(refused).toMatchObject({ ok: false, reason: 'failed' })
     expect(refused.ok === false && refused.message).toContain('does not exist')
@@ -761,5 +768,126 @@ describe('DecisionService follows the world while it starts', () => {
     await expect(explicit.service.load()).rejects.toMatchObject({ code: 'DECISION_ENGINE_UNSUPPORTED' })
     expect(rejected).toEqual([newer.path])
     expect(explicit.service.getStatus().state).toBe('unsupported')
+  })
+})
+
+describe('DecisionService with a checkpoint folder', () => {
+  const FOLDER = 'decision/models/laya-multilingual'
+  const CACHE = join('/data', 'decision', 'gguf-cache')
+  const folderProps = (key: string) => ({
+    api_version: 1,
+    source: 'checkpoint-dir',
+    cache_path: join(CACHE, key, 'laya-multilingual.gguf'),
+    checkpoint: { cache_hit: false, convert_ms: 940 },
+  })
+  const withProps = (pid: number, props: DecisionProcessHandle['props']) => ({ ...stubHandle(pid), props })
+
+  it('converts into the data folder cache, names the model and asks for a build with the converter', async () => {
+    const needs: unknown[] = []
+    const h = harness(
+      {
+        inspectModel: async () => ({ kind: 'checkpoint-dir', missing: [] }),
+        resolveEngine: async (_path, need) => {
+          needs.push(need)
+          return ENGINE
+        },
+        spawn: async (spec) => {
+          h.spawns.push(spec)
+          return withProps(70, folderProps('k1'))
+        },
+      },
+      { model_path: FOLDER }
+    )
+    expect(await h.service.load()).toMatchObject({ state: 'ready', props: { source: 'checkpoint-dir' } })
+    expect(needs).toEqual([{ checkpointDir: true }])
+    expect(h.spawns[0]).toMatchObject({
+      modelPath: join('/data', FOLDER),
+      modelId: 'laya-multilingual',
+      convert: { cacheDir: CACHE, type: 'f16' },
+    })
+  })
+
+  it('keeps the model_id it is given, and a GGUF gets no conversion', async () => {
+    const spawns: DecisionServerSpec[] = []
+    const spying = harness(
+      {
+        inspectModel: async () => ({ kind: 'checkpoint-dir', missing: [] }),
+        spawn: async (spec) => {
+          spawns.push(spec)
+          return stubHandle(73)
+        },
+      },
+      { model_path: FOLDER, model_id: 'laya' }
+    )
+    await spying.service.load()
+    expect(spawns[0]?.modelId).toBe('laya')
+    const ggufSpawns: DecisionServerSpec[] = []
+    const plain = harness({
+      spawn: async (spec) => {
+        ggufSpawns.push(spec)
+        return stubHandle(74)
+      },
+    })
+    await plain.service.load()
+    expect(ggufSpawns[0]?.convert).toBeUndefined()
+    expect(ggufSpawns[0]?.modelId).toBeUndefined()
+  })
+
+  it('refuses an incomplete folder before any engine is looked for, naming the missing files', async () => {
+    let resolved = 0
+    const h = harness(
+      {
+        inspectModel: async () => ({ kind: 'checkpoint-dir', missing: ['model.safetensors'] }),
+        resolveEngine: async () => {
+          resolved++
+          return ENGINE
+        },
+      },
+      { model_path: FOLDER }
+    )
+    await expect(h.service.load()).rejects.toMatchObject({
+      code: 'DECISION_CHECKPOINT_INCOMPLETE',
+      details: expect.stringContaining('missing model.safetensors'),
+    })
+    expect(resolved).toBe(0)
+    expect(h.service.getStatus()).toMatchObject({
+      state: 'failed',
+      error: { code: 'DECISION_CHECKPOINT_INCOMPLETE' },
+    })
+  })
+
+  it('keeps only the conversion in use, and drops the cache when the model is removed', async () => {
+    const pruned: Array<[string, string | undefined]> = []
+    let pid = 80
+    const h = harness(
+      {
+        inspectModel: async () => ({ kind: 'checkpoint-dir', missing: [] }),
+        spawn: async () => withProps(pid++, folderProps(`key-${pid}`)),
+        pruneConvertCache: async (dir, keep) => void pruned.push([dir, keep]),
+      },
+      { model_path: FOLDER }
+    )
+    await h.service.load()
+    expect(pruned).toEqual([[CACHE, 'key-81']])
+    await h.service.configure({ model_path: '' })
+    expect(pruned.at(-1)).toEqual([CACHE, undefined])
+  })
+
+  it('restarts with the new type when convert_type changes', async () => {
+    let pid = 90
+    const h = harness(
+      {
+        inspectModel: async () => ({ kind: 'checkpoint-dir', missing: [] }),
+        spawn: async (spec) => {
+          h.spawns.push(spec)
+          return withProps(pid++, folderProps('k'))
+        },
+      },
+      { model_path: FOLDER }
+    )
+    await h.service.load()
+    await h.service.configure({ convert_type: 'f32' })
+    await h.service.load()
+    expect(h.spawns.map((s) => s.convert?.type)).toEqual(['f16', 'f32'])
   })
 })

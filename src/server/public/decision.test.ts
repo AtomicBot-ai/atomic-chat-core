@@ -15,7 +15,7 @@ afterEach(closeAll)
 const RAW =
   '{"state":{"amount":1.0,"id":12345678901234567890},"questions":{"2":{"type":"noul","instructions":"b?"},"1":{"type":"noul","instructions":"a?"}}}'
 
-function backend(target: () => DecisionTarget | Promise<DecisionTarget>) {
+function backend(target: () => DecisionTarget | Promise<DecisionTarget>, modelId: string | null = null) {
   const log: string[] = []
   const fake: DecisionBackend = {
     acquire: async (waitMs) => {
@@ -23,11 +23,12 @@ function backend(target: () => DecisionTarget | Promise<DecisionTarget>) {
       const t = await target()
       return t.ok ? { ...t, release: () => void log.push('release') } : t
     },
+    modelId: () => modelId,
   }
   return { fake, log }
 }
 
-async function publicWith(decision: DecisionBackend | undefined, apiKey = '') {
+async function publicWith(decision: DecisionBackend | undefined, apiKey = '', inspecting = false) {
   const events: CoreEvents['api:request'][] = []
   const server = await startPublic(
     {
@@ -35,6 +36,7 @@ async function publicWith(decision: DecisionBackend | undefined, apiKey = '') {
       emit: (name, payload) => {
         if (name === 'api:request') events.push(payload as CoreEvents['api:request'])
       },
+      inspecting: () => inspecting,
     },
     { apiKey }
   )
@@ -56,12 +58,15 @@ describe('POST /v1/systemone and /v1/router/score', () => {
       res.writeHead(200, { 'content-type': 'application/json', 'x-engine': 'fork' })
       res.end('{"model":"laya","answers":{"2":{"type":"noul","noul":0.9,"confidence":0.9}},"latency_ms":1.0}')
     })
-    const { fake, log } = backend(() => ({
-      ok: true,
-      port: upstream.port,
-      apiKey: 'process-key',
-      release: () => {},
-    }))
+    const { fake, log } = backend(
+      () => ({
+        ok: true,
+        port: upstream.port,
+        apiKey: 'process-key',
+        release: () => {},
+      }),
+      'laya-multilingual'
+    )
     const { server, events } = await publicWith(fake, 'server-key')
 
     const res = await post(server.port, '/systemone', RAW, { authorization: 'Bearer server-key' })
@@ -74,7 +79,12 @@ describe('POST /v1/systemone and /v1/router/score', () => {
     expect(log).toEqual(['acquire 30000', 'release'])
     expect(events.at(-1)).toMatchObject({
       phase: 'finished',
-      observation: { endpoint: 'systemone', backend: DECISION_BACKEND_LABEL, status: 200 },
+      observation: {
+        endpoint: 'systemone',
+        model_id: 'laya-multilingual',
+        backend: DECISION_BACKEND_LABEL,
+        status: 200,
+      },
     })
 
     await post(server.port, '/router/score', '{"task":"t","criterion":"c","candidates":[]}', {
@@ -82,6 +92,32 @@ describe('POST /v1/systemone and /v1/router/score', () => {
     })
     expect(seen.at(-1)?.url).toBe('/v1/router/score')
     expect(Object.keys(DECISION_ROUTES)).toEqual(['/systemone', '/router/score'])
+  })
+
+  it('gives the open inspector a preview of the state and of the answers, the bytes untouched', async () => {
+    const reply =
+      '{"model":"laya","answers":{"2":{"type":"noul","noul":0.9,"confidence":0.9}},"usage":{"input_tokens":12}}'
+    const upstream = await startUpstream((_req, _body, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(reply)
+    })
+    const { fake } = backend(
+      () => ({ ok: true, port: upstream.port, apiKey: 'k', release: () => {} }),
+      'laya'
+    )
+    const { server, events } = await publicWith(fake, '', true)
+
+    const res = await post(server.port, '/systemone', RAW)
+    expect(await res.text()).toBe(reply)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(events.find((e) => e.phase === 'started')).toMatchObject({
+      endpoint: 'systemone',
+      model_id: 'laya',
+      prompt_preview: '{"amount":1,"id":12345678901234567000}\n\nQuestions: 1, 2',
+    })
+    expect(events.find((e) => e.phase === 'finished')).toMatchObject({
+      finish: { status: 200, reply_preview: '2: 0.90', prompt_tokens: 12 },
+    })
   })
 
   it("relays the engine's error envelope and status as they are", async () => {
@@ -124,6 +160,10 @@ describe('POST /v1/systemone and /v1/router/score', () => {
     const off = await publicWith(fake)
     const refused = await post(off.server.port, '/router/score', '{}')
     expect(refused.status).toBe(503)
+    expect(off.events.at(-1)).toMatchObject({
+      phase: 'finished',
+      observation: { endpoint: 'router/score', model_id: null, status: 503 },
+    })
     expect(((await refused.json()) as { error: { message: string } }).error.message).toBe(
       'The decision model is not available (disabled). The decision model is turned off.'
     )

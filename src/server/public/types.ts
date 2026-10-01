@@ -105,6 +105,8 @@ export interface DecisionBackend {
    * it, and stops waiting when `signal` fires (the client left).
    */
   acquire: (waitMs: number, signal?: AbortSignal) => Promise<DecisionTarget>
+  /** The configured model's id for the request log, `null` when none is set. */
+  modelId?: () => string | null
 }
 
 export interface PublicServerDeps {

@@ -8,7 +8,7 @@
  * here is a `LocalRuntime`; the module borrows only process mechanics.
  *
  * What it guarantees:
- *  - `scoreCandidates` and `decide` never throw and never wait longer than their budget (500 ms by
+ *  - `scoreCandidates` and `decide` never throw and never wait longer than their budget (2 s by
  *    default): every failure is `{unavailable: true, reason}`, and the caller keeps its default policy;
  *  - start and stop are serialized, and a stop aborts a start still waiting for readiness;
  *  - a process that dies after it was ready is restarted with backoff, at most `MAX_RESTARTS` times in
@@ -21,7 +21,8 @@
  *  - every state change is a `decision:state` event, and a failure nobody awaits a `decision:error`.
  */
 
-import { stat } from 'node:fs/promises'
+import { readdir, rm, stat } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import type {
   CoreEvents,
@@ -37,10 +38,13 @@ import type {
   RouterScoreResponse,
   SystemoneResponse,
 } from '../contracts/index.js'
+import { inspectDecisionModelPath } from '../models/index.js'
+import type { DecisionModelSource } from '../models/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import type { DecisionBackend, DecisionTarget } from '../server/index.js'
-import { decisionThreads, resolveDataPath } from './args.js'
+import { DECISION_CONVERT_CACHE_DIR, decisionThreads, resolveDataPath } from './args.js'
 import type { ThreadFacts } from './args.js'
+import type { EngineRequirements } from './engine.js'
 import { nextRestartCount, restartDelayMs, shouldGiveUp } from './backoff.js'
 import { DecisionAbortedError, DecisionTimeoutError } from './http.js'
 import type { DecisionHttp } from './http.js'
@@ -90,7 +94,7 @@ export interface DecisionServiceDeps {
   /** A checked write of the `decision` settings section (`SettingsStore.updateDecision`). */
   writeSettings: (patch: Record<string, unknown>) => Promise<unknown>
   /** The engine gate (`DecisionEngineResolver.resolve`). */
-  resolveEngine: (enginePath: string) => Promise<DecisionEngineInfo>
+  resolveEngine: (enginePath: string, needs?: EngineRequirements) => Promise<DecisionEngineInfo>
   /**
    * A resolved build started but readiness refused it (`DECISION_ENGINE_UNSUPPORTED`, for example
    * API version 2): the gate skips it from now on (`DecisionEngineResolver.reject`), and the start
@@ -110,7 +114,17 @@ export interface DecisionServiceDeps {
   emit: DecisionEmitter
   log: DecisionLogger
   now?: () => number
+  /** Whether the spec file exists. */
   fileExists?: (path: string) => Promise<boolean>
+  /** What the model path is: a GGUF file, a checkpoint folder, or nothing. */
+  inspectModel?: (path: string) => Promise<DecisionModelSource>
+  /** Where checkpoint folders are converted to. Default: `<dataFolder>/decision/gguf-cache`. */
+  convertCacheDir?: string
+  /**
+   * Delete every entry of the conversion cache but `keep` (a key folder name; none = all). The engine
+   * never deletes a cache entry, and an entry is as large as the model.
+   */
+  pruneConvertCache?: (cacheDir: string, keep: string | undefined) => Promise<void>
   /** Run `fn` after `ms`; returns the cancel. The default timer never keeps the process alive. */
   schedule?: (fn: () => void, ms: number) => () => void
 }
@@ -127,6 +141,21 @@ const defaultFileExists = (path: string): Promise<boolean> =>
     () => false
   )
 
+const defaultPruneConvertCache = async (cacheDir: string, keep: string | undefined): Promise<void> => {
+  const entries = await readdir(cacheDir).catch(() => [] as string[])
+  for (const entry of entries)
+    if (entry !== keep) await rm(join(cacheDir, entry), { recursive: true, force: true })
+}
+
+/**
+ * The key folder of the conversion cache a process loaded from (`<cache>/<key>/<name>.gguf`), when it
+ * is in `cacheDir`; `undefined` for a GGUF, or a cache somewhere else.
+ */
+function cacheKeyInUse(props: DecisionProcessHandle['props'], cacheDir: string): string | undefined {
+  if (props.source !== 'checkpoint-dir' || typeof props.cache_path !== 'string') return undefined
+  const keyDir = dirname(props.cache_path)
+  return resolve(dirname(keyDir)) === resolve(cacheDir) ? basename(keyDir) : undefined
+}
 function errorOf(error: unknown): DecisionErrorEvent {
   if (error instanceof AtomicCoreError)
     return error.details === undefined
@@ -147,8 +176,16 @@ function describeExit(exit: ExitInfo): string {
 
 /** The settings a running process was started with; any change means a restart. */
 function launchKey(settings: DecisionSettings): string {
-  const { model_path, model_id, spec_path, threads, allow_uncalibrated, engine_path } = settings
-  return JSON.stringify([model_path, model_id, spec_path, threads, allow_uncalibrated, engine_path])
+  const { model_path, model_id, spec_path, threads, allow_uncalibrated, engine_path, convert_type } = settings
+  return JSON.stringify([
+    model_path,
+    model_id,
+    spec_path,
+    threads,
+    allow_uncalibrated,
+    engine_path,
+    convert_type,
+  ])
 }
 
 type StartMode = 'load' | 'restart'
@@ -179,10 +216,12 @@ export class DecisionService {
   private chain: Promise<unknown> = Promise.resolve()
   private readonly now: () => number
   private readonly schedule: (fn: () => void, ms: number) => () => void
+  private readonly convertCacheDir: string
 
   constructor(private readonly deps: DecisionServiceDeps) {
     this.now = deps.now ?? Date.now
     this.schedule = deps.schedule ?? defaultSchedule
+    this.convertCacheDir = deps.convertCacheDir ?? join(deps.dataFolder, DECISION_CONVERT_CACHE_DIR)
     this.state = {
       state: deps.readSettings().enabled ? 'idle' : 'disabled',
       engine: null,
@@ -243,7 +282,11 @@ export class DecisionService {
       this.cancelRestart = undefined
       if (this.state.restarts !== 0) this.setState({ restarts: 0 })
       if (settings.model_path !== '') this.startInBackground('load')
-      else this.setState({ state: 'idle', error: null })
+      else {
+        this.setState({ state: 'idle', error: null })
+        // The model was removed: its conversion is of no use any more.
+        this.pruneConvertCache(undefined)
+      }
     } else if (this.handle !== undefined) {
       this.armIdle()
     }
@@ -334,7 +377,10 @@ export class DecisionService {
 
   /** What the public server forwards `/systemone` and `/router/score` to. */
   publicBackend(): DecisionBackend {
-    return { acquire: (waitMs, signal) => this.acquire(waitMs, signal) }
+    return {
+      acquire: (waitMs, signal) => this.acquire(waitMs, signal),
+      modelId: () => this.deps.readSettings().model_id || null,
+    }
   }
 
   /** Stop everything for good: timers, a start in flight, the process. No events after this. */
@@ -392,6 +438,17 @@ export class DecisionService {
     this.startInBackground('load', 'DECISION_ENGINE_UNSUPPORTED')
   }
 
+  /** Fire and forget: a cache that cannot be cleaned costs disk space, never a start. */
+  private pruneConvertCache(keep: string | undefined): void {
+    void (this.deps.pruneConvertCache ?? defaultPruneConvertCache)(this.convertCacheDir, keep).catch(
+      (error: unknown) =>
+        this.deps.log(
+          'debug',
+          `decision conversion cache not cleaned: ${error instanceof Error ? error.message : String(error)}`
+        )
+    )
+  }
+
   private reportUnawaited(error: unknown): void {
     const body = errorOf(error)
     // A start stopped by an unload or a shutdown is not a failure anyone needs to hear about.
@@ -436,13 +493,20 @@ export class DecisionService {
       const modelPath = resolveDataPath(this.deps.dataFolder, settings.model_path)
       if (modelPath === undefined)
         throw new AtomicCoreError('DECISION_NOT_CONFIGURED', 'No decision model file is configured.')
-      const exists = this.deps.fileExists ?? defaultFileExists
-      if (!(await exists(modelPath)))
+      const source = await (this.deps.inspectModel ?? inspectDecisionModelPath)(modelPath)
+      if (source.kind === 'none')
+        throw new AtomicCoreError('MODEL_FILE_NOT_FOUND', 'The decision model does not exist.', modelPath)
+      if (source.kind === 'checkpoint-dir' && source.missing.length > 0)
         throw new AtomicCoreError(
-          'MODEL_FILE_NOT_FOUND',
-          'The decision model file does not exist.',
-          modelPath
+          'DECISION_CHECKPOINT_INCOMPLETE',
+          'The decision model folder is missing files of a laya checkpoint.',
+          `${modelPath}: missing ${source.missing.join(', ')}`
         )
+      const checkpointDir = source.kind === 'checkpoint-dir'
+      // A folder always gets `-a`: the engine would otherwise answer with the folder name, which for a
+      // Hugging Face snapshot is a commit hash.
+      const modelId = settings.model_id !== '' ? settings.model_id : checkpointDir ? basename(modelPath) : ''
+      const exists = this.deps.fileExists ?? defaultFileExists
       const specPath = resolveDataPath(this.deps.dataFolder, settings.spec_path)
       if (specPath !== undefined && !(await exists(specPath)))
         throw new AtomicCoreError('MODEL_FILE_NOT_FOUND', 'The decision spec file does not exist.', specPath)
@@ -452,11 +516,15 @@ export class DecisionService {
         engine = chosen
         if (!quiet) this.setState({ engine })
       }
-      const handle = await this.spawnOnFirstGoodEngine(settings, abort.signal, onEngine, (engine) => ({
+      const needs: EngineRequirements = { checkpointDir }
+      const handle = await this.spawnOnFirstGoodEngine(settings, needs, abort.signal, onEngine, (engine) => ({
         engine,
         modelPath,
         ...(specPath !== undefined ? { specPath } : {}),
-        ...(settings.model_id !== '' ? { modelId: settings.model_id } : {}),
+        ...(modelId !== '' ? { modelId } : {}),
+        ...(checkpointDir
+          ? { convert: { cacheDir: this.convertCacheDir, type: settings.convert_type } }
+          : {}),
         threads,
         allowUncalibrated: settings.allow_uncalibrated,
         startupTimeoutMs: settings.startup_timeout_secs * 1000,
@@ -479,6 +547,9 @@ export class DecisionService {
       })
       void handle.exited.then((exit) => this.onExit(handle, exit))
       this.armIdle()
+      // Only one decision model runs, so every other conversion is left over from a model replaced or
+      // removed. Deleted only now: on Windows a file the previous process mapped could not go earlier.
+      this.pruneConvertCache(cacheKeyInUse(handle.props, this.convertCacheDir))
       return handle
     } catch (error) {
       const body = errorOf(error)
@@ -512,12 +583,13 @@ export class DecisionService {
    */
   private async spawnOnFirstGoodEngine(
     settings: DecisionSettings,
+    needs: EngineRequirements,
     signal: AbortSignal,
     onEngine: (engine: DecisionEngineInfo) => void,
     specFor: (engine: DecisionEngineInfo) => DecisionServerSpec
   ): Promise<DecisionProcessHandle> {
     for (let attempt = 1; ; attempt++) {
-      const engine = await this.deps.resolveEngine(settings.engine_path)
+      const engine = await this.deps.resolveEngine(settings.engine_path, needs)
       onEngine(engine)
       if (signal.aborted)
         throw new AtomicCoreError('DECISION_UNAVAILABLE', 'The decision model start was stopped.')

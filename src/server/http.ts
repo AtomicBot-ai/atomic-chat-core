@@ -149,6 +149,8 @@ export function statusForCode(code: ErrorCode): number {
     case 'ENGINE_UPDATE_REQUIRED':
     case 'DECISION_NOT_CONFIGURED':
     case 'DECISION_ENGINE_UNSUPPORTED':
+    case 'DECISION_CHECKPOINT_INCOMPLETE':
+    case 'DECISION_MODEL_NOT_CHAT':
       return 409
     case 'QUEUE_FULL':
       return 429

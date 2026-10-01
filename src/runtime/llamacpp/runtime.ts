@@ -31,7 +31,7 @@ import type { DataLayout } from '../../config/index.js'
 import type { ChildProcessRecord, ProcessJournal } from '../../lock/index.js'
 import { processStartId } from '../../lock/index.js'
 import type { ModelRegistry } from '../../models/index.js'
-import { readGgufMetadataFromFile } from '../../models/index.js'
+import { isDecisionCheckpointDir, isDecisionGguf, readGgufMetadataFromFile } from '../../models/index.js'
 import { resolveLlama3TemplateOverride, STRICT_SYSTEM_GUARD_SIGNATURE } from '../../speculative/index.js'
 import { checkDflashSupport } from '../../speculative/dflash-registry.js'
 import { checkGemmaMtpSupport } from '../../speculative/gemma-mtp-registry.js'
@@ -219,6 +219,8 @@ export class LlamacppRuntime implements LocalRuntime {
     throwIfLoadCancelled(opts.signal)
     const settings = await this.options.readSettings()
     throwIfLoadCancelled(opts.signal)
+    await this.assertNotDecisionModel(modelId, opts)
+    throwIfLoadCancelled(opts.signal)
     const config: LlamacppConfigInput = { ...settings.config }
     if (opts.exePath) config.version_backend = opts.versionBackend ?? 'cli/llama-server'
     else {
@@ -309,6 +311,29 @@ export class LlamacppRuntime implements LocalRuntime {
       'MODEL_LOAD_FAILED',
       `Could not load model "${modelId}" after fallback attempts.`
     )
+  }
+
+  /**
+   * A decision model (a laya GGUF, a GGUF stamped with `decision.spec`, or a laya checkpoint folder)
+   * runs only in the decision module: as a chat or embedding server it answers nothing useful, or
+   * crashes. Refused before the auto-unload, so asking for one never costs the user the chat model.
+   * A model whose header cannot be read is left to the load plan, which says why.
+   */
+  private async assertNotDecisionModel(modelId: string, opts: LoadOptions): Promise<void> {
+    const { registry } = this.options
+    const configured = opts.modelPath ?? (await registry.read(modelId).catch(() => undefined))?.model_path
+    if (!configured) return
+    const path = registry.resolvePaths({ model_path: configured } as never).modelPath
+    const read =
+      this.options.readGgufMetadata ?? (async (p: string) => (await readGgufMetadataFromFile(p)).metadata)
+    const decision =
+      (await isDecisionCheckpointDir(path)) || isDecisionGguf(await read(path).catch(() => undefined))
+    if (decision)
+      throw new AtomicCoreError(
+        'DECISION_MODEL_NOT_CHAT',
+        `"${modelId}" is a decision model and cannot be loaded for chat. Decision models run in the decision module (settings: decision.model_path).`,
+        path
+      )
   }
 
   private enqueueLoad<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {

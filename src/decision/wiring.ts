@@ -133,7 +133,7 @@ export function wireDecision(options: WireDecisionOptions): DecisionService {
     dataFolder: options.layout.root,
     readSettings: () => options.settings.decision,
     writeSettings: (patch) => options.settings.updateDecision(patch),
-    resolveEngine: (enginePath) => resolver.resolve(enginePath),
+    resolveEngine: (enginePath, needs) => resolver.resolve(enginePath, needs),
     rejectEngine: (exe, why) => resolver.reject(exe, why),
     forgetRejectedEngines: () => resolver.forgetRejected(),
     cpu: async () => cpuFactsOf(await options.hardware?.info().catch(() => undefined)),

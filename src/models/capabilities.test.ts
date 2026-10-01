@@ -60,6 +60,21 @@ describe('validateGguf', () => {
     expect(arbiter.isValid).toBe(false)
   })
 
+  it('rejects a laya checkpoint folder without reading it as a GGUF', async () => {
+    const folder = new ModelCapabilityService({
+      layout: data.layout,
+      registry: () => new ModelRegistry(data.layout),
+      readMetadata: async () => {
+        throw new Error('a folder is not read as a GGUF')
+      },
+      isCheckpointDir: async (path) => path.endsWith('laya-multilingual'),
+    })
+
+    const result = await folder.validateGguf('/data/decision/models/laya-multilingual')
+
+    expect(result).toEqual({ isValid: false, error: expect.stringMatching(/decision model/) })
+  })
+
   it('answers rather than throws for a file that is not a GGUF at all', async () => {
     // The user pointed at a file; "that is not a model" is the answer, not a core failure.
     const result = await service().validateGguf('/x/notes.txt')

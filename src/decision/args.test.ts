@@ -50,6 +50,30 @@ describe('buildDecisionArgs', () => {
     expect(argv.at(-1)).toBe('--decision-allow-uncalibrated')
   })
 
+  it('names the conversion cache and type for a checkpoint folder, in argv', () => {
+    const argv = buildDecisionArgs({
+      modelPath: '/data/decision/models/laya-multilingual',
+      modelId: 'laya-multilingual',
+      convert: { cacheDir: '/data/decision/gguf-cache', type: 'f16' },
+      threads: 4,
+      port: 1,
+    })
+    expect(argv.slice(0, 9)).toEqual([
+      '--decision',
+      '-m',
+      '/data/decision/models/laya-multilingual',
+      '-a',
+      'laya-multilingual',
+      '--decision-convert-cache',
+      '/data/decision/gguf-cache',
+      '--decision-convert-type',
+      'f16',
+    ])
+    expect(buildDecisionArgs({ modelPath: '/m/laya.gguf', threads: 1, port: 1 })).not.toContain(
+      '--decision-convert-cache'
+    )
+  })
+
   it('never carries a chat or embedding flag, and never the key', () => {
     const argv = buildDecisionArgs({ modelPath: 'm', threads: 1, port: 1, specPath: '', modelId: '' })
     for (const flag of ['--embedding', '--pooling', '--api-key', '-c', '--ctx-size', '-ngl', '--jinja', '-a'])

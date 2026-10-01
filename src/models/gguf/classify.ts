@@ -87,6 +87,23 @@ export function isDecisionGguf(metadata: Meta): boolean {
   return typeof layout === 'string' ? layout.trim() !== '' : layout !== undefined && layout !== null
 }
 
+/**
+ * The files a laya Hugging Face checkpoint folder needs before the engine can convert it
+ * (`DECISION.md`, "Loading a Hugging Face checkpoint directly"), relative and `/`-separated.
+ * `rl_agent_config.json` is what tells the folder apart from any other model.
+ */
+export const DECISION_CHECKPOINT_FILES = [
+  'rl_agent_config.json',
+  'encoder/config.json',
+  'tokenizer/tokenizer.json',
+  'model.safetensors',
+] as const
+
+/** Which of `DECISION_CHECKPOINT_FILES` a folder lacks, given the relative paths it has. */
+export function missingDecisionCheckpointFiles(present: ReadonlySet<string>): string[] {
+  return DECISION_CHECKPOINT_FILES.filter((file) => !present.has(file))
+}
+
 /** Weights that produce embeddings rather than text (load in embedding mode instead). */
 export function isEmbeddingGguf(metadata: Meta): boolean {
   const raw = metadata?.['general.architecture']

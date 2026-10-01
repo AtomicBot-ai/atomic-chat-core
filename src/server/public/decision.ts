@@ -13,9 +13,11 @@
  * client handles one shape: `{"error": {"code", "type", "reason": "UNAVAILABLE", "message"}}`.
  */
 
+import { decisionPromptPreview, decisionReplyFields } from './decision-preview.js'
 import { answer, clientGone, connectTimeoutMs, header } from './exchange.js'
 import type { Exchange } from './exchange.js'
-import { relay, sendUpstream, UpstreamUnreachable } from './wire.js'
+import { pipeBody, relay, relayedHeaders, sendUpstream, UpstreamUnreachable } from './wire.js'
+import type { UpstreamResponse } from './wire.js'
 
 /** Public path (after the prefix) → the decision process's path. */
 export const DECISION_ROUTES: Readonly<Record<string, string>> = {
@@ -59,6 +61,23 @@ async function readCapped(ex: Exchange, limit: number): Promise<Buffer | undefin
   return size > limit ? undefined : Buffer.concat(chunks)
 }
 
+/**
+ * `relay` with a copy of the bytes kept on the side for the inspector's reply preview. The fields
+ * are stashed when the body ends, before the response closes and the trace reads them.
+ */
+async function relayInspected(ex: Exchange, upstream: UpstreamResponse): Promise<void> {
+  const chunks: Buffer[] = []
+  async function* tap(): AsyncGenerator<Buffer | string> {
+    for await (const chunk of upstream.body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
+      yield chunk as Buffer | string
+    }
+    ex.trace.stash(decisionReplyFields(Buffer.concat(chunks)))
+  }
+  ex.res.writeHead(upstream.status, relayedHeaders(upstream, ex.cors).flat())
+  await pipeBody(ex.res, tap(), () => upstream.body.destroy())
+}
+
 function unavailableAnswer(ex: Exchange, message: string): void {
   ex.trace.errorKind = 'local_model_unreachable'
   answer(ex, 503, decisionErrorBody(503, 'UNAVAILABLE', message, 'unavailable_error'), JSON_HEADERS)
@@ -84,6 +103,8 @@ export async function serveDecision(ex: Exchange, waitMs = DECISION_START_WAIT_M
   }
   const backend = ex.deps.decision
   if (!backend) return unavailableAnswer(ex, 'The decision model is not available in this core.')
+  ex.trace.modelId = backend.modelId?.() ?? null
+  if (ex.trace.inspecting) ex.trace.announce(undefined, undefined, decisionPromptPreview(body))
   // One signal for the whole exchange: a client that leaves while the module starts frees the handler.
   const gone = clientGone(ex)
   const target = await backend.acquire(waitMs, gone)
@@ -109,7 +130,8 @@ export async function serveDecision(ex: Exchange, waitMs = DECISION_START_WAIT_M
     }
     ex.trace.upstreamStatus = upstream.status
     if (upstream.status >= 400) ex.trace.errorKind = 'local_model_error'
-    await relay(ex.res, upstream, ex.cors)
+    if (ex.trace.inspecting) await relayInspected(ex, upstream)
+    else await relay(ex.res, upstream, ex.cors)
   } finally {
     target.release()
   }

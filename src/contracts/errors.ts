@@ -76,6 +76,10 @@ export type CoreErrorCode =
   | 'DECISION_ENGINE_UNSUPPORTED'
   /** The decision model is not running right now (starting, failed or stopped). */
   | 'DECISION_UNAVAILABLE'
+  /** `decision.model_path` is a folder that lacks files of a laya checkpoint; `details` lists them. */
+  | 'DECISION_CHECKPOINT_INCOMPLETE'
+  /** A decision model was asked to load as a chat or embedding session; it runs only in the decision module. */
+  | 'DECISION_MODEL_NOT_CHAT'
 
 /**
  * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the

@@ -21,7 +21,7 @@ import type { ApiRequestFinishFields, ApiRequestObservation } from '../../contra
 import type { JsonValue } from '../shims/index.js'
 import { clientMaxTokens } from './errors.js'
 import { promptPreview, StreamTelemetry } from './telemetry.js'
-import type { TelemetryFields } from './telemetry.js'
+import type { PromptPreview, TelemetryFields } from './telemetry.js'
 import type { PublicServerDeps } from './types.js'
 
 const PROGRESS_INTERVAL_MS = 1000
@@ -125,10 +125,10 @@ export class RequestTrace {
    * The inspector's `request-started`, with the prompt preview when the body is known. Idempotent:
    * a body-parse site announces with detail, the close announces without for everything else.
    */
-  announce(body?: JsonValue, raw?: Buffer): void {
+  announce(body?: JsonValue, raw?: Buffer, ownPreview?: PromptPreview): void {
     if (this.seq === undefined || this.announced) return
     this.announced = true
-    const preview = body !== undefined ? promptPreview(body) : undefined
+    const preview = ownPreview ?? (body !== undefined ? promptPreview(body) : undefined)
     this.deps.emit?.('api:request', {
       phase: 'started',
       id: this.id,

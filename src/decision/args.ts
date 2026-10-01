@@ -5,7 +5,8 @@
  * (a GGUF without a chat head gets `--embedding --pooling mean`), and none of its flags mean anything
  * to `--decision`, which ignores most of them with a warning. The argv follows DECISION.md:
  *
- *   llama-server --decision -m <gguf> [--decision-spec <file>] [-a <id>] --device none -t <n>
+ *   llama-server --decision -m <gguf | checkpoint dir> [--decision-spec <file>] [-a <id>]
+ *                [--decision-convert-cache <dir> --decision-convert-type <f16|f32>] --device none -t <n>
  *                --host 127.0.0.1 --port <p> --no-webui [--decision-allow-uncalibrated]
  *
  * The key travels in `LLAMA_API_KEY`, never in argv, where any local user could read it with `ps`.
@@ -20,9 +21,17 @@
  */
 
 import { isAbsolute, join, win32 } from 'node:path'
+import type { DecisionConvertType } from '../contracts/index.js'
 
 /** The environment variable the fork's auth middleware reads (as `--api-key`). */
 export const DECISION_API_KEY_ENV = 'LLAMA_API_KEY'
+
+/**
+ * Where checkpoint folders are converted to, relative to the data folder. Ours rather than the
+ * engine's default (the OS user cache): it goes away with the app's data and does not depend on
+ * `LLAMA_CACHE`. The engine never deletes old entries; the decision service does.
+ */
+export const DECISION_CONVERT_CACHE_DIR = join('decision', 'gguf-cache')
 
 /**
  * A configured file as an absolute path: absolute as given, relative against the data folder, empty
@@ -50,6 +59,11 @@ export interface DecisionLaunchSpec {
   specPath?: string
   /** `-a`; omitted when empty (the engine then answers with the file name). */
   modelId?: string
+  /**
+   * `modelPath` is a checkpoint folder: where the engine caches its conversion and in which type.
+   * Passed in argv, never through `LLAMA_ARG_DECISION_*`, which `withoutDecisionEnv` strips.
+   */
+  convert?: { cacheDir: string; type: DecisionConvertType }
   threads: number
   port: number
   allowUncalibrated?: boolean
@@ -59,6 +73,8 @@ export function buildDecisionArgs(spec: DecisionLaunchSpec): string[] {
   const argv = ['--decision', '-m', spec.modelPath]
   if (spec.specPath) argv.push('--decision-spec', spec.specPath)
   if (spec.modelId) argv.push('-a', spec.modelId)
+  if (spec.convert)
+    argv.push('--decision-convert-cache', spec.convert.cacheDir, '--decision-convert-type', spec.convert.type)
   // The laya engine is CPU only and ignores `--device`; it is still said out loud so a future engine
   // that could use a GPU does not take VRAM the chat model counted on.
   argv.push('--device', 'none')

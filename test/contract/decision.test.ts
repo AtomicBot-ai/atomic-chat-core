@@ -11,9 +11,9 @@
 
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { DecisionService } from '../../src/decision/index.js'
 import {
   engineErrorOf,
@@ -25,6 +25,7 @@ import {
   parseScoreRequest,
   wireDecision,
 } from '../../src/decision/index.js'
+import { DECISION_CHECKPOINT_FILES } from '../../src/models/index.js'
 import { PublicServer } from '../../src/server/public/index.js'
 import { SettingsStore } from '../../src/settings/index.js'
 import { fakeDecisionSpawn } from '../helpers/fake-llama-server.js'
@@ -150,5 +151,59 @@ describe('contract: the public decision routes pass bytes through', () => {
     const res = await post('/router/score', JSON.stringify(examples['router_request']))
     expect(res.status).toBe(503)
     expect(await res.json()).toMatchObject({ error: { code: 503, reason: 'UNAVAILABLE' } })
+  })
+})
+
+describe('contract: a laya checkpoint folder is converted once into the core cache', () => {
+  let data: TmpDataFolder
+  let service: DecisionService
+
+  beforeAll(async () => {
+    data = await makeTmpDataFolder('atomic-core-decision-checkpoint-')
+    await data.writeBackend('llamacpp', 'b10269-1.7.0', 'macos-arm64')
+    const folder = join(data.root, 'decision', 'models', 'laya-multilingual')
+    for (const file of DECISION_CHECKPOINT_FILES) {
+      await mkdir(dirname(join(folder, file)), { recursive: true })
+      await writeFile(join(folder, file), '{}')
+    }
+    const settings = await SettingsStore.open(data.layout.core.settings)
+    service = wireDecision({
+      layout: data.layout,
+      settings,
+      journal: { add: async () => {}, remove: async () => {} },
+      instanceId: 'contract',
+      emit: () => {},
+      log: () => {},
+      overrides: { probe: async () => true, spawn: fakeDecisionSpawn() },
+    })
+  })
+
+  afterAll(async () => {
+    await service?.shutdown()
+    await data?.cleanup()
+  })
+
+  const cacheDir = () => join(data.root, 'decision', 'gguf-cache')
+
+  it('converts on the first start, hits the cache on the next, and keeps one entry per model', async () => {
+    await service.configure({ enabled: true, model_path: 'decision/models/laya-multilingual' })
+    const first = (await service.load()).props
+    expect(first).toMatchObject({
+      model_id: 'laya-multilingual',
+      source: 'checkpoint-dir',
+      checkpoint: { cache_dir: cacheDir(), outtype: 'f16', cache_hit: false },
+    })
+    expect(first?.cache_path?.startsWith(cacheDir())).toBe(true)
+
+    await service.unload()
+    expect((await service.load()).props?.checkpoint).toMatchObject({ cache_hit: true, convert_ms: 0 })
+
+    await service.configure({ convert_type: 'f32' })
+    const f32 = (await service.load()).props?.checkpoint
+    expect(f32).toMatchObject({ outtype: 'f32', cache_hit: false })
+    await vi.waitFor(async () => expect(await readdir(cacheDir())).toEqual([f32?.key]))
+
+    await service.configure({ model_path: '' })
+    await vi.waitFor(async () => expect(await readdir(cacheDir())).toEqual([]))
   })
 })

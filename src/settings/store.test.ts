@@ -427,7 +427,11 @@ describe('decision section', () => {
     store.onChange((c) => changes.push(c))
     const result = await store.updateDecision({ enabled: true, model_path: ' /m/laya.gguf ' })
     expect(result).toEqual({ revision: 1, changed: ['enabled', 'model_path'] })
-    expect(store.decision).toMatchObject({ enabled: true, model_path: '/m/laya.gguf', timeout_ms: 500 })
+    expect(store.decision).toMatchObject({
+      enabled: true,
+      model_path: '/m/laya.gguf',
+      timeout_ms: DEFAULT_DECISION_SETTINGS.timeout_ms,
+    })
     expect(onDisk(fs)['decision']).toEqual({
       ...DEFAULT_DECISION_SETTINGS,
       enabled: true,

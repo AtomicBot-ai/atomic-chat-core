@@ -46,10 +46,17 @@
  *   FAKE_DECISION_DELAY_MS     milliseconds before each systemone / router answer
  *   FAKE_DECISION_LOAD_MS      `/health` answers 503 for this long after the start (the engine loading)
  *   FAKE_DECISION_NO_CAPABILITY  1 → `/v1/models` lists no `decision` capability (not a decision server)
+ *   FAKE_DECISION_NO_CONVERT   1 → a build from before the converter: `-h` does not list
+ *                     `--decision-convert-cache`, and `-m <folder>` fails the load with exit 1.
+ *                     Otherwise `-m <folder>` is a laya checkpoint (it needs `rl_agent_config.json`):
+ *                     "converted" into `<--decision-convert-cache>/<key>/<folder name>.gguf` once,
+ *                     a cache hit after that, and reported in `/props.decision` (`source`,
+ *                     `cache_path`, `checkpoint`).
  */
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { basename, join } from 'node:path'
 
 const argv = process.argv.slice(2)
 const flag = (name, fallback) => {
@@ -84,6 +91,10 @@ if (argv.includes('-h') || argv.includes('--help')) {
       '  --decision                  serve a decision model (/v1/systemone, /v1/router/score)\n'
     )
     process.stdout.write('  --decision-spec FILE        decision spec replacing the one in the GGUF\n')
+    if (process.env.FAKE_DECISION_NO_CONVERT !== '1') {
+      process.stdout.write('  --decision-convert-cache DIR  where a checkpoint directory is converted to\n')
+      process.stdout.write('  --decision-convert-type TYPE  f16 or f32\n')
+    }
   }
   process.exit(0)
 }
@@ -438,7 +449,52 @@ function answerWithText(body, res, content) {
 
 // ── decision mode (DECISION.md, API version 1) ─────────────────────────────────
 
+/** `-m <folder>`: the conversion the real engine does, as files and `/props` fields; exits on a refusal. */
+function convertCheckpoint() {
+  const isDir = (() => {
+    try {
+      return statSync(modelPath).isDirectory()
+    } catch {
+      return false
+    }
+  })()
+  if (!isDir) return { source: 'gguf', cache_path: null, checkpoint: null }
+  if (process.env.FAKE_DECISION_NO_CONVERT === '1') {
+    err(`llama_model_load: error loading model: failed to open ${modelPath}: is a directory`)
+    process.exit(1)
+  }
+  if (!existsSync(join(modelPath, 'rl_agent_config.json'))) {
+    err(`decision: ${modelPath} is a directory but not a laya checkpoint`)
+    process.exit(1)
+  }
+  const outtype = flag('--decision-convert-type', 'f16')
+  const cacheDir = flag('--decision-convert-cache', join(modelPath, '..', '.fake-gguf-cache'))
+  const name = basename(modelPath)
+  const key = createHash('sha256').update(`${outtype}\0${name}`).digest('hex').slice(0, 32)
+  const cachePath = join(cacheDir, key, `${name}.gguf`)
+  const cacheHit = existsSync(cachePath)
+  if (!cacheHit) {
+    mkdirSync(join(cacheDir, key), { recursive: true })
+    writeFileSync(cachePath, 'GGUF')
+  }
+  err(`decision: ${cacheHit ? 'cache hit' : 'converted'}: ${cachePath}`)
+  return {
+    source: 'checkpoint-dir',
+    cache_path: cachePath,
+    checkpoint: {
+      dir: modelPath,
+      cache_dir: cacheDir,
+      key,
+      outtype,
+      cache_hit: cacheHit,
+      convert_ms: cacheHit ? 0 : 5,
+      converter: 1,
+    },
+  }
+}
+
 function startDecisionServer() {
+  const converted = convertCheckpoint()
   const startedAt = Date.now()
   const loadMs = Number(process.env.FAKE_DECISION_LOAD_MS ?? '0')
   const delayMs = Number(process.env.FAKE_DECISION_DELAY_MS ?? '0')
@@ -550,6 +606,7 @@ function startDecisionServer() {
             },
             plan: { name: 'sequential', router: 'sequential', n_threads: threads },
             device: 'cpu',
+            ...converted,
             future_field: { added_by: 'a newer engine' },
           },
         })
