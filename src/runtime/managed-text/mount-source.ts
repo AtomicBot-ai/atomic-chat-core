@@ -6,7 +6,7 @@
  * `/var/lib/atomic-chat/…`; anything outside the distribution is refused, so a container is never given
  * a Windows path over 9p.
  */
-import { guestPathFor } from '../wsl/index.js'
+import { WSL_LOCALHOST_MOUNT, type GuestMount } from '../wsl/index.js'
 import type { MountSourceResolver } from './types.js'
 
 /** Satisfies `MountSourceResolver`: same `(corePath: string) => string` signature. */
@@ -15,6 +15,9 @@ export function identityMountSourceResolver(corePath: string): string {
 }
 
 /** WSL's resolver: the guest path behind a `\\wsl.localhost\<distribution>\…` path, and nothing else. */
-export function wslMountSourceResolver(distribution: string): MountSourceResolver {
-  return (corePath) => guestPathFor(distribution, corePath)
+export function wslMountSourceResolver(
+  distribution: string,
+  mount: GuestMount = WSL_LOCALHOST_MOUNT
+): MountSourceResolver {
+  return (corePath) => mount.guestPath(distribution, corePath)
 }

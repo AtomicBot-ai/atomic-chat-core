@@ -29,7 +29,8 @@ const args = process.argv.slice(2)
 if (args[0] === '--host') args.splice(0, 2)
 const sub = args[0]
 db.calls.push(sub === 'container' ? `container ${args[1]}` : sub)
-const id = args[args.length - 1]
+// `docker port <id> <port>/tcp` names the container before the port; everything else names it last.
+const id = sub === 'port' ? args[1] : args[args.length - 1]
 const c = db.containers[id]
 const stamp = (line) => `${new Date().toISOString().replace('Z', '000000Z')} ${line}`
 const alive = (pid) => {
@@ -50,7 +51,9 @@ if (sub === 'info') {
   done()
 }
 if (sub === 'create') {
-  const [, hostPort] = args[args.indexOf('-p') + 1].split(':')
+  // `127.0.0.1:<port>:<container port>`, or `127.0.0.1::<container port>`: Docker picks the port (WSL).
+  const [, given] = args[args.indexOf('-p') + 1].split(':')
+  const hostPort = given === '' ? String(30_000 + Math.floor(Math.random() * 20_000)) : given
   const model = args.find((a) => a.endsWith(':/atomic/model:ro')) ?? ''
   const gpus = args[args.indexOf('--gpus') + 1]
   // The `--user` the core ran the container as (final review I-1), or null for the image's own.
@@ -96,6 +99,10 @@ if (sub === 'start') {
   c.status = 'running'
   c.logs.push(stamp('[TRT-LLM] fake engine starting'), stamp('Loading safetensors weights in parallel'))
   console.log(id)
+  done()
+}
+if (sub === 'port') {
+  console.log(`127.0.0.1:${c.hostPort}`)
   done()
 }
 if (sub === 'container' && args[1] === 'inspect') {

@@ -60,3 +60,10 @@ export function validateEnableWslParameters(value: unknown): EnableWslValidation
     ? { ok: true, parameters: {} }
     : { ok: false, problems: [`windows.enable-wsl takes no parameters (got ${keys.sort().join(', ')})`] }
 }
+
+/** What the Windows provisioner binds a `windows.enable-wsl` step to (`EnableWslBinding`). */
+export const ENABLE_WSL_BINDING = Object.freeze({
+  recipe_id: ENABLE_WSL_RECIPE_ID,
+  recipe_digest: ENABLE_WSL_RECIPE_DIGEST,
+  parameters_digest: ENABLE_WSL_PARAMETERS_DIGEST,
+})

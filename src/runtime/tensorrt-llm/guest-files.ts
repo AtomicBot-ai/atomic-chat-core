@@ -8,7 +8,7 @@
  * call for every path counts a hard-linked file once, as the Linux walk does.
  */
 import { AtomicCoreError } from '../../contracts/index.js'
-import { guestPathFor, type WslDistributionTransport } from '../wsl/index.js'
+import { WSL_LOCALHOST_MOUNT, type GuestMount, type WslDistributionTransport } from '../wsl/index.js'
 
 /** Sizing and removing model and cache folders; the Linux default walks the file system itself. */
 export interface ModelFileOps {
@@ -19,8 +19,11 @@ export interface ModelFileOps {
 
 const TIMEOUT_MS = 30 * 60_000
 
-export function guestModelFiles(transport: WslDistributionTransport): ModelFileOps {
-  const toGuest = (paths: string[]): string[] => paths.map((path) => guestPathFor(transport.name, path))
+export function guestModelFiles(
+  transport: WslDistributionTransport,
+  mount: GuestMount = WSL_LOCALHOST_MOUNT
+): ModelFileOps {
+  const toGuest = (paths: string[]): string[] => paths.map((path) => mount.guestPath(transport.name, path))
   return {
     sizes: async (paths) => {
       const sizes = new Map<string, number>(paths.map((path) => [path, 0]))

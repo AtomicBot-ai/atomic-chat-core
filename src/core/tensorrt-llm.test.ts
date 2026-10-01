@@ -26,6 +26,10 @@ import {
   tensorrtLlmModelDeleter,
   tensorrtLlmModelLocation,
   tensorrtLlmModelRegistry,
+  windowsDeployment,
+  windowsModelFiles,
+  windowsModelFilesFor,
+  wiredExec,
   tensorrtLlmSessionUnloader,
   wireTensorrtLlm,
   wireTensorrtLlmModelCheck,
@@ -36,7 +40,7 @@ import type {
   WireTensorrtLlmOptions,
 } from './tensorrt-llm.js'
 import { fakeWindows } from '../../test/helpers/fake-windows-host.js'
-import { createDistributionKeeper } from '../runtime/wsl/index.js'
+import { createDistributionKeeper, directoryGuestMount } from '../runtime/wsl/index.js'
 import { LocalSessions } from './sessions.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
@@ -545,6 +549,32 @@ describe('tensorrtLlmModelDeleter', () => {
     expect(existsSync(modelFolder())).toBe(false)
   })
 
+  it('on Windows sizes and removes the model and its caches with the guest’s files, not by walking them', async () => {
+    const { runtime, sessions } = provider(() => true)
+    await installModel(MODEL)
+    const calls: string[] = []
+    const deleted = await tensorrtLlmModelDeleter({
+      runtime: () => runtime,
+      sessions: (() => sessions) as never,
+      registry: new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      paths: data.layout.managed,
+      windowsFiles: async () => ({
+        paths: data.layout.managed,
+        files: {
+          sizes: async (paths) => {
+            calls.push(`sizes:${paths.length}`)
+            return new Map(paths.map((path) => [path, 700]))
+          },
+          remove: async (paths) => {
+            calls.push(`remove:${paths.length}`)
+          },
+        },
+      }),
+    })(MODEL)
+    expect(deleted).toMatchObject({ model_id: MODEL, freed_bytes: 700, engine_caches_removed: 0 })
+    expect(calls).toEqual(['sizes:1', 'remove:1'])
+  })
+
   it('cancels a load still in flight, then deletes, reporting the model as loaded', async () => {
     const { runtime, sessions, hold } = provider(() => true)
     await installModel(MODEL)
@@ -1026,6 +1056,99 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
       code: 'wsl-vm-memory',
       params: { vm_memory_bytes: String(16_000_000 * 1024), wslconfig_memory: '16GB' },
     })
+  })
+
+  it('checks a model before the import against the cards Windows sees, with no VM to warn about', async () => {
+    const { context, machine: windows } = windowsContext(false)
+    const check = wireTensorrtLlmModelCheck('win32', {
+      descriptors: {
+        forInstallation: async () => ({ kind: 'available', descriptor }),
+        cachedForNewSetup: async () => ({ kind: 'available', descriptor }),
+      },
+      installations: { list: async () => [] },
+      host: cardless as WireTensorrtLlmModelCheckOptions['host'],
+      settings: () => ({}),
+      windows: context,
+    })
+    const result = await check?.({
+      repository: 'acme/model',
+      revision: 'deadbeef',
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+      hf_quant_config_json: null,
+      files: [{ path: 'model.safetensors', size: 20_000_000_000, sha256: null }],
+    })
+    expect(result?.checked_gpu_id).toBe('GPU-aaaa')
+    expect(result?.warnings).toBeUndefined()
+    expect(windows.execCalls.some((call) => call[0]?.endsWith('nvidia-smi.exe'))).toBe(true)
+  })
+
+  it('a load on Windows reads the model under the guest root and the cards in the guest, then starts its container there', async () => {
+    const { context, machine: windows } = windowsContext(true)
+    const mounted = { ...context, mount: directoryGuestMount(join(data.root, 'guest-fs')) }
+    const root = mounted.mount.hostPath('AtomicChat', `${GUEST}/models/tensorrt-llm/acme/m`)
+    await mkdir(root, { recursive: true })
+    await writeFile(
+      join(root, 'config.json'),
+      JSON.stringify({ architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' })
+    )
+    await writeFile(join(root, 'model.safetensors'), Buffer.alloc(20, 1))
+    await writeFile(
+      join(root, 'model.yml'),
+      'repository: acme/m\nrevision: deadbeef\narchitectures:\n  - LlamaForCausalLM\nquantization: bf16\nfiles:\n  - path: model.safetensors\n    size: 20\n    sha256: null\n'
+    )
+    const store = new InstallationStore(join(data.root, 'managed'))
+    await readyInstallation(store)
+    const docker = new FakeDocker()
+    const journal = await ExecutionJournal.open(data.layout)
+    const runtime = wireTensorrtLlm(
+      options({
+        platform: 'win32',
+        windows: mounted,
+        installations: store,
+        descriptors: { forInstallation: async () => ({ kind: 'available', descriptor }) },
+        containers: handle(async () => ({
+          exec: withInfo(docker),
+          journal,
+          dockerPath: '/usr/bin/docker',
+          socketPath: '/var/run/docker.sock',
+          reconciled: { removed: [], unconfirmed: [], failed: [], skipped: [] } as never,
+        })),
+      })
+    ) as TensorrtLlmRuntime
+    // The fake docker has no `docker port`: the load stops right after its container started.
+    await expect(runtime.load('acme/m')).rejects.toBeDefined()
+    expect(docker.calls.some((argv) => argv[0] === 'create')).toBe(true)
+    expect(windows.wslCalls.some((argv) => argv.includes('nvidia-smi'))).toBe(true)
+    await runtime.shutdown()
+  })
+
+  it('the WSL deployment probes inside the guest as root and explains a broken forwarding from .wslconfig', async () => {
+    const { context, machine: windows } = windowsContext(true)
+    const deployment = windowsDeployment(
+      context,
+      { record: RECORD, transport: windows.wsl.distribution('AtomicChat') },
+      async () => ({ code: 0, stdout: '', stderr: '' })
+    )
+    await deployment.probeInGuest?.(
+      { base_url: 'http://127.0.0.1:41000' },
+      { path: '/health', expectedStatus: 200 }
+    )
+    expect(windows.wslCalls.at(-1)?.slice(0, 5)).toEqual(['-d', 'AtomicChat', '-u', 'root', '--exec'])
+    expect((await deployment.forwardingError?.())?.details).toBe('wsl-localhost-forwarding')
+  })
+
+  it('names the guest’s files for a deletion once the distribution exists, and refuses before', async () => {
+    expect((await windowsModelFiles(windowsContext(true).context, data.layout)).paths.root).toContain(
+      'AtomicChat'
+    )
+    expect((await windowsModelFilesFor(windowsContext(true).context, data.layout)()).paths.root).toContain(
+      'AtomicChat'
+    )
+    await expect(windowsModelFiles(windowsContext(false).context, data.layout)).rejects.toMatchObject({
+      code: 'MANAGED_ADAPTER_UNAVAILABLE',
+    })
+    const exec: DockerExec = async () => ({ code: 0, stdout: '', stderr: '' })
+    expect(wiredExec({ exec })).toBe(exec)
   })
 
   it('lists models from the guest root once the distribution exists, nothing before', async () => {

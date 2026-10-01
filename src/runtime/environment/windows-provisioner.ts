@@ -15,7 +15,7 @@
  * elevated is blocked before anything is imported (`elevated-process`).
  */
 import { randomUUID } from 'node:crypto'
-import { win32 } from 'node:path'
+import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   ContainerRuntimeStepParameters,
@@ -474,7 +474,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     const manifest = await consentedManifest(record)
     const { name, path } = seen.distribution
     const previousDefault = seen.facts.distributions.find((entry) => entry.is_default)?.name ?? null
-    const rootfs = win32.join(
+    const rootfs = join(
       deps.host.localAppData,
       'AtomicChat',
       'wsl',
@@ -752,8 +752,6 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     }
     await deps.records.remove()
   }
-
-
 
   const inventory: EffectInventory = {
     async inspect(effect: EffectIntent, record: PersistedOperation): Promise<EffectFinding> {

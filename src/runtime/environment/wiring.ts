@@ -47,19 +47,20 @@ import {
 import { InstallationStore } from './installations.js'
 import { createLinuxProvisioner, type HostView, type LinuxProvisionerDeps } from './linux-provisioner.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
+import { createWindowsProvisioner, type WindowsProvisionerDeps } from './windows-provisioner.js'
 import { OperationStore, type OwnerIdentity } from './store.js'
 
 /** The one environment a machine user has, per scope. Its id is fixed: there is only ever one. */
 export const DEFAULT_ENVIRONMENT_ID = 'default'
 
 /**
- * Which container engine this platform would drive. Null where none of them applies — and, for
- * now, on every platform this change does not target: WSL is out of scope of this change entirely,
- * so a `wsl-docker` environment here would advertise a container engine nothing in this build can
- * ever set up. `darwin` answers null for the same reason (there is no container engine for it).
+ * Which container engine this platform would drive: Docker on the Linux host, Docker inside Atomic
+ * Chat's own WSL distribution on Windows (change `add-tensorrt-llm-windows`). Null where none applies
+ * (`darwin`: there is no container engine for it).
  */
 export function executorFor(platform: NodeJS.Platform): ExecutorKind | null {
   if (platform === 'linux') return 'linux-docker'
+  if (platform === 'win32') return 'wsl-docker'
   return null
 }
 
@@ -74,16 +75,28 @@ export type LinuxProvisionerParts = Omit<
 >
 
 /**
- * The host recipe for this platform, or null when there is none: Linux, when the owner supplied
- * the parts it needs. Null is not a placeholder a later card quietly fills: a caller gets an
+ * What the owner supplies for the Windows recipe (change `add-tensorrt-llm-windows`): the Windows
+ * machine and WSL, the environment record, the elevated and the guest recipes, the rootfs download,
+ * the journal, the guest file commands for caches and models. The rest is built here.
+ */
+export type WindowsProvisionerParts = Omit<
+  WindowsProvisionerDeps,
+  'descriptors' | 'environmentManifests' | 'installations' | 'environmentId' | 'onAssessment' | 'newId'
+>
+
+/**
+ * The host recipe for this platform, or null when there is none: Linux or Windows, when the owner
+ * supplied the parts it needs. Null is not a placeholder a later card quietly fills: a caller gets an
  * environment that says it is unsupported and an operation that fails with an actionable blocker.
  */
 export function provisionerFor(
   platform: NodeJS.Platform,
-  linux?: LinuxProvisionerDeps
+  linux?: LinuxProvisionerDeps,
+  windows?: WindowsProvisionerDeps
 ): EnvironmentProvisioner | null {
-  if (platform !== 'linux' || linux === undefined) return null
-  return createLinuxProvisioner(linux)
+  if (platform === 'linux' && linux !== undefined) return createLinuxProvisioner(linux)
+  if (platform === 'win32' && windows !== undefined) return createWindowsProvisioner(windows)
+  return null
 }
 
 /**
@@ -136,6 +149,8 @@ export interface WireManagedRuntimesOptions {
   provisioner?: EnvironmentProvisioner | null
   /** The Linux recipe's host-side parts (see `LinuxProvisionerParts`); without them, no recipe. */
   linux?: LinuxProvisionerParts
+  /** The Windows recipe's parts (see `WindowsProvisionerParts`); without them, no recipe on Windows. */
+  windows?: WindowsProvisionerParts
   /**
    * Test seam: whose identity this core stamps on what it writes to the shared store
    * (`OperationStore.ownerIdentity`), instead of this real process's own pid. A test simulating a
@@ -204,6 +219,15 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     root: managedRoot,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
   })
+  // Windows' own manifest (change `add-tensorrt-llm-windows`): only a Windows core asks for it.
+  const windowsManifests = createEnvironmentManifestProvider({
+    platform: 'windows',
+    env: options.env.env,
+    fetch: environmentManifestFetchFromFetch(options.fetch ?? fetch),
+    readFile: (path) => nodeReadFile(path, 'utf8'),
+    root: managedRoot,
+    ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
+  })
   const installations = new InstallationStore(managedRoot)
 
   // The view a snapshot is built from. A machine with no executor has no environment at all, which
@@ -261,6 +285,17 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
                 ...options.linux,
                 descriptors,
                 environmentManifests,
+                installations,
+                environmentId: DEFAULT_ENVIRONMENT_ID,
+                onAssessment,
+                newId: options.newId,
+              },
+          options.windows === undefined
+            ? undefined
+            : {
+                ...options.windows,
+                descriptors,
+                environmentManifests: windowsManifests,
                 installations,
                 environmentId: DEFAULT_ENVIRONMENT_ID,
                 onAssessment,

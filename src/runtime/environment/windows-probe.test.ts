@@ -204,3 +204,56 @@ describe('probeWindowsHost', () => {
     expect(facts.unknown).toEqual(expect.arrayContaining(['wslconfig', 'windows-build']))
   })
 })
+
+describe('the edges of reading Windows', () => {
+  it.each([
+    ['riscv64', 'riscv64'],
+    ['x64', 'x86_64'],
+  ])('passes an unknown architecture %s through as itself', (machine, architecture) => {
+    expect(normalizeWindowsArchitecture(machine)).toBe(architecture)
+  })
+
+  it('reads the system integrity level as elevated, and an unanswered whoami as unknown', () => {
+    expect(
+      parseElevation(ok('"Mandatory Label\\System Mandatory Level","Label","S-1-16-16384",""\r\n'))
+    ).toBe(true)
+    expect(parseElevation(failed(1))).toBeNull()
+  })
+
+  it('reads yes/no values of .wslconfig, and ignores a value it cannot read and a line that is not a setting', () => {
+    expect(parseWslConfig('[wsl2]\nlocalhostForwarding=TRUE\n').localhost_forwarding).toBe(true)
+    expect(
+      parseWslConfig('[wsl2]\nlocalhostForwarding=maybe\nnot a setting\n').localhost_forwarding
+    ).toBeNull()
+  })
+
+  it('records a WSL whose version or status it could not read, and a driver it could not ask', async () => {
+    const windows = fakeWindows(machine())
+    const wsl = windows.host.probeDeps.wsl
+    windows.host.probeDeps.wsl = {
+      ...wsl,
+      command: async (args, call) =>
+        args[0] === '--version'
+          ? { code: 0, stdout: 'Copyright\r\n', stderr: '' }
+          : args[0] === '--status'
+            ? { code: null, stdout: '', stderr: 'timed out' }
+            : wsl.command(args, call),
+    }
+    windows.host.probeDeps.pathExists = async () => {
+      throw new Error('EACCES')
+    }
+    const facts = await probeWindowsHost(windows.host.probeDeps)
+    expect(facts.unknown).toEqual(expect.arrayContaining(['wsl-version', 'wsl-status', 'nvidia-driver']))
+  })
+
+  it('without wsl.exe answering at all, WSL is an unread fact', async () => {
+    const windows = fakeWindows(machine())
+    windows.host.probeDeps.wsl = {
+      ...windows.host.probeDeps.wsl,
+      command: async () => ({ code: null, stdout: '', stderr: '' }),
+    }
+    const facts = await probeWindowsHost(windows.host.probeDeps)
+    expect(facts.wsl.installed).toBeNull()
+    expect(facts.unknown).toContain('wsl')
+  })
+})

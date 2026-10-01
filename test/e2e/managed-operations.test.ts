@@ -46,6 +46,13 @@ import {
   type PendingHostStep,
 } from '../helpers/fake-managed-host.js'
 
+/**
+ * The fake Linux machine's commands are `#!/bin/sh` wrappers (`fake-managed-host.ts`), which Windows
+ * cannot execute: those suites run everywhere but Windows, where `managed-windows.test.ts` drives the
+ * Windows path with a fake `wsl.exe` that needs no shell (change `add-tensorrt-llm-windows`, task 2.10).
+ */
+const POSIX_FAKES_UNAVAILABLE = process.platform === 'win32'
+
 let dataFolder: string
 let managedRoot: string
 let host: FakeManagedHost | undefined
@@ -226,455 +233,471 @@ async function beginAndApprove(ready: ReadyLine, requestId = 'req-1'): Promise<O
 const snapshot = async (ready: ReadyLine): Promise<Snapshot> =>
   (await (await control(ready, '/snapshot')).json()) as Snapshot
 
-describe('setting up the managed engine through the compiled core (task 2.6)', () => {
-  it('adopts a ready host: consent, GPU check, byte-progress pull, verification, activation', async () => {
-    host = await fakeManagedHost(readyState())
-    const { ready } = await start()
-    const seen = await events(ready)
-
-    const probe = (await (
-      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
-    ).json()) as { adopts_existing_engine: boolean; system_changes: unknown[]; requires_elevation: boolean }
-    expect(probe).toMatchObject({
-      adopts_existing_engine: true,
-      system_changes: [],
-      requires_elevation: false,
-    })
-
-    const asking = await beginAndApprove(ready)
-    const done = await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')
-    expect(done.phase).toBe('ready')
-    await frame(
-      seen,
-      (f) =>
-        f.event === 'environment:operation' &&
-        f.data.operation_id === asking.operation_id &&
-        f.data.phase === 'ready'
-    )
-
-    const phases = seen
-      .filter((frame) => frame.event === 'environment:operation')
-      .map((frame) => frame.data.phase)
-      .filter((phase, index, all) => phase !== all[index - 1])
-    expect(phases).toEqual([
-      'checking',
-      'awaiting-consent',
-      'checking',
-      'preparing-environment',
-      'pulling-image',
-      'verifying',
-      'activating',
-      'ready',
-    ])
-    // Byte progress while pulling, measured against the descriptor's download size.
-    const progress = seen
-      .map((frame) => frame.data.progress)
-      .filter((tick): tick is NonNullable<Operation['progress']> => tick !== null && tick !== undefined)
-    expect(progress.length).toBeGreaterThan(0)
-    expect(progress.every((tick) => tick.unit === 'bytes')).toBe(true)
-    expect(progress.some((tick) => (tick.completed ?? 0) > 0)).toBe(true)
-
-    // The GPU check ran on the card, from the probe image, before the engine image was pulled.
-    expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
-    const run = host.calls().find((call) => call[0] === 'docker' && call[3] === 'run')
-    expect(run).toContain(`device=${GPU_UUID}`)
-    expect(run).toContain(PROBE_IMAGE)
-
-    // Installed, on a disk the image has now nearly filled: still supported, never disk-blocked.
-    const after = (await (
-      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
-    ).json()) as { availability: string; blockers: unknown[] }
-    expect(after).toMatchObject({ availability: 'supported', blockers: [] })
-    const environment = (await snapshot(ready)).environments[0]
-    expect(environment?.availability).toBe('supported')
-    expect(environment?.gpus.map((gpu) => gpu.gpu_id)).toEqual([GPU_UUID])
-    expect(environment?.installations).toEqual([
-      expect.objectContaining({
-        installation_id: 'tensorrt-llm',
-        status: 'ready',
-        active_descriptor_id: DESCRIPTOR_ID,
-      }),
-    ])
-  })
-
-  it('installs Docker with one privileged step, waits for the sign-in, and continues at the next start', async () => {
-    host = await fakeManagedHost(cleanState())
-    const first = await start()
-    const asking = await beginAndApprove(first.ready)
-    const waiting = await poll(first.ready, asking.operation_id, settled)
-    expect(waiting.phase).toBe('preparing-host')
-    const step = waiting.pending_host_step as PendingHostStep
-    // The step carries the recipe's validated parameters, which the client copies into the request.
-    expect(step.parameters.components).toEqual([
-      'docker-engine',
-      'nvidia-container-toolkit',
-      'nvidia-runtime',
-      'nvidia-cdi',
-      'docker-service',
-      'docker-group',
-    ])
-    expect(host.pulls).toEqual([])
-
-    const receipt = host.runHostStep(step, 'completed')
-    expect(
-      (await post(first.ready, `/environments/operations/${asking.operation_id}/host-step-result`, receipt))
-        .status
-    ).toBe(200)
-    const relogin = await poll(first.ready, asking.operation_id, settled)
-    expect(relogin.phase).toBe('relogin-required')
-    expect(relogin.error?.code).toBe('MANAGED_RELOGIN_REQUIRED')
-
-    // The nonce is spent: the same receipt again, or another outcome for it, is refused.
-    const again = await post(
-      first.ready,
-      `/environments/operations/${asking.operation_id}/host-step-result`,
-      receipt
-    )
-    expect(again.status).toBe(409)
-    expect(((await again.json()) as { error: { code: string } }).error.code).toBe('MANAGED_RECEIPT_CONFLICT')
-    const replay = await post(
-      first.ready,
-      `/environments/operations/${asking.operation_id}/host-step-result`,
-      {
-        ...receipt,
-        outcome: 'failed',
-      }
-    )
-    expect(replay.status).toBe(409)
-    expect(((await replay.json()) as { error: { code: string } }).error.code).toBe('MANAGED_RECEIPT_CONFLICT')
-
-    // The user signs out and back in: the group is in the session, and the app opens again.
-    await crash()
-    host.update((state) => ({
-      ...state,
-      group: { configured: true, effective: true },
-      docker: { ...state.docker, reachable: true },
-    }))
-    const second = await start()
-    const done = await poll(
-      second.ready,
-      asking.operation_id,
-      (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
-    )
-    // Continued on its own, without asking again for what was already approved and done.
-    expect(done.phase).toBe('ready')
-    // The consented plan stays the plan on the wire; the re-probed one is reported apart.
-    expect(done.plan_digest).toBe(done.approved_plan_digest)
-    expect(done.carried_plan_digest).toMatch(/^sha256:/)
-    expect(done.carried_plan_digest).not.toBe(done.plan_digest)
-    expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
-    expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
-  })
-
-  it('a Docker host with only toolkit -base behind a full-tunnel VPN (task 2.23): the plan installs the toolkit, generates the CDI spec, warns about the routes, and a failed start names the cause', async () => {
-    // The 3.10 acceptance host after its first attempt: docker-ce installed, docker.service down,
-    // the nvidia runtime registered in daemon.json, no CDI spec, not in the group, a VPN over tun2.
-    host = await fakeManagedHost({
-      ...cleanState(),
-      docker: { installed: true, reachable: false, service_active: false, gpu_runtime: true },
-      toolkit: false,
-      toolkit_base: true,
-      cdi: false,
-      proc_net_route: [
-        'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
-        'wlp2s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0',
-        'tun2\t00000000\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
-        'tun2\t00000080\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
-      ].join('\n'),
-    })
-    const { ready } = await start()
-    const plan = (await (
-      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
-    ).json()) as {
-      system_changes: { code: string; params?: Record<string, string> }[]
-      blockers: unknown[]
-      warnings: { code: string; text: string; params?: Record<string, string> }[]
-    }
-    expect(plan.blockers).toEqual([])
-    expect(plan.system_changes.map((change) => change.code)).toEqual([
-      'add-repository',
-      'install-packages',
-      'generate-cdi-spec',
-      'enable-docker-service',
-      'add-user-to-docker-group',
-    ])
-    expect(plan.system_changes[1]?.params?.['packages']).toBe('nvidia-container-toolkit')
-    expect(plan.warnings).toEqual([
-      expect.objectContaining({
-        code: 'docker-address-pools-overlap-routes',
-        params: { routes: '128.0.0.0/1', devices: 'tun2' },
-      }),
-    ])
-
-    const asking = await beginAndApprove(ready)
-    const waiting = await poll(ready, asking.operation_id, settled)
-    const step = waiting.pending_host_step as PendingHostStep
-    expect(step.parameters.components).toEqual([
-      'nvidia-container-toolkit',
-      'nvidia-cdi',
-      'docker-service',
-      'docker-group',
-    ])
-    // The privileged step fails at docker.service; the app forwards the result file's log tail.
-    const tail =
-      'docker-service failed: systemctl enable --now docker exited with 1\n' +
-      'failed to start daemon: Error initializing network controller: error creating default "bridge" ' +
-      'network: all predefined address pools have been fully subnetted'
-    const posted = await post(ready, `/environments/operations/${asking.operation_id}/host-step-result`, {
-      ...host.runHostStep(step, 'completed', 'none'),
-      outcome: 'failed',
-      log_tail: tail,
-    })
-    expect(posted.status).toBe(200)
-    const failed = await poll(ready, asking.operation_id, settled)
-    expect(failed.phase).toBe('failed')
-    expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
-    // daemon.json registers only the runtime, no pools: the host's routes are named as the cause.
-    expect(failed.error?.message).toMatch(/because the routes on this machine.*default-address-pools/s)
-    expect(failed.error?.details).toBe(tail)
-  })
-
-  it('keeps a refused system prompt resumable, with nothing changed on the host', async () => {
-    host = await fakeManagedHost(cleanState())
-    const { ready } = await start()
-    const asking = await beginAndApprove(ready)
-    const waiting = await poll(ready, asking.operation_id, settled)
-    const step = waiting.pending_host_step as PendingHostStep
-
-    await post(
-      ready,
-      `/environments/operations/${asking.operation_id}/host-step-result`,
-      host.runHostStep(step, 'declined')
-    )
-    const declined = await poll(ready, asking.operation_id, settled)
-    expect(declined.phase).toBe('failed')
-    expect(declined.error?.code).toBe('MANAGED_ELEVATION_DECLINED')
-    expect(host.state()).toEqual(cleanState())
-
-    // Resumable: the same approved plan issues a fresh step with a new nonce.
-    await post(ready, `/environments/operations/${asking.operation_id}/resume`, {
-      expected_revision: declined.revision,
-    })
-    const again = await poll(ready, asking.operation_id, settled)
-    expect(again.phase).toBe('preparing-host')
-    expect(again.pending_host_step?.nonce).not.toBe(step.nonce)
-  })
-
-  it('refuses a consent given for a plan the host has outgrown (MANAGED_PLAN_CHANGED)', async () => {
-    host = await fakeManagedHost(readyState())
-    const { ready } = await start()
-    const started = (await (
-      await post(ready, '/environments/default/operations', setup())
-    ).json()) as Operation
-    const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
-
-    // Between the probe and the click, a second card appeared.
-    host.update((state) => ({
-      ...state,
-      gpus: [
-        ...(state.gpus ?? []),
-        { uuid: 'GPU-second', name: 'NVIDIA RTX A6000', cc: '8.6', total_mib: 49140, free_mib: 49000 },
-      ],
-    }))
-    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
-      expected_revision: asking.revision,
-      approved_plan_digest: asking.plan_digest,
-    })
-    const changed = await poll(
-      ready,
-      started.operation_id,
-      (o) => o.revision > asking.revision + 1 && settled(o)
-    )
-    expect(changed.phase).toBe('awaiting-consent')
-    expect(changed.error?.code).toBe('MANAGED_PLAN_CHANGED')
-    expect(changed.plan_digest).not.toBe(asking.plan_digest)
-    expect(host.pulls).toEqual([])
-  })
-
-  it('fails with toolkit diagnostics when the GPU is not visible in a container, and pulls no engine image', async () => {
-    host = await fakeManagedHost({ ...readyState(), gpu_visible_in_container: false })
-    const { ready } = await start()
-    const asking = await beginAndApprove(ready)
-    const failed = await poll(ready, asking.operation_id, settled)
-    expect(failed.phase).toBe('failed')
-    expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
-    expect(failed.error?.message).toMatch(/not visible inside a container/)
-    expect(failed.error?.details).toContain(`gpu=${GPU_UUID}`)
-    expect(failed.error?.details).toContain('could not select device driver')
-    expect(host.pulls).toEqual([PROBE_IMAGE])
-  })
-
-  it('hands a retried request the operation it already started, and refuses the id for another one', async () => {
-    host = await fakeManagedHost(readyState())
-    const { ready } = await start()
-    const first = (await (await post(ready, '/environments/default/operations', setup())).json()) as Operation
-    const again = (await (await post(ready, '/environments/default/operations', setup())).json()) as Operation
-    expect(again.operation_id).toBe(first.operation_id)
-    const other = await post(ready, '/environments/default/operations', setup('req-1', { kind: 'remove' }))
-    expect(other.status).toBe(409)
-    expect((await snapshot(ready)).environment_operations).toHaveLength(1)
-  })
-
-  it('picks a pull back up after a crash: verifying when the image is there, pulling on when it is not', async () => {
-    for (const imageLanded of [true, false]) {
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)(
+  'setting up the managed engine through the compiled core (task 2.6)',
+  () => {
+    it('adopts a ready host: consent, GPU check, byte-progress pull, verification, activation', async () => {
       host = await fakeManagedHost(readyState())
-      host.holdEnginePull = true
+      const { ready } = await start()
+      const seen = await events(ready)
+
+      const probe = (await (
+        await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+      ).json()) as { adopts_existing_engine: boolean; system_changes: unknown[]; requires_elevation: boolean }
+      expect(probe).toMatchObject({
+        adopts_existing_engine: true,
+        system_changes: [],
+        requires_elevation: false,
+      })
+
+      const asking = await beginAndApprove(ready)
+      const done = await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')
+      expect(done.phase).toBe('ready')
+      await frame(
+        seen,
+        (f) =>
+          f.event === 'environment:operation' &&
+          f.data.operation_id === asking.operation_id &&
+          f.data.phase === 'ready'
+      )
+
+      const phases = seen
+        .filter((frame) => frame.event === 'environment:operation')
+        .map((frame) => frame.data.phase)
+        .filter((phase, index, all) => phase !== all[index - 1])
+      expect(phases).toEqual([
+        'checking',
+        'awaiting-consent',
+        'checking',
+        'preparing-environment',
+        'pulling-image',
+        'verifying',
+        'activating',
+        'ready',
+      ])
+      // Byte progress while pulling, measured against the descriptor's download size.
+      const progress = seen
+        .map((frame) => frame.data.progress)
+        .filter((tick): tick is NonNullable<Operation['progress']> => tick !== null && tick !== undefined)
+      expect(progress.length).toBeGreaterThan(0)
+      expect(progress.every((tick) => tick.unit === 'bytes')).toBe(true)
+      expect(progress.some((tick) => (tick.completed ?? 0) > 0)).toBe(true)
+
+      // The GPU check ran on the card, from the probe image, before the engine image was pulled.
+      expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
+      const run = host.calls().find((call) => call[0] === 'docker' && call[3] === 'run')
+      expect(run).toContain(`device=${GPU_UUID}`)
+      expect(run).toContain(PROBE_IMAGE)
+
+      // Installed, on a disk the image has now nearly filled: still supported, never disk-blocked.
+      const after = (await (
+        await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+      ).json()) as { availability: string; blockers: unknown[] }
+      expect(after).toMatchObject({ availability: 'supported', blockers: [] })
+      const environment = (await snapshot(ready)).environments[0]
+      expect(environment?.availability).toBe('supported')
+      expect(environment?.gpus.map((gpu) => gpu.gpu_id)).toEqual([GPU_UUID])
+      expect(environment?.installations).toEqual([
+        expect.objectContaining({
+          installation_id: 'tensorrt-llm',
+          status: 'ready',
+          active_descriptor_id: DESCRIPTOR_ID,
+        }),
+      ])
+    })
+
+    it('installs Docker with one privileged step, waits for the sign-in, and continues at the next start', async () => {
+      host = await fakeManagedHost(cleanState())
       const first = await start()
       const asking = await beginAndApprove(first.ready)
-      const pulling = await poll(
-        first.ready,
-        asking.operation_id,
-        (o) => o.phase === 'pulling-image' && (o.progress?.completed ?? 0) > 0
-      )
-      expect(pulling.progress?.unit).toBe('bytes')
+      const waiting = await poll(first.ready, asking.operation_id, settled)
+      expect(waiting.phase).toBe('preparing-host')
+      const step = waiting.pending_host_step as PendingHostStep
+      // The step carries the recipe's validated parameters, which the client copies into the request.
+      expect(step.parameters.components).toEqual([
+        'docker-engine',
+        'nvidia-container-toolkit',
+        'nvidia-runtime',
+        'nvidia-cdi',
+        'docker-service',
+        'docker-group',
+      ])
+      expect(host.pulls).toEqual([])
 
+      const receipt = host.runHostStep(step, 'completed')
+      expect(
+        (await post(first.ready, `/environments/operations/${asking.operation_id}/host-step-result`, receipt))
+          .status
+      ).toBe(200)
+      const relogin = await poll(first.ready, asking.operation_id, settled)
+      expect(relogin.phase).toBe('relogin-required')
+      expect(relogin.error?.code).toBe('MANAGED_RELOGIN_REQUIRED')
+
+      // The nonce is spent: the same receipt again, or another outcome for it, is refused.
+      const again = await post(
+        first.ready,
+        `/environments/operations/${asking.operation_id}/host-step-result`,
+        receipt
+      )
+      expect(again.status).toBe(409)
+      expect(((await again.json()) as { error: { code: string } }).error.code).toBe(
+        'MANAGED_RECEIPT_CONFLICT'
+      )
+      const replay = await post(
+        first.ready,
+        `/environments/operations/${asking.operation_id}/host-step-result`,
+        {
+          ...receipt,
+          outcome: 'failed',
+        }
+      )
+      expect(replay.status).toBe(409)
+      expect(((await replay.json()) as { error: { code: string } }).error.code).toBe(
+        'MANAGED_RECEIPT_CONFLICT'
+      )
+
+      // The user signs out and back in: the group is in the session, and the app opens again.
       await crash()
-      host.holdEnginePull = false
-      // Either way, less than the whole image's requirement is free now: half or all of it is on disk.
-      if (imageLanded) host.landEngineImage()
-      const pullsBefore = host.pulls.length
+      host.update((state) => ({
+        ...state,
+        group: { configured: true, effective: true },
+        docker: { ...state.docker, reachable: true },
+      }))
       const second = await start()
       const done = await poll(
         second.ready,
         asking.operation_id,
         (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
       )
+      // Continued on its own, without asking again for what was already approved and done.
       expect(done.phase).toBe('ready')
-      // No new consent, no second GPU check; the engine image pulled again only when it was missing.
-      expect(host.pulls.slice(pullsBefore)).toEqual(imageLanded ? [] : [ENGINE_IMAGE])
-      // The GPU-check image was pulled by the first core, which died before activating: the second
-      // core still knows it was this setup's own, because that was recorded before the pull.
-      const installation = JSON.parse(
-        await readFile(join(managedRoot, 'installations', 'tensorrt-llm', 'installation.json'), 'utf8')
-      ) as { probe_image?: { repository: string; digest: string } }
-      expect(`${installation.probe_image?.repository}@${installation.probe_image?.digest}`).toBe(PROBE_IMAGE)
-
-      await crash()
-      await host.close()
-      await rm(host.dir, { recursive: true, force: true })
-      host = undefined
-      await rm(managedRoot, { recursive: true, force: true })
-      await mkdir(managedRoot, { recursive: true })
-    }
-  })
-
-  it('refuses a setup the free space cannot hold, before anything is pulled', async () => {
-    host = await fakeManagedHost(readyState())
-    host.setFreeDisk(REQUIRED_DISK_BYTES - 1)
-    const { ready } = await start()
-    const started = (await (
-      await post(ready, '/environments/default/operations', setup())
-    ).json()) as Operation
-    const failed = await poll(ready, started.operation_id, settled)
-    expect(failed.phase).toBe('failed')
-    expect(failed.error?.details).toBe('insufficient-disk')
-    expect(host.pulls).toEqual([])
-  })
-
-  it('fails with what the machine shows when the helper reports success it did not have', async () => {
-    host = await fakeManagedHost(cleanState())
-    const { ready } = await start()
-    const asking = await beginAndApprove(ready)
-    const waiting = await poll(ready, asking.operation_id, settled)
-    const receipt = host.runHostStep(waiting.pending_host_step as PendingHostStep, 'completed', 'none')
-
-    await post(ready, `/environments/operations/${asking.operation_id}/host-step-result`, receipt)
-    const failed = await poll(ready, asking.operation_id, settled)
-    // The probe after the receipt still finds no Docker: a failure with that result, not a relogin.
-    expect(failed.phase).toBe('failed')
-    expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
-    expect(failed.error?.message).toMatch(/still needs/)
-    expect(host.pulls).toEqual([])
-  })
-})
-
-describe('removing the managed engine through the compiled core (task 2.6)', () => {
-  it('stops the engine’s running container first, then removes the image and caches; models and Docker stay', async () => {
-    host = await fakeManagedHost({ ...readyState(), images: ['docker.io/library/postgres@sha256:beef'] })
-    const first = await start()
-    const setupOp = await beginAndApprove(first.ready)
-    expect(
-      (await poll(first.ready, setupOp.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed'))
-        .phase
-    ).toBe('ready')
-    await crash()
-
-    // A model container of this engine that is still running (its stop was not confirmed when the
-    // core restarted, so the startup reconcile left it and its journal record alone), the engine's
-    // cache, a downloaded model, and a container of someone else's.
-    const executions = join(dataFolder, 'atomic-core', 'managed-runtimes', 'executions')
-    await mkdir(executions, { recursive: true })
-    await writeFile(
-      join(executions, 'trt-running.json'),
-      JSON.stringify({
-        container_id: 'trt-running',
-        engine_id: 'tensorrt-llm',
-        image_digest: ENGINE_IMAGE.split('@')[1],
-        scope: 'cli',
-        instance_id: 'previous-core',
-        created_at: '2026-09-29T00:00:00.000Z',
-      })
-    )
-    host.update((state) => ({
-      ...state,
-      containers: [
-        { id: 'trt-running', image: ENGINE_IMAGE, running: true },
-        { id: 'their-db', image: 'docker.io/library/postgres@sha256:beef', running: true },
-      ],
-      stop_refusals: 1,
-    }))
-    const cache = join(dataFolder, 'atomic-core', 'managed-runtimes', 'caches', DESCRIPTOR_ID, 'some-model')
-    await mkdir(cache, { recursive: true })
-    const model = join(dataFolder, 'tensorrt-llm', 'models', 'some-model')
-    await mkdir(model, { recursive: true })
-
-    const second = await start()
-    const started = (await (
-      await post(second.ready, '/environments/default/operations', {
-        request_id: 'rm-1',
-        target: TARGET,
-        kind: 'remove',
-      })
-    ).json()) as Operation
-    const asking = await poll(second.ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
-    await post(second.ready, `/environments/operations/${started.operation_id}/resume`, {
-      expected_revision: asking.revision,
-      approved_plan_digest: asking.plan_digest,
+      // The consented plan stays the plan on the wire; the re-probed one is reported apart.
+      expect(done.plan_digest).toBe(done.approved_plan_digest)
+      expect(done.carried_plan_digest).toMatch(/^sha256:/)
+      expect(done.carried_plan_digest).not.toBe(done.plan_digest)
+      expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
+      expect(host.pulls).toEqual([PROBE_IMAGE, ENGINE_IMAGE])
     })
-    const removed = await poll(
-      second.ready,
-      started.operation_id,
-      (o) => o.phase === 'removed' || o.phase === 'failed'
-    )
-    expect(removed.phase).toBe('removed')
 
-    const docker = host.calls().filter((call) => call[0] === 'docker' && call[1] === '--host')
-    const stop = docker.findIndex((call) => call[3] === 'stop' && call.includes('trt-running'))
-    const imageRm = docker.findIndex((call) => call[3] === 'image' && call[4] === 'rm')
-    expect(stop).toBeGreaterThanOrEqual(0)
-    expect(imageRm).toBeGreaterThan(stop)
-    expect(docker[imageRm]).toContain(ENGINE_IMAGE)
-    // Our container and both our images (the engine's and the GPU check's) are gone; someone
-    // else's container and image are exactly as they were.
-    expect(host.state().containers?.map((c) => c.id)).toEqual(['their-db'])
-    expect(host.state().images).toEqual(['docker.io/library/postgres@sha256:beef'])
-    expect(docker.some((call) => call[3] === 'image' && call[4] === 'rm' && call.includes(PROBE_IMAGE))).toBe(
-      true
-    )
-    expect(docker.some((call) => call.includes('their-db'))).toBe(false)
-    // The caches are gone, the downloaded model stays, and nothing reached for Docker itself.
-    expect(existsSync(cache)).toBe(false)
-    expect(existsSync(model)).toBe(true)
-    expect(await readdir(executions)).toEqual([])
-    expect(host.calls().some((call) => call[0] === 'host-step')).toBe(false)
+    it('a Docker host with only toolkit -base behind a full-tunnel VPN (task 2.23): the plan installs the toolkit, generates the CDI spec, warns about the routes, and a failed start names the cause', async () => {
+      // The 3.10 acceptance host after its first attempt: docker-ce installed, docker.service down,
+      // the nvidia runtime registered in daemon.json, no CDI spec, not in the group, a VPN over tun2.
+      host = await fakeManagedHost({
+        ...cleanState(),
+        docker: { installed: true, reachable: false, service_active: false, gpu_runtime: true },
+        toolkit: false,
+        toolkit_base: true,
+        cdi: false,
+        proc_net_route: [
+          'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT',
+          'wlp2s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0',
+          'tun2\t00000000\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+          'tun2\t00000080\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0',
+        ].join('\n'),
+      })
+      const { ready } = await start()
+      const plan = (await (
+        await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+      ).json()) as {
+        system_changes: { code: string; params?: Record<string, string> }[]
+        blockers: unknown[]
+        warnings: { code: string; text: string; params?: Record<string, string> }[]
+      }
+      expect(plan.blockers).toEqual([])
+      expect(plan.system_changes.map((change) => change.code)).toEqual([
+        'add-repository',
+        'install-packages',
+        'generate-cdi-spec',
+        'enable-docker-service',
+        'add-user-to-docker-group',
+      ])
+      expect(plan.system_changes[1]?.params?.['packages']).toBe('nvidia-container-toolkit')
+      expect(plan.warnings).toEqual([
+        expect.objectContaining({
+          code: 'docker-address-pools-overlap-routes',
+          params: { routes: '128.0.0.0/1', devices: 'tun2' },
+        }),
+      ])
 
-    const environment = (await snapshot(second.ready)).environments[0]
-    expect(environment?.installations).toEqual([])
-    expect(environment?.availability).toBe('setup-required')
-  })
-})
+      const asking = await beginAndApprove(ready)
+      const waiting = await poll(ready, asking.operation_id, settled)
+      const step = waiting.pending_host_step as PendingHostStep
+      expect(step.parameters.components).toEqual([
+        'nvidia-container-toolkit',
+        'nvidia-cdi',
+        'docker-service',
+        'docker-group',
+      ])
+      // The privileged step fails at docker.service; the app forwards the result file's log tail.
+      const tail =
+        'docker-service failed: systemctl enable --now docker exited with 1\n' +
+        'failed to start daemon: Error initializing network controller: error creating default "bridge" ' +
+        'network: all predefined address pools have been fully subnetted'
+      const posted = await post(ready, `/environments/operations/${asking.operation_id}/host-step-result`, {
+        ...host.runHostStep(step, 'completed', 'none'),
+        outcome: 'failed',
+        log_tail: tail,
+      })
+      expect(posted.status).toBe(200)
+      const failed = await poll(ready, asking.operation_id, settled)
+      expect(failed.phase).toBe('failed')
+      expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+      // daemon.json registers only the runtime, no pools: the host's routes are named as the cause.
+      expect(failed.error?.message).toMatch(/because the routes on this machine.*default-address-pools/s)
+      expect(failed.error?.details).toBe(tail)
+    })
 
-describe('an image the user already had', () => {
+    it('keeps a refused system prompt resumable, with nothing changed on the host', async () => {
+      host = await fakeManagedHost(cleanState())
+      const { ready } = await start()
+      const asking = await beginAndApprove(ready)
+      const waiting = await poll(ready, asking.operation_id, settled)
+      const step = waiting.pending_host_step as PendingHostStep
+
+      await post(
+        ready,
+        `/environments/operations/${asking.operation_id}/host-step-result`,
+        host.runHostStep(step, 'declined')
+      )
+      const declined = await poll(ready, asking.operation_id, settled)
+      expect(declined.phase).toBe('failed')
+      expect(declined.error?.code).toBe('MANAGED_ELEVATION_DECLINED')
+      expect(host.state()).toEqual(cleanState())
+
+      // Resumable: the same approved plan issues a fresh step with a new nonce.
+      await post(ready, `/environments/operations/${asking.operation_id}/resume`, {
+        expected_revision: declined.revision,
+      })
+      const again = await poll(ready, asking.operation_id, settled)
+      expect(again.phase).toBe('preparing-host')
+      expect(again.pending_host_step?.nonce).not.toBe(step.nonce)
+    })
+
+    it('refuses a consent given for a plan the host has outgrown (MANAGED_PLAN_CHANGED)', async () => {
+      host = await fakeManagedHost(readyState())
+      const { ready } = await start()
+      const started = (await (
+        await post(ready, '/environments/default/operations', setup())
+      ).json()) as Operation
+      const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+
+      // Between the probe and the click, a second card appeared.
+      host.update((state) => ({
+        ...state,
+        gpus: [
+          ...(state.gpus ?? []),
+          { uuid: 'GPU-second', name: 'NVIDIA RTX A6000', cc: '8.6', total_mib: 49140, free_mib: 49000 },
+        ],
+      }))
+      await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+        expected_revision: asking.revision,
+        approved_plan_digest: asking.plan_digest,
+      })
+      const changed = await poll(
+        ready,
+        started.operation_id,
+        (o) => o.revision > asking.revision + 1 && settled(o)
+      )
+      expect(changed.phase).toBe('awaiting-consent')
+      expect(changed.error?.code).toBe('MANAGED_PLAN_CHANGED')
+      expect(changed.plan_digest).not.toBe(asking.plan_digest)
+      expect(host.pulls).toEqual([])
+    })
+
+    it('fails with toolkit diagnostics when the GPU is not visible in a container, and pulls no engine image', async () => {
+      host = await fakeManagedHost({ ...readyState(), gpu_visible_in_container: false })
+      const { ready } = await start()
+      const asking = await beginAndApprove(ready)
+      const failed = await poll(ready, asking.operation_id, settled)
+      expect(failed.phase).toBe('failed')
+      expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+      expect(failed.error?.message).toMatch(/not visible inside a container/)
+      expect(failed.error?.details).toContain(`gpu=${GPU_UUID}`)
+      expect(failed.error?.details).toContain('could not select device driver')
+      expect(host.pulls).toEqual([PROBE_IMAGE])
+    })
+
+    it('hands a retried request the operation it already started, and refuses the id for another one', async () => {
+      host = await fakeManagedHost(readyState())
+      const { ready } = await start()
+      const first = (await (
+        await post(ready, '/environments/default/operations', setup())
+      ).json()) as Operation
+      const again = (await (
+        await post(ready, '/environments/default/operations', setup())
+      ).json()) as Operation
+      expect(again.operation_id).toBe(first.operation_id)
+      const other = await post(ready, '/environments/default/operations', setup('req-1', { kind: 'remove' }))
+      expect(other.status).toBe(409)
+      expect((await snapshot(ready)).environment_operations).toHaveLength(1)
+    })
+
+    it('picks a pull back up after a crash: verifying when the image is there, pulling on when it is not', async () => {
+      for (const imageLanded of [true, false]) {
+        host = await fakeManagedHost(readyState())
+        host.holdEnginePull = true
+        const first = await start()
+        const asking = await beginAndApprove(first.ready)
+        const pulling = await poll(
+          first.ready,
+          asking.operation_id,
+          (o) => o.phase === 'pulling-image' && (o.progress?.completed ?? 0) > 0
+        )
+        expect(pulling.progress?.unit).toBe('bytes')
+
+        await crash()
+        host.holdEnginePull = false
+        // Either way, less than the whole image's requirement is free now: half or all of it is on disk.
+        if (imageLanded) host.landEngineImage()
+        const pullsBefore = host.pulls.length
+        const second = await start()
+        const done = await poll(
+          second.ready,
+          asking.operation_id,
+          (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
+        )
+        expect(done.phase).toBe('ready')
+        // No new consent, no second GPU check; the engine image pulled again only when it was missing.
+        expect(host.pulls.slice(pullsBefore)).toEqual(imageLanded ? [] : [ENGINE_IMAGE])
+        // The GPU-check image was pulled by the first core, which died before activating: the second
+        // core still knows it was this setup's own, because that was recorded before the pull.
+        const installation = JSON.parse(
+          await readFile(join(managedRoot, 'installations', 'tensorrt-llm', 'installation.json'), 'utf8')
+        ) as { probe_image?: { repository: string; digest: string } }
+        expect(`${installation.probe_image?.repository}@${installation.probe_image?.digest}`).toBe(
+          PROBE_IMAGE
+        )
+
+        await crash()
+        await host.close()
+        await rm(host.dir, { recursive: true, force: true })
+        host = undefined
+        await rm(managedRoot, { recursive: true, force: true })
+        await mkdir(managedRoot, { recursive: true })
+      }
+    })
+
+    it('refuses a setup the free space cannot hold, before anything is pulled', async () => {
+      host = await fakeManagedHost(readyState())
+      host.setFreeDisk(REQUIRED_DISK_BYTES - 1)
+      const { ready } = await start()
+      const started = (await (
+        await post(ready, '/environments/default/operations', setup())
+      ).json()) as Operation
+      const failed = await poll(ready, started.operation_id, settled)
+      expect(failed.phase).toBe('failed')
+      expect(failed.error?.details).toBe('insufficient-disk')
+      expect(host.pulls).toEqual([])
+    })
+
+    it('fails with what the machine shows when the helper reports success it did not have', async () => {
+      host = await fakeManagedHost(cleanState())
+      const { ready } = await start()
+      const asking = await beginAndApprove(ready)
+      const waiting = await poll(ready, asking.operation_id, settled)
+      const receipt = host.runHostStep(waiting.pending_host_step as PendingHostStep, 'completed', 'none')
+
+      await post(ready, `/environments/operations/${asking.operation_id}/host-step-result`, receipt)
+      const failed = await poll(ready, asking.operation_id, settled)
+      // The probe after the receipt still finds no Docker: a failure with that result, not a relogin.
+      expect(failed.phase).toBe('failed')
+      expect(failed.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+      expect(failed.error?.message).toMatch(/still needs/)
+      expect(host.pulls).toEqual([])
+    })
+  }
+)
+
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)(
+  'removing the managed engine through the compiled core (task 2.6)',
+  () => {
+    it('stops the engine’s running container first, then removes the image and caches; models and Docker stay', async () => {
+      host = await fakeManagedHost({ ...readyState(), images: ['docker.io/library/postgres@sha256:beef'] })
+      const first = await start()
+      const setupOp = await beginAndApprove(first.ready)
+      expect(
+        (await poll(first.ready, setupOp.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed'))
+          .phase
+      ).toBe('ready')
+      await crash()
+
+      // A model container of this engine that is still running (its stop was not confirmed when the
+      // core restarted, so the startup reconcile left it and its journal record alone), the engine's
+      // cache, a downloaded model, and a container of someone else's.
+      const executions = join(dataFolder, 'atomic-core', 'managed-runtimes', 'executions')
+      await mkdir(executions, { recursive: true })
+      await writeFile(
+        join(executions, 'trt-running.json'),
+        JSON.stringify({
+          container_id: 'trt-running',
+          engine_id: 'tensorrt-llm',
+          image_digest: ENGINE_IMAGE.split('@')[1],
+          scope: 'cli',
+          instance_id: 'previous-core',
+          created_at: '2026-09-29T00:00:00.000Z',
+        })
+      )
+      host.update((state) => ({
+        ...state,
+        containers: [
+          { id: 'trt-running', image: ENGINE_IMAGE, running: true },
+          { id: 'their-db', image: 'docker.io/library/postgres@sha256:beef', running: true },
+        ],
+        stop_refusals: 1,
+      }))
+      const cache = join(dataFolder, 'atomic-core', 'managed-runtimes', 'caches', DESCRIPTOR_ID, 'some-model')
+      await mkdir(cache, { recursive: true })
+      const model = join(dataFolder, 'tensorrt-llm', 'models', 'some-model')
+      await mkdir(model, { recursive: true })
+
+      const second = await start()
+      const started = (await (
+        await post(second.ready, '/environments/default/operations', {
+          request_id: 'rm-1',
+          target: TARGET,
+          kind: 'remove',
+        })
+      ).json()) as Operation
+      const asking = await poll(second.ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+      await post(second.ready, `/environments/operations/${started.operation_id}/resume`, {
+        expected_revision: asking.revision,
+        approved_plan_digest: asking.plan_digest,
+      })
+      const removed = await poll(
+        second.ready,
+        started.operation_id,
+        (o) => o.phase === 'removed' || o.phase === 'failed'
+      )
+      expect(removed.phase).toBe('removed')
+
+      const docker = host.calls().filter((call) => call[0] === 'docker' && call[1] === '--host')
+      const stop = docker.findIndex((call) => call[3] === 'stop' && call.includes('trt-running'))
+      const imageRm = docker.findIndex((call) => call[3] === 'image' && call[4] === 'rm')
+      expect(stop).toBeGreaterThanOrEqual(0)
+      expect(imageRm).toBeGreaterThan(stop)
+      expect(docker[imageRm]).toContain(ENGINE_IMAGE)
+      // Our container and both our images (the engine's and the GPU check's) are gone; someone
+      // else's container and image are exactly as they were.
+      expect(host.state().containers?.map((c) => c.id)).toEqual(['their-db'])
+      expect(host.state().images).toEqual(['docker.io/library/postgres@sha256:beef'])
+      expect(
+        docker.some((call) => call[3] === 'image' && call[4] === 'rm' && call.includes(PROBE_IMAGE))
+      ).toBe(true)
+      expect(docker.some((call) => call.includes('their-db'))).toBe(false)
+      // The caches are gone, the downloaded model stays, and nothing reached for Docker itself.
+      expect(existsSync(cache)).toBe(false)
+      expect(existsSync(model)).toBe(true)
+      expect(await readdir(executions)).toEqual([])
+      expect(host.calls().some((call) => call[0] === 'host-step')).toBe(false)
+
+      const environment = (await snapshot(second.ready)).environments[0]
+      expect(environment?.installations).toEqual([])
+      expect(environment?.availability).toBe('setup-required')
+    })
+  }
+)
+
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)('an image the user already had', () => {
   it('is never removed with the installation: the GPU-check image was not this setup’s to remove', async () => {
     host = await fakeManagedHost({ ...readyState(), images: [PROBE_IMAGE] })
     const { ready } = await start()
@@ -703,7 +726,8 @@ describe('an image the user already had', () => {
 })
 
 describe('without a Linux host', () => {
-  it.skipIf(process.platform === 'linux')(
+  // Windows offers its own (WSL) environment now; `managed-windows.test.ts` drives that one.
+  it.skipIf(process.platform === 'linux' || process.platform === 'win32')(
     'offers no environment, and a setup says what is missing',
     async () => {
       const { ready } = await start()
@@ -787,7 +811,7 @@ interface ProbedPlan {
   required_disk_bytes: number | null
 }
 
-describe('what the app shows before consent (task 2.22)', () => {
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)('what the app shows before consent (task 2.22)', () => {
   it('after a probe: the plan says where and how much space it measured, and the route answers its descriptor from the cache with no network', async () => {
     host = await fakeManagedHost(cleanState())
     const first = await start()
@@ -869,154 +893,157 @@ describe('what the app shows before consent (task 2.22)', () => {
   )
 })
 
-describe('the environment manifest through the compiled core (change extract-environment-manifest)', () => {
-  interface Plan {
-    plan_digest: string
-    availability: string
-    adopts_existing_engine: boolean
-    requires_elevation: boolean
-    environment_manifest_id: string | null
-    blockers: { code: string; reason?: string }[]
-  }
-  const probe = async (ready: ReadyLine): Promise<Plan> =>
-    (await (
-      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
-    ).json()) as Plan
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)(
+  'the environment manifest through the compiled core (change extract-environment-manifest)',
+  () => {
+    interface Plan {
+      plan_digest: string
+      availability: string
+      adopts_existing_engine: boolean
+      requires_elevation: boolean
+      environment_manifest_id: string | null
+      blockers: { code: string; reason?: string }[]
+    }
+    const probe = async (ready: ReadyLine): Promise<Plan> =>
+      (await (
+        await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+      ).json()) as Plan
 
-  /** The next manifest conf publishes: a new id and, when given, a different distribution list. */
-  const publish = (manifestId: string, distributions?: Array<Record<string, string>>): void => {
-    host?.conf.set(
-      LINUX_MANIFEST_PATH,
-      JSON.stringify({
-        ...LINUX_MANIFEST,
-        manifest_id: manifestId,
-        ...(distributions === undefined
-          ? {}
-          : { recipes: [{ recipe_id: 'linux.install-container-runtime', distributions }] }),
+    /** The next manifest conf publishes: a new id and, when given, a different distribution list. */
+    const publish = (manifestId: string, distributions?: Array<Record<string, string>>): void => {
+      host?.conf.set(
+        LINUX_MANIFEST_PATH,
+        JSON.stringify({
+          ...LINUX_MANIFEST,
+          manifest_id: manifestId,
+          ...(distributions === undefined
+            ? {}
+            : { recipes: [{ recipe_id: 'linux.install-container-runtime', distributions }] }),
+        })
+      )
+    }
+
+    it('a manifest published during the sign-in wait changes nothing: the operation finishes on the consented one', async () => {
+      host = await fakeManagedHost(cleanState())
+      const first = await start()
+      expect((await probe(first.ready)).environment_manifest_id).toBe('linux-r1')
+      const asking = await beginAndApprove(first.ready)
+      const waiting = await poll(first.ready, asking.operation_id, settled)
+      const step = waiting.pending_host_step as PendingHostStep
+      await post(
+        first.ready,
+        `/environments/operations/${asking.operation_id}/host-step-result`,
+        host.runHostStep(step, 'completed')
+      )
+      expect((await poll(first.ready, asking.operation_id, settled)).phase).toBe('relogin-required')
+
+      // conf publishes linux-r2, which no longer lists Ubuntu 24.04, while the user is signing back in.
+      publish('linux-r2', [{ id: 'debian', version_id: '12', arch: 'x86_64' }])
+      await crash()
+      host.update((state) => ({
+        ...state,
+        group: { configured: true, effective: true },
+        docker: { ...state.docker, reachable: true },
+      }))
+      const second = await start()
+      const done = await poll(
+        second.ready,
+        asking.operation_id,
+        (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
+      )
+      expect(done.phase).toBe('ready')
+      expect(done.error).toBeNull()
+      expect(done.plan_digest).toBe(done.approved_plan_digest)
+      expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
+      // A fresh probe, outside the operation, does see the new manifest.
+      expect((await probe(second.ready)).environment_manifest_id).toBe('linux-r2')
+    })
+
+    it('a manifest published between the probe and the consent: the old approval is refused with MANAGED_PLAN_CHANGED', async () => {
+      host = await fakeManagedHost(readyState())
+      const { ready } = await start()
+      const started = (await (
+        await post(ready, '/environments/default/operations', setup())
+      ).json()) as Operation
+      const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+
+      publish('linux-r2')
+      await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+        expected_revision: asking.revision,
+        approved_plan_digest: asking.plan_digest,
       })
-    )
+      const changed = await poll(
+        ready,
+        started.operation_id,
+        (o) => o.phase === 'awaiting-consent' && o.revision > asking.revision
+      )
+      expect(changed.error?.code).toBe('MANAGED_PLAN_CHANGED')
+      expect(changed.plan_digest).not.toBe(asking.plan_digest)
+      expect(host.pulls).toEqual([])
+
+      // Approving the plan built on linux-r2 goes through.
+      await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+        expected_revision: changed.revision,
+        approved_plan_digest: changed.plan_digest,
+      })
+      expect(
+        (await poll(ready, started.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+      ).toBe('ready')
+    })
+
+    it('first start with no network and no cached manifest: a host with a working Docker is adopted and set up', async () => {
+      host = await fakeManagedHost(readyState())
+      host.confOffline = true
+      const { ready } = await start()
+      const plan = await probe(ready)
+      expect(plan).toMatchObject({
+        adopts_existing_engine: true,
+        requires_elevation: false,
+        environment_manifest_id: null,
+        blockers: [],
+      })
+      const asking = await beginAndApprove(ready)
+      expect(
+        (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+      ).toBe('ready')
+      expect(existsSync(join(managedRoot, 'environment-manifests'))).toBe(false)
+    })
+
+    it('first start with no network and no cached manifest: a host that needs Docker is blocked, with no privileged step', async () => {
+      host = await fakeManagedHost(cleanState())
+      host.confOffline = true
+      const { ready } = await start()
+      const plan = await probe(ready)
+      expect(plan.availability).toBe('prerequisite-blocked')
+      expect(plan.requires_elevation).toBe(false)
+      expect(plan.environment_manifest_id).toBeNull()
+      expect(plan.blockers).toEqual([
+        expect.objectContaining({
+          code: 'MANAGED_METADATA_INVALID',
+          reason: 'environment-manifest-unavailable',
+        }),
+      ])
+    })
+
+    it('never asks conf for another platform’s manifest, and a change there changes nothing', async () => {
+      host = await fakeManagedHost(readyState())
+      const { ready } = await start()
+      const before = await probe(ready)
+      host.conf.set(
+        WINDOWS_MANIFEST_PATH,
+        JSON.stringify({ schema_version: 1, manifest_id: 'windows-r2', platform: 'windows' })
+      )
+      const after = await probe(ready)
+      expect(after.plan_digest).toBe(before.plan_digest)
+      const asking = await beginAndApprove(ready)
+      expect(
+        (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+      ).toBe('ready')
+
+      expect(host.confRequests.length).toBeGreaterThan(0)
+      expect(new Set(host.confRequests)).toEqual(new Set([LINUX_MANIFEST_PATH]))
+      // The accepted manifest is cached in the shared root, by its id.
+      expect(existsSync(join(managedRoot, 'environment-manifests', 'linux-r1.json'))).toBe(true)
+    })
   }
-
-  it('a manifest published during the sign-in wait changes nothing: the operation finishes on the consented one', async () => {
-    host = await fakeManagedHost(cleanState())
-    const first = await start()
-    expect((await probe(first.ready)).environment_manifest_id).toBe('linux-r1')
-    const asking = await beginAndApprove(first.ready)
-    const waiting = await poll(first.ready, asking.operation_id, settled)
-    const step = waiting.pending_host_step as PendingHostStep
-    await post(
-      first.ready,
-      `/environments/operations/${asking.operation_id}/host-step-result`,
-      host.runHostStep(step, 'completed')
-    )
-    expect((await poll(first.ready, asking.operation_id, settled)).phase).toBe('relogin-required')
-
-    // conf publishes linux-r2, which no longer lists Ubuntu 24.04, while the user is signing back in.
-    publish('linux-r2', [{ id: 'debian', version_id: '12', arch: 'x86_64' }])
-    await crash()
-    host.update((state) => ({
-      ...state,
-      group: { configured: true, effective: true },
-      docker: { ...state.docker, reachable: true },
-    }))
-    const second = await start()
-    const done = await poll(
-      second.ready,
-      asking.operation_id,
-      (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
-    )
-    expect(done.phase).toBe('ready')
-    expect(done.error).toBeNull()
-    expect(done.plan_digest).toBe(done.approved_plan_digest)
-    expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
-    // A fresh probe, outside the operation, does see the new manifest.
-    expect((await probe(second.ready)).environment_manifest_id).toBe('linux-r2')
-  })
-
-  it('a manifest published between the probe and the consent: the old approval is refused with MANAGED_PLAN_CHANGED', async () => {
-    host = await fakeManagedHost(readyState())
-    const { ready } = await start()
-    const started = (await (
-      await post(ready, '/environments/default/operations', setup())
-    ).json()) as Operation
-    const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
-
-    publish('linux-r2')
-    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
-      expected_revision: asking.revision,
-      approved_plan_digest: asking.plan_digest,
-    })
-    const changed = await poll(
-      ready,
-      started.operation_id,
-      (o) => o.phase === 'awaiting-consent' && o.revision > asking.revision
-    )
-    expect(changed.error?.code).toBe('MANAGED_PLAN_CHANGED')
-    expect(changed.plan_digest).not.toBe(asking.plan_digest)
-    expect(host.pulls).toEqual([])
-
-    // Approving the plan built on linux-r2 goes through.
-    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
-      expected_revision: changed.revision,
-      approved_plan_digest: changed.plan_digest,
-    })
-    expect(
-      (await poll(ready, started.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
-    ).toBe('ready')
-  })
-
-  it('first start with no network and no cached manifest: a host with a working Docker is adopted and set up', async () => {
-    host = await fakeManagedHost(readyState())
-    host.confOffline = true
-    const { ready } = await start()
-    const plan = await probe(ready)
-    expect(plan).toMatchObject({
-      adopts_existing_engine: true,
-      requires_elevation: false,
-      environment_manifest_id: null,
-      blockers: [],
-    })
-    const asking = await beginAndApprove(ready)
-    expect(
-      (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
-    ).toBe('ready')
-    expect(existsSync(join(managedRoot, 'environment-manifests'))).toBe(false)
-  })
-
-  it('first start with no network and no cached manifest: a host that needs Docker is blocked, with no privileged step', async () => {
-    host = await fakeManagedHost(cleanState())
-    host.confOffline = true
-    const { ready } = await start()
-    const plan = await probe(ready)
-    expect(plan.availability).toBe('prerequisite-blocked')
-    expect(plan.requires_elevation).toBe(false)
-    expect(plan.environment_manifest_id).toBeNull()
-    expect(plan.blockers).toEqual([
-      expect.objectContaining({
-        code: 'MANAGED_METADATA_INVALID',
-        reason: 'environment-manifest-unavailable',
-      }),
-    ])
-  })
-
-  it('never asks conf for another platform’s manifest, and a change there changes nothing', async () => {
-    host = await fakeManagedHost(readyState())
-    const { ready } = await start()
-    const before = await probe(ready)
-    host.conf.set(
-      WINDOWS_MANIFEST_PATH,
-      JSON.stringify({ schema_version: 1, manifest_id: 'windows-r2', platform: 'windows' })
-    )
-    const after = await probe(ready)
-    expect(after.plan_digest).toBe(before.plan_digest)
-    const asking = await beginAndApprove(ready)
-    expect(
-      (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
-    ).toBe('ready')
-
-    expect(host.confRequests.length).toBeGreaterThan(0)
-    expect(new Set(host.confRequests)).toEqual(new Set([LINUX_MANIFEST_PATH]))
-    // The accepted manifest is cached in the shared root, by its id.
-    expect(existsSync(join(managedRoot, 'environment-manifests', 'linux-r1.json'))).toBe(true)
-  })
-})
+)

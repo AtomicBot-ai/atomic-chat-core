@@ -41,7 +41,8 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
-import { TensorrtLlmModelRegistry, TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
+import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
+import { TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
@@ -62,7 +63,10 @@ import {
   leftoverContainers,
   tensorrtLlmModelDeleter,
   tensorrtLlmModelLocation,
+  tensorrtLlmModelRegistry,
   tensorrtLlmSessionUnloader,
+  windowsModelFilesFor,
+  wiredExec,
   wireTensorrtLlm,
   wireTensorrtLlmModelCheck,
 } from './tensorrt-llm.js'
@@ -390,6 +394,8 @@ export async function createAtomicCore(
       containers: managedContainers,
       platform: managedPlatform,
       host: managedHost,
+      arch: managedArch,
+      windows: managedWindows,
     } = wireManagedEnvironment({
       env,
       platform,
@@ -410,6 +416,8 @@ export async function createAtomicCore(
       instanceId: lock.instanceId,
       log,
       dockerConfigDir: layout.managed.dockerConfigDir,
+      // On Windows the executor is the guest's docker through WSL: its retries go the same way.
+      ...(managedWindows === undefined ? {} : { exec: wiredExec }),
     })
 
     // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").
@@ -417,7 +425,8 @@ export async function createAtomicCore(
     const tensorrtLlmSettingsOf = (): Record<string, unknown> => settings.get('tensorrt-llm')
     const tensorrtLlm = wireTensorrtLlm({
       platform: managedPlatform,
-      arch: process.arch,
+      arch: managedArch,
+      ...(managedWindows === undefined ? {} : { windows: managedWindows }),
       layout,
       instanceId: lock.instanceId,
       scope,
@@ -440,8 +449,8 @@ export async function createAtomicCore(
     if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
     // `core.registry('tensorrt-llm')` (task 2.16w round 1, finding 2): the same Linux-only gate as
     // the runtime above, so the two are never offered one without the other.
-    const tensorrtLlmRegistry = new TensorrtLlmModelRegistry(layout.provider('tensorrt-llm').modelsDir)
-    if (managedPlatform === 'linux') registries.set('tensorrt-llm', tensorrtLlmRegistry)
+    const tensorrtLlmRegistry = tensorrtLlmModelRegistry(managedPlatform, layout, managedWindows)
+    if (tensorrtLlm !== null) registries.set('tensorrt-llm', tensorrtLlmRegistry)
     /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
     const tensorrtLlmOr = (provider: string): TensorrtLlmRuntime => {
       const runtime = runtimes.get('tensorrt-llm')
@@ -460,12 +469,17 @@ export async function createAtomicCore(
             sessions: facade,
             registry: tensorrtLlmRegistry,
             paths: layout.managed,
+            ...(managedWindows === undefined
+              ? {}
+              : { windowsFiles: windowsModelFilesFor(managedWindows, layout) }),
           })
     const tensorrtLlmModelCheck = wireTensorrtLlmModelCheck(managedPlatform, {
       descriptors: managed.descriptors,
       installations: managed.installations,
       host: managedHost,
       settings: tensorrtLlmSettingsOf,
+      arch: managedArch,
+      ...(managedWindows === undefined ? {} : { windows: managedWindows }),
     })
 
     const control = await ControlServer.start(
@@ -533,7 +547,7 @@ export async function createAtomicCore(
         // Where clients put tensorrt-llm models (change `add-tensorrt-llm-windows`, task 2.8): wherever
         // the provider itself is offered.
         ...(tensorrtLlm !== null
-          ? { tensorrtLlmModelLocation: tensorrtLlmModelLocation(managedPlatform, layout) }
+          ? { tensorrtLlmModelLocation: tensorrtLlmModelLocation(managedPlatform, layout, managedWindows) }
           : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),

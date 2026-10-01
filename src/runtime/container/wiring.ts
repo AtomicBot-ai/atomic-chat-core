@@ -14,6 +14,8 @@ import { ExecutionJournal } from './execution-journal.js'
 import { reconcileExecutions } from './reconcile.js'
 import type { ExecutionReconcileResult, ReconcileLogger } from './reconcile.js'
 import type { DockerExec } from './types.js'
+import { GUEST_DOCKER_BINARY, guestDockerExec } from './wsl-exec.js'
+import type { WslDistributionTransport } from '../wsl/index.js'
 
 export interface WireManagedContainersOptions {
   /** Injected, never `process.platform` read here. */
@@ -32,6 +34,11 @@ export interface WireManagedContainersOptions {
   reconcileCallTimeoutMs?: number
   /** Past this, reconcile starts no further record. Default `RECONCILE_BUDGET_MS`. */
   reconcileBudgetMs?: number
+  /**
+   * Windows (change `add-tensorrt-llm-windows`): Atomic Chat's WSL distribution, or null before it is
+   * imported. Docker runs there, as the guest's root through `wsl.exe` (`guestDockerExec`).
+   */
+  guest?: () => Promise<WslDistributionTransport | null>
 }
 
 /**
@@ -58,20 +65,37 @@ export interface ManagedContainers {
   reconciled: ExecutionReconcileResult
 }
 
-/** `null` off Linux, or when no docker CLI is installed: there is nothing to run a container with. */
+/**
+ * `null` off Linux and Windows, when no docker CLI is installed, or on Windows before Atomic Chat's
+ * WSL distribution exists: there is nothing to run a container with.
+ */
 export async function wireManagedContainers(
   options: WireManagedContainersOptions
 ): Promise<ManagedContainers | null> {
-  if (options.platform !== 'linux') return null
-  const dockerPath = options.dockerPath === undefined ? await resolveDockerBinary() : options.dockerPath
-  if (dockerPath === null) return null
-  const exec = createDockerExec({ dockerPath, dockerConfigDir: options.layout.managed.dockerConfigDir })
+  let dockerPath: string
+  let exec: DockerExec
+  let reconcileExec: DockerExec
+  const reconcileTimeout = options.reconcileCallTimeoutMs ?? RECONCILE_CALL_TIMEOUT_MS
+  if (options.platform === 'win32' && options.guest !== undefined) {
+    const transport = await options.guest()
+    if (transport === null) return null
+    dockerPath = GUEST_DOCKER_BINARY
+    exec = guestDockerExec(transport)
+    const guest = exec
+    reconcileExec = (args, call) => guest(args, { timeoutMs: call?.timeoutMs ?? reconcileTimeout })
+  } else {
+    if (options.platform !== 'linux') return null
+    const resolved = options.dockerPath === undefined ? await resolveDockerBinary() : options.dockerPath
+    if (resolved === null) return null
+    dockerPath = resolved
+    exec = createDockerExec({ dockerPath, dockerConfigDir: options.layout.managed.dockerConfigDir })
+    reconcileExec = createDockerExec({
+      dockerPath,
+      dockerConfigDir: options.layout.managed.dockerConfigDir,
+      timeoutMs: reconcileTimeout,
+    })
+  }
   const journal = await ExecutionJournal.open(options.layout)
-  const reconcileExec = createDockerExec({
-    dockerPath,
-    dockerConfigDir: options.layout.managed.dockerConfigDir,
-    timeoutMs: options.reconcileCallTimeoutMs ?? RECONCILE_CALL_TIMEOUT_MS,
-  })
   const budget = new AbortController()
   const timer = setTimeout(() => budget.abort(), options.reconcileBudgetMs ?? RECONCILE_BUDGET_MS)
   timer.unref?.()

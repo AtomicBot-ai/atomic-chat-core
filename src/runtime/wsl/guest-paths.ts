@@ -12,7 +12,7 @@
  * never be pointed at the Windows disk or at someone else's files. The execution journal and the
  * docker config stay on Windows: they are core's own state, not the container's.
  */
-import { win32 } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import type { ManagedScopePaths } from '../../config/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
 
@@ -51,21 +51,53 @@ export function guestPathFor(distribution: string, uncPath: string): string {
 }
 
 /**
+ * How this process reaches a distribution's files: `\\wsl.localhost\<distribution>\…` in production
+ * (`WSL_LOCALHOST_MOUNT`); a plain folder standing in for the guest's file system under the managed
+ * e2e test hook (`directoryGuestMount`). Everything that turns a guest path into one core opens, or
+ * back, goes through one of these, so the test hook changes nothing else.
+ */
+export interface GuestMount {
+  /** A guest path as this process opens it. */
+  hostPath(distribution: string, guestPath: string): string
+  /** The guest path behind one of this process's paths; `INVALID_ARGUMENT` for anything outside it. */
+  guestPath(distribution: string, hostPath: string): string
+}
+
+export const WSL_LOCALHOST_MOUNT: GuestMount = { hostPath: uncPathFor, guestPath: guestPathFor }
+
+/** Tests only: `<root>/<distribution>/<guest path>` stands in for `\\wsl.localhost\<distribution>\<guest path>`. */
+export function directoryGuestMount(root: string): GuestMount {
+  return {
+    hostPath: (distribution, guestPath) => join(root, distribution, ...guestPath.split('/').filter(Boolean)),
+    guestPath: (distribution, hostPath) => {
+      const inside = relative(join(root, distribution), hostPath)
+      if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) throw outside(hostPath)
+      return `/${inside.split(sep).join('/')}`
+    },
+  }
+}
+
+/**
  * This scope's managed paths on Windows: heartbeats, engine caches and the watchdog script in the
- * guest (as core reaches them, through `\\wsl.localhost`), the journal and docker config where they
- * were. Same layout below the root as Linux's (`config/paths.ts`), so nothing above it changes.
+ * guest (as core reaches them, through `mount`), the journal and docker config where they were. Same
+ * layout below the root as Linux's (`config/paths.ts`), so nothing above it changes.
  */
 export function guestScopePaths(
   windows: ManagedScopePaths,
   distribution: string,
-  scopeKey: string
+  scopeKey: string,
+  mount: GuestMount = WSL_LOCALHOST_MOUNT
 ): ManagedScopePaths {
-  const root = uncPathFor(distribution, guestScopeRoot(scopeKey))
-  const relativeTo = (path: string): string => win32.relative(windows.root, path)
-  const inGuest = (path: string): string => win32.join(root, relativeTo(path))
+  const guestRoot = guestScopeRoot(scopeKey)
+  const inGuest = (path: string): string => {
+    const segments = relative(windows.root, path)
+      .split(/[\\/]+/)
+      .filter(Boolean)
+    return mount.hostPath(distribution, [guestRoot, ...segments].join('/'))
+  }
   return {
     ...windows,
-    root,
+    root: mount.hostPath(distribution, guestRoot),
     heartbeatsDir: inGuest(windows.heartbeatsDir),
     heartbeatDir: (generation) => inGuest(windows.heartbeatDir(generation)),
     cachesDir: inGuest(windows.cachesDir),

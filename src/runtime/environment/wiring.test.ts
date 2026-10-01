@@ -15,6 +15,7 @@ import type {
 import type { DataFolderEnv } from '../../config/index.js'
 import { RUNTIME_DESCRIPTOR_URL_ENV } from './descriptor-provider.js'
 import { ENVIRONMENT_MANIFEST_URL_ENV } from './environment-manifest-provider.js'
+import { fakeWindows } from '../../../test/helpers/fake-windows-host.js'
 import type { DescriptorProviderResult, RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentProvisioner } from './service.js'
 import {
@@ -129,12 +130,10 @@ const wire = (platform: NodeJS.Platform, provisioner?: EnvironmentProvisioner | 
 }
 
 describe('which machines can carry a managed runtime', () => {
-  it('names the container engine Linux would drive, and none for every other platform', () => {
-    // Windows is not a goal of this change (no WSL recipe, no Docker executor anywhere in this
-    // build yet): it answers null exactly like darwin, rather than advertising an environment
-    // nothing here can ever set up.
+  it('names the container engine each platform drives: Docker on Linux, Docker in WSL on Windows, none elsewhere', () => {
+    // Windows (change `add-tensorrt-llm-windows`): Docker in Atomic Chat's own WSL distribution.
     expect(executorFor('linux')).toBe('linux-docker')
-    expect(executorFor('win32')).toBeNull()
+    expect(executorFor('win32')).toBe('wsl-docker')
     expect(executorFor('darwin')).toBeNull()
     expect(executorFor('freebsd')).toBeNull()
   })
@@ -143,7 +142,13 @@ describe('which machines can carry a managed runtime', () => {
     const { managed } = wire('darwin')
     // Not an environment that cannot be set up: there is nothing here to set up.
     expect(managed.environments()).toEqual([])
-    expect(wire('win32').managed.environments()).toEqual([])
+  })
+
+  it('offers the WSL environment on Windows, unsupported until its host parts are supplied', () => {
+    const environment = wire('win32').managed.environments()[0]
+    expect(environment?.executor).toBe('wsl-docker')
+    expect(environment?.availability).toBe('unsupported')
+    expect(environment?.distribution).toBeNull()
   })
 
   it('offers one environment per user on a platform that could carry it', () => {
@@ -637,3 +642,86 @@ describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () 
 })
 
 type EnvironmentSnapshotLike = { revision: number }
+
+describe('the Windows recipe wired (change add-tensorrt-llm-windows, task 2.10)', () => {
+  it('drives the Windows provisioner with its own manifest, and shows the distribution a probe saw', async () => {
+    const descriptorUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+    const manifestUrl = new URL('../../../test/fixtures/runtimes/environments/windows.json', import.meta.url)
+      .href
+    const windows = fakeWindows({
+      wsl: {
+        installed: true,
+        wsl_version: '2.4.4.0',
+        ready: true,
+        distributions: [{ name: 'AtomicChat', state: 'Running', version: 2, is_default: false }],
+        guests: {
+          AtomicChat: {
+            files: {},
+            host: {
+              docker: { installed: false, reachable: false, service_active: false, gpu_runtime: false },
+            },
+          },
+        },
+      },
+      machine: 'x86_64',
+      release: '10.0.22631',
+      elevated: false,
+      virtualization: { firmware: true, hypervisor: true },
+      nvidia: { driver: '591.44', gpus: [] },
+      wslconfig: null,
+      volume_free_bytes: 1,
+      vhdx_bytes: 7,
+    })
+    const record = {
+      schema_version: 1 as const,
+      executor: 'wsl-docker' as const,
+      distribution: { name: 'AtomicChat', path: 'C:\\AtomicChat' },
+      manifest_id: 'windows-r1',
+      imported_at: '2026-10-01T00:00:00.000Z',
+      marker: 'marker-0001',
+    }
+    const never = async (): Promise<never> => {
+      throw new Error('not in a probe')
+    }
+    const managed = wireManagedRuntimes({
+      env: env('win32', {
+        [RUNTIME_DESCRIPTOR_URL_ENV]: descriptorUrl,
+        [ENVIRONMENT_MANIFEST_URL_ENV]: manifestUrl,
+      }),
+      instanceId: 'core-1',
+      platform: 'win32',
+      emit: () => undefined,
+      newId: () => 'id',
+      windows: {
+        host: windows.host,
+        records: { read: async () => record, write: never, remove: never },
+        guestRecipe: {
+          recipe_id: 'linux.install-container-runtime',
+          recipe_digest: `sha256:${'0'.repeat(64)}`,
+          parameters: never,
+          parametersDigest: never,
+        } as never,
+        enableWsl: {
+          recipe_id: 'windows.enable-wsl',
+          recipe_digest: `sha256:${'1'.repeat(64)}`,
+          parameters_digest: `sha256:${'2'.repeat(64)}`,
+        },
+        downloadRootfs: never,
+        removeFile: never,
+        runGuestRecipe: never,
+        journal: { list: () => [], remove: never },
+        removeEngineCaches: never,
+        removeModels: never,
+      },
+    })
+    wired.push(managed)
+    const plan = await managed.service.probe({ descriptor_id: 'none', target: { kind: 'environment' } })
+    expect(plan.environment_manifest_id).toBe('windows-r1')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(managed.environments()[0]?.distribution).toEqual({
+      name: 'AtomicChat',
+      path: 'C:\\AtomicChat',
+      size_bytes: 7,
+    })
+  })
+})

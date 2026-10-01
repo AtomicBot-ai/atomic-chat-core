@@ -22,9 +22,15 @@
  * distribution with — runs until `<state-dir>/stopped` exists (`wsl --shutdown`, or a test) or the
  * process is killed.
  */
+import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { answer as answerLinux } from './fake-linux-host.mjs'
+
+const MODEL_DOCKER = fileURLToPath(new URL('./fake-model-docker.mjs', import.meta.url))
+/** What `fake-model-docker.mjs` answers for a guest: a model container's whole lifecycle. */
+const CONTAINER_COMMANDS = ['create', 'start', 'container', 'logs', 'stop', 'rm', 'port']
 
 const NO_DISTRIBUTION = 'There is no distribution with the supplied name.\r\n'
 
@@ -108,6 +114,9 @@ function guestCommand(state, name, user, command, args, input) {
     case 'chmod':
     case 'chown':
       return result(0)
+    case 'realpath':
+      // Every guest path the core mounts resolves to itself in this fake.
+      return result(0, `${args[args.length - 1]}\n`)
     case 'find': {
       // `find <root> -name model.yml -printf '%h\n'`: the folder of every model.yml under root.
       const root = args[0]
@@ -136,12 +145,31 @@ function guestCommand(state, name, user, command, args, input) {
     }
     case 'timeout': {
       // `timeout <s> python3 -m http.server --bind 127.0.0.1 <port>`: a test listener inside the guest.
+      // As a program it really listens on this machine's 127.0.0.1 — what WSL's forwarding would make
+      // of it — unless the state says forwarding is off (`forwarding: false`).
       if (!args.includes('http.server')) break
       const port = Number(args[args.length - 1])
       return result(0, '', '', {
         next: withGuest(state, name, {
           ...guest,
           listening: [...new Set([...(guest.listening ?? []), port])],
+        }),
+        listen: state.forwarding === false ? undefined : port,
+        hold: true,
+      })
+    }
+    case 'atomic-test-recipe': {
+      // The managed e2e's stand-in for the Linux recipe in the guest (`testGuestRecipe`): what it installs.
+      const host = guest.host ?? {}
+      return result(0, `applied ${args.join(',')}\n`, '', {
+        next: withGuest(state, name, {
+          ...guest,
+          host: {
+            ...host,
+            docker: { installed: true, reachable: true, service_active: true, gpu_runtime: true },
+            toolkit: true,
+            cdi: true,
+          },
         }),
       })
     }
@@ -195,6 +223,18 @@ function guestCommand(state, name, user, command, args, input) {
       return result(0, Buffer.alloc(Number(args[0]), 'x'))
     case 'fake-stream':
       return result(0, '', '', { stream: args })
+  }
+  if (base === 'docker' && state.model_docker !== undefined) {
+    // A model container in the guest: `fake-model-docker.mjs`, which starts a fake engine on this
+    // machine's 127.0.0.1 — where WSL's forwarding would have put it.
+    const sub = args[0] === '--host' ? args[2] : args[0]
+    if (CONTAINER_COMMANDS.includes(sub)) {
+      const ran = spawnSync(process.execPath, [MODEL_DOCKER, ...args], {
+        env: { ...process.env, FAKE_DOCKER_STATE: state.model_docker },
+        encoding: 'utf8',
+      })
+      return result(ran.status ?? 1, ran.stdout ?? '', ran.stderr ?? '')
+    }
   }
   const answered = answerLinux({ ...(guest.host ?? {}), user }, base, args)
   const next =
@@ -355,6 +395,10 @@ if (process.argv[1] && /fake-wsl\.mjs$/.test(process.argv[1])) {
         process.exitCode = answered.code
       })
     )
+  }
+  if (answered.listen !== undefined) {
+    const { createServer } = await import('node:http')
+    createServer((_req, res) => res.end('ok')).listen(answered.listen, '127.0.0.1')
   }
   if (answered.hold) {
     // Held until the VM goes away (`wsl --shutdown`) or the core kills this process.

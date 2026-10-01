@@ -85,8 +85,9 @@ import type { ModelFileOps } from '../runtime/tensorrt-llm/index.js'
 import {
   ensureGuestScope,
   guestScopePaths,
-  uncPathFor,
+  WSL_LOCALHOST_MOUNT,
   type DistributionKeeper,
+  type GuestMount,
   type Wsl,
   type WslDistributionTransport,
 } from '../runtime/wsl/index.js'
@@ -106,6 +107,8 @@ export interface WindowsTensorrtLlmContext {
   keeper: (distribution: string) => DistributionKeeper
   scopeKey: () => Promise<string>
   host: WindowsHost
+  /** How core reaches the guest's files; `\\wsl.localhost` unless the managed test hook says otherwise. */
+  mount?: GuestMount
 }
 
 /** The distribution as it stands now, and this scope's place in it; null before the import. */
@@ -138,8 +141,8 @@ async function windowsGuest(
     record,
     transport: context.wsl.distribution(name),
     key,
-    paths: guestScopePaths(layout.managed, name, key),
-    modelsRoot: uncPathFor(name, guestModelsRoot(key)),
+    paths: guestScopePaths(layout.managed, name, key, context.mount),
+    modelsRoot: (context.mount ?? WSL_LOCALHOST_MOUNT).hostPath(name, guestModelsRoot(key)),
   }
 }
 
@@ -275,16 +278,8 @@ function wireWindowsTensorrtLlm(
     const containers = await options.containers.resolve()
     if (containers === null) return null
     await ensureGuestScope(guest.transport, guest.key)
+    const deployment = windowsDeployment(context, guest, containers.exec)
     const name = guest.record.distribution.name
-    const deployment = createWslManagedDeployment({
-      distribution: name,
-      exec: containers.exec,
-      runInGuest: (argv) => guest.transport.exec(argv, { user: 'root', timeoutMs: 10_000 }),
-      forwardingError: async () =>
-        localhostForwardingError(
-          parseWslConfig(await context.host.probeDeps.readWslConfig().catch(() => null))
-        ),
-    })
     built ??= {
       exec: containers.exec,
       guest,
@@ -339,6 +334,30 @@ function wireWindowsTensorrtLlm(
 }
 
 /**
+ * The WSL deployment of one guest (task 2.7): its mounts through the context's mount, the engine probed
+ * inside the guest as root, and the forwarding error built from `.wslconfig` as it reads at that moment.
+ */
+export function windowsDeployment(
+  context: Pick<WindowsTensorrtLlmContext, 'host' | 'mount'>,
+  guest: { record: WindowsEnvironmentRecord; transport: WslDistributionTransport },
+  exec: DockerExec
+): ReturnType<typeof createWslManagedDeployment> {
+  return createWslManagedDeployment({
+    distribution: guest.record.distribution.name,
+    ...(context.mount === undefined ? {} : { mount: context.mount }),
+    exec,
+    runInGuest: (argv) => guest.transport.exec(argv, { user: 'root', timeoutMs: 10_000 }),
+    forwardingError: async () =>
+      localhostForwardingError(
+        parseWslConfig(await context.host.probeDeps.readWslConfig().catch(() => null))
+      ),
+  })
+}
+
+/** The retried reconcile's executor where the wired one already is the guest's (Windows). */
+export const wiredExec = (wired: { exec: DockerExec }): DockerExec => wired.exec
+
+/**
  * `GET /models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8): `<data>/tensorrt-llm/models`
  * on Linux; the scope's folder in the WSL guest on Windows (`MANAGED_ADAPTER_UNAVAILABLE` before the import).
  */
@@ -354,6 +373,7 @@ export function tensorrtLlmModelLocation(
         scopeKey: windows.scopeKey,
         transport: (name) => windows.wsl.distribution(name),
         volumeFreeBytes: (path) => windows.host.freeDiskBytes(path),
+        ...(windows.mount === undefined ? {} : { mount: windows.mount }),
       })
   }
   return () => linuxModelLocation(layout.provider('tensorrt-llm').modelsDir)
@@ -371,6 +391,14 @@ export function tensorrtLlmModelRegistry(
   return new TensorrtLlmModelRegistry(layout.provider('tensorrt-llm').modelsDir)
 }
 
+/** `windowsModelFiles` bound to one context and layout: the deleter's `windowsFiles` on Windows. */
+export function windowsModelFilesFor(
+  windows: WindowsTensorrtLlmContext,
+  layout: DataLayout
+): () => Promise<{ paths: ManagedScopePaths; files: ModelFileOps }> {
+  return () => windowsModelFiles(windows, layout)
+}
+
 /** Windows: where a model's files and caches are, and how to size and remove them (in the guest). */
 export async function windowsModelFiles(
   windows: WindowsTensorrtLlmContext,
@@ -378,7 +406,7 @@ export async function windowsModelFiles(
 ): Promise<{ paths: ManagedScopePaths; files: ModelFileOps }> {
   const guest = await windowsGuest(windows, layout)
   if (guest === null) throw notImported()
-  return { paths: guest.paths, files: guestModelFiles(guest.transport) }
+  return { paths: guest.paths, files: guestModelFiles(guest.transport, windows.mount) }
 }
 
 export interface WireTensorrtLlmModelCheckOptions {

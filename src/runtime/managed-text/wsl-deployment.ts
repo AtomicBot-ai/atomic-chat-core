@@ -13,6 +13,7 @@
 import { connect } from 'node:net'
 import type { AtomicCoreError } from '../../contracts/index.js'
 import { publishedHostPort, type DockerExec } from '../container/index.js'
+import type { GuestMount } from '../wsl/index.js'
 import type { ManagedReadinessProbe } from './adapter.js'
 import { projectSessionPort } from './backend-target.js'
 import { wslMountSourceResolver } from './mount-source.js'
@@ -30,6 +31,8 @@ export interface WslManagedDeploymentDeps {
   runInGuest: (argv: string[]) => Promise<{ code: number | null; stdout: string; stderr: string }>
   /** Whether anything accepts a connection on Windows' `127.0.0.1:<port>`; `hostPortListening` in production. */
   hostPortListening?: (port: number) => Promise<boolean>
+  /** How core reaches the guest's files; `\\wsl.localhost` unless a test says otherwise. */
+  mount?: GuestMount
   /** The load's error for a broken forwarding, with the user's `.wslconfig` in it (`localhostForwardingError`). */
   forwardingError: () => AtomicCoreError | Promise<AtomicCoreError>
 }
@@ -49,7 +52,7 @@ export function hostPortListening(port: number, timeoutMs = 1_000): Promise<bool
 }
 
 export function createWslManagedDeployment(deps: WslManagedDeploymentDeps): ManagedDeployment {
-  const mountSource = wslMountSourceResolver(deps.distribution)
+  const mountSource = wslMountSourceResolver(deps.distribution, deps.mount)
   const listening = deps.hostPortListening ?? hostPortListening
   return {
     mountSource,

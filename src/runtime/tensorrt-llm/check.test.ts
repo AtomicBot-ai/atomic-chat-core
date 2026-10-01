@@ -382,3 +382,50 @@ describe('checkTensorrtLlmModel on Windows — spec "Памяти VM меньш�
     expect(linux.warnings).toBeUndefined()
   })
 })
+
+describe('checkTensorrtLlmModel on Windows — no warning to give', () => {
+  it('none for a model the check refused, and none when the VM memory could not be read', async () => {
+    const big = body({
+      files: [{ path: 'model.safetensors', size: 900_000_000_000, sha256: 'a'.repeat(64) }],
+    })
+    const refused = await checkTensorrtLlmModel(
+      big,
+      deps({
+        hostFacts: async () => ({
+          gpus: [gpu({ gpu_id: 'gpu-0' })],
+          memory: { availableBytes: 1, totalBytes: 2 },
+        }),
+        wslVm: async () => ({ memory_setting: null }),
+      })
+    )
+    expect(refused.verdict.ok).toBe(false)
+    expect(refused.warnings).toBeUndefined()
+    const unread = await checkTensorrtLlmModel(
+      body(),
+      deps({
+        hostFacts: async () => ({
+          gpus: [gpu({ gpu_id: 'gpu-0' })],
+          memory: { availableBytes: 0, totalBytes: 0 },
+        }),
+        wslVm: async () => ({ memory_setting: null }),
+      })
+    )
+    expect(unread.warnings).toBeUndefined()
+  })
+
+  it('says so when .wslconfig does not set the VM memory', async () => {
+    const GB = 1_000_000_000
+    const result = await checkTensorrtLlmModel(
+      body({ files: [{ path: 'model.safetensors', size: 20 * GB, sha256: 'a'.repeat(64) }] }),
+      deps({
+        hostFacts: async () => ({
+          gpus: [gpu({ gpu_id: 'gpu-0', total_vram_bytes: 48 * 1024 ** 3, free_vram_bytes: 47 * 1024 ** 3 })],
+          memory: { availableBytes: 14 * GB, totalBytes: 16 * GB },
+        }),
+        wslVm: async () => ({ memory_setting: null }),
+      })
+    )
+    expect(result.warnings?.[0]?.message).toMatch(/half of this computer’s memory/)
+    expect(result.warnings?.[0]?.params?.['wslconfig_memory']).toBe('')
+  })
+})

@@ -168,3 +168,80 @@ describe('createManagedContainersHandle (task 2.6)', () => {
     expect((await handle.resolve())?.socketPath).toBe('/tmp/fake-engine.sock')
   })
 })
+
+describe('wireManagedContainers on Windows (change add-tensorrt-llm-windows, task 2.10)', () => {
+  const transport = (calls: string[][]) => ({
+    name: 'AtomicChat',
+    exec: async (argv: string[]) => {
+      calls.push(argv)
+      // `docker inspect` of an orphan: gone already.
+      return { code: 1, stdout: '[]', stderr: 'Error: No such container: orphan0123' }
+    },
+    hold: () => {
+      throw new Error('no hold')
+    },
+  })
+
+  it('nothing before Atomic Chat’s distribution exists', async () => {
+    expect(
+      await wireManagedContainers({
+        platform: 'win32',
+        layout: data.layout,
+        instanceId: 'core-1',
+        log: () => {},
+        guest: async () => null,
+      })
+    ).toBeNull()
+  })
+
+  it('the guest’s docker as root through WSL, the journal on Windows, reconciled through the guest', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add(orphan)
+    const calls: string[][] = []
+    const wired = await wireManagedContainers({
+      platform: 'win32',
+      layout: data.layout,
+      instanceId: 'core-1',
+      log: () => {},
+      guest: async () => transport(calls),
+    })
+    expect(wired?.dockerPath).toBe('/usr/bin/docker')
+    expect(calls[0]?.[0]).toBe('/usr/bin/docker')
+    expect(calls.some((argv) => argv.includes('orphan0123'))).toBe(true)
+    expect(wired?.journal.list()).toEqual([])
+  })
+})
+
+describe('wireManagedContainers on Windows: a running orphan', () => {
+  it('stops and removes it through the guest, with the stop’s own deadline', async () => {
+    const journal = await ExecutionJournal.open(data.layout)
+    await journal.add(orphan)
+    const calls: { argv: string[]; timeoutMs: number | undefined }[] = []
+    const wired = await wireManagedContainers({
+      platform: 'win32',
+      layout: data.layout,
+      instanceId: 'core-1',
+      log: () => {},
+      guest: async () => ({
+        name: 'AtomicChat',
+        exec: async (argv: string[], options?: { timeoutMs?: number }) => {
+          calls.push({ argv, timeoutMs: options?.timeoutMs })
+          if (argv.includes('inspect')) {
+            return {
+              code: 0,
+              stdout: JSON.stringify([{ Id: 'orphan0123', State: { Running: true, Status: 'running' } }]),
+              stderr: '',
+            }
+          }
+          return { code: 0, stdout: 'orphan0123\n', stderr: '' }
+        },
+        hold: () => {
+          throw new Error('no hold')
+        },
+      }),
+    })
+    expect(calls.some((call) => call.argv.includes('stop'))).toBe(true)
+    expect(calls.every((call) => call.timeoutMs !== undefined)).toBe(true)
+    expect(wired?.journal.list()).toEqual([])
+  })
+})

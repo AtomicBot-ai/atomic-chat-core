@@ -15,7 +15,13 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { TensorrtLlmModelLocation } from '../../contracts/index.js'
 import { parseDfAvail } from '../environment/index.js'
 import type { WindowsEnvironmentRecord } from '../environment/index.js'
-import { ensureGuestScope, guestScopeRoot, uncPathFor, type WslDistributionTransport } from '../wsl/index.js'
+import {
+  ensureGuestScope,
+  guestScopeRoot,
+  WSL_LOCALHOST_MOUNT,
+  type GuestMount,
+  type WslDistributionTransport,
+} from '../wsl/index.js'
 
 async function freeAtNearest(path: string): Promise<number | null> {
   for (let current = path; ; current = dirname(current)) {
@@ -43,6 +49,8 @@ export interface WindowsModelLocationDeps {
   transport: (distribution: string) => WslDistributionTransport
   /** Free bytes on the Windows volume holding `path` (`WindowsHost.freeDiskBytes`). */
   volumeFreeBytes: (path: string) => Promise<number | null>
+  /** How core reaches the guest's files; `\\wsl.localhost` unless a test says otherwise. */
+  mount?: GuestMount
 }
 
 /** The guest folder of this scope's `tensorrt-llm` models. */
@@ -73,7 +81,7 @@ export async function windowsModelLocation(
   ])
   const known = [guest, volume].filter((value): value is number => value !== null)
   return {
-    root: uncPathFor(record.distribution.name, guestRoot),
+    root: (deps.mount ?? WSL_LOCALHOST_MOUNT).hostPath(record.distribution.name, guestRoot),
     free_bytes: known.length === 0 ? null : Math.min(...known),
   }
 }
