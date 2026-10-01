@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_DECISION_SETTINGS } from '../contracts/index.js'
 import type { CoreEvents, DecisionEngineInfo, DecisionSettings, ExecutorCard } from '../contracts/index.js'
 import { fakeDecisionSpawn } from '../../test/helpers/fake-llama-server.js'
@@ -14,8 +17,12 @@ import type { DecisionProcessHandle, DecisionServerSpec } from './process.js'
 import { DecisionService, UNSUPPORTED_RETRY_MS } from './service.js'
 import type { DecisionServiceDeps } from './service.js'
 
+/** A real directory: on Windows it is the engine's working directory, and a missing one fails the spawn. */
+const PACK_DIR = mkdtempSync(join(tmpdir(), 'atomic-decision-pack-'))
+afterAll(() => rmSync(PACK_DIR, { recursive: true, force: true }))
+
 const ENGINE: DecisionEngineInfo = {
-  path: '/packs/b10269-1.7.0/macos-arm64/llama-server',
+  path: join(PACK_DIR, 'llama-server'),
   version_backend: 'b10269-1.7.0/macos-arm64',
   fork_version: '1.7.0',
   version_gate: true,

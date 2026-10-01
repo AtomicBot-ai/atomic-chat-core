@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { fakeDecisionSpawn } from '../../test/helpers/fake-llama-server.js'
 import type { FakeLlamaOptions } from '../../test/helpers/fake-llama-server.js'
 import { isProcessAlive } from '../runtime/shared/index.js'
@@ -16,6 +19,13 @@ const rejection = <T>(p: Promise<unknown>): Promise<T> =>
     (e: unknown) => e as T
   )
 
+/**
+ * The pack directory must exist: on Windows it is the child's working directory, and a missing one
+ * fails the spawn with ENOENT. The fake replaces only the executable, not the pack around it.
+ */
+const PACK_DIR = mkdtempSync(join(tmpdir(), 'atomic-decision-pack-'))
+afterAll(() => rmSync(PACK_DIR, { recursive: true, force: true }))
+
 const handles: DecisionProcessHandle[] = []
 afterEach(async () => {
   for (const h of handles.splice(0)) await h.terminate(0)
@@ -23,7 +33,7 @@ afterEach(async () => {
 
 const spec = (over: Partial<DecisionServerSpec> = {}): DecisionServerSpec => ({
   engine: {
-    path: '/packs/b10269-1.7.0/macos-arm64/llama-server',
+    path: join(PACK_DIR, 'llama-server'),
     version_backend: null,
     fork_version: null,
     version_gate: null,
