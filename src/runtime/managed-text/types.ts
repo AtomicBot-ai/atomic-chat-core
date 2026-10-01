@@ -84,8 +84,8 @@ export interface ManagedDeployment {
   probeInGuest?(target: BackendTarget, probe: ManagedReadinessProbe): Promise<ReadinessOutcome>
   /** WSL: why Windows does not reach a port the guest answers on: another program holds it, or no forwarding. */
   diagnoseForwarding?(target: BackendTarget): Promise<'port-taken' | 'not-forwarded'>
-  /** WSL: the load's error for "answers in the guest, not on Windows", saying what to change. */
-  forwardingError?(): AtomicCoreError
+  /** WSL: the load's error for "answers in the guest, not on Windows", saying what to change (`.wslconfig` read now). */
+  forwardingError?(): AtomicCoreError | Promise<AtomicCoreError>
   /**
    * The one resolver for every path this deployment's containers mount — model, engine cache,
    * watchdog script and heartbeat alike (task 2.12 review round 1, ruling 4). The lifecycle never

@@ -304,6 +304,51 @@ describe('tensorrt-llm model deletion route', () => {
   })
 })
 
+describe('tensorrt-llm model location route (change add-tensorrt-llm-windows, task 2.8)', () => {
+  it('answers PROVIDER_NOT_FOUND where the provider is not offered at all', async () => {
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/location')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('answers the root clients download into and its free space', async () => {
+    const withLocation = await start({
+      tensorrtLlmModelLocation: async () => ({
+        root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\models\\tensorrt-llm',
+        free_bytes: 400_000_000_000,
+      }),
+    })
+    const res = await withLocation.get('/atomic/v1/models/tensorrt-llm/location')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\models\\tensorrt-llm',
+      free_bytes: 400_000_000_000,
+    })
+    await withLocation.server.close()
+  })
+
+  it('answers MANAGED_ADAPTER_UNAVAILABLE (422) on Windows before the distribution exists', async () => {
+    const before = await start({
+      tensorrtLlmModelLocation: async () => {
+        throw Object.assign(new Error('no distribution'), { code: 'MANAGED_ADAPTER_UNAVAILABLE' })
+      },
+    })
+    const res = await before.get('/atomic/v1/models/tensorrt-llm/location')
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } })
+    await before.server.close()
+  })
+
+  it('is not taken for a model called "location" of another route', async () => {
+    const withLocation = await start({
+      tensorrtLlmModelLocation: async () => ({ root: '/data/tensorrt-llm/models', free_bytes: 1 }),
+    })
+    const res = await withLocation.get('/atomic/v1/models/tensorrt-llm/location', { method: 'DELETE' })
+    expect(res.status).not.toBe(200)
+    await withLocation.server.close()
+  })
+})
+
 describe('foundation models availability', () => {
   it('answers the runtime token, forwarding force', async () => {
     const asked: boolean[] = []

@@ -24,11 +24,19 @@ import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
   leftoverContainers,
   tensorrtLlmModelDeleter,
+  tensorrtLlmModelLocation,
+  tensorrtLlmModelRegistry,
   tensorrtLlmSessionUnloader,
   wireTensorrtLlm,
   wireTensorrtLlmModelCheck,
 } from './tensorrt-llm.js'
-import type { WireTensorrtLlmModelCheckOptions, WireTensorrtLlmOptions } from './tensorrt-llm.js'
+import type {
+  WindowsTensorrtLlmContext,
+  WireTensorrtLlmModelCheckOptions,
+  WireTensorrtLlmOptions,
+} from './tensorrt-llm.js'
+import { fakeWindows } from '../../test/helpers/fake-windows-host.js'
+import { createDistributionKeeper } from '../runtime/wsl/index.js'
 import { LocalSessions } from './sessions.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
@@ -889,5 +897,139 @@ describe('wireTensorrtLlmModelCheck', () => {
       })
     )
     await expect(check?.(checkBody())).rejects.toMatchObject({ code: 'MANAGED_METADATA_INVALID' })
+  })
+})
+
+describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8)', () => {
+  const RECORD = {
+    schema_version: 1 as const,
+    executor: 'wsl-docker' as const,
+    distribution: { name: 'AtomicChat', path: 'C:\\Users\\ada\\AppData\\Local\\AtomicChat\\wsl\\AtomicChat' },
+    manifest_id: 'windows-r1',
+    imported_at: '2026-10-01T00:00:00.000Z',
+    marker: 'marker-0001',
+  }
+  const GUEST = '/var/lib/atomic-chat/scopes/k1'
+
+  /** A Windows machine with Atomic Chat's distribution (or none yet), in memory. */
+  const windowsContext = (
+    imported: boolean,
+    meminfo = 'MemTotal: 16000000 kB\nMemAvailable: 15000000 kB\n'
+  ) => {
+    const machine = fakeWindows({
+      wsl: {
+        installed: true,
+        ready: true,
+        distributions: imported
+          ? [{ name: 'AtomicChat', state: 'Running', version: 2, is_default: false }]
+          : [],
+        guests: imported
+          ? {
+              AtomicChat: {
+                files: { '/proc/meminfo': meminfo, [`${GUEST}/models/tensorrt-llm/acme/m/model.yml`]: 'x' },
+                dirs: [],
+                free_disk_bytes: 900_000_000_000,
+                nvml_version: '590.48.01',
+                host: {
+                  driver: '591.44',
+                  gpus: [
+                    {
+                      uuid: 'GPU-aaaa',
+                      name: 'NVIDIA RTX 4090',
+                      cc: '8.9',
+                      total_mib: 24564,
+                      free_mib: 24000,
+                    },
+                  ],
+                  docker: { installed: true, reachable: true, service_active: true, gpu_runtime: true },
+                },
+              },
+            }
+          : {},
+      },
+      machine: 'x86_64',
+      release: '10.0.22631',
+      elevated: false,
+      virtualization: { firmware: true, hypervisor: true },
+      nvidia: {
+        driver: '591.44',
+        gpus: [{ uuid: 'GPU-aaaa', name: 'NVIDIA RTX 4090', cc: '8.9', total_mib: 24564, free_mib: 24000 }],
+      },
+      wslconfig: '[wsl2]\nmemory=16GB\n',
+      volume_free_bytes: 400_000_000_000,
+      vhdx_bytes: null,
+    })
+    const context: WindowsTensorrtLlmContext = {
+      records: { read: async () => (imported ? RECORD : null) },
+      wsl: machine.wsl,
+      keeper: (name) => createDistributionKeeper(machine.wsl.distribution(name)),
+      scopeKey: async () => 'k1',
+      host: machine.host,
+    }
+    return { machine, context }
+  }
+
+  it('offers the provider on Windows x64 with its WSL context, none on Windows on ARM or without it', async () => {
+    const { context } = windowsContext(true)
+    const runtime = wireTensorrtLlm(options({ platform: 'win32', windows: context }))
+    expect(runtime).toBeInstanceOf(TensorrtLlmRuntime)
+    await runtime?.shutdown()
+    expect(wireTensorrtLlm(options({ platform: 'win32', arch: 'arm64', windows: context }))).toBeNull()
+    expect(wireTensorrtLlm(options({ platform: 'win32' }))).toBeNull()
+  })
+
+  it('refuses a load before the distribution exists, without a docker call', async () => {
+    const { context, machine } = windowsContext(false)
+    const runtime = wireTensorrtLlm(options({ platform: 'win32', windows: context })) as TensorrtLlmRuntime
+    await expect(runtime.load('acme/m')).rejects.toMatchObject({ code: 'MANAGED_ADAPTER_UNAVAILABLE' })
+    expect(machine.wslCalls.some((argv) => argv.includes('/usr/bin/docker'))).toBe(false)
+  })
+
+  it('answers the models root in the guest and the smaller free space, and MANAGED_ADAPTER_UNAVAILABLE before the import', async () => {
+    expect(await tensorrtLlmModelLocation('win32', data.layout, windowsContext(true).context)()).toEqual({
+      root: `\\\\wsl.localhost\\AtomicChat${GUEST.replaceAll('/', '\\')}\\models\\tensorrt-llm`,
+      free_bytes: 400_000_000_000,
+    })
+    await expect(
+      tensorrtLlmModelLocation('win32', data.layout, windowsContext(false).context)()
+    ).rejects.toMatchObject({
+      code: 'MANAGED_ADAPTER_UNAVAILABLE',
+    })
+  })
+
+  it('on Linux the location is <data>/tensorrt-llm/models, as before', async () => {
+    const location = await tensorrtLlmModelLocation('linux', data.layout)()
+    expect(location.root).toBe(data.layout.provider('tensorrt-llm').modelsDir)
+  })
+
+  it('checks a model against the VM’s memory, warning when the weights do not fit (spec "Памяти VM меньше, чем весов")', async () => {
+    const { context } = windowsContext(true)
+    const check = wireTensorrtLlmModelCheck('win32', {
+      descriptors: {
+        forInstallation: async () => ({ kind: 'available', descriptor }),
+        cachedForNewSetup: async () => ({ kind: 'available', descriptor }),
+      },
+      installations: { list: async () => [] },
+      host: cardless as WireTensorrtLlmModelCheckOptions['host'],
+      settings: () => ({}),
+      windows: context,
+    })
+    const result = await check?.({
+      repository: 'acme/model',
+      revision: 'deadbeef',
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+      hf_quant_config_json: null,
+      files: [{ path: 'model.safetensors', size: 20_000_000_000, sha256: null }],
+    })
+    expect(result?.checked_gpu_id).toBe('GPU-aaaa')
+    expect(result?.warnings?.[0]).toMatchObject({
+      code: 'wsl-vm-memory',
+      params: { vm_memory_bytes: String(16_000_000 * 1024), wslconfig_memory: '16GB' },
+    })
+  })
+
+  it('lists models from the guest root once the distribution exists, nothing before', async () => {
+    const registry = tensorrtLlmModelRegistry('win32', data.layout, windowsContext(false).context)
+    expect(await registry.list()).toEqual([])
   })
 })

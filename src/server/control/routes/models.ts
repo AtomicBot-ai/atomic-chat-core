@@ -104,6 +104,23 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
     sendJson(res, 200, await deps.tensorrtLlmModelCheck(body))
   })
 
+  // Where clients put tensorrt-llm models and how much room is left (change `add-tensorrt-llm-windows`,
+  // task 2.8, design D6): on Windows a path into Atomic Chat's WSL distribution, which only core knows.
+  // Registered before the deletion route, so a GET here is never read as a model id.
+  router.get(p('/models/tensorrt-llm/location'), async (_req, res) => {
+    if (!deps.tensorrtLlmModelLocation) {
+      return sendError(
+        res,
+        new AtomicCoreError(
+          'PROVIDER_NOT_FOUND',
+          'tensorrt-llm is not available in this build.',
+          'tensorrt-llm'
+        )
+      )
+    }
+    sendJson(res, 200, await deps.tensorrtLlmModelLocation())
+  })
+
   // Deleting a downloaded tensorrt-llm model (task 2.24, spec `tensorrt-llm-models`): only core knows
   // whether it is loaded and owns its engine caches, so clients never remove its folder themselves.
   // The id is taken as sent, never percent-decoded: `Qwen%2FQwen3-1.7B` is not `Qwen/Qwen3-1.7B`.

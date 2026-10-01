@@ -61,6 +61,7 @@ import { sessionsOf, unknownProvider } from './sessions.js'
 import {
   leftoverContainers,
   tensorrtLlmModelDeleter,
+  tensorrtLlmModelLocation,
   tensorrtLlmSessionUnloader,
   wireTensorrtLlm,
   wireTensorrtLlmModelCheck,
@@ -529,6 +530,11 @@ export async function createAtomicCore(
         },
         ...(tensorrtLlmModelCheck !== null ? { tensorrtLlmModelCheck } : {}),
         ...(tensorrtLlmModelDelete !== null ? { tensorrtLlmModelDelete } : {}),
+        // Where clients put tensorrt-llm models (change `add-tensorrt-llm-windows`, task 2.8): wherever
+        // the provider itself is offered.
+        ...(tensorrtLlm !== null
+          ? { tensorrtLlmModelLocation: tensorrtLlmModelLocation(managedPlatform, layout) }
+          : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),
           install: (provider, version, backend, opts) =>

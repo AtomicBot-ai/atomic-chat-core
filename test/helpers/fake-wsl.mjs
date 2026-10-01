@@ -106,6 +106,7 @@ function guestCommand(state, name, user, command, args, input) {
         }),
       })
     case 'chmod':
+    case 'chown':
       return result(0)
     case 'mv': {
       const [from, to] = args.filter((a) => !a.startsWith('-'))

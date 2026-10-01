@@ -65,3 +65,29 @@ describe('deleteTensorrtLlmModelFiles', () => {
     ).toEqual({ freedBytes: 0, engineCachesRemoved: 0 })
   })
 })
+
+describe('deleteTensorrtLlmModelFiles with file operations of its own (Windows, change add-tensorrt-llm-windows)', () => {
+  it('sizes the caches and the model in one go and removes them in one go, caches first in the list', async () => {
+    const dir = await writeModel('acme/m', 1000)
+    const r1 = await writeCache('trt-r1', 'acme/m', 300)
+    const calls: string[][] = []
+    const freed = await deleteTensorrtLlmModelFiles(
+      data.layout.managed,
+      { id: 'acme/m', dir },
+      {
+        sizes: async (paths) => {
+          calls.push(['sizes', ...paths])
+          return new Map(paths.map((path) => [path, path === dir ? 1000 : 300]))
+        },
+        remove: async (paths) => {
+          calls.push(['remove', ...paths])
+        },
+      }
+    )
+    expect(freed).toEqual({ freedBytes: 1300, engineCachesRemoved: 1 })
+    expect(calls).toEqual([
+      ['sizes', r1, dir],
+      ['remove', r1, dir],
+    ])
+  })
+})

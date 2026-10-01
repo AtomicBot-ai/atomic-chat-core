@@ -123,6 +123,7 @@ beforeEach(async () => {
       logout: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
       models: async () => [],
     },
+    tensorrtLlmModelLocation: async () => ({ root: '/data/tensorrt-llm/models', free_bytes: 123 }),
     environments: {
       list: async () => {
         environmentCalls.push('list')
@@ -752,6 +753,10 @@ describe('managed environments (task 2.6)', () => {
     })
     expect(receipted.phase).toBe('preparing-environment')
     expect((await client.cancelEnvironmentOperation('op-1')).phase).toBe('cancelled')
+    expect(await client.tensorrtLlmModelLocation()).toEqual({
+      root: '/data/tensorrt-llm/models',
+      free_bytes: 123,
+    })
     const descriptor = await client.environmentDescriptor('tensorrt-llm-1.2.1-r1')
     expect(descriptor).toMatchObject({ descriptor_id: 'tensorrt-llm-1.2.1-r1', notices: ['NVIDIA terms'] })
     expect(environmentCalls).toEqual([

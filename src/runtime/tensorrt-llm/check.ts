@@ -35,6 +35,11 @@ export interface ModelCheckDeps {
   hostFacts: () => Promise<ModelCheckHostFacts>
   /** The provider's stored settings (`settings.get('tensorrt-llm')`), for `kv_cache_free_gpu_memory_fraction`. */
   settings: () => Record<string, unknown>
+  /**
+   * Windows only (change `add-tensorrt-llm-windows`, design D11): `hostFacts.memory` is then the WSL
+   * VM's, and this says what `.wslconfig` sets it to, for the warning when the weights do not fit in it.
+   */
+  wslVm?: () => Promise<{ memory_setting: string | null }>
 }
 
 const invalid = (why: string, details?: string): never => {
@@ -151,7 +156,7 @@ export async function checkTensorrtLlmModel(
   const [descriptor, facts] = await Promise.all([descriptorForCheck(deps), deps.hostFacts()])
   const settings = tensorrtLlmSettings(deps.settings())
   const gpuId = input.gpu_id ?? settings.gpu_id ?? undefined
-  return checkModelCompatibility(
+  const verdict = checkModelCompatibility(
     { ...input, ...(gpuId === undefined ? {} : { gpu_id: gpuId }) },
     descriptor,
     facts.gpus,
@@ -161,4 +166,42 @@ export async function checkTensorrtLlmModel(
       kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,
     }
   )
+  return deps.wslVm === undefined ? verdict : withVmMemoryWarning(verdict, facts.memory, await deps.wslVm())
+}
+
+const GIB = 1024 ** 3
+const gib = (bytes: number): string => `${(bytes / GIB).toFixed(1)} GiB`
+
+/**
+ * On Windows the weights are read into the WSL VM, whose memory is by default half of the RAM (design
+ * D11): fewer bytes of VM than of weights is a warning — they stream, slower — never a refusal, which
+ * would cut off models that do run.
+ */
+function withVmMemoryWarning(
+  verdict: ModelCompatibility,
+  memory: HostMemory,
+  vm: { memory_setting: string | null }
+): ModelCompatibility {
+  if (!verdict.verdict.ok || memory.totalBytes <= 0 || memory.totalBytes >= verdict.weight_bytes)
+    return verdict
+  const setting =
+    vm.memory_setting === null
+      ? 'It is not set in %UserProfile%\\.wslconfig, so WSL uses half of this computer’s memory.'
+      : `%UserProfile%\\.wslconfig sets it to ${vm.memory_setting}.`
+  return {
+    ...verdict,
+    warnings: [
+      {
+        code: 'wsl-vm-memory',
+        message:
+          `The WSL VM has ${gib(memory.totalBytes)} of memory, less than this model’s ${gib(verdict.weight_bytes)} of weights: ` +
+          `it should still load, but more slowly. ${setting} You can raise it with memory= in the [wsl2] section of that file, then run wsl --shutdown.`,
+        params: {
+          vm_memory_bytes: String(memory.totalBytes),
+          weight_bytes: String(verdict.weight_bytes),
+          wslconfig_memory: vm.memory_setting ?? '',
+        },
+      },
+    ],
+  }
 }

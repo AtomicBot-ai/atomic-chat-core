@@ -333,3 +333,52 @@ describe('parseModelCheckInput', () => {
     expect(() => parseModelCheckInput(input)).toThrow(AtomicCoreError)
   })
 })
+
+describe('checkTensorrtLlmModel on Windows — spec "Памяти VM меньше, чем весов"', () => {
+  const GB = 1_000_000_000
+
+  it('warns with both numbers and the WSL memory setting, and does not refuse the model', async () => {
+    const result = await checkTensorrtLlmModel(
+      body({ files: [{ path: 'model.safetensors', size: 20 * GB, sha256: 'a'.repeat(64) }] }),
+      deps({
+        hostFacts: async () => ({
+          gpus: [gpu({ gpu_id: 'gpu-0', total_vram_bytes: 48 * 1024 ** 3, free_vram_bytes: 47 * 1024 ** 3 })],
+          memory: { availableBytes: 14 * GB, totalBytes: 16 * GB },
+        }),
+        wslVm: async () => ({ memory_setting: '16GB' }),
+      })
+    )
+    expect(result.verdict).toEqual({ ok: true })
+    expect(result.warnings).toEqual([
+      expect.objectContaining({
+        code: 'wsl-vm-memory',
+        params: { vm_memory_bytes: String(16 * GB), weight_bytes: String(20 * GB), wslconfig_memory: '16GB' },
+      }),
+    ])
+    expect(result.warnings?.[0]?.message).toMatch(/\.wslconfig/)
+  })
+
+  it('no warning when the VM has room, and none at all off Windows', async () => {
+    const roomy = await checkTensorrtLlmModel(
+      body(),
+      deps({
+        hostFacts: async () => ({
+          gpus: [gpu({ gpu_id: 'gpu-0' })],
+          memory: { availableBytes: 60 * GB, totalBytes: 64 * GB },
+        }),
+        wslVm: async () => ({ memory_setting: null }),
+      })
+    )
+    expect(roomy.warnings).toBeUndefined()
+    const linux = await checkTensorrtLlmModel(
+      body({ files: [{ path: 'model.safetensors', size: 20 * GB, sha256: 'a'.repeat(64) }] }),
+      deps({
+        hostFacts: async () => ({
+          gpus: [gpu({ gpu_id: 'gpu-0', total_vram_bytes: 48 * 1024 ** 3, free_vram_bytes: 47 * 1024 ** 3 })],
+          memory: { availableBytes: 1, totalBytes: 2 },
+        }),
+      })
+    )
+    expect(linux.warnings).toBeUndefined()
+  })
+})

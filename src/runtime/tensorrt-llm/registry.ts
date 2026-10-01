@@ -36,11 +36,18 @@ export interface TensorrtLlmScanResult {
 }
 
 export class TensorrtLlmModelRegistry {
-  constructor(private readonly modelsDir: string) {}
+  /**
+   * The models root, or how to learn it at each scan (change `add-tensorrt-llm-windows`, task 2.8): on
+   * Windows it is a folder in Atomic Chat's WSL distribution, known only once that exists — `null`
+   * until then, which lists nothing.
+   */
+  constructor(private readonly modelsDir: string | (() => Promise<string | null>)) {}
 
   async scan(): Promise<TensorrtLlmScanResult> {
-    const root = this.modelsDir
     const result: TensorrtLlmScanResult = { entries: [], skipped: [] }
+    const root =
+      typeof this.modelsDir === 'string' ? this.modelsDir : await this.modelsDir().catch(() => null)
+    if (root === null) return result
     const stack: string[] = [root]
     while (stack.length) {
       const dir = stack.pop() as string

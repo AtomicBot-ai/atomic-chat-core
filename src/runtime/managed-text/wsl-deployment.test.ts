@@ -71,7 +71,7 @@ describe('createWslManagedDeployment', () => {
     expect(await deployment({ listening: false }).deployment.diagnoseForwarding!(target)).toBe(
       'not-forwarded'
     )
-    expect(deployment().deployment.forwardingError!().details).toBe('wsl-localhost-forwarding')
+    expect((await deployment().deployment.forwardingError!()).details).toBe('wsl-localhost-forwarding')
   })
 })
 

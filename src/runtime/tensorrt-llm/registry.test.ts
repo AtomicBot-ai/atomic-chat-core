@@ -98,3 +98,14 @@ describe('TensorrtLlmModelRegistry', () => {
     expect((await registry.list()).map((e) => e.id)).toEqual(['m'])
   })
 })
+
+describe('a root core learns only at scan time (change add-tensorrt-llm-windows, task 2.8)', () => {
+  it('scans the root it is given each time, and lists nothing while there is none (Windows before the import)', async () => {
+    let root: string | null = null
+    const lazy = new TensorrtLlmModelRegistry(async () => root)
+    expect(await lazy.list()).toEqual([])
+    await install('acme/m', QWEN)
+    root = modelsDir
+    expect((await lazy.list()).map((entry) => entry.id)).toEqual(['acme/m'])
+  })
+})

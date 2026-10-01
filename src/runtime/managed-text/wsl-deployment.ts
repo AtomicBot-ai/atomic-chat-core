@@ -31,7 +31,7 @@ export interface WslManagedDeploymentDeps {
   /** Whether anything accepts a connection on Windows' `127.0.0.1:<port>`; `hostPortListening` in production. */
   hostPortListening?: (port: number) => Promise<boolean>
   /** The load's error for a broken forwarding, with the user's `.wslconfig` in it (`localhostForwardingError`). */
-  forwardingError: () => AtomicCoreError
+  forwardingError: () => AtomicCoreError | Promise<AtomicCoreError>
 }
 
 /** Whether something on this machine accepts a TCP connection on `127.0.0.1:<port>` within a second. */

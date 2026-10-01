@@ -722,6 +722,21 @@ export interface ModelCompatibility {
   fits_other_gpus: string[]
   kv_reserve_basis?: 'config' | 'weight_fraction'
   verdict: { ok: true } | { ok: false; error: ErrorBody }
+  /**
+   * What the caller should know that does not refuse the model (change `add-tensorrt-llm-windows`,
+   * design D11): `wsl-vm-memory` — on Windows the WSL VM has less memory than the weights
+   * (`params.vm_memory_bytes`, `params.weight_bytes`, `params.wslconfig_memory` as `.wslconfig` sets it,
+   * or `''` when unset), so loading streams and is slower. Absent when there is nothing to say;
+   * additive, a client that predates it ignores the key.
+   */
+  warnings?: ModelCheckWarning[]
+}
+
+/** One `ModelCompatibility.warnings` entry: shaped like `ManagedPlanWarning`. */
+export interface ModelCheckWarning {
+  code: string
+  message: string
+  params?: Record<string, string>
 }
 
 /**
@@ -736,4 +751,17 @@ export interface TensorrtLlmModelDeletion {
   freed_bytes: number
   /** Engine cache folders removed: one per engine release (descriptor) the model was ever loaded with. */
   engine_caches_removed: number
+}
+
+/**
+ * `GET /atomic/v1/models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8, design
+ * D6; spec `tensorrt-llm-models` "Core сообщает расположение моделей"): the one root a client downloads
+ * `tensorrt-llm` models into, checks files under and writes `model.yml` in — as this machine opens it:
+ * `<data>/tensorrt-llm/models` on Linux, `\\wsl.localhost\<distribution>\var\lib\atomic-chat\scopes\<key>\models\tensorrt-llm`
+ * on Windows. `free_bytes` is the space left for new models there — on Windows the smaller of the
+ * guest's and the Windows volume's that holds the distribution — or null when it could not be read.
+ */
+export interface TensorrtLlmModelLocation {
+  root: string
+  free_bytes: number | null
 }

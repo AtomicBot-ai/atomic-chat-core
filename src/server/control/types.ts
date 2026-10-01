@@ -39,6 +39,7 @@ import type {
   ManagedHostReceipt,
   ModelCompatibility,
   TensorrtLlmModelDeletion,
+  TensorrtLlmModelLocation,
   ProbeEnvironmentInput,
   RemoteAccessStatus,
   RequirementPlan,
@@ -357,6 +358,12 @@ export interface ControlServerDeps {
    * confirmation, then remove every engine cache of it and its folder. Absent off Linux.
    */
   tensorrtLlmModelDelete?: (modelId: string) => Promise<TensorrtLlmModelDeletion>
+  /**
+   * `GET /models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8): where clients put
+   * `tensorrt-llm` models and how much room is left. Absent where the provider is not offered;
+   * `MANAGED_ADAPTER_UNAVAILABLE` on Windows before Atomic Chat's distribution exists.
+   */
+  tensorrtLlmModelLocation?: () => Promise<TensorrtLlmModelLocation>
   /**
    * Whether Apple's on-device model can run here: the server's own `--check` token (`available`,
    * `notEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, `unavailable`, `binaryNotFound`).

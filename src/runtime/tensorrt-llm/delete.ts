@@ -11,6 +11,7 @@ import { lstat, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ManagedScopePaths } from '../../config/index.js'
 import { engineCacheDirsOf, removeEngineCaches } from '../managed-text/index.js'
+import type { ModelFileOps } from './guest-files.js'
 
 export interface DeletedTensorrtLlmModelFiles {
   freedBytes: number
@@ -37,10 +38,23 @@ async function bytesUnder(path: string, seen: Set<string>): Promise<number> {
   return total
 }
 
+/**
+ * `files` (change `add-tensorrt-llm-windows`, task 2.8): on Windows the model and its caches are in the
+ * WSL guest, and are sized and removed by commands there (`guestModelFiles`) — all caches and the model
+ * in one call each, the caches listed first. Without it, the walk below, as on Linux.
+ */
 export async function deleteTensorrtLlmModelFiles(
   paths: ManagedScopePaths,
-  model: { id: string; dir: string }
+  model: { id: string; dir: string },
+  files?: ModelFileOps
 ): Promise<DeletedTensorrtLlmModelFiles> {
+  if (files !== undefined) {
+    const caches = await engineCacheDirsOf(paths, model.id)
+    const sizes = await files.sizes([...caches, model.dir])
+    await files.remove([...caches, model.dir])
+    const freed = [...sizes.values()].reduce((sum, bytes) => sum + bytes, 0)
+    return { freedBytes: freed, engineCachesRemoved: caches.length }
+  }
   const seen = new Set<string>()
   const caches = await engineCacheDirsOf(paths, model.id)
   const sizes = new Map<string, number>()

@@ -710,7 +710,7 @@ export class ManagedTextLifecycle {
           if (!(error instanceof ForwardingFailure)) throw error
           // Another program holds the port on Windows: publish once more, on a port Docker picks anew.
           if (error.kind !== 'port-taken' || republished >= this.timings.republishAttempts) {
-            throw this.deps.deployment.forwardingError?.() ?? error
+            throw (await this.deps.deployment.forwardingError?.()) ?? error
           }
           this.log(
             'warn',

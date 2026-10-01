@@ -21,13 +21,18 @@
  */
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreEvents } from '../contracts/index.js'
-import type { ModelCompatibility, TensorrtLlmModelDeletion } from '../contracts/index.js'
+import type {
+  ModelCompatibility,
+  TensorrtLlmModelDeletion,
+  TensorrtLlmModelLocation,
+} from '../contracts/index.js'
 import type { DataLayout, ManagedScopePaths } from '../config/index.js'
 import {
   RECONCILE_BUDGET_MS,
   RECONCILE_CALL_TIMEOUT_MS,
   RECONCILE_STARTUP_STOP_TIMEOUT_SECONDS,
   createDockerExec,
+  guestRealpath,
   reconcileExecutions,
 } from '../runtime/container/index.js'
 import type {
@@ -38,34 +43,118 @@ import type {
   ManagedContainersHandle,
   ReconcileLogger,
 } from '../runtime/container/index.js'
-import { TENSORRT_LLM_ENGINE_ID } from '../runtime/environment/index.js'
+import {
+  guestProbeDeps,
+  localhostForwardingError,
+  parseWslConfig,
+  TENSORRT_LLM_ENGINE_ID,
+} from '../runtime/environment/index.js'
 import type {
   InstallationStore,
   LinuxHost,
   RuntimeDescriptorProvider,
   UnloadEngineSessions,
+  WindowsEnvironmentRecord,
+  WindowsHost,
 } from '../runtime/environment/index.js'
 import {
   ManagedTextAdapterRegistry,
   ManagedTextLifecycle,
   createDesktopManagedDeployment,
+  createWslManagedDeployment,
 } from '../runtime/managed-text/index.js'
 import type { GpuClaimHook, LocalRuntime } from '../runtime/shared/index.js'
 import {
+  TensorrtLlmModelRegistry,
   TensorrtLlmRuntime,
   checkTensorrtLlmModel,
   containerPlatformFor,
   deleteTensorrtLlmModelFiles,
+  guestModelFiles,
+  guestModelsRoot,
+  linuxModelLocation,
+  probeTensorrtLlmGpus,
   probeTensorrtLlmGpusAndMemory,
   probeTensorrtLlmHost,
   readTensorrtLlmModel,
   resolveReadyInstallation,
   tensorrtLlmAdapter,
+  windowsModelLocation,
 } from '../runtime/tensorrt-llm/index.js'
-import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
+import type { ModelFileOps } from '../runtime/tensorrt-llm/index.js'
+import {
+  ensureGuestScope,
+  guestScopePaths,
+  uncPathFor,
+  type DistributionKeeper,
+  type Wsl,
+  type WslDistributionTransport,
+} from '../runtime/wsl/index.js'
 import type { AtomicCore } from './atomic-core.js'
 import type { ResidencyOccupant } from './gpu/index.js'
 import type { CoreLogger } from './types.js'
+
+/**
+ * What the Windows `tensorrt-llm` wiring reaches Atomic Chat's WSL distribution through (change
+ * `add-tensorrt-llm-windows`, task 2.8), built by the managed environment on Windows: the environment
+ * record (which distribution, if any yet), the WSL transport, the one keeper per distribution, this
+ * scope's `scope_key`, and the Windows machine (its `.wslconfig`, its volumes).
+ */
+export interface WindowsTensorrtLlmContext {
+  records: { read(): Promise<WindowsEnvironmentRecord | null> }
+  wsl: Wsl
+  keeper: (distribution: string) => DistributionKeeper
+  scopeKey: () => Promise<string>
+  host: WindowsHost
+}
+
+/** The distribution as it stands now, and this scope's place in it; null before the import. */
+interface WindowsGuest {
+  record: WindowsEnvironmentRecord
+  transport: WslDistributionTransport
+  key: string
+  paths: ManagedScopePaths
+  /** The models root as Windows opens it (`\\wsl.localhost\…`). */
+  modelsRoot: string
+}
+
+/** The recorded distribution and its transport; null before the import. */
+async function windowsDistribution(
+  context: WindowsTensorrtLlmContext
+): Promise<{ record: WindowsEnvironmentRecord; transport: WslDistributionTransport } | null> {
+  const record = await context.records.read()
+  return record === null ? null : { record, transport: context.wsl.distribution(record.distribution.name) }
+}
+
+async function windowsGuest(
+  context: WindowsTensorrtLlmContext,
+  layout: DataLayout
+): Promise<WindowsGuest | null> {
+  const record = await context.records.read()
+  if (record === null) return null
+  const name = record.distribution.name
+  const key = await context.scopeKey()
+  return {
+    record,
+    transport: context.wsl.distribution(name),
+    key,
+    paths: guestScopePaths(layout.managed, name, key),
+    modelsRoot: uncPathFor(name, guestModelsRoot(key)),
+  }
+}
+
+const notImported = (): AtomicCoreError =>
+  new AtomicCoreError(
+    'MANAGED_ADAPTER_UNAVAILABLE',
+    'TensorRT-LLM runs in Atomic Chat’s WSL distribution, which is not set up on this computer yet.'
+  )
+
+/** Windows on x64 only: no WSL GPU path for ARM (spec `tensorrt-llm-desktop`). */
+const windowsX64 = (
+  platform: NodeJS.Platform,
+  arch: string,
+  context: WindowsTensorrtLlmContext | undefined
+) => platform === 'win32' && arch === 'x64' && context !== undefined
 
 export interface WireTensorrtLlmOptions {
   /** Injected, never `process.platform` read here; the managed environment's (the test host is Linux). */
@@ -95,10 +184,15 @@ export interface WireTensorrtLlmOptions {
    * platform has no numeric user, which leaves the image's own user.
    */
   containerUser: ContainerUser | null
+  /** Windows x64 (change `add-tensorrt-llm-windows`): the WSL context; without it Windows offers nothing. */
+  windows?: WindowsTensorrtLlmContext
 }
 
-/** The provider, or null where it is not offered: everywhere but Linux. */
+/** The provider, or null where it is not offered: everywhere but Linux and Windows x64. */
 export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRuntime | null {
+  if (options.windows !== undefined && windowsX64(options.platform, options.arch, options.windows)) {
+    return wireWindowsTensorrtLlm(options, options.windows)
+  }
   if (options.platform !== 'linux') return null
   const adapters = new ManagedTextAdapterRegistry()
   adapters.register(tensorrtLlmAdapter)
@@ -159,6 +253,134 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
   })
 }
 
+/**
+ * The Windows provider (change `add-tensorrt-llm-windows`, tasks 2.6–2.8): the same lifecycle and
+ * runtime as Linux, over the WSL guest — the core's one executor (the guest's docker, from the handle),
+ * this scope's folder in the guest for heartbeats, caches and the watchdog, the WSL deployment (a port
+ * Docker picks, forwarding checked), `realpath` in the guest, uid 1000 for the container, the
+ * distribution held while a model loads or is loaded; the host facts of a load read in the guest
+ * (its `nvidia-smi`, the VM's memory); models under the scope's guest root.
+ */
+function wireWindowsTensorrtLlm(
+  options: WireTensorrtLlmOptions,
+  context: WindowsTensorrtLlmContext
+): TensorrtLlmRuntime {
+  const adapters = new ManagedTextAdapterRegistry()
+  adapters.register(tensorrtLlmAdapter)
+  let built: { lifecycle: ManagedTextLifecycle; exec: DockerExec; guest: WindowsGuest } | null = null
+  const lifecycle = async (): Promise<ManagedTextLifecycle | null> => {
+    if (built !== null) return built.lifecycle
+    const guest = await windowsGuest(context, options.layout)
+    if (guest === null) throw notImported()
+    const containers = await options.containers.resolve()
+    if (containers === null) return null
+    await ensureGuestScope(guest.transport, guest.key)
+    const name = guest.record.distribution.name
+    const deployment = createWslManagedDeployment({
+      distribution: name,
+      exec: containers.exec,
+      runInGuest: (argv) => guest.transport.exec(argv, { user: 'root', timeoutMs: 10_000 }),
+      forwardingError: async () =>
+        localhostForwardingError(
+          parseWslConfig(await context.host.probeDeps.readWslConfig().catch(() => null))
+        ),
+    })
+    built ??= {
+      exec: containers.exec,
+      guest,
+      lifecycle: new ManagedTextLifecycle({
+        provider: 'tensorrt-llm',
+        adapters,
+        exec: containers.exec,
+        deployment,
+        journal: containers.journal,
+        paths: guest.paths,
+        instanceId: options.instanceId,
+        scope: options.scope,
+        allowedHosts: options.trustedHosts,
+        // SELinux is not enforcing in Atomic Chat's Ubuntu guest; never used, but must be in the guest.
+        selinuxDataRoot: guest.paths.root,
+        emit: options.emit,
+        log: options.log,
+        createContainerDeps: { realpath: guestRealpath(guest.transport) },
+        containerUser: { uid: 1000, gid: 1000 },
+        keeper: context.keeper(name),
+      }),
+    }
+    return built.lifecycle
+  }
+  const platform = containerPlatformFor(options.arch)
+  return new TensorrtLlmRuntime({
+    lifecycle,
+    readyInstallation: () =>
+      resolveReadyInstallation({
+        installations: options.installations,
+        descriptors: options.descriptors,
+        platform,
+      }),
+    hostFacts: () => {
+      const current = built as NonNullable<typeof built>
+      const deps = guestProbeDeps(current.guest.transport)
+      return probeTensorrtLlmHost({
+        exec: deps.exec,
+        docker: current.exec,
+        nvidiaSmi: 'nvidia-smi',
+        readFile: deps.readFile,
+      })
+    },
+    model: async (modelId) => {
+      const guest = await windowsGuest(context, options.layout)
+      if (guest === null) throw notImported()
+      return readTensorrtLlmModel(guest.modelsRoot, modelId)
+    },
+    settings: options.settings,
+    ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
+  })
+}
+
+/**
+ * `GET /models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8): `<data>/tensorrt-llm/models`
+ * on Linux; the scope's folder in the WSL guest on Windows (`MANAGED_ADAPTER_UNAVAILABLE` before the import).
+ */
+export function tensorrtLlmModelLocation(
+  platform: NodeJS.Platform,
+  layout: DataLayout,
+  windows?: WindowsTensorrtLlmContext
+): () => Promise<TensorrtLlmModelLocation> {
+  if (platform === 'win32' && windows !== undefined) {
+    return () =>
+      windowsModelLocation({
+        records: windows.records,
+        scopeKey: windows.scopeKey,
+        transport: (name) => windows.wsl.distribution(name),
+        volumeFreeBytes: (path) => windows.host.freeDiskBytes(path),
+      })
+  }
+  return () => linuxModelLocation(layout.provider('tensorrt-llm').modelsDir)
+}
+
+/** The `tensorrt-llm` model registry: the data folder's root on Linux, the guest root (once it exists) on Windows. */
+export function tensorrtLlmModelRegistry(
+  platform: NodeJS.Platform,
+  layout: DataLayout,
+  windows?: WindowsTensorrtLlmContext
+): TensorrtLlmModelRegistry {
+  if (platform === 'win32' && windows !== undefined) {
+    return new TensorrtLlmModelRegistry(async () => (await windowsGuest(windows, layout))?.modelsRoot ?? null)
+  }
+  return new TensorrtLlmModelRegistry(layout.provider('tensorrt-llm').modelsDir)
+}
+
+/** Windows: where a model's files and caches are, and how to size and remove them (in the guest). */
+export async function windowsModelFiles(
+  windows: WindowsTensorrtLlmContext,
+  layout: DataLayout
+): Promise<{ paths: ManagedScopePaths; files: ModelFileOps }> {
+  const guest = await windowsGuest(windows, layout)
+  if (guest === null) throw notImported()
+  return { paths: guest.paths, files: guestModelFiles(guest.transport) }
+}
+
 export interface WireTensorrtLlmModelCheckOptions {
   descriptors: Pick<RuntimeDescriptorProvider, 'forInstallation' | 'cachedForNewSetup'>
   /** The setup operation's installation records, under the shared per-user root. */
@@ -166,6 +388,10 @@ export interface WireTensorrtLlmModelCheckOptions {
   /** The machine `nvidia-smi`/`/proc/meminfo` are read through; never asked about Docker. */
   host: Pick<LinuxHost, 'probeDeps'>
   settings: () => Record<string, unknown>
+  /** Windows x64 (change `add-tensorrt-llm-windows`): the cards and the VM's memory are read in the guest. */
+  windows?: WindowsTensorrtLlmContext
+  /** `process.arch`; x64 unless told. */
+  arch?: string
 }
 
 /**
@@ -178,6 +404,37 @@ export function wireTensorrtLlmModelCheck(
   platform: NodeJS.Platform,
   options: WireTensorrtLlmModelCheckOptions
 ): ((body: unknown) => Promise<ModelCompatibility>) | null {
+  const windows = options.windows
+  if (windows !== undefined && windowsX64(platform, options.arch ?? 'x64', windows)) {
+    return (body: unknown) =>
+      checkTensorrtLlmModel(body, {
+        installations: options.installations,
+        descriptors: options.descriptors,
+        // The guest's cards and the WSL VM's memory once the distribution exists (design D11); before
+        // that, the cards Windows sees, with no memory to compare against.
+        hostFacts: async () => {
+          const guest = await windowsDistribution(windows)
+          if (guest === null) {
+            const gpus = await probeTensorrtLlmGpus({
+              exec: windows.host.probeDeps.exec,
+              nvidiaSmi: `${windows.host.probeDeps.systemRoot}\\System32\\nvidia-smi.exe`,
+            })
+            return { gpus, memory: { availableBytes: 0, totalBytes: 0 } }
+          }
+          const deps = guestProbeDeps(guest.transport)
+          return probeTensorrtLlmGpusAndMemory({
+            exec: deps.exec,
+            nvidiaSmi: 'nvidia-smi',
+            readFile: deps.readFile,
+          })
+        },
+        settings: options.settings,
+        wslVm: async () => ({
+          memory_setting: parseWslConfig(await windows.host.probeDeps.readWslConfig().catch(() => null))
+            .memory,
+        }),
+      })
+  }
   if (platform !== 'linux') return null
   return (body: unknown) =>
     checkTensorrtLlmModel(body, {
@@ -317,6 +574,11 @@ export interface TensorrtLlmModelDeleterOptions {
   registry: Pick<TensorrtLlmModelRegistry, 'list'>
   /** This scope's managed paths: where the model's engine caches live. */
   paths: ManagedScopePaths
+  /**
+   * Windows (change `add-tensorrt-llm-windows`, task 2.8): the guest's paths and its file commands,
+   * read at deletion time — the model and its caches are sized and removed in the guest.
+   */
+  windowsFiles?: () => Promise<{ paths: ManagedScopePaths; files: ModelFileOps }>
 }
 
 /**
@@ -356,7 +618,11 @@ export function tensorrtLlmModelDeleter(
           modelId
         )
       }
-      const files = await deleteTensorrtLlmModelFiles(options.paths, model)
+      const guest = options.windowsFiles === undefined ? null : await options.windowsFiles()
+      const files =
+        guest === null
+          ? await deleteTensorrtLlmModelFiles(options.paths, model)
+          : await deleteTensorrtLlmModelFiles(guest.paths, model, guest.files)
       return {
         model_id: modelId,
         was_loaded: cancelled || result.was_loaded === true,
