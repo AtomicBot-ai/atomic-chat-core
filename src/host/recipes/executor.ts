@@ -27,9 +27,16 @@ import {
   validateInstallContainerRuntimeParameters,
 } from './install-container-runtime.js'
 import type { HostRecipeStep } from './install-container-runtime.js'
+import {
+  ENABLE_WSL_RECIPE,
+  ENABLE_WSL_RECIPE_DIGEST,
+  ENABLE_WSL_RECIPE_ID,
+  enableWslParametersDigest,
+  validateEnableWslParameters,
+} from './enable-wsl.js'
 import { dearmorPublicKey, primaryKeyFingerprints } from './openpgp.js'
 import { parseHostStepRequest, resultPathFor } from './request-file.js'
-import type { HostStepEcho, HostStepResult, HostStepStepOutcome } from './request-file.js'
+import type { HostStepEcho, HostStepRequest, HostStepResult, HostStepStepOutcome } from './request-file.js'
 
 export interface HostCommandOutput {
   /** Null when the command could not run or answer at all. */
@@ -585,6 +592,7 @@ async function execute(text: string, fileName: string, deps: HostStepExecutorDep
   // A request copied or renamed into another step's slot would otherwise report under that step.
   if (fileName !== `${request.step_id}.request.json`)
     return refuse(`step_id ${request.step_id} does not match the request file name ${fileName}`)
+  if (request.recipe_id === ENABLE_WSL_RECIPE_ID) return enableWsl(request, echo, deps)
   if (request.recipe_id !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
     return refuse(`unknown recipe ${request.recipe_id}`)
   if (request.action !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
@@ -652,6 +660,104 @@ async function execute(text: string, fileName: string, deps: HostStepExecutorDep
     error_code: null,
     steps: outcomes,
   }
+}
+
+/**
+ * `windows.enable-wsl` (`enable-wsl.ts`): exactly `wsl --install --no-distribution`, then `wsl
+ * --status` to tell "ready now" from "after a restart". The same refusals as the Linux recipe come
+ * first — another recipe's bytes, another action, any parameter, a parameters digest that is not the
+ * empty object's — so nothing runs for a request the user did not approve.
+ */
+async function enableWsl(
+  request: HostStepRequest,
+  echo: HostStepEcho,
+  deps: HostStepExecutorDeps
+): Promise<HostStepResult> {
+  const refuse = (problems: string[]) => refused(echo, problems, deps.now())
+  if (request.action !== ENABLE_WSL_RECIPE_ID)
+    return refuse([`action ${request.action} is not what recipe ${request.recipe_id} does`])
+  if (request.recipe_digest !== ENABLE_WSL_RECIPE_DIGEST)
+    return refuse([`recipe_digest ${request.recipe_digest} is not this build's ${ENABLE_WSL_RECIPE_DIGEST}`])
+  const validation = validateEnableWslParameters(request.parameters)
+  if (!validation.ok) return refuse(validation.problems)
+  const digest = enableWslParametersDigest(validation.parameters)
+  if (request.parameters_digest !== digest)
+    return refuse([
+      `parameters_digest ${request.parameters_digest} does not match the parameters (${digest})`,
+    ])
+
+  const result = (
+    outcome: HostStepResult['outcome'],
+    exitCode: number | null,
+    log: string,
+    steps: HostStepStepOutcome[]
+  ): HostStepResult => ({
+    schema_version: 1,
+    step_id: request.step_id,
+    outcome,
+    exit_code: exitCode,
+    log_tail: tail(log),
+    finished_at: deps.now(),
+    nonce: request.nonce,
+    recipe_id: request.recipe_id,
+    recipe_digest: request.recipe_digest,
+    parameters_digest: request.parameters_digest,
+    error_code: null,
+    steps,
+  })
+
+  const install = await deps.exec([...ENABLE_WSL_RECIPE.install], { longRunning: true })
+  const rebootSaid = install.code === ENABLE_WSL_RECIPE.reboot_required_exit_code
+  if (install.code !== 0 && !rebootSaid) {
+    const said = `${install.stdout.trim()}\n${install.stderr.trim()}`.trim()
+    return result(
+      'failed',
+      install.code,
+      `install-wsl failed: wsl --install exited with ${String(install.code)}\n${said}`,
+      [
+        {
+          id: 'install-wsl',
+          status: 'failed',
+          exit_code: install.code,
+          stderr: tail(install.stderr),
+          detail: said,
+        },
+        { id: 'check-wsl', status: 'not-run', exit_code: null, stderr: '', detail: '' },
+      ]
+    )
+  }
+  const installed: HostStepStepOutcome = {
+    id: 'install-wsl',
+    status: 'applied',
+    exit_code: install.code,
+    stderr: '',
+    detail: rebootSaid ? 'installed WSL; Windows reported that a restart is required' : 'installed WSL',
+  }
+  if (rebootSaid) {
+    return result('reboot-required', 0, `${request.recipe_id}: WSL installed; restart Windows to finish`, [
+      installed,
+      { id: 'check-wsl', status: 'not-run', exit_code: null, stderr: '', detail: 'a restart comes first' },
+    ])
+  }
+  const status = await deps.exec([...ENABLE_WSL_RECIPE.verify])
+  const ready = status.code === 0
+  return result(
+    ready ? 'completed' : 'reboot-required',
+    0,
+    ready
+      ? `${request.recipe_id}: WSL installed and running`
+      : `${request.recipe_id}: WSL installed; it starts after Windows restarts`,
+    [
+      installed,
+      {
+        id: 'check-wsl',
+        status: 'satisfied',
+        exit_code: status.code,
+        stderr: '',
+        detail: ready ? 'wsl --status answers' : 'wsl --status does not answer yet: a restart is required',
+      },
+    ]
+  )
 }
 
 /**

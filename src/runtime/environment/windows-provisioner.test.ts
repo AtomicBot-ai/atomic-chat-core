@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { BeginOperation, RuntimeDescriptor, WindowsEnvironmentManifest } from '../../contracts/index.js'
 import {
+  ENABLE_WSL_PARAMETERS_DIGEST,
+  ENABLE_WSL_RECIPE_DIGEST,
+  ENABLE_WSL_RECIPE_ID,
   INSTALL_CONTAINER_RUNTIME_RECIPE_DIGEST,
   INSTALL_CONTAINER_RUNTIME_RECIPE_ID,
   installContainerRuntimeParametersDigest,
@@ -25,8 +28,10 @@ import { parseWindowsEnvironmentManifest } from './environment-manifest.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
 import type { HostRecipeBinding, HostView } from './linux-provisioner.js'
+import { EnvironmentService } from './service.js'
 import { startOperation } from './state.js'
-import type { PersistedOperation } from './store.js'
+import { OperationStore, type PersistedOperation } from './store.js'
+import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
 import type { WindowsEnvironmentRecord } from './windows-environment-record.js'
 import { distributionDirectory } from './windows-host.js'
 import { createWindowsProvisioner, type WindowsProvisionerDeps } from './windows-provisioner.js'
@@ -227,6 +232,11 @@ const harness = (
       },
     },
     guestRecipe: GUEST_RECIPE,
+    enableWsl: {
+      recipe_id: ENABLE_WSL_RECIPE_ID,
+      recipe_digest: ENABLE_WSL_RECIPE_DIGEST,
+      parameters_digest: ENABLE_WSL_PARAMETERS_DIGEST,
+    },
     installations: new InstallationStore(root),
     environmentId: 'default',
     onAssessment: (view) => views.push(view),
@@ -482,5 +492,136 @@ describe('Windows probe — the rest of the plan', () => {
     await probe(h)
     expect(read).toHaveBeenCalled()
     expect(h.windows.wslCalls.flat().join(' ')).not.toMatch(/wslconfig/i)
+  })
+})
+
+describe('enabling WSL — spec "Включение WSL — единственный шаг с повышением прав"', () => {
+  it('hands out windows.enable-wsl with its recipe and empty-parameters digests and a fresh nonce', async () => {
+    const { host_step } = await probe(harness(freshWindows()))
+    expect(host_step).toEqual({
+      step_id: expect.stringMatching(/^host-step-/),
+      action: 'windows.enable-wsl',
+      recipe_id: ENABLE_WSL_RECIPE_ID,
+      recipe_digest: ENABLE_WSL_RECIPE_DIGEST,
+      parameters_digest: ENABLE_WSL_PARAMETERS_DIGEST,
+      parameters: {},
+      nonce: expect.any(String),
+      expected_operation_revision: 0,
+    })
+  })
+
+  it('verifies a receipt against the machine: not met while WSL cannot start, met once it can', async () => {
+    const machine = freshWindows()
+    const h = harness(machine)
+    const provisioner = createWindowsProvisioner(h.deps)
+    // The package is in, the VM needs the restart.
+    machine.wsl = { installed: true, wsl_version: '2.4.4.0', ready: false, distributions: [], guests: {} }
+    expect(await provisioner.verifyHostStep(record(), signal)).toMatchObject({
+      prerequisites_met: false,
+      needs_relogin: false,
+    })
+    machine.wsl = { ...machine.wsl, ready: true }
+    expect(await provisioner.verifyHostStep(record(), signal)).toEqual({
+      prerequisites_met: true,
+      needs_relogin: false,
+      error: null,
+    })
+  })
+
+  it('needs a reboot only for an operation waiting on one, and only until WSL can start', async () => {
+    const machine = freshWindows()
+    machine.wsl = { installed: true, wsl_version: '2.4.4.0', ready: false, distributions: [], guests: {} }
+    const provisioner = createWindowsProvisioner(harness(machine).deps)
+    const waiting = record()
+    waiting.machine.operation.phase = 'reboot-required'
+    expect(await provisioner.inventory.needsReboot(waiting)).toBe(true)
+    expect(await provisioner.inventory.needsReboot(record())).toBe(false)
+    machine.wsl = { ...machine.wsl, ready: true }
+    expect(await provisioner.inventory.needsReboot(waiting)).toBe(false)
+  })
+})
+
+describe('UAC, a restart, and on without a new consent (state and recovery over the fake WSL)', () => {
+  const serviceOn = (h: Harness, store: OperationStore, events: string[]) =>
+    new EnvironmentService({
+      store,
+      environmentId: 'default',
+      instanceId: 'core-1',
+      newEffectId: (() => {
+        let n = 0
+        return () => `effect-${(n += 1)}`
+      })(),
+      provisioner: createWindowsProvisioner(h.deps),
+      readSnapshot: async () => [],
+      emit: (_name, payload) => events.push(payload.phase),
+      identityDeps: { alive: () => false },
+    })
+
+  it('preparing-host → the app’s UAC → reboot-required → (still not restarted) reboot-required → restarted → on', async () => {
+    const machine = freshWindows()
+    const h = harness(machine)
+    const fs = new FakeManagedFs()
+    let ids = 0
+    const store = new OperationStore({
+      root: '/shared',
+      instanceId: 'core-1',
+      newOperationId: () => 'op-1',
+      newEffectId: () => `store-effect-${(ids += 1)}`,
+      fs,
+      now: () => fs.clock,
+      sleep: async () => undefined,
+      ownerIdentity: async () => ({ pid: 4242, startId: 'harness:owner' }),
+    })
+    const events: string[] = []
+    const first = serviceOn(h, store, events)
+    await first.begin('default', {
+      request_id: 'req-1',
+      target: TARGET,
+      kind: 'setup',
+      descriptor_id: DESCRIPTOR.descriptor_id,
+    })
+    await first.idle()
+    let operation = await first.get('op-1')
+    expect(operation.phase).toBe('awaiting-consent')
+    await first.resume('op-1', {
+      expected_revision: operation.revision,
+      approved_plan_digest: operation.plan_digest!,
+    })
+    await first.idle()
+    operation = await first.get('op-1')
+    expect(operation.phase).toBe('preparing-host')
+    const step = operation.pending_host_step!
+    expect(step.action).toBe('windows.enable-wsl')
+
+    // The app ran the executor through UAC: WSL is installed, and it starts only after a restart.
+    machine.wsl = { installed: true, wsl_version: '2.4.4.0', ready: false, distributions: [], guests: {} }
+    operation = await first.acceptHostReceipt('op-1', {
+      step_id: step.step_id,
+      nonce: step.nonce,
+      expected_operation_revision: step.expected_operation_revision,
+      recipe_digest: step.recipe_digest,
+      parameters_digest: step.parameters_digest,
+      outcome: 'reboot-required',
+      receipt_id: 'receipt-1',
+    })
+    expect(operation.phase).toBe('reboot-required')
+    await first.shutdown(new AbortController().signal)
+
+    // The app opens again before the restart: still waiting, nothing asked.
+    const early = serviceOn(h, store, events)
+    await early.recover('core-2')
+    await early.idle()
+    expect((await early.get('op-1')).phase).toBe('reboot-required')
+    await early.shutdown(new AbortController().signal)
+
+    // After the restart WSL starts: the operation goes on to import, without a new consent.
+    machine.wsl = { ...machine.wsl, ready: true }
+    const after = serviceOn(h, store, events)
+    await after.recover('core-3')
+    await after.idle()
+    const phasesAfterReboot = events.slice(events.lastIndexOf('reboot-required') + 1)
+    expect(phasesAfterReboot).toContain('preparing-environment')
+    expect(phasesAfterReboot).not.toContain('awaiting-consent')
+    expect(h.windows.wslCalls.flat()).not.toContain('--install')
   })
 })

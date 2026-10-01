@@ -1,0 +1,158 @@
+import { describe, expect, it } from 'vitest'
+import {
+  ENABLE_WSL_PARAMETERS_DIGEST,
+  ENABLE_WSL_RECIPE,
+  ENABLE_WSL_RECIPE_DIGEST,
+  ENABLE_WSL_RECIPE_ID,
+  enableWslParametersDigest,
+  validateEnableWslParameters,
+} from './enable-wsl.js'
+import { executeHostStep, type HostStepExecutorDeps } from './executor.js'
+import type { HostStepResult } from './request-file.js'
+
+const REQUEST = 'C:/Users/ada/AppData/Local/AtomicChat/host-steps/step-7.request.json'
+const RESULT = 'C:/Users/ada/AppData/Local/AtomicChat/host-steps/step-7.result.json'
+
+/** A Windows machine as the elevated executor sees it: what `wsl.exe` answers, and every call. */
+class FakeWindows {
+  calls: string[][] = []
+  longRunning: string[] = []
+  /** `wsl --install --no-distribution`'s exit code; 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. */
+  installExit = 0
+  installStderr = ''
+  /** Whether `wsl --status` answers after the install (no restart needed). */
+  readyAfterInstall = false
+  written = new Map<string, string>()
+
+  deps(request: Record<string, unknown>): HostStepExecutorDeps {
+    return {
+      readRequest: async () => JSON.stringify(request),
+      writeResult: async (path, text) => {
+        this.written.set(path, text)
+      },
+      readFile: async () => {
+        throw new Error('the WSL recipe reads no file')
+      },
+      writeFile: async () => {
+        throw new Error('the WSL recipe writes no file')
+      },
+      exec: async (argv, options) => {
+        this.calls.push(argv)
+        if (options?.longRunning) this.longRunning.push(argv.join(' '))
+        if (argv.join(' ') === 'wsl.exe --install --no-distribution') {
+          return {
+            code: this.installExit,
+            stdout: 'Installing: Windows Subsystem for Linux\n',
+            stderr: this.installStderr,
+          }
+        }
+        if (argv.join(' ') === 'wsl.exe --status') {
+          return this.readyAfterInstall
+            ? { code: 0, stdout: 'Default Version: 2\n', stderr: '' }
+            : { code: 1, stdout: 'Please enable the Virtual Machine Platform Windows feature.\n', stderr: '' }
+        }
+        throw new Error(`unexpected command ${argv.join(' ')}`)
+      },
+      fetch: async () => {
+        throw new Error('the WSL recipe fetches nothing')
+      },
+      now: () => 1_000,
+      invokingUid: null,
+    }
+  }
+}
+
+const request = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schema_version: 1,
+  step_id: 'step-7',
+  operation_id: 'op-1',
+  action: ENABLE_WSL_RECIPE_ID,
+  recipe_id: ENABLE_WSL_RECIPE_ID,
+  recipe_digest: ENABLE_WSL_RECIPE_DIGEST,
+  parameters_digest: ENABLE_WSL_PARAMETERS_DIGEST,
+  nonce: 'once-7',
+  expected_operation_revision: 4,
+  data_folder: 'C:/Users/ada/AppData/Roaming/Atomic Chat/data',
+  parameters: {},
+  ...over,
+})
+
+const run = async (windows: FakeWindows, over: Record<string, unknown> = {}): Promise<HostStepResult> =>
+  executeHostStep(REQUEST, windows.deps(request(over)))
+
+describe('the windows.enable-wsl recipe', () => {
+  it('is one command with no parameter at all, and the digests bind exactly that', () => {
+    expect(ENABLE_WSL_RECIPE.install).toEqual(['wsl.exe', '--install', '--no-distribution'])
+    expect(ENABLE_WSL_RECIPE.verify).toEqual(['wsl.exe', '--status'])
+    expect(ENABLE_WSL_RECIPE_DIGEST).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(enableWslParametersDigest({})).toBe(ENABLE_WSL_PARAMETERS_DIGEST)
+    expect(validateEnableWslParameters({})).toEqual({ ok: true, parameters: {} })
+    expect(validateEnableWslParameters({ distribution: 'Ubuntu' })).toMatchObject({ ok: false })
+  })
+})
+
+describe('executeHostStep — windows.enable-wsl', () => {
+  it('installs WSL, finds it cannot start a VM yet, and reports reboot-required', async () => {
+    const windows = new FakeWindows()
+    const result = await run(windows)
+
+    expect(result.outcome).toBe('reboot-required')
+    expect(result.exit_code).toBe(0)
+    expect(result.nonce).toBe('once-7')
+    expect(result.parameters_digest).toBe(ENABLE_WSL_PARAMETERS_DIGEST)
+    expect(windows.calls).toEqual([
+      ['wsl.exe', '--install', '--no-distribution'],
+      ['wsl.exe', '--status'],
+    ])
+    expect(windows.longRunning).toEqual(['wsl.exe --install --no-distribution'])
+    expect(JSON.parse(windows.written.get(RESULT) ?? '{}')).toMatchObject({ outcome: 'reboot-required' })
+  })
+
+  it('reports completed when WSL starts right away (only the package was missing)', async () => {
+    const windows = new FakeWindows()
+    windows.readyAfterInstall = true
+    expect((await run(windows)).outcome).toBe('completed')
+  })
+
+  it('reads 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) as success that needs a restart, whatever --status says', async () => {
+    const windows = new FakeWindows()
+    windows.installExit = 3010
+    windows.readyAfterInstall = true
+    const result = await run(windows)
+    expect(result.outcome).toBe('reboot-required')
+  })
+
+  it('reports a failed install with its exit code and stderr, and asks nothing more', async () => {
+    const windows = new FakeWindows()
+    windows.installExit = 1
+    windows.installStderr = 'Error code: Wsl/InstallDistro/E_ACCESSDENIED'
+    const result = await run(windows)
+
+    expect(result.outcome).toBe('failed')
+    expect(result.exit_code).toBe(1)
+    expect(result.log_tail).toContain('E_ACCESSDENIED')
+    expect(windows.calls).toEqual([['wsl.exe', '--install', '--no-distribution']])
+  })
+
+  it.each([
+    ['another recipe digest', { recipe_digest: `sha256:${'e'.repeat(64)}` }],
+    ['a parameter', { parameters: { distribution: 'Ubuntu' } }],
+    ['another parameters digest', { parameters_digest: `sha256:${'e'.repeat(64)}` }],
+    ['the Linux action', { action: 'linux.install-container-runtime' }],
+  ])('refuses a request with %s before running anything', async (_label, over) => {
+    const windows = new FakeWindows()
+    const result = await run(windows, over)
+    expect(result.outcome).toBe('failed')
+    expect(result.error_code).toBe('MANAGED_HOST_STEP_INVALID')
+    expect(windows.calls).toEqual([])
+  })
+
+  it('never enters, imports or changes a distribution', async () => {
+    const windows = new FakeWindows()
+    await run(windows)
+    const flat = windows.calls.flat()
+    for (const forbidden of ['-d', '--exec', '--import', '--unregister', '--set-default']) {
+      expect(flat).not.toContain(forbidden)
+    }
+  })
+})

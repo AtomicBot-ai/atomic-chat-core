@@ -17,8 +17,10 @@
 import { randomUUID } from 'node:crypto'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
+  ErrorBody,
   ManagedAvailability,
   ManagedBlocker,
+  ManagedHostStep,
   PlatformImage,
   RequirementPlan,
   RuntimeDescriptor,
@@ -48,6 +50,14 @@ import {
 import { assessWindowsHost, type WindowsBlocker } from './windows-plan.js'
 import { probeWindowsHost, type WindowsHostFacts, type WslDistribution } from './windows-probe.js'
 
+/** The elevated recipe's identity: what a `windows.enable-wsl` step and its receipt are bound to. */
+export interface EnableWslBinding {
+  recipe_id: string
+  recipe_digest: Sha256Digest
+  /** The digest of its (empty) parameters. */
+  parameters_digest: Sha256Digest
+}
+
 /** The environment record store, as far as the provisioner needs it. */
 export interface WindowsEnvironmentRecords {
   read(): Promise<WindowsEnvironmentRecord | null>
@@ -63,6 +73,8 @@ export interface WindowsProvisionerDeps {
   records: WindowsEnvironmentRecords
   /** `linux.install-container-runtime`, run in the guest as its root (design D3). */
   guestRecipe: HostRecipeBinding
+  /** `windows.enable-wsl`, the one elevated step (design D2), as `src/host/recipes` builds it. */
+  enableWsl: EnableWslBinding
   installations: InstallationStore
   environmentId: string
   onAssessment?: (view: HostView) => void
@@ -106,7 +118,6 @@ export interface WindowsLook {
 
 export function createWindowsProvisioner(deps: WindowsProvisionerDeps): EnvironmentProvisioner {
   const newId = deps.newId ?? randomUUID
-  void newId
   const wsl = deps.host.probeDeps.wsl
 
   /** The guest's docker CLI, as root, by its absolute path, over the transport (design D3). */
@@ -274,6 +285,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
         system_changes: systemChanges,
         requires_elevation: requiresElevation,
         may_require_reboot: requiresElevation,
+        enable_wsl: requiresElevation ? deps.enableWsl.recipe_digest : null,
         descriptor: { descriptor_id: descriptor.descriptor_id, image_digest: image.digest },
         environment_manifest_id: manifestId,
         host: {
@@ -321,7 +333,27 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
             },
       memory_bytes: seen.guest?.extras.memory_bytes ?? null,
     })
-    return { plan, host_step: null, image_present: present }
+    // The one elevated step, with nothing in it a client could choose (design D2).
+    const hostStep: ManagedHostStep | null = requiresElevation
+      ? {
+          step_id: `host-step-${newId()}`,
+          action: 'windows.enable-wsl',
+          recipe_id: deps.enableWsl.recipe_id,
+          recipe_digest: deps.enableWsl.recipe_digest,
+          parameters_digest: deps.enableWsl.parameters_digest,
+          parameters: {},
+          nonce: newId(),
+          // Stamped with the real revision when the step is issued (`state.ts`, `afterConsent`).
+          expected_operation_revision: 0,
+        }
+      : null
+    return { plan, host_step: hostStep, image_present: present }
+  }
+
+  /** WSL answers `--version` and `--status`: the elevated step's work is in effect. */
+  const wslReady = async (): Promise<boolean> => {
+    const facts = await probeWindowsHost(deps.host.probeDeps)
+    return facts.wsl.installed === true && facts.wsl.ready === true
   }
 
   const notYet = (what: string): never => {
@@ -334,15 +366,46 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
   const inventory: EffectInventory = {
     inspect: async () => ({ kind: 'absent' }),
     needsRelogin: async () => false,
-    needsReboot: async () => false,
-    verifyCompletedSteps: async () => [],
+    // Asked at every core start (`recovery.ts`): an operation waiting on a restart keeps waiting until
+    // WSL can start; then the probe that follows continues it under the consent it already has.
+    needsReboot: async (record) =>
+      record.machine.operation.phase === 'reboot-required' && !(await wslReady().catch(() => false)),
+    verifyCompletedSteps: async (record) => {
+      const steps = record.machine.operation.completed_step_ids
+      if (steps.length === 0) return []
+      return (await wslReady().catch(() => false)) ? steps : []
+    },
     currentPlanDigest: async (record) =>
       (await setupProbe(record).catch(() => null))?.plan.plan_digest ?? null,
   }
 
   return {
     probe: (record) => setupProbe(record),
-    verifyHostStep: async (): Promise<HostStepVerdict> => notYet('verify a privileged step'),
+    async verifyHostStep(record: PersistedOperation): Promise<HostStepVerdict> {
+      // The receipt is an assertion; the machine is the evidence (task 2.6's rule, on Windows too).
+      const answer = await setupProbe(record)
+      const { blockers } = answer.plan
+      if (blockers.length > 0) {
+        return {
+          prerequisites_met: false,
+          needs_relogin: false,
+          error: {
+            code: (blockers[0] as ManagedBlocker).code,
+            message: `WSL was reported as enabled, but the machine says: ${blockers.map((entry) => entry.message).join(' ')}`,
+            details: blockers.map((entry) => entry.reason ?? entry.code).join(','),
+          },
+        }
+      }
+      if (answer.host_step !== null) {
+        const missing: ErrorBody = {
+          code: 'MANAGED_PREREQUISITE_BLOCKED',
+          message: 'WSL was reported as enabled, but it does not start yet; Windows may need a restart.',
+          details: 'enable-wsl',
+        }
+        return { prerequisites_met: false, needs_relogin: false, error: missing }
+      }
+      return { prerequisites_met: true, needs_relogin: false, error: null }
+    },
     prepare: async () => notYet('prepare the environment'),
     pull: async () => notYet('pull the engine image'),
     verify: async () => notYet('verify the installation'),

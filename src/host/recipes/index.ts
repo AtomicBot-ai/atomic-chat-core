@@ -8,6 +8,8 @@
  * Public API of this module is exported from this file only.
  */
 export * from './install-container-runtime.js'
+export * from './enable-wsl.js'
 export * from './request-file.js'
 export * from './executor.js'
 export * from './executor-io.js'
+export * from './executor-io-windows.js'

@@ -9,7 +9,7 @@ import {
 import type { HostStepExecutorDeps, HostStepResult } from '../../host/recipes/index.js'
 import { recordingIo } from '../io.js'
 import { runCli } from '../main.js'
-import { hostStepCommand } from './host-step.js'
+import { hostStepCommand, hostStepDepsFor } from './host-step.js'
 
 const parameters = {
   user: 'alice',
@@ -136,4 +136,11 @@ describe('the core binary routes host-step to the real executor', () => {
       })
     }
   )
+})
+
+describe('hostStepDepsFor', () => {
+  it('picks the Windows I/O on win32 and the root I/O elsewhere', () => {
+    expect(hostStepDepsFor('win32', {}).invokingUid).toBeNull()
+    expect(hostStepDepsFor('linux', { SUDO_UID: '1000' }).invokingUid).toBe('1000')
+  })
 })
