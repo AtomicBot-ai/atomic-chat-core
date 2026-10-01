@@ -61,6 +61,7 @@ describe('dataLayout', () => {
     expect(m.watchdogScript).toBe(
       native('/data/atomic-core/managed-runtimes/watchdog/atomic-watchdog-entrypoint.sh')
     )
+    expect(m.guestScopeFile).toBe(native('/data/atomic-core/managed-runtimes/guest-scope.json'))
   })
   it('encodes every id it spells onto disk, so a model id or generation is always exactly one segment', () => {
     const m = layout.managed

@@ -17,6 +17,8 @@ import {
   stopContainer,
 } from './operations.js'
 import type { DockerCommandResult, DockerExec, ModelContainerCreateSpec, Realpath } from './types.js'
+import type { WslDistributionTransport } from '../wsl/index.js'
+import { guestRealpath } from './wsl-exec.js'
 
 const ok = (stdout = '', stderr = ''): DockerCommandResult => ({ code: 0, stdout, stderr })
 const failed = (code: number | null, stderr: string, stdout = ''): DockerCommandResult => ({
@@ -388,5 +390,41 @@ describe('runOnce', () => {
     const result = await runOnce(exec, { image, gpuUuid: 'GPU-1', command: ['nvidia-smi', '-L'] })
     expect(result.code).toBe(1)
     expect(result.stderr).toContain('CUDA driver version is insufficient')
+  })
+})
+
+describe('createContainer on Windows: mount sources resolved in the WSL guest (change add-tensorrt-llm-windows, task 2.6)', () => {
+  it('runs realpath in the guest for every mount, where Docker will bind it, and builds argv from its answers', async () => {
+    const resolved: string[][] = []
+    const transport: WslDistributionTransport = {
+      name: 'AtomicChat',
+      exec: async (argv) => {
+        resolved.push(argv)
+        return { code: 0, stdout: `${argv[argv.length - 1]}\n`, stderr: '' }
+      },
+      hold: () => {
+        throw new Error('no hold')
+      },
+    }
+    let capturedArgv: string[] = []
+    const exec: DockerExec = async (args) => {
+      capturedArgv = args
+      return ok('c1')
+    }
+    const guest = '/var/lib/atomic-chat/scopes/k1'
+    const spec: ModelContainerCreateSpec = {
+      ...createSpec,
+      mounts: {
+        model: { source: `${guest}/models/tensorrt-llm/m` },
+        engineCache: { source: `${guest}/caches/d/m` },
+        entrypoint: { source: `${guest}/watchdog/atomic-watchdog-entrypoint.sh` },
+        heartbeat: { source: `${guest}/heartbeats/g1` },
+      },
+      user: { uid: 1000, gid: 1000 },
+    }
+    await createContainer(exec, spec, { realpath: guestRealpath(transport) })
+    expect(resolved.map((argv) => argv.slice(0, 3))).toEqual(Array(4).fill(['realpath', '-e', '--']))
+    expect(capturedArgv.join(' ')).toContain(`${guest}/models/tensorrt-llm/m:/atomic/model:ro`)
+    expect(capturedArgv.join(' ')).toContain('--user 1000:1000')
   })
 })

@@ -23,6 +23,7 @@ import type {
   ManagedAvailability,
   ManagedBlocker,
   ManagedHostStep,
+  ManagedProgress,
   PlatformImage,
   RequirementPlan,
   RuntimeDescriptor,
@@ -30,17 +31,36 @@ import type {
   WindowsEnvironmentManifest,
   WslRootfs,
 } from '../../contracts/index.js'
-import { inspectImage, pullImageWithCurl, runOnce, type DockerExec } from '../container/index.js'
+import {
+  containersUsingImage,
+  inspectImage,
+  pullImageWithCurl,
+  removeContainer,
+  removeImage,
+  runOnce,
+  stopContainer,
+  type DockerExec,
+  type ExecutionRecord,
+} from '../container/index.js'
 import type { WslDistributionTransport } from '../wsl/index.js'
 import { canonicalDigest } from './canonical-json.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { GUEST_DOCKER, GUEST_ROOT, guestLinuxHost, probeGuestExtras, type GuestExtras } from './guest-host.js'
-import type { InstallationStore } from './installations.js'
-import { imageMatchesDigest, pickGpu, type HostRecipeBinding, type HostView } from './linux-provisioner.js'
+import type { InstallationRecord, InstallationStore } from './installations.js'
+import {
+  imageMatchesDigest,
+  NOTHING_LOADED,
+  ownedImageId,
+  pickGpu,
+  type HostRecipeBinding,
+  type HostView,
+  type UnloadEngineSessions,
+} from './linux-provisioner.js'
 import { probeLinux, type LinuxFacts } from './linux-probe.js'
 import { descriptorForProbe, pinnedDescriptor } from './provisioner-descriptors.js'
-import type { EffectInventory } from './recovery.js'
+import type { EffectFinding, EffectInventory } from './recovery.js'
+import type { EffectIntent } from './state.js'
 import type { EnvironmentProvisioner, HostStepVerdict, ProvisionerProbe } from './service.js'
 import type { PersistedOperation } from './store.js'
 import type { WindowsEnvironmentRecord } from './windows-environment-record.js'
@@ -106,6 +126,13 @@ export interface WindowsProvisionerDeps {
   removeFile: (path: string) => Promise<void>
   runGuestRecipe: GuestRecipeRunner
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
+  /** This scope's execution journal (Windows-side, core's own state): the engine's containers to remove. */
+  journal: { list(): ExecutionRecord[]; remove(containerId: string): Promise<void> }
+  /** Removes this scope's engine caches of one descriptor, in the guest. */
+  removeEngineCaches: (descriptorId: string) => Promise<void>
+  /** Removes this scope's downloaded models of one engine, in the guest; only for `retain_models: false`. */
+  removeModels: (engineId: string) => Promise<void>
+  unloadEngineSessions?: UnloadEngineSessions
   onAssessment?: (view: HostView) => void
   newId?: () => string
   now?: () => Date
@@ -116,6 +143,7 @@ const ZERO_DIGEST: Sha256Digest = `sha256:${'0'.repeat(64)}`
 const PULL_PHASES: readonly string[] = ['pulling-image', 'verifying', 'activating']
 /** The only platform a Windows guest runs (the manifest's rootfs is x86_64). */
 const GUEST_PLATFORM = 'linux/amd64'
+const STOP_TIMEOUT_SECONDS = 10
 
 /** The unsupported verdicts: what hides the provider rather than blocking a plan. */
 const METADATA_REASONS: readonly string[] = ['environment-manifest-unavailable']
@@ -521,7 +549,8 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     transport: WslDistributionTransport,
     descriptor: RuntimeDescriptor,
     seen: WindowsLook,
-    signal: AbortSignal
+    signal: AbortSignal,
+    own: (resourceIds: string[]) => Promise<void>
   ): Promise<void> => {
     const gpu = pickGpu(seen.facts.gpus, descriptor.minimum_compute_capability)
     if (gpu === null) {
@@ -532,6 +561,9 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     }
     const docker = guestDocker(transport)
     const probeImage = descriptor.probe_image[GUEST_PLATFORM]
+    // Only a GPU-check image this setup pulls itself is its to remove later (as on Linux).
+    const inspected = await inspectImage(docker, probeImage).catch(() => null)
+    if (inspected !== null && !inspected.found) await own([ownedImageId(probeImage)])
     await pullImageWithCurl(probeImage, {
       run: (argv, call) => transport.exec(argv, { user: GUEST_ROOT, ...call }),
       signal,
@@ -556,6 +588,17 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     }
   }
 
+  /** Atomic Chat's own distribution, as its record names it; no record is no environment. */
+  const ownTransport = async (): Promise<WslDistributionTransport> => {
+    const environment = await deps.records.read()
+    if (environment === null) {
+      throw blocked('The Atomic Chat distribution is not set up on this computer.', 'no-distribution')
+    }
+    return wsl.distribution(environment.distribution.name)
+  }
+
+  const unload = deps.unloadEngineSessions ?? NOTHING_LOADED
+
   const notYet = (what: string): never => {
     throw new AtomicCoreError(
       'MANAGED_PREREQUISITE_BLOCKED',
@@ -564,7 +607,32 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
   }
 
   const inventory: EffectInventory = {
-    inspect: async () => ({ kind: 'absent' }),
+    async inspect(effect: EffectIntent, record: PersistedOperation): Promise<EffectFinding> {
+      if (record.request.kind === 'remove') return { kind: 'absent' }
+      try {
+        if (effect.kind === 'pull-image' || effect.kind === 'verify') {
+          const descriptor = await pinnedDescriptor(deps.descriptors, record)
+          return (await imagePresent(await ownTransport(), descriptor.image[GUEST_PLATFORM]))
+            ? { kind: 'completed', owned_resource_ids: [] }
+            : { kind: 'absent' }
+        }
+        if (effect.kind === 'activate') {
+          const target = record.machine.operation.target
+          const existing =
+            target.kind === 'runtime' ? await deps.installations.read(target.installation_id) : null
+          const planned =
+            record.machine.consented?.descriptor_id ?? record.requirement_plan?.descriptor_id ?? null
+          return existing !== null &&
+            existing.installation.active_descriptor_id === planned &&
+            existing.installation.status === 'ready'
+            ? { kind: 'completed', owned_resource_ids: [] }
+            : { kind: 'absent' }
+        }
+      } catch {
+        // Nothing this core can check: the effect runs again, and fails there with its own reason.
+      }
+      return { kind: 'absent' }
+    },
     needsRelogin: async () => false,
     // Asked at every core start (`recovery.ts`): an operation waiting on a restart keeps waiting until
     // WSL can start; then the probe that follows continues it under the consent it already has.
@@ -606,7 +674,11 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       }
       return { prerequisites_met: true, needs_relogin: false, error: null }
     },
-    async prepare(record: PersistedOperation, signal: AbortSignal): Promise<void> {
+    async prepare(
+      record: PersistedOperation,
+      signal: AbortSignal,
+      own: (resourceIds: string[]) => Promise<void>
+    ): Promise<void> {
       const descriptor = await pinnedDescriptor(deps.descriptors, record)
       const seen = await look()
       if (seen.foreign) {
@@ -631,13 +703,138 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
         descriptor,
         signal
       )
-      await checkGpu(transport, descriptor, seen, signal)
+      await checkGpu(transport, descriptor, seen, signal, own)
     },
-    pull: async () => notYet('pull the engine image'),
-    verify: async () => notYet('verify the installation'),
+    async pull(
+      record: PersistedOperation,
+      onProgress: (progress: ManagedProgress) => void,
+      signal: AbortSignal
+    ): Promise<void> {
+      const descriptor = await pinnedDescriptor(deps.descriptors, record)
+      const image = descriptor.image[GUEST_PLATFORM]
+      const transport = await ownTransport()
+      const label = 'Downloading the engine image'
+      onProgress({ label, completed: 0, total: descriptor.download_bytes, unit: 'bytes' })
+      // Inside the guest, through its own socket: the Engine API never leaves the distribution (D4).
+      await pullImageWithCurl(image, {
+        run: (argv, call) => transport.exec(argv, { user: GUEST_ROOT, ...call }),
+        signal,
+        knownTotalBytes: descriptor.download_bytes,
+        verify: guestDocker(transport),
+        onProgress: (progress) =>
+          onProgress({ label, completed: progress.current, total: progress.total, unit: 'bytes' }),
+      })
+    },
+
+    async verify(record: PersistedOperation): Promise<void> {
+      const target = record.machine.operation.target
+      if (target.kind === 'environment') {
+        const seen = await look()
+        const docker = seen.guest?.facts.docker
+        if (docker === undefined || !docker.daemon_reachable || !docker.gpu_runtime) {
+          throw blocked(
+            'Docker in the Atomic Chat distribution does not answer with a GPU runtime.',
+            'docker-unreachable'
+          )
+        }
+        return
+      }
+      const descriptor = await pinnedDescriptor(deps.descriptors, record)
+      const image = descriptor.image[GUEST_PLATFORM]
+      const transport = await ownTransport()
+      if (!(await imagePresent(transport, image))) {
+        throw new AtomicCoreError(
+          'MANAGED_IDENTITY_MISMATCH',
+          'The engine image in the Atomic Chat distribution does not carry the digest the descriptor pins.',
+          `${image.repository}@${image.digest}`
+        )
+      }
+    },
+
     unloadResident: async () => undefined,
-    activate: async () => notYet('activate an installation'),
-    remove: async () => notYet('remove an installation'),
+
+    async activate(record: PersistedOperation): Promise<void> {
+      const target = record.machine.operation.target
+      if (target.kind !== 'runtime') return
+      const descriptor = await pinnedDescriptor(deps.descriptors, record)
+      const probeImage = descriptor.probe_image[GUEST_PLATFORM]
+      const previous = await deps.installations.read(target.installation_id)
+      const ownsProbe =
+        record.owned_resource_ids.includes(ownedImageId(probeImage)) ||
+        previous?.probe_image?.digest === probeImage.digest
+      const installation: InstallationRecord = {
+        schema_version: 1,
+        installation: {
+          installation_id: target.installation_id,
+          engine_id: target.engine_id,
+          environment_id: record.machine.operation.environment_id,
+          active_descriptor_id: descriptor.descriptor_id,
+          candidate_descriptor_id: null,
+          availability: 'supported',
+          status: 'ready',
+        },
+        image: descriptor.image[GUEST_PLATFORM],
+        ...(ownsProbe ? { probe_image: probeImage } : {}),
+        platform: GUEST_PLATFORM,
+        installed_at: now().toISOString(),
+      }
+      await deps.installations.write(installation)
+    },
+
+    async remove(record: PersistedOperation): Promise<void> {
+      const target = record.machine.operation.target
+      if (target.kind !== 'runtime') return notYet('remove the environment')
+      const existing = await deps.installations.read(target.installation_id)
+      // As on Linux: a loaded model first, its container confirmed stopped; loads held off till the end.
+      const hold = await unload(target.engine_id)
+      try {
+        const environment = await deps.records.read()
+        if (environment !== null) {
+          const docker = guestDocker(wsl.distribution(environment.distribution.name))
+          for (const container of deps.journal
+            .list()
+            .filter((entry) => entry.engine_id === target.engine_id)) {
+            const stopped = await stopContainer(docker, container.container_id, STOP_TIMEOUT_SECONDS)
+            if (!stopped.confirmed) {
+              throw new AtomicCoreError(
+                'MANAGED_STOP_UNCONFIRMED',
+                'A container of this engine could not be confirmed stopped, so nothing was removed.',
+                `${container.container_id}: ${stopped.reason}`
+              )
+            }
+            await removeContainer(docker, container.container_id)
+            await deps.journal.remove(container.container_id)
+          }
+          if (existing !== null) {
+            if (existing.installation.status !== 'removing') {
+              await deps.installations.write({
+                ...existing,
+                installation: { ...existing.installation, status: 'removing' },
+              })
+            }
+            if ((await containersUsingImage(docker, existing.image)).length === 0)
+              await removeImage(docker, existing.image)
+            const probe = existing.probe_image
+            if (probe !== undefined) {
+              const others = (await deps.installations.list()).filter(
+                (entry) =>
+                  entry.installation.installation_id !== target.installation_id &&
+                  entry.probe_image?.digest === probe.digest
+              )
+              if (others.length === 0 && (await containersUsingImage(docker, probe)).length === 0) {
+                await removeImage(docker, probe)
+              }
+            }
+          }
+        }
+        const descriptorId = existing?.installation.active_descriptor_id ?? null
+        if (descriptorId !== null) await deps.removeEngineCaches(descriptorId)
+        if (record.request.retain_models === false) await deps.removeModels(target.engine_id)
+        await deps.installations.remove(target.installation_id)
+      } finally {
+        hold.release?.()
+      }
+    },
     cleanup: async () => undefined,
     inventory,
   }

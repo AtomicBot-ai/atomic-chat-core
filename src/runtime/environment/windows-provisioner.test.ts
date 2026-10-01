@@ -27,6 +27,7 @@ import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { parseWindowsEnvironmentManifest } from './environment-manifest.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
+import type { ExecutionRecord } from '../container/index.js'
 import type { HostRecipeBinding, HostView } from './linux-provisioner.js'
 import { EnvironmentService } from './service.js'
 import { startOperation } from './state.js'
@@ -230,6 +231,7 @@ const harness = (
   const downloads: { url: string; destination: string }[] = []
   const removed: string[] = []
   const recipes: unknown[] = []
+  const journal: ExecutionRecord[] = []
   let current = options.record ?? null
   const descriptors: RuntimeDescriptorProvider = {
     forNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
@@ -289,6 +291,25 @@ const harness = (
       return { outcome: 'completed', log_tail: 'linux.install-container-runtime: 5 step(s) applied' }
     },
     sleep: async () => undefined,
+    journal: {
+      list: () => [...journal],
+      remove: async (id) => {
+        journal.splice(
+          journal.findIndex((entry) => entry.container_id === id),
+          1
+        )
+      },
+    },
+    removeEngineCaches: async (descriptorId) => {
+      removed.push(`caches:${descriptorId}`)
+    },
+    removeModels: async (engineId) => {
+      removed.push(`models:${engineId}`)
+    },
+    unloadEngineSessions: async (engineId) => {
+      removed.push(`unload:${engineId}`)
+      return { unloaded: 0 }
+    },
     onAssessment: (view) => views.push(view),
     newId: (() => {
       let n = 0
@@ -884,5 +905,62 @@ describe('the guest recipe — spec "Гость готовится тем же �
       code: 'MANAGED_PREREQUISITE_BLOCKED',
       message: expect.stringContaining('RTX 4070'),
     })
+  })
+})
+
+describe('the engine image through the guest’s Engine API (design D4)', () => {
+  const ENGINE = DESCRIPTOR.image['linux/amd64']
+  const ENGINE_REF = `${ENGINE.repository}@${ENGINE.digest}`
+
+  it('pulls by digest inside the guest with byte progress, verifies the digest there, and activates the installation', async () => {
+    const machine = importedWindows()
+    const h = harness(machine, { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+    const progress: { completed: number | null; total: number | null; unit: string }[] = []
+
+    await provisioner.pull(consented(), (tick) => progress.push(tick), signal)
+    expect(machine.wsl.guests?.['AtomicChat']?.host?.images).toContain(ENGINE_REF)
+    expect(progress.at(-1)).toMatchObject({ unit: 'bytes', total: DESCRIPTOR.download_bytes })
+    expect(progress.some((tick) => (tick.completed ?? 0) > 0)).toBe(true)
+    const curl = h.windows.wslCalls.find((argv) => argv.includes('curl'))
+    expect(curl?.slice(0, 5)).toEqual(['-d', 'AtomicChat', '-u', 'root', '--exec'])
+
+    await provisioner.verify(consented(), signal)
+    await provisioner.activate(consented(), signal)
+    const installed = await h.deps.installations.read('tensorrt-llm')
+    expect(installed?.installation.status).toBe('ready')
+    expect(installed?.platform).toBe('linux/amd64')
+    expect(installed?.image).toEqual(ENGINE)
+  })
+
+  it('a digest the guest does not hold fails verification', async () => {
+    const h = harness(importedWindows(), { record: RECORD })
+    await expect(createWindowsProvisioner(h.deps).verify(consented(), signal)).rejects.toMatchObject({
+      code: 'MANAGED_IDENTITY_MISMATCH',
+    })
+  })
+
+  it('removing the engine: loads held off and unloaded, its image and caches removed in the guest, the record gone', async () => {
+    const machine = importedWindows()
+    const h = harness(machine, { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.pull(consented(), () => undefined, signal)
+    await provisioner.activate(consented(), signal)
+
+    const removal = consented()
+    removal.request = { ...removal.request, kind: 'remove', retain_models: false }
+    await provisioner.remove(removal, signal)
+
+    expect(h.removed).toEqual(
+      expect.arrayContaining([
+        'unload:tensorrt-llm',
+        `caches:${DESCRIPTOR.descriptor_id}`,
+        'models:tensorrt-llm',
+      ])
+    )
+    expect(machine.wsl.guests?.['AtomicChat']?.host?.images ?? []).not.toContain(ENGINE_REF)
+    expect(await h.deps.installations.read('tensorrt-llm')).toBeNull()
+    // The distribution itself stays: removing the engine is not removing the environment.
+    expect((machine.wsl.distributions ?? []).map((d) => d.name)).toContain('AtomicChat')
   })
 })

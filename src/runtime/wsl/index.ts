@@ -7,3 +7,5 @@
  * Public API of this module is exported from this file only.
  */
 export * from './transport.js'
+export * from './guest-paths.js'
+export * from './guest-scope.js'

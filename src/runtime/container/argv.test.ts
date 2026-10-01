@@ -512,3 +512,31 @@ describe('buildRunOnceArgv', () => {
     expect(argv.slice(refIndex + 1)).toEqual(['nvidia-smi', '-L'])
   })
 })
+
+describe('buildCreateModelContainerArgv on Windows (change add-tensorrt-llm-windows, task 2.6)', () => {
+  it('takes guest mount sources and uid 1000 like any others: no Windows path, loopback only', () => {
+    const guest = '/var/lib/atomic-chat/scopes/k1'
+    const argv = buildCreateModelContainerArgv({
+      ...baseSpec,
+      mounts: {
+        model: { source: `${guest}/models/tensorrt-llm/qwen3` },
+        engineCache: { source: `${guest}/caches/d/qwen3` },
+        entrypoint: { source: `${guest}/watchdog/atomic-watchdog-entrypoint.sh` },
+        heartbeat: { source: `${guest}/heartbeats/g1` },
+      },
+      user: { uid: 1000, gid: 1000 },
+    })
+    expect(argv).toContain(`${guest}/models/tensorrt-llm/qwen3:/atomic/model:ro`)
+    expect(argv.slice(argv.indexOf('--user'), argv.indexOf('--user') + 2)).toEqual(['--user', '1000:1000'])
+    expect(argv[argv.indexOf('-p') + 1]).toBe('127.0.0.1:34521:8000')
+  })
+
+  it('refuses a Windows path as a mount source', () => {
+    expect(() =>
+      buildCreateModelContainerArgv({
+        ...baseSpec,
+        mounts: { ...baseSpec.mounts, model: { source: 'C:\\models\\qwen3' } },
+      })
+    ).toThrow(AtomicCoreError)
+  })
+})

@@ -119,6 +119,12 @@ export interface ManagedScopePaths {
   dockerConfigDir: string
   /** `<root>/watchdog/atomic-watchdog-entrypoint.sh` — the watchdog entrypoint, mounted read-only. */
   watchdogScript: string
+  /**
+   * `<root>/guest-scope.json` — Windows only (change `add-tensorrt-llm-windows`, design D5): this scope's
+   * `scope_key`, naming its folder in the WSL guest (`/var/lib/atomic-chat/scopes/<scope_key>/`). Kept
+   * with the scope's data, so moving the data folder keeps its models in the guest.
+   */
+  guestScopeFile: string
 }
 
 export interface DataLayout {
@@ -157,6 +163,7 @@ function managedScopePaths(coreDir: string): ManagedScopePaths {
     // `WATCHDOG_SCRIPT_FILENAME` in `runtime/container/watchdog.ts`; spelled here because `config/`
     // never imports a runtime module.
     watchdogScript: join(root, 'watchdog', 'atomic-watchdog-entrypoint.sh'),
+    guestScopeFile: join(root, 'guest-scope.json'),
   }
 }
 

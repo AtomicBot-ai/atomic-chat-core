@@ -552,6 +552,75 @@ describe('ManagedTextLifecycle: container, cache, journal, heartbeat', () => {
     expect(existsSync(join(data.layout.managed.heartbeatDir('gen-1'), 'heartbeat'))).toBe(true)
   })
 
+  it('on Windows (spec «Проверка параметров запуска на Windows»): guest paths, uid 1000, loopback only, the same limits as Linux', async () => {
+    // The guest's filesystem as core reaches it (in production `\\wsl.localhost\AtomicChat\…`; here a
+    // folder standing in for it), and the resolver that turns it into what the guest's Docker mounts.
+    const guestFs = join(data.root, 'guest-fs')
+    const scope = join(guestFs, 'var', 'lib', 'atomic-chat', 'scopes', 'k1')
+    const guestModel = join(scope, 'models', 'tensorrt-llm', 'model-a')
+    await mkdir(guestModel, { recursive: true })
+    const toGuest = (path: string): string =>
+      `/${path
+        .slice(guestFs.length + 1)
+        .split(/[\\/]/)
+        .join('/')}`
+    const guestPaths = {
+      ...data.layout.managed,
+      root: scope,
+      heartbeatsDir: join(scope, 'heartbeats'),
+      heartbeatDir: (generation: string) => join(scope, 'heartbeats', generation),
+      cachesDir: join(scope, 'caches'),
+      descriptorCachesDir: (descriptor: string) => join(scope, 'caches', descriptor),
+      engineCacheDir: (descriptor: string, model: string) =>
+        join(scope, 'caches', descriptor, model.replace('/', '%2F')),
+      watchdogScript: join(scope, 'watchdog', 'atomic-watchdog-entrypoint.sh'),
+    }
+    const resolved: string[] = []
+    await build({
+      paths: guestPaths,
+      deployment: createDesktopManagedDeployment({
+        allocateHostPort: async () => 41_500,
+        mountSource: toGuest,
+      }),
+      // `realpath` runs in the guest: a path is resolved where Docker will mount it.
+      createContainerDeps: {
+        realpath: async (path) => {
+          resolved.push(path)
+          return path
+        },
+      },
+      containerUser: { uid: 1000, gid: 1000 },
+    })
+    await lifecycle.load(request_({ modelPath: guestModel }))
+    const argv = docker.last().createArgv
+
+    const guestScope = '/var/lib/atomic-chat/scopes/k1'
+    expect(argv).toContain(`${guestScope}/models/tensorrt-llm/model-a:/atomic/model:ro`)
+    expect(argv).toContain(`${guestScope}/watchdog/atomic-watchdog-entrypoint.sh:/atomic/entrypoint.sh:ro`)
+    expect(argv).toContain(`${guestScope}/heartbeats/gen-1:/atomic/heartbeat:ro`)
+    expect(
+      argv.some(
+        (a) => a.startsWith(`${guestScope}/caches/engine-1.0-r1/`) && a.endsWith(':/atomic/engine-cache:rw')
+      )
+    ).toBe(true)
+    expect(resolved.every((path) => path.startsWith(guestScope))).toBe(true)
+    expect(argv.slice(argv.indexOf('--user'), argv.indexOf('--user') + 2)).toEqual(['--user', '1000:1000'])
+    const publish = argv[argv.indexOf('-p') + 1]
+    expect(publish).toMatch(/^127\.0\.0\.1:/)
+    // The same limits a Linux container gets, nothing loosened for Windows.
+    const linux = await (async () => {
+      await lifecycle.unload('org/model-a')
+      await build()
+      await lifecycle.load(request_())
+      return docker.last().createArgv
+    })()
+    const limits = (all: string[]) =>
+      all.filter((a) =>
+        /^--(cap-drop|security-opt|read-only|pids-limit|shm-size|ulimit|network|restart|init)/.test(a)
+      )
+    expect(limits(argv)).toEqual(limits(linux))
+  })
+
   /** An engine whose launch writes one file into its generation's read-only directory (final review I-2). */
   const withFiles = (files: Record<string, string>): ManagedTextAdapter<Record<string, never>> => ({
     ...beta,

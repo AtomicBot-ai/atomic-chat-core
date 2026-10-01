@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { projectSessionPort } from './backend-target.js'
 import { createDesktopManagedDeployment } from './deployment.js'
+import { wslMountSourceResolver } from './mount-source.js'
 import type { EngineLaunchSpec, ManagedDeployment, PreparedLaunch } from './types.js'
 
 const SPEC: EngineLaunchSpec = { container_port: 8000 }
@@ -105,5 +106,21 @@ describe('createDesktopManagedDeployment', () => {
     expect(prepared.publication.host).toBe('127.0.0.1')
     expect(Number.isInteger(prepared.publication.host_port)).toBe(true)
     expect(projectSessionPort(prepared.target)).toBe(prepared.publication.host_port)
+  })
+})
+
+describe('createDesktopManagedDeployment on Windows (change add-tensorrt-llm-windows, task 2.6)', () => {
+  it('binds the heartbeat the guest’s Docker sees, from the \\\\wsl.localhost path core writes it at', async () => {
+    const deployment = createDesktopManagedDeployment({
+      allocateHostPort: async () => 41_000,
+      mountSource: wslMountSourceResolver('AtomicChat'),
+    })
+    const core = '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\heartbeats\\g1'
+    const prepared = await deployment.prepareLaunch({ container_port: 8000 }, core)
+    expect(prepared.heartbeat).toEqual({
+      core_path: core,
+      mount_source: '/var/lib/atomic-chat/scopes/k1/heartbeats/g1',
+    })
+    expect(prepared.publication.host).toBe('127.0.0.1')
   })
 })
