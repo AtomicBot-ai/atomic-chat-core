@@ -12,7 +12,10 @@
  * The brief's list, one test each: the adopt path; the install path with a relogin; a polkit
  * refusal; `MANAGED_PLAN_CHANGED`; a GPU not visible in a container; a repeated `request_id`; a
  * restart mid-pull (image there → verifying, not there → the pull continues); a receipt with no real
- * result behind it; and a removal while a model container of the engine still runs.
+ * result behind it; and a removal while a model container of the engine still runs. Then the
+ * environment manifest (change `extract-environment-manifest`), served by the fake conf: one
+ * published during the sign-in wait, one published before the consent, none at all on a first start,
+ * and another platform's that the core never asks for.
  *
  * No imports from `src/`: a packaging change that breaks a route cannot pass by type-checking.
  */
@@ -33,7 +36,10 @@ import {
   ENGINE_IMAGE,
   fakeManagedHost,
   GPU_UUID,
+  LINUX_MANIFEST,
+  LINUX_MANIFEST_PATH,
   PROBE_IMAGE,
+  WINDOWS_MANIFEST_PATH,
   readyState,
   REQUIRED_DISK_BYTES,
   type FakeManagedHost,
@@ -861,4 +867,156 @@ describe('what the app shows before consent (task 2.22)', () => {
       )
     }
   )
+})
+
+describe('the environment manifest through the compiled core (change extract-environment-manifest)', () => {
+  interface Plan {
+    plan_digest: string
+    availability: string
+    adopts_existing_engine: boolean
+    requires_elevation: boolean
+    environment_manifest_id: string | null
+    blockers: { code: string; reason?: string }[]
+  }
+  const probe = async (ready: ReadyLine): Promise<Plan> =>
+    (await (
+      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+    ).json()) as Plan
+
+  /** The next manifest conf publishes: a new id and, when given, a different distribution list. */
+  const publish = (manifestId: string, distributions?: Array<Record<string, string>>): void => {
+    host?.conf.set(
+      LINUX_MANIFEST_PATH,
+      JSON.stringify({
+        ...LINUX_MANIFEST,
+        manifest_id: manifestId,
+        ...(distributions === undefined
+          ? {}
+          : { recipes: [{ recipe_id: 'linux.install-container-runtime', distributions }] }),
+      })
+    )
+  }
+
+  it('a manifest published during the sign-in wait changes nothing: the operation finishes on the consented one', async () => {
+    host = await fakeManagedHost(cleanState())
+    const first = await start()
+    expect((await probe(first.ready)).environment_manifest_id).toBe('linux-r1')
+    const asking = await beginAndApprove(first.ready)
+    const waiting = await poll(first.ready, asking.operation_id, settled)
+    const step = waiting.pending_host_step as PendingHostStep
+    await post(
+      first.ready,
+      `/environments/operations/${asking.operation_id}/host-step-result`,
+      host.runHostStep(step, 'completed')
+    )
+    expect((await poll(first.ready, asking.operation_id, settled)).phase).toBe('relogin-required')
+
+    // conf publishes linux-r2, which no longer lists Ubuntu 24.04, while the user is signing back in.
+    publish('linux-r2', [{ id: 'debian', version_id: '12', arch: 'x86_64' }])
+    await crash()
+    host.update((state) => ({
+      ...state,
+      group: { configured: true, effective: true },
+      docker: { ...state.docker, reachable: true },
+    }))
+    const second = await start()
+    const done = await poll(
+      second.ready,
+      asking.operation_id,
+      (o) => o.phase === 'ready' || o.phase === 'failed' || o.phase === 'awaiting-consent'
+    )
+    expect(done.phase).toBe('ready')
+    expect(done.error).toBeNull()
+    expect(done.plan_digest).toBe(done.approved_plan_digest)
+    expect(host.calls().filter((call) => call[0] === 'host-step')).toHaveLength(1)
+    // A fresh probe, outside the operation, does see the new manifest.
+    expect((await probe(second.ready)).environment_manifest_id).toBe('linux-r2')
+  })
+
+  it('a manifest published between the probe and the consent: the old approval is refused with MANAGED_PLAN_CHANGED', async () => {
+    host = await fakeManagedHost(readyState())
+    const { ready } = await start()
+    const started = (await (
+      await post(ready, '/environments/default/operations', setup())
+    ).json()) as Operation
+    const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+
+    publish('linux-r2')
+    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+      expected_revision: asking.revision,
+      approved_plan_digest: asking.plan_digest,
+    })
+    const changed = await poll(
+      ready,
+      started.operation_id,
+      (o) => o.phase === 'awaiting-consent' && o.revision > asking.revision
+    )
+    expect(changed.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(changed.plan_digest).not.toBe(asking.plan_digest)
+    expect(host.pulls).toEqual([])
+
+    // Approving the plan built on linux-r2 goes through.
+    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+      expected_revision: changed.revision,
+      approved_plan_digest: changed.plan_digest,
+    })
+    expect(
+      (await poll(ready, started.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+    ).toBe('ready')
+  })
+
+  it('first start with no network and no cached manifest: a host with a working Docker is adopted and set up', async () => {
+    host = await fakeManagedHost(readyState())
+    host.confOffline = true
+    const { ready } = await start()
+    const plan = await probe(ready)
+    expect(plan).toMatchObject({
+      adopts_existing_engine: true,
+      requires_elevation: false,
+      environment_manifest_id: null,
+      blockers: [],
+    })
+    const asking = await beginAndApprove(ready)
+    expect(
+      (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+    ).toBe('ready')
+    expect(existsSync(join(managedRoot, 'environment-manifests'))).toBe(false)
+  })
+
+  it('first start with no network and no cached manifest: a host that needs Docker is blocked, with no privileged step', async () => {
+    host = await fakeManagedHost(cleanState())
+    host.confOffline = true
+    const { ready } = await start()
+    const plan = await probe(ready)
+    expect(plan.availability).toBe('prerequisite-blocked')
+    expect(plan.requires_elevation).toBe(false)
+    expect(plan.environment_manifest_id).toBeNull()
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({
+        code: 'MANAGED_METADATA_INVALID',
+        reason: 'environment-manifest-unavailable',
+      }),
+    ])
+  })
+
+  it('never asks conf for another platform’s manifest, and a change there changes nothing', async () => {
+    host = await fakeManagedHost(readyState())
+    const { ready } = await start()
+    const before = await probe(ready)
+    host.conf.set(
+      WINDOWS_MANIFEST_PATH,
+      JSON.stringify({ schema_version: 1, manifest_id: 'windows-r2', platform: 'windows' })
+    )
+    const after = await probe(ready)
+    expect(after.plan_digest).toBe(before.plan_digest)
+    const asking = await beginAndApprove(ready)
+    expect(
+      (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+    ).toBe('ready')
+
+    expect(host.confRequests.length).toBeGreaterThan(0)
+    expect(new Set(host.confRequests)).toEqual(new Set([LINUX_MANIFEST_PATH]))
+    // The accepted manifest is cached in the shared root, by its id.
+    expect(existsSync(join(managedRoot, 'environment-manifests', 'linux-r1.json'))).toBe(true)
+  })
 })

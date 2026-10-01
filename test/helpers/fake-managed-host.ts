@@ -6,6 +6,12 @@
  * an image pull and records every pull. `runHostStep` is the fake privileged executor: it changes
  * the machine the way the recipe would (or not at all) and hands back the receipt a client posts.
  *
+ * conf main is faked too, for the environment manifest (change `extract-environment-manifest`): an
+ * HTTPS server on loopback with the test CA (`test/fixtures/tls`, trusted through
+ * `NODE_EXTRA_CA_CERTS`) serves `runtimes/environments/*.json` from `conf`, which a test can change
+ * mid-run (a newly published manifest) or take off the network (`confOffline`), and records every
+ * path the core asked for (`confRequests`). The core's manifest override points at its `linux.json`.
+ *
  * Nothing here imports from `src/`: the e2e suite drives the binary only through its routes.
  */
 import {
@@ -18,6 +24,8 @@ import {
   writeFileSync,
 } from 'node:fs'
 import http from 'node:http'
+import https from 'node:https'
+import type { Socket } from 'node:net'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -40,6 +48,16 @@ export const DESCRIPTOR_ID = DESCRIPTOR.descriptor_id
 export const ENGINE_IMAGE = `${DESCRIPTOR.image['linux/amd64']!.repository}@${DESCRIPTOR.image['linux/amd64']!.digest}`
 export const PROBE_IMAGE = `${DESCRIPTOR.probe_image['linux/amd64']!.repository}@${DESCRIPTOR.probe_image['linux/amd64']!.digest}`
 export const GPU_UUID = 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11'
+
+const MANIFEST_FIXTURE = fileURLToPath(
+  new URL('../fixtures/runtimes/environments/linux.json', import.meta.url)
+)
+/** conf's Linux environment manifest (`linux-r1`), as the fixture has it. */
+export const LINUX_MANIFEST = JSON.parse(readFileSync(MANIFEST_FIXTURE, 'utf8')) as Record<string, unknown>
+/** Where the fake conf serves each platform's manifest. */
+export const LINUX_MANIFEST_PATH = '/runtimes/environments/linux.json'
+export const WINDOWS_MANIFEST_PATH = '/runtimes/environments/windows.json'
+const tls = (name: string): string => fileURLToPath(new URL(`../fixtures/tls/${name}`, import.meta.url))
 
 const COMMANDS = [
   'uname',
@@ -87,6 +105,12 @@ export interface PendingHostStep {
 export interface FakeManagedHost {
   dir: string
   env: Record<string, string>
+  /** conf main, path → document; a path that is not here answers 404. */
+  conf: Map<string, string>
+  /** While true, the conf server drops every connection before a byte is read: no network. */
+  confOffline: boolean
+  /** Every path the core asked conf for, oldest first. */
+  confRequests: string[]
   state(): FakeLinuxHostState
   update(change: (state: FakeLinuxHostState) => FakeLinuxHostState): void
   /** Every probe or docker command the core ran, oldest first. */
@@ -157,12 +181,46 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
   }
   write(initial)
 
+  // conf main: `linux.json` is the fixture; a Windows manifest is published too, to show it is
+  // never asked for (spec `runtime-environment-manifest`: core on Linux reads only Linux's).
+  const conf = new Map<string, string>([
+    [LINUX_MANIFEST_PATH, readFileSync(MANIFEST_FIXTURE, 'utf8')],
+    [
+      WINDOWS_MANIFEST_PATH,
+      JSON.stringify({ schema_version: 1, manifest_id: 'windows-r1', platform: 'windows' }),
+    ],
+  ])
+  const confRequests: string[] = []
+  const confServer = https.createServer(
+    { key: readFileSync(tls('server.key')), cert: readFileSync(tls('server.pem')) },
+    (req, res) => {
+      const path = new URL(req.url ?? '/', 'https://conf').pathname
+      confRequests.push(path)
+      const body = conf.get(path)
+      if (body === undefined) {
+        res.writeHead(404).end('404: Not Found')
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(body)
+    }
+  )
+  confServer.on('connection', (socket: Socket) => {
+    if (host.confOffline) socket.destroy()
+  })
+  await new Promise<void>((resolve) => confServer.listen(0, '127.0.0.1', resolve))
+  const confPort = (confServer.address() as { port: number }).port
+
   const host: FakeManagedHost = {
     dir,
     env: {
       ATOMIC_MANAGED_TEST_HOST: dir,
       ATOMIC_RUNTIME_DESCRIPTOR_URL: DESCRIPTOR_URL,
+      ATOMIC_ENVIRONMENT_MANIFEST_URL: `https://127.0.0.1:${confPort}${LINUX_MANIFEST_PATH}`,
+      NODE_EXTRA_CA_CERTS: tls('ca.pem'),
     },
+    conf,
+    confOffline: false,
+    confRequests,
     state: read,
     update: (change) => write(change(read())),
     calls: () =>
@@ -218,8 +276,10 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
       }
     },
     close: async () => {
-      server.closeAllConnections()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      for (const listening of [server, confServer]) {
+        listening.closeAllConnections()
+        await new Promise<void>((resolve) => listening.close(() => resolve()))
+      }
     },
   }
 
