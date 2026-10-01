@@ -441,10 +441,10 @@ export function pickTierModel(
 }
 
 /** A runtime descriptor from a `file://` URL (a conf checkout or the fixture copy) or over HTTPS. */
-export async function readDescriptor<T>(url: string): Promise<T> {
+export async function readDescriptor<T>(url: string, what = 'descriptor'): Promise<T> {
   if (url.startsWith('file://')) return JSON.parse(readFileSync(fileURLToPath(url), 'utf8')) as T
   const res = await fetch(url)
-  if (!res.ok) throw new Error(`descriptor ${url} answered ${res.status}`)
+  if (!res.ok) throw new Error(`${what} ${url} answered ${res.status}`)
   return (await res.json()) as T
 }
 

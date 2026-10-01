@@ -24,8 +24,9 @@
  * kills the one core process it spawned itself.
  *
  * Runs only with ATOMIC_LIVE=1 on Linux with `/usr/bin/nvidia-smi`; anywhere else every scenario is
- * skipped with that reason. Optional: ATOMIC_LIVE_CORE_BIN, ATOMIC_RUNTIME_DESCRIPTOR_URL (default:
- * the conf fixture copy in this repo), ATOMIC_LIVE_MANAGED_ROOT (the managed root the engine was set
+ * skipped with that reason. Optional: ATOMIC_LIVE_CORE_BIN, ATOMIC_RUNTIME_DESCRIPTOR_URL and
+ * ATOMIC_ENVIRONMENT_MANIFEST_URL (default: the conf fixture copies in this repo,
+ * `test/fixtures/runtimes/`), ATOMIC_LIVE_MANAGED_ROOT (the managed root the engine was set
  * up in; default the per-user one), ATOMIC_LIVE_OUT, ATOMIC_LIVE_MODEL_CACHE, ATOMIC_LIVE_TRT_MODEL,
  * ATOMIC_LIVE_TRT_CONTEXT_LENGTH, ATOMIC_LIVE_TRT_VRAM_TOLERANCE_MIB, ATOMIC_LIVE_PUBLIC_PORT,
  * ATOMIC_LIVE_UPSTREAM_BIN and ATOMIC_LIVE_UPSTREAM_MODEL (the residency race), HF_ENDPOINT, HF_TOKEN. The core runs with DO_NOT_TRACK=1: a test run sends no error reports.
@@ -93,6 +94,7 @@ import {
   cardBytes,
   compareVersions,
   detectHost,
+  type EnvironmentManifestDoc,
   gpuMemoryUsed,
   parseNvidiaSmi,
   run,
@@ -117,6 +119,10 @@ const BIN =
 const DESCRIPTOR_URL =
   process.env['ATOMIC_RUNTIME_DESCRIPTOR_URL'] ??
   pathToFileURL(join(ROOT, 'test/fixtures/runtimes/tensorrt-llm.json')).href
+/** The Linux environment manifest: the install recipe's qualified distributions (change `extract-environment-manifest`). */
+const MANIFEST_URL =
+  process.env['ATOMIC_ENVIRONMENT_MANIFEST_URL'] ??
+  pathToFileURL(join(ROOT, 'test/fixtures/runtimes/environments/linux.json')).href
 const MANAGED_ROOT = process.env['ATOMIC_LIVE_MANAGED_ROOT'] ?? null
 const MODEL_CACHE =
   process.env['ATOMIC_LIVE_MODEL_CACHE'] ?? join(homedir(), '.cache', 'atomic-chat-live', 'hf')
@@ -227,10 +233,6 @@ interface Descriptor {
     string,
     { tool_parser: string | null; reasoning_parser: string | null; structured_output: boolean }
   >
-  recipes: Array<{
-    recipe_id: string
-    distributions: Array<{ id: string; version_id: string; arch: string }>
-  }>
 }
 
 interface SessionInfo {
@@ -296,6 +298,7 @@ interface CardRun {
 
 const S: {
   descriptor: Descriptor
+  manifest: EnvironmentManifestDoc
   facts: HostFacts
   problems: string[]
   constants: CitedConstant[]
@@ -320,6 +323,7 @@ const S: {
   prepared: Map<string, PreparedModel>
 } = {
   descriptor: undefined as unknown as Descriptor,
+  manifest: undefined as unknown as EnvironmentManifestDoc,
   facts: undefined as unknown as HostFacts,
   problems: [],
   constants: [],
@@ -884,7 +888,8 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
   beforeAll(async () => {
     if (!ENABLED) return
     S.descriptor = await readDescriptor<Descriptor>(DESCRIPTOR_URL)
-    S.facts = detectHost(S.descriptor)
+    S.manifest = await readDescriptor<EnvironmentManifestDoc>(MANIFEST_URL, 'environment manifest')
+    S.facts = detectHost(S.manifest)
     S.problems = hostProblems(S.facts, S.descriptor)
     S.constants = readSourceConstants(ROOT, SOURCE_CONSTANTS)
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
@@ -895,6 +900,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
     mkdirSync(S.dataFolder, { recursive: true })
     S.coreEnv = {
       ATOMIC_RUNTIME_DESCRIPTOR_URL: DESCRIPTOR_URL,
+      ATOMIC_ENVIRONMENT_MANIFEST_URL: MANIFEST_URL,
       ...(MANAGED_ROOT === null ? {} : { ATOMIC_CORE_MANAGED_ROOT: MANAGED_ROOT }),
       HOME: homedir(),
       DO_NOT_TRACK: '1',
@@ -942,6 +948,7 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
       git_head: run('git', ['-C', ROOT, 'rev-parse', 'HEAD']).stdout.trim() || null,
       managed_root: MANAGED_ROOT ?? 'the per-user default (<dataDir>/atomic-managed-runtimes)',
     })
+    report.section('environment_manifest', { url: MANIFEST_URL, manifest_id: S.manifest.manifest_id })
     report.section('descriptor', {
       url: DESCRIPTOR_URL,
       descriptor_id: S.descriptor.descriptor_id,
@@ -1015,7 +1022,9 @@ describe('TensorRT-LLM engine on every NVIDIA card of a real Linux host (task 2.
         )
       expect(
         installation.active_descriptor_id,
-        `the engine is pinned to ${installation.active_descriptor_id}; point ATOMIC_RUNTIME_DESCRIPTOR_URL at that descriptor`
+        `the engine is pinned to ${installation.active_descriptor_id}; point ATOMIC_RUNTIME_DESCRIPTOR_URL at that ` +
+          'descriptor and ATOMIC_ENVIRONMENT_MANIFEST_URL at the environment manifest that goes with it ' +
+          '(an engine set up from tensorrt-llm-1.2.1-r1 is reinstalled: remove, then setup from r2)'
       ).toBe(S.descriptor.descriptor_id)
     }
   )

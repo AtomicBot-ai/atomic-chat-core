@@ -176,11 +176,13 @@ bun build --compile --target=bun-linux-arm64 --minify-syntax --minify-whitespace
   src/cli/bin.ts --outfile dist/bin/atomic-chat-core-aarch64-unknown-linux-gnu
 ```
 
-Copy the checkout without `node_modules`, the binary, and the conf descriptor to the VM:
+Copy the checkout without `node_modules`, the binary, the conf descriptor and the conf environment
+manifest to the VM:
 
 ```sh
 rsync -a --exclude node_modules --exclude test/tmp ./ vm:atomic-chat-core/
 scp ../atomic-chat-conf/runtimes/tensorrt-llm.json vm:tensorrt-llm.json
+scp ../atomic-chat-conf/runtimes/environments/linux.json vm:linux.json
 ssh vm 'cd atomic-chat-core && ~/.bun/bin/bun install --frozen-lockfile'
 ```
 
@@ -200,6 +202,7 @@ cd ~/atomic-chat-core
 . /etc/os-release
 ATOMIC_LIVE=1 ATOMIC_LIVE_MANAGED=1 \
 ATOMIC_RUNTIME_DESCRIPTOR_URL="file://$HOME/tensorrt-llm.json" \
+ATOMIC_ENVIRONMENT_MANIFEST_URL="file://$HOME/linux.json" \
 npx vitest run --project live test/live/managed-install.test.ts 2>&1 \
   | tee "managed-install-$ID-$VERSION_ID-$(uname -m).log"
 ```
@@ -211,8 +214,12 @@ keeps that login's groups, so the relogin emulation is unaffected as well.
 
 Both opt-ins are required: `ATOMIC_LIVE=1` alone (which `npm run test:live` sets) never starts this test,
 because it installs system packages. Without `ATOMIC_RUNTIME_DESCRIPTOR_URL` the test uses the verbatim
-copy in `test/fixtures/runtimes/tensorrt-llm.json`. Set it explicitly whenever conf has changed since that
-copy.
+copy in `test/fixtures/runtimes/tensorrt-llm.json`, and without `ATOMIC_ENVIRONMENT_MANIFEST_URL` the
+copy in `test/fixtures/runtimes/environments/linux.json`. Set both explicitly whenever conf has changed
+since those copies. The two are separate documents: the descriptor says what the engine needs (image,
+driver, compute capability), the manifest says on which distributions the core installs Docker and the
+toolkit itself. The test passes both to the core it starts, and decides whether this host is a recipe
+host from the manifest.
 
 Optional variables:
 
@@ -264,7 +271,8 @@ Do not attach `data/`, which holds the model's hard links.
 
 Put a table in the PR description: one row per distribution, version, arch and starting state, with its
 passed, failed and skipped counts. A distribution or version whose run fails must not stay in
-`recipes[].distributions` of `atomic-chat-conf/runtimes/tensorrt-llm.json` (conf task 1.2).
+`recipes[].distributions` of `atomic-chat-conf/runtimes/environments/linux.json`: removing it, like
+adding one, is a new `manifest_id`, and the engine descriptor does not change.
 
 ## Engine test (task 2.19)
 
@@ -343,6 +351,7 @@ tmux new -s engine
 cd ~/atomic-chat-core
 ATOMIC_LIVE=1 \
 ATOMIC_RUNTIME_DESCRIPTOR_URL="file://$HOME/tensorrt-llm.json" \
+ATOMIC_ENVIRONMENT_MANIFEST_URL="file://$HOME/linux.json" \
 ATOMIC_LIVE_MANAGED_ROOT="$HOME/atomic-chat-core/test/tmp/live-managed-install/<install run>/managed" \
 npx vitest run --project live test/live/tensorrt-llm.test.ts 2>&1 \
   | tee "tensorrt-llm-$(hostname)-$(date +%Y%m%d-%H%M).log"
@@ -354,7 +363,12 @@ command above in a script) survives an ssh drop as well.
 Leave out `ATOMIC_LIVE_MANAGED_ROOT` when the app or `atc` set the engine up. `ATOMIC_RUNTIME_DESCRIPTOR_URL`
 must name the descriptor the engine was installed with, because `preconditions` compares the ids. Until
 conf merges, that is the `file://` URL of your copy of `atomic-chat-conf/runtimes/tensorrt-llm.json`.
-Without it, the test reads the fixture copy in `test/fixtures/runtimes/tensorrt-llm.json`.
+Without it, the test reads the fixture copy in `test/fixtures/runtimes/tensorrt-llm.json`. An engine
+installed from `tensorrt-llm-1.2.1-r1` (the shape with `recipes`, before the environment manifest) is
+not served by this core any more: remove it and set it up again from `r2`.
+`ATOMIC_ENVIRONMENT_MANIFEST_URL` (default: `test/fixtures/runtimes/environments/linux.json`) goes to
+the core the same way; an installed engine never needs the manifest, so it only matters if the run
+probes a host that still needs setup.
 
 The only opt-in is `ATOMIC_LIVE=1`, on Linux with `/usr/bin/nvidia-smi`. Anywhere else, every scenario is
 skipped with the reason. The CI live job on runners without a GPU is one example. `npm run test:live`

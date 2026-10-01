@@ -29,7 +29,8 @@
  *
  * Opt in with ATOMIC_LIVE=1 and ATOMIC_LIVE_MANAGED=1 on Linux (it installs system packages with
  * sudo, so `npm run test:live` alone never starts it). Optional: ATOMIC_LIVE_CORE_BIN,
- * ATOMIC_RUNTIME_DESCRIPTOR_URL (default: the conf fixture copy in this repo), ATOMIC_LIVE_OUT,
+ * ATOMIC_RUNTIME_DESCRIPTOR_URL and ATOMIC_ENVIRONMENT_MANIFEST_URL (default: the conf fixture copies
+ * in this repo, `test/fixtures/runtimes/`), ATOMIC_LIVE_OUT,
  * ATOMIC_LIVE_MODEL_CACHE, ATOMIC_LIVE_TRT_MODEL, ATOMIC_LIVE_TRT_CONTEXT_LENGTH,
  * ATOMIC_LIVE_PUBLIC_PORT, ATOMIC_LIVE_SENTINELS, ATOMIC_LIVE_SENTINEL_IMAGE,
  * ATOMIC_LIVE_MANAGED_KEEP_ENGINE (skip the final removal, to run the engine test next), HF_ENDPOINT,
@@ -58,6 +59,7 @@ import {
   pickLaunchCard,
   daemonJsonDigest,
   detectHost,
+  type EnvironmentManifestDoc,
   dockerCli,
   packageSetDigest,
   groupGid,
@@ -84,6 +86,10 @@ const BIN =
 const DESCRIPTOR_URL =
   process.env['ATOMIC_RUNTIME_DESCRIPTOR_URL'] ??
   pathToFileURL(join(ROOT, 'test/fixtures/runtimes/tensorrt-llm.json')).href
+/** The Linux environment manifest: the install recipe's qualified distributions (change `extract-environment-manifest`). */
+const MANIFEST_URL =
+  process.env['ATOMIC_ENVIRONMENT_MANIFEST_URL'] ??
+  pathToFileURL(join(ROOT, 'test/fixtures/runtimes/environments/linux.json')).href
 const PUBLIC_PORT = Number(process.env['ATOMIC_LIVE_PUBLIC_PORT'] ?? 1337)
 const CONTEXT_LENGTH = process.env['ATOMIC_LIVE_TRT_CONTEXT_LENGTH']
   ? Number(process.env['ATOMIC_LIVE_TRT_CONTEXT_LENGTH'])
@@ -183,10 +189,6 @@ interface Descriptor {
   image: Record<string, { repository: string; digest: string }>
   probe_image: Record<string, { repository: string; digest: string }>
   curated_models: CuratedModel[]
-  recipes: Array<{
-    recipe_id: string
-    distributions: Array<{ id: string; version_id: string; arch: string }>
-  }>
 }
 
 interface SystemChange {
@@ -219,6 +221,7 @@ interface HostStepResult {
 /** Everything the scenarios hand each other, in file order. */
 const S: {
   descriptor: Descriptor
+  manifest: EnvironmentManifestDoc
   facts: HostFacts
   path: SetupPath
   problems: string[]
@@ -255,6 +258,7 @@ const S: {
   containerId: string | null
 } = {
   descriptor: undefined as unknown as Descriptor,
+  manifest: undefined as unknown as EnvironmentManifestDoc,
   facts: undefined as unknown as HostFacts,
   path: 'unsupported',
   problems: [],
@@ -464,13 +468,14 @@ const needsHostPrepared = (): string | null =>
 describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task 2.18)', () => {
   beforeAll(async () => {
     S.descriptor = await readDescriptor<Descriptor>(DESCRIPTOR_URL)
-    S.facts = detectHost(S.descriptor)
+    S.manifest = await readDescriptor<EnvironmentManifestDoc>(MANIFEST_URL, 'environment manifest')
+    S.facts = detectHost(S.manifest)
     S.path = setupPath(S.facts)
     S.problems = preconditionProblems(S.facts, S.descriptor)
     if (!existsSync(BIN)) S.problems.push(`no core binary at ${BIN} (build it or set ATOMIC_LIVE_CORE_BIN)`)
     if (S.path === 'unsupported')
       S.problems.push(
-        `${S.facts.os.id} ${S.facts.os.version_id ?? ''} ${S.facts.arch} is neither on the descriptor's recipe list nor Arch, ` +
+        `${S.facts.os.id} ${S.facts.os.version_id ?? ''} ${S.facts.arch} is neither on the environment manifest's recipe list nor Arch, ` +
           'and Docker with a GPU runtime is not ready for this user: there is no setup path to test here'
       )
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
@@ -483,6 +488,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
     S.coreEnv = {
       ATOMIC_CORE_MANAGED_ROOT: join(S.out, 'managed'),
       ATOMIC_RUNTIME_DESCRIPTOR_URL: DESCRIPTOR_URL,
+      ATOMIC_ENVIRONMENT_MANIFEST_URL: MANIFEST_URL,
       HOME: homedir(),
       // Both cores alike: the relogin core goes through sudo's env_reset, which would drop what the
       // first one inherits. No error reports from a test run, and the runtime dir a login has.
@@ -496,6 +502,7 @@ describe.skipIf(!ENABLED)('managed TensorRT-LLM install on a real Linux VM (task
       sha256: existsSync(BIN) ? createHash('sha256').update(readFileSync(BIN)).digest('hex') : null,
       git_head: run('git', ['-C', ROOT, 'rev-parse', 'HEAD']).stdout.trim() || null,
     })
+    report.section('environment_manifest', { url: MANIFEST_URL, manifest_id: S.manifest.manifest_id })
     report.section('descriptor', {
       url: DESCRIPTOR_URL,
       descriptor_id: S.descriptor.descriptor_id,

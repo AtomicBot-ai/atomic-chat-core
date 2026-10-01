@@ -229,7 +229,7 @@ export interface HostFacts {
   arch: string
   kernel: string
   family: PackageFamily
-  /** `(id, version_id, arch)` is on the descriptor's `linux.install-container-runtime` list. */
+  /** `(id, version_id, arch)` is on the environment manifest's `linux.install-container-runtime` list. */
   in_recipe: boolean
   /** rpm-ostree (Silverblue, Kinoite, Bazzite): no recipe path, a blocker. */
   immutable: boolean
@@ -262,10 +262,19 @@ export interface HostFacts {
   docker: DockerFacts
 }
 
-export interface RecipeDescriptor {
+/** What the engine descriptor asks of the host: the driver and compute-capability floor. */
+export interface HostDescriptor {
   descriptor_id: string
   minimum_driver_version: string
   minimum_compute_capability: string
+}
+
+/**
+ * The environment manifest (`runtimes/environments/linux.json`, change `extract-environment-manifest`):
+ * the distributions the install recipe is qualified on. The descriptor no longer carries them.
+ */
+export interface EnvironmentManifestDoc {
+  manifest_id: string
   recipes: Array<{
     recipe_id: string
     distributions: Array<{ id: string; version_id: string; arch: string }>
@@ -426,12 +435,12 @@ function dockerFacts(): DockerFacts {
   }
 }
 
-/** Reads the machine. `descriptor` decides whether this distribution is on the recipe's list. */
-export function detectHost(descriptor: RecipeDescriptor): HostFacts {
+/** Reads the machine. `manifest` decides whether this distribution is on the recipe's list. */
+export function detectHost(manifest: EnvironmentManifestDoc): HostFacts {
   const os = parseOsRelease(existsSync('/etc/os-release') ? readFileSync('/etc/os-release', 'utf8') : '')
   const arch = run('uname', ['-m']).stdout.trim()
   const family = packageFamily(os)
-  const recipe = descriptor.recipes.find((r) => r.recipe_id === 'linux.install-container-runtime')
+  const recipe = manifest.recipes.find((r) => r.recipe_id === 'linux.install-container-runtime')
   const inRecipe =
     recipe?.distributions.some((d) => d.id === os.id && d.version_id === os.version_id && d.arch === arch) ??
     false
@@ -507,7 +516,7 @@ export function addressPoolWarningExpected(facts: HostFacts): boolean {
 }
 
 /** Why the VM cannot run this test at all; empty when it can. */
-export function preconditionProblems(facts: HostFacts, descriptor: RecipeDescriptor): string[] {
+export function preconditionProblems(facts: HostFacts, descriptor: HostDescriptor): string[] {
   const problems: string[] = []
   if (facts.uid === 0)
     problems.push('run the test as a normal user with passwordless sudo, not as root (root needs no relogin)')
