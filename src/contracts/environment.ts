@@ -169,6 +169,25 @@ export interface EnvironmentSnapshot {
    * `runtime-descriptor-catalog`, "Минимальные версии соблюдаются").
    */
   minimum_app_version: string | null
+  /**
+   * The WSL distribution this environment runs in (change `add-tensorrt-llm-windows`): on Windows,
+   * once core has imported its own one; `null` before that and always on Linux, where the
+   * environment is the host itself. Additive: a client that predates it ignores the key.
+   */
+  distribution: EnvironmentDistribution | null
+}
+
+/**
+ * Atomic Chat's own WSL distribution as a client shows it: its registered `name`, the Windows
+ * directory that holds its `ext4.vhdx` (`path`, under the user's `%LOCALAPPDATA%`), and how many
+ * bytes that disk image takes on the Windows volume (`size_bytes`). The image grows and never shrinks
+ * by itself, so this is the space removing the environment gives back. Null when it could not be
+ * read — never a guessed 0.
+ */
+export interface EnvironmentDistribution {
+  name: string
+  path: string
+  size_bytes: number | null
 }
 
 /**
@@ -199,21 +218,41 @@ export interface ContainerRuntimeStepParameters {
 }
 
 /**
+ * The validated values of a `windows.enable-wsl` step (change `add-tensorrt-llm-windows`, design
+ * D2): none. The elevated executor only ever runs `wsl --install --no-distribution`, so nothing a
+ * client or a user could choose reaches it; the digest still binds the (empty) object, the same
+ * check every action gets.
+ */
+export type EnableWslStepParameters = Record<string, never>
+
+/**
+ * The parameters of each privileged action, keyed by `ManagedHostStep.action`: one action, one
+ * shape, so a client and the executor tell them apart by the action alone.
+ */
+export interface ManagedHostStepParameters {
+  'linux.install-container-runtime': ContainerRuntimeStepParameters
+  'windows.enable-wsl': EnableWslStepParameters
+}
+
+/**
  * The pending privileged step. `nonce` is single-use and `expected_operation_revision` pins it to
  * one state of one operation, so a receipt cannot be replayed into a later phase. The digests bind
  * it to the exact recipe and parameters the user approved; `parameters` are those parameters, which
- * the client writes into the host-step request file unchanged.
+ * the client writes into the host-step request file unchanged. A union by `action`: the parameters'
+ * shape is the action's own (`ManagedHostStepParameters`).
  */
-export interface ManagedHostStep {
-  step_id: string
-  action: ManagedHostAction
-  recipe_id: string
-  recipe_digest: Sha256Digest
-  parameters_digest: Sha256Digest
-  parameters: ContainerRuntimeStepParameters
-  nonce: string
-  expected_operation_revision: number
-}
+export type ManagedHostStep = {
+  [A in ManagedHostAction]: {
+    step_id: string
+    action: A
+    recipe_id: string
+    recipe_digest: Sha256Digest
+    parameters_digest: Sha256Digest
+    parameters: ManagedHostStepParameters[A]
+    nonce: string
+    expected_operation_revision: number
+  }
+}[ManagedHostAction]
 
 /**
  * What the app reports back after the OS authorization prompt. It is an assertion, not proof: the
@@ -335,6 +374,27 @@ export interface ManagedPlanWarning {
 }
 
 /**
+ * The Windows causes of a blocker (`ManagedBlocker.reason`) or of a failure (`ErrorBody.details`) a
+ * client switches on (change `add-tensorrt-llm-windows`, spec `wsl-runtime-environment`):
+ * - `wsl-localhost-forwarding` — the engine answers inside the distribution but not on Windows'
+ *   `127.0.0.1`: WSL's localhost forwarding is off or broken (`.wslconfig`);
+ * - `wsl-stopped` — the distribution or the WSL VM stopped under a running session;
+ * - `wsl-version` — the installed WSL is older than the manifest's `minimum_wsl_version`;
+ * - `wsl1-distribution` — Atomic Chat's own distribution is registered as WSL 1;
+ * - `virtualization-disabled` — virtualization is off in the firmware;
+ * - `foreign-distribution` — a distribution with Atomic Chat's name exists that it did not import.
+ */
+export const WSL_REASONS = [
+  'wsl-localhost-forwarding',
+  'wsl-stopped',
+  'wsl-version',
+  'wsl1-distribution',
+  'virtualization-disabled',
+  'foreign-distribution',
+] as const
+export type WslReason = (typeof WSL_REASONS)[number]
+
+/**
  * One reason the host cannot proceed. The `ErrorBody` part is what becomes the operation's `error`;
  * `reason` is a stable machine-readable cause (`driver-too-old`, `relogin-required`, ...), `params`
  * its specifics (required and actual versions, ...), and `commands` exact, copyable shell commands
@@ -390,6 +450,14 @@ export interface RequirementPlan {
    * `required_disk_bytes`. If Docker is later set up with another root directory, the next probe
    * reports that one. Null together with `free_disk_bytes` whenever the core measured nothing: the
    * free-space read failed, or the plan never read the machine (a removal, or no descriptor).
+   *
+   * On Windows (change `add-tensorrt-llm-windows`, ruling core 2.1) the same two fields keep their
+   * meaning — "the path the core measured, and what it found there" — over the one disk that
+   * matters: the Windows directory of Atomic Chat's own distribution (`%LOCALAPPDATA%\AtomicChat\wsl\<name>`,
+   * where its `ext4.vhdx` lives or will be imported to). `free_disk_bytes` is then the free space on
+   * that directory's volume, and once the distribution exists the smaller of that and the free space
+   * at `DockerRootDir` inside the guest: the image lands in the guest's disk, which can grow only as
+   * far as the Windows volume lets it.
    */
   docker_root_dir: string | null
   /**
@@ -508,18 +576,54 @@ export interface CuratedModel {
 
 /**
  * The data about the foundation every managed engine runs on, kept apart from any engine's
- * descriptor (openspec change `extract-environment-manifest`): which install recipes exist and on
- * which distributions each is qualified. One document per platform, `runtimes/environments/<platform>.json`
- * in conf; this build reads only Linux's. Immutable per `manifest_id` (`<platform>-r<N>`), like a
- * descriptor per `descriptor_id`. Data only — the recipe body is compiled into core. Shape matches
- * `atomic-chat-conf/runtimes/environments/linux.schema.json`.
+ * descriptor (openspec change `extract-environment-manifest`). One document per platform,
+ * `runtimes/environments/<platform>.json` in conf, and a core reads only its own platform's — a
+ * union by `platform`. Immutable per `manifest_id` (`<platform>-r<N>`), like a descriptor per
+ * `descriptor_id`. Data only: every recipe body and argv is compiled into core.
  */
-export interface EnvironmentManifest {
+export type EnvironmentManifest = LinuxEnvironmentManifest | WindowsEnvironmentManifest
+
+/** The platforms an environment manifest is published for. */
+export type EnvironmentPlatform = EnvironmentManifest['platform']
+
+/**
+ * Linux's manifest: which install recipes exist and on which distributions each is qualified. Shape
+ * matches `atomic-chat-conf/runtimes/environments/linux.schema.json`.
+ */
+export interface LinuxEnvironmentManifest {
   schema_version: 1
   manifest_id: string
   platform: 'linux'
   minimum_core_version: string
   recipes: InstallRecipe[]
+}
+
+/**
+ * The guest root filesystem Windows core imports as Atomic Chat's own WSL distribution: an HTTPS
+ * `url`, the file's lowercase-hex `sha256` (checked before the file is used for anything) and what
+ * the guest is, in a Linux manifest's terms.
+ */
+export interface WslRootfs {
+  url: string
+  sha256: string
+  distribution: { id: string; version_id: string; arch: 'x86_64' }
+}
+
+/**
+ * Windows' manifest (change `add-tensorrt-llm-windows`, design D13): the lowest Windows build and
+ * WSL package version core offers the environment on, the pinned rootfs, and the recipe compiled into
+ * core that prepares the guest. Shape matches `atomic-chat-conf/runtimes/environments/windows.schema.json`.
+ * `minimum_wsl_version` is `MAJOR.MINOR.PATCH`; `wsl --version`'s fourth part is ignored (conf ruling 1.1).
+ */
+export interface WindowsEnvironmentManifest {
+  schema_version: 1
+  manifest_id: string
+  platform: 'windows'
+  minimum_core_version: string
+  minimum_windows_build: number
+  minimum_wsl_version: string
+  rootfs: WslRootfs
+  guest_recipe_id: string
 }
 
 /**

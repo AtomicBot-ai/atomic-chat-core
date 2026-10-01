@@ -28,7 +28,7 @@ import { randomUUID } from 'node:crypto'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   ContainerRuntimeStepParameters,
-  EnvironmentManifest,
+  LinuxEnvironmentManifest,
   ErrorBody,
   GpuFacts,
   ManagedAvailability,
@@ -107,7 +107,7 @@ export interface LinuxProvisionerDeps {
   host: LinuxHost
   descriptors: RuntimeDescriptorProvider
   /** The Linux environment manifest: the install recipe's qualified distributions. */
-  environmentManifests: EnvironmentManifestProvider
+  environmentManifests: EnvironmentManifestProvider<'linux'>
   recipe: HostRecipeBinding
   /** The one executor of this core; null while this host has no docker CLI. */
   docker: () => Promise<ProvisionerDocker | null>
@@ -308,7 +308,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
    * is fetched again and used only if conf still serves that very `manifest_id`: an id's content
    * never changes, so this is the consented manifest, not a newer one.
    */
-  const manifestForProbe = async (record: PersistedOperation): Promise<EnvironmentManifest | null> => {
+  const manifestForProbe = async (record: PersistedOperation): Promise<LinuxEnvironmentManifest | null> => {
     const consented = record.machine.consented ?? null
     if (consented !== null) {
       const id = consented.environment_manifest_id ?? null

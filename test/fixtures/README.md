@@ -24,6 +24,9 @@
   by `test/contract/core-log.test.ts`; see `core-log/README.md`.
 - `runtimes/` — verbatim copies of published conf documents: `tensorrt-llm.json` is
   `atomic-chat-conf/runtimes/tensorrt-llm.json` (`tensorrt-llm-1.2.1-r2`) and `environments/linux.json` is
-  `atomic-chat-conf/runtimes/environments/linux.json` (`linux-r1`), both as of conf commit `2676324`. Replace a file
+  `atomic-chat-conf/runtimes/environments/linux.json` (`linux-r1`), both as of conf commit `2676324`;
+  `environments/windows.json` is `atomic-chat-conf/runtimes/environments/windows.json` (`windows-r1`) as of conf
+  commit `df05c77` on branch `change/add-tensorrt-llm-windows` (not in conf main until the live Windows
+  acceptance, change `add-tensorrt-llm-windows` design D14). Replace a file
   with conf's, never edit it by hand: the parsers are tested against what conf CI accepted.
 - Everything else is hand-written test data owned by this repo.

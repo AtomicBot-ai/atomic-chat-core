@@ -6,10 +6,11 @@ import type { DocumentFetch } from './cached-document.js'
 import {
   createEnvironmentManifestProvider,
   DEFAULT_LINUX_ENVIRONMENT_MANIFEST_URL,
+  DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL,
   ENVIRONMENT_MANIFEST_URL_ENV,
   environmentManifestFetchFromFetch,
 } from './environment-manifest-provider.js'
-import { parseEnvironmentManifest } from './environment-manifest.js'
+import { parseLinuxEnvironmentManifest, parseWindowsEnvironmentManifest } from './environment-manifest.js'
 
 const ROOT = '/shared'
 const PATHS = managedSharedPaths(ROOT)
@@ -18,7 +19,7 @@ const CORE_VERSION = '0.7.5'
 /** The real fixture, verbatim: `manifest_id` `linux-r1`, `minimum_core_version` `0.7.5`. */
 const FIXTURE = readRuntimeFixture('environments/linux.json') as Record<string, unknown>
 const RAW_R1 = JSON.stringify(FIXTURE)
-const MANIFEST_R1 = parseEnvironmentManifest(FIXTURE)
+const MANIFEST_R1 = parseLinuxEnvironmentManifest(FIXTURE)
 
 const rawWith = (mutate: (doc: Record<string, unknown>) => void): string => {
   const doc = JSON.parse(RAW_R1) as Record<string, unknown>
@@ -31,7 +32,7 @@ const RAW_R2 = rawWith((doc) => {
   const recipes = doc['recipes'] as Array<{ distributions: unknown[] }>
   recipes[0]?.distributions.push({ id: 'ubuntu', version_id: '28.04', arch: 'x86_64' })
 })
-const MANIFEST_R2 = parseEnvironmentManifest(JSON.parse(RAW_R2))
+const MANIFEST_R2 = parseLinuxEnvironmentManifest(JSON.parse(RAW_R2))
 const RAW_TOO_NEW = rawWith((doc) => {
   doc['manifest_id'] = 'linux-r9'
   doc['minimum_core_version'] = '9.9.9'
@@ -216,6 +217,48 @@ describe('latest', () => {
     expect(await provider({ fetch: failingFetch(), fs }).latest()).toEqual({
       kind: 'available',
       manifest: MANIFEST_R1,
+    })
+  })
+})
+
+describe('on Windows', () => {
+  /** The real Windows fixture, verbatim: `manifest_id` `windows-r1`, `minimum_core_version` `0.7.5`. */
+  const RAW_WINDOWS = JSON.stringify(readRuntimeFixture('environments/windows.json'))
+  const WINDOWS_R1 = parseWindowsEnvironmentManifest(JSON.parse(RAW_WINDOWS))
+
+  const windowsProvider = (fetch: DocumentFetch, fs: FakeManagedFs) =>
+    createEnvironmentManifestProvider({
+      platform: 'windows',
+      env: {},
+      fetch,
+      readFile: unreachableReadFile,
+      fs,
+      root: ROOT,
+      coreVersion: CORE_VERSION,
+    })
+
+  it('fetches conf main’s Windows manifest, never Linux’s, and caches it by its own manifest_id', async () => {
+    const fs = new FakeManagedFs()
+    const fetch = okFetch(RAW_WINDOWS)
+    expect(await windowsProvider(fetch, fs).latest()).toEqual({ kind: 'available', manifest: WINDOWS_R1 })
+    expect(fetch).toHaveBeenCalledWith(DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL, expect.any(Number))
+    expect(DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL).toMatch(/\/main\/runtimes\/environments\/windows\.json$/)
+    expect(fs.files.get(PATHS.environmentManifestFile('windows-r1'))).toBe(RAW_WINDOWS)
+  })
+
+  it('a Linux manifest served where Windows’ is expected is refused and never cached (spec: no other platform)', async () => {
+    const fs = new FakeManagedFs()
+    const result = await windowsProvider(okFetch(RAW_R1), fs).latest()
+    expect(result.kind).toBe('unavailable')
+    expect(fs.files.has(PATHS.environmentManifestFile('linux-r1'))).toBe(false)
+  })
+
+  it('pins the Windows manifest by id from the cache alone', async () => {
+    const fs = new FakeManagedFs()
+    seedAccepted(fs, RAW_WINDOWS, 'windows-r1')
+    expect(await windowsProvider(unreachableFetch, fs).pinned('windows-r1')).toEqual({
+      kind: 'available',
+      manifest: WINDOWS_R1,
     })
   })
 })

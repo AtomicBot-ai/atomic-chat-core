@@ -197,6 +197,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
   // Linux's manifest only: the provisioner that reads it exists only on Linux, and this provider's
   // source is `runtimes/environments/linux.json` — another platform's manifest is never fetched.
   const environmentManifests = createEnvironmentManifestProvider({
+    platform: 'linux',
     env: options.env.env,
     fetch: environmentManifestFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
@@ -225,6 +226,8 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
             active_operation_id: null,
             // Resolved for real in `recover()`, network-free, from `descriptors` below.
             minimum_app_version: null,
+            // Only a Windows environment runs in a distribution of its own.
+            distribution: null,
           },
         ]
   let assessed: ManagedAvailability | null = null

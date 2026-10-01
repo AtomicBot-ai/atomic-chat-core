@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   BeginOperation,
-  EnvironmentManifest,
+  LinuxEnvironmentManifest,
   GpuFacts,
   RuntimeDescriptor,
 } from '../../contracts/index.js'
@@ -25,7 +25,7 @@ import type { ExecutionRecord } from '../container/index.js'
 import { removeEngineCaches } from '../managed-text/index.js'
 import { parseRuntimeDescriptor } from './descriptor.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
-import { parseEnvironmentManifest } from './environment-manifest.js'
+import { parseLinuxEnvironmentManifest } from './environment-manifest.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
 import type { LinuxHost } from './linux-host.js'
@@ -48,7 +48,7 @@ const IMAGE = DESCRIPTOR.image['linux/amd64']
 const IMAGE_REF = `${IMAGE.repository}@${IMAGE.digest}`
 const PROBE_IMAGE = DESCRIPTOR.probe_image['linux/amd64']
 const PROBE_REF = `${PROBE_IMAGE.repository}@${PROBE_IMAGE.digest}`
-const MANIFEST = parseEnvironmentManifest(readRuntimeFixture('environments/linux.json'))
+const MANIFEST = parseLinuxEnvironmentManifest(readRuntimeFixture('environments/linux.json'))
 const GPU = 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11'
 const GIB = 1024 ** 3
 
@@ -206,8 +206,8 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
  * plus `cached`. `latest` and `pinned` are spies, so a test can tell which one a probe asked.
  */
 function manifestsOf(
-  latest: EnvironmentManifest | null,
-  cached: EnvironmentManifest[] = []
+  latest: LinuxEnvironmentManifest | null,
+  cached: LinuxEnvironmentManifest[] = []
 ): EnvironmentManifestProvider & { latest: ReturnType<typeof vi.fn>; pinned: ReturnType<typeof vi.fn> } {
   const store = [...(latest === null ? [] : [latest]), ...cached]
   const missing = (details?: string) => ({
@@ -228,7 +228,7 @@ function manifestsOf(
 /** The fixture manifest under another id with the recipe's distributions replaced. */
 const manifestWith = (
   manifestId: string,
-  distributions: EnvironmentManifest['recipes'][number]['distributions']
+  distributions: LinuxEnvironmentManifest['recipes'][number]['distributions']
 ) => ({
   ...MANIFEST,
   manifest_id: manifestId,

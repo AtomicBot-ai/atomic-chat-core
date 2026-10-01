@@ -6,6 +6,7 @@ import {
   MANAGED_OPERATION_KINDS,
   MANAGED_PHASES,
   RUNTIME_INSTALLATION_STATUSES,
+  WSL_REASONS,
   type EnvironmentOperation,
   type EnvironmentSnapshot,
   type ManagedHostReceipt,
@@ -194,6 +195,7 @@ describe('managed environment wire shapes', () => {
       ],
       active_operation_id: null,
       minimum_app_version: '2.0.49',
+      distribution: null,
     }
 
     const back = roundTrip(snapshot)
@@ -202,6 +204,40 @@ describe('managed environment wire shapes', () => {
     // VRAM is bytes here, not the MiB the llama.cpp backend probe reports, because the model check
     // compares it against weight bytes.
     expect(back.gpus[0]?.total_vram_bytes).toBe(12_884_901_888)
+  })
+
+  it('names the WSL distribution a Windows environment owns, where it lives and the space it takes', () => {
+    const distribution = roundTrip<EnvironmentSnapshot['distribution']>({
+      name: 'AtomicChat',
+      path: 'C:\\Users\\ada\\AppData\\Local\\AtomicChat\\wsl\\AtomicChat',
+      size_bytes: 42_949_672_960,
+    })
+
+    expect(distribution).toEqual({
+      name: 'AtomicChat',
+      path: 'C:\\Users\\ada\\AppData\\Local\\AtomicChat\\wsl\\AtomicChat',
+      size_bytes: 42_949_672_960,
+    })
+    // A size the core could not read is null, never a guessed 0 a client would show as "empty".
+    expect(roundTrip({ ...distribution, size_bytes: null }).size_bytes).toBeNull()
+  })
+
+  it('carries the enable-WSL step with its own parameters, told apart from the Linux one by action', () => {
+    const step: ManagedHostStep = {
+      step_id: 'step-2',
+      action: 'windows.enable-wsl',
+      recipe_id: 'windows.enable-wsl',
+      recipe_digest: 'sha256:bb',
+      parameters_digest: 'sha256:cc',
+      parameters: {},
+      nonce: 'once-2',
+      expected_operation_revision: 3,
+    }
+
+    const back = roundTrip(step)
+    expect(back).toEqual(step)
+    // Nothing the user typed reaches the elevated process: the step has no parameter at all.
+    if (back.action === 'windows.enable-wsl') expect(Object.keys(back.parameters)).toEqual([])
   })
 
   it('leaves total_vram_bytes null for a unified-memory card that reports none of its own', () => {
@@ -457,6 +493,25 @@ describe('managed environment wire shapes', () => {
     expect(roundTrip(manifest)).toEqual(manifest)
   })
 
+  it('round-trips a Windows environment manifest: a rootfs pinned by URL and sha256, and a recipe id', () => {
+    const manifest: EnvironmentManifest = {
+      schema_version: 1,
+      manifest_id: 'windows-r1',
+      platform: 'windows',
+      minimum_core_version: '0.7.5',
+      minimum_windows_build: 22000,
+      minimum_wsl_version: '2.4.4',
+      rootfs: {
+        url: 'https://releases.ubuntu.com/24.04.5/ubuntu-24.04.5-wsl-amd64.wsl',
+        sha256: 'bb415d824822c4b878125729af451a5d18fb13d1cf5cbed9a7393ad64ac6039e',
+        distribution: { id: 'ubuntu', version_id: '24.04', arch: 'x86_64' },
+      },
+      guest_recipe_id: 'linux.install-container-runtime',
+    }
+    expect(roundTrip(manifest)).toEqual(manifest)
+    expect('recipes' in manifest).toBe(false)
+  })
+
   it('keeps the phases a setup can be in, including both waits that need the user to come back', () => {
     // The app relays this vocabulary verbatim; a phase added here without a matching app release
     // would arrive as a string the app does not know how to render.
@@ -537,5 +592,14 @@ describe('managed environment wire shapes', () => {
       'failed',
     ])
     expect([...MANAGED_HOST_ACTIONS]).toEqual(['linux.install-container-runtime', 'windows.enable-wsl'])
+    // The Windows causes a client switches on (change `add-tensorrt-llm-windows`); the app relays them.
+    expect([...WSL_REASONS]).toEqual([
+      'wsl-localhost-forwarding',
+      'wsl-stopped',
+      'wsl-version',
+      'wsl1-distribution',
+      'virtualization-disabled',
+      'foreign-distribution',
+    ])
   })
 })
