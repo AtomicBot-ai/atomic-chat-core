@@ -34,6 +34,8 @@ export interface BackendFeatures {
   cuda13: boolean
   vulkan: boolean
   rocm: boolean
+  /** Windows on ARM with a Qualcomm Adreno GPU: the `win-opencl-adreno-arm64` build can run. */
+  opencl?: boolean
 }
 
 /** Rust `SupportedFeatures` (output of `get_supported_features`). */

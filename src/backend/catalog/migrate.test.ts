@@ -35,6 +35,10 @@ describe('mapOldBackendToNew (Rust test_map_old_backend_to_new_*)', () => {
     ['linux-arm64', 'linux-cpu-arm64'],
     ['linux-common_cpus-arm64', 'linux-cpu-arm64'],
     ['linux-cpu-arm64', 'linux-cpu-arm64'],
+    ['win-cpu-arm64', 'win-cpu-arm64'],
+    ['win-opencl-adreno-arm64', 'win-opencl-adreno-arm64'],
+    ['win-cuda-13.4-arm64', 'win-cuda-13.4-arm64'],
+    ['win-cuda-13-arm64', 'win-cuda-13-arm64'],
     // rocm family and concrete pass through
     ['win-rocm-x64', 'win-rocm-x64'],
     ['win-rocm-7.14-x64', 'win-rocm-7.14-x64'],

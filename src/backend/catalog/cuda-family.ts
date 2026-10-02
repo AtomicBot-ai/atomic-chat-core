@@ -14,10 +14,10 @@
 import type { BackendVersion } from '../types.js'
 import { stripBom } from '../version.js'
 
-/** Minor-less Windows CUDA family id: `win-cuda-13-x64`, `win-cuda-12-x64`. */
-export const WIN_CUDA_FAMILY_RE = /^win-cuda-(\d+)-x64$/
-/** Concrete Windows CUDA asset id: `win-cuda-12.4-x64`, `win-cuda-13.3-x64`. */
-export const WINDOWS_CUDA_BACKEND_RE = /^win-cuda-(12\.\d+|13\.\d+)-x64$/
+/** Minor-less Windows CUDA family id: `win-cuda-13-x64`, `win-cuda-12-x64`, `win-cuda-13-arm64`. */
+export const WIN_CUDA_FAMILY_RE = /^win-cuda-(\d+)-(x64|arm64)$/
+/** Concrete Windows CUDA asset id: `win-cuda-12.4-x64`, `win-cuda-13.3-x64`, `win-cuda-13.4-arm64`. */
+export const WINDOWS_CUDA_BACKEND_RE = /^win-cuda-(12\.\d+|13\.\d+)-(x64|arm64)$/
 /** HIP has no major to pin: one `win-rocm-<major>.<minor>-x64` asset per release, moved wholesale. */
 export const WIN_ROCM_FAMILY_ID = 'win-rocm-x64'
 export const WIN_ROCM_CONCRETE_RE = /^win-rocm-(\d+)\.(\d+)-x64$/
@@ -38,8 +38,8 @@ export function cudaFamilyMajor(backend: string): string | null {
 export function gpuFamilyConcreteRe(familyBackend: string): RegExp | null {
   const id = stripBom(familyBackend)
   if (id === WIN_ROCM_FAMILY_ID) return WIN_ROCM_CONCRETE_RE
-  const major = cudaFamilyMajor(id)
-  return major ? new RegExp(`^win-cuda-(${major})\\.(\\d+)-x64$`) : null
+  const m = WIN_CUDA_FAMILY_RE.exec(id)
+  return m ? new RegExp(`^win-cuda-(${m[1]})\\.(\\d+)-${m[2]}$`) : null
 }
 
 /** True when `familyBackend` is one of the version-less family ids. */
@@ -84,6 +84,12 @@ export function resolveGpuFamilyConcrete(familyBackend: string, remote: BackendV
 export function matchWindowsCudaBackend(backend: string): string | null {
   const m = WINDOWS_CUDA_BACKEND_RE.exec(stripBom(backend))
   return m ? (m[1] ?? null) : null
+}
+
+/** Arch suffix (`x64` / `arm64`) of a concrete Windows CUDA backend id, or `null` for anything else. */
+export function windowsCudaBackendArch(backend: string): 'x64' | 'arm64' | null {
+  const m = WINDOWS_CUDA_BACKEND_RE.exec(stripBom(backend))
+  return m ? (m[2] as 'x64' | 'arm64') : null
 }
 
 /**

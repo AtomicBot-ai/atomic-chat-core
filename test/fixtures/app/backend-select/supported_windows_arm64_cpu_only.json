@@ -1,0 +1,24 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    "win-cpu-arm64"
+  ],
+  "input": {
+    "arch": "arm64",
+    "features": {
+      "cuda11": false,
+      "cuda12": false,
+      "cuda13": false,
+      "rocm": false,
+      "vulkan": false
+    },
+    "kind": "supported",
+    "os_type": "windows"
+  },
+  "name": "supported_windows_arm64_cpu_only",
+  "source": {
+    "commit": "7ee71026dfa05e8800bebd587f728ec49b968246",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

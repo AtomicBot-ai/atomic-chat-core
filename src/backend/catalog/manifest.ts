@@ -53,7 +53,8 @@ export function isSupportedBackendOs(osType: string): osType is BackendOsType {
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /**
- * Backends a manifest offers this OS + arch. Windows: the whitelisted `win-*` zips matching the arch.
+ * Backends a manifest offers this OS + arch. Windows: the whitelisted `win-*` zips matching the arch
+ * (arm64: CPU, OpenCL for Adreno and CUDA 13).
  * Linux: x64 only, `ubuntu-*` tarballs translated to `linux-*` ids. macOS: only `macos-<arch>`, so an
  * Intel host is never offered the arm64 build the manifest lists (macOS is passed through
  * `listSupportedBackends` unfiltered, so the arch filter has to happen here). Every entry has
@@ -77,7 +78,10 @@ export function parseManifestForPlatform(
       /^win-cuda-12\.\d+-x64$/.test(name) ||
       /^win-cuda-13\.\d+-x64$/.test(name) ||
       /^win-rocm-\d+\.\d+-x64$/.test(name) ||
-      name === 'win-vulkan-x64'
+      name === 'win-vulkan-x64' ||
+      name === 'win-cpu-arm64' ||
+      name === 'win-opencl-adreno-arm64' ||
+      /^win-cuda-13\.\d+-arm64$/.test(name)
     for (const asset of assets) {
       const backendName = re.exec(asset.name)?.[1]
       if (!backendName || !isAllowed(backendName)) continue

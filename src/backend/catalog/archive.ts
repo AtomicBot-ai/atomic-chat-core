@@ -10,7 +10,7 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import { matchWindowsCudaBackend } from './cuda-family.js'
+import { matchWindowsCudaBackend, windowsCudaBackendArch } from './cuda-family.js'
 import type { BackendArchiveSource, UpstreamManifest } from '../types.js'
 import { stripBom } from '../version.js'
 
@@ -87,7 +87,8 @@ export function resolveBackendArchiveSource(
 /** Short label for the "Latest <variant>" dropdown entries; the raw id for anything unrecognised. */
 export function friendlyBackendLabel(backend: string): string {
   const id = stripBom(backend)
-  if (id.endsWith('cpu-x64')) return 'CPU'
+  if (id.endsWith('cpu-x64') || id.endsWith('cpu-arm64')) return 'CPU'
+  if (id.includes('opencl-adreno')) return 'OpenCL (Adreno)'
   if (id.includes('cuda-13')) return 'CUDA 13'
   if (id.includes('cuda-12')) return 'CUDA 12'
   if (id.includes('rocm')) {
@@ -123,25 +124,28 @@ export function requiredDiskSpaceForBackend(backend: string, archiveBytes?: numb
 }
 
 /**
- * `cudart-llama-bin-win-cuda-<toolkit>-x64.zip`: the CUDA runtime DLLs the main Windows CUDA
+ * `cudart-llama-bin-win-cuda-<toolkit>-<arch>.zip`: the CUDA runtime DLLs the main Windows CUDA
  * archive does not carry. Without them `llama-server.exe --list-devices` is empty on hosts without
  * a system-wide toolkit (Atomic-Chat#14). Never mirrored — NVIDIA-signed and ~391 MB each.
  */
-export function buildWindowsCudartArchiveName(cudaToolkitVersion: string): string {
-  return `cudart-llama-bin-win-cuda-${cudaToolkitVersion}-x64.zip`
+export function buildWindowsCudartArchiveName(
+  cudaToolkitVersion: string,
+  arch: 'x64' | 'arm64' = 'x64'
+): string {
+  return `cudart-llama-bin-win-cuda-${cudaToolkitVersion}-${arch}.zip`
 }
 
 /** cudart companion URL on the ggml-org CDN, or `null` for a non-CUDA Windows backend. */
 export function getCudartDownloadUrl(version: string, backend: string): string | null {
-  const toolkit = matchWindowsCudaBackend(backend)
-  if (!toolkit) return null
-  return `${GGML_ORG_DOWNLOAD_BASE}/${stripBom(version)}/${buildWindowsCudartArchiveName(toolkit)}`
+  const name = getCudartArchiveName(backend)
+  return name ? `${GGML_ORG_DOWNLOAD_BASE}/${stripBom(version)}/${name}` : null
 }
 
 /** cudart companion file name, or `null` for a non-CUDA Windows backend. */
 export function getCudartArchiveName(backend: string): string | null {
   const toolkit = matchWindowsCudaBackend(backend)
-  return toolkit ? buildWindowsCudartArchiveName(toolkit) : null
+  const arch = windowsCudaBackendArch(backend)
+  return toolkit && arch ? buildWindowsCudartArchiveName(toolkit, arch) : null
 }
 
 /** CUDA toolkit version (`"13.3"`) `isCudaInstalled` expects for a Windows CUDA backend, else `null`. */

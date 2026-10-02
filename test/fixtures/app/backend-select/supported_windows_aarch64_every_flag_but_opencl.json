@@ -1,0 +1,25 @@
+{
+  "comparator": "json-exact",
+  "expected": [
+    "win-cpu-arm64",
+    "win-cuda-13-arm64"
+  ],
+  "input": {
+    "arch": "aarch64",
+    "features": {
+      "cuda11": true,
+      "cuda12": true,
+      "cuda13": true,
+      "rocm": true,
+      "vulkan": true
+    },
+    "kind": "supported",
+    "os_type": "windows"
+  },
+  "name": "supported_windows_aarch64_every_flag_but_opencl",
+  "source": {
+    "commit": "7ee71026dfa05e8800bebd587f728ec49b968246",
+    "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
+    "provider": "llamacpp-upstream"
+  }
+}

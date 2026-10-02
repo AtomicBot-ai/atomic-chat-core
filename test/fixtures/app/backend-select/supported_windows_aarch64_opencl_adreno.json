@@ -1,23 +1,25 @@
 {
   "comparator": "json-exact",
   "expected": [
-    "win-cpu-arm64"
+    "win-cpu-arm64",
+    "win-opencl-adreno-arm64"
   ],
   "input": {
     "arch": "aarch64",
     "features": {
-      "cuda11": true,
-      "cuda12": true,
-      "cuda13": true,
-      "rocm": true,
-      "vulkan": true
+      "cuda11": false,
+      "cuda12": false,
+      "cuda13": false,
+      "opencl": true,
+      "rocm": false,
+      "vulkan": false
     },
     "kind": "supported",
     "os_type": "windows"
   },
-  "name": "supported_windows_aarch64_cpu_placeholder",
+  "name": "supported_windows_aarch64_opencl_adreno",
   "source": {
-    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "commit": "7ee71026dfa05e8800bebd587f728ec49b968246",
     "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
     "provider": "llamacpp-upstream"
   }

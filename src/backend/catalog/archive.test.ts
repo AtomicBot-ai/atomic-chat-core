@@ -84,6 +84,9 @@ describe('resolveBackendArchiveSource', () => {
 describe('friendlyBackendLabel', () => {
   it.each([
     ['win-cpu-x64', 'CPU'],
+    ['win-cpu-arm64', 'CPU'],
+    ['win-opencl-adreno-arm64', 'OpenCL (Adreno)'],
+    ['win-cuda-13.4-arm64', 'CUDA 13'],
     ['linux-cpu-x64', 'CPU'],
     ['win-cuda-13-x64', 'CUDA 13'],
     ['win-cuda-12.4-x64', 'CUDA 12'],
@@ -131,14 +134,26 @@ describe('cudart companion', () => {
     )
     expect(getCudaToolkitVersion('win-cuda-13.3-x64')).toBe('13.3')
   })
-  it.each(['win-vulkan-x64', 'win-cuda-13-x64', 'linux-cpu-x64', 'macos-arm64'])(
-    'is null for %s',
-    (backend) => {
-      expect(getCudartArchiveName(backend)).toBeNull()
-      expect(getCudartDownloadUrl('b10205', backend)).toBeNull()
-      expect(getCudaToolkitVersion(backend)).toBeNull()
-    }
-  )
+  it('pairs a Windows arm64 CUDA backend with the arm64 companion', () => {
+    expect(buildWindowsCudartArchiveName('13.4', 'arm64')).toBe('cudart-llama-bin-win-cuda-13.4-arm64.zip')
+    expect(getCudartArchiveName('win-cuda-13.4-arm64')).toBe('cudart-llama-bin-win-cuda-13.4-arm64.zip')
+    expect(getCudartDownloadUrl('b11344', 'win-cuda-13.4-arm64')).toBe(
+      `${GGML_ORG_DOWNLOAD_BASE}/b11344/cudart-llama-bin-win-cuda-13.4-arm64.zip`
+    )
+    expect(getCudaToolkitVersion('win-cuda-13.4-arm64')).toBe('13.4')
+  })
+  it.each([
+    'win-vulkan-x64',
+    'win-cuda-13-x64',
+    'linux-cpu-x64',
+    'macos-arm64',
+    'win-cpu-arm64',
+    'win-opencl-adreno-arm64',
+  ])('is null for %s', (backend) => {
+    expect(getCudartArchiveName(backend)).toBeNull()
+    expect(getCudartDownloadUrl('b10205', backend)).toBeNull()
+    expect(getCudaToolkitVersion(backend)).toBeNull()
+  })
 })
 
 // Reference copies of `assetNameFor` and `pickSource` from Atomic-Chat/scripts/resolve-upstream-backend.mjs.

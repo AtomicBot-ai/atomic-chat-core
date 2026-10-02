@@ -7,7 +7,7 @@
  * probe result and the catalog are parameters.
  */
 
-import { friendlyBackendLabel, WIN_ROCM_FAMILY_ID } from '../catalog/index.js'
+import { archSuffixFor, friendlyBackendLabel, WIN_ROCM_FAMILY_ID } from '../catalog/index.js'
 import type { BackendOption, BackendVersion, GpuProbeInfo } from '../types.js'
 import { isConcreteVersionBackend, parseBuildNumber, stripBom } from '../version.js'
 import { determineBestBackend } from './categories.js'
@@ -49,11 +49,23 @@ export function shouldApplyBundledBackend(versionBackendAfterRecovery: string | 
  * Backend ids behind the static "Latest <variant>" dropdown entries, unfiltered by hardware on
  * purpose (a manual override). Windows offers the minor-less CUDA / ROCm family ids; Linux CPU and
  * Vulkan; macOS only `macos-arm64`, and only when the bundled (or current) build is that arch — an
- * Intel host gets no sentinel because `latest/macos-x64` resolves to nothing.
+ * Intel host gets no sentinel because `latest/macos-x64` resolves to nothing. Windows arm64 (by
+ * `arch`, or the current build when the caller does not know the arch) offers CPU, OpenCL and CUDA 13.
  */
-export function staticLatestVariants(osType: string, macHostVersionBackend?: string | null): string[] {
-  if (osType === 'windows')
+export function staticLatestVariants(
+  osType: string,
+  macHostVersionBackend?: string | null,
+  arch?: string
+): string[] {
+  if (osType === 'windows') {
+    const currentId =
+      stripBom(macHostVersionBackend ?? '')
+        .split('/')[1]
+        ?.trim() ?? ''
+    const arm64 = arch ? archSuffixFor(arch) === 'arm64' : currentId.endsWith('-arm64')
+    if (arm64) return ['win-cpu-arm64', 'win-opencl-adreno-arm64', 'win-cuda-13-arm64']
     return ['win-cpu-x64', 'win-cuda-12-x64', 'win-cuda-13-x64', WIN_ROCM_FAMILY_ID, 'win-vulkan-x64']
+  }
   if (osType === 'linux') return ['linux-cpu-x64', 'linux-vulkan-x64']
   if (osType === 'macos') {
     const variant = stripBom(macHostVersionBackend ?? '')

@@ -51,6 +51,8 @@ describe('icdVendorOf', () => {
     ['intel_icd.x86_64.json', 'Intel'],
     ['intel_hasvk_icd.x86_64.json', 'Intel'],
     ['igvk64.json', 'Intel'],
+    ['qcvk_icd_arm64x.json', 'Qualcomm'],
+    ['freedreno_icd.aarch64.json', 'Qualcomm'],
     ['lvp_icd.x86_64.json', undefined],
     ['virtio_icd.x86_64.json', undefined],
     ['dzn_icd.x86_64.json', undefined],
@@ -161,6 +163,7 @@ describe('guessDeviceType', () => {
       'Unknown',
     ],
     ['AMD without a VRAM reading stays unproven', { vendor: 'AMD', deviceId: 0x744c }, 'Unknown'],
+    ['Qualcomm Adreno is part of the SoC', { vendor: 'Qualcomm', deviceId: 0x0c36 }, 'IntegratedGpu'],
     ['anyone else', { vendor: 'Unknown (vendor_id: 6900)', deviceId: 1 }, 'Unknown'],
   ])('%s', (_name, gpu, expected) => expect(guessDeviceType(gpu)).toBe(expected))
 })

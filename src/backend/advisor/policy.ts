@@ -94,7 +94,7 @@ export interface BackendProviderPolicy {
   /** `find_latest_version_for_backend`. */
   findLatest(list: readonly BackendVersion[], backendType: string): string | null
   /** Ids behind the static "Latest <variant>" dropdown entries. */
-  staticVariants(osType: string, currentVersionBackend: string): string[]
+  staticVariants(osType: string, currentVersionBackend: string, arch?: string): string[]
   /** `get_backend_category`. */
   getCategory(backend: string): string | null
   readonly alreadyOptimalRule: AlreadyOptimalRule
@@ -131,7 +131,7 @@ export const UPSTREAM_POLICY: BackendProviderPolicy = {
   filterBySupport: filterBackendsBySupport,
   determineBest: determineBestBackend,
   findLatest: findLatestVersionForBackend,
-  staticVariants: (osType, current) => staticLatestVariants(osType, current),
+  staticVariants: (osType, current, arch) => staticLatestVariants(osType, current, arch),
   getCategory: getBackendCategory,
   alreadyOptimalRule: 'type-and-category',
   noCatalogEntryWrites: 'null',

@@ -18,7 +18,8 @@ import type { BackendVersion, SettingUpdateResult } from '../types.js'
  *
  *   - `ubuntu-*` (a tarball installed by file name, ATO-233) → `linux-{cpu,vulkan}-<arch>`.
  *   - Windows: `win-cpu-x64`, the family ids `win-cuda-13-x64` / `win-rocm-*`, concrete
- *     `cuda-12.4` / `cuda-13.3` and `win-vulkan-x64` pass through; legacy CUDA 13 / `cu13` →
+ *     `cuda-12.4` / `cuda-13.3` and `win-vulkan-x64` pass through, as do the arm64 ids
+ *     (`win-cpu-arm64`, `win-opencl-adreno-arm64`, `win-cuda-13[.N]-arm64`); legacy CUDA 13 / `cu13` →
  *     `win-cuda-13.3`, CUDA 12 / `cu12` → `win-cuda-12.4`, CUDA 11 / `cu11` → `win-cuda-12.4`
  *     (ggml-org dropped CUDA 11; the driver gate refuses it on too-old hosts), vulkan →
  *     `win-vulkan`, AVX tiers / `common_cpus` → `win-cpu`.
@@ -51,6 +52,15 @@ export function mapOldBackendToNew(oldBackend: string): string {
       oldBackend.includes('cuda-13.3') ||
       oldBackend.includes('rocm') ||
       oldBackend === 'win-vulkan-x64')
+  ) {
+    return oldBackend
+  }
+
+  if (
+    isWindows &&
+    (oldBackend === 'win-cpu-arm64' ||
+      oldBackend === 'win-opencl-adreno-arm64' ||
+      /^win-cuda-13(\.\d+)?-arm64$/.test(oldBackend))
   ) {
     return oldBackend
   }

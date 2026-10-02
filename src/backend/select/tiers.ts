@@ -18,7 +18,7 @@ import type {
   TierProbeDeps,
 } from '../types.js'
 import { hasEnoughGpuMemory } from './categories.js'
-import { getSupportedFeatures, normalizeFeatures } from './features.js'
+import { getSupportedFeatures, isAdrenoGpu, normalizeFeatures } from './features.js'
 
 // ---------------------------------------------------------------------------------------------
 // Ideal backend detection (determineBestBackend / detectIdealBackendType / tierEnumeratesDevices)
@@ -42,11 +42,12 @@ export function integratedGpuOnly(gpus: readonly GpuProbeInfo[]): boolean {
 
 /**
  * Whether the hardware probe corroborates that `backendType` could use a GPU here: CUDA needs an
- * NVIDIA GPU, Vulkan any GPU, anything else (CPU) is trivially corroborated so the picker can fall
- * through. Vendor strings as `tauri-plugin-hardware/src/types.rs` serialises them.
+ * NVIDIA GPU, OpenCL an Adreno, Vulkan any GPU, anything else (CPU) is trivially corroborated so the
+ * picker can fall through. Vendor strings as `tauri-plugin-hardware/src/types.rs` serialises them.
  */
 export function hasCorroboratingGpu(backendType: string, gpus: readonly GpuProbeInfo[]): boolean {
   if (backendType.includes('cuda')) return gpus.some((g) => g.vendor === 'NVIDIA')
+  if (backendType.includes('opencl')) return gpus.some(isAdrenoGpu)
   if (backendType.includes('vulkan')) return gpus.length > 0
   return true
 }
@@ -126,16 +127,18 @@ export async function pickFirstWorkingTier(
 /**
  * App regex for "any GPU backend in the catalog", kept verbatim. Note the `-` required right after
  * the first digit: `win-cuda-13.3-x64` and `win-rocm-10.0-x64` do NOT match, only Vulkan ids do.
- * It still works because ggml-org always publishes a Vulkan Windows asset next to CUDA.
+ * It still works because ggml-org always publishes a Vulkan Windows asset next to CUDA. On Windows
+ * arm64 there is no Vulkan asset, so the OpenCL id (`win-opencl-adreno-arm64`) is matched as well.
  */
 export function isGpuBackendId(backend: string): boolean {
-  return /-(cuda-\d|rocm-\d|vulkan)-/.test(backend)
+  return /-(cuda-\d|rocm-\d|vulkan|opencl)-/.test(backend)
 }
 
 /**
- * Windows GPU tiers in preference order: CUDA 13, CUDA 12, ROCm (VRAM-gated; `features.rocm` is
- * already PCI-gated), Vulkan (VRAM-gated, never on integrated-only hosts). Each tier is the first
- * catalog entry matching its pattern — the catalog is sorted newest first, so that is the newest tag.
+ * Windows GPU tiers in preference order: CUDA 13, CUDA 12, OpenCL (Adreno; not VRAM-gated, the GPU
+ * shares system RAM), ROCm (VRAM-gated; `features.rocm` is already PCI-gated), Vulkan (VRAM-gated,
+ * never on integrated-only hosts). Each tier is the first catalog entry matching its pattern — the
+ * catalog is sorted newest first, so that is the newest tag.
  */
 export function windowsGpuTiers(
   features: BackendFeatures,
@@ -147,12 +150,14 @@ export function windowsGpuTiers(
     available.find((b) => pattern.test(b.backend))?.backend ?? null
   const cuda13 = pick(new RegExp(`^win-cuda-13\\.\\d+-${archSuffix}$`))
   const cuda12 = pick(new RegExp(`^win-cuda-12\\.\\d+-${archSuffix}$`))
+  const opencl = pick(new RegExp(`^win-opencl-adreno-${archSuffix}$`))
   const rocm = pick(new RegExp(`^win-rocm-\\d+\\.\\d+-${archSuffix}$`))
   const vulkan = pick(new RegExp(`^win-vulkan-${archSuffix}$`))
   const enoughVram = hasEnoughGpuMemory(gpus)
   const tiers: string[] = []
   if (features.cuda13 && cuda13) tiers.push(cuda13)
   if (features.cuda12 && cuda12) tiers.push(cuda12)
+  if (features.opencl && opencl) tiers.push(opencl)
   if (features.rocm && enoughVram && rocm) tiers.push(rocm)
   if (features.vulkan && enoughVram && vulkan && !integratedGpuOnly(gpus)) tiers.push(vulkan)
   return tiers
@@ -200,6 +205,7 @@ export async function detectIdealBackendType(input: DetectIdealBackendInput): Pr
       const gpuCapable =
         features.cuda13 ||
         features.cuda12 ||
+        features.opencl ||
         (features.rocm && enoughVram) ||
         (features.vulkan && enoughVram && !integratedOnly)
       const anyGpuBackendAvailable = available.some((b) => isGpuBackendId(b.backend))

@@ -38,6 +38,15 @@ describe('configureBackends startup decisions', () => {
       'win-rocm-x64',
       'win-vulkan-x64',
     ])
+    const armVariants = ['win-cpu-arm64', 'win-opencl-adreno-arm64', 'win-cuda-13-arm64']
+    expect(staticLatestVariants('windows', 'b11344/win-cpu-x64', 'aarch64')).toEqual(armVariants)
+    expect(staticLatestVariants('windows', 'b11344/win-cpu-arm64')).toEqual(armVariants)
+    expect(staticLatestVariants('windows', 'b11344/win-cpu-arm64', 'x86_64')[0]).toBe('win-cpu-x64')
+    expect(latestBackendOptions(armVariants).map((o) => o.name)).toEqual([
+      'Latest CPU',
+      'Latest OpenCL (Adreno)',
+      'Latest CUDA 13',
+    ])
     expect(staticLatestVariants('linux')).toEqual(['linux-cpu-x64', 'linux-vulkan-x64'])
     expect(staticLatestVariants('macos', 'b10809/macos-arm64')).toEqual(['macos-arm64'])
     expect(staticLatestVariants('macos', 'b10809/macos-x64')).toEqual([])

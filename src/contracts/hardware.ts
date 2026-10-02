@@ -19,8 +19,9 @@
  * `driver_version`; everything else is `#[serde(default)]`.
  */
 export interface GpuProbeInfo {
+  name?: string
   driver_version?: string
-  /** `"NVIDIA" | "AMD" | "Intel" | "Unknown (vendor_id: N)"` as `tauri-plugin-hardware` spells it. */
+  /** `"NVIDIA" | "AMD" | "Intel" | "Qualcomm" | "Unknown (vendor_id: N)"`; the plugin has no `Qualcomm`. */
   vendor?: string | null
   /** MiB. */
   total_memory?: number
