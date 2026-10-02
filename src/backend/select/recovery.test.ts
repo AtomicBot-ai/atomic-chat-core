@@ -48,6 +48,18 @@ describe('configureBackends startup decisions', () => {
       'Latest CUDA 13',
     ])
     expect(staticLatestVariants('linux')).toEqual(['linux-cpu-x64', 'linux-vulkan-x64'])
+    const linuxArm = ['linux-cpu-arm64', 'linux-vulkan-arm64', 'linux-cuda-13-arm64']
+    expect(staticLatestVariants('linux', null, 'aarch64')).toEqual(linuxArm)
+    expect(staticLatestVariants('linux', 'b11344/linux-cpu-arm64')).toEqual(linuxArm)
+    expect(staticLatestVariants('linux', 'b11344/linux-cpu-arm64', 'x86_64')).toEqual([
+      'linux-cpu-x64',
+      'linux-vulkan-x64',
+    ])
+    expect(latestBackendOptions(linuxArm).map((o) => o.name)).toEqual([
+      'Latest CPU',
+      'Latest Vulkan',
+      'Latest CUDA 13',
+    ])
     expect(staticLatestVariants('macos', 'b10809/macos-arm64')).toEqual(['macos-arm64'])
     expect(staticLatestVariants('macos', 'b10809/macos-x64')).toEqual([])
     expect(staticLatestVariants('macos')).toEqual([])

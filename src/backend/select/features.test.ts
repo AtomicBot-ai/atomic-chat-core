@@ -185,6 +185,17 @@ describe('determineSupportedBackends (Rust test_determine_supported_backends_*)'
   })
   it('arm and macOS placeholders, unsupported system throws', () => {
     expect(determineSupportedBackends('linux', 'aarch64', features())).toEqual(['linux-cpu-arm64'])
+    expect(determineSupportedBackends('linux', 'arm64', features({ vulkan: true }))).toEqual([
+      'linux-cpu-arm64',
+      'linux-vulkan-arm64',
+    ])
+    expect(
+      determineSupportedBackends(
+        'linux',
+        'aarch64',
+        features({ cuda12: true, cuda13: true, vulkan: true, rocm: true })
+      )
+    ).toEqual(['linux-cpu-arm64', 'linux-vulkan-arm64', 'linux-cuda-13-arm64'])
     expect(determineSupportedBackends('windows', 'arm64', features())).toEqual(['win-cpu-arm64'])
     expect(determineSupportedBackends('windows', 'aarch64', features({ opencl: true }))).toEqual([
       'win-cpu-arm64',
@@ -268,5 +279,22 @@ describe('filterBackendsBySupport (Windows family-aware filter from backend.ts)'
       )
     ).toEqual(['win-opencl-adreno-arm64', 'win-cpu-arm64'])
     expect(filterBackendsBySupport(arm, ['win-cpu-x64', 'win-cuda-13-x64'], 'windows')).toEqual([])
+  })
+  it('keeps the Linux arm64 CUDA 13 asset only through its family and passes the rest of Linux through', () => {
+    const linux = [
+      b('b11344', 'linux-cuda-13.4-arm64'),
+      b('b11344', 'linux-vulkan-arm64'),
+      b('b11344', 'linux-cpu-arm64'),
+    ]
+    expect(
+      filterBackendsBySupport(linux, ['linux-cpu-arm64', 'linux-cuda-13-arm64'], 'linux').map(
+        (x) => x.backend
+      )
+    ).toEqual(['linux-cuda-13.4-arm64', 'linux-vulkan-arm64', 'linux-cpu-arm64'])
+    expect(
+      filterBackendsBySupport(linux, ['linux-cpu-arm64', 'linux-vulkan-arm64'], 'linux').map((x) => x.backend)
+    ).toEqual(['linux-vulkan-arm64', 'linux-cpu-arm64'])
+    const x64 = [b('b11344', 'linux-vulkan-x64'), b('b11344', 'linux-cpu-x64')]
+    expect(filterBackendsBySupport(x64, ['linux-cpu-x64'], 'linux')).toEqual(x64)
   })
 })

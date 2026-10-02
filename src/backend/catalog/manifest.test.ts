@@ -107,7 +107,29 @@ describe('parseManifestForPlatform', () => {
       'win-cpu-x64',
     ])
   })
-  it('returns cpu + vulkan for Linux x64 under linux-* ids and nothing for Linux arm64', () => {
+  it('returns the Linux arm64 catalog: CPU, Vulkan and CUDA 13, not Snapdragon or x64 CUDA', () => {
+    const manifest: UpstreamManifest = {
+      tag_name: 'b11344',
+      assets: [
+        { name: 'llama-b11344-bin-ubuntu-arm64.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-vulkan-arm64.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz' },
+        { name: 'llama-b11344-bin-linux-arm64-snapdragon.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-cuda-13.4-x64.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-x64.tar.gz' },
+        { name: 'cudart-llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz' },
+      ],
+    }
+    expect(
+      parseManifestForPlatform(manifest, 'linux', 'arm64')
+        .map((b) => b.backend)
+        .sort()
+    ).toEqual(['linux-cpu-arm64', 'linux-cuda-13.4-arm64', 'linux-vulkan-arm64'])
+    expect(parseManifestForPlatform(manifest, 'linux', 'x64').map((b) => b.backend)).toEqual([
+      'linux-cpu-x64',
+    ])
+  })
+  it('returns cpu + vulkan for Linux x64 under linux-* ids and nothing for Linux arm64 without arm64 assets', () => {
     expect(
       parseManifestForPlatform(MANIFEST, 'linux', 'x64')
         .map((b) => b.backend)

@@ -157,6 +157,14 @@ describe('backendTypeEquivalents / findCompatibleInstalledBackend', () => {
     expect([...backendTypeEquivalents('linux-vulkan-x64')]).toEqual(['linux-vulkan-x64', 'ubuntu-vulkan-x64'])
     expect([...backendTypeEquivalents('ubuntu-x64')]).toEqual(['ubuntu-x64', 'linux-cpu-x64'])
     expect([...backendTypeEquivalents('win-cpu-x64')]).toEqual(['win-cpu-x64'])
+    expect([...backendTypeEquivalents('linux-cuda-13.4-arm64')]).toEqual([
+      'linux-cuda-13.4-arm64',
+      'ubuntu-cuda-13.4-arm64',
+    ])
+    expect([...backendTypeEquivalents('ubuntu-cuda-13.4-arm64')]).toEqual([
+      'ubuntu-cuda-13.4-arm64',
+      'linux-cuda-13.4-arm64',
+    ])
   })
   it('returns the newest same-type build by install order, never crossing types', () => {
     const installed = [

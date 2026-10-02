@@ -150,8 +150,9 @@ export function normalizeFeatures(features: Partial<BackendFeatures> | null | un
  * CPU, then CUDA 12.4, the *family* ids `win-cuda-13-x64` / `win-rocm-x64` (concrete minors come
  * from the manifest, ATO-105) and Vulkan. Windows arm64: CPU, OpenCL on an Adreno GPU and the
  * `win-cuda-13-arm64` family. Linux x64: CPU, plus Vulkan — the CUDA and ROCm flags are ignored
- * because ggml-org publishes no Linux CUDA/HIP archive (2026-05-28 ADR). arm64 Linux gets a CPU
- * placeholder; macOS its single arch build. Anything else is `INVALID_ARGUMENT`.
+ * (2026-05-28 ADR). Linux arm64: CPU, Vulkan and the `linux-cuda-13-arm64` family (NVIDIA GB10 /
+ * Grace hosts); the Snapdragon build is not offered. macOS its single arch build. Anything else is
+ * `INVALID_ARGUMENT`.
  */
 export function determineSupportedBackends(
   osType: string,
@@ -182,6 +183,8 @@ export function determineSupportedBackends(
     case 'linux-aarch64':
     case 'linux-arm64':
       supported.push('linux-cpu-arm64')
+      if (features.vulkan) supported.push('linux-vulkan-arm64')
+      if (features.cuda13) supported.push('linux-cuda-13-arm64')
       break
     case 'macos-x86_64':
     case 'macos-x86':
@@ -221,15 +224,24 @@ export function listSupportedBackends(
  * The hardware gate on the merged catalog. Windows keeps only backends whose (normalised) id is in
  * `supportedBackends`, matching concrete CUDA-13 and ROCm assets against their family ids so
  * `win-cuda-13.4-x64` is accepted when `win-cuda-13-x64` is supported and flows downstream unchanged.
- * Every other OS returns the list unfiltered (the manifest parser already applied the arch filter).
+ * Linux keeps everything but the CUDA builds, which need their family id (`linux-cuda-13-arm64`)
+ * supported: CUDA ranks above every other category, so an unfiltered entry would be recommended to
+ * a host without an NVIDIA GPU. Every other OS returns the list unfiltered (the manifest parser
+ * already applied the arch filter).
  */
 export function filterBackendsBySupport(
   merged: readonly BackendVersion[],
   supportedBackends: readonly string[],
   osType: string
 ): BackendVersion[] {
-  if (osType !== 'windows') return [...merged]
   const supportedSet = new Set(supportedBackends)
+  if (osType === 'linux') {
+    return merged.filter((b) => {
+      const m = /^linux-cuda-(\d+)\.\d+-(arm64)$/.exec(stripBom(b.backend))
+      return !m || supportedSet.has(`linux-cuda-${m[1]}-${m[2]}`)
+    })
+  }
+  if (osType !== 'windows') return [...merged]
   const cuda13Concrete = /^win-cuda-13\.\d+-(x64|arm64)$/
   const isSupported = (rawBackend: string, normalized: string): boolean => {
     if (supportedSet.has(normalized)) return true

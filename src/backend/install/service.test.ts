@@ -200,6 +200,49 @@ describe('install', () => {
     expect(items[1]).toMatchObject({ proxy })
   })
 
+  it('installs a Linux arm64 CUDA pack with its cudart companion next to llama-server', async () => {
+    const fixtures = join(data.root, 'linux-cuda-fixtures')
+    await mkdir(join(fixtures, 'llama-b11344'), { recursive: true })
+    await writeFile(join(fixtures, 'llama-b11344', 'llama-server'), 'server')
+    await writeFile(join(fixtures, 'llama-b11344', 'libggml-cuda.so'), 'ggml-cuda')
+    const cudartDir = 'cudart-llama-b11344-bin-ubuntu-cuda-13.4-arm64'
+    await mkdir(join(fixtures, cudartDir), { recursive: true })
+    await writeFile(join(fixtures, cudartDir, 'libcudart.so.13'), 'cudart')
+    await writeFile(join(fixtures, cudartDir, 'libcublas.so.13'), 'cublas')
+    const urls: string[] = []
+    const downloader = {
+      download: vi.fn(async (_task: string, items: Array<{ url: string; save_path: string }>) => {
+        for (const item of items) {
+          urls.push(item.url)
+          const entry = item.save_path.includes('cudart-') ? cudartDir : 'llama-b11344'
+          await tarCreate({ gzip: true, cwd: fixtures, file: item.save_path }, [entry])
+        }
+      }),
+    }
+    const s = new BackendService({
+      layout: data.layout,
+      provider: 'llamacpp-upstream',
+      downloader: downloader as never,
+      readManifest: async () => null,
+      platform: 'linux',
+      now: () => 1,
+    })
+
+    const result = await s.install('b11344', 'linux-cuda-13.4-arm64', { taskId: 't' })
+
+    expect(urls).toEqual([
+      'https://github.com/ggml-org/llama.cpp/releases/download/b11344/llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz',
+      `https://github.com/ggml-org/llama.cpp/releases/download/b11344/${cudartDir}.tar.gz`,
+    ])
+    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
+      'libcublas.so.13',
+      'libcudart.so.13',
+      'libggml-cuda.so',
+      'llama-server',
+    ])
+    expect(await readdir(result.path)).toEqual(['build'])
+  })
+
   it('still has a URL for a tag the mirror never published, without a checksum', async () => {
     // The fallback to the ggml-org CDN is what lets a backend be installed for a build the mirror
     // has not caught up with. A wrong tag then fails as a 404 mid-download, not as a refusal here.

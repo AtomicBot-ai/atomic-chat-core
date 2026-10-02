@@ -59,6 +59,25 @@ export async function verifyMacBackendBinary(staging: string, version: string): 
   }
 }
 
+/**
+ * The Linux cudart companion unpacks into its own `cudart-llama-<tag>-bin-…/` directory, outside the
+ * `build/bin` the runtime puts on `LD_LIBRARY_PATH`; its libraries are moved there.
+ */
+export async function mergeCudartIntoBin(staging: string): Promise<void> {
+  const bin = join(staging, 'build', 'bin')
+  for (const entry of await readdir(staging, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('cudart-')) continue
+    const dir = join(staging, entry.name)
+    await mkdir(bin, { recursive: true })
+    for (const inner of await readdir(dir)) {
+      const to = join(bin, inner)
+      await rm(to, { recursive: true, force: true })
+      await rename(join(dir, inner), to)
+    }
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
 /** The server executable inside a pack; the only name `normalizeBackendLayout` looks for. */
 export function backendExeName(osType: string): string {
   return osType === 'windows' ? 'llama-server.exe' : 'llama-server'
@@ -163,6 +182,7 @@ export class BackendService {
         await rm(archive, { force: true })
       }
       await normalizeBackendLayout(staging, llamaServerExeName(this.deps.platform ?? process.platform))
+      await mergeCudartIntoBin(staging)
 
       if (
         this.deps.provider === 'llamacpp-upstream' &&
@@ -220,7 +240,7 @@ export class BackendService {
     const manifest = await this.deps.readManifest(options.proxy)
     const source = resolveBackendArchiveSource(version, backend, manifest ?? undefined)
     const archivePath = join(staging, getBackendArchiveName(version, backend))
-    const cudartName = getCudartArchiveName(backend)
+    const cudartName = getCudartArchiveName(backend, version)
     const cudartUrl = getCudartDownloadUrl(version, backend)
     const proxy = options.proxy ? { proxy: options.proxy } : {}
     const items: DownloadItem[] = [

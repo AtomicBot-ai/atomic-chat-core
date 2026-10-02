@@ -19,6 +19,21 @@ export const BUNDLED_MANIFEST_BASELINE: UpstreamManifest = {
       size: 11920825,
     },
     {
+      name: 'llama-b11344-bin-ubuntu-arm64.tar.gz',
+      sha256: '71438ab9cba751ca0e5b24164dffd32ef97f2f7c960c6dca3ea1bce4644e9c64',
+      size: 13587961,
+    },
+    {
+      name: 'llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz',
+      sha256: 'a27f72c6634544ab2b4de0ef846aa8ef950ef16ccdca89293ae9eb2f98644b38',
+      size: 147412805,
+    },
+    {
+      name: 'llama-b11344-bin-ubuntu-vulkan-arm64.tar.gz',
+      sha256: '6f6c7f3c0185f2541d2410dc4583580691f4fecd442b33567f7a71b93a02506f',
+      size: 24747904,
+    },
+    {
       name: 'llama-b11344-bin-ubuntu-vulkan-x64.tar.gz',
       sha256: 'b8adfbb4eff636fcefb9574f52d8832d4ea7e9e3afbb8659d8ea538bad462b7a',
       size: 31495599,
@@ -67,6 +82,9 @@ export const BUNDLED_MANIFEST_BASELINE: UpstreamManifest = {
       name: 'llama-b11344-bin-win-vulkan-x64.zip',
       sha256: '520221d6694e1d018adccd727f62a224594dc304c3807153e16b34dda86c22e6',
       size: 33031511,
+    },
+    {
+      name: 'cudart-llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz',
     },
     {
       name: 'cudart-llama-bin-win-cuda-12.4-x64.zip',

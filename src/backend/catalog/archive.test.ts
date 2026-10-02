@@ -11,6 +11,9 @@ import {
   getCudartDownloadUrl,
   GGML_ORG_DOWNLOAD_BASE,
   LINUX_BACKEND_BY_UPSTREAM_ASSET,
+  buildLinuxCudartArchiveName,
+  linuxBackendForUpstreamInfix,
+  linuxUpstreamInfix,
   requiredDiskSpaceForBackend,
   resolveBackendArchiveSource,
   WIN_ROCM_ARCHIVE_BYTES_FALLBACK,
@@ -28,6 +31,19 @@ describe('getBackendArchiveName / getBackendDownloadUrl (app backend.test.ts)', 
     )
     expect(getBackendArchiveName('b9691', 'linux-cpu-x64')).toBe('llama-b9691-bin-ubuntu-x64.tar.gz')
     expect(LINUX_BACKEND_BY_UPSTREAM_ASSET['ubuntu-x64']).toBe('linux-cpu-x64')
+  })
+  it('translates the Linux arm64 ids, the CUDA one by pattern', () => {
+    expect(getBackendArchiveName('b11344', 'linux-cpu-arm64')).toBe('llama-b11344-bin-ubuntu-arm64.tar.gz')
+    expect(getBackendArchiveName('b11344', 'linux-vulkan-arm64')).toBe(
+      'llama-b11344-bin-ubuntu-vulkan-arm64.tar.gz'
+    )
+    expect(getBackendArchiveName('b11344', 'linux-cuda-13.4-arm64')).toBe(
+      'llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz'
+    )
+    expect(linuxUpstreamInfix('linux-cuda-13-arm64')).toBeNull()
+    expect(linuxBackendForUpstreamInfix('ubuntu-cuda-13.4-arm64')).toBe('linux-cuda-13.4-arm64')
+    expect(linuxBackendForUpstreamInfix('ubuntu-cuda-13.4-x64')).toBeUndefined()
+    expect(linuxBackendForUpstreamInfix('ubuntu-s390x')).toBeUndefined()
   })
   it('uses tarballs for macOS and zips for Windows, and strips BOMs', () => {
     expect(getBackendArchiveName('b9702', 'macos-arm64')).toBe('llama-b9702-bin-macos-arm64.tar.gz')
@@ -142,7 +158,23 @@ describe('cudart companion', () => {
     )
     expect(getCudaToolkitVersion('win-cuda-13.4-arm64')).toBe('13.4')
   })
+  it('names the Linux arm64 companion with the release tag, and only when the tag is known', () => {
+    expect(buildLinuxCudartArchiveName('\uFEFFb11344', '13.4')).toBe(
+      'cudart-llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz'
+    )
+    expect(getCudartArchiveName('linux-cuda-13.4-arm64', 'b11344')).toBe(
+      'cudart-llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz'
+    )
+    expect(getCudartArchiveName('linux-cuda-13.4-arm64')).toBeNull()
+    expect(getCudartDownloadUrl('b11344', 'linux-cuda-13.4-arm64')).toBe(
+      `${GGML_ORG_DOWNLOAD_BASE}/b11344/cudart-llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz`
+    )
+    expect(getCudaToolkitVersion('linux-cuda-13.4-arm64')).toBe('13.4')
+  })
   it.each([
+    'linux-cpu-arm64',
+    'linux-vulkan-arm64',
+    'linux-cuda-13-arm64',
     'win-vulkan-x64',
     'win-cuda-13-x64',
     'linux-cpu-x64',
@@ -160,6 +192,8 @@ describe('cudart companion', () => {
 const LINUX_ASSET_INFIX: Record<string, string> = {
   'linux-cpu-x64': 'ubuntu-x64',
   'linux-vulkan-x64': 'ubuntu-vulkan-x64',
+  'linux-cpu-arm64': 'ubuntu-arm64',
+  'linux-vulkan-arm64': 'ubuntu-vulkan-arm64',
 }
 function scriptAssetNameFor(tag: string, backend: string): string {
   const infix = LINUX_ASSET_INFIX[backend]
@@ -216,6 +250,8 @@ describe('equivalence with scripts/resolve-upstream-backend.mjs (its three usage
       'win-rocm-10.0-x64',
       'win-vulkan-x64',
       'linux-vulkan-x64',
+      'linux-cpu-arm64',
+      'linux-vulkan-arm64',
     ]) {
       const asset = scriptAssetNameFor(tag, backend)
       expect(getBackendArchiveName(tag, backend)).toBe(asset)
