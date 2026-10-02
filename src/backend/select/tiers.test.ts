@@ -8,6 +8,7 @@ import {
   hasDiscreteGpu,
   integratedGpuOnly,
   isGpuBackendId,
+  linuxArm64GpuTiers,
   pickFirstWorkingTier,
   tierEnumeratesDevices,
   windowsGpuTiers,
@@ -36,6 +37,14 @@ const amd = (deviceId: number | null = SUPPORTED_AMD_ID): GpuProbeInfo => ({
   nvidia_info: null,
   vulkan_info: { api_version: '1.3', device_id: deviceId, device_type: 'DiscreteGpu' },
 })
+const adreno: GpuProbeInfo = {
+  name: 'Qualcomm(R) Adreno(TM) X1-85 GPU',
+  driver_version: '31.0.112.0',
+  vendor: 'Qualcomm',
+  total_memory: 512,
+  nvidia_info: null,
+  vulkan_info: { api_version: '1.3', device_id: 0x0c36, device_type: 'IntegratedGpu' },
+}
 
 describe('GPU memory and corroboration helpers', () => {
   it('hasDiscreteGpu / integratedGpuOnly', () => {
@@ -52,8 +61,11 @@ describe('GPU memory and corroboration helpers', () => {
     expect(hasCorroboratingGpu('win-vulkan-x64', [amd()])).toBe(true)
     expect(hasCorroboratingGpu('win-vulkan-x64', [])).toBe(false)
     expect(hasCorroboratingGpu('win-cpu-x64', [])).toBe(true)
+    expect(hasCorroboratingGpu('win-opencl-adreno-arm64', [adreno])).toBe(true)
+    expect(hasCorroboratingGpu('win-opencl-adreno-arm64', [nvidia('581.42')])).toBe(false)
   })
   it('isGpuBackendId', () => {
+    expect(isGpuBackendId('win-opencl-adreno-arm64')).toBe(true)
     expect(
       // The app's regex needs a `-` right after the first digit, so only Vulkan ids match in practice.
       ['win-vulkan-x64', 'linux-vulkan-x64', 'win-cuda-1-x64'].every(isGpuBackendId)
@@ -257,6 +269,101 @@ describe('detectIdealBackendType', () => {
     expect(await linux([])).toEqual({ kind: 'cpu-optimal' })
     expect(await linux([{ vulkan_info: { api_version: '1.3' }, total_memory: 4096 }], 'aarch64')).toEqual({
       kind: 'cpu-optimal',
+    })
+  })
+  describe('windows arm64', () => {
+    const armCatalog = [
+      b('b11344', 'win-cuda-13.4-arm64'),
+      b('b11344', 'win-opencl-adreno-arm64'),
+      b('b11344', 'win-cpu-arm64'),
+    ]
+    const arm = (
+      gpus: GpuProbeInfo[],
+      available: BackendVersion[] = armCatalog,
+      verdict: (t: string) => TierHealth = () => 'works'
+    ) =>
+      detectIdealBackendType({
+        osType: 'windows',
+        arch: 'aarch64',
+        cpuExtensions: [],
+        gpus,
+        listAvailableBackends: async () => available,
+        probeTier: async (t) => verdict(t),
+      })
+
+    it('Snapdragon with Adreno → OpenCL, regardless of its small dedicated VRAM', async () => {
+      expect(await arm([adreno])).toEqual({ kind: 'gpu', backend: 'win-opencl-adreno-arm64' })
+    })
+    it('arm64 with a CUDA 13 capable NVIDIA GPU → the arm64 CUDA build, OpenCL next when it is broken', async () => {
+      const gpus = [nvidia('581.42', '8.9', { total_memory: 16384 }), adreno]
+      expect(await arm(gpus)).toEqual({ kind: 'gpu', backend: 'win-cuda-13.4-arm64' })
+      expect(await arm(gpus, armCatalog, (t) => (t.includes('cuda') ? 'broken' : 'works'))).toEqual({
+        kind: 'gpu',
+        backend: 'win-opencl-adreno-arm64',
+      })
+    })
+    it('arm64 without a GPU → cpu-optimal; a broken OpenCL tier degrades to cpu-optimal', async () => {
+      expect(await arm([])).toEqual({ kind: 'cpu-optimal' })
+      expect(await arm([adreno], armCatalog, () => 'broken')).toEqual({ kind: 'cpu-optimal' })
+    })
+    it('Adreno host whose catalog has no OpenCL build is detection-failed (manifest unreachable)', async () => {
+      expect(await arm([adreno], [b('b11344', 'win-cpu-arm64')])).toEqual({ kind: 'detection-failed' })
+    })
+    it('never picks an x64 build on arm64', async () => {
+      expect(windowsGpuTiers(features({ opencl: true, cuda13: true }), catalog, 'arm64', [adreno])).toEqual(
+        []
+      )
+    })
+  })
+  describe('linux arm64', () => {
+    const armCatalog = [
+      b('b11344', 'linux-cuda-13.4-arm64'),
+      b('b11344', 'linux-vulkan-arm64'),
+      b('b11344', 'linux-cpu-arm64'),
+    ]
+    const vulkanGpu: GpuProbeInfo = { vulkan_info: { api_version: '1.3' }, total_memory: 4096 }
+    const arm = (
+      gpus: GpuProbeInfo[],
+      available: BackendVersion[] = armCatalog,
+      verdict: (t: string) => TierHealth = () => 'works'
+    ) =>
+      detectIdealBackendType({
+        osType: 'linux',
+        arch: 'aarch64',
+        cpuExtensions: [],
+        gpus,
+        listAvailableBackends: async () => available,
+        probeTier: async (t) => verdict(t),
+      })
+
+    it('CUDA 13 capable NVIDIA host → the arm64 CUDA build, Vulkan next when it is broken', async () => {
+      const gpus = [nvidia('580.95', '12.1', { total_memory: 8192, vulkan_info: { api_version: '1.4' } })]
+      expect(await arm(gpus)).toEqual({ kind: 'gpu', backend: 'linux-cuda-13.4-arm64' })
+      expect(await arm(gpus, armCatalog, (t) => (t.includes('cuda') ? 'broken' : 'works'))).toEqual({
+        kind: 'gpu',
+        backend: 'linux-vulkan-arm64',
+      })
+    })
+    it('Vulkan with a ≥2 GiB device → Vulkan; a smaller one or no GPU → cpu-optimal', async () => {
+      expect(await arm([vulkanGpu])).toEqual({ kind: 'gpu', backend: 'linux-vulkan-arm64' })
+      expect(await arm([{ ...vulkanGpu, total_memory: 1024 }])).toEqual({ kind: 'cpu-optimal' })
+      expect(await arm([])).toEqual({ kind: 'cpu-optimal' })
+    })
+    it('a CUDA host whose catalog has no CUDA build, or a GPU nothing sees, is detection-failed', async () => {
+      const gpus = [nvidia('580.95', '12.1', { total_memory: 8192 })]
+      expect(await arm(gpus, [b('b11344', 'linux-vulkan-arm64'), b('b11344', 'linux-cpu-arm64')])).toEqual({
+        kind: 'detection-failed',
+      })
+      expect(await arm([{ total_memory: 4096 }])).toEqual({ kind: 'detection-failed' })
+    })
+    it('never picks a Windows or x64 build', () => {
+      expect(
+        linuxArm64GpuTiers(
+          features({ cuda13: true, vulkan: true }),
+          [b('b11344', 'win-cuda-13.4-arm64'), b('b11344', 'linux-vulkan-x64')],
+          [vulkanGpu]
+        )
+      ).toEqual([])
     })
   })
   it('macos: always cpu-optimal', async () => {

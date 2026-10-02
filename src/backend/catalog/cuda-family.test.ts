@@ -5,6 +5,7 @@ import {
   gpuFamilyConcreteRe,
   isConcreteOfGpuFamily,
   isGpuFamilyId,
+  matchLinuxCudaBackend,
   matchWindowsCudaBackend,
   resolveGpuFamilyConcrete,
   resolveLatestVersionBackend,
@@ -18,6 +19,7 @@ describe('family ids', () => {
     ['win-cuda-13-x64', '13'],
     ['win-cuda-12-x64', '12'],
     ['\uFEFFwin-cuda-12-x64 ', '12'],
+    ['win-cuda-13-arm64', '13'],
     ['win-cuda-13.3-x64', null],
     ['win-rocm-x64', null],
     ['win-vulkan-x64', null],
@@ -38,7 +40,36 @@ describe('family ids', () => {
     expect(isConcreteOfGpuFamily('win-cuda-13-x64', 'win-cuda-12.4-x64')).toBe(false)
     expect(isConcreteOfGpuFamily('win-cuda-13.3-x64', 'win-cuda-13.3-x64')).toBe(false)
   })
+  it('keeps the arch of a family: arm64 matches arm64 assets only', () => {
+    expect(isConcreteOfGpuFamily('win-cuda-13-arm64', 'win-cuda-13.4-arm64')).toBe(true)
+    expect(isConcreteOfGpuFamily('win-cuda-13-arm64', 'win-cuda-13.4-x64')).toBe(false)
+    expect(isConcreteOfGpuFamily('win-cuda-13-x64', 'win-cuda-13.4-arm64')).toBe(false)
+    expect(
+      resolveGpuFamilyConcrete('win-cuda-13-arm64', [
+        { version: 'b11344', backend: 'win-cuda-13.4-x64', order: 0 },
+        { version: 'b11344', backend: 'win-cuda-13.4-arm64', order: 0 },
+      ])
+    ).toBe('b11344/win-cuda-13.4-arm64')
+  })
+  it('resolves the Linux arm64 CUDA 13 family against Linux arm64 assets only', () => {
+    expect(cudaFamilyMajor('linux-cuda-13-arm64')).toBe('13')
+    expect(cudaFamilyMajor('linux-cuda-13.4-arm64')).toBeNull()
+    expect(isGpuFamilyId('linux-cuda-13-arm64')).toBe(true)
+    expect(isConcreteOfGpuFamily('linux-cuda-13-arm64', 'linux-cuda-13.4-arm64')).toBe(true)
+    expect(isConcreteOfGpuFamily('linux-cuda-13-arm64', 'win-cuda-13.4-arm64')).toBe(false)
+    expect(
+      resolveLatestVersionBackend('linux-cuda-13-arm64', [
+        { version: 'b11344', backend: 'win-cuda-13.4-arm64', order: 0 },
+        { version: 'b11344', backend: 'linux-cuda-13.4-arm64', order: 0 },
+        { version: 'b11344', backend: 'linux-cuda-13.10-arm64', order: 0 },
+      ])
+    ).toBe('b11344/linux-cuda-13.10-arm64')
+    expect(matchLinuxCudaBackend('linux-cuda-13.4-arm64')).toBe('13.4')
+    expect(matchLinuxCudaBackend('linux-cuda-13-arm64')).toBeNull()
+    expect(matchWindowsCudaBackend('linux-cuda-13.4-arm64')).toBeNull()
+  })
   it.each([
+    ['win-cuda-13.4-arm64', '13.4'],
     ['win-cuda-13.3-x64', '13.3'],
     ['win-cuda-12.4-x64', '12.4'],
     ['\uFEFFwin-cuda-13.4-x64', '13.4'],

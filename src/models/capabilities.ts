@@ -16,8 +16,9 @@ import { join } from 'node:path'
 import type { DataLayout } from '../config/index.js'
 import type { LocalProviderId } from '../contracts/index.js'
 import { checkDflashSupport, checkGemmaMtpSupport, listDflashDrafts } from '../speculative/index.js'
-import { classifyProjector, ggufContextLength, isEmbeddingGguf } from './gguf/index.js'
+import { classifyProjector, ggufContextLength, isDecisionGguf, isEmbeddingGguf } from './gguf/index.js'
 import { readGgufMetadataFromFile } from './gguf/read-file.js'
+import { isDecisionCheckpointDir } from './decision-checkpoint.js'
 import type { ModelRegistry } from './registry.js'
 
 export interface GgufValidation {
@@ -33,6 +34,11 @@ export interface ModelCapabilities {
   /** A projector file exists, so this model can be given images. */
   mmprojExists: boolean
   isEmbedding: boolean
+  /**
+   * A decision model (`isDecisionGguf`): it runs in the decision module, never as a chat or embedding
+   * session, and `isEmbedding` is then `false`.
+   */
+  isDecision: boolean
   vision: boolean
   audio: boolean
   /** Speculative decoding this model id is known to support. */
@@ -47,7 +53,12 @@ export interface CapabilitiesDeps {
   /** Test seam; production reads the file. */
   readMetadata?: (path: string) => Promise<Record<string, string>>
   exists?: (path: string) => Promise<boolean>
+  isCheckpointDir?: (path: string) => Promise<boolean>
 }
+
+const DECISION_IMPORT_ERROR =
+  'This is a decision model (a router or classifier) and cannot be imported as a text generation model. ' +
+  'Decision models run in the decision module (settings: decision.model_path).'
 
 const defaultExists = (path: string) =>
   stat(path).then(
@@ -66,6 +77,7 @@ export class ModelCapabilityService {
    * prompt with nothing. The app has always named this case specifically, so the core does too.
    */
   async validateGguf(filePath: string): Promise<GgufValidation> {
+    if (await this.isCheckpointDir(filePath)) return { isValid: false, error: DECISION_IMPORT_ERROR }
     let metadata: Record<string, string>
     try {
       metadata = await this.readMetadata(filePath)
@@ -73,6 +85,9 @@ export class ModelCapabilityService {
       return { isValid: false, error: (e as Error).message }
     }
     const architecture = metadata['general.architecture']
+    // Checked first: a decision GGUF parses as a perfectly good model (a stamped Arbiter is even a
+    // `qwen35`), but it answers probabilities, not text, and runs only in the decision module.
+    if (isDecisionGguf(metadata)) return { isValid: false, error: DECISION_IMPORT_ERROR, metadata }
     if (architecture === 'clip') {
       return {
         isValid: false,
@@ -98,6 +113,7 @@ export class ModelCapabilityService {
       modelId,
       mmprojExists: false,
       isEmbedding: false,
+      isDecision: false,
       vision: false,
       audio: false,
       gemmaMtp: checkGemmaMtpSupport(modelId),
@@ -126,6 +142,7 @@ export class ModelCapabilityService {
       }
     }
 
+    if (await this.isCheckpointDir(paths.modelPath)) return { ...base, isDecision: true }
     const metadata = await this.readMetadata(paths.modelPath).catch(() => undefined)
     if (!metadata) return base
 
@@ -134,6 +151,7 @@ export class ModelCapabilityService {
       ...base,
       ...(maxCtxTrain !== undefined ? { maxCtxTrain } : {}),
       isEmbedding: isEmbeddingGguf(metadata),
+      isDecision: isDecisionGguf(metadata),
     }
   }
 
@@ -159,6 +177,10 @@ export class ModelCapabilityService {
     if (declared && (await exists(declared))) return declared
     const conventional = join(this.deps.layout.provider(provider).modelsDir, modelId, 'mmproj.gguf')
     return (await exists(conventional)) ? conventional : undefined
+  }
+
+  private isCheckpointDir(path: string): Promise<boolean> {
+    return (this.deps.isCheckpointDir ?? isDecisionCheckpointDir)(path).catch(() => false)
   }
 
   private async readMetadata(path: string): Promise<Record<string, string>> {

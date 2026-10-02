@@ -19,7 +19,7 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import { LINUX_BACKEND_BY_UPSTREAM_ASSET } from './archive.js'
+import { linuxBackendForUpstreamInfix } from './archive.js'
 import { BUNDLED_MANIFEST_BASELINE } from './bundled-manifest-baseline.js'
 import type { ArchSuffix, BackendOsType, BackendVersion, UpstreamManifest } from '../types.js'
 
@@ -53,8 +53,10 @@ export function isSupportedBackendOs(osType: string): osType is BackendOsType {
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /**
- * Backends a manifest offers this OS + arch. Windows: the whitelisted `win-*` zips matching the arch.
- * Linux: x64 only, `ubuntu-*` tarballs translated to `linux-*` ids. macOS: only `macos-<arch>`, so an
+ * Backends a manifest offers this OS + arch. Windows: the whitelisted `win-*` zips matching the arch
+ * (arm64: CPU, OpenCL for Adreno and CUDA 13).
+ * Linux: the whitelisted `ubuntu-*` tarballs matching the arch, translated to `linux-*` ids (arm64:
+ * CPU, Vulkan and CUDA 13). macOS: only `macos-<arch>`, so an
  * Intel host is never offered the arm64 build the manifest lists (macOS is passed through
  * `listSupportedBackends` unfiltered, so the arch filter has to happen here). Every entry has
  * `order: 0` — a manifest entry never outranks an installed one by install time.
@@ -77,7 +79,10 @@ export function parseManifestForPlatform(
       /^win-cuda-12\.\d+-x64$/.test(name) ||
       /^win-cuda-13\.\d+-x64$/.test(name) ||
       /^win-rocm-\d+\.\d+-x64$/.test(name) ||
-      name === 'win-vulkan-x64'
+      name === 'win-vulkan-x64' ||
+      name === 'win-cpu-arm64' ||
+      name === 'win-opencl-adreno-arm64' ||
+      /^win-cuda-13\.\d+-arm64$/.test(name)
     for (const asset of assets) {
       const backendName = re.exec(asset.name)?.[1]
       if (!backendName || !isAllowed(backendName)) continue
@@ -88,12 +93,11 @@ export function parseManifestForPlatform(
   }
 
   if (osType === 'linux') {
-    if (archSuffix !== 'x64') return []
     const re = new RegExp(`^llama-${escapedTag}-bin-(ubuntu-.+)\\.tar\\.gz$`)
     for (const asset of assets) {
       const infix = re.exec(asset.name)?.[1]
-      const backendName = infix ? LINUX_BACKEND_BY_UPSTREAM_ASSET[infix] : undefined
-      if (!backendName) continue
+      const backendName = infix ? linuxBackendForUpstreamInfix(infix) : undefined
+      if (!backendName || !backendName.endsWith(`-${archSuffix}`)) continue
       backends.push({ version: tag, backend: backendName, order: 0 })
     }
     return backends
@@ -270,7 +274,7 @@ export interface FetchRemoteBackendsOptions extends FetchLiveManifestOptions {
 /**
  * Backend builds available to this host: the session-cached manifest, else a live fetch, else the
  * bundled baseline. Never throws and never returns the baseline through the cache. `[]` for an OS
- * outside windows/linux/macos, for Linux on arm64 and for an Intel Mac.
+ * outside windows/linux/macos and for an Intel Mac.
  */
 export async function fetchRemoteBackends(options: FetchRemoteBackendsOptions): Promise<BackendVersion[]> {
   const { osType, arch, cache } = options

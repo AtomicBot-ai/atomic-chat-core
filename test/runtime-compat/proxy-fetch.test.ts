@@ -6,6 +6,9 @@ import type { ProxyServers } from '../helpers/proxy-servers.js'
 // The proxied download path must behave the same under Node (vitest) and Bun (`bun test`): the
 // failure mode to catch is a runtime that silently sends the request direct instead of through the
 // proxy, so every case asserts on what the proxy recorded. PLAN.md §6 risk 13.
+//
+// Rejections are awaited directly, not through `expect(promise).rejects`: under `bun test` 1.3.10 on
+// macOS that matcher intermittently segfaults Bun's event loop after a failed TLS handshake.
 
 let s: ProxyServers
 beforeAll(async () => {
@@ -29,7 +32,7 @@ describe('proxied fetch on this runtime', () => {
     expect((await bypass(`${s.httpOrigin}/echo`)).status).toBe(200)
     expect(s.events()).toEqual([])
     const strict = createPolicyFetch({ proxy: { url: s.httpProxy } })
-    await expect(strict(`${s.selfSignedOrigin}/echo`)).rejects.toThrow()
+    expect(await strict(`${s.selfSignedOrigin}/echo`).catch((e: unknown) => e)).toBeInstanceOf(Error)
     const relaxed = createPolicyFetch({ proxy: { url: s.httpProxy, ignore_ssl: true } })
     expect((await relaxed(`${s.selfSignedOrigin}/echo`)).status).toBe(200)
     expect(s.events().map((e) => e.kind)).toEqual(['http-connect', 'http-connect'])
@@ -47,6 +50,6 @@ describe('proxied fetch on this runtime', () => {
     const reader = (slow.body as ReadableStream<Uint8Array>).getReader()
     await reader.read()
     controller.abort()
-    await expect(reader.read()).rejects.toMatchObject({ name: 'AbortError' })
+    expect(await reader.read().catch((e: unknown) => e)).toMatchObject({ name: 'AbortError' })
   })
 })

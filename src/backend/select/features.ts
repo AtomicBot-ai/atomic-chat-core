@@ -61,6 +61,12 @@ export function isAmdGpu(gpu: GpuProbeInfo): boolean {
   return typeof gpu.vendor === 'string' && gpu.vendor.toLowerCase() === 'amd'
 }
 
+/** Snapdragon's Adreno, by the probe's vendor or, when the vendor id was not recognised, its name. */
+export function isAdrenoGpu(gpu: GpuProbeInfo): boolean {
+  if (typeof gpu.vendor === 'string' && gpu.vendor.toLowerCase() === 'qualcomm') return true
+  return typeof gpu.name === 'string' && /adreno/i.test(gpu.name)
+}
+
 /**
  * The Windows ROCm decision. The upstream archive statically carries HIP inside `ggml-hip.dll`, so
  * an AMD driver is enough; what must be checked is the gfx architecture, and the PCI device id is the
@@ -75,7 +81,8 @@ export function rocmSupportedWindows(hasAmdGpu: boolean, deviceIds: readonly num
  * Which CPU/GPU tiers this host can run. The driver is system-wide, so *any* NVIDIA GPU over a floor
  * enables that CUDA tier; architecture is per-card and must hold for *every* card (llama.cpp
  * offloads across all visible devices), so one sub-7.5 GPU vetoes CUDA 13 for the whole host.
- * Vulkan is on when any GPU carries `vulkan_info`; ROCm only on Windows via the PCI table. On any OS
+ * Vulkan is on when any GPU carries `vulkan_info`; ROCm only on Windows via the PCI table; OpenCL
+ * only on Windows with an Adreno GPU (the only OpenCL build ggml-org ships is for Adreno). On any OS
  * other than linux/windows only the CPU flags are set (no CUDA, no Vulkan — macOS has Metal).
  */
 export function getSupportedFeatures(
@@ -95,6 +102,8 @@ export function getSupportedFeatures(
   }
   const floors = osType === 'linux' || osType === 'windows' ? CUDA_DRIVER_FLOORS[osType] : undefined
   if (!floors) return features
+  // Set only when true: every other host keeps the exact shape of the Rust `SupportedFeatures`.
+  if (osType === 'windows' && gpus.some(isAdrenoGpu)) features.opencl = true
 
   const amdDeviceIds: number[] = []
   let hasAmdGpu = false
@@ -128,6 +137,7 @@ export function normalizeFeatures(features: Partial<BackendFeatures> | null | un
     cuda13: features?.cuda13 || false,
     vulkan: features?.vulkan || false,
     rocm: features?.rocm || false,
+    ...(features?.opencl ? { opencl: true } : {}),
   }
 }
 
@@ -138,9 +148,11 @@ export function normalizeFeatures(features: Partial<BackendFeatures> | null | un
 /**
  * Backend ids installable on `<osType>-<arch>` given the detected features. Windows x64 always has
  * CPU, then CUDA 12.4, the *family* ids `win-cuda-13-x64` / `win-rocm-x64` (concrete minors come
- * from the manifest, ATO-105) and Vulkan. Linux x64: CPU, plus Vulkan — the CUDA and ROCm flags are
- * ignored because ggml-org publishes no Linux CUDA/HIP archive (2026-05-28 ADR). arm64 Linux and
- * Windows get a CPU placeholder; macOS its single arch build. Anything else is `INVALID_ARGUMENT`.
+ * from the manifest, ATO-105) and Vulkan. Windows arm64: CPU, OpenCL on an Adreno GPU and the
+ * `win-cuda-13-arm64` family. Linux x64: CPU, plus Vulkan — the CUDA and ROCm flags are ignored
+ * (2026-05-28 ADR). Linux arm64: CPU, Vulkan and the `linux-cuda-13-arm64` family (NVIDIA GB10 /
+ * Grace hosts); the Snapdragon build is not offered. macOS its single arch build. Anything else is
+ * `INVALID_ARGUMENT`.
  */
 export function determineSupportedBackends(
   osType: string,
@@ -160,6 +172,8 @@ export function determineSupportedBackends(
     case 'windows-aarch64':
     case 'windows-arm64':
       supported.push('win-cpu-arm64')
+      if (features.opencl) supported.push('win-opencl-adreno-arm64')
+      if (features.cuda13) supported.push('win-cuda-13-arm64')
       break
     case 'linux-x86_64':
     case 'linux-x86':
@@ -169,6 +183,8 @@ export function determineSupportedBackends(
     case 'linux-aarch64':
     case 'linux-arm64':
       supported.push('linux-cpu-arm64')
+      if (features.vulkan) supported.push('linux-vulkan-arm64')
+      if (features.cuda13) supported.push('linux-cuda-13-arm64')
       break
     case 'macos-x86_64':
     case 'macos-x86':
@@ -208,15 +224,24 @@ export function listSupportedBackends(
  * The hardware gate on the merged catalog. Windows keeps only backends whose (normalised) id is in
  * `supportedBackends`, matching concrete CUDA-13 and ROCm assets against their family ids so
  * `win-cuda-13.4-x64` is accepted when `win-cuda-13-x64` is supported and flows downstream unchanged.
- * Every other OS returns the list unfiltered (the manifest parser already applied the arch filter).
+ * Linux keeps everything but the CUDA builds, which need their family id (`linux-cuda-13-arm64`)
+ * supported: CUDA ranks above every other category, so an unfiltered entry would be recommended to
+ * a host without an NVIDIA GPU. Every other OS returns the list unfiltered (the manifest parser
+ * already applied the arch filter).
  */
 export function filterBackendsBySupport(
   merged: readonly BackendVersion[],
   supportedBackends: readonly string[],
   osType: string
 ): BackendVersion[] {
-  if (osType !== 'windows') return [...merged]
   const supportedSet = new Set(supportedBackends)
+  if (osType === 'linux') {
+    return merged.filter((b) => {
+      const m = /^linux-cuda-(\d+)\.\d+-(arm64)$/.exec(stripBom(b.backend))
+      return !m || supportedSet.has(`linux-cuda-${m[1]}-${m[2]}`)
+    })
+  }
+  if (osType !== 'windows') return [...merged]
   const cuda13Concrete = /^win-cuda-13\.\d+-(x64|arm64)$/
   const isSupported = (rawBackend: string, normalized: string): boolean => {
     if (supportedSet.has(normalized)) return true

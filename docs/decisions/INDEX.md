@@ -11,10 +11,12 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-02** — [Bump core to 0.9.2 after merging main's 0.8.0-0.9.1](2026-10-02-bump-core-to-0-9-2-after-merging-main.md) — supersedes the version of the 2026-10-01 0.7.5 record; the app branch pins 0.9.2.
 - **2026-10-02** — [tensorrt-llm: what the Windows live acceptance changed](2026-10-02-tensorrt-llm-windows-live-acceptance-fixes.md) — supersedes D2's `--no-distribution` of the 2026-10-01 Windows record and the discrete-card half of the 2026-09-29 unified-memory KV record; adds `max_batch_size`, `kv_cache_max_tokens`, `cuda_graphs`, `kv_cache_dtype`, `windows-restart-pending`.
 - **2026-10-01** — [TensorRT-LLM on Windows runs in Atomic Chat's own WSL distribution, switched on by conf](2026-10-01-tensorrt-llm-on-windows-runs-in-atomic-chats-own-wsl-distribution.md) — WSL transport, guest as a Linux host, one elevated step, `GET /models/tensorrt-llm/location`, `windows.json` in conf main is the switch.
 - **2026-10-01** — [Install distributions come from a per-platform environment manifest, not the engine descriptor](2026-10-01-read-install-distributions-from-the-environment-manifest.md) — adds `RequirementPlan.environment_manifest_id`; core refuses a descriptor with `recipes` (r1 installs reinstall).
 - **2026-10-01** — [Bump core to 0.7.5 after merging main's 0.7.1-0.7.4](2026-10-01-bump-core-to-0-7-5-after-merging-main.md) — supersedes the version half of the 2026-09-28 0.7.0 bump record.
+- **2026-09-30** — [The decision model is its own core module, outside the sessions registry](2026-09-30-the-decision-model-is-its-own-core-module.md) — adds the `decision` settings section, `/atomic/v1/decision/*`, `decision:*` events and the `/v1/systemone`, `/v1/router/score` passthrough.
 - **2026-09-30** — [Gate embedded MTP on every upstream MTP architecture](2026-09-30-gate-embedded-mtp-on-every-upstream-mtp-architecture.md) — 2 → 14 architectures, matching llama.cpp b10809.
 - **2026-09-30** — [Fall back to offload when the GPU runs out of memory](2026-09-30-fall-back-to-offload-when-the-gpu-runs-out-of-memory.md) — adds `LoadDiffusionModelRequest.offloadFallback`.
 - **2026-09-30** — [Keep the video ETA past its forecast](2026-09-30-keep-the-video-eta-past-its-forecast.md) — prices the Metal decode ×10 and doubles a spent forecast instead of going `null`.

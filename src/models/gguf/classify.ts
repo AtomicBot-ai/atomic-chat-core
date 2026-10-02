@@ -67,11 +67,49 @@ export const NON_TEXT_GGUF_ARCHITECTURES = new Set([
   't5encoder',
 ])
 
+/** Architectures that are decision models by themselves (the Laya family: an mmBERT encoder with a marker head). */
+export const DECISION_GGUF_ARCHITECTURES = new Set(['laya'])
+
+/**
+ * A decision model: served by `llama-server --decision` in the decision module, never as a chat or
+ * embedding session. Either the architecture is one (`laya`) or the file is stamped with a decision
+ * spec (`decision.layout`, the mirror key of `decision.spec`, which any architecture can carry: an
+ * Arbiter or JevK5 GGUF stays `qwen35` underneath). Checked before `isEmbeddingGguf`, which it
+ * excludes: `laya` is deliberately not in `NON_TEXT_GGUF_ARCHITECTURES`, because that would load it
+ * with `--embedding --pooling mean`.
+ */
+export function isDecisionGguf(metadata: Meta): boolean {
+  if (!metadata) return false
+  const raw = metadata['general.architecture']
+  const arch = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  if (DECISION_GGUF_ARCHITECTURES.has(arch)) return true
+  const layout = metadata['decision.layout']
+  return typeof layout === 'string' ? layout.trim() !== '' : layout !== undefined && layout !== null
+}
+
+/**
+ * The files a laya Hugging Face checkpoint folder needs before the engine can convert it
+ * (`DECISION.md`, "Loading a Hugging Face checkpoint directly"), relative and `/`-separated.
+ * `rl_agent_config.json` is what tells the folder apart from any other model.
+ */
+export const DECISION_CHECKPOINT_FILES = [
+  'rl_agent_config.json',
+  'encoder/config.json',
+  'tokenizer/tokenizer.json',
+  'model.safetensors',
+] as const
+
+/** Which of `DECISION_CHECKPOINT_FILES` a folder lacks, given the relative paths it has. */
+export function missingDecisionCheckpointFiles(present: ReadonlySet<string>): string[] {
+  return DECISION_CHECKPOINT_FILES.filter((file) => !present.has(file))
+}
+
 /** Weights that produce embeddings rather than text (load in embedding mode instead). */
 export function isEmbeddingGguf(metadata: Meta): boolean {
   const raw = metadata?.['general.architecture']
   const arch = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
   if (!arch) return false
+  if (isDecisionGguf(metadata)) return false
   if (NON_TEXT_GGUF_ARCHITECTURES.has(arch)) return true
   // Embedding/reranker conversions of a generative arch keep the arch name; a pooling type other
   // than 0 (NONE) or a classifier head gives them away.

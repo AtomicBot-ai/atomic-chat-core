@@ -36,6 +36,7 @@ export function getBackendCategory(backend: string): string | null {
   if (backend.includes('cuda-11-common_cpus') || backend.includes('cu11.7')) return 'cuda-cu11.7'
   if (backend.includes('rocm') || backend.includes('hip')) return 'rocm'
   if (backend.includes('vulkan')) return 'vulkan'
+  if (backend.includes('opencl')) return 'opencl'
   if (backend.startsWith('win-cpu-')) return 'cpu'
   if (backend.includes('common_cpus')) return 'common_cpus'
   if (backend.includes('avx512')) return 'avx512'
@@ -60,6 +61,8 @@ export function backendCategoryToLabel(category: string): string {
       return 'CUDA 11'
     case 'vulkan':
       return 'Vulkan'
+    case 'opencl':
+      return 'OpenCL (Adreno)'
     default:
       return category
   }
@@ -73,6 +76,7 @@ const GPU_FIRST_PRIORITIES = [
   'cuda-cu11.7',
   'rocm',
   'vulkan',
+  'opencl',
   'common_cpus',
   'cpu',
   'avx512',
@@ -89,6 +93,7 @@ const LOW_VRAM_PRIORITIES = [
   'cuda-cu12.4',
   'cuda-cu12.0',
   'cuda-cu11.7',
+  'opencl',
   'common_cpus',
   'cpu',
   'avx512',
@@ -103,7 +108,8 @@ const LOW_VRAM_PRIORITIES = [
 
 /**
  * Best backend by category priority. CUDA tiers always lead (they carry no VRAM gate); with enough
- * GPU memory ROCm and Vulkan come next, otherwise they rank below every CPU bucket. Within a
+ * GPU memory ROCm and Vulkan come next, otherwise they rank below every CPU bucket. OpenCL (Adreno,
+ * shared system RAM) is not VRAM-gated and ranks just above the CPU buckets either way. Within a
  * category the newest build wins. No category matching → the first entry. Empty → `INVALID_ARGUMENT`.
  */
 export function prioritizeBackends(

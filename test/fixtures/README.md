@@ -29,4 +29,7 @@
   commit `df05c77` on branch `change/add-tensorrt-llm-windows` (not in conf main until the live Windows
   acceptance, change `add-tensorrt-llm-windows` design D14). Replace a file
   with conf's, never edit it by hand: the parsers are tested against what conf CI accepted.
+- `decision/engine-examples.json` — the examples of the fork's `DECISION.md` (API version 1: systemone and router
+  requests and answers, the error envelope, `/health`, `/v1/models`, `/props`), copied by hand with the source named
+  inside. The engine is the source of truth; `test/contract/decision.test.ts` holds the core's readers against them.
 - Everything else is hand-written test data owned by this repo.

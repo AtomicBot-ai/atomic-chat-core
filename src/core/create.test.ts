@@ -849,6 +849,98 @@ describe.skipIf(process.platform === 'win32')('video generation through the owne
   })
 })
 
+describe('the decision model through the owner', () => {
+  const control = (core: AtomicCore, method: string, path: string, body?: unknown) =>
+    fetch(`${core.control.url}/atomic/v1/decision/${path}`, {
+      method,
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+
+  it('runs it outside the sessions, journals it, serves it on /v1 and stops it with the core', async () => {
+    const { fakeDecisionSpawn } = await import('../../test/helpers/fake-llama-server.js')
+    const { isProcessAlive } = await import('../runtime/shared/index.js')
+    await data.writeBackend('llamacpp', 'b10269-1.7.0', 'macos-arm64')
+    await writeFile(join(data.root, 'router.gguf'), 'GGUF')
+    const core = await createCore({ decision: { probe: async () => true, spawn: fakeDecisionSpawn() } })
+    const events: string[] = []
+    for (const name of ['decision:state', 'decision:error', 'settings:changed'] as const)
+      core.events.on(name, () => events.push(name))
+    expect(await (await control(core, 'GET', 'status')).json()).toMatchObject({ state: 'disabled' })
+
+    const configured = await control(core, 'PUT', 'config', { enabled: true, model_path: 'router.gguf' })
+    expect(await configured.json()).toMatchObject({ config: { enabled: true, model_path: 'router.gguf' } })
+    const ready = (await (await control(core, 'POST', 'load')).json()) as { state: string; pid: number }
+    expect(ready.state).toBe('ready')
+    expect(events).toContain('settings:changed')
+    expect(events).toContain('decision:state')
+    expect(core.sessions()).toEqual([])
+    const journal = JSON.parse(await readFile(data.layout.core.processes, 'utf8')) as {
+      processes: Array<{ provider: string; pid: number }>
+    }
+    expect(journal.processes).toContainEqual(
+      expect.objectContaining({ provider: 'decision', pid: ready.pid })
+    )
+
+    const candidates = [{ id: 'local/qwen', card: { name: 'Qwen', kind: 'local' } }]
+    const scored = await control(core, 'POST', 'score', { task: 't', criterion: 'c', candidates })
+    expect(await scored.json()).toMatchObject({
+      unavailable: false,
+      result: { scores: [{ id: 'local/qwen' }] },
+    })
+    const decided = await control(core, 'POST', 'decide', {
+      state: 'Billed twice, refund please',
+      questions: { refund: { type: 'noul', instructions: 'Asks for money back?' } },
+      timeout_ms: 5_000,
+    })
+    expect(await decided.json()).toMatchObject({ unavailable: false, result: { answers: { refund: {} } } })
+    // The optional request fields reach the model on both routes, with or without a timeout.
+    const scoredWithOptions = await control(core, 'POST', 'score', {
+      task: 't',
+      criterion: 'c',
+      candidates,
+      timeout_ms: 5_000,
+      truncation: 'allow',
+    })
+    expect(await scoredWithOptions.json()).toMatchObject({ unavailable: false })
+    const decidedTruncated = await control(core, 'POST', 'decide', {
+      state: 'Billed twice, refund please',
+      questions: { refund: { type: 'noul', instructions: 'Asks for money back?' } },
+      truncation: 'allow',
+    })
+    expect(await decidedTruncated.json()).toMatchObject({ unavailable: false })
+
+    const served = await core.startPublicServer({ port: 0 })
+    const base = `http://127.0.0.1:${served.port}/v1`
+    const routed = await fetch(`${base}/router/score`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 't', criterion: 'c', candidates }),
+    })
+    expect(routed.status).toBe(200)
+    const models = (await (await fetch(`${base}/models`)).json()) as { data: unknown[] }
+    expect(models.data).toEqual([])
+
+    await core.shutdown()
+    expect(isProcessAlive(ready.pid)).toBe(false)
+  })
+
+  it('starts an enabled model when the owner comes up', async () => {
+    const { fakeDecisionSpawn } = await import('../../test/helpers/fake-llama-server.js')
+    await data.writeBackend('llamacpp', 'b10269-1.7.0', 'macos-arm64')
+    await writeFile(join(data.root, 'router.gguf'), 'GGUF')
+    await mkdir(data.layout.core.dir, { recursive: true })
+    await writeFile(
+      data.layout.core.settings,
+      JSON.stringify({ version: 1, revision: 1, decision: { enabled: true, model_path: 'router.gguf' } })
+    )
+    const core = await createCore({ decision: { probe: async () => true, spawn: fakeDecisionSpawn() } })
+    for (let i = 0; i < 200 && core.decision.getStatus().state !== 'ready'; i++)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(core.decision.getStatus()).toMatchObject({ state: 'ready', enabled: true })
+  })
+})
+
 describe('error reporting', () => {
   it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
     const captured: ErrorReport[] = []

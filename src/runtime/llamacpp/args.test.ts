@@ -201,6 +201,40 @@ describe('planLlamaArgs', () => {
     ).not.toContain('turbo3')
   })
 
+  describe('model loading mode', () => {
+    const loadArgs = (version_backend: string, no_mmap: boolean, mlock: boolean) => {
+      const argv = buildLlamaArgs({ ...base(), version_backend, no_mmap, mlock }, input)
+      const at = argv.indexOf('--load-mode')
+      return {
+        loadMode: at >= 0 ? argv[at + 1] : undefined,
+        legacy: argv.filter((a) => a === '--no-mmap' || a === '--mlock'),
+      }
+    }
+
+    it.each([
+      [true, false, 'none'],
+      [false, true, 'mmap+mlock'],
+      [true, true, 'mlock'],
+    ])('no_mmap=%s mlock=%s → --load-mode %s from b10875 on', (noMmap, mlock, mode) => {
+      expect(loadArgs('b10875/macos-arm64', noMmap, mlock)).toEqual({ loadMode: mode, legacy: [] })
+      expect(loadArgs('b11344/win-cuda-13-arm64', noMmap, mlock)).toEqual({ loadMode: mode, legacy: [] })
+    })
+
+    it('leaves the default loading mode alone when neither is set', () => {
+      expect(loadArgs('b11344/macos-arm64', false, false)).toEqual({ loadMode: undefined, legacy: [] })
+    })
+
+    it('keeps the removed flags for builds that still accept them', () => {
+      expect(loadArgs('b10874/macos-arm64', true, true)).toEqual({
+        loadMode: undefined,
+        legacy: ['--no-mmap', '--mlock'],
+      })
+      // TurboQuant's fork is based on b10269.
+      expect(loadArgs('b10269-1.7.0/macos-arm64', true, false).legacy).toEqual(['--no-mmap'])
+      expect(loadArgs('b11344/ik-cuda', false, true).legacy).toEqual(['--mlock'])
+    })
+  })
+
   it('drops the whole extra_args string on an unterminated quote and warns', () => {
     const plan = planLlamaArgs({ ...base(), extra_args: '--x "y' }, input)
     expect(plan.argv.at(-1)).toBe('off')

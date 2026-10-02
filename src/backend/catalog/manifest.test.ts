@@ -84,9 +84,52 @@ describe('parseManifestForPlatform', () => {
     expect(parseManifestForPlatform(manifest, 'windows', 'x64').map((b) => b.backend)).toEqual([
       'win-rocm-10.0-x64',
     ])
-    expect(parseManifestForPlatform(manifest, 'windows', 'arm64')).toEqual([])
   })
-  it('returns cpu + vulkan for Linux x64 under linux-* ids and nothing for Linux arm64', () => {
+  it('returns the Windows arm64 catalog: CPU, OpenCL Adreno and CUDA 13 only', () => {
+    const manifest: UpstreamManifest = {
+      tag_name: 'b11344',
+      assets: [
+        { name: 'llama-b11344-bin-win-cpu-arm64.zip' },
+        { name: 'llama-b11344-bin-win-opencl-adreno-arm64.zip' },
+        { name: 'llama-b11344-bin-win-cuda-13.4-arm64.zip' },
+        { name: 'llama-b11344-bin-win-cuda-12.4-arm64.zip' },
+        { name: 'llama-b11344-bin-win-vulkan-arm64.zip' },
+        { name: 'llama-b11344-bin-win-cpu-x64.zip' },
+        { name: 'cudart-llama-bin-win-cuda-13.4-arm64.zip' },
+      ],
+    }
+    expect(
+      parseManifestForPlatform(manifest, 'windows', 'arm64')
+        .map((b) => b.backend)
+        .sort()
+    ).toEqual(['win-cpu-arm64', 'win-cuda-13.4-arm64', 'win-opencl-adreno-arm64'])
+    expect(parseManifestForPlatform(manifest, 'windows', 'x64').map((b) => b.backend)).toEqual([
+      'win-cpu-x64',
+    ])
+  })
+  it('returns the Linux arm64 catalog: CPU, Vulkan and CUDA 13, not Snapdragon or x64 CUDA', () => {
+    const manifest: UpstreamManifest = {
+      tag_name: 'b11344',
+      assets: [
+        { name: 'llama-b11344-bin-ubuntu-arm64.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-vulkan-arm64.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz' },
+        { name: 'llama-b11344-bin-linux-arm64-snapdragon.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-cuda-13.4-x64.tar.gz' },
+        { name: 'llama-b11344-bin-ubuntu-x64.tar.gz' },
+        { name: 'cudart-llama-b11344-bin-ubuntu-cuda-13.4-arm64.tar.gz' },
+      ],
+    }
+    expect(
+      parseManifestForPlatform(manifest, 'linux', 'arm64')
+        .map((b) => b.backend)
+        .sort()
+    ).toEqual(['linux-cpu-arm64', 'linux-cuda-13.4-arm64', 'linux-vulkan-arm64'])
+    expect(parseManifestForPlatform(manifest, 'linux', 'x64').map((b) => b.backend)).toEqual([
+      'linux-cpu-x64',
+    ])
+  })
+  it('returns cpu + vulkan for Linux x64 under linux-* ids and nothing for Linux arm64 without arm64 assets', () => {
     expect(
       parseManifestForPlatform(MANIFEST, 'linux', 'x64')
         .map((b) => b.backend)

@@ -40,6 +40,7 @@ import {
   resolveBackendExe,
   selectInstalledBackend,
 } from '../backend/index.js'
+import { noticeEngineInstall, wireDecision } from '../decision/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
 import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
 import { TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
@@ -482,6 +483,23 @@ export async function createAtomicCore(
       ...(managedWindows === undefined ? {} : { windows: managedWindows }),
     })
 
+    // The decision model: its own process outside the sessions registry. Started (in the background,
+    // nothing waits for it) only once the facade exists, below.
+    const decision = wireDecision({
+      layout,
+      settings,
+      journal,
+      instanceId: lock.instanceId,
+      hardware,
+      emit: (name, payload) => emitter.emit(name, payload),
+      on: (name, listener) => emitter.on(name, listener),
+      log: runtimeLog,
+      platform,
+      env,
+      ...(options.decision ? { overrides: options.decision } : {}),
+      ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
+
     const control = await ControlServer.start(
       {
         token,
@@ -551,8 +569,13 @@ export async function createAtomicCore(
           : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),
-          install: (provider, version, backend, opts) =>
-            backendService(provider as LocalProviderId).install(version, backend, opts),
+          install: async (provider, version, backend, opts) => {
+            const result = await backendService(provider as LocalProviderId).install(version, backend, opts)
+            // The core emits no `backend:download-finished` for its own installs, so the decision
+            // module hears about a new TurboQuant build here: it may be the first to serve `--decision`.
+            noticeEngineInstall(decision, provider, result.installed)
+            return result
+          },
           remove: (provider, version, backend) =>
             backendService(provider as LocalProviderId).remove(
               version,
@@ -577,6 +600,23 @@ export async function createAtomicCore(
           stop: () => (core as AtomicCore).stopRemoteAccess(),
         },
         diffusion,
+        decision: {
+          status: () => decision.getStatus(),
+          config: () => decision.getConfig(),
+          configure: (patch) => decision.configure(patch),
+          load: () => decision.load(),
+          unload: () => decision.unload(),
+          score: (request) =>
+            decision.scoreCandidates(request.task, request.criterion, request.candidates, {
+              ...(request.timeout_ms !== undefined ? { timeoutMs: request.timeout_ms } : {}),
+              ...(request.truncation !== undefined ? { truncation: request.truncation } : {}),
+            }),
+          decide: (request) =>
+            decision.decide(request.state, request.questions, {
+              ...(request.timeout_ms !== undefined ? { timeoutMs: request.timeout_ms } : {}),
+              ...(request.truncation !== undefined ? { truncation: request.truncation } : {}),
+            }),
+        },
         settings: {
           get: (provider) => settings.get(provider),
           revision: () => settings.revision,
@@ -658,6 +698,7 @@ export async function createAtomicCore(
       diffusion,
       managed,
       managedTrustedHosts,
+      decision,
       errors: reporter,
       telemetry: reporter,
       remoteAccess: await wireRemoteAccess({
@@ -690,6 +731,8 @@ export async function createAtomicCore(
     // app that replaced it does not. Same checks, and the file is consumed. Only the app owner's folder
     // can hold it: a CLI owner refuses the app's folder, and one app instance runs at a time.
     await reapTunnelOrphan(layout.legacyRemoteAccessTunnel, { log: warn })
+    // An enabled and configured decision model starts now; its shutdown belongs to the facade.
+    decision.start()
     await lock.publish(control.host, control.port)
     log('info', `core ${CORE_VERSION} owns ${layout.root} (control ${control.url})`)
     return core

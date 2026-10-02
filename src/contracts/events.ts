@@ -13,6 +13,7 @@ import type {
   DiffusionStateEvent,
 } from './diffusion.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
+import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo, SessionLoadStage } from './session.js'
 
@@ -85,7 +86,11 @@ export interface CoreEvents {
     optimal: unknown | null
   }
 
-  'settings:changed': { provider: LocalProviderId | 'server' | 'cloud'; key: string; value: unknown }
+  'settings:changed': {
+    provider: LocalProviderId | 'server' | 'cloud' | 'decision'
+    key: string
+    value: unknown
+  }
 
   'session:started': SessionInfo & { provider: LocalProviderId }
   'session:died': {
@@ -166,6 +171,14 @@ export interface CoreEvents {
    */
   'environment:changed': EnvironmentSnapshot
   'environment:operation': EnvironmentOperation
+
+  /**
+   * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). `state` on every
+   * status change (the payload is the whole `DecisionStatus`, like `GET /decision/status`); `error`
+   * for a failure nobody is awaiting: a crash, a failed restart, restarts given up.
+   */
+  'decision:state': DecisionStateEvent
+  'decision:error': DecisionErrorEvent
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

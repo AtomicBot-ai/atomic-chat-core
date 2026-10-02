@@ -10,7 +10,12 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import { matchWindowsCudaBackend } from './cuda-family.js'
+import {
+  linuxCudaBackendArch,
+  matchLinuxCudaBackend,
+  matchWindowsCudaBackend,
+  windowsCudaBackendArch,
+} from './cuda-family.js'
 import type { BackendArchiveSource, UpstreamManifest } from '../types.js'
 import { stripBom } from '../version.js'
 
@@ -23,16 +28,39 @@ export const GGML_ORG_DOWNLOAD_BASE = 'https://github.com/ggml-org/llama.cpp/rel
 /**
  * Internal Linux backend id → ggml-org asset infix (between `bin-` and `.tar.gz`). Upstream calls
  * its Linux builds `ubuntu-*`; the app surfaces them as `linux-*`. The whitelist is deliberately
- * narrow (`s390x`, `arm64`, `rocm-*`, `openvino-*`, `vulkan-arm64` are dropped).
+ * narrow (`s390x`, `rocm-*`, `openvino-*`, the Snapdragon build are dropped). The arm64 CUDA builds
+ * carry a toolkit minor and are translated by pattern (`linuxUpstreamInfix`), not listed here.
  */
 export const LINUX_UPSTREAM_ASSET_BY_BACKEND: Readonly<Record<string, string>> = {
   'linux-cpu-x64': 'ubuntu-x64',
   'linux-vulkan-x64': 'ubuntu-vulkan-x64',
+  'linux-cpu-arm64': 'ubuntu-arm64',
+  'linux-vulkan-arm64': 'ubuntu-vulkan-arm64',
 }
 
 export const LINUX_BACKEND_BY_UPSTREAM_ASSET: Readonly<Record<string, string>> = Object.fromEntries(
   Object.entries(LINUX_UPSTREAM_ASSET_BY_BACKEND).map(([k, v]) => [v, k])
 )
+
+const LINUX_CUDA_UPSTREAM_INFIX_RE = /^ubuntu-cuda-(13\.\d+)-(arm64)$/
+
+/** `ubuntu-*` asset infix of a Linux backend id (`linux-cuda-13.4-arm64` → `ubuntu-cuda-13.4-arm64`). */
+export function linuxUpstreamInfix(backend: string): string | null {
+  const id = stripBom(backend)
+  const listed = LINUX_UPSTREAM_ASSET_BY_BACKEND[id]
+  if (listed) return listed
+  const toolkit = matchLinuxCudaBackend(id)
+  const arch = linuxCudaBackendArch(id)
+  return toolkit && arch ? `ubuntu-cuda-${toolkit}-${arch}` : null
+}
+
+/** Linux backend id of an `ubuntu-*` asset infix, or `undefined` for an infix the app does not use. */
+export function linuxBackendForUpstreamInfix(infix: string): string | undefined {
+  const listed = LINUX_BACKEND_BY_UPSTREAM_ASSET[infix]
+  if (listed) return listed
+  const m = LINUX_CUDA_UPSTREAM_INFIX_RE.exec(infix)
+  return m ? `linux-cuda-${m[1]}-${m[2]}` : undefined
+}
 
 /**
  * `llama-{tag}-bin-{variant}.{tar.gz|zip}`: macOS and Linux tarballs, Windows zips; Linux ids are
@@ -41,7 +69,7 @@ export const LINUX_BACKEND_BY_UPSTREAM_ASSET: Readonly<Record<string, string>> =
 export function getBackendArchiveName(version: string, backend: string): string {
   const tag = stripBom(version)
   const id = stripBom(backend)
-  const linuxInfix = LINUX_UPSTREAM_ASSET_BY_BACKEND[id]
+  const linuxInfix = linuxUpstreamInfix(id)
   if (linuxInfix) return `llama-${tag}-bin-${linuxInfix}.tar.gz`
   const extension = id.startsWith('macos-') ? 'tar.gz' : 'zip'
   return `llama-${tag}-bin-${id}.${extension}`
@@ -87,7 +115,8 @@ export function resolveBackendArchiveSource(
 /** Short label for the "Latest <variant>" dropdown entries; the raw id for anything unrecognised. */
 export function friendlyBackendLabel(backend: string): string {
   const id = stripBom(backend)
-  if (id.endsWith('cpu-x64')) return 'CPU'
+  if (id.endsWith('cpu-x64') || id.endsWith('cpu-arm64')) return 'CPU'
+  if (id.includes('opencl-adreno')) return 'OpenCL (Adreno)'
   if (id.includes('cuda-13')) return 'CUDA 13'
   if (id.includes('cuda-12')) return 'CUDA 12'
   if (id.includes('rocm')) {
@@ -123,28 +152,52 @@ export function requiredDiskSpaceForBackend(backend: string, archiveBytes?: numb
 }
 
 /**
- * `cudart-llama-bin-win-cuda-<toolkit>-x64.zip`: the CUDA runtime DLLs the main Windows CUDA
+ * `cudart-llama-bin-win-cuda-<toolkit>-<arch>.zip`: the CUDA runtime DLLs the main Windows CUDA
  * archive does not carry. Without them `llama-server.exe --list-devices` is empty on hosts without
  * a system-wide toolkit (Atomic-Chat#14). Never mirrored — NVIDIA-signed and ~391 MB each.
  */
-export function buildWindowsCudartArchiveName(cudaToolkitVersion: string): string {
-  return `cudart-llama-bin-win-cuda-${cudaToolkitVersion}-x64.zip`
+export function buildWindowsCudartArchiveName(
+  cudaToolkitVersion: string,
+  arch: 'x64' | 'arm64' = 'x64'
+): string {
+  return `cudart-llama-bin-win-cuda-${cudaToolkitVersion}-${arch}.zip`
 }
 
-/** cudart companion URL on the ggml-org CDN, or `null` for a non-CUDA Windows backend. */
+/**
+ * `cudart-llama-<tag>-bin-ubuntu-cuda-<toolkit>-<arch>.tar.gz`: the CUDA runtime libraries
+ * (`libcudart.so.13`, `libcublas.so.13`, …) the Linux CUDA archive does not carry. Unlike the
+ * Windows companion its name carries the release tag. Never mirrored (~550 MB).
+ */
+export function buildLinuxCudartArchiveName(
+  version: string,
+  cudaToolkitVersion: string,
+  arch: 'arm64' = 'arm64'
+): string {
+  return `cudart-llama-${stripBom(version)}-bin-ubuntu-cuda-${cudaToolkitVersion}-${arch}.tar.gz`
+}
+
+/** cudart companion URL on the ggml-org CDN, or `null` for a non-CUDA backend. */
 export function getCudartDownloadUrl(version: string, backend: string): string | null {
-  const toolkit = matchWindowsCudaBackend(backend)
-  if (!toolkit) return null
-  return `${GGML_ORG_DOWNLOAD_BASE}/${stripBom(version)}/${buildWindowsCudartArchiveName(toolkit)}`
+  const name = getCudartArchiveName(backend, version)
+  return name ? `${GGML_ORG_DOWNLOAD_BASE}/${stripBom(version)}/${name}` : null
 }
 
-/** cudart companion file name, or `null` for a non-CUDA Windows backend. */
-export function getCudartArchiveName(backend: string): string | null {
+/**
+ * cudart companion file name, or `null` for a non-CUDA backend. The Linux name needs the release
+ * tag, so a Linux CUDA backend without `version` is `null` as well.
+ */
+export function getCudartArchiveName(backend: string, version?: string): string | null {
   const toolkit = matchWindowsCudaBackend(backend)
-  return toolkit ? buildWindowsCudartArchiveName(toolkit) : null
+  const arch = windowsCudaBackendArch(backend)
+  if (toolkit && arch) return buildWindowsCudartArchiveName(toolkit, arch)
+  const linuxToolkit = matchLinuxCudaBackend(backend)
+  const linuxArch = linuxCudaBackendArch(backend)
+  if (linuxToolkit && linuxArch && version)
+    return buildLinuxCudartArchiveName(version, linuxToolkit, linuxArch)
+  return null
 }
 
-/** CUDA toolkit version (`"13.3"`) `isCudaInstalled` expects for a Windows CUDA backend, else `null`. */
+/** CUDA toolkit version (`"13.3"`) `isCudaInstalled` expects for a Windows or Linux CUDA backend, else `null`. */
 export function getCudaToolkitVersion(backend: string): string | null {
-  return matchWindowsCudaBackend(backend)
+  return matchWindowsCudaBackend(backend) ?? matchLinuxCudaBackend(backend)
 }

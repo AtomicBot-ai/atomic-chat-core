@@ -149,6 +149,10 @@ export function spawnManaged(
   })
   const terminate = async (graceMs = DEFAULT_TERMINATE_GRACE_MS): Promise<ExitInfo> => {
     if (child.exitCode !== null || child.signalCode !== null) return exited
+    // Never started (ENOENT, a missing cwd, …): there is nothing to signal, and `exited` settles with
+    // the spawn error. Until that error is emitted Node still holds the handle, and `kill()` on it
+    // throws EINVAL on Windows and signals pid 0, the caller's whole process group, on POSIX.
+    if (child.pid === undefined) return exited
     if (process.platform === 'win32') {
       child.kill()
       return exited

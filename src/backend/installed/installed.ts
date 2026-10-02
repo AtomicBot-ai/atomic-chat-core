@@ -156,6 +156,8 @@ export function backendTypeEquivalents(backendType: string): Set<string> {
     if (bt === linux) ids.add(ubuntu)
     if (bt === ubuntu) ids.add(linux)
   }
+  const cuda = /^(linux|ubuntu)-cuda-(13\.\d+-arm64)$/.exec(bt)
+  if (cuda) ids.add(`${cuda[1] === 'linux' ? 'ubuntu' : 'linux'}-cuda-${cuda[2]}`)
   return ids
 }
 

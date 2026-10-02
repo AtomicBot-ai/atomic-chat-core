@@ -28,7 +28,7 @@
   },
   "name": "features_linux_amd_navi31_no_rocm_upstream",
   "source": {
-    "commit": "c634598e8e317b12f249a7d453c0fb599ba745be",
+    "commit": "7379d30d6627a6ec9073403d1efeb8cff9bddf17",
     "file": "src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/backend.rs",
     "provider": "llamacpp-upstream"
   }

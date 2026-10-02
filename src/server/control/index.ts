@@ -16,6 +16,7 @@ export type {
   CloudControl,
   ControlServerDeps,
   ControlSnapshot,
+  DecisionControl,
   DiffusionControl,
   DiskControl,
   ExternalSessionControl,

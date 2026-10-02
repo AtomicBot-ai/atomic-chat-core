@@ -25,6 +25,8 @@ describe('getBackendCategory / backendCategoryToLabel', () => {
     ['win-vulkan-x64', 'vulkan'],
     ['win-cpu-x64', 'cpu'],
     ['win-cpu-arm64', 'cpu'],
+    ['win-opencl-adreno-arm64', 'opencl'],
+    ['win-cuda-13.4-arm64', 'cuda-cu13'],
     ['linux-common_cpus-x64', 'common_cpus'],
     ['linux-avx512-x64', 'avx512'],
     ['linux-avx2-x64', 'avx2'],
@@ -45,6 +47,7 @@ describe('getBackendCategory / backendCategoryToLabel', () => {
     ['cuda-cu12.0', 'CUDA 12'],
     ['cuda-cu11.7', 'CUDA 11'],
     ['vulkan', 'Vulkan'],
+    ['opencl', 'OpenCL (Adreno)'],
     ['rocm', 'rocm'],
     ['cpu', 'cpu'],
   ])('backendCategoryToLabel(%j) = %j', (input, expected) => {
@@ -82,6 +85,16 @@ describe('prioritizeBackends (Rust test_prioritize_backends_*)', () => {
     ]
     expect(prioritizeBackends(available, true).backend_type).toBe('win-rocm-7.14-x64')
     expect(prioritizeBackends(available, false).backend_type).toBe('win-cpu-x64')
+  })
+  it('ranks Windows arm64 as CUDA 13, then OpenCL, then CPU, OpenCL ungated by VRAM', () => {
+    const arm = [
+      b('b11344', 'win-cpu-arm64', 1),
+      b('b11344', 'win-opencl-adreno-arm64', 1),
+      b('b11344', 'win-cuda-13.4-arm64', 1),
+    ]
+    expect(prioritizeBackends(arm, true).backend_type).toBe('win-cuda-13.4-arm64')
+    expect(prioritizeBackends(arm.slice(0, 2), false).backend_type).toBe('win-opencl-adreno-arm64')
+    expect(prioritizeBackends(arm.slice(0, 2), true).backend_type).toBe('win-opencl-adreno-arm64')
   })
   it('falls back to the first entry when nothing categorises, and rejects an empty catalog', () => {
     expect(prioritizeBackends([b('b1', 'weird'), b('b2', 'odd')], true).backend_string).toBe('b1/weird')

@@ -219,6 +219,7 @@ beforeEach(async () => {
         modelId,
         mmprojExists: false,
         isEmbedding: false,
+        isDecision: false,
         vision: false,
         audio: false,
         gemmaMtp: false,

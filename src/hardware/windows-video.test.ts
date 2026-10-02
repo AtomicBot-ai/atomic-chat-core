@@ -143,6 +143,9 @@ describe('parsePnpDeviceId', () => {
       { vendorId: 0x10de, deviceId: 0x2684 },
     ],
     ['pci\\ven_1002&dev_744c', { vendorId: 0x1002, deviceId: 0x744c }],
+    ['ACPI\\QCOM0C36\\2&DABA3FF&0', { vendorId: 0x5143, deviceId: 0x0c36 }],
+    ['ACPI\\VEN_QCOM&DEV_0C36&SUBSYS_CLS08180&REV_0000\\0', { vendorId: 0x5143, deviceId: 0x0c36 }],
+    ['ACPI\\PNP0A08\\0', undefined],
     ['ROOT\\BASICDISPLAY\\0000', undefined],
     ['SWD\\REMOTEDISPLAYENUM\\RDPIDD', undefined],
     ['', undefined],
@@ -203,6 +206,47 @@ describe('windowsGpus', () => {
       'NVIDIA GeForce RTX 4090: VRAM read from Win32_VideoController.AdapterRAM, which caps at 4 GiB',
       'Intel(R) UHD Graphics 770: VRAM read from Win32_VideoController.AdapterRAM, which caps at 4 GiB',
     ])
+  })
+
+  it('keeps the ACPI-enumerated Adreno of a Snapdragon laptop with its class key and ICD', () => {
+    const probe = parseWindowsProbe(
+      JSON.stringify({
+        video: [
+          {
+            Name: 'Qualcomm(R) Adreno(TM) X1-85 GPU',
+            PNPDeviceID: 'ACPI\\QCOM0C36\\2&DABA3FF&0',
+            DriverVersion: '31.0.112.0',
+            AdapterRAM: 536870912,
+          },
+        ],
+        classKeys: [
+          {
+            key: '0000',
+            MatchingDeviceId: 'acpi\\ven_qcom&dev_0c36',
+            qwMemorySize: 536870912,
+            VulkanDriverName: [
+              'C:\\Windows\\System32\\DriverStore\\FileRepository\\qcdx\\qcvk_icd_arm64x.json',
+            ],
+          },
+          { key: '0001', qwMemorySize: 1073741824 },
+          { key: '0002', MatchingDeviceId: 'pci\\ven_10de&dev_0c36', qwMemorySize: 1073741824 },
+        ],
+        vulkan: { dll: true, drivers: [] },
+      })
+    )
+    const result = windowsGpus(probe)
+    expect(result.adapters).toEqual([
+      {
+        name: 'Qualcomm(R) Adreno(TM) X1-85 GPU',
+        vendorId: 0x5143,
+        deviceId: 0x0c36,
+        pnpDeviceId: 'ACPI\\QCOM0C36\\2&DABA3FF&0',
+        driverVersion: '31.0.112.0',
+        vramTotalMiB: 512,
+        vulkanDriver: true,
+      },
+    ])
+    expect([...result.icdVendors]).toEqual(['Qualcomm'])
   })
 
   it('answers no adapters for a headless server, and names a nameless adapter by its instance id', () => {

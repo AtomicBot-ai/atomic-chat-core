@@ -381,6 +381,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       modelId,
       mmprojExists: false,
       isEmbedding: false,
+      isDecision: false,
       audio: false,
       gemmaMtp: false,
       dflash: false,

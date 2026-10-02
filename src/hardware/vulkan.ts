@@ -35,6 +35,7 @@ export function icdVendorOf(fileName: string): string | undefined {
   if (/^(nvidia_icd|nv-vk)/.test(name)) return 'NVIDIA'
   if (/^(radeon_icd|amd_icd|amd-vulkan|amd_pro_icd)/.test(name)) return 'AMD'
   if (/^(intel_icd|intel_hasvk|igvk)/.test(name)) return 'Intel'
+  if (/^(qcvk|qc_vk|qualcomm|adreno|freedreno_icd)/.test(name)) return 'Qualcomm'
   return undefined
 }
 
@@ -134,10 +135,12 @@ export function parseVulkaninfoSummary(text: string): VulkanDevice[] {
  * Discrete or integrated, without a Vulkan enumeration to ask. A heuristic, by design: NVIDIA sells
  * no integrated PCI GPUs; Intel's discrete Arc parts (Alchemist `0x56xx`, Battlemage `0xe2xx`) are
  * the only Intel GPUs that are not an iGPU; an AMD GPU whose driver reports under 1 GiB of VRAM is
- * an APU. Everything else is `Unknown`, which `integratedGpuOnly` does not count as integrated.
+ * an APU; Qualcomm Adreno is always part of the SoC. Everything else is `Unknown`, which
+ * `integratedGpuOnly` does not count as integrated.
  */
 export function guessDeviceType(gpu: { vendor: string; deviceId: number; vramTotalMiB?: number }): string {
   if (gpu.vendor === 'NVIDIA') return 'DiscreteGpu'
+  if (gpu.vendor === 'Qualcomm') return 'IntegratedGpu'
   if (gpu.vendor === 'Intel') {
     const family = (gpu.deviceId >> 8) & 0xff
     return family === 0x56 || family === 0xe2 ? 'DiscreteGpu' : 'IntegratedGpu'

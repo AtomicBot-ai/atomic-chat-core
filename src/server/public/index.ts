@@ -20,6 +20,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { LocalApiServerState } from '../../contracts/index.js'
 import { captureReport, internalErrorReport } from '../../telemetry/index.js'
+import { DECISION_ROUTES, serveDecision } from './decision.js'
 import { answer, newExchange } from './exchange.js'
 import { serveForward } from './forward.js'
 import { serveImagesGenerations } from './images.js'
@@ -36,6 +37,8 @@ import { sendWhole } from './wire.js'
 
 export type {
   CtxIncreaseOutcome,
+  DecisionBackend,
+  DecisionTarget,
   ImagesBackend,
   LocalTarget,
   PublicServerConfig,
@@ -95,6 +98,8 @@ const ALLOWED_METHODS: Record<string, string> = {
   '/embeddings': 'POST',
   '/messages/count_tokens': 'POST',
   '/images/generations': 'POST',
+  '/systemone': 'POST',
+  '/router/score': 'POST',
 }
 
 const FORWARDED = new Set([
@@ -175,6 +180,11 @@ export async function handlePublicRequest(
     if (path === '/images/generations') {
       trace.endpoint = endpointFromPath(path)
       return serveImagesGenerations(ex)
+    }
+    // Served by the decision module's own process, byte for byte; never a chat session.
+    if (Object.hasOwn(DECISION_ROUTES, path)) {
+      trace.endpoint = endpointFromPath(path)
+      return serveDecision(ex)
     }
   }
   if (ex.method === 'GET') {

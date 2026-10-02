@@ -18,7 +18,7 @@ import type {
   TierProbeDeps,
 } from '../types.js'
 import { hasEnoughGpuMemory } from './categories.js'
-import { getSupportedFeatures, normalizeFeatures } from './features.js'
+import { getSupportedFeatures, isAdrenoGpu, normalizeFeatures } from './features.js'
 
 // ---------------------------------------------------------------------------------------------
 // Ideal backend detection (determineBestBackend / detectIdealBackendType / tierEnumeratesDevices)
@@ -42,11 +42,12 @@ export function integratedGpuOnly(gpus: readonly GpuProbeInfo[]): boolean {
 
 /**
  * Whether the hardware probe corroborates that `backendType` could use a GPU here: CUDA needs an
- * NVIDIA GPU, Vulkan any GPU, anything else (CPU) is trivially corroborated so the picker can fall
- * through. Vendor strings as `tauri-plugin-hardware/src/types.rs` serialises them.
+ * NVIDIA GPU, OpenCL an Adreno, Vulkan any GPU, anything else (CPU) is trivially corroborated so the
+ * picker can fall through. Vendor strings as `tauri-plugin-hardware/src/types.rs` serialises them.
  */
 export function hasCorroboratingGpu(backendType: string, gpus: readonly GpuProbeInfo[]): boolean {
   if (backendType.includes('cuda')) return gpus.some((g) => g.vendor === 'NVIDIA')
+  if (backendType.includes('opencl')) return gpus.some(isAdrenoGpu)
   if (backendType.includes('vulkan')) return gpus.length > 0
   return true
 }
@@ -126,16 +127,18 @@ export async function pickFirstWorkingTier(
 /**
  * App regex for "any GPU backend in the catalog", kept verbatim. Note the `-` required right after
  * the first digit: `win-cuda-13.3-x64` and `win-rocm-10.0-x64` do NOT match, only Vulkan ids do.
- * It still works because ggml-org always publishes a Vulkan Windows asset next to CUDA.
+ * It still works because ggml-org always publishes a Vulkan Windows asset next to CUDA. On Windows
+ * arm64 there is no Vulkan asset, so the OpenCL id (`win-opencl-adreno-arm64`) is matched as well.
  */
 export function isGpuBackendId(backend: string): boolean {
-  return /-(cuda-\d|rocm-\d|vulkan)-/.test(backend)
+  return /-(cuda-\d|rocm-\d|vulkan|opencl)-/.test(backend)
 }
 
 /**
- * Windows GPU tiers in preference order: CUDA 13, CUDA 12, ROCm (VRAM-gated; `features.rocm` is
- * already PCI-gated), Vulkan (VRAM-gated, never on integrated-only hosts). Each tier is the first
- * catalog entry matching its pattern — the catalog is sorted newest first, so that is the newest tag.
+ * Windows GPU tiers in preference order: CUDA 13, CUDA 12, OpenCL (Adreno; not VRAM-gated, the GPU
+ * shares system RAM), ROCm (VRAM-gated; `features.rocm` is already PCI-gated), Vulkan (VRAM-gated,
+ * never on integrated-only hosts). Each tier is the first catalog entry matching its pattern — the
+ * catalog is sorted newest first, so that is the newest tag.
  */
 export function windowsGpuTiers(
   features: BackendFeatures,
@@ -147,14 +150,33 @@ export function windowsGpuTiers(
     available.find((b) => pattern.test(b.backend))?.backend ?? null
   const cuda13 = pick(new RegExp(`^win-cuda-13\\.\\d+-${archSuffix}$`))
   const cuda12 = pick(new RegExp(`^win-cuda-12\\.\\d+-${archSuffix}$`))
+  const opencl = pick(new RegExp(`^win-opencl-adreno-${archSuffix}$`))
   const rocm = pick(new RegExp(`^win-rocm-\\d+\\.\\d+-${archSuffix}$`))
   const vulkan = pick(new RegExp(`^win-vulkan-${archSuffix}$`))
   const enoughVram = hasEnoughGpuMemory(gpus)
   const tiers: string[] = []
   if (features.cuda13 && cuda13) tiers.push(cuda13)
   if (features.cuda12 && cuda12) tiers.push(cuda12)
+  if (features.opencl && opencl) tiers.push(opencl)
   if (features.rocm && enoughVram && rocm) tiers.push(rocm)
   if (features.vulkan && enoughVram && vulkan && !integratedGpuOnly(gpus)) tiers.push(vulkan)
+  return tiers
+}
+
+/**
+ * Linux arm64 GPU tiers in preference order: CUDA 13 (NVIDIA GB10 / Grace; the newest
+ * `linux-cuda-13.N-arm64` in the catalog), then Vulkan (VRAM-gated, as on Linux x64).
+ */
+export function linuxArm64GpuTiers(
+  features: BackendFeatures,
+  available: readonly BackendVersion[],
+  gpus: readonly GpuProbeInfo[]
+): string[] {
+  const cuda13 = available.find((b) => /^linux-cuda-13\.\d+-arm64$/.test(b.backend))?.backend ?? null
+  const vulkan = available.find((b) => b.backend === 'linux-vulkan-arm64')?.backend ?? null
+  const tiers: string[] = []
+  if (features.cuda13 && cuda13) tiers.push(cuda13)
+  if (features.vulkan && hasEnoughGpuMemory(gpus) && vulkan) tiers.push(vulkan)
   return tiers
 }
 
@@ -163,9 +185,9 @@ export interface DetectIdealBackendInput {
   arch: string
   cpuExtensions: readonly string[]
   gpus: readonly GpuProbeInfo[]
-  /** Windows only: the hardware-gated catalog (`listSupportedBackends` + `filterBackendsBySupport`). */
+  /** Windows and Linux arm64: the hardware-gated catalog (`listSupportedBackends` + `filterBackendsBySupport`). */
   listAvailableBackends: () => Promise<BackendVersion[]>
-  /** Windows only: `tierEnumeratesDevices` bound to this host. */
+  /** Windows and Linux arm64: `tierEnumeratesDevices` bound to this host. */
   probeTier: (tier: string) => Promise<TierHealth>
   onWarn?: (message: string) => void
 }
@@ -175,11 +197,13 @@ export interface DetectIdealBackendInput {
  * a GPU-capable host with no GPU backend in the catalog is `detection-failed` (the manifest was
  * unreachable — ggml-org always publishes CUDA + Vulkan Windows assets), otherwise `cpu-optimal`.
  * Linux x64: Vulkan when the loader enumerates a device with ≥ 2 GiB; a GPU the loader cannot see
- * is `detection-failed` (ask again next launch, ATO-464); no accelerator is `cpu-optimal`. macOS and
+ * is `detection-failed` (ask again next launch, ATO-464); no accelerator is `cpu-optimal`. Linux
+ * arm64: the first of CUDA 13 / Vulkan that survives the probe; a CUDA-capable host with no CUDA
+ * build in the catalog, or a GPU neither CUDA nor Vulkan sees, is `detection-failed`. macOS and
  * everything else: `cpu-optimal`. Any thrown error is `detection-failed`.
  *
- * The caller wraps this in its 20 s `withTimeout` (timeout → `detection-failed`) and, on Windows,
- * supplies `listAvailableBackends` / `probeTier`.
+ * The caller wraps this in its 20 s `withTimeout` (timeout → `detection-failed`) and, on Windows
+ * and Linux arm64, supplies `listAvailableBackends` / `probeTier`.
  */
 export async function detectIdealBackendType(input: DetectIdealBackendInput): Promise<IdealBackendResult> {
   const warn = input.onWarn ?? (() => {})
@@ -200,6 +224,7 @@ export async function detectIdealBackendType(input: DetectIdealBackendInput): Pr
       const gpuCapable =
         features.cuda13 ||
         features.cuda12 ||
+        features.opencl ||
         (features.rocm && enoughVram) ||
         (features.vulkan && enoughVram && !integratedOnly)
       const anyGpuBackendAvailable = available.some((b) => isGpuBackendId(b.backend))
@@ -209,6 +234,21 @@ export async function detectIdealBackendType(input: DetectIdealBackendInput): Pr
         )
         return { kind: 'detection-failed' }
       }
+      return { kind: 'cpu-optimal' }
+    }
+
+    if (osType === 'linux' && archSuffix === 'arm64') {
+      const available = await input.listAvailableBackends()
+      const tiers = linuxArm64GpuTiers(features, available, gpus)
+      const picked = await pickFirstWorkingTier(tiers, input.probeTier)
+      if (picked) return { kind: 'gpu', backend: picked }
+      if (features.cuda13 && !available.some((b) => /^linux-cuda-13\.\d+-arm64$/.test(b.backend))) {
+        warn(
+          'detectIdealBackendType: CUDA-capable Linux arm64 host but no GPU backend in catalog — treating as detection failure (release stream likely unreachable)'
+        )
+        return { kind: 'detection-failed' }
+      }
+      if (!features.vulkan && !features.cuda13 && gpus.length > 0) return { kind: 'detection-failed' }
       return { kind: 'cpu-optimal' }
     }
 

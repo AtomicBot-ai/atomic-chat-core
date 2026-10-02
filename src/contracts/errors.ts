@@ -70,6 +70,16 @@ export type CoreErrorCode =
   | 'REMOTE_ACCESS_OPERATION_IN_PROGRESS'
   /** A previous tunnel could not be confirmed dead; only Stop is offered until it is. */
   | 'REMOTE_ACCESS_STOP_FAILED'
+  /** The decision model is turned off, or no model file is configured for it. */
+  | 'DECISION_NOT_CONFIGURED'
+  /** No installed engine build serves `llama-server --decision` (API version 1). */
+  | 'DECISION_ENGINE_UNSUPPORTED'
+  /** The decision model is not running right now (starting, failed or stopped). */
+  | 'DECISION_UNAVAILABLE'
+  /** `decision.model_path` is a folder that lacks files of a laya checkpoint; `details` lists them. */
+  | 'DECISION_CHECKPOINT_INCOMPLETE'
+  /** A decision model was asked to load as a chat or embedding session; it runs only in the decision module. */
+  | 'DECISION_MODEL_NOT_CHAT'
 
 /**
  * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the

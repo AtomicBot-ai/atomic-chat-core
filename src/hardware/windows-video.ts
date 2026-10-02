@@ -161,11 +161,35 @@ function compact<T extends object>(value: { [K in keyof T]: T[K] | undefined }):
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T
 }
 
-/** `PCI\VEN_10DE&DEV_2684&…` → the two ids; `undefined` for anything that is not a PCI instance id. */
+const QUALCOMM_VENDOR_ID = 0x5143
+
+/**
+ * `PCI\VEN_10DE&DEV_2684&…` → the two ids. Snapdragon's Adreno is not on PCI: its instance id is
+ * `ACPI\QCOM0C36\…` (or `ACPI\VEN_QCOM&DEV_0C36…`), read as Qualcomm's Vulkan vendor id and the
+ * ACPI device number. `undefined` for anything else.
+ */
 export function parsePnpDeviceId(id: string): { vendorId: number; deviceId: number } | undefined {
   const m = /PCI\\VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})/i.exec(id)
-  if (!m) return undefined
-  return { vendorId: Number.parseInt(m[1] ?? '', 16), deviceId: Number.parseInt(m[2] ?? '', 16) }
+  if (m) return { vendorId: Number.parseInt(m[1] ?? '', 16), deviceId: Number.parseInt(m[2] ?? '', 16) }
+  const qcomDevice = /ACPI\\(?:VEN_)?QCOM(?:&DEV_)?([0-9A-F]{4})/i.exec(id)?.[1]
+  if (qcomDevice) return { vendorId: QUALCOMM_VENDOR_ID, deviceId: Number.parseInt(qcomDevice, 16) }
+  return undefined
+}
+
+/** The display class keys registered for an adapter: PCI keys by `ven_xxxx&dev_xxxx`, Adreno by `qcom` + device. */
+function classKeysFor(
+  classKeys: WindowsDisplayClassKey[],
+  ids: { vendorId: number; deviceId: number }
+): WindowsDisplayClassKey[] {
+  const dev = hex4(ids.deviceId)
+  if (ids.vendorId === QUALCOMM_VENDOR_ID) {
+    return classKeys.filter((key) => {
+      const id = (key.MatchingDeviceId ?? '').toLowerCase()
+      return id.includes('qcom') && id.includes(dev)
+    })
+  }
+  const needle = `ven_${hex4(ids.vendorId)}&dev_${dev}`
+  return classKeys.filter((key) => (key.MatchingDeviceId ?? '').toLowerCase().includes(needle))
 }
 
 /** A PCI display adapter as the probe saw it, before merging with nvidia-smi. */
@@ -184,7 +208,7 @@ export interface WindowsAdapter {
 }
 
 /**
- * The PCI GPUs of the machine. Software adapters (`ROOT\BasicDisplay`, the `SWD\` RDP mirror) are not
+ * The PCI GPUs of the machine, plus Snapdragon's ACPI-enumerated Adreno. Software adapters (`ROOT\BasicDisplay`, the `SWD\` RDP mirror) are not
  * GPUs and are skipped. VRAM comes from the class key matched by vendor and device id — `AdapterRAM`
  * is a 32-bit field that reports 4 GiB for every larger card, so falling back to it is warned about.
  */
@@ -211,10 +235,7 @@ export function windowsGpus(probe: WindowsProbe): {
     const ids = parsePnpDeviceId(pnp)
     if (!ids) continue
     const name = controller.Name?.trim() || `GPU ${pnp}`
-    const needle = `ven_${hex4(ids.vendorId)}&dev_${hex4(ids.deviceId)}`
-    const matching = probe.classKeys.filter((key) =>
-      (key.MatchingDeviceId ?? '').toLowerCase().includes(needle)
-    )
+    const matching = classKeysFor(probe.classKeys, ids)
     const classKey = matching.find((key) => key.qwMemorySize !== undefined) ?? matching[0]
     let vramTotalMiB: number | undefined
     if (classKey?.qwMemorySize !== undefined && classKey.qwMemorySize > 0)

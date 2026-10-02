@@ -192,7 +192,7 @@ export class BackendAdvisor {
       recommended: this.policy.determineBest(available, gpus) || null,
       recommended_installed: this.policy.determineBest(installedAvailable, gpus) || null,
       latest_by_type: latestByType,
-      static_variants: this.policy.staticVariants(osType, current),
+      static_variants: this.policy.staticVariants(osType, current, arch),
       source,
       ...(releases ? { releases: releases.map(toCatalogRelease) } : {}),
     }

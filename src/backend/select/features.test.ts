@@ -25,6 +25,14 @@ const features = (over: Partial<BackendFeatures> = {}): BackendFeatures => ({
   rocm: false,
   ...over,
 })
+const adreno = (extra: Partial<GpuProbeInfo> = {}): GpuProbeInfo => ({
+  name: 'Qualcomm(R) Adreno(TM) X1-85 GPU',
+  driver_version: '31.0.112.0',
+  vendor: 'Qualcomm',
+  nvidia_info: null,
+  vulkan_info: { api_version: '1.3', device_id: 0x0c36, device_type: 'IntegratedGpu' },
+  ...extra,
+})
 const nvidia = (driver: string, cc = '8.9', extra: Partial<GpuProbeInfo> = {}): GpuProbeInfo => ({
   driver_version: driver,
   vendor: 'NVIDIA',
@@ -75,6 +83,15 @@ describe('getSupportedFeatures (Rust test_get_supported_features_* and driver-fl
       vulkan: false,
       rocm: false,
     })
+  })
+  it('enables OpenCL on Windows for an Adreno GPU, by vendor or by name, and nowhere else', () => {
+    expect(getSupportedFeatures('windows', [], [adreno()])).toMatchObject({ opencl: true, rocm: false })
+    expect(
+      getSupportedFeatures('windows', [], [adreno({ vendor: 'Unknown (vendor_id: 20803)' })]).opencl
+    ).toBe(true)
+    expect(getSupportedFeatures('linux', [], [adreno()])).not.toHaveProperty('opencl')
+    expect(getSupportedFeatures('windows', [], [amd()])).not.toHaveProperty('opencl')
+    expect(normalizeFeatures({ opencl: true })).toEqual(features({ opencl: true }))
   })
   it('applies the Linux driver floors', () => {
     const r = getSupportedFeatures('linux', [], [nvidia('530.00', '8.0')])
@@ -168,7 +185,25 @@ describe('determineSupportedBackends (Rust test_determine_supported_backends_*)'
   })
   it('arm and macOS placeholders, unsupported system throws', () => {
     expect(determineSupportedBackends('linux', 'aarch64', features())).toEqual(['linux-cpu-arm64'])
+    expect(determineSupportedBackends('linux', 'arm64', features({ vulkan: true }))).toEqual([
+      'linux-cpu-arm64',
+      'linux-vulkan-arm64',
+    ])
+    expect(
+      determineSupportedBackends(
+        'linux',
+        'aarch64',
+        features({ cuda12: true, cuda13: true, vulkan: true, rocm: true })
+      )
+    ).toEqual(['linux-cpu-arm64', 'linux-vulkan-arm64', 'linux-cuda-13-arm64'])
     expect(determineSupportedBackends('windows', 'arm64', features())).toEqual(['win-cpu-arm64'])
+    expect(determineSupportedBackends('windows', 'aarch64', features({ opencl: true }))).toEqual([
+      'win-cpu-arm64',
+      'win-opencl-adreno-arm64',
+    ])
+    expect(
+      determineSupportedBackends('windows', 'aarch64', features({ cuda12: true, cuda13: true, vulkan: true }))
+    ).toEqual(['win-cpu-arm64', 'win-cuda-13-arm64'])
     expect(determineSupportedBackends('macos', 'arm64', features())).toEqual(['macos-arm64'])
     expect(determineSupportedBackends('macos', 'x86_64', features())).toEqual(['macos-x64'])
     expect(() => determineSupportedBackends('freebsd', 'x86_64', features())).toThrow(AtomicCoreError)
@@ -228,5 +263,38 @@ describe('filterBackendsBySupport (Windows family-aware filter from backend.ts)'
       'win-cpu-x64',
     ])
     expect(filterBackendsBySupport(merged, [], 'macos')).toEqual(merged)
+  })
+  it('keeps the Windows arm64 CUDA 13 asset through its arm64 family and OpenCL only when supported', () => {
+    const arm = [
+      b('b11344', 'win-cuda-13.4-arm64'),
+      b('b11344', 'win-opencl-adreno-arm64'),
+      b('b11344', 'win-cpu-arm64'),
+    ]
+    expect(
+      filterBackendsBySupport(arm, ['win-cpu-arm64', 'win-cuda-13-arm64'], 'windows').map((x) => x.backend)
+    ).toEqual(['win-cuda-13.4-arm64', 'win-cpu-arm64'])
+    expect(
+      filterBackendsBySupport(arm, ['win-cpu-arm64', 'win-opencl-adreno-arm64'], 'windows').map(
+        (x) => x.backend
+      )
+    ).toEqual(['win-opencl-adreno-arm64', 'win-cpu-arm64'])
+    expect(filterBackendsBySupport(arm, ['win-cpu-x64', 'win-cuda-13-x64'], 'windows')).toEqual([])
+  })
+  it('keeps the Linux arm64 CUDA 13 asset only through its family and passes the rest of Linux through', () => {
+    const linux = [
+      b('b11344', 'linux-cuda-13.4-arm64'),
+      b('b11344', 'linux-vulkan-arm64'),
+      b('b11344', 'linux-cpu-arm64'),
+    ]
+    expect(
+      filterBackendsBySupport(linux, ['linux-cpu-arm64', 'linux-cuda-13-arm64'], 'linux').map(
+        (x) => x.backend
+      )
+    ).toEqual(['linux-cuda-13.4-arm64', 'linux-vulkan-arm64', 'linux-cpu-arm64'])
+    expect(
+      filterBackendsBySupport(linux, ['linux-cpu-arm64', 'linux-vulkan-arm64'], 'linux').map((x) => x.backend)
+    ).toEqual(['linux-vulkan-arm64', 'linux-cpu-arm64'])
+    const x64 = [b('b11344', 'linux-vulkan-x64'), b('b11344', 'linux-cpu-x64')]
+    expect(filterBackendsBySupport(x64, ['linux-cpu-x64'], 'linux')).toEqual(x64)
   })
 })

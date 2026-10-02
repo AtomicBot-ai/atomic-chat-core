@@ -1,0 +1,173 @@
+{
+  "source": {
+    "file": "atomic-llama-cpp-turboquant/DECISION.md",
+    "revision": "working tree of branch feature/decision-laya-phase0, read 2026-09-30 (not yet committed)",
+    "api_version": 1,
+    "comparator": "shape: the core's own readers accept every example; unknown fields are tolerated"
+  },
+  "systemone_request": {
+    "model": "optional, ignored",
+    "state": "Billed twice, please refund",
+    "questions": {
+      "refund": { "type": "noul", "instructions": "Asks for money back?" },
+      "topic": { "type": "choice", "instructions": "Topic?", "criteria": { "billing": "payments", "other": null } },
+      "tone": { "type": "choice", "instructions": "Tone?", "criteria": ["calm", "angry"] },
+      "sev": { "type": "score", "instructions": "Severity?", "criteria": ["low", "mid", "high"] },
+      "urgent": {
+        "type": "noul",
+        "instructions": "Urgent?",
+        "criteria": { "True": "today" },
+        "labels": { "false": "later", "true": "now" }
+      }
+    },
+    "truncation": "allow"
+  },
+  "systemone_response": {
+    "model": "tiny-laya",
+    "answers": {
+      "refund": { "type": "noul", "noul": 0.93, "confidence": 0.93 },
+      "topic": {
+        "type": "choice",
+        "choice": "billing",
+        "probabilities": { "billing": 0.97, "other": 0.03 },
+        "confidence": 0.81
+      },
+      "sev": {
+        "type": "score",
+        "score": 1.4,
+        "probabilities": { "0": 0.2, "1": 0.2, "2": 0.6 },
+        "legend": { "0": "low", "1": "mid", "2": "high" },
+        "confidence": 0.1
+      }
+    },
+    "usage": { "input_tokens": 138, "output_tokens": 0, "evaluated_tokens": 138 },
+    "latency_ms": 42.1,
+    "timings": { "queue_ms": 0.1, "render_ms": 0.4, "compute_ms": 41.5 },
+    "warnings": [],
+    "runtime": { "layout": "laya", "format": "laya-v1", "plan": "sequential", "spec_sha256": "...", "calibration": "..." }
+  },
+  "router_request": {
+    "task": "Extract invoice number, date and total",
+    "criterion": "All three fields exact; nothing invented.",
+    "candidates": [
+      {
+        "id": "local/qwen3.5-4b-q4_k_m",
+        "card": {
+          "schema": "atomic.executor-card/1",
+          "name": "Qwen3.5-4B local",
+          "kind": "local",
+          "description": "4B general model on this laptop (Q4_K_M)",
+          "checks": [
+            {
+              "skill": "field extraction",
+              "status": "measured",
+              "passed": 188,
+              "total": 200,
+              "criterion": "exact match",
+              "source": "atomic-evals/extract",
+              "version": "2026-09"
+            },
+            { "skill": "long-document QA", "status": "missing", "source": "atomic-evals/longqa", "version": "2026-09" }
+          ]
+        }
+      }
+    ],
+    "truncation": "allow"
+  },
+  "router_response": {
+    "object": "router.scores",
+    "model": "...",
+    "scores": [
+      {
+        "id": "local/qwen3.5-4b-q4_k_m",
+        "p_success": 0.9412,
+        "logit": 2.78,
+        "calibrated": true,
+        "input_tokens": 431,
+        "truncated_tokens": 0
+      }
+    ],
+    "usage": { "input_tokens": 431, "output_tokens": 0, "passes": 1 },
+    "latency_ms": 212.4,
+    "timings": { "queue_ms": 0.1, "render_ms": 0.6, "compute_ms": 211.5 },
+    "runtime": { "layout": "laya", "format": "laya-v1", "plan": "sequential", "spec_sha256": "...", "calibration": "platt" },
+    "warnings": []
+  },
+  "error_envelope": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": 400,
+        "type": "invalid_request_error",
+        "reason": "INVALID_CARD",
+        "message": "card name must be a string",
+        "param": "candidates[0].card.name"
+      }
+    }
+  },
+  "health": { "status": "ok", "ok": true, "model": "tiny-laya", "layout": "laya" },
+  "models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "tiny-laya",
+        "object": "model",
+        "capabilities": ["decision", "systemone", "router_score"],
+        "decision": { "api_version": 1, "layout": "laya", "model_id": "tiny-laya", "model_version": "0.0.0" }
+      }
+    ]
+  },
+  "props": {
+    "model_alias": "tiny-laya",
+    "model_path": "/models/tiny-laya.gguf",
+    "build_info": "b10269-1.7.0",
+    "decision": {
+      "api_version": 1,
+      "endpoints": ["/v1/systemone", "/v1/router/score"],
+      "layout": "laya",
+      "format": "laya-v1",
+      "model_id": "tiny-laya",
+      "model_version": "0.0.0",
+      "spec_version": 1,
+      "spec_sha256": "...",
+      "spec_source": "default",
+      "question_types": ["noul", "choice", "score"],
+      "limits": {
+        "max_questions": 16,
+        "max_candidates": 16,
+        "max_options": 20,
+        "max_checks": 32,
+        "max_tokens": 1024,
+        "max_card_tokens": 384,
+        "max_card_field_bytes": 4096,
+        "max_body_bytes": 1048576
+      },
+      "confidence": "laya",
+      "calibration": { "method": "none", "calibrated": false, "version": "none" },
+      "router": {
+        "available": true,
+        "calibrated": true,
+        "method": "platt",
+        "card_schema": "atomic.executor-card/1",
+        "card_renderer": "card-v1"
+      },
+      "plan": {
+        "name": "sequential",
+        "router": "sequential",
+        "plans": ["sequential", "packed"],
+        "n_threads": 4,
+        "state_split": true,
+        "recipe": "Q8_0-mixed",
+        "fa": false,
+        "n_batch": 1024,
+        "n_ubatch": 1024
+      },
+      "device": "cpu",
+      "kv_type": "none",
+      "queue_capacity": 4,
+      "input_contract": "laya-router-v1",
+      "special_tokens": "escape-control",
+      "debug": false
+    }
+  }
+}

@@ -6,14 +6,15 @@
  * Pure: file contents in, `SysfsGpu` out. The walk itself is in `probe-linux.ts`.
  */
 
-/** PCI vendor ids as sysfs prints them (`0x10de`). */
-export const PCI_VENDOR = { NVIDIA: 0x10de, AMD: 0x1002, INTEL: 0x8086 } as const
+/** PCI vendor ids as sysfs prints them (`0x10de`). Qualcomm's is the one Vulkan reports for Adreno. */
+export const PCI_VENDOR = { NVIDIA: 0x10de, AMD: 0x1002, INTEL: 0x8086, QUALCOMM: 0x5143 } as const
 
 /** The plugin's vendor spelling, `Unknown (vendor_id: N)` for anyone else. */
 export function vendorName(vendorId: number): string {
   if (vendorId === PCI_VENDOR.NVIDIA) return 'NVIDIA'
   if (vendorId === PCI_VENDOR.AMD) return 'AMD'
   if (vendorId === PCI_VENDOR.INTEL) return 'Intel'
+  if (vendorId === PCI_VENDOR.QUALCOMM) return 'Qualcomm'
   return `Unknown (vendor_id: ${vendorId})`
 }
 

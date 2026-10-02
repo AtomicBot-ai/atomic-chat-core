@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -244,6 +244,21 @@ describe('spawnAndAwaitReady', () => {
     expect(exit.code).toBe(3)
     await new Promise((r) => setTimeout(r, 20))
     expect(p.output()).toEqual({ stdout: 'a\nb\n', stderr: 'c\n' })
+  })
+
+  it.each([
+    ['a missing executable', { exe: '/definitely/not/here', args: [], env: {} }],
+    ['a missing working directory', { ...node('setInterval(()=>{},1000)'), cwd: '/definitely/not/here' }],
+  ])('terminates a child that never started (%s) without signalling anything', async (_name, spec) => {
+    const p = spawnManaged(spec)
+    // Called before the spawn error is emitted, as a caller does right after the spawn: `kill()`
+    // there throws EINVAL on Windows and signals pid 0, this test's whole process group, on POSIX,
+    // so the spy never lets a regression through to the real one.
+    const kill = vi.spyOn(p.child, 'kill').mockReturnValue(false)
+    expect(p.pid).toBe(-1)
+    expect(await p.terminate(0)).toEqual({ code: null, signal: null })
+    expect(kill).not.toHaveBeenCalled()
+    expect(p.spawnFailure()).toMatchObject({ code: 'ENOENT' })
   })
 })
 

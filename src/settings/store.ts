@@ -25,7 +25,8 @@
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { AtomicCoreError, DEFAULT_SERVER_SETTINGS } from '../contracts/index.js'
-import type { LocalProviderId, ServerSettings } from '../contracts/index.js'
+import type { DecisionSettings, LocalProviderId, ServerSettings } from '../contracts/index.js'
+import { decisionSettingsOf, parseDecisionSettingsPatch } from './decision.js'
 import { LOCAL_PROVIDER_IDS, canonicalizeSettingValues, defaultSettingValues } from './schema.js'
 import { classifyImport, legacyHash, planImport } from './import.js'
 import type { ImportOutcome, Resolutions } from './import.js'
@@ -75,7 +76,7 @@ export interface SettingsDocument {
   [extra: string]: unknown
 }
 
-export type SettingsScope = LocalProviderId | 'server' | 'cloud' | 'state'
+export type SettingsScope = LocalProviderId | 'server' | 'cloud' | 'decision' | 'state'
 
 /** What `onChange` listeners receive; the events module maps it onto `settings:changed`. */
 export interface SettingsChange {
@@ -301,6 +302,32 @@ export class SettingsStore {
 
   get state(): CoreState {
     return structuredClone(this.doc.state)
+  }
+
+  /**
+   * The decision model's section, defaults filled in. Absent from a file until the first write: a
+   * fresh `settings.json` keeps the shape older cores and the app already know.
+   */
+  get decision(): DecisionSettings {
+    return decisionSettingsOf(this.doc['decision'])
+  }
+
+  /** Apply a checked patch to `decision` (`INVALID_ARGUMENT` for an unknown key or a bad value). */
+  async updateDecision(patch: Record<string, unknown>, options: UpdateOptions = {}): Promise<UpdateResult> {
+    const checked = parseDecisionSettingsPatch(patch)
+    return this.mutate(options, (doc) => {
+      const raw = doc['decision']
+      const section =
+        typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+      // Stored in full, so a hand edit sees every key; unknown keys already there survive.
+      const target: Record<string, unknown> = { ...section, ...decisionSettingsOf(section) }
+      doc['decision'] = target
+      return applyPatch(target, checked as Record<string, unknown>, (key, value) => ({
+        scope: 'decision',
+        key,
+        value,
+      }))
+    })
   }
 
   /** Apply `patch` (canonicalized) to a provider; keys whose value is unchanged are ignored. */

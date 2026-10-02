@@ -6,6 +6,7 @@ describe('vendorName', () => {
     [PCI_VENDOR.NVIDIA, 'NVIDIA'],
     [PCI_VENDOR.AMD, 'AMD'],
     [PCI_VENDOR.INTEL, 'Intel'],
+    [PCI_VENDOR.QUALCOMM, 'Qualcomm'],
     [0x1af4, 'Unknown (vendor_id: 6900)'],
   ])('%s → %s', (id, expected) => expect(vendorName(id)).toBe(expected))
 })
