@@ -75,8 +75,10 @@ import { checkLocalhostForwarding } from './windows-forwarding.js'
 import { importDistribution, restoreDefaultDistribution, setupGuest } from './windows-guest-setup.js'
 import { assessWindowsHost, type WindowsBlocker } from './windows-plan.js'
 import {
+  parseRebootPending,
   parseWslDistributions,
   probeWindowsHost,
+  REBOOT_PENDING_KEY,
   type WindowsHostFacts,
   type WslDistribution,
 } from './windows-probe.js'
@@ -423,10 +425,19 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     return { plan, host_step: hostStep, image_present: present }
   }
 
-  /** WSL answers `--version` and `--status`: the elevated step's work is in effect. Two calls, nothing else. */
+  /**
+   * WSL answers `--version` and `--status`, and Windows is not waiting for a restart: the elevated
+   * step's work is in effect. `--status` exits 0 right after the install even though a WSL 2 VM cannot
+   * start until the restart, so the CBS restart flag decides that part.
+   */
   const wslReady = async (): Promise<boolean> => {
     if ((await wsl.command(['--version'], { timeoutMs: 30_000 })).code !== 0) return false
-    return (await wsl.command(['--status'], { timeoutMs: 30_000 })).code === 0
+    if ((await wsl.command(['--status'], { timeoutMs: 30_000 })).code !== 0) return false
+    const system32 = `${deps.host.probeDeps.systemRoot.replace(/[\\/]+$/, '')}\\System32`
+    const pending = parseRebootPending(
+      await deps.host.probeDeps.exec(`${system32}\\reg.exe`, ['query', REBOOT_PENDING_KEY])
+    )
+    return pending !== true
   }
 
   const blocked = (message: string, reason: string): AtomicCoreError =>
@@ -949,7 +960,21 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
 
     async remove(record: PersistedOperation): Promise<void> {
       const target = record.machine.operation.target
-      if (target.kind !== 'runtime') return removeEnvironment()
+      if (target.kind !== 'runtime') {
+        await removeEnvironment()
+        // The snapshot names the distribution until something probes again, and the app would offer
+        // to remove it a second time (live acceptance): say at once that it is gone.
+        const facts = await probeWindowsHost(deps.host.probeDeps).catch(() => null)
+        deps.onAssessment?.({
+          availability: 'setup-required',
+          gpus: facts?.gpus ?? [],
+          blockers: [],
+          selinux: null,
+          distribution: null,
+          memory_bytes: null,
+        })
+        return
+      }
       const existing = await deps.installations.read(target.installation_id)
       // As on Linux: a loaded model first, its container confirmed stopped; loads held off till the end.
       const hold = await unload(target.engine_id)

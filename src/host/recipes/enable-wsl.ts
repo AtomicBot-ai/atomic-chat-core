@@ -1,10 +1,16 @@
 /**
  * `windows.enable-wsl` (change `add-tensorrt-llm-windows`, task 2.4, design D2): the one privileged
  * thing Atomic Chat ever asks for on Windows. The app runs `atomic-chat-core.exe host-step exec
- * <request>` through UAC; the executor runs exactly `wsl --install --no-distribution` — the WSL
- * package from the Store and the Windows components it needs — and then `wsl --status`, which says
+ * <request>` through UAC; the executor runs exactly `wsl --install`, then `wsl --status`, which says
  * whether a WSL 2 VM can start now or only after a restart.
  *
+ * Bare `wsl --install`, not `wsl --install --no-distribution`: on a Windows without the WSL package
+ * `System32\wsl.exe` is an inbox stub that understands only the bare form — it answered "The Windows
+ * Subsystem for Linux is not installed" to `--install --no-distribution` and to `--update` alike in
+ * the live acceptance (build 26200). The cost, accepted by the owner (2026-10-02): Windows also
+ * installs its default Ubuntu distribution, which may open its own first-run console after the
+ * restart. Atomic Chat never uses it; its own distribution is still imported unelevated afterwards.
+
  * It takes no parameter. Nothing a client, a request file or a person could choose reaches the
  * elevated process: no distribution name, no path, no flag. And it never runs `wsl.exe` with a
  * distribution (`-d`, `--exec`, `--import`, …): an elevated `wsl.exe` registers and starts
@@ -28,7 +34,7 @@ export const REBOOT_REQUIRED_EXIT_CODE = 3010
 /** The recipe as data: the two argv it runs, frozen, and what its digest is computed from. */
 export const ENABLE_WSL_RECIPE = Object.freeze({
   recipe_id: ENABLE_WSL_RECIPE_ID,
-  install: Object.freeze(['wsl.exe', '--install', '--no-distribution']) as readonly string[],
+  install: Object.freeze(['wsl.exe', '--install']) as readonly string[],
   verify: Object.freeze(['wsl.exe', '--status']) as readonly string[],
   reboot_required_exit_code: REBOOT_REQUIRED_EXIT_CODE,
 })

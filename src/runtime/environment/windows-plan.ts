@@ -41,6 +41,7 @@ export type WindowsBlockerReason =
   | 'virtualization-disabled'
   | 'wsl-version'
   | 'wsl1-distribution'
+  | 'windows-restart-pending'
 
 export interface WindowsBlocker {
   reason: WindowsBlockerReason
@@ -75,7 +76,7 @@ export interface WindowsAssessment {
   /** Ours exists and its guest already runs containers on the GPU: nothing to change. */
   adopts_existing_engine: boolean
   blockers: WindowsBlocker[]
-  /** The one elevated step: `wsl --install --no-distribution`. */
+  /** The one elevated step: `wsl --install`. */
   enable_wsl: boolean
   import_distribution: boolean
   /** The guest recipe's own plan, when ours exists and still needs it. */
@@ -252,7 +253,17 @@ export function assessWindowsHost(input: WindowsAssessmentInput): WindowsAssessm
   blockers.push(...nvidiaBlockers(facts, input.minimumComputeCapability))
 
   const wslReady = facts.wsl.installed === true && facts.wsl.ready === true
-  const enableWsl = facts.wsl.installed !== null && !wslReady
+  // WSL is in and the VM platform is on, but Windows has not restarted yet: no second elevation.
+  const restartPending = facts.wsl.installed === true && facts.wsl.reboot_pending === true && !wslReady
+  if (restartPending) {
+    blockers.push(
+      blocker(
+        'windows-restart-pending',
+        'Windows needs a restart to finish turning on the Windows Subsystem for Linux. Restart the computer, open Atomic Chat again and check again.'
+      )
+    )
+  }
+  const enableWsl = facts.wsl.installed !== null && !wslReady && !restartPending
   if (enableWsl && facts.virtualization === false) {
     blockers.push(
       blocker(
@@ -317,7 +328,7 @@ export function assessWindowsHost(input: WindowsAssessmentInput): WindowsAssessm
   if (enableWsl && facts.virtualization !== false) {
     changes.push({
       code: 'enable-wsl',
-      text: 'Turn on the Windows Subsystem for Linux (wsl --install --no-distribution). Windows asks for administrator approval, and a restart may be needed.',
+      text: 'Turn on the Windows Subsystem for Linux (wsl --install). Windows asks for administrator approval and a restart is needed. Windows also installs its default Ubuntu distribution, which may open its own setup window after the restart; Atomic Chat does not use it, and you can close that window.',
     })
   }
   if (importDistribution && manifest !== null) {

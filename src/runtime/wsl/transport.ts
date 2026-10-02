@@ -28,6 +28,18 @@ import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import { HeadAndTail } from '../shared/index.js'
 
+/**
+ * Every command in a distribution runs through `env` with the system `PATH`. `wsl --exec` starts the
+ * program without a shell and with a `PATH` that has no `sbin`: `useradd`, `usermod` and the like
+ * were not found there (live acceptance, `execvpe(useradd) failed: No such file or directory`).
+ * Still one argv and no shell; `env` only sets `PATH` and resolves the program against it.
+ * `/usr/lib/wsl/lib` stays on it: WSL puts `nvidia-smi` and the NVIDIA user-mode libraries there and
+ * adds that directory to the `PATH` it gives a command itself (live acceptance: without it the probe
+ * could not read the library version).
+ */
+export const GUEST_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib'
+const GUEST_ENV_PREFIX = ['/usr/bin/env', `PATH=${GUEST_PATH}`] as const
+
 /** What one `wsl.exe` call answered. `code: null`: it never got as far as an exit code. */
 export interface WslCommandOutput {
   code: number | null
@@ -197,7 +209,17 @@ export function createWsl(options: WslOptions = {}): Wsl {
   const distribution = (name: string): WslDistributionTransport => ({
     name,
     exec: (argv, call = {}) =>
-      run(['-d', name, ...(call.user === undefined ? [] : ['-u', call.user]), '--exec', ...argv], call),
+      run(
+        [
+          '-d',
+          name,
+          ...(call.user === undefined ? [] : ['-u', call.user]),
+          '--exec',
+          ...GUEST_ENV_PREFIX,
+          ...argv,
+        ],
+        call
+      ),
     hold: () => {
       let released = false
       let child: ReturnType<typeof spawn> | undefined

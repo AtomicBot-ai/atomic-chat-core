@@ -1109,6 +1109,14 @@ describe('removing the environment — spec "Окружение Windows удал
     expect(h.windows.wslCalls.some((argv) => argv.includes('Ubuntu'))).toBe(false)
   })
 
+  it('says at once that the distribution is gone, so the app does not offer to remove it again', async () => {
+    const machine = withModels()
+    const h = harness(machine, { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.remove(removal(), signal)
+    expect(h.views.at(-1)).toMatchObject({ availability: 'setup-required', distribution: null })
+  })
+
   it('after the removal the environment offers setup again', async () => {
     const machine = withModels()
     const h = harness(machine, { record: RECORD })

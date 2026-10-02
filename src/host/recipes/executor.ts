@@ -62,9 +62,23 @@ export interface HostStepExecutorDeps {
    */
   exec: (
     argv: string[],
-    options?: { longRunning?: boolean; diagnostic?: boolean }
+    options?: {
+      longRunning?: boolean
+      diagnostic?: boolean
+      /**
+       * Windows only: run with this process's own (hidden) console instead of pipes; nothing is
+       * captured, only the exit code. The inbox `wsl.exe` stub starts installing only with a console —
+       * with piped output it answers "not installed" at once (live acceptance, build 26200).
+       */
+      console?: boolean
+    }
   ) => Promise<HostCommandOutput>
   fetch: typeof fetch
+  /**
+   * Windows only: whether Windows waits for a restart to apply a component change (CBS
+   * `RebootPending`), or null when unread. Absent elsewhere.
+   */
+  rebootPending?: () => Promise<boolean | null>
   now: () => number
   /**
    * The uid of the person who asked for elevation (`PKEXEC_UID`, `SUDO_UID`), or null when this
@@ -663,8 +677,8 @@ async function execute(text: string, fileName: string, deps: HostStepExecutorDep
 }
 
 /**
- * `windows.enable-wsl` (`enable-wsl.ts`): exactly `wsl --install --no-distribution`, then `wsl
- * --status` to tell "ready now" from "after a restart". The same refusals as the Linux recipe come
+ * `windows.enable-wsl` (`enable-wsl.ts`): exactly `wsl --install` (the only form the inbox stub
+ * understands), then `wsl --status` to tell "ready now" from "after a restart". The same refusals as the Linux recipe come
  * first — another recipe's bytes, another action, any parameter, a parameters digest that is not the
  * empty object's — so nothing runs for a request the user did not approve.
  */
@@ -706,10 +720,15 @@ async function enableWsl(
     steps,
   })
 
-  const install = await deps.exec([...ENABLE_WSL_RECIPE.install], { longRunning: true })
+  const install = await deps.exec([...ENABLE_WSL_RECIPE.install], { longRunning: true, console: true })
   const rebootSaid = install.code === ENABLE_WSL_RECIPE.reboot_required_exit_code
   if (install.code !== 0 && !rebootSaid) {
-    const said = `${install.stdout.trim()}\n${install.stderr.trim()}`.trim()
+    // With a console nothing is captured; `wsl --status` says what WSL itself thinks is wrong.
+    const status = await deps.exec([...ENABLE_WSL_RECIPE.verify], { diagnostic: true })
+    const said = [install.stdout, install.stderr, status.stdout, status.stderr]
+      .map((text) => text.trim())
+      .filter((text) => text !== '')
+      .join('\n')
     return result(
       'failed',
       install.code,
@@ -740,7 +759,9 @@ async function enableWsl(
     ])
   }
   const status = await deps.exec([...ENABLE_WSL_RECIPE.verify])
-  const ready = status.code === 0
+  // `--status` exits 0 right after the install while WSL 2 still cannot start: the restart flag decides.
+  const restartPending = (await deps.rebootPending?.().catch(() => null)) === true
+  const ready = status.code === 0 && !restartPending
   return result(
     ready ? 'completed' : 'reboot-required',
     0,

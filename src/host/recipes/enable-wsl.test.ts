@@ -17,11 +17,21 @@ const RESULT = 'C:/Users/ada/AppData/Local/AtomicChat/host-steps/step-7.result.j
 class FakeWindows {
   calls: string[][] = []
   longRunning: string[] = []
-  /** `wsl --install --no-distribution`'s exit code; 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. */
+  /** Commands run with the executor's own console instead of pipes. */
+  withConsole: string[] = []
+  /**
+   * Whether the WSL package is installed. Without it `System32\wsl.exe` is the inbox stub, which
+   * runs only a bare `wsl --install` and answers "not installed" to `--install --no-distribution` and
+   * `--update` (live acceptance, build 26200).
+   */
+  packageInstalled = false
+  /** `wsl --install`'s exit code; 3010 is ERROR_SUCCESS_REBOOT_REQUIRED. */
   installExit = 0
   installStderr = ''
   /** Whether `wsl --status` answers after the install (no restart needed). */
   readyAfterInstall = false
+  /** CBS `RebootPending` after the install: `--status` still exits 0 then (live acceptance). */
+  restartPendingAfterInstall = false
   written = new Map<string, string>()
 
   deps(request: Record<string, unknown>): HostStepExecutorDeps {
@@ -39,13 +49,22 @@ class FakeWindows {
       exec: async (argv, options) => {
         this.calls.push(argv)
         if (options?.longRunning) this.longRunning.push(argv.join(' '))
-        if (argv.join(' ') === 'wsl.exe --install --no-distribution') {
+        if (options?.console) this.withConsole.push(argv.join(' '))
+        const stubRefusal = {
+          code: 1,
+          stdout:
+            "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.\n",
+          stderr: '',
+        }
+        if (argv.join(' ') === 'wsl.exe --install') {
+          if (this.installExit === 0 || this.installExit === 3010) this.packageInstalled = true
           return {
             code: this.installExit,
             stdout: 'Installing: Windows Subsystem for Linux\n',
             stderr: this.installStderr,
           }
         }
+        if (!this.packageInstalled && argv[0] === 'wsl.exe' && argv[1] !== '--status') return stubRefusal
         if (argv.join(' ') === 'wsl.exe --status') {
           return this.readyAfterInstall
             ? { code: 0, stdout: 'Default Version: 2\n', stderr: '' }
@@ -56,6 +75,7 @@ class FakeWindows {
       fetch: async () => {
         throw new Error('the WSL recipe fetches nothing')
       },
+      rebootPending: async () => this.restartPendingAfterInstall,
       now: () => 1_000,
       invokingUid: null,
     }
@@ -81,8 +101,8 @@ const run = async (windows: FakeWindows, over: Record<string, unknown> = {}): Pr
   executeHostStep(REQUEST, windows.deps(request(over)))
 
 describe('the windows.enable-wsl recipe', () => {
-  it('is one command with no parameter at all, and the digests bind exactly that', () => {
-    expect(ENABLE_WSL_RECIPE.install).toEqual(['wsl.exe', '--install', '--no-distribution'])
+  it('is two fixed commands with no parameter at all, and the digests bind exactly that', () => {
+    expect(ENABLE_WSL_RECIPE.install).toEqual(['wsl.exe', '--install'])
     expect(ENABLE_WSL_RECIPE.verify).toEqual(['wsl.exe', '--status'])
     expect(ENABLE_WSL_RECIPE_DIGEST).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(enableWslParametersDigest({})).toBe(ENABLE_WSL_PARAMETERS_DIGEST)
@@ -101,10 +121,12 @@ describe('executeHostStep — windows.enable-wsl', () => {
     expect(result.nonce).toBe('once-7')
     expect(result.parameters_digest).toBe(ENABLE_WSL_PARAMETERS_DIGEST)
     expect(windows.calls).toEqual([
-      ['wsl.exe', '--install', '--no-distribution'],
+      ['wsl.exe', '--install'],
       ['wsl.exe', '--status'],
     ])
-    expect(windows.longRunning).toEqual(['wsl.exe --install --no-distribution'])
+    expect(windows.longRunning).toEqual(['wsl.exe --install'])
+    // The inbox stub installs only with a console; with piped output it answers "not installed".
+    expect(windows.withConsole).toEqual(['wsl.exe --install'])
     expect(JSON.parse(windows.written.get(RESULT) ?? '{}')).toMatchObject({ outcome: 'reboot-required' })
   })
 
@@ -112,6 +134,13 @@ describe('executeHostStep — windows.enable-wsl', () => {
     const windows = new FakeWindows()
     windows.readyAfterInstall = true
     expect((await run(windows)).outcome).toBe('completed')
+  })
+
+  it('reports reboot-required when --status exits 0 but Windows waits for a restart', async () => {
+    const windows = new FakeWindows()
+    windows.readyAfterInstall = true
+    windows.restartPendingAfterInstall = true
+    expect((await run(windows)).outcome).toBe('reboot-required')
   })
 
   it('reads 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) as success that needs a restart, whatever --status says', async () => {
@@ -131,7 +160,19 @@ describe('executeHostStep — windows.enable-wsl', () => {
     expect(result.outcome).toBe('failed')
     expect(result.exit_code).toBe(1)
     expect(result.log_tail).toContain('E_ACCESSDENIED')
-    expect(windows.calls).toEqual([['wsl.exe', '--install', '--no-distribution']])
+    // Only a diagnostic `--status` follows, to say what WSL thinks is wrong.
+    expect(windows.calls).toEqual([
+      ['wsl.exe', '--install'],
+      ['wsl.exe', '--status'],
+    ])
+  })
+
+  it('uses the one form the inbox stub runs: a bare --install, which installs the package', async () => {
+    const windows = new FakeWindows()
+    const result = await run(windows)
+    expect(result.outcome).not.toBe('failed')
+    expect(windows.calls[0]).toEqual(['wsl.exe', '--install'])
+    expect(windows.packageInstalled).toBe(true)
   })
 
   it.each([

@@ -219,7 +219,7 @@ export interface ContainerRuntimeStepParameters {
 
 /**
  * The validated values of a `windows.enable-wsl` step (change `add-tensorrt-llm-windows`, design
- * D2): none. The elevated executor only ever runs `wsl --install --no-distribution`, so nothing a
+ * D2): none. The elevated executor only ever runs `wsl --install`, so nothing a
  * client or a user could choose reaches it; the digest still binds the (empty) object, the same
  * check every action gets.
  */

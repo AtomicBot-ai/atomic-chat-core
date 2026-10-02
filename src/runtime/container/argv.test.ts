@@ -298,7 +298,10 @@ describe('buildCreateModelContainerArgv', () => {
     expect(argv).toContain('/daemon/view/entrypoint.sh:/atomic/entrypoint.sh:ro')
     expect(argv).toContain('/daemon/view/heartbeat:/atomic/heartbeat:ro')
     const i = argv.indexOf('--entrypoint')
-    expect(argv[i + 1]).toBe('/atomic/entrypoint.sh')
+    // Through its interpreter: the script needs only read access (9p keeps no exec bit on Windows).
+    expect(argv[i + 1]).toBe('/bin/sh')
+    const ref = argv.findIndex((token) => token.includes('@sha256:'))
+    expect(argv.slice(ref + 1, ref + 2)).toEqual(['/atomic/entrypoint.sh'])
   })
 
   it('publishes the port only on 127.0.0.1, host_port:container_port', () => {
@@ -412,7 +415,7 @@ describe('buildCreateModelContainerArgv', () => {
     expect(
       argv.slice(0, refIndex).filter((t) => t === '--gpus' || t === '-p' || t === '--entrypoint').length
     ).toBe(3)
-    expect(argv.slice(refIndex + 1)).toEqual(['serve', '--port', '8000'])
+    expect(argv.slice(refIndex + 1)).toEqual(['/atomic/entrypoint.sh', 'serve', '--port', '8000'])
   })
 
   it('refuses a hostile image repository end to end (-foo/bar@sha256:... is refused)', () => {

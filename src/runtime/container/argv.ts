@@ -50,6 +50,8 @@ const FORBIDDEN_MOUNT_SOURCES = new Set(['/var/run/docker.sock', '/run/docker.so
 export const CONTAINER_MODEL_PATH = '/atomic/model'
 export const CONTAINER_ENGINE_CACHE_PATH = '/atomic/engine-cache'
 export const CONTAINER_ENTRYPOINT_PATH = '/atomic/entrypoint.sh'
+/** What runs the watchdog script (`#!/bin/sh`) inside the container. */
+export const CONTAINER_ENTRYPOINT_SHELL = '/bin/sh'
 export const CONTAINER_HEARTBEAT_PATH = '/atomic/heartbeat'
 
 /**
@@ -462,13 +464,18 @@ export function buildCreateModelContainerArgv(spec: ModelContainerCreateSpec): s
       dataRoot,
       'heartbeat mount source'
     ),
+    // The watchdog script runs through its interpreter, not as an executable: on Windows it reaches
+    // the guest through `\\wsl.localhost` (9p), which keeps no Unix mode, and a direct entrypoint
+    // failed with `exec: "/atomic/entrypoint.sh": permission denied` (live acceptance). Read access is
+    // all `/bin/sh` needs, on every host.
     '--entrypoint',
-    CONTAINER_ENTRYPOINT_PATH,
+    CONTAINER_ENTRYPOINT_SHELL,
     '-p',
     `${host}:${hostPort}:${containerPort}`,
     ...labelFlags(spec.labels),
     ...envFlags(spec.env),
     ref,
+    CONTAINER_ENTRYPOINT_PATH,
     ...commandWords(spec.command),
   ]
   return withSystemSocket(args)

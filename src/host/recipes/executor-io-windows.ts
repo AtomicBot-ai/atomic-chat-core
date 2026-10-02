@@ -22,11 +22,12 @@
  * the only recipe that runs on Windows is `windows.enable-wsl`.
  */
 
+import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { lstat, open, readFile, rename, rm } from 'node:fs/promises'
 import { win32 } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
-import { hostExec } from '../../runtime/environment/index.js'
+import { hostExec, parseRebootPending, REBOOT_PENDING_KEY } from '../../runtime/environment/index.js'
 import type { HostCommandOutput, HostStepExecutorDeps } from './executor.js'
 
 /** One access rule as `Get-Acl` reports it, by SID. */
@@ -122,7 +123,7 @@ export interface WindowsHostStepIo {
   exec(
     command: string,
     args: string[],
-    options?: { timeoutMs?: number; env?: Record<string, string> }
+    options?: { timeoutMs?: number; env?: Record<string, string>; console?: boolean }
   ): Promise<HostCommandOutput>
   /** Whether `path` is a symlink/junction, a file, a directory, and its size. */
   lstat(
@@ -135,10 +136,32 @@ export interface WindowsHostStepIo {
   remove(path: string): Promise<void>
 }
 
+/**
+ * Runs `command` with this process's own console (stdio inherited, window hidden), no shell, and
+ * resolves with the exit code only. The elevated executor is started by the app with `SW_HIDE`, so the
+ * console it shares is invisible. Used for the inbox `wsl.exe --install`, which refuses to install
+ * when its output is a pipe.
+ */
+const consoleExec = (command: string, args: string[], timeoutMs: number): Promise<HostCommandOutput> =>
+  new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: 'inherit', windowsHide: true, shell: false })
+    const timer = setTimeout(() => child.kill(), timeoutMs)
+    child.once('error', (error) => {
+      clearTimeout(timer)
+      resolve({ code: null, stdout: '', stderr: error.message })
+    })
+    child.once('exit', (code) => {
+      clearTimeout(timer)
+      resolve({ code, stdout: '', stderr: '' })
+    })
+  })
+
 const nodeIo = (): WindowsHostStepIo => {
   return {
     exec: (command, args, options) =>
-      hostExec({ timeoutMs: options?.timeoutMs ?? 60_000 })(command, args, options?.env),
+      options?.console === true
+        ? consoleExec(command, args, options.timeoutMs ?? 60_000)
+        : hostExec({ timeoutMs: options?.timeoutMs ?? 60_000 })(command, args, options?.env),
     lstat: (path) => lstat(path),
     readFile: (path) => readFile(path, 'utf8'),
     createExclusive: async (path, text) => {
@@ -220,9 +243,12 @@ export function windowsHostStepDeps(
         return refuse(`${String(command)} is not a command the Windows executor runs`)
       return io.exec(`${system32}\\wsl.exe`, args, {
         timeoutMs: options?.longRunning === true ? INSTALL_TIMEOUT_MS : COMMAND_TIMEOUT_MS,
+        ...(options?.console === true ? { console: true } : {}),
       })
     },
     fetch: async () => refuse('the Windows executor downloads nothing'),
+    rebootPending: async () =>
+      parseRebootPending(await io.exec(`${system32}\\reg.exe`, ['query', REBOOT_PENDING_KEY])),
     now: () => Date.now(),
     invokingUid: null,
   }

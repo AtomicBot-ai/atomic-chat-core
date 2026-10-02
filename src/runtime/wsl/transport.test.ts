@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createWsl, decodeWslBytes, defaultWslExecutable, type Wsl } from './transport.js'
+import { createWsl, decodeWslBytes, defaultWslExecutable, GUEST_PATH, type Wsl } from './transport.js'
 
 const FAKE_WSL = fileURLToPath(new URL('../../../test/helpers/fake-wsl.mjs', import.meta.url))
 
@@ -43,12 +43,28 @@ describe('createWsl — a command inside one distribution', () => {
     const out = await wsl.distribution('AtomicChat').exec(argv, { user: 'root' })
 
     expect(out).toEqual({ code: 0, stdout: `${argv.slice(1).join(' ')}\n`, stderr: '' })
-    expect(calls().at(-1)?.argv).toEqual(['-d', 'AtomicChat', '-u', 'root', '--exec', ...argv])
+    expect(calls().at(-1)?.argv).toEqual([
+      '-d',
+      'AtomicChat',
+      '-u',
+      'root',
+      '--exec',
+      '/usr/bin/env',
+      `PATH=${GUEST_PATH}`,
+      ...argv,
+    ])
   })
 
   it('leaves `-u` out when no user is named, so the guest runs it as its default user', async () => {
     await wsl.distribution('AtomicChat').exec(['true'])
-    expect(calls().at(-1)?.argv).toEqual(['-d', 'AtomicChat', '--exec', 'true'])
+    expect(calls().at(-1)?.argv).toEqual([
+      '-d',
+      'AtomicChat',
+      '--exec',
+      '/usr/bin/env',
+      `PATH=${GUEST_PATH}`,
+      'true',
+    ])
   })
 
   it('asks wsl.exe for UTF-8 on every call (`WSL_UTF8=1`)', async () => {

@@ -246,6 +246,17 @@ function guestCommand(state, name, user, command, args, input) {
  * What `wsl.exe <argv>` answers on `state`. `own(text)` encodes `wsl.exe`'s own voice (UTF-16LE unless
  * the caller asked for UTF-8). `hold`/`stream` mark the two answers a program has to act out in time.
  */
+/**
+ * What the real `env` does with the core's `/usr/bin/env PATH=… <program> …` prefix (transport
+ * `GUEST_ENV_PREFIX`): drops it and its `NAME=value` settings, leaving the program and its arguments.
+ */
+function withoutEnvPrefix(argv) {
+  if (argv[0] !== '/usr/bin/env' && argv[0] !== 'env') return argv
+  let at = 1
+  while (at < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[at])) at += 1
+  return argv.slice(at)
+}
+
 export function answerWsl(state, argv, input = undefined, utf8 = true) {
   const own = (text) => (utf8 ? bytes(text) : Buffer.from(text, 'utf16le'))
   if (argv[0] === '-d') {
@@ -263,7 +274,8 @@ export function answerWsl(state, argv, input = undefined, utf8 = true) {
       return result(1, own('The Windows Subsystem for Linux is not available.\r\n'))
     }
     if (!(state.distributions ?? []).some((d) => d.name === name)) return result(255, own(NO_DISTRIBUTION))
-    return guestCommand(state, name, user, rest[1], rest.slice(2), input)
+    const command = withoutEnvPrefix(rest.slice(1))
+    return guestCommand(state, name, user, command[0], command.slice(1), input)
   }
 
   if (state.installed === false) {
@@ -379,7 +391,8 @@ if (process.argv[1] && /fake-wsl\.mjs$/.test(process.argv[1])) {
 
   let input
   const execAt = argv.indexOf('--exec')
-  if (execAt !== -1 && argv[execAt + 1] === 'cat' && argv.length === execAt + 2) {
+  const guestArgv = execAt === -1 ? [] : withoutEnvPrefix(argv.slice(execAt + 1))
+  if (execAt !== -1 && guestArgv[0] === 'cat' && guestArgv.length === 1) {
     const chunks = []
     for await (const chunk of process.stdin) chunks.push(chunk)
     input = Buffer.concat(chunks)

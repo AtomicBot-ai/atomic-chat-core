@@ -11,7 +11,7 @@ const facts = (over: Partial<WindowsHostFacts> = {}): WindowsHostFacts => ({
   architecture: 'x86_64',
   windows_build: 22631,
   elevated: false,
-  wsl: { installed: true, version: '2.4.4', ready: true },
+  wsl: { installed: true, version: '2.4.4', ready: true, reboot_pending: false },
   virtualization: true,
   driver_installed: true,
   driver_version: '591.44',
@@ -67,9 +67,24 @@ describe('assessWindowsHost', () => {
     expect(verdict.blockers).toEqual([])
   })
 
+  it('WSL installed but Windows waiting for a restart: a restart blocker, no second elevation', () => {
+    const verdict = assessWindowsHost(
+      input({
+        facts: facts({ wsl: { installed: true, version: '3.0.1', ready: false, reboot_pending: true } }),
+      })
+    )
+    expect(verdict.enable_wsl).toBe(false)
+    expect(verdict.blockers.map((b) => b.reason)).toContain('windows-restart-pending')
+  })
+
   it('unknown virtualization does not block enabling WSL (ruling core 2.3)', () => {
     const verdict = assessWindowsHost(
-      input({ facts: facts({ wsl: { installed: false, version: null, ready: null }, virtualization: null }) })
+      input({
+        facts: facts({
+          wsl: { installed: false, version: null, ready: null, reboot_pending: null },
+          virtualization: null,
+        }),
+      })
     )
     expect(verdict.enable_wsl).toBe(true)
     expect(verdict.blockers).toEqual([])
@@ -77,7 +92,12 @@ describe('assessWindowsHost', () => {
 
   it('an unread WSL blocks as an unknown fact, offering nothing', () => {
     const verdict = assessWindowsHost(
-      input({ facts: facts({ wsl: { installed: null, version: null, ready: null }, unknown: ['wsl'] }) })
+      input({
+        facts: facts({
+          wsl: { installed: null, version: null, ready: null, reboot_pending: null },
+          unknown: ['wsl'],
+        }),
+      })
     )
     expect(verdict.availability).toBe('prerequisite-blocked')
     expect(verdict.blockers.map((b) => b.reason)).toEqual(['unknown-fact'])

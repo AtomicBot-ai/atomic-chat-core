@@ -174,7 +174,7 @@ describe('probeWindowsHost', () => {
     const windows = fakeWindows(machine({ wsl: { installed: false } }))
     const facts = await probeWindowsHost(windows.host.probeDeps)
 
-    expect(facts.wsl).toEqual({ installed: false, version: null, ready: null })
+    expect(facts.wsl).toEqual({ installed: false, version: null, ready: null, reboot_pending: null })
     expect(facts.virtualization).toBe(true)
     expect(windows.wslCalls).toEqual([['--version']])
     expect(windows.execCalls.some((call) => call[0]?.endsWith('powershell.exe'))).toBe(true)
@@ -183,7 +183,7 @@ describe('probeWindowsHost', () => {
   it('a package whose components are off answers --version but not --status', async () => {
     const windows = fakeWindows(machine({ wsl: { installed: true, wsl_version: '2.4.4.0', ready: false } }))
     const facts = await probeWindowsHost(windows.host.probeDeps)
-    expect(facts.wsl).toEqual({ installed: true, version: '2.4.4', ready: false })
+    expect(facts.wsl).toEqual({ installed: true, version: '2.4.4', ready: false, reboot_pending: null })
   })
 
   it('no nvidia-smi.exe in System32 is no driver, not an unread fact', async () => {

@@ -50,8 +50,26 @@ export interface WslFacts {
   installed: boolean | null
   /** `MAJOR.MINOR.PATCH` of the package (`--version`'s first line, its fourth part dropped). */
   version: string | null
-  /** `--status` answers: the components are on and a WSL 2 VM can start. Null when not asked. */
+  /**
+   * `--status` answers and Windows is not waiting for a restart: a WSL 2 VM can start. Null when not
+   * asked. `--status` alone is not enough: right after `wsl --install` it exits 0 while saying WSL 2
+   * cannot start until the restart (live acceptance, build 26200).
+   */
   ready: boolean | null
+  /** Windows has a component change waiting for a restart (CBS `RebootPending`). Null when unread. */
+  reboot_pending: boolean | null
+}
+
+/** The CBS key Windows keeps while a component change (such as the VM platform) waits for a restart. */
+export const REBOOT_PENDING_KEY =
+  'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending'
+
+/** `reg.exe query` of the key: 0 when it exists (a restart is pending), 1 when it does not. */
+export function parseRebootPending(output: CommandOutput | null): boolean | null {
+  if (output === null || output.code === null) return null
+  if (output.code === 0) return true
+  if (output.code === 1) return false
+  return null
 }
 
 export interface WindowsHostFacts {
@@ -264,8 +282,13 @@ export async function probeWindowsHost(deps: WindowsProbeDeps): Promise<WindowsH
           deps.wsl.command(['--list', '--verbose'], { timeoutMs: 30_000 }),
         ])
       : [null, null]
-  const ready = status === null ? null : status.code === null ? null : status.code === 0
-  if (installed === true && ready === null) unknown.push('wsl-status')
+  const rebootPending =
+    installed === true
+      ? parseRebootPending(await deps.exec(`${system32}\\reg.exe`, ['query', REBOOT_PENDING_KEY]))
+      : null
+  const answered = status === null ? null : status.code === null ? null : status.code === 0
+  const ready = answered === null ? null : answered && rebootPending !== true
+  if (installed === true && answered === null) unknown.push('wsl-status')
 
   // Only a WSL that cannot start a VM leaves the question of firmware virtualization open.
   let virtualization: boolean | null = ready === true ? true : null
@@ -294,7 +317,7 @@ export async function probeWindowsHost(deps: WindowsProbeDeps): Promise<WindowsH
     architecture,
     windows_build: windowsBuild,
     elevated,
-    wsl: { installed, version: wslVersion, ready },
+    wsl: { installed, version: wslVersion, ready, reboot_pending: rebootPending },
     virtualization,
     driver_installed: smiInstalled,
     driver_version: nvidia.driver_version,
