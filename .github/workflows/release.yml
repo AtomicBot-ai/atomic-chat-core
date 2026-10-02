@@ -27,6 +27,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
       - uses: actions/checkout@v7
       - name: Resolve the version and refuse one already released
@@ -55,6 +58,24 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Releasing $tag from $GITHUB_SHA"
+
+      # Telegram notifications are skipped while the TELEGRAM_* secrets are unset and never fail the release.
+      - name: Notify Telegram that the release started
+        if: env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        continue-on-error: true
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          text="$(printf '%s\n' \
+            "🚀 <b>atomic-chat-core $TAG</b>: сборка поставлена" \
+            "Ref: <code>$GITHUB_REF_NAME</code> (<code>${GITHUB_SHA:0:7}</code>)" \
+            "Запустил: $GITHUB_ACTOR" \
+            "<a href=\"$run_url\">Билд в GitHub Actions</a>")"
+          curl -fsS -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=$text" \
+            -d parse_mode=HTML -d disable_web_page_preview=true > /dev/null
 
   # Never publish something the gates have not seen: all three OSes (Linux and Windows on x64 and
   # arm64), e2e against the binary.
@@ -144,3 +165,41 @@ jobs:
             --generate-notes \
             --latest \
             $verify
+
+  notify-finish:
+    needs: [version, gates, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - name: Notify Telegram that the release finished
+        if: env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        continue-on-error: true
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION_RESULT: ${{ needs.version.result }}
+          GATES_RESULT: ${{ needs.gates.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          title="atomic-chat-core ${TAG:-$GITHUB_REF_NAME}"
+          if [ "$PUBLISH_RESULT" = success ]; then
+            text="$(printf '%s\n' \
+              "✅ <b>$title</b>: сборка завершена и опубликована" \
+              "<a href=\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG\">Релиз</a> · <a href=\"$run_url\">Билд</a>")"
+          else
+            case "$VERSION_RESULT/$GATES_RESULT/$PUBLISH_RESULT" in
+              *cancelled*) head="⏹ <b>$title</b>: сборка отменена" ;;
+              *) head="❌ <b>$title</b>: сборка упала" ;;
+            esac
+            text="$(printf '%s\n' \
+              "$head" \
+              "version: $VERSION_RESULT · gates: $GATES_RESULT · publish: $PUBLISH_RESULT" \
+              "<a href=\"$run_url\">Билд в GitHub Actions</a>")"
+          fi
+          curl -fsS -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=$text" \
+            -d parse_mode=HTML -d disable_web_page_preview=true > /dev/null
