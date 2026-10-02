@@ -61,8 +61,8 @@ describe('resolveBackendArchiveSource', () => {
   it('uses the signed mirror with hash and size when the manifest lists this exact asset', () => {
     expect(resolveBackendArchiveSource(`\uFEFF${tag}`, 'macos-arm64', BUNDLED_MANIFEST_BASELINE)).toEqual({
       url: `${BUNDLED_MANIFEST_BASELINE.download_base}/${tag}/llama-${tag}-bin-macos-arm64.tar.gz`,
-      sha256: '60bd20e22dcaee096da9147f3ab49eee37020191faafd636af398e099930b753',
-      size: 11224595,
+      sha256: 'd5eca9837663d76676358123f80183338c5246d0e7bca81e834112ed4ed177ec',
+      size: 11920825,
     })
   })
   it.each([
@@ -192,7 +192,7 @@ describe('equivalence with scripts/resolve-upstream-backend.mjs (its three usage
       parseManifestForPlatform(manifest, 'windows', 'x64')
     )
     const backend = concrete!.split('/')[1]!
-    expect(backend).toBe('win-cuda-13.3-x64')
+    expect(backend).toBe('win-cuda-13.4-x64')
     const asset = scriptAssetNameFor(tag, backend)
     expect(getBackendArchiveName(tag, backend)).toBe(asset)
     expect(resolveBackendArchiveSource(tag, backend, manifest)).toEqual(
