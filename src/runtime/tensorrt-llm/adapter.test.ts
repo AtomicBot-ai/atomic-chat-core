@@ -102,6 +102,10 @@ describe('tensorrtLlmAdapter shape', () => {
       'model_engine.py:716, _capture_generation_cuda_graphs',
       'Creating CUDA graph instances for 8 batch sizes.',
     ],
+    [
+      '1.3.0rc29 model_engine.py:2709, _capture_generation_cuda_graphs',
+      'Running CUDA graph capture for 8 batch sizes.',
+    ],
   ])('a stage marker matches the real %s line', (_case, line) => {
     expect(tensorrtLlmAdapter.stageMarkers.some((marker) => marker.pattern.test(line))).toBe(true)
   })
@@ -384,10 +388,15 @@ describe('buildLaunch', () => {
   it('points the engine cache env vars at the mounted engine cache directory', () => {
     const context = baseContext({ engineCachePath: '/atomic/engine-cache' })
     const launch = tensorrtLlmAdapter.buildLaunch(context)
-    for (const value of Object.values(launch.env ?? {})) {
+    const { TRTLLM_NO_USAGE_STATS: _telemetry, ...caches } = launch.env ?? {}
+    for (const value of Object.values(caches)) {
       expect(value.startsWith('/atomic/engine-cache/')).toBe(true)
     }
-    expect(Object.keys(launch.env ?? {}).length).toBeGreaterThan(0)
+    expect(Object.keys(caches).length).toBeGreaterThan(0)
+  })
+
+  it('turns off the usage telemetry trtllm-serve sends to NVIDIA by default from 1.3', () => {
+    expect(tensorrtLlmAdapter.buildLaunch(baseContext()).env?.['TRTLLM_NO_USAGE_STATS']).toBe('1')
   })
 })
 
@@ -746,6 +755,29 @@ describe('mapTensorrtLlmContextLengthError', () => {
     const body =
       'The sum of prompt length (4000) and query length (0) max_tokens (2048) should not exceed max_seq_len (4096)'
     expect(mapTensorrtLlmContextLengthError(400, body)).toBeNull()
+  })
+
+  it('maps the 1.3.0rc29 prompt-length overflow message (llm.py:1578), which no longer carries a query length', () => {
+    const body = JSON.stringify({
+      object: 'error',
+      message: 'The prompt length (72417.0) should not exceed max_num_tokens (69632)',
+      type: 'BadRequestError',
+      param: null,
+      code: 400,
+    })
+    const mapped = mapTensorrtLlmContextLengthError(400, body)
+    expect(mapped?.error.code).toBe('context_length_exceeded')
+    expect(mapped?.error.message).toContain('maximum context length is 69632 tokens')
+    expect(mapped?.error.message).toContain('resulted in 72417 tokens')
+  })
+
+  it('maps the 1.3.0rc29 _deduce_max_tokens overflow (base_worker.py:456), which no longer carries query_token_len', () => {
+    const body =
+      '`default_max_tokens` (-152) must be greater than 0, `default_max_tokens` (-152) = ' +
+      'max_seq_len (8192) - `splited_prompt_len` (8344)'
+    const mapped = mapTensorrtLlmContextLengthError(400, body)
+    expect(mapped?.error.message).toContain('maximum context length is 8192 tokens')
+    expect(mapped?.error.message).toContain('resulted in 8344 tokens')
   })
 
   it('accepts a raw unstructured body, not only the ErrorResponse JSON envelope', () => {

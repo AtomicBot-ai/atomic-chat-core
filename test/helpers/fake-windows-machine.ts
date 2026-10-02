@@ -20,7 +20,7 @@ import type { FakeWslState } from './fake-wsl.mjs'
 
 const FAKE_WSL = fileURLToPath(new URL('./fake-wsl.mjs', import.meta.url))
 const tls = (name: string): string => fileURLToPath(new URL(`../fixtures/tls/${name}`, import.meta.url))
-export const DESCRIPTOR_URL = new URL('../fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+export const DESCRIPTOR_URL = new URL('../fixtures/runtimes/tensorrt-llm-1.2.1-r2.json', import.meta.url).href
 const DESCRIPTOR = JSON.parse(readFileSync(fileURLToPath(DESCRIPTOR_URL), 'utf8')) as {
   descriptor_id: string
   image: Record<string, { repository: string; digest: string }>

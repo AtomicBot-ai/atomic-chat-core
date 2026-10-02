@@ -5,6 +5,7 @@ import {
   describeUnrecognizedQuantization,
   isGgufCheckpoint,
   kvCacheQuantAlgo,
+  quantizationComponents,
   quantizationFormat,
   type JsonObject,
 } from './quant-format.js'
@@ -256,5 +257,73 @@ describe('isGgufCheckpoint', () => {
 
   it('matches the extension case-insensitively', () => {
     expect(isGgufCheckpoint([{ path: 'model.GGUF' }])).toBe(true)
+  })
+})
+
+describe('quantizationComponents', () => {
+  it('is the format itself for a single-format checkpoint', () => {
+    expect(quantizationComponents('nvfp4', null)).toEqual(['nvfp4'])
+  })
+
+  it('lists every distinct per-layer format of a mixed-precision checkpoint, named by the same rule', () => {
+    const hf = {
+      quantization: {
+        quant_algo: 'MIXED_PRECISION',
+        quantized_layers: {
+          a: { quant_algo: 'FP8' },
+          b: { quant_algo: 'W4A16_NVFP4', group_size: 16 },
+          c: { quant_algo: 'FP8_PB_WO' },
+        },
+      },
+    }
+    expect(quantizationComponents('mixed_precision', hf)).toEqual(['fp8', 'fp8_block_scales', 'w4a16_nvfp4'])
+  })
+
+  it('is empty when a mixed-precision checkpoint has no layers or a layer without quant_algo', () => {
+    expect(
+      quantizationComponents('mixed_precision', { quantization: { quant_algo: 'MIXED_PRECISION' } })
+    ).toEqual([])
+    expect(
+      quantizationComponents('mixed_precision', {
+        quantization: { quant_algo: 'MIXED_PRECISION', quantized_layers: { a: { group_size: 16 } } },
+      })
+    ).toEqual([])
+  })
+})
+
+describe('dtype on text_config (VLM-style configs)', () => {
+  it.each<[string, JsonObject, string | null]>([
+    ['text_config.dtype', { text_config: { dtype: 'bfloat16' } }, 'bf16'],
+    ['text_config.torch_dtype', { text_config: { torch_dtype: 'float16' } }, 'fp16'],
+    [
+      'a top-level dtype wins over text_config',
+      { dtype: 'float16', text_config: { dtype: 'bfloat16' } },
+      'fp16',
+    ],
+    ['text_config with no dtype at all', { text_config: {} }, null],
+    ['a text_config that is not an object', { text_config: 'bfloat16' }, null],
+  ])('%s', (_case, config, expected) => {
+    expect(quantizationFormat(config, null)).toBe(expected)
+  })
+
+  it('names the text_config dtype it saw when it does not recognise it', () => {
+    expect(describeUnrecognizedQuantization({ text_config: { dtype: 'float32' } }, null)).toBe(
+      'config.json dtype="float32"'
+    )
+  })
+})
+
+describe('quantizationComponents edge cases', () => {
+  it('is empty for a mixed-precision name with no hf_quant_config.json, or one without a quantization object', () => {
+    expect(quantizationComponents('mixed_precision', null)).toEqual([])
+    expect(quantizationComponents('mixed_precision', { quantization: 'MIXED_PRECISION' })).toEqual([])
+  })
+
+  it('is empty when a layer entry is not an object', () => {
+    expect(
+      quantizationComponents('mixed_precision', {
+        quantization: { quant_algo: 'MIXED_PRECISION', quantized_layers: { a: 'FP8' } },
+      })
+    ).toEqual([])
   })
 })

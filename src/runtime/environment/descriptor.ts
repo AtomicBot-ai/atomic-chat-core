@@ -36,8 +36,9 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/
 const CAPABILITY = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/
 /** NVIDIA display driver version: 2 or 3 dot-separated components, e.g. `590.44.01`. */
 const DRIVER_VERSION = /^[0-9]+\.[0-9]+(\.[0-9]+)?$/
-/** HF `config.json` `architectures` entries and `model_families` keys, e.g. `LlamaForCausalLM`. */
-const ARCHITECTURE_NAME = /^[A-Z][A-Za-z0-9]*$/
+/** HF `config.json` `architectures` entries and `model_families` keys, e.g. `LlamaForCausalLM` or
+ *  `Qwen3_5ForConditionalGeneration` (Qwen3.5 and later spell the version with an underscore). */
+const ARCHITECTURE_NAME = /^[A-Z][A-Za-z0-9_]*$/
 /** A bare parser name: no flags, no paths, no leading dash — the adapter passes it as one argv value. */
 const PARSER_NAME = /^[a-z0-9][a-z0-9_.-]*$/
 

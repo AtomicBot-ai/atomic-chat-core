@@ -43,7 +43,9 @@ import { parseNvidiaSmi } from './linux-probe.js'
 import { startOperation } from './state.js'
 import type { PersistedOperation } from './store.js'
 
-const DESCRIPTOR = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
+const DESCRIPTOR = parseRuntimeDescriptor(
+  readRuntimeFixture('tensorrt-llm-1.2.1-r2.json')
+) as RuntimeDescriptor
 const IMAGE = DESCRIPTOR.image['linux/amd64']
 const IMAGE_REF = `${IMAGE.repository}@${IMAGE.digest}`
 const PROBE_IMAGE = DESCRIPTOR.probe_image['linux/amd64']

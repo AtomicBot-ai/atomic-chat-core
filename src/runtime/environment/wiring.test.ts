@@ -328,7 +328,8 @@ describe('coming back to what a previous core left', () => {
 
 describe('the descriptor provider this wiring builds (task 2.3)', () => {
   /** The real fixture (`descriptor_id` `tensorrt-llm-1.2.1-r2`, `minimum_core_version` `0.7.5`). */
-  const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+  const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm-1.2.1-r2.json', import.meta.url)
+    .href
 
   it('reads a file:// override end to end and caches it under the wired managed root', async () => {
     const managed = wireManagedRuntimes({
@@ -518,7 +519,8 @@ describe('environmentAvailability', () => {
 })
 
 describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () => {
-  const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+  const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm-1.2.1-r2.json', import.meta.url)
+    .href
   const manifestUrl = new URL('../../../test/fixtures/runtimes/environments/linux.json', import.meta.url).href
 
   it('probes, sets up, and shows the ready installation and the GPUs in the snapshot', async () => {
@@ -645,7 +647,10 @@ type EnvironmentSnapshotLike = { revision: number }
 
 describe('the Windows recipe wired (change add-tensorrt-llm-windows, task 2.10)', () => {
   it('drives the Windows provisioner with its own manifest, and shows the distribution a probe saw', async () => {
-    const descriptorUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm.json', import.meta.url).href
+    const descriptorUrl = new URL(
+      '../../../test/fixtures/runtimes/tensorrt-llm-1.2.1-r2.json',
+      import.meta.url
+    ).href
     const manifestUrl = new URL('../../../test/fixtures/runtimes/environments/windows.json', import.meta.url)
       .href
     const windows = fakeWindows({

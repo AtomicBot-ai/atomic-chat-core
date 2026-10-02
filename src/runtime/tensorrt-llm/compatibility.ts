@@ -41,6 +41,8 @@ import {
   describeUnrecognizedQuantization,
   isGgufCheckpoint,
   kvCacheQuantAlgo,
+  MIXED_PRECISION,
+  quantizationComponents,
   quantizationFormat,
 } from './quant-format.js'
 import type { JsonObject } from './quant-format.js'
@@ -199,8 +201,18 @@ interface KvCacheShape {
  * need — `kvCacheBytes` then has nothing to compute from, and `kvCacheReserveBytes` falls back to
  * the older weight-proportional rule.
  */
-function readKvCacheShape(configJson: JsonObject): KvCacheShape | undefined {
-  const numHiddenLayers = positiveNumberField(configJson, 'num_hidden_layers')
+function readKvCacheShape(rootConfigJson: JsonObject): KvCacheShape | undefined {
+  // A VLM-style config (Qwen3.5+, Gemma 4, Mistral 3) keeps the language model's shape on
+  // `text_config`; the top level then has no `num_hidden_layers` at all.
+  const textConfig = rootConfigJson.text_config
+  const configJson =
+    positiveNumberField(rootConfigJson, 'num_hidden_layers') === undefined &&
+    typeof textConfig === 'object' &&
+    textConfig !== null &&
+    !Array.isArray(textConfig)
+      ? (textConfig as JsonObject)
+      : rootConfigJson
+  const numHiddenLayers = attentionLayerCount(configJson)
   const numAttentionHeads = positiveNumberField(configJson, 'num_attention_heads')
   const numKeyValueHeads = positiveNumberField(configJson, 'num_key_value_heads') ?? numAttentionHeads
   const hiddenSize = positiveNumberField(configJson, 'hidden_size')
@@ -211,6 +223,19 @@ function readKvCacheShape(configJson: JsonObject): KvCacheShape | undefined {
     return undefined
   }
   return { numHiddenLayers, numKeyValueHeads, headDim }
+}
+
+/**
+ * Layers that keep a per-token KV cache. A hybrid config lists `layer_types`; its
+ * `linear_attention` layers (Qwen3.5's Gated DeltaNet) hold a fixed-size state instead, so only the
+ * rest count. Sliding-window layers still count in full, which over-reserves for them on purpose.
+ */
+function attentionLayerCount(configJson: JsonObject): number | undefined {
+  const total = positiveNumberField(configJson, 'num_hidden_layers')
+  const layerTypes = configJson.layer_types
+  if (total === undefined || !Array.isArray(layerTypes) || layerTypes.length !== total) return total
+  const attention = layerTypes.filter((type) => type !== 'linear_attention').length
+  return attention > 0 ? attention : total
 }
 
 /**
@@ -349,12 +374,59 @@ function computeCapabilityAtLeast(actual: string, min: string): boolean {
   return !Number.isNaN(compared) && compared >= 0
 }
 
-/** Whether `format` is loadable on `gpu` per the descriptor's per-format compute-capability rule. */
-function formatAllowedOnGpu(descriptor: RuntimeDescriptor, format: string, gpu: GpuFacts): boolean {
-  const support = descriptor.quantization.find((entry) => entry.format === format)
-  if (support === undefined) return false
-  if (!computeCapabilityAtLeast(gpu.compute_capability, support.min_compute_capability)) return false
-  return !support.excluded_compute_capabilities.includes(gpu.compute_capability)
+/** The compute-capability rule a checkpoint's format puts on a card. */
+interface FormatRequirement {
+  min_compute_capability: string
+  excluded_compute_capabilities: string[]
+}
+
+type FormatResolution =
+  | { ok: true; requirement: FormatRequirement }
+  /** `missing` names the format the descriptor has no row for; `null` when a mixed checkpoint names none. */
+  | { ok: false; missing: string | null }
+
+/**
+ * The descriptor's rule for `format`. A `mixed_precision` checkpoint needs every one of its per-layer
+ * formats (`quantizationComponents`) to have a row, and a card has to clear all of them: the highest
+ * minimum and every exclusion. Any per-layer format without a row fails the whole checkpoint closed.
+ */
+function formatRequirement(
+  descriptor: RuntimeDescriptor,
+  format: string,
+  hfQuantConfigJson: JsonObject | null
+): FormatResolution {
+  const components = quantizationComponents(format, hfQuantConfigJson)
+  if (components.length === 0) return { ok: false, missing: null }
+  let minimum: string | undefined
+  const excluded = new Set<string>()
+  for (const component of components) {
+    const row = descriptor.quantization.find((entry) => entry.format === component)
+    if (row === undefined) return { ok: false, missing: component }
+    if (minimum === undefined || compareComputeCapability(row.min_compute_capability, minimum) > 0) {
+      minimum = row.min_compute_capability
+    }
+    for (const capability of row.excluded_compute_capabilities) excluded.add(capability)
+  }
+  return {
+    ok: true,
+    requirement: {
+      min_compute_capability: minimum as string,
+      excluded_compute_capabilities: [...excluded],
+    },
+  }
+}
+
+/** `mixed_precision (fp8 + nvfp4)` for a mixed checkpoint, the format itself otherwise. */
+function formatLabel(format: string, hfQuantConfigJson: JsonObject | null): string {
+  if (format !== MIXED_PRECISION) return format
+  const components = quantizationComponents(format, hfQuantConfigJson)
+  return components.length === 0 ? format : `${format} (${components.join(' + ')})`
+}
+
+/** Whether a checkpoint with `requirement` is loadable on `gpu`. */
+function formatAllowedOnGpu(requirement: FormatRequirement, gpu: GpuFacts): boolean {
+  if (!computeCapabilityAtLeast(gpu.compute_capability, requirement.min_compute_capability)) return false
+  return !requirement.excluded_compute_capabilities.includes(gpu.compute_capability)
 }
 
 /**
@@ -364,14 +436,14 @@ function formatAllowedOnGpu(descriptor: RuntimeDescriptor, format: string, gpu: 
 function fitsOtherGpus(
   gpus: readonly GpuFacts[],
   selected: GpuFacts,
-  descriptor: RuntimeDescriptor,
-  format: string,
+  requirement: FormatRequirement | null,
   needOn: (gpu: GpuFacts) => number,
   hostMemory: HostMemory
 ): string[] {
+  if (requirement === null) return []
   return gpus
     .filter((gpu) => gpu.gpu_id !== selected.gpu_id)
-    .filter((gpu) => formatAllowedOnGpu(descriptor, format, gpu))
+    .filter((gpu) => formatAllowedOnGpu(requirement, gpu))
     .filter((gpu) => needOn(gpu) <= freeMemoryBytes(gpu, hostMemory))
     .map((gpu) => gpu.gpu_id)
 }
@@ -594,8 +666,9 @@ export function checkModelCompatibilityFiles(
     }
   }
 
-  const formatSupport = descriptor.quantization.find((entry) => entry.format === format)
-  if (formatSupport === undefined) {
+  const resolution = formatRequirement(descriptor, format, input.hf_quant_config_json)
+  if (!resolution.ok) {
+    const missing = resolution.missing
     return {
       ok: false,
       verdict: buildCompatibility(
@@ -604,14 +677,21 @@ export function checkModelCompatibilityFiles(
           ok: false,
           error: {
             code: 'MODEL_INCOMPATIBLE',
-            message: `Unsupported quantization format: "${format}" is not part of this engine's descriptor.`,
-            details: format,
+            message:
+              missing === null
+                ? `Unsupported quantization format: "${format}" does not name the format of its layers.`
+                : missing === format
+                  ? `Unsupported quantization format: "${format}" is not part of this engine's descriptor.`
+                  : `Unsupported quantization format: "${format}" has layers in "${missing}", which is not part of this engine's descriptor.`,
+            details: missing ?? format,
           },
         },
         []
       ),
     }
   }
+  const formatSupport = resolution.requirement
+  const label = formatLabel(format, input.hf_quant_config_json)
 
   if (weightBytesTotal === 0) {
     return {
@@ -637,14 +717,7 @@ export function checkModelCompatibilityFiles(
   const needOn = (gpu: GpuFacts): MemoryNeed =>
     memoryNeedOn(gpu, weightBytesTotal, input.config_json, input.hf_quant_config_json, memory)
   const { basis } = needOn(selected)
-  const fitsOther = fitsOtherGpus(
-    gpus,
-    selected,
-    descriptor,
-    format,
-    (gpu) => needOn(gpu).neededBytes,
-    hostMemory
-  )
+  const fitsOther = fitsOtherGpus(gpus, selected, formatSupport, (gpu) => needOn(gpu).neededBytes, hostMemory)
 
   if (!computeCapabilityAtLeast(selected.compute_capability, formatSupport.min_compute_capability)) {
     return {
@@ -655,7 +728,7 @@ export function checkModelCompatibilityFiles(
           ok: false,
           error: {
             code: 'MODEL_INCOMPATIBLE',
-            message: `Format ${format} requires compute capability ${formatSupport.min_compute_capability} or newer.`,
+            message: `Format ${label} requires compute capability ${formatSupport.min_compute_capability} or newer.`,
             details: `required=${formatSupport.min_compute_capability} actual=${selected.compute_capability}`,
           },
         },
@@ -674,7 +747,7 @@ export function checkModelCompatibilityFiles(
           ok: false,
           error: {
             code: 'MODEL_INCOMPATIBLE',
-            message: `Format ${format} is not supported by this engine release on compute capability ${selected.compute_capability}.`,
+            message: `Format ${label} is not supported by this engine release on compute capability ${selected.compute_capability}.`,
             details: `format=${format} compute_capability=${selected.compute_capability}`,
           },
         },
@@ -729,11 +802,11 @@ export function checkModelMemory(
     memoryNeedOn(gpu, resolved.weightBytesTotal, resolved.configJson, resolved.hfQuantConfigJson, memory)
   const { reserveBytes, basis, neededBytes } = needOn(selected)
   const freeBytes = freeMemoryBytes(selected, hostMemory)
+  const resolution = formatRequirement(descriptor, resolved.quantizationFormat, resolved.hfQuantConfigJson)
   const fitsOther = fitsOtherGpus(
     gpus,
     selected,
-    descriptor,
-    resolved.quantizationFormat,
+    resolution.ok ? resolution.requirement : null,
     (gpu) => needOn(gpu).neededBytes,
     hostMemory
   )

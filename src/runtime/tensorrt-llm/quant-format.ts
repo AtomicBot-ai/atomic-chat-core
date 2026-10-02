@@ -89,9 +89,25 @@ function fromConfigQuantizationConfig(configJson: JsonObject): string | null | u
   return null
 }
 
-/** Step 3: unquantized. `dtype` is what TensorRT-LLM itself reads; `torch_dtype` is the legacy fallback. */
+/**
+ * The checkpoint's weight dtype: `dtype` is what TensorRT-LLM itself reads, `torch_dtype` is the
+ * legacy fallback. A VLM-style config (Qwen3.5 and later) declares it only on `text_config`, which
+ * TensorRT-LLM 1.3 falls back to as well (`model_config.py`), so this does too.
+ */
+function configDtype(configJson: JsonObject): unknown {
+  const textConfig = asObject(configJson.text_config)
+  return (
+    asNonEmptyString(configJson.dtype) ??
+    asNonEmptyString(configJson.torch_dtype) ??
+    (textConfig === undefined
+      ? undefined
+      : (asNonEmptyString(textConfig.dtype) ?? asNonEmptyString(textConfig.torch_dtype)))
+  )
+}
+
+/** Step 3: unquantized, named by `configDtype`. */
 function fromDtype(configJson: JsonObject): string | null {
-  const dtype = asNonEmptyString(configJson.dtype) ?? asNonEmptyString(configJson.torch_dtype)
+  const dtype = configDtype(configJson)
   if (dtype === 'bfloat16') return 'bf16'
   if (dtype === 'float16') return 'fp16'
   return null
@@ -165,6 +181,29 @@ export function describeUnrecognizedQuantization(
     }
     return `config.json quantization_config.quant_method=${JSON.stringify(quantMethod ?? null)}`
   }
-  const dtype = configJson.dtype ?? configJson.torch_dtype
-  return `config.json dtype=${JSON.stringify(dtype ?? null)}`
+  return `config.json dtype=${JSON.stringify(configDtype(configJson) ?? null)}`
+}
+
+/** What NVIDIA ModelOpt calls a checkpoint whose layers carry different formats. */
+export const MIXED_PRECISION = 'mixed_precision'
+
+/**
+ * The formats a checkpoint actually needs the engine to load. One format for every checkpoint but a
+ * ModelOpt `MIXED_PRECISION` one, whose `hf_quant_config.json` lists a `quant_algo` per layer in
+ * `quantization.quantized_layers` (e.g. `NVFP4` + `FP8`, or `W4A16_NVFP4` + `FP8`): every distinct
+ * per-layer format, named by the same rule as a whole-checkpoint `quant_algo`. An empty list means
+ * the mixed checkpoint names no per-layer format at all, which the caller must reject.
+ */
+export function quantizationComponents(format: string, hfQuantConfigJson: JsonObject | null): string[] {
+  if (format !== MIXED_PRECISION) return [format]
+  const quantization = hfQuantConfigJson === null ? undefined : asObject(hfQuantConfigJson.quantization)
+  const layers = quantization === undefined ? undefined : asObject(quantization.quantized_layers)
+  if (layers === undefined) return []
+  const formats = new Set<string>()
+  for (const layer of Object.values(layers)) {
+    const quantAlgo = asNonEmptyString(asObject(layer)?.quant_algo)
+    if (quantAlgo === undefined) return []
+    formats.add(renameFp8PbWo(quantAlgo))
+  }
+  return [...formats].sort()
 }

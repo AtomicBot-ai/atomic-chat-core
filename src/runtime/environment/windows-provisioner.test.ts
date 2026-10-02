@@ -37,7 +37,9 @@ import type { WindowsEnvironmentRecord } from './windows-environment-record.js'
 import { distributionDirectory } from './windows-host.js'
 import { createWindowsProvisioner, type WindowsProvisionerDeps } from './windows-provisioner.js'
 
-const DESCRIPTOR = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json')) as RuntimeDescriptor
+const DESCRIPTOR = parseRuntimeDescriptor(
+  readRuntimeFixture('tensorrt-llm-1.2.1-r2.json')
+) as RuntimeDescriptor
 const MANIFEST = parseWindowsEnvironmentManifest(readRuntimeFixture('environments/windows.json'))
 const GPU = 'GPU-1c6a2b3c-0000-4000-8000-000000000001'
 const GIB = 1024 ** 3

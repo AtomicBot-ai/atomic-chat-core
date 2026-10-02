@@ -11,19 +11,20 @@ const broken = (mutate: (doc: Record<string, unknown>) => void): unknown => {
 }
 
 describe('parseRuntimeDescriptor', () => {
-  it('accepts the published TensorRT-LLM descriptor verbatim (conf commit 2676324)', () => {
+  it('accepts the published TensorRT-LLM descriptor verbatim (conf tensorrt-llm-1.3.0rc29-r1)', () => {
     const fixture = readRuntimeFixture('tensorrt-llm.json')
     const descriptor = parseRuntimeDescriptor(fixture)
 
-    expect(descriptor.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
-    expect(descriptor.minimum_core_version).toBe('0.7.5')
+    expect(descriptor.descriptor_id).toBe('tensorrt-llm-1.3.0rc29-r1')
+    expect(descriptor.minimum_core_version).toBe('0.7.6')
     expect(descriptor.engine_id).toBe('tensorrt-llm')
-    expect(descriptor.minimum_driver_version).toBe('590.44.01')
+    expect(descriptor.minimum_driver_version).toBe('615.65.02')
     expect(descriptor.image['linux/amd64'].repository).toBe('nvcr.io/nvidia/tensorrt-llm/release')
     expect(descriptor.image['linux/arm64'].digest.startsWith('sha256:')).toBe(true)
     expect(descriptor.probe_image['linux/amd64'].repository).toBe('nvcr.io/nvidia/cuda')
     expect(descriptor.supported_architectures).toContain('LlamaForCausalLM')
-    expect(descriptor.curated_models).toHaveLength(11)
+    expect(descriptor.supported_architectures).toContain('Qwen3_5ForConditionalGeneration')
+    expect(descriptor.curated_models).toHaveLength(15)
     expect('recipes' in descriptor).toBe(false)
   })
 
@@ -175,6 +176,19 @@ describe('parseRuntimeDescriptor', () => {
     expect(() => parseRuntimeDescriptor(doc)).toThrow(AtomicCoreError)
   })
 
+  it('accepts an architecture class name with an underscore, as Qwen3.5 and later spell it', () => {
+    const doc = broken((d) => {
+      ;(d['supported_architectures'] as string[]).push('Qwen9_9ForCausalLM')
+      ;(d['model_families'] as Record<string, unknown>)['Qwen9_9ForCausalLM'] = {
+        tool_parser: 'qwen3',
+        reasoning_parser: 'qwen3_5',
+        structured_output: true,
+      }
+    })
+    const descriptor = parseRuntimeDescriptor(doc)
+    expect(descriptor.supported_architectures).toContain('Qwen9_9ForCausalLM')
+  })
+
   it('rejects a curated model whose inventory_digest is not a sha256 digest', () => {
     const doc = broken((d) => {
       const curated = d['curated_models'] as Array<Record<string, unknown>>
@@ -211,13 +225,13 @@ describe('summarizeRuntimeDescriptor', () => {
       'notices',
       'supported_architectures',
     ])
-    expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
+    expect(summary.descriptor_id).toBe('tensorrt-llm-1.3.0rc29-r1')
     expect(summary.engine_id).toBe('tensorrt-llm')
     // Notices verbatim and in order: they are the NVIDIA terms the user reads before consenting.
     expect(summary.notices).toEqual(descriptor.notices)
     expect(summary.notices.length).toBeGreaterThan(0)
     expect(summary.curated_models).toEqual(descriptor.curated_models)
-    expect(summary.curated_models).toHaveLength(11)
+    expect(summary.curated_models).toHaveLength(15)
     expect(summary.supported_architectures).toEqual(descriptor.supported_architectures)
 
     // Copies: whoever serializes or edits the summary never reaches into the descriptor it came from.

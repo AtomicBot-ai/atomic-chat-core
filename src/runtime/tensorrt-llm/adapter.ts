@@ -358,6 +358,8 @@ export function buildTensorrtLlmLaunch(
       TORCHINDUCTOR_CACHE_DIR: `${engineCachePath}/inductor`,
       TRITON_CACHE_DIR: `${engineCachePath}/triton`,
       CUDA_CACHE_PATH: `${engineCachePath}/nvcc`,
+      // From 1.3 `trtllm-serve` reports anonymous usage to NVIDIA by default; a local app does not.
+      TRTLLM_NO_USAGE_STATS: '1',
     },
   }
 }
@@ -628,6 +630,10 @@ const NUM = '(-?[\\d.]+)'
 const OVERFLOW_VS_MAX_NUM_TOKENS = new RegExp(
   `sum of prompt length \\(${NUM}\\), query length \\(${NUM}\\) should not exceed max_num_tokens \\(${NUM}\\)`
 )
+/** The same check in 1.3.0rc29 (`llmapi/llm.py:1578`): the query length is gone from the message. */
+const OVERFLOW_PROMPT_VS_MAX_NUM_TOKENS = new RegExp(
+  `The prompt length \\(${NUM}\\) should not exceed max_num_tokens \\(${NUM}\\)`
+)
 /** pytorch backend `_deduce_max_tokens` (`base_worker.py`, file header): a narrow boundary case, not
  *  the common one — since `_check_arguments` above already guarantees `prompt + query <=
  *  max_seq_len` before this ever runs, this only fires when `prompt + query` lands *exactly* on
@@ -645,6 +651,18 @@ const OVERFLOW_VIA_DEDUCE_MAX_TOKENS = new RegExp(
     '\\) - `splited_prompt_len` \\(' +
     NUM +
     '\\) - `query_token_len` \\(' +
+    NUM +
+    '\\)'
+)
+/** The same boundary case in 1.3.0rc29 (`base_worker.py:456-458`): no `query_token_len` term. */
+const OVERFLOW_VIA_DEDUCE_MAX_TOKENS_NO_QUERY = new RegExp(
+  '`default_max_tokens` \\(' +
+    NUM +
+    '\\) must be greater than 0, `default_max_tokens` \\(' +
+    NUM +
+    '\\) = max_seq_len \\(' +
+    NUM +
+    '\\) - `splited_prompt_len` \\(' +
     NUM +
     '\\)'
 )
@@ -717,6 +735,24 @@ export function mapTensorrtLlmContextLengthError(
       string,
     ]
     return contextLengthExceeded(Number(splitedPromptLen) + Number(queryTokenLen), Number(maxSeqLen))
+  }
+
+  const viaPromptVsMaxNumTokens = OVERFLOW_PROMPT_VS_MAX_NUM_TOKENS.exec(message)
+  if (viaPromptVsMaxNumTokens) {
+    const [, promptLen, limit] = viaPromptVsMaxNumTokens as unknown as [string, string, string]
+    return contextLengthExceeded(Number(promptLen), Number(limit))
+  }
+
+  const viaDeduceNoQuery = OVERFLOW_VIA_DEDUCE_MAX_TOKENS_NO_QUERY.exec(message)
+  if (viaDeduceNoQuery) {
+    const [, , , maxSeqLen, splitedPromptLen] = viaDeduceNoQuery as unknown as [
+      string,
+      string,
+      string,
+      string,
+      string,
+    ]
+    return contextLengthExceeded(Number(splitedPromptLen), Number(maxSeqLen))
   }
 
   return null
@@ -944,6 +980,11 @@ const STAGE_MARKERS = [
   { stage: 'initializing-engine' as const, pattern: /Loading (?:safetensors|bin) weights in parallel/ },
   { stage: 'initializing-engine' as const, pattern: /Prefetching [\d.]+GB checkpoint files/ },
   { stage: 'initializing-engine' as const, pattern: /Creating CUDA graph instances/ },
+  // 1.3.0rc29 (`model_engine.py:2709`) logs the capture as "Running CUDA graph capture|warmup for N batch sizes."
+  {
+    stage: 'initializing-engine' as const,
+    pattern: /Running CUDA graph (?:capture|warmup) for \d+ batch sizes/,
+  },
 ]
 
 /** The `tensorrt-llm` engine's `ManagedTextAdapter` (task 2.13). Registered against the pinned

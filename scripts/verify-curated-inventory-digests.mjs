@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Live proof that `inventory_digest` in test/fixtures/runtimes/tensorrt-llm.json matches what
 // this core's own algorithm (src/runtime/environment/inventory.ts) computes from each curated
-// model's *real* Hugging Face file listing, for all 11 curated entries (task 2.16).
+// model's *real* Hugging Face file listing, for every curated entry (task 2.16).
 //
 // Not run by any test and not wired into `npm test` / CI: it fetches from the live Hugging Face
 // API, which unit tests must never do (design D12, "core MUST NOT touch the network"). Task 2.16

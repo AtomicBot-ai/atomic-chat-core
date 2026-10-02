@@ -1162,48 +1162,54 @@ describe('target hosts: format rules and the curated tier model, on the publishe
       })),
     }
   }
-  const LLAMA_70B_NVFP4 = curatedInput(
-    'nvidia/Llama-3.3-70B-Instruct-NVFP4',
-    {
-      architectures: ['LlamaForCausalLM'],
-      num_hidden_layers: 80,
-      num_attention_heads: 64,
-      num_key_value_heads: 8,
-      hidden_size: 8192,
-      torch_dtype: 'bfloat16',
-    },
-    { quantization: { quant_algo: 'NVFP4', group_size: 16, exclude_modules: ['lm_head'] } }
+  /** Qwen3.8-27B's published `text_config`: 64 layers, every fourth one full attention. */
+  const qwen38TextConfig = {
+    dtype: 'bfloat16',
+    num_hidden_layers: 64,
+    num_attention_heads: 24,
+    num_key_value_heads: 4,
+    head_dim: 256,
+    hidden_size: 5120,
+    layer_types: Array.from({ length: 64 }, (_, index) =>
+      index % 4 === 3 ? 'full_attention' : 'linear_attention'
+    ),
+  }
+  const qwen38Layers = (algos: string[]): JsonObject =>
+    Object.fromEntries(algos.map((algo, index) => [`model.layers.${index}.mlp`, { quant_algo: algo }]))
+  const QWEN38_27B_BF16 = curatedInput(
+    'Qwen/Qwen3.8-27B',
+    { architectures: ['Qwen3_5ForConditionalGeneration'], text_config: qwen38TextConfig },
+    null
   )
-  const NEMOTRON_NANO_FP8 = curatedInput(
-    'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8',
+  const QWEN38_27B_NVFP4 = curatedInput(
+    'nvidia/Qwen3.8-27B-NVFP4',
     {
-      architectures: ['NemotronHForCausalLM'],
-      num_hidden_layers: 52,
-      num_attention_heads: 32,
-      num_key_value_heads: 2,
-      head_dim: 128,
-      hidden_size: 2688,
-      torch_dtype: 'bfloat16',
+      architectures: ['Qwen3_5ForConditionalGeneration'],
+      dtype: 'bfloat16',
+      quantization_config: { quant_method: 'modelopt', quant_algo: 'MIXED_PRECISION' },
+      text_config: qwen38TextConfig,
     },
-    { quantization: { quant_algo: 'FP8' } }
+    { quantization: { quant_algo: 'MIXED_PRECISION', quantized_layers: qwen38Layers(['FP8', 'NVFP4']) } }
   )
-  const QWEN3_32B_NVFP4 = curatedInput(
-    'nvidia/Qwen3-32B-NVFP4',
+  const QWEN36_35B_FP8 = curatedInput(
+    'Qwen/Qwen3.6-35B-A3B-FP8',
     {
-      architectures: ['Qwen3ForCausalLM'],
-      num_hidden_layers: 64,
-      num_attention_heads: 64,
-      num_key_value_heads: 8,
-      head_dim: 128,
-      hidden_size: 5120,
-      torch_dtype: 'bfloat16',
+      architectures: ['Qwen3_5MoeForConditionalGeneration'],
+      quantization_config: { quant_method: 'fp8', fmt: 'e4m3', weight_block_size: [128, 128] },
+      text_config: {
+        num_hidden_layers: 40,
+        num_attention_heads: 16,
+        num_key_value_heads: 2,
+        head_dim: 256,
+        hidden_size: 2048,
+      },
     },
-    { quantization: { quant_algo: 'NVFP4', group_size: 16, exclude_modules: ['lm_head'] } }
+    null
   )
 
-  it('GB10: its tier model (80 GB tier, NVFP4) is curated, checked against MemAvailable, and fits', () => {
+  it('GB10: its tier model (80 GB tier, BF16) is curated, checked against MemAvailable, and fits', () => {
     const result = checkModelCompatibility(
-      LLAMA_70B_NVFP4,
+      QWEN38_27B_BF16,
       descriptor,
       [GB10],
       memAvailable(GB10_MEM_AVAILABLE),
@@ -1212,7 +1218,7 @@ describe('target hosts: format rules and the curated tier model, on the publishe
     expect(result).toMatchObject({
       curated: true,
       unified_memory: true,
-      quantization_format: 'nvfp4',
+      quantization_format: 'bf16',
       checked_gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32',
       kv_reserve_basis: 'config',
       verdict: { ok: true },
@@ -1221,7 +1227,7 @@ describe('target hosts: format rules and the curated tier model, on the publishe
 
   it('GB10: with less MemAvailable than the weights, the same model is refused with the host numbers', () => {
     const result = checkModelCompatibility(
-      LLAMA_70B_NVFP4,
+      QWEN38_27B_BF16,
       descriptor,
       [GB10],
       memAvailable(30 * 1024 ** 3),
@@ -1231,18 +1237,19 @@ describe('target hosts: format rules and the curated tier model, on the publishe
     if (!result.verdict.ok) expect(result.verdict.error.details).toContain(`free_bytes=${30 * 1024 ** 3}`)
   })
 
-  it('GH200: the 80 GB tier (NVFP4) is refused on 9.0, its 48 GB tier model (FP8) fits in HBM', () => {
+  it('GH200: the mixed NVFP4 + FP8 model is refused on 9.0, the block-scaled FP8 80 GB tier model fits in HBM', () => {
     const nvfp4 = checkModelCompatibility(
-      LLAMA_70B_NVFP4,
+      QWEN38_27B_NVFP4,
       descriptor,
       [GH200],
       memAvailable(DISCRETE_HOST_MEM),
       sizing
     )
+    expect(nvfp4.quantization_format).toBe('mixed_precision')
     expect(nvfp4.verdict.ok).toBe(false)
     if (!nvfp4.verdict.ok) expect(nvfp4.verdict.error.details).toBe('required=10.0 actual=9.0')
     const fp8 = checkModelCompatibility(
-      NEMOTRON_NANO_FP8,
+      QWEN36_35B_FP8,
       descriptor,
       [GH200],
       memAvailable(DISCRETE_HOST_MEM),
@@ -1251,14 +1258,14 @@ describe('target hosts: format rules and the curated tier model, on the publishe
     expect(fp8).toMatchObject({
       curated: true,
       unified_memory: false,
-      quantization_format: 'fp8',
+      quantization_format: 'fp8_block_scales',
       verdict: { ok: true },
     })
   })
 
-  it('RTX 5090: its tier model (32 GB tier, NVFP4) is curated and fits its 32 GB', () => {
+  it('RTX 5090: its tier model (32 GB tier, mixed NVFP4 + FP8) is curated and fits; block-scaled FP8 is refused on 12.0', () => {
     const result = checkModelCompatibility(
-      QWEN3_32B_NVFP4,
+      QWEN38_27B_NVFP4,
       descriptor,
       [RTX5090],
       memAvailable(DISCRETE_HOST_MEM),
@@ -1267,9 +1274,18 @@ describe('target hosts: format rules and the curated tier model, on the publishe
     expect(result).toMatchObject({
       curated: true,
       unified_memory: false,
-      quantization_format: 'nvfp4',
+      quantization_format: 'mixed_precision',
+      kv_reserve_basis: 'config',
       verdict: { ok: true },
     })
+    const fp8 = checkModelCompatibility(
+      QWEN36_35B_FP8,
+      descriptor,
+      [RTX5090],
+      memAvailable(DISCRETE_HOST_MEM),
+      sizing
+    )
+    expect(fp8.verdict.ok).toBe(false)
   })
 })
 
@@ -1332,5 +1348,95 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
       memory
     )
     expect(short.fits_other_gpus).toEqual([])
+  })
+})
+
+describe('TensorRT-LLM 1.3 checkpoints', () => {
+  const qwen35 = { architectures: ['Qwen3_5ForConditionalGeneration'] }
+  const descriptor = (rows: RuntimeDescriptor['quantization'] = baseDescriptor().quantization) =>
+    baseDescriptor({ supported_architectures: ['Qwen3_5ForConditionalGeneration'], quantization: rows })
+  const mixed = (algos: string[]): JsonObject => ({
+    quantization: {
+      quant_algo: 'MIXED_PRECISION',
+      kv_cache_quant_algo: 'FP8',
+      quantized_layers: Object.fromEntries(
+        algos.map((algo, index) => [`layers.${index}`, { quant_algo: algo }])
+      ),
+    },
+  })
+  const run = (input: ModelCheckInput, rows?: RuntimeDescriptor['quantization'], cc = '8.9') =>
+    checkModelCompatibility(
+      input,
+      descriptor(rows),
+      [gpu({ gpu_id: 'gpu-0', compute_capability: cc })],
+      memAvailable(0),
+      {
+        contextLength: 8192,
+        kvCacheFreeGpuMemoryFraction: 0.9,
+      }
+    )
+
+  it('reads a VLM-style config whose dtype lives only on text_config as bf16', () => {
+    const result = run(baseInput({ config_json: { ...qwen35, text_config: { dtype: 'bfloat16' } } }))
+    expect(result.quantization_format).toBe('bf16')
+    expect(result.verdict.ok).toBe(true)
+  })
+
+  it('a mixed-precision checkpoint needs the strictest rule of its layer formats', () => {
+    const input = baseInput({ config_json: qwen35, hf_quant_config_json: mixed(['FP8', 'NVFP4', 'FP8']) })
+    const ada = run(input)
+    expect(ada.quantization_format).toBe('mixed_precision')
+    expect(ada.verdict.ok).toBe(false)
+    if (!ada.verdict.ok) {
+      expect(ada.verdict.error.details).toBe('required=10.0 actual=8.9')
+      expect(ada.verdict.error.message).toContain('mixed_precision (fp8 + nvfp4)')
+    }
+    expect(run(input, undefined, '12.0').verdict.ok).toBe(true)
+  })
+
+  it('a mixed-precision checkpoint inherits the exclusions of every layer format', () => {
+    const input = baseInput({ config_json: qwen35, hf_quant_config_json: mixed(['FP8_PB_WO', 'FP8']) })
+    const result = run(input, undefined, '12.0')
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok)
+      expect(result.verdict.error.details).toBe('format=mixed_precision compute_capability=12.0')
+  })
+
+  it('a mixed-precision checkpoint with a layer format the descriptor lacks fails closed by that name', () => {
+    const result = run(
+      baseInput({ config_json: qwen35, hf_quant_config_json: mixed(['FP8', 'W4A16_NVFP4']) })
+    )
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok) expect(result.verdict.error.details).toBe('w4a16_nvfp4')
+    const rows = [
+      ...baseDescriptor().quantization,
+      { format: 'w4a16_nvfp4', min_compute_capability: '8.9', excluded_compute_capabilities: [] },
+    ]
+    const withRow = run(
+      baseInput({ config_json: qwen35, hf_quant_config_json: mixed(['FP8', 'W4A16_NVFP4']) }),
+      rows
+    )
+    expect(withRow.verdict.ok).toBe(true)
+  })
+
+  it('a mixed-precision checkpoint that names no layer format is rejected', () => {
+    const result = run(baseInput({ config_json: qwen35, hf_quant_config_json: mixed([]) }))
+    expect(result.verdict.ok).toBe(false)
+    if (!result.verdict.ok) expect(result.verdict.error.details).toBe('mixed_precision')
+  })
+
+  it('sizes the KV cache from text_config, counting only the layers that keep one', () => {
+    const textConfig = {
+      num_hidden_layers: 4,
+      num_attention_heads: 16,
+      num_key_value_heads: 4,
+      head_dim: 256,
+      layer_types: ['linear_attention', 'linear_attention', 'linear_attention', 'full_attention'],
+    }
+    // 2 * 1 * 4 * 256 * 2 * 8192 = 33,554,432
+    expect(kvCacheBytes({ ...qwen35, text_config: textConfig }, null, 8192)).toBe(33_554_432)
+    // Without layer_types every layer counts.
+    const { layer_types: _ignored, ...plain } = textConfig
+    expect(kvCacheBytes({ ...qwen35, text_config: plain }, null, 8192)).toBe(134_217_728)
   })
 })

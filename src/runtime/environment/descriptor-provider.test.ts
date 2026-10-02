@@ -16,10 +16,10 @@ import type { DescriptorFetch } from './descriptor-provider.js'
 
 const ROOT = '/shared'
 const PATHS = managedSharedPaths(ROOT)
-const CORE_VERSION = '0.7.5'
+const CORE_VERSION = '0.7.6'
 
-/** The real fixture, verbatim: `descriptor_id` `tensorrt-llm-1.2.1-r2`, `minimum_core_version` `0.7.5`. */
-const FIXTURE_A = readRuntimeFixture('tensorrt-llm.json') as Record<string, unknown>
+/** A real published descriptor, verbatim: `descriptor_id` `tensorrt-llm-1.2.1-r2`, `minimum_core_version` `0.7.5`. */
+const FIXTURE_A = readRuntimeFixture('tensorrt-llm-1.2.1-r2.json') as Record<string, unknown>
 const RAW_A = JSON.stringify(FIXTURE_A)
 const DESCRIPTOR_A = parseRuntimeDescriptor(FIXTURE_A)
 
