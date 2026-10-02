@@ -15,6 +15,10 @@ const KEYS = [
   'context_length',
   'max_output_tokens',
   'kv_cache_free_gpu_memory_fraction',
+  'max_batch_size',
+  'kv_cache_max_tokens',
+  'cuda_graphs',
+  'kv_cache_dtype',
   'load_timeout_seconds',
 ] as const
 
@@ -34,5 +38,6 @@ export function tensorrtLlmSettings(
   }
   if (typeof merged['gpu_id'] === 'string' && merged['gpu_id'].trim() === '') merged['gpu_id'] = null
   if (merged['load_timeout_seconds'] === 0) merged['load_timeout_seconds'] = null
+  if (merged['kv_cache_max_tokens'] === 0) merged['kv_cache_max_tokens'] = null
   return validateTensorrtLlmSettings(merged)
 }

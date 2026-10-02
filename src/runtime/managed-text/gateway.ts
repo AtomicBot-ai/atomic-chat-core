@@ -47,11 +47,13 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { hostAndKeyGate } from '../../server/public/index.js'
 import type { HostAndKeyConfig } from '../../server/public/index.js'
 import {
   forwardableHeaders,
+  pipeBody,
   readBody,
   relay,
   relayedHeaders,
@@ -60,7 +62,7 @@ import {
 } from '../../server/public/index.js'
 import type { HeaderPairs, UpstreamResponse } from '../../server/public/index.js'
 import { ManagedRequestRefusal } from './adapter.js'
-import type { ManagedRoute } from './adapter.js'
+import type { ManagedResponseRewrite, ManagedRoute } from './adapter.js'
 
 /** Hosts accepted as "loopback" for the upstream the gateway proxies to. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
@@ -109,6 +111,8 @@ export interface ManagedGatewayOptions {
    * `ManagedTextAdapter.rewriteRequestBody`.
    */
   rewriteRequestBody?: (route: string, body: unknown) => unknown
+  /** `ManagedTextAdapter.rewriteResponseFor`, bound to the session's family; rewritable routes only. */
+  rewriteResponseFor?: (route: string, requestBody: unknown) => ManagedResponseRewrite | null
   /**
    * Optional: the OpenAI error body for an engine's non-2xx answer on a declared POST route, or null
    * to relay it as it is (`ManagedTextAdapter.mapErrorResponse`). Never called for a 2xx answer.
@@ -301,7 +305,8 @@ async function sendBodyToUpstream(
   res: ServerResponse,
   upstream: ManagedGatewayUpstream,
   body: Buffer,
-  mapError?: (status: number, body: string) => object | null
+  mapError?: (status: number, body: string) => object | null,
+  responseRewrite: ManagedResponseRewrite | null = null
 ): Promise<void> {
   // A client that disconnects before the upstream has even answered must not leave that connect
   // attempt, or a slow-to-respond container, running unattended.
@@ -331,9 +336,76 @@ async function sendBodyToUpstream(
     await answerEngineError(res, upstreamResponse, mapError)
     return
   }
+  if (responseRewrite !== null && status >= 200 && status <= 299) {
+    await relayRewritten(res, upstreamResponse, responseRewrite)
+    return
+  }
   // `relay` owns the rest: it writes the status/headers, pipes the body with backpressure, and
   // tears the upstream connection down itself if the client disconnects mid-stream.
   await relay(res, upstreamResponse, [])
+}
+
+/** A JSON text rewritten by `rewrite`, or the text itself when it is not a JSON object. */
+function rewriteJsonText(text: string, rewrite: ManagedResponseRewrite): string {
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return text
+    return JSON.stringify(rewrite(parsed as Record<string, unknown>))
+  } catch {
+    return text
+  }
+}
+
+/** Each complete SSE line of a stream, `data:` JSON events rewritten, everything else verbatim. */
+async function* rewrittenEventStream(
+  source: AsyncIterable<Buffer | string>,
+  rewrite: ManagedResponseRewrite
+): AsyncGenerator<string> {
+  // A multi-byte character can straddle two chunks; the decoder holds its first bytes back.
+  const decoder = new StringDecoder('utf8')
+  let pending = ''
+  const line = (raw: string): string => {
+    const match = /^data:\s?(.*)$/.exec(raw.replace(/\r$/, ''))
+    if (match === null) return raw
+    const payload = (match[1] as string).trim()
+    if (payload === '' || payload === '[DONE]') return raw
+    return `data: ${rewriteJsonText(payload, rewrite)}`
+  }
+  for await (const chunk of source) {
+    pending += typeof chunk === 'string' ? chunk : decoder.write(chunk)
+    const lines = pending.split('\n')
+    pending = lines.pop() as string
+    if (lines.length > 0) yield `${lines.map(line).join('\n')}\n`
+  }
+  pending += decoder.end()
+  if (pending !== '') yield line(pending)
+}
+
+/** A 2xx answer through `rewrite`: a stream event by event, a JSON body as a whole. */
+async function relayRewritten(
+  res: ServerResponse,
+  upstream: UpstreamResponse,
+  rewrite: ManagedResponseRewrite
+): Promise<void> {
+  const type = upstream.headers.find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? ''
+  if (type.toLowerCase().includes('text/event-stream')) {
+    res.writeHead(upstream.status, relayedHeaders(upstream, []).flat())
+    await pipeBody(res, rewrittenEventStream(upstream.body, rewrite), () => upstream.body.destroy())
+    return
+  }
+  const whole = await readCappedBody(upstream.body, MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES * 64).catch(
+    () => null
+  )
+  if (whole === null || whole === 'too-large') {
+    if (!res.headersSent && !res.destroyed) sendWhole(res, 502, [], 'Bad Gateway')
+    return
+  }
+  sendWhole(
+    res,
+    upstream.status,
+    relayedHeaders(upstream, []),
+    rewriteJsonText(whole.toString('utf8'), rewrite)
+  )
 }
 
 /**
@@ -502,7 +574,16 @@ async function proxyToUpstream(
     mapErrorResponse !== undefined && method === 'POST'
       ? (status: number, text: string) => mapErrorResponse(route, status, text)
       : undefined
-  await sendBodyToUpstream(req, res, options.upstream, body, mapError)
+  // A response rewrite is chosen from the request the engine actually gets (rewritable routes only).
+  let responseRewrite: ManagedResponseRewrite | null = null
+  if (rewritable && options.rewriteResponseFor !== undefined && body.length > 0) {
+    try {
+      responseRewrite = options.rewriteResponseFor(route, JSON.parse(body.toString('utf8')))
+    } catch {
+      responseRewrite = null
+    }
+  }
+  await sendBodyToUpstream(req, res, options.upstream, body, mapError, responseRewrite)
 }
 
 function assertLoopback(host: string): void {

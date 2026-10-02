@@ -52,7 +52,7 @@ describe('settingsSchema', () => {
     ['llamacpp', 31],
     ['mlx', 11],
     ['foundation-models', 0],
-    ['tensorrt-llm', 5],
+    ['tensorrt-llm', 9],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -129,6 +129,10 @@ describe('defaultSettingValues', () => {
       context_length: 8192,
       max_output_tokens: 4096,
       kv_cache_free_gpu_memory_fraction: 0.8,
+      max_batch_size: 8,
+      kv_cache_max_tokens: 0,
+      cuda_graphs: 'auto',
+      kv_cache_dtype: 'auto',
       load_timeout_seconds: 0,
     })
   })

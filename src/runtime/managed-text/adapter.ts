@@ -62,6 +62,10 @@ export interface ManagedLaunchContext<S> {
    * memory too.
    */
   unifiedMemory: boolean
+  /** The chosen card's memory in bytes (`null` on a unified-memory card or when unknown). */
+  gpuTotalVramBytes?: number | null
+  /** The chosen card's compute capability (`"8.9"`), or `null` when unknown. */
+  gpuComputeCapability?: string | null
 }
 
 export interface ManagedEngineLaunch {
@@ -205,6 +209,19 @@ export interface ManagedTextAdapter<S = unknown> {
    */
   mapErrorResponse?(route: string, status: number, body: string): object | null
   /**
+   * Optional: a rewrite of a 2xx answer's JSON — the whole body, or each SSE `data:` event of a
+   * stream — chosen per request from the request's own (already rewritten) body and the session's
+   * model family, or `null` to relay the answer byte for byte as before. Only for rewritable routes.
+   * Exists for one engine behaviour: a reasoning parser that assumes every reply starts inside the
+   * reasoning (`qwen3_5` on 1.3.0rc29) files a no-thinking reply under `reasoning_content`, and only
+   * the request says whether thinking was on.
+   */
+  rewriteResponseFor?(
+    route: string,
+    requestBody: unknown,
+    family: ModelFamilySupport | null
+  ): ManagedResponseRewrite | null
+  /**
    * Optional: the part of the validated settings a running container was started with. A later load
    * of the same model whose settings differ only outside this part joins the running session (with
    * the new settings in force for what the gateway enforces per request) instead of restarting a
@@ -212,6 +229,9 @@ export interface ManagedTextAdapter<S = unknown> {
    */
   restartKey?(settings: S): unknown
 }
+
+/** Rewrites one JSON object of an engine's 2xx answer (`ManagedTextAdapter.rewriteResponseFor`). */
+export type ManagedResponseRewrite = (json: Record<string, unknown>) => Record<string, unknown>
 
 /**
  * What a request-side hook (`rewriteRequestBody`) throws to refuse a request with a specific OpenAI

@@ -110,6 +110,14 @@ export interface TensorrtLlmProviderConfig {
   /** Enforced per request by the session gateway (it caps `max_tokens`), not an engine flag. */
   max_output_tokens: number
   kv_cache_free_gpu_memory_fraction: number
+  /** `trtllm-serve --max_batch_size`: requests served at once. */
+  max_batch_size: number
+  /** `kv_cache_config.max_tokens`; `0` sizes it as context length × `max_batch_size`. */
+  kv_cache_max_tokens: number
+  /** `auto` (on only on cards with 12 GB or more), `on` or `off`. */
+  cuda_graphs: 'auto' | 'on' | 'off'
+  /** `auto` (the model's own precision) or `fp8` (Ada and newer; ignored on older cards). */
+  kv_cache_dtype: 'auto' | 'fp8'
   load_timeout_seconds: number
 }
 

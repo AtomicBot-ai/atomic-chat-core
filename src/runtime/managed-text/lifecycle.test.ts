@@ -535,13 +535,15 @@ describe('ManagedTextLifecycle: container, cache, journal, heartbeat', () => {
     expect(argv).toContain(`${real(modelDir)}:/atomic/model:ro`)
     expect(argv.slice(argv.indexOf('--entrypoint'), argv.indexOf('--entrypoint') + 2)).toEqual([
       '--entrypoint',
-      '/atomic/entrypoint.sh',
+      '/bin/sh',
     ])
+    expect(argv).toContain('/atomic/entrypoint.sh')
     expect(argv).toContain('ATOMIC_WATCHDOG_HEARTBEAT_FILE=/atomic/heartbeat/heartbeat')
     expect(argv).toContain('ALPHA_MODE=fast')
     expect(argv).not.toContain('--pid=host')
     const image = argv.indexOf(`registry.example/alpha@${DIGEST}`)
     expect(argv.slice(image + 1)).toEqual([
+      '/atomic/entrypoint.sh',
       '--',
       'alpha-serve',
       '/atomic/model',
@@ -1369,6 +1371,8 @@ describe('ManagedTextLifecycle: task 2.14 fix round 1 (findings-2.14-r1.md items
       body,
     }),
     mapErrorResponse: (route, status, body) => ({ error: { route, status, body } }),
+    rewriteResponseFor: (route, body, family) =>
+      family?.reasoning_parser ? (json) => ({ ...json, route, body, parser: family.reasoning_parser }) : null,
     restartKey: (settings) => settings.ctx,
   }
   const deltaInstallation = {
@@ -1404,6 +1408,29 @@ describe('ManagedTextLifecycle: task 2.14 fix round 1 (findings-2.14-r1.md items
     expect(gateway()?.mapErrorResponse?.('/v1/chat/completions', 400, 'boom')).toEqual({
       error: { route: '/v1/chat/completions', status: 400, body: 'boom' },
     })
+  })
+
+  it("hands the gateway the adapter's response rewrite bound to the loaded model's family", async () => {
+    const gateway = await captureGateway()
+    await lifecycle.load(
+      request_({
+        installation: deltaInstallation,
+        family: { tool_parser: null, reasoning_parser: 'qwen3_5', structured_output: false },
+      })
+    )
+    const rewrite = gateway()?.rewriteResponseFor?.('/v1/chat/completions', { q: 1 })
+    expect(rewrite?.({ choices: [] })).toEqual({
+      choices: [],
+      route: '/v1/chat/completions',
+      body: { q: 1 },
+      parser: 'qwen3_5',
+    })
+  })
+
+  it('answers no response rewrite for a model whose family names no reasoning parser', async () => {
+    const gateway = await captureGateway()
+    await lifecycle.load(request_({ installation: deltaInstallation, family: null }))
+    expect(gateway()?.rewriteResponseFor?.('/v1/chat/completions', {})).toBeNull()
   })
 
   it('joins the running session when only settings outside the restart key changed, and enforces the new ones', async () => {

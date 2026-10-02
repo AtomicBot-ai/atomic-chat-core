@@ -267,6 +267,8 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       // No VRAM of its own (design D13): the launch bounds the KV cache by tokens, as the memory
       // check (`checkModelMemory`, same rule) reserved for it.
       unifiedMemory: gpu.total_vram_bytes === null,
+      gpuTotalVramBytes: gpu.total_vram_bytes,
+      gpuComputeCapability: gpu.compute_capability,
       selinux: facts.selinux,
       settings,
       // Always passed, evaluated when the stage runs: a second model that arrived a moment earlier

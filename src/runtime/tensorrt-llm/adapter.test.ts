@@ -7,7 +7,9 @@ import type { ManagedLaunchContext } from '../managed-text/index.js'
 import { readTensorrtLlmLogFixture } from '../../../test/helpers/tensorrt-llm-log-fixtures.js'
 import {
   mapTensorrtLlmContextLengthError,
+  tensorrtLlmReasoningIntoContent,
   tensorrtLlmRewriteRequestBody,
+  tensorrtLlmRewriteResponseFor,
   TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
   TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS,
   TENSORRT_LLM_MAX_CONTEXT_LENGTH,
@@ -15,6 +17,7 @@ import {
   TENSORRT_LLM_MIN_CONTEXT_LENGTH,
   TENSORRT_LLM_MIN_KV_CACHE_FREE_FRACTION,
   TENSORRT_LLM_MIN_LOAD_TIMEOUT_SECONDS,
+  TENSORRT_LLM_MAX_BATCH_SIZE,
   TENSORRT_LLM_READINESS_BASE_MS,
   TENSORRT_LLM_REWRITABLE_ROUTES,
   TENSORRT_LLM_ROUTES,
@@ -42,6 +45,10 @@ function baseContext(overrides: Partial<ManagedLaunchContext<TensorrtLlmSettings
     weightBytes: 4 * GiB,
     family: null,
     unifiedMemory: false,
+    // A 24 GB Ada card: CUDA graphs stay on under `cuda_graphs: auto` and FP8 KV is allowed, so a
+    // test of another key sees only that key in the option file.
+    gpuTotalVramBytes: 24 * GiB,
+    gpuComputeCapability: '8.9',
     ...overrides,
   }
   return context
@@ -128,9 +135,27 @@ describe('validateSettings', () => {
         context_length: TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
         max_output_tokens: TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS,
         kv_cache_free_gpu_memory_fraction: TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
+        max_batch_size: TENSORRT_LLM_MAX_BATCH_SIZE,
+        kv_cache_max_tokens: null,
+        cuda_graphs: 'auto',
+        kv_cache_dtype: 'auto',
         load_timeout_seconds: null,
       },
     ],
+    ['max_batch_size at its upper bound', { max_batch_size: 256 }, { max_batch_size: 256 }],
+    ['max_batch_size 0 throws', { max_batch_size: 0 }, 'throws'],
+    ['max_batch_size above 256 throws', { max_batch_size: 257 }, 'throws'],
+    ['kv_cache_max_tokens passes through', { kv_cache_max_tokens: 32768 }, { kv_cache_max_tokens: 32768 }],
+    [
+      'kv_cache_max_tokens 0 throws (the settings layer maps the UI 0 to null)',
+      { kv_cache_max_tokens: 0 },
+      'throws',
+    ],
+    ['cuda_graphs off passes through', { cuda_graphs: 'off' }, { cuda_graphs: 'off' }],
+    ['an empty cuda_graphs falls back to auto', { cuda_graphs: '' }, { cuda_graphs: 'auto' }],
+    ['an unknown cuda_graphs throws', { cuda_graphs: 'always' }, 'throws'],
+    ['kv_cache_dtype fp8 passes through', { kv_cache_dtype: 'fp8' }, { kv_cache_dtype: 'fp8' }],
+    ['an unknown kv_cache_dtype throws', { kv_cache_dtype: 'int8' }, 'throws'],
     ['undefined behaves like an empty object', undefined, { gpu_id: null }],
     [
       'a valid GPU-<uuid> gpu_id passes through',
@@ -286,8 +311,15 @@ describe('buildLaunch', () => {
       // _check_arguments, adapter.ts file header), never the output, so it always tracks
       // context_length here, never max_output_tokens (findings-2.13-r1.md item 1's ruling).
       String(TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH),
+      // A desktop's concurrency, not trtllm-serve's 2048: hybrid (Mamba) models reserve their
+      // recurrent state per sequence up front (adapter.ts, TENSORRT_LLM_MAX_BATCH_SIZE).
+      '--max_batch_size',
+      '8',
       '--kv_cache_free_gpu_memory_fraction',
       String(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION),
+      // Always present: the KV cache is always bounded in tokens (see the KV tests below).
+      '--extra_llm_api_options',
+      '/atomic/heartbeat/llm-api-options.yaml',
     ])
     expect(launch.argv).not.toContain('--tool_parser')
     expect(launch.argv).not.toContain('--reasoning_parser')
@@ -341,14 +373,16 @@ describe('buildLaunch', () => {
       baseContext({ family: family({ structured_output: true }) })
     )
     expect(flagValue(launch.argv, '--extra_llm_api_options')).toBe('/atomic/heartbeat/llm-api-options.yaml')
-    expect(launch.files).toEqual({ 'llm-api-options.yaml': 'guided_decoding_backend: xgrammar\n' })
+    expect(parseYaml(launch.files?.['llm-api-options.yaml'] ?? '')).toEqual({
+      guided_decoding_backend: 'xgrammar',
+      kv_cache_config: { max_tokens: TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH * TENSORRT_LLM_MAX_BATCH_SIZE },
+    })
   })
 
-  it('writes no LLM API options file for a family without structured output, or no family at all', () => {
+  it('leaves guided decoding out for a family without structured output, or no family at all', () => {
     for (const f of [family(), null]) {
       const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ family: f }))
-      expect(launch.argv).not.toContain('--extra_llm_api_options')
-      expect(launch.files).toBeUndefined()
+      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 65536\n' })
     }
   })
 
@@ -378,11 +412,82 @@ describe('buildLaunch', () => {
     }
   })
 
-  it('never bounds the KV cache by tokens on a discrete card: the fraction alone sizes it, as live-verified', () => {
-    const launch = tensorrtLlmAdapter.buildLaunch(
-      baseContext({ unifiedMemory: false, family: family({ structured_output: true }) })
+  it('bounds the KV cache on a discrete card to every sequence the batch admits at full context: hybrid (Mamba) models refuse to start without a token quota', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({
+      context_length: 4096,
+      max_output_tokens: 1024,
+      max_batch_size: 4,
+    })
+    const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ settings, unifiedMemory: false }))
+    expect(flagValue(launch.argv, '--max_batch_size')).toBe('4')
+    // The fraction stays: the engine takes the smaller of the two bounds.
+    expect(flagValue(launch.argv, '--kv_cache_free_gpu_memory_fraction')).toBe(
+      String(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION)
     )
-    expect(launch.files).toEqual({ 'llm-api-options.yaml': 'guided_decoding_backend: xgrammar\n' })
+    expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 16384\n' })
+  })
+
+  it('lets an explicit kv_cache_max_tokens win over both the discrete and the unified-memory default', () => {
+    for (const unifiedMemory of [false, true]) {
+      const settings = tensorrtLlmAdapter.validateSettings({ kv_cache_max_tokens: 30000 })
+      const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ settings, unifiedMemory }))
+      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 30000\n' })
+    }
+  })
+
+  it('turns CUDA graphs off under auto on a card below 12 GiB, and keeps them when the card reports no size (unified memory)', () => {
+    const options = (context: ManagedLaunchContext<TensorrtLlmSettings>) =>
+      parseYaml(tensorrtLlmAdapter.buildLaunch(context).files?.['llm-api-options.yaml'] ?? '') as Record<
+        string,
+        unknown
+      >
+    expect(options(baseContext({ gpuTotalVramBytes: 8 * GiB }))).toHaveProperty('cuda_graph_config', null)
+    expect(options(baseContext({ gpuTotalVramBytes: null }))).not.toHaveProperty('cuda_graph_config')
+    const { gpuTotalVramBytes: _absent, ...noSize } = baseContext()
+    expect(options(noSize)).not.toHaveProperty('cuda_graph_config')
+  })
+
+  it('keeps CUDA graphs under auto on a 12 GiB card, and follows an explicit on/off whatever the card', () => {
+    const graphsOff = (cuda_graphs: string, gpuTotalVramBytes: number) => {
+      const settings = tensorrtLlmAdapter.validateSettings({ cuda_graphs })
+      const yaml = tensorrtLlmAdapter.buildLaunch(baseContext({ settings, gpuTotalVramBytes })).files?.[
+        'llm-api-options.yaml'
+      ]
+      return 'cuda_graph_config' in (parseYaml(yaml ?? '') as Record<string, unknown>)
+    }
+    expect(graphsOff('auto', 12 * GiB)).toBe(false)
+    expect(graphsOff('on', 8 * GiB)).toBe(false)
+    expect(graphsOff('off', 24 * GiB)).toBe(true)
+  })
+
+  it('writes an FP8 KV cache only on compute capability 8.9 or newer, and never under auto', () => {
+    const dtype = (kv_cache_dtype: string, gpuComputeCapability: string | null) => {
+      const settings = tensorrtLlmAdapter.validateSettings({ kv_cache_dtype })
+      const yaml = tensorrtLlmAdapter.buildLaunch(baseContext({ settings, gpuComputeCapability })).files?.[
+        'llm-api-options.yaml'
+      ]
+      return (parseYaml(yaml ?? '') as { kv_cache_config: { dtype?: string } }).kv_cache_config.dtype
+    }
+    expect(dtype('fp8', '8.9')).toBe('fp8')
+    expect(dtype('fp8', '12.0')).toBe('fp8')
+    expect(dtype('fp8', '8.6')).toBeUndefined()
+    expect(dtype('fp8', null)).toBeUndefined()
+    expect(dtype('auto', '12.0')).toBeUndefined()
+  })
+
+  it('restarts the container when any launch-shaping setting changes, never for the output cap or load timeout', () => {
+    const key = (raw: Record<string, unknown>) =>
+      JSON.stringify(tensorrtLlmAdapter.restartKey?.(tensorrtLlmAdapter.validateSettings(raw)))
+    const base = key({})
+    for (const changed of [
+      { max_batch_size: 4 },
+      { kv_cache_max_tokens: 4096 },
+      { cuda_graphs: 'off' },
+      { kv_cache_dtype: 'fp8' },
+    ]) {
+      expect(key(changed)).not.toBe(base)
+    }
+    expect(key({ max_output_tokens: 128, load_timeout_seconds: 60 })).toBe(base)
   })
 
   it('points the engine cache env vars at the mounted engine cache directory', () => {
@@ -1187,5 +1292,47 @@ describe('tensorrtLlmAdapter: the session port refuses what the model cannot do 
     expect(key({ load_timeout_seconds: 900 })).toBe(base)
     expect(key({ context_length: 16384 })).not.toBe(base)
     expect(key({ kv_cache_free_gpu_memory_fraction: 0.5 })).not.toBe(base)
+  })
+})
+
+describe('rewriteResponseFor: a reasoning-at-start parser with thinking off (qwen3_5)', () => {
+  const qwen35 = family({ reasoning_parser: 'qwen3_5' })
+
+  it('moves the answer the parser filed as reasoning back into content, in a whole reply and a stream delta', () => {
+    const rewrite = tensorrtLlmRewriteResponseFor('/v1/chat/completions', { messages: [] }, qwen35)
+    expect(rewrite).toBe(tensorrtLlmReasoningIntoContent)
+    expect(
+      rewrite?.({
+        choices: [
+          { message: { content: null, reasoning_content: 'Hello!' } },
+          { delta: { content: 'A', reasoning_content: 'B' } },
+        ],
+      })
+    ).toEqual({
+      choices: [
+        { message: { content: 'Hello!', reasoning_content: null } },
+        { delta: { content: 'AB', reasoning_content: null } },
+      ],
+    })
+  })
+
+  it('leaves the reply alone when the request turned thinking on, at either place it can say so', () => {
+    for (const body of [{ chat_template_kwargs: { enable_thinking: true } }, { enable_thinking: true }]) {
+      expect(tensorrtLlmRewriteResponseFor('/v1/chat/completions', body, qwen35)).toBeNull()
+    }
+  })
+
+  it('never rewrites another parser, another route, or a model with no family', () => {
+    expect(
+      tensorrtLlmRewriteResponseFor('/v1/chat/completions', {}, family({ reasoning_parser: 'qwen3' }))
+    ).toBeNull()
+    expect(tensorrtLlmRewriteResponseFor('/v1/completions', {}, qwen35)).toBeNull()
+    expect(tensorrtLlmRewriteResponseFor('/v1/chat/completions', {}, null)).toBeNull()
+  })
+
+  it('keeps choices that carry no reasoning, and a body with no choices, as they are', () => {
+    const untouched = { choices: [{ message: { content: 'hi', reasoning_content: '' } }, null] }
+    expect(tensorrtLlmReasoningIntoContent(structuredClone(untouched))).toEqual(untouched)
+    expect(tensorrtLlmReasoningIntoContent({ error: 'x' })).toEqual({ error: 'x' })
   })
 })

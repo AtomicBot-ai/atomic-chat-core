@@ -45,7 +45,15 @@ export type {
 export { hostAndKeyGate, isValidHost, removePrefix } from './gates.js'
 export type { HostAndKeyConfig } from './gates.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
-export { forwardableHeaders, readBody, relay, relayedHeaders, sendUpstream, sendWhole } from './wire.js'
+export {
+  forwardableHeaders,
+  pipeBody,
+  readBody,
+  relay,
+  relayedHeaders,
+  sendUpstream,
+  sendWhole,
+} from './wire.js'
 export type { HeaderPairs, UpstreamResponse } from './wire.js'
 
 export const DEFAULT_PUBLIC_PORT = 1337

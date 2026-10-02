@@ -13,7 +13,7 @@ import {
   readCappedBody,
   startManagedGateway,
 } from './gateway.js'
-import type { ManagedGateway } from './gateway.js'
+import type { ManagedGateway, ManagedGatewayOptions } from './gateway.js'
 
 /** A bare local HTTP server standing in for the container's engine port. */
 interface FakeUpstream {
@@ -106,6 +106,7 @@ async function setup(
     routes?: ManagedRoute[]
     rewritableRoutes?: ManagedRoute[]
     rewriteRequestBody?: (route: string, body: unknown) => unknown
+    rewriteResponseFor?: ManagedGatewayOptions['rewriteResponseFor']
     mapErrorResponse?: (route: string, status: number, body: string) => object | null
   } = {}
 ): Promise<{ gw: ManagedGateway; upstream: FakeUpstream; apiKey: string }> {
@@ -120,6 +121,7 @@ async function setup(
     ...(opts.rewritableRoutes ? { rewritableRoutes: opts.rewritableRoutes } : {}),
     ...(opts.rewriteRequestBody ? { rewriteRequestBody: opts.rewriteRequestBody } : {}),
     ...(opts.mapErrorResponse ? { mapErrorResponse: opts.mapErrorResponse } : {}),
+    ...(opts.rewriteResponseFor ? { rewriteResponseFor: opts.rewriteResponseFor } : {}),
   })
   gateways.push(gw)
   return { gw, upstream, apiKey }
@@ -1226,5 +1228,100 @@ describe('engine error answers (task 2.14 fix round 1, findings-2.14-r1.md item 
       },
     })
     expect(reached).toBe(false)
+  })
+})
+
+describe('rewriteResponseFor: an answer rewritten on its way back (qwen3_5 with thinking off)', () => {
+  const CHAT: ManagedRoute[] = [{ method: 'POST', path: '/v1/chat/completions' }]
+  /** Uppercases `content` — enough to see which JSON objects went through the rewrite. */
+  const upper = (json: Record<string, unknown>) => ({
+    ...json,
+    content: String(json['content']).toUpperCase(),
+  })
+
+  async function post(
+    handler: (req: IncomingMessage, res: ServerResponse) => void,
+    requestBody: object,
+    rewriteResponseFor: ManagedGatewayOptions['rewriteResponseFor'] = (_route, body) =>
+      (body as { rewrite?: boolean }).rewrite === true ? upper : null
+  ): Promise<RawResponse> {
+    // A response is rewritten only where the request is too (`rewritable`), as on every TensorRT-LLM route.
+    const { gw, apiKey } = await setup(handler, {
+      rewritableRoutes: CHAT,
+      rewriteRequestBody: (_route, body) => body,
+      rewriteResponseFor,
+    })
+    const body = JSON.stringify(requestBody)
+    return send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(body)),
+      },
+      body,
+    })
+  }
+
+  it('rewrites a whole JSON answer once, chosen by the request the engine got', async () => {
+    const answer = (req: IncomingMessage, res: ServerResponse) => {
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ content: 'hello' }))
+      })
+    }
+    expect(JSON.parse((await post(answer, { rewrite: true })).body)).toEqual({ content: 'HELLO' })
+    expect(JSON.parse((await post(answer, { rewrite: false })).body)).toEqual({ content: 'hello' })
+  })
+
+  it('rewrites every SSE data event, passes [DONE] and other lines verbatim, and keeps a character split across chunks whole', async () => {
+    const event = Buffer.from('data: {"content":"привет"}\n\n', 'utf8')
+    // Cut inside the two-byte "и" of "привет": a per-chunk decode would turn it into two U+FFFD.
+    const cut = event.indexOf(Buffer.from('и', 'utf8')) + 1
+    const res = await post(
+      (req, response) => {
+        req.resume()
+        req.on('end', () => {
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          response.write(': keep-alive\n')
+          response.write(event.subarray(0, cut))
+          setTimeout(() => {
+            response.write(event.subarray(cut))
+            response.end('data: [DONE]\n\n')
+          }, 20)
+        })
+      },
+      { rewrite: true }
+    )
+    expect(res.status).toBe(200)
+    expect(res.body).toBe(': keep-alive\ndata: {"content":"ПРИВЕТ"}\n\ndata: [DONE]\n\n')
+  })
+
+  it('relays the answer untouched when choosing the rewrite throws', async () => {
+    const { gw, apiKey } = await setup(
+      (req, res) => {
+        req.resume()
+        req.on('end', () => res.end('{"content":"x"}'))
+      },
+      {
+        rewritableRoutes: CHAT,
+        rewriteRequestBody: (_route, body) => body,
+        rewriteResponseFor: () => {
+          throw new Error('never asked')
+        },
+      }
+    )
+    const res = await send(gw.port, {
+      method: 'POST',
+      headers: {
+        'host': '127.0.0.1',
+        'authorization': `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(res.body).toBe('{"content":"x"}')
   })
 })

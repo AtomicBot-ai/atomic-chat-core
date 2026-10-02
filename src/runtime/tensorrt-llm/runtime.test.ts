@@ -344,11 +344,13 @@ describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
     )
   })
 
-  it('launches a discrete card exactly as before: no token bound', async () => {
+  it('bounds a discrete card by context × batch instead, and hands the card size to the CUDA-graphs choice', async () => {
     build()
     facts = { gpus: [LARGE], selinux: false, memory: NO_HOST_MEMORY }
     await runtime.load('qwen3')
-    expect(await readFile(optionsFile(), 'utf8')).toBe('guided_decoding_backend: xgrammar\n')
+    expect(await readFile(optionsFile(), 'utf8')).toBe(
+      'guided_decoding_backend: xgrammar\nkv_cache_config:\n  max_tokens: 65536\n'
+    )
   })
 })
 

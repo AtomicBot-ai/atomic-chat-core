@@ -251,6 +251,9 @@ export interface ManagedLoadRequest {
   gpuUuid: string
   /** `gpuUuid` names a unified-memory card (`ManagedLaunchContext.unifiedMemory`); absent, a discrete one. */
   unifiedMemory?: boolean
+  /** The chosen card's memory and compute capability, for launch defaults that depend on the card. */
+  gpuTotalVramBytes?: number | null
+  gpuComputeCapability?: string | null
   /** Whether Docker runs with SELinux (probe snapshot): mounts then get the shared `:z` label. */
   selinux: boolean
   /** Raw provider settings; the adapter validates them. */
@@ -694,6 +697,8 @@ export class ManagedTextLifecycle {
         weightBytes: request.weightBytes,
         family: request.family,
         unifiedMemory: request.unifiedMemory === true,
+        gpuTotalVramBytes: request.gpuTotalVramBytes ?? null,
+        gpuComputeCapability: request.gpuComputeCapability ?? null,
       })
       await writeWatchdogScript(this.deps.paths.watchdogScript)
       await mkdir(entry.heartbeatDir, { recursive: true })
@@ -752,6 +757,12 @@ export class ManagedTextLifecycle {
           : {
               rewriteRequestBody: (route: string, body: unknown) =>
                 adapter.rewriteRequestBody!(route, body, entry.settings, capabilities),
+            }),
+        ...(adapter.rewriteResponseFor === undefined
+          ? {}
+          : {
+              rewriteResponseFor: (route: string, body: unknown) =>
+                adapter.rewriteResponseFor!(route, body, request.family),
             }),
         ...(adapter.mapErrorResponse === undefined
           ? {}

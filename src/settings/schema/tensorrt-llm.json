@@ -51,6 +51,74 @@
     }
   },
   {
+    "key": "max_batch_size",
+    "title": "Parallel Requests",
+    "description": "How many requests the engine serves at once (chat, agent and API together); more wait in a queue. Hybrid models such as Qwen3.5 reserve memory for each one up front, so a higher value needs more GPU memory. Applies from the next model load.",
+    "controllerType": "input",
+    "controllerProps": {
+      "value": 8,
+      "placeholder": "8",
+      "type": "number",
+      "min": 1,
+      "max": 256
+    }
+  },
+  {
+    "key": "kv_cache_max_tokens",
+    "title": "KV Cache Token Limit",
+    "description": "Upper bound of the KV cache in tokens. 0 sizes it for every parallel request at the full context length. The engine uses the smaller of this and the KV cache memory fraction; hybrid models such as Qwen3.5 need it to start. Applies from the next model load.",
+    "controllerType": "input",
+    "controllerProps": {
+      "value": 0,
+      "placeholder": "0",
+      "type": "number",
+      "min": 0,
+      "max": 16777216
+    }
+  },
+  {
+    "key": "cuda_graphs",
+    "title": "CUDA Graphs",
+    "description": "Speeds up token generation, but takes extra GPU memory (about 2 GB for a small model) and a few seconds at load. Auto turns them on only on cards with 12 GB of memory or more, so a model still fits on a small card. Applies from the next model load.",
+    "controllerType": "dropdown",
+    "controllerProps": {
+      "value": "auto",
+      "options": [
+        {
+          "value": "auto",
+          "name": "Auto"
+        },
+        {
+          "value": "on",
+          "name": "On"
+        },
+        {
+          "value": "off",
+          "name": "Off"
+        }
+      ]
+    }
+  },
+  {
+    "key": "kv_cache_dtype",
+    "title": "KV Cache Precision",
+    "description": "FP8 halves the KV cache memory, so a longer context fits, at a small quality cost on very long contexts. Needs an Ada (RTX 40) or newer card; on older cards it is ignored and the model's own precision is used. Applies from the next model load.",
+    "controllerType": "dropdown",
+    "controllerProps": {
+      "value": "auto",
+      "options": [
+        {
+          "value": "auto",
+          "name": "Model precision"
+        },
+        {
+          "value": "fp8",
+          "name": "FP8"
+        }
+      ]
+    }
+  },
+  {
     "key": "load_timeout_seconds",
     "title": "Load Timeout (seconds)",
     "description": "How long a load may take before it fails. 0 estimates it from the model's size. Applies from the next model load.",

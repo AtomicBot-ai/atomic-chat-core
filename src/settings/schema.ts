@@ -156,6 +156,10 @@ const TENSORRT_LLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
   context_length: 'number',
   max_output_tokens: 'number',
   kv_cache_free_gpu_memory_fraction: 'number',
+  max_batch_size: 'number',
+  kv_cache_max_tokens: 'number',
+  cuda_graphs: 'string',
+  kv_cache_dtype: 'string',
   load_timeout_seconds: 'number',
 }
 

@@ -167,6 +167,12 @@ export interface TensorrtLlmSettings {
   context_length: number
   max_output_tokens: number
   kv_cache_free_gpu_memory_fraction: number
+  /** `--max_batch_size` (`TENSORRT_LLM_MAX_BATCH_SIZE` by default). */
+  max_batch_size: number
+  /** `kv_cache_config.max_tokens`; `null` sizes it as `context_length × max_batch_size`. */
+  kv_cache_max_tokens: number | null
+  cuda_graphs: 'auto' | 'on' | 'off'
+  kv_cache_dtype: 'auto' | 'fp8'
   /** Seconds. `null` leaves `readinessTimeoutMs`'s own weight-based estimate in force. */
   load_timeout_seconds: number | null
 }
@@ -205,6 +211,19 @@ function validateFraction(value: unknown): number {
     invalid(`tensorrt-llm kv_cache_free_gpu_memory_fraction must be between ${min} and ${max}.`, value)
   }
   return value
+}
+
+function validateChoice<T extends string>(
+  value: unknown,
+  label: string,
+  choices: readonly T[],
+  fallback: T
+): T {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value !== 'string' || !(choices as readonly string[]).includes(value)) {
+    invalid(`tensorrt-llm ${label} must be one of ${choices.join(', ')}.`, value)
+  }
+  return value as T
 }
 
 function validateLoadTimeoutOverride(value: unknown): number | null {
@@ -251,6 +270,25 @@ export function validateTensorrtLlmSettings(raw: unknown): TensorrtLlmSettings {
     context_length,
     max_output_tokens,
     kv_cache_free_gpu_memory_fraction: validateFraction(r['kv_cache_free_gpu_memory_fraction']),
+    max_batch_size: validateBoundedInt(
+      r['max_batch_size'],
+      'max_batch_size',
+      TENSORRT_LLM_MAX_BATCH_SIZE,
+      1,
+      TENSORRT_LLM_MAX_MAX_BATCH_SIZE
+    ),
+    kv_cache_max_tokens:
+      r['kv_cache_max_tokens'] === undefined || r['kv_cache_max_tokens'] === null
+        ? null
+        : validateBoundedInt(
+            r['kv_cache_max_tokens'],
+            'kv_cache_max_tokens',
+            0,
+            1,
+            TENSORRT_LLM_MAX_KV_CACHE_MAX_TOKENS
+          ),
+    cuda_graphs: validateChoice(r['cuda_graphs'], 'cuda_graphs', ['auto', 'on', 'off'] as const, 'auto'),
+    kv_cache_dtype: validateChoice(r['kv_cache_dtype'], 'kv_cache_dtype', ['auto', 'fp8'] as const, 'auto'),
     load_timeout_seconds: validateLoadTimeoutOverride(r['load_timeout_seconds']),
   }
 }
@@ -284,13 +322,49 @@ export const TENSORRT_LLM_CONTAINER_PORT = 8000
 export const TENSORRT_LLM_API_OPTIONS_FILE = 'llm-api-options.yaml'
 export const TENSORRT_LLM_GUIDED_DECODING_OPTIONS = 'guided_decoding_backend: xgrammar\n'
 
-/** The option file's text, or `null` when neither key applies (no file, no flag). */
-function llmApiOptions(guided: boolean, kvMaxTokens: number | null): string | null {
+/** The option file's text, or `null` when no key applies (no file, no flag). */
+function llmApiOptions(
+  guided: boolean,
+  kvMaxTokens: number | null,
+  kvFp8 = false,
+  cudaGraphsOff = false
+): string | null {
   const lines: string[] = []
   if (guided) lines.push(TENSORRT_LLM_GUIDED_DECODING_OPTIONS.trimEnd())
-  if (kvMaxTokens !== null) lines.push('kv_cache_config:', `  max_tokens: ${kvMaxTokens}`)
+  if (kvMaxTokens !== null || kvFp8) {
+    lines.push('kv_cache_config:')
+    if (kvMaxTokens !== null) lines.push(`  max_tokens: ${kvMaxTokens}`)
+    if (kvFp8) lines.push('  dtype: fp8')
+  }
+  // `null` turns CUDA graphs off on the PyTorch backend (`llm_args.py`, `cuda_graph_config`).
+  if (cudaGraphsOff) lines.push('cuda_graph_config: null')
   return lines.length === 0 ? null : `${lines.join('\n')}\n`
 }
+
+/** Below this much card memory `cuda_graphs: auto` leaves CUDA graphs off: they took about 2 GB on
+ *  an 8 GB card in the Windows live acceptance (Qwen3.5-2B, "Memory used outside torch … 2.12 GiB").
+ *  A card that reports no size of its own is a unified-memory one (GB10): it keeps them. */
+export const TENSORRT_LLM_CUDA_GRAPHS_MIN_VRAM_BYTES = 12 * 1024 ** 3
+
+/** FP8 KV cache needs compute capability 8.9 (Ada) or newer. */
+function supportsFp8Kv(computeCapability: string | null | undefined): boolean {
+  if (computeCapability === null || computeCapability === undefined) return false
+  const [major, minor] = computeCapability.split('.').map((part) => Number(part))
+  if (major === undefined || Number.isNaN(major)) return false
+  return major > 8 || (major === 8 && (minor ?? 0) >= 9)
+}
+
+/**
+ * `--max_batch_size`: how many sequences the engine serves at once. `trtllm-serve` defaults to 2048, a
+ * server's number; a desktop runs a chat, an agent turn and a few API calls at most. For a model with
+ * recurrent layers (Qwen3.5, hybrid Mamba) the engine reserves the recurrent state for every one of
+ * those sequences up front: on an 8 GB card Qwen3.5-2B failed with "The V2 Mamba GPU cache quota is
+ * too small … need at least 20696801280 bytes" (Windows live acceptance, 1.3.0rc29). Attention-only
+ * models only lose queueing beyond this many concurrent requests.
+ */
+export const TENSORRT_LLM_MAX_BATCH_SIZE = 8
+export const TENSORRT_LLM_MAX_MAX_BATCH_SIZE = 256
+export const TENSORRT_LLM_MAX_KV_CACHE_MAX_TOKENS = 16_777_216
 
 /** The container binds every interface; only the host-side publication (design D1/D11) is
  *  loopback-restricted, by the executor, not by the engine's own bind address. */
@@ -329,6 +403,8 @@ export function buildTensorrtLlmLaunch(
     String(settings.context_length),
     '--max_num_tokens',
     String(settings.context_length),
+    '--max_batch_size',
+    String(settings.max_batch_size),
     '--kv_cache_free_gpu_memory_fraction',
     String(settings.kv_cache_free_gpu_memory_fraction),
   ]
@@ -338,9 +414,24 @@ export function buildTensorrtLlmLaunch(
   // `response_format` is otherwise ignored or refused, so a family that declares structured output
   // gets `guided_decoding_backend: xgrammar` through the option file, written read-only per generation.
   // On a unified-memory card the same file bounds the KV cache by tokens (`kv-cache.ts`).
+  // The KV cache is always bounded in tokens too: a hybrid (Mamba) model on 1.3.0rc29 refuses to start
+  // without it ("Quota not set. Check kv_cache_config.max_tokens or kv_cache_config.max_gpu_total_bytes",
+  // Windows live acceptance with Qwen3.5-2B). Room for every sequence the batch admits at full context;
+  // the engine takes the smaller of this and the free-memory fraction, so attention-only models keep
+  // the memory they had. A unified-memory card keeps its own, tighter bound.
+  const vram = context.gpuTotalVramBytes ?? null
+  const cudaGraphsOff =
+    settings.cuda_graphs === 'off' ||
+    (settings.cuda_graphs === 'auto' && vram !== null && vram < TENSORRT_LLM_CUDA_GRAPHS_MIN_VRAM_BYTES)
+  const kvFp8 = settings.kv_cache_dtype === 'fp8' && supportsFp8Kv(context.gpuComputeCapability)
   const options = llmApiOptions(
     family?.structured_output === true,
-    context.unifiedMemory ? tensorrtLlmUnifiedKvMaxTokens(settings.context_length) : null
+    settings.kv_cache_max_tokens ??
+      (context.unifiedMemory
+        ? tensorrtLlmUnifiedKvMaxTokens(settings.context_length)
+        : settings.context_length * settings.max_batch_size),
+    kvFp8,
+    cudaGraphsOff
   )
   if (options !== null) {
     argv.push('--extra_llm_api_options', `${generationFilesPath}/${TENSORRT_LLM_API_OPTIONS_FILE}`)
@@ -884,6 +975,62 @@ function unwrapJsonSchemaFormat(format: unknown): unknown {
 }
 
 /**
+ * Reasoning parsers that assume every reply starts inside the reasoning, because the chat template
+ * opens `<think>` in the prompt when thinking is on. `qwen3_5` (Qwen3.5, 1.3.0rc29) is one: with
+ * thinking off the template closes an empty `<think></think>` in the prompt instead, the model
+ * answers with no tags at all, and the parser still files the whole answer under
+ * `reasoning_content`, leaving `content` empty (Windows live acceptance, Qwen3.5-2B). The parser is
+ * fixed per container; only the request says whether thinking was on.
+ */
+export const TENSORRT_LLM_REASONING_AT_START_PARSERS: ReadonlySet<string> = new Set(['qwen3_5'])
+
+/** Whether a chat request turned thinking on (`chat_template_kwargs.enable_thinking`, or top level). */
+function thinkingRequested(body: unknown): boolean {
+  if (body === null || typeof body !== 'object') return false
+  const record = body as Record<string, unknown>
+  const kwargs = record['chat_template_kwargs']
+  if (
+    kwargs !== null &&
+    typeof kwargs === 'object' &&
+    (kwargs as Record<string, unknown>)['enable_thinking'] === true
+  )
+    return true
+  return record['enable_thinking'] === true
+}
+
+/** Moves `reasoning_content` into `content` on every choice's `message` and stream `delta`. */
+export function tensorrtLlmReasoningIntoContent(json: Record<string, unknown>): Record<string, unknown> {
+  const choices = json['choices']
+  if (!Array.isArray(choices)) return json
+  for (const choice of choices) {
+    if (choice === null || typeof choice !== 'object') continue
+    for (const key of ['message', 'delta']) {
+      const part = (choice as Record<string, unknown>)[key]
+      if (part === null || typeof part !== 'object') continue
+      const record = part as Record<string, unknown>
+      const reasoning = record['reasoning_content']
+      if (typeof reasoning !== 'string' || reasoning === '') continue
+      const content = typeof record['content'] === 'string' ? (record['content'] as string) : ''
+      record['content'] = content + reasoning
+      record['reasoning_content'] = null
+    }
+  }
+  return json
+}
+
+/** The response rewrite for a chat request with thinking off on a reasoning-at-start parser. */
+export function tensorrtLlmRewriteResponseFor(
+  route: string,
+  requestBody: unknown,
+  family: ModelFamilySupport | null
+): ((json: Record<string, unknown>) => Record<string, unknown>) | null {
+  if (route !== '/v1/chat/completions') return null
+  const parser = family?.reasoning_parser ?? null
+  if (parser === null || !TENSORRT_LLM_REASONING_AT_START_PARSERS.has(parser)) return null
+  return thinkingRequested(requestBody) ? null : tensorrtLlmReasoningIntoContent
+}
+
+/**
  * Enforces `settings.max_output_tokens` per request, since `trtllm-serve` 1.2.1 has no server-side
  * flag that does it (`buildTensorrtLlmLaunch`'s doc comment; ADR
  * `docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md`). Only
@@ -1002,11 +1149,19 @@ export const tensorrtLlmAdapter: ManagedTextAdapter<TensorrtLlmSettings> = {
   classifyExit: classifyTensorrtLlmExit,
   capabilities: tensorrtLlmCapabilities,
   rewriteRequestBody: tensorrtLlmRewriteRequestBody,
+  rewriteResponseFor: tensorrtLlmRewriteResponseFor,
   // The session port answers `trtllm-serve`'s context overflow the way `:1337` does
   // (findings-2.14-r1.md item 1): OpenAI's `context_length_exceeded`, with both numbers.
   mapErrorResponse: (_route, status, body) => mapTensorrtLlmContextLengthError(status, body),
   // Only these are `trtllm-serve` flags; the output cap is the gateway's and the load timeout only a
   // load's, so changing either never restarts a container (findings-2.14-r1.md item 3). The card is
   // part of the lifecycle's own key already, as the one the load actually picked.
-  restartKey: (settings) => [settings.context_length, settings.kv_cache_free_gpu_memory_fraction],
+  restartKey: (settings) => [
+    settings.context_length,
+    settings.kv_cache_free_gpu_memory_fraction,
+    settings.max_batch_size,
+    settings.kv_cache_max_tokens,
+    settings.cuda_graphs,
+    settings.kv_cache_dtype,
+  ],
 }
