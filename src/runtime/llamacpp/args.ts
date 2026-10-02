@@ -27,6 +27,11 @@ export const GEMMA_MTP_MIN_BUILD = 9553
 export const REASONING_PRESERVE_MIN_BUILD = 9837
 /** First upstream release where reasoning preservation is on by default (silence means "on"). */
 export const REASONING_PRESERVE_DEFAULT_ON_MIN_BUILD = 10762
+/**
+ * First upstream release without `--mmap`, `--no-mmap`, `--mlock` and `--direct-io` (ggml-org/llama.cpp#28334):
+ * `--load-mode` (since b10105) is the only spelling left, and the removed flags fail the launch.
+ */
+export const LOAD_MODE_ONLY_MIN_BUILD = 10875
 
 /** Cache types supported by stock ggml-org builds. */
 export const STANDARD_CACHE_TYPES: readonly string[] = [
@@ -266,8 +271,14 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
 
   if (cfg.ctx_shift) push('--context-shift')
   if (cfg.cont_batching) push('--cont-batching')
-  if (cfg.no_mmap) push('--no-mmap')
-  if (cfg.mlock) push('--mlock')
+  if (!ik && build !== undefined && build >= LOAD_MODE_ONLY_MIN_BUILD) {
+    if (cfg.no_mmap && cfg.mlock) push('--load-mode', 'mlock')
+    else if (cfg.no_mmap) push('--load-mode', 'none')
+    else if (cfg.mlock) push('--load-mode', 'mmap+mlock')
+  } else {
+    if (cfg.no_mmap) push('--no-mmap')
+    if (cfg.mlock) push('--mlock')
+  }
   if (cfg.no_kv_offload) push('--no-kv-offload')
 
   if (cfg.parallel > 0) {
