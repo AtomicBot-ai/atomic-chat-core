@@ -606,7 +606,8 @@ export interface LinuxEnvironmentManifest {
 export interface WslRootfs {
   url: string
   sha256: string
-  distribution: { id: string; version_id: string; arch: 'x86_64' }
+  /** `aarch64` only in the Windows on Arm manifest (`windows-arm64.json`, id `windows-arm64-r<N>`). */
+  distribution: { id: string; version_id: string; arch: 'x86_64' | 'aarch64' }
 }
 
 /**

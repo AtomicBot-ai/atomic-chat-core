@@ -167,6 +167,31 @@ describe('parseWindowsEnvironmentManifest', () => {
     })
   })
 
+  it('accepts a Windows on Arm manifest: its own id prefix and an aarch64 guest (windows-arm64.json)', () => {
+    const manifest = parseWindowsEnvironmentManifest(
+      brokenWindows((doc) => {
+        doc['manifest_id'] = 'windows-arm64-r1'
+        rootfs(doc)['url'] = 'https://example.org/ubuntu-24.04.5-wsl-arm64.wsl'
+        rootfsDistribution(doc)['arch'] = 'aarch64'
+      })
+    )
+    expect(manifest.manifest_id).toBe('windows-arm64-r1')
+    expect(manifest.rootfs.distribution.arch).toBe('aarch64')
+  })
+
+  it.each([
+    [
+      'an aarch64 guest under an x64 manifest id',
+      (doc: Record<string, unknown>) => (rootfsDistribution(doc)['arch'] = 'aarch64'),
+    ],
+    [
+      'an x86_64 guest under an arm64 manifest id',
+      (doc: Record<string, unknown>) => (doc['manifest_id'] = 'windows-arm64-r1'),
+    ],
+  ])('refuses %s: the id says which machines read the file', (_label, mutate) => {
+    expect(() => parseWindowsEnvironmentManifest(brokenWindows(mutate))).toThrow(AtomicCoreError)
+  })
+
   it.each([
     ['a rootfs without sha256', (doc: Record<string, unknown>) => delete rootfs(doc)['sha256']],
     [
@@ -197,6 +222,10 @@ describe('parseWindowsEnvironmentManifest', () => {
     [
       'a guest architecture other than x86_64',
       (doc: Record<string, unknown>) => (rootfsDistribution(doc)['arch'] = 'aarch64'),
+    ],
+    [
+      'a guest architecture that is neither x86_64 nor aarch64',
+      (doc: Record<string, unknown>) => (rootfsDistribution(doc)['arch'] = 'riscv64'),
     ],
     [
       'a minimum_windows_build that is not a positive whole number',

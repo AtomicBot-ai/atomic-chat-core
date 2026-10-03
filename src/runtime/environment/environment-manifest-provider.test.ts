@@ -6,6 +6,7 @@ import type { DocumentFetch } from './cached-document.js'
 import {
   createEnvironmentManifestProvider,
   DEFAULT_LINUX_ENVIRONMENT_MANIFEST_URL,
+  DEFAULT_WINDOWS_ARM64_ENVIRONMENT_MANIFEST_URL,
   DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL,
   ENVIRONMENT_MANIFEST_URL_ENV,
   environmentManifestFetchFromFetch,
@@ -244,6 +245,39 @@ describe('on Windows', () => {
     expect(fetch).toHaveBeenCalledWith(DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL, expect.any(Number))
     expect(DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL).toMatch(/\/main\/runtimes\/environments\/windows\.json$/)
     expect(fs.files.get(PATHS.environmentManifestFile('windows-r1'))).toBe(RAW_WINDOWS)
+  })
+
+  it('on Windows on Arm, fetches the arm64 manifest, a file released cores never read', async () => {
+    const fs = new FakeManagedFs()
+    const raw = JSON.stringify({
+      ...JSON.parse(RAW_WINDOWS),
+      manifest_id: 'windows-arm64-r1',
+      rootfs: {
+        ...JSON.parse(RAW_WINDOWS).rootfs,
+        url: 'https://example.org/ubuntu-24.04.5-wsl-arm64.wsl',
+        distribution: { id: 'ubuntu', version_id: '24.04', arch: 'aarch64' },
+      },
+    })
+    const fetch = okFetch(raw)
+    const provider = createEnvironmentManifestProvider({
+      platform: 'windows',
+      arch: 'aarch64',
+      env: {},
+      fetch,
+      readFile: unreachableReadFile,
+      fs,
+      root: ROOT,
+      coreVersion: CORE_VERSION,
+    })
+
+    const result = await provider.latest()
+
+    expect(result.kind).toBe('available')
+    expect(fetch).toHaveBeenCalledWith(DEFAULT_WINDOWS_ARM64_ENVIRONMENT_MANIFEST_URL, expect.any(Number))
+    expect(DEFAULT_WINDOWS_ARM64_ENVIRONMENT_MANIFEST_URL).toMatch(
+      /\/main\/runtimes\/environments\/windows-arm64\.json$/
+    )
+    expect(fs.files.get(PATHS.environmentManifestFile('windows-arm64-r1'))).toBe(raw)
   })
 
   it('a Linux manifest served where Windows’ is expected is refused and never cached (spec: no other platform)', async () => {

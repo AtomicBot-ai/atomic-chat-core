@@ -41,6 +41,16 @@ const DESCRIPTOR = parseRuntimeDescriptor(
   readRuntimeFixture('tensorrt-llm-1.2.1-r2.json')
 ) as RuntimeDescriptor
 const MANIFEST = parseWindowsEnvironmentManifest(readRuntimeFixture('environments/windows.json'))
+/** The arm64 manifest's shape: its own id, an aarch64 guest. */
+const ARM_MANIFEST = parseWindowsEnvironmentManifest({
+  ...(readRuntimeFixture('environments/windows.json') as Record<string, unknown>),
+  manifest_id: 'windows-arm64-r1',
+  rootfs: {
+    url: 'https://example.org/ubuntu-24.04.5-wsl-arm64.wsl',
+    sha256: 'a'.repeat(64),
+    distribution: { id: 'ubuntu', version_id: '24.04', arch: 'aarch64' },
+  },
+})
 const GPU = 'GPU-1c6a2b3c-0000-4000-8000-000000000001'
 const GIB = 1024 ** 3
 const DISTRO_DIR = distributionDirectory('C:\\Users\\ada\\AppData\\Local')
@@ -407,11 +417,19 @@ describe('Windows probe — spec "Probe Windows-хоста без изменен
     expect(reasons(plan)).toEqual(['no-gpu'])
   })
 
-  it('Windows on ARM: unsupported, the provider hidden', async () => {
+  it('Windows on ARM with only the x64 manifest: unsupported, the provider hidden', async () => {
     const h = harness({ ...freshWindows(), machine: 'arm64' })
     const { plan } = await probe(h)
     expect(plan.availability).toBe('unsupported')
     expect(reasons(plan)).toEqual(['unsupported-architecture'])
+  })
+
+  it('Windows on ARM with the arm64 manifest: the same setup an x64 PC is offered', async () => {
+    const h = harness({ ...freshWindows(), machine: 'arm64' }, { manifests: manifestsOf(ARM_MANIFEST) })
+    const { plan } = await probe(h)
+    expect(plan.availability).toBe('setup-required')
+    expect(plan.environment_manifest_id).toBe('windows-arm64-r1')
+    expect(reasons(plan)).not.toContain('unsupported-architecture')
   })
 
   it('a build below the manifest’s minimum_windows_build: unsupported', async () => {
@@ -872,57 +890,82 @@ describe('the pinned manifest — spec "Окружение Windows закреп�
 })
 
 describe('the guest recipe — spec "Гость готовится тем же рецептом без повышения прав"', () => {
-  it('a fresh distribution: Docker and the toolkit by the Linux recipe as guest root, the GPU checked, on to the pull — no relogin', async () => {
-    const machine = wslWindows()
-    const h = harness(machine)
-    const store = memoryStore()
-    const phases: string[] = []
-    const service = new EnvironmentService({
-      store,
-      environmentId: 'default',
-      instanceId: 'core-1',
-      newEffectId: (() => {
-        let n = 0
-        return () => `effect-${(n += 1)}`
-      })(),
-      provisioner: createWindowsProvisioner(h.deps),
-      readSnapshot: async () => [],
-      emit: (_name, payload) => phases.push(payload.phase),
-      identityDeps: { alive: () => false },
-    })
-    await service.begin('default', {
-      request_id: 'req-1',
-      target: TARGET,
-      kind: 'setup',
-      descriptor_id: DESCRIPTOR.descriptor_id,
-    })
-    await service.idle()
-    const offered = await service.get('op-1')
-    expect(offered.phase).toBe('awaiting-consent')
-    await service.resume('op-1', {
-      expected_revision: offered.revision,
-      approved_plan_digest: offered.plan_digest!,
-    })
-    await service.idle()
+  it.each([
+    ['an x64 PC', (): FakeWindowsMachine => wslWindows(), MANIFEST, 'x86_64'],
+    [
+      'an arm64 PC',
+      (): FakeWindowsMachine => {
+        const machine = wslWindows()
+        // The arm64 rootfs is an arm64 guest: its `uname -m` says so.
+        return {
+          ...machine,
+          machine: 'arm64',
+          wsl: {
+            ...machine.wsl,
+            import_guest: {
+              ...machine.wsl.import_guest!,
+              host: { ...machine.wsl.import_guest!.host, arch: 'aarch64' },
+            },
+          },
+        }
+      },
+      ARM_MANIFEST,
+      'aarch64',
+    ],
+  ] as const)(
+    'a fresh distribution on %s: Docker and the toolkit by the Linux recipe for its architecture as guest root, the GPU checked, on to the pull — no relogin',
+    async (_label, machineOf, manifest, arch) => {
+      const machine = machineOf()
+      const h = harness(machine, { manifests: manifestsOf(manifest) })
+      const store = memoryStore()
+      const phases: string[] = []
+      const service = new EnvironmentService({
+        store,
+        environmentId: 'default',
+        instanceId: 'core-1',
+        newEffectId: (() => {
+          let n = 0
+          return () => `effect-${(n += 1)}`
+        })(),
+        provisioner: createWindowsProvisioner(h.deps),
+        readSnapshot: async () => [],
+        emit: (_name, payload) => phases.push(payload.phase),
+        identityDeps: { alive: () => false },
+      })
+      await service.begin('default', {
+        request_id: 'req-1',
+        target: TARGET,
+        kind: 'setup',
+        descriptor_id: DESCRIPTOR.descriptor_id,
+      })
+      await service.idle()
+      const offered = await service.get('op-1')
+      expect(offered.phase).toBe('awaiting-consent')
+      await service.resume('op-1', {
+        expected_revision: offered.revision,
+        approved_plan_digest: offered.plan_digest!,
+      })
+      await service.idle()
 
-    expect(h.recipes).toEqual([
-      expect.objectContaining({
-        user: 'root',
-        arch: 'x86_64',
-        family: 'apt',
-        distro_id: 'ubuntu',
-        version_id: '24.04',
-        components: expect.arrayContaining(['docker-engine', 'nvidia-container-toolkit', 'nvidia-cdi']),
-      }),
-    ])
-    expect((h.recipes[0] as { components: string[] }).components).not.toContain('docker-group')
-    // The GPU check ran in the guest on the card, after the small image came in through the Engine API.
-    const runs = h.windows.wslCalls.filter((argv) => argv.includes('run') && argv.includes('--gpus'))
-    expect(runs[0]).toEqual(expect.arrayContaining([`device=${GPU}`, 'nvidia-smi']))
-    expect(h.windows.wslCalls.some((argv) => argv.includes('curl'))).toBe(true)
-    expect(phases).toContain('pulling-image')
-    expect(phases).not.toContain('relogin-required')
-  })
+      expect(h.recipes).toEqual([
+        expect.objectContaining({
+          user: 'root',
+          arch,
+          family: 'apt',
+          distro_id: 'ubuntu',
+          version_id: '24.04',
+          components: expect.arrayContaining(['docker-engine', 'nvidia-container-toolkit', 'nvidia-cdi']),
+        }),
+      ])
+      expect((h.recipes[0] as { components: string[] }).components).not.toContain('docker-group')
+      // The GPU check ran in the guest on the card, after the small image came in through the Engine API.
+      const runs = h.windows.wslCalls.filter((argv) => argv.includes('run') && argv.includes('--gpus'))
+      expect(runs[0]).toEqual(expect.arrayContaining([`device=${GPU}`, 'nvidia-smi']))
+      expect(h.windows.wslCalls.some((argv) => argv.includes('curl'))).toBe(true)
+      expect(phases).toContain('pulling-image')
+      expect(phases).not.toContain('relogin-required')
+    }
+  )
 
   it('a GPU the container cannot see: the setup fails before the engine image, naming the card', async () => {
     const machine = wslWindows()

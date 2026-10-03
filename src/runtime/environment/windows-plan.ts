@@ -200,13 +200,20 @@ function guestVerdict(
 export function assessWindowsHost(input: WindowsAssessmentInput): WindowsAssessment {
   const { facts, manifest } = input
 
-  // What makes the provider pointless to show here at all.
-  if (facts.architecture !== 'x86_64') {
+  // What makes the provider pointless to show here at all: an architecture with no rootfs, or a
+  // manifest whose rootfs is for the other one (Windows on Arm reads `windows-arm64.json`).
+  const architecture = facts.architecture
+  if (
+    (architecture !== 'x86_64' && architecture !== 'aarch64') ||
+    (manifest !== null && manifest.rootfs.distribution.arch !== architecture)
+  ) {
     return verdict('unsupported', [
       blocker(
         'unsupported-architecture',
-        'TensorRT-LLM on Windows needs a 64-bit x86 (x64) PC; Windows on ARM is not supported.',
-        { actual: facts.architecture ?? 'unknown' }
+        architecture === 'aarch64'
+          ? 'TensorRT-LLM is not available for Windows on Arm on this version of Atomic Chat yet.'
+          : 'TensorRT-LLM on Windows needs a 64-bit PC (x64 or Arm).',
+        { actual: architecture ?? 'unknown' }
       ),
     ])
   }

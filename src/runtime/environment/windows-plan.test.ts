@@ -46,6 +46,42 @@ const input = (over: Partial<WindowsAssessmentInput> = {}): WindowsAssessmentInp
   ...over,
 })
 
+/** The arm64 manifest's shape: its own id, an aarch64 guest. */
+const ARM_MANIFEST = parseWindowsEnvironmentManifest({
+  ...(readRuntimeFixture('environments/windows.json') as Record<string, unknown>),
+  manifest_id: 'windows-arm64-r1',
+  rootfs: {
+    url: 'https://example.org/ubuntu-24.04.5-wsl-arm64.wsl',
+    sha256: 'a'.repeat(64),
+    distribution: { id: 'ubuntu', version_id: '24.04', arch: 'aarch64' },
+  },
+})
+
+describe('assessWindowsHost — Windows on Arm', () => {
+  it('an arm64 PC with the arm64 manifest is offered the setup like an x64 one', () => {
+    const assessment = assessWindowsHost(
+      input({ facts: facts({ architecture: 'aarch64' }), manifest: ARM_MANIFEST })
+    )
+    expect(assessment.availability).not.toBe('unsupported')
+    expect(assessment.blockers.map((b) => b.reason)).not.toContain('unsupported-architecture')
+  })
+
+  it.each([
+    ['an arm64 PC given the x64 rootfs', 'aarch64', MANIFEST],
+    ['an x64 PC given the arm64 rootfs', 'x86_64', ARM_MANIFEST],
+  ] as const)('%s: unsupported, nothing imported', (_label, architecture, manifest) => {
+    const assessment = assessWindowsHost(input({ facts: facts({ architecture }), manifest }))
+    expect(assessment.availability).toBe('unsupported')
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['unsupported-architecture'])
+  })
+
+  it('another architecture (32-bit ARM, x86) stays unsupported', () => {
+    const assessment = assessWindowsHost(input({ facts: facts({ architecture: 'armv7l' }) }))
+    expect(assessment.availability).toBe('unsupported')
+    expect(assessment.blockers.map((b) => b.reason)).toEqual(['unsupported-architecture'])
+  })
+})
+
 describe('assessWindowsHost', () => {
   it('a fresh import needs the image and room for the guest itself', () => {
     const exact = assessWindowsHost(input({ volumeFreeBytes: 60 * GIB + GUEST_BASE_BYTES }))

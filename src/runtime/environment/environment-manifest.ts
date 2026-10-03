@@ -33,7 +33,12 @@ import {
 
 /** `manifest_id`: `<platform>-r<N>` (schema `properties.manifest_id.pattern`). */
 const LINUX_MANIFEST_ID = /^linux-r[0-9]+$/
-const WINDOWS_MANIFEST_ID = /^windows-r[0-9]+$/
+/**
+ * `windows-r<N>` for x64 (`windows.json`), `windows-arm64-r<N>` for Windows on Arm
+ * (`windows-arm64.json`, its own file: every released core parses `windows.json` strictly and would
+ * refuse an arm64 rootfs there). The id names the architecture its rootfs is for.
+ */
+const WINDOWS_MANIFEST_ID = /^windows(-arm64)?-r[0-9]+$/
 
 // Copied character-for-character from `windows.schema.json`'s `definitions.rootfs`.
 /** `rootfs.url`: HTTPS only, no whitespace. */
@@ -115,12 +120,14 @@ export function parseWindowsEnvironmentManifest(input: unknown): WindowsEnvironm
     fields.fail('minimum_windows_build is not a whole number >= 1', JSON.stringify(build))
   }
 
+  const manifestId = fields.pattern(
+    WINDOWS_MANIFEST_ID,
+    'a Windows manifest id (windows-r<N> or windows-arm64-r<N>)'
+  )(raw['manifest_id'], 'manifest_id')
+
   return {
     schema_version: 1,
-    manifest_id: fields.pattern(WINDOWS_MANIFEST_ID, 'a Windows manifest id (windows-r<N>)')(
-      raw['manifest_id'],
-      'manifest_id'
-    ),
+    manifest_id: manifestId,
     platform: 'windows',
     minimum_core_version: fields.pattern(DOCUMENT_SEMVER, SEMVER_LABEL)(
       raw['minimum_core_version'],
@@ -131,12 +138,21 @@ export function parseWindowsEnvironmentManifest(input: unknown): WindowsEnvironm
       raw['minimum_wsl_version'],
       'minimum_wsl_version'
     ),
-    rootfs: rootfs(fields, raw['rootfs']),
+    rootfs: rootfsFor(manifestId, rootfs(fields, raw['rootfs'])),
     guest_recipe_id: fields.pattern(DOCUMENT_ID, DOCUMENT_ID_LABEL)(
       raw['guest_recipe_id'],
       'guest_recipe_id'
     ),
   }
+}
+
+/** An arm64 manifest carries an aarch64 guest and an x64 one an x86_64 guest — never the other. */
+function rootfsFor(manifestId: string, entry: WslRootfs): WslRootfs {
+  const expected = manifestId.startsWith('windows-arm64-') ? 'aarch64' : 'x86_64'
+  if (entry.distribution.arch !== expected) {
+    fields.fail(`rootfs.distribution.arch is not ${expected} for ${manifestId}`, entry.distribution.arch)
+  }
+  return entry
 }
 
 /** `#/definitions/rootfs`: where the guest comes from and what it is — never how to import it. */
@@ -145,8 +161,9 @@ function rootfs(fields: DocumentFields, value: unknown): WslRootfs {
   fields.known(entry, 'rootfs', ROOTFS_KEYS)
   const distribution = fields.object(entry['distribution'], 'rootfs.distribution')
   fields.known(distribution, 'rootfs.distribution', ROOTFS_DISTRIBUTION_KEYS)
-  if (distribution['arch'] !== 'x86_64') {
-    fields.fail('rootfs.distribution.arch is not x86_64', JSON.stringify(distribution['arch']))
+  const arch = distribution['arch']
+  if (arch !== 'x86_64' && arch !== 'aarch64') {
+    fields.fail('rootfs.distribution.arch is not x86_64 or aarch64', JSON.stringify(arch))
   }
   return {
     url: fields.pattern(ROOTFS_URL, 'an https:// URL')(entry['url'], 'rootfs.url'),
@@ -157,7 +174,7 @@ function rootfs(fields: DocumentFields, value: unknown): WslRootfs {
         distribution['version_id'],
         'rootfs.distribution.version_id'
       ),
-      arch: 'x86_64',
+      arch: arch as 'x86_64' | 'aarch64',
     },
   }
 }

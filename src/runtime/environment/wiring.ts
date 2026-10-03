@@ -44,6 +44,7 @@ import {
   createEnvironmentManifestProvider,
   environmentManifestFetchFromFetch,
 } from './environment-manifest-provider.js'
+import { normalizeWindowsArchitecture } from './windows-probe.js'
 import { InstallationStore } from './installations.js'
 import { createLinuxProvisioner, type HostView, type LinuxProvisionerDeps } from './linux-provisioner.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
@@ -221,9 +222,14 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     root: managedRoot,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
   })
-  // Windows' own manifest (change `add-tensorrt-llm-windows`): only a Windows core asks for it.
+  // Windows' own manifest (change `add-tensorrt-llm-windows`): only a Windows core asks for it, and
+  // Windows on Arm asks for its own file (`windows-arm64.json`).
   const windowsManifests = createEnvironmentManifestProvider({
     platform: 'windows',
+    arch:
+      options.windows === undefined
+        ? null
+        : normalizeWindowsArchitecture(options.windows.host.probeDeps.machine()),
     env: options.env.env,
     fetch: environmentManifestFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),

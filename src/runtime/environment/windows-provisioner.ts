@@ -547,7 +547,8 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     }
     const parameters = deps.guestRecipe.parameters(plan, {
       user: GUEST_ROOT,
-      arch: 'x86_64',
+      // The plan let only a guest of the machine's own architecture this far.
+      arch: seen.facts.architecture === 'aarch64' ? 'aarch64' : 'x86_64',
       family: 'apt',
       distro_id: distribution.id,
       version_id: distribution.version_id,

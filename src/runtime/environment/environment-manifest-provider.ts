@@ -43,6 +43,10 @@ export const DEFAULT_LINUX_ENVIRONMENT_MANIFEST_URL =
 export const DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/environments/windows.json'
 
+/** conf main, the Windows on Arm manifest: its own file, which released (x64-only) cores never read. */
+export const DEFAULT_WINDOWS_ARM64_ENVIRONMENT_MANIFEST_URL =
+  'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/environments/windows-arm64.json'
+
 const DEFAULT_URLS: Record<EnvironmentPlatform, string> = {
   linux: DEFAULT_LINUX_ENVIRONMENT_MANIFEST_URL,
   windows: DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL,
@@ -59,6 +63,8 @@ export type EnvironmentManifestProviderOptions<P extends EnvironmentPlatform = '
 > & {
   /** Whose manifest this core reads: its own platform's. Linux when omitted. */
   platform?: P
+  /** The machine's architecture: on Windows, `aarch64` reads the Windows on Arm manifest. */
+  arch?: string | null
   /** The shared per-user managed root (`managedSharedRoot`); both scopes share one cache. */
   root: string
   /** Default source when no override is set; defaults to the platform's published manifest. */
@@ -92,7 +98,7 @@ const unavailable = <P extends EnvironmentPlatform>(
 export function createEnvironmentManifestProvider<P extends EnvironmentPlatform = 'linux'>(
   options: EnvironmentManifestProviderOptions<P>
 ): EnvironmentManifestProvider<P> {
-  const { root, url, platform: chosen, ...rest } = options
+  const { root, url, platform: chosen, arch, ...rest } = options
   const platform = (chosen ?? 'linux') as P
   const paths = managedSharedPaths(root)
   const documents = createCachedDocuments<EnvironmentManifestByPlatform[P]>(
@@ -107,7 +113,14 @@ export function createEnvironmentManifestProvider<P extends EnvironmentPlatform 
       cacheFile: paths.environmentManifestFile,
       latestFile: paths.environmentManifestLatestFile,
     },
-    { ...rest, url: url ?? DEFAULT_URLS[platform] }
+    {
+      ...rest,
+      url:
+        url ??
+        (platform === 'windows' && arch === 'aarch64'
+          ? DEFAULT_WINDOWS_ARM64_ENVIRONMENT_MANIFEST_URL
+          : DEFAULT_URLS[platform]),
+    }
   )
 
   return {
