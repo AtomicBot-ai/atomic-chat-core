@@ -118,6 +118,12 @@ export interface ManagedGatewayOptions {
    * to relay it as it is (`ManagedTextAdapter.mapErrorResponse`). Never called for a 2xx answer.
    */
   mapErrorResponse?: (route: string, status: number, body: string) => object | null
+  /**
+   * Optional: why the engine cut a 2xx event stream short, for the error event the gateway sends in
+   * its place (the session's log tail read by the adapter, `ManagedTextAdapter.describeStreamFailure`);
+   * null for no better words than the gateway's own.
+   */
+  streamFailure?: () => Promise<string | null>
 }
 
 export interface ManagedGateway {
@@ -306,7 +312,8 @@ async function sendBodyToUpstream(
   upstream: ManagedGatewayUpstream,
   body: Buffer,
   mapError?: (status: number, body: string) => object | null,
-  responseRewrite: ManagedResponseRewrite | null = null
+  responseRewrite: ManagedResponseRewrite | null = null,
+  streamFailure?: () => Promise<string | null>
 ): Promise<void> {
   // A client that disconnects before the upstream has even answered must not leave that connect
   // attempt, or a slow-to-respond container, running unattended.
@@ -336,6 +343,13 @@ async function sendBodyToUpstream(
     await answerEngineError(res, upstreamResponse, mapError)
     return
   }
+  if (status >= 200 && status <= 299 && isEventStream(upstreamResponse)) {
+    res.writeHead(upstreamResponse.status, relayedHeaders(upstreamResponse, []).flat())
+    await pipeBody(res, guardedEventStream(upstreamResponse.body, responseRewrite, streamFailure), () =>
+      upstreamResponse.body.destroy()
+    )
+    return
+  }
   if (responseRewrite !== null && status >= 200 && status <= 299) {
     await relayRewritten(res, upstreamResponse, responseRewrite)
     return
@@ -356,43 +370,63 @@ function rewriteJsonText(text: string, rewrite: ManagedResponseRewrite): string 
   }
 }
 
-/** Each complete SSE line of a stream, `data:` JSON events rewritten, everything else verbatim. */
-async function* rewrittenEventStream(
+function isEventStream(upstream: UpstreamResponse): boolean {
+  const type = upstream.headers.find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? ''
+  return type.toLowerCase().includes('text/event-stream')
+}
+
+/** What a client reads when the engine ends a stream without finishing it and says nothing better. */
+export const MANAGED_STREAM_CUT_MESSAGE = 'The engine stopped the answer before finishing it.'
+
+/**
+ * Each complete SSE line of a 2xx stream, `data:` JSON events through `rewrite` when there is one,
+ * everything else verbatim — and an end the client can tell from a finished answer: a stream that
+ * breaks off or closes without `data: [DONE]` gets an OpenAI error event (`streamFailure`'s words,
+ * else {@link MANAGED_STREAM_CUT_MESSAGE}) and then `[DONE]`. Without it an engine that failed a
+ * request after `200 OK` (TensorRT-LLM's `RequestError` when the KV cache cannot hold it) reached the
+ * client as a clean, empty answer: `pipeBody` swallows an upstream failure mid-stream.
+ */
+async function* guardedEventStream(
   source: AsyncIterable<Buffer | string>,
-  rewrite: ManagedResponseRewrite
+  rewrite: ManagedResponseRewrite | null,
+  streamFailure?: () => Promise<string | null>
 ): AsyncGenerator<string> {
   // A multi-byte character can straddle two chunks; the decoder holds its first bytes back.
   const decoder = new StringDecoder('utf8')
   let pending = ''
+  let done = false
   const line = (raw: string): string => {
     const match = /^data:\s?(.*)$/.exec(raw.replace(/\r$/, ''))
     if (match === null) return raw
     const payload = (match[1] as string).trim()
-    if (payload === '' || payload === '[DONE]') return raw
+    if (payload === '[DONE]') done = true
+    if (payload === '' || payload === '[DONE]' || rewrite === null) return raw
     return `data: ${rewriteJsonText(payload, rewrite)}`
   }
-  for await (const chunk of source) {
-    pending += typeof chunk === 'string' ? chunk : decoder.write(chunk)
-    const lines = pending.split('\n')
-    pending = lines.pop() as string
-    if (lines.length > 0) yield `${lines.map(line).join('\n')}\n`
+  try {
+    for await (const chunk of source) {
+      pending += typeof chunk === 'string' ? chunk : decoder.write(chunk)
+      const lines = pending.split('\n')
+      pending = lines.pop() as string
+      if (lines.length > 0) yield `${lines.map(line).join('\n')}\n`
+    }
+  } catch {
+    // The upstream broke off mid-stream; what follows tells the client so.
   }
   pending += decoder.end()
-  if (pending !== '') yield line(pending)
+  if (pending !== '') yield `${line(pending)}\n`
+  if (done) return
+  const message = (await streamFailure?.().catch(() => null)) ?? MANAGED_STREAM_CUT_MESSAGE
+  const error = { error: { message, type: 'server_error', code: 'stream_interrupted' } }
+  yield `\ndata: ${JSON.stringify(error)}\n\ndata: [DONE]\n\n`
 }
 
-/** A 2xx answer through `rewrite`: a stream event by event, a JSON body as a whole. */
+/** A 2xx JSON answer through `rewrite`, as a whole (event streams go through `guardedEventStream`). */
 async function relayRewritten(
   res: ServerResponse,
   upstream: UpstreamResponse,
   rewrite: ManagedResponseRewrite
 ): Promise<void> {
-  const type = upstream.headers.find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? ''
-  if (type.toLowerCase().includes('text/event-stream')) {
-    res.writeHead(upstream.status, relayedHeaders(upstream, []).flat())
-    await pipeBody(res, rewrittenEventStream(upstream.body, rewrite), () => upstream.body.destroy())
-    return
-  }
   const whole = await readCappedBody(upstream.body, MANAGED_GATEWAY_REWRITE_BODY_CAP_BYTES * 64).catch(
     () => null
   )
@@ -583,7 +617,7 @@ async function proxyToUpstream(
       responseRewrite = null
     }
   }
-  await sendBodyToUpstream(req, res, options.upstream, body, mapError, responseRewrite)
+  await sendBodyToUpstream(req, res, options.upstream, body, mapError, responseRewrite, options.streamFailure)
 }
 
 function assertLoopback(host: string): void {

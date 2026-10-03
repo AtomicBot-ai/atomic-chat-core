@@ -16,6 +16,7 @@ import {
   checkModelCompatibility,
   checkModelCompatibilityFiles,
   checkModelMemory,
+  engineOverheadBytes,
   kvCacheBytes,
   kvCacheReserveBytes,
   normalizeWeightName,
@@ -167,15 +168,17 @@ describe('checkModelCompatibility', () => {
 
     expect(result.weight_bytes).toBe(79_000_000_000)
     // No KV-cache shape in config.json: falls back to the weight-proportional rule.
-    // 79,000,000,000 + 10% reserve (7,900,000,000) = 86,900,000,000 > 85,532,850,176 free.
+    // 79,000,000,000 + 10% reserve (7,900,000,000) + the engine's 1.5 GiB runtime overhead (no MLP
+    // shape in config.json, so no activation term) = 88,510,612,736 > 85,532,850,176 free.
     expect(result.kv_reserve_basis).toBe('weight_fraction')
     expect(result.verdict).toEqual({
       ok: false,
       error: {
         code: 'MODEL_INCOMPATIBLE',
-        message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
+        message:
+          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU.',
         details:
-          'weight_bytes=79000000000 kv_reserve_bytes=7900000000 kv_reserve_basis=weight_fraction needed_bytes=86900000000 free_bytes=85532850176',
+          'weight_bytes=79000000000 kv_reserve_bytes=7900000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=1610612736 needed_bytes=88510612736 free_bytes=85532850176',
       },
     })
   })
@@ -220,14 +223,16 @@ describe('checkModelCompatibility', () => {
     })
 
     expect(result.checked_gpu_id).toBe('gpu-a')
-    // 40,000,000,000 + 10% reserve (4,000,000,000) = 44,000,000,000 > 22,000,000,000 free on gpu-a.
+    // 40,000,000,000 + 10% reserve (4,000,000,000) + 1.5 GiB engine overhead = 45,610,612,736 >
+    // 22,000,000,000 free on gpu-a, and < 46,000,000,000 on gpu-b.
     expect(result.verdict).toEqual({
       ok: false,
       error: {
         code: 'MODEL_INCOMPATIBLE',
-        message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
+        message:
+          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU.',
         details:
-          'weight_bytes=40000000000 kv_reserve_bytes=4000000000 kv_reserve_basis=weight_fraction needed_bytes=44000000000 free_bytes=22000000000',
+          'weight_bytes=40000000000 kv_reserve_bytes=4000000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=1610612736 needed_bytes=45610612736 free_bytes=22000000000',
       },
     })
     expect(result.fits_other_gpus).toEqual(['gpu-b'])
@@ -1296,6 +1301,8 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
   const shape = { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16', ...LLAMA_3_8B_SHAPE }
   const weights = 16_000_000_000
   const kv = kvCacheBytes(shape, null, 2 * 8192) as number
+  const overhead = engineOverheadBytes(shape, 8192)
+  const need = weights + kv + overhead
   const memory = {
     contextLength: 8192,
     kvCacheFreeGpuMemoryFraction: TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
@@ -1308,20 +1315,18 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
   })
   const input = baseInput({ config_json: shape, files: weightFiles(weights) })
 
-  it('fits at exactly weights + KV(2 x context) of MemAvailable, and is refused one byte below', () => {
+  it('fits at exactly weights + KV(2 x context) + engine overhead of MemAvailable, and is refused one byte below', () => {
     const files = checkModelCompatibilityFiles(input, descriptor, [gb10], memAvailable(0), memory)
     if (!files.ok) throw new Error('expected the files check to pass')
-    expect(
-      checkModelMemory(files.resolved, descriptor, [gb10], memAvailable(weights + kv), memory).verdict
-    ).toEqual({
+    expect(checkModelMemory(files.resolved, descriptor, [gb10], memAvailable(need), memory).verdict).toEqual({
       ok: true,
     })
-    const short = checkModelMemory(files.resolved, descriptor, [gb10], memAvailable(weights + kv - 1), memory)
+    const short = checkModelMemory(files.resolved, descriptor, [gb10], memAvailable(need - 1), memory)
     expect(short.verdict.ok).toBe(false)
     if (!short.verdict.ok) {
       expect(short.verdict.error.details).toBe(
         `weight_bytes=${weights} kv_reserve_bytes=${kv} kv_reserve_basis=config kv_max_tokens=16384 ` +
-          `needed_bytes=${weights + kv} free_bytes=${weights + kv - 1}`
+          `engine_overhead_bytes=${overhead} needed_bytes=${need} free_bytes=${need - 1}`
       )
     }
   })
@@ -1333,20 +1338,14 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
       free_vram_bytes: 8_000_000_000,
     })
     const pinned = baseInput({ config_json: shape, files: weightFiles(weights), gpu_id: 'GPU-small' })
-    const fits = checkModelCompatibility(
-      pinned,
-      descriptor,
-      [tooSmall, gb10],
-      memAvailable(weights + kv),
-      memory
-    )
+    const fits = checkModelCompatibility(pinned, descriptor, [tooSmall, gb10], memAvailable(need), memory)
     expect(fits.checked_gpu_id).toBe('GPU-small')
     expect(fits.fits_other_gpus).toEqual(['GPU-gb10'])
     const short = checkModelCompatibility(
       pinned,
       descriptor,
       [tooSmall, gb10],
-      memAvailable(weights + kv - 1),
+      memAvailable(need - 1),
       memory
     )
     expect(short.fits_other_gpus).toEqual([])
@@ -1546,5 +1545,48 @@ describe('normalizeWeightName', () => {
 
   it('de-duplicates and sorts', () => {
     expect(normalizeWeightNames(['b.1.x', 'b.2.x', 'a.0.y'])).toEqual(['a.*.y', 'b.*.x'])
+  })
+})
+
+describe('engineOverheadBytes: what trtllm-serve takes beyond weights and KV cache (Windows acceptance, 2026-10-03)', () => {
+  const ministral = { architectures: ['MistralForCausalLM'], intermediate_size: 14336, hidden_size: 4096 }
+
+  it('is the 1.5 GiB runtime overhead plus an activation peak that grows with the context length', () => {
+    const GiB = 1024 ** 3
+    // Measured: 0.91 GiB of activations at 8192 tokens, 0.46 GiB at 4096 (Ministral-3b, RTX 4070 Laptop).
+    expect((engineOverheadBytes(ministral, 8192) - 1.5 * GiB) / GiB).toBeCloseTo(0.93, 1)
+    expect((engineOverheadBytes(ministral, 4096) - 1.5 * GiB) / GiB).toBeCloseTo(0.47, 1)
+  })
+
+  it('falls back to 4 x hidden_size, a VLM text_config, and to the runtime overhead alone', () => {
+    expect(engineOverheadBytes({ hidden_size: 1024 }, 1000)).toBe(
+      engineOverheadBytes({ intermediate_size: 4096 }, 1000)
+    )
+    expect(engineOverheadBytes({ text_config: { intermediate_size: 4096 } }, 1000)).toBe(
+      engineOverheadBytes({ intermediate_size: 4096 }, 1000)
+    )
+    expect(engineOverheadBytes({}, 8192)).toBe(1.5 * 1024 ** 3)
+  })
+
+  it('refuses Ministral-3b bf16 on an 8 GB card that the weights alone would fit', () => {
+    const descriptor = baseDescriptor({ supported_architectures: ['MistralForCausalLM'] })
+    const laptop = gpu({ gpu_id: 'gpu-0', total_vram_bytes: 8_585_216_000, free_vram_bytes: 8_270_000_000 })
+    const result = checkModelCompatibility(
+      baseInput({
+        config_json: {
+          ...ministral,
+          dtype: 'bfloat16',
+          num_hidden_layers: 14,
+          num_attention_heads: 32,
+          num_key_value_heads: 8,
+        },
+        files: weightFiles(6_631_447_112),
+      }),
+      descriptor,
+      [laptop],
+      memAvailable(0),
+      { contextLength: 4096, kvCacheFreeGpuMemoryFraction: 0.8 }
+    )
+    expect(result.verdict.ok).toBe(false)
   })
 })

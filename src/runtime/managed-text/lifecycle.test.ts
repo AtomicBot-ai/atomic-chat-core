@@ -383,6 +383,39 @@ describe('ManagedTextLifecycle: stages and timeout', () => {
   })
 })
 
+describe('ManagedTextLifecycle: an adapter refuses a container that got ready (classifyReady)', () => {
+  const picky: ManagedTextAdapter<Record<string, never>> = {
+    ...beta,
+    id: 'picky-engine',
+    classifyReady: (log) =>
+      /room for 7 tokens/.test(log)
+        ? { kind: 'out-of-memory', message: 'Only 7 tokens of KV cache.', excerpt: 'room for 7 tokens' }
+        : null,
+  }
+  const pickyInstallation = { ...betaInstallation, adapter_id: 'picky-engine' }
+
+  it('fails the load with the classification, stops the container and opens no gateway', async () => {
+    await build({}, [picky])
+    docker.bootLog = ['engine up', 'room for 7 tokens', 'Application startup complete.']
+    const error = await rejection(lifecycle.load(request_({ installation: pickyInstallation })))
+    expect(error).toBeInstanceOf(ManagedLoadError)
+    expect(error.code).toBe('OUT_OF_MEMORY')
+    expect(error.message).toBe('Only 7 tokens of KV cache.')
+    expect(error.details).toContain('room for 7 tokens')
+    expect(docker.containers.size).toBe(0)
+    expect(journal.list()).toEqual([])
+    expect(lifecycle.findSession('org/model-a')).toBeUndefined()
+    expect(lifecycle.lastAttempt('org/model-a')?.error.code).toBe('OUT_OF_MEMORY')
+  })
+
+  it('loads as usual when the adapter finds the container fit', async () => {
+    await build({}, [picky])
+    docker.bootLog = ['engine up', 'Application startup complete.']
+    await lifecycle.load(request_({ installation: pickyInstallation }))
+    expect(docker.containers.size).toBe(1)
+  })
+})
+
 describe('ManagedTextLifecycle: early exit', () => {
   it('a container exit fails within seconds with the classification, its numbers and the log tail', async () => {
     await build()
