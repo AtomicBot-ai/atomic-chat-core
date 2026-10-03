@@ -1336,3 +1336,34 @@ describe('rewriteResponseFor: a reasoning-at-start parser with thinking off (qwe
     expect(tensorrtLlmReasoningIntoContent({ error: 'x' })).toEqual({ error: 'x' })
   })
 })
+
+describe('classifyReady: a ready engine that cannot hold one sequence of its context (Windows acceptance, 2026-10-03)', () => {
+  const at = (context_length: number) =>
+    tensorrtLlmAdapter.validateSettings({ context_length, max_output_tokens: 1024 })
+  const profiling =
+    '[TRT-LLM] [I] [batchmgr][RANK 0] Max KV cache blocks per sequence: 128 [window size=4096], tokens per block=32, primary blocks=129, secondary blocks=0, max sequence length=4096'
+  const final =
+    '[TRT-LLM] [I] [batchmgr][RANK 0] Max KV cache blocks per sequence: 7 [window size=224], tokens per block=32, primary blocks=7, secondary blocks=0, max sequence length=224'
+
+  it('refuses as out of memory, with both numbers, when the final allocation holds less than the context', () => {
+    const verdict = tensorrtLlmAdapter.classifyReady!(
+      `${profiling}\nsomething\n${final}\nINFO: Application startup complete.`,
+      at(4096)
+    )
+    expect(verdict).toMatchObject({
+      kind: 'out-of-memory',
+      numbers: { kv_capacity_tokens: 224, context_length: 4096 },
+      excerpt: final,
+    })
+    expect(verdict?.message).toContain('224')
+    expect(verdict?.message).toContain('4096')
+  })
+
+  it('is fit when the last capacity line holds the whole context', () => {
+    expect(tensorrtLlmAdapter.classifyReady!(`${final}\n${profiling}`, at(4096))).toBeNull()
+  })
+
+  it('is fit when the log carries no capacity line at all (another engine build)', () => {
+    expect(tensorrtLlmAdapter.classifyReady!('INFO: Application startup complete.', at(4096))).toBeNull()
+  })
+})

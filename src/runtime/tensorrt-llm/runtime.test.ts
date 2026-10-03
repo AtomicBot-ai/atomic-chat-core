@@ -30,6 +30,7 @@ import type { HostMemory } from './compatibility.js'
 import { TensorrtLlmRuntime } from './runtime.js'
 import type { TensorrtLlmRuntimeDeps } from './runtime.js'
 import type { GpuClaim } from '../shared/index.js'
+import { TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES } from './compatibility.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
 const MiB = 1024 * 1024
@@ -444,8 +445,10 @@ describe('TensorrtLlmRuntime: pre-launch check (task 2.16, spec "Проверк�
 })
 
 describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (task 2.16w round 1, finding 1, Critical)', () => {
-  // needed = weights (2,000) + the 10% weight-fraction fallback reserve (200) = 2,200 bytes.
+  // needed = weights (2,000) + the 10% weight-fraction fallback reserve (200) + the engine's runtime
+  // overhead (no MLP shape in config.json, so no activation term).
   const WEIGHT_BYTES = 2_000
+  const OVERHEAD = TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES
 
   async function installBigModel(id: string): Promise<void> {
     const dir = join(data.layout.provider('tensorrt-llm').modelsDir, id)
@@ -465,12 +468,12 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
     await installBigModel('big-a')
     await installBigModel('big-b')
     // While `big-a`'s container exists, the card reports too little free memory for `big-b`
-    // (1,000 < 2,200 needed); once stopPrevious has actually stopped it, a fresh probe reports
+    // (1,000 < 2,200 + overhead needed); once stopPrevious has actually stopped it, a fresh probe reports
     // plenty. A stale, pre-eviction snapshot re-used for the memory gate would refuse `big-b`
     // outright on this single-GPU host — exactly the bug this split fixes.
     build({
       hostFacts: async () => ({
-        gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 1_000_000_000 }],
+        gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 2 * OVERHEAD }],
         selinux: false,
         memory: NO_HOST_MEMORY,
       }),
@@ -495,7 +498,7 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
       hostFacts: async () => {
         order.push(`probe: ${docker.containers.size} containers, ${creates()} creates`)
         return {
-          gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 1_000_000_000 }],
+          gpus: [{ ...SMALL, free_vram_bytes: docker.containers.size > 0 ? 1_000 : 2 * OVERHEAD }],
           selinux: false,
           memory: NO_HOST_MEMORY,
         }
@@ -532,10 +535,10 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
     await installModel('small', 'LlamaForCausalLM') // weight 20 bytes: fits easily
     await installBigModel('big-b') // needs 2,200 bytes
     build({
-      // A fixed, small card throughout: enough for `small` (needed 22 bytes), never enough for
-      // `big-b` (needed 2,200) — whether or not anything else currently holds it.
+      // A fixed, small card throughout: enough for `small` (needed 22 bytes + overhead), never enough
+      // for `big-b` (needed 2,200 + overhead) — whether or not anything else currently holds it.
       hostFacts: async () => ({
-        gpus: [{ ...SMALL, free_vram_bytes: 2_000 }],
+        gpus: [{ ...SMALL, free_vram_bytes: OVERHEAD + 2_000 }],
         selinux: false,
         memory: NO_HOST_MEMORY,
       }),

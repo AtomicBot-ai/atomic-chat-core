@@ -433,7 +433,53 @@ function totalMemoryBytes(gpu: GpuFacts, host: HostMemory): number {
 
 /** What the checkpoint needs on `gpu`: its weights plus that card's own kind of KV reserve. */
 interface MemoryNeed extends MemoryReserve {
+  /** What the engine itself takes beyond weights and KV cache (`engineOverheadBytes`). */
+  overheadBytes: number
   neededBytes: number
+}
+
+/**
+ * What `trtllm-serve` holds outside torch on any card: the CUDA context, cuBLAS/cuDNN workspaces,
+ * NCCL buffers. Measured 1.14–1.62 GiB on an RTX 4070 Laptop (Windows live acceptance, 2026-10-03,
+ * "Memory used outside torch"); the check takes the high end, never the low one.
+ */
+export const TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES = 1.5 * 1024 ** 3
+
+/**
+ * Bytes of activation peak per prompt token per MLP intermediate element: the engine profiles a
+ * warmup of `max_num_tokens` tokens (the launch sets it to the context length), and the peak grows
+ * with both. Measured 0.91 GiB at 8192 tokens and 0.46 GiB at 4096 tokens for an
+ * `intermediate_size` of 14336 (ministral/Ministral-3b-instruct, same acceptance machine): ≈ 8.4.
+ */
+const ACTIVATION_BYTES_PER_TOKEN_ELEMENT = 8.5
+
+/** The MLP width that sizes the activations: `intermediate_size`, a VLM's `text_config` one, else 4 × hidden. */
+function intermediateSize(rootConfigJson: JsonObject): number | undefined {
+  const textConfig =
+    typeof rootConfigJson.text_config === 'object' && rootConfigJson.text_config !== null
+      ? (rootConfigJson.text_config as JsonObject)
+      : undefined
+  for (const config of [rootConfigJson, textConfig]) {
+    if (config === undefined) continue
+    const intermediate = positiveNumberField(config, 'intermediate_size')
+    if (intermediate !== undefined) return intermediate
+    const hidden = positiveNumberField(config, 'hidden_size')
+    if (hidden !== undefined) return 4 * hidden
+  }
+  return undefined
+}
+
+/**
+ * The engine's own memory beyond weights and KV cache: the runtime overhead plus the activation
+ * peak of a `contextLength`-token prefill. Without it a checkpoint whose weights fit an 8 GB card
+ * passed the check and then left the KV cache 224 tokens (Ministral-3b bf16, 8.20 GiB peak on an
+ * 8.00 GiB card), and every request failed mid-stream.
+ */
+export function engineOverheadBytes(configJson: JsonObject, contextLength: number): number {
+  const intermediate = intermediateSize(configJson) ?? 0
+  return Math.ceil(
+    TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES + contextLength * intermediate * ACTIVATION_BYTES_PER_TOKEN_ELEMENT
+  )
 }
 
 function memoryNeedOn(
@@ -451,7 +497,8 @@ function memoryNeedOn(
     memory.kvCacheFreeGpuMemoryFraction,
     isUnifiedMemory(gpu)
   )
-  return { ...reserve, neededBytes: weightBytesTotal + reserve.reserveBytes }
+  const overheadBytes = engineOverheadBytes(configJson, memory.contextLength)
+  return { ...reserve, overheadBytes, neededBytes: weightBytesTotal + reserve.reserveBytes + overheadBytes }
 }
 
 /**
@@ -919,7 +966,7 @@ export function checkModelMemory(
   }
   const needOn = (gpu: GpuFacts): MemoryNeed =>
     memoryNeedOn(gpu, resolved.weightBytesTotal, resolved.configJson, resolved.hfQuantConfigJson, memory)
-  const { reserveBytes, basis, neededBytes } = needOn(selected)
+  const { reserveBytes, basis, neededBytes, overheadBytes } = needOn(selected)
   const freeBytes = freeMemoryBytes(selected, hostMemory)
   const resolution = formatRequirement(descriptor, resolved.quantizationFormat, resolved.hfQuantConfigJson)
   const fitsOther = fitsOtherGpus(
@@ -942,8 +989,9 @@ export function checkModelMemory(
         ok: false,
         error: {
           code: 'MODEL_INCOMPATIBLE',
-          message: 'The checkpoint plus the KV-cache reserve does not fit the selected GPU.',
-          details: `weight_bytes=${resolved.weightBytesTotal} kv_reserve_bytes=${reserveBytes} kv_reserve_basis=${basis}${kvTokens} needed_bytes=${neededBytes} free_bytes=${freeBytes}`,
+          message:
+            'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU.',
+          details: `weight_bytes=${resolved.weightBytesTotal} kv_reserve_bytes=${reserveBytes} kv_reserve_basis=${basis}${kvTokens} engine_overhead_bytes=${overheadBytes} needed_bytes=${neededBytes} free_bytes=${freeBytes}`,
         },
       },
       fitsOther,

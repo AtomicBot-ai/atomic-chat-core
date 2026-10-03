@@ -170,6 +170,20 @@ export interface ManagedTextAdapter<S = unknown> {
    * above the last one still counts; after a crash of a ready session it is the log tail.
    */
   classifyExit(log: string, exitCode: number | null): ManagedExitClassification
+  /**
+   * Optional: why an engine that answers its readiness probe still cannot serve its own launch, read
+   * off the container's whole log right after readiness; `null` when it can. The load then fails as an
+   * exit before readiness would, with this classification, and the container is stopped with
+   * confirmation (TensorRT-LLM on an 8 GB card started with a KV cache of 224 tokens for a 4096-token
+   * context, and every request then failed mid-stream).
+   */
+  classifyReady?(log: string, settings: S): ManagedExitClassification | null
+  /**
+   * Optional: why the engine cut a streamed answer short, read off the session's log tail right after
+   * the stream broke off; null when the log does not say. The session gateway sends it to the client
+   * as an error event in place of the missing end (`gateway.ts`, `guardedEventStream`).
+   */
+  describeStreamFailure?(logTail: string): string | null
   capabilities(context: { settings: S; family: ModelFamilySupport | null }): ManagedTextCapabilities
   /**
    * Optional: rewrites a JSON POST request body before the session gateway forwards it upstream

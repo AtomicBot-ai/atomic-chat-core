@@ -629,6 +629,52 @@ function classifyUnsupportedQuantization(log: string): ManagedExitClassification
  *  out-of-memory line appears earlier in the whole log — then an out-of-memory message, with the
  *  lines that said so as `excerpt` and the numbers of the last allocation failure, then an
  *  unsupported quantization, otherwise `other`. */
+/** The KV-cache manager's own capacity line: `[batchmgr][RANK 0] Max KV cache blocks per sequence: … max sequence length=224`. */
+const KV_CAPACITY_LINE = /^.*\bmax sequence length=(\d+).*$/gm
+
+/**
+ * Whether a `trtllm-serve` that answered `/health` can hold one sequence of the context it was
+ * launched with: the KV-cache manager logs how long a sequence it can keep (the last line wins — the
+ * engine logs one for its memory-profiling pass and one for the final allocation). Shorter than the
+ * context length is an out-of-memory refusal with both numbers — Ministral-3b bf16 on an RTX 4070
+ * Laptop started with room for 224 tokens of a 4096-token context and answered every request with an
+ * empty, failed stream. No such line (another engine build) is not a refusal.
+ */
+export function classifyTensorrtLlmReady(
+  log: string,
+  settings: TensorrtLlmSettings
+): ManagedExitClassification | null {
+  const lines = [...log.matchAll(KV_CAPACITY_LINE)]
+  const last = lines.at(-1)
+  if (last === undefined) return null
+  const capacity = Number.parseInt(last[1] as string, 10)
+  const context = settings.context_length
+  if (!Number.isFinite(capacity) || capacity >= context) return null
+  return {
+    kind: 'out-of-memory',
+    message:
+      `The model loaded, but this GPU has room for a KV cache of only ${capacity} tokens, less than the ` +
+      `context length of ${context}. Lower the context length in the TensorRT-LLM settings, or use a ` +
+      `smaller or quantized model.`,
+    numbers: { kv_capacity_tokens: capacity, context_length: context },
+    excerpt: last[0].trim(),
+  }
+}
+
+/** `tensorrt_llm.executor.utils.RequestError: KV_CACHE_MANAGER requires 67 KV cache blocks …` and the like. */
+const REQUEST_ERROR_LINE = /^.*\bRequestError:\s*(.+?)\s*$/gm
+
+/**
+ * The engine's own words for the request it failed mid-stream: the last `RequestError` in the log
+ * tail. `trtllm-serve` raises it inside the streaming generator after `200 OK` and only logs it, so
+ * the client otherwise saw an empty answer (Ministral-3b on an 8 GB card: "KV_CACHE_MANAGER requires
+ * 67 KV cache blocks to complete the request, which exceeds its GPU-primary capacity of 7 blocks").
+ */
+export function describeTensorrtLlmStreamFailure(logTail: string): string | null {
+  const last = [...logTail.matchAll(REQUEST_ERROR_LINE)].at(-1)
+  return last === undefined ? null : `TensorRT-LLM failed the request: ${last[1] as string}`
+}
+
 export function classifyTensorrtLlmExit(log: string, exitCode: number | null): ManagedExitClassification {
   const classification =
     classifyUnsupportedArchitecture(log) ?? classifyOom(log) ?? classifyUnsupportedQuantization(log)
@@ -1147,6 +1193,8 @@ export const tensorrtLlmAdapter: ManagedTextAdapter<TensorrtLlmSettings> = {
   buildLaunch: buildTensorrtLlmLaunch,
   readinessTimeoutMs: tensorrtLlmReadinessTimeoutMs,
   classifyExit: classifyTensorrtLlmExit,
+  classifyReady: classifyTensorrtLlmReady,
+  describeStreamFailure: describeTensorrtLlmStreamFailure,
   capabilities: tensorrtLlmCapabilities,
   rewriteRequestBody: tensorrtLlmRewriteRequestBody,
   rewriteResponseFor: tensorrtLlmRewriteResponseFor,

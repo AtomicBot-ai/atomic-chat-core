@@ -732,6 +732,9 @@ export class ManagedTextLifecycle {
         }
       }
 
+      const refusal = await this.readyRefusal(entry, settings)
+      if (refusal !== null) throw refusal
+
       const apiKey = generateGatewayKey()
       const adapter = entry.adapter
       // What this session can do, for the rewriter to refuse what it cannot (findings-2.14-r1.md
@@ -769,6 +772,14 @@ export class ManagedTextLifecycle {
           : {
               mapErrorResponse: (route: string, status: number, body: string) =>
                 adapter.mapErrorResponse!(route, status, body),
+            }),
+        ...(adapter.describeStreamFailure === undefined
+          ? {}
+          : {
+              streamFailure: async () =>
+                entry.containerId === undefined
+                  ? null
+                  : adapter.describeStreamFailure!(await this.tail(entry.containerId)),
             }),
       })
       this.checkAborted(signal)
@@ -1010,6 +1021,21 @@ export class ManagedTextLifecycle {
       exitFailureDetails(tail, classification.excerpt),
       classification,
       exitCode
+    )
+  }
+
+  /** The adapter's `classifyReady` verdict on a container that just got ready, as the load's error; null when fit. */
+  private async readyRefusal(entry: Entry, settings: unknown): Promise<ManagedLoadError | null> {
+    const adapter = entry.adapter
+    if (adapter.classifyReady === undefined || entry.containerId === undefined) return null
+    const whole = await this.wholeLog(entry.containerId).catch(() => '')
+    const classification = adapter.classifyReady(whole, settings)
+    if (classification === null) return null
+    return new ManagedLoadError(
+      exitErrorCode(classification.kind),
+      classification.message,
+      exitFailureDetails(lastLogLines(whole, this.timings.logTailLines), classification.excerpt),
+      classification
     )
   }
 
