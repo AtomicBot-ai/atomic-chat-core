@@ -18,6 +18,8 @@ import {
   checkModelMemory,
   kvCacheBytes,
   kvCacheReserveBytes,
+  normalizeWeightName,
+  normalizeWeightNames,
   selectLaunchGpu,
   weightBytes,
   type CheckpointFile,
@@ -1438,5 +1440,111 @@ describe('TensorRT-LLM 1.3 checkpoints', () => {
     // Without layer_types every layer counts.
     const { layer_types: _ignored, ...plain } = textConfig
     expect(kvCacheBytes({ ...qwen35, text_config: plain }, null, 8192)).toBe(134_217_728)
+  })
+})
+
+describe('checkModelCompatibility: checkpoint shapes the architecture name does not rule out (Windows acceptance, 2026-10-03)', () => {
+  const descriptor = baseDescriptor({
+    supported_architectures: ['NemotronHForCausalLM', 'Glm4MoeForCausalLM', 'DeepseekV3ForCausalLM'],
+  })
+  const selected = gpu({ gpu_id: 'gpu-0' })
+  const check = (input: ModelCheckInput) =>
+    checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
+      contextLength: 8192,
+      kvCacheFreeGpuMemoryFraction: 0.9,
+    })
+  const errorOf = (input: ModelCheckInput) => {
+    const result = check(input)
+    return result.verdict.ok ? null : result.verdict.error
+  }
+  const small = weightFiles(1_000_000_000)
+  const glmConfig = { architectures: ['Glm4MoeForCausalLM'], dtype: 'bfloat16', n_routed_experts: 8 }
+
+  it('Nemotron-H with dense MLP layers ("-" in hybrid_override_pattern) is MODEL_INCOMPATIBLE, naming the pattern', () => {
+    const error = errorOf(
+      baseInput({
+        files: small,
+        config_json: {
+          architectures: ['NemotronHForCausalLM'],
+          dtype: 'bfloat16',
+          hybrid_override_pattern: 'M-M-M*-M-',
+        },
+      })
+    )
+    expect(error?.code).toBe('MODEL_INCOMPATIBLE')
+    expect(error?.message).toContain('hybrid_override_pattern')
+    expect(error?.details).toContain('M-M-M*-M-')
+  })
+
+  it('Nemotron-H without "-" (Mamba and MoE layers only) still passes', () => {
+    const result = check(
+      baseInput({
+        files: small,
+        config_json: {
+          architectures: ['NemotronHForCausalLM'],
+          dtype: 'bfloat16',
+          hybrid_override_pattern: 'MEMEM*EMEM',
+        },
+      })
+    )
+    expect(result.verdict.ok).toBe(true)
+  })
+
+  it('a Glm4Moe checkpoint whose tensors have no e_score_correction_bias is MODEL_INCOMPATIBLE (PrimeIntellect/GLM-0.5B)', () => {
+    const error = errorOf(
+      baseInput({
+        files: small,
+        config_json: glmConfig,
+        weight_names: ['model.layers.*.mlp.gate.weight', 'model.layers.*.mlp.experts.*.down_proj.weight'],
+      })
+    )
+    expect(error?.code).toBe('MODEL_INCOMPATIBLE')
+    expect(error?.message).toContain('e_score_correction_bias')
+  })
+
+  it('the same architecture with e_score_correction_bias in its index passes', () => {
+    const result = check(
+      baseInput({
+        files: small,
+        config_json: glmConfig,
+        weight_names: ['model.layers.*.mlp.gate.weight', 'model.layers.*.mlp.gate.e_score_correction_bias'],
+      })
+    )
+    expect(result.verdict.ok).toBe(true)
+  })
+
+  it('without weight_names (no index, or an older client) the tensor rule is skipped, never failed', () => {
+    expect(check(baseInput({ files: small, config_json: glmConfig })).verdict.ok).toBe(true)
+  })
+
+  it('without MoE layers (no n_routed_experts) the gate is never built, so the tensor rule does not apply', () => {
+    const result = check(
+      baseInput({
+        files: small,
+        config_json: { architectures: ['DeepseekV3ForCausalLM'], dtype: 'bfloat16' },
+        weight_names: ['model.layers.*.mlp.down_proj.weight'],
+      })
+    )
+    expect(result.verdict.ok).toBe(true)
+  })
+})
+
+describe('normalizeWeightName', () => {
+  it('folds every numeric path segment to *, consecutive ones included', () => {
+    expect(normalizeWeightName('model.layers.12.mlp.experts.7.w1.weight')).toBe(
+      'model.layers.*.mlp.experts.*.w1.weight'
+    )
+    expect(normalizeWeightName('blocks.0.1.attn')).toBe('blocks.*.*.attn')
+    expect(normalizeWeightName('0.weight')).toBe('*.weight')
+  })
+
+  it('leaves digits inside a segment alone', () => {
+    expect(normalizeWeightName('model.layers.3.self_attn.q_proj2.weight')).toBe(
+      'model.layers.*.self_attn.q_proj2.weight'
+    )
+  })
+
+  it('de-duplicates and sorts', () => {
+    expect(normalizeWeightNames(['b.1.x', 'b.2.x', 'a.0.y'])).toEqual(['a.*.y', 'b.*.x'])
   })
 })

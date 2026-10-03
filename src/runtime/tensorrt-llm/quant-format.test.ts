@@ -142,6 +142,21 @@ describe('quantizationFormat', () => {
       hfQuantConfig: {},
       expected: null,
     },
+    {
+      name: 'an MLX checkpoint (top-level quantization, no quantization_config) is unrecognised, never its dtype (Bonsai-27B-mlx-1bit)',
+      config: { dtype: 'bfloat16', quantization: { group_size: 128, bits: 1 } },
+      hfQuantConfig: null,
+      expected: null,
+    },
+    {
+      name: 'quantization_config still decides before an MLX-style quantization object',
+      config: {
+        quantization_config: { quant_method: 'modelopt', quant_algo: 'NVFP4' },
+        quantization: { bits: 4 },
+      },
+      hfQuantConfig: null,
+      expected: 'nvfp4',
+    },
   ]
 
   for (const testCase of cases) {
@@ -180,6 +195,15 @@ describe('describeUnrecognizedQuantization', () => {
     expect(describeUnrecognizedQuantization({ quantization_config: { quant_method: 'awq' } }, null)).toBe(
       'config.json quantization_config.quant_method="awq"'
     )
+  })
+
+  it('names an MLX quantization object, saying it is MLX', () => {
+    expect(
+      describeUnrecognizedQuantization(
+        { dtype: 'bfloat16', quantization: { group_size: 128, bits: 1 } },
+        null
+      )
+    ).toBe('config.json quantization={"group_size":128,"bits":1} (an MLX checkpoint)')
   })
 
   it('names the dtype it saw, including when absent', () => {

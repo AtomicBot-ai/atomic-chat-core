@@ -17,7 +17,7 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../contracts/index.js'
 import { TENSORRT_LLM_ENGINE_ID } from '../environment/index.js'
 import type { InstallationStore, RuntimeDescriptorProvider } from '../environment/index.js'
-import { checkModelCompatibility } from './compatibility.js'
+import { checkModelCompatibility, normalizeWeightNames } from './compatibility.js'
 import type { CheckpointFile, HostMemory, ModelCheckInput } from './compatibility.js'
 import type { JsonObject } from './quant-format.js'
 import { tensorrtLlmSettings } from './settings.js'
@@ -95,6 +95,13 @@ const optionalGpuId = (value: unknown): string | undefined => {
   return invalid('gpu_id must be a string.') as never
 }
 
+/** Folded and de-duplicated here as well, so a caller that sends the raw index keys costs no more. */
+const optionalWeightNames = (value: unknown): string[] | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) return invalid('weight_names must be an array of strings.') as never
+  return normalizeWeightNames(value.map((name, index) => nonEmptyString(name, `weight_names[${index}]`)))
+}
+
 /** `INVALID_ARGUMENT` for anything that does not shape up as `ModelCheckInput`; every field the spec names. */
 export function parseModelCheckInput(body: unknown): ModelCheckInput {
   const raw = object(body, 'the request')
@@ -105,8 +112,10 @@ export function parseModelCheckInput(body: unknown): ModelCheckInput {
     'hf_quant_config_json',
     'files',
     'gpu_id',
+    'weight_names',
   ])
   const gpuId = optionalGpuId(raw['gpu_id'])
+  const weightNames = optionalWeightNames(raw['weight_names'])
   return {
     repository: nonEmptyString(raw['repository'], 'repository'),
     revision: nonEmptyString(raw['revision'], 'revision'),
@@ -114,6 +123,7 @@ export function parseModelCheckInput(body: unknown): ModelCheckInput {
     hf_quant_config_json: nullableJsonObject(raw['hf_quant_config_json'], 'hf_quant_config_json'),
     files: files(raw['files'], 'files'),
     ...(gpuId === undefined ? {} : { gpu_id: gpuId }),
+    ...(weightNames === undefined ? {} : { weight_names: weightNames }),
   }
 }
 

@@ -307,6 +307,15 @@ describe('parseModelCheckInput', () => {
     expect(parseModelCheckInput(body())).not.toHaveProperty('gpu_id')
   })
 
+  it('carries weight_names through folded and de-duplicated, and only when given', () => {
+    expect(
+      parseModelCheckInput(
+        body({ weight_names: ['model.layers.1.mlp.gate.weight', 'model.layers.0.mlp.gate.weight'] })
+      ).weight_names
+    ).toEqual(['model.layers.*.mlp.gate.weight'])
+    expect(parseModelCheckInput(body())).not.toHaveProperty('weight_names')
+  })
+
   it('accepts hf_quant_config_json as an object', () => {
     expect(
       parseModelCheckInput(body({ hf_quant_config_json: { quantization: { quant_algo: 'FP8' } } }))
@@ -328,6 +337,8 @@ describe('parseModelCheckInput', () => {
     [{ ...body(), files: [{ path: 'a', size: -1 }] }, 'file size negative'],
     [{ ...body(), files: [{ path: 'a', size: 1, sha256: 42 }] }, 'file sha256 not string or null'],
     [{ ...body(), gpu_id: 42 }, 'gpu_id not a string'],
+    [{ ...body(), weight_names: 'nope' }, 'weight_names not an array'],
+    [{ ...body(), weight_names: [''] }, 'weight_names with an empty name'],
     [{ ...body(), extra_field: true }, 'unknown top-level field'],
   ])('rejects %#: %s', (input) => {
     expect(() => parseModelCheckInput(input)).toThrow(AtomicCoreError)
