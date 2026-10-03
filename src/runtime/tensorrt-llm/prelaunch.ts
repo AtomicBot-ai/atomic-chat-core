@@ -27,11 +27,17 @@
  * itself — nothing here is a shell command or a network call that would need faking on a non-Linux
  * test host.
  */
-import { readFile, stat } from 'node:fs/promises'
+import { open, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ErrorBody, GpuFacts, RuntimeDescriptor } from '../../contracts/index.js'
-import { checkModelCompatibilityFiles } from './compatibility.js'
+import {
+  checkModelCompatibilityFiles,
+  normalizeWeightNames,
+  safetensorsHeaderLength,
+  safetensorsTensorNames,
+  weightSafetensorsFiles,
+} from './compatibility.js'
 import type {
   CheckpointFile,
   HostMemory,
@@ -108,6 +114,47 @@ async function readJsonObjectFile(path: string): Promise<JsonObject | null> {
   return parsed as JsonObject
 }
 
+/**
+ * The tensor names in one `.safetensors` file's own header (8-byte little-endian length, then JSON):
+ * what the file really holds, unlike `model.safetensors.index.json`, which a repository can ship
+ * stale or copied from another model (PrimeIntellect/GLM-0.5B: an 18k-name index over a 429-tensor
+ * file). `undefined` for a file that does not shape up as safetensors — the shape checks are then
+ * skipped, never failed on a header this core cannot read.
+ */
+async function tensorNamesOnDisk(path: string): Promise<string[] | undefined> {
+  const handle = await open(path, 'r').catch(() => undefined)
+  if (handle === undefined) return undefined
+  try {
+    const prefix = Buffer.alloc(8)
+    if ((await handle.read(prefix, 0, 8, 0)).bytesRead !== 8) return undefined
+    const length = safetensorsHeaderLength(prefix)
+    if (length === undefined) return undefined
+    const header = Buffer.alloc(length)
+    if ((await handle.read(header, 0, length, 8)).bytesRead !== length) return undefined
+    return safetensorsTensorNames(JSON.parse(header.toString('utf8')))
+  } catch {
+    return undefined
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Every weight file's tensor names, folded; `undefined` when there is none or any header is unreadable. */
+async function weightNamesOnDisk(
+  dir: string,
+  files: readonly CheckpointFile[]
+): Promise<string[] | undefined> {
+  const weights = weightSafetensorsFiles(files)
+  if (weights.length === 0) return undefined
+  const names: string[] = []
+  for (const file of weights) {
+    const own = await tensorNamesOnDisk(safeJoin(dir, file.path))
+    if (own === undefined) return undefined
+    names.push(...own)
+  }
+  return normalizeWeightNames(names)
+}
+
 export interface VerifyModelFilesOptions {
   /** The card this load is about to use; already resolved (and possibly substituted) by the caller. */
   gpuId: string
@@ -143,6 +190,9 @@ export async function verifyModelFilesAndCompatibility(
   }
   // Read whenever the file is actually there, independent of model.yml's own files list (finding 4).
   const hfQuantConfigJson = await readJsonObjectFile(join(model.dir, HF_QUANT_CONFIG_FILE))
+  // The same tensor names the download-time check gets from the app, so a checkpoint downloaded
+  // before that check knew to look (or by an older app) is refused here, before any container.
+  const weightNames = await weightNamesOnDisk(model.dir, model.files)
 
   const input: ModelCheckInput = {
     repository: model.repository ?? '',
@@ -151,6 +201,7 @@ export async function verifyModelFilesAndCompatibility(
     hf_quant_config_json: hfQuantConfigJson,
     files: model.files,
     gpu_id: options.gpuId,
+    ...(weightNames === undefined ? {} : { weight_names: weightNames }),
   }
   const result = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemory, options.memory)
   if (!result.ok) {

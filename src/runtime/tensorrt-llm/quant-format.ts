@@ -11,8 +11,8 @@
  * `nvidia/Llama-3.3-70B-Instruct-NVFP4`), so `hf_quant_config.json` must always be checked before
  * `dtype`/`torch_dtype` is trusted. Steps apply in order, stopping at the first that matches; `null`
  * means the naming rule does not recognise the checkpoint (an unsupported `quant_method` such as
- * `awq`/`gptq`, an `fp8` checkpoint without the block size this engine loads, or a `dtype` other
- * than `bfloat16`/`float16`) — the caller rejects that as an unsupported format, never guesses.
+ * `awq`/`gptq`, an `fp8` checkpoint without the block size this engine loads, an MLX checkpoint's
+ * top-level `quantization`, or a `dtype` other than `bfloat16`/`float16`) — the caller rejects that as an unsupported format, never guesses.
  *
  * Pure and network-free, like every file in this module (design D12).
  */
@@ -130,7 +130,17 @@ export function quantizationFormat(
   }
   const fromConfig = fromConfigQuantizationConfig(configJson)
   if (fromConfig !== undefined) return fromConfig
+  // An MLX checkpoint names its quantization in a top-level `quantization` object (`bits`,
+  // `group_size`) and keeps the unquantized model's `dtype`, so stepping on to `dtype` would call
+  // its packed low-bit weights `bf16` and pass the check (prism-ml/Bonsai-27B-mlx-1bit on the
+  // Windows acceptance machine). The engine cannot read MLX packing: recognised as not supported.
+  if (hasMlxQuantization(configJson)) return null
   return fromDtype(configJson)
+}
+
+/** `config.json`'s MLX-style top-level `quantization` object; `quantization_config` is checked before it. */
+function hasMlxQuantization(configJson: JsonObject): boolean {
+  return asObject(configJson.quantization) !== undefined
 }
 
 /**
@@ -180,6 +190,9 @@ export function describeUnrecognizedQuantization(
       return `config.json quantization_config.quant_method="fp8" weight_block_size=${JSON.stringify(quantizationConfig.weight_block_size ?? null)}`
     }
     return `config.json quantization_config.quant_method=${JSON.stringify(quantMethod ?? null)}`
+  }
+  if (hasMlxQuantization(configJson)) {
+    return `config.json quantization=${JSON.stringify(configJson.quantization)} (an MLX checkpoint)`
   }
   return `config.json dtype=${JSON.stringify(configDtype(configJson) ?? null)}`
 }

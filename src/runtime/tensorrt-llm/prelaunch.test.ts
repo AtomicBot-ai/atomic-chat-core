@@ -177,6 +177,89 @@ describe('verifyModelFilesAndCompatibility', () => {
     })
   })
 
+  /** A real `.safetensors` file: 8-byte little-endian header length, the JSON header, 4 bytes per tensor. */
+  function safetensors(names: string[]): Buffer {
+    const header: Record<string, unknown> = {}
+    names.forEach((name, index) => {
+      header[name] = { dtype: 'F32', shape: [1], data_offsets: [index * 4, index * 4 + 4] }
+    })
+    const json = Buffer.from(JSON.stringify(header), 'utf8')
+    const prefix = Buffer.alloc(8)
+    prefix.writeBigUInt64LE(BigInt(json.length))
+    return Buffer.concat([prefix, json, Buffer.alloc(names.length * 4)])
+  }
+
+  async function writeGlmCheckpoint(
+    tensors: string[],
+    index?: Record<string, string>
+  ): Promise<CheckpointFile[]> {
+    await writeCheckpoint({ architectures: ['Glm4MoeForCausalLM'], dtype: 'bfloat16', n_routed_experts: 8 })
+    const weights = safetensors(tensors)
+    await writeFile(join(dir, 'model.safetensors'), weights)
+    if (index !== undefined) {
+      await writeFile(join(dir, 'model.safetensors.index.json'), JSON.stringify({ weight_map: index }))
+    }
+    return [{ path: 'model.safetensors', size: weights.length, sha256: 'a'.repeat(64) }]
+  }
+
+  const glmDescriptor = () => baseDescriptor({ supported_architectures: ['Glm4MoeForCausalLM'] })
+
+  it("reads the weight files' own safetensors headers: a gate architecture without e_score_correction_bias refuses before any container", async () => {
+    const glmFiles = await writeGlmCheckpoint([
+      'model.layers.1.mlp.router.gate.weight',
+      'model.layers.1.mlp.expert_bias',
+    ])
+    await expect(
+      verifyModelFilesAndCompatibility(
+        { ...model(), files: glmFiles },
+        glmDescriptor(),
+        gpus,
+        memAvailable(0),
+        options
+      )
+    ).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
+  })
+
+  it('trusts the file over a model.safetensors.index.json that names tensors the file does not hold (PrimeIntellect/GLM-0.5B)', async () => {
+    const glmFiles = await writeGlmCheckpoint(['model.layers.1.mlp.router.gate.weight'], {
+      'model.layers.1.mlp.gate.weight': 'model.safetensors',
+      'model.layers.1.mlp.gate.e_score_correction_bias': 'model.safetensors',
+    })
+    await expect(
+      verifyModelFilesAndCompatibility(
+        { ...model(), files: glmFiles },
+        glmDescriptor(),
+        gpus,
+        memAvailable(0),
+        options
+      )
+    ).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
+  })
+
+  it('passes the same architecture whose file holds e_score_correction_bias', async () => {
+    const glmFiles = await writeGlmCheckpoint([
+      'model.layers.1.mlp.gate.weight',
+      'model.layers.1.mlp.gate.e_score_correction_bias',
+    ])
+    await expect(
+      verifyModelFilesAndCompatibility(
+        { ...model(), files: glmFiles },
+        glmDescriptor(),
+        gpus,
+        memAvailable(0),
+        options
+      )
+    ).resolves.toMatchObject({ architectures: ['Glm4MoeForCausalLM'] })
+  })
+
+  it('skips the tensor check, never fails it, when a weight file has no readable safetensors header', async () => {
+    await writeCheckpoint({ architectures: ['Glm4MoeForCausalLM'], dtype: 'bfloat16', n_routed_experts: 8 })
+    // writeCheckpoint's model.safetensors is filler bytes, not a header.
+    await expect(
+      verifyModelFilesAndCompatibility(model(), glmDescriptor(), gpus, memAvailable(0), options)
+    ).resolves.toMatchObject({ architectures: ['Glm4MoeForCausalLM'] })
+  })
+
   it('re-checks against the current card: a compute capability the format no longer supports refuses the load', async () => {
     await writeCheckpoint()
     const tooOld = [gpu({ gpu_id: 'gpu-0', compute_capability: '7.5' })]

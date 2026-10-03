@@ -66,6 +66,108 @@ export interface ModelCheckInput {
   files: CheckpointFile[]
   /** Omitted or not found on this host falls back to `selectLaunchGpu`'s "most free memory" rule. */
   gpu_id?: string
+  /**
+   * The checkpoint's tensor names, read from the headers of its weight `.safetensors` files (never
+   * from `model.safetensors.index.json`, which can be stale or another model's), with numeric path
+   * segments optionally folded to `*` (`normalizeWeightName`). Omitted when the caller could not
+   * read the headers or predates the field: the checks that need tensor names are then skipped,
+   * never failed.
+   */
+  weight_names?: string[]
+}
+
+/**
+ * `model.layers.12.mlp.experts.7.w1.weight` → `model.layers.*.mlp.experts.*.w1.weight`: a large MoE
+ * index (DeepSeek-V3: ~90k names) folds to a few hundred, and no shape check here looks at indices.
+ */
+export function normalizeWeightName(name: string): string {
+  return name.replace(/(?<=^|\.)\d+(?=\.|$)/g, '*')
+}
+
+/** Folded and de-duplicated tensor names, in a stable order. */
+export function normalizeWeightNames(names: Iterable<string>): string[] {
+  return [...new Set([...names].map(normalizeWeightName))].sort()
+}
+
+/** A safetensors header larger than this is not a header this core reads (real ones are KB to a few MB). */
+const MAX_SAFETENSORS_HEADER_BYTES = 100 * 1024 * 1024
+
+/** The header length a `.safetensors` file's first 8 bytes declare (little-endian u64); `undefined` if implausible. */
+export function safetensorsHeaderLength(prefix: Uint8Array): number | undefined {
+  if (prefix.length < 8) return undefined
+  const length = new DataView(prefix.buffer, prefix.byteOffset, 8).getBigUint64(0, true)
+  return length > 0n && length <= BigInt(MAX_SAFETENSORS_HEADER_BYTES) ? Number(length) : undefined
+}
+
+/** The tensor names a parsed safetensors header lists (its keys, minus `__metadata__`); `undefined` if it is not an object. */
+export function safetensorsTensorNames(header: unknown): string[] | undefined {
+  if (header === null || typeof header !== 'object' || Array.isArray(header)) return undefined
+  return Object.keys(header).filter((key) => key !== '__metadata__')
+}
+
+/**
+ * Architectures whose MoE layers TensorRT-LLM builds with `DeepseekV3Gate`, which refuses to load
+ * without an `e_score_correction_bias` tensor next to the router weight (TensorRT-LLM v1.3.0rc29,
+ * `_torch/models/modeling_deepseekv3.py` `DeepseekV3Gate.load_weights`; `modeling_glm.py` builds
+ * `Glm4Moe` with the same gate). `NemotronH*` also uses the gate, but only in its MoE layers, and a
+ * dense Nemotron-H has none, so it is not listed: a rule here must never refuse a model that loads.
+ */
+const CORRECTION_BIAS_GATED_ARCHITECTURES: ReadonlySet<string> = new Set([
+  'DeepseekV3ForCausalLM',
+  'DeepseekV32ForCausalLM',
+  'GlmMoeDsaForCausalLM',
+  'Glm4MoeForCausalLM',
+])
+
+const CORRECTION_BIAS_TENSOR = 'e_score_correction_bias'
+
+const NEMOTRON_H_ARCHITECTURE = /^NemotronH/
+
+/**
+ * A checkpoint whose architecture is supported but whose own shape the engine image cannot load —
+ * what the architecture name alone cannot tell (Windows acceptance machine, 2026-10-03):
+ *
+ * - Nemotron-H with dense MLP layers: a `-` in `hybrid_override_pattern`. The `transformers` 5.5.4
+ *   in the 1.3.0rc29 image maps that pattern through `M`/`E`/`*` only and fails with
+ *   `KeyError: '-'` before TensorRT-LLM (which does support `-`) is reached
+ *   (NVIDIA-Nemotron-3-Nano-4B, Nano-9B-v2). Drop this once a descriptor's image ships a
+ *   `transformers` that knows `-`.
+ * - A `DeepseekV3Gate` architecture with MoE layers (`n_routed_experts > 0`) whose tensors have no
+ *   `e_score_correction_bias` (PrimeIntellect/GLM-0.5B, saved in its training framework's own
+ *   layout — `mlp.router.gate.weight`, `mlp.expert_bias` — not the Hugging Face one TensorRT-LLM
+ *   reads): `AssertionError` while the weights load. Needs `weight_names`; without them it is not
+ *   checked.
+ *
+ * `null` when none applies.
+ */
+function checkpointShapeProblem(
+  architecture: string,
+  configJson: JsonObject,
+  weightNames: readonly string[] | undefined
+): { message: string; details: string } | null {
+  if (NEMOTRON_H_ARCHITECTURE.test(architecture)) {
+    const pattern = configJson.hybrid_override_pattern
+    if (typeof pattern === 'string' && pattern.includes('-')) {
+      return {
+        message:
+          'This engine release cannot load Nemotron-H checkpoints with dense MLP layers ("-" in hybrid_override_pattern).',
+        details: `architecture=${architecture} hybrid_override_pattern=${pattern}`,
+      }
+    }
+  }
+  if (
+    CORRECTION_BIAS_GATED_ARCHITECTURES.has(architecture) &&
+    weightNames !== undefined &&
+    weightNames.length > 0 &&
+    (positiveNumberField(configJson, 'n_routed_experts') ?? 0) > 0 &&
+    !weightNames.some((name) => name.endsWith(CORRECTION_BIAS_TENSOR))
+  ) {
+    return {
+      message: `This checkpoint has no ${CORRECTION_BIAS_TENSOR} tensors, which ${architecture} needs in its MoE router on this engine.`,
+      details: `architecture=${architecture} missing=${CORRECTION_BIAS_TENSOR}`,
+    }
+  }
+  return null
 }
 
 /**
@@ -168,6 +270,11 @@ function selectWeightFiles(files: readonly CheckpointFile[]): readonly Checkpoin
   if (anySafetensors.length > 0) return anySafetensors
 
   return files.filter((file) => isLegacyWeightFile(file.path))
+}
+
+/** The weight files whose safetensors headers hold the checkpoint's tensor names (legacy `.bin`/`.pth` excluded). */
+export function weightSafetensorsFiles(files: readonly CheckpointFile[]): readonly CheckpointFile[] {
+  return selectWeightFiles(files).filter((file) => file.path.toLowerCase().endsWith(SAFETENSORS_SUFFIX))
 }
 
 /** Weight bytes for the memory check: the sum of `selectWeightFiles(files)`. */
@@ -661,6 +768,18 @@ export function checkModelCompatibilityFiles(
             ...(architecture !== undefined ? { details: architecture } : {}),
           },
         },
+        []
+      ),
+    }
+  }
+
+  const shapeProblem = checkpointShapeProblem(architecture, input.config_json, input.weight_names)
+  if (shapeProblem !== null) {
+    return {
+      ok: false,
+      verdict: buildCompatibility(
+        context,
+        { ok: false, error: { code: 'MODEL_INCOMPATIBLE', ...shapeProblem } },
         []
       ),
     }
