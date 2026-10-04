@@ -17,6 +17,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
+import { WINDOWS_MANIFEST_ID } from './environment-manifest.js'
 
 export interface WindowsEnvironmentRecord {
   schema_version: 1
@@ -65,7 +66,8 @@ export function parseWindowsEnvironmentRecord(input: unknown): WindowsEnvironmen
   if (typeof distribution?.name !== 'string' || distribution.name === '')
     throw invalid('no distribution name')
   if (typeof distribution.path !== 'string' || distribution.path === '') throw invalid('no distribution path')
-  if (typeof raw.manifest_id !== 'string' || !/^windows-r[0-9]+$/.test(raw.manifest_id)) {
+  // The manifest's own id rule, so a Windows on Arm environment (`windows-arm64-r<N>`) reads back too.
+  if (typeof raw.manifest_id !== 'string' || !WINDOWS_MANIFEST_ID.test(raw.manifest_id)) {
     throw invalid('manifest_id is not a Windows manifest id')
   }
   if (typeof raw.imported_at !== 'string') throw invalid('no imported_at')

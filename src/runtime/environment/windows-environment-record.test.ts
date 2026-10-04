@@ -45,11 +45,18 @@ describe('WindowsEnvironmentRecordStore', () => {
 })
 
 describe('parseWindowsEnvironmentRecord', () => {
+  it('reads back a Windows on Arm environment (windows-arm64-r<N>), which it wrote itself', () => {
+    expect(parseWindowsEnvironmentRecord({ ...RECORD, manifest_id: 'windows-arm64-r1' })).toMatchObject({
+      manifest_id: 'windows-arm64-r1',
+    })
+  })
+
   it.each([
     ['another executor', { ...RECORD, executor: 'linux-docker' }],
     ['no distribution name', { ...RECORD, distribution: { ...RECORD.distribution, name: '' } }],
     ['no path', { ...RECORD, distribution: { name: 'AtomicChat' } }],
     ['schema_version 2', { ...RECORD, schema_version: 2 }],
+    ['a manifest id of no Windows architecture', { ...RECORD, manifest_id: 'windows-arm-r1' }],
   ])('refuses %s', (_label, value) => {
     expect(() => parseWindowsEnvironmentRecord(value)).toThrow(/Invalid Windows environment record/)
   })

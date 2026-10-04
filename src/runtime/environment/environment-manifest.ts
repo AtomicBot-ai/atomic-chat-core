@@ -38,7 +38,7 @@ const LINUX_MANIFEST_ID = /^linux-r[0-9]+$/
  * (`windows-arm64.json`, its own file: every released core parses `windows.json` strictly and would
  * refuse an arm64 rootfs there). The id names the architecture its rootfs is for.
  */
-const WINDOWS_MANIFEST_ID = /^windows(-arm64)?-r[0-9]+$/
+export const WINDOWS_MANIFEST_ID = /^windows(-arm64)?-r[0-9]+$/
 
 // Copied character-for-character from `windows.schema.json`'s `definitions.rootfs`.
 /** `rootfs.url`: HTTPS only, no whitespace. */
