@@ -196,7 +196,10 @@ const consoleExec = (
 const UNTIL_POLL_MS = 5_000
 
 const nodeIo = (): WindowsHostStepIo => {
-  const systemRoot = (process.env['SystemRoot'] ?? process.env['SYSTEMROOT'] ?? 'C:\\Windows').replace(/[\\/]+$/, '')
+  const systemRoot = (process.env['SystemRoot'] ?? process.env['SYSTEMROOT'] ?? 'C:\\Windows').replace(
+    /[\\/]+$/,
+    ''
+  )
   const taskkill = `${systemRoot}\\System32\\taskkill.exe`
   return {
     exec: (command, args, options) =>

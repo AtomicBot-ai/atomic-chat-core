@@ -188,7 +188,10 @@ describe('probeWindowsHost', () => {
 
   it('a WSL that answers --status while Windows waits for its restart is not ready: no VM boots', async () => {
     const windows = fakeWindows(
-      machine({ wsl: { installed: true, wsl_version: '2.4.4.0', ready: true, vm_boots: false }, reboot_pending: true })
+      machine({
+        wsl: { installed: true, wsl_version: '2.4.4.0', ready: true, vm_boots: false },
+        reboot_pending: true,
+      })
     )
     const facts = await probeWindowsHost(windows.host.probeDeps)
     expect(facts.wsl).toEqual({ installed: true, version: '2.4.4', ready: false, reboot_pending: true })
