@@ -4,7 +4,13 @@ import type { BeginOperation, ManagedHostReceipt, Sha256Digest } from '../../con
 import { managedSharedPaths } from '../../config/index.js'
 import { TAKEOVER_MUTEX_TTL_MS } from '../../lock/index.js'
 import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
-import { classifyReceipt, withReceipt, OperationStore, type OwnerIdentity } from './store.js'
+import {
+  classifyReceipt,
+  operationFileName,
+  withReceipt,
+  OperationStore,
+  type OwnerIdentity,
+} from './store.js'
 
 const ROOT = '/shared'
 const PATHS = managedSharedPaths(ROOT)
@@ -686,5 +692,12 @@ describe('receipts are used once (OP03)', () => {
   it('treats a receipt for another authorization as new, not as a replay', () => {
     const recorded = withReceipt(base, receipt())
     expect(classifyReceipt(recorded, receipt({ nonce: 'once-2' }))).toBe('fresh')
+  })
+})
+
+describe('operationFileName', () => {
+  it('names one JSON file per operation, with an id that could not climb out of the folder', () => {
+    expect(operationFileName('op-1')).toMatch(/\.json$/)
+    expect(operationFileName('../escape/op')).not.toMatch(/[\\/]/)
   })
 })

@@ -6,7 +6,8 @@
  */
 import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
@@ -960,18 +961,71 @@ describe('ManagedTextLifecycle: session gateway', () => {
   })
 })
 
+describe('ManagedTextLifecycle: a stream the engine cuts short', () => {
+  it("ends with an error event in the adapter's words from the session's log tail, then [DONE]", async () => {
+    // A real engine port: the gateway forwards to it, and it ends an event stream without [DONE].
+    const engine = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n')
+    })
+    await new Promise<void>((resolve) => engine.listen(0, '127.0.0.1', () => resolve()))
+    const port = (engine.address() as AddressInfo).port
+    const cutting: ManagedTextAdapter<Record<string, never>> = {
+      ...beta,
+      id: 'cutting-engine',
+      routes: [
+        { method: 'GET', path: '/v1/models' },
+        { method: 'POST', path: '/v1/chat/completions' },
+      ],
+      describeStreamFailure: (tail) => /RequestError: (.+)/.exec(tail)?.[1] ?? null,
+    }
+    try {
+      await build({ deployment: createDesktopManagedDeployment({ allocateHostPort: async () => port }) }, [
+        cutting,
+      ])
+      const info = await lifecycle.load(
+        request_({ installation: { ...betaInstallation, adapter_id: 'cutting-engine' } })
+      )
+      docker.log(docker.last().id, 'RequestError: the KV cache holds 7 blocks')
+      const body = await new Promise<string>((resolve, reject) => {
+        const req = request(
+          {
+            host: '127.0.0.1',
+            port: info.port,
+            path: '/v1/chat/completions',
+            method: 'POST',
+            headers: {
+              'host': '127.0.0.1',
+              'authorization': `Bearer ${info.api_key}`,
+              'content-type': 'application/json',
+            },
+          },
+          (res) => {
+            let text = ''
+            res.on('data', (chunk: Buffer) => (text += chunk.toString('utf8')))
+            res.on('end', () => resolve(text))
+          }
+        )
+        req.on('error', reject)
+        req.end(JSON.stringify({ model: 'org/model-a', stream: true, messages: [] }))
+      })
+      expect(body).toContain('"content":"Hi"')
+      expect(body).toContain('"code":"stream_interrupted"')
+      expect(body).toContain('the KV cache holds 7 blocks')
+      expect(body.trimEnd().endsWith('data: [DONE]')).toBe(true)
+    } finally {
+      await new Promise<void>((resolve) => engine.close(() => resolve()))
+    }
+  })
+})
+
 describe('ManagedTextLifecycle: crash after ready', () => {
   it('reports session:died with a null pid, closes the gateway, stops the heartbeat and keeps the log tail', async () => {
     await build()
     const info = await lifecycle.load(request_())
     const id = docker.last().id
     docker.exit(id, 1, ['CUDA out of memory. Tried to allocate 1.00 GiB'])
-    // Bounded by time, not by a count of ticks: the journal write on the way is real disk I/O, which
-    // a slow CI runner did not finish within 500 setImmediate turns.
-    const deadline = Date.now() + 5_000
-    while (!emitted.some((e) => e.name === 'session:died') && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 5))
-    }
+    await until(() => emitted.some((e) => e.name === 'session:died'))
     expect(emitted.find((e) => e.name === 'session:died')?.payload).toEqual({
       provider: 'llamacpp-upstream',
       pid: null,
@@ -1006,9 +1060,7 @@ describe('ManagedTextLifecycle: a crash after ready reads the tail, not the whol
       'served 2000 requests',
       'segfault',
     ])
-    for (let i = 0; i < 500 && !emitted.some((e) => e.name === 'session:died'); i++) {
-      await new Promise((resolve) => setImmediate(resolve))
-    }
+    await until(() => emitted.some((e) => e.name === 'session:died'))
     expect((emitted.find((e) => e.name === 'session:died')?.payload as { message: string }).message).toBe(
       'alpha exited with 1'
     )
@@ -1017,6 +1069,15 @@ describe('ManagedTextLifecycle: a crash after ready reads the tail, not the whol
 })
 
 /** Lets every pending microtask and immediate run, enough for the lifecycle to reach its next await on docker. */
+/**
+ * Waits for `done` by wall time, up to `ms`: a monitor's way to it goes through real disk I/O (the
+ * journal), which a slow CI runner does not finish within any fixed number of setImmediate turns.
+ */
+async function until(done: () => boolean, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms
+  while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
+}
+
 async function settle(rounds = 50): Promise<void> {
   for (let i = 0; i < rounds; i++) await new Promise((resolve) => setImmediate(resolve))
 }
@@ -1117,7 +1178,7 @@ describe('ManagedTextLifecycle: teardown races (review round 1)', () => {
     const first = docker.last().id
     const release = gateStops()
     docker.exit(first, 1, ['segfault'])
-    for (let i = 0; i < 500 && lifecycle.reservations()[0]?.state !== 'stopping'; i++) await settle(1)
+    await until(() => lifecycle.reservations()[0]?.state === 'stopping')
     expect(lifecycle.reservations()).toEqual([expect.objectContaining({ state: 'stopping' })])
 
     const loading = lifecycle.load(request_())
@@ -1137,7 +1198,7 @@ describe('ManagedTextLifecycle: teardown races (review round 1)', () => {
     await lifecycle.load(request_())
     docker.stopConfirms = false
     docker.exit(docker.last().id, 1, ['gone'])
-    for (let i = 0; i < 500 && !emitted.some((e) => e.name === 'session:died'); i++) await settle(1)
+    await until(() => emitted.some((e) => e.name === 'session:died'))
     expect(lifecycle.reservations()).toEqual([expect.objectContaining({ state: 'stop-unconfirmed' })])
     expect(journal.list()).toHaveLength(1)
   })
@@ -1353,7 +1414,7 @@ describe('ManagedTextLifecycle: carry-forward into task 2.14', () => {
     })
     const dead = await lifecycle.load(request_())
     docker.exit(docker.last().id, 1, ['segfault'])
-    for (let i = 0; i < 500 && releaseLogs === undefined; i++) await settle(1)
+    await until(() => releaseLogs !== undefined)
     expect(releaseLogs).toBeDefined()
     expect(lifecycle.findSession('org/model-a')).toBeUndefined()
 

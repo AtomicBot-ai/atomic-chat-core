@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -244,6 +244,71 @@ describe('verifyModelFilesAndCompatibility', () => {
     await expect(
       verifyModelFilesAndCompatibility(
         { ...model(), files: glmFiles },
+        glmDescriptor(),
+        gpus,
+        memAvailable(0),
+        options
+      )
+    ).resolves.toMatchObject({ architectures: ['Glm4MoeForCausalLM'] })
+  })
+
+  /** 8-byte little-endian `length`, then `body` as the header bytes (which may not match the length). */
+  function rawSafetensors(length: bigint, body: string): Buffer {
+    const prefix = Buffer.alloc(8)
+    prefix.writeBigUInt64LE(length)
+    return Buffer.concat([prefix, Buffer.from(body, 'utf8')])
+  }
+
+  it.each<[string, Buffer]>([
+    ['shorter than its 8-byte length prefix', Buffer.from([1, 2, 3])],
+    ['a zero header length', rawSafetensors(0n, '{}')],
+    ['a header length past any real one', rawSafetensors(200n * 1024n * 1024n, '{}')],
+    ['a header cut short of its declared length', rawSafetensors(1_000n, '{"a":1}')],
+    ['a header that is not JSON', rawSafetensors(5n, 'nope!')],
+    ['a header that is a JSON array, not an object', rawSafetensors(2n, '[]')],
+  ])('skips the tensor check, never fails the load, for a weight file with %s', async (_label, weights) => {
+    await writeCheckpoint({ architectures: ['Glm4MoeForCausalLM'], dtype: 'bfloat16', n_routed_experts: 8 })
+    await writeFile(join(dir, 'model.safetensors'), weights)
+    const glmFiles = [{ path: 'model.safetensors', size: weights.length, sha256: null }]
+    await expect(
+      verifyModelFilesAndCompatibility(
+        { ...model(), files: glmFiles },
+        glmDescriptor(),
+        gpus,
+        memAvailable(0),
+        options
+      )
+    ).resolves.toMatchObject({ architectures: ['Glm4MoeForCausalLM'] })
+  })
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'skips the tensor check for a weight file it cannot open (a root or Windows host opens it anyway)',
+    async () => {
+      const glmFiles = await writeGlmCheckpoint(['model.layers.1.mlp.router.gate.weight'])
+      await chmod(join(dir, 'model.safetensors'), 0o000)
+      try {
+        await expect(
+          verifyModelFilesAndCompatibility(
+            { ...model(), files: glmFiles },
+            glmDescriptor(),
+            gpus,
+            memAvailable(0),
+            options
+          )
+        ).resolves.toMatchObject({ architectures: ['Glm4MoeForCausalLM'] })
+      } finally {
+        await chmod(join(dir, 'model.safetensors'), 0o644)
+      }
+    }
+  )
+
+  it('has no tensor names to check for a legacy .bin checkpoint', async () => {
+    await writeCheckpoint({ architectures: ['Glm4MoeForCausalLM'], dtype: 'bfloat16', n_routed_experts: 8 })
+    await writeFile(join(dir, 'pytorch_model.bin'), Buffer.alloc(16, 1))
+    const binFiles = [{ path: 'pytorch_model.bin', size: 16, sha256: null }]
+    await expect(
+      verifyModelFilesAndCompatibility(
+        { ...model(), files: binFiles },
         glmDescriptor(),
         gpus,
         memAvailable(0),
