@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,12 +13,25 @@ let wsl: Wsl
 const writeState = (state: Record<string, unknown>): void =>
   writeFileSync(join(dir, 'state.json'), JSON.stringify(state))
 
-/** Every argv the fake `wsl.exe` was started with, in order, and whether it was asked for UTF-8. */
-const calls = (): { argv: string[]; wsl_utf8: string | null }[] =>
-  readFileSync(join(dir, 'calls.jsonl'), 'utf8')
-    .trim()
+/**
+ * Every argv the fake `wsl.exe` was started with, in order, and whether it was asked for UTF-8. A
+ * process still starting has no line yet, and one still appending has a partial line: neither is a
+ * call yet (the windows-11-arm runner read the log mid-append).
+ */
+const calls = (): { argv: string[]; wsl_utf8: string | null }[] => {
+  const path = join(dir, 'calls.jsonl')
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8')
     .split('\n')
+    .filter((line) => line.endsWith('}'))
     .map((line) => JSON.parse(line) as { argv: string[]; wsl_utf8: string | null })
+}
+
+/** Waits by wall time for `done`, up to `ms`: how long a node process takes to start varies by runner. */
+async function until(done: () => boolean, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms
+  while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'fake-wsl-'))
@@ -123,7 +136,7 @@ describe('createWsl — a command inside one distribution', () => {
     controller.abort()
     const out = await wsl.distribution('AtomicChat').exec(['true'], { signal: controller.signal })
     expect(out.code).toBeNull()
-    expect(() => calls()).toThrow()
+    expect(calls()).toEqual([])
   })
 
   it('keeps the start and the end of an output larger than its cap, dropping the middle', async () => {
@@ -178,8 +191,9 @@ describe('createWsl — wsl.exe’s own commands', () => {
 describe('createWsl — holding a distribution', () => {
   it('starts an attached `sleep infinity` in the distribution and reports its end when the VM stops', async () => {
     const hold = wsl.distribution('AtomicChat').hold()
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    expect(calls().at(-1)?.argv).toEqual(['-d', 'AtomicChat', '--exec', 'sleep', 'infinity'])
+    const holding = ['-d', 'AtomicChat', '--exec', 'sleep', 'infinity']
+    await until(() => JSON.stringify(calls().at(-1)?.argv) === JSON.stringify(holding))
+    expect(calls().at(-1)?.argv).toEqual(holding)
 
     // `wsl --shutdown` from anywhere: the hold process ends, and the core learns of it.
     await wsl.command(['--shutdown'])
