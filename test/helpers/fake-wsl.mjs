@@ -297,6 +297,11 @@ export function answerWsl(state, argv, input = undefined, utf8 = true) {
             )
           )
         : result(0, own('Default Version: 2\r\n'))
+    case '--system':
+      // `--system --exec <argv>`: WSL's own system distribution, which boots the VM.
+      return state.ready === false || state.vm_boots === false
+        ? result(1, own('The virtual machine could not be started because a required feature is not installed.\r\n'))
+        : result(0, '')
     case '--list': {
       const distributions = state.distributions ?? []
       if (distributions.length === 0) {

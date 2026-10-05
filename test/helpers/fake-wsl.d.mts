@@ -38,6 +38,8 @@ export interface FakeWslState {
   wsl_version?: string
   /** False: `--status` fails, no VM can start (a component off). */
   ready?: boolean
+  /** False: `--status` answers but no VM boots yet (the restart after `wsl --install` is still owed). */
+  vm_boots?: boolean
   distributions?: FakeWslDistribution[]
   guests?: Record<string, FakeWslGuest>
   /** What a freshly imported distribution's guest looks like. */

@@ -32,6 +32,13 @@ class FakeWindows {
   readyAfterInstall = false
   /** CBS `RebootPending` after the install: `--status` still exits 0 then (live acceptance). */
   restartPendingAfterInstall = false
+  /**
+   * With no restart needed, `wsl --install` starts its Ubuntu and never exits: the first-run prompt
+   * waits for a user name in a console nobody sees (live, 2026-10-05). Only `until` ends it here.
+   */
+  hangsInFirstRun = false
+  /** A distribution runs (`wsl --list --running` exits 0). */
+  distributionRunning = false
   written = new Map<string, string>()
 
   deps(request: Record<string, unknown>): HostStepExecutorDeps {
@@ -58,6 +65,13 @@ class FakeWindows {
         }
         if (argv.join(' ') === 'wsl.exe --install') {
           if (this.installExit === 0 || this.installExit === 3010) this.packageInstalled = true
+          if (this.hangsInFirstRun) {
+            this.distributionRunning = true
+            // Ubuntu's first-run prompt: the install exits only when `until` ends it, or at the deadline.
+            return options?.until !== undefined && (await options.until())
+              ? { code: 0, stdout: '', stderr: '', cutShort: true }
+              : { code: null, stdout: '', stderr: 'deadline' }
+          }
           return {
             code: this.installExit,
             stdout: 'Installing: Windows Subsystem for Linux\n',
@@ -65,6 +79,11 @@ class FakeWindows {
           }
         }
         if (!this.packageInstalled && argv[0] === 'wsl.exe' && argv[1] !== '--status') return stubRefusal
+        if (argv.join(' ') === 'wsl.exe --list --running') {
+          return this.distributionRunning
+            ? { code: 0, stdout: 'Ubuntu (Default)\n', stderr: '' }
+            : { code: -1, stdout: 'There are no running distributions.\n', stderr: '' }
+        }
         if (argv.join(' ') === 'wsl.exe --status') {
           return this.readyAfterInstall
             ? { code: 0, stdout: 'Default Version: 2\n', stderr: '' }
@@ -101,8 +120,9 @@ const run = async (windows: FakeWindows, over: Record<string, unknown> = {}): Pr
   executeHostStep(REQUEST, windows.deps(request(over)))
 
 describe('the windows.enable-wsl recipe', () => {
-  it('is two fixed commands with no parameter at all, and the digests bind exactly that', () => {
+  it('is three fixed commands with no parameter at all, and the digests bind exactly that', () => {
     expect(ENABLE_WSL_RECIPE.install).toEqual(['wsl.exe', '--install'])
+    expect(ENABLE_WSL_RECIPE.watch).toEqual(['wsl.exe', '--list', '--running'])
     expect(ENABLE_WSL_RECIPE.verify).toEqual(['wsl.exe', '--status'])
     expect(ENABLE_WSL_RECIPE_DIGEST).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(enableWslParametersDigest({})).toBe(ENABLE_WSL_PARAMETERS_DIGEST)
@@ -121,6 +141,7 @@ describe('executeHostStep — windows.enable-wsl', () => {
     expect(result.nonce).toBe('once-7')
     expect(result.parameters_digest).toBe(ENABLE_WSL_PARAMETERS_DIGEST)
     expect(windows.calls).toEqual([
+      ['wsl.exe', '--list', '--running'],
       ['wsl.exe', '--install'],
       ['wsl.exe', '--status'],
     ])
@@ -151,6 +172,29 @@ describe('executeHostStep — windows.enable-wsl', () => {
     expect(result.outcome).toBe('reboot-required')
   })
 
+  it('ends an install stuck in its Ubuntu first-run prompt once a distribution runs, and reports completed', async () => {
+    const windows = new FakeWindows()
+    windows.hangsInFirstRun = true
+    windows.readyAfterInstall = true
+    // CBS can keep an empty RebootPending that no restart clears; a VM that ran outweighs it.
+    windows.restartPendingAfterInstall = true
+    const result = await run(windows)
+
+    expect(result.outcome).toBe('completed')
+    expect(result.steps[0]).toMatchObject({ id: 'install-wsl', status: 'applied', exit_code: 0 })
+    expect(result.steps[0]?.detail).toContain('first-run prompt')
+  })
+
+  it('does not end the install early when a distribution already ran before it', async () => {
+    const windows = new FakeWindows()
+    windows.packageInstalled = true
+    windows.distributionRunning = true
+    windows.hangsInFirstRun = true
+    const result = await run(windows)
+    // No `until` was given: the install ran to its deadline and failed, as before.
+    expect(result.outcome).toBe('failed')
+  })
+
   it('reports a failed install with its exit code and stderr, and asks nothing more', async () => {
     const windows = new FakeWindows()
     windows.installExit = 1
@@ -162,6 +206,7 @@ describe('executeHostStep — windows.enable-wsl', () => {
     expect(result.log_tail).toContain('E_ACCESSDENIED')
     // Only a diagnostic `--status` follows, to say what WSL thinks is wrong.
     expect(windows.calls).toEqual([
+      ['wsl.exe', '--list', '--running'],
       ['wsl.exe', '--install'],
       ['wsl.exe', '--status'],
     ])
@@ -171,7 +216,7 @@ describe('executeHostStep — windows.enable-wsl', () => {
     const windows = new FakeWindows()
     const result = await run(windows)
     expect(result.outcome).not.toBe('failed')
-    expect(windows.calls[0]).toEqual(['wsl.exe', '--install'])
+    expect(windows.calls[1]).toEqual(['wsl.exe', '--install'])
     expect(windows.packageInstalled).toBe(true)
   })
 

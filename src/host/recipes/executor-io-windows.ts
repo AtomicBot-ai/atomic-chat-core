@@ -123,7 +123,13 @@ export interface WindowsHostStepIo {
   exec(
     command: string,
     args: string[],
-    options?: { timeoutMs?: number; env?: Record<string, string>; console?: boolean }
+    options?: {
+      timeoutMs?: number
+      env?: Record<string, string>
+      console?: boolean
+      /** With `console`: polled while it runs; true ends the process tree (`cutShort`, code 0). */
+      until?: () => Promise<boolean>
+    }
   ): Promise<HostCommandOutput>
   /** Whether `path` is a symlink/junction, a file, a directory, and its size. */
   lstat(
@@ -141,26 +147,61 @@ export interface WindowsHostStepIo {
  * resolves with the exit code only. The elevated executor is started by the app with `SW_HIDE`, so the
  * console it shares is invisible. Used for the inbox `wsl.exe --install`, which refuses to install
  * when its output is a pipe.
+ *
+ * The deadline and `until` end the whole process tree with `taskkill /T /F`: `wsl --install` runs a
+ * second `wsl.exe` that holds the distribution's console, and killing only the first leaves it behind.
  */
-const consoleExec = (command: string, args: string[], timeoutMs: number): Promise<HostCommandOutput> =>
+const consoleExec = (
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  taskkill: string,
+  until?: () => Promise<boolean>
+): Promise<HostCommandOutput> =>
   new Promise((resolve) => {
     const child = spawn(command, args, { stdio: 'inherit', windowsHide: true, shell: false })
-    const timer = setTimeout(() => child.kill(), timeoutMs)
-    child.once('error', (error) => {
+    let settled = false
+    let cut = false
+    let poll: ReturnType<typeof setTimeout> | undefined
+    const endTree = () => {
+      if (child.pid === undefined) return void child.kill()
+      spawn(taskkill, ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore', windowsHide: true }).once(
+        'error',
+        () => child.kill()
+      )
+    }
+    const timer = setTimeout(endTree, timeoutMs)
+    const check = async () => {
+      const done = await until!().catch(() => false)
+      if (settled) return
+      if (done) {
+        cut = true
+        endTree()
+      } else poll = setTimeout(() => void check(), UNTIL_POLL_MS)
+    }
+    if (until !== undefined) poll = setTimeout(() => void check(), UNTIL_POLL_MS)
+    const settle = (output: HostCommandOutput) => {
+      settled = true
       clearTimeout(timer)
-      resolve({ code: null, stdout: '', stderr: error.message })
-    })
-    child.once('exit', (code) => {
-      clearTimeout(timer)
-      resolve({ code, stdout: '', stderr: '' })
-    })
+      clearTimeout(poll)
+      resolve(output)
+    }
+    child.once('error', (error) => settle({ code: null, stdout: '', stderr: error.message }))
+    child.once('exit', (code) =>
+      settle(cut ? { code: 0, stdout: '', stderr: '', cutShort: true } : { code, stdout: '', stderr: '' })
+    )
   })
 
+/** How often `until` is asked while a console command runs. */
+const UNTIL_POLL_MS = 5_000
+
 const nodeIo = (): WindowsHostStepIo => {
+  const systemRoot = (process.env['SystemRoot'] ?? process.env['SYSTEMROOT'] ?? 'C:\\Windows').replace(/[\\/]+$/, '')
+  const taskkill = `${systemRoot}\\System32\\taskkill.exe`
   return {
     exec: (command, args, options) =>
       options?.console === true
-        ? consoleExec(command, args, options.timeoutMs ?? 60_000)
+        ? consoleExec(command, args, options.timeoutMs ?? 60_000, taskkill, options.until)
         : hostExec({ timeoutMs: options?.timeoutMs ?? 60_000 })(command, args, options?.env),
     lstat: (path) => lstat(path),
     readFile: (path) => readFile(path, 'utf8'),
@@ -244,6 +285,7 @@ export function windowsHostStepDeps(
       return io.exec(`${system32}\\wsl.exe`, args, {
         timeoutMs: options?.longRunning === true ? INSTALL_TIMEOUT_MS : COMMAND_TIMEOUT_MS,
         ...(options?.console === true ? { console: true } : {}),
+        ...(options?.console === true && options.until !== undefined ? { until: options.until } : {}),
       })
     },
     fetch: async () => refuse('the Windows executor downloads nothing'),

@@ -43,6 +43,8 @@ export interface HostCommandOutput {
   code: number | null
   stdout: string
   stderr: string
+  /** The command was ended, its process tree with it, because `until` said its work was done. */
+  cutShort?: boolean
 }
 
 export interface HostStepExecutorDeps {
@@ -71,6 +73,11 @@ export interface HostStepExecutorDeps {
        * with piped output it answers "not installed" at once (live acceptance, build 26200).
        */
       console?: boolean
+      /**
+       * With `console` only: asked every few seconds while the command runs; once it answers true the
+       * command's process tree is ended and the output says `cutShort` with code 0.
+       */
+      until?: () => Promise<boolean>
     }
   ) => Promise<HostCommandOutput>
   fetch: typeof fetch
@@ -678,7 +685,8 @@ async function execute(text: string, fileName: string, deps: HostStepExecutorDep
 
 /**
  * `windows.enable-wsl` (`enable-wsl.ts`): exactly `wsl --install` (the only form the inbox stub
- * understands), then `wsl --status` to tell "ready now" from "after a restart". The same refusals as the Linux recipe come
+ * understands), watched by `wsl --list --running`, then `wsl --status` to tell "ready now" from "after
+ * a restart". The same refusals as the Linux recipe come
  * first — another recipe's bytes, another action, any parameter, a parameters digest that is not the
  * empty object's — so nothing runs for a request the user did not approve.
  */
@@ -720,7 +728,18 @@ async function enableWsl(
     steps,
   })
 
-  const install = await deps.exec([...ENABLE_WSL_RECIPE.install], { longRunning: true, console: true })
+  // With no restart needed, `wsl --install` ends by starting its Ubuntu, whose first-run prompt waits in
+  // the hidden console forever: a distribution running is the install done (see `enable-wsl.ts`).
+  const running = async (): Promise<boolean> =>
+    (await deps.exec([...ENABLE_WSL_RECIPE.watch], { diagnostic: true })).code === 0
+  const runningBefore = await running()
+  const install = await deps.exec([...ENABLE_WSL_RECIPE.install], {
+    longRunning: true,
+    console: true,
+    ...(runningBefore ? {} : { until: running }),
+  })
+  // A distribution ran: a WSL 2 VM started, whatever CBS `RebootPending` says.
+  const vmStarted = install.cutShort === true
   const rebootSaid = install.code === ENABLE_WSL_RECIPE.reboot_required_exit_code
   if (install.code !== 0 && !rebootSaid) {
     // With a console nothing is captured; `wsl --status` says what WSL itself thinks is wrong.
@@ -750,7 +769,11 @@ async function enableWsl(
     status: 'applied',
     exit_code: install.code,
     stderr: '',
-    detail: rebootSaid ? 'installed WSL; Windows reported that a restart is required' : 'installed WSL',
+    detail: rebootSaid
+      ? 'installed WSL; Windows reported that a restart is required'
+      : vmStarted
+        ? 'installed WSL; it started its distribution, whose first-run prompt was closed'
+        : 'installed WSL',
   }
   if (rebootSaid) {
     return result('reboot-required', 0, `${request.recipe_id}: WSL installed; restart Windows to finish`, [
@@ -759,8 +782,9 @@ async function enableWsl(
     ])
   }
   const status = await deps.exec([...ENABLE_WSL_RECIPE.verify])
-  // `--status` exits 0 right after the install while WSL 2 still cannot start: the restart flag decides.
-  const restartPending = (await deps.rebootPending?.().catch(() => null)) === true
+  // `--status` exits 0 right after the install while WSL 2 still cannot start: the restart flag decides,
+  // unless a VM already started — CBS can keep an empty `RebootPending` that no restart clears.
+  const restartPending = vmStarted ? false : (await deps.rebootPending?.().catch(() => null)) === true
   const ready = status.code === 0 && !restartPending
   return result(
     ready ? 'completed' : 'reboot-required',
