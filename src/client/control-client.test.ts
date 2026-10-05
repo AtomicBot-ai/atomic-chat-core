@@ -9,6 +9,7 @@ import type {
   BackendCatalogRequest,
   BackendRecommendationRequest,
   BackendUpdateCheckRequest,
+  ModelSetup,
 } from '../contracts/index.js'
 import { fakeCatalog } from '../../test/helpers/control-harness.js'
 import type {
@@ -43,6 +44,19 @@ let inspecting = false
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
 const environmentCalls: string[] = []
+const setupCalls: string[] = []
+
+const SETUP = {
+  setup_id: 's1',
+  request_id: 'r1',
+  revision: 0,
+  stage: 'queued',
+  request: { repo: 'o/r', file: 'f.gguf' },
+  plan: { digest: 'd', model_id: 'o/f' },
+  task_ids: { model: 'model-setup-s1-model' },
+  created_at: 1,
+  updated_at: 1,
+} as unknown as ModelSetup
 
 const OPERATION: EnvironmentOperation = {
   schema_version: 1,
@@ -168,6 +182,41 @@ beforeEach(async () => {
     },
     environmentsSnapshot: () => [{ environment_id: 'default' } as EnvironmentSnapshot],
     environmentOperations: () => [OPERATION],
+    modelSetups: {
+      compatibility: async (request) => {
+        setupCalls.push(`compatibility:${request.repo}`)
+        return {
+          outcome: 'engine_required',
+          provider: 'atomic-prism',
+          requires: ['pq2_0'],
+          evidence: 'rules',
+          rules_version: 1,
+          reason: 'r',
+        }
+      },
+      plan: async (request) => {
+        setupCalls.push(`plan:${request.file}`)
+        return SETUP.plan
+      },
+      start: async (request) => {
+        setupCalls.push(`start:${request.request_id}:${request.plan_digest}`)
+        return SETUP
+      },
+      list: async () => [SETUP],
+      get: async (id) => {
+        setupCalls.push(`get:${id}`)
+        return SETUP
+      },
+      cancel: async (id) => {
+        setupCalls.push(`cancel:${id}`)
+        return { ...SETUP, stage: 'cancelled' }
+      },
+      resume: async (id, options) => {
+        setupCalls.push(`resume:${id}:${JSON.stringify(options.proxy)}`)
+        return SETUP
+      },
+      snapshot: () => [SETUP],
+    },
     backends: {
       list: async () => [],
       install: async (_p: string, version: string, backend: string) => ({
@@ -719,6 +768,31 @@ describe('request', () => {
     expect(health.ok).toBe(true)
     expect(health.instance_id).toBe('client-test-instance')
     await expect(client.request('GET', '/no-such-route')).rejects.toBeInstanceOf(AtomicCoreError)
+  })
+})
+
+describe('model compatibility and setup', () => {
+  it('drives compatibility, plan, start, list, get, cancel and resume, and reads the snapshot field', async () => {
+    setupCalls.length = 0
+    expect((await client.modelCompatibility({ repo: 'o/r', file: 'f.gguf' })).outcome).toBe('engine_required')
+    expect((await client.modelSetupPlan({ repo: 'o/r', file: 'f.gguf' })).digest).toBe('d')
+    expect(
+      (await client.startModelSetup({ repo: 'o/r', file: 'f.gguf', request_id: 'r1', plan_digest: 'd' }))
+        .setup_id
+    ).toBe('s1')
+    expect(await client.modelSetups()).toEqual([SETUP])
+    expect((await client.modelSetup('s1')).stage).toBe('queued')
+    expect((await client.cancelModelSetup('s1')).stage).toBe('cancelled')
+    await client.resumeModelSetup('s1')
+    expect((await client.snapshot()).model_setups).toEqual([SETUP])
+    expect(setupCalls).toEqual([
+      'compatibility:o/r',
+      'plan:f.gguf',
+      'start:r1:d',
+      'get:s1',
+      'cancel:s1',
+      'resume:s1:null',
+    ])
   })
 })
 

@@ -1,12 +1,19 @@
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { c as tarCreate } from 'tar'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../test/helpers/fake-backend-pack.js'
+import {
+  CAN_INSTALL_FAKE_BACKEND,
+  FAKE_LLAMA_SCRIPT,
+  installFakeBackend,
+} from '../../test/helpers/fake-backend-pack.js'
+import { BPW, bonsaiLikeGguf } from '../../test/helpers/gguf-builder.js'
 import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
@@ -188,7 +195,9 @@ describe('taking ownership', () => {
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
     expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
     expect(() => core.runtime('ollama' as never)).toThrow(
-      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp, tensorrt-llm' })
+      expect.objectContaining({
+        details: 'available: llamacpp-upstream, llamacpp, atomic-prism, tensorrt-llm',
+      })
     )
   })
 
@@ -1381,3 +1390,177 @@ describe('managed runtime environment', () => {
     }
   })
 })
+
+const PRISM_HOST_BACKEND =
+  process.platform === 'darwin'
+    ? `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
+    : process.platform === 'linux' && process.arch === 'x64'
+      ? 'linux-cpu-x64'
+      : null
+
+describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
+  'PrismML model setup through the owner',
+  () => {
+    it('wires the verdict, the plan, the setup, its engine install and registration, and PrismML updates', async () => {
+      const tag = 'prism-b10754-2459f68'
+      const repo = 'atomic-unit/Bonsai-gguf'
+      const revision = 'c'.repeat(40)
+      const file = 'Bonsai-PQ2_0.gguf'
+      const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex')
+      const gguf = bonsaiLikeGguf({
+        weightType: 142,
+        bitsPerWeight: BPW.pq2_0,
+        metadata: { 'prism.hadamard.version': 1 },
+      })
+
+      const scratch = await mkdtemp(join(tmpdir(), 'atomic-core-prism-unit-'))
+      const packDir = join(scratch, `llama-${tag}`)
+      await mkdir(packDir, { recursive: true })
+      await writeFile(
+        join(packDir, 'llama-server'),
+        `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "version: 10754 (2459f68)" >&2; exit 0; fi\n` +
+          `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_LLAMA_SCRIPT)} "$@"\n`
+      )
+      await chmod(join(packDir, 'llama-server'), 0o755)
+      await tarCreate({ gzip: true, file: join(scratch, 'pack.tar.gz'), cwd: scratch }, [`llama-${tag}`])
+      const pack = await readFile(join(scratch, 'pack.tar.gz'))
+      await rm(scratch, { recursive: true, force: true })
+
+      const asset = `llama-${tag}-bin-${PRISM_HOST_BACKEND}.tar.gz`
+      const served: Record<string, Buffer> = {
+        'http://conf.test/manifest.json': Buffer.from(
+          JSON.stringify({
+            schema_version: 1,
+            updated_at: '2026-10-05T00:00:00Z',
+            upstream_repo: 'PrismML-Eng/llama.cpp',
+            download_base: 'http://packs.test',
+            releases: [
+              {
+                tag,
+                commit: '2459f68b5c0eb26261fd5a81682004b93cd645ba',
+                published_at: '2026-10-02T00:00:00Z',
+                min_core_version: '0.1.0',
+                notes_url: `https://example.test/${tag}`,
+                capabilities: ['pq2_0', 'hadamard'],
+                assets: [
+                  {
+                    backend: PRISM_HOST_BACKEND,
+                    name: asset,
+                    size: pack.length,
+                    sha256: sha(pack),
+                    validation: 'approved',
+                  },
+                ],
+              },
+            ],
+          })
+        ),
+        'http://conf.test/rules.json': Buffer.from(
+          JSON.stringify({
+            schema_version: 1,
+            updated_at: '2026-10-05T00:00:00Z',
+            rules_version: 3,
+            tensor_types: { '142': 'pq2_0' },
+            metadata_capabilities: { 'prism.hadamard.version': 'hadamard' },
+            upstream_capabilities: ['q1_0'],
+            families: [
+              {
+                id: 'unit-bonsai',
+                title: 'Unit Bonsai',
+                repo,
+                revision,
+                default_packing: 'pq2_0',
+                files: [
+                  {
+                    file,
+                    size: gguf.length,
+                    sha256: sha(gguf),
+                    packing: 'pq2_0',
+                    treatment: 'prism_required',
+                    requires: ['pq2_0', 'hadamard'],
+                    min_prism_build: 10754,
+                    default: true,
+                  },
+                ],
+              },
+            ],
+          })
+        ),
+        [`http://packs.test/${tag}/${asset}`]: pack,
+        [`http://hub.test/${repo}/resolve/${revision}/${file}`]: gguf,
+      }
+      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+        const body = served[String(input instanceof Request ? input.url : input)]
+        return body
+          ? new Response(new Uint8Array(body), {
+              status: 200,
+              headers: { 'content-length': String(body.length) },
+            })
+          : new Response('not found', { status: 404 })
+      }) as typeof fetch
+
+      const core = await createCore({
+        fetch: fetchImpl,
+        env: {
+          ...process.env,
+          ATOMIC_PRISM_MANIFEST_URL: 'http://conf.test/manifest.json',
+          ATOMIC_PRISM_MODEL_RULES_URL: 'http://conf.test/rules.json',
+          ATOMIC_HF_ENDPOINT: 'http://hub.test',
+        },
+      })
+      const call = (path: string, body?: unknown) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          method: body === undefined ? 'GET' : 'POST',
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        })
+
+      const verdict = (await (await call('/models/compatibility', { repo, file })).json()) as {
+        outcome: string
+      }
+      expect(verdict.outcome).toBe('engine_required')
+      const plan = (await (await call('/models/setup-plan', { repo, file })).json()) as {
+        digest: string
+        blockers: unknown[]
+      }
+      expect(plan.blockers).toEqual([])
+
+      const started = await call('/model-setups', {
+        repo,
+        file,
+        request_id: 'unit-1',
+        plan_digest: plan.digest,
+      })
+      expect(started.status).toBe(202)
+      const { setup_id: setupId } = (await started.json()) as { setup_id: string }
+      let stage = ''
+      const deadline = Date.now() + 15_000
+      while (!['ready', 'failed', 'cancelled'].includes(stage) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        stage = ((await (await call(`/model-setups/${setupId}`)).json()) as { stage: string }).stage
+      }
+      expect(stage).toBe('ready')
+      expect(((await (await call('/model-setups')).json()) as { setups: unknown[] }).setups).toHaveLength(1)
+      expect(core.settings.get('atomic-prism')['version_backend']).toBe(`${tag}/${PRISM_HOST_BACKEND}`)
+
+      // A finished setup is neither cancelled nor resumed; the answer is the record as it is.
+      for (const action of ['cancel', 'resume']) {
+        const answered = await call(`/model-setups/${setupId}/${action}`, {})
+        expect(answered.status).toBe(200)
+        expect(await answered.json()).toMatchObject({ setup_id: setupId, stage: 'ready' })
+      }
+
+      const onDisk = (await (
+        await call('/models/compatibility', {
+          model_id: 'atomic-unit/Bonsai-PQ2_0',
+          provider: 'atomic-prism',
+        })
+      ).json()) as { outcome: string }
+      expect(onDisk.outcome).toBe('compatible')
+
+      const updates = await call('/backends/atomic-prism/updates', {})
+      expect(updates.status).toBe(200)
+      expect(await updates.json()).toMatchObject({ provider: 'atomic-prism', update_needed: false })
+    })
+  }
+)

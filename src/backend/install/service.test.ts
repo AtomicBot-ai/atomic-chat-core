@@ -5,7 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { storedZip } from '../../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { BackendService, verifyMacBackendBinary } from './service.js'
+import {
+  BackendService,
+  mergeCompanionIntoBin,
+  verifyMacBackendBinary,
+  verifyPrismBackendBinary,
+} from './service.js'
+import type { PrismManifest } from '../catalog/index.js'
 import { OptimalBackendStore } from '../optimal/index.js'
 import type { UpstreamManifest } from '../types.js'
 
@@ -382,6 +388,160 @@ describe('install on the TurboQuant provider', () => {
     expect(warnings).toEqual([
       expect.stringContaining('cudart repair for b1-1.0.0/windows-x64-cuda-12.4 failed'),
     ])
+  })
+})
+
+describe('install on the PrismML provider', () => {
+  const TAG = 'prism-b10754-2459f68'
+  const asset = (backend: string, name: string, extra: Record<string, unknown> = {}) => ({
+    backend,
+    name,
+    size: 3,
+    sha256: backend.charCodeAt(4).toString(16).padStart(2, '0').repeat(32),
+    validation: 'approved' as const,
+    ...extra,
+  })
+  const manifest = (withdrawn = false): PrismManifest => ({
+    schema_version: 1,
+    updated_at: '2026-10-05T00:00:00Z',
+    upstream_repo: 'PrismML-Eng/llama.cpp',
+    releases: [
+      {
+        tag: TAG,
+        commit: '2459f68b5c0eb26261fd5a81682004b93cd645ba',
+        published_at: '2026-10-02T00:00:00Z',
+        min_core_version: '0.10.0',
+        notes_url: `https://github.com/PrismML-Eng/llama.cpp/releases/tag/${TAG}`,
+        capabilities: ['pq2_0'],
+        ...(withdrawn ? { withdrawn: { reason: 'broken' } } : {}),
+        assets: [
+          asset('win-cuda-12.4-x64', `llama-${TAG}-bin-win-cuda-12.4-x64.zip`, {
+            companion_backend: 'win-cudart-12.4-x64',
+          }),
+          asset('win-cudart-12.4-x64', 'cudart-llama-bin-win-cuda-12.4-x64.zip', { companion: true }),
+          asset('linux-cpu-x64', `llama-${TAG}-bin-ubuntu-x64.tar.gz`),
+        ],
+      },
+    ],
+  })
+  const prism = (
+    downloader: { download: (task: string, items: never[]) => Promise<void> },
+    options: { withdrawn?: boolean; verify?: () => Promise<void>; platform?: NodeJS.Platform } = {}
+  ) =>
+    new BackendService({
+      layout: data.layout,
+      provider: 'atomic-prism',
+      downloader: downloader as never,
+      readManifest: async () => {
+        throw new Error('the upstream manifest is not read for PrismML')
+      },
+      prismCatalog: { catalog: async () => ({ manifest: manifest(options.withdrawn), source: 'live' }) },
+      platform: options.platform ?? 'win32',
+      now: () => 1,
+      verifyPrismBackend: options.verify ?? (async () => {}),
+    })
+
+  it('installs a Windows CUDA pack and its runtime into one build/bin, with hashes, under one task', async () => {
+    const items: Array<{ url: string; save_path: string; sha256?: string; size?: number }> = []
+    const downloader = {
+      download: vi.fn(async (task: string, given: typeof items) => {
+        expect(task).toBe('prism-task')
+        items.push(...given)
+        await writeFile(given[0]!.save_path, storedZip(`llama-${TAG}/llama-server.exe`, Buffer.from('exe')))
+        await writeFile(given[1]!.save_path, storedZip('cudart64_12.dll', Buffer.from('dll')))
+      }),
+    }
+    const result = await prism(downloader as never).install(TAG, 'win-cuda-12.4-x64', {
+      taskId: 'prism-task',
+    })
+    expect(items.map((i) => i.url)).toEqual([
+      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-win-cuda-12.4-x64.zip`,
+      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/cudart-llama-bin-win-cuda-12.4-x64.zip`,
+    ])
+    expect(items.every((i) => i.sha256?.length === 64 && i.size === 3)).toBe(true)
+    expect(result.path).toBe(join(data.layout.provider('atomic-prism').backendsDir, TAG, 'win-cuda-12.4-x64'))
+    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
+      'cudart64_12.dll',
+      'llama-server.exe',
+    ])
+    expect(await readdir(result.path)).toEqual(['build'])
+  })
+
+  it.each([
+    ['an asset the manifest does not list', TAG, 'win-vulkan-x64', false, /not in the Atomic Chat manifest/],
+    [
+      'a companion asked for on its own',
+      TAG,
+      'win-cudart-12.4-x64',
+      false,
+      /not in the Atomic Chat manifest/,
+    ],
+    ['a withdrawn release', TAG, 'linux-cpu-x64', true, /withdrawn/],
+  ])('refuses %s before downloading', async (_label, tag, backend, withdrawn, message) => {
+    const downloader = fakeDownloader()
+    await expect(prism(downloader, { withdrawn }).install(tag, backend, { taskId: 't' })).rejects.toThrow(
+      message
+    )
+    expect(downloader.download).not.toHaveBeenCalled()
+  })
+
+  it('keeps the previous pack when the new one fails its launch check', async () => {
+    await data.writeBackend('atomic-prism', TAG, 'linux-cpu-x64')
+    const target = join(data.layout.provider('atomic-prism').backendsDir, TAG, 'linux-cpu-x64')
+    await writeFile(join(target, 'build', 'bin', 'llama-server'), 'previous')
+    const fixture = join(data.root, 'prism-fixture')
+    await mkdir(join(fixture, `llama-${TAG}`), { recursive: true })
+    await writeFile(join(fixture, `llama-${TAG}`, 'llama-server'), 'new')
+    const downloader = {
+      download: vi.fn(async (_t: string, given: Array<{ save_path: string }>) => {
+        await tarCreate({ gzip: true, cwd: fixture, file: given[0]!.save_path }, [`llama-${TAG}`])
+      }),
+    }
+    const verify = async () => {
+      throw new Error('did not report build 10754')
+    }
+    await expect(
+      prism(downloader as never, { platform: 'linux', verify }).install(TAG, 'linux-cpu-x64', {
+        taskId: 't',
+        force: true,
+      })
+    ).rejects.toThrow(/launch check .*Keeping the current backend/)
+    expect(await readFile(join(target, 'build', 'bin', 'llama-server'), 'utf8')).toBe('previous')
+  })
+})
+
+describe('verifyPrismBackendBinary', () => {
+  it.skipIf(process.platform === 'win32')('accepts the build the tag names and nothing else', async () => {
+    const staging = join(data.root, 'prism-launch')
+    await mkdir(join(staging, 'build', 'bin'), { recursive: true })
+    await writeFile(
+      join(staging, 'build', 'bin', 'llama-server'),
+      '#!/bin/sh\necho "version: 10754 (2459f68)" >&2\n'
+    )
+    await expect(verifyPrismBackendBinary(staging, 'prism-b10754-2459f68', 'linux')).resolves.toBeUndefined()
+    await expect(verifyPrismBackendBinary(staging, 'prism-b10755-2459f68', 'linux')).rejects.toThrow(
+      /did not report build 10755/
+    )
+  })
+  it('refuses a tag that is not a PrismML tag', async () => {
+    await expect(verifyPrismBackendBinary(data.root, 'b6325', 'linux')).rejects.toThrow(
+      /not a PrismML release tag/
+    )
+  })
+})
+
+describe('mergeCompanionIntoBin', () => {
+  it.each([
+    ['a flat archive', 'cudart64_12.dll'],
+    ['an archive with one top directory', 'cudart-llama-bin-win-cuda-12.4-x64/cudart64_12.dll'],
+  ])('puts %s beside llama-server', async (_label, entry) => {
+    const staging = join(data.root, `companion-${entry.length}`)
+    await mkdir(join(staging, 'build', 'bin'), { recursive: true })
+    const archive = join(staging, 'c.zip')
+    await writeFile(archive, storedZip(entry, Buffer.from('dll')))
+    await mergeCompanionIntoBin(staging, archive)
+    expect(await readdir(join(staging, 'build', 'bin'))).toEqual(['cudart64_12.dll'])
+    expect((await readdir(staging)).sort()).toEqual(['build', 'c.zip'])
   })
 })
 

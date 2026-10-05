@@ -16,6 +16,7 @@
  */
 
 import type { LocalProviderId, SettingDescriptor } from '../contracts/index.js'
+import atomicPrismSchema from './schema/atomic-prism.json' with { type: 'json' }
 import foundationModelsSchema from './schema/foundation-models.json' with { type: 'json' }
 import llamacppUpstreamSchema from './schema/llamacpp-upstream.json' with { type: 'json' }
 import llamacppSchema from './schema/llamacpp.json' with { type: 'json' }
@@ -25,6 +26,7 @@ import tensorrtLlmSchema from './schema/tensorrt-llm.json' with { type: 'json' }
 export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'llamacpp-upstream',
   'llamacpp',
+  'atomic-prism',
   'mlx',
   'foundation-models',
   'tensorrt-llm',
@@ -55,6 +57,7 @@ function toDescriptors(provider: LocalProviderId, raw: unknown): SettingDescript
 const SCHEMAS: Record<LocalProviderId, readonly SettingDescriptor[]> = {
   'llamacpp-upstream': toDescriptors('llamacpp-upstream', llamacppUpstreamSchema),
   'llamacpp': toDescriptors('llamacpp', llamacppSchema),
+  'atomic-prism': toDescriptors('atomic-prism', atomicPrismSchema),
   'mlx': toDescriptors('mlx', mlxSchema),
   'foundation-models': toDescriptors('foundation-models', foundationModelsSchema),
   'tensorrt-llm': toDescriptors('tensorrt-llm', tensorrtLlmSchema),
@@ -166,6 +169,7 @@ const TENSORRT_LLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
 export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<string, CanonicalValueType>>> = {
   'llamacpp-upstream': LLAMACPP_VALUE_TYPES,
   'llamacpp': LLAMACPP_VALUE_TYPES,
+  'atomic-prism': { ...LLAMACPP_VALUE_TYPES, allow_candidate_builds: 'boolean' },
   'mlx': MLX_VALUE_TYPES,
   'foundation-models': FOUNDATION_MODELS_VALUE_TYPES,
   'tensorrt-llm': TENSORRT_LLM_VALUE_TYPES,

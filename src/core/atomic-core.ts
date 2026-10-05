@@ -13,6 +13,7 @@
 import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import type { ReadyLine } from '../contracts/index.js'
 import type {
+  LlamacppProviderId,
   LocalApiServerState,
   LocalProviderId,
   RemoteAccessStatus,
@@ -255,7 +256,7 @@ export class AtomicCore {
   }
 
   /** A llama.cpp runtime, for what only llama.cpp has (devices, runtime device info, context size). */
-  llamacpp(provider: 'llamacpp' | 'llamacpp-upstream' = 'llamacpp-upstream'): LlamacppRuntime {
+  llamacpp(provider: LlamacppProviderId = 'llamacpp-upstream'): LlamacppRuntime {
     const runtime = this.runtime(provider)
     if (!(runtime instanceof LlamacppRuntime)) throw unknownProvider(provider, this.runtimes.keys())
     return runtime

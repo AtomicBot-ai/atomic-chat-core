@@ -8,13 +8,22 @@ import {
   BUNDLED_BASELINE_TAG,
   LLAMACPP_BACKEND_MANIFEST_URL,
   ManifestSessionCache,
+  PRISM_MANIFEST_URL,
   TURBOQUANT_LATEST_RELEASE_URL,
   TURBOQUANT_LEGACY_MANIFEST_URL,
 } from '../catalog/index.js'
+import type { PrismManifest } from '../catalog/index.js'
 import { OptimalBackendStore } from '../optimal/index.js'
 import { TURBOQUANT_RELEASE_INDEX_URL } from '../turboquant.js'
 import type { BackendVersion, GpuProbeInfo, OptimalBackendCacheRecord } from '../types.js'
-import { BackendAdvisor, classifyCurrent, recommendationOf, refreshOutcome } from './advisor.js'
+import {
+  BackendAdvisor,
+  classifyCurrent,
+  prismCatalogReleases,
+  prismUpdateResponse,
+  recommendationOf,
+  refreshOutcome,
+} from './advisor.js'
 import type { BackendAdvisorDeps } from './advisor.js'
 
 // ---------------------------------------------------------------------------------------------
@@ -931,5 +940,180 @@ describe('classifyCurrent / refreshOutcome / recommendationOf', () => {
     expect(
       recommendationOf({ ...gpu, currentBackend: gpu.recommendedBackend as string }, 'llamacpp')
     ).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// atomic-prism
+// ---------------------------------------------------------------------------------------------
+
+const P1 = 'prism-b10754-2459f68'
+const P2 = 'prism-b10800-aaaaaaa'
+const prismAsset = (backend: string, validation: 'approved' | 'candidate' = 'approved', extra = {}) => ({
+  backend,
+  name: `${backend}.zip`,
+  size: 100,
+  sha256: 'a'.repeat(64),
+  validation,
+  ...extra,
+})
+const prismRelease = (tag: string, assets: ReturnType<typeof prismAsset>[], extra = {}) => ({
+  tag,
+  commit: 'b'.repeat(40),
+  published_at: '2026-10-02T00:00:00Z',
+  min_core_version: '0.10.0',
+  notes_url: `https://example.test/${tag}`,
+  capabilities: ['pq2_0'],
+  assets,
+  ...extra,
+})
+const prismManifest = (releases: ReturnType<typeof prismRelease>[]): PrismManifest => ({
+  schema_version: 1,
+  updated_at: '2026-10-05T00:00:00Z',
+  upstream_repo: 'PrismML-Eng/llama.cpp',
+  releases: releases as PrismManifest['releases'],
+})
+const PRISM_DOC = prismManifest([
+  prismRelease(
+    P2,
+    [
+      prismAsset('win-cuda-13.3-x64', 'approved', { companion_backend: 'win-cudart-13.3-x64' }),
+      prismAsset('win-cudart-13.3-x64', 'approved', { companion: true, size: 50 }),
+      prismAsset('win-cpu-x64', 'candidate'),
+    ],
+    { notes: 'Faster PQ2_0' }
+  ),
+  prismRelease(P1, [
+    prismAsset('win-cuda-13.3-x64', 'approved', { companion_backend: 'win-cudart-13.3-x64' }),
+    prismAsset('win-cudart-13.3-x64', 'approved', { companion: true }),
+    prismAsset('win-cpu-x64'),
+  ]),
+])
+
+describe('BackendAdvisor — atomic-prism', () => {
+  const prismHarness = (doc: PrismManifest, deps: Partial<BackendAdvisorDeps> = {}) =>
+    harness('atomic-prism', host('windows', [rtx4090]), {
+      routes: { [PRISM_MANIFEST_URL]: () => json(doc) },
+      current: `${P1}/win-cuda-13.3-x64`,
+      deps: { coreVersion: '0.10.0', ...deps },
+    })
+
+  it('serves the conf manifest gated by approval and hardware, with release notes', async () => {
+    const h = await prismHarness(PRISM_DOC)
+    const catalog = await h.advisor.catalog()
+    expect(catalog.source).toBe('live')
+    expect(catalog.available).toEqual([
+      { version: P2, backend: 'win-cuda-13.3-x64' },
+      { version: P1, backend: 'win-cuda-13.3-x64' },
+      { version: P1, backend: 'win-cpu-x64' },
+    ])
+    expect(catalog.recommended).toBe(`${P2}/win-cuda-13.3-x64`)
+    expect(catalog.releases?.[0]).toMatchObject({
+      tag: P2,
+      notes: 'Faster PQ2_0',
+      notes_url: `https://example.test/${P2}`,
+    })
+  })
+
+  it('offers candidates only on opt-in', async () => {
+    const h = await prismHarness(PRISM_DOC, { allowCandidateBuilds: () => true })
+    expect((await h.advisor.catalog()).available).toContainEqual({ version: P2, backend: 'win-cpu-x64' })
+  })
+
+  it('keeps candidates hidden when the opt-in cannot be read', async () => {
+    const h = await prismHarness(PRISM_DOC, {
+      allowCandidateBuilds: () => {
+        throw new Error('settings gone')
+      },
+    })
+    expect((await h.advisor.catalog()).available).not.toContainEqual({ version: P2, backend: 'win-cpu-x64' })
+    expect(h.log).toHaveBeenCalledWith('warn', 'catalog: allow_candidate_builds unreadable: settings gone')
+  })
+
+  it('rechecks the hardware against the PrismML matrix', async () => {
+    const onCuda = await prismHarness(PRISM_DOC)
+    const same = await onCuda.advisor.recommend({ mode: 'recheck' })
+    expect(same).toMatchObject({ provider: 'atomic-prism', outcome: 'already_optimal' })
+    expect(same.detection).toEqual({ kind: 'gpu', backend: 'win-cuda-13.3-x64' })
+
+    const onCpu = await harness('atomic-prism', host('windows', [rtx4090]), {
+      routes: { [PRISM_MANIFEST_URL]: () => json(PRISM_DOC) },
+      current: `${P1}/win-cpu-x64`,
+      deps: { coreVersion: '0.10.0' },
+    })
+    const upgrade = await onCpu.advisor.recommend({ mode: 'recheck' })
+    expect(upgrade).toMatchObject({ provider: 'atomic-prism', outcome: 'recommend' })
+    expect(upgrade.recommendation?.recommendedBackend).toBe(`${P2}/win-cuda-13.3-x64`)
+  })
+
+  it('reports a newer approved build with its notes and download size', async () => {
+    const h = await prismHarness(PRISM_DOC)
+    const response = await h.advisor.checkUpdates()
+    expect(response).toMatchObject({
+      update_needed: true,
+      offer: `${P2}/win-cuda-13.3-x64`,
+      reason: 'newer',
+      notes: 'Faster PQ2_0',
+      notes_url: `https://example.test/${P2}`,
+      download_size: 150,
+    })
+  })
+
+  it('says model_requires when the caller needs the newer build', async () => {
+    const h = await prismHarness(PRISM_DOC)
+    expect((await h.advisor.checkUpdates({ requires_build: 10800 })).reason).toBe('model_requires')
+  })
+
+  it('moves a user off a withdrawn release, even to an older build', async () => {
+    const doc = prismManifest([
+      prismRelease(P2, [prismAsset('win-cpu-x64')], { withdrawn: { reason: 'crashes on load' } }),
+      prismRelease(P1, [prismAsset('win-cpu-x64')]),
+    ])
+    const h = await prismHarness(doc)
+    const response = await h.advisor.checkUpdates({ current: `${P2}/win-cpu-x64` })
+    expect(response).toMatchObject({
+      current_withdrawn: { reason: 'crashes on load' },
+      offer: `${P1}/win-cpu-x64`,
+      reason: 'withdrawn',
+    })
+    expect((await h.advisor.catalog()).releases?.[0]).toMatchObject({
+      tag: P2,
+      variants: [],
+      withdrawn: { reason: 'crashes on load' },
+    })
+  })
+
+  it('ignores releases that need a newer core', async () => {
+    const doc = prismManifest([
+      prismRelease(P2, [prismAsset('win-cpu-x64')], { min_core_version: '9.0.0' }),
+      prismRelease(P1, [prismAsset('win-cpu-x64')]),
+    ])
+    const h = await prismHarness(doc)
+    const response = await h.advisor.checkUpdates({ current: `${P1}/win-cpu-x64` })
+    expect(response.update_needed).toBe(false)
+    expect((await h.advisor.catalog()).releases?.map((r) => r.tag)).toEqual([P1])
+  })
+})
+
+describe('prismCatalogReleases / prismUpdateResponse', () => {
+  const offer = { coreVersion: '0.10.0', allowCandidates: false }
+  it('lists runnable releases newest first with only offered variants', () => {
+    expect(prismCatalogReleases(PRISM_DOC, offer).map((r) => [r.tag, r.variants.map((v) => v.id)])).toEqual([
+      [P2, ['win-cuda-13.3-x64']],
+      [P1, ['win-cuda-13.3-x64', 'win-cpu-x64']],
+    ])
+  })
+  it('leaves an answer without an offer untouched', () => {
+    const base = {
+      provider: 'atomic-prism' as const,
+      current: `${P2}/win-cuda-13.3-x64`,
+      current_kind: 'concrete' as const,
+      update_needed: false,
+      new_version: '0',
+      target_backend: null,
+      same_family: false,
+      offer: null,
+    }
+    expect(prismUpdateResponse(base, PRISM_DOC, offer)).toEqual(base)
   })
 })

@@ -378,6 +378,39 @@ describe('failure paths', () => {
     expect(runtime.getLoadedModels()).toEqual(['demo'])
   })
 
+  it('asks the compatibility gate with the resolved path and sha256 before it unloads or spawns', async () => {
+    await data.writeModel('demo')
+    await data.writeModel('bonsai', {
+      model_path: 'llamacpp/models/bonsai/b.gguf',
+      model_sha256: 'f'.repeat(64),
+    })
+    const asked: unknown[] = []
+    let spawned = 0
+    const spawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      checkCompatibility: async (target) => {
+        asked.push(target)
+        if (target.modelId === 'bonsai')
+          throw new AtomicCoreError('MODEL_ENGINE_INCOMPATIBLE', 'needs PrismML')
+      },
+      spawn: (spec, opts) => {
+        spawned++
+        return spawn(spec, opts)
+      },
+    })
+    await runtime.load('demo')
+    await expect(runtime.load('bonsai', { overrides: { auto_unload: true } })).rejects.toMatchObject({
+      code: 'MODEL_ENGINE_INCOMPATIBLE',
+    })
+    expect(spawned).toBe(1)
+    expect(runtime.getLoadedModels()).toEqual(['demo'])
+    expect(asked[1]).toEqual({
+      modelId: 'bonsai',
+      modelPath: join(data.root, 'llamacpp', 'models', 'bonsai', 'b.gguf'),
+      sha256: 'f'.repeat(64),
+    })
+  })
+
   it('classifies an out-of-memory crash and leaves no session or journal entry behind', async () => {
     await data.writeModel('oom')
     const runtime = await makeRuntime({ spawn: fakeLlamaSpawn({ mode: 'oom' }) })

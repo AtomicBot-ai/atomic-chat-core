@@ -3,6 +3,7 @@ import type { BackendVersion, GpuProbeInfo } from '../types.js'
 import {
   isLlamacppProviderId,
   policyFor,
+  PRISM_POLICY,
   recordPolicyOf,
   TURBOQUANT_POLICY,
   UPSTREAM_POLICY,
@@ -27,11 +28,13 @@ const FORK_REMOTE: BackendVersion[] = [
 ]
 
 describe('policyFor / isLlamacppProviderId / recordPolicyOf', () => {
-  it('maps the two provider ids onto their tables and nothing else', () => {
+  it('maps the three provider ids onto their tables and nothing else', () => {
     expect(policyFor('llamacpp-upstream')).toBe(UPSTREAM_POLICY)
     expect(policyFor('llamacpp')).toBe(TURBOQUANT_POLICY)
+    expect(policyFor('atomic-prism')).toBe(PRISM_POLICY)
     expect(isLlamacppProviderId('llamacpp')).toBe(true)
     expect(isLlamacppProviderId('llamacpp-upstream')).toBe(true)
+    expect(isLlamacppProviderId('atomic-prism')).toBe(true)
     expect(isLlamacppProviderId('mlx')).toBe(false)
     expect(isLlamacppProviderId(undefined)).toBe(false)
   })
@@ -44,6 +47,71 @@ describe('policyFor / isLlamacppProviderId / recordPolicyOf', () => {
     expect(fork.provider).toBe('llamacpp')
     expect(fork.alreadyOptimalRule).toBe('category')
     expect(fork.getCategory?.('windows-x64-cpu')).toBe('common_cpus')
+    const prism = recordPolicyOf(PRISM_POLICY)
+    expect(prism.provider).toBe('atomic-prism')
+    expect(prism.alreadyOptimalRule).toBe('category')
+    expect(prism.getCategory?.('win-cuda-12.4-x64')).toBe('cuda-cu12.0')
+  })
+})
+
+describe('PRISM_POLICY', () => {
+  it('never moves a pack between backend ids and offers every resolved target', () => {
+    expect(PRISM_POLICY.sameFamily('win-cuda-12.4-x64', 'win-cuda-12.4-x64')).toBe(true)
+    expect(PRISM_POLICY.sameFamily('linux-cuda-12.4-x64', 'linux-cuda-12.8-x64')).toBe(false)
+    expect(PRISM_POLICY.acceptsUpdateTarget('prism-b10754-2459f68/macos-arm64')).toBe(true)
+    expect(PRISM_POLICY.staticVariants('windows', 'x')).toEqual([])
+    expect(PRISM_POLICY.noCatalogEntryWrites).toBe('record')
+  })
+  it('resolves a sentinel and a detected type to the newest offered build', async () => {
+    const list = [
+      { version: 'prism-b10754-2459f68', backend: 'macos-arm64' },
+      { version: 'prism-b10800-aaaaaaa', backend: 'macos-arm64' },
+    ]
+    expect(PRISM_POLICY.resolveSentinel('macos-arm64', list)).toBe('prism-b10800-aaaaaaa/macos-arm64')
+    expect(
+      await PRISM_POLICY.resolveConcrete('macos-arm64', '', {
+        listSupportedBackends: async () => list,
+        fetchRemoteBackends: async () => list,
+      })
+    ).toBe('prism-b10800-aaaaaaa/macos-arm64')
+    const warn = vi.fn()
+    expect(
+      await PRISM_POLICY.resolveConcrete('macos-arm64', '', {
+        listSupportedBackends: () => Promise.reject(new Error('x')),
+        fetchRemoteBackends: async () => [],
+        onWarn: warn,
+      })
+    ).toBeNull()
+    expect(warn).toHaveBeenCalled()
+  })
+  it('names a non-Error rejection in the warning', async () => {
+    const warn = vi.fn()
+    for (const policy of [PRISM_POLICY, TURBOQUANT_POLICY]) {
+      expect(
+        await policy.resolveConcrete('macos-arm64', '', {
+          listSupportedBackends: () => Promise.reject('offline'),
+          fetchRemoteBackends: async () => [],
+          onWarn: warn,
+        })
+      ).toBeNull()
+    }
+    expect(warn.mock.calls.map(([message]) => String(message).endsWith('offline'))).toEqual([true, true])
+  })
+  it('detects on the PrismML matrix, passing the ROCm facts and the warning sink through', async () => {
+    const onWarn = vi.fn()
+    const base = { arch: 'x64', cpuExtensions: ['avx2'], gpus: [], probeTier: async () => 'works' as const }
+    expect(
+      await PRISM_POLICY.detect({
+        ...base,
+        osType: 'linux',
+        rocm: { gfxTargetVersions: [], hasRuntime: false },
+        listAvailableBackends: async () => [{ version: 'prism-b10754-2459f68', backend: 'linux-cpu-x64' }],
+        onWarn,
+      })
+    ).toEqual({ kind: 'cpu-optimal' })
+    expect(
+      await PRISM_POLICY.detect({ ...base, osType: 'macos', listAvailableBackends: async () => [] })
+    ).toEqual({ kind: 'cpu-optimal' })
   })
 })
 

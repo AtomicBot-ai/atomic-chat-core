@@ -88,6 +88,7 @@ describe('SettingsStore.open', () => {
         providers: {
           'llamacpp-upstream': EMPTY_PROVIDER_STATE,
           'llamacpp': EMPTY_PROVIDER_STATE,
+          'atomic-prism': EMPTY_PROVIDER_STATE,
           'mlx': EMPTY_PROVIDER_STATE,
           'foundation-models': EMPTY_PROVIDER_STATE,
           'tensorrt-llm': EMPTY_PROVIDER_STATE,
@@ -98,6 +99,7 @@ describe('SettingsStore.open', () => {
     expect(doc['providers']).toEqual({
       'llamacpp-upstream': canonicalProviderDefaults('llamacpp-upstream'),
       'llamacpp': canonicalProviderDefaults('llamacpp'),
+      'atomic-prism': canonicalProviderDefaults('atomic-prism'),
       'mlx': canonicalProviderDefaults('mlx'),
       'foundation-models': {},
       'tensorrt-llm': canonicalProviderDefaults('tensorrt-llm'),

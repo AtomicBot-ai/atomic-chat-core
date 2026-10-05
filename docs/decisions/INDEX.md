@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-05** — [PrismML provider: a per-file compatibility gate and one recoverable model setup](2026-10-05-prismml-provider-compatibility-gate-and-model-setup.md) — implements the record below: conf manifest with candidate/approved, update reasons, offline load gate on every llama.cpp provider, `/models/setup-plan` + `/model-setups`, core 0.10.0.
+- **2026-10-05** — [Use PrismML llama.cpp for desktop Bonsai](2026-10-05-use-prismml-llamacpp-for-desktop-bonsai.md) — implementation direction: isolated provider, shared GGUF storage, model-aware routing and onboarding; Metal on Mac, no new MLX path.
 - **2026-10-02** — [Bump core to 0.9.2 after merging main's 0.8.0-0.9.1](2026-10-02-bump-core-to-0-9-2-after-merging-main.md) — supersedes the version of the 2026-10-01 0.7.5 record; the app branch pins 0.9.2.
 - **2026-10-02** — [tensorrt-llm: what the Windows live acceptance changed](2026-10-02-tensorrt-llm-windows-live-acceptance-fixes.md) — supersedes D2's `--no-distribution` of the 2026-10-01 Windows record and the discrete-card half of the 2026-09-29 unified-memory KV record; adds `max_batch_size`, `kv_cache_max_tokens`, `cuda_graphs`, `kv_cache_dtype`, `windows-restart-pending`.
 - **2026-10-01** — [TensorRT-LLM on Windows runs in Atomic Chat's own WSL distribution, switched on by conf](2026-10-01-tensorrt-llm-on-windows-runs-in-atomic-chats-own-wsl-distribution.md) — WSL transport, guest as a Linux host, one elevated step, `GET /models/tensorrt-llm/location`, `windows.json` in conf main is the switch.

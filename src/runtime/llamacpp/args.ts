@@ -8,7 +8,9 @@
  *
  * Provider dependence (PLAN.md §8.2 "Divergences"): only the cache-type whitelist differs —
  * `llamacpp-upstream` never emits fork-only `turbo*` types, `llamacpp` (TurboQuant) allows them when
- * the installed version is a fork tag. Everything else is shared.
+ * the installed version is a fork tag. `atomic-prism` (PrismML) takes stock cache types only, reads
+ * its build from the `prism-b<build>-<sha>` tag, and never emits speculative or multi-GPU split
+ * flags. Everything else is shared.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
@@ -122,6 +124,14 @@ export function parseBuildNumber(version: string): number | undefined {
   return n <= 0xffff_ffff ? n : undefined
 }
 
+/** PrismML release tag: `"prism-b10754-2459f68"` → 10754, anything else → undefined. */
+export function parsePrismBuildNumber(version: string): number | undefined {
+  const match = /^prism-b(\d+)-[0-9a-f]{7}$/.exec(version)
+  if (!match) return undefined
+  const n = Number(match[1])
+  return n <= 0xffff_ffff ? n : undefined
+}
+
 /** TurboQuant release train: `turboquant-*` or the unified `b<build>-<x>.<y>.<z>` tag. */
 export function isTurboquantVersion(version: string): boolean {
   if (version.startsWith('turboquant-')) return true
@@ -192,8 +202,10 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   const cfg: LlamacppConfig = { ...config }
   const argv: string[] = []
   const warnings: string[] = []
-  const build = parseBuildNumber(version)
-  const turboquant = isTurboquantVersion(version)
+  const prism = input.provider === 'atomic-prism'
+  // A Prism tag carries the upstream build it is cut from, so the build gates below apply to it.
+  const build = prism ? parsePrismBuildNumber(version) : parseBuildNumber(version)
+  const turboquant = !prism && isTurboquantVersion(version)
   const ik = backend.startsWith('ik')
   const push = (...items: string[]) => argv.push(...items)
 
@@ -209,6 +221,15 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   if (input.provider === 'llamacpp') {
     cfg.mtp = false
     cfg.dflash = false
+  }
+  // PrismML: no speculative decoding and one GPU — neither is validated on its kernels.
+  if (prism) {
+    if (cfg.mtp || cfg.dflash)
+      warnings.push('Speculative decoding is not available on PrismML llama.cpp; skipping')
+    cfg.mtp = false
+    cfg.dflash = false
+    cfg.split_mode = ''
+    cfg.main_gpu = 0
   }
   if (input.provider !== 'llamacpp' && backend.includes('vulkan') && cfg.flash_attn === 'auto') {
     warnings.push(`Vulkan backend (${backend}): overriding flash_attn auto→off for stability (ATO-244)`)

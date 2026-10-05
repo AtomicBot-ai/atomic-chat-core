@@ -11,8 +11,8 @@
  * Browser-safe: types only.
  */
 
-/** The two llama.cpp providers the advisor answers for. */
-export type LlamacppProviderId = 'llamacpp-upstream' | 'llamacpp'
+/** The llama.cpp providers the advisor answers for. */
+export type LlamacppProviderId = 'llamacpp-upstream' | 'llamacpp' | 'atomic-prism'
 
 /**
  * One backend build. Rust `BackendInfo { version, backend, #[serde(default)] order: u32 }`: `order`
@@ -113,13 +113,18 @@ export interface BackendCatalogRequest {
   proxy?: ProxyConfig | null
 }
 
-/** One release of the TurboQuant fork, for the dropdown's release notes (fork only). */
+/** One release of the TurboQuant fork or of PrismML, for the dropdown's release notes. */
 export interface BackendCatalogRelease {
   tag: string
   title?: string
   highlights?: string[]
   min_app_version?: string
-  variants: Array<{ id: string; asset?: string; size?: number }>
+  /** PrismML: the release page and the one-line note the update banner shows. */
+  notes_url?: string
+  notes?: string
+  /** PrismML: present when the release was pulled; its packs are never offered. */
+  withdrawn?: { reason: string }
+  variants: Array<{ id: string; asset?: string; size?: number; validation?: 'candidate' | 'approved' }>
 }
 
 /** Where the remote half of the catalog came from. */
@@ -157,7 +162,7 @@ export interface BackendCatalogResponse {
   /** Ids behind the static "Latest <variant>" dropdown entries (upstream only; fork `[]`). */
   static_variants: string[]
   source: BackendCatalogSource
-  /** Fork only: the stable releases with their notes. */
+  /** Fork and PrismML: the releases with their notes. */
   releases?: BackendCatalogRelease[]
 }
 
@@ -212,7 +217,18 @@ export interface BackendUpdateCheckRequest {
   force?: boolean
   app_version?: string | null
   proxy?: ProxyConfig | null
+  /**
+   * PrismML only: the build a model the user wants needs (`engine_update_required`). An update that
+   * reaches it is reported with `reason: 'model_requires'`.
+   */
+  requires_build?: number
 }
+
+/**
+ * PrismML only: why an update is offered. `newer`: an approved newer build; `withdrawn`: the current
+ * release was pulled; `model_requires`: a model the user wants needs a newer build.
+ */
+export type BackendUpdateReason = 'newer' | 'withdrawn' | 'model_requires'
 
 /** What `current` looked like: a `<tag>/<id>`, a parked `latest/<id>` sentinel, or nothing usable. */
 export type BackendCurrentKind = 'concrete' | 'sentinel' | 'missing'
@@ -225,4 +241,13 @@ export interface BackendUpdateCheckResponse extends UpdateCheckResult {
   same_family: boolean
   /** The target the app may offer: `target_backend` when an update is needed and the family holds. */
   offer: string | null
+  /** PrismML only, set with an offer. */
+  reason?: BackendUpdateReason
+  /** PrismML only: the target release's page and banner note. */
+  notes_url?: string
+  notes?: string
+  /** PrismML only: bytes to download for the target (the pack plus its companion). */
+  download_size?: number
+  /** PrismML only: present when the current release was withdrawn, offer or not. */
+  current_withdrawn?: { reason: string }
 }

@@ -23,17 +23,22 @@ import { chmod, mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
+import { AtomicCoreError } from '../../contracts/index.js'
 import type { LocalProviderId } from '../../contracts/index.js'
 import type { DataLayout } from '../../config/index.js'
 import { validateProxyConfig } from '../../downloads/index.js'
 import type { DownloadItem, Downloader, ProxyConfig } from '../../downloads/index.js'
 import { extractArchive, normalizeBackendLayout } from '../../downloads/index.js'
 import {
+  findPrismRelease,
   getBackendArchiveName,
   getCudartArchiveName,
   getCudartDownloadUrl,
+  prismArchiveSources,
+  prismTagBuild,
   resolveBackendArchiveSource,
 } from '../catalog/index.js'
+import type { PrismCatalogService } from '../catalog/index.js'
 import { deletableBackendPack, getBackendDir, listInstalledBackendPacks } from '../installed/index.js'
 import { scanInstalledBackends } from '../installed/index.js'
 import { llamaServerExeName } from '../../config/index.js'
@@ -78,6 +83,55 @@ export async function mergeCudartIntoBin(staging: string): Promise<void> {
   }
 }
 
+/**
+ * The launch gate of a PrismML pack, on every platform: the server must start and report the build
+ * its tag names (`prism-b10754-…` → `build 10754`). A pack that cannot is never published, so the
+ * previous one stays selectable.
+ */
+export async function verifyPrismBackendBinary(
+  staging: string,
+  version: string,
+  platform: NodeJS.Platform
+): Promise<void> {
+  const expected = prismTagBuild(version)
+  if (expected === null) throw new Error(`${version} is not a PrismML release tag`)
+  const bin = join(staging, 'build', 'bin')
+  if (platform !== 'win32') {
+    for (const entry of await readdir(bin, { withFileTypes: true })) {
+      if (entry.isFile()) await chmod(join(bin, entry.name), 0o755)
+    }
+  }
+  const { stdout, stderr } = await execFileAsync(join(bin, llamaServerExeName(platform)), ['--version'], {
+    timeout: 15_000,
+    cwd: bin,
+  })
+  if (parseBinaryVersion(`${stdout}\n${stderr}`) !== expected) {
+    throw new Error(`backend did not report build ${expected}`)
+  }
+}
+
+/**
+ * A companion archive (the Windows CUDA runtime) unpacked into `build/bin`, beside `llama-server`:
+ * flat, or under one top directory, which is dropped.
+ */
+export async function mergeCompanionIntoBin(staging: string, archive: string): Promise<void> {
+  const scratch = join(staging, '.companion')
+  await rm(scratch, { recursive: true, force: true })
+  await mkdir(scratch, { recursive: true })
+  await extractArchive(archive, scratch)
+  let from = scratch
+  const top = await readdir(scratch, { withFileTypes: true })
+  if (top.length === 1 && top[0]?.isDirectory()) from = join(scratch, top[0].name)
+  const bin = join(staging, 'build', 'bin')
+  await mkdir(bin, { recursive: true })
+  for (const inner of await readdir(from)) {
+    const to = join(bin, inner)
+    await rm(to, { recursive: true, force: true })
+    await rename(join(from, inner), to)
+  }
+  await rm(scratch, { recursive: true, force: true })
+}
+
 /** The server executable inside a pack; the only name `normalizeBackendLayout` looks for. */
 export function backendExeName(osType: string): string {
   return osType === 'windows' ? 'llama-server.exe' : 'llama-server'
@@ -96,7 +150,18 @@ export interface BackendServiceDeps {
   now?: () => number
   /** Test seam for the macOS launch gate. */
   verifyMacBackend?: (staging: string, version: string) => Promise<void>
+  /** `atomic-prism` only: where its packs, sizes and hashes come from. */
+  prismCatalog?: Pick<PrismCatalogService, 'catalog'>
+  /** Test seam for the PrismML launch gate. */
+  verifyPrismBackend?: (staging: string, version: string) => Promise<void>
   log?: (message: string) => void
+}
+
+interface DownloadPlan {
+  items: DownloadItem[]
+  archives: string[]
+  /** Unpacked into `build/bin` after the layout is normalised. */
+  companions?: string[]
 }
 
 export interface InstallBackendOptions {
@@ -171,7 +236,10 @@ export class BackendService {
     const plan =
       this.deps.provider === 'llamacpp'
         ? await this.turboquantDownloads(version, backend, staging, options)
-        : await this.upstreamDownloads(version, backend, staging, options)
+        : this.deps.provider === 'atomic-prism'
+          ? await this.prismDownloads(version, backend, staging, options)
+          : await this.upstreamDownloads(version, backend, staging, options)
+    const platform = this.deps.platform ?? process.platform
 
     await rm(staging, { recursive: true, force: true })
     await mkdir(staging, { recursive: true })
@@ -181,15 +249,22 @@ export class BackendService {
         await extractArchive(archive, staging)
         await rm(archive, { force: true })
       }
-      await normalizeBackendLayout(staging, llamaServerExeName(this.deps.platform ?? process.platform))
+      await normalizeBackendLayout(staging, llamaServerExeName(platform))
       await mergeCudartIntoBin(staging)
+      for (const companion of plan.companions ?? []) {
+        await mergeCompanionIntoBin(staging, companion)
+        await rm(companion, { force: true })
+      }
 
-      if (
-        this.deps.provider === 'llamacpp-upstream' &&
-        (this.deps.platform ?? process.platform) === 'darwin'
-      ) {
+      const verify =
+        this.deps.provider === 'atomic-prism'
+          ? (this.deps.verifyPrismBackend ?? ((dir, tag) => verifyPrismBackendBinary(dir, tag, platform)))
+          : this.deps.provider === 'llamacpp-upstream' && platform === 'darwin'
+            ? (this.deps.verifyMacBackend ?? verifyMacBackendBinary)
+            : null
+      if (verify) {
         try {
-          await (this.deps.verifyMacBackend ?? verifyMacBackendBinary)(staging, version)
+          await verify(staging, version)
         } catch (error) {
           throw new Error(
             `The downloaded ${version}/${backend} backend failed its launch check (${String(error)}). Keeping the current backend.`
@@ -236,7 +311,7 @@ export class BackendService {
     backend: string,
     staging: string,
     options: InstallBackendOptions
-  ): Promise<{ items: DownloadItem[]; archives: string[] }> {
+  ): Promise<DownloadPlan> {
     const manifest = await this.deps.readManifest(options.proxy)
     const source = resolveBackendArchiveSource(version, backend, manifest ?? undefined)
     const archivePath = join(staging, getBackendArchiveName(version, backend))
@@ -261,6 +336,49 @@ export class BackendService {
   }
 
   /**
+   * A PrismML pack: only an asset the conf manifest lists, always with its size and sha256 — the
+   * releases are a third party's, and the manifest is what this product vouches for. A withdrawn
+   * release is refused. The Windows CUDA runtime the manifest pairs with the pack downloads under
+   * the same task and lands in the same `build/bin`.
+   */
+  private async prismDownloads(
+    version: string,
+    backend: string,
+    staging: string,
+    options: InstallBackendOptions
+  ): Promise<DownloadPlan> {
+    if (!this.deps.prismCatalog) throw new Error('The PrismML catalog is not configured')
+    const { manifest } = await this.deps.prismCatalog.catalog(options.proxy ? { proxy: options.proxy } : {})
+    if (findPrismRelease(manifest, version)?.withdrawn) {
+      throw new AtomicCoreError(
+        'BACKEND_TAG_UNRESOLVED',
+        `PrismML ${version} was withdrawn; pick another build`
+      )
+    }
+    const sources = prismArchiveSources(manifest, version, backend)
+    if (!sources) {
+      throw new AtomicCoreError(
+        'BACKEND_TAG_UNRESOLVED',
+        `PrismML ${version}/${backend} is not in the Atomic Chat manifest`
+      )
+    }
+    const proxy = options.proxy ? { proxy: options.proxy } : {}
+    const plan: DownloadPlan = { items: [], archives: [], companions: [] }
+    for (const source of sources) {
+      const savePath = join(staging, source.name)
+      plan.items.push({
+        url: source.url,
+        save_path: savePath,
+        sha256: source.sha256,
+        size: source.size,
+        ...proxy,
+      })
+      ;(source.companion ? plan.companions! : plan.archives).push(savePath)
+    }
+    return plan
+  }
+
+  /**
    * A TurboQuant pack from the fork's release CDN, under the asset name its release index gives.
    * The index carries sizes and hashes, but the extension never checked them; neither does this, so
    * a republished asset installs the same way it did.
@@ -270,7 +388,7 @@ export class BackendService {
     backend: string,
     staging: string,
     options: InstallBackendOptions
-  ): Promise<{ items: DownloadItem[]; archives: string[] }> {
+  ): Promise<DownloadPlan> {
     const asset = options.assetName ?? (await readTurboquantIndexedAsset(this.deps.layout, version, backend))
     const url = turboquantArchiveUrl(version, backend, asset, this.deps.platform)
     const archivePath = join(staging, url.slice(url.lastIndexOf('/') + 1))

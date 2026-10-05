@@ -17,18 +17,21 @@ export interface RemoteProvider {
   models: string[]
 }
 
-export type LocalProvider = 'llamacpp' | 'llamacpp-upstream' | 'mlx' | 'tensorrt-llm'
+export type LocalProvider = 'llamacpp' | 'llamacpp-upstream' | 'mlx' | 'tensorrt-llm' | 'atomic-prism'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
  * loaded under two engines resolves to the first; changing the order would silently move traffic.
- * `tensorrt-llm` comes last for exactly that reason: adding it moves nothing that already resolved.
+ * `tensorrt-llm` and `atomic-prism` come last for exactly that reason: adding them moves nothing that
+ * already resolved. A Prism-only file never loads under another engine (the compatibility gate), so
+ * its sessions are found here even at the end of the list.
  */
 export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
   'llamacpp',
   'llamacpp-upstream',
   'mlx',
   'tensorrt-llm',
+  'atomic-prism',
 ]
 
 /**

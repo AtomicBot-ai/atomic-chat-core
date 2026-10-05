@@ -139,6 +139,47 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
     }
   })
 
+  it('chooses among PrismML packs with the Prism matrix, newest build first', async () => {
+    const data = await makeTmpDataFolder('atomic-runtime-backend-')
+    try {
+      for (const [version, backend] of [
+        ['prism-b10754-2459f68', 'win-cpu-x64'],
+        ['prism-b10754-2459f68', 'win-cuda-12.4-x64'],
+        ['prism-b10800-aaaaaaa', 'win-cuda-12.4-x64'],
+        ['b7000', 'win-cuda-13.3-x64'],
+      ] as const)
+        await installFakeBackend(data.layout, { provider: 'atomic-prism', version, backend })
+      const nvidia = facts({
+        osType: 'windows',
+        cpuExtensions: ['avx2'],
+        gpus: [
+          {
+            vendor: 'NVIDIA',
+            driver_version: '581.42',
+            total_memory: 24_576,
+            nvidia_info: { compute_capability: '8.9' },
+          },
+        ],
+      })
+      await expect(selectInstalledBackend(data.layout, 'atomic-prism', nvidia, 'x64')).resolves.toMatchObject(
+        {
+          version_backend: 'prism-b10800-aaaaaaa/win-cuda-12.4-x64',
+        }
+      )
+      const cpuOnly = facts({ osType: 'windows', cpuExtensions: [] })
+      await expect(
+        selectInstalledBackend(data.layout, 'atomic-prism', cpuOnly, 'x64')
+      ).resolves.toMatchObject({
+        version_backend: 'prism-b10754-2459f68/win-cpu-x64',
+      })
+      await expect(
+        selectInstalledBackend(data.layout, 'atomic-prism', cpuOnly, 'arm64')
+      ).resolves.toBeUndefined()
+    } finally {
+      await data.cleanup()
+    }
+  })
+
   it('keeps an exact configured executable authoritative', async () => {
     const data = await makeTmpDataFolder('atomic-runtime-backend-')
     try {

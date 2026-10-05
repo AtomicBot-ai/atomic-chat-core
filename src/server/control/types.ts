@@ -22,6 +22,12 @@ import type {
   DiffusionStatus,
   EnvironmentOperation,
   EnvironmentSnapshot,
+  ModelCompatibilityRequest,
+  ModelCompatibilityResponse,
+  ModelSetup,
+  ModelSetupPlan,
+  ModelSetupPlanRequest,
+  ModelSetupStartRequest,
   FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
@@ -321,6 +327,19 @@ export interface ChatGptControl {
   models: () => Promise<SubscriptionModel[]>
 }
 
+/** Model compatibility and the model setup (PrismML Bonsai and every other Hub GGUF). */
+export interface ModelSetupControl {
+  compatibility: (request: ModelCompatibilityRequest) => Promise<ModelCompatibilityResponse>
+  plan: (request: ModelSetupPlanRequest) => Promise<ModelSetupPlan>
+  start: (request: ModelSetupStartRequest) => Promise<ModelSetup>
+  list: () => Promise<ModelSetup[]>
+  get: (setupId: string) => Promise<ModelSetup>
+  cancel: (setupId: string) => Promise<ModelSetup>
+  resume: (setupId: string, options: { proxy?: ProxyConfig | null }) => Promise<ModelSetup>
+  /** In memory, for the control snapshot. */
+  snapshot: () => ModelSetup[]
+}
+
 export interface ControlServerDeps {
   /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
   environments?: ManagedEnvironmentControl
@@ -373,6 +392,8 @@ export interface ControlServerDeps {
   decision?: DecisionControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
+  /** Absent in a core without the setup wired; its routes then answer `INVALID_ARGUMENT`. */
+  modelSetups?: ModelSetupControl
   /**
    * `POST /models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`): whether a Hugging
    * Face checkpoint the caller has not downloaded yet would run, computed without touching the
@@ -428,6 +449,8 @@ export interface ControlSnapshot {
   /** The managed container runtimes this user has, and the changes in flight on them. */
   environments: EnvironmentSnapshot[]
   environment_operations: EnvironmentOperation[]
+  /** Model setups, the running ones and those left to resume or read. */
+  model_setups: ModelSetup[]
 }
 
 /**

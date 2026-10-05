@@ -5,6 +5,7 @@ import type {
   BackendCatalogRequest,
   BackendRecommendationRequest,
   BackendUpdateCheckRequest,
+  LlamacppProviderId,
 } from '../../../contracts/index.js'
 import type { OptimalBackendCacheRecord } from '../../../backend/index.js'
 import { isLlamacppProviderId } from '../../../backend/index.js'
@@ -83,11 +84,11 @@ export function registerBackendRoutes(
 
   // The advisor answers; the app decides when to act (ADR 2026-09-27). All three are POST because the
   // proxy policy may carry credentials, and those never travel in a query string.
-  const llamacppProvider = (raw: string): 'llamacpp-upstream' | 'llamacpp' => {
+  const llamacppProvider = (raw: string): LlamacppProviderId => {
     if (!isLlamacppProviderId(raw))
       throw new AtomicCoreError(
         'INVALID_ARGUMENT',
-        `The backend advisor knows llamacpp-upstream and llamacpp, not ${raw}`
+        `The backend advisor knows llamacpp-upstream, llamacpp and atomic-prism, not ${raw}`
       )
     return raw
   }
