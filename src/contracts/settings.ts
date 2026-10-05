@@ -99,11 +99,35 @@ export interface FoundationModelsConfig {
   timeout: number
 }
 
+/**
+ * `tensorrt-llm` as the settings store holds it (`src/settings/schema/tensorrt-llm.json`). `gpu_id: ''`
+ * lets a load pick the card with the most free memory and `load_timeout_seconds: 0` keeps the engine's own
+ * weight-based estimate; every value applies from the next load, never to a running container.
+ */
+export interface TensorrtLlmProviderConfig {
+  gpu_id: string
+  context_length: number
+  /** Enforced per request by the session gateway (it caps `max_tokens`), not an engine flag. */
+  max_output_tokens: number
+  kv_cache_free_gpu_memory_fraction: number
+  /** `trtllm-serve --max_batch_size`: requests served at once. */
+  max_batch_size: number
+  /** `kv_cache_config.max_tokens`; `0` sizes it as context length × `max_batch_size`. */
+  kv_cache_max_tokens: number
+  /** `auto` (on only on cards with 12 GB or more), `on` or `off`. */
+  cuda_graphs: 'auto' | 'on' | 'off'
+  /** `auto` (the model's own precision) or `fp8` (Ada and newer; ignored on older cards). */
+  kv_cache_dtype: 'auto' | 'fp8'
+  load_timeout_seconds: number
+}
+
 export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
   ? MlxConfig
   : P extends 'foundation-models'
     ? FoundationModelsConfig
-    : LlamacppConfig
+    : P extends 'tensorrt-llm'
+      ? TensorrtLlmProviderConfig
+      : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

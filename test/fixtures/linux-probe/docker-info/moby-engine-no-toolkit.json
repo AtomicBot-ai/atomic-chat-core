@@ -1,0 +1,24 @@
+{
+  "ID": "MOBY:AAAA:BBBB:CCCC:DDDD:EEEE:FFFF:0000:1111:2222:3333:4444",
+  "Containers": 0,
+  "ContainersRunning": 0,
+  "ContainersPaused": 0,
+  "ContainersStopped": 0,
+  "Images": 1,
+  "Driver": "overlay2",
+  "SystemTime": "2026-09-28T12:00:00.000000000Z",
+  "ServerVersion": "27.1.1",
+  "OperatingSystem": "Fedora Linux 43 (Workstation Edition)",
+  "OSType": "linux",
+  "Architecture": "x86_64",
+  "Name": "fedora-workstation",
+  "DockerRootDir": "/var/lib/docker",
+  "Runtimes": {
+    "runc": { "path": "runc" },
+    "io.containerd.runc.v2": { "path": "runc" }
+  },
+  "DefaultRuntime": "runc",
+  "CDISpecDirs": [],
+  "SecurityOptions": ["name=selinux", "name=seccomp,profile=default"],
+  "ServerErrors": []
+}

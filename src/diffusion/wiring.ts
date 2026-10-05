@@ -8,7 +8,7 @@ import type { DataLayout } from '../config/index.js'
 import type { CoreEvents, HardwareInfoResponse, SystemInfo } from '../contracts/index.js'
 import { processStartId } from '../lock/index.js'
 import type { ProcessJournal } from '../lock/index.js'
-import type { BackendOutputSink } from '../runtime/shared/index.js'
+import type { BackendOutputSink, GpuClaimHook } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
 import type { DiffusionServiceDeps } from './service.js'
 
@@ -24,6 +24,8 @@ export interface WireDiffusionOptions {
   hardware?: { info(): Promise<HardwareInfoResponse> }
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
+  /** Core's GPU residency (task 2.15), asked before every `sd-server` spawn. */
+  claimGpu?: GpuClaimHook
   /** Test seams, straight through to the service. */
   overrides?: Pick<
     DiffusionServiceDeps,
@@ -70,6 +72,7 @@ export function wireDiffusion(options: WireDiffusionOptions): DiffusionService {
     ...(options.hardware ? { systemInfo: hardwareSystemInfo(options.hardware) } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
     ...(options.env ? { env: options.env } : {}),
+    ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
     ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     ...options.overrides,
   })

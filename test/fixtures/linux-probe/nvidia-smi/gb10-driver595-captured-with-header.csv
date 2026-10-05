@@ -1,0 +1,2 @@
+uuid, name, compute_cap, memory.total [MiB], memory.free [MiB], driver_version
+GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32, NVIDIA GB10, 12.1, [N/A], [N/A], 595.71.05

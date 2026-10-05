@@ -81,6 +81,36 @@ describe('parseNvidiaSmiCsv / nvidiaGpuFromRow', () => {
     })
   })
 
+  it('reads the GB10 (unified memory, [N/A] memory) as an unknown size of 0, never NaN', () => {
+    // The values captured on a DGX Spark-class host (driver 595.71.05), laid out in this query's own
+    // column order; the index and bus id columns were not captured and are made up.
+    const rows = parseNvidiaSmiCsv(
+      '0, NVIDIA GB10, GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32, [N/A], 595.71.05, 12.1, 0000000F:01:00.0\n',
+      NVIDIA_SMI_FIELDS
+    )
+    expect(rows).toHaveLength(1)
+    expect(nvidiaGpuFromRow(rows[0]!)).toMatchObject({
+      name: 'NVIDIA GB10',
+      total_memory: 0,
+      uuid: 'd991dc71-7825-0bf8-3339-cb2e7ead6a32',
+      driver_version: '595.71.05',
+      nvidia_info: { index: 0, compute_capability: '12.1' },
+    })
+  })
+
+  it('skips a header line and reads memory with its unit, for output from a query without noheader,nounits', () => {
+    const rows = parseNvidiaSmiCsv(
+      'index, name, uuid, memory.total [MiB], driver_version, compute_cap, pci.bus_id\n' +
+        '0, NVIDIA GeForce RTX 5090, GPU-5a0f7d19-2c4b-4e8a-b6d3-91e2c0f4a7d8, 32607 MiB, 595.71.05, 12.0, 00000000:01:00.0\n',
+      NVIDIA_SMI_FIELDS
+    )
+    expect(rows).toHaveLength(1)
+    expect(nvidiaGpuFromRow(rows[0]!)).toMatchObject({
+      name: 'NVIDIA GeForce RTX 5090',
+      total_memory: 32_607,
+    })
+  })
+
   it('drops lines whose column count does not match the query', () => {
     const rows = parseNvidiaSmiCsv(
       'Warning: persistence mode is disabled\n0, GPU, GPU-1, 100, 550.1, 7.5, 00000000:01:00.0\n\n',

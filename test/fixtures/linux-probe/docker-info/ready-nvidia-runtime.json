@@ -1,0 +1,25 @@
+{
+  "ID": "X4RT:AAAA:BBBB:CCCC:DDDD:EEEE:FFFF:0000:1111:2222:3333:4444",
+  "Containers": 2,
+  "ContainersRunning": 0,
+  "ContainersPaused": 0,
+  "ContainersStopped": 2,
+  "Images": 5,
+  "Driver": "overlay2",
+  "SystemTime": "2026-09-28T12:00:00.000000000Z",
+  "ServerVersion": "28.3.0",
+  "OperatingSystem": "Ubuntu 24.04.3 LTS",
+  "OSType": "linux",
+  "Architecture": "x86_64",
+  "Name": "ana-desktop",
+  "DockerRootDir": "/var/lib/docker",
+  "Runtimes": {
+    "runc": { "path": "runc" },
+    "nvidia": { "path": "/usr/bin/nvidia-container-runtime" },
+    "io.containerd.runc.v2": { "path": "runc" }
+  },
+  "DefaultRuntime": "runc",
+  "CDISpecDirs": ["/etc/cdi", "/var/run/cdi"],
+  "SecurityOptions": ["name=apparmor", "name=seccomp,profile=default", "name=cgroupns"],
+  "ServerErrors": []
+}

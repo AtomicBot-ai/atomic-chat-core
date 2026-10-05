@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 /**
  * A stand-in for `nvidia-smi --query-gpu=… --format=csv,noheader,nounits`, for the hardware e2e on
- * Linux: one RTX 4090 with the driver 581.42. Wrapped by a `#!/bin/sh` script named `nvidia-smi` in
- * a directory the test prepends to PATH.
+ * Linux and the `tensorrt-llm` provider e2e's test host: one RTX 4090 with the driver 581.42.
+ * Wrapped by a `#!/bin/sh` script named `nvidia-smi` in a directory the test prepends to PATH (or
+ * the test host's `bin/`).
  *
  *   FAKE_NVIDIA_SMI_MODE  modern (default) | legacy — `legacy` refuses `compute_cap` the way a
  *                         driver older than 470 does, so the probe has to retry with the legacy fields.
+ *   FAKE_NVIDIA_SMI_GPUS  a JSON array of per-card field overrides (`{"uuid": …, "memory.free": …}`),
+ *                         one line per card in that order, each over the default card's fields —
+ *                         a multi-GPU host (task 2.21: the default card is the one with the most
+ *                         free memory). Unset: the one default card.
  */
 const mode = process.env.FAKE_NVIDIA_SMI_MODE ?? 'modern'
 const query = process.argv.find((arg) => arg.startsWith('--query-gpu='))
@@ -25,6 +30,7 @@ const values = {
   'name': 'NVIDIA GeForce RTX 4090',
   'uuid': 'GPU-0b6f4f4e-6c1c-3a54-8f2d-1b0d2f4d6a11',
   'memory.total': '24564',
+  'memory.free': '24000',
   'driver_version': '581.42',
   'compute_cap': '8.9',
   'pci.bus_id': '00000000:01:00.0',
@@ -34,4 +40,11 @@ if (unknown.length) {
   process.stderr.write(`Field "${unknown[0]}" is not a valid field to query.\n`)
   process.exit(2)
 }
-process.stdout.write(fields.map((field) => values[field]).join(', ') + '\n')
+const cards = process.env.FAKE_NVIDIA_SMI_GPUS
+  ? JSON.parse(process.env.FAKE_NVIDIA_SMI_GPUS).map((overrides, index) => ({
+      ...values,
+      index: String(index),
+      ...overrides,
+    }))
+  : [values]
+process.stdout.write(cards.map((card) => fields.map((field) => card[field]).join(', ') + '\n').join(''))

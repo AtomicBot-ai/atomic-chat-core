@@ -12,9 +12,10 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { RemoteAccessStatus } from './remote-access.js'
-import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo } from './session.js'
+import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo, SessionLoadStage } from './session.js'
 
 export type DownloadKind = 'model' | 'backend' | 'draft' | 'cudart'
 
@@ -94,11 +95,18 @@ export interface CoreEvents {
   'session:started': SessionInfo & { provider: LocalProviderId }
   'session:died': {
     provider: LocalProviderId
-    pid: number
+    /** null when the session was a container: it never had a host process to report. */
+    pid: number | null
     model_id: string
     exit_code: number | null
     signal: string | null
     message: string
+    /**
+     * Why the session ended when it was not the engine's own exit (change `add-tensorrt-llm-windows`):
+     * `wsl-stopped` — the WSL distribution or VM stopped under it (`wsl --shutdown`). Absent otherwise;
+     * additive, a client that predates it ignores the key.
+     */
+    reason?: 'wsl-stopped'
   }
   'session:ctx-increased': {
     provider: LocalProviderId
@@ -107,7 +115,27 @@ export interface CoreEvents {
     newCtx: number
     reason: string
   }
-  'session:unloaded': { provider: LocalProviderId; model_id: string; pid: number }
+  /** `pid` is null when the session was a container: it never had a host process to report. */
+  'session:unloaded': { provider: LocalProviderId; model_id: string; pid: number | null }
+  /**
+   * Managed-runtime load stages (design D8, spec `tensorrt-llm-runtime`): `generation` ties the
+   * progress to the exact load a caller started, since a second load of the same model replaces it
+   * with a new one. Only a container-backed provider emits this; a native load has no stages to
+   * report and goes straight from `session:started` to ready.
+   */
+  'session:load-progress': {
+    provider: LocalProviderId
+    model_id: string
+    generation: string
+    stage: SessionLoadStage
+    elapsed_ms: number
+    /**
+     * Present on every progress event of a load whose saved card was not found by the probe, so it
+     * runs on the card with the most free memory instead (spec `tensorrt-llm-runtime`, "Выбранная карта
+     * исчезла"). Absent when the load runs where it was asked to.
+     */
+    gpu_substituted?: { requested_gpu_id: string; gpu_id: string }
+  }
 
   'server:started': { host: string; port: number }
   'server:stopped': Record<string, never>
@@ -131,6 +159,18 @@ export interface CoreEvents {
   /** Video generation shares `state` and `error`; its jobs have their own two, so image consumers see no new shape. */
   'diffusion:video-progress': DiffusionVideoProgressEvent
   'diffusion:video-job': DiffusionVideoJobEvent
+
+  /**
+   * Managed text runtimes (`src/contracts/environment.ts`; openspec change `add-tensorrt-llm-linux`).
+   * Both carry full state rather than a delta, so a client that reconnects rebuilds from the
+   * snapshot and then applies whatever arrives. Both are proposed: no producer exists yet.
+   *
+   * `changed` is one environment and the engines installed into it. `operation` is one durable
+   * setup, update or removal. Each carries `instance_id` and `revision`: apply only a strictly
+   * newer revision of the current instance, and treat an equal revision as a no-op.
+   */
+  'environment:changed': EnvironmentSnapshot
+  'environment:operation': EnvironmentOperation
 
   /**
    * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). `state` on every

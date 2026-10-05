@@ -179,6 +179,9 @@ describe('CloudRegistry', () => {
     await expect(registry.upsert({ provider: 'llamacpp-upstream' })).rejects.toMatchObject({
       message: '"llamacpp-upstream" is a local engine, not a cloud provider',
     })
+    await expect(registry.upsert({ provider: 'tensorrt-llm' })).rejects.toMatchObject({
+      message: '"tensorrt-llm" is a local engine, not a cloud provider',
+    })
     for (const bad of [
       { models: 'gpt' },
       { models: [1] },

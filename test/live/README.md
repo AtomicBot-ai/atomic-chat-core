@@ -30,3 +30,19 @@ Stage 5 providers, each opt-in on its own:
   Wan; `ATOMIC_LIVE_SD_VIDEO_MODE_FLAG=1` also passes `-M vid_gen`): load → a nine-frame clip with parsed step progress,
   the WebM and its sidecar → `/v1/videos` queue, poll and content → a hard cancel → respawn → unload. It prints the
   engine's capabilities and the clip's numbers, which is the evidence the ADR of 2026-09-23 leaves open.
+
+Managed TensorRT-LLM install on Linux (`test/live/managed-install.test.ts`, task 2.18): `ATOMIC_LIVE=1` **and**
+`ATOMIC_LIVE_MANAGED=1`, on a throwaway Linux VM with an NVIDIA GPU, driver ≥ the descriptor's minimum and passwordless
+sudo. It installs Docker and the NVIDIA Container Toolkit through the core's own recipe, emulates the relogin, pulls the
+engine, loads a curated model and streams a chat on `:1337`, then writes `summary.json` for the PR. VM states, build,
+exact command and what to attach: [`docs/live-tests.md`](../../docs/live-tests.md).
+
+TensorRT-LLM engine on every NVIDIA card (`test/live/tensorrt-llm.test.ts`, task 2.19): `ATOMIC_LIVE=1` on Linux with
+`/usr/bin/nvidia-smi` and the engine already `ready` (after the install test run with
+`ATOMIC_LIVE_MANAGED_KEEP_ENGINE=1`, pass its `managed/` folder as `ATOMIC_LIVE_MANAGED_ROOT`). It changes nothing on the host. Per card, pinned through the stored `gpu_id` setting: the
+tier's curated model loads as the core's own user, streams on `:1337`, reloads faster from its engine cache, answers
+a tool call and a JSON schema, and after `kill -9` of the core its container exits through the watchdog and the card's
+memory comes back. With `ATOMIC_LIVE_UPSTREAM_BIN`/`ATOMIC_LIVE_UPSTREAM_MODEL` it also races a reload against a
+llama.cpp GPU load. It writes the measured
+heartbeat, watchdog, `--shm-size`, memory-limit and load-timeout values into `summary.json` for an ADR. Prerequisites,
+exact command and how to carry the results into an ADR and conf: [`docs/live-tests.md`](../../docs/live-tests.md).

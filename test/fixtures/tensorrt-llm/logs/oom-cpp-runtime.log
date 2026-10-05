@@ -1,0 +1,7 @@
+INFO 09-28 10:27:33 [server.py] Started server process [1]
+INFO 09-28 10:27:33 [server.py] Waiting for application startup.
+Creating CUDA graph instances for 8 batch sizes.
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/pyexecutor/py_executor_creator.py", line 214, in create_py_executor
+    executor = PyExecutor(...)
+RuntimeError: CUDA runtime error in cudaMallocAsync(&ptr, size, stream): out of memory (/workspace/cpp/tensorrt_llm/runtime/tllmBuffers.h:130)

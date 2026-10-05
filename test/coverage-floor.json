@@ -149,6 +149,12 @@
     "functions": 80,
     "lines": 100
   },
+  "src/cli/commands/host-step.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/cli/commands/models.ts": {
     "statements": 100,
     "branches": 80,
@@ -251,6 +257,30 @@
     "functions": 92,
     "lines": 97
   },
+  "src/core/gpu-residency.ts": {
+    "statements": 100,
+    "branches": 87,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/core/gpu/policy.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/core/gpu/residency.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/core/managed-environment.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/core/public-server.ts": {
     "statements": 100,
     "branches": 95,
@@ -267,6 +297,12 @@
     "statements": 100,
     "branches": 93,
     "functions": 100,
+    "lines": 100
+  },
+  "src/core/tensorrt-llm.ts": {
+    "statements": 100,
+    "branches": 87,
+    "functions": 85,
     "lines": 100
   },
   "src/credentials/api-keys.ts": {
@@ -665,6 +701,36 @@
     "functions": 81,
     "lines": 89
   },
+  "src/host/recipes/executor-io.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 95,
+    "lines": 100
+  },
+  "src/host/recipes/executor.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/host/recipes/install-container-runtime.ts": {
+    "statements": 99,
+    "branches": 97,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/host/recipes/openpgp.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/host/recipes/request-file.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
   "src/integrations/catalog.ts": {
     "statements": 100,
     "branches": 100,
@@ -989,6 +1055,126 @@
     "functions": 100,
     "lines": 100
   },
+  "src/runtime/container/docker-binary.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/container/wiring.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/cached-document.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 92,
+    "lines": 100
+  },
+  "src/runtime/environment/canonical-json.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/descriptor.ts": {
+    "statements": 98,
+    "branches": 88,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/runtime/environment/document-fields.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/environment-manifest-provider.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/environment-manifest.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/host-exec.ts": {
+    "statements": 96,
+    "branches": 94,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/runtime/environment/installations.ts": {
+    "statements": 96,
+    "branches": 93,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/runtime/environment/inventory.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/linux-host.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 87,
+    "lines": 100
+  },
+  "src/runtime/environment/linux-probe.ts": {
+    "statements": 100,
+    "branches": 92,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/environment/linux-provisioner.ts": {
+    "statements": 96,
+    "branches": 85,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/runtime/environment/recovery.ts": {
+    "statements": 94,
+    "branches": 91,
+    "functions": 100,
+    "lines": 94
+  },
+  "src/runtime/environment/service.ts": {
+    "statements": 83,
+    "branches": 85,
+    "functions": 95,
+    "lines": 83
+  },
+  "src/runtime/environment/state.ts": {
+    "statements": 95,
+    "branches": 81,
+    "functions": 100,
+    "lines": 95
+  },
+  "src/runtime/environment/store.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 95,
+    "lines": 100
+  },
+  "src/runtime/environment/windows-probe.ts": {
+    "statements": 97,
+    "branches": 91,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/runtime/environment/wiring.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/foundation-models/errors.ts": {
     "statements": 100,
     "branches": 100,
@@ -1054,6 +1240,36 @@
     "branches": 86,
     "functions": 81,
     "lines": 89
+  },
+  "src/runtime/managed-text/adapter.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/managed-text/engine-cache.ts": {
+    "statements": 98,
+    "branches": 95,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/runtime/managed-text/lifecycle.ts": {
+    "statements": 94,
+    "branches": 86,
+    "functions": 97,
+    "lines": 94
+  },
+  "src/runtime/managed-text/load-policy.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/managed-text/readiness.ts": {
+    "statements": 100,
+    "branches": 85,
+    "functions": 100,
+    "lines": 100
   },
   "src/runtime/mlx/args.ts": {
     "statements": 100,
@@ -1151,6 +1367,72 @@
     "functions": 100,
     "lines": 99
   },
+  "src/runtime/tensorrt-llm/check.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/compatibility.ts": {
+    "statements": 99,
+    "branches": 90,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/runtime/tensorrt-llm/host-facts.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/installation.ts": {
+    "statements": 97,
+    "branches": 94,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/runtime/tensorrt-llm/model-dir.ts": {
+    "statements": 98,
+    "branches": 98,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/runtime/tensorrt-llm/prelaunch.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/quant-format.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/registry.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/route-policy.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/runtime.ts": {
+    "statements": 100,
+    "branches": 88,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/tensorrt-llm/settings.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/clients.ts": {
     "statements": 100,
     "branches": 100,
@@ -1198,6 +1480,12 @@
     "branches": 100,
     "functions": 100,
     "lines": 100
+  },
+  "src/server/control/routes/environments.ts": {
+    "statements": 97,
+    "branches": 90,
+    "functions": 100,
+    "lines": 97
   },
   "src/server/control/routes/external-sessions.ts": {
     "statements": 100,
@@ -1318,6 +1606,12 @@
     "branches": 84,
     "functions": 100,
     "lines": 98
+  },
+  "src/server/public/policy.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
   },
   "src/server/public/responses.ts": {
     "statements": 94,
@@ -1524,6 +1818,12 @@
     "lines": 100
   },
   "src/telemetry/subscribe.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/util/result.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,

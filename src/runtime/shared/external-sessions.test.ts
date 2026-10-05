@@ -68,6 +68,10 @@ describe('ExternalSessions', () => {
       sessions: 1,
     })
     expect(sessions.list()[0]).toMatchObject({ api_key: '', is_embedding: false, pid: null })
+    expect(sessions.publish('app', 2, [{ provider: 'tensorrt-llm', model_id: 'trt', port: 2 }])).toEqual({
+      generation: 2,
+      sessions: 1,
+    })
   })
 
   it('asks the owner to grow a context and resolves with its answer, once', async () => {

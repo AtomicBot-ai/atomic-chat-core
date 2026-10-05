@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
+import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../test/helpers/fake-backend-pack.js'
 import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { CoreClient } from '../client/index.js'
@@ -10,8 +13,75 @@ import { AtomicCore, CORE_VERSION } from './index.js'
 import type { BackendOutputSink } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
+import { ExecutionJournal } from '../runtime/container/index.js'
+import { isProcessAlive } from '../runtime/index.js'
+import { skipTestOnWindows } from '../../test/helpers/platform.js'
+
+/**
+ * The tests here build a whole core, several of them with real (fake-engine) child processes. Under the
+ * full suite's parallel load some crossed vitest's 5 s default and failed at random (final review
+ * T-282), so the whole file gets an explicit, longer per-test timeout.
+ */
+vi.setConfig({ testTimeout: 20_000 })
 
 useCoreHarness()
+
+describe('managed runtime containers at startup', () => {
+  /** A `docker` that has never heard of any container, and logs what it was asked. */
+  async function fakeDocker(): Promise<{ path: string; log: string }> {
+    const path = join(data.root, 'fake-docker')
+    const log = join(data.root, 'fake-docker.log')
+    await writeFile(
+      path,
+      `#!/bin/sh\necho "$*" >> '${log}'\necho "Error: No such container: $5" >&2\nexit 1\n`
+    )
+    await chmod(path, 0o755)
+    return { path, log }
+  }
+  const orphan = {
+    container_id: 'orphan0123',
+    engine_id: 'tensorrt-llm',
+    image_digest: `sha256:${'d'.repeat(64)}`,
+    scope: 'app',
+    instance_id: 'previous-core',
+    created_at: '2026-09-28T00:00:00.000Z',
+  }
+
+  it("reconciles a previous core's journalled containers on Linux before the endpoint is published", async (ctx) => {
+    skipTestOnWindows(ctx, 'the fake docker is a shebang script, which Windows cannot execute')
+    await (await ExecutionJournal.open(data.layout)).add(orphan)
+    const docker = await fakeDocker()
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: docker.path,
+    })
+    cores.push(core)
+    expect((await ExecutionJournal.open(data.layout)).list()).toEqual([])
+    expect(await readFile(docker.log, 'utf8')).toContain('container inspect orphan0123')
+  })
+
+  it('leaves the journal alone off Linux, and on Linux without a docker CLI', async () => {
+    await (await ExecutionJournal.open(data.layout)).add(orphan)
+    const docker = await fakeDocker()
+    const mac = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'darwin',
+      dockerPath: docker.path,
+    })
+    await mac.shutdown()
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+    })
+    cores.push(linux)
+    expect((await ExecutionJournal.open(data.layout)).list()).toEqual([orphan])
+  })
+})
 
 describe('taking ownership', () => {
   it('expires an app owner after its registration vanishes, without changing CLI lifetime', async () => {
@@ -59,7 +129,7 @@ describe('taking ownership', () => {
     expect(await client.health()).toMatchObject({ ok: true, instance_id: core.instanceId })
     expect(core.readyLine()).toMatchObject({
       event: 'core:ready',
-      protocol: 1,
+      protocol: 2,
       version: CORE_VERSION,
       control_port: core.control.port,
     })
@@ -118,7 +188,7 @@ describe('taking ownership', () => {
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
     expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
     expect(() => core.runtime('ollama' as never)).toThrow(
-      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp' })
+      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp, tensorrt-llm' })
     )
   })
 
@@ -144,6 +214,108 @@ describe('taking ownership', () => {
     expect(mac.registry('mlx').modelsDir).toBe(join(data.root, 'mlx', 'models'))
     expect(() => mac.llamacpp('foundation-models' as never)).toThrow(/Unknown provider/)
     expect(await call(mac)).toEqual({ status: 'binaryNotFound' })
+  })
+
+  it('offers tensorrt-llm on Linux only; elsewhere its routes answer PROVIDER_NOT_FOUND, not a transport error', async () => {
+    const call = (core: AtomicCore, path: string, method = 'GET') =>
+      fetch(`${core.control.url}/atomic/v1${path}`, {
+        method,
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }))
+
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+    })
+    expect(linux.runtime('tensorrt-llm')).toBeDefined()
+    // No docker CLI on this "Linux": the load is refused before anything else is asked of the machine.
+    expect(await call(linux, '/models/tensorrt-llm/m/load', 'POST')).toMatchObject({
+      body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
+    })
+    expect(await call(linux, '/models/tensorrt-llm/m/capabilities')).toMatchObject({
+      status: 200,
+      body: { modelId: 'm', tools: false, embeddings: false },
+    })
+    expect(await call(linux, '/models/tensorrt-llm/m/logs')).toEqual({
+      status: 200,
+      body: { model_id: 'm', source: null, log_tail: '' },
+    })
+    expect(await call(linux, '/models/llamacpp-upstream/m/logs')).toMatchObject({
+      status: 400,
+      body: { error: { code: 'INVALID_ARGUMENT' } },
+    })
+    await linux.shutdown()
+
+    const mac = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'darwin',
+      resourcesDir: join(data.root, 'no-resources'),
+    })
+    cores.push(mac)
+    expect(() => mac.runtime('tensorrt-llm')).toThrow(/Unknown provider/)
+    for (const [path, method] of [
+      ['/models/tensorrt-llm/m/load', 'POST'],
+      ['/models/tensorrt-llm/m/unload', 'POST'],
+      ['/models/tensorrt-llm/m/load/cancel', 'POST'],
+      ['/models/tensorrt-llm/m/capabilities', 'GET'],
+      ['/models/tensorrt-llm/m/logs', 'GET'],
+      ['/models/tensorrt-llm/m', 'DELETE'],
+    ] as const) {
+      expect(await call(mac, path, method)).toMatchObject({
+        status: 404,
+        body: { error: { code: 'PROVIDER_NOT_FOUND' } },
+      })
+    }
+  })
+
+  it("exposes the tensorrt-llm model registry through core.registry('tensorrt-llm') on Linux only, a fresh scan on every list() (task 2.16w round 1, finding 2), and deletes through core (task 2.24)", async () => {
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+    })
+
+    const modelsDir = linux.layout.provider('tensorrt-llm').modelsDir
+    // A directory with files but no model.yml is not shown at all (spec "Недокачанный каталог").
+    await mkdir(join(modelsDir, 'downloading'), { recursive: true })
+    await writeFile(join(modelsDir, 'downloading', 'model.safetensors'), 'partial')
+    expect((await linux.registry('tensorrt-llm').list()).map((m) => m.id)).toEqual([])
+
+    // The app finishes the download and writes model.yml last: the very next list() finds it, no restart.
+    await writeFile(
+      join(modelsDir, 'downloading', 'model.yml'),
+      'repository: acme/model\nrevision: deadbeef\narchitectures:\n  - LlamaForCausalLM\nquantization: bf16\nfiles: []\n'
+    )
+    expect((await linux.registry('tensorrt-llm').list()).map((m) => m.id)).toEqual(['downloading'])
+
+    // Deleted through core only (task 2.24): an id the registry does not list is an error, a listed
+    // one that never loaded goes with its folder, and an unload of an unknown id is not a stop.
+    const del = (id: string) =>
+      fetch(`${linux.control.url}/atomic/v1/models/tensorrt-llm/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${linux.controlToken}` },
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }))
+    expect(await del('missing')).toMatchObject({ status: 404, body: { error: { code: 'MODEL_NOT_FOUND' } } })
+    expect(await linux.unload('tensorrt-llm', 'missing')).toEqual({ success: true, was_loaded: false })
+    expect(await del('downloading')).toMatchObject({
+      status: 200,
+      body: { model_id: 'downloading', was_loaded: false, engine_caches_removed: 0 },
+    })
+    expect((await linux.registry('tensorrt-llm').list()).map((m) => m.id)).toEqual([])
+    await linux.shutdown()
+
+    const mac = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'darwin',
+      resourcesDir: join(data.root, 'no-resources'),
+    })
+    cores.push(mac)
+    expect(() => mac.registry('tensorrt-llm')).toThrow(/Unknown provider/)
   })
 
   it('wires settings, context and public-server control routes to the facade', async () => {
@@ -725,6 +897,21 @@ describe('the decision model through the owner', () => {
       timeout_ms: 5_000,
     })
     expect(await decided.json()).toMatchObject({ unavailable: false, result: { answers: { refund: {} } } })
+    // The optional request fields reach the model on both routes, with or without a timeout.
+    const scoredWithOptions = await control(core, 'POST', 'score', {
+      task: 't',
+      criterion: 'c',
+      candidates,
+      timeout_ms: 5_000,
+      truncation: 'allow',
+    })
+    expect(await scoredWithOptions.json()).toMatchObject({ unavailable: false })
+    const decidedTruncated = await control(core, 'POST', 'decide', {
+      state: 'Billed twice, refund please',
+      questions: { refund: { type: 'noul', instructions: 'Asks for money back?' } },
+      truncation: 'allow',
+    })
+    expect(await decidedTruncated.json()).toMatchObject({ unavailable: false })
 
     const served = await core.startPublicServer({ port: 0 })
     const base = `http://127.0.0.1:${served.port}/v1`
@@ -1009,4 +1196,188 @@ describe('hardware facts', () => {
       })
     }
   )
+})
+
+describe('GPU residency', () => {
+  it.skipIf(process.platform === 'win32')(
+    'loading on one llama.cpp provider stops the other’s GPU session through the facade, claim and all, and leaves the voice model',
+    async () => {
+      const { installFakeBackend } = await import('../../test/helpers/fake-backend-pack.js')
+      const core = await createCore()
+      for (const id of ['a', 'b', 'ggml-org/Voxtral-Mini-3B-2507-Q4_K_M']) await data.writeModel(id)
+      for (const [provider, version] of [
+        ['llamacpp-upstream', 'b6325'],
+        ['llamacpp', 'b10018-1.3.0'],
+      ] as const) {
+        const pack = await installFakeBackend(data.layout, { provider, version, backend: 'linux-vulkan-x64' })
+        await core.settings.update(provider, { version_backend: pack.versionBackend, fit: false })
+      }
+      const claims = () => readdir(data.layout.core.modelClaims).catch(() => [] as string[])
+
+      const voice = await core.load('llamacpp-upstream', 'ggml-org/Voxtral-Mini-3B-2507-Q4_K_M', {
+        bypassAutoUnload: true,
+      })
+      const a = await core.load('llamacpp-upstream', 'a')
+      const heldBefore = await claims()
+      await core.load('llamacpp', 'b')
+
+      expect(core.runtime('llamacpp-upstream').getLoadedModels()).toEqual([
+        'ggml-org/Voxtral-Mini-3B-2507-Q4_K_M',
+      ])
+      expect(core.runtime('llamacpp').getLoadedModels()).toEqual(['b'])
+      expect(isProcessAlive(voice.pid as number)).toBe(true)
+      expect(isProcessAlive(a.pid as number)).toBe(false)
+      // a's cross-process claim went with its confirmed stop; the voice model's is still held, and b's is new.
+      expect(heldBefore).toHaveLength(2)
+      const heldAfter = await claims()
+      expect(heldAfter).toHaveLength(2)
+      expect(heldAfter.filter((claim) => heldBefore.includes(claim))).toHaveLength(1)
+    }
+  )
+})
+
+describe('GPU residency: racing loads and other owners', () => {
+  const gpuPacks = async (layout: typeof data.layout, core: AtomicCore) => {
+    const { installFakeBackend } = await import('../../test/helpers/fake-backend-pack.js')
+    for (const [provider, version] of [
+      ['llamacpp-upstream', 'b6325'],
+      ['llamacpp', 'b10018-1.3.0'],
+    ] as const) {
+      const pack = await installFakeBackend(layout, { provider, version, backend: 'linux-vulkan-x64' })
+      await core.settings.update(provider, { version_backend: pack.versionBackend, fit: false })
+    }
+  }
+
+  it.skipIf(process.platform === 'win32')(
+    'two GPU loads on two engines at once: the later claim stops the earlier load, and one model ends up resident',
+    async () => {
+      const core = await createCore()
+      for (const id of ['a', 'b']) await data.writeModel(id)
+      await gpuPacks(data.layout, core)
+      const outcomes = await Promise.allSettled([
+        core.load('llamacpp-upstream', 'a'),
+        core.load('llamacpp', 'b'),
+      ])
+      const loaded = [
+        ...core.runtime('llamacpp-upstream').getLoadedModels(),
+        ...core.runtime('llamacpp').getLoadedModels(),
+      ]
+      expect(loaded).toHaveLength(1)
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1)
+      const [refused] = outcomes.filter((o) => o.status === 'rejected')
+      expect((refused as PromiseRejectedResult).reason).toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'never stops what another core scope runs, nor a session another process registered here',
+    async () => {
+      // The CLI core, in its own data folder, holds a model on the card.
+      const cliData = await makeTmpDataFolder('atomic-core-cli-scope-')
+      try {
+        const cli = await createCore({ dataFolder: cliData.root, ownerScope: 'cli' })
+        await cliData.writeModel('cli-model')
+        await gpuPacks(cliData.layout, cli)
+        const held = await cli.load('llamacpp-upstream', 'cli-model')
+
+        // The app core: the app also registered that session with it as external.
+        const app = await createCore({ ownerScope: 'app' })
+        await data.writeModel('app-model')
+        await gpuPacks(data.layout, app)
+        app.externalSessions.publish('cli', 1, [
+          { provider: 'llamacpp-upstream', model_id: 'cli-model', port: held.port, api_key: held.api_key },
+        ])
+        await app.load('llamacpp-upstream', 'app-model')
+
+        expect(isProcessAlive(held.pid as number)).toBe(true)
+        expect(cli.runtime('llamacpp-upstream').getLoadedModels()).toEqual(['cli-model'])
+        expect(app.externalSessions.list().map((s) => s.model_id)).toEqual(['cli-model'])
+        expect(app.runtime('llamacpp-upstream').getLoadedModels()).toEqual(['app-model'])
+      } finally {
+        await Promise.all(cores.splice(0).map((c) => c.shutdown()))
+        await cliData.cleanup()
+      }
+    }
+  )
+})
+
+describe('managed runtime environment', () => {
+  it('wires the environment routes, the snapshot and the event stream to one core', async () => {
+    // A throwaway shared root, so this never touches the real per-user environment on the host
+    // running the test — the same isolation the e2e suite gives every daemon it starts.
+    const managedRoot = await mkdtemp(join(tmpdir(), 'atomic-core-managed-unit-'))
+    try {
+      // No descriptor anywhere, whatever the developer's own environment says: the outcome must not
+      // depend on the machine (it did — CI on Linux and Windows reached the descriptor, macOS did not).
+      const core = await createCore({
+        env: {
+          ...process.env,
+          ATOMIC_CORE_MANAGED_ROOT: managedRoot,
+          ATOMIC_RUNTIME_DESCRIPTOR_URL: pathToFileURL(join(managedRoot, 'no-descriptor.json')).href,
+        },
+      })
+      const call = (path: string, init: RequestInit = {}) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          ...init,
+          headers: { authorization: `Bearer ${core.controlToken}`, ...init.headers },
+        })
+
+      const listed = (await (await call('/environments')).json()) as {
+        environments: Array<{ environment_id: string; executor: string; availability: string }>
+      }
+      const snapshot = (await (await call('/snapshot')).json()) as {
+        environments: unknown[]
+        environment_operations: unknown[]
+      }
+      // The control snapshot and the dedicated route describe the same in-memory view.
+      expect(snapshot.environments).toEqual(listed.environments)
+      expect(snapshot.environment_operations).toEqual([])
+
+      const started = await call('/environments/default/operations', {
+        method: 'POST',
+        body: JSON.stringify({
+          request_id: 'req-1',
+          target: { kind: 'environment' },
+          kind: 'setup',
+          descriptor_id: 'trtllm-1.3.0rc27',
+        }),
+      })
+      // No host recipe is qualified on this platform yet: the request is still recorded and
+      // dispatched (202), it just runs straight into a blocker.
+      expect(started.status).toBe(202)
+      const operation = (await started.json()) as { operation_id: string }
+
+      const deadline = Date.now() + 5_000
+      let current: { phase: string; error: { code: string } | null } = { phase: 'checking', error: null }
+      while (current.phase !== 'failed' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        current = (await (
+          await call(`/environments/operations/${operation.operation_id}`)
+        ).json()) as typeof current
+      }
+      expect(current.phase).toBe('failed')
+      // Where setup is real (Linux, Windows) the plan needs the descriptor, which nobody has: metadata.
+      // Elsewhere (macOS) the host itself is the blocker, before any descriptor is asked for.
+      expect(current.error?.code).toBe(
+        process.platform === 'linux' || process.platform === 'win32'
+          ? 'MANAGED_METADATA_INVALID'
+          : 'MANAGED_PREREQUISITE_BLOCKED'
+      )
+
+      // A retried request with the same id gets the operation it already started, not a new one —
+      // exercising the id generator's idempotency path a second time changes nothing.
+      const again = await call('/environments/default/operations', {
+        method: 'POST',
+        body: JSON.stringify({
+          request_id: 'req-1',
+          target: { kind: 'environment' },
+          kind: 'setup',
+          descriptor_id: 'trtllm-1.3.0rc27',
+        }),
+      })
+      expect(((await again.json()) as { operation_id: string }).operation_id).toBe(operation.operation_id)
+    } finally {
+      await rm(managedRoot, { recursive: true, force: true, maxRetries: 3 })
+    }
+  })
 })

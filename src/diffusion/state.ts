@@ -73,6 +73,14 @@ export class DiffusionState {
   session: DiffusionSession | undefined
   /** The last spec that loaded; the respawn source after a cancel or a crash. Cleared only by an unload. */
   spec: ServerSpec | undefined
+  /** A server whose GPU claim succeeded and that is starting: it holds the GPU before it is a session. */
+  starting: ServerSpec | undefined
+  /**
+   * A server being taken down whose exit is not confirmed yet: no longer the session, still on the
+   * GPU. `done` settles once the exit is confirmed (or the stop failed and the server is the session
+   * again).
+   */
+  stopping: { spec: ServerSpec; done: Promise<void> } | undefined
   /** The sizes of `spec`'s files, read when it loaded; what the video estimate weighs. Cleared with it. */
   modelFileBytes: ModelFileBytes | undefined
   modelState: DiffusionModelState = 'unloaded'

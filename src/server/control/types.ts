@@ -6,6 +6,7 @@
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
+  BeginOperation,
   DecisionDecideRequest,
   DecisionOutcome,
   DecisionScoreRequest,
@@ -19,6 +20,8 @@ import type {
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
+  EnvironmentOperation,
+  EnvironmentSnapshot,
   FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
@@ -40,7 +43,15 @@ import type {
   HardwareOverrideInput,
   LocalApiServerState,
   LocalProviderId,
+  ManagedHostReceipt,
+  ModelCompatibility,
+  TensorrtLlmModelDeletion,
+  TensorrtLlmModelLocation,
+  ProbeEnvironmentInput,
   RemoteAccessStatus,
+  RequirementPlan,
+  ResumeOperation,
+  RuntimeDescriptorSummary,
   SessionInfo,
   UnloadResult,
 } from '../../contracts/index.js'
@@ -78,6 +89,23 @@ export const SSE_HEARTBEAT_MS = 15_000
 
 export interface SessionSummary extends SessionInfo {
   provider: LocalProviderId
+}
+
+/**
+ * The managed container runtime, as the control API needs it (openspec change
+ * `add-tensorrt-llm-linux`, task 2.2). A narrow view on purpose: the control layer does not depend
+ * on the runtime module's class, and a build with no managed runtime wired simply leaves it out.
+ */
+export interface ManagedEnvironmentControl {
+  list(): Promise<EnvironmentSnapshot[]>
+  probe(input: ProbeEnvironmentInput): Promise<RequirementPlan>
+  /** One cached runtime descriptor, read from the core's cache only, never fetched (task 2.22). */
+  descriptor(descriptorId: string): Promise<RuntimeDescriptorSummary>
+  begin(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation>
+  get(operationId: string): Promise<EnvironmentOperation>
+  cancel(operationId: string): Promise<EnvironmentOperation>
+  resume(operationId: string, input: ResumeOperation): Promise<EnvironmentOperation>
+  acceptHostReceipt(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation>
 }
 
 export interface PublicServerControl {
@@ -167,6 +195,13 @@ export interface ModelControl {
     input: string[],
     ubatchSize: number
   ) => Promise<EmbeddingResponse>
+  /**
+   * `GET /models/:provider/:id/logs`: a container-backed model's recent log lines — the loaded
+   * container's, or the last failed attempt's until the next load (spec `tensorrt-llm-runtime`,
+   * "Логи контейнера доступны"). Throws `PROVIDER_NOT_FOUND` for a provider that keeps none; absent
+   * in a build that has no such provider at all.
+   */
+  logs?: (provider: string, modelId: string) => Promise<object>
 }
 
 /**
@@ -287,6 +322,11 @@ export interface ChatGptControl {
 }
 
 export interface ControlServerDeps {
+  /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
+  environments?: ManagedEnvironmentControl
+  /** The snapshot's view of them, kept in memory so it needs no disk read. */
+  environmentsSnapshot?: () => EnvironmentSnapshot[]
+  environmentOperations?: () => EnvironmentOperation[]
   token: string
   instanceId: string
   version: string
@@ -334,6 +374,23 @@ export interface ControlServerDeps {
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /**
+   * `POST /models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`): whether a Hugging
+   * Face checkpoint the caller has not downloaded yet would run, computed without touching the
+   * network. Absent off Linux, where the `tensorrt-llm` provider is not offered at all.
+   */
+  tensorrtLlmModelCheck?: (body: unknown) => Promise<ModelCompatibility>
+  /**
+   * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a): stop the model with Docker's
+   * confirmation, then remove every engine cache of it and its folder. Absent off Linux.
+   */
+  tensorrtLlmModelDelete?: (modelId: string) => Promise<TensorrtLlmModelDeletion>
+  /**
+   * `GET /models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8): where clients put
+   * `tensorrt-llm` models and how much room is left. Absent where the provider is not offered;
+   * `MANAGED_ADAPTER_UNAVAILABLE` on Windows before Atomic Chat's distribution exists.
+   */
+  tensorrtLlmModelLocation?: () => Promise<TensorrtLlmModelLocation>
+  /**
    * Whether Apple's on-device model can run here: the server's own `--check` token (`available`,
    * `notEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, `unavailable`, `binaryNotFound`).
    * Answers `unavailable` on a platform without the runtime.
@@ -368,6 +425,9 @@ export interface ControlSnapshot {
   clients: ReturnType<ClientRegistry['list']>
   downloads: unknown[]
   optimal_backends: Record<string, OptimalState>
+  /** The managed container runtimes this user has, and the changes in flight on them. */
+  environments: EnvironmentSnapshot[]
+  environment_operations: EnvironmentOperation[]
 }
 
 /**

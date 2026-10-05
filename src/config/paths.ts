@@ -12,10 +12,21 @@
  *   <data>/local-api-server.json, <data>/atomic-chatgpt-auth.json
  *   <data>/remote-access-tunnel.json  (the app's 2.0.40 tunnel journal: reaped once at startup, never written)
  *   <data>/atomic-core/  — the only new folder (settings, credentials, lock, journal, logs)
+ *   <dataDir>/atomic-managed-runtimes/{environment.json, environment.lock, installations/, operations/,
+ *                                       descriptors/<descriptor_id>.json, descriptors/latest.json,
+ *                                       environment-manifests/<manifest_id>.json, environment-manifests/latest.json}
+ *                                                        (managed text runtimes, shared by the app and CLI scopes)
+ *   <data>/atomic-core/managed-runtimes/executions/  (task 2.10 execution journal: this scope's own
+ *                                                      model containers, one file per container id)
+ *   <data>/atomic-core/managed-runtimes/{heartbeats/<generation>/, caches/<descriptor_id>/<model id>/,
+ *                                        docker-config/, watchdog/atomic-watchdog-entrypoint.sh}
+ *                                                     (task 2.12: the managed-text load lifecycle)
  */
 
 import { join, relative, sep } from 'node:path'
+import { AtomicCoreError } from '../contracts/index.js'
 import type { LocalProviderId } from '../contracts/index.js'
+import { dataDir, type DataFolderEnv } from './data-folder.js'
 
 /** Subfolder holding the shared GGUF tree: `<data>/llamacpp/models`. Not the provider id. */
 export const MODELS_ROOT = 'llamacpp'
@@ -23,6 +34,8 @@ export const CORE_DIR = 'atomic-core'
 export const MODEL_YML = 'model.yml'
 export const LOCAL_API_SERVER_STATE_FILE = 'local-api-server.json'
 export const CHATGPT_AUTH_FILE = 'atomic-chatgpt-auth.json'
+/** Per-scope subtree under `<data>/atomic-core/` for the managed text runtimes (task 2.10). */
+export const MANAGED_SCOPE_DIR = 'managed-runtimes'
 
 export interface ProviderPaths {
   /** `<data>/<provider>` */
@@ -76,6 +89,44 @@ export interface DiffusionPaths {
   defaultVideoOutputDir: string
 }
 
+/**
+ * What this scope (this core's own data folder) owns alone among the managed text runtimes' files —
+ * as opposed to the container environment itself (Docker/WSL), which belongs to the machine's user
+ * account and is shared by the app and CLI scopes at a fixed per-user root outside any data folder
+ * (ADR `2026-09-22-managed-runtimes-split-per-user-environment-from-per-scope-data`). The
+ * execution journal (task 2.10) and the load lifecycle's heartbeats, engine caches, docker config and
+ * watchdog script (task 2.12) live here; there is no per-scope artifact store (ADR
+ * `2026-09-28-managed-runtime-shared-root-only-no-per-scope-artifact-store`).
+ */
+export interface ManagedScopePaths {
+  /** `<data>/atomic-core/managed-runtimes` */
+  root: string
+  /** `<root>/executions` — one file per container this core created, named by its container id. */
+  executionsDir: string
+  /** This container's execution-journal record. */
+  executionFile(containerId: string): string
+  /** `<root>/heartbeats` — one directory per load generation, bind-mounted into its container (task 2.12). */
+  heartbeatsDir: string
+  /** `<heartbeatsDir>/<encoded generation>`: holds the one heartbeat file core touches for that load. */
+  heartbeatDir(generation: string): string
+  /** `<root>/caches` — engine caches, kept across loads (spec `tensorrt-llm-runtime`, "Кэш движка"). */
+  cachesDir: string
+  /** `<cachesDir>/<encoded descriptor_id>`: every model's cache for one pinned engine release. */
+  descriptorCachesDir(descriptorId: string): string
+  /** `<cachesDir>/<encoded descriptor_id>/<encoded model id>`: mounted read-write into that model's container. */
+  engineCacheDir(descriptorId: string, modelId: string): string
+  /** `<root>/docker-config` — the empty directory every docker CLI call reads as `$DOCKER_CONFIG`. */
+  dockerConfigDir: string
+  /** `<root>/watchdog/atomic-watchdog-entrypoint.sh` — the watchdog entrypoint, mounted read-only. */
+  watchdogScript: string
+  /**
+   * `<root>/guest-scope.json` — Windows only (change `add-tensorrt-llm-windows`, design D5): this scope's
+   * `scope_key`, naming its folder in the WSL guest (`/var/lib/atomic-chat/scopes/<scope_key>/`). Kept
+   * with the scope's data, so moving the data folder keeps its models in the guest.
+   */
+  guestScopeFile: string
+}
+
 export interface DataLayout {
   root: string
   serverStateFile: string
@@ -87,7 +138,33 @@ export interface DataLayout {
   legacyRemoteAccessTunnel: string
   core: CoreFiles
   diffusion: DiffusionPaths
+  /** This scope's half of the managed text runtimes' layout. */
+  managed: ManagedScopePaths
   provider(id: LocalProviderId): ProviderPaths
+}
+
+function managedScopePaths(coreDir: string): ManagedScopePaths {
+  const root = join(coreDir, MANAGED_SCOPE_DIR)
+  const executionsDir = join(root, 'executions')
+  const heartbeatsDir = join(root, 'heartbeats')
+  const cachesDir = join(root, 'caches')
+  const descriptorCachesDir = (descriptorId: string) => join(cachesDir, encodeManagedId(descriptorId))
+  return {
+    root,
+    executionsDir,
+    executionFile: (containerId) => join(executionsDir, `${containerId}.json`),
+    heartbeatsDir,
+    heartbeatDir: (generation) => join(heartbeatsDir, encodeManagedId(generation)),
+    cachesDir,
+    descriptorCachesDir,
+    engineCacheDir: (descriptorId, modelId) =>
+      join(descriptorCachesDir(descriptorId), encodeManagedId(modelId)),
+    dockerConfigDir: join(root, 'docker-config'),
+    // `WATCHDOG_SCRIPT_FILENAME` in `runtime/container/watchdog.ts`; spelled here because `config/`
+    // never imports a runtime module.
+    watchdogScript: join(root, 'watchdog', 'atomic-watchdog-entrypoint.sh'),
+    guestScopeFile: join(root, 'guest-scope.json'),
+  }
 }
 
 export function dataLayout(root: string): DataLayout {
@@ -98,6 +175,7 @@ export function dataLayout(root: string): DataLayout {
     serverStateFile: join(root, LOCAL_API_SERVER_STATE_FILE),
     chatgptAuthFile: join(root, CHATGPT_AUTH_FILE),
     legacyRemoteAccessTunnel: join(root, 'remote-access-tunnel.json'),
+    managed: managedScopePaths(coreDir),
     core: {
       dir: coreDir,
       publicServerState: join(coreDir, LOCAL_API_SERVER_STATE_FILE),
@@ -140,8 +218,11 @@ export function dataLayout(root: string): DataLayout {
             tmpDir: join(providerRoot, 'tmp'),
             modelsDir: join(root, MODELS_ROOT, 'models'),
           }
+        // `tensorrt-llm`'s `<data>/tensorrt-llm/models/<id>/` is a Hugging Face checkpoint directory
+        // plus `model.yml`, written by the app and the CLI, read by core (spec `tensorrt-llm-models`).
         case 'mlx':
         case 'foundation-models':
+        case 'tensorrt-llm':
           return {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),
@@ -185,4 +266,141 @@ export function modelDirFromId(modelsDir: string, modelId: string): string {
  */
 export function resolveDataRelative(root: string, path: string, isAbsolute: (p: string) => boolean): string {
   return isAbsolute(path) ? path : join(root, path)
+}
+
+// ── Managed text runtimes ────────────────────────────────────────────────────────────────────────
+
+/**
+ * The container environment a managed text runtime (e.g. TensorRT-LLM) runs in — the Docker engine
+ * on Linux, or the Docker inside the WSL distribution the core owns on Windows — belongs to the
+ * machine's user account, not to a data folder. Both the app scope and the CLI scope drive the same
+ * one, so its record lives at a fixed per-user location and survives a data-folder move untouched:
+ * duplicating it per scope would mean two copies of a multi-gigabyte image for one user.
+ *
+ * Only that shared half is laid out here (openspec change `add-tensorrt-llm-linux`, task 2.2, design
+ * D12): core neither downloads model weights nor keeps a per-scope artifact/cache store for them —
+ * that stays the app's and the CLI's job, so there is no per-scope managed subtree to add yet.
+ */
+
+/** Overrides the shared per-user root. Tests and e2e set it so they never touch a real machine. */
+export const MANAGED_ROOT_ENV = 'ATOMIC_CORE_MANAGED_ROOT'
+/** Shared per-user root under `dataDir`, beside the app's own folders. */
+export const MANAGED_SHARED_DIR = 'atomic-managed-runtimes'
+
+const UNRESERVED = /^[A-Za-z0-9._-]$/
+/** Names Windows refuses whatever the extension follows them: `CON`, `nul.json`, `LPT1.txt`. */
+const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
+const encoder = new TextEncoder()
+const decoder = new TextDecoder('utf-8', { fatal: true })
+
+const percent = (byte: number): string => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+
+/**
+ * One identifier as one directory name. Managed ids are opaque values that may hold anything an
+ * operation or effect id does — `/`, `:`, spaces, any script — so they are never spelled onto disk
+ * raw. Every byte outside `[A-Za-z0-9._-]` becomes `%XX` of its UTF-8 encoding, which keeps the
+ * common case readable, keeps the result a single path segment, and is reversible because `%` itself
+ * is always encoded.
+ *
+ * The three shapes that are legal characters but illegal names are escaped too: `.` and `..`, a
+ * trailing dot, and the Windows device names.
+ *
+ * The result is therefore always exactly one path segment — it holds no separator and is never `.`
+ * or `..` — which is what lets every builder below join it onto a root without re-checking. That
+ * invariant is asserted directly in `paths.test.ts`; loosening the character set breaks it.
+ */
+export function encodeManagedId(id: string): string {
+  if (id === '') throw new AtomicCoreError('INVALID_ARGUMENT', 'A managed id cannot be empty.')
+  let out = ''
+  for (const byte of encoder.encode(id)) {
+    const ch = String.fromCharCode(byte)
+    out += UNRESERVED.test(ch) ? ch : percent(byte)
+  }
+  if (/^\.+$/.test(out)) return out.replace(/\./g, '%2E')
+  out = out.replace(/\.+$/, (run) => '%2E'.repeat(run.length))
+  if (WINDOWS_DEVICE.test(out)) out = percent(out.charCodeAt(0)) + out.slice(1)
+  return out
+}
+
+/** The inverse of `encodeManagedId`, for reading an id back off a directory listing. */
+export function decodeManagedId(segment: string): string {
+  const bytes: number[] = []
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i] as string
+    if (ch !== '%') {
+      bytes.push(ch.charCodeAt(0))
+      continue
+    }
+    const hex = segment.slice(i + 1, i + 3)
+    if (!/^[0-9A-Fa-f]{2}$/.test(hex)) {
+      throw new AtomicCoreError('INVALID_ARGUMENT', `Not an encoded managed id: ${segment}`)
+    }
+    bytes.push(Number.parseInt(hex, 16))
+    i += 2
+  }
+  try {
+    return decoder.decode(new Uint8Array(bytes))
+  } catch {
+    throw new AtomicCoreError('INVALID_ARGUMENT', `Not an encoded managed id: ${segment}`)
+  }
+}
+
+/** What the machine's user owns: the container environment and which engines are installed in it. */
+export interface ManagedSharedPaths {
+  root: string
+  /** Executor kind, host recipe and, on Windows, the owned distribution's registration. */
+  environmentFile: string
+  /** Held for the length of any mutation, so an app core and a CLI core cannot interleave writes. */
+  lockFile: string
+  installationsDir: string
+  operationsDir: string
+  /** Accepted runtime descriptors, cached by `descriptor_id` (task 2.3). */
+  descriptorsDir: string
+  installationFile(installationId: string): string
+  operationFile(operationId: string): string
+  /** `<descriptorsDir>/<encoded descriptor_id>.json`: the canonical bytes of one accepted descriptor. */
+  descriptorFile(descriptorId: string): string
+  /** Points at the `descriptor_id` of the newest descriptor a fresh setup would use. */
+  descriptorLatestFile: string
+  /** Accepted environment manifests, cached by `manifest_id` (change `extract-environment-manifest`). */
+  environmentManifestsDir: string
+  /** `<environmentManifestsDir>/<encoded manifest_id>.json`: the bytes of one accepted manifest. */
+  environmentManifestFile(manifestId: string): string
+  /** Points at the `manifest_id` of the newest manifest a probe before consent would use. */
+  environmentManifestLatestFile: string
+}
+
+export function managedSharedPaths(root: string): ManagedSharedPaths {
+  const installationsDir = join(root, 'installations')
+  const operationsDir = join(root, 'operations')
+  const descriptorsDir = join(root, 'descriptors')
+  const environmentManifestsDir = join(root, 'environment-manifests')
+  return {
+    root,
+    environmentFile: join(root, 'environment.json'),
+    lockFile: join(root, 'environment.lock'),
+    descriptorsDir,
+    installationsDir,
+    operationsDir,
+    installationFile: (installationId) =>
+      join(installationsDir, encodeManagedId(installationId), 'installation.json'),
+    operationFile: (operationId) => join(operationsDir, `${encodeManagedId(operationId)}.json`),
+    descriptorFile: (descriptorId) => join(descriptorsDir, `${encodeManagedId(descriptorId)}.json`),
+    descriptorLatestFile: join(descriptorsDir, 'latest.json'),
+    environmentManifestsDir,
+    environmentManifestFile: (manifestId) =>
+      join(environmentManifestsDir, `${encodeManagedId(manifestId)}.json`),
+    environmentManifestLatestFile: join(environmentManifestsDir, 'latest.json'),
+  }
+}
+
+/**
+ * The shared root: the env override, else a fixed folder under `dataDir`. Deliberately not derived
+ * from `<data>` — the environment is the user's, and moving the data folder must not strand the
+ * containers, nor make the CLI scope install its own copy of the same image.
+ */
+export function managedSharedRoot(e: DataFolderEnv): string {
+  const override = e.env[MANAGED_ROOT_ENV]
+  if (override !== undefined && override.trim() !== '') return override
+  return join(dataDir(e), MANAGED_SHARED_DIR)
 }

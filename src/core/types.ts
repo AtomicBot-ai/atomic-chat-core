@@ -33,6 +33,11 @@ export interface AtomicCoreOptions {
   hardware?: { probe?: () => Promise<HardwareProbeResult> }
   /** The platform runtimes are offered for (macOS-only engines are not registered elsewhere). Test seam. */
   platform?: NodeJS.Platform
+  /**
+   * Test seam: the docker CLI managed text runtimes run on Linux. Omitted, it is resolved from the
+   * system directories (`/usr/bin`, `/usr/local/bin`, `/bin`), never `PATH`; `null` means none.
+   */
+  dockerPath?: string | null
   fetch?: typeof fetch
   env?: NodeJS.ProcessEnv
   /** 'owner' takes the instance lock; 'auto' is the same today — attaching is the CLI's job. */

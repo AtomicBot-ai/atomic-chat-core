@@ -118,7 +118,15 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
   res.end(payload)
 }
 
-/** HTTP status for a core error code. Anything unmapped is a 500: an unknown failure is not the caller's fault. */
+/**
+ * HTTP status for a core error code. Anything unmapped is a 500: an unknown failure is not the
+ * caller's fault.
+ *
+ * The managed runtime's conflicts are all 409: somebody else is changing it, the caller computed
+ * their request from a state it has left, consent is missing or no longer covers the plan, or the
+ * machine is not in a position to continue yet. An engine this build has no adapter for is 422 — the
+ * request was understood and well formed, and the answer is still no.
+ */
 export function statusForCode(code: ErrorCode): number {
   switch (code) {
     case 'UNAUTHORIZED':
@@ -135,6 +143,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'ENGINE_MISSING':
     case 'MODEL_MISSING':
     case 'SIDE_FILE_MISSING':
+    case 'MANAGED_OPERATION_NOT_FOUND':
       return 404
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
@@ -147,6 +156,20 @@ export function statusForCode(code: ErrorCode): number {
     case 'NOT_CONFIGURED':
     case 'CANCELLED':
     case 'ENGINE_UPDATE_REQUIRED':
+    case 'MANAGED_OPERATION_CONFLICT':
+    case 'MANAGED_REVISION_CONFLICT':
+    case 'MANAGED_CONSENT_REQUIRED':
+    case 'MANAGED_PLAN_CHANGED':
+    case 'MANAGED_RECEIPT_CONFLICT':
+    case 'MANAGED_RESOURCE_IN_USE':
+    case 'MANAGED_IDENTITY_MISMATCH':
+    case 'MANAGED_STOP_UNCONFIRMED':
+    case 'MANAGED_ELEVATION_DECLINED':
+    case 'MANAGED_PREREQUISITE_BLOCKED':
+    case 'MANAGED_RELOGIN_REQUIRED':
+    case 'MANAGED_REBOOT_REQUIRED':
+    case 'GPU_BUSY':
+    case 'SESSION_GENERATION_STALE':
     case 'DECISION_NOT_CONFIGURED':
     case 'DECISION_ENGINE_UNSUPPORTED':
     case 'DECISION_CHECKPOINT_INCOMPLETE':
@@ -159,13 +182,25 @@ export function statusForCode(code: ErrorCode): number {
     case 'AUTH_FAILED':
     case 'UPSTREAM_ERROR':
       return 502
+    // `MANAGED_HOST_STEP_INVALID`/`MANAGED_METADATA_INVALID` are a descriptor or plan this core
+    // refused because a *caller* sent it something malformed
+    // (`src/runtime/environment/descriptor.ts`'s parser). Deliberately not shared with an on-disk
+    // operation record this core itself cannot read: that is never the caller's fault, so
+    // `OperationStore`'s own corruption case (`store.ts`'s `corrupt()`) raises `IO_ERROR` instead
+    // and falls through to the 500 below, rather than answering a client mistake and this store's
+    // own corruption with the same 400.
     case 'INVALID_ARGUMENT':
     case 'INVALID_REQUEST':
     case 'INVALID_DIMENSIONS':
     case 'UNSUPPORTED_WORKFLOW':
     case 'UNSUPPORTED_BACKEND':
     case 'MODEL_INCOMPATIBLE':
+    case 'MANAGED_HOST_STEP_INVALID':
+    case 'MANAGED_METADATA_INVALID':
       return 400
+    // Understood, well-formed, and asking for an engine this build has no adapter for.
+    case 'MANAGED_ADAPTER_UNAVAILABLE':
+      return 422
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':
     case 'DECISION_UNAVAILABLE':

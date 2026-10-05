@@ -10,6 +10,7 @@
  */
 
 import type { LocalProviderId, SessionInfo, UnloadResult } from '../../contracts/index.js'
+import type { GpuOccupancy } from './gpu-occupancy.js'
 
 /** What `autoIncreaseCtx` did, or why it declined to do anything. */
 export type CtxIncreaseResult =
@@ -51,6 +52,30 @@ export interface LocalLoadOptions {
   signal?: AbortSignal
 }
 
+/**
+ * How the public server must treat one session's traffic, for a runtime whose engine declares what it
+ * serves instead of taking everything (`tensorrt-llm`, spec `tensorrt-llm-runtime`). A runtime without
+ * a policy keeps the server's own behaviour: forward everything, grow the context on an overflow.
+ */
+export interface SessionRoutePolicy {
+  /** The method+path routes the session serves; any other model-bearing route is refused, never forwarded. */
+  routes: readonly { method: string; path: string }[]
+  /** False refuses a request that asks for tool calls with a clear error, instead of silently dropping them. */
+  tools: boolean
+  /** False refuses a request that asks for JSON output (`response_format` json_schema/json_object). */
+  structuredOutput: boolean
+  /**
+   * The client-facing OpenAI error for an engine error this policy knows (a context overflow), or null
+   * for the server's generic wrapping. A session with a policy is never grown or recreated: its
+   * context was fixed when its container started.
+   */
+  mapError: (status: number, body: string) => object | null
+  /** The context the session was started with, when known (advertised to clients that size by it). */
+  contextLength?: number
+  /** The per-request output cap the session enforces, when known. */
+  maxOutputTokens?: number
+}
+
 export interface LocalRuntime {
   list(): SessionInfo[]
   findSession(modelId: string): SessionInfo | undefined
@@ -61,6 +86,14 @@ export interface LocalRuntime {
   autoIncreaseCtx(modelId: string, reason?: string): Promise<CtxIncreaseResult>
   recreateSession(modelId: string): Promise<RecreateResult>
   shutdown(): Promise<void>
+  /** The routing policy of a loaded session; absent (or undefined) keeps the public server's defaults. */
+  routePolicy?(modelId: string): SessionRoutePolicy | undefined
+  /**
+   * The GPUs this runtime's sessions hold, for core's residency rule (spec `gpu-residency`): every
+   * session that is ready, loading past its claim, stopping, or whose stop was never confirmed. A
+   * runtime without it holds no GPU core has to free (Foundation Models).
+   */
+  gpuOccupancy?(): GpuOccupancy[]
 }
 
 export type { LocalProviderId }

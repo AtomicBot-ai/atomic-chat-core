@@ -21,7 +21,7 @@ const READY: ReturnType<AppDaemonCore['readyLine']> = {
   event: 'core:ready',
   pid: 4242,
   instance_id: 'instance-1',
-  protocol: 1,
+  protocol: 2,
   version: CORE_VERSION,
   control_host: '127.0.0.1',
   control_port: 5555,

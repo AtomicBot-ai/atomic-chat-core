@@ -27,12 +27,30 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'llamacpp': 'llama.cpp',
   'llamacpp-upstream': 'llama.cpp-upstream',
   'mlx': 'mlx',
+  'tensorrt-llm': 'tensorrt-llm',
 }
 
-export function servedModels(ex: Exchange): Array<{ id: string; ownedBy: string }> {
-  const models = ex.deps.listLocal().map((s) => ({ id: s.modelId, ownedBy: OWNED_BY[s.provider] }))
+/** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */
+interface MuseFacts {
+  toolCall?: boolean
+  context?: number
+  output?: number
+}
+
+export function servedModels(ex: Exchange): Array<{ id: string; ownedBy: string; muse: MuseFacts }> {
+  const models = ex.deps.listLocal().map((s) => ({
+    id: s.modelId,
+    ownedBy: OWNED_BY[s.provider],
+    muse: s.policy
+      ? {
+          toolCall: s.policy.tools,
+          ...(s.policy.contextLength === undefined ? {} : { context: s.policy.contextLength }),
+          ...(s.policy.maxOutputTokens === undefined ? {} : { output: s.policy.maxOutputTokens }),
+        }
+      : {},
+  }))
   for (const provider of ex.deps.providers().values()) {
-    for (const id of provider.models) models.push({ id, ownedBy: 'remote' })
+    for (const id of provider.models) models.push({ id, ownedBy: 'remote', muse: {} })
   }
   return models
 }
@@ -43,17 +61,21 @@ export function serveModels(ex: Exchange): void {
 }
 
 export function serveMuseCatalog(ex: Exchange): void {
-  const data = servedModels(ex).map((m) => museCatalogEntry(m.id, m.ownedBy))
+  const data = servedModels(ex).map((m) => museCatalogEntry(m.id, m.ownedBy, m.muse))
   answer(ex, 200, serdeToString({ object: 'list', data }), [['Content-Type', 'application/json']])
 }
 
 /**
  * One row of Muse Code's catalogue. `modalities.input` claims text only and `reasoning` is false,
  * because the server cannot know either per model and the safe answer never sends a text-only model
- * an image or a reasoning parameter. `tool_call` must stay true: without it Muse has no agent loop.
+ * an image or a reasoning parameter. `tool_call` stays true unless the session itself says otherwise:
+ * without it Muse has no agent loop, but a session that declares it has no tool-call parser
+ * (`tensorrt-llm`) would refuse every agent request, so it says so here too. A session that knows the
+ * context and output cap it was started with advertises those instead of the guesses above.
  */
-export function museCatalogEntry(modelId: string, ownedBy: string): JsonValue {
-  const context = ownedBy === 'remote' ? MUSE_REMOTE_CONTEXT_LIMIT : MUSE_LOCAL_CONTEXT_LIMIT
+export function museCatalogEntry(modelId: string, ownedBy: string, facts: MuseFacts = {}): JsonValue {
+  const context =
+    facts.context ?? (ownedBy === 'remote' ? MUSE_REMOTE_CONTEXT_LIMIT : MUSE_LOCAL_CONTEXT_LIMIT)
   return {
     id: modelId,
     object: 'model',
@@ -68,9 +90,9 @@ export function museCatalogEntry(modelId: string, ownedBy: string): JsonValue {
         attachment: false,
         reasoning: false,
         temperature: false,
-        tool_call: true,
+        tool_call: facts.toolCall ?? true,
         modalities: { input: ['text'], output: ['text'] },
-        limit: { context, output: MUSE_OUTPUT_LIMIT },
+        limit: { context, output: facts.output ?? MUSE_OUTPUT_LIMIT },
         options: { include: [], temperature: 0.9, top_p: 0.9 },
         variants: {},
         description: `${modelId} via Atomic Chat`,

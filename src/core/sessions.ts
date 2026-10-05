@@ -16,6 +16,7 @@ import type {
   LoadCancelHandle,
   LocalRuntime,
   RecreateResult,
+  SessionRoutePolicy,
 } from '../runtime/index.js'
 import type { CtxIncreaseOutcome, LocalTarget, SessionSummary } from '../server/index.js'
 import { LOCAL_SEARCH_ORDER, modelIdsMatch } from '../router/index.js'
@@ -33,6 +34,11 @@ export interface LocalSessionsDeps {
   assertRunning: () => void
   increaseCtx: (provider: LocalProviderId, modelId: string, reason?: string) => Promise<CtxIncreaseResult>
   recreateSession: (provider: LocalProviderId, modelId: string) => Promise<RecreateResult>
+  /**
+   * The policy for a session another process registered: its runtime cannot describe a session it
+   * did not start, so this is the provider's own static one (`tensorrt-llm`), or none.
+   */
+  externalPolicy?: (provider: LocalProvider) => SessionRoutePolicy | undefined
 }
 
 /** Model claims and per-model transitions for the sessions this core loads. */
@@ -147,24 +153,25 @@ export class LocalSessions {
   }
 
   localTarget(provider: LocalProvider, modelId: string): LocalTarget | undefined {
-    const session =
-      this.deps.runtimes
-        .get(provider)
-        ?.list()
-        .find((s) => modelIdsMatch(s.model_id, modelId)) ??
-      this.deps.externalSessions.find(provider, (id) => modelIdsMatch(id, modelId))
-    return session ? toLocalTarget(provider, session) : undefined
+    const runtime = this.deps.runtimes.get(provider)
+    const owned = runtime?.list().find((s) => modelIdsMatch(s.model_id, modelId))
+    if (owned) return toLocalTarget(provider, owned, runtime?.routePolicy?.(owned.model_id))
+    const external = this.deps.externalSessions.find(provider, (id) => modelIdsMatch(id, modelId))
+    return external ? toLocalTarget(provider, external, this.deps.externalPolicy?.(provider)) : undefined
   }
 
   /** Every session the public server can route to, owned here or registered as external. */
   listLocalTargets(): LocalTarget[] {
-    return LOCAL_SEARCH_ORDER.flatMap((provider) => [
-      ...(this.deps.runtimes.get(provider)?.list() ?? []).map((s) => toLocalTarget(provider, s)),
-      ...this.deps.externalSessions
-        .list()
-        .filter((s) => s.provider === provider)
-        .map((s) => toLocalTarget(provider, s)),
-    ])
+    return LOCAL_SEARCH_ORDER.flatMap((provider) => {
+      const runtime = this.deps.runtimes.get(provider)
+      return [
+        ...(runtime?.list() ?? []).map((s) => toLocalTarget(provider, s, runtime?.routePolicy?.(s.model_id))),
+        ...this.deps.externalSessions
+          .list()
+          .filter((s) => s.provider === provider)
+          .map((s) => toLocalTarget(provider, s, this.deps.externalPolicy?.(provider))),
+      ]
+    })
   }
 
   /**
@@ -216,7 +223,8 @@ export class LocalSessions {
 
 function toLocalTarget(
   provider: LocalProvider,
-  session: Pick<SessionInfo, 'model_id' | 'port' | 'api_key' | 'is_embedding'>
+  session: Pick<SessionInfo, 'model_id' | 'port' | 'api_key' | 'is_embedding'>,
+  policy?: SessionRoutePolicy
 ): LocalTarget {
   return {
     provider,
@@ -224,6 +232,7 @@ function toLocalTarget(
     port: session.port,
     apiKey: session.api_key,
     isEmbedding: session.is_embedding,
+    ...(policy === undefined ? {} : { policy }),
   }
 }
 

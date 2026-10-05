@@ -23,12 +23,15 @@ import type { DataLayout } from '../config/index.js'
 import type { DecisionService } from '../decision/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
 import type { CoreEmitter } from '../events/index.js'
+import type { ManagedRuntimes } from '../runtime/environment/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
 import type { InstanceLock } from '../lock/index.js'
 import type { ModelRegistry } from '../models/index.js'
 import { RemoteAccessManager } from '../remote-access/index.js'
 import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
+import { tensorrtLlmRoutePolicy } from '../runtime/tensorrt-llm/index.js'
+import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
 import { captureReport, loadFailureReport } from '../telemetry/index.js'
@@ -53,7 +56,12 @@ export interface AtomicCoreParts {
   clients: ClientRegistry
   lock: InstanceLock
   runtimes: Map<LocalProviderId, LocalRuntime>
-  registries: Map<LocalProviderId, ModelRegistry>
+  /**
+   * The llama.cpp/MLX registries share one `ModelRegistry` class (GGUF `model.yml`); `tensorrt-llm`
+   * (task 2.16w round 1, finding 2) has its own, a different `model.yml` schema entirely, so this
+   * map holds either. `AtomicCore.registry`'s overloads narrow the return type back per provider.
+   */
+  registries: Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>
   control: ControlServer
   log: CoreLogger
   controlToken: string
@@ -68,6 +76,13 @@ export interface AtomicCoreParts {
   remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
   /** Image generation (stage 7): its own module, not a runtime. */
   diffusion: DiffusionService
+  /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
+  managed: ManagedRuntimes
+  /**
+   * The public server's trusted hosts, kept in this one array while it runs: every managed session
+   * gateway gates `Host` on the same reference (task 2.11/2.14).
+   */
+  managedTrustedHosts: string[]
   /** The decision model: its own module and process, outside the sessions registry. */
   decision: DecisionService
   /** Where a failed load and the public server's failures are reported; absent, nothing is. */
@@ -103,7 +118,7 @@ export class AtomicCore {
   readonly externalSessions: ExternalSessions
   private readonly lock: InstanceLock
   private readonly runtimes: Map<LocalProviderId, LocalRuntime>
-  private readonly registries: Map<LocalProviderId, ModelRegistry>
+  private readonly registries: Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>
   private readonly log: CoreLogger
   private readonly appLeaseTimer: NodeJS.Timeout | undefined
   private readonly errors: ErrorSink | undefined
@@ -123,6 +138,8 @@ export class AtomicCore {
   private readonly remoteAccess: RemoteAccessManager
   /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
   readonly diffusion: DiffusionService
+  /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
+  readonly managed: ManagedRuntimes
   /**
    * The decision model (`llama-server --decision`): `scoreCandidates` and `decide` for the router,
    * fail-open; it survives model switches and the chat auto-unload.
@@ -146,6 +163,7 @@ export class AtomicCore {
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
+    this.managed = parts.managed
     this.decision = parts.decision
     this.errors = parts.errors
     this.telemetry = parts.telemetry
@@ -158,6 +176,8 @@ export class AtomicCore {
       assertRunning: () => this.assertRunning(),
       increaseCtx: (provider, modelId, reason) => this.increaseCtx(provider, modelId, reason),
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
+      // A `tensorrt-llm` session another process registered still only serves the declared routes.
+      externalPolicy: (provider) => (provider === 'tensorrt-llm' ? tensorrtLlmRoutePolicy(null) : undefined),
     })
     this.remoteAccess = new RemoteAccessManager({
       ...parts.remoteAccess,
@@ -172,6 +192,7 @@ export class AtomicCore {
       log: parts.log,
       assertRunning: () => this.assertRunning(),
       remoteAccess: this.remoteAccess,
+      liveTrustedHosts: parts.managedTrustedHosts,
       serverDeps: () => ({
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
@@ -211,7 +232,17 @@ export class AtomicCore {
     }
   }
 
-  registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry {
+  /**
+   * The per-provider model listing (task 2.16w round 1, finding 2): `ModelRegistry` for every
+   * llama.cpp/MLX provider, `TensorrtLlmModelRegistry` for `'tensorrt-llm'` — a fresh scan of
+   * `<data>/tensorrt-llm/models` on every `list()`, so a model the app finishes downloading appears
+   * with no restart, the same guarantee the llama.cpp registry already gives. `unknownProvider` when
+   * this core does not offer the provider at all (`tensorrt-llm` off Linux, for instance).
+   */
+  registry(provider?: Exclude<LocalProviderId, 'tensorrt-llm'>): ModelRegistry
+  registry(provider: 'tensorrt-llm'): TensorrtLlmModelRegistry
+  registry(provider: LocalProviderId): ModelRegistry | TensorrtLlmModelRegistry
+  registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry | TensorrtLlmModelRegistry {
     const registry = this.registries.get(provider)
     if (!registry) throw unknownProvider(provider, this.registries.keys())
     return registry
@@ -331,6 +362,9 @@ export class AtomicCore {
       await this.decision.shutdown()
       // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
       await this.diffusion.shutdown()
+      // Whatever a managed-runtime operation is doing stops here; its intent stays on disk for the
+      // next core to resume, so this never races the lock release below.
+      await this.managed.shutdown(AbortSignal.timeout(5_000)).catch(() => {})
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
       await this.localSessions.releaseAll()
       await this.control.close()

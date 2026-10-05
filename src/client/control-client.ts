@@ -18,7 +18,16 @@ import type {
   BackendRecommendationResponse,
   BackendUpdateCheckRequest,
   BackendUpdateCheckResponse,
+  BeginOperation,
   CoreEventName,
+  EnvironmentOperation,
+  EnvironmentSnapshot,
+  ManagedHostReceipt,
+  ProbeEnvironmentInput,
+  RequirementPlan,
+  ResumeOperation,
+  RuntimeDescriptorSummary,
+  TensorrtLlmModelLocation,
   LlamacppProviderId,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
@@ -78,6 +87,12 @@ export interface CoreSnapshot {
   clients: Array<{ id: string; name: string; pid: number | null }>
   downloads: unknown[]
   optimal_backends?: Record<string, { revision: number; optimal: unknown | null }>
+  /**
+   * The managed container runtimes and the changes in flight on them. Optional so a client can
+   * still read a snapshot from a core that predates them.
+   */
+  environments?: EnvironmentSnapshot[]
+  environment_operations?: EnvironmentOperation[]
 }
 
 export interface CoreEventMessage {
@@ -536,6 +551,87 @@ export class CoreClient {
 
   shutdown(options: { force?: boolean; client_id?: string } = {}): Promise<{ ok: true }> {
     return this.call('/shutdown', { method: 'POST', body: JSON.stringify(options) })
+  }
+
+  // ── Managed container runtimes ───────────────────────────────────────────────────────────────
+
+  /** Every environment this user has, with the engines installed into it. */
+  async environments(): Promise<EnvironmentSnapshot[]> {
+    return (await this.call<{ environments: EnvironmentSnapshot[] }>('/environments')).environments
+  }
+
+  /** What setting this up would involve. Reads the machine; changes nothing on it. */
+  probeEnvironment(input: ProbeEnvironmentInput): Promise<RequirementPlan> {
+    return this.call('/environments/probe', { method: 'POST', body: JSON.stringify(input) })
+  }
+
+  /**
+   * One runtime descriptor the core has cached, as a client shows it: NVIDIA notices, curated models,
+   * supported architectures. Pass the id an installation pins (`active_descriptor_id`) or a plan
+   * names (`descriptor_id`). The core reads its cache only, never the network; an id it has not
+   * cached is 404 `MANAGED_METADATA_INVALID`, and off Linux the answer is 422
+   * `MANAGED_ADAPTER_UNAVAILABLE`.
+   */
+  environmentDescriptor(descriptorId: string): Promise<RuntimeDescriptorSummary> {
+    return this.call(`/environments/descriptors/${encodeURIComponent(descriptorId)}`)
+  }
+
+  /**
+   * Where `tensorrt-llm` models go on this machine and how much room is left (change
+   * `add-tensorrt-llm-windows`, design D6): download, check and write `model.yml` only under `root`.
+   * On Windows that is a `\\wsl.localhost\…` path; before Atomic Chat's distribution exists the answer
+   * is 422 `MANAGED_ADAPTER_UNAVAILABLE`, and where the provider is not offered 404 `PROVIDER_NOT_FOUND`.
+   */
+  tensorrtLlmModelLocation(): Promise<TensorrtLlmModelLocation> {
+    return this.call('/models/tensorrt-llm/location')
+  }
+
+  /**
+   * Start a change, or get back the one this request already started. Answers as soon as the
+   * operation is recorded: what it does next outlives the call, and is watched through `get`.
+   */
+  beginEnvironmentOperation(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation> {
+    return this.call(`/environments/${encodeURIComponent(environmentId)}/operations`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  environmentOperation(operationId: string): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}`)
+  }
+
+  /** Ask it to stop. Work that cannot be interrupted safely finishes first. */
+  cancelEnvironmentOperation(operationId: string): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  /**
+   * Approve the plan, or carry on after a sign-out, a restart, a failure or a cancellation. The
+   * revision is what the caller saw: if the operation has moved since, this is refused rather than
+   * applied to a state nobody looked at.
+   */
+  resumeEnvironmentOperation(operationId: string, input: ResumeOperation): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  /**
+   * Report what the system authorization prompt did. The core checks it against the machine before
+   * the step counts. A nonce is used once: the same receipt again (or another one for a nonce already
+   * used, or for another revision) is refused with 409 `MANAGED_RECEIPT_CONFLICT`, and nothing is
+   * applied a second time — a caller that lost the first answer reads the operation with
+   * `environmentOperation` instead of resending.
+   */
+  reportHostStep(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation> {
+    return this.call(`/environments/operations/${encodeURIComponent(operationId)}/host-step-result`, {
+      method: 'POST',
+      body: JSON.stringify(receipt),
+    })
   }
 
   /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apiUrl, baseUrl, formatBytes } from './shared.js'
+import { apiUrl, baseUrl, formatBytes, sessionProcess } from './shared.js'
 
 describe('url helpers', () => {
   it('dials loopback for a server bound to every interface', () => {
@@ -21,5 +21,14 @@ describe('url helpers', () => {
     expect(formatBytes(512)).toBe('512 B')
     expect(formatBytes(1024)).toBe('1.0 KB')
     expect(formatBytes(3_221_225_472)).toBe('3.0 GB')
+  })
+})
+
+describe('sessionProcess', () => {
+  it.each([
+    [{ pid: 4242 }, 'pid 4242'],
+    [{ pid: null }, 'in a container'],
+  ])('describes %o as %s', (session, expected) => {
+    expect(sessionProcess(session)).toBe(expected)
   })
 })

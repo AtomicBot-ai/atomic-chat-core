@@ -25,7 +25,7 @@ import {
 import type { ModelEntry } from '../../models/index.js'
 import { withAttachedOwner } from '../owner.js'
 import type { CliIo } from '../io.js'
-import { apiUrl, formatBytes, layoutFor, pathValue } from './shared.js'
+import { apiUrl, formatBytes, layoutFor, pathValue, sessionProcess } from './shared.js'
 import { printFirstRunNotice } from './telemetry.js'
 
 export const DEFAULT_SERVE_PORT = 6767
@@ -171,7 +171,7 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
       io.stdout(`${JSON.stringify({ session, server: state }, null, 2)}\n`)
     } else {
       io.stdout(`\n  ${modelId} is serving at ${apiUrl(state)}\n`)
-      io.stdout(`  model process pid ${session.pid}, port ${session.port}\n`)
+      io.stdout(`  model process ${sessionProcess(session)}, port ${session.port}\n`)
       if (state.requires_api_key) io.stdout('  clients must send the API key you configured\n')
       io.stdout('\n  The core keeps running after this command exits; stop it with `shutdown`.\n\n')
     }
@@ -255,9 +255,9 @@ async function serveSidecar(
     if (values['json']) io.stdout(`${JSON.stringify({ session, server: state }, null, 2)}\n`)
     else if (provider === 'mlx') {
       io.stdout(`\n  ${modelId} is serving at ${apiUrl(state)}\n`)
-      io.stdout(`  model process pid ${session.pid}, port ${session.port}\n\n`)
+      io.stdout(`  model process ${sessionProcess(session)}, port ${session.port}\n\n`)
     } else {
-      io.stdout(`\n  ${modelId} is running on port ${session.port} (pid ${session.pid})\n`)
+      io.stdout(`\n  ${modelId} is running on port ${session.port} (${sessionProcess(session)})\n`)
       io.stdout('  The public API does not route to Foundation Models; talk to that port directly.\n\n')
     }
     return 0

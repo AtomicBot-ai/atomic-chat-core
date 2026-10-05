@@ -4,8 +4,10 @@
  * previous owner left running and only then publish the endpoint.
  */
 
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { AtomicCoreError } from '../contracts/index.js'
 import type { LlamacppProviderId, LocalProviderId } from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
@@ -17,6 +19,7 @@ import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
 import { MlxRuntime } from '../runtime/mlx/index.js'
 import { SettingsStore } from '../settings/index.js'
+import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from '../cloud/index.js'
@@ -39,6 +42,8 @@ import {
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
+import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
+import { TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
@@ -51,8 +56,21 @@ import {
 } from '../telemetry/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
+import { wireManagedEnvironment } from './managed-environment.js'
+import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
-import { sessionsOf } from './sessions.js'
+import { sessionsOf, unknownProvider } from './sessions.js'
+import {
+  leftoverContainers,
+  tensorrtLlmModelDeleter,
+  tensorrtLlmModelLocation,
+  tensorrtLlmModelRegistry,
+  tensorrtLlmSessionUnloader,
+  windowsModelFilesFor,
+  wiredExec,
+  wireTensorrtLlm,
+  wireTensorrtLlmModelCheck,
+} from './tensorrt-llm.js'
 import { LOCAL_PROVIDER } from './types.js'
 import type { AtomicCoreOptions, CoreLoadOptions } from './types.js'
 
@@ -168,7 +186,7 @@ export async function createAtomicCore(
       fetch: options.fetch ?? fetch,
       emit: (name, payload) => emitter.emit(name, payload),
     })
-    const registries = new Map<LocalProviderId, ModelRegistry>([
+    const registries = new Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>([
       [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
     ])
@@ -214,6 +232,10 @@ export async function createAtomicCore(
           const facts = await hardware.facts()
           return facts.cpuExtensions ? { arch: facts.arch, extensions: facts.cpuExtensions } : undefined
         },
+        // The voice model the app loads next to a chat model: auxiliary, like an embedding model —
+        // never auto-unloaded, never evicted by GPU residency, never evicting.
+        transcriptionModelId: TRANSCRIPTION_MODEL_ID,
+        claimGpu: (claim, signal) => gpuResidency.hook(provider)(claim, signal),
         unifiedMemory: async () =>
           probeUnifiedMemory(
             nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
@@ -226,6 +248,18 @@ export async function createAtomicCore(
       [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
       ['llamacpp', llamacppRuntime('llamacpp')],
     ])
+    // The facade, constructed last: what GPU residency and an engine removal stop a session through,
+    // exactly as a client's unload would. Read when they act, never before.
+    const facade = (): AtomicCore => core as AtomicCore
+    // GPU residency (task 2.15, spec `gpu-residency`): one resident model per card across every local
+    // engine of this core. Every part is read at claim time — image generation, the Docker executor's
+    // leftovers and the facade are wired further down.
+    const gpuResidency = wireGpuResidency({
+      runtimes,
+      diffusion: () => diffusion,
+      leftovers: () => managedLeftovers(),
+      sessions: facade,
+    })
 
     if (platform === 'darwin') {
       const mlxRegistry = new ModelRegistry(layout, 'mlx')
@@ -240,6 +274,7 @@ export async function createAtomicCore(
           readSettings: async () => settings.get('mlx'),
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
+          claimGpu: gpuResidency.hook('mlx'),
           log: runtimeLog,
           ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
         })
@@ -256,6 +291,9 @@ export async function createAtomicCore(
         })
       )
     }
+
+    // The public server's trusted hosts, kept in this one array for every session gateway to read.
+    const managedTrustedHosts: string[] = []
 
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
@@ -343,8 +381,106 @@ export async function createAtomicCore(
       log: runtimeLog,
       platform,
       env,
+      claimGpu: gpuResidency.hook(DIFFUSION_GPU_PROVIDER),
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
+
+    // The managed container environment and the one Docker executor of this core (task 2.6). The
+    // `tensorrt-llm` provider (task 2.14) takes `managedContainers`, never a second executor, and the
+    // environment's machine (`managedHost`: the e2e stand-in under `ATOMIC_MANAGED_TEST_HOST`, whose
+    // platform counts as Linux). A removal unloads the provider's loaded model first.
+    const {
+      managed,
+      containers: managedContainers,
+      platform: managedPlatform,
+      host: managedHost,
+      arch: managedArch,
+      windows: managedWindows,
+    } = wireManagedEnvironment({
+      env,
+      platform,
+      layout,
+      instanceId: lock.instanceId,
+      emit: (name, payload) => emitter.emit(name, payload),
+      newId: () => randomUUID(),
+      log,
+      onWarn: (message) => log('warn', message),
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
+      unloadEngineSessions: tensorrtLlmSessionUnloader(() => runtimes.get('tensorrt-llm'), facade),
+    })
+    // Containers a previous core left that startup reconcile could not confirm stopped: they hold every
+    // card for GPU residency until a retried stop is confirmed.
+    const managedLeftovers = leftoverContainers({
+      containers: managedContainers,
+      instanceId: lock.instanceId,
+      log,
+      dockerConfigDir: layout.managed.dockerConfigDir,
+      // On Windows the executor is the guest's docker through WSL: its retries go the same way.
+      ...(managedWindows === undefined ? {} : { exec: wiredExec }),
+    })
+
+    // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").
+    // Shared by the runtime below and `wireTensorrtLlmModelCheck`: one settings reader, not two.
+    const tensorrtLlmSettingsOf = (): Record<string, unknown> => settings.get('tensorrt-llm')
+    const tensorrtLlm = wireTensorrtLlm({
+      platform: managedPlatform,
+      arch: managedArch,
+      ...(managedWindows === undefined ? {} : { windows: managedWindows }),
+      layout,
+      instanceId: lock.instanceId,
+      scope,
+      descriptors: managed.descriptors,
+      installations: managed.installations,
+      containers: managedContainers,
+      host: managedHost,
+      trustedHosts: managedTrustedHosts,
+      settings: tensorrtLlmSettingsOf,
+      emit: (name, payload) => emitter.emit(name, payload),
+      log,
+      claimGpu: gpuResidency.hook('tensorrt-llm'),
+      // The engine container runs as this core's own user (final review I-1, ADR
+      // 2026-09-29-the-engine-container-runs-as-the-invoking-user).
+      containerUser:
+        process.getuid !== undefined && process.getgid !== undefined
+          ? { uid: process.getuid(), gid: process.getgid() }
+          : null,
+    })
+    if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
+    // `core.registry('tensorrt-llm')` (task 2.16w round 1, finding 2): the same Linux-only gate as
+    // the runtime above, so the two are never offered one without the other.
+    const tensorrtLlmRegistry = tensorrtLlmModelRegistry(managedPlatform, layout, managedWindows)
+    if (tensorrtLlm !== null) registries.set('tensorrt-llm', tensorrtLlmRegistry)
+    /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
+    const tensorrtLlmOr = (provider: string): TensorrtLlmRuntime => {
+      const runtime = runtimes.get('tensorrt-llm')
+      if (!(runtime instanceof TensorrtLlmRuntime)) throw unknownProvider(provider, runtimes.keys())
+      return runtime
+    }
+    // `POST /models/tensorrt-llm/check` (task 2.16): composed apart from the runtime above (its own
+    // deps, never Docker), so a compatibility question answers the same whether or not the engine is
+    // even installed yet. `null` off Linux, same gate as `wireTensorrtLlm`.
+    // `DELETE /models/tensorrt-llm/:id` (task 2.24): wherever the provider itself is offered.
+    const tensorrtLlmModelDelete =
+      tensorrtLlm === null
+        ? null
+        : tensorrtLlmModelDeleter({
+            runtime: () => runtimes.get('tensorrt-llm'),
+            sessions: facade,
+            registry: tensorrtLlmRegistry,
+            paths: layout.managed,
+            ...(managedWindows === undefined
+              ? {}
+              : { windowsFiles: windowsModelFilesFor(managedWindows, layout) }),
+          })
+    const tensorrtLlmModelCheck = wireTensorrtLlmModelCheck(managedPlatform, {
+      descriptors: managed.descriptors,
+      installations: managed.installations,
+      host: managedHost,
+      settings: tensorrtLlmSettingsOf,
+      arch: managedArch,
+      ...(managedWindows === undefined ? {} : { windows: managedWindows }),
     })
 
     // The decision model: its own process outside the sessions registry. Started (in the background,
@@ -371,6 +507,9 @@ export async function createAtomicCore(
         version: CORE_VERSION,
         ownerScope: scope,
         dataFolder: layout.root,
+        environments: managed.service,
+        environmentsSnapshot: managed.environments,
+        environmentOperations: managed.operations,
         emitter,
         clients,
         sessions: () => sessionsOf(runtimes),
@@ -392,8 +531,19 @@ export async function createAtomicCore(
             : Promise.resolve('unavailable')
         },
         models: {
-          capabilities: (provider, modelId) =>
-            capabilities.capabilities(provider as LocalProviderId, modelId),
+          capabilities: async (provider, modelId) =>
+            provider === 'tensorrt-llm'
+              ? tensorrtLlmOr(provider).capabilities(modelId)
+              : capabilities.capabilities(provider as LocalProviderId, modelId),
+          logs: async (provider, modelId) => {
+            if (provider === 'tensorrt-llm') return tensorrtLlmOr(provider).logs(modelId)
+            if (!runtimes.has(provider as LocalProviderId)) throw unknownProvider(provider, runtimes.keys())
+            throw new AtomicCoreError(
+              'INVALID_ARGUMENT',
+              `The provider "${provider}" runs no container, so it keeps no model logs.`,
+              provider
+            )
+          },
           validateGguf: (path) => capabilities.validateGguf(path),
           devices: async (provider) => {
             // Asking a backend what devices it sees needs a backend; with none installed the
@@ -410,6 +560,13 @@ export async function createAtomicCore(
           embed: (provider, modelId, input, ubatchSize) =>
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
+        ...(tensorrtLlmModelCheck !== null ? { tensorrtLlmModelCheck } : {}),
+        ...(tensorrtLlmModelDelete !== null ? { tensorrtLlmModelDelete } : {}),
+        // Where clients put tensorrt-llm models (change `add-tensorrt-llm-windows`, task 2.8): wherever
+        // the provider itself is offered.
+        ...(tensorrtLlm !== null
+          ? { tensorrtLlmModelLocation: tensorrtLlmModelLocation(managedPlatform, layout, managedWindows) }
+          : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),
           install: async (provider, version, backend, opts) => {
@@ -539,6 +696,8 @@ export async function createAtomicCore(
       externalSessions,
       appLeaseTimer,
       diffusion,
+      managed,
+      managedTrustedHosts,
       decision,
       errors: reporter,
       telemetry: reporter,
@@ -555,6 +714,17 @@ export async function createAtomicCore(
       }),
     })
     await reapOrphans(journal, lock.instanceId, log)
+    // Model containers a previous core left running are stopped and removed before the first load is
+    // served, like `reapOrphans` above does for native backends. Linux with a docker CLI only. This
+    // wires the executor first, so a setup recovered just below (a pull in flight) finds it; the
+    // `tensorrt-llm` provider uses the same handle. A failure here is not "no docker": the handle
+    // tries again at the next load, which says the runtime failed to initialise, and why.
+    await managedContainers
+      .resolve()
+      .catch((e: unknown) => warn(`managed runtime container reconcile: ${String(e)}`))
+    // A setup the previous core was in the middle of is reconciled against the machine before the
+    // endpoint is published, so the first snapshot a client sees already describes it.
+    await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

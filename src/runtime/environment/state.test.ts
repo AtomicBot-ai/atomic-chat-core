@@ -1,0 +1,1213 @@
+import { describe, expect, it } from 'vitest'
+import type {
+  ManagedHostStep,
+  ManagedOperationKind,
+  ManagedOperationTarget,
+  RequirementPlan,
+  Sha256Digest,
+} from '../../contracts/index.js'
+import { reduceOperation, startOperation, type OperationEvent, type OperationMachine } from './state.js'
+
+const RUNTIME: ManagedOperationTarget = {
+  kind: 'runtime',
+  installation_id: 'inst-1',
+  engine_id: 'tensorrt-llm',
+}
+const ENVIRONMENT: ManagedOperationTarget = { kind: 'environment' }
+
+const HOST_STEP: ManagedHostStep = {
+  step_id: 'step-1',
+  action: 'linux.install-container-runtime',
+  recipe_id: 'ubuntu-24.04-docker-ce',
+  recipe_digest: 'sha256:re',
+  parameters_digest: 'sha256:pa',
+  parameters: {
+    user: 'ada',
+    arch: 'x86_64',
+    family: 'apt',
+    distro_id: 'ubuntu',
+    version_id: '24.04',
+    components: ['docker-engine'],
+  },
+  nonce: 'once-1',
+  expected_operation_revision: 1,
+}
+
+const plan = (digest: Sha256Digest, over: Partial<RequirementPlan> = {}): RequirementPlan => ({
+  plan_digest: digest,
+  environment_id: 'env-1',
+  target: RUNTIME,
+  availability: 'setup-required',
+  recipe_id: 'ubuntu-24.04-docker-ce',
+  recipe_digest: 'sha256:re',
+  descriptor_id: 'tensorrt-llm-1',
+  environment_manifest_id: 'linux-r1',
+  image_digest: 'sha256:img1',
+  adopts_existing_engine: false,
+  system_changes: [{ code: 'install-packages', text: 'Install docker-ce' }],
+  download_bytes: null,
+  required_disk_bytes: null,
+  docker_root_dir: null,
+  free_disk_bytes: null,
+  warnings: [],
+  requires_elevation: true,
+  may_require_relogin: true,
+  may_require_reboot: false,
+  blockers: [],
+  ...over,
+})
+
+/** Drives the machine, allocating a fresh effect id per transition like the service does. */
+class Driver {
+  machine: OperationMachine
+  effects: { kind: string; effect_id: string }[] = []
+  private serial = 0
+
+  constructor(kind: ManagedOperationKind = 'setup', target = RUNTIME, approved?: Sha256Digest) {
+    const started = startOperation(
+      {
+        operation_id: 'op-1',
+        request_id: 'req-1',
+        environment_id: 'env-1',
+        instance_id: 'core-1',
+        target,
+        kind,
+        ...(approved === undefined ? {} : { approved_plan_digest: approved }),
+      },
+      { next_effect_id: this.next() }
+    )
+    this.machine = started.state
+    this.record(started.effects)
+  }
+
+  private next(): string {
+    this.serial += 1
+    return `effect-${this.serial}`
+  }
+
+  private record(effects: { kind: string; effect_id: string }[]): void {
+    for (const effect of effects) this.effects.push({ kind: effect.kind, effect_id: effect.effect_id })
+  }
+
+  /** Fills in the identity of whatever effect is pending, which is what a real runner reports. */
+  reply(event: Record<string, unknown>): OperationEvent {
+    const pending = this.machine.pending_effect
+    if (pending === null) throw new Error('no effect is pending')
+    return {
+      ...event,
+      effect_id: pending.effect_id,
+      expected_revision: this.machine.operation.revision,
+    } as OperationEvent
+  }
+
+  apply(event: OperationEvent): OperationMachine {
+    const result = reduceOperation(this.machine, event, { next_effect_id: this.next() })
+    if (!result.ok) throw new Error(`refused: ${result.error.code} (${result.error.details ?? ''})`)
+    this.machine = result.value.state
+    this.record(result.value.effects)
+    return this.machine
+  }
+
+  refuse(event: OperationEvent): string {
+    const before = this.machine
+    const result = reduceOperation(this.machine, event, { next_effect_id: this.next() })
+    if (result.ok) throw new Error('expected the event to be refused')
+    // A refusal never moves the machine.
+    expect(this.machine).toBe(before)
+    return result.error.code
+  }
+
+  get phase(): string {
+    return this.machine.operation.phase
+  }
+  get pending(): string | null {
+    return this.machine.pending_effect?.kind ?? null
+  }
+  kinds(kind: string): number {
+    return this.effects.filter((effect) => effect.kind === kind).length
+  }
+}
+
+describe('startOperation', () => {
+  it('begins by looking, before anything on the machine has been touched', () => {
+    const driver = new Driver()
+    expect(driver.phase).toBe('checking')
+    expect(driver.pending).toBe('probe')
+    expect(driver.machine.operation.revision).toBe(0)
+    expect(driver.machine.operation.completed_step_ids).toEqual([])
+    expect(driver.effects).toHaveLength(1)
+  })
+})
+
+describe('consent (OP02)', () => {
+  it('asks for approval, refuses one made for a plan the host has since changed, then proceeds', () => {
+    const driver = new Driver()
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.pending).toBeNull()
+
+    // The user approves A; the machine looks again and the host now yields plan B.
+    driver.apply({
+      type: 'approve',
+      input: { expected_revision: driver.machine.operation.revision, approved_plan_digest: 'sha256:A' },
+    })
+    expect(driver.phase).toBe('checking')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:B'), host_step: HOST_STEP }))
+
+    // Back to asking, with the new plan, and the privileged step was never issued.
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:B')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.kinds('host-step')).toBe(0)
+
+    // Approving B at the revision it is really at issues exactly one host step.
+    driver.apply({
+      type: 'approve',
+      input: { expected_revision: driver.machine.operation.revision, approved_plan_digest: 'sha256:B' },
+    })
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:B'), host_step: HOST_STEP }))
+    expect(driver.phase).toBe('preparing-host')
+    expect(driver.kinds('host-step')).toBe(1)
+    // The step is pinned to the revision it was issued at, whatever the probe put there.
+    expect(driver.machine.operation.pending_host_step).toEqual({
+      ...HOST_STEP,
+      expected_operation_revision: driver.machine.operation.revision,
+    })
+    expect(driver.machine.operation.error).toBeNull()
+  })
+
+  it('refuses an approval prepared against a revision the operation has left', () => {
+    const driver = new Driver()
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    expect(
+      driver.refuse({ type: 'approve', input: { expected_revision: 0, approved_plan_digest: 'sha256:A' } })
+    ).toBe('MANAGED_REVISION_CONFLICT')
+  })
+
+  it('refuses an approval that carries no plan at all', () => {
+    const driver = new Driver()
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    expect(
+      driver.refuse({
+        type: 'approve',
+        input: { expected_revision: driver.machine.operation.revision },
+      })
+    ).toBe('MANAGED_CONSENT_REQUIRED')
+  })
+
+  it('goes straight on when the approval already in hand still matches (OP09, adopted engine)', () => {
+    // A host that already runs containers with a GPU needs no privileged step at all.
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:A', {
+          adopts_existing_engine: true,
+          system_changes: [],
+          requires_elevation: false,
+        }),
+        host_step: null,
+      })
+    )
+    expect(driver.phase).toBe('preparing-environment')
+    expect(driver.kinds('host-step')).toBe(0)
+  })
+
+  it('fails with the blocker rather than asking to approve something that cannot work', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:A', {
+          blockers: [{ code: 'MANAGED_PREREQUISITE_BLOCKED', message: 'No NVIDIA driver was found.' }],
+        }),
+        host_step: null,
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    expect(driver.machine.operation.error?.message).toContain('NVIDIA driver')
+    expect(driver.effects).toHaveLength(1)
+  })
+})
+
+describe('waiting on the user (OP09)', () => {
+  const toRelogin = (): Driver => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: HOST_STEP }))
+    driver.apply(driver.reply({ type: 'host-step-started' }))
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        prerequisites_met: false,
+        // The probe after the receipt, not the receipt, says the group is not effective yet.
+        needs_relogin: true,
+        receipt: {
+          step_id: 'step-1',
+          nonce: 'once-1',
+          expected_operation_revision: 1,
+          recipe_digest: 'sha256:re',
+          parameters_digest: 'sha256:pa',
+          outcome: 'relogin-required',
+          receipt_id: 'receipt-1',
+        },
+      })
+    )
+    return driver
+  }
+
+  it('holds the phase across restarts while the group is not effective, then continues once', () => {
+    const driver = toRelogin()
+    expect(driver.phase).toBe('relogin-required')
+    expect(driver.machine.operation.completed_step_ids).toEqual(['step-1'])
+    // The single-use nonce is gone, so nothing can re-elevate on its own.
+    expect(driver.machine.operation.pending_host_step).toBeNull()
+
+    for (const instance of ['core-2', 'core-3']) {
+      driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+      expect(driver.pending).toBe('reconcile')
+      driver.apply(
+        driver.reply({
+          type: 'reconciled',
+          instance_id: instance,
+          verified_completed_step_ids: ['step-1'],
+          current_plan_digest: 'sha256:A',
+          needs_relogin: true,
+          needs_reboot: false,
+        })
+      )
+      expect(driver.phase).toBe('relogin-required')
+      expect(driver.machine.operation.instance_id).toBe(instance)
+    }
+    // Two restarts, and still not one step of installation.
+    expect(driver.kinds('prepare-environment')).toBe(0)
+    expect(driver.kinds('host-step')).toBe(1)
+
+    // The user signs out and back in: the group counts, and the machine looks once more.
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-4',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:A',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    expect(driver.phase).toBe('checking')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    expect(driver.phase).toBe('preparing-environment')
+    expect(driver.kinds('prepare-environment')).toBe(1)
+    expect(driver.kinds('host-step')).toBe(1)
+  })
+
+  it('waits for a reboot the same way, and keeps the step that was already applied', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: HOST_STEP }))
+    driver.apply(driver.reply({ type: 'host-step-started' }))
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        prerequisites_met: false,
+        receipt: { ...HOST_STEP, outcome: 'reboot-required', receipt_id: 'r', nonce: 'once-1' } as never,
+      })
+    )
+    expect(driver.phase).toBe('reboot-required')
+    expect(driver.machine.operation.completed_step_ids).toEqual(['step-1'])
+  })
+})
+
+describe('privileged steps', () => {
+  const atHostStep = (): Driver => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: HOST_STEP }))
+    return driver
+  }
+
+  it('stops when the user declines the system change', () => {
+    const driver = atHostStep()
+    driver.apply(driver.reply({ type: 'host-step-started' }))
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        prerequisites_met: false,
+        receipt: { ...HOST_STEP, outcome: 'declined', receipt_id: 'r' } as never,
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_ELEVATION_DECLINED')
+    expect(driver.kinds('prepare-environment')).toBe(0)
+  })
+
+  it('believes the machine over a helper that reports success it cannot show', () => {
+    const driver = atHostStep()
+    driver.apply(driver.reply({ type: 'host-step-started' }))
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        prerequisites_met: false,
+        receipt: { ...HOST_STEP, outcome: 'completed', receipt_id: 'r' } as never,
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+  })
+
+  it('cancels only at the safe boundary of a package transaction (OP04)', () => {
+    const driver = atHostStep()
+    driver.apply(driver.reply({ type: 'host-step-started' }))
+    expect(driver.machine.indivisible_host_step_running).toBe(true)
+
+    driver.apply({ type: 'cancel' })
+    // The wish is recorded; the transaction is not killed, and nothing new is started.
+    expect(driver.machine.operation.cancellation_requested).toBe(true)
+    expect(driver.phase).toBe('preparing-host')
+    expect(driver.pending).toBe('host-step')
+    const afterCancel = driver.effects.length
+
+    // A second cancel changes nothing at all.
+    const revision = driver.machine.operation.revision
+    driver.apply({ type: 'cancel' })
+    expect(driver.machine.operation.revision).toBe(revision)
+    expect(driver.effects).toHaveLength(afterCancel)
+
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        prerequisites_met: true,
+        receipt: { ...HOST_STEP, outcome: 'completed', receipt_id: 'r' } as never,
+      })
+    )
+    expect(driver.phase).toBe('cancelling')
+    expect(driver.pending).toBe('cleanup')
+    // The installed package stays recorded; cancelling does not un-install it.
+    expect(driver.machine.operation.completed_step_ids).toEqual(['step-1'])
+    // And nothing went on to pull or import anything.
+    expect(driver.kinds('prepare-environment')).toBe(0)
+    expect(driver.kinds('pull-image')).toBe(0)
+
+    driver.apply(driver.reply({ type: 'cleanup-completed' }))
+    expect(driver.phase).toBe('cancelled')
+  })
+})
+
+describe('setup, update and removal', () => {
+  it('runs a setup through to a ready installation', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    driver.apply(driver.reply({ type: 'environment-verified' }))
+    expect(driver.phase).toBe('pulling-image')
+    driver.apply(driver.reply({ type: 'image-pulled' }))
+    expect(driver.phase).toBe('verifying')
+    driver.apply(driver.reply({ type: 'verification-passed' }))
+    expect(driver.phase).toBe('activating')
+    expect(driver.pending).toBe('activate')
+    driver.apply(driver.reply({ type: 'activation-committed' }))
+    expect(driver.phase).toBe('ready')
+    expect(driver.pending).toBeNull()
+    // An environment-only setup never touches an image.
+    expect(driver.kinds('unload-resident')).toBe(0)
+  })
+
+  it('finishes an environment-only setup at verification, with no runtime to activate', () => {
+    const driver = new Driver('setup', ENVIRONMENT, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    driver.apply(driver.reply({ type: 'environment-verified' }))
+    expect(driver.phase).toBe('verifying')
+    driver.apply(driver.reply({ type: 'verification-passed' }))
+    expect(driver.phase).toBe('ready')
+    expect(driver.kinds('pull-image')).toBe(0)
+    expect(driver.kinds('activate')).toBe(0)
+  })
+
+  it('takes the GPU back before proving a new image, and only then commits it', () => {
+    const driver = new Driver('update', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    // An update stages over an environment that already exists.
+    expect(driver.phase).toBe('pulling-image')
+    expect(driver.kinds('prepare-environment')).toBe(0)
+    driver.apply(driver.reply({ type: 'image-pulled' }))
+    driver.apply(driver.reply({ type: 'verification-passed' }))
+    expect(driver.phase).toBe('activating')
+    expect(driver.pending).toBe('unload-resident')
+    driver.apply(driver.reply({ type: 'resident-unloaded' }))
+    expect(driver.pending).toBe('activate')
+    driver.apply(driver.reply({ type: 'activation-committed' }))
+    expect(driver.phase).toBe('ready')
+  })
+
+  it('leaves the running installation alone when the candidate fails its smoke test (OP06)', () => {
+    const driver = new Driver('update', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    driver.apply(driver.reply({ type: 'image-pulled' }))
+    driver.apply(
+      driver.reply({
+        type: 'failed',
+        error: { code: 'MANAGED_METADATA_INVALID', message: 'The candidate did not answer.' },
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    // Nothing was activated, so the digest that was running is still the active one.
+    expect(driver.kinds('activate')).toBe(0)
+    expect(driver.kinds('unload-resident')).toBe(0)
+  })
+
+  it('removes without preparing anything first', () => {
+    const driver = new Driver('remove', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    expect(driver.phase).toBe('removing')
+    driver.apply(driver.reply({ type: 'removal-completed' }))
+    expect(driver.phase).toBe('removed')
+    expect(driver.kinds('prepare-environment')).toBe(0)
+    expect(driver.kinds('pull-image')).toBe(0)
+  })
+})
+
+describe('cancellation and refusals', () => {
+  it('never erases an installation that did commit', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    driver.apply(driver.reply({ type: 'environment-verified' }))
+    driver.apply(driver.reply({ type: 'image-pulled' }))
+    driver.apply(driver.reply({ type: 'verification-passed' }))
+
+    driver.apply({ type: 'cancel' })
+    expect(driver.phase).toBe('activating')
+    driver.apply(driver.reply({ type: 'activation-committed' }))
+    // The commit won the race; reporting it as cancelled would misdescribe what is running.
+    expect(driver.phase).toBe('ready')
+    expect(driver.machine.operation.cancellation_requested).toBe(false)
+  })
+
+  it('is a no-op once the operation has finished', () => {
+    const driver = new Driver('remove', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    driver.apply(driver.reply({ type: 'removal-completed' }))
+    const before = driver.machine
+    driver.apply({ type: 'cancel' })
+    driver.apply({ type: 'cancel' })
+    expect(driver.machine).toBe(before)
+    expect(driver.machine.operation.revision).toBe(before.operation.revision)
+  })
+
+  it('cancels a failure that never started anything without asking for cleanup', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:A', {
+          blockers: [{ code: 'MANAGED_PREREQUISITE_BLOCKED', message: 'No driver.' }],
+        }),
+        host_step: null,
+      })
+    )
+    driver.apply({ type: 'cancel' })
+    expect(driver.phase).toBe('cancelled')
+    expect(driver.kinds('cleanup')).toBe(0)
+  })
+
+  it('refuses a result from an effect that is no longer the one in flight', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    const stale = driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null })
+    driver.apply(stale)
+    // The same answer arriving twice belongs to an attempt that is over.
+    expect(driver.refuse(stale)).toBe('MANAGED_OPERATION_CONFLICT')
+    expect(
+      driver.refuse({
+        type: 'requirements-ready',
+        plan: plan('sha256:A'),
+        host_step: null,
+        effect_id: 'someone-elses',
+        expected_revision: driver.machine.operation.revision,
+      })
+    ).toBe('MANAGED_OPERATION_CONFLICT')
+  })
+
+  it('refuses an answer that does not belong to the effect that is pending', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    // A probe cannot answer with a pulled image.
+    expect(driver.refuse(driver.reply({ type: 'image-pulled' }))).toBe('MANAGED_OPERATION_CONFLICT')
+    expect(driver.phase).toBe('checking')
+  })
+
+  it('moves the revision on exactly once per accepted event, and not at all per refused one', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    expect(driver.machine.operation.revision).toBe(0)
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: null }))
+    expect(driver.machine.operation.revision).toBe(1)
+    driver.apply(driver.reply({ type: 'environment-verified' }))
+    expect(driver.machine.operation.revision).toBe(2)
+    driver.refuse(driver.reply({ type: 'environment-verified' }))
+    expect(driver.machine.operation.revision).toBe(2)
+  })
+
+  it('refuses a resume for a phase that is already running, and one prepared at an old revision', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    expect(
+      driver.refuse({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    ).toBe('MANAGED_OPERATION_CONFLICT')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:A', { blockers: [{ code: 'IO_ERROR', message: 'disk' }] }),
+        host_step: null,
+      })
+    )
+    expect(driver.refuse({ type: 'resume', input: { expected_revision: 0 } })).toBe(
+      'MANAGED_REVISION_CONFLICT'
+    )
+  })
+
+  it('looks at the machine again on resume instead of trusting the phase it stored', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:A', { blockers: [{ code: 'IO_ERROR', message: 'disk' }] }),
+        host_step: null,
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    expect(driver.phase).toBe('checking')
+    expect(driver.pending).toBe('reconcile')
+    expect(driver.machine.operation.error).toBeNull()
+  })
+})
+
+describe('consent that was already acted on (task 2.6)', () => {
+  const RECEIPT = {
+    step_id: 'step-1',
+    nonce: 'once-1',
+    expected_operation_revision: 1,
+    recipe_digest: 'sha256:re',
+    parameters_digest: 'sha256:pa',
+    receipt_id: 'receipt-1',
+  } as const
+  const ADOPTED = { adopts_existing_engine: true, system_changes: [], requires_elevation: false }
+
+  /** Approved plan A with a host step, the step started: the operation waits on its receipt. */
+  const atReceipt = (): Driver => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:A'), host_step: HOST_STEP }))
+    driver.apply(driver.reply({ type: 'host-step-started' }))
+    return driver
+  }
+
+  it('waits for a sign-in when the probe after the step shows the group is not effective yet', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    expect(driver.phase).toBe('relogin-required')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_RELOGIN_REQUIRED')
+    expect(driver.machine.operation.completed_step_ids).toEqual(['step-1'])
+    expect(driver.pending).toBeNull()
+  })
+
+  it('a failed step says why when its log tail shows Docker had no address pool left, and keeps the tail (task 2.23, F-4)', () => {
+    const tail =
+      'docker-service failed: systemctl enable --now docker exited with 1\n' +
+      'failed to start daemon: Error initializing network controller: error creating default "bridge" ' +
+      'network: all predefined address pools have been fully subnetted'
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'failed', log_tail: tail },
+        prerequisites_met: false,
+        needs_relogin: false,
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    const error = driver.machine.operation.error
+    expect(error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+    expect(error?.message).toMatch(/full-tunnel VPN.*default-address-pools/s)
+    expect(error?.details).toBe(tail)
+  })
+
+  it('a failed pool start with pools set in daemon.json names the configured ranges, not the routes (review round 1)', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: {
+          ...RECEIPT,
+          outcome: 'failed',
+          log_tail: 'docker-service failed\nall predefined address pools have been fully subnetted',
+        },
+        prerequisites_met: false,
+        needs_relogin: false,
+        address_pools_configured: true,
+      })
+    )
+    expect(driver.machine.operation.error?.message).toMatch(
+      /address ranges set in \/etc\/docker\/daemon\.json/
+    )
+    expect(driver.machine.operation.error?.message).not.toMatch(/VPN/)
+  })
+
+  it('a failed step without a log tail keeps the old message and the receipt id', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'failed' },
+        prerequisites_met: false,
+        needs_relogin: false,
+      })
+    )
+    expect(driver.machine.operation.error).toEqual({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      message: 'Preparing the system did not finish.',
+      details: RECEIPT.receipt_id,
+    })
+  })
+
+  it('fails with what the probe found when the helper says done and the machine disagrees', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        // A helper claiming a relogin is not evidence of one either.
+        receipt: { ...RECEIPT, outcome: 'relogin-required' },
+        prerequisites_met: false,
+        needs_relogin: false,
+        probe_error: {
+          code: 'MANAGED_PREREQUISITE_BLOCKED',
+          message: 'Docker Engine is still not installed.',
+          details: 'docker-cli-missing',
+        },
+      })
+    )
+    expect(driver.phase).toBe('failed')
+    expect(driver.machine.operation.error).toEqual({
+      code: 'MANAGED_PREREQUISITE_BLOCKED',
+      message: 'Docker Engine is still not installed.',
+      details: 'docker-cli-missing',
+    })
+  })
+
+  it('parks in relogin-required rather than failing when a probe itself reports the relogin', () => {
+    const driver = new Driver('setup', RUNTIME)
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:A', {
+          availability: 'prerequisite-blocked',
+          blockers: [
+            {
+              code: 'MANAGED_RELOGIN_REQUIRED',
+              message: 'Log out and back in.',
+              reason: 'relogin-required',
+              commands: ['newgrp docker'],
+            },
+          ],
+        }),
+        host_step: null,
+      })
+    )
+    expect(driver.phase).toBe('relogin-required')
+    // Only the ErrorBody part becomes the operation's error.
+    expect(driver.machine.operation.error).toEqual({
+      code: 'MANAGED_RELOGIN_REQUIRED',
+      message: 'Log out and back in.',
+      details: 'relogin-required',
+    })
+    // It is resumable like the relogin that follows a host step.
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    expect(driver.pending).toBe('reconcile')
+  })
+
+  it('continues from preparing-environment after the sign-in without asking again', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:C',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    // The host now adopts as it stands: a different plan, but nothing left that needs consent.
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:C', ADOPTED), host_step: null })
+    )
+    expect(driver.phase).toBe('preparing-environment')
+    expect(driver.pending).toBe('prepare-environment')
+    expect(driver.kinds('host-step')).toBe(1)
+    // The consented plan stays the plan and the approval; what the core continued under is apart
+    // (review r2, ruling A).
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:C')
+  })
+
+  it('asks again when what remains after the step needs a new privileged change (a Docker restart)', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:D',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:D'), host_step: HOST_STEP }))
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.kinds('host-step')).toBe(1)
+  })
+
+  /** The sign-in wait after the step, then the probe after the user is back: what it planned. */
+  const afterSignIn = (driver: Driver, next: RequirementPlan): Driver => {
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    expect(driver.phase).toBe('relogin-required')
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: next.plan_digest,
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: next, host_step: null }))
+    return driver
+  }
+
+  it('records the environment manifest the consent was given under (extract-environment-manifest D4)', () => {
+    const driver = atReceipt()
+    expect(driver.machine.consented?.environment_manifest_id).toBe('linux-r1')
+  })
+
+  it('a manifest published during the sign-in wait changes nothing: the consented one carries the work on', () => {
+    // The provisioner plans with the consented manifest from the cache after a consent; the plan
+    // after the sign-in names it, and the work continues without asking.
+    const driver = afterSignIn(
+      atReceipt(),
+      plan('sha256:C', { ...ADOPTED, environment_manifest_id: 'linux-r1' })
+    )
+    expect(driver.phase).toBe('preparing-environment')
+    expect(driver.machine.operation.error).toBeNull()
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+  })
+
+  it('never carries a consent over to a plan judged against another manifest', () => {
+    const driver = afterSignIn(
+      atReceipt(),
+      plan('sha256:C', { ...ADOPTED, environment_manifest_id: 'linux-r2' })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:C')
+  })
+
+  it('a record written before the field existed reads, and its consent carries over only to a plan with no manifest', () => {
+    const legacy = (): Driver => {
+      const driver = atReceipt()
+      const { environment_manifest_id: _absent, ...basis } = driver.machine.consented as NonNullable<
+        OperationMachine['consented']
+      >
+      driver.machine = { ...driver.machine, consented: basis }
+      return driver
+    }
+    const carried = afterSignIn(legacy(), plan('sha256:C', { ...ADOPTED, environment_manifest_id: null }))
+    expect(carried.phase).toBe('preparing-environment')
+    const asked = afterSignIn(legacy(), plan('sha256:C', { ...ADOPTED, environment_manifest_id: 'linux-r1' }))
+    expect(asked.phase).toBe('awaiting-consent')
+    expect(asked.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+  })
+
+  it('a manifest published between the probe and the consent: the old approval is refused with MANAGED_PLAN_CHANGED', () => {
+    // The user approved the plan built under linux-r1 (digest A); the probe the consent triggers was
+    // built under linux-r2, so its digest differs (the manifest id is in the digest).
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:B', { environment_manifest_id: 'linux-r2' }),
+        host_step: HOST_STEP,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:B')
+    expect(driver.kinds('host-step')).toBe(0)
+  })
+
+  const midPull = (): Driver => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:A', ADOPTED), host_step: null })
+    )
+    driver.apply(driver.reply({ type: 'environment-verified' }))
+    expect(driver.phase).toBe('pulling-image')
+    // A restart: recovery reconciles, then the machine looks at requirements again.
+    driver.apply(
+      driver.reply({
+        type: 'failed',
+        error: { code: 'IO_ERROR', message: 'the core stopped' },
+      })
+    )
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: [],
+        current_plan_digest: 'sha256:E',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    return driver
+  }
+
+  it('goes to verifying when the image is already there after a restart mid-pull', () => {
+    const driver = midPull()
+    // Free space moved while pulling, so the plan digest moved too — the pull was already approved.
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', ADOPTED),
+        host_step: null,
+        image_present: true,
+      })
+    )
+    expect(driver.phase).toBe('verifying')
+    expect(driver.pending).toBe('verify')
+  })
+
+  it('continues the pull when the image is not there yet, without re-running the GPU check', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', ADOPTED),
+        host_step: null,
+        image_present: false,
+      })
+    )
+    expect(driver.phase).toBe('pulling-image')
+    expect(driver.kinds('prepare-environment')).toBe(1)
+  })
+
+  it('still fails on a blocker after consent was acted on', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', {
+          blockers: [{ code: 'MANAGED_PREREQUISITE_BLOCKED', message: 'The driver is gone.' }],
+        }),
+        host_step: null,
+      })
+    )
+    expect(driver.phase).toBe('failed')
+  })
+
+  it('keeps removing after a restart mid-removal', () => {
+    const driver = new Driver('remove', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:A', ADOPTED), host_step: null })
+    )
+    driver.apply(driver.reply({ type: 'failed', error: { code: 'IO_ERROR', message: 'stopped' } }))
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: [],
+        current_plan_digest: 'sha256:F',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:F', ADOPTED), host_step: null })
+    )
+    expect(driver.phase).toBe('removing')
+  })
+
+  it('asks again when the descriptor changed since the consent, even with no host step (review r1, item 2)', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', { ...ADOPTED, descriptor_id: 'tensorrt-llm-2' }),
+        host_step: null,
+        image_present: false,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+    expect(driver.kinds('pull-image')).toBe(1)
+  })
+
+  it('asks again when the image digest for this host changed since the consent', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', { ...ADOPTED, image_digest: 'sha256:img2' }),
+        host_step: null,
+        image_present: true,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+  })
+
+  it('asks again when the target changed since the consent', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', { ...ADOPTED, target: { ...RUNTIME, installation_id: 'other' } }),
+        host_step: null,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+  })
+
+  it('carries over for the same descriptor, image and target, keeping the approval the user gave', () => {
+    const driver = midPull()
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', ADOPTED),
+        host_step: null,
+        image_present: false,
+      })
+    )
+    expect(driver.phase).toBe('pulling-image')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:E')
+    expect(driver.machine.consented).toEqual({
+      plan_digest: 'sha256:A',
+      descriptor_id: 'tensorrt-llm-1',
+      environment_manifest_id: 'linux-r1',
+      image_digest: 'sha256:img1',
+      target: RUNTIME,
+    })
+  })
+
+  it('keeps plan_digest equal to the approval in every state outside awaiting-consent (review r2, ruling A)', () => {
+    const seen: string[] = []
+    const check = (driver: Driver): void => {
+      const { phase, plan_digest, approved_plan_digest } = driver.machine.operation
+      seen.push(phase)
+      if (phase !== 'awaiting-consent') expect(plan_digest).toBe(approved_plan_digest)
+    }
+    // A sign-in wait, a reconcile with a moved digest, then carried work through to ready.
+    const driver = atReceipt()
+    check(driver)
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    check(driver)
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    check(driver)
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:C',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    check(driver)
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:C')
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:D', ADOPTED), host_step: null })
+    )
+    check(driver)
+    for (const type of [
+      'environment-verified',
+      'image-pulled',
+      'verification-passed',
+      'activation-committed',
+    ]) {
+      driver.apply(driver.reply({ type }))
+      check(driver)
+    }
+    expect(driver.phase).toBe('ready')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:D')
+    expect(seen).not.toContain('awaiting-consent')
+  })
+
+  it('refuses a resume carrying another approval than the plan it is on (review r3, N1 path 1)', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:A', ADOPTED), host_step: null })
+    )
+    driver.apply(driver.reply({ type: 'environment-verified' }))
+    driver.apply(driver.reply({ type: 'failed', error: { code: 'IO_ERROR', message: 'pull broke' } }))
+    expect(driver.phase).toBe('failed')
+    const revision = driver.machine.operation.revision
+    expect(
+      driver.refuse({
+        type: 'resume',
+        input: { expected_revision: revision, approved_plan_digest: 'sha256:X' },
+      })
+    ).toBe('MANAGED_PLAN_CHANGED')
+    // The approval it already has, restated, is fine, and the work carries on under it.
+    driver.apply({ type: 'resume', input: { expected_revision: revision, approved_plan_digest: 'sha256:A' } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: [],
+        current_plan_digest: 'sha256:E',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:E', ADOPTED),
+        host_step: null,
+        image_present: false,
+      })
+    )
+    expect(driver.phase).toBe('pulling-image')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+  })
+
+  it('keeps plan and approval equal when a core restarts during a re-ask after work began (review r3, N1 path 2)', () => {
+    const driver = atReceipt()
+    driver.apply(
+      driver.reply({
+        type: 'host-receipt-verified',
+        receipt: { ...RECEIPT, outcome: 'completed' },
+        prerequisites_met: false,
+        needs_relogin: true,
+      })
+    )
+    driver.apply({ type: 'resume', input: { expected_revision: driver.machine.operation.revision } })
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-2',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:B',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    // Something privileged is needed again (a Docker restart): the operation asks.
+    driver.apply(driver.reply({ type: 'requirements-ready', plan: plan('sha256:B'), host_step: HOST_STEP }))
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:B')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+
+    // The core restarts while it asks; recovery reconciles, and the host now needs nothing new.
+    const m = driver.machine
+    const revision = m.operation.revision + 1
+    driver.machine = {
+      ...m,
+      operation: { ...m.operation, phase: 'checking', revision, pending_host_step: null, error: null },
+      pending_effect: {
+        effect_id: 'restart-1',
+        operation_id: 'op-1',
+        expected_revision: revision,
+        kind: 'reconcile',
+        plan_digest: m.operation.plan_digest,
+      },
+    }
+    driver.apply(
+      driver.reply({
+        type: 'reconciled',
+        instance_id: 'core-3',
+        verified_completed_step_ids: ['step-1'],
+        current_plan_digest: 'sha256:F',
+        needs_relogin: false,
+        needs_reboot: false,
+      })
+    )
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:F', ADOPTED), host_step: null })
+    )
+    // Work carries on under the consent the user gave, and the wire says so.
+    expect(driver.phase).toBe('preparing-environment')
+    expect(driver.machine.operation.plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.approved_plan_digest).toBe('sha256:A')
+    expect(driver.machine.operation.carried_plan_digest).toBe('sha256:F')
+  })
+
+  it('never carries when the approval on record is not the consent the work began under', () => {
+    const driver = midPull()
+    // An approval that is not the basis (a record tampered with, or written by an older core).
+    driver.machine = {
+      ...driver.machine,
+      operation: { ...driver.machine.operation, approved_plan_digest: 'sha256:Z' },
+    }
+    driver.apply(
+      driver.reply({ type: 'requirements-ready', plan: plan('sha256:E', ADOPTED), host_step: null })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+  })
+
+  it('never carries consent over for an operation that has not acted on one', () => {
+    const driver = new Driver('setup', RUNTIME, 'sha256:A')
+    driver.apply(
+      driver.reply({
+        type: 'requirements-ready',
+        plan: plan('sha256:B', ADOPTED),
+        host_step: null,
+        image_present: true,
+      })
+    )
+    expect(driver.phase).toBe('awaiting-consent')
+    expect(driver.machine.operation.error?.code).toBe('MANAGED_PLAN_CHANGED')
+  })
+})

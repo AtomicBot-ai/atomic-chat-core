@@ -1,0 +1,217 @@
+/**
+ * `POST /atomic/v1/models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`, "Проверка
+ * совместимости без сети"): wires the pure `checkModelCompatibility` (`compatibility.ts`) to the
+ * pinned descriptor of the ready installation — or, "если движок не установлен", the latest accepted
+ * cached descriptor (`descriptors.cachedForNewSetup()`) — and to the host's GPUs and memory.
+ * Never fetches: `descriptorForCheck` below only ever reads `forInstallation`/`cachedForNewSetup`,
+ * both cache-only (`descriptor-provider.ts`), and `hostFacts` is the check route's own Docker-free
+ * probe (`probeTensorrtLlmGpusAndMemory`, `host-facts.ts`) — matching the spec's "Core MUST NOT
+ * обращаться в сеть при проверке".
+ *
+ * Body validation lives here, not in the pure module: `checkModelCompatibility` trusts its typed
+ * input completely, so an HTTP body that does not even shape up as one is refused with
+ * `INVALID_ARGUMENT` before it ever reaches that function, the same way `routes/environments.ts`
+ * validates its own request bodies.
+ */
+import { AtomicCoreError } from '../../contracts/index.js'
+import type { GpuFacts, ModelCompatibility, RuntimeDescriptor } from '../../contracts/index.js'
+import { TENSORRT_LLM_ENGINE_ID } from '../environment/index.js'
+import type { InstallationStore, RuntimeDescriptorProvider } from '../environment/index.js'
+import { checkModelCompatibility, normalizeWeightNames } from './compatibility.js'
+import type { CheckpointFile, HostMemory, ModelCheckInput } from './compatibility.js'
+import type { JsonObject } from './quant-format.js'
+import { tensorrtLlmSettings } from './settings.js'
+
+export interface ModelCheckHostFacts {
+  gpus: GpuFacts[]
+  memory: HostMemory
+}
+
+export interface ModelCheckDeps {
+  /** The setup operation's installation records; a torn or foreign file is skipped there. */
+  installations: Pick<InstallationStore, 'list'>
+  descriptors: Pick<RuntimeDescriptorProvider, 'forInstallation' | 'cachedForNewSetup'>
+  /** Never asks Docker anything (see the file banner); a card can disappear between two checks. */
+  hostFacts: () => Promise<ModelCheckHostFacts>
+  /** The provider's stored settings (`settings.get('tensorrt-llm')`), for `kv_cache_free_gpu_memory_fraction`. */
+  settings: () => Record<string, unknown>
+  /**
+   * Windows only (change `add-tensorrt-llm-windows`, design D11): `hostFacts.memory` is then the WSL
+   * VM's, and this says what `.wslconfig` sets it to, for the warning when the weights do not fit in it.
+   */
+  wslVm?: () => Promise<{ memory_setting: string | null }>
+}
+
+const invalid = (why: string, details?: string): never => {
+  throw new AtomicCoreError('INVALID_ARGUMENT', why, details)
+}
+
+const object = (value: unknown, at: string): Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : (invalid(`${at} must be an object.`) as never)
+
+const known = (source: Record<string, unknown>, at: string, keys: readonly string[]): void => {
+  const extra = Object.keys(source).filter((key) => !keys.includes(key))
+  if (extra.length > 0) invalid(`${at} has fields this core does not know.`, extra.sort().join(', '))
+}
+
+const nonEmptyString = (value: unknown, at: string): string =>
+  typeof value === 'string' && value !== '' ? value : (invalid(`${at} must be a non-empty string.`) as never)
+
+const jsonObject = (value: unknown, at: string): JsonObject => object(value, at)
+
+const nullableJsonObject = (value: unknown, at: string): JsonObject | null =>
+  value === null || value === undefined ? null : object(value, at)
+
+const fileSize = (value: unknown, at: string): number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : (invalid(`${at} must be a non-negative number.`) as never)
+
+const fileSha256 = (value: unknown, at: string): string | null => {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') return value
+  return invalid(`${at} must be a string or null.`) as never
+}
+
+const checkpointFile = (value: unknown, at: string): CheckpointFile => {
+  const raw = object(value, at)
+  return {
+    path: nonEmptyString(raw['path'], `${at}.path`),
+    size: fileSize(raw['size'], `${at}.size`),
+    sha256: fileSha256(raw['sha256'], `${at}.sha256`),
+  }
+}
+
+const files = (value: unknown, at: string): CheckpointFile[] =>
+  Array.isArray(value)
+    ? value.map((entry, index) => checkpointFile(entry, `${at}[${index}]`))
+    : (invalid(`${at} must be an array.`) as never)
+
+const optionalGpuId = (value: unknown): string | undefined => {
+  if (value === undefined) return undefined
+  if (typeof value === 'string') return value
+  return invalid('gpu_id must be a string.') as never
+}
+
+/** Folded and de-duplicated here as well, so a caller that sends the raw index keys costs no more. */
+const optionalWeightNames = (value: unknown): string[] | undefined => {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) return invalid('weight_names must be an array of strings.') as never
+  return normalizeWeightNames(value.map((name, index) => nonEmptyString(name, `weight_names[${index}]`)))
+}
+
+/** `INVALID_ARGUMENT` for anything that does not shape up as `ModelCheckInput`; every field the spec names. */
+export function parseModelCheckInput(body: unknown): ModelCheckInput {
+  const raw = object(body, 'the request')
+  known(raw, 'the request', [
+    'repository',
+    'revision',
+    'config_json',
+    'hf_quant_config_json',
+    'files',
+    'gpu_id',
+    'weight_names',
+  ])
+  const gpuId = optionalGpuId(raw['gpu_id'])
+  const weightNames = optionalWeightNames(raw['weight_names'])
+  return {
+    repository: nonEmptyString(raw['repository'], 'repository'),
+    revision: nonEmptyString(raw['revision'], 'revision'),
+    config_json: jsonObject(raw['config_json'], 'config_json'),
+    hf_quant_config_json: nullableJsonObject(raw['hf_quant_config_json'], 'hf_quant_config_json'),
+    files: files(raw['files'], 'files'),
+    ...(gpuId === undefined ? {} : { gpu_id: gpuId }),
+    ...(weightNames === undefined ? {} : { weight_names: weightNames }),
+  }
+}
+
+/**
+ * The descriptor to check against: the `ready` `tensorrt-llm` installation's pinned descriptor when
+ * there is one, else the latest accepted cached descriptor — spec "по закреплённому дескриптору
+ * установки (или по актуальному, если движок не установлен)". Throws the descriptor provider's own
+ * `MANAGED_METADATA_INVALID` when neither is available (nothing has ever been cached).
+ */
+async function descriptorForCheck(
+  deps: Pick<ModelCheckDeps, 'installations' | 'descriptors'>
+): Promise<RuntimeDescriptor> {
+  const ours = (await deps.installations.list())
+    .map((record) => record.installation)
+    .filter((installation) => installation.engine_id === TENSORRT_LLM_ENGINE_ID)
+  const ready = ours.find(
+    (installation) => installation.status === 'ready' && installation.active_descriptor_id !== null
+  )
+  const resolved =
+    ready !== undefined
+      ? await deps.descriptors.forInstallation(ready.active_descriptor_id as string)
+      : await deps.descriptors.cachedForNewSetup()
+  if (resolved.kind !== 'available') throw resolved.error
+  return resolved.descriptor
+}
+
+/**
+ * The full route: validate, resolve the descriptor and host facts (in parallel), then the pure
+ * check. Without an explicit `gpu_id` in the request, checks against the card a real load would
+ * pick — the provider's own stored `gpu_id` setting, falling back to `selectLaunchGpu`'s "most free
+ * memory, then most total memory" rule only when nothing is saved or the saved card is gone (task
+ * 2.16w round 1, finding 3; design D12b) — the very function and inputs `runtime.ts`'s load uses,
+ * so the verdict and the launch cannot be about different cards.
+ */
+export async function checkTensorrtLlmModel(
+  body: unknown,
+  deps: ModelCheckDeps
+): Promise<ModelCompatibility> {
+  const input = parseModelCheckInput(body)
+  const [descriptor, facts] = await Promise.all([descriptorForCheck(deps), deps.hostFacts()])
+  const settings = tensorrtLlmSettings(deps.settings())
+  const gpuId = input.gpu_id ?? settings.gpu_id ?? undefined
+  const verdict = checkModelCompatibility(
+    { ...input, ...(gpuId === undefined ? {} : { gpu_id: gpuId }) },
+    descriptor,
+    facts.gpus,
+    facts.memory,
+    {
+      contextLength: settings.context_length,
+      kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,
+    }
+  )
+  return deps.wslVm === undefined ? verdict : withVmMemoryWarning(verdict, facts.memory, await deps.wslVm())
+}
+
+const GIB = 1024 ** 3
+const gib = (bytes: number): string => `${(bytes / GIB).toFixed(1)} GiB`
+
+/**
+ * On Windows the weights are read into the WSL VM, whose memory is by default half of the RAM (design
+ * D11): fewer bytes of VM than of weights is a warning — they stream, slower — never a refusal, which
+ * would cut off models that do run.
+ */
+function withVmMemoryWarning(
+  verdict: ModelCompatibility,
+  memory: HostMemory,
+  vm: { memory_setting: string | null }
+): ModelCompatibility {
+  if (!verdict.verdict.ok || memory.totalBytes <= 0 || memory.totalBytes >= verdict.weight_bytes)
+    return verdict
+  const setting =
+    vm.memory_setting === null
+      ? 'It is not set in %UserProfile%\\.wslconfig, so WSL uses half of this computer’s memory.'
+      : `%UserProfile%\\.wslconfig sets it to ${vm.memory_setting}.`
+  return {
+    ...verdict,
+    warnings: [
+      {
+        code: 'wsl-vm-memory',
+        message:
+          `The WSL VM has ${gib(memory.totalBytes)} of memory, less than this model’s ${gib(verdict.weight_bytes)} of weights: ` +
+          `it should still load, but more slowly. ${setting} You can raise it with memory= in the [wsl2] section of that file, then run wsl --shutdown.`,
+        params: {
+          vm_memory_bytes: String(memory.totalBytes),
+          weight_bytes: String(verdict.weight_bytes),
+          wslconfig_memory: vm.memory_setting ?? '',
+        },
+      },
+    ],
+  }
+}

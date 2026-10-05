@@ -1,0 +1,8 @@
+INFO 09-28 10:22:41 [server.py] Started server process [1]
+INFO 09-28 10:22:41 [server.py] Waiting for application startup.
+Loading safetensors weights in parallel: 100%|##########| 2/2 [00:07<00:00,  3.71s/it]
+[TensorRT-LLM] Estimating max KV cache tokens...
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/pyexecutor/resource_manager.py", line 244, in _create_kv_cache_manager
+    kv_cache_manager = KVCacheManager(mapping, config)
+RuntimeError: CUDA out of memory. Tried to allocate 135.00 GiB. GPU 0 has a total capacity of 15.93 GiB of which 0 bytes is free.

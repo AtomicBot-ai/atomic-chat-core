@@ -90,6 +90,7 @@ describe('SettingsStore.open', () => {
           'llamacpp': EMPTY_PROVIDER_STATE,
           'mlx': EMPTY_PROVIDER_STATE,
           'foundation-models': EMPTY_PROVIDER_STATE,
+          'tensorrt-llm': EMPTY_PROVIDER_STATE,
         },
         migrations: {},
       },
@@ -99,6 +100,7 @@ describe('SettingsStore.open', () => {
       'llamacpp': canonicalProviderDefaults('llamacpp'),
       'mlx': canonicalProviderDefaults('mlx'),
       'foundation-models': {},
+      'tensorrt-llm': canonicalProviderDefaults('tensorrt-llm'),
     })
     // canonical, not raw: the schema ships timeout "1800" and fit_ctx 4096
     expect(store.get('llamacpp-upstream')).toMatchObject({

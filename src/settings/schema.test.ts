@@ -52,6 +52,7 @@ describe('settingsSchema', () => {
     ['llamacpp', 31],
     ['mlx', 11],
     ['foundation-models', 0],
+    ['tensorrt-llm', 9],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -121,6 +122,19 @@ describe('defaultSettingValues', () => {
       auto_unload: true,
     })
     expect(defaultSettingValues('foundation-models')).toEqual({})
+    // `gpu_id: ''` picks the card with the most free memory; `load_timeout_seconds: 0` keeps the adapter's
+    // own weight-based estimate. Both mean "not set", which is what the adapter's `null` means.
+    expect(defaultSettingValues('tensorrt-llm')).toEqual({
+      gpu_id: '',
+      context_length: 8192,
+      max_output_tokens: 4096,
+      kv_cache_free_gpu_memory_fraction: 0.8,
+      max_batch_size: 8,
+      kv_cache_max_tokens: 0,
+      cuda_graphs: 'auto',
+      kv_cache_dtype: 'auto',
+      load_timeout_seconds: 0,
+    })
   })
 
   it('returns a fresh object each call', () => {
@@ -201,6 +215,19 @@ describe('canonicalizeSettingValues', () => {
       kv_bits: 3.5,
       block_size: 16,
       dflash_enabled: true,
+    })
+    expect(
+      canonicalizeSettingValues('tensorrt-llm', {
+        gpu_id: 'GPU-1',
+        context_length: '16384',
+        kv_cache_free_gpu_memory_fraction: '0.8',
+        load_timeout_seconds: '600',
+      })
+    ).toEqual({
+      gpu_id: 'GPU-1',
+      context_length: 16384,
+      kv_cache_free_gpu_memory_fraction: 0.8,
+      load_timeout_seconds: 600,
     })
     expect(canonicalizeSettingValues('foundation-models', { timeout: '300', other: 'x' })).toEqual({
       timeout: 300,

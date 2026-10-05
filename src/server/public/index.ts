@@ -45,8 +45,19 @@ export type {
   PublicServerDeps,
   VideosBackend,
 } from './types.js'
-export { isValidHost, removePrefix } from './gates.js'
+export { hostAndKeyGate, isValidHost, removePrefix } from './gates.js'
+export type { HostAndKeyConfig } from './gates.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
+export {
+  forwardableHeaders,
+  pipeBody,
+  readBody,
+  relay,
+  relayedHeaders,
+  sendUpstream,
+  sendWhole,
+} from './wire.js'
+export type { HeaderPairs, UpstreamResponse } from './wire.js'
 
 export const DEFAULT_PUBLIC_PORT = 1337
 export const DEFAULT_PUBLIC_HOST = '127.0.0.1'

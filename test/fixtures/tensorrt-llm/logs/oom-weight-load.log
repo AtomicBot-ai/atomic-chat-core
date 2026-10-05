@@ -1,0 +1,9 @@
+INFO 09-28 10:14:02 [server.py] Started server process [1]
+INFO 09-28 10:14:02 [server.py] Waiting for application startup.
+Loading safetensors weights in parallel: 100%|##########| 4/4 [00:12<00:00,  3.05s/it]
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/_torch/pyexecutor/weight_loader.py", line 68, in _load_safetensors_file
+    tensor = tensor.to(device="cuda")
+  File "/usr/local/lib/python3.12/dist-packages/torch/cuda/memory.py", line 130, in _raise_out_of_memory
+    raise torch.OutOfMemoryError(msg)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.30 GiB. GPU 0 has a total capacity of 23.69 GiB of which 1.12 GiB is free. Process 4213 has 22.40 GiB memory in use.

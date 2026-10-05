@@ -5,7 +5,13 @@
 import type { ErrorBody } from './errors.js'
 
 export const CONTROL_API_PREFIX = '/atomic/v1'
-export const CONTROL_PROTOCOL_VERSION = 1
+/**
+ * The wire contract's version. Bumped to 2 when a session stopped having to be a process on this
+ * machine: `SessionInfo.pid` became nullable, so a core that reports a container session would hand
+ * an app built against version 1 a field it cannot deserialize, and that app would quietly drop the
+ * session rather than fail. The protocol check is what turns that into a refusal to attach.
+ */
+export const CONTROL_PROTOCOL_VERSION = 2
 
 /**
  * The core's first and only stdout line, printed by `daemon` once the control listener is bound

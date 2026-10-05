@@ -1,0 +1,5 @@
+package docker-ce is not installed
+package docker.io is not installed
+package moby-engine is not installed
+podman-docker-5.2.2-1.fc43.noarch
+package docker-desktop is not installed

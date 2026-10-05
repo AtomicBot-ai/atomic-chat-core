@@ -24,6 +24,7 @@ import type { DiffusionState, ServerHandle } from './state.js'
 import { MAX_BATCH, MODEL_FILE_KEYS } from './types.js'
 import type { ModelFileBytes, ServerSpec } from './types.js'
 import { videoWorkflowsForFamily, workflowsForSpec } from './workflow.js'
+import type { GpuCards } from '../runtime/shared/index.js'
 
 /** CUDA and ROCm need a moment after the chat model's process dies before the driver reports the VRAM as free. */
 export const GPU_SETTLE_MS = 500
@@ -51,8 +52,21 @@ export interface SessionDeps {
   spawn: (spec: ServerSpec, scratchDir: string, signal?: AbortSignal) => Promise<ServerHandle>
   /** The child is gone (or was never journalled); forget it. */
   onServerGone?: (pid: number) => Promise<void>
+  /**
+   * Core's GPU residency (spec `gpu-residency`): asked before every spawn — a load and a respawn
+   * alike — to free the GPU of the other engines. Rejects (`GPU_BUSY`, a cancel) fail the load.
+   */
+  claimGpu?: (spec: ServerSpec, signal?: AbortSignal, granted?: () => void) => Promise<void>
   /** A file's size in bytes, `undefined` when it cannot be read. Default: `statFileSize`. */
   fileSize?: (path: string) => Promise<number | undefined>
+}
+
+/**
+ * Which GPUs an `sd-server` holds: every card on a device backend (the model is spread over whatever
+ * the build can see), none on the CPU backend or after the recovery moved it to the CPU.
+ */
+export function diffusionGpuCards(spec: Pick<ServerSpec, 'backend' | 'cpuFallback'>): GpuCards {
+  return spec.backend === 'cpu' || spec.cpuFallback ? [] : 'all'
 }
 
 /** A regular file's size, or `undefined` when it is missing or not a file. */
@@ -232,7 +246,9 @@ async function spawnFallingBack(
 
 /**
  * Spawn the server for `spec` and make it the resident session. The caller holds the load lock,
- * and any previous session is already gone.
+ * and any previous session is already gone — or still exiting: a crash or cancel teardown that began
+ * outside the lock may not have seen its exit yet, so its `stopping` is awaited before the claim and
+ * the spawn (final review M-9); otherwise two `sd-server`s of this service would share the GPU.
  */
 export async function loadFromSpec(
   deps: SessionDeps,
@@ -243,7 +259,6 @@ export async function loadFromSpec(
   const { state } = deps
   state.setModelState('loading')
   await emitState(deps, reason)
-  await settleGpu(deps, spec)
 
   // A load reads the sizes the video estimate weighs, once; a respawn of the kept spec reuses them.
   const fileBytes =
@@ -255,6 +270,17 @@ export async function loadFromSpec(
   try {
     // A retained spec can name an engine build that an update has since made too old for it.
     checkEngineCompatibility(spec.family, spec.tag)
+    // `done` never rejects: an unconfirmed exit puts the server back as the session instead.
+    await state.stopping?.done
+    // Every other engine is off the GPU, its exit confirmed, before this server starts; from the
+    // moment the claim is granted this server holds the GPU as starting.
+    const hold = () => {
+      state.starting = spec
+    }
+    if (deps.claimGpu) await deps.claimGpu(spec, signal, hold)
+    hold()
+    // After the claim, so the settle follows the exit of whatever the claim evicted as well as ours.
+    await settleGpu(deps, spec)
     started = await spawnFallingBack(deps, spec, signal)
   } catch (raw) {
     const error = toDiffusionError(raw)
@@ -263,6 +289,8 @@ export async function loadFromSpec(
     await emitState(deps, 'load-failed')
     emitError(deps, undefined, body)
     throw error
+  } finally {
+    state.starting = undefined
   }
 
   // What runs, which is `spec` unless loading it ran out of memory and its fallback took over.
@@ -299,7 +327,19 @@ export async function takeDownSession(deps: SessionDeps, graceMs?: number): Prom
   if (!session) return false
   state.session = undefined
   session.server.setLineListener(undefined)
-  await session.server.terminate(graceMs)
+  // Still on the GPU until its exit is confirmed: GPU residency sees it as stopping until then.
+  const exit = session.server.terminate(graceMs).then(() => undefined)
+  const stopping = { spec: session.spec, done: exit.catch(() => undefined) }
+  state.stopping = stopping
+  try {
+    await exit
+  } catch (error) {
+    // Not confirmed: a server that may still be running stays the session, never forgotten.
+    if (session.server.exitStatus() === undefined && state.session === undefined) state.session = session
+    throw error
+  } finally {
+    if (state.stopping === stopping) state.stopping = undefined
+  }
   await deps.onServerGone?.(session.server.pid)
   return true
 }

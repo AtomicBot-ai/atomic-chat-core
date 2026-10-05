@@ -113,6 +113,36 @@ describe('error envelope', () => {
     for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)
   })
 
+  it('maps the managed-runtime codes: every conflict is 409, an unsupported engine is 422', () => {
+    const table: Array<[ErrorCode, number]> = [
+      ['MANAGED_OPERATION_NOT_FOUND', 404],
+      ['MANAGED_OPERATION_CONFLICT', 409],
+      ['MANAGED_REVISION_CONFLICT', 409],
+      ['MANAGED_CONSENT_REQUIRED', 409],
+      ['MANAGED_PLAN_CHANGED', 409],
+      ['MANAGED_RECEIPT_CONFLICT', 409],
+      ['MANAGED_RESOURCE_IN_USE', 409],
+      ['MANAGED_IDENTITY_MISMATCH', 409],
+      ['MANAGED_STOP_UNCONFIRMED', 409],
+      ['MANAGED_ELEVATION_DECLINED', 409],
+      ['MANAGED_PREREQUISITE_BLOCKED', 409],
+      ['MANAGED_RELOGIN_REQUIRED', 409],
+      ['MANAGED_REBOOT_REQUIRED', 409],
+      ['GPU_BUSY', 409],
+      ['SESSION_GENERATION_STALE', 409],
+      ['MANAGED_HOST_STEP_INVALID', 400],
+      // A caller sent a descriptor or plan this core refused.
+      ['MANAGED_METADATA_INVALID', 400],
+      ['MANAGED_ADAPTER_UNAVAILABLE', 422],
+      // An on-disk operation record this core itself cannot read is never the caller's fault, so
+      // `OperationStore`'s own corruption (`store.ts`'s `corrupt()`) is `IO_ERROR`, not
+      // `MANAGED_METADATA_INVALID` — unmapped here, it falls through to the same 500 as any other
+      // unexpected failure.
+      ['IO_ERROR', 500],
+    ]
+    for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)
+  })
+
   it("maps the decision codes: configuration and engine are the caller's to fix, a stopped model is 503", () => {
     expect(statusForCode('DECISION_NOT_CONFIGURED')).toBe(409)
     expect(statusForCode('DECISION_ENGINE_UNSUPPORTED')).toBe(409)

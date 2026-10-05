@@ -146,3 +146,214 @@ describe('error reports', () => {
     ])
   })
 })
+
+describe('a session that declares its routes (tensorrt-llm)', () => {
+  const overflow = JSON.stringify({
+    object: 'error',
+    message: 'The sum of prompt length (9000), query length (0) should not exceed max_num_tokens (8192)',
+    type: 'BadRequestError',
+    param: null,
+    code: 400,
+  })
+  const trt = (port: number, tools = false) =>
+    localSession(port, {
+      provider: 'tensorrt-llm',
+      modelId: 'trt',
+      policy: {
+        routes: [
+          { method: 'POST', path: '/v1/chat/completions' },
+          { method: 'POST', path: '/v1/completions' },
+          { method: 'GET', path: '/v1/models' },
+        ],
+        tools,
+        structuredOutput: false,
+        mapError: (status, body) =>
+          status === 400 && body.includes('max_num_tokens (8192)')
+            ? {
+                error: {
+                  message: 'maximum context length is 8192 tokens, your messages resulted in 9000 tokens',
+                  type: 'invalid_request_error',
+                  param: null,
+                  code: 'context_length_exceeded',
+                },
+              }
+            : null,
+      },
+    })
+
+  it('answers /v1/embeddings with a clear error and never reaches the session', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((req, _body, res) => {
+      seen.push(req.url ?? '')
+      res.end('{}')
+    })
+    const server = await startPublic({ sessions: [trt(port)] })
+    const res = await postJson(server, '/embeddings', { model: 'trt', input: 'hi' })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({
+      error: { message: "The model 'trt' does not support embeddings.", code: 'unsupported_endpoint' },
+    })
+    expect(seen).toEqual([])
+  })
+
+  it('refuses tools when the session has no tool parser, and forwards a plain chat', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((req, _body, res) => {
+      seen.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }] }))
+    })
+    const server = await startPublic({ sessions: [trt(port)] })
+    const tools = [{ type: 'function', function: { name: 'f', parameters: {} } }]
+    expect((await postJson(server, '/chat/completions', { model: 'trt', tools })).status).toBe(400)
+    expect(seen).toEqual([])
+    expect((await postJson(server, '/chat/completions', { model: 'trt' })).status).toBe(200)
+    expect(seen).toEqual(['/v1/chat/completions'])
+  })
+
+  it('maps a context overflow to context_length_exceeded and never asks for a larger context', async () => {
+    const asked: string[] = []
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(overflow)
+    })
+    const server = await startPublic({
+      sessions: [trt(port)],
+      increaseCtx: (_p, _m, trigger) => {
+        asked.push(trigger)
+        return Promise.resolve({ ok: true, new_ctx_len: 16384 })
+      },
+    })
+    const res = await postJson(server, '/chat/completions', { model: 'trt', stream: true })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    expect(asked).toEqual([])
+  })
+
+  it('never grows the context for a reply cut off at the window, either', async () => {
+    const asked: string[] = []
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'cut' }, finish_reason: 'length' }] }))
+    })
+    const server = await startPublic({
+      sessions: [trt(port)],
+      increaseCtx: (_p, _m, trigger) => {
+        asked.push(trigger)
+        return Promise.resolve({ ok: true })
+      },
+    })
+    expect((await postJson(server, '/chat/completions', { model: 'trt' })).status).toBe(200)
+    expect(asked).toEqual([])
+  })
+
+  it('wraps any other engine error the generic way, still without a context increase', async () => {
+    const asked: string[] = []
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(500, { 'content-type': 'text/plain' })
+      res.end('Compute error: out of memory')
+    })
+    const server = await startPublic({
+      sessions: [trt(port)],
+      increaseCtx: (_p, _m, trigger) => {
+        asked.push(trigger)
+        return Promise.resolve({ ok: true })
+      },
+    })
+    const res = await postJson(server, '/chat/completions', { model: 'trt' })
+    expect(res.status).toBe(500)
+    expect(asked).toEqual([])
+  })
+
+  it('answers an engine error it does not map as JSON, on chat and on the Anthropic fallback (final review M-4)', async () => {
+    // What the session gateway answers once it has already mapped the engine's error itself.
+    const alreadyMapped = JSON.stringify({
+      error: {
+        message: 'too long',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'context_length_exceeded',
+      },
+    })
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(alreadyMapped)
+    })
+    const server = await startPublic({ sessions: [trt(port)] })
+    const chat = await postJson(server, '/chat/completions', { model: 'trt' })
+    expect(chat.status).toBe(400)
+    expect(chat.headers.get('content-type')).toContain('application/json')
+    expect(await chat.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    const messages = await postJson(server, '/messages', {
+      model: 'trt',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'hello' }],
+    })
+    expect(messages.status).toBe(400)
+    expect(messages.headers.get('content-type')).toContain('application/json')
+    expect(await messages.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+  })
+
+  it('sends /v1/messages straight to chat completions, never to the undeclared route, and maps an overflow there too', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push(req.url ?? '')
+      if (body.includes('OVERFLOW')) {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(overflow)
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          id: 'c1',
+          model: 'trt',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [trt(port)] })
+    const ok = await postJson(server, '/messages', {
+      model: 'trt',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'hello' }],
+    })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ type: 'message', content: [{ type: 'text', text: 'hi' }] })
+    const overflowed = await postJson(server, '/messages', {
+      model: 'trt',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'OVERFLOW' }],
+    })
+    expect(overflowed.status).toBe(400)
+    expect(await overflowed.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    expect(seen).toEqual(['/v1/chat/completions', '/v1/chat/completions'])
+  })
+
+  it('answers a /v1/messages it cannot translate with a 400, and an unreachable session with a 503', async () => {
+    const { port } = await startUpstream((_req, _body, res) => res.end('{}'))
+    const server = await startPublic({ sessions: [trt(port)] })
+    const untranslatable = await postJson(server, '/messages', { model: 'trt' })
+    expect(untranslatable.status).toBe(400)
+    expect(await untranslatable.json()).toMatchObject({ error: { type: 'invalid_request_error' } })
+
+    const down = await startPublic({ sessions: [trt(await closedPort())] })
+    const unreachable = await postJson(down, '/messages', {
+      model: 'trt',
+      max_tokens: 8,
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    expect(unreachable.status).toBe(503)
+  })
+
+  it('answers /v1/responses for a tensorrt-llm model with a clear error', async () => {
+    const { port } = await startUpstream((_req, _body, res) => res.end('{}'))
+    const server = await startPublic({ sessions: [trt(port)] })
+    const res = await postJson(server, '/responses', { model: 'trt', input: 'hi' })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({
+      error: { message: "The model 'trt' does not support the Responses API." },
+    })
+  })
+})

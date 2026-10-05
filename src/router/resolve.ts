@@ -17,13 +17,19 @@ export interface RemoteProvider {
   models: string[]
 }
 
-export type LocalProvider = 'llamacpp' | 'llamacpp-upstream' | 'mlx'
+export type LocalProvider = 'llamacpp' | 'llamacpp-upstream' | 'mlx' | 'tensorrt-llm'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
  * loaded under two engines resolves to the first; changing the order would silently move traffic.
+ * `tensorrt-llm` comes last for exactly that reason: adding it moves nothing that already resolved.
  */
-export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = ['llamacpp', 'llamacpp-upstream', 'mlx']
+export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
+  'llamacpp',
+  'llamacpp-upstream',
+  'mlx',
+  'tensorrt-llm',
+]
 
 /**
  * The remote provider that owns `modelId`, if any. Remote wins over local — a model id the user

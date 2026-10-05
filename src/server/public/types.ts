@@ -24,6 +24,22 @@ import type { LocalProvider, RemoteProvider } from '../../router/index.js'
 import type { ChatGptBackend } from '../../cloud/index.js'
 import type { ErrorSink } from '../../telemetry/index.js'
 
+/**
+ * What a session whose engine declares its routes requires of this server (the runtime's
+ * `SessionRoutePolicy`; `tensorrt-llm` today): refuse what it does not serve instead of forwarding it,
+ * refuse `tools` it has no parser for, map the engine's own errors, and never grow or recreate it.
+ */
+export interface LocalTargetPolicy {
+  routes: readonly { method: string; path: string }[]
+  tools: boolean
+  structuredOutput: boolean
+  mapError: (status: number, body: string) => object | null
+  /** The context the session was started with, when known: what `/muse-code/models` advertises. */
+  contextLength?: number
+  /** The per-request output cap the session enforces, when known. */
+  maxOutputTokens?: number
+}
+
 /** A model a local engine is serving right now. */
 export interface LocalTarget {
   provider: LocalProvider
@@ -32,6 +48,8 @@ export interface LocalTarget {
   /** Per-session bearer the engine expects; empty for MLX, which has no auth layer. */
   apiKey: string
   isEmbedding: boolean
+  /** Absent for an engine that takes every route (llama.cpp, MLX): the server's own defaults apply. */
+  policy?: LocalTargetPolicy
 }
 
 /** What asking the owning runtime for a larger context produced. */

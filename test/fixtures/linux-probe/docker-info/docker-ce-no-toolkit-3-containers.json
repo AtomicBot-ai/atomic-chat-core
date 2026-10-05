@@ -1,0 +1,24 @@
+{
+  "ID": "CE01:AAAA:BBBB:CCCC:DDDD:EEEE:FFFF:0000:1111:2222:3333:6666",
+  "Containers": 3,
+  "ContainersRunning": 3,
+  "ContainersPaused": 0,
+  "ContainersStopped": 0,
+  "Images": 4,
+  "Driver": "overlay2",
+  "SystemTime": "2026-09-28T12:00:00.000000000Z",
+  "ServerVersion": "28.3.0",
+  "OperatingSystem": "Ubuntu 24.04.3 LTS",
+  "OSType": "linux",
+  "Architecture": "x86_64",
+  "Name": "ana-desktop",
+  "DockerRootDir": "/var/lib/docker",
+  "Runtimes": {
+    "runc": { "path": "runc" },
+    "io.containerd.runc.v2": { "path": "runc" }
+  },
+  "DefaultRuntime": "runc",
+  "CDISpecDirs": [],
+  "SecurityOptions": ["name=apparmor", "name=seccomp,profile=default"],
+  "ServerErrors": []
+}

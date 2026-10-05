@@ -48,7 +48,7 @@ const writeFakeBackend = () => core.writeFakeBackend(dataFolder)
 describe.skipIf(!existsSync(BIN))('the compiled core as an owner', () => {
   it('prints a ready line, answers control, and refuses a second owner', async () => {
     const { ready } = await startDaemon()
-    expect(ready).toMatchObject({ event: 'core:ready', protocol: 1 })
+    expect(ready).toMatchObject({ event: 'core:ready', protocol: 2 })
     expect(ready.control_port).toBeGreaterThan(0)
     expect(ready.pid).toBeGreaterThan(0)
 

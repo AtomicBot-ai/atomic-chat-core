@@ -184,6 +184,171 @@ describe('model capability routes', () => {
   })
 })
 
+describe('tensorrt-llm model check route', () => {
+  it('answers PROVIDER_NOT_FOUND when this build offers no tensorrt-llm provider (off Linux)', async () => {
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('passes the body through to the wired check and answers its verdict', async () => {
+    let seenBody: unknown
+    const withCheck = await start({
+      tensorrtLlmModelCheck: async (body) => {
+        seenBody = body
+        return {
+          architectures: ['LlamaForCausalLM'],
+          quantization_format: 'bf16',
+          weight_bytes: 20,
+          checked_gpu_id: 'gpu-0',
+          curated: false,
+          unified_memory: false,
+          fits_other_gpus: [],
+          verdict: { ok: true },
+        }
+      },
+    })
+    const body = {
+      repository: 'acme/model',
+      revision: 'deadbeef',
+      config_json: { architectures: ['LlamaForCausalLM'] },
+      hf_quant_config_json: null,
+      files: [{ path: 'model.safetensors', size: 20, sha256: null }],
+    }
+    const res = await withCheck.get('/atomic/v1/models/tensorrt-llm/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ verdict: { ok: true } })
+    expect(seenBody).toEqual(body)
+    await withCheck.server.close()
+  })
+
+  it('surfaces the error the wired check throws, e.g. an incompatible checkpoint', async () => {
+    const incompatible = await start({
+      tensorrtLlmModelCheck: async () => {
+        throw Object.assign(new Error('Unsupported architecture: GPT2LMHeadModel.'), {
+          code: 'MODEL_INCOMPATIBLE',
+        })
+      },
+    })
+    const res = await incompatible.get('/atomic/v1/models/tensorrt-llm/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({ error: { code: 'MODEL_INCOMPATIBLE' } })
+    await incompatible.server.close()
+  })
+})
+
+describe('tensorrt-llm model deletion route', () => {
+  it('answers PROVIDER_NOT_FOUND when this build offers no tensorrt-llm provider (off Linux)', async () => {
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('passes the id exactly as sent — a nested id whole, a percent-encoded slash not decoded — and answers the deletion', async () => {
+    const seen: string[] = []
+    const withDelete = await start({
+      tensorrtLlmModelDelete: async (modelId) => {
+        seen.push(modelId)
+        return { model_id: modelId, was_loaded: true, freed_bytes: 1500, engine_caches_removed: 2 }
+      },
+    })
+    const res = await withDelete.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      model_id: 'acme/m',
+      was_loaded: true,
+      freed_bytes: 1500,
+      engine_caches_removed: 2,
+    })
+    await withDelete.get('/atomic/v1/models/tensorrt-llm/acme%2Fm', { method: 'DELETE' })
+    expect(seen).toEqual(['acme/m', 'acme%2Fm'])
+    await withDelete.server.close()
+  })
+
+  it.each([
+    ['MODEL_NOT_FOUND', 404],
+    ['MANAGED_STOP_UNCONFIRMED', 409],
+  ])('surfaces %s from the wired deletion as %i', async (code, status) => {
+    const failing = await start({
+      tensorrtLlmModelDelete: async () => {
+        throw Object.assign(new Error('refused'), { code })
+      },
+    })
+    const res = await failing.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    expect(res.status).toBe(status)
+    expect(await res.json()).toMatchObject({ error: { code } })
+    await failing.server.close()
+  })
+
+  it('is not offered for another provider', async () => {
+    const withDelete = await start({
+      tensorrtLlmModelDelete: async () => {
+        throw new Error('never asked')
+      },
+    })
+    const res = await withDelete.get('/atomic/v1/models/llamacpp-upstream/acme/m', { method: 'DELETE' })
+    expect([404, 405]).toContain(res.status)
+    await withDelete.server.close()
+  })
+})
+
+describe('tensorrt-llm model location route (change add-tensorrt-llm-windows, task 2.8)', () => {
+  it('answers PROVIDER_NOT_FOUND where the provider is not offered at all', async () => {
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/location')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('answers the root clients download into and its free space', async () => {
+    const withLocation = await start({
+      tensorrtLlmModelLocation: async () => ({
+        root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\models\\tensorrt-llm',
+        free_bytes: 400_000_000_000,
+      }),
+    })
+    const res = await withLocation.get('/atomic/v1/models/tensorrt-llm/location')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\models\\tensorrt-llm',
+      free_bytes: 400_000_000_000,
+    })
+    await withLocation.server.close()
+  })
+
+  it('answers MANAGED_ADAPTER_UNAVAILABLE (422) on Windows before the distribution exists', async () => {
+    const before = await start({
+      tensorrtLlmModelLocation: async () => {
+        throw Object.assign(new Error('no distribution'), { code: 'MANAGED_ADAPTER_UNAVAILABLE' })
+      },
+    })
+    const res = await before.get('/atomic/v1/models/tensorrt-llm/location')
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } })
+    await before.server.close()
+  })
+
+  it('is not taken for a model called "location" of another route', async () => {
+    const withLocation = await start({
+      tensorrtLlmModelLocation: async () => ({ root: '/data/tensorrt-llm/models', free_bytes: 1 }),
+    })
+    const res = await withLocation.get('/atomic/v1/models/tensorrt-llm/location', { method: 'DELETE' })
+    expect(res.status).not.toBe(200)
+    await withLocation.server.close()
+  })
+})
+
 describe('foundation models availability', () => {
   it('answers the runtime token, forwarding force', async () => {
     const asked: boolean[] = []
@@ -205,5 +370,35 @@ describe('foundation models availability', () => {
     expect(await (await h.get('/atomic/v1/runtimes/foundation-models/availability')).json()).toEqual({
       status: 'unavailable',
     })
+  })
+})
+
+describe('model logs route', () => {
+  it("answers the provider's logs for a model whose id contains slashes", async () => {
+    h.models.logs = async (provider, modelId) => ({ provider, model_id: modelId, source: null, log_tail: '' })
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/Qwen/Qwen3-8B-FP8/logs')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      provider: 'tensorrt-llm',
+      model_id: 'Qwen/Qwen3-8B-FP8',
+      source: null,
+      log_tail: '',
+    })
+  })
+
+  it('answers with the error the provider gives, e.g. one this core does not offer', async () => {
+    h.models.logs = async (provider) => {
+      throw Object.assign(new Error(`Unknown provider "${provider}".`), { code: 'PROVIDER_NOT_FOUND' })
+    }
+    const res = await h.get('/atomic/v1/models/tensorrt-llm/m/logs')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('answers PROVIDER_NOT_FOUND when this build keeps no model logs at all', async () => {
+    delete h.models.logs
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/m/logs')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
   })
 })

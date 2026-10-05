@@ -7,7 +7,7 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { CoreEvents, LoadDiffusionModelRequest, SystemInfo } from '../contracts/index.js'
@@ -18,8 +18,16 @@ import {
   writeFakeSdModel,
 } from '../../test/helpers/fake-sd-server.js'
 import type { FakeSdOptions } from '../../test/helpers/fake-sd-server.js'
-import { isProcessAlive } from '../runtime/shared/index.js'
+import { isProcessAlive, loadCancelledError } from '../runtime/shared/index.js'
+import type { GpuClaim, GpuClaimHook } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
+
+/**
+ * The tests here build the diffusion service, several of them with real (fake-engine) child processes. Under the
+ * full suite's parallel load some crossed vitest's 5 s default and failed at random (final review
+ * T-282), so the whole file gets an explicit, longer per-test timeout.
+ */
+vi.setConfig({ testTimeout: 20_000 })
 
 const posix = process.platform !== 'win32'
 
@@ -51,7 +59,9 @@ const MAC_16: SystemInfo = {
   gpus: [],
 }
 
-function harness(options: { idleTickMs?: number; systemInfo?: SystemInfo } = {}): Harness {
+function harness(
+  options: { idleTickMs?: number; claimGpu?: GpuClaimHook; systemInfo?: SystemInfo } = {}
+): Harness {
   const events: Harness['events'] = []
   const journal: Harness['journal'] = []
   const log: string[] = []
@@ -70,6 +80,7 @@ function harness(options: { idleTickMs?: number; systemInfo?: SystemInfo } = {})
     },
     timings: { pollIntervalMs: 30, cancelGraceMs: 300, cancelPollMs: 30 },
     idleTickMs: options.idleTickMs ?? 50,
+    ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
     ...(options.systemInfo ? { systemInfo: async () => options.systemInfo as SystemInfo } : {}),
   })
   service.start()
@@ -364,6 +375,156 @@ describe.skipIf(!posix)('the engine and the model', () => {
   })
 })
 
+describe.skipIf(!posix)('GPU residency', () => {
+  it('claims the GPU for a load, reports the server it holds, and nothing once it is unloaded', async () => {
+    const claims: GpuClaim[] = []
+    const built: { service?: DiffusionService } = {}
+    const h = harness({
+      claimGpu: async (claim, _signal, granted) => {
+        claims.push(claim)
+        expect(built.service?.gpuOccupancy()).toEqual([])
+        granted?.()
+      },
+    })
+    built.service = h.service
+    await installFakeSdEngine(layout)
+    await h.service.configure({ dataFolder })
+    expect(h.service.gpuOccupancy()).toEqual([])
+    await h.service.loadModel(await loadRequest())
+    // The fake engine is a CPU build: it holds no card, and says so.
+    expect(claims).toEqual([{ model_id: 'z-image:q4_k_m', cards: [], auxiliary: false }])
+    expect(h.service.gpuOccupancy()).toEqual([
+      { model_id: 'z-image:q4_k_m', cards: [], auxiliary: false, state: 'ready' },
+    ])
+    await h.service.unloadModel()
+    expect(h.service.gpuOccupancy()).toEqual([])
+  })
+
+  it('holds the GPU as loading while the server starts, once its claim went through', async () => {
+    const h = harness({ claimGpu: async (_claim, _signal, granted) => granted?.() })
+    await installFakeSdEngine(layout, { loadMs: 5_000, pidFile: join(dataFolder, 'pids') })
+    await h.service.configure({ dataFolder })
+    const loading = h.service.loadModel(await loadRequest()).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await waitFor(() => exists(join(dataFolder, 'pids')))
+    expect(h.service.gpuOccupancy()).toEqual([
+      { model_id: 'z-image:q4_k_m', cards: [], auxiliary: false, state: 'loading' },
+    ])
+    await h.service.unloadModel()
+    await loading
+    expect(h.service.gpuOccupancy()).toEqual([])
+  })
+
+  it(
+    'an unload that arrives while a load is still taking the old server down never deadlocks with that load’s claim',
+    { timeout: 10_000 },
+    async () => {
+      // The claim behaves like core's residency while it evicts this very service: it is granted only
+      // once the eviction — `unloadModel` — has finished, unless the load is aborted first.
+      let unloaded: Promise<void> = new Promise(() => {})
+      let blocking = false
+      const h = harness({
+        claimGpu: (_claim, signal, granted) => {
+          if (!blocking) {
+            granted?.()
+            return Promise.resolve()
+          }
+          if (signal?.aborted) return Promise.reject(loadCancelledError())
+          return new Promise((resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(loadCancelledError()), { once: true })
+            void unloaded.then(() => {
+              granted?.()
+              resolve()
+            })
+          })
+        },
+      })
+      await installFakeSdEngine(layout)
+      await h.service.configure({ dataFolder })
+      const request = await loadRequest()
+      await h.service.loadModel(request)
+
+      blocking = true
+      const reloading = h.service.loadModel(request).then(
+        () => 'loaded',
+        (e: unknown) => (e as { details?: string }).details ?? String(e)
+      )
+      unloaded = h.service.unloadModel()
+      await unloaded
+      expect(await reloading).toContain('MODEL_LOAD_CANCELLED')
+      expect(h.service.gpuOccupancy()).toEqual([])
+      // The lock is free: the next load goes through.
+      blocking = false
+      await h.service.loadModel(request)
+    }
+  )
+
+  it('reports a server being taken down as stopping, and an unload waits for that exit even when it began outside the lock', async () => {
+    const h = harness()
+    const stopping = { spec: { modelId: 'flux', backend: 'cuda', cpuFallback: false } }
+    let release!: () => void
+    const done = new Promise<void>((resolve) => (release = resolve))
+    h.service.state.stopping = { ...stopping, done } as unknown as typeof h.service.state.stopping
+    expect(h.service.gpuOccupancy()).toEqual([
+      { model_id: 'flux', cards: 'all', auxiliary: false, state: 'stopping' },
+    ])
+    let finished = false
+    const unloading = h.service.unloadModel().then(() => (finished = true))
+    await sleep(30)
+    expect(finished).toBe(false)
+    release()
+    await unloading
+    expect(finished).toBe(true)
+  })
+
+  it('a load waits for a server still being taken down outside the lock before it spawns another (final review M-9)', async () => {
+    const h = harness()
+    await installFakeSdEngine(layout)
+    await h.service.configure({ dataFolder })
+    // A crash or cancel teardown that began outside the load lock and has not seen its exit yet.
+    let release!: () => void
+    const done = new Promise<void>((resolve) => (release = resolve))
+    h.service.state.stopping = {
+      spec: { modelId: 'z-image:q4_k_m', backend: 'cpu', cpuFallback: false },
+      done,
+    } as unknown as typeof h.service.state.stopping
+    const loading = h.service.loadModel(await loadRequest())
+    await sleep(100)
+    expect(h.journal.filter((j) => j.op === 'add')).toEqual([])
+    h.service.state.stopping = undefined
+    release()
+    await loading
+    expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(1)
+  })
+
+  it('an unload aborts a load still waiting for its GPU claim, so the load lock is never held hostage', async () => {
+    let waiting = false
+    const h = harness({
+      claimGpu: (_claim, signal) =>
+        new Promise((_resolve, reject) => {
+          waiting = true
+          signal?.addEventListener('abort', () => reject(loadCancelledError()), { once: true })
+        }),
+    })
+    await installFakeSdEngine(layout)
+    await h.service.configure({ dataFolder })
+    const loading = h.service.loadModel(await loadRequest()).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+    await waitFor(() => waiting)
+    await h.service.unloadModel()
+    expect(await loading).toMatchObject({
+      code: 'INTERNAL',
+      details: expect.stringContaining('MODEL_LOAD_CANCELLED'),
+    })
+    expect(h.journal).toEqual([])
+    expect(h.service.gpuOccupancy()).toEqual([])
+  })
+})
+
 describe.skipIf(!posix)('generating', () => {
   async function loadedService(options: FakeSdOptions = {}) {
     const h = harness()
@@ -437,6 +598,46 @@ describe.skipIf(!posix)('generating', () => {
     expect(status.model.state).toBe('loaded')
     expect(status.model.loaded?.pid).not.toBe(h.loaded.pid)
     expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(2)
+  })
+
+  it('an unload asked for while a respawn waits for a teardown aborts the GPU claim that respawn then starts (final review M-9)', async () => {
+    const aborted: boolean[] = []
+    const h = harness({
+      claimGpu: (_claim, signal, granted) => {
+        aborted.push(signal?.aborted === true)
+        if (signal?.aborted) return Promise.reject(loadCancelledError())
+        granted?.()
+        return Promise.resolve()
+      },
+    })
+    await h.service.configure({ dataFolder })
+    await installFakeSdEngine(layout, { stepMs: 400 })
+    const loaded = await h.service.loadModel(await loadRequest())
+    // A cancel stops the engine and keeps the spec: the next job respawns it.
+    const first = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    await waitFor(() => h.service.getJob(first.jobId)?.state === 'generating')
+    await h.service.cancelJob(first.jobId)
+    expect(isProcessAlive(loaded.pid)).toBe(false)
+
+    // A teardown still in flight outside the lock holds the respawn before its claim.
+    let release!: () => void
+    const done = new Promise<void>((resolve) => (release = resolve))
+    h.service.state.stopping = {
+      spec: { modelId: 'z-image:q4_k_m', backend: 'cpu', cpuFallback: false },
+      done,
+    } as unknown as typeof h.service.state.stopping
+    const next = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32, steps: 1 }))
+    await sleep(100)
+    // No load is in flight for `unloadModel` to abort: only its pending-unload count reaches the respawn.
+    const unloading = h.service.unloadModel()
+    h.service.state.stopping = undefined
+    release()
+    await unloading
+    await waitFor(() => ['failed', 'cancelled'].includes(h.service.getJob(next.jobId)?.state ?? ''))
+    expect(aborted).toEqual([false, true])
+    expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(1)
+    expect(h.service.gpuOccupancy()).toEqual([])
+    expect((await h.service.getStatus()).model.state).toBe('unloaded')
   })
 
   // `finalize_backend_install` + `activate_install` (`commands.rs`/`session.rs`, app commit ec1fd3ea7).

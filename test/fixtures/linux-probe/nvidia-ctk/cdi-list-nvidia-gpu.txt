@@ -1,0 +1,2 @@
+INFO[0000] Found 1 CDI devices
+nvidia.com/gpu=all

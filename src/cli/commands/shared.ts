@@ -1,7 +1,7 @@
 /** Helpers used by more than one CLI command: the data folder, sizes, paths and server URLs. */
 
 import { isAbsolute, resolve } from 'node:path'
-import type { LocalApiServerState } from '../../contracts/index.js'
+import type { LocalApiServerState, SessionInfo } from '../../contracts/index.js'
 import {
   assertCliDataFolder,
   dataLayout,
@@ -43,4 +43,12 @@ export function baseUrl(state: LocalApiServerState): string {
 
 export function apiUrl(state: LocalApiServerState): string {
   return `${baseUrl(state)}${state.prefix}`
+}
+
+/**
+ * Where a session's engine runs, for a line a person reads: a native backend has a host process id,
+ * a container-backed one (`tensorrt-llm`) has none and says so rather than printing "pid null".
+ */
+export function sessionProcess(session: Pick<SessionInfo, 'pid'>): string {
+  return session.pid === null ? 'in a container' : `pid ${session.pid}`
 }

@@ -51,12 +51,15 @@ import {
   raceLoadCancel,
   redactArgs,
   throwIfLoadCancelled,
+  hostPid,
 } from '../shared/index.js'
 import type {
   BackendOutputSink,
   ManagedProcess,
   SpawnSpec,
   CtxIncreaseResult,
+  GpuClaimHook,
+  GpuOccupancy,
   LocalRuntime,
   RecreateResult,
 } from '../shared/index.js'
@@ -65,7 +68,7 @@ import type { LlamacppConfigInput } from './args.js'
 import { parseDeviceOutput } from './devices.js'
 import { classifyProcessOutput } from './errors.js'
 import type { ExitInfo } from './errors.js'
-import { autoUnloadTargets, nextRetry, planLlamaLoad } from './load-plan.js'
+import { autoUnloadTargets, llamaGpuFootprint, nextRetry, planLlamaLoad } from './load-plan.js'
 import type { LlamacppEngineSettings, LoadPlan, LoadPlanDeps } from './load-plan.js'
 import { classifyBackendMismatch, formatLoadError, isConcreteVersionBackend } from './policy.js'
 import { checkSpecTypeSupport, DFLASH_SPEC_TYPE } from './probe.js'
@@ -135,6 +138,11 @@ export interface LlamacppRuntimeOptions {
   /** Model that must never be auto-unloaded. */
   transcriptionModelId?: string
   /**
+   * Core's GPU residency (spec `gpu-residency`): asked once a load knows its backend, before anything
+   * is spawned, to free the cards it will take from every other engine. Absent, nothing is asked.
+   */
+  claimGpu?: GpuClaimHook | undefined
+  /**
    * Read a model's GGUF metadata. A seam because the model's trained context comes from here, and
    * it is what decides when the context ladder has nowhere left to climb — untestable otherwise
    * without hand-building a GGUF file.
@@ -159,6 +167,13 @@ export const DEVICE_PROBE_TIMEOUT_MS = 10_000
 export class LlamacppRuntime implements LocalRuntime {
   private readonly sessions = new Map<string, Session>()
   private readonly loading = new Map<string, Promise<SessionInfo>>()
+  /** Loads past their GPU claim and not yet a session: they hold their cards as `loading`. */
+  private readonly claimed = new Map<string, GpuOccupancy>()
+  /**
+   * Sessions being stopped: out of the session table, but their process has not exited yet, so they
+   * still hold their cards (`stopping`) and a second unload waits for the same exit.
+   */
+  private readonly stopping = new Map<string, { session: Session; done: Promise<UnloadResult> }>()
   private loadTail: Promise<void> = Promise.resolve()
   private readonly shutdownController = new AbortController()
   private closing = false
@@ -186,6 +201,24 @@ export class LlamacppRuntime implements LocalRuntime {
 
   getLoadedModels(): string[] {
     return [...this.sessions.keys()]
+  }
+
+  /** The GPUs every session holds, and every load past its claim, for core's residency rule. */
+  gpuOccupancy(): GpuOccupancy[] {
+    const ready = [...this.sessions.values()].map((session): GpuOccupancy => {
+      return { model_id: session.plan.modelId, ...this.footprint(session.plan), state: 'ready' }
+    })
+    const stopping = [...this.stopping.values()].map(({ session }): GpuOccupancy => ({
+      model_id: session.plan.modelId,
+      ...this.footprint(session.plan),
+      state: 'stopping',
+    }))
+    const loading = [...this.claimed.values()].filter((claim) => !this.sessions.has(claim.model_id))
+    return [...ready, ...stopping, ...loading]
+  }
+
+  private footprint(plan: LoadPlan): Pick<GpuOccupancy, 'cards' | 'auxiliary'> {
+    return llamaGpuFootprint(plan, this.options.transcriptionModelId)
   }
 
   getRuntimeDeviceInfo(modelId: string): RuntimeDeviceInfo | undefined {
@@ -286,6 +319,31 @@ export class LlamacppRuntime implements LocalRuntime {
     )
     if (opts.port !== undefined) plan = { ...plan, port: opts.port }
 
+    // GPU residency: the backend is known now, and nothing is started yet. Every other engine on the
+    // cards this build takes is stopped, with its exit confirmed, before the spawn below.
+    // It holds its cards as `loading` from the moment core grants the claim, inside core's turn.
+    const footprint = this.footprint(plan)
+    const occupancy: GpuOccupancy = { model_id: modelId, ...footprint, state: 'loading' }
+    const hold = () => {
+      this.claimed.set(modelId, occupancy)
+    }
+    try {
+      if (this.options.claimGpu) {
+        await this.options.claimGpu({ model_id: modelId, ...footprint }, opts.signal, hold)
+        hold()
+        this.assertRunning()
+        throwIfLoadCancelled(opts.signal)
+      } else hold()
+      return await this.spawnWithRetries(plan, opts)
+    } finally {
+      if (this.claimed.get(modelId) === occupancy) this.claimed.delete(modelId)
+    }
+  }
+
+  /** The spawn, and the two post-failure retries of `performLoad` (drop mmproj, drop MTP), once each. */
+  private async spawnWithRetries(initial: LoadPlan, opts: LoadOptions): Promise<SessionInfo> {
+    let plan = initial
+    const { modelId } = plan
     for (let attempt = 0; attempt < 3; attempt++) {
       this.assertRunning()
       throwIfLoadCancelled(opts.signal)
@@ -491,7 +549,7 @@ export class LlamacppRuntime implements LocalRuntime {
       this.watchExit(session)
     } catch (error) {
       await proc.terminate(isLoadCancelled(opts.signal) ? 0 : undefined).catch(() => {})
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       throw error
     }
@@ -506,8 +564,8 @@ export class LlamacppRuntime implements LocalRuntime {
     if (!journal) return
     const record: ChildProcessRecord = {
       instance_id: this.options.instanceId,
-      pid: session.info.pid,
-      process_start_id: (await processStartId(session.info.pid)) ?? null,
+      pid: hostPid(session.info),
+      process_start_id: (await processStartId(hostPid(session.info))) ?? null,
       exe: session.plan.exePath,
       provider: session.plan.provider,
       model_id: session.plan.modelId,
@@ -523,13 +581,13 @@ export class LlamacppRuntime implements LocalRuntime {
       const current = this.sessions.get(session.plan.modelId)
       if (current !== session) return // already replaced or unloaded
       this.sessions.delete(session.plan.modelId)
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       const { stderr, stdout } = session.process.output()
       const error = classifyProcessOutput(exit, stderr, stdout, this.platform, session.plan.provider)
       this.emit('session:died', {
         provider: session.plan.provider,
-        pid: session.info.pid,
+        pid: hostPid(session.info),
         model_id: session.plan.modelId,
         exit_code: exit.code,
         signal: exit.signal === null ? null : String(exit.signal),
@@ -655,24 +713,41 @@ export class LlamacppRuntime implements LocalRuntime {
     return { ok: true, session: info }
   }
 
-  private async unloadSession(modelId: string): Promise<UnloadResult> {
+  private unloadSession(modelId: string): Promise<UnloadResult> {
+    // A stop already in flight is joined: its answer comes only once the process has exited.
+    const inFlight = this.stopping.get(modelId)
+    if (inFlight) return inFlight.done
     const session = this.sessions.get(modelId)
-    if (!session) return { success: true }
+    if (!session) return Promise.resolve({ success: true })
     this.sessions.delete(modelId)
+    const done = this.terminateSession(modelId, session)
+    const entry = { session, done }
+    this.stopping.set(modelId, entry)
+    // `.catch`: `done` goes back to the caller, who handles its rejection; this derived promise would
+    // otherwise be a second, unhandled one (final review M-8).
+    void done
+      .finally(() => {
+        if (this.stopping.get(modelId) === entry) this.stopping.delete(modelId)
+      })
+      .catch(() => {})
+    return done
+  }
+
+  private async terminateSession(modelId: string, session: Session): Promise<UnloadResult> {
     try {
       await session.process.terminate()
-      if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
       this.emit('session:unloaded', {
         provider: session.plan.provider,
         model_id: modelId,
-        pid: session.info.pid,
+        pid: hostPid(session.info),
       })
       return { success: true }
     } catch (e) {
       if (session.process.child.exitCode === null && session.process.child.signalCode === null)
         this.sessions.set(modelId, session)
-      else if (session.journalled) await this.options.journal?.remove(session.info.pid).catch(() => {})
+      else if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       return { success: false, error: (e as Error).message }
     }
   }

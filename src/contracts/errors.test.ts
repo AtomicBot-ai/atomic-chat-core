@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AtomicCoreError, DIFFUSION_ERROR_CODES, DISK_ERROR_TAGS } from './errors.js'
+import { AtomicCoreError, DIFFUSION_ERROR_CODES, DISK_ERROR_TAGS, MANAGED_ERROR_CODES } from './errors.js'
 
 describe('AtomicCoreError', () => {
   it('serialises to the {code, message, details?} wire shape and omits details when absent', () => {
@@ -59,5 +59,31 @@ describe('AtomicCoreError', () => {
       'NOT_CONFIGURED',
       'INTERNAL',
     ])
+  })
+
+  it('keeps the managed text-runtime codes (environment.ts), including the ones shared with other surfaces', () => {
+    expect([...MANAGED_ERROR_CODES]).toEqual([
+      'MANAGED_OPERATION_CONFLICT',
+      'MANAGED_OPERATION_NOT_FOUND',
+      'MANAGED_REVISION_CONFLICT',
+      'MANAGED_CONSENT_REQUIRED',
+      'MANAGED_PLAN_CHANGED',
+      'MANAGED_HOST_STEP_INVALID',
+      'MANAGED_PREREQUISITE_BLOCKED',
+      'MANAGED_ADAPTER_UNAVAILABLE',
+      'MANAGED_IDENTITY_MISMATCH',
+      'MANAGED_STOP_UNCONFIRMED',
+      'MANAGED_RESOURCE_IN_USE',
+      'MANAGED_METADATA_INVALID',
+      'MANAGED_RECEIPT_CONFLICT',
+      'MANAGED_ELEVATION_DECLINED',
+      'MANAGED_RELOGIN_REQUIRED',
+      'MANAGED_REBOOT_REQUIRED',
+      'MODEL_INCOMPATIBLE',
+      'GPU_BUSY',
+      'SESSION_GENERATION_STALE',
+    ])
+    // MODEL_INCOMPATIBLE is reused from the image-generation codes above, not redeclared there.
+    expect(new Set(DIFFUSION_ERROR_CODES).has('MODEL_INCOMPATIBLE')).toBe(true)
   })
 })

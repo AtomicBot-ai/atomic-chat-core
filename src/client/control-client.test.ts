@@ -11,7 +11,14 @@ import type {
   BackendUpdateCheckRequest,
 } from '../contracts/index.js'
 import { fakeCatalog } from '../../test/helpers/control-harness.js'
-import type { LocalApiServerState, RemoteAccessStatus, SessionInfo } from '../contracts/index.js'
+import type {
+  EnvironmentOperation,
+  EnvironmentSnapshot,
+  LocalApiServerState,
+  RemoteAccessStatus,
+  RequirementPlan,
+  SessionInfo,
+} from '../contracts/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { ClientRegistry } from '../server/clients.js'
 import { ControlServer } from '../server/control/index.js'
@@ -35,6 +42,27 @@ let loadFailure: Error | undefined
 let inspecting = false
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
+const environmentCalls: string[] = []
+
+const OPERATION: EnvironmentOperation = {
+  schema_version: 1,
+  operation_id: 'op-1',
+  request_id: 'req-1',
+  environment_id: 'default',
+  target: { kind: 'runtime', installation_id: 'tensorrt-llm', engine_id: 'tensorrt-llm' },
+  kind: 'setup',
+  instance_id: 'client-test-instance',
+  revision: 3,
+  phase: 'awaiting-consent',
+  plan_digest: `sha256:${'a'.repeat(64)}`,
+  approved_plan_digest: null,
+  carried_plan_digest: null,
+  progress: null,
+  pending_host_step: null,
+  completed_step_ids: [],
+  cancellation_requested: false,
+  error: null,
+}
 
 beforeEach(async () => {
   emitter = new CoreEmitter({ instanceId: 'client-test-instance' })
@@ -95,6 +123,51 @@ beforeEach(async () => {
       logout: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
       models: async () => [],
     },
+    tensorrtLlmModelLocation: async () => ({ root: '/data/tensorrt-llm/models', free_bytes: 123 }),
+    environments: {
+      list: async () => {
+        environmentCalls.push('list')
+        return [{ environment_id: 'default' } as EnvironmentSnapshot]
+      },
+      probe: async (input) => {
+        environmentCalls.push(`probe:${input.descriptor_id}`)
+        return { plan_digest: OPERATION.plan_digest } as RequirementPlan
+      },
+      descriptor: async (descriptorId) => {
+        environmentCalls.push(`descriptor:${descriptorId}`)
+        return {
+          descriptor_id: descriptorId,
+          engine_id: 'tensorrt-llm',
+          notices: ['NVIDIA terms'],
+          curated_models: [],
+          supported_architectures: ['LlamaForCausalLM'],
+        }
+      },
+      begin: async (environmentId, input) => {
+        environmentCalls.push(`begin:${environmentId}:${input.request_id}`)
+        return OPERATION
+      },
+      get: async (operationId) => {
+        environmentCalls.push(`get:${operationId}`)
+        return OPERATION
+      },
+      cancel: async (operationId) => {
+        environmentCalls.push(`cancel:${operationId}`)
+        return { ...OPERATION, phase: 'cancelled' }
+      },
+      resume: async (operationId, input) => {
+        environmentCalls.push(
+          `resume:${operationId}:${input.expected_revision}:${input.approved_plan_digest}`
+        )
+        return { ...OPERATION, phase: 'checking' }
+      },
+      acceptHostReceipt: async (operationId, receipt) => {
+        environmentCalls.push(`receipt:${operationId}:${receipt.outcome}`)
+        return { ...OPERATION, phase: 'preparing-environment' }
+      },
+    },
+    environmentsSnapshot: () => [{ environment_id: 'default' } as EnvironmentSnapshot],
+    environmentOperations: () => [OPERATION],
     backends: {
       list: async () => [],
       install: async (_p: string, version: string, backend: string) => ({
@@ -233,7 +306,7 @@ afterEach(() => server.close())
 
 describe('handshake and registration', () => {
   it('reads health, snapshot and registers with a heartbeat interval', async () => {
-    expect(await client.health()).toMatchObject({ ok: true, version: CORE_VERSION, protocol: 1 })
+    expect(await client.health()).toMatchObject({ ok: true, version: CORE_VERSION, protocol: 2 })
     const snapshot = await client.handshake()
     expect(snapshot.instance_id).toBe('client-test-instance')
     expect(snapshot.cursor).toBe('client-test-instance:0')
@@ -646,5 +719,60 @@ describe('request', () => {
     expect(health.ok).toBe(true)
     expect(health.instance_id).toBe('client-test-instance')
     await expect(client.request('GET', '/no-such-route')).rejects.toBeInstanceOf(AtomicCoreError)
+  })
+})
+
+describe('managed environments (task 2.6)', () => {
+  it('drives probe, begin, get, resume, the host-step receipt and cancel, and reads the snapshot fields', async () => {
+    environmentCalls.length = 0
+    const target = OPERATION.target
+    expect((await client.environments())[0]?.environment_id).toBe('default')
+    expect(
+      (await client.probeEnvironment({ descriptor_id: 'tensorrt-llm-1.2.1-r1', target })).plan_digest
+    ).toBe(OPERATION.plan_digest)
+    const begun = await client.beginEnvironmentOperation('default', {
+      request_id: 'req-1',
+      target,
+      kind: 'setup',
+      descriptor_id: 'tensorrt-llm-1.2.1-r1',
+    })
+    expect(begun.operation_id).toBe('op-1')
+    expect((await client.environmentOperation('op-1')).revision).toBe(3)
+    const resumed = await client.resumeEnvironmentOperation('op-1', {
+      expected_revision: 3,
+      approved_plan_digest: OPERATION.plan_digest as `sha256:${string}`,
+    })
+    expect(resumed.phase).toBe('checking')
+    const receipted = await client.reportHostStep('op-1', {
+      step_id: 'step-1',
+      nonce: 'nonce-1',
+      expected_operation_revision: 4,
+      recipe_digest: OPERATION.plan_digest as `sha256:${string}`,
+      parameters_digest: OPERATION.plan_digest as `sha256:${string}`,
+      outcome: 'completed',
+      receipt_id: 'receipt-1',
+    })
+    expect(receipted.phase).toBe('preparing-environment')
+    expect((await client.cancelEnvironmentOperation('op-1')).phase).toBe('cancelled')
+    expect(await client.tensorrtLlmModelLocation()).toEqual({
+      root: '/data/tensorrt-llm/models',
+      free_bytes: 123,
+    })
+    const descriptor = await client.environmentDescriptor('tensorrt-llm-1.2.1-r1')
+    expect(descriptor).toMatchObject({ descriptor_id: 'tensorrt-llm-1.2.1-r1', notices: ['NVIDIA terms'] })
+    expect(environmentCalls).toEqual([
+      'list',
+      'probe:tensorrt-llm-1.2.1-r1',
+      'begin:default:req-1',
+      'get:op-1',
+      `resume:op-1:3:${OPERATION.plan_digest}`,
+      'receipt:op-1:completed',
+      'cancel:op-1',
+      'descriptor:tensorrt-llm-1.2.1-r1',
+    ])
+
+    const snapshot = await client.snapshot()
+    expect(snapshot.environments?.[0]?.environment_id).toBe('default')
+    expect(snapshot.environment_operations?.[0]?.operation_id).toBe('op-1')
   })
 })

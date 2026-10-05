@@ -46,6 +46,7 @@ import {
   structuredErrorJson,
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
+import { policyRefusal } from './policy.js'
 import type { Exchange } from './exchange.js'
 import type { LocalTarget } from './types.js'
 import {
@@ -178,12 +179,30 @@ export async function serveForward(ex: Exchange): Promise<void> {
     }
     backend = { kind: 'local', session }
     trace.backend = session.provider
+    const refused = session.policy && policyRefusal(session.policy, ex.path, modelId, json)
+    if (refused) {
+      trace.errorKind = 'bad_request'
+      answer(ex, refused.status, refused.body, [['Content-Type', 'application/json']])
+      return
+    }
     key = session.apiKey
     url = `http://127.0.0.1:${session.port}/v1${ex.path}`
   }
   if (url === undefined) {
     trace.errorKind = 'proxy_internal'
     answer(ex, 500, 'Internal routing error')
+    return
+  }
+
+  // A session that declares its routes and has no `/v1/messages` of its own goes straight to the
+  // chat-completions translation: asking it first would only be refused (findings-2.14-r1.md item 4).
+  if (
+    isMessages &&
+    backend.kind === 'local' &&
+    backend.session.policy &&
+    !backend.session.policy.routes.some((r) => r.method === 'POST' && r.path === '/v1/messages')
+  ) {
+    await messagesFallback(ex, backend, url, key, json)
     return
   }
 
@@ -369,6 +388,35 @@ async function upstreamError(
 
   if (backend.kind === 'local') {
     const provider = backend.session.provider
+    const policy = backend.session.policy
+    if (policy) {
+      // A session that declares its routes is never grown or recreated: its context was fixed when
+      // it started. An error it knows (a context overflow) gets its own OpenAI body; any other is
+      // wrapped like every local engine's.
+      recordFailure()
+      captureReport(
+        ex.deps.errors,
+        inferenceFailureReport({
+          provider,
+          modelId,
+          status,
+          body: errorBody,
+          compute: false,
+          oom: trace.oomDetected,
+        })
+      )
+      const mapped = policy.mapError(status, errorBody)
+      if (mapped !== null) {
+        answer(ex, status, serdeToString(mapped as JsonValue), [['Content-Type', 'application/json']])
+        return
+      }
+      // Always a JSON error body here, so say so (final review M-4): the session gateway may already
+      // have mapped the engine's error, which then reaches this branch unmapped.
+      answer(ex, status, structureBackendErrorBody(errorBody, trace.oomDetected, trace.ctxOverflowDetected), [
+        ['Content-Type', 'application/json'],
+      ])
+      return
+    }
     if (isContextLimitError(status, errorBody) && (await growAndRetry(ex, provider, modelId, raw, 'error')))
       return
 
@@ -435,6 +483,8 @@ async function inspectFinish(
   }
   if (
     parsed !== undefined &&
+    // A session with a fixed context (a route policy) returns its cut-off answer as it is.
+    session.policy === undefined &&
     isContextOverflowFinishLength(parsed, raw) &&
     (await growAndRetry(ex, session.provider, modelId, raw, 'finish_length'))
   ) {
@@ -454,9 +504,10 @@ async function messagesFallback(
   url: string,
   key: string | undefined,
   json: JsonValue,
-  response: UpstreamResponse
+  /** The engine's own answer to `/messages`; absent when the session is known not to serve it. */
+  response?: UpstreamResponse
 ): Promise<void> {
-  const errorBody = await readUpstreamText(response)
+  const errorBody = response === undefined ? undefined : await readUpstreamText(response)
   const trace = ex.trace
   trace.anthropicFallback = true
   const errorKind = backend.kind === 'local' ? 'local_model_error' : 'remote_provider_error'
@@ -489,6 +540,27 @@ async function messagesFallback(
         trace.upstreamStatus = fallback.status
         trace.oomDetected = bodyIndicatesOom(fallbackError)
         trace.ctxOverflowDetected = isContextLimitError(fallback.status, fallbackError)
+        // A declared session's own error wording (its context overflow) reads the same here as on
+        // the chat route itself.
+        const policy = backend.kind === 'local' ? backend.session.policy : undefined
+        const mapped = policy?.mapError(fallback.status, fallbackError)
+        if (mapped) {
+          answer(ex, fallback.status, serdeToString(mapped as JsonValue), [
+            ['Content-Type', 'application/json'],
+          ])
+          return
+        }
+        if (policy !== undefined) {
+          // The session gateway may already have mapped it (final review M-4): an OpenAI error body,
+          // wrapped like the chat route's own and answered as the JSON it is.
+          answer(
+            ex,
+            fallback.status,
+            structureBackendErrorBody(fallbackError, trace.oomDetected, trace.ctxOverflowDetected),
+            [['Content-Type', 'application/json']]
+          )
+          return
+        }
         answer(ex, fallback.status, fallbackError)
         return
       }
@@ -498,9 +570,28 @@ async function messagesFallback(
         fallback.body.destroy()
       )
       return
-    } catch {
+    } catch (e) {
       if (signal.aborted) return
+      if (response === undefined) {
+        answerUnreachable(ex, backend, e as Error)
+        return
+      }
     }
+  }
+  if (response === undefined || errorBody === undefined) {
+    // Nothing was asked of the engine, and the request cannot be put as chat completions either.
+    trace.errorKind = 'bad_request'
+    answer(
+      ex,
+      400,
+      structuredErrorJson(
+        'This request cannot be sent to the model as chat completions.',
+        'invalid_request_error',
+        'invalid_request_error'
+      ),
+      [['Content-Type', 'application/json']]
+    )
+    return
   }
   trace.errorKind = errorKind
   trace.upstreamStatus = response.status

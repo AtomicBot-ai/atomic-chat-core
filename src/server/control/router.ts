@@ -13,6 +13,7 @@ import { registerDecisionRoutes } from './routes/decision.js'
 import { registerDiffusionRoutes } from './routes/diffusion.js'
 import { registerDiffusionVideoRoutes } from './routes/diffusion-video.js'
 import { registerDiskRoutes } from './routes/disk.js'
+import { registerEnvironmentRoutes } from './routes/environments.js'
 import { registerExternalSessionRoutes } from './routes/external-sessions.js'
 import { registerHardwareRoutes } from './routes/hardware.js'
 import { registerLifecycleRoutes, registerShutdownRoute } from './routes/lifecycle.js'
@@ -43,6 +44,8 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
     clients: deps.clients.list(),
     downloads: [],
     optimal_backends: deps.backends.optimalSnapshot(),
+    environments: deps.environmentsSnapshot?.() ?? [],
+    environment_operations: deps.environmentOperations?.() ?? [],
   })
   const ctx: ControlRouteContext = { p, now, startedAt, snapshot, self }
 
@@ -54,6 +57,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerBackendRoutes(router, deps, ctx)
   registerHardwareRoutes(router, deps, ctx)
   registerDiskRoutes(router, deps, ctx)
+  registerEnvironmentRoutes(router, deps, ctx)
   registerSettingsRoutes(router, deps, ctx)
   registerExternalSessionRoutes(router, deps, ctx)
   registerCloudRoutes(router, deps, ctx)

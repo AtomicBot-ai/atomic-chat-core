@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -14,10 +14,17 @@ import type { CoreEvents } from '../../contracts/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { ProcessJournal } from '../../lock/index.js'
 import { ModelRegistry } from '../../models/index.js'
-import { spawnManaged } from '../shared/index.js'
-import type { ManagedProcess } from '../shared/index.js'
+import { hostPid, spawnManaged } from '../shared/index.js'
+import type { GpuClaim, ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
+
+/**
+ * The tests here build a llama.cpp runtime, several of them with real (fake-engine) child processes. Under the
+ * full suite's parallel load some crossed vitest's 5 s default and failed at random (final review
+ * T-282), so the whole file gets an explicit, longer per-test timeout.
+ */
+vi.setConfig({ testTimeout: 20_000 })
 
 let data: TmpDataFolder
 let journal: ProcessJournal
@@ -464,7 +471,7 @@ describe('failure paths', () => {
     await data.writeModel('dies')
     const runtime = await makeRuntime()
     const info = await runtime.load('dies')
-    process.kill(info.pid, 'SIGKILL')
+    process.kill(hostPid(info), 'SIGKILL')
     await waitFor(() => events.some((e) => e.name === 'session:died'))
     expect(runtime.list()).toEqual([])
     expect(runtime.findSession('dies')).toBeUndefined()
@@ -529,8 +536,8 @@ describe('unload', () => {
     expect(await runtime.unload('demo')).toEqual({ success: true })
     expect(runtime.list()).toEqual([])
     expect(journal.list()).toEqual([])
-    await waitFor(() => !isAlive(info.pid))
-    expect(isAlive(info.pid)).toBe(false)
+    await waitFor(() => !isAlive(hostPid(info)))
+    expect(isAlive(hostPid(info))).toBe(false)
     expect(payloads('session:unloaded')).toMatchObject([{ model_id: 'demo', pid: info.pid }])
     expect(await runtime.unload('demo')).toEqual({ success: true })
   })
@@ -542,7 +549,7 @@ describe('unload', () => {
     const [first, second] = [await runtime.load('a'), await runtime.load('b')]
     await runtime.unloadAll()
     expect(runtime.list()).toEqual([])
-    await waitFor(() => !isAlive(first.pid) && !isAlive(second.pid))
+    await waitFor(() => !isAlive(hostPid(first)) && !isAlive(hostPid(second)))
   })
 
   it('auto-unloads another text model before starting the next one', async () => {
@@ -557,8 +564,8 @@ describe('unload', () => {
     const first = await runtime.load('first')
     const second = await runtime.load('second')
     expect(runtime.getLoadedModels()).toEqual(['second'])
-    await waitFor(() => !isAlive(first.pid))
-    expect(isAlive(second.pid)).toBe(true)
+    await waitFor(() => !isAlive(hostPid(first)))
+    expect(isAlive(hostPid(second))).toBe(true)
   })
 
   it('honours a per-load auto_unload override', async () => {
@@ -573,6 +580,168 @@ describe('unload', () => {
     await runtime.load('first')
     await runtime.load('second', { overrides: { auto_unload: false } })
     expect(runtime.getLoadedModels()).toEqual(['first', 'second'])
+  })
+
+  it('asks core for every GPU before spawning, with the load signal, and reports the session it started', async () => {
+    await data.writeModel('chat')
+    const order: string[] = []
+    const claims: Array<{ claim: GpuClaim; signal: AbortSignal | undefined }> = []
+    const baseSpawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      claimGpu: async (claim, signal) => {
+        order.push('claim')
+        claims.push({ claim, signal })
+        // Not an occupant yet while its claim is pending: nothing has been started.
+        expect(runtime.gpuOccupancy()).toEqual([])
+      },
+      spawn: async (spec, opts) => {
+        order.push('spawn')
+        expect(runtime.gpuOccupancy()).toEqual([
+          { model_id: 'chat', cards: 'all', auxiliary: false, state: 'loading' },
+        ])
+        return baseSpawn(spec, opts)
+      },
+    })
+    const controller = new AbortController()
+    await runtime.load('chat', { signal: controller.signal })
+    expect(order).toEqual(['claim', 'spawn'])
+    expect(claims).toEqual([
+      { claim: { model_id: 'chat', cards: 'all', auxiliary: false }, signal: controller.signal },
+    ])
+    expect(runtime.gpuOccupancy()).toEqual([
+      { model_id: 'chat', cards: 'all', auxiliary: false, state: 'ready' },
+    ])
+  })
+
+  it('keeps a session it is stopping on the GPU as stopping until its process has exited, and a second unload waits for that exit', async () => {
+    await data.writeModel('chat')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const baseSpawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        const started = await baseSpawn(spec, opts)
+        const terminate = started.process.terminate
+        started.process.terminate = async (graceMs) => {
+          await gate
+          return terminate(graceMs)
+        }
+        return started
+      },
+    })
+    const info = await runtime.load('chat')
+    const first = runtime.unload('chat')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(runtime.gpuOccupancy()).toEqual([
+      { model_id: 'chat', cards: 'all', auxiliary: false, state: 'stopping' },
+    ])
+    let joined = false
+    const second = runtime.unload('chat').then((result) => {
+      joined = true
+      return result
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(joined).toBe(false)
+    expect(isAlive(hostPid(info))).toBe(true)
+
+    release()
+    expect(await first).toEqual({ success: true })
+    expect(await second).toEqual({ success: true })
+    expect(isAlive(hostPid(info))).toBe(false)
+    expect(runtime.gpuOccupancy()).toEqual([])
+  })
+
+  it('a stop whose cleanup itself throws answers the caller, and leaves no unhandled rejection behind (final review M-8)', async () => {
+    await data.writeModel('chat')
+    const baseSpawn = fakeLlamaSpawn()
+    let restore: (() => Promise<void>) | undefined
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        const started = await baseSpawn(spec, opts)
+        const { terminate } = started.process
+        const child = started.process.child
+        restore = async () => {
+          Object.defineProperty(started.process, 'child', { value: child, configurable: true })
+          await terminate(0)
+        }
+        started.process.terminate = async () => {
+          // The stop fails, and so does reading whether the process is still there.
+          Object.defineProperty(started.process, 'child', {
+            configurable: true,
+            get: () => {
+              throw new Error('child handle gone')
+            },
+          })
+          throw new Error('terminate failed')
+        }
+        return started
+      },
+    })
+    await runtime.load('chat')
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      await expect(runtime.unload('chat')).rejects.toThrow('child handle gone')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      await restore?.()
+    }
+  })
+
+  it('starts nothing when core refuses the GPU, and holds nothing afterwards', async () => {
+    await data.writeModel('chat')
+    let spawned = false
+    const runtime = await makeRuntime({
+      claimGpu: async () => {
+        throw new AtomicCoreError('GPU_BUSY', 'busy', 'holder=tensorrt-llm/x')
+      },
+      spawn: async () => {
+        spawned = true
+        throw new Error('must not spawn')
+      },
+    })
+    const error = (await runtime.load('chat').catch((e: unknown) => e)) as AtomicCoreError
+    expect(error.code).toBe('GPU_BUSY')
+    expect(spawned).toBe(false)
+    expect(runtime.gpuOccupancy()).toEqual([])
+  })
+
+  it('reports a CPU build as holding no GPU, and embeddings and the transcription companion as auxiliary', async () => {
+    await data.writeModel('cpu-chat')
+    await data.writeModel('emb')
+    await data.writeModel('voice')
+    const claims: GpuClaim[] = []
+    const cpuExe = await data.writeBackend('llamacpp-upstream', 'b6325', 'linux-cpu-x64')
+    const runtime = await makeRuntime({
+      claimGpu: async (claim) => void claims.push(claim),
+      transcriptionModelId: 'voice',
+    })
+    await runtime.load('emb', { isEmbedding: true })
+    await runtime.load('voice')
+    const cpu = await makeRuntime({
+      claimGpu: async (claim) => void claims.push(claim),
+      readSettings: async () => ({
+        ...settings(),
+        config: { ...settings().config, version_backend: 'b6325/linux-cpu-x64' },
+      }),
+      ensureBackendReady: async (backend, version) => ({ backend, version, exePath: cpuExe }),
+    })
+    await cpu.load('cpu-chat')
+    expect(claims).toEqual([
+      { model_id: 'emb', cards: 'all', auxiliary: true },
+      { model_id: 'voice', cards: 'all', auxiliary: true },
+      { model_id: 'cpu-chat', cards: [], auxiliary: false },
+    ])
+    expect(runtime.gpuOccupancy()).toEqual([
+      { model_id: 'emb', cards: 'all', auxiliary: true, state: 'ready' },
+      { model_id: 'voice', cards: 'all', auxiliary: true, state: 'ready' },
+    ])
+    expect(cpu.gpuOccupancy()).toEqual([
+      { model_id: 'cpu-chat', cards: [], auxiliary: false, state: 'ready' },
+    ])
   })
 
   it('keeps a live session registered when terminating it fails', async () => {
