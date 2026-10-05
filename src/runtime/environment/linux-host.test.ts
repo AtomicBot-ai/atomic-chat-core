@@ -10,6 +10,7 @@ import {
   realLinuxHost,
   testLinuxHost,
 } from './linux-host.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 let dir: string
 beforeEach(async () => {
@@ -22,6 +23,7 @@ afterEach(async () => {
 const answer = vi.fn<HostExec>(async () => ({ code: 0, stdout: 'ok', stderr: '' }))
 
 describe('realLinuxHost', () => {
+  skipOnWindows("realLinuxHost reads the Linux host's own files")
   it('runs docker by its absolute system path, never whatever PATH finds first', async () => {
     const exec = vi.fn<HostExec>(async () => ({ code: 0, stdout: '', stderr: '' }))
     const host = realLinuxHost({}, exec, async () => '/usr/bin/docker')

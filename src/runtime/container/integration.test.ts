@@ -23,6 +23,7 @@ import {
   stopContainer,
 } from './operations.js'
 import type { DockerExec, ModelContainerCreateSpec } from './types.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 const image = {
   repository: 'nvcr.io/nvidia/tensorrt-llm/release',
@@ -103,6 +104,7 @@ process.exit(1)
 const fakeDocker = { exe: process.execPath, prefixArgs: ['-e', FAKE_DOCKER_SCRIPT, '--'] }
 
 describe('the executor end to end against a fake docker binary', () => {
+  skipOnWindows('the fake docker is a shebang script, which Windows cannot execute')
   it('runs the full model-container lifecycle: create, start, confirmed stop, logs, rm', async () => {
     const rawExec = createDockerExec({
       dockerPath: fakeDocker.exe,

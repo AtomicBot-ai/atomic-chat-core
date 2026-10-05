@@ -25,6 +25,7 @@ import type { ManagedGatewayOptions } from './gateway.js'
 import { ManagedLoadError, ManagedTextLifecycle } from './lifecycle.js'
 import type { ManagedLoadRequest, ManagedTextLifecycleDeps } from './lifecycle.js'
 import type { ManagedDeployment } from './types.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 const GiB = 1024 ** 3
 const DIGEST = `sha256:${'b'.repeat(64)}` as const
@@ -262,6 +263,7 @@ afterEach(async () => {
 })
 
 describe('ManagedTextLifecycle: stages and timeout', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('a long start does not fail before the timeout, and reports initializing-engine with growing elapsed time', async () => {
     await build()
     readyAt = 180_000 // three minutes; alpha's timeout for 30 GiB is 330 s
@@ -385,6 +387,7 @@ describe('ManagedTextLifecycle: stages and timeout', () => {
 })
 
 describe('ManagedTextLifecycle: an adapter refuses a container that got ready (classifyReady)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   const picky: ManagedTextAdapter<Record<string, never>> = {
     ...beta,
     id: 'picky-engine',
@@ -418,6 +421,7 @@ describe('ManagedTextLifecycle: an adapter refuses a container that got ready (c
 })
 
 describe('ManagedTextLifecycle: early exit', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('a container exit fails within seconds with the classification, its numbers and the log tail', async () => {
     await build()
     readyAt = null
@@ -544,6 +548,7 @@ describe('ManagedTextLifecycle: early exit', () => {
 })
 
 describe('ManagedTextLifecycle: container, cache, journal, heartbeat', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('reuses the engine cache directory on the second load, contents kept', async () => {
     await build()
     await lifecycle.load(request_())
@@ -819,6 +824,7 @@ describe('ManagedTextLifecycle: container, cache, journal, heartbeat', () => {
 })
 
 describe('ManagedTextLifecycle: cancel and stop', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('cancel stops and removes the container, publishes no session, and answers MODEL_LOAD_CANCELLED', async () => {
     await build()
     readyAt = null
@@ -923,6 +929,7 @@ describe('ManagedTextLifecycle: cancel and stop', () => {
 })
 
 describe('ManagedTextLifecycle: session gateway', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('rotates the gateway key per generation: the old key gets 401 from the new session', async () => {
     await build()
     const first = await lifecycle.load(request_())
@@ -962,6 +969,7 @@ describe('ManagedTextLifecycle: session gateway', () => {
 })
 
 describe('ManagedTextLifecycle: a stream the engine cuts short', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it("ends with an error event in the adapter's words from the session's log tail, then [DONE]", async () => {
     // A real engine port: the gateway forwards to it, and it ends an event stream without [DONE].
     const engine = createServer((_req, res) => {
@@ -1020,6 +1028,7 @@ describe('ManagedTextLifecycle: a stream the engine cuts short', () => {
 })
 
 describe('ManagedTextLifecycle: crash after ready', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('reports session:died with a null pid, closes the gateway, stops the heartbeat and keeps the log tail', async () => {
     await build()
     const info = await lifecycle.load(request_())
@@ -1043,6 +1052,7 @@ describe('ManagedTextLifecycle: crash after ready', () => {
 })
 
 describe('ManagedTextLifecycle: a crash after ready reads the tail, not the whole log', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it("classifies from the tail: an out-of-memory line far above it does not decide a ready session's crash", async () => {
     await build({
       timings: {
@@ -1095,6 +1105,7 @@ function gateStops(): () => void {
 const unloadedEvents = () => emitted.filter((e) => e.name === 'session:unloaded')
 
 describe('ManagedTextLifecycle: teardown races (review round 1)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('a load while an unload is still stopping waits for it, then starts fresh; the old teardown never touches the new session', async () => {
     await build()
     await lifecycle.load(request_())
@@ -1205,6 +1216,7 @@ describe('ManagedTextLifecycle: teardown races (review round 1)', () => {
 })
 
 describe('ManagedTextLifecycle: review round 1 gaps', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('a second load of a model that is still loading is refused with MANAGED_OPERATION_CONFLICT', async () => {
     await build()
     readyAt = null
@@ -1303,6 +1315,7 @@ describe('ManagedTextLifecycle: review round 1 gaps', () => {
 })
 
 describe('ManagedTextLifecycle: review round 2 gaps (findings-2.13-r2.md item 4)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it("passes the adapter's declared routes/rewritableRoutes to startGateway, and calls rewriteRequestBody bound to the adapter object, not a detached reference", async () => {
     let captured: ManagedGatewayOptions | undefined
     await build(
@@ -1344,6 +1357,7 @@ describe('ManagedTextLifecycle: review round 2 gaps (findings-2.13-r2.md item 4)
 })
 
 describe('ManagedTextLifecycle: carry-forward into task 2.14', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('a load of a ready model with different settings reloads it: old container stopped, a new generation', async () => {
     await build()
     const first = await lifecycle.load(request_({ settings: { ctx: 4096 } }))
@@ -1442,6 +1456,7 @@ describe('ManagedTextLifecycle: carry-forward into task 2.14', () => {
 })
 
 describe('ManagedTextLifecycle: task 2.14 fix round 1 (findings-2.14-r1.md items 1 and 3)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   const toolsCapabilities = { ...capabilities, tools: true }
   const delta: ManagedTextAdapter<{ tag: string; ctx: number }> = {
     id: 'delta-engine',
@@ -1547,6 +1562,9 @@ describe('ManagedTextLifecycle: task 2.14 fix round 1 (findings-2.14-r1.md items
 })
 
 describe('ManagedTextLifecycle on Windows: port, forwarding, the distribution held (change add-tensorrt-llm-windows, task 2.7)', () => {
+  skipOnWindows(
+    "this host's realpath runs over guest-shaped paths (the real WSL deployment resolves them in the guest); the port, forwarding and hold logic runs on the POSIX runners"
+  )
   /** A WSL-shaped deployment: Docker picks the guest port, the guest can be probed, forwarding diagnosed. */
   const wslDeployment = (options: {
     hostPort?: number

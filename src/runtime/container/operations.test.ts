@@ -20,6 +20,7 @@ import {
 import type { DockerCommandResult, DockerExec, ModelContainerCreateSpec, Realpath } from './types.js'
 import type { WslDistributionTransport } from '../wsl/index.js'
 import { guestRealpath } from './wsl-exec.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 const ok = (stdout = '', stderr = ''): DockerCommandResult => ({ code: 0, stdout, stderr })
 const failed = (code: number | null, stderr: string, stdout = ''): DockerCommandResult => ({
@@ -157,6 +158,7 @@ describe('createContainer', () => {
 })
 
 describe('createContainer symlink resolution against a real filesystem (review round 2, item 2, controller ruling)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   const dirs: string[] = []
   afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })

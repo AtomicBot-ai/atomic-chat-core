@@ -1,8 +1,9 @@
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { RuntimeDescriptor } from '../../contracts/index.js'
 import { managedSharedPaths } from '../../config/index.js'
-import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
+import { FakeManagedFs, posixPath } from '../../../test/helpers/managed-store-fs.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import {
   createRuntimeDescriptorProvider,
@@ -157,14 +158,16 @@ describe('forNewSetup', () => {
 
   it('file:// override reads from disk instead of fetching, and is cached the same way', async () => {
     const fs = new FakeManagedFs()
+    // The host's own spelling of the file URL (a drive on Windows), and the path it names.
+    const url = pathToFileURL('/dev/tensorrt-llm.json')
     const readFile = vi.fn(async (path: string) => {
-      expect(path).toBe('/dev/tensorrt-llm.json')
+      expect(path).toBe(fileURLToPath(url))
       return RAW_A
     })
     const result = await provider({
       fetch: unreachableFetch,
       readFile,
-      env: { [RUNTIME_DESCRIPTOR_URL_ENV]: 'file:///dev/tensorrt-llm.json' },
+      env: { [RUNTIME_DESCRIPTOR_URL_ENV]: url.href },
       fs,
     }).forNewSetup()
 
@@ -191,7 +194,7 @@ describe('forNewSetup', () => {
     await provider({ fetch: okFetch(RAW_A), fs }).forNewSetup()
 
     const finalPath = PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')
-    const rename = fs.renames.find(([, to]) => to === finalPath)
+    const rename = fs.renames.find(([, to]) => to === posixPath(finalPath))
     expect(rename).toBeDefined()
     // Not a fixed `<path>.tmp`: this cache has no lock, so a shared name would let a second,
     // concurrent writer (the other scope's core) clobber it. `<path>.<uuid>.tmp` per call instead.
@@ -199,7 +202,7 @@ describe('forNewSetup', () => {
     // The temp file never lingers: the rename consumed it (FakeManagedFs.rename deletes the source).
     expect(fs.files.has(rename?.[0] ?? '')).toBe(false)
 
-    const latestRename = fs.renames.find(([, to]) => to === PATHS.descriptorLatestFile)
+    const latestRename = fs.renames.find(([, to]) => to === posixPath(PATHS.descriptorLatestFile))
     expect(latestRename?.[0]).toMatch(/^\/shared\/descriptors\/latest\.json\.[0-9a-f-]{36}\.tmp$/)
   })
 

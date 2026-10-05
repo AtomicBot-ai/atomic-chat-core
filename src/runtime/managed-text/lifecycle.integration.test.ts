@@ -18,6 +18,7 @@ import type { ManagedTextAdapter } from './adapter.js'
 import { createDesktopManagedDeployment } from './deployment.js'
 import { ManagedTextLifecycle } from './lifecycle.js'
 import type { ManagedLoadRequest } from './lifecycle.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 const FAKE_DOCKER = String.raw`
 import fs from 'node:fs'
@@ -176,6 +177,7 @@ function get(port: number, apiKey: string): Promise<{ status: number; body: stri
 }
 
 describe('ManagedTextLifecycle against a fake docker binary', () => {
+  skipOnWindows('the fake docker is a shebang script, which Windows cannot execute')
   it('loads, serves through the gateway without leaking its key upstream, and unloads with a confirmed stop', async () => {
     const info = await lifecycle.load(load())
     expect(journal.list()).toHaveLength(1)

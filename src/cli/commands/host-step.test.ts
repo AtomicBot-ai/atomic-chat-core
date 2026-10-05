@@ -10,6 +10,7 @@ import type { HostStepExecutorDeps, HostStepResult } from '../../host/recipes/in
 import { recordingIo } from '../io.js'
 import { runCli } from '../main.js'
 import { hostStepCommand, hostStepDepsFor } from './host-step.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 const parameters = {
   user: 'alice',
@@ -103,6 +104,7 @@ describe('when no result file can be written', () => {
 })
 
 describe('the core binary routes host-step to the real executor', () => {
+  skipOnWindows('the Linux root executor: uid, group/world modes, FIFOs and symlinks')
   let dir: string
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'atomic-host-step-cli-'))

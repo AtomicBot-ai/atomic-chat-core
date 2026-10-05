@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { hostExec } from './host-exec.js'
 import type { HostExecOptions } from './host-exec.js'
+import { skipTestOnWindows } from '../../../test/helpers/platform.js'
 
 /** A real child process: the point of this module is what spawning actually does. */
 const node = process.execPath
@@ -37,7 +38,8 @@ describe('running a probe command', () => {
     expect(answer.stderr).toMatch(/timed out/)
   })
 
-  it('with a grace period, asks a hung command to stop and waits for it before answering', async () => {
+  it('with a grace period, asks a hung command to stop and waits for it before answering', async (ctx) => {
+    skipTestOnWindows(ctx, 'a polite stop is a POSIX signal; Windows only terminates')
     // A package manager killed outright can leave dpkg half-configured; SIGTERM lets it stop cleanly.
     const script =
       'process.on("SIGTERM", () => { process.stderr.write("stopping cleanly"); process.exit(0) }); setInterval(() => {}, 1000)'

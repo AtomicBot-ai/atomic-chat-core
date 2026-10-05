@@ -15,6 +15,7 @@ import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
 import { ExecutionJournal } from '../runtime/container/index.js'
 import { isProcessAlive } from '../runtime/index.js'
+import { skipTestOnWindows } from '../../test/helpers/platform.js'
 
 /**
  * The tests here build a whole core, several of them with real (fake-engine) child processes. Under the
@@ -46,7 +47,8 @@ describe('managed runtime containers at startup', () => {
     created_at: '2026-09-28T00:00:00.000Z',
   }
 
-  it("reconciles a previous core's journalled containers on Linux before the endpoint is published", async () => {
+  it("reconciles a previous core's journalled containers on Linux before the endpoint is published", async (ctx) => {
+    skipTestOnWindows(ctx, 'the fake docker is a shebang script, which Windows cannot execute')
     await (await ExecutionJournal.open(data.layout)).add(orphan)
     const docker = await fakeDocker()
     const core = await AtomicCore.create({

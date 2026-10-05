@@ -31,6 +31,7 @@ import { TensorrtLlmRuntime } from './runtime.js'
 import type { TensorrtLlmRuntimeDeps } from './runtime.js'
 import type { GpuClaim } from '../shared/index.js'
 import { TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES } from './compatibility.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
 const MiB = 1024 * 1024
@@ -197,6 +198,7 @@ afterEach(async () => {
 })
 
 describe('TensorrtLlmRuntime: which card', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('runs on the saved card when the probe still finds it', async () => {
     build()
     stored.gpu_id = SMALL.gpu_id
@@ -318,6 +320,7 @@ describe('TensorrtLlmRuntime: which card', () => {
 })
 
 describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   const GB10: GpuFacts = {
     gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32',
     name: 'NVIDIA GB10',
@@ -356,6 +359,7 @@ describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
 })
 
 describe('TensorrtLlmRuntime: refused before a container exists', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('answers MANAGED_ADAPTER_UNAVAILABLE when the engine installation is not ready', async () => {
     build()
     installation = () =>
@@ -445,6 +449,7 @@ describe('TensorrtLlmRuntime: pre-launch check (task 2.16, spec "Проверк�
 })
 
 describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (task 2.16w round 1, finding 1, Critical)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   // needed = weights (2,000) + the 10% weight-fraction fallback reserve (200) + the engine's runtime
   // overhead (no MLP shape in config.json, so no activation term).
   const WEIGHT_BYTES = 2_000
@@ -580,6 +585,7 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
 })
 
 describe('TensorrtLlmRuntime: sessions', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('publishes a container session: null pid, a generation, the gateway port and key', async () => {
     build()
     const session = await runtime.load('qwen3')
@@ -821,6 +827,7 @@ describe('TensorrtLlmRuntime: sessions', () => {
 })
 
 describe('TensorrtLlmRuntime: what a session can do', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it("gates tools on the descriptor's parser for the model's family", async () => {
     build()
     await runtime.load('qwen3')
@@ -863,6 +870,7 @@ describe('TensorrtLlmRuntime: what a session can do', () => {
 })
 
 describe('TensorrtLlmRuntime: logs', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it("serves the loaded container's log, then a failed attempt's log until the next load", async () => {
     build()
     expect(await runtime.logs('qwen3')).toEqual({ model_id: 'qwen3', source: null, log_tail: '' })

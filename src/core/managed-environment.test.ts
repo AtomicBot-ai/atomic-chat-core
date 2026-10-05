@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { fakeWindows } from '../../test/helpers/fake-windows-host.js'
 import { directoryGuestMount } from '../runtime/wsl/index.js'
+import { skipTestOnWindows } from '../../test/helpers/platform.js'
 
 let dir: string
 beforeEach(async () => {
@@ -50,7 +51,8 @@ describe('wireManagedEnvironment', () => {
     await managed.shutdown(AbortSignal.timeout(1_000))
   })
 
-  it('drives a test machine folder on any platform, with its docker binary and socket', async () => {
+  it('drives a test machine folder on any platform, with its docker binary and socket', async (ctx) => {
+    skipTestOnWindows(ctx, 'the fake docker is a shebang script, which Windows cannot execute')
     const host = join(dir, 'host')
     await mkdir(join(host, 'bin'), { recursive: true })
     await writeFile(join(host, 'bin', 'docker'), '#!/bin/sh\nexit 1\n')

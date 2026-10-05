@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { invokingUidFrom, nodeHostFs, nodeHostStepDeps } from './executor-io.js'
 import type { HostFs } from './executor-io.js'
 import { INSTALL_CONTAINER_RUNTIME_RECIPE } from './install-container-runtime.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 let dir: string
 beforeEach(async () => {
@@ -124,6 +125,7 @@ async function request(name = 's.request.json', body = '{"a":1}', mode = 0o644):
 }
 
 describe.each(FILE_SYSTEMS)('on %s', (_name, fs) => {
+  skipOnWindows('the Linux root executor: uid, group/world modes, FIFOs and symlinks')
   describe('reading the request as root', () => {
     it('reads a regular file the invoking user owns', async () => {
       expect(await deps(fs()).readRequest(await request())).toBe('{"a":1}')
@@ -338,6 +340,7 @@ describe.each(FILE_SYSTEMS)('on %s', (_name, fs) => {
 })
 
 describe('working through /proc/self/fd when the kernel offers it', () => {
+  skipOnWindows('the Linux root executor: uid, group/world modes, FIFOs and symlinks')
   it('writes into the folder it checked even if the path is swapped for a link afterwards', async () => {
     const original = join(dir, 'steps')
     const moved = join(dir, 'moved')

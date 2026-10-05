@@ -1,3 +1,4 @@
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { managedSharedPaths } from '../../config/index.js'
 import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
@@ -168,17 +169,16 @@ describe('latest', () => {
     const fs = new FakeManagedFs()
     const fetch = vi.fn(unreachableFetch)
     const readFile = vi.fn(async () => RAW_R1)
+    const url = pathToFileURL('/work/atomic-chat-conf/runtimes/environments/linux.json')
     const result = await provider({
       fetch,
       readFile,
       fs,
-      env: {
-        [ENVIRONMENT_MANIFEST_URL_ENV]: 'file:///work/atomic-chat-conf/runtimes/environments/linux.json',
-      },
+      env: { [ENVIRONMENT_MANIFEST_URL_ENV]: url.href },
     }).latest()
 
     expect(result).toEqual({ kind: 'available', manifest: MANIFEST_R1 })
-    expect(readFile).toHaveBeenCalledWith('/work/atomic-chat-conf/runtimes/environments/linux.json')
+    expect(readFile).toHaveBeenCalledWith(fileURLToPath(url))
     expect(fetch).not.toHaveBeenCalled()
     expect(fs.files.has(PATHS.environmentManifestFile('linux-r1'))).toBe(true)
   })

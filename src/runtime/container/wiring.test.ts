@@ -6,6 +6,7 @@ import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { ExecutionJournal } from './execution-journal.js'
 import { createManagedContainersHandle, wireManagedContainers } from './wiring.js'
+import { skipTestOnWindows } from '../../../test/helpers/platform.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -75,7 +76,8 @@ describe('wireManagedContainers', () => {
     ).toBeNull()
   })
 
-  it("reconciles a previous instance's journalled container through the absolute binary and the core-owned DOCKER_CONFIG", async () => {
+  it("reconciles a previous instance's journalled container through the absolute binary and the core-owned DOCKER_CONFIG", async (ctx) => {
+    skipTestOnWindows(ctx, 'the fake docker is a shebang script, which Windows cannot execute')
     const seeded = await ExecutionJournal.open(data.layout)
     await seeded.add(orphan)
     const docker = await fakeDocker()
@@ -98,7 +100,8 @@ describe('wireManagedContainers', () => {
     expect(await readFile(join(data.layout.managed.dockerConfigDir, 'config.json'), 'utf8')).toBe('{}\n')
   })
 
-  it('bounds each startup reconcile call and the whole pass, so a hung daemon cannot hold startup (review 2.12 round 1)', async () => {
+  it('bounds each startup reconcile call and the whole pass, so a hung daemon cannot hold startup (review 2.12 round 1)', async (ctx) => {
+    skipTestOnWindows(ctx, 'the fake docker is a shebang script, which Windows cannot execute')
     const seeded = await ExecutionJournal.open(data.layout)
     await seeded.add(orphan)
     await seeded.add({ ...orphan, container_id: 'orphan0456' })

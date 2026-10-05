@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DOCKER_BINARY_CANDIDATES, resolveDockerBinary } from './docker-binary.js'
+import { skipTestOnWindows } from '../../../test/helpers/platform.js'
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -21,7 +22,8 @@ describe('resolveDockerBinary', () => {
     expect(DOCKER_BINARY_CANDIDATES.every((p) => p.startsWith('/'))).toBe(true)
   })
 
-  it('answers the first candidate that is an executable file', async () => {
+  it('answers the first candidate that is an executable file', async (ctx) => {
+    skipTestOnWindows(ctx, 'Windows has no executable bit: every file passes X_OK')
     const dir = await tmp()
     const notExecutable = join(dir, 'a')
     const aDirectory = join(dir, 'b')

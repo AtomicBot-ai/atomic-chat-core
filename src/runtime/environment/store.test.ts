@@ -3,7 +3,7 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { BeginOperation, ManagedHostReceipt, Sha256Digest } from '../../contracts/index.js'
 import { managedSharedPaths } from '../../config/index.js'
 import { TAKEOVER_MUTEX_TTL_MS } from '../../lock/index.js'
-import { FakeManagedFs } from '../../../test/helpers/managed-store-fs.js'
+import { FakeManagedFs, posixPath } from '../../../test/helpers/managed-store-fs.js'
 import {
   classifyReceipt,
   operationFileName,
@@ -192,7 +192,7 @@ describe('starting an operation once (OP01)', () => {
     await expect(s.createOrGet('env-1', begin({ descriptor_id: 'trtllm-1.4.0' }), DIGEST_B)).rejects.toThrow(
       AtomicCoreError
     )
-    expect(fs.files).toEqual(before)
+    expect(new Map(fs.files)).toEqual(before)
   })
 
   it('refuses a second change to an environment that is still busy', async () => {
@@ -598,7 +598,7 @@ describe('committing against a revision (OP08)', () => {
 
     expect(fs.files.has(`${path}.bak`)).toBe(true)
     // The new state arrives by rename, never by writing over the file that is being read.
-    expect(fs.renames.some(([, to]: [string, string]) => to === path)).toBe(true)
+    expect(fs.renames.some(([, to]: [string, string]) => to === posixPath(path))).toBe(true)
     expect(fs.files.has(`${path}.tmp`)).toBe(false)
   })
 

@@ -32,6 +32,7 @@ import {
   writeWatchdogScript,
 } from './watchdog.js'
 import type { WatchdogScriptFs } from './watchdog.js'
+import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 // ── watchdogEnv ──────────────────────────────────────────────────────────────────────────────────
 
@@ -130,6 +131,7 @@ function fakeFs(initial: Record<string, FakeEntry> = {}): WatchdogScriptFs & {
 }
 
 describe('writeWatchdogScript', () => {
+  skipOnWindows('POSIX modes and symlinks: on Windows the script is written into the WSL guest')
   it('writes the script to a temp file in the same directory, chmods it, then renames it over the target', async () => {
     const fs = fakeFs()
     const path = '/data/atomic-core/managed-runtimes/watchdog/atomic-watchdog-entrypoint.sh'
