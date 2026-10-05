@@ -742,7 +742,9 @@ describe('without a Linux host', () => {
     }
   )
 
-  it('refuses a body it does not understand before anything is recorded', async () => {
+  it('refuses a body it does not understand before anything is recorded', async (ctx) => {
+    // fakeManagedHost is a POSIX host made of shebang scripts, as for the blocks above (POSIX_FAKES_UNAVAILABLE).
+    if (POSIX_FAKES_UNAVAILABLE) ctx.skip()
     host = await fakeManagedHost(readyState())
     const { ready } = await start()
     const res = await post(ready, '/environments/default/operations', {
@@ -753,7 +755,9 @@ describe('without a Linux host', () => {
     expect((await snapshot(ready)).environment_operations).toEqual([])
   })
 
-  it('answers 404 for an operation nobody started', async () => {
+  it('answers 404 for an operation nobody started', async (ctx) => {
+    // fakeManagedHost is a POSIX host made of shebang scripts, as for the blocks above (POSIX_FAKES_UNAVAILABLE).
+    if (POSIX_FAKES_UNAVAILABLE) ctx.skip()
     host = await fakeManagedHost(readyState())
     const { ready } = await start()
     expect((await control(ready, '/environments/operations/op-nobody')).status).toBe(404)

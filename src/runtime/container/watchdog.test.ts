@@ -32,7 +32,7 @@ import {
   writeWatchdogScript,
 } from './watchdog.js'
 import type { WatchdogScriptFs } from './watchdog.js'
-import { skipOnWindows } from '../../../test/helpers/platform.js'
+import { skipTestOnWindows } from '../../../test/helpers/platform.js'
 
 // ── watchdogEnv ──────────────────────────────────────────────────────────────────────────────────
 
@@ -131,8 +131,8 @@ function fakeFs(initial: Record<string, FakeEntry> = {}): WatchdogScriptFs & {
 }
 
 describe('writeWatchdogScript', () => {
-  skipOnWindows('POSIX modes and symlinks: on Windows the script is written into the WSL guest')
-  it('writes the script to a temp file in the same directory, chmods it, then renames it over the target', async () => {
+  it('writes the script to a temp file in the same directory, chmods it, then renames it over the target', async (ctx) => {
+    skipTestOnWindows(ctx, 'asserts POSIX paths and modes')
     const fs = fakeFs()
     const path = '/data/atomic-core/managed-runtimes/watchdog/atomic-watchdog-entrypoint.sh'
 
@@ -243,6 +243,38 @@ describe('writeWatchdogScript', () => {
 
   // Item 1 (findings-2.9-r1): the script is 0555, so a second call that used to write straight at
   // the same path used to fail EACCES; on a real filesystem this is the actual failure mode.
+  it('on Windows, reads a script whose mode reads back as 0444 as current: no second write', async () => {
+    const fs = fakeFs()
+    await writeWatchdogScript('/data/watchdog.sh', fs, 'win32')
+    const written = fs.entries['/data/watchdog.sh']
+    if (written === undefined) throw new Error('expected the script to be written')
+    written.mode = 0o444 // what Windows reports for the read-only 0555 file
+    await writeWatchdogScript('/data/watchdog.sh', fs, 'win32')
+    expect(fs.renameCalls).toHaveLength(1)
+  })
+
+  it('elsewhere, still rewrites a script whose mode is not 0555', async () => {
+    const fs = fakeFs()
+    await writeWatchdogScript('/data/watchdog.sh', fs, 'linux')
+    const written = fs.entries['/data/watchdog.sh']
+    if (written === undefined) throw new Error('expected the script to be written')
+    written.mode = 0o444
+    await writeWatchdogScript('/data/watchdog.sh', fs, 'linux')
+    expect(fs.renameCalls).toHaveLength(2)
+  })
+
+  it('on Windows, makes a stale script writable before renaming over it (NTFS refuses a read-only target)', async () => {
+    const fs = fakeFs()
+    await writeWatchdogScript('/data/watchdog.sh', fs, 'win32')
+    const written = fs.entries['/data/watchdog.sh']
+    if (written === undefined) throw new Error('expected the script to be written')
+    written.content = 'an older script'
+    await writeWatchdogScript('/data/watchdog.sh', fs, 'win32')
+    expect(fs.chmodCalls.at(-1)).toEqual({ path: '/data/watchdog.sh', mode: 0o644 })
+    expect(fs.renameCalls).toHaveLength(2)
+    expect(fs.entries['/data/watchdog.sh']?.mode).toBe(0o555)
+  })
+
   it('can be called twice in a row on the same real path without EACCES', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'atomic-core-watchdog-write-'))
     try {
@@ -260,7 +292,8 @@ describe('writeWatchdogScript', () => {
 
   // Item 6 (findings-2.9-r2), on a real filesystem: a symlink to a file with identical content must
   // be replaced with a real regular file, not left as a symlink.
-  it('replaces a real symlink pointing at identical content', async () => {
+  it('replaces a real symlink pointing at identical content', async (ctx) => {
+    skipTestOnWindows(ctx, 'asserts the 0555 mode, which Windows does not keep')
     const dir = await mkdtemp(join(tmpdir(), 'atomic-core-watchdog-symlink-'))
     try {
       const target = join(dir, 'real.sh')

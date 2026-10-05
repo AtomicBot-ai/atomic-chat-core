@@ -408,9 +408,12 @@ const NODE_FS: WatchdogScriptFs = { mkdir, writeFile, chmod, rename, rm, lstat, 
  * regular file with the right content but the wrong mode (e.g. still `0644` from some other writer),
  * both need to be replaced, not left alone.
  */
-async function isCurrent(fs: WatchdogScriptFs, path: string): Promise<boolean> {
+async function isCurrent(fs: WatchdogScriptFs, path: string, host: NodeJS.Platform): Promise<boolean> {
   const info = await fs.lstat(path).catch(() => undefined)
-  if (info === undefined || !info.isFile() || (info.mode & 0o777) !== WATCHDOG_SCRIPT_MODE) return false
+  if (info === undefined || !info.isFile()) return false
+  // Windows keeps no POSIX mode: a 0555 file reads back as 0444, so the mode can never match there
+  // and only the content says whether the script is current.
+  if (host !== 'win32' && (info.mode & 0o777) !== WATCHDOG_SCRIPT_MODE) return false
   const content = await fs.readFile(path, 'utf8').catch(() => undefined)
   return content === WATCHDOG_SCRIPT
 }
@@ -433,8 +436,12 @@ async function isCurrent(fs: WatchdogScriptFs, path: string): Promise<boolean> {
  * it as the container's entrypoint; this function has no opinion on where `path` lives — that is the
  * core's per-scope data directory, chosen by the caller.
  */
-export async function writeWatchdogScript(path: string, fs: WatchdogScriptFs = NODE_FS): Promise<string> {
-  if (await isCurrent(fs, path)) return path
+export async function writeWatchdogScript(
+  path: string,
+  fs: WatchdogScriptFs = NODE_FS,
+  host: NodeJS.Platform = process.platform
+): Promise<string> {
+  if (await isCurrent(fs, path, host)) return path
 
   let tempPath: string | undefined
   try {
@@ -443,6 +450,10 @@ export async function writeWatchdogScript(path: string, fs: WatchdogScriptFs = N
     tempPath = join(dir, `.${basename(path)}.tmp-${randomBytes(6).toString('hex')}`)
     await fs.writeFile(tempPath, WATCHDOG_SCRIPT, { flag: 'wx' })
     await fs.chmod(tempPath, WATCHDOG_SCRIPT_MODE)
+    // On Windows the 0555 of an earlier write is the read-only attribute, and NTFS refuses to rename
+    // over a read-only file (EPERM): the second write after a restart failed. Made writable first, the
+    // replacement stays one rename.
+    if (host === 'win32') await fs.chmod(path, 0o644).catch(() => {})
     await fs.rename(tempPath, path)
   } catch (error) {
     if (tempPath !== undefined) await fs.rm(tempPath).catch(() => {})
