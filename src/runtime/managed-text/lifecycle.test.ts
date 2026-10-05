@@ -966,8 +966,11 @@ describe('ManagedTextLifecycle: crash after ready', () => {
     const info = await lifecycle.load(request_())
     const id = docker.last().id
     docker.exit(id, 1, ['CUDA out of memory. Tried to allocate 1.00 GiB'])
-    for (let i = 0; i < 500 && !emitted.some((e) => e.name === 'session:died'); i++) {
-      await new Promise((resolve) => setImmediate(resolve))
+    // Bounded by time, not by a count of ticks: the journal write on the way is real disk I/O, which
+    // a slow CI runner did not finish within 500 setImmediate turns.
+    const deadline = Date.now() + 5_000
+    while (!emitted.some((e) => e.name === 'session:died') && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
     }
     expect(emitted.find((e) => e.name === 'session:died')?.payload).toEqual({
       provider: 'llamacpp-upstream',

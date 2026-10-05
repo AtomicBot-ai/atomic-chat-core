@@ -895,7 +895,8 @@ describe('wireTensorrtLlmModelCheck', () => {
     const bigWeights = checkBody({
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
       config_json: { architectures: ['LlamaForCausalLM'] },
-      files: [{ path: 'model.safetensors', size: 20_000_000_000, sha256: null }],
+      // 19 GB + the 20% reserve + the engine's 1.5 GiB runtime overhead fits 24000 MiB free.
+      files: [{ path: 'model.safetensors', size: 19_000_000_000, sha256: null }],
     })
     const atDefault = wireTensorrtLlmModelCheck('linux', checkOptions())
     expect((await atDefault?.(bigWeights))?.verdict).toEqual({ ok: true })
@@ -1049,7 +1050,8 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
       revision: 'deadbeef',
       config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
       hf_quant_config_json: null,
-      files: [{ path: 'model.safetensors', size: 20_000_000_000, sha256: null }],
+      // Fits the card with the engine overhead, and is still more than the VM's 16 GiB.
+      files: [{ path: 'model.safetensors', size: 19_000_000_000, sha256: null }],
     })
     expect(result?.checked_gpu_id).toBe('GPU-aaaa')
     expect(result?.warnings?.[0]).toMatchObject({

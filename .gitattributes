@@ -1,3 +1,8 @@
 # core.log fixtures are compared byte for byte against LF output (test/contract/core-log.test.ts);
 # keep them LF on every checkout, core.autocrlf=true on Windows included.
 test/fixtures/**/*.log text eol=lf
+
+# The .mjs test helpers start with a shebang (several also run as programs). Vitest strips it with a
+# regex whose `.` stops at a CR, so a CRLF checkout (core.autocrlf=true on Windows) left `#!` in the
+# module and every test importing fake-wsl.mjs / fake-linux-host.mjs failed with a SyntaxError.
+test/helpers/*.mjs text eol=lf

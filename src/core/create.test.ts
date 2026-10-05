@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -1304,7 +1305,15 @@ describe('managed runtime environment', () => {
     // running the test — the same isolation the e2e suite gives every daemon it starts.
     const managedRoot = await mkdtemp(join(tmpdir(), 'atomic-core-managed-unit-'))
     try {
-      const core = await createCore({ env: { ...process.env, ATOMIC_CORE_MANAGED_ROOT: managedRoot } })
+      // No descriptor anywhere, whatever the developer's own environment says: the outcome must not
+      // depend on the machine (it did — CI on Linux and Windows reached the descriptor, macOS did not).
+      const core = await createCore({
+        env: {
+          ...process.env,
+          ATOMIC_CORE_MANAGED_ROOT: managedRoot,
+          ATOMIC_RUNTIME_DESCRIPTOR_URL: pathToFileURL(join(managedRoot, 'no-descriptor.json')).href,
+        },
+      })
       const call = (path: string, init: RequestInit = {}) =>
         fetch(`${core.control.url}/atomic/v1${path}`, {
           ...init,
@@ -1345,7 +1354,13 @@ describe('managed runtime environment', () => {
         ).json()) as typeof current
       }
       expect(current.phase).toBe('failed')
-      expect(current.error?.code).toBe('MANAGED_PREREQUISITE_BLOCKED')
+      // Where setup is real (Linux, Windows) the plan needs the descriptor, which nobody has: metadata.
+      // Elsewhere (macOS) the host itself is the blocker, before any descriptor is asked for.
+      expect(current.error?.code).toBe(
+        process.platform === 'linux' || process.platform === 'win32'
+          ? 'MANAGED_METADATA_INVALID'
+          : 'MANAGED_PREREQUISITE_BLOCKED'
+      )
 
       // A retried request with the same id gets the operation it already started, not a new one —
       // exercising the id generator's idempotency path a second time changes nothing.
