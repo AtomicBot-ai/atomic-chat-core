@@ -181,7 +181,8 @@ describe('writeWatchdogScript', () => {
     const path = '/data/x/entrypoint.sh'
     const fs = fakeFs({ [path]: { content: WATCHDOG_SCRIPT, mode: 0o644 } })
 
-    await writeWatchdogScript(path, fs)
+    // POSIX semantics on purpose, whatever the runner: Windows keeps no mode to re-secure.
+    await writeWatchdogScript(path, fs, 'linux')
 
     expect(fs.renameCalls).toHaveLength(1)
     expect(fs.entries[path]?.mode).toBe(WATCHDOG_SCRIPT_MODE)
@@ -284,7 +285,10 @@ describe('writeWatchdogScript', () => {
       await expect(writeWatchdogScript(path)).resolves.toBe(path)
 
       expect(await readFile(path, 'utf8')).toBe(WATCHDOG_SCRIPT)
-      expect((await stat(path)).mode & 0o777).toBe(WATCHDOG_SCRIPT_MODE)
+      const mode = (await stat(path)).mode & 0o777
+      // Windows keeps only the read-only attribute of 0555: no write bit is what it can show.
+      if (process.platform === 'win32') expect(mode & 0o222).toBe(0)
+      else expect(mode).toBe(WATCHDOG_SCRIPT_MODE)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
