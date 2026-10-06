@@ -94,7 +94,7 @@ async function wrap(path: string, script: string, env: Record<string, string> = 
  * capability, and 20 bytes of weights fit its free VRAM.
  */
 async function installTrtModel(id: string): Promise<void> {
-  const dir = join(dataFolder, 'tensorrt-llm', 'models', id)
+  const dir = join(dataFolder, 'managed-models', id)
   await mkdir(dir, { recursive: true })
   await writeFile(
     join(dir, 'config.json'),

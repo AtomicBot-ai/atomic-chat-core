@@ -46,7 +46,6 @@ describe('ManagedModelRegistry', () => {
           repository: 'Qwen/Qwen3-8B-FP8',
           revision: 'deadbeef',
           architectures: ['Qwen3ForCausalLM'],
-          quantization: 'fp8',
           files: [{ path: 'model.safetensors', size: 8_000_000_000, sha256: 'a'.repeat(64) }],
         },
       },

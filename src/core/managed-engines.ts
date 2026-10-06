@@ -25,7 +25,12 @@
  */
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreEvents, LocalProviderId } from '../contracts/index.js'
-import type { ModelCompatibility, ManagedModelDeletion, ManagedModelLocation } from '../contracts/index.js'
+import type {
+  ModelCompatibility,
+  ManagedModelDeletion,
+  ManagedModelLocation,
+  ManagedStoreMigration,
+} from '../contracts/index.js'
 import type { DataLayout, ManagedScopePaths } from '../config/index.js'
 import {
   RECONCILE_BUDGET_MS,
@@ -79,7 +84,10 @@ import {
   deleteManagedModelFiles,
   guestModelFiles,
   guestModelsRoot,
+  guestStoreMigrationFs,
+  legacyGuestModelsRoot,
   linuxModelLocation,
+  migrateTensorrtLlmModels,
   readManagedModel,
   windowsModelLocation,
 } from '../runtime/managed-models/index.js'
@@ -141,12 +149,55 @@ async function windowsDistribution(
   return record === null ? null : { record, transport: context.wsl.distribution(record.distribution.name) }
 }
 
+/**
+ * The move of this scope's TensorRT-LLM models into the store in the guest (change `add-vllm-runtime`,
+ * design D5), once per core, before the first look at the store: run in the guest, with the
+ * distribution held for it. No distribution, nothing to move.
+ */
+const windowsMigrations = new WeakMap<WindowsManagedContext, Promise<ManagedStoreMigration | null>>()
+
+export function windowsStoreMigration(
+  context: WindowsManagedContext,
+  onResult?: (result: ManagedStoreMigration) => void
+): Promise<ManagedStoreMigration | null> {
+  const known = windowsMigrations.get(context)
+  if (known !== undefined) return known
+  const run = (async (): Promise<ManagedStoreMigration | null> => {
+    const record = await context.records.read()
+    if (record === null) return null
+    const name = record.distribution.name
+    const key = await context.scopeKey()
+    const lease = context.keeper(name).acquire('moving models into the managed model store')
+    try {
+      const result = await migrateTensorrtLlmModels({
+        from: legacyGuestModelsRoot(key),
+        to: guestModelsRoot(key),
+        fs: guestStoreMigrationFs(context.wsl.distribution(name)),
+      })
+      onResult?.(result)
+      return result
+    } finally {
+      lease.release()
+    }
+  })()
+  // A failure is tried again on the next look, never cached.
+  windowsMigrations.set(
+    context,
+    run.catch((error: unknown) => {
+      windowsMigrations.delete(context)
+      throw error
+    })
+  )
+  return windowsMigrations.get(context) as Promise<ManagedStoreMigration | null>
+}
+
 async function windowsGuest(
   context: WindowsManagedContext,
   layout: DataLayout
 ): Promise<WindowsGuest | null> {
   const record = await context.records.read()
   if (record === null) return null
+  await windowsStoreMigration(context)
   const name = record.distribution.name
   const key = await context.scopeKey()
   return {
@@ -272,7 +323,7 @@ export function wireManagedEngine<S extends ManagedEngineSettings>(
         nvidiaSmi: 'nvidia-smi',
         readFile: options.host.probeDeps.readFile,
       }),
-    model: (modelId) => readManagedModel(options.layout.provider('tensorrt-llm').modelsDir, modelId),
+    model: (modelId) => readManagedModel(options.layout.managedModelsDir, modelId),
     settings: options.settings,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
   })
@@ -383,29 +434,31 @@ export function windowsDeployment(
 export const wiredExec = (wired: { exec: DockerExec }): DockerExec => wired.exec
 
 /**
- * `GET /models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8): `<data>/tensorrt-llm/models`
- * on Linux; the scope's folder in the WSL guest on Windows (`MANAGED_ADAPTER_UNAVAILABLE` before the import).
+ * `GET /managed-models/location` (spec `managed-model-store`): `<data>/managed-models` on Linux; the
+ * scope's store in the WSL guest on Windows (`MANAGED_ADAPTER_UNAVAILABLE` before the import).
  */
-export function tensorrtLlmModelLocation(
+export function managedModelLocation(
   platform: NodeJS.Platform,
   layout: DataLayout,
   windows?: WindowsManagedContext
 ): () => Promise<ManagedModelLocation> {
   if (platform === 'win32' && windows !== undefined) {
-    return () =>
-      windowsModelLocation({
+    return async () => {
+      await windowsStoreMigration(windows).catch(() => null)
+      return windowsModelLocation({
         records: windows.records,
         scopeKey: windows.scopeKey,
         transport: (name) => windows.wsl.distribution(name),
         volumeFreeBytes: (path) => windows.host.freeDiskBytes(path),
         ...(windows.mount === undefined ? {} : { mount: windows.mount }),
       })
+    }
   }
-  return () => linuxModelLocation(layout.provider('tensorrt-llm').modelsDir)
+  return () => linuxModelLocation(layout.managedModelsDir)
 }
 
-/** The `tensorrt-llm` model registry: the data folder's root on Linux, the guest root (once it exists) on Windows. */
-export function tensorrtLlmModelRegistry(
+/** The managed model store's registry: the data folder's root on Linux, the guest root (once it exists) on Windows. */
+export function managedModelRegistry(
   platform: NodeJS.Platform,
   layout: DataLayout,
   windows?: WindowsManagedContext
@@ -413,7 +466,7 @@ export function tensorrtLlmModelRegistry(
   if (platform === 'win32' && windows !== undefined) {
     return new ManagedModelRegistry(async () => (await windowsGuest(windows, layout))?.modelsRoot ?? null)
   }
-  return new ManagedModelRegistry(layout.provider('tensorrt-llm').modelsDir)
+  return new ManagedModelRegistry(layout.managedModelsDir)
 }
 
 /** `windowsModelFiles` bound to one context and layout: the deleter's `windowsFiles` on Windows. */

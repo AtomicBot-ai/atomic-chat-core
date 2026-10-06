@@ -178,8 +178,8 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
     removeEngineCaches: async (descriptorId) => {
       calls.push(`caches:${descriptorId}`)
     },
-    removeModels: async (engineId) => {
-      calls.push(`models:${engineId}`)
+    removeStoreModels: async () => {
+      calls.push('models')
     },
     unloadEngineSessions: async (engineId) => {
       calls.push(`unload:${engineId}`)
@@ -1427,7 +1427,47 @@ describe('removing the installation', () => {
   it('deletes the models only when asked to', async () => {
     const { h, provisioner } = await installed(readyHost())
     await provisioner.remove(removal({ retain_models: false }), signal)
-    expect(h.calls).toContain('models:tensorrt-llm')
+    expect(h.calls).toContain('models')
+  })
+
+  /** Another engine's ready installation next to TensorRT-LLM's (change add-vllm-runtime, D13). */
+  const withSecond = async (h: Harness): Promise<void> => {
+    const trt = await h.installations.read('tensorrt-llm')
+    await h.installations.write({
+      ...(trt as NonNullable<typeof trt>),
+      installation: {
+        ...(trt as NonNullable<typeof trt>).installation,
+        installation_id: 'vllm',
+        engine_id: 'vllm',
+        active_descriptor_id: 'vllm-0.31.0-cu129-r1',
+      },
+    })
+  }
+
+  it('Удаление одного из двух движков с моделями: the plan says the models stay for vLLM, and they do', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    await withSecond(h)
+    const { plan } = await provisioner.probe(removal({ retain_models: false }), signal)
+    const codes = plan.system_changes.map((change) => change.code)
+    expect(codes).not.toContain('remove-models')
+    expect(plan.system_changes.find((change) => change.code === 'keep-models')).toMatchObject({
+      params: { engines: 'vllm' },
+    })
+
+    await provisioner.remove(removal({ retain_models: false }), signal)
+    expect(h.calls).not.toContain('models')
+    expect(h.calls).toContain(`caches:${DESCRIPTOR.descriptor_id}`)
+    expect(await h.installations.read('tensorrt-llm')).toBeNull()
+    expect((await h.installations.read('vllm'))?.installation.status).toBe('ready')
+  })
+
+  it('Удаление последнего движка с моделями: the plan deletes the store’s models, and the removal does', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    const { plan } = await provisioner.probe(removal({ retain_models: false }), signal)
+    expect(plan.system_changes.map((change) => change.code)).toContain('remove-models')
+    expect(plan.system_changes.map((change) => change.code)).not.toContain('keep-models')
+    await provisioner.remove(removal({ retain_models: false }), signal)
+    expect(h.calls).toContain('models')
   })
 
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(

@@ -297,9 +297,9 @@ describe('the model check route of any managed provider (change add-vllm-runtime
   })
 })
 
-describe('tensorrt-llm model deletion route', () => {
-  it('answers PROVIDER_NOT_FOUND when this build offers no tensorrt-llm provider (off Linux)', async () => {
-    const res = await h.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+describe('managed model store deletion route (change add-vllm-runtime, spec managed-model-store)', () => {
+  it('answers PROVIDER_NOT_FOUND when this build offers no managed provider (off Linux and Windows)', async () => {
+    const res = await h.get('/atomic/v1/managed-models/acme/m', { method: 'DELETE' })
     expect(res.status).toBe(404)
     expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
   })
@@ -307,12 +307,12 @@ describe('tensorrt-llm model deletion route', () => {
   it('passes the id exactly as sent — a nested id whole, a percent-encoded slash not decoded — and answers the deletion', async () => {
     const seen: string[] = []
     const withDelete = await start({
-      tensorrtLlmModelDelete: async (modelId) => {
+      managedModelDelete: async (modelId) => {
         seen.push(modelId)
         return { model_id: modelId, was_loaded: true, freed_bytes: 1500, engine_caches_removed: 2 }
       },
     })
-    const res = await withDelete.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    const res = await withDelete.get('/atomic/v1/managed-models/acme/m', { method: 'DELETE' })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       model_id: 'acme/m',
@@ -320,7 +320,7 @@ describe('tensorrt-llm model deletion route', () => {
       freed_bytes: 1500,
       engine_caches_removed: 2,
     })
-    await withDelete.get('/atomic/v1/models/tensorrt-llm/acme%2Fm', { method: 'DELETE' })
+    await withDelete.get('/atomic/v1/managed-models/acme%2Fm', { method: 'DELETE' })
     expect(seen).toEqual(['acme/m', 'acme%2Fm'])
     await withDelete.server.close()
   })
@@ -330,46 +330,48 @@ describe('tensorrt-llm model deletion route', () => {
     ['MANAGED_STOP_UNCONFIRMED', 409],
   ])('surfaces %s from the wired deletion as %i', async (code, status) => {
     const failing = await start({
-      tensorrtLlmModelDelete: async () => {
+      managedModelDelete: async () => {
         throw Object.assign(new Error('refused'), { code })
       },
     })
-    const res = await failing.get('/atomic/v1/models/tensorrt-llm/acme/m', { method: 'DELETE' })
+    const res = await failing.get('/atomic/v1/managed-models/acme/m', { method: 'DELETE' })
     expect(res.status).toBe(status)
     expect(await res.json()).toMatchObject({ error: { code } })
     await failing.server.close()
   })
 
-  it('is not offered for another provider', async () => {
+  it('is not offered under a provider: neither the old tensorrt-llm route nor any other answers', async () => {
     const withDelete = await start({
-      tensorrtLlmModelDelete: async () => {
+      managedModelDelete: async () => {
         throw new Error('never asked')
       },
     })
-    const res = await withDelete.get('/atomic/v1/models/llamacpp-upstream/acme/m', { method: 'DELETE' })
-    expect([404, 405]).toContain(res.status)
+    for (const provider of ['tensorrt-llm', 'llamacpp-upstream']) {
+      const res = await withDelete.get(`/atomic/v1/models/${provider}/acme/m`, { method: 'DELETE' })
+      expect([404, 405]).toContain(res.status)
+    }
     await withDelete.server.close()
   })
 })
 
-describe('tensorrt-llm model location route (change add-tensorrt-llm-windows, task 2.8)', () => {
+describe('managed model store location route (change add-vllm-runtime, spec managed-model-store)', () => {
   it('answers PROVIDER_NOT_FOUND where the provider is not offered at all', async () => {
-    const res = await h.get('/atomic/v1/models/tensorrt-llm/location')
+    const res = await h.get('/atomic/v1/managed-models/location')
     expect(res.status).toBe(404)
     expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
   })
 
   it('answers the root clients download into and its free space', async () => {
     const withLocation = await start({
-      tensorrtLlmModelLocation: async () => ({
-        root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\models\\tensorrt-llm',
+      managedModelLocation: async () => ({
+        root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\managed-models',
         free_bytes: 400_000_000_000,
       }),
     })
-    const res = await withLocation.get('/atomic/v1/models/tensorrt-llm/location')
+    const res = await withLocation.get('/atomic/v1/managed-models/location')
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
-      root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\models\\tensorrt-llm',
+      root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\managed-models',
       free_bytes: 400_000_000_000,
     })
     await withLocation.server.close()
@@ -377,21 +379,30 @@ describe('tensorrt-llm model location route (change add-tensorrt-llm-windows, ta
 
   it('answers MANAGED_ADAPTER_UNAVAILABLE (422) on Windows before the distribution exists', async () => {
     const before = await start({
-      tensorrtLlmModelLocation: async () => {
+      managedModelLocation: async () => {
         throw Object.assign(new Error('no distribution'), { code: 'MANAGED_ADAPTER_UNAVAILABLE' })
       },
     })
-    const res = await before.get('/atomic/v1/models/tensorrt-llm/location')
+    const res = await before.get('/atomic/v1/managed-models/location')
     expect(res.status).toBe(422)
     expect(await res.json()).toMatchObject({ error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } })
     await before.server.close()
   })
 
+  it('the old tensorrt-llm location route is gone', async () => {
+    const withLocation = await start({
+      managedModelLocation: async () => ({ root: '/data/managed-models', free_bytes: 1 }),
+    })
+    const res = await withLocation.get('/atomic/v1/models/tensorrt-llm/location')
+    expect(res.status).toBe(404)
+    await withLocation.server.close()
+  })
+
   it('is not taken for a model called "location" of another route', async () => {
     const withLocation = await start({
-      tensorrtLlmModelLocation: async () => ({ root: '/data/tensorrt-llm/models', free_bytes: 1 }),
+      managedModelLocation: async () => ({ root: '/data/managed-models', free_bytes: 1 }),
     })
-    const res = await withLocation.get('/atomic/v1/models/tensorrt-llm/location', { method: 'DELETE' })
+    const res = await withLocation.get('/atomic/v1/managed-models/location', { method: 'DELETE' })
     expect(res.status).not.toBe(200)
     await withLocation.server.close()
   })

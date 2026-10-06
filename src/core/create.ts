@@ -8,7 +8,12 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { LlamacppProviderId, LocalProviderId, ModelCompatibility } from '../contracts/index.js'
+import type {
+  LlamacppProviderId,
+  LocalProviderId,
+  ManagedStoreMigration,
+  ModelCompatibility,
+} from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
@@ -43,6 +48,7 @@ import {
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
+import { migrateTensorrtLlmModels, nodeStoreMigrationFs } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
@@ -65,8 +71,9 @@ import {
   managedEngineRegistry,
   managedModelDeleter,
   managedSessionUnloader,
-  tensorrtLlmModelLocation,
-  tensorrtLlmModelRegistry,
+  managedModelLocation,
+  managedModelRegistry,
+  windowsStoreMigration,
   windowsModelFilesFor,
   wiredExec,
   wireManagedEngine,
@@ -393,6 +400,35 @@ export async function createAtomicCore(
     // `tensorrt-llm` provider (task 2.14) takes `managedContainers`, never a second executor, and the
     // environment's machine (`managedHost`: the e2e stand-in under `ATOMIC_MANAGED_TEST_HOST`, whose
     // platform counts as Linux). A removal unloads the provider's loaded model first.
+    // TensorRT-LLM's models move into the managed model store before anything lists or loads one
+    // (change `add-vllm-runtime`, design D5), under this core's lock on its data folder. On Linux the
+    // old root is in the data folder; on Windows it is in the guest and moves on first use (below).
+    let storeMigration: ManagedStoreMigration | null = null
+    const logStoreMigration = (result: ManagedStoreMigration): void => {
+      if (result.moved.length > 0) {
+        log(
+          'info',
+          `Moved ${result.moved.length} model(s) into the managed model store: ${result.moved.join(', ')}.`
+        )
+      }
+      for (const conflict of result.conflicts) {
+        log(
+          'warn',
+          `Model ${conflict.model_id} was not moved: ${conflict.target} already exists; ${conflict.source} is left as it is.`
+        )
+      }
+    }
+    if (process.platform !== 'win32') {
+      storeMigration = await migrateTensorrtLlmModels({
+        from: layout.legacyTensorrtLlmModelsDir,
+        to: layout.managedModelsDir,
+        fs: nodeStoreMigrationFs,
+      }).catch((error: unknown) => {
+        log('warn', `Moving models into the managed model store failed: ${String(error)}`)
+        return null
+      })
+      if (storeMigration !== null) logStoreMigration(storeMigration)
+    }
     const {
       managed,
       containers: managedContainers,
@@ -412,6 +448,7 @@ export async function createAtomicCore(
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
       engines: managedEngines.descriptorSources(),
+      storeMigration: () => storeMigration,
       unloadEngineSessions: managedSessionUnloader(() => managedRuntimes, facade),
     })
     // Containers a previous core left that startup reconcile could not confirm stopped: they hold every
@@ -475,9 +512,18 @@ export async function createAtomicCore(
     }
     // The managed models' registry: the same gate as the runtimes, so the two are never offered one
     // without the other.
-    const tensorrtLlmRegistry = tensorrtLlmModelRegistry(managedPlatform, layout, managedWindows)
-    for (const provider of managedRuntimes.keys())
-      registries.set(provider as LocalProviderId, tensorrtLlmRegistry)
+    const storeRegistry = managedModelRegistry(managedPlatform, layout, managedWindows)
+    for (const provider of managedRuntimes.keys()) registries.set(provider as LocalProviderId, storeRegistry)
+    // Windows moves this scope's TensorRT-LLM models into the store in the guest before the first look
+    // at it (`windowsStoreMigration`); the outcome goes to the environment diagnostics.
+    if (managedWindows !== undefined && managedRuntimes.size > 0) {
+      void windowsStoreMigration(managedWindows, (result) => {
+        storeMigration = result
+        logStoreMigration(result)
+      }).catch((error: unknown) =>
+        log('warn', `Moving models into the managed model store failed: ${String(error)}`)
+      )
+    }
     /** A managed runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
     const managedOr = (provider: string): ManagedTextRuntime => {
       const runtime = managedRuntimes.get(provider)
@@ -491,7 +537,7 @@ export async function createAtomicCore(
         : managedModelDeleter({
             runtimes: () => managedRuntimes,
             sessions: facade,
-            registry: tensorrtLlmRegistry,
+            registry: storeRegistry,
             paths: layout.managed,
             ...(managedWindows === undefined
               ? {}
@@ -576,11 +622,11 @@ export async function createAtomicCore(
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
         managedModelChecks,
-        ...(managedModelDelete !== null ? { tensorrtLlmModelDelete: managedModelDelete } : {}),
+        ...(managedModelDelete !== null ? { managedModelDelete } : {}),
         // Where clients put tensorrt-llm models (change `add-tensorrt-llm-windows`, task 2.8): wherever
         // the provider itself is offered.
         ...(managedRuntimes.size > 0
-          ? { tensorrtLlmModelLocation: tensorrtLlmModelLocation(managedPlatform, layout, managedWindows) }
+          ? { managedModelLocation: managedModelLocation(managedPlatform, layout, managedWindows) }
           : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),

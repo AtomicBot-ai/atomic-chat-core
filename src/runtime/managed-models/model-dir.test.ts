@@ -40,7 +40,7 @@ files:
 `
 
 describe('readManagedModel', () => {
-  it('reads the directory, repository, revision, first architecture, quantization, files and weight bytes of an installed model', async () => {
+  it('Модель, скачанная до этого change: reads a model.yml that still carries quantization, and ignores the field', async () => {
     const dir = await install('Qwen/Qwen3-8B-FP8', QWEN)
     expect(await readManagedModel(modelsDir, 'Qwen/Qwen3-8B-FP8')).toEqual({
       id: 'Qwen/Qwen3-8B-FP8',
@@ -48,7 +48,6 @@ describe('readManagedModel', () => {
       repository: 'Qwen/Qwen3-8B-FP8',
       revision: '0123456789abcdef',
       architecture: 'Qwen3ForCausalLM',
-      quantization: 'fp8',
       files: [
         { path: 'model-00001-of-00002.safetensors', size: 4_000_000_000, sha256: 'a'.repeat(64) },
         { path: 'model-00002-of-00002.safetensors', size: 4_500_000_000, sha256: 'b'.repeat(64) },
@@ -58,13 +57,12 @@ describe('readManagedModel', () => {
     })
   })
 
-  it('tolerates a model.yml without repository, revision, architectures, quantization or files', async () => {
+  it('tolerates a model.yml without repository, revision, architectures or files', async () => {
     await install('bare', 'name: bare\n')
     expect(await readManagedModel(modelsDir, 'bare')).toMatchObject({
       repository: null,
       revision: null,
       architecture: null,
-      quantization: null,
       files: [],
       weightBytes: 0,
     })
@@ -145,12 +143,18 @@ describe('readManagedModel', () => {
 })
 
 describe('parseManagedModelYml', () => {
+  it('model.yml не зависит от движка: an engine-dependent field is never part of the document or the model', async () => {
+    const doc = parseManagedModelYml(QWEN, '/x/model.yml')
+    expect(doc).not.toHaveProperty('quantization')
+    await install('Qwen/Qwen3-8B-FP8', QWEN)
+    expect(await readManagedModel(modelsDir, 'Qwen/Qwen3-8B-FP8')).not.toHaveProperty('quantization')
+  })
+
   it('parses every field readManagedModel derives from, on its own', () => {
     expect(parseManagedModelYml(QWEN, '/x/model.yml')).toEqual({
       repository: 'Qwen/Qwen3-8B-FP8',
       revision: '0123456789abcdef',
       architectures: ['Qwen3ForCausalLM'],
-      quantization: 'fp8',
       files: [
         { path: 'model-00001-of-00002.safetensors', size: 4_000_000_000, sha256: 'a'.repeat(64) },
         { path: 'model-00002-of-00002.safetensors', size: 4_500_000_000, sha256: 'b'.repeat(64) },

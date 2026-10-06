@@ -219,6 +219,21 @@ export interface EnvironmentDiagnostics {
   operations: EnvironmentOperationSummary[]
   /** The last warnings the managed-runtime code logged, newest last: document fallbacks, cache failures. */
   recent_warnings: string[]
+  /**
+   * What this core's move of TensorRT-LLM's models into the managed model store did at its start
+   * (change `add-vllm-runtime`, design D5); null before it ran or where there is nothing to move.
+   */
+  store_migration?: ManagedStoreMigration | null
+}
+
+/** The move of TensorRT-LLM's models into the managed model store, as it went. */
+export interface ManagedStoreMigration {
+  from: string
+  to: string
+  /** Ids moved, in order. */
+  moved: string[]
+  /** Ids already in the store: neither folder was touched. */
+  conflicts: { model_id: string; source: string; target: string }[]
 }
 
 /** One conf document a core reads: where from, whether that is overridden, and what it has cached. */

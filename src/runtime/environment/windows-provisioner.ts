@@ -64,6 +64,7 @@ import type { EffectFinding, EffectInventory } from './recovery.js'
 import type { EffectIntent } from './state.js'
 import type { EnvironmentProvisioner, HostStepVerdict, ProvisionerProbe } from './service.js'
 import type { PersistedOperation } from './store.js'
+import { otherEngines } from './store-models.js'
 import type { WindowsEnvironmentRecord } from './windows-environment-record.js'
 import {
   ATOMIC_CHAT_DISTRIBUTION,
@@ -140,8 +141,11 @@ export interface WindowsProvisionerDeps {
   journal: { list(): ExecutionRecord[]; remove(containerId: string): Promise<void> }
   /** Removes this scope's engine caches of one descriptor, in the guest. */
   removeEngineCaches: (descriptorId: string) => Promise<void>
-  /** Removes this scope's downloaded models of one engine, in the guest; only for `retain_models: false`. */
-  removeModels: (engineId: string) => Promise<void>
+  /**
+   * Removes this scope's managed model store, in the guest; only for `retain_models: false`, and only
+   * when no other managed engine's installation is left (change `add-vllm-runtime`, D13).
+   */
+  removeStoreModels: () => Promise<void>
   unloadEngineSessions?: UnloadEngineSessions
   /** What the forwarding check reaches the guest's test listener from Windows with; the global `fetch` by default. */
   fetch?: typeof fetch
@@ -1032,7 +1036,12 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
         }
         const descriptorId = existing?.installation.active_descriptor_id ?? null
         if (descriptorId !== null) await deps.removeEngineCaches(descriptorId)
-        if (record.request.retain_models === false) await deps.removeModels(target.engine_id)
+        if (
+          record.request.retain_models === false &&
+          (await otherEngines(deps.installations, target)).length === 0
+        ) {
+          await deps.removeStoreModels()
+        }
         await deps.installations.remove(target.installation_id)
       } finally {
         lease?.release()

@@ -319,8 +319,8 @@ const harness = (
     removeEngineCaches: async (descriptorId) => {
       removed.push(`caches:${descriptorId}`)
     },
-    removeModels: async (engineId) => {
-      removed.push(`models:${engineId}`)
+    removeStoreModels: async () => {
+      removed.push('models')
     },
     unloadEngineSessions: async (engineId) => {
       removed.push(`unload:${engineId}`)
@@ -1049,11 +1049,7 @@ describe('the engine image through the guest’s Engine API (design D4)', () => 
     await provisioner.remove(removal, signal)
 
     expect(h.removed).toEqual(
-      expect.arrayContaining([
-        'unload:tensorrt-llm',
-        `caches:${DESCRIPTOR.descriptor_id}`,
-        'models:tensorrt-llm',
-      ])
+      expect.arrayContaining(['unload:tensorrt-llm', `caches:${DESCRIPTOR.descriptor_id}`, 'models'])
     )
     expect(machine.wsl.guests?.['AtomicChat']?.host?.images ?? []).not.toContain(ENGINE_REF)
     expect(await h.deps.installations.read('tensorrt-llm')).toBeNull()

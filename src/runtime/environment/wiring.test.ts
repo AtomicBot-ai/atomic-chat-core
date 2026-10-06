@@ -675,7 +675,7 @@ describe('the Linux recipe wired end to end over a fake machine (task 2.6)', () 
         journal: { list: () => [], remove: async () => undefined },
       }),
       removeEngineCaches: async () => undefined,
-      removeModels: async () => undefined,
+      removeStoreModels: async () => undefined,
       pull: async (image) => {
         state = { ...state, images: [...(state.images ?? []), `${image.repository}@${image.digest}`] }
       },
@@ -826,7 +826,7 @@ describe('the Windows recipe wired (change add-tensorrt-llm-windows, task 2.10)'
         runGuestRecipe: never,
         journal: { list: () => [], remove: never },
         removeEngineCaches: never,
-        removeModels: never,
+        removeStoreModels: never,
       },
     })
     wired.push(managed)

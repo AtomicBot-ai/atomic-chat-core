@@ -30,6 +30,9 @@ import { dataDir, type DataFolderEnv } from './data-folder.js'
 
 /** Subfolder holding the shared GGUF tree: `<data>/llamacpp/models`. Not the provider id. */
 export const MODELS_ROOT = 'llamacpp'
+
+/** The managed engines' one model store under `<data>` (change `add-vllm-runtime`, design D4). */
+export const MANAGED_MODELS_DIR = 'managed-models'
 export const CORE_DIR = 'atomic-core'
 export const MODEL_YML = 'model.yml'
 export const LOCAL_API_SERVER_STATE_FILE = 'local-api-server.json'
@@ -140,6 +143,16 @@ export interface DataLayout {
   diffusion: DiffusionPaths
   /** This scope's half of the managed text runtimes' layout. */
   managed: ManagedScopePaths
+  /**
+   * `<data>/managed-models`: the one store of Hugging Face checkpoints every managed engine loads from
+   * (change `add-vllm-runtime`, spec `managed-model-store`); a managed provider's `modelsDir`.
+   */
+  managedModelsDir: string
+  /**
+   * `<data>/tensorrt-llm/models`: where TensorRT-LLM's models lived before the store; core moves them
+   * out at startup (design D5) and nothing writes here any more.
+   */
+  legacyTensorrtLlmModelsDir: string
   provider(id: LocalProviderId): ProviderPaths
 }
 
@@ -176,6 +189,8 @@ export function dataLayout(root: string): DataLayout {
     chatgptAuthFile: join(root, CHATGPT_AUTH_FILE),
     legacyRemoteAccessTunnel: join(root, 'remote-access-tunnel.json'),
     managed: managedScopePaths(coreDir),
+    managedModelsDir: join(root, MANAGED_MODELS_DIR),
+    legacyTensorrtLlmModelsDir: join(root, 'tensorrt-llm', 'models'),
     core: {
       dir: coreDir,
       publicServerState: join(coreDir, LOCAL_API_SERVER_STATE_FILE),
@@ -218,11 +233,18 @@ export function dataLayout(root: string): DataLayout {
             tmpDir: join(providerRoot, 'tmp'),
             modelsDir: join(root, MODELS_ROOT, 'models'),
           }
-        // `tensorrt-llm`'s `<data>/tensorrt-llm/models/<id>/` is a Hugging Face checkpoint directory
-        // plus `model.yml`, written by the app and the CLI, read by core (spec `tensorrt-llm-models`).
+        // A managed engine's models are the store's (`<data>/managed-models/<id>/`): a Hugging Face
+        // checkpoint directory plus `model.yml`, written by the app and the CLI, read by core (spec
+        // `managed-model-store`), and the same folder for every managed engine.
+        case 'tensorrt-llm':
+          return {
+            root: providerRoot,
+            backendsDir: join(providerRoot, 'backends'),
+            tmpDir: join(providerRoot, 'tmp'),
+            modelsDir: join(root, MANAGED_MODELS_DIR),
+          }
         case 'mlx':
         case 'foundation-models':
-        case 'tensorrt-llm':
           return {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),

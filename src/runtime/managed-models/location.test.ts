@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { WslDistributionTransport } from '../wsl/index.js'
-import { linuxModelLocation, windowsModelLocation } from './location.js'
+import {
+  guestModelsRoot,
+  legacyGuestModelsRoot,
+  linuxModelLocation,
+  windowsModelLocation,
+} from './location.js'
 
 let dir: string
 beforeEach(async () => {
@@ -48,6 +53,13 @@ const guest = (free: string) => {
   return { transport, calls }
 }
 
+describe('the store in the guest (change add-vllm-runtime, spec managed-model-store)', () => {
+  it('is managed-models in the scope’s folder; the TensorRT-LLM models root it replaces is models/tensorrt-llm', () => {
+    expect(guestModelsRoot('k1')).toBe('/var/lib/atomic-chat/scopes/k1/managed-models')
+    expect(legacyGuestModelsRoot('k1')).toBe('/var/lib/atomic-chat/scopes/k1/models/tensorrt-llm')
+  })
+})
+
 describe('windowsModelLocation', () => {
   it('is the scope’s folder in the guest as Windows opens it, with the smaller of the guest’s and the volume’s space', async () => {
     const g = guest('900000000000')
@@ -58,7 +70,7 @@ describe('windowsModelLocation', () => {
       volumeFreeBytes: async () => 400_000_000_000,
     })
     expect(location).toEqual({
-      root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\models\\tensorrt-llm',
+      root: '\\\\wsl.localhost\\AtomicChat\\var\\lib\\atomic-chat\\scopes\\k1\\managed-models',
       free_bytes: 400_000_000_000,
     })
     // The folder exists before a client writes into it, and belongs to uid 1000.

@@ -262,7 +262,9 @@ describe('taking ownership', () => {
       ['/models/tensorrt-llm/m/load/cancel', 'POST'],
       ['/models/tensorrt-llm/m/capabilities', 'GET'],
       ['/models/tensorrt-llm/m/logs', 'GET'],
-      ['/models/tensorrt-llm/m', 'DELETE'],
+      // The model store's routes (change add-vllm-runtime): no managed provider, no store.
+      ['/managed-models/m', 'DELETE'],
+      ['/managed-models/location', 'GET'],
     ] as const) {
       expect(await call(mac, path, method)).toMatchObject({
         status: 404,
@@ -279,7 +281,9 @@ describe('taking ownership', () => {
       dockerPath: null,
     })
 
-    const modelsDir = linux.layout.provider('tensorrt-llm').modelsDir
+    // The managed model store (change add-vllm-runtime): the provider's models are the store's.
+    const modelsDir = linux.layout.managedModelsDir
+    expect(linux.layout.provider('tensorrt-llm').modelsDir).toBe(modelsDir)
     // A directory with files but no model.yml is not shown at all (spec "Недокачанный каталог").
     await mkdir(join(modelsDir, 'downloading'), { recursive: true })
     await writeFile(join(modelsDir, 'downloading', 'model.safetensors'), 'partial')
@@ -295,7 +299,7 @@ describe('taking ownership', () => {
     // Deleted through core only (task 2.24): an id the registry does not list is an error, a listed
     // one that never loaded goes with its folder, and an unload of an unknown id is not a stop.
     const del = (id: string) =>
-      fetch(`${linux.control.url}/atomic/v1/models/tensorrt-llm/${id}`, {
+      fetch(`${linux.control.url}/atomic/v1/managed-models/${id}`, {
         method: 'DELETE',
         headers: { authorization: `Bearer ${linux.controlToken}` },
       }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }))

@@ -24,8 +24,8 @@ import {
   leftoverContainers,
   managedModelDeleter,
   managedSessionUnloader,
-  tensorrtLlmModelLocation,
-  tensorrtLlmModelRegistry,
+  managedModelLocation,
+  managedModelRegistry,
   windowsDeployment,
   windowsModelFiles,
   windowsModelFilesFor,
@@ -1101,20 +1101,20 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
   })
 
   it('answers the models root in the guest and the smaller free space, and MANAGED_ADAPTER_UNAVAILABLE before the import', async () => {
-    expect(await tensorrtLlmModelLocation('win32', data.layout, windowsContext(true).context)()).toEqual({
-      root: `\\\\wsl.localhost\\AtomicChat${GUEST.replaceAll('/', '\\')}\\models\\tensorrt-llm`,
+    expect(await managedModelLocation('win32', data.layout, windowsContext(true).context)()).toEqual({
+      root: `\\\\wsl.localhost\\AtomicChat${GUEST.replaceAll('/', '\\')}\\managed-models`,
       free_bytes: 400_000_000_000,
     })
     await expect(
-      tensorrtLlmModelLocation('win32', data.layout, windowsContext(false).context)()
+      managedModelLocation('win32', data.layout, windowsContext(false).context)()
     ).rejects.toMatchObject({
       code: 'MANAGED_ADAPTER_UNAVAILABLE',
     })
   })
 
-  it('on Linux the location is <data>/tensorrt-llm/models, as before', async () => {
-    const location = await tensorrtLlmModelLocation('linux', data.layout)()
-    expect(location.root).toBe(data.layout.provider('tensorrt-llm').modelsDir)
+  it('on Linux the location is the store, <data>/managed-models (change add-vllm-runtime)', async () => {
+    const location = await managedModelLocation('linux', data.layout)()
+    expect(location.root).toBe(join(data.root, 'managed-models'))
   })
 
   it('checks a model against the VM’s memory, warning when the weights do not fit (spec "Памяти VM меньше, чем весов")', async () => {
@@ -1197,7 +1197,7 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
   it('a load on Windows reads the model under the guest root and the cards in the guest, then starts its container there', async () => {
     const { context, machine: windows } = windowsContext(true)
     const mounted = { ...context, mount: directoryGuestMount(join(data.root, 'guest-fs')) }
-    const root = mounted.mount.hostPath('AtomicChat', `${GUEST}/models/tensorrt-llm/acme/m`)
+    const root = mounted.mount.hostPath('AtomicChat', `${GUEST}/managed-models/acme/m`)
     await mkdir(root, { recursive: true })
     await writeFile(
       join(root, 'config.json'),
@@ -1265,7 +1265,7 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
   })
 
   it('lists models from the guest root once the distribution exists, nothing before', async () => {
-    const registry = tensorrtLlmModelRegistry('win32', data.layout, windowsContext(false).context)
+    const registry = managedModelRegistry('win32', data.layout, windowsContext(false).context)
     expect(await registry.list()).toEqual([])
   })
 })

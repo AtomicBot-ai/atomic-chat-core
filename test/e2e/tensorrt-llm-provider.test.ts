@@ -88,7 +88,7 @@ async function wrap(path: string, script: string, env: Record<string, string> = 
  * (`8.9`) clears.
  */
 async function installModel(id: string, architecture: string): Promise<void> {
-  const dir = join(dataFolder, 'tensorrt-llm', 'models', id)
+  const dir = join(dataFolder, 'managed-models', id)
   await mkdir(dir, { recursive: true })
   await writeFile(
     join(dir, 'config.json'),
@@ -561,7 +561,7 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     expect(gone === null || gone.status >= 400).toBe(true)
     // The installation is gone, so the next load is refused; the downloaded model stays.
     expect(existsSync(join(managedRoot, 'installations', 'trt-1'))).toBe(false)
-    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'llama-3'))).toBe(true)
+    expect(existsSync(join(dataFolder, 'managed-models', 'llama-3'))).toBe(true)
     const again = await post(ready, '/models/tensorrt-llm/llama-3/load')
     expect(await again.json()).toMatchObject({ error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } })
   })
@@ -588,7 +588,7 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     await writeFile(join(older, 'engine.bin'), Buffer.alloc(4096, 3))
     await mkdir(cacheDir(DESCRIPTOR_ID, 'qwen3'), { recursive: true })
 
-    const res = await control(ready, '/models/tensorrt-llm/llama-3', { method: 'DELETE' })
+    const res = await control(ready, '/managed-models/llama-3', { method: 'DELETE' })
     expect(res.status, await res.clone().text()).toBe(200)
     const deleted = (await res.json()) as { freed_bytes: number }
     expect(deleted).toMatchObject({ model_id: 'llama-3', was_loaded: true, engine_caches_removed: 2 })
@@ -600,13 +600,13 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
       sessions: Array<{ provider: string }>
     }
     expect(sessions.sessions.filter((s) => s.provider === 'tensorrt-llm')).toEqual([])
-    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'llama-3'))).toBe(false)
+    expect(existsSync(join(dataFolder, 'managed-models', 'llama-3'))).toBe(false)
     expect(existsSync(cacheDir(DESCRIPTOR_ID, 'llama-3'))).toBe(false)
     expect(existsSync(older)).toBe(false)
     expect(existsSync(cacheDir(DESCRIPTOR_ID, 'qwen3'))).toBe(true)
-    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'qwen3', 'model.yml'))).toBe(true)
+    expect(existsSync(join(dataFolder, 'managed-models', 'qwen3', 'model.yml'))).toBe(true)
 
-    const again = await control(ready, '/models/tensorrt-llm/llama-3', { method: 'DELETE' })
+    const again = await control(ready, '/managed-models/llama-3', { method: 'DELETE' })
     expect(again.status).toBe(404)
     expect(await again.json()).toMatchObject({ error: { code: 'MODEL_NOT_FOUND' } })
   })
@@ -616,12 +616,10 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     const { ready } = await start()
     await load(ready, 'stuck-model')
 
-    const res = await control(ready, '/models/tensorrt-llm/stuck-model', { method: 'DELETE' })
+    const res = await control(ready, '/managed-models/stuck-model', { method: 'DELETE' })
     expect(res.status).toBe(409)
     expect(await res.json()).toMatchObject({ error: { code: 'MANAGED_STOP_UNCONFIRMED' } })
-    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'stuck-model', 'model.safetensors'))).toBe(
-      true
-    )
+    expect(existsSync(join(dataFolder, 'managed-models', 'stuck-model', 'model.safetensors'))).toBe(true)
     expect(existsSync(cacheDir(DESCRIPTOR_ID, 'stuck-model'))).toBe(true)
   })
 
@@ -629,18 +627,18 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     await installModel('acme/nested', 'LlamaForCausalLM')
     const { ready } = await start()
     for (const id of ['no-such-model', 'acme%2Fnested', 'nested']) {
-      const res = await control(ready, `/models/tensorrt-llm/${id}`, { method: 'DELETE' })
+      const res = await control(ready, `/managed-models/${id}`, { method: 'DELETE' })
       expect(res.status, id).toBe(404)
       expect(await res.json()).toMatchObject({ error: { code: 'MODEL_NOT_FOUND' } })
       const unload = await post(ready, `/models/tensorrt-llm/${id}/unload`)
       expect(await unload.json()).toEqual({ success: true, was_loaded: false })
     }
-    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'acme', 'nested', 'model.yml'))).toBe(true)
+    expect(existsSync(join(dataFolder, 'managed-models', 'acme', 'nested', 'model.yml'))).toBe(true)
 
-    const nested = await control(ready, '/models/tensorrt-llm/acme/nested', { method: 'DELETE' })
+    const nested = await control(ready, '/managed-models/acme/nested', { method: 'DELETE' })
     expect(nested.status, await nested.clone().text()).toBe(200)
     expect(await nested.json()).toMatchObject({ model_id: 'acme/nested', was_loaded: false })
-    expect(existsSync(join(dataFolder, 'tensorrt-llm', 'models', 'acme', 'nested'))).toBe(false)
+    expect(existsSync(join(dataFolder, 'managed-models', 'acme', 'nested'))).toBe(false)
   })
 })
 

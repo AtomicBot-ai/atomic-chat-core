@@ -10,7 +10,7 @@
  *      `POST /models/tensorrt-llm/check` whether it would run here, when this build has that route;
  *   3. download every file of the revision into a persistent cache, checking each size and each
  *      LFS sha256;
- *   4. hard-link the files into `<data>/tensorrt-llm/models/<id>/` and write `model.yml` last.
+ *   4. hard-link the files into `<data>/managed-models/<id>/` and write `model.yml` last.
  *
  * Only the curated list is used, and curated models are ungated: no token is needed. `HF_ENDPOINT`
  * (the Hugging Face tooling's own variable) points it at a mirror; `HF_TOKEN` is sent when set.
@@ -348,7 +348,7 @@ export async function installModel(options: {
   architectures: string[]
   quantization: string
 }): Promise<string> {
-  const dir = join(options.dataFolder, 'tensorrt-llm', 'models', ...options.id.split('/'))
+  const dir = join(options.dataFolder, 'managed-models', ...options.id.split('/'))
   await rm(dir, { recursive: true, force: true })
   for (const file of options.files) {
     const from = join(options.cacheDir, ...file.path.split('/'))
@@ -475,7 +475,7 @@ export interface PreparedModel {
   /** The whole revision, every file. */
   bytes: number
   download_ms: number
-  /** `<data>/tensorrt-llm/models/<id>/`. */
+  /** `<data>/managed-models/<id>/`. */
   dir: string
 }
 

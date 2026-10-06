@@ -20,6 +20,7 @@ import type {
   EnvironmentOperationSummary,
   EnvironmentSnapshot,
   EnvironmentSourceOverride,
+  ManagedStoreMigration,
 } from '../../contracts/index.js'
 import { RUNTIME_DESCRIPTOR_URL_ENV } from './descriptor-provider.js'
 import { ENVIRONMENT_MANIFEST_URL_ENV } from './environment-manifest-provider.js'
@@ -138,6 +139,8 @@ export interface DiagnosticsInput {
   documents: readonly DocumentSourceInput[]
   operations: () => Promise<PersistedOperation[]>
   recentWarnings: () => string[]
+  /** The move of TensorRT-LLM's models into the managed model store (change `add-vllm-runtime`, D5). */
+  storeMigration?: () => ManagedStoreMigration | null
 }
 
 export async function buildEnvironmentDiagnostics(input: DiagnosticsInput): Promise<EnvironmentDiagnostics> {
@@ -153,5 +156,6 @@ export async function buildEnvironmentDiagnostics(input: DiagnosticsInput): Prom
     sources,
     operations: records.map(summarizeOperation),
     recent_warnings: input.recentWarnings(),
+    store_migration: input.storeMigration?.() ?? null,
   }
 }

@@ -647,7 +647,7 @@ describe.skipIf(POSIX_FAKES_UNAVAILABLE)(
       }))
       const cache = join(dataFolder, 'atomic-core', 'managed-runtimes', 'caches', DESCRIPTOR_ID, 'some-model')
       await mkdir(cache, { recursive: true })
-      const model = join(dataFolder, 'tensorrt-llm', 'models', 'some-model')
+      const model = join(dataFolder, 'managed-models', 'some-model')
       await mkdir(model, { recursive: true })
 
       const second = await start()

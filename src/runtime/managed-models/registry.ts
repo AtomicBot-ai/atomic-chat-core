@@ -1,20 +1,18 @@
 /**
- * The `tensorrt-llm` model registry (task 2.16, spec `tensorrt-llm-models`, "Модель — каталог
- * провайдера с манифестом"): a depth-first scan of `<data>/tensorrt-llm/models`, following the same
- * rules `src/models/registry.ts`'s `ModelRegistry` already uses for llama.cpp so all three surfaces
- * (core, the app, the CLI) see the same ids for the same folders — a directory holding `model.yml`
- * *is* a model and is never descended into, the id is its path relative to the models root with `\`
- * rewritten to `/`, ids sort ascending, and an unreadable or invalid `model.yml` is skipped rather
- * than failing the whole scan (spec "Недокачанный каталог": a directory with files but no
- * `model.yml` is not shown at all).
+ * The managed model store's registry (spec `managed-model-store`, "Один корень моделей для всех
+ * managed-движков"): a depth-first scan of the store's root, following the same rules
+ * `src/models/registry.ts`'s `ModelRegistry` already uses for llama.cpp so all three surfaces (core,
+ * the app, the CLI) see the same ids for the same folders — a directory holding `model.yml` *is* a
+ * model and is never descended into, the id is its path relative to the root with `\` rewritten to
+ * `/`, ids sort ascending, and an unreadable or invalid `model.yml` is skipped rather than failing the
+ * whole scan (spec "Недокачанный каталог": a directory with files but no `model.yml` is not shown).
+ * Every managed provider lists the same root under the same ids, whichever engine the model was
+ * picked for: whether it runs on an engine is decided when it loads, never when it is listed.
  *
  * There is no caching here, by design: every call re-walks the directory, so a model the app finishes
- * downloading and writes `model.yml` for appears on the very next `list()` with no restart needed
- * (spec "Модель докачана в app"). `model.yml` itself is a different shape from llama.cpp's
- * (`repository`, `revision`, `files`, `architectures`, `quantization` — no `model_path`), which is
- * why this is its own registry rather than a reuse of the llama.cpp one; `parseManagedModelYml`
- * (`model-dir.ts`) is the one parser both this scan and the single-id load-path lookup
- * (`readManagedModel`) share, so they can never disagree about what a `model.yml` means.
+ * downloading and writes `model.yml` for appears on the very next `list()` with no restart needed.
+ * `parseManagedModelYml` (`model-dir.ts`) is the one parser both this scan and the single-id load-path
+ * lookup (`readManagedModel`) share, so they can never disagree about what a `model.yml` means.
  */
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
