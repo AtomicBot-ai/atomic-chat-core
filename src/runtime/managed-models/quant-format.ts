@@ -3,16 +3,22 @@
  * `RuntimeDescriptor.quantization[].format` (`src/contracts/environment.ts`) is keyed by. Ported
  * verbatim from `atomic-chat-conf`'s README, "Runtime descriptors (`runtimes/`)" →
  * `quantization[].format` names — this file *is* the core side of that conf↔core contract, so any
- * change to the rule has to change both places together.
+ * change to the rule has to change both places together. One rule for every managed engine (change
+ * `add-vllm-runtime`, design D6): a name says how the weights are encoded on disk, and an engine
+ * loads a format iff its own descriptor has a row for it. The names added for vLLM (`hf_fp8`,
+ * `autoawq_w4a16`, `gptq_w4a16`/`gptq_w8a16`, the `ct_*` schemes) went only to checkpoints the rule
+ * did not recognise before, so no TensorRT-LLM verdict changed (`trt-verdict-invariant.test.ts`).
  *
  * The inputs are a checkpoint's `config.json` and, when the repository carries the file, its
  * `hf_quant_config.json`. A checkpoint can be quantized with no `quantization_config` in
  * `config.json` at all (e.g. `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8`,
  * `nvidia/Llama-3.3-70B-Instruct-NVFP4`), so `hf_quant_config.json` must always be checked before
  * `dtype`/`torch_dtype` is trusted. Steps apply in order, stopping at the first that matches; `null`
- * means the naming rule does not recognise the checkpoint (an unsupported `quant_method` such as
- * `awq`/`gptq`, an `fp8` checkpoint without the block size this engine loads, an MLX checkpoint's
- * top-level `quantization`, or a `dtype` other than `bfloat16`/`float16`) — the caller rejects that as an unsupported format, never guesses.
+ * means the naming rule does not recognise the checkpoint (an unknown `quant_method` or
+ * `bitsandbytes`, an AWQ/GPTQ packing outside the named ones, an `fp8` block size other than
+ * 128×128, a compressed-tensors scheme outside the table, an MLX checkpoint's top-level
+ * `quantization`, or a `dtype` other than `bfloat16`/`float16`) — every engine rejects that as an
+ * unsupported format, never guesses.
  *
  * Pure and network-free, like every file in this module (design D12).
  */
@@ -22,6 +28,8 @@ export type JsonObject = Record<string, unknown>
 
 const FP8_PB_WO = 'fp8_pb_wo'
 const FP8_BLOCK_SCALES = 'fp8_block_scales'
+/** Hugging Face / AutoFP8: `quant_method: fp8` with per-tensor or per-channel scales, no blocks. */
+const HF_FP8 = 'hf_fp8'
 
 function asObject(value: unknown): JsonObject | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -64,9 +72,14 @@ function fromHfQuantConfig(hfQuantConfigJson: JsonObject): string | null {
 
 /**
  * Step 2: `config.json`'s `quantization_config.quant_method`. Returns `null` (recognised as *not
- * loadable*, distinct from `undefined` meaning "step 2 does not apply") for every `quant_method`
- * this engine release cannot load, so the caller never falls through to reading `dtype` for a
+ * nameable*, distinct from `undefined` meaning "step 2 does not apply") for every `quant_method` or
+ * packing the rule does not name, so the caller never falls through to reading `dtype` for a
  * checkpoint that step 2 already identified as quantized.
+ *
+ * `modelopt`, `fp8` and `mxfp4` are matched exactly as before the shared rule; only the methods it
+ * added (`awq`, `gptq`, `compressed-tensors`) are matched lower-cased. Lower-casing the old ones
+ * too would name a checkpoint spelled `"FP8"` that was unrecognised until now, and so change a
+ * TensorRT-LLM verdict (ruling core 2.3).
  */
 function fromConfigQuantizationConfig(configJson: JsonObject): string | null | undefined {
   const quantizationConfig = asObject(configJson.quantization_config)
@@ -78,15 +91,92 @@ function fromConfigQuantizationConfig(configJson: JsonObject): string | null | u
   }
   if (quantMethod === 'fp8') {
     const blockSize = quantizationConfig.weight_block_size
+    if (blockSize === undefined || blockSize === null) return HF_FP8
     const isFp8BlockScales =
       Array.isArray(blockSize) && blockSize.length === 2 && blockSize[0] === 128 && blockSize[1] === 128
-    // `fp8` without that exact block size is not loadable by this engine release
-    // (`model_config.py:323`) and must not fall through to step 3 as `bf16`/`fp16`.
+    // Any other block size is not recognised and must not fall through to `dtype` as `bf16`/`fp16`.
     return isFp8BlockScales ? FP8_BLOCK_SCALES : null
   }
   if (quantMethod === 'mxfp4') return 'mxfp4'
-  // awq, gptq, anything else: not loadable by this engine release.
+  const method = typeof quantMethod === 'string' ? quantMethod.toLowerCase() : undefined
+  if (method === 'awq') return fromAutoAwq(quantizationConfig)
+  if (method === 'gptq') return fromGptq(quantizationConfig)
+  if (method === 'compressed-tensors') return fromCompressedTensors(quantizationConfig)
+  // bitsandbytes (deliberately: engines load it slowly and only partially), anything else.
   return null
+}
+
+const lower = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value.toLowerCase() : undefined
+
+/** AutoAWQ: 4 bits (`bits` or `w_bit`) and the `gemm` packing (or none named); other packings differ on disk. */
+function fromAutoAwq(config: JsonObject): string | null {
+  const bits = config.bits ?? config.w_bit
+  const version = config.version
+  const gemm = version === undefined || version === null || lower(version) === 'gemm'
+  return bits === 4 && gemm ? 'autoawq_w4a16' : null
+}
+
+/** GPTQ: 4 or 8 bits, symmetric, the plain `gptq` checkpoint format (or none named). */
+function fromGptq(config: JsonObject): string | null {
+  const format = config.checkpoint_format
+  const plain = format === undefined || format === null || lower(format) === 'gptq'
+  if (config.sym !== true || !plain) return null
+  if (config.bits === 4) return 'gptq_w4a16'
+  if (config.bits === 8) return 'gptq_w8a16'
+  return null
+}
+
+/** One compressed-tensors group's `weights` × `input_activations` against the scheme table. */
+function compressedTensorsScheme(group: JsonObject): string | null {
+  const weights = asObject(group.weights)
+  if (weights === undefined) return null
+  const activations = group.input_activations === null ? undefined : asObject(group.input_activations)
+  if (group.input_activations !== undefined && group.input_activations !== null && activations === undefined)
+    return null
+  const type = lower(weights.type)
+  const bits = weights.num_bits
+  if (activations === undefined) {
+    if (type === 'int' && bits === 4) return 'ct_w4a16'
+    if (type === 'int' && bits === 8) return 'ct_w8a16'
+    return null
+  }
+  const activationType = lower(activations.type)
+  const activationBits = activations.num_bits
+  if (type === 'float' && bits === 8 && activationType === 'float' && activationBits === 8)
+    return 'ct_w8a8_fp8'
+  if (type === 'int' && bits === 8 && activationType === 'int' && activationBits === 8) return 'ct_w8a8_int8'
+  if (
+    type === 'float' &&
+    bits === 4 &&
+    weights.group_size === 16 &&
+    activationType === 'float' &&
+    activationBits === 4
+  )
+    return 'ct_nvfp4'
+  return null
+}
+
+/**
+ * compressed-tensors (llm-compressor): every group must name the same scheme, and a sparsity config
+ * other than none (`null`, `{}`) or `dense` makes the checkpoint unrecognised.
+ */
+function fromCompressedTensors(config: JsonObject): string | null {
+  const sparsity = config.sparsity_config
+  if (sparsity !== undefined && sparsity !== null) {
+    const sparsityObject = asObject(sparsity)
+    if (sparsityObject === undefined) return null
+    if (Object.keys(sparsityObject).length > 0 && lower(sparsityObject.format) !== 'dense') return null
+  }
+  const groups = asObject(config.config_groups)
+  if (groups === undefined) return null
+  const names = new Set<string | null>()
+  for (const group of Object.values(groups)) {
+    const groupObject = asObject(group)
+    names.add(groupObject === undefined ? null : compressedTensorsScheme(groupObject))
+  }
+  if (names.size !== 1) return null
+  return [...names][0] ?? null
 }
 
 /**

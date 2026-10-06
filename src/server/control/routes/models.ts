@@ -86,22 +86,23 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
     sendJson(res, 200, await deps.models.validateGguf(body.path))
   })
 
-  // Whether a checkpoint the caller has not downloaded yet would run on tensorrt-llm (task 2.16,
-  // spec `tensorrt-llm-models`): no network, no filesystem read of any model directory. Absent off
-  // Linux, where the provider is not offered at all.
-  router.post(p('/models/tensorrt-llm/check'), async (req, res) => {
-    if (!deps.tensorrtLlmModelCheck) {
+  // Whether a checkpoint the caller has not downloaded yet would run on a managed provider (spec
+  // `managed-model-store`): one route, one shape, every managed engine's own descriptor and memory
+  // rule. No network, no filesystem read of any model directory. A provider with no check — not a
+  // managed one, or not offered on this platform — is not found.
+  router.post(p('/models/:provider/check'), async (req, res, { params }) => {
+    const provider = params['provider'] as string
+    const check = Object.hasOwn(deps.managedModelChecks ?? {}, provider)
+      ? deps.managedModelChecks?.[provider]
+      : undefined
+    if (check === undefined) {
       return sendError(
         res,
-        new AtomicCoreError(
-          'PROVIDER_NOT_FOUND',
-          'tensorrt-llm is not available in this build.',
-          'tensorrt-llm'
-        )
+        new AtomicCoreError('PROVIDER_NOT_FOUND', `${provider} has no model check in this build.`, provider)
       )
     }
     const body = await readJsonBody(req)
-    sendJson(res, 200, await deps.tensorrtLlmModelCheck(body))
+    sendJson(res, 200, await check(body))
   })
 
   // Where clients put tensorrt-llm models and how much room is left (change `add-tensorrt-llm-windows`,

@@ -46,7 +46,7 @@ import type {
   ResolvedCheckpoint,
 } from './compatibility.js'
 import type { TensorrtLlmModel } from './model-dir.js'
-import type { JsonObject } from './quant-format.js'
+import type { JsonObject } from '../managed-models/quant-format.js'
 
 const CONFIG_FILE = 'config.json'
 const HF_QUANT_CONFIG_FILE = 'hf_quant_config.json'

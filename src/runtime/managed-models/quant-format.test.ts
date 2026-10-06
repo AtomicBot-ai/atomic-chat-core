@@ -62,7 +62,7 @@ describe('quantizationFormat', () => {
       expected: 'fp8_block_scales',
     },
     {
-      name: 'step 2: fp8 without that block size is not loadable, never falls through to dtype',
+      name: 'step 2: fp8 with any other block size is not recognised, never falls through to dtype',
       config: {
         quantization_config: { quant_method: 'fp8', weight_block_size: [64, 64] },
         dtype: 'bfloat16',
@@ -71,10 +71,10 @@ describe('quantizationFormat', () => {
       expected: null,
     },
     {
-      name: 'step 2: fp8 with no weight_block_size at all is not loadable',
+      name: 'step 2: fp8 with no weight_block_size at all is the Hugging Face encoding, hf_fp8',
       config: { quantization_config: { quant_method: 'fp8' }, dtype: 'bfloat16' },
       hfQuantConfig: null,
-      expected: null,
+      expected: 'hf_fp8',
     },
     {
       name: 'step 2: mxfp4',
@@ -83,13 +83,13 @@ describe('quantizationFormat', () => {
       expected: 'mxfp4',
     },
     {
-      name: 'step 2: awq is not loadable',
+      name: 'step 2: awq without a bit width is not recognised',
       config: { quantization_config: { quant_method: 'awq' }, dtype: 'bfloat16' },
       hfQuantConfig: null,
       expected: null,
     },
     {
-      name: 'step 2: gptq is not loadable',
+      name: 'step 2: gptq without a bit width is not recognised',
       config: { quantization_config: { quant_method: 'gptq' }, dtype: 'bfloat16' },
       hfQuantConfig: null,
       expected: null,
@@ -164,6 +164,115 @@ describe('quantizationFormat', () => {
       expect(quantizationFormat(testCase.config, testCase.hfQuantConfig)).toBe(testCase.expected)
     })
   }
+})
+
+/**
+ * The names the shared rule adds for vLLM (change `add-vllm-runtime`, design D6; conf README
+ * `quantization[].format` names, ruling conf 1.2): one case per new name and per boundary the rule
+ * draws, plus GGUF. The names are a contract with conf: they are repeated here, never invented.
+ */
+describe('the shared naming rule: encodings vLLM reads', () => {
+  const qc = (quantizationConfig: JsonObject): JsonObject => ({
+    dtype: 'bfloat16',
+    quantization_config: quantizationConfig,
+  })
+  const group = (weights: JsonObject, inputActivations: JsonObject | null = null): JsonObject => ({
+    targets: ['Linear'],
+    weights,
+    input_activations: inputActivations,
+  })
+  const ct = (groups: JsonObject, extra: JsonObject = {}): JsonObject =>
+    qc({ quant_method: 'compressed-tensors', config_groups: groups, ...extra })
+
+  it.each([
+    ['HF fp8 without blocks', qc({ quant_method: 'fp8' }), 'hf_fp8'],
+    ['HF fp8 with a null block size', qc({ quant_method: 'fp8', weight_block_size: null }), 'hf_fp8'],
+    ['AutoAWQ 4-bit gemm', qc({ quant_method: 'awq', bits: 4, version: 'gemm' }), 'autoawq_w4a16'],
+    ['AutoAWQ w_bit 4, no version', qc({ quant_method: 'AWQ', w_bit: 4 }), 'autoawq_w4a16'],
+    ['GPTQ 4-bit symmetric', qc({ quant_method: 'gptq', bits: 4, sym: true }), 'gptq_w4a16'],
+    [
+      'GPTQ 8-bit symmetric, gptq format',
+      qc({ quant_method: 'gptq', bits: 8, sym: true, checkpoint_format: 'gptq' }),
+      'gptq_w8a16',
+    ],
+    ['compressed-tensors W4A16', ct({ g: group({ type: 'int', num_bits: 4, group_size: 128 }) }), 'ct_w4a16'],
+    ['compressed-tensors W8A16', ct({ g: group({ type: 'int', num_bits: 8 }) }), 'ct_w8a16'],
+    [
+      'compressed-tensors W8A8 FP8',
+      ct({ g: group({ type: 'float', num_bits: 8 }, { type: 'float', num_bits: 8 }) }),
+      'ct_w8a8_fp8',
+    ],
+    [
+      'compressed-tensors W8A8 INT8',
+      ct({ g: group({ type: 'int', num_bits: 8 }, { type: 'int', num_bits: 8 }) }),
+      'ct_w8a8_int8',
+    ],
+    [
+      'compressed-tensors NVFP4',
+      ct({
+        g: group(
+          { type: 'float', num_bits: 4, group_size: 16 },
+          { type: 'float', num_bits: 4, group_size: 16 }
+        ),
+      }),
+      'ct_nvfp4',
+    ],
+    [
+      'compressed-tensors, two groups of one scheme, an empty sparsity_config',
+      ct(
+        { a: group({ type: 'int', num_bits: 4 }), b: group({ type: 'int', num_bits: 4 }) },
+        { sparsity_config: {} }
+      ),
+      'ct_w4a16',
+    ],
+    [
+      'compressed-tensors with a dense sparsity_config',
+      ct({ g: group({ type: 'int', num_bits: 4 }) }, { sparsity_config: { format: 'dense' } }),
+      'ct_w4a16',
+    ],
+  ] as const)('%s → %s', (_name, config, expected) => {
+    expect(quantizationFormat(config, null)).toBe(expected)
+  })
+
+  it.each([
+    ['AutoAWQ 8-bit', qc({ quant_method: 'awq', bits: 8 })],
+    ['AutoAWQ gemv packing', qc({ quant_method: 'awq', bits: 4, version: 'gemv' })],
+    ['GPTQ 3-bit', qc({ quant_method: 'gptq', bits: 3, sym: true })],
+    ['GPTQ asymmetric', qc({ quant_method: 'gptq', bits: 4, sym: false })],
+    [
+      'GPTQ v2 checkpoint format',
+      qc({ quant_method: 'gptq', bits: 4, sym: true, checkpoint_format: 'gptq_v2' }),
+    ],
+    ['compressed-tensors without groups', ct({})],
+    ['compressed-tensors with an unknown scheme', ct({ g: group({ type: 'int', num_bits: 2 }) })],
+    [
+      'compressed-tensors NVFP4 without group size 16',
+      ct({ g: group({ type: 'float', num_bits: 4 }, { type: 'float', num_bits: 4 }) }),
+    ],
+    [
+      'compressed-tensors with groups of two schemes',
+      ct({ a: group({ type: 'int', num_bits: 4 }), b: group({ type: 'int', num_bits: 8 }) }),
+    ],
+    [
+      'compressed-tensors with 2:4 sparsity',
+      ct({ g: group({ type: 'int', num_bits: 4 }) }, { sparsity_config: { format: 'sparse-24-bitmask' } }),
+    ],
+    ['bitsandbytes', qc({ quant_method: 'bitsandbytes', load_in_4bit: true })],
+  ] as const)('%s is not recognised, never its dtype', (_name, config) => {
+    expect(quantizationFormat(config, null)).toBeNull()
+  })
+
+  it('GGUF is its own always-reject gate, before any naming', () => {
+    expect(isGgufCheckpoint([{ path: 'Qwen3-4B-Q4_K_M.gguf' }])).toBe(true)
+    expect(isGgufCheckpoint([{ path: 'model.safetensors' }, { path: 'sub/MODEL.GGUF' }])).toBe(true)
+    expect(isGgufCheckpoint([{ path: 'model.safetensors' }])).toBe(false)
+  })
+
+  it('names the quant_method it did not recognise', () => {
+    expect(describeUnrecognizedQuantization(qc({ quant_method: 'bitsandbytes' }), null)).toBe(
+      'config.json quantization_config.quant_method="bitsandbytes"'
+    )
+  })
 })
 
 describe('describeUnrecognizedQuantization', () => {

@@ -1241,6 +1241,24 @@
     "functions": 81,
     "lines": 89
   },
+  "src/runtime/managed-models/check.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/managed-models/compatibility.ts": {
+    "statements": 99,
+    "branches": 90,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/runtime/managed-models/quant-format.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/managed-text/adapter.ts": {
     "statements": 100,
     "branches": 100,
@@ -1398,12 +1416,6 @@
     "lines": 98
   },
   "src/runtime/tensorrt-llm/prelaunch.ts": {
-    "statements": 100,
-    "branches": 94,
-    "functions": 100,
-    "lines": 100
-  },
-  "src/runtime/tensorrt-llm/quant-format.ts": {
     "statements": 100,
     "branches": 94,
     "functions": 100,

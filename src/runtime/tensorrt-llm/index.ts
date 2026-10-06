@@ -1,9 +1,10 @@
 /**
  * The `tensorrt-llm` provider (openspec change `add-tensorrt-llm-linux`).
  *
- * `compatibility.ts` is the network-free verdict behind `POST /atomic/v1/models/tensorrt-llm/check`
- * (spec `tensorrt-llm-models`) and the GPU-selection rule the load path reuses; `quant-format.ts` is
- * the conf-README naming rule it checks against. `adapter.ts` (task 2.13) is the `ManagedTextAdapter`
+ * `compatibility.ts` is TensorRT-LLM's memory rule and checkpoint quirks plugged into the shared
+ * check skeleton (`../managed-models/`, change `add-vllm-runtime`), behind
+ * `POST /atomic/v1/models/tensorrt-llm/check` (spec `tensorrt-llm-models`); the shared naming rule
+ * and the GPU-selection rule the load path reuses are re-exported from there. `adapter.ts` (task 2.13) is the `ManagedTextAdapter`
  * the engine-neutral load lifecycle (`../managed-text/`) plugs into. Task 2.14 adds the provider
  * itself: `runtime.ts` (the `LocalRuntime`), `settings.ts` (stored settings → adapter settings),
  * `route-policy.ts` (what the public server must refuse or map for a session), `installation.ts`
@@ -17,7 +18,7 @@
  * Public API of this module is exported from this file only.
  */
 export * from './compatibility.js'
-export * from './quant-format.js'
+export * from '../managed-models/quant-format.js'
 export * from './adapter.js'
 export * from './kv-cache.js'
 export * from './settings.js'

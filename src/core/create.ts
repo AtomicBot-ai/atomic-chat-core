@@ -560,7 +560,9 @@ export async function createAtomicCore(
           embed: (provider, modelId, input, ubatchSize) =>
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
-        ...(tensorrtLlmModelCheck !== null ? { tensorrtLlmModelCheck } : {}),
+        ...(tensorrtLlmModelCheck !== null
+          ? { managedModelChecks: { 'tensorrt-llm': tensorrtLlmModelCheck } }
+          : {}),
         ...(tensorrtLlmModelDelete !== null ? { tensorrtLlmModelDelete } : {}),
         // Where clients put tensorrt-llm models (change `add-tensorrt-llm-windows`, task 2.8): wherever
         // the provider itself is offered.

@@ -198,18 +198,20 @@ describe('tensorrt-llm model check route', () => {
   it('passes the body through to the wired check and answers its verdict', async () => {
     let seenBody: unknown
     const withCheck = await start({
-      tensorrtLlmModelCheck: async (body) => {
-        seenBody = body
-        return {
-          architectures: ['LlamaForCausalLM'],
-          quantization_format: 'bf16',
-          weight_bytes: 20,
-          checked_gpu_id: 'gpu-0',
-          curated: false,
-          unified_memory: false,
-          fits_other_gpus: [],
-          verdict: { ok: true },
-        }
+      managedModelChecks: {
+        'tensorrt-llm': async (body) => {
+          seenBody = body
+          return {
+            architectures: ['LlamaForCausalLM'],
+            quantization_format: 'bf16',
+            weight_bytes: 20,
+            checked_gpu_id: 'gpu-0',
+            curated: false,
+            unified_memory: false,
+            fits_other_gpus: [],
+            verdict: { ok: true },
+          }
+        },
       },
     })
     const body = {
@@ -232,10 +234,12 @@ describe('tensorrt-llm model check route', () => {
 
   it('surfaces the error the wired check throws, e.g. an incompatible checkpoint', async () => {
     const incompatible = await start({
-      tensorrtLlmModelCheck: async () => {
-        throw Object.assign(new Error('Unsupported architecture: GPT2LMHeadModel.'), {
-          code: 'MODEL_INCOMPATIBLE',
-        })
+      managedModelChecks: {
+        'tensorrt-llm': async () => {
+          throw Object.assign(new Error('Unsupported architecture: GPT2LMHeadModel.'), {
+            code: 'MODEL_INCOMPATIBLE',
+          })
+        },
       },
     })
     const res = await incompatible.get('/atomic/v1/models/tensorrt-llm/check', {
@@ -246,6 +250,50 @@ describe('tensorrt-llm model check route', () => {
     expect(res.status).toBe(400)
     expect(await res.json()).toMatchObject({ error: { code: 'MODEL_INCOMPATIBLE' } })
     await incompatible.server.close()
+  })
+})
+
+describe('the model check route of any managed provider (change add-vllm-runtime, task 2.3)', () => {
+  const verdictOf = (format: string) => ({
+    architectures: ['LlamaForCausalLM'],
+    quantization_format: format,
+    weight_bytes: 20,
+    checked_gpu_id: 'gpu-0',
+    curated: false,
+    unified_memory: false,
+    fits_other_gpus: [],
+    verdict: { ok: true as const },
+  })
+
+  it('routes each registered managed provider to its own check, and refuses a provider without one', async () => {
+    const seen: string[] = []
+    const withChecks = await start({
+      managedModelChecks: {
+        'tensorrt-llm': async () => {
+          seen.push('tensorrt-llm')
+          return verdictOf('bf16')
+        },
+        'test-engine': async () => {
+          seen.push('test-engine')
+          return verdictOf('gptq_w4a16')
+        },
+      },
+    })
+    const post = (provider: string) =>
+      withChecks.get(`/atomic/v1/models/${provider}/check`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+
+    const second = await post('test-engine')
+    expect(second.status).toBe(200)
+    expect(await second.json()).toMatchObject({ quantization_format: 'gptq_w4a16' })
+    const native = await post('llamacpp')
+    expect(native.status).toBe(404)
+    expect(await native.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND', details: 'llamacpp' } })
+    expect(seen).toEqual(['test-engine'])
+    await withChecks.server.close()
   })
 })
 

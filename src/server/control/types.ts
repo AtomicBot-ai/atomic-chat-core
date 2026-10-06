@@ -380,11 +380,13 @@ export interface ControlServerDeps {
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /**
-   * `POST /models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`): whether a Hugging
-   * Face checkpoint the caller has not downloaded yet would run, computed without touching the
-   * network. Absent off Linux, where the `tensorrt-llm` provider is not offered at all.
+   * `POST /models/:provider/check` (spec `managed-model-store`, "Проверка совместимости одинакова по
+   * форме для всех managed-движков"): for each managed provider this core offers, whether a Hugging
+   * Face checkpoint the caller has not downloaded yet would run on it, computed without touching the
+   * network. A provider absent here (any non-managed one, or every managed one off Linux and
+   * Windows) answers `PROVIDER_NOT_FOUND`.
    */
-  tensorrtLlmModelCheck?: (body: unknown) => Promise<ModelCompatibility>
+  managedModelChecks?: Readonly<Record<string, (body: unknown) => Promise<ModelCompatibility>>>
   /**
    * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a): stop the model with Docker's
    * confirmation, then remove every engine cache of it and its folder. Absent off Linux.

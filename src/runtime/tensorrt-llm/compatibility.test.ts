@@ -11,7 +11,7 @@ import {
 import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { parseMemAvailableBytes } from './host-facts.js'
-import type { JsonObject } from './quant-format.js'
+import type { JsonObject } from '../managed-models/quant-format.js'
 import {
   checkModelCompatibility,
   checkModelCompatibilityFiles,
