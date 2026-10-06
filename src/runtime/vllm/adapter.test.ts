@@ -24,7 +24,7 @@ const family = (over: Partial<ModelFamilySupport> = {}): ModelFamilySupport => (
   ...over,
 })
 const PLAN: VllmLaunchPlan = {
-  kvCacheMemoryBytes: 1_610_612_736,
+  kvCacheMemoryBytes: null,
   gpuMemoryUtilization: 0.87,
   multimodal: true,
 }
@@ -59,7 +59,7 @@ describe('the vllm adapter', () => {
 })
 
 describe('buildLaunch: argv', () => {
-  it('serves the mounted model under its id, on the container port, with core’s KV bytes and memory share', () => {
+  it('serves the mounted model under its id, on the container port, with core’s memory share and vLLM’s own KV cache', () => {
     const launch = vllmAdapter.buildLaunch(context())
     expect(launch.engine.container_port).toBe(8000)
     expect(launch.argv.slice(0, 3)).toEqual(['vllm', 'serve', '/atomic/model'])
@@ -68,8 +68,13 @@ describe('buildLaunch: argv', () => {
     expect(flag(launch.argv, '--port')).toBe('8000')
     expect(flag(launch.argv, '--max-model-len')).toBe('8192')
     expect(flag(launch.argv, '--max-num-seqs')).toBe('1')
-    expect(flag(launch.argv, '--kv-cache-memory-bytes')).toBe('1610612736')
+    expect(launch.argv).not.toContain('--kv-cache-memory-bytes')
     expect(flag(launch.argv, '--gpu-memory-utilization')).toBe('0.87')
+  })
+
+  it('passes --kv-cache-memory-bytes only when the KV cache size setting fixes it', () => {
+    const launch = vllmAdapter.buildLaunch(context({ plan: { ...PLAN, kvCacheMemoryBytes: 1_610_612_736 } }))
+    expect(flag(launch.argv, '--kv-cache-memory-bytes')).toBe('1610612736')
   })
 
   it('Контейнер vLLM не обращается в сеть: never --trust-remote-code, --enable-log-requests or --api-key, whatever the settings', () => {
@@ -366,7 +371,8 @@ describe('restartKey', () => {
     expect(key({ max_num_seqs: 2 })).not.toBe(key({}))
     expect(key({ cuda_graphs: 'off' })).not.toBe(key({}))
     expect(key({ kv_cache_dtype: 'fp8' })).not.toBe(key({}))
-    expect(key({ kv_cache_max_tokens: 1000 })).not.toBe(key({}))
+    expect(key({ kv_cache_memory_gib: 2 })).not.toBe(key({}))
+    expect(key({ gpu_memory_utilization: 0.8 })).not.toBe(key({}))
     for (const changed of [
       { max_num_batched_tokens: 2048 },
       { enable_prefix_caching: false },

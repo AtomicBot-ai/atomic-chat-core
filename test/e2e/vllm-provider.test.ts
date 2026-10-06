@@ -305,7 +305,8 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the vllm
     expect(args).not.toContain('--trust-remote-code')
     expect(args).not.toContain('--enable-log-requests')
     expect(args).not.toContain('--api-key')
-    expect(Number(args[args.indexOf('--kv-cache-memory-bytes') + 1])).toBeGreaterThan(0)
+    // vLLM sizes its own KV cache within its share unless the KV cache size setting fixes it.
+    expect(args).not.toContain('--kv-cache-memory-bytes')
     const utilization = Number(args[args.indexOf('--gpu-memory-utilization') + 1])
     expect(utilization).toBeGreaterThan(0)
     expect(utilization).toBeLessThanOrEqual(0.95)

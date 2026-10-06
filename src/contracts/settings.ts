@@ -122,8 +122,9 @@ export interface TensorrtLlmProviderConfig {
 }
 
 /**
- * `vllm` (change `add-vllm-runtime`, spec `vllm-runtime`): stored values. There is no memory fraction —
- * core sizes the KV cache in bytes and the engine's share of the card itself (design D9).
+ * `vllm` (change `add-vllm-runtime`, spec `vllm-runtime`): stored values. The engine's share of the card
+ * is core's own unless `gpu_memory_utilization` fixes it (design D9); the KV cache is vLLM's own unless
+ * `kv_cache_memory_gib` fixes it.
  */
 export interface VllmProviderConfig {
   /** The card's UUID; `''` picks the card with the most free memory at load time. */
@@ -132,8 +133,10 @@ export interface VllmProviderConfig {
   max_output_tokens: number
   /** `--max-num-seqs`: requests served at once. */
   max_num_seqs: number
-  /** Upper bound of the KV cache in tokens; `0` sizes it as context length × `max_num_seqs`. */
-  kv_cache_max_tokens: number
+  /** `--kv-cache-memory-bytes`, in GiB; `0` lets vLLM size the KV cache from its share of the card. */
+  kv_cache_memory_gib: number
+  /** `--gpu-memory-utilization`; `0` (auto) lets core compute it from the card's free memory. */
+  gpu_memory_utilization: number
   /** `auto` (on only on cards with 12 GB or more), `on` or `off` (`--enforce-eager`). */
   cuda_graphs: 'auto' | 'on' | 'off'
   /** `auto` (the model's own precision) or `fp8` (Ada and newer; ignored on older cards). */

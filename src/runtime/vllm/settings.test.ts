@@ -10,7 +10,8 @@ describe('vllmSettings', () => {
         context_length: 8192,
         max_output_tokens: 4096,
         max_num_seqs: 1,
-        kv_cache_max_tokens: 0,
+        kv_cache_memory_gib: 0,
+        gpu_memory_utilization: 0,
         cuda_graphs: 'auto',
         kv_cache_dtype: 'auto',
         load_timeout_seconds: 0,
@@ -20,7 +21,8 @@ describe('vllmSettings', () => {
       context_length: 8192,
       max_output_tokens: 4096,
       max_num_seqs: 1,
-      kv_cache_max_tokens: null,
+      kv_cache_memory_gib: null,
+      gpu_memory_utilization: null,
       cuda_graphs: 'auto',
       kv_cache_dtype: 'auto',
       load_timeout_seconds: null,
@@ -90,5 +92,13 @@ describe('vllmSettings', () => {
     ['prefix caching that is not a yes or a no', { enable_prefix_caching: 'maybe' }],
   ])('refuses %s with INVALID_ARGUMENT', (_label, stored) => {
     expect(() => vllmSettings(stored)).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }))
+  })
+
+  it('a KV cache size and a memory share, when set, are kept; out of range is INVALID_ARGUMENT', () => {
+    const set = vllmSettings({ kv_cache_memory_gib: 1.5, gpu_memory_utilization: 0.6 })
+    expect(set.kv_cache_memory_gib).toBe(1.5)
+    expect(set.gpu_memory_utilization).toBe(0.6)
+    expect(() => vllmSettings({ gpu_memory_utilization: 1.2 })).toThrow(/gpu_memory_utilization/)
+    expect(() => vllmSettings({ kv_cache_memory_gib: -1 })).toThrow(/kv_cache_memory_gib/)
   })
 })

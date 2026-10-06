@@ -582,7 +582,8 @@ ATOMIC_LIVE=1 npx vitest run --project live test/live/vllm.test.ts
 
 ### What to carry into the change (task 6.1)
 
-- `<out>/summary.json`: first and second load times, `--kv-cache-memory-bytes`,
+- `<out>/summary.json`: first and second load times, `--kv-cache-memory-bytes` (null unless the KV
+  cache size is set), the KV cache vLLM gave itself (`vllm_kv_cache_gib`),
   `--gpu-memory-utilization`, `--shm-size`, the card's free memory before the load
   (`gpu_free_bytes_before_load`, core's last probe) and vLLM's own reading at its start check
   (`vllm_free_gib_at_start_check`) — their difference is what vLLM's CUDA context takes on this host.

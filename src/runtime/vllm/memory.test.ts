@@ -9,6 +9,7 @@ import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from '../tensorrt-llm/kv-
 import {
   VLLM_ENGINE_OVERHEAD_BYTES,
   VLLM_FREE_MEMORY_MARGIN_BYTES,
+  VLLM_START_CHECK_MARGIN_BYTES,
   vllmCheckEngine,
   vllmKvCacheBytes,
   vllmLaunchPlan,
@@ -63,15 +64,15 @@ describe('the KV cache in bytes', () => {
     })
   })
 
-  it('a token limit wins over context × requests; FP8 halves it, only on 8.9 and newer', () => {
-    const limited = vllmSettings({ kv_cache_max_tokens: 10_000 })
+  it('the KV cache size setting replaces the estimate; FP8 halves the estimate, only on 8.9 and newer', () => {
+    const fixed = vllmSettings({ kv_cache_memory_gib: 1.5 })
     expect(
-      vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, limited, card(), false).bytes
-    ).toBe(10_000 * PER_TOKEN_BF16)
-    const fp8 = vllmSettings({ kv_cache_max_tokens: 10_000, kv_cache_dtype: 'fp8' })
+      vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, fixed, card(), false).bytes
+    ).toBe(1.5 * GiB)
+    const fp8 = vllmSettings({ kv_cache_dtype: 'fp8' })
     expect(
       vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, fp8, card(), false).bytes
-    ).toBe((10_000 * PER_TOKEN_BF16) / 2)
+    ).toBe((8192 * PER_TOKEN_BF16) / 2)
     expect(
       vllmKvCacheBytes(
         { configJson: config(), hfQuantConfigJson: null },
@@ -79,7 +80,7 @@ describe('the KV cache in bytes', () => {
         card({ compute_capability: '8.6' }),
         false
       ).bytes
-    ).toBe(10_000 * PER_TOKEN_BF16)
+    ).toBe(8192 * PER_TOKEN_BF16)
   })
 
   it('on a card with the host’s memory it is two contexts, whatever the requests', () => {
@@ -100,10 +101,10 @@ describe('the KV cache in bytes', () => {
         i % 4 === 3 ? 'full_attention' : 'linear_attention'
       ),
     })
-    const settings = vllmSettings({ kv_cache_max_tokens: 1000 })
+    const settings = vllmSettings({ context_length: 2048, max_output_tokens: 1024 })
     expect(
       vllmKvCacheBytes({ configJson: hybrid, hfQuantConfigJson: null }, settings, card(), false).bytes
-    ).toBe(1000 * 2 * 7 * 8 * 128 * 2)
+    ).toBe(2048 * 2 * 7 * 8 * 128 * 2)
   })
 })
 
@@ -111,63 +112,45 @@ describe('the memory share and the launch plan', () => {
   /** vLLM V1's start check (`v1/worker/utils.py:request_memory`): free, measured after its own CUDA context, ≥ ⌈total × share⌉. */
   const startCheckPasses = (freeAtCheck: number, total: number, share: number) =>
     freeAtCheck >= Math.ceil(total * share)
+  const model = { weightBytesTotal: 4.04 * 1e9, configJson: config(), hfQuantConfigJson: null }
 
-  it('Карта частично занята рабочим столом: 8 GB with 1.5 GB taken — the share is what vLLM still places, so its start check passes', () => {
-    const plan = vllmLaunchPlan(
-      vllmSettings({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 2 }),
-      { weightBytesTotal: 4.5 * 1e9, configJson: config(), hfQuantConfigJson: null },
-      card({ free_vram_bytes: 6.5 * GiB }),
-      HOST
-    )
-    const placed = 4.5 * 1e9 + 4096 * 2 * PER_TOKEN_BF16
-    expect(plan.kvCacheMemoryBytes).toBe(4096 * 2 * PER_TOKEN_BF16)
-    expect(plan.gpuMemoryUtilization).toBeCloseTo(placed / (8 * GiB), 3)
-    expect(8 * GiB * plan.gpuMemoryUtilization).toBeGreaterThanOrEqual(placed)
+  it('Карта частично занята рабочим столом: 8 GB with 1.5 GB taken — auto gives vLLM what is free less 1.5 GiB, and its start check passes', () => {
+    const plan = vllmLaunchPlan(vllmSettings({}), model, card({ free_vram_bytes: 6.5 * GiB }), HOST)
+    expect(plan.gpuMemoryUtilization).toBe(0.625)
+    expect(plan.kvCacheMemoryBytes).toBeNull()
     expect(startCheckPasses(6.5 * GiB - VLLM_CUDA_CONTEXT_MEASURED, 8 * GiB, plan.gpuMemoryUtilization)).toBe(true)
   })
 
-  it('the Windows acceptance card: the share no longer depends on what vLLM’s own context takes', () => {
-    // RTX 4070 Laptop under WSL, 2026-10-06: 7.76 GiB free before the container, 6.89 GiB at vLLM's
-    // check. The share taken from the free memory (0.9081, 7.26 GiB) failed every model.
+  it('the Windows acceptance card: 7.76 GiB free before the container, 6.89 GiB at vLLM’s check — the start check passes', () => {
+    // RTX 4070 Laptop under WSL, 2026-10-06: with a 512 MiB margin the share was 0.9081 (7.26 GiB) and
+    // vLLM refused every model, its own CUDA context having taken 0.87 GiB before it measured.
+    const plan = vllmLaunchPlan(vllmSettings({}), model, card({ free_vram_bytes: 7.76 * GiB }), HOST)
+    expect(plan.gpuMemoryUtilization).toBe(0.7825)
+    expect(startCheckPasses(6.89 * GiB, 8 * GiB, plan.gpuMemoryUtilization)).toBe(true)
+    expect(VLLM_START_CHECK_MARGIN_BYTES).toBeGreaterThan(VLLM_CUDA_CONTEXT_MEASURED)
+  })
+
+  it('the settings win over auto: a memory share and a KV cache size set by hand are passed as they are', () => {
     const plan = vllmLaunchPlan(
-      vllmSettings({}),
-      { weightBytesTotal: 4.04 * 1e9, configJson: config(), hfQuantConfigJson: null },
+      vllmSettings({ gpu_memory_utilization: 0.6, kv_cache_memory_gib: 1 }),
+      model,
       card({ free_vram_bytes: 7.76 * GiB }),
       HOST
     )
-    expect(startCheckPasses(6.89 * GiB, 8 * GiB, plan.gpuMemoryUtilization)).toBe(true)
-    // The same plan whatever the card has free: only the model decides the share.
-    const busier = vllmLaunchPlan(
-      vllmSettings({}),
-      { weightBytesTotal: 4.04 * 1e9, configJson: config(), hfQuantConfigJson: null },
-      card({ free_vram_bytes: 5 * GiB }),
-      HOST
-    )
-    expect(busier.gpuMemoryUtilization).toBe(plan.gpuMemoryUtilization)
-  })
-
-  it('weights offloaded to the CPU are not counted in the share', () => {
-    const settings = vllmSettings({ kv_cache_max_tokens: 1000, cpu_offload_gb: 2 })
-    const plan = vllmLaunchPlan(
-      settings,
-      { weightBytesTotal: 6 * GiB, configJson: config(), hfQuantConfigJson: null },
-      card(),
-      HOST
-    )
-    expect(plan.gpuMemoryUtilization).toBeCloseTo((4 * GiB + 1000 * PER_TOKEN_BF16) / (8 * GiB), 3)
+    expect(plan).toMatchObject({ gpuMemoryUtilization: 0.6, kvCacheMemoryBytes: GiB })
   })
 
   it('never more than 95% of the card, and half of the host’s memory on a card with the host’s memory', () => {
-    const huge = vllmLaunchPlan(
-      vllmSettings({ kv_cache_max_tokens: 1000 }),
-      { weightBytesTotal: 79 * GiB, configJson: config(), hfQuantConfigJson: null },
+    const idle = vllmLaunchPlan(
+      vllmSettings({}),
+      { weightBytesTotal: GiB, configJson: config(), hfQuantConfigJson: null },
       card({ total_vram_bytes: 80 * GiB, free_vram_bytes: 80 * GiB }),
       HOST
     )
-    expect(huge.gpuMemoryUtilization).toBe(0.95)
+    expect(idle.gpuMemoryUtilization).toBe(0.95)
     const gb10 = vllmLaunchPlan(
       vllmSettings({}),
-      { weightBytesTotal: 100 * GiB, configJson: config(), hfQuantConfigJson: null },
+      { weightBytesTotal: GiB, configJson: config(), hfQuantConfigJson: null },
       card({ total_vram_bytes: null, free_vram_bytes: null }),
       { availableBytes: 100 * GiB, totalBytes: 120 * GiB }
     )

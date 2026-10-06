@@ -4,16 +4,17 @@
  * managed-text lifecycle.
  *
  * - **argv**: `vllm serve <model> --served-model-name <id> --host 0.0.0.0 --port 8000
- *   --max-model-len <ctx> --max-num-seqs <n> --kv-cache-memory-bytes <B> --gpu-memory-utilization <U>
+ *   --max-model-len <ctx> --max-num-seqs <n> --gpu-memory-utilization <U>
  *   --override-generation-config {"max_new_tokens":<cap>, …sampling defaults}`,
  *   `--limit-mm-per-prompt {"image":0,"video":0}` for a multimodal checkpoint, the further options the
  *   settings set (`--max-num-batched-tokens`, `--no-enable-prefix-caching`, `--cpu-offload-gb`,
- *   `--dtype`, `--seed`, `--async-scheduling`), plus `--enforce-eager` when CUDA graphs are off,
+ *   `--dtype`, `--seed`, `--async-scheduling`, `--kv-cache-memory-bytes` when the KV cache size is
+ *   set), plus `--enforce-eager` when CUDA graphs are off,
  *   `--kv-cache-dtype fp8` on compute capability 8.9 and newer, and the family's tool-call and
- *   reasoning parsers. `B` and `U` are core's (`plan`, computed by the vLLM memory model from the card
- *   as it stands right before the container is created, design D9): vLLM itself would size its cache
- *   as a share of the card's *total* memory and refuse to start on any desktop whose card is partly
- *   taken. Never `--trust-remote-code` (no code from a model repository runs), `--enable-log-requests`
+ *   reasoning parsers. `U` is core's (`plan`, from the card as it stands right before the container
+ *   is created, design D9): vLLM's default share of the card's *total* memory would refuse to start on
+ *   any desktop whose card is partly taken. Within `U`, vLLM sizes the KV cache itself — it knows every
+ *   model's KV shape, hybrid ones included — unless the KV cache size setting fixes it. Never `--trust-remote-code` (no code from a model repository runs), `--enable-log-requests`
  *   (prompts would land in the logs core serves) or `--api-key` (the session gateway checks the key).
  * - **env**: usage stats off (`VLLM_NO_USAGE_STATS`, `DO_NOT_TRACK`), Hugging Face offline (every file
  *   is already in the store), and every compile cache — vLLM's own, Triton's, inductor's, FlashInfer's
@@ -56,8 +57,8 @@ export const VLLM_CUDA_GRAPHS_MIN_VRAM_BYTES = 12 * GiB
 
 /** What core decides for a launch from the card as it stands right before the container (design D9). */
 export interface VllmLaunchPlan {
-  /** `--kv-cache-memory-bytes`. */
-  kvCacheMemoryBytes: number
+  /** `--kv-cache-memory-bytes` from the KV cache size setting; `null` lets vLLM size it within its share. */
+  kvCacheMemoryBytes: number | null
   /** `--gpu-memory-utilization`: what vLLM's start-up check compares the card's free memory against. */
   gpuMemoryUtilization: number
   /**
@@ -71,9 +72,10 @@ function isPlan(value: unknown): value is VllmLaunchPlan {
   if (value === null || typeof value !== 'object') return false
   const plan = value as Record<string, unknown>
   return (
-    typeof plan['kvCacheMemoryBytes'] === 'number' &&
-    Number.isInteger(plan['kvCacheMemoryBytes']) &&
-    plan['kvCacheMemoryBytes'] > 0 &&
+    (plan['kvCacheMemoryBytes'] === null ||
+      (typeof plan['kvCacheMemoryBytes'] === 'number' &&
+        Number.isInteger(plan['kvCacheMemoryBytes']) &&
+        plan['kvCacheMemoryBytes'] > 0)) &&
     typeof plan['gpuMemoryUtilization'] === 'number' &&
     plan['gpuMemoryUtilization'] > 0 &&
     plan['gpuMemoryUtilization'] <= 1 &&
@@ -131,8 +133,6 @@ export function buildVllmLaunch(context: ManagedLaunchContext<VllmSettings>): Ma
     String(settings.context_length),
     '--max-num-seqs',
     String(settings.max_num_seqs),
-    '--kv-cache-memory-bytes',
-    String(context.plan.kvCacheMemoryBytes),
     '--gpu-memory-utilization',
     String(Number(context.plan.gpuMemoryUtilization.toFixed(4))),
     // The output cap for a request that names none: vLLM's own default, so a long prompt keeps the
@@ -140,6 +140,9 @@ export function buildVllmLaunch(context: ManagedLaunchContext<VllmSettings>): Ma
     '--override-generation-config',
     JSON.stringify({ max_new_tokens: settings.max_output_tokens, ...settings.generation }),
   ]
+  if (context.plan.kvCacheMemoryBytes !== null) {
+    argv.push('--kv-cache-memory-bytes', String(context.plan.kvCacheMemoryBytes))
+  }
   if (settings.max_num_batched_tokens !== null) {
     argv.push('--max-num-batched-tokens', String(settings.max_num_batched_tokens))
   }
@@ -470,7 +473,8 @@ export const vllmAdapter: ManagedTextAdapter<VllmSettings> = {
     settings.context_length,
     settings.max_output_tokens,
     settings.max_num_seqs,
-    settings.kv_cache_max_tokens,
+    settings.kv_cache_memory_gib,
+    settings.gpu_memory_utilization,
     settings.cuda_graphs,
     settings.kv_cache_dtype,
     settings.max_num_batched_tokens,

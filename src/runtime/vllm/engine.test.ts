@@ -37,7 +37,7 @@ describe('VLLM_ENGINE', () => {
       driver_version: '580.95.05',
     }
     const plan = VLLM_ENGINE.launchPlan?.(
-      VLLM_ENGINE.settings({ kv_cache_max_tokens: 1000 }),
+      VLLM_ENGINE.settings({ kv_cache_memory_gib: 1.5 }),
       {
         weightBytesTotal: GiB,
         configJson: { num_hidden_layers: 2, num_attention_heads: 2, head_dim: 64 },
@@ -46,7 +46,8 @@ describe('VLLM_ENGINE', () => {
       gpu,
       { availableBytes: 0, totalBytes: 0 }
     )
-    expect(plan).toMatchObject({ kvCacheMemoryBytes: 1000 * 2 * 2 * 2 * 64 * 2 })
+    // The KV cache size setting is passed as bytes; the share is core's auto from the re-probed card.
+    expect(plan).toMatchObject({ kvCacheMemoryBytes: 1.5 * GiB, gpuMemoryUtilization: 0.625 })
   })
 })
 

@@ -1,29 +1,27 @@
 /**
  * vLLM's memory, decided by core (change `add-vllm-runtime`, task 3.3, design D9; spec `vllm-runtime`,
- * "Память vLLM задаёт core"). vLLM sizes its KV cache as a share of the card's *total* memory and,
- * before it starts, refuses to run when the card's free memory is below that share — so on any
- * desktop whose card holds a display and a browser, a fixed share fails at start. Core instead:
+ * "Память vLLM задаёт core"). vLLM takes a share of the card's *total* memory (`--gpu-memory-
+ * utilization`, 0.92 by default) and, before it starts, refuses to run when the card's free memory —
+ * measured after its own CUDA context exists — is below that share; so on any desktop whose card holds
+ * a display and a browser, its default fails at start. Core instead:
  *
- * - sizes the KV cache in bytes (`--kv-cache-memory-bytes`): the KV-cache token limit when one is set,
- *   otherwise the context length × the concurrent requests (on a card with the host's memory, two
- *   contexts, as for TensorRT-LLM), × the bytes one token takes in the model's KV shape (attention
- *   layers only) at the KV precision — FP8 when asked for on compute capability 8.9 and newer, or when
- *   the checkpoint's own KV cache is FP8, else two bytes;
- * - gives vLLM, as `--gpu-memory-utilization`, the share of the card it places after its start check:
- *   `min(0.95, (weights on the card + KV cache) / total)` (on a card with the host's memory, never more
- *   than half of it). With the KV cache in bytes the share sizes nothing in vLLM 0.31; it only gates the
- *   start check, which asks whether the card's free memory — measured *after* vLLM's own CUDA context
- *   exists — covers `share × total`. Sized from what still has to be placed, that check asks "does the
- *   model fit next to the context?", whatever the context takes on this host. A share taken from the
- *   free memory instead failed whenever the context outgrew the margin left (Windows acceptance,
- *   2026-10-06: an RTX 4070 Laptop under WSL had 7.76 GiB free before the container and 6.89 GiB at
- *   vLLM's check; the share 0.9081 asked for 7.26 GiB, and every model failed at start);
- * - checks, before any container, that the weights, that KV cache and vLLM's own overhead fit the
- *   free memory — the same rule the compatibility check (`POST /models/vllm/check`) applies.
+ * - gives vLLM (unless the memory share setting fixes it) the share of the card that is free right
+ *   before the container is created, less a margin larger than vLLM's own CUDA context: `min(0.95, (free − 1.5 GiB) / total)` (on a card with
+ *   the host's memory, never more than half of it). Within that share vLLM places the weights and
+ *   activations and gives the rest to the KV cache, sized by vLLM itself — it knows every model's KV
+ *   shape, hybrid ones (Qwen3.5's linear attention) included. Core passes `--kv-cache-memory-bytes`
+ *   only when the KV cache size setting fixes it. (Core sized the KV cache in bytes at first, from the
+ *   attention layers only; for Qwen3.5 that was a third of what vLLM needs, and every load failed —
+ *   Windows acceptance, 2026-10-06. The 1.5 GiB margin comes from the same run: the context took 0.87
+ *   GiB under WSL on an RTX 4070 Laptop, more than the first 512 MiB.)
+ * - checks, before any container, that the weights, an estimate of the KV cache (context × concurrent
+ *   requests × the model's per-token KV bytes over its attention layers, or the KV cache size setting)
+ *   and vLLM's own overhead fit the free memory — the same rule the compatibility check
+ *   (`POST /models/vllm/check`) applies. It is an estimate for the verdict and the refusal before a
+ *   container; it no longer sizes anything vLLM runs with.
  *
- * The overhead (~2 GiB: CUDA context, activations, sampler, graphs) and the margin are first
- * estimates; the live run of task 6.1 confirms or changes them, with the numbers in the change's
- * rulings.
+ * The overhead (~2 GiB: CUDA context, activations, sampler, graphs) and the margins are first
+ * estimates; the live run of task 6.1 records the numbers (`summary.json`).
  */
 import type { GpuFacts } from '../../contracts/index.js'
 import {
@@ -49,6 +47,11 @@ const MiB = 1024 ** 2
 export const VLLM_ENGINE_OVERHEAD_BYTES = 2 * GiB
 /** Counted as needed in the memory check: what other processes may still take meanwhile. */
 export const VLLM_FREE_MEMORY_MARGIN_BYTES = 512 * MiB
+/**
+ * Left out of the share vLLM is given: more than vLLM's own CUDA context, which already holds memory
+ * when vLLM checks the share at start (0.87 GiB under WSL on an RTX 4070 Laptop, 2026-10-06).
+ */
+export const VLLM_START_CHECK_MARGIN_BYTES = 1536 * MiB
 /** The highest share of a card vLLM is ever given. */
 export const VLLM_MAX_GPU_MEMORY_UTILIZATION = 0.95
 /** On a card with the host's memory: contexts the KV cache holds, as for TensorRT-LLM (design D9). */
@@ -64,21 +67,27 @@ function supportsFp8Kv(computeCapability: string): boolean {
   return major > 8 || (major === 8 && (minor ?? 0) >= 9)
 }
 
-/** The tokens the KV cache holds: the limit, else context × requests (two contexts on unified memory). */
+/** The tokens the KV cache estimate covers: context × requests (two contexts on unified memory). */
 export function vllmKvTokens(settings: VllmSettings, unifiedMemory: boolean): number {
-  if (settings.kv_cache_max_tokens !== null) return settings.kv_cache_max_tokens
   return unifiedMemory
     ? settings.context_length * VLLM_UNIFIED_KV_CONTEXTS
     : settings.context_length * settings.max_num_seqs
 }
 
-/** The KV cache in bytes for this checkpoint, settings and card, and whether the model's shape sized it. */
+/**
+ * The KV cache the memory check counts: the KV cache size setting when set, else an estimate from the
+ * model's attention layers — and whether the model's shape sized it. vLLM sizes its own KV cache
+ * unless the setting fixes it, so this only feeds the check's verdict.
+ */
 export function vllmKvCacheBytes(
   checkpoint: { configJson: JsonObject; hfQuantConfigJson: JsonObject | null; weightBytesTotal?: number },
   settings: VllmSettings,
   gpu: GpuFacts,
   unifiedMemory: boolean
 ): { bytes: number; basis: KvReserveBasis } {
+  if (settings.kv_cache_memory_gib !== null) {
+    return { bytes: Math.round(settings.kv_cache_memory_gib * GiB), basis: 'config' }
+  }
   const shape = readKvCacheShape(checkpoint.configJson)
   if (shape === undefined) {
     const weights = checkpoint.weightBytesTotal ?? 0
@@ -146,17 +155,15 @@ function isMultimodal(configJson: JsonObject): boolean {
   )
 }
 
-/**
- * `--gpu-memory-utilization`: the share of the card vLLM places after its start check — the weights on
- * the card and the KV cache — rounded up, so vLLM's check asks for at least that (see the file banner).
- */
-export function vllmGpuMemoryUtilization(gpu: GpuFacts, host: HostMemory, placedBytes: number): number {
+/** `--gpu-memory-utilization` from the card as it stands now (see the file banner). */
+export function vllmGpuMemoryUtilization(gpu: GpuFacts, host: HostMemory): number {
   const total = totalMemoryBytes(gpu, host)
   if (total <= 0) return VLLM_MAX_GPU_MEMORY_UTILIZATION
-  let share = Math.min(VLLM_MAX_GPU_MEMORY_UTILIZATION, placedBytes / total)
+  let available = freeMemoryBytes(gpu, host) - VLLM_START_CHECK_MARGIN_BYTES
   // On the host's memory, half of it stays the system's (the same rule as TensorRT-LLM's).
-  if (isUnifiedMemory(gpu)) share = Math.min(share, 0.5)
-  return Math.max(0.01, Math.ceil(share * 10_000) / 10_000)
+  if (isUnifiedMemory(gpu)) available = Math.min(available, total / 2)
+  const share = Math.min(VLLM_MAX_GPU_MEMORY_UTILIZATION, available / total)
+  return Math.max(0.01, Math.floor(share * 10_000) / 10_000)
 }
 
 /** The launch plan `beforeCreate` hands the adapter, from the card re-probed right before the container. */
@@ -166,12 +173,10 @@ export function vllmLaunchPlan(
   gpu: GpuFacts,
   host: HostMemory
 ): VllmLaunchPlan {
-  const unified = isUnifiedMemory(gpu)
-  const kvCacheMemoryBytes = vllmKvCacheBytes(checkpoint, settings, gpu, unified).bytes
-  const { weightsOnCard } = vllmWeightsOnCard(checkpoint, settings, unified)
   return {
-    kvCacheMemoryBytes,
-    gpuMemoryUtilization: vllmGpuMemoryUtilization(gpu, host, weightsOnCard + kvCacheMemoryBytes),
+    kvCacheMemoryBytes:
+      settings.kv_cache_memory_gib === null ? null : Math.round(settings.kv_cache_memory_gib * GiB),
+    gpuMemoryUtilization: settings.gpu_memory_utilization ?? vllmGpuMemoryUtilization(gpu, host),
     multimodal: isMultimodal(checkpoint.configJson),
   }
 }

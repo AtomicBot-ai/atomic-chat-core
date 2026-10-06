@@ -239,15 +239,23 @@ describe.skipIf(!ENABLED)('live vLLM (ATOMIC_LIVE=1)', () => {
       expect(facts.restart_policy).toBe('no')
       expect(facts.published_host_ips.every((ip) => ip === '127.0.0.1')).toBe(true)
       const flag = (name: string) => facts.command[facts.command.indexOf(name) + 1]
-      S.summary['kv_cache_memory_bytes'] = Number(flag('--kv-cache-memory-bytes'))
+      S.summary['kv_cache_memory_bytes'] = facts.command.includes('--kv-cache-memory-bytes')
+        ? Number(flag('--kv-cache-memory-bytes'))
+        : null
       S.summary['gpu_memory_utilization'] = Number(flag('--gpu-memory-utilization'))
       S.summary['shm_size_bytes'] = facts.shm_size_bytes
       // The engine's own first-start log, for test/helpers/vllm-log-fixtures.ts (task 6.1).
       const logs = await core().api.get<{ log_tail: string }>(`/models/vllm/${S.model?.id}/logs`)
       writeFileSync(join(S.out, 'vllm-start.log'), logs.body.log_tail)
-      // vLLM's own free-memory reading at its start check, after its CUDA context exists.
-      const atCheck = /Initial free memory ([\d.]+) GiB/.exec(logs.body.log_tail)
+      // vLLM's own free-memory reading at its start check, after its CUDA context exists ("Free memory
+      // on device (X/Y GiB) on startup" when it sizes the KV cache, "Initial free memory X GiB" when
+      // the KV cache size setting fixes it), and the KV cache it gave itself.
+      const atCheck =
+        /Free memory on device(?: [^\s(]+)? \(([\d.]+)\/[\d.]+ GiB\) on startup\./.exec(logs.body.log_tail) ??
+        /Initial free memory ([\d.]+) GiB/.exec(logs.body.log_tail)
       S.summary['vllm_free_gib_at_start_check'] = atCheck === null ? null : Number(atCheck[1])
+      const kvAvailable = /Available KV cache memory: ([\d.]+) GiB/.exec(logs.body.log_tail)
+      S.summary['vllm_kv_cache_gib'] = kvAvailable === null ? null : Number(kvAvailable[1])
     },
     5 * MIN
   )

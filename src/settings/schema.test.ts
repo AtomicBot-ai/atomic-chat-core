@@ -53,7 +53,7 @@ describe('settingsSchema', () => {
     ['mlx', 11],
     ['foundation-models', 0],
     ['tensorrt-llm', 18],
-    ['vllm', 19],
+    ['vllm', 20],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -147,13 +147,14 @@ describe('defaultSettingValues', () => {
       default_min_p: '',
       default_repetition_penalty: '',
     })
-    // vLLM (change add-vllm-runtime): no memory fraction — core sizes the KV cache in bytes itself.
+    // vLLM (change add-vllm-runtime): KV cache size and memory share are 0 — vLLM's own and core's auto.
     expect(defaultSettingValues('vllm')).toEqual({
       gpu_id: '',
       context_length: 8192,
       max_output_tokens: 4096,
       max_num_seqs: 1,
-      kv_cache_max_tokens: 0,
+      kv_cache_memory_gib: 0,
+      gpu_memory_utilization: 0,
       cuda_graphs: 'auto',
       kv_cache_dtype: 'auto',
       load_timeout_seconds: 0,

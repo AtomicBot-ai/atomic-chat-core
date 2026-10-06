@@ -19,8 +19,17 @@ export interface VllmSettings {
   max_output_tokens: number
   /** `--max-num-seqs`. */
   max_num_seqs: number
-  /** `null` sizes the KV cache as `context_length × max_num_seqs` tokens. */
-  kv_cache_max_tokens: number | null
+  /**
+   * `--kv-cache-memory-bytes`, in GiB; `null` passes nothing, and vLLM sizes the KV cache itself from
+   * the memory its share of the card leaves after the weights (it knows every model's KV shape,
+   * hybrid ones included).
+   */
+  kv_cache_memory_gib: number | null
+  /**
+   * `--gpu-memory-utilization`: the share of the card vLLM may take; `null` (auto) lets core compute it
+   * from the card's free memory right before the container (`vllmGpuMemoryUtilization`).
+   */
+  gpu_memory_utilization: number | null
   cuda_graphs: 'auto' | 'on' | 'off'
   kv_cache_dtype: 'auto' | 'fp8'
   /** Seconds. `null` leaves the adapter's own weight-based estimate in force. */
@@ -52,7 +61,8 @@ const KEYS = [
   'context_length',
   'max_output_tokens',
   'max_num_seqs',
-  'kv_cache_max_tokens',
+  'kv_cache_memory_gib',
+  'gpu_memory_utilization',
   'cuda_graphs',
   'kv_cache_dtype',
   'load_timeout_seconds',
@@ -69,9 +79,10 @@ const DEFAULTS: VllmSettings = {
   gpu_id: null,
   context_length: 8192,
   max_output_tokens: 4096,
-  // One request at a time (owner's decision): the KV cache is sized for one full context.
+  // One request at a time (owner's decision).
   max_num_seqs: 1,
-  kv_cache_max_tokens: null,
+  kv_cache_memory_gib: null,
+  gpu_memory_utilization: null,
   cuda_graphs: 'auto',
   kv_cache_dtype: 'auto',
   load_timeout_seconds: null,
@@ -137,8 +148,20 @@ export function validateVllmSettings(raw: Record<string, unknown>): VllmSettings
     settings.max_output_tokens = integer('max_output_tokens', raw['max_output_tokens'], 1, 1_048_576)
   if (raw['max_num_seqs'] !== undefined)
     settings.max_num_seqs = integer('max_num_seqs', raw['max_num_seqs'], 1, 256)
-  if (raw['kv_cache_max_tokens'] !== undefined && raw['kv_cache_max_tokens'] !== null)
-    settings.kv_cache_max_tokens = integer('kv_cache_max_tokens', raw['kv_cache_max_tokens'], 1, 16_777_216)
+  if (raw['kv_cache_memory_gib'] !== undefined && raw['kv_cache_memory_gib'] !== null)
+    settings.kv_cache_memory_gib = decimal(
+      'kv_cache_memory_gib',
+      raw['kv_cache_memory_gib'],
+      (n) => n > 0 && n <= 1024,
+      'above 0 and at most 1024'
+    )
+  if (raw['gpu_memory_utilization'] !== undefined && raw['gpu_memory_utilization'] !== null)
+    settings.gpu_memory_utilization = decimal(
+      'gpu_memory_utilization',
+      raw['gpu_memory_utilization'],
+      (n) => n > 0 && n <= 1,
+      'above 0 and at most 1'
+    )
   if (raw['cuda_graphs'] !== undefined)
     settings.cuda_graphs = oneOf('cuda_graphs', raw['cuda_graphs'], ['auto', 'on', 'off'])
   if (raw['kv_cache_dtype'] !== undefined)
@@ -195,7 +218,8 @@ export function vllmSettings(
   }
   if (typeof merged['gpu_id'] === 'string' && merged['gpu_id'].trim() === '') merged['gpu_id'] = null
   if (merged['load_timeout_seconds'] === 0) merged['load_timeout_seconds'] = null
-  if (merged['kv_cache_max_tokens'] === 0) merged['kv_cache_max_tokens'] = null
+  if (merged['kv_cache_memory_gib'] === 0) merged['kv_cache_memory_gib'] = null
+  if (merged['gpu_memory_utilization'] === 0) merged['gpu_memory_utilization'] = null
   if (merged['max_num_batched_tokens'] === 0) merged['max_num_batched_tokens'] = null
   if (merged['seed'] === 0) merged['seed'] = null
   for (const key of Object.values(GENERATION_DEFAULT_KEYS)) {
