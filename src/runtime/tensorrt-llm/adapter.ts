@@ -120,7 +120,14 @@
  */
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
-import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION, ManagedRequestRefusal } from '../managed-text/index.js'
+import {
+  MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
+  ManagedRequestRefusal,
+  asksForStructuredOutput,
+  asksForTools,
+  reasoningIntoContent,
+  thinkingRequested,
+} from '../managed-text/index.js'
 import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION, tensorrtLlmUnifiedKvMaxTokens } from './kv-cache.js'
 import type {
   ManagedEngineLaunch,
@@ -929,31 +936,6 @@ function readCandidateField(body: Record<string, unknown>, key: string): Candida
 }
 
 /**
- * What asks for tool calls: a non-empty `tools` list, or a `tool_choice` other than `"none"`. An
- * empty list and `"none"` ask for nothing, so they pass (the same rule `:1337` applies).
- */
-function asksForTools(body: Record<string, unknown>): boolean {
-  const tools = body['tools']
-  const choice = body['tool_choice']
-  return (
-    (Array.isArray(tools) && tools.length > 0) ||
-    (choice !== undefined && choice !== null && choice !== 'none')
-  )
-}
-
-/**
- * `response_format` asking for constrained output: anything but `{"type": "text"}` — OpenAI's
- * `json_schema`/`json_object`, `trtllm-serve`'s own `json`/`regex`/`ebnf`/`structural_tag`
- * (`openai_protocol.py`'s `ResponseFormat`), and any type this core does not know (final review I-2).
- * The same rule `:1337` applies (`server/public/policy.ts`).
- */
-function asksForStructuredOutput(body: Record<string, unknown>): boolean {
-  const format = body['response_format']
-  if (format === null || typeof format !== 'object' || Array.isArray(format)) return false
-  return (format as { type?: unknown }).type !== 'text'
-}
-
-/**
  * Refuses, on the session gateway itself, what this session cannot do (findings-2.14-r1.md item 1;
  * spec "запрос с `tools` к этой модели получает ошибку о неподдерживаемой возможности, а не молча
  * игнорируется"): tool calls without a tool-call parser, JSON output without structured-output support
@@ -1034,39 +1016,8 @@ function unwrapJsonSchemaFormat(format: unknown): unknown {
  */
 export const TENSORRT_LLM_REASONING_AT_START_PARSERS: ReadonlySet<string> = new Set(['qwen3_5'])
 
-/** Whether a chat request turned thinking on (`chat_template_kwargs.enable_thinking`, or top level). */
-function thinkingRequested(body: unknown): boolean {
-  if (body === null || typeof body !== 'object') return false
-  const record = body as Record<string, unknown>
-  const kwargs = record['chat_template_kwargs']
-  if (
-    kwargs !== null &&
-    typeof kwargs === 'object' &&
-    (kwargs as Record<string, unknown>)['enable_thinking'] === true
-  )
-    return true
-  return record['enable_thinking'] === true
-}
-
-/** Moves `reasoning_content` into `content` on every choice's `message` and stream `delta`. */
-export function tensorrtLlmReasoningIntoContent(json: Record<string, unknown>): Record<string, unknown> {
-  const choices = json['choices']
-  if (!Array.isArray(choices)) return json
-  for (const choice of choices) {
-    if (choice === null || typeof choice !== 'object') continue
-    for (const key of ['message', 'delta']) {
-      const part = (choice as Record<string, unknown>)[key]
-      if (part === null || typeof part !== 'object') continue
-      const record = part as Record<string, unknown>
-      const reasoning = record['reasoning_content']
-      if (typeof reasoning !== 'string' || reasoning === '') continue
-      const content = typeof record['content'] === 'string' ? (record['content'] as string) : ''
-      record['content'] = content + reasoning
-      record['reasoning_content'] = null
-    }
-  }
-  return json
-}
+/** Moves a no-thinking reply filed as reasoning back into `content` (the shared rule, `request-rules.ts`). */
+export const tensorrtLlmReasoningIntoContent = reasoningIntoContent
 
 /** The response rewrite for a chat request with thinking off on a reasoning-at-start parser. */
 export function tensorrtLlmRewriteResponseFor(
@@ -1077,7 +1028,7 @@ export function tensorrtLlmRewriteResponseFor(
   if (route !== '/v1/chat/completions') return null
   const parser = family?.reasoning_parser ?? null
   if (parser === null || !TENSORRT_LLM_REASONING_AT_START_PARSERS.has(parser)) return null
-  return thinkingRequested(requestBody) ? null : tensorrtLlmReasoningIntoContent
+  return thinkingRequested(requestBody) ? null : reasoningIntoContent
 }
 
 /**

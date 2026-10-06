@@ -10,8 +10,8 @@
  * cache (`caches/<descriptor_id>/<model id>`) stays valid since the id does not change. A folder
  * without `model.yml` is a download still in progress and stays where it is: the client that started
  * it cleans it up. An id already in the store is a conflict: neither folder is touched, and the
- * conflict is reported (environment diagnostics). Empty folders left behind go, the old root with
- * them once nothing is in it. Every step is idempotent: on the next start there is nothing to move.
+ * conflict is reported (environment diagnostics). The folders a move emptied go — the moved model's
+ * parents, the old root once nothing is in it; a folder left in place is never touched. Every step is idempotent: on the next start there is nothing to move.
  *
  * What runs it is the core's own lock on its data folder (one owner per canonical data folder): the
  * old root and the store are both in that folder, or in that scope's guest folder.
@@ -30,8 +30,11 @@ export interface StoreMigrationFs {
   exists(path: string): Promise<boolean>
   /** Renames `from` to `to` on the same file system, creating `to`'s parent first. */
   move(from: string, to: string): Promise<void>
-  /** Removes every empty folder under `root`, and `root` itself once it is empty; never a file. */
-  pruneEmpty(root: string): Promise<void>
+  /**
+   * Removes `dir` when it is empty, then its parent, and so on up to and including `root`, stopping at
+   * the first that is not empty — never a file, and never a folder no move emptied.
+   */
+  pruneEmptyUpTo(root: string, dir: string): Promise<void>
   /** How a model path is joined: the host's separator, or `/` in the guest. */
   join(root: string, id: string): string
 }
@@ -54,10 +57,15 @@ export async function migrateTensorrtLlmModels(options: {
     }
     await fs.move(source, target)
     result.moved.push(id)
+    // Only what this move emptied: the moved folder's parents, never a folder left in place.
+    await fs.pruneEmptyUpTo(from, parentOf(source))
   }
-  await fs.pruneEmpty(from)
   return result
 }
+
+/** The parent of a path, by either separator (host paths or the guest's `/`). */
+const parentOf = (path: string): string =>
+  path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
 
 const exists = (path: string): Promise<boolean> =>
   stat(path).then(
@@ -91,21 +99,17 @@ export const nodeStoreMigrationFs: StoreMigrationFs = {
     await mkdir(dirname(to), { recursive: true })
     await rename(from, to)
   },
-  async pruneEmpty(root) {
-    const prune = async (dir: string): Promise<boolean> => {
-      const children = await readdir(dir, { withFileTypes: true }).catch(() => null)
-      if (children === null) return false
-      let empty = true
-      for (const child of children) {
-        if (!child.isDirectory() || !(await prune(join(dir, child.name)))) empty = false
-      }
-      if (!empty) return false
-      return rmdir(dir).then(
-        () => true,
-        () => false
+  async pruneEmptyUpTo(root, dir) {
+    for (let current = dir; current.length >= root.length; current = dirname(current)) {
+      if (
+        !(await rmdir(current).then(
+          () => true,
+          () => false
+        ))
       )
+        return
+      if (current === root) return
     }
-    await prune(root)
   },
   join: (root, id) => join(root, ...id.split('/')),
 }
@@ -143,8 +147,15 @@ export function guestStoreMigrationFs(transport: WslDistributionTransport): Stor
         )
       }
     },
-    async pruneEmpty(root) {
-      await run(['find', root, '-depth', '-type', 'd', '-empty', '-delete'])
+    async pruneEmptyUpTo(root, dir) {
+      for (
+        let current = dir;
+        current.length >= root.length;
+        current = current.slice(0, current.lastIndexOf('/'))
+      ) {
+        if ((await run(['rmdir', '--', current])).code !== 0) return
+        if (current === root) return
+      }
     },
     join: (root, id) => `${root}/${id}`,
   }

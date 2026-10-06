@@ -5,7 +5,8 @@
  *
  * - **argv**: `vllm serve <model> --served-model-name <id> --host 0.0.0.0 --port 8000
  *   --max-model-len <ctx> --max-num-seqs <n> --kv-cache-memory-bytes <B> --gpu-memory-utilization <U>
- *   --limit-mm-per-prompt {"image":0,"video":0}`, plus `--enforce-eager` when CUDA graphs are off,
+ *   --override-generation-config {"max_new_tokens":<cap>}`, `--limit-mm-per-prompt {"image":0,"video":0}`
+ *   for a multimodal checkpoint, plus `--enforce-eager` when CUDA graphs are off,
  *   `--kv-cache-dtype fp8` on compute capability 8.9 and newer, and the family's tool-call and
  *   reasoning parsers. `B` and `U` are core's (`plan`, computed by the vLLM memory model from the card
  *   as it stands right before the container is created, design D9): vLLM itself would size its cache
@@ -17,7 +18,8 @@
  *   — under the engine cache, so a second start of the same model reuses the first one's work.
  * - **readiness** `GET /health`; **routes** chat completions, completions and the model list;
  *   requests capped at the output setting, refused for tools without a parser, structured output the
- *   family does not declare, and images; vLLM's context overflow answered as OpenAI's
+ *   family does not declare, and images (a cap the client did not ask for comes from the launch's
+ *   default, so a long prompt is not refused for the room a written cap would take); vLLM's context overflow answered as OpenAI's
  *   `context_length_exceeded` with both numbers.
  *
  * Log lines, exit wording and error bodies follow vLLM 0.31's source (`test/helpers/vllm-log-fixtures.ts`);
@@ -28,6 +30,10 @@ import type { ModelFamilySupport } from '../../contracts/index.js'
 import {
   MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   ManagedRequestRefusal,
+  asksForStructuredOutput,
+  asksForTools,
+  reasoningIntoContent,
+  thinkingRequested,
   type ManagedExitClassification,
   type ManagedLaunchContext,
   type ManagedEngineLaunch,
@@ -52,6 +58,11 @@ export interface VllmLaunchPlan {
   kvCacheMemoryBytes: number
   /** `--gpu-memory-utilization`: what vLLM's start-up check compares the card's free memory against. */
   gpuMemoryUtilization: number
+  /**
+   * The checkpoint has a vision or audio part: `--limit-mm-per-prompt` then reserves nothing for it.
+   * A text-only model gets no multimodal flag at all.
+   */
+  multimodal: boolean
 }
 
 function isPlan(value: unknown): value is VllmLaunchPlan {
@@ -63,7 +74,8 @@ function isPlan(value: unknown): value is VllmLaunchPlan {
     plan['kvCacheMemoryBytes'] > 0 &&
     typeof plan['gpuMemoryUtilization'] === 'number' &&
     plan['gpuMemoryUtilization'] > 0 &&
-    plan['gpuMemoryUtilization'] <= 1
+    plan['gpuMemoryUtilization'] <= 1 &&
+    typeof plan['multimodal'] === 'boolean'
   )
 }
 
@@ -121,9 +133,12 @@ export function buildVllmLaunch(context: ManagedLaunchContext<VllmSettings>): Ma
     String(context.plan.kvCacheMemoryBytes),
     '--gpu-memory-utilization',
     String(Number(context.plan.gpuMemoryUtilization.toFixed(4))),
-    '--limit-mm-per-prompt',
-    JSON.stringify({ image: 0, video: 0 }),
+    // The output cap for a request that names none: vLLM's own default, so a long prompt keeps the
+    // room it has (a cap written into every request would make vLLM refuse input + cap > context).
+    '--override-generation-config',
+    JSON.stringify({ max_new_tokens: settings.max_output_tokens }),
   ]
+  if (context.plan.multimodal) argv.push('--limit-mm-per-prompt', JSON.stringify({ image: 0, video: 0 }))
   if (eager(context)) argv.push('--enforce-eager')
   if (settings.kv_cache_dtype === 'fp8' && supportsFp8Kv(context.gpuComputeCapability)) {
     argv.push('--kv-cache-dtype', 'fp8')
@@ -277,21 +292,6 @@ function positive(body: Record<string, unknown>, key: string): { present: boolea
   return { present: true, value }
 }
 
-function asksForTools(body: Record<string, unknown>): boolean {
-  const tools = body['tools']
-  const choice = body['tool_choice']
-  return (
-    (Array.isArray(tools) && tools.length > 0) ||
-    (choice !== undefined && choice !== null && choice !== 'none')
-  )
-}
-
-function asksForStructuredOutput(body: Record<string, unknown>): boolean {
-  const format = body['response_format']
-  if (format === null || typeof format !== 'object' || Array.isArray(format)) return false
-  return (format as { type?: unknown }).type !== 'text'
-}
-
 /** Any message part that is not text: an image, a video, audio — none of which this engine accepts here. */
 const MEDIA_PART = new Set([
   'image_url',
@@ -322,8 +322,8 @@ function carriesMedia(body: Record<string, unknown>): boolean {
 }
 
 /**
- * Caps the output of every request at `max_output_tokens` (one key, as the client sent it, or
- * `max_tokens` when it sent none), and refuses what the session cannot do with `:1337`'s own wording
+ * Caps the output a request asks for at `max_output_tokens` (one key, as the client sent it); a
+ * request that asks for none is capped by vLLM's launch default instead. Refuses what the session cannot do with `:1337`'s own wording
  * and code: tools without a parser, structured output the family does not declare, images.
  */
 export function vllmRewriteRequestBody(
@@ -353,16 +353,17 @@ export function vllmRewriteRequestBody(
   const cap = settings.max_output_tokens
   if (route === '/v1/completions') {
     const field = positive(client, 'max_tokens')
-    return { ...client, max_tokens: field.present ? Math.min(field.value, cap) : cap }
+    return field.present ? { ...client, max_tokens: Math.min(field.value, cap) } : client
   }
   const legacy = positive(client, 'max_tokens')
   const modern = positive(client, 'max_completion_tokens')
   const asked = [legacy, modern].filter((field) => field.present).map((field) => field.value)
-  const value = asked.length > 0 ? Math.min(cap, ...asked) : cap
+  // Nothing asked: vLLM's launch default (`--override-generation-config`) caps it, within the room left.
+  if (asked.length === 0) return client
   const rest: Record<string, unknown> = { ...client }
   delete rest['max_tokens']
   delete rest['max_completion_tokens']
-  rest[modern.present ? 'max_completion_tokens' : 'max_tokens'] = value
+  rest[modern.present ? 'max_completion_tokens' : 'max_tokens'] = Math.min(cap, ...asked)
   return rest
 }
 
@@ -410,41 +411,6 @@ export function mapVllmContextLengthError(status: number, body: string): object 
  */
 export const VLLM_REASONING_AT_START_PARSERS: ReadonlySet<string> = new Set(['qwen3'])
 
-function thinkingRequested(body: unknown): boolean {
-  if (body === null || typeof body !== 'object') return false
-  const record = body as Record<string, unknown>
-  const kwargs = record['chat_template_kwargs']
-  if (
-    kwargs !== null &&
-    typeof kwargs === 'object' &&
-    (kwargs as Record<string, unknown>)['enable_thinking'] === true
-  )
-    return true
-  return record['enable_thinking'] === true
-}
-
-/** Moves `reasoning_content` into `content` on every choice's `message` and stream `delta`. */
-export function vllmReasoningIntoContent(json: Record<string, unknown>): Record<string, unknown> {
-  const choices = json['choices']
-  if (!Array.isArray(choices)) return json
-  for (const choice of choices) {
-    if (choice === null || typeof choice !== 'object') continue
-    for (const key of ['message', 'delta']) {
-      const part = (choice as Record<string, unknown>)[key]
-      if (part === null || typeof part !== 'object') continue
-      const record = part as Record<string, unknown>
-      for (const field of ['reasoning_content', 'reasoning']) {
-        const reasoning = record[field]
-        if (typeof reasoning !== 'string' || reasoning === '') continue
-        const content = typeof record['content'] === 'string' ? (record['content'] as string) : ''
-        record['content'] = content + reasoning
-        record[field] = null
-      }
-    }
-  }
-  return json
-}
-
 export function vllmRewriteResponseFor(
   route: string,
   requestBody: unknown,
@@ -453,7 +419,7 @@ export function vllmRewriteResponseFor(
   if (route !== '/v1/chat/completions') return null
   const parser = family?.reasoning_parser ?? null
   if (parser === null || !VLLM_REASONING_AT_START_PARSERS.has(parser)) return null
-  return thinkingRequested(requestBody) ? null : vllmReasoningIntoContent
+  return thinkingRequested(requestBody) ? null : reasoningIntoContent
 }
 
 /**
@@ -485,9 +451,11 @@ export const vllmAdapter: ManagedTextAdapter<VllmSettings> = {
   rewriteRequestBody: vllmRewriteRequestBody,
   rewriteResponseFor: vllmRewriteResponseFor,
   mapErrorResponse: (_route, status, body) => mapVllmContextLengthError(status, body),
-  // Everything vLLM is started with; the output cap is the gateway's and the load timeout a load's.
+  // Everything vLLM is started with — the output cap too, its default for a request that names none;
+  // only the load timeout is a load's alone.
   restartKey: (settings) => [
     settings.context_length,
+    settings.max_output_tokens,
     settings.max_num_seqs,
     settings.kv_cache_max_tokens,
     settings.cuda_graphs,

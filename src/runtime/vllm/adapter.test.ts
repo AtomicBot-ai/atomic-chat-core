@@ -22,7 +22,11 @@ const family = (over: Partial<ModelFamilySupport> = {}): ModelFamilySupport => (
   structured_output: true,
   ...over,
 })
-const PLAN: VllmLaunchPlan = { kvCacheMemoryBytes: 1_610_612_736, gpuMemoryUtilization: 0.87 }
+const PLAN: VllmLaunchPlan = {
+  kvCacheMemoryBytes: 1_610_612_736,
+  gpuMemoryUtilization: 0.87,
+  multimodal: true,
+}
 const context = (
   over: Partial<ManagedLaunchContext<VllmSettings>> = {}
 ): ManagedLaunchContext<VllmSettings> => ({
@@ -90,8 +94,14 @@ describe('buildLaunch: argv', () => {
     })
   })
 
-  it('accepts text only: no memory is reserved for images or video', () => {
+  it('accepts text only: a multimodal model reserves nothing for images or video; a text-only one gets no multimodal flag', () => {
     expect(flag(argvOf(), '--limit-mm-per-prompt')).toBe('{"image":0,"video":0}')
+    expect(argvOf({ plan: { ...PLAN, multimodal: false } })).not.toContain('--limit-mm-per-prompt')
+  })
+
+  it('caps a reply the client did not cap through vLLM’s own default, so a long prompt keeps the room it has', () => {
+    const argv = argvOf({ settings: vllmSettings({ max_output_tokens: 1000 }) })
+    expect(flag(argv, '--override-generation-config')).toBe('{"max_new_tokens":1000}')
   })
 
   it('FP8 KV only on compute capability 8.9 and newer; the model’s own precision elsewhere', () => {
@@ -176,8 +186,15 @@ describe('the gateway routes and request rewrites', () => {
     ])
   })
 
-  it('caps the output of every request at the setting, and writes it when the client sent none', () => {
-    expect(rewrite('/v1/chat/completions', { messages: [] })).toEqual({ messages: [], max_tokens: 1000 })
+  it('caps the output a client asks for at the setting, and adds none when it asked for none', () => {
+    // vLLM refuses input + max_tokens over the context: a cap written into every request would refuse a
+    // long prompt that still fits. The launch's default cap covers the request that names none.
+    expect(rewrite('/v1/chat/completions', { messages: [] })).toEqual({ messages: [] })
+    expect(rewrite('/v1/completions', { prompt: 'x' })).toEqual({ prompt: 'x' })
+    expect(rewrite('/v1/chat/completions', { messages: [], max_tokens: 5000 })).toEqual({
+      messages: [],
+      max_tokens: 1000,
+    })
     expect(rewrite('/v1/chat/completions', { messages: [], max_completion_tokens: 5000 })).toEqual({
       messages: [],
       max_completion_tokens: 1000,
@@ -296,10 +313,10 @@ describe('Этапы и таймаут загрузки vLLM', () => {
 })
 
 describe('restartKey', () => {
-  it('every setting but the output cap and the load timeout restarts the container', () => {
+  it('every setting but the load timeout restarts the container (the output cap is a launch default too)', () => {
     const key = (stored: Record<string, unknown>) =>
       JSON.stringify(vllmAdapter.restartKey?.(vllmSettings(stored)))
-    expect(key({ max_output_tokens: 100 })).toBe(key({ max_output_tokens: 200 }))
+    expect(key({ max_output_tokens: 100 })).not.toBe(key({ max_output_tokens: 200 }))
     expect(key({ load_timeout_seconds: 60 })).toBe(key({}))
     expect(key({ context_length: 16384 })).not.toBe(key({}))
     expect(key({ max_num_seqs: 2 })).not.toBe(key({}))

@@ -23,6 +23,7 @@ import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
   createStoreMigration,
   leftoverContainers,
+  windowsStoreMigration,
   managedEngineRegistry,
   managedModelDeleter,
   managedModelExclusivity,
@@ -1218,12 +1219,16 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
     }
     const logged: string[] = []
     const migration = createStoreMigration((level, message) => logged.push(`${level}: ${message}`))
+    // Watching starts nothing: a core start never boots WSL for the move.
     migration.onWindows(flaky)
-    await vi.waitFor(() => expect(logged.some((line) => line.includes('failed'))).toBe(true))
+    expect(failures).toBe(1)
+    // The first look fails to move, and is answered anyway: the store is used as it is.
+    await expect(windowsStoreMigration(flaky)).resolves.toBeNull()
+    expect(logged.some((line) => line.includes('failed'))).toBe(true)
     expect(migration.current()).toBeNull()
 
-    migration.onWindows(flaky)
-    await vi.waitFor(() => expect(migration.current()?.moved).toEqual(['acme/m']))
+    expect((await windowsStoreMigration(flaky))?.moved).toEqual(['acme/m'])
+    expect(migration.current()?.moved).toEqual(['acme/m'])
     expect(logged.some((line) => line.startsWith('info: Moved 1 model(s)'))).toBe(true)
     const guest = context.wsl.distribution('AtomicChat')
     const exists = async (path: string) => (await guest.exec(['test', '-e', path])).code === 0

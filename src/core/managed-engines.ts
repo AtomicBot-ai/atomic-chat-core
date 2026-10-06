@@ -118,9 +118,13 @@ export function managedEngineRegistry(): ManagedEngineRegistry {
   return registry
 }
 
+/** The registry the external route policy reads: built once, the specs never change at runtime. */
+let externalPolicyEngines: ManagedEngineRegistry | null = null
+
 /** A managed provider's route policy for a session it did not start (one the app registered). */
 export function managedExternalRoutePolicy(provider: string): SessionRoutePolicy | undefined {
-  return managedEngineRegistry().get(provider)?.routePolicy(null)
+  externalPolicyEngines ??= managedEngineRegistry()
+  return externalPolicyEngines.get(provider)?.routePolicy(null)
 }
 
 /**
@@ -160,14 +164,18 @@ async function windowsDistribution(
 /**
  * The move of this scope's TensorRT-LLM models into the store in the guest (change `add-vllm-runtime`,
  * design D5), once per core, before the first look at the store: run in the guest, with the
- * distribution held for it. No distribution, nothing to move.
+ * distribution held for it — and only then, so a core start never boots WSL just for it. No
+ * distribution, nothing to move. A failure is tried again on the next look, never cached, and never
+ * stops that look: the store is used as it is meanwhile. Whoever watches the context
+ * (`createStoreMigration`) hears how each attempt went.
  */
 const windowsMigrations = new WeakMap<WindowsManagedContext, Promise<ManagedStoreMigration | null>>()
+const windowsMigrationWatchers = new WeakMap<
+  WindowsManagedContext,
+  { done: (result: ManagedStoreMigration) => void; failed: (error: unknown) => void }
+>()
 
-export function windowsStoreMigration(
-  context: WindowsManagedContext,
-  onResult?: (result: ManagedStoreMigration) => void
-): Promise<ManagedStoreMigration | null> {
+export function windowsStoreMigration(context: WindowsManagedContext): Promise<ManagedStoreMigration | null> {
   const known = windowsMigrations.get(context)
   if (known !== undefined) return known
   const run = (async (): Promise<ManagedStoreMigration | null> => {
@@ -182,28 +190,26 @@ export function windowsStoreMigration(
         to: guestModelsRoot(key),
         fs: guestStoreMigrationFs(context.wsl.distribution(name)),
       })
-      onResult?.(result)
+      windowsMigrationWatchers.get(context)?.done(result)
       return result
     } finally {
       lease.release()
     }
   })()
-  // A failure is tried again on the next look, never cached.
-  windowsMigrations.set(
-    context,
-    run.catch((error: unknown) => {
-      windowsMigrations.delete(context)
-      throw error
-    })
-  )
-  return windowsMigrations.get(context) as Promise<ManagedStoreMigration | null>
+  const settled = run.catch((error: unknown) => {
+    windowsMigrations.delete(context)
+    windowsMigrationWatchers.get(context)?.failed(error)
+    return null
+  })
+  windowsMigrations.set(context, settled)
+  return settled
 }
 
 /**
  * The move of TensorRT-LLM's models into the managed model store, as `create.ts` runs it (change
  * `add-vllm-runtime`, design D5): on Linux (and any data folder off Windows) at startup, before the
- * environment and the engines are wired, under the core's lock on its data folder; on Windows in the
- * guest, once the managed providers exist, before the first look at the store. What it did is logged
+ * environment and the engines are wired, under the core's lock on its data folder; on Windows it
+ * watches the move the guest runs on the first look at the store. What it did is logged
  * and kept for the environment diagnostics (`current`); a failure is a warning, never a failed start.
  */
 export function createStoreMigration(log: CoreLogger): {
@@ -238,8 +244,9 @@ export function createStoreMigration(log: CoreLogger): {
         fs: nodeStoreMigrationFs,
       }).then(record, failed)
     },
+    // Watches only: the move itself runs on the first look at the store (`windowsStoreMigration`).
     onWindows: (context) => {
-      void windowsStoreMigration(context, record).catch(failed)
+      windowsMigrationWatchers.set(context, { done: record, failed })
     },
   }
 }
@@ -501,7 +508,7 @@ export function managedModelLocation(
 ): () => Promise<ManagedModelLocation> {
   if (platform === 'win32' && windows !== undefined) {
     return async () => {
-      await windowsStoreMigration(windows).catch(() => null)
+      await windowsStoreMigration(windows)
       return windowsModelLocation({
         records: windows.records,
         scopeKey: windows.scopeKey,

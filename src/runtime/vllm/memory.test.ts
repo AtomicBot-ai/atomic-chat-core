@@ -12,8 +12,9 @@ import {
   vllmCheckEngine,
   vllmKvCacheBytes,
   vllmLaunchPlan,
-  vllmModelCheck,
 } from './memory.js'
+import { managedModelCheckOf } from '../managed-engines/index.js'
+import { VLLM_ENGINE } from './engine.js'
 import { vllmSettings } from './settings.js'
 
 /** Change `add-vllm-runtime`, task 3.3 (design D9; spec `vllm-runtime`, "Память vLLM задаёт core"). */
@@ -166,7 +167,8 @@ describe('the vllm check (same skeleton, vLLM’s memory rule)', () => {
   it('Модель не помещается: weights and KV over the free memory — MODEL_INCOMPATIBLE with needed and free bytes', () => {
     const verdict = check(weights(5 * GiB), card({ free_vram_bytes: 6.5 * GiB }))
     const kv = 4096 * 2 * PER_TOKEN_BF16
-    const needed = 5 * GiB + kv + VLLM_ENGINE_OVERHEAD_BYTES
+    // The margin left free when vLLM's share is computed is part of what the card must hold.
+    const needed = 5 * GiB + kv + VLLM_ENGINE_OVERHEAD_BYTES + VLLM_FREE_MEMORY_MARGIN_BYTES
     expect(verdict.verdict).toMatchObject({
       ok: false,
       error: { code: 'MODEL_INCOMPATIBLE', details: expect.stringContaining(`needed_bytes=${needed}`) },
@@ -207,6 +209,41 @@ describe('the vllm check (same skeleton, vLLM’s memory rule)', () => {
     expect(viaTrt.verdict).toMatchObject({ ok: false, error: { code: 'MODEL_INCOMPATIBLE' } })
   })
 
+  it('on a card with the host’s memory it counts only the half of RAM the launch gives vLLM', () => {
+    const gb10 = card({ total_vram_bytes: null, free_vram_bytes: null })
+    const host = { availableBytes: 100 * GiB, totalBytes: 120 * GiB }
+    const run = (bytes: number) =>
+      checkCheckpoint(
+        {
+          repository: 'acme/model',
+          revision: 'main',
+          config_json: config(),
+          hf_quant_config_json: null,
+          files: weights(bytes),
+        },
+        VLLM,
+        [gb10],
+        host,
+        vllmCheckEngine(vllmSettings({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 2 }))
+      )
+    expect(run(50 * GiB).verdict).toEqual({ ok: true })
+    // 70 GiB of weights fit the 100 GiB available, not the 60 GiB half of the host vLLM is given.
+    expect(run(70 * GiB).verdict).toMatchObject({ ok: false, error: { code: 'MODEL_INCOMPATIBLE' } })
+  })
+
+  it('marks a checkpoint with a vision or audio part as multimodal in the plan, a text-only one not', () => {
+    const plan = (extra: Record<string, unknown>) =>
+      vllmLaunchPlan(
+        vllmSettings({}),
+        { weightBytesTotal: GiB, configJson: config(extra), hfQuantConfigJson: null },
+        card(),
+        HOST
+      )
+    expect(plan({}).multimodal).toBe(false)
+    expect(plan({ architectures: ['Qwen3_5ForConditionalGeneration'] }).multimodal).toBe(true)
+    expect(plan({ vision_config: { depth: 2 } }).multimodal).toBe(true)
+  })
+
   it('a curated model is held to the vllm descriptor’s inventory_digest', () => {
     const curated = VLLM.curated_models.find((model) => model.repository === 'Qwen/Qwen3.5-2B')
     const verdict = checkCheckpoint(
@@ -231,7 +268,7 @@ describe('the vllm check (same skeleton, vLLM’s memory rule)', () => {
     )
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
     const verdict = await checkManagedModel(
-      vllmModelCheck,
+      managedModelCheckOf(VLLM_ENGINE),
       {
         repository: 'acme/model',
         revision: 'main',

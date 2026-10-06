@@ -73,6 +73,21 @@ describe('migrateTensorrtLlmModels on Linux', () => {
     expect(await readFile(join(target, 'a.txt'), 'utf8')).toBe('new')
   })
 
+  it('leaves a folder it did not move exactly as it was, empty subfolders included', async () => {
+    const source = await model(legacy(), 'acme/m')
+    await mkdir(join(source, 'checkpoints'), { recursive: true })
+    await model(store(), 'acme/m')
+    await mkdir(join(legacy(), 'half', 'onnx'), { recursive: true })
+    await writeFile(join(legacy(), 'half', 'part.safetensors'), 'part')
+    await model(legacy(), 'acme/other')
+
+    await migrateTensorrtLlmModels({ from: legacy(), to: store(), fs: nodeStoreMigrationFs })
+
+    expect(existsSync(join(source, 'checkpoints'))).toBe(true)
+    expect(existsSync(join(legacy(), 'half', 'onnx'))).toBe(true)
+    expect(existsSync(join(store(), 'acme', 'other', 'model.yml'))).toBe(true)
+  })
+
   it('is a no-op on every later start, and without an old root at all', async () => {
     await model(legacy(), 'acme/m')
     await migrateTensorrtLlmModels({ from: legacy(), to: store(), fs: nodeStoreMigrationFs })

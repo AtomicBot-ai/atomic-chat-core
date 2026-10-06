@@ -31,11 +31,10 @@ import {
   type JsonObject,
   type KvReserveBasis,
   type ManagedCheckEngine,
-  type ManagedModelCheckEngine,
   type MemoryNeed,
 } from '../managed-models/index.js'
 import type { VllmLaunchPlan } from './adapter.js'
-import { vllmSettings, type VllmSettings } from './settings.js'
+import type { VllmSettings } from './settings.js'
 
 const GiB = 1024 ** 3
 const MiB = 1024 ** 2
@@ -89,19 +88,47 @@ export function vllmKvCacheBytes(
   return { bytes: perToken * vllmKvTokens(settings, unifiedMemory), basis: 'config' }
 }
 
-/** vLLM's memory rule on `gpu`: weights + KV cache in bytes + its own overhead. */
+/**
+ * vLLM's memory rule on `gpu`: weights + KV cache in bytes + its own overhead, held to the same share
+ * the launch gives vLLM (`vllmGpuMemoryUtilization`): the margin left free counts as needed, and on a
+ * card with the host's memory so does whatever of `MemAvailable` lies beyond half the host's memory —
+ * so the check and the start agree on what fits.
+ */
 export function vllmMemoryNeed(
   gpu: GpuFacts,
   checkpoint: CheckpointMemoryInputs,
-  settings: VllmSettings
+  settings: VllmSettings,
+  host: HostMemory
 ): MemoryNeed {
-  const kv = vllmKvCacheBytes(checkpoint, settings, gpu, isUnifiedMemory(gpu))
-  const neededBytes = checkpoint.weightBytesTotal + kv.bytes + VLLM_ENGINE_OVERHEAD_BYTES
+  const unified = isUnifiedMemory(gpu)
+  const kv = vllmKvCacheBytes(checkpoint, settings, gpu, unified)
+  const systemReserve = unified
+    ? Math.max(0, freeMemoryBytes(gpu, host) - totalMemoryBytes(gpu, host) / 2)
+    : 0
+  const neededBytes =
+    checkpoint.weightBytesTotal +
+    kv.bytes +
+    VLLM_ENGINE_OVERHEAD_BYTES +
+    VLLM_FREE_MEMORY_MARGIN_BYTES +
+    systemReserve
   return {
     neededBytes,
     kvReserveBasis: kv.basis,
-    details: `weight_bytes=${checkpoint.weightBytesTotal} kv_cache_bytes=${kv.bytes} kv_reserve_basis=${kv.basis} engine_overhead_bytes=${VLLM_ENGINE_OVERHEAD_BYTES} needed_bytes=${neededBytes}`,
+    details:
+      `weight_bytes=${checkpoint.weightBytesTotal} kv_cache_bytes=${kv.bytes} kv_reserve_basis=${kv.basis} ` +
+      `engine_overhead_bytes=${VLLM_ENGINE_OVERHEAD_BYTES} free_margin_bytes=${VLLM_FREE_MEMORY_MARGIN_BYTES}` +
+      (unified ? ` system_reserve_bytes=${systemReserve}` : '') +
+      ` needed_bytes=${neededBytes}`,
   }
+}
+
+/** A vision or audio part in the checkpoint: a multimodal architecture, or its encoder's config. */
+function isMultimodal(configJson: JsonObject): boolean {
+  const architectures = Array.isArray(configJson['architectures']) ? configJson['architectures'] : []
+  return (
+    architectures.some((name) => typeof name === 'string' && name.endsWith('ForConditionalGeneration')) ||
+    ['vision_config', 'audio_config', 'vision_tower'].some((key) => key in configJson)
+  )
 }
 
 /** `--gpu-memory-utilization` from the card as it stands now (see the file banner). */
@@ -125,6 +152,7 @@ export function vllmLaunchPlan(
   return {
     kvCacheMemoryBytes: vllmKvCacheBytes(checkpoint, settings, gpu, isUnifiedMemory(gpu)).bytes,
     gpuMemoryUtilization: vllmGpuMemoryUtilization(gpu, host),
+    multimodal: isMultimodal(checkpoint.configJson),
   }
 }
 
@@ -133,13 +161,6 @@ export function vllmCheckEngine(settings: VllmSettings): ManagedCheckEngine {
   return {
     engineId: 'vllm',
     checkpointProblems: () => null,
-    memoryNeed: (gpu, checkpoint) => vllmMemoryNeed(gpu, checkpoint, settings),
+    memoryNeed: (gpu, checkpoint, host) => vllmMemoryNeed(gpu, checkpoint, settings, host),
   }
-}
-
-/** `POST /models/vllm/check`'s side of the engine: its saved card and its memory rule from stored settings. */
-export const vllmModelCheck: ManagedModelCheckEngine = {
-  engineId: 'vllm',
-  gpuIdOf: (settings) => vllmSettings(settings).gpu_id,
-  checkEngineOf: (settings) => vllmCheckEngine(vllmSettings(settings)),
 }

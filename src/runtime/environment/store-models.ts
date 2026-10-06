@@ -8,7 +8,11 @@
 import type { ManagedOperationTarget, ManagedSystemChange } from '../../contracts/index.js'
 import type { InstallationStore } from './installations.js'
 
-/** The engines of the installations other than the one being removed: who still uses the models. */
+/**
+ * The engines of the installations other than the one being removed that use the models: installed
+ * once (an active descriptor) and not being removed. A setup that failed before it ever installed
+ * anything uses nothing.
+ */
 export async function otherEngines(
   installations: Pick<InstallationStore, 'list'>,
   target: Extract<ManagedOperationTarget, { kind: 'runtime' }>
@@ -17,6 +21,9 @@ export async function otherEngines(
   const engines = records
     .map((record) => record.installation)
     .filter((installation) => installation.installation_id !== target.installation_id)
+    .filter(
+      (installation) => installation.active_descriptor_id !== null && installation.status !== 'removing'
+    )
     .map((installation) => installation.engine_id)
   return [...new Set(engines)].sort()
 }
