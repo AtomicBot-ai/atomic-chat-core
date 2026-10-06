@@ -63,7 +63,8 @@ import {
   type DistributionKeeper,
   type GuestMount,
 } from '../runtime/wsl/index.js'
-import type { WindowsTensorrtLlmContext } from './tensorrt-llm.js'
+import type { DescriptorSource } from '../runtime/environment/index.js'
+import type { WindowsManagedContext } from './managed-engines.js'
 
 export interface WireManagedEnvironmentOptions {
   env: NodeJS.ProcessEnv
@@ -75,6 +76,8 @@ export interface WireManagedEnvironmentOptions {
   log: ReconcileLogger
   onWarn?: (message: string) => void
   fetch?: typeof fetch
+  /** The managed engine registry's descriptor sources (change `add-vllm-runtime`, D2); TensorRT-LLM alone when omitted. */
+  engines?: readonly DescriptorSource[]
   /** `AtomicCoreOptions.dockerPath`: the docker CLI, or null for none. Omitted: the system directories. */
   dockerPath?: string | null
   unloadEngineSessions?: UnloadEngineSessions
@@ -91,7 +94,7 @@ export interface ManagedEnvironment {
   /** `process.arch`, or `x64` on the Windows test machine (which stands in for a Windows x64 PC). */
   arch: string
   /** Windows only: what the `tensorrt-llm` provider reaches Atomic Chat's WSL distribution through. */
-  windows?: WindowsTensorrtLlmContext
+  windows?: WindowsManagedContext
 }
 
 /** An engine id becomes one folder name under the data folder; anything else is refused. */
@@ -270,6 +273,7 @@ function wireWindowsEnvironment(
     newId: options.newId,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    ...(options.engines === undefined ? {} : { engines: options.engines }),
     windows: parts,
   })
   return {
@@ -317,6 +321,7 @@ export function wireManagedEnvironment(options: WireManagedEnvironmentOptions): 
     newId: options.newId,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    ...(options.engines === undefined ? {} : { engines: options.engines }),
     linux: linuxProvisionerParts(options, host, containers),
   })
   return { managed, containers, platform, host, arch: process.arch }

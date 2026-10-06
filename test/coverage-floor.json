@@ -275,6 +275,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/core/managed-engines.ts": {
+    "statements": 100,
+    "branches": 87,
+    "functions": 85,
+    "lines": 100
+  },
   "src/core/managed-environment.ts": {
     "statements": 100,
     "branches": 100,
@@ -297,12 +303,6 @@
     "statements": 100,
     "branches": 93,
     "functions": 100,
-    "lines": 100
-  },
-  "src/core/tensorrt-llm.ts": {
-    "statements": 100,
-    "branches": 87,
-    "functions": 85,
     "lines": 100
   },
   "src/credentials/api-keys.ts": {
@@ -1241,6 +1241,12 @@
     "functions": 81,
     "lines": 89
   },
+  "src/runtime/managed-engines/runtime.ts": {
+    "statements": 100,
+    "branches": 88,
+    "functions": 100,
+    "lines": 100
+  },
   "src/runtime/managed-models/check.ts": {
     "statements": 100,
     "branches": 100,
@@ -1430,12 +1436,6 @@
   "src/runtime/tensorrt-llm/route-policy.ts": {
     "statements": 100,
     "branches": 100,
-    "functions": 100,
-    "lines": 100
-  },
-  "src/runtime/tensorrt-llm/runtime.ts": {
-    "statements": 100,
-    "branches": 88,
     "functions": 100,
     "lines": 100
   },

@@ -1,32 +1,33 @@
 /**
- * The `tensorrt-llm` provider (task 2.14, spec `tensorrt-llm-runtime`): a `LocalRuntime` on the
- * engine-neutral managed-text lifecycle (`../managed-text/`), registered by core only on Linux. What
- * this file adds on top of the lifecycle is the provider's own part of a load:
+ * The one `LocalRuntime` every managed engine is (change `add-vllm-runtime`, design D3; before it, the
+ * `tensorrt-llm` provider of change `add-tensorrt-llm-linux`, task 2.14): a provider on the
+ * engine-neutral managed-text lifecycle (`../managed-text/`), parameterized by the engine's
+ * `ManagedEngineSpec` — its adapter, settings, memory rule and route policy. What this file adds on
+ * top of the lifecycle is the provider's own part of a load:
  *
  *  - refusing it before any container exists — no Docker, no `ready` installation
- *    (`MANAGED_ADAPTER_UNAVAILABLE`), settings the adapter rejects (`INVALID_ARGUMENT`), a model that
+ *    (`MANAGED_ADAPTER_UNAVAILABLE`), settings the spec rejects (`INVALID_ARGUMENT`), a model that
  *    is not installed, a host with no NVIDIA card, an embedding request;
  *  - the card: the saved `gpu_id` when the probe still finds it, otherwise the one with the most free
- *    memory, ties by the most total memory (`selectLaunchGpu`, the same rule `POST /check` uses,
- *    design D12b), with the replacement reported on every load event;
+ *    memory, ties by the most total memory (`selectLaunchGpu`, the same rule `POST /check` uses),
+ *    with the replacement reported on every load event;
  *  - one session at a time, and one resident model per card: the lifecycle's `stopping-previous`
- *    stage asks core's GPU residency (`claimGpu`, task 2.15) to stop every other `tensorrt-llm`
- *    model and every other engine on the chosen card, each with a confirmed exit, before this one's
- *    container is created — or, with no residency wired, stops the other `tensorrt-llm` models itself;
+ *    stage asks core's GPU residency (`claimGpu`) to stop every other model of this provider and
+ *    every other engine on the chosen card, each with a confirmed exit, before this one's container
+ *    is created — or, with no residency wired, stops this provider's other models itself;
  *  - what a session can do (`routePolicy`, `capabilities`), read off the pinned descriptor's
- *    `model_families` entry for the model's architecture — never guessed (design D9);
+ *    `model_families` entry for the model's architecture — never guessed;
  *  - never growing a context or recreating a session: a restart of a multi-minute container in the
- *    middle of a conversation is worse than an honest `context_length_exceeded` (design D9);
- *  - the pre-launch check (task 2.16), split in two (round 1, finding 1 (Critical)): before
- *    `stopPrevious` runs, `verifyModelFilesAndCompatibility` (`prelaunch.ts`) re-verifies every file
- *    `model.yml` recorded present on disk at its size, and recomputes architecture/format/compute-
- *    capability against `config.json`/`hf_quant_config.json` as they sit in the model's directory
- *    right now — never memory, which the model this load is about to replace may still be holding on
- *    the very same card. Memory is checked after `stopPrevious`, through the lifecycle's own
- *    `beforeCreate` hook (`checkMemoryBeforeCreate` below), which re-probes the chosen card's free
- *    memory once whatever `stopPrevious` freed is actually free;
+ *    middle of a conversation is worse than an honest `context_length_exceeded`;
+ *  - the pre-launch check, split in two: before `stopPrevious` runs, `verifyModelFilesAndCompatibility`
+ *    (`prelaunch.ts`) re-verifies every file `model.yml` recorded present on disk at its size, and
+ *    recomputes architecture/format/compute-capability against `config.json`/`hf_quant_config.json`
+ *    as they sit in the model's directory right now — never memory, which the model this load is
+ *    about to replace may still be holding on the very same card. Memory is checked after
+ *    `stopPrevious`, through the lifecycle's own `beforeCreate` hook (`checkMemoryBeforeCreate`
+ *    below), by the engine's own memory rule, against a re-probed card;
  *  - `family` (tools/structured output/route policy) is read off the descriptor's `model_families`
- *    entry for the *verified* `config.json` architecture (finding 5) — `model.yml`'s own copy of the
+ *    entry for the *verified* `config.json` architecture — `model.yml`'s own copy of the
  *    architecture is never consulted for this, since the pre-launch check may have found it stale.
  *
  * Everything that touches the machine arrives injected: the lifecycle over the core's one Docker
@@ -55,17 +56,15 @@ import type {
   RecreateResult,
   SessionRoutePolicy,
 } from '../shared/index.js'
-import { tensorrtLlmAdapter } from './adapter.js'
-import { checkModelMemory, selectLaunchGpu } from './compatibility.js'
-import type { MemorySizingInputs, ResolvedCheckpoint } from './compatibility.js'
-import type { TensorrtLlmHostFacts } from './host-facts.js'
-import type { ReadyInstallation } from './installation.js'
-import type { TensorrtLlmModel } from './model-dir.js'
-import { verifyModelFilesAndCompatibility } from './prelaunch.js'
-import { tensorrtLlmRoutePolicy } from './route-policy.js'
-import { tensorrtLlmSettings } from './settings.js'
+import { checkCheckpointMemory, selectLaunchGpu } from '../managed-models/index.js'
+import type { ManagedCheckEngine, ResolvedCheckpoint } from '../managed-models/index.js'
+import type { TensorrtLlmHostFacts } from '../tensorrt-llm/host-facts.js'
+import type { ReadyInstallation } from '../tensorrt-llm/installation.js'
+import type { TensorrtLlmModel } from '../tensorrt-llm/model-dir.js'
+import { verifyModelFilesAndCompatibility } from '../tensorrt-llm/prelaunch.js'
+import type { ManagedEngineSettings, ManagedEngineSpec } from './spec.js'
 
-export interface TensorrtLlmRuntimeDeps {
+export interface ManagedTextRuntimeDeps {
   /**
    * The lifecycle over the core's one Docker executor and journal (the startup handle the setup
    * operation shares), asked at every load: `null` while this host has no docker CLI — a setup that
@@ -78,29 +77,29 @@ export interface TensorrtLlmRuntimeDeps {
   /** The cards and SELinux, asked right before each load: a card can disappear between two loads. */
   hostFacts: () => Promise<TensorrtLlmHostFacts>
   model: (modelId: string) => Promise<TensorrtLlmModel>
-  /** The provider's stored settings (`settings.get('tensorrt-llm')`), read at every load. */
+  /** The provider's stored settings (`settings.get(<provider>)`), read at every load. */
   settings: () => Record<string, unknown>
   /**
    * Core's GPU residency (spec `gpu-residency`), run as the `stopping-previous` stage: frees the chosen
-   * card of every other engine and this provider's other session. Absent, the stage stops only the
-   * other `tensorrt-llm` models, itself.
+   * card of every other engine and this provider's other session. Absent, the stage stops only this
+   * provider's other models, itself.
    */
   claimGpu?: GpuClaimHook
 }
 
 /**
- * `GET /models/tensorrt-llm/:id/capabilities`: the fields every provider's answer has (all false for
- * this engine — no projector, no embedding, no speculative decoding), and the managed engine's own,
- * which the app gates Agent, tools and attachments on (task 3.8).
+ * `GET /models/<managed provider>/:id/capabilities`: the fields every provider's answer has (all false
+ * for a managed engine — no projector, no embedding, no speculative decoding), and the managed engine's
+ * own, which the app gates Agent, tools and attachments on.
  */
-export type TensorrtLlmModelCapabilities = ModelCapabilities &
+export type ManagedModelCapabilities = ModelCapabilities &
   ManagedTextCapabilities & {
     /** The architecture `model.yml` names, which picked the descriptor's `model_families` entry. */
     architecture: string | null
   }
 
-/** `GET /models/tensorrt-llm/:id/logs`: the loaded container's live tail, or the last failed attempt's. */
-export type TensorrtLlmModelLogs =
+/** `GET /models/<managed provider>/:id/logs`: the loaded container's live tail, or the last failed attempt's. */
+export type ManagedModelLogs =
   | { model_id: string; source: 'session'; generation: string; log_tail: string }
   | {
       model_id: string
@@ -142,7 +141,9 @@ function familyFromResolved(
   return architecture === undefined ? null : (ready.descriptor.model_families[architecture] ?? null)
 }
 
-export class TensorrtLlmRuntime implements LocalRuntime {
+export class ManagedTextRuntime<
+  S extends ManagedEngineSettings = ManagedEngineSettings,
+> implements LocalRuntime {
   private current: ManagedTextLifecycle | null = null
   private closed = false
   /** Removals of the engine in progress: while any holds loads off, every load is refused (M-1). */
@@ -161,7 +162,10 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     }
   >()
 
-  constructor(private readonly deps: TensorrtLlmRuntimeDeps) {}
+  constructor(
+    readonly engine: ManagedEngineSpec<S>,
+    private readonly deps: ManagedTextRuntimeDeps
+  ) {}
 
   list(): SessionInfo[] {
     return this.current?.list() ?? []
@@ -185,21 +189,25 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     this.assertNotHeldOff(modelId)
     throwIfLoadCancelled(signal)
     if (opts.isEmbedding) {
-      throw new AtomicCoreError('INVALID_ARGUMENT', 'tensorrt-llm models do not serve embeddings.', modelId)
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `${this.engine.provider} models do not serve embeddings.`,
+        modelId
+      )
     }
     // Validated first, before anything is asked of the machine (spec: schema validation before start).
-    const settings = tensorrtLlmSettings(this.deps.settings(), opts.overrides)
+    const settings = this.engine.settings(this.deps.settings(), opts.overrides)
     const lifecycle = await this.deps.lifecycle().catch((cause: unknown) => {
       throw new AtomicCoreError(
         'MANAGED_ADAPTER_UNAVAILABLE',
-        'The managed container runtime failed to initialise, so tensorrt-llm cannot run models.',
+        `The managed container runtime failed to initialise, so ${this.engine.provider} cannot run models.`,
         cause instanceof Error ? cause.message : String(cause)
       )
     })
     if (lifecycle === null) {
       throw new AtomicCoreError(
         'MANAGED_ADAPTER_UNAVAILABLE',
-        'Docker is not installed on this machine, so tensorrt-llm cannot run models.'
+        `Docker is not installed on this machine, so ${this.engine.provider} cannot run models.`
       )
     }
     // Kept from the first load on: what `list`, `unload` and `shutdown` act on. Nothing is loaded
@@ -216,17 +224,14 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     if (gpu === null) {
       throw new AtomicCoreError(
         'MANAGED_PREREQUISITE_BLOCKED',
-        'No NVIDIA GPU was found on this machine, so tensorrt-llm cannot load a model.'
+        `No NVIDIA GPU was found on this machine, so ${this.engine.provider} cannot load a model.`
       )
     }
     const substituted =
       settings.gpu_id !== null && gpu.gpu_id !== settings.gpu_id
         ? { requested_gpu_id: settings.gpu_id, gpu_id: gpu.gpu_id }
         : undefined
-    const memory: MemorySizingInputs = {
-      contextLength: settings.context_length,
-      kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,
-    }
+    const check = this.engine.check(settings)
 
     // Pre-launch check, phase 1 (task 2.16, spec "Проверка файлов при загрузке"; round 1, finding 1
     // (Critical)): every file model.yml recorded is still on disk at its size, and architecture/
@@ -239,7 +244,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       ready.descriptor,
       facts.gpus,
       facts.memory,
-      { gpuId: gpu.gpu_id, memory }
+      { gpuId: gpu.gpu_id, engine: check }
     )
     throwIfLoadCancelled(signal)
     this.assertOpen()
@@ -278,14 +283,14 @@ export class TensorrtLlmRuntime implements LocalRuntime {
       // Pre-launch check, phase 2 (finding 1): the memory line alone, re-probed fresh once
       // stopPrevious (above) has actually freed the card — never the snapshot `facts` took before
       // eviction, which is why this is a lifecycle hook and not just more code in this function.
-      beforeCreate: () => this.checkMemoryBeforeCreate(gpu.gpu_id, descriptor, resolved, memory),
+      beforeCreate: () => this.checkMemoryBeforeCreate(gpu.gpu_id, descriptor, resolved, check),
       ...(opts.timeoutSecs !== undefined ? { timeoutMs: opts.timeoutSecs * 1000 } : {}),
       ...(signal !== undefined ? { signal } : {}),
       ...(substituted !== undefined ? { gpuSubstituted: substituted } : {}),
     })
     this.sessionCapabilities.set(modelId, {
       generation: session.generation ?? '',
-      capabilities: tensorrtLlmAdapter.capabilities({ settings, family }),
+      capabilities: this.engine.adapter.capabilities({ settings, family }),
       limits: { contextLength: settings.context_length, maxOutputTokens: settings.max_output_tokens },
     })
     return session
@@ -354,7 +359,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     return Promise.reject(
       new AtomicCoreError(
         'INVALID_ARGUMENT',
-        'A tensorrt-llm session is not recreated in place; unload the model and load it again.',
+        `A ${this.engine.provider} session is not recreated in place; unload the model and load it again.`,
         modelId
       )
     )
@@ -371,13 +376,13 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     if (session === undefined) return undefined
     const known = this.sessionCapabilities.get(modelId)
     // A session with no record of what it can do is treated as able to do nothing optional.
-    if (known === undefined || known.generation !== session.generation) return tensorrtLlmRoutePolicy(NONE)
-    return tensorrtLlmRoutePolicy(known.capabilities, known.limits)
+    if (known === undefined || known.generation !== session.generation) return this.engine.routePolicy(NONE)
+    return this.engine.routePolicy(known.capabilities, known.limits)
   }
 
   /** Answers rather than throws, like every provider's capabilities: all false while nothing resolves. */
-  async capabilities(modelId: string): Promise<TensorrtLlmModelCapabilities> {
-    const base: TensorrtLlmModelCapabilities = {
+  async capabilities(modelId: string): Promise<ManagedModelCapabilities> {
+    const base: ManagedModelCapabilities = {
       modelId,
       mmprojExists: false,
       isEmbedding: false,
@@ -391,10 +396,10 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     }
     try {
       const [ready, model] = await Promise.all([this.deps.readyInstallation(), this.deps.model(modelId)])
-      const settings = tensorrtLlmSettings({})
+      const settings = this.engine.settings({})
       return {
         ...base,
-        ...tensorrtLlmAdapter.capabilities({ settings, family: familyOf(ready, model) }),
+        ...this.engine.adapter.capabilities({ settings, family: familyOf(ready, model) }),
         architecture: model.architecture,
       }
     } catch {
@@ -402,7 +407,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     }
   }
 
-  async logs(modelId: string): Promise<TensorrtLlmModelLogs> {
+  async logs(modelId: string): Promise<ManagedModelLogs> {
     const lifecycle = this.current
     const session = lifecycle?.findSession(modelId)
     if (lifecycle && session) {
@@ -427,7 +432,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
 
   private assertOpen(): void {
     if (this.closed) {
-      throw new AtomicCoreError('CORE_NOT_RUNNING', 'The tensorrt-llm provider is shutting down.')
+      throw new AtomicCoreError('CORE_NOT_RUNNING', `The ${this.engine.provider} provider is shutting down.`)
     }
   }
 
@@ -435,7 +440,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     if (this.loadHolds > 0) {
       throw new AtomicCoreError(
         'MANAGED_OPERATION_CONFLICT',
-        'The TensorRT-LLM engine is being removed; load the model once the removal has finished.',
+        `The ${this.engine.label} engine is being removed; load the model once the removal has finished.`,
         modelId
       )
     }
@@ -468,9 +473,9 @@ export class TensorrtLlmRuntime implements LocalRuntime {
 
   /**
    * The `stopping-previous` stage. With core's residency: its claim on `gpuId`, which stops every other
-   * `tensorrt-llm` model (one session at a time) and every other engine on that card, each with a
+   * model of this provider (one session at a time) and every other engine on that card, each with a
    * confirmed exit, and refuses with `GPU_BUSY` while one will not stop. Without it: every other
-   * `tensorrt-llm` model, loading or loaded, stopped with confirmation. Either way the load holds its
+   * model of this provider, loading or loaded, stopped with confirmation. Either way the load holds its
    * card from then on — with residency, from the moment core grants the claim, inside core's turn.
    */
   private async stopOthers(
@@ -512,7 +517,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
     gpuId: string,
     descriptor: RuntimeDescriptor,
     resolved: ResolvedCheckpoint,
-    memory: MemorySizingInputs
+    check: ManagedCheckEngine
   ): Promise<void> {
     const facts = await this.deps.hostFacts()
     if (!facts.gpus.some((gpu) => gpu.gpu_id === gpuId)) {
@@ -522,7 +527,7 @@ export class TensorrtLlmRuntime implements LocalRuntime {
         gpuId
       )
     }
-    const verdict = checkModelMemory(resolved, descriptor, facts.gpus, facts.memory, memory)
+    const verdict = checkCheckpointMemory(resolved, descriptor, facts.gpus, facts.memory, check)
     if (!verdict.verdict.ok) {
       const { code, message, details } = verdict.verdict.error
       throw new AtomicCoreError(code, message, details)

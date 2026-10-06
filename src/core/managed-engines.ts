@@ -1,26 +1,30 @@
 /**
- * Composition of the `tensorrt-llm` provider for `create.ts` (task 2.14): offered only on Linux, on
- * the managed-text lifecycle built over the core's one Docker executor and journal — the startup
- * handle the managed environment (task 2.6) wires, reconciles and hands its setup and removal too,
- * never a second pair — the desktop deployment, this scope's managed paths,
- * `selinuxDataRoot = <data>`, and the public server's live trusted-hosts array.
+ * Composition of the managed providers for `create.ts` (change `add-vllm-runtime`, design D3; before
+ * it, the `tensorrt-llm` provider of change `add-tensorrt-llm-linux`, task 2.14): every engine of the
+ * managed engine registry is wired by `wireManagedEngine` from its `ManagedEngineSpec`, the same way —
+ * offered on Linux and on Windows with Atomic Chat's WSL distribution, on the managed-text lifecycle
+ * built over the core's one Docker executor and journal (the startup handle the managed environment
+ * wires, reconciles and hands its setup and removal too, never a second pair), the desktop or WSL
+ * deployment, this scope's managed paths, `selinuxDataRoot = <data>`, and the public server's live
+ * trusted-hosts array. No branch here names an engine.
  *
  * What it shares with the managed environment rather than duplicating: the installation records
  * (`InstallationStore`, the one reader of that format), the Linux machine (`LinuxHost`, which is the
  * `ATOMIC_MANAGED_TEST_HOST` stand-in machine in the e2e suite, so that hook is read in one place),
- * and, the other way round, `unloadEngineSessions`: a removal of the engine holds its loads off and
- * unloads its loaded model first, through `tensorrtLlmSessionUnloader` and the facade's own unload.
+ * and, the other way round, `unloadEngineSessions`: a removal of an engine holds its loads off and
+ * unloads its loaded model first, through `managedSessionUnloader` and the facade's own unload.
  *
- * `wireTensorrtLlmModelCheck` (task 2.16) composes `POST /models/tensorrt-llm/check`'s deps
- * separately from the runtime above: it shares the installation records, the descriptor provider and
- * `LinuxHost.probeDeps`, but deliberately never touches `containers`/Docker (`check.ts`'s own file
- * banner explains why) and is offered even when the runtime itself would refuse every load.
+ * `wireManagedModelCheck` composes `POST /models/:provider/check`'s deps separately from the runtime:
+ * it shares the installation records, the descriptor provider and `LinuxHost.probeDeps`, but
+ * deliberately never touches `containers`/Docker and is offered even when the runtime itself would
+ * refuse every load.
  *
- * `tensorrtLlmModelDeleter` (task 2.24) is `DELETE /models/tensorrt-llm/:id`: the same hold-and-unload
- * through the facade as the engine removal's unloader, for one model, then its files.
+ * `managedModelDeleter` is the deletion of a downloaded model: the same hold-and-unload through the
+ * facade as the engine removal's unloader, for one model in whichever managed provider holds it, then
+ * its files.
  */
 import { AtomicCoreError } from '../contracts/index.js'
-import type { CoreEvents } from '../contracts/index.js'
+import type { CoreEvents, LocalProviderId } from '../contracts/index.js'
 import type {
   ModelCompatibility,
   TensorrtLlmModelDeletion,
@@ -43,12 +47,7 @@ import type {
   ManagedContainersHandle,
   ReconcileLogger,
 } from '../runtime/container/index.js'
-import {
-  guestProbeDeps,
-  localhostForwardingError,
-  parseWslConfig,
-  TENSORRT_LLM_ENGINE_ID,
-} from '../runtime/environment/index.js'
+import { guestProbeDeps, localhostForwardingError, parseWslConfig } from '../runtime/environment/index.js'
 import type {
   InstallationStore,
   LinuxHost,
@@ -63,11 +62,17 @@ import {
   createDesktopManagedDeployment,
   createWslManagedDeployment,
 } from '../runtime/managed-text/index.js'
-import type { GpuClaimHook, LocalRuntime } from '../runtime/shared/index.js'
+import type { GpuClaimHook } from '../runtime/shared/index.js'
+import { checkManagedModel } from '../runtime/managed-models/index.js'
 import {
+  ManagedEngineRegistry,
+  ManagedTextRuntime,
+  managedModelCheckOf,
+} from '../runtime/managed-engines/index.js'
+import type { ManagedEngineSettings, ManagedEngineSpec } from '../runtime/managed-engines/index.js'
+import {
+  TENSORRT_LLM_ENGINE,
   TensorrtLlmModelRegistry,
-  TensorrtLlmRuntime,
-  checkTensorrtLlmModel,
   containerPlatformFor,
   deleteTensorrtLlmModelFiles,
   guestModelFiles,
@@ -78,7 +83,6 @@ import {
   probeTensorrtLlmHost,
   readTensorrtLlmModel,
   resolveReadyInstallation,
-  tensorrtLlmAdapter,
   windowsModelLocation,
 } from '../runtime/tensorrt-llm/index.js'
 import type { ModelFileOps } from '../runtime/tensorrt-llm/index.js'
@@ -96,12 +100,22 @@ import type { ResidencyOccupant } from './gpu/index.js'
 import type { CoreLogger } from './types.js'
 
 /**
- * What the Windows `tensorrt-llm` wiring reaches Atomic Chat's WSL distribution through (change
+ * The managed engines this core can run, in priority order: every one is wired, checked and removed
+ * the same way. Registration checks the registry's invariants (`engine_id` is the provider id).
+ */
+export function managedEngineRegistry(): ManagedEngineRegistry {
+  const registry = new ManagedEngineRegistry()
+  registry.register(TENSORRT_LLM_ENGINE)
+  return registry
+}
+
+/**
+ * What the Windows wiring of a managed engine reaches Atomic Chat's WSL distribution through (change
  * `add-tensorrt-llm-windows`, task 2.8), built by the managed environment on Windows: the environment
  * record (which distribution, if any yet), the WSL transport, the one keeper per distribution, this
  * scope's `scope_key`, and the Windows machine (its `.wslconfig`, its volumes).
  */
-export interface WindowsTensorrtLlmContext {
+export interface WindowsManagedContext {
   records: { read(): Promise<WindowsEnvironmentRecord | null> }
   wsl: Wsl
   keeper: (distribution: string) => DistributionKeeper
@@ -123,14 +137,14 @@ interface WindowsGuest {
 
 /** The recorded distribution and its transport; null before the import. */
 async function windowsDistribution(
-  context: WindowsTensorrtLlmContext
+  context: WindowsManagedContext
 ): Promise<{ record: WindowsEnvironmentRecord; transport: WslDistributionTransport } | null> {
   const record = await context.records.read()
   return record === null ? null : { record, transport: context.wsl.distribution(record.distribution.name) }
 }
 
 async function windowsGuest(
-  context: WindowsTensorrtLlmContext,
+  context: WindowsManagedContext,
   layout: DataLayout
 ): Promise<WindowsGuest | null> {
   const record = await context.records.read()
@@ -146,10 +160,10 @@ async function windowsGuest(
   }
 }
 
-const notImported = (): AtomicCoreError =>
+const notImported = (label = 'TensorRT-LLM'): AtomicCoreError =>
   new AtomicCoreError(
     'MANAGED_ADAPTER_UNAVAILABLE',
-    'TensorRT-LLM runs in Atomic Chat’s WSL distribution, which is not set up on this computer yet.'
+    `${label} runs in Atomic Chat’s WSL distribution, which is not set up on this computer yet.`
   )
 
 /**
@@ -158,13 +172,10 @@ const notImported = (): AtomicCoreError =>
  * the `linux/arm64` images (NVIDIA RTX Spark N1X, 2026-10-06). The runtime picks the same image by
  * `containerPlatformFor(arch)`.
  */
-const windowsWsl = (
-  platform: NodeJS.Platform,
-  arch: string,
-  context: WindowsTensorrtLlmContext | undefined
-) => platform === 'win32' && containerPlatformFor(arch) !== null && context !== undefined
+const windowsWsl = (platform: NodeJS.Platform, arch: string, context: WindowsManagedContext | undefined) =>
+  platform === 'win32' && containerPlatformFor(arch) !== null && context !== undefined
 
-export interface WireTensorrtLlmOptions {
+export interface WireManagedEngineOptions {
   /** Injected, never `process.platform` read here; the managed environment's (the test host is Linux). */
   platform: NodeJS.Platform
   /** `process.arch`: which of the descriptor's images this host runs. */
@@ -184,7 +195,7 @@ export interface WireTensorrtLlmOptions {
   settings: () => Record<string, unknown>
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
   log: CoreLogger
-  /** Core's GPU residency (task 2.15): the provider's `stopping-previous` stage. */
+  /** Core's GPU residency (spec `gpu-residency`): the provider's `stopping-previous` stage. */
   claimGpu?: GpuClaimHook
   /**
    * The uid:gid this core runs as (`process.getuid`/`getgid`, read by `create.ts`, never here): every
@@ -193,17 +204,23 @@ export interface WireTensorrtLlmOptions {
    */
   containerUser: ContainerUser | null
   /** Windows (change `add-tensorrt-llm-windows`): the WSL context; without it Windows offers nothing. */
-  windows?: WindowsTensorrtLlmContext
+  windows?: WindowsManagedContext
 }
 
-/** The provider, or null where it is not offered: everywhere but Linux and Windows (x64, arm64). */
-export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRuntime | null {
+/**
+ * One managed engine's provider, or null where it is not offered: everywhere but Linux and Windows
+ * (x64, arm64). `options.settings` is that provider's stored settings.
+ */
+export function wireManagedEngine<S extends ManagedEngineSettings>(
+  engine: ManagedEngineSpec<S>,
+  options: WireManagedEngineOptions
+): ManagedTextRuntime<S> | null {
   if (options.windows !== undefined && windowsWsl(options.platform, options.arch, options.windows)) {
-    return wireWindowsTensorrtLlm(options, options.windows)
+    return wireWindowsManagedEngine(engine, options, options.windows)
   }
   if (options.platform !== 'linux') return null
   const adapters = new ManagedTextAdapterRegistry()
-  adapters.register(tensorrtLlmAdapter)
+  adapters.register(engine.adapter)
   const deployment = createDesktopManagedDeployment()
   /** The lifecycle and the executor it was built over: the load path's probe asks the same one. */
   let built: { lifecycle: ManagedTextLifecycle; exec: DockerExec } | null = null
@@ -217,7 +234,7 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
     built ??= {
       exec: containers.exec,
       lifecycle: new ManagedTextLifecycle({
-        provider: 'tensorrt-llm',
+        provider: engine.provider as LocalProviderId,
         adapters,
         exec: containers.exec,
         deployment,
@@ -235,10 +252,12 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
     return built.lifecycle
   }
   const platform = containerPlatformFor(options.arch)
-  return new TensorrtLlmRuntime({
+  return new ManagedTextRuntime(engine, {
     lifecycle,
     readyInstallation: () =>
       resolveReadyInstallation({
+        engineId: engine.engine_id,
+        label: engine.label,
         installations: options.installations,
         descriptors: options.descriptors,
         platform,
@@ -246,7 +265,7 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
     // Probed fresh at every load, never read off the environment snapshot: that view is only as new
     // as the last setup or removal probe (and empty after a restart), while a card can disappear
     // between two loads (spec "Выбранная карта исчезла"). An unanswered `docker info` refuses the load.
-    // Through the lifecycle's own executor: `TensorrtLlmRuntime` asks for host facts only once the
+    // Through the lifecycle's own executor: `ManagedTextRuntime` asks for host facts only once the
     // lifecycle resolved, so it is always there (final review T-288 removed a dead fallback).
     hostFacts: () =>
       probeTensorrtLlmHost({
@@ -262,24 +281,25 @@ export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRun
 }
 
 /**
- * The Windows provider (change `add-tensorrt-llm-windows`, tasks 2.6–2.8): the same lifecycle and
- * runtime as Linux, over the WSL guest — the core's one executor (the guest's docker, from the handle),
+ * A managed engine's Windows provider (change `add-tensorrt-llm-windows`, tasks 2.6–2.8): the same
+ * lifecycle and runtime as Linux, over the WSL guest — the core's one executor (the guest's docker, from the handle),
  * this scope's folder in the guest for heartbeats, caches and the watchdog, the WSL deployment (a port
  * Docker picks, forwarding checked), `realpath` in the guest, uid 1000 for the container, the
  * distribution held while a model loads or is loaded; the host facts of a load read in the guest
  * (its `nvidia-smi`, the VM's memory); models under the scope's guest root.
  */
-function wireWindowsTensorrtLlm(
-  options: WireTensorrtLlmOptions,
-  context: WindowsTensorrtLlmContext
-): TensorrtLlmRuntime {
+function wireWindowsManagedEngine<S extends ManagedEngineSettings>(
+  engine: ManagedEngineSpec<S>,
+  options: WireManagedEngineOptions,
+  context: WindowsManagedContext
+): ManagedTextRuntime<S> {
   const adapters = new ManagedTextAdapterRegistry()
-  adapters.register(tensorrtLlmAdapter)
+  adapters.register(engine.adapter)
   let built: { lifecycle: ManagedTextLifecycle; exec: DockerExec; guest: WindowsGuest } | null = null
   const lifecycle = async (): Promise<ManagedTextLifecycle | null> => {
     if (built !== null) return built.lifecycle
     const guest = await windowsGuest(context, options.layout)
-    if (guest === null) throw notImported()
+    if (guest === null) throw notImported(engine.label)
     const containers = await options.containers.resolve()
     if (containers === null) return null
     await ensureGuestScope(guest.transport, guest.key)
@@ -289,7 +309,7 @@ function wireWindowsTensorrtLlm(
       exec: containers.exec,
       guest,
       lifecycle: new ManagedTextLifecycle({
-        provider: 'tensorrt-llm',
+        provider: engine.provider as LocalProviderId,
         adapters,
         exec: containers.exec,
         deployment,
@@ -310,10 +330,12 @@ function wireWindowsTensorrtLlm(
     return built.lifecycle
   }
   const platform = containerPlatformFor(options.arch)
-  return new TensorrtLlmRuntime({
+  return new ManagedTextRuntime(engine, {
     lifecycle,
     readyInstallation: () =>
       resolveReadyInstallation({
+        engineId: engine.engine_id,
+        label: engine.label,
         installations: options.installations,
         descriptors: options.descriptors,
         platform,
@@ -330,7 +352,7 @@ function wireWindowsTensorrtLlm(
     },
     model: async (modelId) => {
       const guest = await windowsGuest(context, options.layout)
-      if (guest === null) throw notImported()
+      if (guest === null) throw notImported(engine.label)
       return readTensorrtLlmModel(guest.modelsRoot, modelId)
     },
     settings: options.settings,
@@ -343,7 +365,7 @@ function wireWindowsTensorrtLlm(
  * inside the guest as root, and the forwarding error built from `.wslconfig` as it reads at that moment.
  */
 export function windowsDeployment(
-  context: Pick<WindowsTensorrtLlmContext, 'host' | 'mount'>,
+  context: Pick<WindowsManagedContext, 'host' | 'mount'>,
   guest: { record: WindowsEnvironmentRecord; transport: WslDistributionTransport },
   exec: DockerExec
 ): ReturnType<typeof createWslManagedDeployment> {
@@ -369,7 +391,7 @@ export const wiredExec = (wired: { exec: DockerExec }): DockerExec => wired.exec
 export function tensorrtLlmModelLocation(
   platform: NodeJS.Platform,
   layout: DataLayout,
-  windows?: WindowsTensorrtLlmContext
+  windows?: WindowsManagedContext
 ): () => Promise<TensorrtLlmModelLocation> {
   if (platform === 'win32' && windows !== undefined) {
     return () =>
@@ -388,7 +410,7 @@ export function tensorrtLlmModelLocation(
 export function tensorrtLlmModelRegistry(
   platform: NodeJS.Platform,
   layout: DataLayout,
-  windows?: WindowsTensorrtLlmContext
+  windows?: WindowsManagedContext
 ): TensorrtLlmModelRegistry {
   if (platform === 'win32' && windows !== undefined) {
     return new TensorrtLlmModelRegistry(async () => (await windowsGuest(windows, layout))?.modelsRoot ?? null)
@@ -398,7 +420,7 @@ export function tensorrtLlmModelRegistry(
 
 /** `windowsModelFiles` bound to one context and layout: the deleter's `windowsFiles` on Windows. */
 export function windowsModelFilesFor(
-  windows: WindowsTensorrtLlmContext,
+  windows: WindowsManagedContext,
   layout: DataLayout
 ): () => Promise<{ paths: ManagedScopePaths; files: ModelFileOps }> {
   return () => windowsModelFiles(windows, layout)
@@ -406,7 +428,7 @@ export function windowsModelFilesFor(
 
 /** Windows: where a model's files and caches are, and how to size and remove them (in the guest). */
 export async function windowsModelFiles(
-  windows: WindowsTensorrtLlmContext,
+  windows: WindowsManagedContext,
   layout: DataLayout
 ): Promise<{ paths: ManagedScopePaths; files: ModelFileOps }> {
   const guest = await windowsGuest(windows, layout)
@@ -414,7 +436,7 @@ export async function windowsModelFiles(
   return { paths: guest.paths, files: guestModelFiles(guest.transport, windows.mount) }
 }
 
-export interface WireTensorrtLlmModelCheckOptions {
+export interface WireManagedModelCheckOptions {
   descriptors: Pick<RuntimeDescriptorProvider, 'forInstallation' | 'cachedForNewSetup'>
   /** The setup operation's installation records, under the shared per-user root. */
   installations: Pick<InstallationStore, 'list'>
@@ -422,25 +444,27 @@ export interface WireTensorrtLlmModelCheckOptions {
   host: Pick<LinuxHost, 'probeDeps'>
   settings: () => Record<string, unknown>
   /** Windows x64 (change `add-tensorrt-llm-windows`): the cards and the VM's memory are read in the guest. */
-  windows?: WindowsTensorrtLlmContext
+  windows?: WindowsManagedContext
   /** `process.arch`; x64 unless told. */
   arch?: string
 }
 
 /**
- * `POST /models/tensorrt-llm/check` (task 2.16): `null` off Linux, where the provider is not offered
- * at all. Available even when the engine is not installed yet — the check falls back to the latest
- * cached descriptor itself (`check.ts`) — and never asks Docker anything, unlike `wireTensorrtLlm`'s
+ * `POST /models/<engine>/check`: `null` where the provider is not offered at all. Available even when
+ * the engine is not installed yet — the check falls back to that engine's latest cached descriptor
+ * itself (`managed-models/check.ts`) — and never asks Docker anything, unlike `wireManagedEngine`'s
  * own `hostFacts` above.
  */
-export function wireTensorrtLlmModelCheck(
+export function wireManagedModelCheck<S extends ManagedEngineSettings>(
   platform: NodeJS.Platform,
-  options: WireTensorrtLlmModelCheckOptions
+  engine: ManagedEngineSpec<S>,
+  options: WireManagedModelCheckOptions
 ): ((body: unknown) => Promise<ModelCompatibility>) | null {
+  const check = managedModelCheckOf(engine)
   const windows = options.windows
   if (windows !== undefined && windowsWsl(platform, options.arch ?? 'x64', windows)) {
     return (body: unknown) =>
-      checkTensorrtLlmModel(body, {
+      checkManagedModel(check, body, {
         installations: options.installations,
         descriptors: options.descriptors,
         // The guest's cards and the WSL VM's memory once the distribution exists (design D11); before
@@ -470,7 +494,7 @@ export function wireTensorrtLlmModelCheck(
   }
   if (platform !== 'linux') return null
   return (body: unknown) =>
-    checkTensorrtLlmModel(body, {
+    checkManagedModel(check, body, {
       installations: options.installations,
       descriptors: options.descriptors,
       hostFacts: () =>
@@ -560,30 +584,30 @@ export function leftoverContainers(options: {
 
 /**
  * The managed environment's `unloadEngineSessions` (spec "Удаление при загруженной модели"): before
- * a removal touches the engine's image, loads of `tensorrt-llm` are held off (`holdOffLoads`) and
- * every model holding a card is unloaded with its container's stop confirmed — through the facade's
- * own `unload`, as a client's unload or GPU residency would, so each model's cross-process claim is
- * released and a load still pending is cancelled rather than queued behind (final review M-1). The
- * hold lasts until the removal calls `release`. An unconfirmed stop rejects with
- * `MANAGED_STOP_UNCONFIRMED`, which fails the removal with nothing removed, and lifts the hold at
- * once. `runtime` and `sessions` are read at removal time: the provider is registered after the
- * environment is wired, and the facade after both.
+ * a removal touches an engine's image, loads of that engine's provider are held off (`holdOffLoads`)
+ * and every model holding a card is unloaded with its container's stop confirmed — through the
+ * facade's own `unload`, as a client's unload or GPU residency would, so each model's cross-process
+ * claim is released and a load still pending is cancelled rather than queued behind (final review
+ * M-1). The provider is looked up by the engine id among the managed runtimes (`engine_id` is the
+ * provider id, design D3), never by its class. The hold lasts until the removal calls `release`. An
+ * unconfirmed stop rejects with `MANAGED_STOP_UNCONFIRMED`, which fails the removal with nothing
+ * removed, and lifts the hold at once. `runtimes` and `sessions` are read at removal time: the
+ * providers are registered after the environment is wired, and the facade after both.
  */
-export function tensorrtLlmSessionUnloader(
-  runtime: () => LocalRuntime | undefined,
+export function managedSessionUnloader(
+  runtimes: () => ReadonlyMap<string, ManagedTextRuntime>,
   sessions: () => Pick<AtomicCore, 'cancelLoad' | 'unload'>
 ): UnloadEngineSessions {
   return async (engineId) => {
-    if (engineId !== TENSORRT_LLM_ENGINE_ID) return { unloaded: 0 }
-    const provider = runtime()
-    if (!(provider instanceof TensorrtLlmRuntime)) return { unloaded: 0 }
+    const provider = runtimes().get(engineId)
+    if (provider === undefined) return { unloaded: 0 }
     const release = provider.holdOffLoads()
     try {
       const facade = sessions()
       const models = provider.residentModels()
       for (const modelId of models) {
-        facade.cancelLoad(TENSORRT_LLM_ENGINE_ID, modelId)
-        const result = await facade.unload(TENSORRT_LLM_ENGINE_ID, modelId)
+        facade.cancelLoad(provider.engine.provider as LocalProviderId, modelId)
+        const result = await facade.unload(provider.engine.provider as LocalProviderId, modelId)
         if (!result.success) {
           throw new AtomicCoreError(
             'MANAGED_STOP_UNCONFIRMED',
@@ -600,9 +624,9 @@ export function tensorrtLlmSessionUnloader(
   }
 }
 
-export interface TensorrtLlmModelDeleterOptions {
-  /** Read at deletion time, like `tensorrtLlmSessionUnloader`'s: the provider is registered late. */
-  runtime: () => LocalRuntime | undefined
+export interface ManagedModelDeleterOptions {
+  /** Read at deletion time, like `managedSessionUnloader`'s: the providers are registered late. */
+  runtimes: () => ReadonlyMap<string, ManagedTextRuntime>
   sessions: () => Pick<AtomicCore, 'cancelLoad' | 'unload'>
   registry: Pick<TensorrtLlmModelRegistry, 'list'>
   /** This scope's managed paths: where the model's engine caches live. */
@@ -615,41 +639,46 @@ export interface TensorrtLlmModelDeleterOptions {
 }
 
 /**
- * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a, spec `tensorrt-llm-models` "Модель
- * удаляется через core"). The id must be one the registry lists — exactly, never percent-decoded or
+ * Deleting a downloaded model (design D12a of change `add-tensorrt-llm-linux`; change
+ * `add-vllm-runtime`, D4). The id must be one the registry lists — exactly, never percent-decoded or
  * resolved as a path — else `MODEL_NOT_FOUND`: a client's wrong id is an error, not a success. Loads
- * of that model are held off for the whole deletion; a load in flight is cancelled and the model
- * unloaded through the facade, as a client's unload would be, so its cross-process claim is released.
- * Only once Docker confirmed the stop are the files touched; an unconfirmed stop rejects with
- * `MANAGED_STOP_UNCONFIRMED` and removes nothing.
+ * of that model are held off in every managed provider for the whole deletion; a load in flight is
+ * cancelled and the model unloaded, in whichever provider holds it, through the facade as a client's
+ * unload would be, so its cross-process claim is released. Only once Docker confirmed every stop are
+ * the files touched; an unconfirmed stop rejects with `MANAGED_STOP_UNCONFIRMED` and removes nothing.
  */
-export function tensorrtLlmModelDeleter(
-  options: TensorrtLlmModelDeleterOptions
+export function managedModelDeleter(
+  options: ManagedModelDeleterOptions
 ): (modelId: string) => Promise<TensorrtLlmModelDeletion> {
   return async (modelId) => {
-    const provider = options.runtime()
-    if (!(provider instanceof TensorrtLlmRuntime)) {
+    const providers = [...options.runtimes().values()]
+    if (providers.length === 0) {
       throw new AtomicCoreError(
         'PROVIDER_NOT_FOUND',
-        'tensorrt-llm is not available in this build.',
-        TENSORRT_LLM_ENGINE_ID
+        'No managed engine is available in this build.',
+        'managed-models'
       )
     }
     const model = (await options.registry.list()).find((entry) => entry.id === modelId)
     if (model === undefined) {
-      throw new AtomicCoreError('MODEL_NOT_FOUND', `No tensorrt-llm model has the id '${modelId}'.`, modelId)
+      throw new AtomicCoreError('MODEL_NOT_FOUND', `No managed model has the id '${modelId}'.`, modelId)
     }
-    const release = provider.holdOffModel(modelId)
+    const releases = providers.map((provider) => provider.holdOffModel(modelId))
     try {
       const facade = options.sessions()
-      const cancelled = facade.cancelLoad(TENSORRT_LLM_ENGINE_ID, modelId)
-      const result = await facade.unload(TENSORRT_LLM_ENGINE_ID, modelId)
-      if (!result.success || provider.residentModels().includes(modelId)) {
-        throw new AtomicCoreError(
-          'MANAGED_STOP_UNCONFIRMED',
-          result.error ?? `The container of ${modelId} did not confirm its stop; nothing was deleted.`,
-          modelId
-        )
+      let wasLoaded = false
+      for (const provider of providers) {
+        const id = provider.engine.provider as LocalProviderId
+        const cancelled = facade.cancelLoad(id, modelId)
+        const result = await facade.unload(id, modelId)
+        if (!result.success || provider.residentModels().includes(modelId)) {
+          throw new AtomicCoreError(
+            'MANAGED_STOP_UNCONFIRMED',
+            result.error ?? `The container of ${modelId} did not confirm its stop; nothing was deleted.`,
+            modelId
+          )
+        }
+        wasLoaded ||= cancelled || result.was_loaded === true
       }
       const guest = options.windowsFiles === undefined ? null : await options.windowsFiles()
       const files =
@@ -658,12 +687,12 @@ export function tensorrtLlmModelDeleter(
           : await deleteTensorrtLlmModelFiles(guest.paths, model, guest.files)
       return {
         model_id: modelId,
-        was_loaded: cancelled || result.was_loaded === true,
+        was_loaded: wasLoaded,
         freed_bytes: files.freedBytes,
         engine_caches_removed: files.engineCachesRemoved,
       }
     } finally {
-      release()
+      for (const release of releases) release()
     }
   }
 }
