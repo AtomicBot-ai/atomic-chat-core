@@ -121,13 +121,35 @@ export interface TensorrtLlmProviderConfig {
   load_timeout_seconds: number
 }
 
+/**
+ * `vllm` (change `add-vllm-runtime`, spec `vllm-runtime`): stored values. There is no memory fraction —
+ * core sizes the KV cache in bytes and the engine's share of the card itself (design D9).
+ */
+export interface VllmProviderConfig {
+  /** The card's UUID; `''` picks the card with the most free memory at load time. */
+  gpu_id: string
+  context_length: number
+  max_output_tokens: number
+  /** `--max-num-seqs`: requests served at once. */
+  max_num_seqs: number
+  /** Upper bound of the KV cache in tokens; `0` sizes it as context length × `max_num_seqs`. */
+  kv_cache_max_tokens: number
+  /** `auto` (on only on cards with 12 GB or more), `on` or `off` (`--enforce-eager`). */
+  cuda_graphs: 'auto' | 'on' | 'off'
+  /** `auto` (the model's own precision) or `fp8` (Ada and newer; ignored on older cards). */
+  kv_cache_dtype: 'auto' | 'fp8'
+  load_timeout_seconds: number
+}
+
 export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
   ? MlxConfig
   : P extends 'foundation-models'
     ? FoundationModelsConfig
     : P extends 'tensorrt-llm'
       ? TensorrtLlmProviderConfig
-      : LlamacppConfig
+      : P extends 'vllm'
+        ? VllmProviderConfig
+        : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

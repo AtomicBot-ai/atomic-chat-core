@@ -53,6 +53,7 @@ describe('settingsSchema', () => {
     ['mlx', 11],
     ['foundation-models', 0],
     ['tensorrt-llm', 9],
+    ['vllm', 8],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -134,6 +135,35 @@ describe('defaultSettingValues', () => {
       cuda_graphs: 'auto',
       kv_cache_dtype: 'auto',
       load_timeout_seconds: 0,
+    })
+    // vLLM (change add-vllm-runtime): no memory fraction — core sizes the KV cache in bytes itself.
+    expect(defaultSettingValues('vllm')).toEqual({
+      gpu_id: '',
+      context_length: 8192,
+      max_output_tokens: 4096,
+      max_num_seqs: 8,
+      kv_cache_max_tokens: 0,
+      cuda_graphs: 'auto',
+      kv_cache_dtype: 'auto',
+      load_timeout_seconds: 0,
+    })
+  })
+
+  it('canonicalizes vllm values to their wire types', () => {
+    expect(
+      canonicalizeSettingValues('vllm', {
+        gpu_id: 'GPU-1',
+        context_length: '4096',
+        max_num_seqs: '4',
+        cuda_graphs: 'off',
+        load_timeout_seconds: '600',
+      })
+    ).toEqual({
+      gpu_id: 'GPU-1',
+      context_length: 4096,
+      max_num_seqs: 4,
+      cuda_graphs: 'off',
+      load_timeout_seconds: 600,
     })
   })
 

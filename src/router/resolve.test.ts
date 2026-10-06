@@ -53,6 +53,7 @@ describe('modelIdsMatch', () => {
 
 describe('LOCAL_SEARCH_ORDER', () => {
   it('searches TurboQuant, then upstream, then MLX, then TensorRT-LLM last so no existing route moves', () => {
-    expect(LOCAL_SEARCH_ORDER).toEqual(['llamacpp', 'llamacpp-upstream', 'mlx', 'tensorrt-llm'])
+    // vllm last (change add-vllm-runtime, D11): a new provider moves no traffic that already resolved.
+    expect(LOCAL_SEARCH_ORDER).toEqual(['llamacpp', 'llamacpp-upstream', 'mlx', 'tensorrt-llm', 'vllm'])
   })
 })

@@ -8,7 +8,8 @@
  * `tensorrt-llm` runs in a container on Linux only (openspec change `add-tensorrt-llm-linux`); a core
  * on any other platform never offers it, and its sessions carry `pid: null`.
  */
-export type LocalProviderId = 'llamacpp-upstream' | 'llamacpp' | 'mlx' | 'foundation-models' | 'tensorrt-llm'
+export type LocalProviderId =
+  'llamacpp-upstream' | 'llamacpp' | 'mlx' | 'foundation-models' | 'tensorrt-llm' | 'vllm'
 
 export interface RuntimeDeviceInfo {
   /** Backends in load order, deduped, e.g. ["CUDA", "CPU"]. */

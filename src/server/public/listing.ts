@@ -28,6 +28,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'llamacpp-upstream': 'llama.cpp-upstream',
   'mlx': 'mlx',
   'tensorrt-llm': 'tensorrt-llm',
+  'vllm': 'vllm',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */

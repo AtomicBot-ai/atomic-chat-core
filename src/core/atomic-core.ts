@@ -234,13 +234,14 @@ export class AtomicCore {
 
   /**
    * The per-provider model listing (task 2.16w round 1, finding 2): `ModelRegistry` for every
-   * llama.cpp/MLX provider, `ManagedModelRegistry` for `'tensorrt-llm'` — a fresh scan of
-   * `<data>/tensorrt-llm/models` on every `list()`, so a model the app finishes downloading appears
-   * with no restart, the same guarantee the llama.cpp registry already gives. `unknownProvider` when
-   * this core does not offer the provider at all (`tensorrt-llm` off Linux, for instance).
+   * llama.cpp/MLX provider, `ManagedModelRegistry` for a managed one (`tensorrt-llm`, `vllm`) — the
+   * same scan of the managed model store for every one of them, fresh on every `list()`, so a model
+   * the app finishes downloading appears with no restart, the same guarantee the llama.cpp registry
+   * already gives. `unknownProvider` when this core does not offer the provider at all (a managed one
+   * off Linux and Windows, for instance).
    */
-  registry(provider?: Exclude<LocalProviderId, 'tensorrt-llm'>): ModelRegistry
-  registry(provider: 'tensorrt-llm'): ManagedModelRegistry
+  registry(provider?: Exclude<LocalProviderId, 'tensorrt-llm' | 'vllm'>): ModelRegistry
+  registry(provider: 'tensorrt-llm' | 'vllm'): ManagedModelRegistry
   registry(provider: LocalProviderId): ModelRegistry | ManagedModelRegistry
   registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry | ManagedModelRegistry {
     const registry = this.registries.get(provider)

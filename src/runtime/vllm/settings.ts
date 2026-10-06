@@ -1,0 +1,123 @@
+/**
+ * The `vllm` provider's settings (change `add-vllm-runtime`, task 3.1; spec `vllm-runtime`, "Выбор
+ * карты и настройки провайдера vllm"): stored values, overlaid by a load's own overrides, reduced to
+ * this provider's keys and validated before anything is asked of the machine — `INVALID_ARGUMENT` for
+ * anything the schema (`src/settings/schema/vllm.json`) would refuse. What the engine is never told
+ * by a setting: `trust_remote_code`, request logging, an API key — no key here reaches it.
+ */
+import { AtomicCoreError } from '../../contracts/index.js'
+
+export interface VllmSettings {
+  /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */
+  gpu_id: string | null
+  context_length: number
+  max_output_tokens: number
+  /** `--max-num-seqs`. */
+  max_num_seqs: number
+  /** `null` sizes the KV cache as `context_length × max_num_seqs` tokens. */
+  kv_cache_max_tokens: number | null
+  cuda_graphs: 'auto' | 'on' | 'off'
+  kv_cache_dtype: 'auto' | 'fp8'
+  /** Seconds. `null` leaves the adapter's own weight-based estimate in force. */
+  load_timeout_seconds: number | null
+}
+
+const KEYS = [
+  'gpu_id',
+  'context_length',
+  'max_output_tokens',
+  'max_num_seqs',
+  'kv_cache_max_tokens',
+  'cuda_graphs',
+  'kv_cache_dtype',
+  'load_timeout_seconds',
+] as const
+
+const DEFAULTS: VllmSettings = {
+  gpu_id: null,
+  context_length: 8192,
+  max_output_tokens: 4096,
+  max_num_seqs: 8,
+  kv_cache_max_tokens: null,
+  cuda_graphs: 'auto',
+  kv_cache_dtype: 'auto',
+  load_timeout_seconds: null,
+}
+
+const GPU_UUID = /^(GPU|MIG)-[0-9A-Za-z-]+$/
+
+const invalid = (key: string, value: unknown, why: string): never => {
+  throw new AtomicCoreError(
+    'INVALID_ARGUMENT',
+    `vllm setting ${key} ${why}.`,
+    `${key}=${JSON.stringify(value)}`
+  )
+}
+
+function integer(key: string, value: unknown, min: number, max: number): number {
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value
+  if (typeof number !== 'number' || !Number.isInteger(number) || number < min || number > max) {
+    return invalid(key, value, `must be a whole number from ${min} to ${max}`)
+  }
+  return number
+}
+
+function oneOf<T extends string>(key: string, value: unknown, allowed: readonly T[]): T {
+  return allowed.includes(value as T)
+    ? (value as T)
+    : invalid(key, value, `must be one of ${allowed.join(', ')}`)
+}
+
+/** Validates already-merged values; anything absent takes the schema's default. */
+export function validateVllmSettings(raw: Record<string, unknown>): VllmSettings {
+  const settings: VllmSettings = { ...DEFAULTS }
+  if (raw['gpu_id'] !== undefined && raw['gpu_id'] !== null) {
+    if (typeof raw['gpu_id'] !== 'string' || !GPU_UUID.test(raw['gpu_id'])) {
+      invalid('gpu_id', raw['gpu_id'], 'must be an NVIDIA GPU or MIG UUID')
+    }
+    settings.gpu_id = raw['gpu_id'] as string
+  }
+  if (raw['context_length'] !== undefined)
+    settings.context_length = integer('context_length', raw['context_length'], 512, 1_048_576)
+  if (raw['max_output_tokens'] !== undefined)
+    settings.max_output_tokens = integer('max_output_tokens', raw['max_output_tokens'], 1, 1_048_576)
+  if (raw['max_num_seqs'] !== undefined)
+    settings.max_num_seqs = integer('max_num_seqs', raw['max_num_seqs'], 1, 256)
+  if (raw['kv_cache_max_tokens'] !== undefined && raw['kv_cache_max_tokens'] !== null)
+    settings.kv_cache_max_tokens = integer('kv_cache_max_tokens', raw['kv_cache_max_tokens'], 1, 16_777_216)
+  if (raw['cuda_graphs'] !== undefined)
+    settings.cuda_graphs = oneOf('cuda_graphs', raw['cuda_graphs'], ['auto', 'on', 'off'])
+  if (raw['kv_cache_dtype'] !== undefined)
+    settings.kv_cache_dtype = oneOf('kv_cache_dtype', raw['kv_cache_dtype'], ['auto', 'fp8'])
+  if (raw['load_timeout_seconds'] !== undefined && raw['load_timeout_seconds'] !== null)
+    settings.load_timeout_seconds = integer('load_timeout_seconds', raw['load_timeout_seconds'], 1, 3600)
+  if (settings.max_output_tokens >= settings.context_length) {
+    invalid(
+      'max_output_tokens',
+      settings.max_output_tokens,
+      `must be less than the context length (${settings.context_length})`
+    )
+  }
+  return settings
+}
+
+/**
+ * Stored values, overlaid by a load's own overrides (the control API's `overrides`), reduced to this
+ * provider's keys and validated. Anything else in either object — another provider's key, a stray
+ * field a client sent — is ignored rather than passed to the engine. `''` and `0` are the stored
+ * spelling of "not set".
+ */
+export function vllmSettings(
+  stored: Record<string, unknown>,
+  overrides: Record<string, unknown> = {}
+): VllmSettings {
+  const merged: Record<string, unknown> = {}
+  for (const key of KEYS) {
+    const value = key in overrides ? overrides[key] : stored[key]
+    if (value !== undefined) merged[key] = value
+  }
+  if (typeof merged['gpu_id'] === 'string' && merged['gpu_id'].trim() === '') merged['gpu_id'] = null
+  if (merged['load_timeout_seconds'] === 0) merged['load_timeout_seconds'] = null
+  if (merged['kv_cache_max_tokens'] === 0) merged['kv_cache_max_tokens'] = null
+  return validateVllmSettings(merged)
+}

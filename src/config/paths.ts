@@ -237,6 +237,7 @@ export function dataLayout(root: string): DataLayout {
         // checkpoint directory plus `model.yml`, written by the app and the CLI, read by core (spec
         // `managed-model-store`), and the same folder for every managed engine.
         case 'tensorrt-llm':
+        case 'vllm':
           return {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),

@@ -17,18 +17,21 @@ export interface RemoteProvider {
   models: string[]
 }
 
-export type LocalProvider = 'llamacpp' | 'llamacpp-upstream' | 'mlx' | 'tensorrt-llm'
+export type LocalProvider = 'llamacpp' | 'llamacpp-upstream' | 'mlx' | 'tensorrt-llm' | 'vllm'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
  * loaded under two engines resolves to the first; changing the order would silently move traffic.
- * `tensorrt-llm` comes last for exactly that reason: adding it moves nothing that already resolved.
+ * `tensorrt-llm` came last for exactly that reason, and `vllm` after it (change `add-vllm-runtime`,
+ * D11): adding a provider moves nothing that already resolved. One store model is never loaded in two
+ * managed providers at once, so their order never decides between two live sessions of one id.
  */
 export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
   'llamacpp',
   'llamacpp-upstream',
   'mlx',
   'tensorrt-llm',
+  'vllm',
 ]
 
 /**

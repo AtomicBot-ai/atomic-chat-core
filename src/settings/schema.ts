@@ -21,6 +21,7 @@ import llamacppUpstreamSchema from './schema/llamacpp-upstream.json' with { type
 import llamacppSchema from './schema/llamacpp.json' with { type: 'json' }
 import mlxSchema from './schema/mlx.json' with { type: 'json' }
 import tensorrtLlmSchema from './schema/tensorrt-llm.json' with { type: 'json' }
+import vllmSchema from './schema/vllm.json' with { type: 'json' }
 
 export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'llamacpp-upstream',
@@ -28,6 +29,7 @@ export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'mlx',
   'foundation-models',
   'tensorrt-llm',
+  'vllm',
 ]
 
 const CONTROLLER_TYPES = new Set(['checkbox', 'input', 'dropdown', 'slider'])
@@ -58,6 +60,7 @@ const SCHEMAS: Record<LocalProviderId, readonly SettingDescriptor[]> = {
   'mlx': toDescriptors('mlx', mlxSchema),
   'foundation-models': toDescriptors('foundation-models', foundationModelsSchema),
   'tensorrt-llm': toDescriptors('tensorrt-llm', tensorrtLlmSchema),
+  'vllm': toDescriptors('vllm', vllmSchema),
 }
 
 /** The descriptor array as the app registers it (deep copy — callers may mutate `options`/`value`). */
@@ -163,12 +166,25 @@ const TENSORRT_LLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
   load_timeout_seconds: 'number',
 }
 
+/** `VllmProviderConfig`: the card's UUID and the two dropdowns as text, every other key a number. */
+const VLLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
+  gpu_id: 'string',
+  context_length: 'number',
+  max_output_tokens: 'number',
+  max_num_seqs: 'number',
+  kv_cache_max_tokens: 'number',
+  cuda_graphs: 'string',
+  kv_cache_dtype: 'string',
+  load_timeout_seconds: 'number',
+}
+
 export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<string, CanonicalValueType>>> = {
   'llamacpp-upstream': LLAMACPP_VALUE_TYPES,
   'llamacpp': LLAMACPP_VALUE_TYPES,
   'mlx': MLX_VALUE_TYPES,
   'foundation-models': FOUNDATION_MODELS_VALUE_TYPES,
   'tensorrt-llm': TENSORRT_LLM_VALUE_TYPES,
+  'vllm': VLLM_VALUE_TYPES,
 }
 
 /**
