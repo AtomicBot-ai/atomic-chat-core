@@ -637,6 +637,7 @@ export async function createAtomicCore(
         modelSetups: {
           compatibility: (request) => compatibilityFor(modelSetupDeps, request),
           plan: (request) => modelSetups.plan(request),
+          families: () => prismCompatibility.families(),
           start: (request) => modelSetups.start(request),
           list: () => modelSetups.list(),
           get: (setupId) => modelSetups.get(setupId),

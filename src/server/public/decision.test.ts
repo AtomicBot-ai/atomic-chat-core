@@ -239,3 +239,36 @@ describe('POST /v1/systemone and /v1/router/score', () => {
     })
   })
 })
+
+describe('a route the running engine does not serve', () => {
+  it('answers 501 UNSUPPORTED_ENDPOINT for the router on upstream, without a request, and releases', async () => {
+    const seen: string[] = []
+    const upstream = await startUpstream((req, _body, res) => {
+      seen.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"answers":{},"usage":{"input_tokens":1,"output_tokens":0}}')
+    })
+    const { fake, log } = backend(() => ({
+      ok: true,
+      port: upstream.port,
+      apiKey: 'process-key',
+      endpoints: ['/v1/systemone'],
+      release: () => {},
+    }))
+    const { server } = await publicWith(fake)
+
+    const router = await post(server.port, '/router/score', '{"task":"t","criterion":"c","candidates":[]}')
+    expect(router.status).toBe(501)
+    expect(await router.json()).toEqual({
+      error: {
+        code: 501,
+        type: 'not_supported_error',
+        reason: 'UNSUPPORTED_ENDPOINT',
+        message: 'The running decision model does not serve /v1/router/score.',
+      },
+    })
+    expect(log).toEqual(['acquire 30000', 'release'])
+    expect((await post(server.port, '/systemone', RAW)).status).toBe(200)
+    expect(seen).toEqual(['/v1/systemone'])
+  })
+})

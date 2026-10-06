@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-06** — [Run upstream decision GGUFs on stock llama.cpp, chosen by the model file](2026-10-06-run-decision-models-on-upstream-llamacpp.md) — extends the 2026-09-30 decision module: `<arch>.decision.type` → `llamacpp-upstream` at the type's build floor (b11370 / clef b11371 / clef + images b11418), readiness by `output_modalities`, no router (501 `UNSUPPORTED_ENDPOINT`), `mmproj_path` and `ctx_size` settings.
 - **2026-10-05** — [PrismML provider: a per-file compatibility gate and one recoverable model setup](2026-10-05-prismml-provider-compatibility-gate-and-model-setup.md) — implements the record below: conf manifest with candidate/approved, update reasons, offline load gate on every llama.cpp provider, `/models/setup-plan` + `/model-setups`, core 0.10.0.
 - **2026-10-05** — [Use PrismML llama.cpp for desktop Bonsai](2026-10-05-use-prismml-llamacpp-for-desktop-bonsai.md) — implementation direction: isolated provider, shared GGUF storage, model-aware routing and onboarding; Metal on Mac, no new MLX path.
 - **2026-10-02** — [Bump core to 0.9.2 after merging main's 0.8.0-0.9.1](2026-10-02-bump-core-to-0-9-2-after-merging-main.md) — supersedes the version of the 2026-10-01 0.7.5 record; the app branch pins 0.9.2.

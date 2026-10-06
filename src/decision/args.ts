@@ -23,7 +23,7 @@
 import { isAbsolute, join, win32 } from 'node:path'
 import type { DecisionConvertType } from '../contracts/index.js'
 
-/** The environment variable the fork's auth middleware reads (as `--api-key`). */
+/** The environment variable the server's auth middleware reads (as `--api-key`), the fork's and upstream's. */
 export const DECISION_API_KEY_ENV = 'LLAMA_API_KEY'
 
 /**
@@ -82,6 +82,41 @@ export function buildDecisionArgs(spec: DecisionLaunchSpec): string[] {
   argv.push('--host', DECISION_HOST, '--port', String(spec.port))
   argv.push('--no-webui')
   if (spec.allowUncalibrated) argv.push('--decision-allow-uncalibrated')
+  return argv
+}
+
+/** What an upstream decision GGUF is started with, beyond the model and the port. */
+export interface UpstreamDecisionLaunch {
+  /** `--mmproj`, for a model that reads images. */
+  mmprojPath?: string
+  /** `-c`, and `-b`: the decision outputs are read from one batch, so it holds the whole prompt. */
+  ctxSize: number
+  /** `-ub` too (laya, kev, clef): their scores come out of the embeddings, one ubatch for the prompt. */
+  wholePromptUbatch: boolean
+}
+
+/**
+ * The argv of stock llama.cpp (b11370 on) for a GGUF with `<arch>.decision.type`: no decision flag,
+ * the server reads the type from the file and serves `/v1/systemone` (and turns on embedding mode
+ * itself where the type needs it). No `--device none`: upstream decision models run up to 27B
+ * parameters, and the server's own fitting puts them on the GPU when there is room.
+ *
+ *   llama-server -m <gguf> [--mmproj <file>] [-a <id>] -c <n> -b <n> [-ub <n>] -t <n>
+ *                --host 127.0.0.1 --port <p> --no-webui
+ */
+export function buildUpstreamDecisionArgs(
+  spec: Pick<DecisionLaunchSpec, 'modelPath' | 'modelId' | 'threads' | 'port'>,
+  upstream: UpstreamDecisionLaunch
+): string[] {
+  const argv = ['-m', spec.modelPath]
+  if (upstream.mmprojPath) argv.push('--mmproj', upstream.mmprojPath)
+  if (spec.modelId) argv.push('-a', spec.modelId)
+  const ctx = String(upstream.ctxSize)
+  argv.push('-c', ctx, '-b', ctx)
+  if (upstream.wholePromptUbatch) argv.push('-ub', ctx)
+  argv.push('-t', String(spec.threads))
+  argv.push('--host', DECISION_HOST, '--port', String(spec.port))
+  argv.push('--no-webui')
   return argv
 }
 

@@ -23,6 +23,27 @@ const SETUP = {
   updated_at: 1,
 } as unknown as ModelSetup
 
+const FAMILIES = {
+  rules_version: 3,
+  families: [
+    {
+      id: 'bonsai-8b',
+      title: 'Bonsai 8B',
+      repo: 'prism-ml/Bonsai-8B-gguf',
+      revision: 'abc',
+      files: [
+        {
+          file: 'Bonsai-8B-PQ2_0.gguf',
+          size: 1,
+          sha256: 'a'.repeat(64),
+          treatment: 'prism_required' as const,
+        },
+      ],
+      projectors: [],
+    },
+  ],
+}
+
 function fakeSetups(calls: string[], over: Partial<ModelSetupControl> = {}): ModelSetupControl {
   return {
     compatibility: async (request) => {
@@ -39,6 +60,10 @@ function fakeSetups(calls: string[], over: Partial<ModelSetupControl> = {}): Mod
     plan: async (request) => {
       calls.push(`plan ${JSON.stringify(request)}`)
       return SETUP.plan
+    },
+    families: async () => {
+      calls.push('families')
+      return FAMILIES
     },
     start: async (request) => {
       calls.push(`start ${request.request_id}`)
@@ -86,6 +111,15 @@ describe('model-setup routes', () => {
       'compatibility {"repo":"o/r","file":"f.gguf","inspect_remote":true}',
       'plan {"repo":"o/r","file":"f.gguf"}',
     ])
+  })
+
+  it('lists the Bonsai families for the Hub', async () => {
+    const calls: string[] = []
+    h = await start({ modelSetups: fakeSetups(calls) })
+    const families = await send('GET', '/models/atomic-prism/families')
+    expect(families.status).toBe(200)
+    expect(await families.json()).toEqual(FAMILIES)
+    expect(calls).toEqual(['families'])
   })
 
   it('starts with 202, lists, reads, cancels and resumes', async () => {

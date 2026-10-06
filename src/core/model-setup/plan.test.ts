@@ -15,6 +15,14 @@ const MAC: PrismHost = {
   gpus: [],
 }
 const OFFER = { coreVersion: '0.10.0', allowCandidates: true }
+/** The bundled manifest with every asset still a candidate: what the release watch publishes. */
+const CANDIDATES_ONLY = {
+  ...PRISM_MANIFEST_BASELINE,
+  releases: PRISM_MANIFEST_BASELINE.releases.map((release) => ({
+    ...release,
+    assets: release.assets.map((asset) => ({ ...asset, validation: 'candidate' as const })),
+  })),
+}
 
 const verdict = (over: Partial<ModelCompatibilityResponse> = {}): ModelCompatibilityResponse => ({
   outcome: 'engine_required',
@@ -53,6 +61,17 @@ describe('defaultModelId', () => {
 })
 
 describe('choosePrismPack', () => {
+  it('offers an approved pack without the unverified-builds setting', () => {
+    expect(
+      choosePrismPack({
+        manifest: PRISM_MANIFEST_BASELINE,
+        offer: { ...OFFER, allowCandidates: false },
+        host: MAC,
+        requires: ['pq2_0'],
+      })
+    ).toMatchObject({ version: TAG, backend: 'macos-arm64' })
+  })
+
   it('picks the Metal pack on Apple Silicon, sized with nothing extra', () => {
     const pack = choosePrismPack({
       manifest: PRISM_MANIFEST_BASELINE,
@@ -65,13 +84,31 @@ describe('choosePrismPack', () => {
   })
 
   it.each([
-    ['candidate builds are not offered', { ...OFFER, allowCandidates: false }, ['pq2_0'] as const, undefined],
-    ['the release lacks a capability', OFFER, ['pq2_0', 'not_a_capability'] as never, undefined],
-    ['the release is older than the minimum build', OFFER, ['pq2_0'] as const, 99_999],
-  ])('is null when %s', (_name, offer, requires, minBuild) => {
+    [
+      'candidate builds are not offered',
+      CANDIDATES_ONLY,
+      { ...OFFER, allowCandidates: false },
+      ['pq2_0'] as const,
+      undefined,
+    ],
+    [
+      'the release lacks a capability',
+      PRISM_MANIFEST_BASELINE,
+      OFFER,
+      ['pq2_0', 'not_a_capability'] as never,
+      undefined,
+    ],
+    [
+      'the release is older than the minimum build',
+      PRISM_MANIFEST_BASELINE,
+      OFFER,
+      ['pq2_0'] as const,
+      99_999,
+    ],
+  ])('is null when %s', (_name, manifest, offer, requires, minBuild) => {
     expect(
       choosePrismPack({
-        manifest: PRISM_MANIFEST_BASELINE,
+        manifest,
         offer,
         host: MAC,
         requires: [...requires],
@@ -152,7 +189,11 @@ describe('planModelSetup', () => {
       { verdict: verdict({ outcome: 'legacy_artifact', replacement: 'X-Q2_0_g64.gguf' }) },
       'legacy_artifact',
     ],
-    ['no build', { offer: { ...OFFER, allowCandidates: false } }, 'no_engine_build'],
+    [
+      'no build',
+      { manifest: CANDIDATES_ONLY, offer: { ...OFFER, allowCandidates: false } },
+      'no_engine_build',
+    ],
     ['no room', { freeBytes: 1_000 }, 'insufficient_disk_space'],
   ] as const)('blocks a %s setup', (_name, over, code) => {
     const plan = planModelSetup(input(over as Partial<ModelSetupPlanInput>))

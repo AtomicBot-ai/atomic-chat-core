@@ -23,6 +23,7 @@ import type {
   EnvironmentOperation,
   ModelCompatibilityRequest,
   ModelCompatibilityResponse,
+  PrismFamiliesResponse,
   ModelSetup,
   ModelSetupList,
   ModelSetupPlan,
@@ -649,6 +650,11 @@ export class CoreClient {
   /** What a file needs and whether this core runs it; for a Hub file, before it is downloaded. */
   modelCompatibility(request: ModelCompatibilityRequest): Promise<ModelCompatibilityResponse> {
     return this.call('/models/compatibility', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** The Bonsai families the conf model rules name, each with the files the Hub may offer. */
+  prismFamilies(): Promise<PrismFamiliesResponse> {
+    return this.call('/models/atomic-prism/families')
   }
 
   /** What a setup would install and download, what blocks it, and the digest `startModelSetup` takes. */

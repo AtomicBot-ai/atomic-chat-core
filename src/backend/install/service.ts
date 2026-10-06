@@ -84,6 +84,14 @@ export async function mergeCudartIntoBin(staging: string): Promise<void> {
 }
 
 /**
+ * How long a PrismML pack's `llama-server --version` may take. Its macOS build initialises Metal
+ * while it parses its arguments and compiles its shaders at runtime, and the shader cache follows
+ * the executable's path, which is new on every install: the first run took 15.7 s on an M-series
+ * Mac (0.05 s the second time), past the 15 s the upstream gate allows.
+ */
+export const PRISM_LAUNCH_CHECK_TIMEOUT_MS = 120_000
+
+/**
  * The launch gate of a PrismML pack, on every platform: the server must start and report the build
  * its tag names (`prism-b10754-…` → `build 10754`). A pack that cannot is never published, so the
  * previous one stays selectable.
@@ -91,7 +99,8 @@ export async function mergeCudartIntoBin(staging: string): Promise<void> {
 export async function verifyPrismBackendBinary(
   staging: string,
   version: string,
-  platform: NodeJS.Platform
+  platform: NodeJS.Platform,
+  timeoutMs = PRISM_LAUNCH_CHECK_TIMEOUT_MS
 ): Promise<void> {
   const expected = prismTagBuild(version)
   if (expected === null) throw new Error(`${version} is not a PrismML release tag`)
@@ -101,10 +110,26 @@ export async function verifyPrismBackendBinary(
       if (entry.isFile()) await chmod(join(bin, entry.name), 0o755)
     }
   }
-  const { stdout, stderr } = await execFileAsync(join(bin, llamaServerExeName(platform)), ['--version'], {
-    timeout: 15_000,
-    cwd: bin,
-  })
+  let stdout: string
+  let stderr: string
+  try {
+    ;({ stdout, stderr } = await execFileAsync(join(bin, llamaServerExeName(platform)), ['--version'], {
+      timeout: timeoutMs,
+      cwd: bin,
+    }))
+  } catch (error) {
+    // `Command failed` alone says nothing: name the exit code or the signal, and what it printed.
+    const e = error as { code?: unknown; signal?: unknown; killed?: unknown; stderr?: unknown }
+    const how = e.signal
+      ? `signal ${String(e.signal)}${e.killed ? ', timed out' : ''}`
+      : `exit code ${String(e.code)}`
+    const said = String(e.stderr ?? '')
+      .trim()
+      .split('\n')
+      .slice(-3)
+      .join(' | ')
+    throw new Error(`llama-server --version failed (${how})${said ? `: ${said}` : ''}`)
+  }
   if (parseBinaryVersion(`${stdout}\n${stderr}`) !== expected) {
     throw new Error(`backend did not report build ${expected}`)
   }

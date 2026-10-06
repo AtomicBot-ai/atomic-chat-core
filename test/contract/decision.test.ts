@@ -11,7 +11,7 @@
 
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { DecisionService } from '../../src/decision/index.js'
@@ -29,6 +29,7 @@ import { DECISION_CHECKPOINT_FILES } from '../../src/models/index.js'
 import { PublicServer } from '../../src/server/public/index.js'
 import { SettingsStore } from '../../src/settings/index.js'
 import { fakeDecisionSpawn } from '../helpers/fake-llama-server.js'
+import { buildGguf } from '../helpers/gguf-builder.js'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
 
@@ -205,5 +206,145 @@ describe('contract: a laya checkpoint folder is converted once into the core cac
 
     await service.configure({ model_path: '' })
     await vi.waitFor(async () => expect(await readdir(cacheDir())).toEqual([]))
+  })
+})
+
+describe('contract: an upstream decision GGUF runs on stock llama.cpp at its floor', () => {
+  let data: TmpDataFolder
+  let service: DecisionService
+  let server: PublicServer
+  let argvFile: string
+
+  beforeAll(async () => {
+    data = await makeTmpDataFolder('atomic-core-decision-upstream-')
+    argvFile = join(data.root, 'argv.jsonl')
+    // A fork build (which must not be picked), an upstream build below the floor, and one above it.
+    await data.writeBackend('llamacpp', 'b10269-1.7.0', 'macos-arm64')
+    await data.writeBackend('llamacpp-upstream', 'b11344', 'macos-arm64')
+    await data.writeBackend('llamacpp-upstream', 'b11436', 'macos-arm64')
+    const folder = join(data.root, 'decision', 'models', 'julia-1')
+    await mkdir(folder, { recursive: true })
+    await writeFile(
+      join(folder, 'Julia-1-Q8_0.gguf'),
+      buildGguf({
+        metadata: {
+          'general.architecture': 'modern-bert',
+          'modern-bert.decision.type': 'laya',
+          'modern-bert.context_length': 8192,
+        },
+        tensors: [],
+      })
+    )
+    const settings = await SettingsStore.open(data.layout.core.settings)
+    service = wireDecision({
+      layout: data.layout,
+      settings,
+      journal: { add: async () => {}, remove: async () => {} },
+      instanceId: 'contract',
+      emit: () => {},
+      log: () => {},
+      overrides: {
+        probe: async () => {
+          throw new Error('upstream has no flag to probe')
+        },
+        spawn: fakeDecisionSpawn({ decision: { upstream: true }, argvFile }),
+      },
+    })
+    await service.configure({
+      enabled: true,
+      model_path: 'decision/models/julia-1/Julia-1-Q8_0.gguf',
+      model_id: 'julia-1',
+      ctx_size: 1024,
+    })
+    await service.load()
+    server = await PublicServer.start(
+      {
+        findLocal: () => undefined,
+        listLocal: () => [],
+        providers: () => new Map(),
+        increaseCtx: async () => ({ ok: false }),
+        decision: service.publicBackend(),
+      },
+      { host: '127.0.0.1', port: 0, apiKey: 'public-key' }
+    )
+  })
+
+  afterAll(async () => {
+    await server?.close()
+    await service?.shutdown()
+    await data?.cleanup()
+  })
+
+  const post = (path: string, body: string) =>
+    fetch(`http://127.0.0.1:${server.port}/v1${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'authorization': 'Bearer public-key' },
+      body,
+    })
+
+  it('picks the newest upstream build and starts it without --decision, the prompt in one ubatch', async () => {
+    expect(service.getStatus()).toMatchObject({
+      state: 'ready',
+      engine: { dialect: 'upstream', provider: 'llamacpp-upstream', version_backend: 'b11436/macos-arm64' },
+      props: { endpoints: ['/v1/systemone'], model_id: 'julia-1' },
+    })
+    const [record] = (await readFile(argvFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l))
+    expect(record.argv).not.toContain('--decision')
+    expect(record.argv).toEqual(
+      expect.arrayContaining(['-a', 'julia-1', '-c', '1024', '-b', '1024', '-ub', '1024'])
+    )
+  })
+
+  it('passes /systemone through byte for byte and answers the router with 501', async () => {
+    const body =
+      '{"state":"Charged twice for #4471","questions":{"refund":{"type":"noul","instructions":"Refund?"}}}'
+    const res = await post('/systemone', body)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-fake-body-sha256')).toBe(createHash('sha256').update(body).digest('hex'))
+    expect(isSystemoneBody(await res.json())).toBe(true)
+    const router = await post('/router/score', JSON.stringify(examples['router_request']))
+    expect(router.status).toBe(501)
+    expect(await router.json()).toMatchObject({ error: { reason: 'UNSUPPORTED_ENDPOINT' } })
+  })
+
+  it('is unsupported with the build to update to when no upstream build reaches the floor', async () => {
+    const older = await makeTmpDataFolder('atomic-core-decision-upstream-old-')
+    try {
+      await older.writeBackend('llamacpp-upstream', 'b11344', 'macos-arm64')
+      await mkdir(join(older.root, 'm'), { recursive: true })
+      await writeFile(
+        join(older.root, 'm', 'lev.gguf'),
+        buildGguf({
+          metadata: { 'general.architecture': 'qwen35', 'qwen35.decision.type': 'lev' },
+          tensors: [],
+        })
+      )
+      const settings = await SettingsStore.open(older.layout.core.settings)
+      const stale = wireDecision({
+        layout: older.layout,
+        settings,
+        journal: { add: async () => {}, remove: async () => {} },
+        instanceId: 'contract',
+        emit: () => {},
+        log: () => {},
+        overrides: { spawn: fakeDecisionSpawn({ decision: { upstream: true } }) },
+      })
+      try {
+        await stale.configure({ enabled: true, model_path: 'm/lev.gguf' })
+        await expect(stale.load()).rejects.toMatchObject({
+          code: 'DECISION_ENGINE_UNSUPPORTED',
+          message:
+            'No installed llama.cpp build can run the decision model. Update llama.cpp to b11370 or newer.',
+        })
+        expect(stale.getStatus().state).toBe('unsupported')
+      } finally {
+        await stale.shutdown()
+      }
+    } finally {
+      await older.cleanup()
+    }
   })
 })

@@ -65,3 +65,44 @@ export interface ModelCompatibilityResponse extends CompatibilityVerdict {
     ctx_len?: number
   }
 }
+
+/** A file of a Bonsai family the Hub may offer: the conf rules neither exclude it nor call it legacy. */
+export interface PrismFamilyFile {
+  file: string
+  size: number
+  sha256: string
+  packing?: string
+  /** `prism_required`: only PrismML runs it; `any`: every llama.cpp engine does. */
+  treatment: 'prism_required' | 'any'
+  /** The file the family recommends. */
+  default?: boolean
+  summary?: string
+}
+
+export interface PrismFamilyProjector {
+  file: string
+  size: number
+  sha256: string
+  default?: boolean
+}
+
+/** One Bonsai model as the conf model rules name it, pinned to a revision. */
+export interface PrismFamily {
+  id: string
+  title: string
+  repo: string
+  revision: string
+  featured?: boolean
+  files: PrismFamilyFile[]
+  projectors: PrismFamilyProjector[]
+}
+
+/**
+ * `GET /atomic/v1/models/atomic-prism/families`: the Bonsai families of the newest model rules the
+ * core has (live, cached or bundled), for the Hub's PrismML list. A family with no file to offer
+ * is left out.
+ */
+export interface PrismFamiliesResponse {
+  rules_version: number
+  families: PrismFamily[]
+}

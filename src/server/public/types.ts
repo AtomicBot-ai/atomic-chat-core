@@ -111,6 +111,11 @@ export type DecisionTarget =
       port: number
       /** The process's own bearer key; the client's key for this server never reaches it. */
       apiKey: string
+      /**
+       * The engine paths the process serves (`/props.decision.endpoints`, or the core's for upstream);
+       * absent when it did not say, and then every route is forwarded.
+       */
+      endpoints?: readonly string[]
       /** Called once the answer has been relayed (or abandoned): the idle unload counts from here. */
       release: () => void
     }

@@ -77,8 +77,8 @@ describe('resolveBackendArchiveSource', () => {
   it('uses the signed mirror with hash and size when the manifest lists this exact asset', () => {
     expect(resolveBackendArchiveSource(`\uFEFF${tag}`, 'macos-arm64', BUNDLED_MANIFEST_BASELINE)).toEqual({
       url: `${BUNDLED_MANIFEST_BASELINE.download_base}/${tag}/llama-${tag}-bin-macos-arm64.tar.gz`,
-      sha256: 'd5eca9837663d76676358123f80183338c5246d0e7bca81e834112ed4ed177ec',
-      size: 11920825,
+      sha256: 'c9bbbd22a36ca5e0e2b64db24bcf95e24816d68de91bc8d5f5d28525e9772e27',
+      size: 12057060,
     })
   })
   it.each([

@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildDecisionArgs,
+  buildUpstreamDecisionArgs,
   commandSummary,
   DECISION_ENV_PREFIX,
   decisionEnv,
@@ -137,5 +138,53 @@ describe('commandSummary', () => {
     expect(commandSummary('/b/llama-server', ['-m', '/My Models/x.gguf'])).toBe(
       '/b/llama-server -m "/My Models/x.gguf"'
     )
+  })
+})
+
+describe('buildUpstreamDecisionArgs', () => {
+  it('starts stock llama.cpp without a decision flag, the whole prompt in one batch', () => {
+    expect(
+      buildUpstreamDecisionArgs(
+        { modelPath: '/m/lev.gguf', modelId: 'lev', threads: 6, port: 4567 },
+        { ctxSize: 8192, wholePromptUbatch: false }
+      )
+    ).toEqual([
+      '-m',
+      '/m/lev.gguf',
+      '-a',
+      'lev',
+      '-c',
+      '8192',
+      '-b',
+      '8192',
+      '-t',
+      '6',
+      '--host',
+      '127.0.0.1',
+      '--port',
+      '4567',
+      '--no-webui',
+    ])
+  })
+
+  it('adds the projector, and the ubatch for a type read from the embeddings', () => {
+    const argv = buildUpstreamDecisionArgs(
+      { modelPath: '/m/clef.gguf', threads: 4, port: 1 },
+      { mmprojPath: '/m/mmproj.gguf', ctxSize: 4096, wholePromptUbatch: true }
+    )
+    expect(argv.slice(0, 10)).toEqual([
+      '-m',
+      '/m/clef.gguf',
+      '--mmproj',
+      '/m/mmproj.gguf',
+      '-c',
+      '4096',
+      '-b',
+      '4096',
+      '-ub',
+      '4096',
+    ])
+    expect(argv).not.toContain('--decision')
+    expect(argv).not.toContain('--device')
   })
 })

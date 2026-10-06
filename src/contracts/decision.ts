@@ -1,12 +1,18 @@
 /**
- * The decision model: a small model served by `llama-server --decision` (the TurboQuant fork, from
- * release 1.7.0) that answers calibrated probabilities in one forward pass. It runs as its own core
- * module, outside the sessions registry (ADR 2026-09-30-the-decision-model-is-its-own-core-module).
+ * The decision model: a small model that answers typed questions with probabilities in one forward
+ * pass. It runs as its own core module, outside the sessions registry
+ * (ADR 2026-09-30-the-decision-model-is-its-own-core-module), on one of two engines
+ * (ADR 2026-10-06-run-decision-models-on-upstream-llamacpp):
+ *  - `turboquant`: `llama-server --decision` of the TurboQuant fork (release 1.7.0 on), which also
+ *    serves the router (`/v1/router/score`) and converts laya checkpoint folders;
+ *  - `upstream`: ggml-org llama.cpp (b11370 on), which serves `/v1/systemone` for a GGUF stamped with
+ *    `<arch>.decision.type` (laya, openjev, lev, kev, nimble, clef). No router.
  *
  * Two halves live here:
- *  - the engine's wire contract (`DECISION.md` in atomic-llama-cpp-turboquant, API version 1),
- *    mirrored as types only. Fields the engine may add later are tolerated: every object keeps an
- *    index signature, and nothing in the core rejects an unknown key;
+ *  - the engine's wire contract (`DECISION.md` in atomic-llama-cpp-turboquant, API version 1, which
+ *    upstream's `/v1/systemone` shares for requests), mirrored as types only. Fields the engine may
+ *    add later are tolerated: every object keeps an index signature, and nothing in the core rejects
+ *    an unknown key;
  *  - the core's own surface: the settings section, the status, the fail-open outcome and the events.
  *
  * Browser-safe: types and constants only. snake_case throughout, like the engine and `settings.json`.
@@ -14,6 +20,13 @@
 
 /** `/props.decision.api_version` this core speaks. Anything else is treated as an unsupported engine. */
 export const DECISION_API_VERSION = 1
+
+/**
+ * Which decision API an engine speaks, decided by the model file: a laya checkpoint folder or a GGUF
+ * the fork converted (`decision.layout`, architecture `laya`) is `turboquant`; a GGUF with
+ * `<arch>.decision.type` is `upstream`.
+ */
+export type DecisionDialect = 'turboquant' | 'upstream'
 
 // ---------------------------------------------------------------------------------------------
 // Engine contract (DECISION.md, API version 1)
@@ -72,14 +85,15 @@ export interface DecisionTimings {
   [extra: string]: unknown
 }
 
+/** Upstream llama.cpp answers only `answers` and `usage.{input,output}_tokens`; the rest is the fork's. */
 export interface SystemoneResponse {
-  model: string
+  model?: string
   answers: Record<string, DecisionAnswer>
-  usage: { input_tokens: number; output_tokens: number; evaluated_tokens: number; [extra: string]: unknown }
-  latency_ms: number
+  usage: { input_tokens: number; output_tokens: number; evaluated_tokens?: number; [extra: string]: unknown }
+  latency_ms?: number
   timings?: DecisionTimings
-  warnings: string[]
-  runtime: DecisionRuntimeInfo
+  warnings?: string[]
+  runtime?: DecisionRuntimeInfo
   [extra: string]: unknown
 }
 
@@ -272,10 +286,18 @@ export interface DecisionSettings {
   /** Off by default: nothing is spawned until the app turns it on and names a model. */
   enabled: boolean
   /**
-   * The decision GGUF (a laya model, or any GGUF stamped with `decision.spec`), or a laya Hugging Face
-   * checkpoint folder, which the engine converts once into `<data>/decision/gguf-cache`.
+   * The decision GGUF (a laya model, any GGUF stamped with `decision.spec`, or an upstream one with
+   * `<arch>.decision.type`), or a laya Hugging Face checkpoint folder, which the fork converts once
+   * into `<data>/decision/gguf-cache`. The file decides the engine (`DecisionDialect`).
    */
   model_path: string
+  /** `--mmproj` for an upstream model that reads images (openjev, clef); empty = none. Ignored by the fork. */
+  mmproj_path: string
+  /**
+   * `-c` for an upstream model, also its batch (the decision outputs are read from one batch); 0 = the
+   * core picks (`UPSTREAM_DECISION_DEFAULT_CTX`, capped at the trained context). Ignored by the fork.
+   */
+  ctx_size: number
   /** `-a`: the name the engine answers with; empty = the file name, or the folder name for a checkpoint. */
   model_id: string
   /** `--decision-spec`: a spec or a bare `calibration.json` replacing the embedded one; empty = none. */
@@ -290,7 +312,7 @@ export interface DecisionSettings {
   startup_timeout_secs: number
   /** `--decision-allow-uncalibrated`: serve `/v1/router/score` with `calibrated: false` scores. */
   allow_uncalibrated: boolean
-  /** An explicit `llama-server` to run instead of the installed fork build; empty = resolve one. */
+  /** An explicit `llama-server` to run instead of an installed build of the model's engine; empty = resolve one. */
   engine_path: string
   /** `--decision-convert-type` for a checkpoint folder; ignored for a GGUF. */
   convert_type: DecisionConvertType
@@ -299,6 +321,8 @@ export interface DecisionSettings {
 export const DEFAULT_DECISION_SETTINGS: DecisionSettings = {
   enabled: false,
   model_path: '',
+  mmproj_path: '',
+  ctx_size: 0,
   model_id: '',
   spec_path: '',
   threads: 0,
@@ -324,8 +348,14 @@ export type DecisionState =
   | 'restarting'
   /** A start failed, or restarts gave up; `error` says why. Cleared by `load` or a settings change. */
   | 'failed'
-  /** No installed engine build speaks `--decision` (or it speaks another API version). */
+  /**
+   * No installed build of the model's engine can run it: no fork build speaks `--decision` (or it
+   * speaks another API version), or no upstream build is new enough for the model's decision type.
+   */
   | 'unsupported'
+
+/** The providers whose builds can run a decision model, one per dialect. */
+export type DecisionEngineProvider = 'llamacpp' | 'llamacpp-upstream'
 
 /** Which `llama-server` runs the decision model, and why the core trusts it. */
 export interface DecisionEngineInfo {
@@ -334,8 +364,15 @@ export interface DecisionEngineInfo {
   version_backend: string | null
   /** Fork semver from the release tag (`b10269-1.7.0` → `1.7.0`); `null` when the tag has none. */
   fork_version: string | null
-  /** Whether the tag alone says the build is new enough; the `-h` probe has the last word. */
+  /**
+   * Whether the tag alone says the build is new enough: for the fork the `-h` probe has the last
+   * word, for upstream the build number is the gate.
+   */
   version_gate: boolean | null
+  /** The API the engine is started for. */
+  dialect: DecisionDialect
+  /** The provider whose pack it is; `null` for an explicit `engine_path`. */
+  provider: DecisionEngineProvider | null
 }
 
 export interface DecisionStatus {

@@ -63,6 +63,40 @@ describe('ModelCompatibilityService.check', () => {
   })
 })
 
+describe('ModelCompatibilityService.families', () => {
+  it('lists every family with only the files the Hub may offer', async () => {
+    const { svc } = make()
+    const { rules_version, families } = await svc.families()
+
+    expect(rules_version).toBe(RULES.rules_version)
+    const b2 = families.find((f) => f.repo === B2)!
+    expect(b2.files.map((f) => f.file)).toEqual([
+      'Ternary-Bonsai-2-27B-PQ2_0.gguf',
+      'Ternary-Bonsai-2-27B-PTQ1_0.gguf',
+    ])
+    expect(b2.files[0]).toMatchObject({ treatment: 'prism_required', default: true })
+    expect(b2.projectors.length).toBeGreaterThan(0)
+    // An F16 master and a legacy layout are never offered.
+    for (const family of families)
+      for (const file of family.files) expect(['prism_required', 'any']).toContain(file.treatment)
+  })
+
+  it('leaves out a family with nothing to offer', async () => {
+    const only = RULES.families[0]!
+    const rules = {
+      ...RULES,
+      families: [{ ...only, files: only.files.map((f) => ({ ...f, treatment: 'excluded' as const })) }],
+    }
+    const svc = new ModelCompatibilityService({
+      rules: { rules: async () => rules, cachedRules: async () => rules },
+      installedPrism: async () => ({ build: null }),
+      fetch: (async () => new Response()) as typeof fetch,
+    })
+
+    expect((await svc.families()).families).toEqual([])
+  })
+})
+
 describe('ModelCompatibilityService.ruleFor', () => {
   it('matches a file the way check does', async () => {
     const { svc } = make()

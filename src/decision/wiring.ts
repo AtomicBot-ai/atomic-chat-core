@@ -11,7 +11,7 @@ import { processStartId } from '../lock/index.js'
 import type { ProcessJournal } from '../lock/index.js'
 import type { BackendOutputSink } from '../runtime/shared/index.js'
 import type { ThreadFacts } from './args.js'
-import { DECISION_ENGINE_PROVIDER, DecisionEngineResolver } from './engine.js'
+import { DECISION_ENGINE_PROVIDERS, DecisionEngineResolver } from './engine.js'
 import type { EngineResolverDeps } from './engine.js'
 import { createDecisionHttp } from './http.js'
 import type { DecisionHttp } from './http.js'
@@ -29,7 +29,7 @@ export interface WireDecisionOptions {
   journal: Pick<ProcessJournal, 'add' | 'remove'>
   instanceId: string
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
-  /** The core's event bus: a finished TurboQuant install lets an `unsupported` or `failed` module retry. */
+  /** The core's event bus: a finished TurboQuant or llama.cpp install lets an `unsupported` or `failed` module retry. */
   on?: (
     name: 'backend:download-finished',
     listener: (payload: CoreEvents['backend:download-finished']) => void
@@ -89,16 +89,19 @@ export function cpuFactsOf(info: HardwareInfoResponse | undefined): Omit<ThreadF
 }
 
 /**
- * A backend install finished: a TurboQuant build lets an `unsupported` or `failed` module try again
- * (`DecisionService.onEnginesChanged`). Fire and forget, and never an unhandled rejection. Shared by
- * the event bus (installs made by the app) and the owner's own control route, which emits no event.
+ * A backend install finished: a TurboQuant or llama.cpp build lets an `unsupported` or `failed`
+ * module try again (`DecisionService.onEnginesChanged`), which ignores the install when its model
+ * needs the other provider. Fire and forget, and never an
+ * unhandled rejection. Shared by the event bus (installs made by the app) and the owner's own control
+ * route, which emits no event.
  */
 export function noticeEngineInstall(
   service: Pick<DecisionService, 'onEnginesChanged'>,
   provider: string,
   installed: boolean
 ): void {
-  if (provider === DECISION_ENGINE_PROVIDER && installed) void service.onEnginesChanged().catch(() => {})
+  if (installed && (DECISION_ENGINE_PROVIDERS as readonly string[]).includes(provider))
+    void service.onEnginesChanged(provider).catch(() => {})
 }
 
 export function wireDecision(options: WireDecisionOptions): DecisionService {

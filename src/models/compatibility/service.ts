@@ -8,7 +8,12 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { LocalProviderId, ModelCompatibilityResponse } from '../../contracts/index.js'
+import type {
+  LocalProviderId,
+  ModelCompatibilityResponse,
+  PrismFamiliesResponse,
+  PrismFamilyFile,
+} from '../../contracts/index.js'
 import { hfResolveUrl, inspectLocalGguf, inspectRemoteGguf } from './inspect.js'
 import { gateDecision, resolveCompatibility } from './resolve.js'
 import type { GgufEvidence, InstalledPrism } from './resolve.js'
@@ -71,6 +76,50 @@ export class ModelCompatibilityService {
   }
 
   /** The conf rule for a file, as `check` would match it. */
+  /** The Bonsai families the Hub lists, each with only the files it may offer. */
+  async families(): Promise<PrismFamiliesResponse> {
+    const rules = await this.deps.rules.rules()
+    const offered = (treatment: string): treatment is PrismFamilyFile['treatment'] =>
+      treatment === 'prism_required' || treatment === 'any'
+    return {
+      rules_version: rules.rules_version,
+      families: rules.families.flatMap((family) => {
+        const files: PrismFamilyFile[] = family.files.flatMap(({ treatment, ...file }) =>
+          offered(treatment)
+            ? [
+                {
+                  file: file.file,
+                  size: file.size,
+                  sha256: file.sha256,
+                  treatment,
+                  ...(file.packing ? { packing: file.packing } : {}),
+                  ...(file.default ? { default: true } : {}),
+                  ...(file.summary ? { summary: file.summary } : {}),
+                },
+              ]
+            : []
+        )
+        if (files.length === 0) return []
+        return [
+          {
+            id: family.id,
+            title: family.title,
+            repo: family.repo,
+            revision: family.revision,
+            ...(family.featured ? { featured: true } : {}),
+            files,
+            projectors: family.projectors.map(({ file, size, sha256, ...rest }) => ({
+              file,
+              size,
+              sha256,
+              ...(rest.default ? { default: true } : {}),
+            })),
+          },
+        ]
+      }),
+    }
+  }
+
   async ruleFor(query: Pick<CompatibilityQuery, 'sha256' | 'repo' | 'file'>): Promise<RuleMatch | undefined> {
     return findPrismModelRule(await this.deps.rules.rules(), query)
   }

@@ -12,6 +12,8 @@ describe('decisionSettingsOf', () => {
     expect(DEFAULT_DECISION_SETTINGS).toEqual({
       enabled: false,
       model_path: '',
+      mmproj_path: '',
+      ctx_size: 0,
       model_id: '',
       spec_path: '',
       threads: 0,

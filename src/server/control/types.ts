@@ -26,6 +26,7 @@ import type {
   EnvironmentSnapshot,
   ModelCompatibilityRequest,
   ModelCompatibilityResponse,
+  PrismFamiliesResponse,
   ModelSetup,
   ModelSetupPlan,
   ModelSetupPlanRequest,
@@ -337,6 +338,8 @@ export interface ChatGptControl {
 export interface ModelSetupControl {
   compatibility: (request: ModelCompatibilityRequest) => Promise<ModelCompatibilityResponse>
   plan: (request: ModelSetupPlanRequest) => Promise<ModelSetupPlan>
+  /** The Bonsai families the conf model rules name, for the Hub's PrismML list. */
+  families: () => Promise<PrismFamiliesResponse>
   start: (request: ModelSetupStartRequest) => Promise<ModelSetup>
   list: () => Promise<ModelSetup[]>
   get: (setupId: string) => Promise<ModelSetup>

@@ -1,6 +1,7 @@
 /**
  * Model compatibility and the model setup: `POST /models/compatibility` (what a file needs and
- * whether this core runs it), `POST /models/setup-plan` (what a setup would install and download,
+ * whether this core runs it), `GET /models/atomic-prism/families` (the Bonsai models the conf rules
+ * name, for the Hub), `POST /models/setup-plan` (what a setup would install and download,
  * with a digest), `POST /model-setups` (start one from that digest), `GET /model-setups[/:id]`, and
  * `POST /model-setups/:id/{cancel,resume}`. Progress is the `model-setup:changed` event plus the
  * `download:*` events of the setup's task ids.
@@ -35,6 +36,9 @@ export function registerModelSetupRoutes(
   router.post(p('/models/compatibility'), async (req, res) => {
     const setups = control(deps)
     sendJson(res, 200, await setups.compatibility(await objectBody(req)))
+  })
+  router.get(p('/models/atomic-prism/families'), async (_req, res) => {
+    sendJson(res, 200, await control(deps).families())
   })
   router.post(p('/models/setup-plan'), async (req, res) => {
     const setups = control(deps)

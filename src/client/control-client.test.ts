@@ -206,6 +206,10 @@ beforeEach(async () => {
         setupCalls.push(`plan:${request.file}`)
         return SETUP.plan
       },
+      families: async () => {
+        setupCalls.push('families')
+        return { rules_version: 2, families: [] }
+      },
       start: async (request) => {
         setupCalls.push(`start:${request.request_id}:${request.plan_digest}`)
         return SETUP
@@ -784,6 +788,7 @@ describe('model compatibility and setup', () => {
     setupCalls.length = 0
     expect((await client.modelCompatibility({ repo: 'o/r', file: 'f.gguf' })).outcome).toBe('engine_required')
     expect((await client.modelSetupPlan({ repo: 'o/r', file: 'f.gguf' })).digest).toBe('d')
+    expect(await client.prismFamilies()).toEqual({ rules_version: 2, families: [] })
     expect(
       (await client.startModelSetup({ repo: 'o/r', file: 'f.gguf', request_id: 'r1', plan_digest: 'd' }))
         .setup_id
@@ -796,6 +801,7 @@ describe('model compatibility and setup', () => {
     expect(setupCalls).toEqual([
       'compatibility:o/r',
       'plan:f.gguf',
+      'families',
       'start:r1:d',
       'get:s1',
       'cancel:s1',

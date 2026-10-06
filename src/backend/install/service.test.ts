@@ -9,6 +9,7 @@ import {
   BackendService,
   mergeCompanionIntoBin,
   verifyMacBackendBinary,
+  PRISM_LAUNCH_CHECK_TIMEOUT_MS,
   verifyPrismBackendBinary,
 } from './service.js'
 import type { PrismManifest } from '../catalog/index.js'
@@ -527,6 +528,31 @@ describe('verifyPrismBackendBinary', () => {
     await expect(verifyPrismBackendBinary(data.root, 'b6325', 'linux')).rejects.toThrow(
       /not a PrismML release tag/
     )
+  })
+  it.skipIf(process.platform === 'win32')(
+    'says how the server failed: its exit code and what it printed',
+    async () => {
+      const staging = join(data.root, 'prism-crash')
+      await mkdir(join(staging, 'build', 'bin'), { recursive: true })
+      await writeFile(
+        join(staging, 'build', 'bin', 'llama-server'),
+        '#!/bin/sh\necho "dyld: Library not loaded: @rpath/libllama.0.dylib" >&2\nexit 6\n'
+      )
+      await expect(verifyPrismBackendBinary(staging, 'prism-b10754-2459f68', 'linux')).rejects.toThrow(
+        /exit code 6\): dyld: Library not loaded/
+      )
+    }
+  )
+  it.skipIf(process.platform === 'win32')('says a server that took too long timed out', async () => {
+    const staging = join(data.root, 'prism-slow')
+    await mkdir(join(staging, 'build', 'bin'), { recursive: true })
+    await writeFile(join(staging, 'build', 'bin', 'llama-server'), '#!/bin/sh\nsleep 5\n')
+    await expect(verifyPrismBackendBinary(staging, 'prism-b10754-2459f68', 'linux', 200)).rejects.toThrow(
+      /signal SIGTERM, timed out/
+    )
+  })
+  it('waits long enough for a first run that compiles its Metal shaders', () => {
+    expect(PRISM_LAUNCH_CHECK_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000)
   })
 })
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { capabilitiesOf, checkReadiness, decisionPropsOf, judgeDecisionEndpoint } from './readiness.js'
+import {
+  capabilitiesOf,
+  checkReadiness,
+  decisionPropsOf,
+  judgeDecisionEndpoint,
+  judgeUpstreamDecisionEndpoint,
+  modalitiesOf,
+} from './readiness.js'
 import { DecisionTimeoutError } from './http.js'
 import type { DecisionHttp, DecisionRequest } from './http.js'
 
@@ -157,5 +164,77 @@ describe('checkReadiness', () => {
       '/props': { status: 200, text: '{}' },
     })
     expect((await checkReadiness(http, 'http://x', 'k')).kind).toBe('unsupported')
+  })
+})
+
+/** An upstream `/v1/models` answer (b11370 on): the decision model shows in `output_modalities`. */
+const upstreamModels = (outputs: string[], inputs: string[] = ['text']) => ({
+  status: 200,
+  text: JSON.stringify({
+    object: 'list',
+    data: [{ id: 'julia-1', architecture: { input_modalities: inputs, output_modalities: outputs } }],
+    models: [{ name: 'julia-1', capabilities: ['completion'] }],
+  }),
+})
+
+describe('judgeUpstreamDecisionEndpoint', () => {
+  it('is ready when /v1/models lists decisions, with the props the core stands in', () => {
+    expect(judgeUpstreamDecisionEndpoint(upstreamModels(['decisions'], ['text', 'image']))).toEqual({
+      kind: 'ready',
+      capabilities: ['decision', 'systemone'],
+      props: {
+        api_version: 1,
+        endpoints: ['/v1/systemone'],
+        source: 'gguf',
+        model_id: 'julia-1',
+        input_modalities: ['text', 'image'],
+      },
+    })
+  })
+
+  it('refuses a server whose model is not a decision model', () => {
+    expect(judgeUpstreamDecisionEndpoint(upstreamModels(['text']))).toEqual({
+      kind: 'unsupported',
+      detail: '/v1/models does not list the "decisions" output modality (got ["text"])',
+    })
+  })
+
+  it('reads anything but a JSON 200 as still loading', () => {
+    expect(judgeUpstreamDecisionEndpoint({ status: 503, text: '' }).kind).toBe('loading')
+    expect(judgeUpstreamDecisionEndpoint({ status: 200, text: 'nope' }).kind).toBe('loading')
+  })
+
+  it('leaves the model id out when the entry has none', () => {
+    const verdict = judgeUpstreamDecisionEndpoint({
+      status: 200,
+      text: JSON.stringify({ data: [{ architecture: { output_modalities: ['decisions'] } }] }),
+    })
+    expect(verdict).toMatchObject({ kind: 'ready' })
+    expect(verdict.kind === 'ready' && 'model_id' in verdict.props).toBe(false)
+    expect(judgeUpstreamDecisionEndpoint({ status: 200, text: '[]' })).toMatchObject({ kind: 'unsupported' })
+  })
+
+  it('reads the modalities of the first entry that has them', () => {
+    expect(
+      modalitiesOf(
+        { data: [{}, { architecture: { output_modalities: ['decisions', 3] } }] },
+        'output_modalities'
+      )
+    ).toEqual(['decisions'])
+    expect(modalitiesOf({ models: [] }, 'input_modalities')).toEqual([])
+    expect(modalitiesOf({ data: ['x', { architecture: 'y' }] }, 'input_modalities')).toEqual([])
+    expect(modalitiesOf(null, 'output_modalities')).toEqual([])
+  })
+})
+
+describe('checkReadiness for upstream', () => {
+  it('asks health and models only: upstream has no /props.decision', async () => {
+    const { http, seen } = scriptedHttp({
+      '/health': { status: 200, text: '{"status":"ok"}' },
+      '/v1/models': upstreamModels(['decisions']),
+    })
+    const result = await checkReadiness(http, 'http://127.0.0.1:9', 'key', 2_000, 'upstream')
+    expect(result).toMatchObject({ kind: 'ready', props: { endpoints: ['/v1/systemone'] } })
+    expect(seen.map((s) => new URL(s.url).pathname)).toEqual(['/health', '/v1/models'])
   })
 })
