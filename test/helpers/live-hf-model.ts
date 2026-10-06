@@ -334,9 +334,10 @@ export function quantizationOf(
 }
 
 /**
- * The model directory the app and the CLI would leave: every file hard-linked from the cache (a copy
- * across file systems), and `model.yml` written last — a directory without it is a download in
- * progress, not a model (spec `tensorrt-llm-models`).
+ * The model directory the app and the CLI would leave in the managed model store: every file
+ * hard-linked from the cache (a copy across file systems), and `model.yml` written last — a directory
+ * without it is a download in progress, not a model. `model.yml` names nothing engine-dependent (spec
+ * `managed-model-store`, change `add-vllm-runtime`).
  */
 export async function installModel(options: {
   dataFolder: string
@@ -346,7 +347,6 @@ export async function installModel(options: {
   revision: string
   files: readonly RepoFile[]
   architectures: string[]
-  quantization: string
 }): Promise<string> {
   const dir = join(options.dataFolder, 'managed-models', ...options.id.split('/'))
   await rm(dir, { recursive: true, force: true })
@@ -366,7 +366,6 @@ export async function installModel(options: {
       repository: options.repository,
       revision: options.revision,
       architectures: options.architectures,
-      quantization: options.quantization,
       files: options.files.map((file) => ({ path: file.path, size: file.size, sha256: file.sha256 })),
     })
   )
@@ -491,9 +490,11 @@ export async function checkModel(options: {
   hfQuant: Record<string, unknown> | null
   files: readonly RepoFile[]
   gpuId: string | undefined
+  /** The managed provider whose check answers (change `add-vllm-runtime`); `tensorrt-llm` when omitted. */
+  provider?: string
 }): Promise<ModelCheck | null> {
   const { api, model } = options
-  const answer = await api.post<ModelCheck>('/models/tensorrt-llm/check', {
+  const answer = await api.post<ModelCheck>(`/models/${options.provider ?? 'tensorrt-llm'}/check`, {
     repository: model.repository,
     revision: model.revision,
     config_json: options.config,
@@ -521,6 +522,8 @@ export async function prepareCuratedModel(options: {
   dataFolder: string
   cacheRoot: string
   log: (line: string) => void
+  /** The managed provider whose check must accept the model; `tensorrt-llm` when omitted. */
+  provider?: string
 }): Promise<PreparedModel> {
   const { api, model, log } = options
   const id = model.repository.split('/').pop() as string
@@ -535,7 +538,15 @@ export async function prepareCuratedModel(options: {
     ? await fetchJson(model.repository, model.revision, 'hf_quant_config.json', log)
     : null
   let quantization = quantizationOf(config, hfQuant)
-  const check = await checkModel({ api, model, config, hfQuant, files, gpuId: options.gpuId })
+  const check = await checkModel({
+    api,
+    model,
+    config,
+    hfQuant,
+    files,
+    gpuId: options.gpuId,
+    ...(options.provider === undefined ? {} : { provider: options.provider }),
+  })
   if (check !== null) quantization = check.quantization_format ?? quantization
   const cache = join(options.cacheRoot, ...model.repository.split('/'), model.revision)
   const started = Date.now()
@@ -550,7 +561,6 @@ export async function prepareCuratedModel(options: {
     revision: model.revision,
     files,
     architectures,
-    quantization,
   })
   return {
     model,

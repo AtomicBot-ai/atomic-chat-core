@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-06** — [vLLM runs `vllm serve` with its KV cache in bytes and its memory share sized by core](2026-10-06-vllm-runs-vllm-serve-with-memory-sized-by-core.md) — the `vllm` adapter, `beforeCreate` now hands an engine its launch plan.
 - **2026-10-06** — [Managed engines are registered specs, and an engine id is its provider id](2026-10-06-managed-engines-are-registered-specs-and-engine-id-is-the-provider-id.md) — `ManagedEngineSpec`, `ManagedEngineRegistry`, `ManagedTextRuntime(spec)`, `wireManagedEngine`.
 - **2026-10-06** — [One model store for every managed engine; TensorRT-LLM's models move into it at startup](2026-10-06-one-model-store-for-every-managed-engine-and-trt-models-move-into-it.md) — `<data>/managed-models`, `GET /managed-models/location`, `DELETE /managed-models/:id` replace the `tensorrt-llm` routes.
 - **2026-10-06** — [One quantization naming rule for every managed engine; a name is the encoding on disk](2026-10-06-one-quantization-naming-rule-for-every-managed-engine.md) — `autoawq_w4a16`, `gptq_*`, `hf_fp8`, `ct_*`; no TensorRT-LLM verdict changes.

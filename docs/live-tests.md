@@ -556,3 +556,38 @@ built from the branch and an existing TensorRT-LLM installation and models from 
 
 Record the numbers (moved folders, first-load time before and after) under the change's `rulings/` in
 atomic-chat-spec.
+
+## vLLM (change `add-vllm-runtime`)
+
+`test/live/vllm.test.ts` runs the real `vllm/vllm-openai` image on a Linux host whose container
+environment is already prepared (the install test above, or TensorRT-LLM set up through the app): it
+sets the vLLM engine up if it is not `ready` (no privileged step; it stops if one would be needed),
+downloads the curated `Qwen/Qwen3.5-2B` into the managed model store, loads it, and checks chat and
+streaming through `:1337`, thinking off (the answer in `content`) and on (`reasoning_content`), a tool
+call, `context_length_exceeded`, the container's env (`VLLM_NO_USAGE_STATS`, `DO_NOT_TRACK`,
+`HF_HUB_OFFLINE`), argv (no `--trust-remote-code`) and mounts, and a faster second start from the
+compile cache.
+
+### Run
+
+conf's `runtimes/vllm.json` is not in main until this acceptance passes (design D15): the test reads the
+copy in `test/fixtures/runtimes/vllm.json`, or `ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM`.
+
+```bash
+npm run build:bin
+ATOMIC_LIVE=1 npx vitest run --project live test/live/vllm.test.ts
+```
+
+`ATOMIC_LIVE_GPU=<uuid>` pins a card; `ATOMIC_LIVE_OUT` sets where the report lands.
+
+### What to carry into the change (task 6.1)
+
+- `<out>/summary.json`: first and second load times, `--kv-cache-memory-bytes`,
+  `--gpu-memory-utilization`, `--shm-size`. Compare the card's used memory during the load with the
+  core's estimate (weights + KV + 2 GiB): the overhead and the 512 MiB margin are first estimates.
+- `<out>/vllm-start.log`: the engine's real start log. Replace the constructed lines in
+  `test/helpers/vllm-log-fixtures.ts` with its decisive lines, and adjust the adapter's stage markers and
+  exit classification where they differ.
+- Which quantization rows of the descriptor actually start on compute capability 8.9 (an AWQ model of
+  the curated list), the driver floor, and whether `qwen3`'s parser needs the reasoning-into-content
+  rewrite (ruling core 3.2): all into `rulings/` of the change, and the descriptor in conf's branch.
