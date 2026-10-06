@@ -152,12 +152,17 @@ const notImported = (): AtomicCoreError =>
     'TensorRT-LLM runs in Atomic Chat’s WSL distribution, which is not set up on this computer yet.'
   )
 
-/** Windows on x64 only: no WSL GPU path for ARM (spec `tensorrt-llm-desktop`). */
-const windowsX64 = (
+/**
+ * Windows with the WSL context, on a CPU the descriptor publishes an image for: x64, and arm64 since
+ * Windows on Arm got its own environment manifest (`windows-arm64-r<N>`) and the provisioner pulls
+ * the `linux/arm64` images (NVIDIA RTX Spark N1X, 2026-10-06). The runtime picks the same image by
+ * `containerPlatformFor(arch)`.
+ */
+const windowsWsl = (
   platform: NodeJS.Platform,
   arch: string,
   context: WindowsTensorrtLlmContext | undefined
-) => platform === 'win32' && arch === 'x64' && context !== undefined
+) => platform === 'win32' && containerPlatformFor(arch) !== null && context !== undefined
 
 export interface WireTensorrtLlmOptions {
   /** Injected, never `process.platform` read here; the managed environment's (the test host is Linux). */
@@ -187,13 +192,13 @@ export interface WireTensorrtLlmOptions {
    * platform has no numeric user, which leaves the image's own user.
    */
   containerUser: ContainerUser | null
-  /** Windows x64 (change `add-tensorrt-llm-windows`): the WSL context; without it Windows offers nothing. */
+  /** Windows (change `add-tensorrt-llm-windows`): the WSL context; without it Windows offers nothing. */
   windows?: WindowsTensorrtLlmContext
 }
 
-/** The provider, or null where it is not offered: everywhere but Linux and Windows x64. */
+/** The provider, or null where it is not offered: everywhere but Linux and Windows (x64, arm64). */
 export function wireTensorrtLlm(options: WireTensorrtLlmOptions): TensorrtLlmRuntime | null {
-  if (options.windows !== undefined && windowsX64(options.platform, options.arch, options.windows)) {
+  if (options.windows !== undefined && windowsWsl(options.platform, options.arch, options.windows)) {
     return wireWindowsTensorrtLlm(options, options.windows)
   }
   if (options.platform !== 'linux') return null
@@ -433,7 +438,7 @@ export function wireTensorrtLlmModelCheck(
   options: WireTensorrtLlmModelCheckOptions
 ): ((body: unknown) => Promise<ModelCompatibility>) | null {
   const windows = options.windows
-  if (windows !== undefined && windowsX64(platform, options.arch ?? 'x64', windows)) {
+  if (windows !== undefined && windowsWsl(platform, options.arch ?? 'x64', windows)) {
     return (body: unknown) =>
       checkTensorrtLlmModel(body, {
         installations: options.installations,
