@@ -10,8 +10,12 @@
  *   layers only) at the KV precision — FP8 when asked for on compute capability 8.9 and newer, or when
  *   the checkpoint's own KV cache is FP8, else two bytes;
  * - gives vLLM the share of the card that is free right before the container is created, less a
- *   margin: `min(0.95, (free − 512 MiB) / total)` (on a card with the host's memory, never more than
- *   half the host's memory), so vLLM's own start check passes by construction;
+ *   margin: `min(0.95, (free − 1.5 GiB) / total)` (on a card with the host's memory, never more than
+ *   half the host's memory), so vLLM's own start check passes by construction. With the KV cache in
+ *   bytes the share sizes nothing: vLLM only checks at start that the card's free memory — measured
+ *   after its own CUDA context exists — covers `share × total`. The margin must therefore exceed that
+ *   context; 512 MiB did not (Windows acceptance, 2026-10-06: an RTX 4070 Laptop under WSL had 7.76
+ *   GiB free before the container and 6.89 GiB at vLLM's check, so every model failed at start);
  * - checks, before any container, that the weights, that KV cache and vLLM's own overhead fit the
  *   free memory — the same rule the compatibility check (`POST /models/vllm/check`) applies.
  *
@@ -41,8 +45,14 @@ const MiB = 1024 ** 2
 
 /** What vLLM holds beyond weights and KV cache: CUDA context, activations, sampler, graphs. */
 export const VLLM_ENGINE_OVERHEAD_BYTES = 2 * GiB
-/** Left free on the card when the share is computed: what other processes may still take meanwhile. */
+/** Counted as needed in the memory check: what other processes may still take meanwhile. */
 export const VLLM_FREE_MEMORY_MARGIN_BYTES = 512 * MiB
+/**
+ * Left out of the share vLLM is given (`--gpu-memory-utilization`): more than vLLM's own CUDA context,
+ * which already holds memory when vLLM checks the share at start (0.87 GiB measured under WSL on an
+ * RTX 4070 Laptop, 2026-10-06), plus what other processes may take meanwhile.
+ */
+export const VLLM_START_CHECK_MARGIN_BYTES = 1536 * MiB
 /** The highest share of a card vLLM is ever given. */
 export const VLLM_MAX_GPU_MEMORY_UTILIZATION = 0.95
 /** On a card with the host's memory: contexts the KV cache holds, as for TensorRT-LLM (design D9). */
@@ -89,10 +99,11 @@ export function vllmKvCacheBytes(
 }
 
 /**
- * vLLM's memory rule on `gpu`: weights + KV cache in bytes + its own overhead, held to the same share
- * the launch gives vLLM (`vllmGpuMemoryUtilization`): the margin left free counts as needed, and on a
- * card with the host's memory so does whatever of `MemAvailable` lies beyond half the host's memory —
- * so the check and the start agree on what fits. Weights offloaded to the CPU (`cpu_offload_gb`, GiB as
+ * vLLM's memory rule on `gpu`: weights + KV cache in bytes + its own overhead (CUDA context included) +
+ * a margin for what other processes may take meanwhile; on a card with the host's memory, whatever of
+ * `MemAvailable` lies beyond half the host's memory counts as needed too. The share the launch gives
+ * vLLM (`vllmGpuMemoryUtilization`) is not a budget here: with the KV cache in bytes it only gates
+ * vLLM's start check, so its larger margin is not added to this need. Weights offloaded to the CPU (`cpu_offload_gb`, GiB as
  * vLLM counts them) leave the card, except on a card with the host's memory, where they stay in the
  * same memory.
  */
@@ -139,7 +150,7 @@ function isMultimodal(configJson: JsonObject): boolean {
 export function vllmGpuMemoryUtilization(gpu: GpuFacts, host: HostMemory): number {
   const total = totalMemoryBytes(gpu, host)
   if (total <= 0) return VLLM_MAX_GPU_MEMORY_UTILIZATION
-  let available = freeMemoryBytes(gpu, host) - VLLM_FREE_MEMORY_MARGIN_BYTES
+  let available = freeMemoryBytes(gpu, host) - VLLM_START_CHECK_MARGIN_BYTES
   // On the host's memory, half of it stays the system's (the same rule as TensorRT-LLM's).
   if (isUnifiedMemory(gpu)) available = Math.min(available, total / 2)
   const share = Math.min(VLLM_MAX_GPU_MEMORY_UTILIZATION, available / total)

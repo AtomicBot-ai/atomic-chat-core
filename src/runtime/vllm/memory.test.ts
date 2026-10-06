@@ -9,6 +9,7 @@ import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from '../tensorrt-llm/kv-
 import {
   VLLM_ENGINE_OVERHEAD_BYTES,
   VLLM_FREE_MEMORY_MARGIN_BYTES,
+  VLLM_START_CHECK_MARGIN_BYTES,
   vllmCheckEngine,
   vllmKvCacheBytes,
   vllmLaunchPlan,
@@ -19,6 +20,8 @@ import { vllmSettings } from './settings.js'
 
 /** Change `add-vllm-runtime`, task 3.3 (design D9; spec `vllm-runtime`, "Память vLLM задаёт core"). */
 const GiB = 1024 ** 3
+/** vLLM's own CUDA context before its start check, measured on the Windows acceptance card (2026-10-06). */
+const VLLM_CUDA_CONTEXT_MEASURED = 0.87 * GiB
 const VLLM = parseRuntimeDescriptor(readRuntimeFixture('vllm.json'))
 const TRT = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm-1.3.0rc29-r3.json'))
 /** Qwen3-style dense shape: 28 layers, 8 KV heads of 128 → 2 × 28 × 8 × 128 × 2 bytes = 112 KiB per token at bf16. */
@@ -114,10 +117,25 @@ describe('the memory share and the launch plan', () => {
       gpu,
       HOST
     )
-    expect(plan.gpuMemoryUtilization).toBeCloseTo((6.5 * GiB - VLLM_FREE_MEMORY_MARGIN_BYTES) / (8 * GiB), 4)
-    // vLLM V1: free on device must be at least total × utilization.
-    expect(6.5 * GiB).toBeGreaterThanOrEqual(8 * GiB * plan.gpuMemoryUtilization)
+    expect(plan.gpuMemoryUtilization).toBeCloseTo((6.5 * GiB - VLLM_START_CHECK_MARGIN_BYTES) / (8 * GiB), 4)
+    // vLLM V1 checks free ≥ total × utilization *after* its own CUDA context took its memory.
+    expect(6.5 * GiB - VLLM_CUDA_CONTEXT_MEASURED).toBeGreaterThanOrEqual(8 * GiB * plan.gpuMemoryUtilization)
     expect(plan.kvCacheMemoryBytes).toBe(4096 * 2 * PER_TOKEN_BF16)
+  })
+
+  it('the Windows acceptance card: 7.76 GiB free before the container, 6.89 GiB at vLLM’s check — the start check passes', () => {
+    // RTX 4070 Laptop under WSL, 2026-10-06: with a 512 MiB margin the share was 0.9081 (7.26 GiB) and
+    // vLLM refused every model, its own CUDA context having taken 0.87 GiB before it measured.
+    const freeBefore = 7.76 * GiB
+    const plan = vllmLaunchPlan(
+      vllmSettings({}),
+      { weightBytesTotal: 4.04 * 1e9, configJson: config(), hfQuantConfigJson: null },
+      card({ free_vram_bytes: freeBefore }),
+      HOST
+    )
+    const freeAtVllmCheck = 6.89 * GiB
+    expect(Math.ceil(8 * GiB * plan.gpuMemoryUtilization)).toBeLessThanOrEqual(freeAtVllmCheck)
+    expect(VLLM_START_CHECK_MARGIN_BYTES).toBeGreaterThan(VLLM_CUDA_CONTEXT_MEASURED)
   })
 
   it('never more than 95% of the card, and half of the host’s memory on a card with the host’s memory', () => {
