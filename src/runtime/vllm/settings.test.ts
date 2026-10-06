@@ -9,7 +9,7 @@ describe('vllmSettings', () => {
         gpu_id: '',
         context_length: 8192,
         max_output_tokens: 4096,
-        max_num_seqs: 8,
+        max_num_seqs: 1,
         kv_cache_max_tokens: 0,
         cuda_graphs: 'auto',
         kv_cache_dtype: 'auto',
@@ -19,11 +19,46 @@ describe('vllmSettings', () => {
       gpu_id: null,
       context_length: 8192,
       max_output_tokens: 4096,
-      max_num_seqs: 8,
+      max_num_seqs: 1,
       kv_cache_max_tokens: null,
       cuda_graphs: 'auto',
       kv_cache_dtype: 'auto',
       load_timeout_seconds: null,
+      max_num_batched_tokens: null,
+      enable_prefix_caching: true,
+      cpu_offload_gb: 0,
+      dtype: 'auto',
+      seed: null,
+      async_scheduling: false,
+      generation: {},
+    })
+    // Nothing stored at all: one request at a time.
+    expect(vllmSettings({}).max_num_seqs).toBe(1)
+  })
+
+  it('reads every further option, the generation defaults as vLLM names them, "" and 0 as not set', () => {
+    expect(
+      vllmSettings({
+        max_num_batched_tokens: 2048,
+        enable_prefix_caching: false,
+        cpu_offload_gb: 1.5,
+        dtype: 'float16',
+        seed: 42,
+        async_scheduling: true,
+        default_temperature: 0.6,
+        default_top_p: '0.95',
+        default_top_k: 20,
+        default_min_p: 0,
+        default_repetition_penalty: '',
+      })
+    ).toMatchObject({
+      max_num_batched_tokens: 2048,
+      enable_prefix_caching: false,
+      cpu_offload_gb: 1.5,
+      dtype: 'float16',
+      seed: 42,
+      async_scheduling: true,
+      generation: { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0 },
     })
   })
 
@@ -47,6 +82,12 @@ describe('vllmSettings', () => {
     ['an unknown KV cache precision', { kv_cache_dtype: 'int4' }],
     ['a card that is not an NVIDIA UUID', { gpu_id: 'card 1' }],
     ['a load timeout above an hour', { load_timeout_seconds: 7200 }],
+    ['a negative CPU offload', { cpu_offload_gb: -1 }],
+    ['an unknown weight precision', { dtype: 'float8' }],
+    ['a temperature above 2', { default_temperature: 3 }],
+    ['a top_p of 0', { default_top_p: 0 }],
+    ['a repetition penalty of 0', { default_repetition_penalty: 0 }],
+    ['prefix caching that is not a yes or a no', { enable_prefix_caching: 'maybe' }],
   ])('refuses %s with INVALID_ARGUMENT', (_label, stored) => {
     expect(() => vllmSettings(stored)).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }))
   })

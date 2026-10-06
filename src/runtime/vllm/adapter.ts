@@ -5,8 +5,10 @@
  *
  * - **argv**: `vllm serve <model> --served-model-name <id> --host 0.0.0.0 --port 8000
  *   --max-model-len <ctx> --max-num-seqs <n> --kv-cache-memory-bytes <B> --gpu-memory-utilization <U>
- *   --override-generation-config {"max_new_tokens":<cap>}`, `--limit-mm-per-prompt {"image":0,"video":0}`
- *   for a multimodal checkpoint, plus `--enforce-eager` when CUDA graphs are off,
+ *   --override-generation-config {"max_new_tokens":<cap>, …sampling defaults}`,
+ *   `--limit-mm-per-prompt {"image":0,"video":0}` for a multimodal checkpoint, the further options the
+ *   settings set (`--max-num-batched-tokens`, `--no-enable-prefix-caching`, `--cpu-offload-gb`,
+ *   `--dtype`, `--seed`, `--async-scheduling`), plus `--enforce-eager` when CUDA graphs are off,
  *   `--kv-cache-dtype fp8` on compute capability 8.9 and newer, and the family's tool-call and
  *   reasoning parsers. `B` and `U` are core's (`plan`, computed by the vLLM memory model from the card
  *   as it stands right before the container is created, design D9): vLLM itself would size its cache
@@ -136,8 +138,16 @@ export function buildVllmLaunch(context: ManagedLaunchContext<VllmSettings>): Ma
     // The output cap for a request that names none: vLLM's own default, so a long prompt keeps the
     // room it has (a cap written into every request would make vLLM refuse input + cap > context).
     '--override-generation-config',
-    JSON.stringify({ max_new_tokens: settings.max_output_tokens }),
+    JSON.stringify({ max_new_tokens: settings.max_output_tokens, ...settings.generation }),
   ]
+  if (settings.max_num_batched_tokens !== null) {
+    argv.push('--max-num-batched-tokens', String(settings.max_num_batched_tokens))
+  }
+  if (!settings.enable_prefix_caching) argv.push('--no-enable-prefix-caching')
+  if (settings.cpu_offload_gb > 0) argv.push('--cpu-offload-gb', String(settings.cpu_offload_gb))
+  if (settings.dtype !== 'auto') argv.push('--dtype', settings.dtype)
+  if (settings.seed !== null) argv.push('--seed', String(settings.seed))
+  if (settings.async_scheduling) argv.push('--async-scheduling')
   if (context.plan.multimodal) argv.push('--limit-mm-per-prompt', JSON.stringify({ image: 0, video: 0 }))
   if (eager(context)) argv.push('--enforce-eager')
   if (settings.kv_cache_dtype === 'fp8' && supportsFp8Kv(context.gpuComputeCapability)) {
@@ -460,5 +470,12 @@ export const vllmAdapter: ManagedTextAdapter<VllmSettings> = {
     settings.kv_cache_max_tokens,
     settings.cuda_graphs,
     settings.kv_cache_dtype,
+    settings.max_num_batched_tokens,
+    settings.enable_prefix_caching,
+    settings.cpu_offload_gb,
+    settings.dtype,
+    settings.seed,
+    settings.async_scheduling,
+    JSON.stringify(settings.generation),
   ],
 }

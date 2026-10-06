@@ -209,6 +209,32 @@ describe('the vllm check (same skeleton, vLLM’s memory rule)', () => {
     expect(viaTrt.verdict).toMatchObject({ ok: false, error: { code: 'MODEL_INCOMPATIBLE' } })
   })
 
+  it('weights offloaded to the CPU (cpu_offload_gb) do not count against the card', () => {
+    const settings = (offload: number) =>
+      vllmSettings({
+        max_output_tokens: 1024,
+        context_length: 4096,
+        max_num_seqs: 2,
+        cpu_offload_gb: offload,
+      })
+    const run = (offload: number) =>
+      checkCheckpoint(
+        {
+          repository: 'acme/model',
+          revision: 'main',
+          config_json: config(),
+          hf_quant_config_json: null,
+          files: weights(5 * GiB),
+        },
+        VLLM,
+        [card({ free_vram_bytes: 6.5 * GiB })],
+        HOST,
+        vllmCheckEngine(settings(offload))
+      )
+    expect(run(0).verdict.ok).toBe(false)
+    expect(run(2).verdict).toEqual({ ok: true })
+  })
+
   it('on a card with the host’s memory it counts only the half of RAM the launch gives vLLM', () => {
     const gb10 = card({ total_vram_bytes: null, free_vram_bytes: null })
     const host = { availableBytes: 100 * GiB, totalBytes: 120 * GiB }

@@ -66,7 +66,7 @@ describe('buildLaunch: argv', () => {
     expect(flag(launch.argv, '--host')).toBe('0.0.0.0')
     expect(flag(launch.argv, '--port')).toBe('8000')
     expect(flag(launch.argv, '--max-model-len')).toBe('8192')
-    expect(flag(launch.argv, '--max-num-seqs')).toBe('8')
+    expect(flag(launch.argv, '--max-num-seqs')).toBe('1')
     expect(flag(launch.argv, '--kv-cache-memory-bytes')).toBe('1610612736')
     expect(flag(launch.argv, '--gpu-memory-utilization')).toBe('0.87')
   })
@@ -135,6 +135,44 @@ describe('buildLaunch: argv', () => {
     expect(bare).not.toContain('--tool-call-parser')
     expect(bare).not.toContain('--reasoning-parser')
     expect(argvOf({ family: null })).not.toContain('--tool-call-parser')
+  })
+
+  it('passes every further option the settings set, and nothing for what they leave to the engine', () => {
+    const plain = argvOf()
+    for (const flagName of [
+      '--max-num-batched-tokens',
+      '--no-enable-prefix-caching',
+      '--cpu-offload-gb',
+      '--dtype',
+      '--seed',
+      '--async-scheduling',
+    ]) {
+      expect(plain).not.toContain(flagName)
+    }
+    const argv = argvOf({
+      settings: vllmSettings({
+        max_num_batched_tokens: 2048,
+        enable_prefix_caching: false,
+        cpu_offload_gb: 2,
+        dtype: 'float16',
+        seed: 7,
+        async_scheduling: true,
+        default_temperature: 0.7,
+        default_top_k: 20,
+        max_output_tokens: 1000,
+      }),
+    })
+    expect(flag(argv, '--max-num-batched-tokens')).toBe('2048')
+    expect(argv).toContain('--no-enable-prefix-caching')
+    expect(flag(argv, '--cpu-offload-gb')).toBe('2')
+    expect(flag(argv, '--dtype')).toBe('float16')
+    expect(flag(argv, '--seed')).toBe('7')
+    expect(argv).toContain('--async-scheduling')
+    expect(JSON.parse(flag(argv, '--override-generation-config') ?? '{}')).toEqual({
+      max_new_tokens: 1000,
+      temperature: 0.7,
+      top_k: 20,
+    })
   })
 
   it('refuses to launch without core’s memory plan: the share of the card is never guessed', () => {
@@ -323,5 +361,16 @@ describe('restartKey', () => {
     expect(key({ cuda_graphs: 'off' })).not.toBe(key({}))
     expect(key({ kv_cache_dtype: 'fp8' })).not.toBe(key({}))
     expect(key({ kv_cache_max_tokens: 1000 })).not.toBe(key({}))
+    for (const changed of [
+      { max_num_batched_tokens: 2048 },
+      { enable_prefix_caching: false },
+      { cpu_offload_gb: 1 },
+      { dtype: 'float16' },
+      { seed: 3 },
+      { async_scheduling: true },
+      { default_temperature: 0.2 },
+    ]) {
+      expect(key(changed), JSON.stringify(changed)).not.toBe(key({}))
+    }
   })
 })

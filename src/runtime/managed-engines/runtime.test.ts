@@ -356,7 +356,7 @@ describe('ManagedTextRuntime (tensorrt-llm): a unified-memory card (GB10)', () =
     facts = { gpus: [LARGE], selinux: false, memory: NO_HOST_MEMORY }
     await runtime.load('qwen3')
     expect(await readFile(optionsFile(), 'utf8')).toBe(
-      'guided_decoding_backend: xgrammar\nkv_cache_config:\n  max_tokens: 65536\n'
+      'guided_decoding_backend: xgrammar\nkv_cache_config:\n  max_tokens: 8192\n'
     )
   })
 })

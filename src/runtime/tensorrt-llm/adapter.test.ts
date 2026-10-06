@@ -314,7 +314,7 @@ describe('buildLaunch', () => {
       // A desktop's concurrency, not trtllm-serve's 2048: hybrid (Mamba) models reserve their
       // recurrent state per sequence up front (adapter.ts, TENSORRT_LLM_MAX_BATCH_SIZE).
       '--max_batch_size',
-      '8',
+      '1',
       '--kv_cache_free_gpu_memory_fraction',
       String(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION),
       // Always present: the KV cache is always bounded in tokens (see the KV tests below).
@@ -382,7 +382,7 @@ describe('buildLaunch', () => {
   it('leaves guided decoding out for a family without structured output, or no family at all', () => {
     for (const f of [family(), null]) {
       const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ family: f }))
-      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 65536\n' })
+      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 8192\n' })
     }
   })
 

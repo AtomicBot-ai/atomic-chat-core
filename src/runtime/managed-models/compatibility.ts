@@ -845,7 +845,8 @@ export function checkCheckpointMemory(
         error: {
           code: 'MODEL_INCOMPATIBLE',
           message:
-            'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU.',
+            'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU: ' +
+            `they need ${gib(need.neededBytes)} GiB, ${gib(freeBytes)} GiB is free.`,
           details: `${need.details} free_bytes=${freeBytes}`,
         },
       },
@@ -856,6 +857,9 @@ export function checkCheckpointMemory(
 
   return buildCompatibility(context, { ok: true }, fitsOther, basis)
 }
+
+/** Bytes as GiB with one decimal, for a message a person reads. */
+const gib = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1)
 
 /**
  * The full verdict: `checkCheckpointFiles` then, if it passed, `checkCheckpointMemory` — for the check

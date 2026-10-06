@@ -367,9 +367,11 @@ function supportsFp8Kv(computeCapability: string | null | undefined): boolean {
  * recurrent layers (Qwen3.5, hybrid Mamba) the engine reserves the recurrent state for every one of
  * those sequences up front: on an 8 GB card Qwen3.5-2B failed with "The V2 Mamba GPU cache quota is
  * too small … need at least 20696801280 bytes" (Windows live acceptance, 1.3.0rc29). Attention-only
- * models only lose queueing beyond this many concurrent requests.
+ * models only lose queueing beyond this many concurrent requests. One by default (owner's decision,
+ * change `add-vllm-runtime`): the KV cache is then sized for one full context, which is what fits a
+ * desktop card; a person who runs agents in parallel raises it.
  */
-export const TENSORRT_LLM_MAX_BATCH_SIZE = 8
+export const TENSORRT_LLM_MAX_BATCH_SIZE = 1
 export const TENSORRT_LLM_MAX_MAX_BATCH_SIZE = 256
 export const TENSORRT_LLM_MAX_KV_CACHE_MAX_TOKENS = 16_777_216
 

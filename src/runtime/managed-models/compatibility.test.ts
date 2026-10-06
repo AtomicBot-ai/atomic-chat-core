@@ -84,6 +84,10 @@ describe('checkCheckpoint (the shared skeleton)', () => {
         details: `weight_bytes=${3.5 * GIB} needed_bytes=${8 * GIB} free_bytes=${7 * GIB}`,
       },
     })
+    // The person reads how far off it is, so they know whether a setting change can close the gap.
+    expect(refused.verdict.ok === false && refused.verdict.error.message).toMatch(
+      /need 8\.0 GiB.*7\.0 GiB is free/
+    )
   })
 
   it('the memory line reports the other cards the engine’s rule would fit', () => {

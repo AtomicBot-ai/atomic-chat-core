@@ -92,7 +92,9 @@ export function vllmKvCacheBytes(
  * vLLM's memory rule on `gpu`: weights + KV cache in bytes + its own overhead, held to the same share
  * the launch gives vLLM (`vllmGpuMemoryUtilization`): the margin left free counts as needed, and on a
  * card with the host's memory so does whatever of `MemAvailable` lies beyond half the host's memory —
- * so the check and the start agree on what fits.
+ * so the check and the start agree on what fits. Weights offloaded to the CPU (`cpu_offload_gb`, GiB as
+ * vLLM counts them) leave the card, except on a card with the host's memory, where they stay in the
+ * same memory.
  */
 export function vllmMemoryNeed(
   gpu: GpuFacts,
@@ -105,17 +107,19 @@ export function vllmMemoryNeed(
   const systemReserve = unified
     ? Math.max(0, freeMemoryBytes(gpu, host) - totalMemoryBytes(gpu, host) / 2)
     : 0
+  const offloadedBytes = unified
+    ? 0
+    : Math.min(checkpoint.weightBytesTotal, Math.round(settings.cpu_offload_gb * 1024 ** 3))
+  const weightsOnCard = checkpoint.weightBytesTotal - offloadedBytes
   const neededBytes =
-    checkpoint.weightBytesTotal +
-    kv.bytes +
-    VLLM_ENGINE_OVERHEAD_BYTES +
-    VLLM_FREE_MEMORY_MARGIN_BYTES +
-    systemReserve
+    weightsOnCard + kv.bytes + VLLM_ENGINE_OVERHEAD_BYTES + VLLM_FREE_MEMORY_MARGIN_BYTES + systemReserve
   return {
     neededBytes,
     kvReserveBasis: kv.basis,
     details:
-      `weight_bytes=${checkpoint.weightBytesTotal} kv_cache_bytes=${kv.bytes} kv_reserve_basis=${kv.basis} ` +
+      `weight_bytes=${checkpoint.weightBytesTotal}` +
+      (offloadedBytes > 0 ? ` cpu_offload_bytes=${offloadedBytes}` : '') +
+      ` kv_cache_bytes=${kv.bytes} kv_reserve_basis=${kv.basis} ` +
       `engine_overhead_bytes=${VLLM_ENGINE_OVERHEAD_BYTES} free_margin_bytes=${VLLM_FREE_MEMORY_MARGIN_BYTES}` +
       (unified ? ` system_reserve_bytes=${systemReserve}` : '') +
       ` needed_bytes=${neededBytes}`,
