@@ -106,7 +106,11 @@ describe('createCachedDocuments', () => {
     )
 
     const statusWarn = vi.fn()
-    await documents(fs, vi.fn(async () => new Response('', { status: 404 })), statusWarn).latest()
+    await documents(
+      fs,
+      vi.fn(async () => new Response('', { status: 404 })),
+      statusWarn
+    ).latest()
     expect(statusWarn.mock.calls[0]?.[0]).toContain('could not be read (HTTP 404)')
 
     const invalidWarn = vi.fn()
