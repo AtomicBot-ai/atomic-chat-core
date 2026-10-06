@@ -292,7 +292,11 @@ describe('readSource scheme restriction (via forNewSetup)', () => {
 
     expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(unreachableFetch).not.toHaveBeenCalled()
-    expect(onWarn).toHaveBeenCalledTimes(1)
+    // The override itself, then why it gave nothing and what stands in.
+    expect(onWarn).toHaveBeenCalledTimes(2)
+    expect(onWarn.mock.calls[0]?.[0]).toContain(`overridden by ${RUNTIME_DESCRIPTOR_URL_ENV}=http://example.test`)
+    expect(onWarn.mock.calls[1]?.[0]).toContain('neither file:// nor https://')
+    expect(onWarn.mock.calls[1]?.[0]).toContain(`using the cached ${DESCRIPTOR_A.descriptor_id}`)
     expect(onWarn.mock.calls[0]?.[0]).toContain('http://example.test/tensorrt-llm.json')
   })
 
