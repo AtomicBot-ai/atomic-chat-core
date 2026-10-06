@@ -464,10 +464,14 @@ export function buildTensorrtLlmLaunch(
  * загрузки — измеряются в live-тесте core", i.e. live test 2.19 replaces these). Until then they
  * only have to clear the spec's own acceptance scenario ("Долгий первый старт": a 30 GB model
  * starting in three minutes must not time out) with real headroom, not cut it close.
+ *
+ * Raised from 60 s + 6 s/GiB (2026-10-06): on an NVIDIA RTX Spark (Windows on Arm, WSL) Qwen3.5-2B
+ * spent 62 s in executor profiling alone and was still sizing its KV cache, with no error, when the
+ * 128 s that formula gave ran out. A healthy slow start must not fail; a stuck one still ends.
  */
-export const TENSORRT_LLM_READINESS_BASE_MS = 60_000
+export const TENSORRT_LLM_READINESS_BASE_MS = 240_000
 /** Budgeted per GiB of checkpoint weights, before the margin multiplier — to be measured in live test 2.19. */
-export const TENSORRT_LLM_READINESS_PER_GIB_MS = 6_000
+export const TENSORRT_LLM_READINESS_PER_GIB_MS = 12_000
 /** Applied to the whole base-plus-per-GiB estimate — to be measured in live test 2.19. */
 export const TENSORRT_LLM_READINESS_MARGIN = 1.5
 

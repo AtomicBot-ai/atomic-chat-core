@@ -520,6 +520,11 @@ describe('readinessTimeoutMs', () => {
     expect(timeoutMs).toBeGreaterThan(3 * 60_000)
   })
 
+  it('gives a small model several minutes: Qwen3.5-2B on an RTX Spark was still starting after 128 s', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({})
+    expect(tensorrtLlmAdapter.readinessTimeoutMs(4.2 * GiB, settings)).toBeGreaterThanOrEqual(5 * 60_000)
+  })
+
   it('treats zero weight bytes as the base cost, never throwing or going negative', () => {
     const settings = tensorrtLlmAdapter.validateSettings({})
     expect(tensorrtLlmAdapter.readinessTimeoutMs(0, settings)).toBeGreaterThanOrEqual(
