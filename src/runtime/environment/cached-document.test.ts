@@ -159,6 +159,61 @@ describe('createCachedDocuments', () => {
   })
 })
 
+describe('createCachedDocuments: what it says about odd failures', () => {
+  /* eslint-disable @typescript-eslint/only-throw-error -- these cases are exactly a non-Error being thrown */
+  it('names a fetch that rejects with something other than an Error', async () => {
+    const onWarn = vi.fn()
+    const rejects: DocumentFetch = vi.fn(async () => {
+      throw 'socket hang up'
+    })
+    expect(await documents(new FakeManagedFs(), rejects, onWarn).latest()).toEqual({ kind: 'none' })
+    expect(onWarn.mock.calls[0]?.[0]).toContain('could not be read (socket hang up)')
+  })
+
+  it('names a cache write that fails with something other than an Error', async () => {
+    const fs = new FakeManagedFs()
+    fs.rename = async () => {
+      throw 'EPERM'
+    }
+    const onWarn = vi.fn()
+    expect(await documents(fs, serve(raw(A)), onWarn).latest()).toEqual({ kind: 'fresh', document: A })
+    expect(onWarn.mock.calls[0]?.[0]).toBe('Could not cache toy document toy-a: EPERM')
+  })
+
+  it('names a parser that rejects with something other than an Error, or answers nothing at all', async () => {
+    const make = (parse: CachedDocumentKind<Toy>['parse']) =>
+      createCachedDocuments(
+        { ...KIND, parse },
+        {
+          env: {},
+          fetch: serve(raw(A)),
+          readFile: () => Promise.reject(new Error('no file://')),
+          fs: new FakeManagedFs(),
+          coreVersion: '1.2.0',
+          url: 'https://conf.test/toy.json',
+          onWarn,
+        }
+      )
+    const onWarn = vi.fn()
+    await make(() => {
+      throw 'bad shape'
+    }).latest()
+    await make(() => null as unknown as Toy).latest()
+    expect(onWarn.mock.calls.map((call) => call[0])).toEqual([
+      expect.stringContaining('is not a valid toy document (bad shape)'),
+      expect.stringContaining('is not a valid toy document (unreadable)'),
+    ])
+  })
+  /* eslint-enable @typescript-eslint/only-throw-error */
+
+  it('a latest.json whose id is not a string points at nothing', async () => {
+    const fs = new FakeManagedFs()
+    await documents(fs, serve(raw(A))).latest()
+    fs.files.set('/root/toys/latest.json', '{"toy_id": 7}')
+    expect(await documents(fs, offline).latestCached()).toBeNull()
+  })
+})
+
 describe('meetsCoreVersion', () => {
   it.each([
     ['1.2.0', '1.2.0', true],

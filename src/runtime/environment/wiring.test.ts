@@ -234,6 +234,87 @@ describe('what a snapshot shows', () => {
   })
 })
 
+describe('resetting the environment and reporting on it', () => {
+  it('a reset archives the finished operation and the snapshot forgets it', async () => {
+    const { managed } = wire('linux', fakeProvisioner())
+    const started = await managed.service.begin('default', {
+      request_id: 'req-1',
+      target: { kind: 'environment' },
+      kind: 'setup',
+      descriptor_id: 'trtllm',
+      approved_plan_digest: DIGEST,
+    })
+    await managed.service.idle()
+    expect(managed.operations().map((operation) => operation.operation_id)).toEqual([started.operation_id])
+
+    const result = await managed.service.reset('default')
+    expect(result.archived_operation_ids).toEqual([started.operation_id])
+    expect(managed.operations()).toEqual([])
+  })
+
+  it('the diagnostics report names the overridden source, what the cache holds and the operations on disk', async () => {
+    const fixtureUrl = new URL('../../../test/fixtures/runtimes/tensorrt-llm-1.2.1-r2.json', import.meta.url)
+      .href
+    const warnings: string[] = []
+    const managed = wireManagedRuntimes({
+      env: env('linux', { [RUNTIME_DESCRIPTOR_URL_ENV]: fixtureUrl }),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: () => undefined,
+      newId: () => 'id-1',
+      provisioner: fakeProvisioner(),
+      onWarn: (message) => warnings.push(message),
+    })
+    wired.push(managed)
+    await managed.descriptors.forNewSetup()
+
+    const report = await managed.service.diagnostics('default')
+    expect(report.platform).toBe('linux')
+    expect(report.environment?.environment_id).toBe('default')
+    const descriptor = report.sources.find((source) => source.document === 'runtime-descriptor')
+    expect(descriptor).toMatchObject({
+      url: fixtureUrl,
+      overridden_by: RUNTIME_DESCRIPTOR_URL_ENV,
+      latest_cached_id: 'tensorrt-llm-1.2.1-r2',
+    })
+    expect(
+      report.sources.find((source) => source.document === 'environment-manifest')?.overridden_by
+    ).toBeNull()
+    expect(report.operations).toEqual([])
+    // The override warning reached both the log and the report.
+    expect(warnings.some((message) => message.includes(RUNTIME_DESCRIPTOR_URL_ENV))).toBe(true)
+    expect(report.recent_warnings.some((line) => line.includes(RUNTIME_DESCRIPTOR_URL_ENV))).toBe(true)
+  })
+
+  it('reports no environment on a machine that cannot carry one', async () => {
+    const { managed } = wire('darwin')
+    const report = await managed.service.diagnostics('default')
+    expect(report.platform).toBe('darwin')
+    expect(report.environment).toBeNull()
+  })
+
+  it('keeps only the last 30 warnings for the report, and needs no log to keep them', async () => {
+    let attempt = 0
+    const managed = wireManagedRuntimes({
+      env: env('linux'),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: () => undefined,
+      newId: () => 'id-1',
+      provisioner: fakeProvisioner(),
+      // Each failed fetch is a different warning, so none is folded into an earlier one.
+      fetch: (() => Promise.reject(new Error(`offline ${(attempt += 1)}`))) as typeof fetch,
+    })
+    wired.push(managed)
+    for (let i = 0; i < 35; i += 1) await managed.descriptors.forNewSetup()
+
+    const report = await managed.service.diagnostics('default')
+    expect(report.recent_warnings).toHaveLength(30)
+    expect(report.recent_warnings.at(-1)).toContain('offline 35')
+    expect(report.recent_warnings.some((line) => line.includes('offline 5)'))).toBe(false)
+  })
+})
+
 describe('coming back to what a previous core left', () => {
   it('reads an unfinished operation back before anything is served', async () => {
     const first = wire('linux', fakeProvisioner())

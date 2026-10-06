@@ -58,10 +58,12 @@ describe('archiving finished operations', () => {
     const archived = await store.archiveFinished('2026-10-06T10-00-00')
 
     expect(archived.ids.sort()).toEqual([cancelled, failed].sort())
-    expect(archived.path).toBe('/shared/operations-archive/2026-10-06T10-00-00')
+    // The store joins with the platform's separator: backslashes on Windows.
+    const archive = join('/shared', 'operations-archive', '2026-10-06T10-00-00')
+    expect(archived.path).toBe(archive)
     expect(await store.listAll()).toEqual([])
-    expect(fs.files.has(`/shared/operations-archive/2026-10-06T10-00-00/${failed}.json`)).toBe(true)
-    expect(fs.files.has(`/shared/operations-archive/2026-10-06T10-00-00/${failed}.json.bak`)).toBe(true)
+    expect(fs.files.has(join(archive, `${failed}.json`))).toBe(true)
+    expect(fs.files.has(join(archive, `${failed}.json.bak`))).toBe(true)
   })
 
   it('refuses while an operation still runs, and moves nothing', async () => {
@@ -102,7 +104,7 @@ describe('EnvironmentService.reset', () => {
     expect(result).toEqual({
       environment_id: 'default',
       archived_operation_ids: [failed],
-      archive_path: '/shared/operations-archive/stamp',
+      archive_path: join('/shared', 'operations-archive', 'stamp'),
     })
     expect(forgotten).toEqual([[failed]])
   })
