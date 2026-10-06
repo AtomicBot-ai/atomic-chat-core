@@ -529,3 +529,30 @@ Attach the results to the conf PR that merges `windows.json` into main, with the
 WSL version, card, driver) and every value above that a ruling left to this acceptance
 (`atomic-chat-spec/openspec/changes/add-tensorrt-llm-windows/rulings/core.md`). A failure is fixed in
 core or in a new `windows-rN` before the merge, never after.
+
+## TensorRT-LLM regression after the managed-engine generalization (change `add-vllm-runtime`)
+
+The generalization (a registry of managed engines, one model store, one naming rule, a descriptor per
+engine) must not change what a TensorRT-LLM user sees, apart from where models live. Unit tests and
+e2e prove the logic (`trt-verdict-invariant.test.ts`, `test/e2e/{tensorrt-llm-provider,
+managed-model-store}.test.ts`); this run proves it on the machine of the engine test above, with a core
+built from the branch and an existing TensorRT-LLM installation and models from a release before it.
+
+1. **The move**: before the update, note `ls <data>/tensorrt-llm/models` and the engine caches
+   (`<data>/atomic-core/managed-runtimes/caches/<descriptor>/`). Start the new core once: every folder
+   with `model.yml` is now in `<data>/managed-models/` under the same id, a folder without one stayed,
+   `<data>/tensorrt-llm/models` is gone once empty, and the core log says what moved. On Windows the same
+   in the guest (`/var/lib/atomic-chat/scopes/<key>/managed-models`), after the first model list.
+2. **The cache survives**: load a moved model that was loaded before the update; its readiness time is
+   the warm one, not a first build, and `docker inspect` shows the same cache folder mounted.
+3. **The descriptor pointer**: with the network off, the plan for a new setup names the same TensorRT-LLM
+   descriptor as before the update (read through the old `descriptors/latest.json`); after one online
+   probe, `descriptors/latest-tensorrt-llm.json` exists.
+4. **The check**: `POST /models/tensorrt-llm/check` on the curated list gives the same verdicts as the
+   previous core (`ok` versus `MODEL_INCOMPATIBLE`); an AWQ or GPTQ repository is refused naming its
+   format (`autoawq_w4a16`, `gptq_w4a16`) and `tensorrt-llm`.
+5. **Delete and remove**: `DELETE /managed-models/<id>` of a loaded model stops it first; removing the
+   engine with "delete models" deletes `<data>/managed-models` when no other engine is installed.
+
+Record the numbers (moved folders, first-load time before and after) under the change's `rulings/` in
+atomic-chat-spec.

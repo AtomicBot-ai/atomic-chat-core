@@ -11,6 +11,9 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-06** — [Managed engines are registered specs, and an engine id is its provider id](2026-10-06-managed-engines-are-registered-specs-and-engine-id-is-the-provider-id.md) — `ManagedEngineSpec`, `ManagedEngineRegistry`, `ManagedTextRuntime(spec)`, `wireManagedEngine`.
+- **2026-10-06** — [One model store for every managed engine; TensorRT-LLM's models move into it at startup](2026-10-06-one-model-store-for-every-managed-engine-and-trt-models-move-into-it.md) — `<data>/managed-models`, `GET /managed-models/location`, `DELETE /managed-models/:id` replace the `tensorrt-llm` routes.
+- **2026-10-06** — [One quantization naming rule for every managed engine; a name is the encoding on disk](2026-10-06-one-quantization-naming-rule-for-every-managed-engine.md) — `autoawq_w4a16`, `gptq_*`, `hf_fp8`, `ct_*`; no TensorRT-LLM verdict changes.
 - **2026-10-02** — [Bump core to 0.9.2 after merging main's 0.8.0-0.9.1](2026-10-02-bump-core-to-0-9-2-after-merging-main.md) — supersedes the version of the 2026-10-01 0.7.5 record; the app branch pins 0.9.2.
 - **2026-10-02** — [tensorrt-llm: what the Windows live acceptance changed](2026-10-02-tensorrt-llm-windows-live-acceptance-fixes.md) — supersedes D2's `--no-distribution` of the 2026-10-01 Windows record and the discrete-card half of the 2026-09-29 unified-memory KV record; adds `max_batch_size`, `kv_cache_max_tokens`, `cuda_graphs`, `kv_cache_dtype`, `windows-restart-pending`.
 - **2026-10-01** — [TensorRT-LLM on Windows runs in Atomic Chat's own WSL distribution, switched on by conf](2026-10-01-tensorrt-llm-on-windows-runs-in-atomic-chats-own-wsl-distribution.md) — WSL transport, guest as a Linux host, one elevated step, `GET /models/tensorrt-llm/location`, `windows.json` in conf main is the switch.
