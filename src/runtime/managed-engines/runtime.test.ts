@@ -8,7 +8,7 @@
  */
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { CoreEvents, GpuFacts } from '../../contracts/index.js'
 import { ExecutionJournal, startHeartbeatTicker } from '../container/index.js'
@@ -588,6 +588,35 @@ describe('ManagedTextRuntime (tensorrt-llm): the memory check runs after evictio
 })
 
 /** Change `add-vllm-runtime`, task 2.6 (design D11): one store model, one managed provider. */
+/** Change `add-vllm-runtime`, task 3.3 (design D9): the engine's launch plan from the re-probed card. */
+describe('ManagedTextRuntime: an engine’s launch plan', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
+  it('is made once the memory check passed, from the card as it stands after the previous sessions stopped', async () => {
+    const launchPlan = vi.fn((_settings: unknown, _resolved: unknown, gpu: GpuFacts) => ({
+      free: gpu.free_vram_bytes,
+    }))
+    build()
+    runtime = new ManagedTextRuntime(
+      { ...TENSORRT_LLM_ENGINE, launchPlan } as typeof TENSORRT_LLM_ENGINE,
+      {
+        lifecycle: () => lastLifecycle,
+        readyInstallation: () => installation(),
+        hostFacts: async () => facts,
+        model: (id: string) => readManagedModel(data.layout.provider('tensorrt-llm').modelsDir, id),
+        settings: () => stored,
+        stopPrevious: undefined,
+        releaseModelElsewhere: async () => {
+          // The card the load picked frees up once the previous sessions are gone.
+          facts = { ...facts, gpus: facts.gpus.map((gpu) => ({ ...gpu, free_vram_bytes: 23_000 * MiB })) }
+        },
+      } as never
+    )
+    await runtime.load('qwen3')
+    expect(launchPlan).toHaveBeenCalledTimes(1)
+    expect(launchPlan.mock.calls[0]?.[2]).toMatchObject({ free_vram_bytes: 23_000 * MiB })
+  })
+})
+
 describe('ManagedTextRuntime: the same model in another managed provider', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('Та же модель другим движком: asks the other providers to let the model go before its container is created', async () => {

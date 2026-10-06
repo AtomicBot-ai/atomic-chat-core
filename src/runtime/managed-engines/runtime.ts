@@ -290,7 +290,7 @@ export class ManagedTextRuntime<
       // Pre-launch check, phase 2 (finding 1): the memory line alone, re-probed fresh once
       // stopPrevious (above) has actually freed the card — never the snapshot `facts` took before
       // eviction, which is why this is a lifecycle hook and not just more code in this function.
-      beforeCreate: () => this.checkMemoryBeforeCreate(gpu.gpu_id, descriptor, resolved, check),
+      beforeCreate: () => this.checkMemoryBeforeCreate(gpu.gpu_id, descriptor, resolved, check, settings),
       ...(opts.timeoutSecs !== undefined ? { timeoutMs: opts.timeoutSecs * 1000 } : {}),
       ...(signal !== undefined ? { signal } : {}),
       ...(substituted !== undefined ? { gpuSubstituted: substituted } : {}),
@@ -527,10 +527,12 @@ export class ManagedTextRuntime<
     gpuId: string,
     descriptor: RuntimeDescriptor,
     resolved: ResolvedCheckpoint,
-    check: ManagedCheckEngine
-  ): Promise<void> {
+    check: ManagedCheckEngine,
+    settings: S
+  ): Promise<unknown> {
     const facts = await this.deps.hostFacts()
-    if (!facts.gpus.some((gpu) => gpu.gpu_id === gpuId)) {
+    const card = facts.gpus.find((gpu) => gpu.gpu_id === gpuId)
+    if (card === undefined) {
       throw new AtomicCoreError(
         'MANAGED_PREREQUISITE_BLOCKED',
         'The selected GPU disappeared before the container could start.',
@@ -542,5 +544,16 @@ export class ManagedTextRuntime<
       const { code, message, details } = verdict.verdict.error
       throw new AtomicCoreError(code, message, details)
     }
+    // The engine's launch plan from this same fresh look at the card (design D9 of add-vllm-runtime).
+    return this.engine.launchPlan?.(
+      settings,
+      {
+        weightBytesTotal: resolved.weightBytesTotal,
+        configJson: resolved.configJson,
+        hfQuantConfigJson: resolved.hfQuantConfigJson,
+      },
+      card,
+      facts.memory
+    )
   }
 }

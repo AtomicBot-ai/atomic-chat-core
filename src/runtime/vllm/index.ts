@@ -7,3 +7,4 @@
  */
 export * from './settings.js'
 export * from './adapter.js'
+export * from './memory.js'

@@ -1,0 +1,259 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { GpuFacts } from '../../contracts/index.js'
+import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
+import { parseRuntimeDescriptor } from '../environment/index.js'
+import type { DescriptorProviderResult } from '../environment/index.js'
+import { checkCheckpoint, checkManagedModel, type CheckpointFile } from '../managed-models/index.js'
+import { tensorrtLlmCheckEngine } from '../tensorrt-llm/compatibility.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from '../tensorrt-llm/kv-cache.js'
+import {
+  VLLM_ENGINE_OVERHEAD_BYTES,
+  VLLM_FREE_MEMORY_MARGIN_BYTES,
+  vllmCheckEngine,
+  vllmKvCacheBytes,
+  vllmLaunchPlan,
+  vllmModelCheck,
+} from './memory.js'
+import { vllmSettings } from './settings.js'
+
+/** Change `add-vllm-runtime`, task 3.3 (design D9; spec `vllm-runtime`, "Память vLLM задаёт core"). */
+const GiB = 1024 ** 3
+const VLLM = parseRuntimeDescriptor(readRuntimeFixture('vllm.json'))
+const TRT = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm-1.3.0rc29-r3.json'))
+/** Qwen3-style dense shape: 28 layers, 8 KV heads of 128 → 2 × 28 × 8 × 128 × 2 bytes = 112 KiB per token at bf16. */
+const SHAPE = {
+  num_hidden_layers: 28,
+  num_attention_heads: 16,
+  num_key_value_heads: 8,
+  head_dim: 128,
+  hidden_size: 2048,
+}
+const PER_TOKEN_BF16 = 2 * 28 * 8 * 128 * 2
+const config = (extra: Record<string, unknown> = {}) => ({
+  architectures: ['LlamaForCausalLM'],
+  dtype: 'bfloat16',
+  ...SHAPE,
+  ...extra,
+})
+const card = (over: Partial<GpuFacts> = {}): GpuFacts => ({
+  gpu_id: 'GPU-4070',
+  name: 'NVIDIA GeForce RTX 4070 Laptop GPU',
+  compute_capability: '8.9',
+  total_vram_bytes: 8 * GiB,
+  free_vram_bytes: 6.5 * GiB,
+  driver_version: '580.95.05',
+  ...over,
+})
+const HOST = { availableBytes: 32 * GiB, totalBytes: 64 * GiB }
+const weights = (bytes: number): CheckpointFile[] => [
+  { path: 'model.safetensors', size: bytes, sha256: 'aa' },
+]
+
+describe('the KV cache in bytes', () => {
+  it('is context × concurrent requests tokens by default, × the bytes per token of the model’s KV shape', () => {
+    const settings = vllmSettings({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 2 })
+    expect(
+      vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, settings, card(), false)
+    ).toEqual({
+      bytes: 4096 * 2 * PER_TOKEN_BF16,
+      basis: 'config',
+    })
+  })
+
+  it('a token limit wins over context × requests; FP8 halves it, only on 8.9 and newer', () => {
+    const limited = vllmSettings({ kv_cache_max_tokens: 10_000 })
+    expect(
+      vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, limited, card(), false).bytes
+    ).toBe(10_000 * PER_TOKEN_BF16)
+    const fp8 = vllmSettings({ kv_cache_max_tokens: 10_000, kv_cache_dtype: 'fp8' })
+    expect(
+      vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, fp8, card(), false).bytes
+    ).toBe((10_000 * PER_TOKEN_BF16) / 2)
+    expect(
+      vllmKvCacheBytes(
+        { configJson: config(), hfQuantConfigJson: null },
+        fp8,
+        card({ compute_capability: '8.6' }),
+        false
+      ).bytes
+    ).toBe(10_000 * PER_TOKEN_BF16)
+  })
+
+  it('on a card with the host’s memory it is two contexts, whatever the requests', () => {
+    const settings = vllmSettings({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 8 })
+    expect(
+      vllmKvCacheBytes(
+        { configJson: config(), hfQuantConfigJson: null },
+        settings,
+        card({ total_vram_bytes: null }),
+        true
+      ).bytes
+    ).toBe(2 * 4096 * PER_TOKEN_BF16)
+  })
+
+  it('counts only the attention layers of a hybrid model', () => {
+    const hybrid = config({
+      layer_types: Array.from({ length: 28 }, (_, i) =>
+        i % 4 === 3 ? 'full_attention' : 'linear_attention'
+      ),
+    })
+    const settings = vllmSettings({ kv_cache_max_tokens: 1000 })
+    expect(
+      vllmKvCacheBytes({ configJson: hybrid, hfQuantConfigJson: null }, settings, card(), false).bytes
+    ).toBe(1000 * 2 * 7 * 8 * 128 * 2)
+  })
+})
+
+describe('the memory share and the launch plan', () => {
+  it('Карта частично занята рабочим столом: 8 GB with 1.5 GB taken — the share is what is free now, so vLLM’s own start check passes', () => {
+    const gpu = card({ free_vram_bytes: 6.5 * GiB })
+    const plan = vllmLaunchPlan(
+      vllmSettings({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 2 }),
+      { weightBytesTotal: 4.5 * 1e9, configJson: config(), hfQuantConfigJson: null },
+      gpu,
+      HOST
+    )
+    expect(plan.gpuMemoryUtilization).toBeCloseTo((6.5 * GiB - VLLM_FREE_MEMORY_MARGIN_BYTES) / (8 * GiB), 4)
+    // vLLM V1: free on device must be at least total × utilization.
+    expect(6.5 * GiB).toBeGreaterThanOrEqual(8 * GiB * plan.gpuMemoryUtilization)
+    expect(plan.kvCacheMemoryBytes).toBe(4096 * 2 * PER_TOKEN_BF16)
+  })
+
+  it('never more than 95% of the card, and half of the host’s memory on a card with the host’s memory', () => {
+    const idle = vllmLaunchPlan(
+      vllmSettings({}),
+      { weightBytesTotal: GiB, configJson: config(), hfQuantConfigJson: null },
+      card({ total_vram_bytes: 80 * GiB, free_vram_bytes: 80 * GiB }),
+      HOST
+    )
+    expect(idle.gpuMemoryUtilization).toBe(0.95)
+    const gb10 = vllmLaunchPlan(
+      vllmSettings({}),
+      { weightBytesTotal: GiB, configJson: config(), hfQuantConfigJson: null },
+      card({ total_vram_bytes: null, free_vram_bytes: null }),
+      { availableBytes: 100 * GiB, totalBytes: 120 * GiB }
+    )
+    expect(gb10.gpuMemoryUtilization).toBeCloseTo(0.5, 4)
+  })
+})
+
+describe('the vllm check (same skeleton, vLLM’s memory rule)', () => {
+  const check = (
+    files: CheckpointFile[],
+    gpu: GpuFacts,
+    extra: Record<string, unknown> = {},
+    settings = vllmSettings({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 2 })
+  ) =>
+    checkCheckpoint(
+      {
+        repository: 'acme/model',
+        revision: 'main',
+        config_json: config(extra),
+        hf_quant_config_json: null,
+        files,
+      },
+      VLLM,
+      [gpu],
+      HOST,
+      vllmCheckEngine(settings)
+    )
+
+  it('fits when weights + KV + vLLM’s own overhead fit the free memory', () => {
+    const verdict = check(weights(3 * GiB), card({ free_vram_bytes: 6.5 * GiB }))
+    expect(verdict.verdict).toEqual({ ok: true })
+  })
+
+  it('Модель не помещается: weights and KV over the free memory — MODEL_INCOMPATIBLE with needed and free bytes', () => {
+    const verdict = check(weights(5 * GiB), card({ free_vram_bytes: 6.5 * GiB }))
+    const kv = 4096 * 2 * PER_TOKEN_BF16
+    const needed = 5 * GiB + kv + VLLM_ENGINE_OVERHEAD_BYTES
+    expect(verdict.verdict).toMatchObject({
+      ok: false,
+      error: { code: 'MODEL_INCOMPATIBLE', details: expect.stringContaining(`needed_bytes=${needed}`) },
+    })
+    if (!verdict.verdict.ok) expect(verdict.verdict.error.details).toContain(`free_bytes=${6.5 * GiB}`)
+  })
+
+  it('Одна модель, два вердикта: an NVFP4 model on 8.9 — each engine by its own descriptor, in one shape', () => {
+    const nvfp4 = {
+      repository: 'nvidia/model-NVFP4',
+      revision: 'main',
+      config_json: config(),
+      hf_quant_config_json: { quantization: { quant_algo: 'NVFP4' } },
+      files: [...weights(2 * GiB), { path: 'hf_quant_config.json', size: 100, sha256: null }],
+    }
+    const gpu = card()
+    const viaVllm = checkCheckpoint(
+      nvfp4,
+      VLLM,
+      [gpu],
+      HOST,
+      vllmCheckEngine(vllmSettings({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 2 }))
+    )
+    const viaTrt = checkCheckpoint(
+      nvfp4,
+      TRT,
+      [gpu],
+      HOST,
+      tensorrtLlmCheckEngine({
+        contextLength: 4096,
+        kvCacheFreeGpuMemoryFraction: TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
+      })
+    )
+    expect(Object.keys(viaVllm).sort()).toEqual(Object.keys(viaTrt).sort())
+    expect(viaVllm.quantization_format).toBe('nvfp4')
+    expect(viaTrt.quantization_format).toBe('nvfp4')
+    expect(viaVllm.verdict).toEqual({ ok: true })
+    expect(viaTrt.verdict).toMatchObject({ ok: false, error: { code: 'MODEL_INCOMPATIBLE' } })
+  })
+
+  it('a curated model is held to the vllm descriptor’s inventory_digest', () => {
+    const curated = VLLM.curated_models.find((model) => model.repository === 'Qwen/Qwen3.5-2B')
+    const verdict = checkCheckpoint(
+      {
+        repository: 'Qwen/Qwen3.5-2B',
+        revision: curated?.revision ?? '',
+        config_json: config(),
+        hf_quant_config_json: null,
+        files: weights(GiB),
+      },
+      VLLM,
+      [card()],
+      HOST,
+      vllmCheckEngine(vllmSettings({}))
+    )
+    expect(verdict.verdict).toMatchObject({ ok: false, error: { code: 'MANAGED_METADATA_INVALID' } })
+  })
+
+  it('Движок не установлен: the check reads vllm’s cached descriptor, never the network', async () => {
+    const cachedForNewSetup = vi.fn(async (engineId: string): Promise<DescriptorProviderResult> =>
+      engineId === 'vllm' ? { kind: 'available', descriptor: VLLM } : { kind: 'available', descriptor: TRT }
+    )
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const verdict = await checkManagedModel(
+      vllmModelCheck,
+      {
+        repository: 'acme/model',
+        revision: 'main',
+        config_json: config(),
+        hf_quant_config_json: null,
+        files: weights(2 * GiB),
+      },
+      {
+        installations: { list: async () => [] },
+        descriptors: {
+          forInstallation: async () => {
+            throw new Error('nothing is installed')
+          },
+          cachedForNewSetup,
+        },
+        hostFacts: async () => ({ gpus: [card()], memory: HOST }),
+        settings: () => ({ max_output_tokens: 1024, context_length: 4096, max_num_seqs: 2 }),
+      }
+    )
+    expect(cachedForNewSetup).toHaveBeenCalledWith('vllm')
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(verdict.verdict).toEqual({ ok: true })
+    fetchSpy.mockRestore()
+  })
+})

@@ -319,7 +319,7 @@ export function freeMemoryBytes(gpu: GpuFacts, host: HostMemory): number {
 }
 
 /** A card's size, for ranking only: `MemTotal` for a unified-memory card (design D13). */
-function totalMemoryBytes(gpu: GpuFacts, host: HostMemory): number {
+export function totalMemoryBytes(gpu: GpuFacts, host: HostMemory): number {
   return isUnifiedMemory(gpu) ? host.totalBytes : (gpu.total_vram_bytes ?? 0)
 }
 

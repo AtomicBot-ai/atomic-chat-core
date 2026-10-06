@@ -17,7 +17,13 @@
 import type { SessionRoutePolicy } from '../shared/index.js'
 import type { DescriptorSource } from '../environment/index.js'
 import type { ManagedTextAdapter, ManagedTextCapabilities } from '../managed-text/index.js'
-import type { ManagedCheckEngine, ManagedModelCheckEngine } from '../managed-models/index.js'
+import type { GpuFacts } from '../../contracts/index.js'
+import type {
+  CheckpointMemoryInputs,
+  HostMemory,
+  ManagedCheckEngine,
+  ManagedModelCheckEngine,
+} from '../managed-models/index.js'
 
 /** What every managed engine's validated settings carry, whatever else they hold. */
 export interface ManagedEngineSettings {
@@ -44,6 +50,12 @@ export interface ManagedEngineSpec<S extends ManagedEngineSettings = ManagedEngi
   settings(stored: Record<string, unknown>, overrides?: Record<string, unknown>): S
   /** The compatibility check's hooks (memory rule, checkpoint quirks), sized by these settings. */
   check(settings: S): ManagedCheckEngine
+  /**
+   * Optional: the engine's launch plan, made right before its container is created — after the
+   * previous sessions stopped and the memory check passed on the card as it stands then — and handed
+   * to its adapter as `ManagedLaunchContext.plan` (vLLM's KV cache bytes and memory share, design D9).
+   */
+  launchPlan?(settings: S, checkpoint: CheckpointMemoryInputs, gpu: GpuFacts, host: HostMemory): unknown
   /** What the public server must know about a session to route it honestly. */
   routePolicy(
     capabilities: ManagedTextCapabilities | null,
