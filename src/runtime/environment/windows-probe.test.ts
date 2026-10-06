@@ -186,6 +186,31 @@ describe('probeWindowsHost', () => {
     expect(facts.wsl).toEqual({ installed: true, version: '2.4.4', ready: false, reboot_pending: null })
   })
 
+  it('a WSL that answers --status while Windows waits for its restart is not ready: no VM boots', async () => {
+    const windows = fakeWindows(
+      machine({
+        wsl: { installed: true, wsl_version: '2.4.4.0', ready: true, vm_boots: false },
+        reboot_pending: true,
+      })
+    )
+    const facts = await probeWindowsHost(windows.host.probeDeps)
+    expect(facts.wsl).toEqual({ installed: true, version: '2.4.4', ready: false, reboot_pending: true })
+    expect(windows.wslCalls).toContainEqual(['--system', '--exec', '/bin/true'])
+  })
+
+  it('an empty RebootPending that a restart did not clear does not hold back a WSL whose VM boots', async () => {
+    const windows = fakeWindows(machine({ reboot_pending: true }))
+    const facts = await probeWindowsHost(windows.host.probeDeps)
+    expect(facts.wsl).toEqual({ installed: true, version: '2.4.4', ready: true, reboot_pending: true })
+  })
+
+  it('boots no VM when Windows waits for no restart', async () => {
+    const windows = fakeWindows(machine({ reboot_pending: false }))
+    const facts = await probeWindowsHost(windows.host.probeDeps)
+    expect(facts.wsl.ready).toBe(true)
+    expect(windows.wslCalls).toEqual([['--version'], ['--status'], ['--list', '--verbose']])
+  })
+
   it('no nvidia-smi.exe in System32 is no driver, not an unread fact', async () => {
     const facts = await probeWindowsHost(fakeWindows(machine({ nvidia: null })).host.probeDeps)
     expect(facts.driver_installed).toBe(false)

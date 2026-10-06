@@ -26,6 +26,7 @@
 export * from './canonical-json.js'
 export * from './descriptor.js'
 export * from './descriptor-provider.js'
+export * from './diagnostics.js'
 export * from './environment-manifest.js'
 export * from './environment-manifest-provider.js'
 export * from './cached-document.js'

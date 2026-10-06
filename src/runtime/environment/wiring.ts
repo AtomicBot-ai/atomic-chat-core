@@ -23,7 +23,8 @@
  */
 
 import { readFile as nodeReadFile } from 'node:fs/promises'
-import { managedSharedRoot } from '../../config/index.js'
+import { managedSharedPaths, managedSharedRoot } from '../../config/index.js'
+import { CORE_VERSION } from '../../version.js'
 import type { DataFolderEnv } from '../../config/index.js'
 import type {
   CoreEvents,
@@ -36,12 +37,19 @@ import type {
 import { processStartId } from '../../lock/index.js'
 import {
   createRuntimeDescriptorProvider,
+  DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL,
   descriptorFetchFromFetch,
+  RUNTIME_DESCRIPTOR_URL_ENV,
   TENSORRT_LLM_ENGINE_ID,
 } from './descriptor-provider.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { buildEnvironmentDiagnostics, sourceOverrides } from './diagnostics.js'
 import {
   createEnvironmentManifestProvider,
+  DEFAULT_LINUX_ENVIRONMENT_MANIFEST_URL,
+  DEFAULT_WINDOWS_ARM64_ENVIRONMENT_MANIFEST_URL,
+  DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL,
+  ENVIRONMENT_MANIFEST_URL_ENV,
   environmentManifestFetchFromFetch,
 } from './environment-manifest-provider.js'
 import { normalizeWindowsArchitecture } from './windows-probe.js'
@@ -197,6 +205,15 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     return ownerIdentityCache
   }
 
+  // The providers' warnings (a document source overridden, a fetch that fell back to the cache) go to
+  // the log as before, and the last few are kept for the diagnostics report.
+  const recentWarnings: string[] = []
+  const warn = (message: string): void => {
+    recentWarnings.push(`${new Date().toISOString()} ${message}`)
+    if (recentWarnings.length > RECENT_WARNINGS_KEPT) recentWarnings.shift()
+    options.onWarn?.(message)
+  }
+
   const store = new OperationStore({
     root: managedRoot,
     instanceId: options.instanceId,
@@ -210,7 +227,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     fetch: descriptorFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
     root: managedRoot,
-    ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
+    onWarn: warn,
   })
   // Linux's manifest only: the provisioner that reads it exists only on Linux, and this provider's
   // source is `runtimes/environments/linux.json` — another platform's manifest is never fetched.
@@ -220,7 +237,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     fetch: environmentManifestFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
     root: managedRoot,
-    ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
+    onWarn: warn,
   })
   // Windows' own manifest (change `add-tensorrt-llm-windows`): only a Windows core asks for it, and
   // Windows on Arm asks for its own file (`windows-arm64.json`).
@@ -234,9 +251,18 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     fetch: environmentManifestFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
     root: managedRoot,
-    ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
+    onWarn: warn,
   })
   const installations = new InstallationStore(managedRoot)
+  const sharedPaths = managedSharedPaths(managedRoot)
+  // The manifest this core's own platform reads by default, for the diagnostics report.
+  const manifestDefaultUrl =
+    options.platform !== 'win32'
+      ? DEFAULT_LINUX_ENVIRONMENT_MANIFEST_URL
+      : options.windows !== undefined &&
+          normalizeWindowsArchitecture(options.windows.host.probeDeps.machine()) === 'aarch64'
+        ? DEFAULT_WINDOWS_ARM64_ENVIRONMENT_MANIFEST_URL
+        : DEFAULT_WINDOWS_ENVIRONMENT_MANIFEST_URL
 
   // The view a snapshot is built from. A machine with no executor has no environment at all, which
   // is different from having one that cannot be set up.
@@ -260,6 +286,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
             minimum_app_version: null,
             // Only a Windows environment runs in a distribution of its own.
             distribution: null,
+            source_overrides: sourceOverrides(options.env.env),
           },
         ]
   let assessed: ManagedAvailability | null = null
@@ -350,6 +377,37 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     // `GET …/environments/descriptors/:id` (task 2.22) reads this cache, never the network.
     descriptors,
     readSnapshot: async () => view,
+    onReset: (archivedIds) => {
+      for (const id of archivedIds) operations.delete(id)
+      publish()
+    },
+    diagnostics: () =>
+      buildEnvironmentDiagnostics({
+        now: () => new Date(),
+        coreVersion: CORE_VERSION,
+        platform: options.platform,
+        arch: process.arch,
+        environment: view[0] === undefined ? null : { ...view[0] },
+        env: options.env.env,
+        documents: [
+          {
+            document: 'runtime-descriptor',
+            defaultUrl: DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL,
+            variable: RUNTIME_DESCRIPTOR_URL_ENV,
+            cacheDir: sharedPaths.descriptorsDir,
+            idField: 'descriptor_id',
+          },
+          {
+            document: 'environment-manifest',
+            defaultUrl: manifestDefaultUrl,
+            variable: ENVIRONMENT_MANIFEST_URL_ENV,
+            cacheDir: sharedPaths.environmentManifestsDir,
+            idField: 'manifest_id',
+          },
+        ],
+        operations: () => store.listAll(),
+        recentWarnings: () => [...recentWarnings],
+      }),
     emit: (name, payload) => {
       // Keep the snapshot and the event stream describing the same thing: a client that reconnects
       // must not see a snapshot older than the events it then receives.
@@ -390,3 +448,6 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
 }
 
 const TERMINAL: readonly EnvironmentOperation['phase'][] = ['ready', 'removed', 'cancelled', 'failed']
+
+/** How many of the providers' warnings the diagnostics report keeps. */
+const RECENT_WARNINGS_KEPT = 30

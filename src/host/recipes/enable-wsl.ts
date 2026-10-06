@@ -17,6 +17,13 @@
  * distributions for the elevated token — another user, or another mount namespace of the same one —
  * where the app would never find them (microsoft/WSL#9690). Importing is the unelevated core's job.
  *
+ * When no restart is needed (the VM platform was already on), `wsl --install` does not exit: its last
+ * act is to start the Ubuntu it installed, whose first-run prompt waits for a user name in the
+ * executor's hidden console — until the install deadline (live, build 26200, 2026-10-05). So while it
+ * runs the executor asks `wsl --list --running`: a running distribution means the install is done and
+ * a WSL 2 VM has started, and the install's process tree is ended there. A distribution already
+ * running before the install would answer the same, so then the executor waits for the exit as before.
+ *
  * Its outcome: `completed` when WSL answers `--status` right away, `reboot-required` when the install
  * succeeded but WSL cannot start until Windows restarts (or the installer said so with 3010), `failed`
  * with the installer's exit code and output otherwise. `wsl.exe` here is the bare name; the Windows
@@ -31,10 +38,12 @@ export const ENABLE_WSL_RECIPE_ID = 'windows.enable-wsl'
 /** `ERROR_SUCCESS_REBOOT_REQUIRED`: the installer succeeded and Windows must restart before it applies. */
 export const REBOOT_REQUIRED_EXIT_CODE = 3010
 
-/** The recipe as data: the two argv it runs, frozen, and what its digest is computed from. */
+/** The recipe as data: the three argv it runs, frozen, and what its digest is computed from. */
 export const ENABLE_WSL_RECIPE = Object.freeze({
   recipe_id: ENABLE_WSL_RECIPE_ID,
   install: Object.freeze(['wsl.exe', '--install']) as readonly string[],
+  /** Asked before and while the install runs: exits 0 once a distribution runs. */
+  watch: Object.freeze(['wsl.exe', '--list', '--running']) as readonly string[],
   verify: Object.freeze(['wsl.exe', '--status']) as readonly string[],
   reboot_required_exit_code: REBOOT_REQUIRED_EXIT_CODE,
 })
@@ -42,6 +51,7 @@ export const ENABLE_WSL_RECIPE = Object.freeze({
 export const ENABLE_WSL_RECIPE_DIGEST: Sha256Digest = canonicalDigest({
   recipe_id: ENABLE_WSL_RECIPE.recipe_id,
   install: [...ENABLE_WSL_RECIPE.install],
+  watch: [...ENABLE_WSL_RECIPE.watch],
   verify: [...ENABLE_WSL_RECIPE.verify],
   reboot_required_exit_code: ENABLE_WSL_RECIPE.reboot_required_exit_code,
 })

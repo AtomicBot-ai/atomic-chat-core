@@ -16,7 +16,9 @@
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
   BeginOperation,
+  EnvironmentDiagnostics,
   EnvironmentOperation,
+  EnvironmentResetResult,
   EnvironmentSnapshot,
   ErrorBody,
   ManagedHostReceipt,
@@ -123,6 +125,15 @@ export interface EnvironmentServiceOptions {
    * cache-only read: this service is never handed a way to fetch a descriptor for that call.
    */
   descriptors?: Pick<RuntimeDescriptorProvider, 'forInstallation'>
+  /**
+   * Called after `reset()` archived finished operations, with their ids: the snapshot's own view of
+   * operations forgets them and is published again. Absent in tests that do not look.
+   */
+  onReset?: (archivedIds: string[]) => void
+  /** Builds `diagnostics()`'s report; absent where nothing assembles one (tests). */
+  diagnostics?: () => Promise<EnvironmentDiagnostics>
+  /** The archive folder's name for a reset: a sortable UTC time by default. */
+  resetStamp?: () => string
 }
 
 const unsupported = (input: {
@@ -240,6 +251,43 @@ export class EnvironmentService {
       )
     }
     return summarizeRuntimeDescriptor(cached.descriptor)
+  }
+
+  /**
+   * Put the environment's bookkeeping back to "nothing was ever attempted" without uninstalling
+   * anything: every finished operation is archived, so no failed setup is shown or resumed any more
+   * and the next setup starts from a fresh probe — with whatever descriptor conf serves now, not the
+   * one an old consent pinned. Refused with `MANAGED_OPERATION_CONFLICT` while an operation is still
+   * running. The distribution, the images, the models, the installation records and the cached conf
+   * documents stay exactly as they are; removing those is `remove`'s job.
+   */
+  async reset(environmentId: string): Promise<EnvironmentResetResult> {
+    if (environmentId !== this.options.environmentId) {
+      throw new AtomicCoreError('MANAGED_OPERATION_NOT_FOUND', 'No such environment.', environmentId)
+    }
+    const stamp = this.options.resetStamp?.() ?? new Date().toISOString().replace(/[:.]/g, '-')
+    const archived = await this.options.store.archiveFinished(stamp)
+    for (const id of archived.ids) this.latest.delete(id)
+    this.options.onReset?.(archived.ids)
+    return {
+      environment_id: environmentId,
+      archived_operation_ids: archived.ids,
+      archive_path: archived.path,
+    }
+  }
+
+  /** A read-only report on the environment for a support message (`EnvironmentDiagnostics`). */
+  async diagnostics(environmentId: string): Promise<EnvironmentDiagnostics> {
+    if (environmentId !== this.options.environmentId) {
+      throw new AtomicCoreError('MANAGED_OPERATION_NOT_FOUND', 'No such environment.', environmentId)
+    }
+    if (this.options.diagnostics === undefined) {
+      throw new AtomicCoreError(
+        'MANAGED_ADAPTER_UNAVAILABLE',
+        'Managed runtimes are not available on this system.'
+      )
+    }
+    return this.options.diagnostics()
   }
 
   /**

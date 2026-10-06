@@ -196,6 +196,7 @@ describe('managed environment wire shapes', () => {
       active_operation_id: null,
       minimum_app_version: '2.0.49',
       distribution: null,
+      source_overrides: [],
     }
 
     const back = roundTrip(snapshot)

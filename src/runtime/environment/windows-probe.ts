@@ -53,7 +53,9 @@ export interface WslFacts {
   /**
    * `--status` answers and Windows is not waiting for a restart: a WSL 2 VM can start. Null when not
    * asked. `--status` alone is not enough: right after `wsl --install` it exits 0 while saying WSL 2
-   * cannot start until the restart (live acceptance, build 26200).
+   * cannot start until the restart (live acceptance, build 26200). `RebootPending` alone is not enough
+   * either: CBS can recreate it empty at every boot (live, build 26200, 2026-10-05), so when it is set
+   * the probe starts the WSL system distribution, and a VM that boots is ready.
    */
   ready: boolean | null
   /** Windows has a component change waiting for a restart (CBS `RebootPending`). Null when unread. */
@@ -245,7 +247,8 @@ const VIRTUALIZATION_QUERY =
 
 /**
  * Read the machine. Nothing here enables a component, imports, starts or stops a distribution, or
- * writes a file. `wsl --status` and the firmware check are asked only when they can change the
+ * writes a file — except that with `RebootPending` set it boots WSL's own system distribution once to
+ * see whether a VM can start (it idles out on its own). `wsl --status` and the firmware check are asked only when they can change the
  * answer: a package that is not installed has no status, and a WSL that already starts VMs proves
  * virtualization.
  */
@@ -287,7 +290,12 @@ export async function probeWindowsHost(deps: WindowsProbeDeps): Promise<WindowsH
       ? parseRebootPending(await deps.exec(`${system32}\\reg.exe`, ['query', REBOOT_PENDING_KEY]))
       : null
   const answered = status === null ? null : status.code === null ? null : status.code === 0
-  const ready = answered === null ? null : answered && rebootPending !== true
+  // A restart Windows waits for need not be WSL's: when the flag is up, a VM that boots settles it.
+  const vmBoots =
+    answered === true && rebootPending === true
+      ? (await deps.wsl.command(['--system', '--exec', '/bin/true'], { timeoutMs: 60_000 })).code === 0
+      : false
+  const ready = answered === null ? null : answered && (rebootPending !== true || vmBoots)
   if (installed === true && answered === null) unknown.push('wsl-status')
 
   // Only a WSL that cannot start a VM leaves the question of firmware virtualization open.

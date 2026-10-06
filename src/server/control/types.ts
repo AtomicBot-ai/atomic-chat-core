@@ -20,7 +20,9 @@ import type {
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
+  EnvironmentDiagnostics,
   EnvironmentOperation,
+  EnvironmentResetResult,
   EnvironmentSnapshot,
   ModelCompatibilityRequest,
   ModelCompatibilityResponse,
@@ -112,6 +114,10 @@ export interface ManagedEnvironmentControl {
   cancel(operationId: string): Promise<EnvironmentOperation>
   resume(operationId: string, input: ResumeOperation): Promise<EnvironmentOperation>
   acceptHostReceipt(operationId: string, receipt: ManagedHostReceipt): Promise<EnvironmentOperation>
+  /** Archive the finished operations; nothing installed is touched. */
+  reset(environmentId: string): Promise<EnvironmentResetResult>
+  /** A read-only report for a support message. */
+  diagnostics(environmentId: string): Promise<EnvironmentDiagnostics>
 }
 
 export interface PublicServerControl {

@@ -75,6 +75,7 @@ import { checkLocalhostForwarding } from './windows-forwarding.js'
 import { importDistribution, restoreDefaultDistribution, setupGuest } from './windows-guest-setup.js'
 import { assessWindowsHost, type WindowsBlocker } from './windows-plan.js'
 import {
+  normalizeWindowsArchitecture,
   parseRebootPending,
   parseWslDistributions,
   probeWindowsHost,
@@ -158,8 +159,16 @@ export interface WindowsProvisionerDeps {
 const ZERO_DIGEST: Sha256Digest = `sha256:${'0'.repeat(64)}`
 /** Checkpoints at which part or all of the engine image is already in the guest's layer store. */
 const PULL_PHASES: readonly string[] = ['pulling-image', 'verifying', 'activating']
-/** The only platform a Windows guest runs (the manifest's rootfs is x86_64). */
-const GUEST_PLATFORM = 'linux/amd64'
+/**
+ * The image platform of Atomic Chat's distribution: the machine's own architecture, which is also the
+ * architecture of the rootfs its manifest imports (`windows.json` x86_64, `windows-arm64.json`
+ * aarch64). An x86_64 constant here pulled the amd64 GPU-check image onto Windows on Arm, where its
+ * `nvidia-smi` cannot run (NVIDIA RTX Spark N1X, 2026-10-06). Another architecture never gets this
+ * far: the plan blocks it as `unsupported-architecture`.
+ */
+export function windowsGuestPlatform(machine: string): 'linux/amd64' | 'linux/arm64' {
+  return normalizeWindowsArchitecture(machine) === 'aarch64' ? 'linux/arm64' : 'linux/amd64'
+}
 const STOP_TIMEOUT_SECONDS = 10
 
 /** The unsupported verdicts: what hides the provider rather than blocking a plan. */
@@ -194,6 +203,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
   const newId = deps.newId ?? randomUUID
   const now = deps.now ?? (() => new Date())
   const wsl = deps.host.probeDeps.wsl
+  const guestPlatform = windowsGuestPlatform(deps.host.probeDeps.machine())
 
   /** The guest's docker CLI, as root, by its absolute path, over the transport (design D3). */
   const guestDocker =
@@ -292,7 +302,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     const target = record.machine.operation.target
     const seen = await look()
     const manifest = await manifestFor(record, seen.record)
-    const image = descriptor.image[GUEST_PLATFORM]
+    const image = descriptor.image[guestPlatform]
     const transport = seen.owned === null ? null : wsl.distribution(seen.owned.name)
     const existing = target.kind === 'runtime' ? await deps.installations.read(target.installation_id) : null
     const present =
@@ -587,7 +597,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       )
     }
     const docker = guestDocker(transport)
-    const probeImage = descriptor.probe_image[GUEST_PLATFORM]
+    const probeImage = descriptor.probe_image[guestPlatform]
     // Only a GPU-check image this setup pulls itself is its to remove later (as on Linux).
     const inspected = await inspectImage(docker, probeImage).catch(() => null)
     if (inspected !== null && !inspected.found) await own([ownedImageId(probeImage)])
@@ -771,7 +781,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       try {
         if (effect.kind === 'pull-image' || effect.kind === 'verify') {
           const descriptor = await pinnedDescriptor(deps.descriptors, record)
-          return (await imagePresent(await ownTransport(), descriptor.image[GUEST_PLATFORM]))
+          return (await imagePresent(await ownTransport(), descriptor.image[guestPlatform]))
             ? { kind: 'completed', owned_resource_ids: [] }
             : { kind: 'absent' }
         }
@@ -876,7 +886,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     ): Promise<void> {
       return held('pulling the engine image', async () => {
         const descriptor = await pinnedDescriptor(deps.descriptors, record)
-        const image = descriptor.image[GUEST_PLATFORM]
+        const image = descriptor.image[guestPlatform]
         const transport = await ownTransport()
         const label = 'Downloading the engine image'
         onProgress({ label, completed: 0, total: descriptor.download_bytes, unit: 'bytes' })
@@ -907,7 +917,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
           return
         }
         const descriptor = await pinnedDescriptor(deps.descriptors, record)
-        const image = descriptor.image[GUEST_PLATFORM]
+        const image = descriptor.image[guestPlatform]
         const transport = await ownTransport()
         if (!(await imagePresent(transport, image))) {
           throw new AtomicCoreError(
@@ -935,7 +945,7 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       const target = record.machine.operation.target
       if (target.kind !== 'runtime') return
       const descriptor = await pinnedDescriptor(deps.descriptors, record)
-      const probeImage = descriptor.probe_image[GUEST_PLATFORM]
+      const probeImage = descriptor.probe_image[guestPlatform]
       const previous = await deps.installations.read(target.installation_id)
       const ownsProbe =
         record.owned_resource_ids.includes(ownedImageId(probeImage)) ||
@@ -951,9 +961,9 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
           availability: 'supported',
           status: 'ready',
         },
-        image: descriptor.image[GUEST_PLATFORM],
+        image: descriptor.image[guestPlatform],
         ...(ownsProbe ? { probe_image: probeImage } : {}),
-        platform: GUEST_PLATFORM,
+        platform: guestPlatform,
         installed_at: now().toISOString(),
       }
       await deps.installations.write(installation)

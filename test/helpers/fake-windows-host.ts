@@ -27,6 +27,8 @@ export interface FakeWindowsMachine {
   wslconfig: string | null
   volume_free_bytes: number | null
   vhdx_bytes: number | null
+  /** CBS `RebootPending` as `reg.exe query` finds it; unread when absent. */
+  reboot_pending?: boolean
 }
 
 export interface FakeWindows {
@@ -124,6 +126,10 @@ export function fakeWindows(machine: FakeWindowsMachine): FakeWindows {
         }),
         stderr: '',
       }
+    }
+    if (base === 'reg.exe' && machine.reboot_pending !== undefined) {
+      // Exit 0 when the key exists, 1 when it does not; an empty key prints nothing.
+      return { code: machine.reboot_pending ? 0 : 1, stdout: '', stderr: '' }
     }
     return { code: null, stdout: '', stderr: `fake windows: unexpected ${command}` }
   }
