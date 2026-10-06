@@ -657,12 +657,9 @@ describe('a second managed engine', () => {
         : { kind: 'available', descriptor: found }
     },
   }
-  const probeFor = (state: FakeLinuxHostState, target: BeginOperation['target']) =>
+  const probeFor = (state: FakeLinuxHostState, target: typeof TARGET | typeof SECOND_TARGET) =>
     createLinuxProvisioner(harness(state, { descriptors }).deps).probe(
-      fresh({
-        target,
-        descriptor_id: (target.kind === 'runtime' ? byEngine[target.engine_id] : TRT_615)?.descriptor_id,
-      }),
+      fresh({ target, descriptor_id: (byEngine[target.engine_id] as RuntimeDescriptor).descriptor_id }),
       signal
     )
 
