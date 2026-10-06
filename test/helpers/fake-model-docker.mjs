@@ -106,7 +106,9 @@ if (sub === 'start') {
     c.status = 'exited'
     c.exitCode = 1
     c.logs.push(
-      stamp('(EngineCore_DP0 pid=212) INFO [gpu_model_runner.py:2338] Starting to load model /atomic/model...'),
+      stamp(
+        '(EngineCore_DP0 pid=212) INFO [gpu_model_runner.py:2338] Starting to load model /atomic/model...'
+      ),
       stamp(
         'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.17 GiB. GPU 0 has a total capacity of 7.63 GiB of which 512.00 MiB is free.'
       )
@@ -125,7 +127,9 @@ if (sub === 'start') {
   if (c.engine === 'vllm') {
     c.logs.push(
       stamp('INFO [api_server.py:1880] vLLM API server version 0.31.0'),
-      stamp('(EngineCore_DP0 pid=212) INFO [gpu_model_runner.py:2338] Starting to load model /atomic/model...'),
+      stamp(
+        '(EngineCore_DP0 pid=212) INFO [gpu_model_runner.py:2338] Starting to load model /atomic/model...'
+      ),
       stamp('INFO:     Application startup complete.')
     )
   } else {

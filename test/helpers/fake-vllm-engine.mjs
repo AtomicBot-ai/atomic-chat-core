@@ -47,13 +47,17 @@ createServer((req, res) => {
       const parsed = JSON.parse(body || '{}')
       if (parsed.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' })
-        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'hello from vllm' } }] })}\n\n`)
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'hello from vllm' } }] })}\n\n`
+        )
         res.end('data: [DONE]\n\n')
         return
       }
       json(200, {
         object: 'chat.completion',
-        choices: [{ index: 0, message: { role: 'assistant', content: 'hello from vllm' }, finish_reason: 'stop' }],
+        choices: [
+          { index: 0, message: { role: 'assistant', content: 'hello from vllm' }, finish_reason: 'stop' },
+        ],
         received: parsed,
         auth: req.headers.authorization ?? null,
       })
