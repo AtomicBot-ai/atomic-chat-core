@@ -16,7 +16,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { AtomicCoreError, MANAGED_PHASES } from '../../contracts/index.js'
 import type {
   BeginOperation,
@@ -330,6 +330,47 @@ export class OperationStore {
   async listRecoverable(): Promise<PersistedOperation[]> {
     const all = await this.all()
     return all.filter((record) => !TERMINAL.includes(record.machine.operation.phase))
+  }
+
+  /** Every operation in the directory, finished or not, for a diagnostics report. */
+  async listAll(): Promise<PersistedOperation[]> {
+    return this.all()
+  }
+
+  /**
+   * Move every finished operation (`ready`, `removed`, `cancelled`, `failed`) — both its `.json` and
+   * its `.json.bak` — into `operations-archive/<stamp>/` next to the operations directory, under the
+   * store's lock; an unfinished one
+   * refuses the whole move with `MANAGED_OPERATION_CONFLICT`, since resetting under a running
+   * operation would hide what it is doing. Archived records are never read again by this store,
+   * which only lists the operations directory itself. Returns the ids it moved and
+   * where to, `null` when there was nothing to move.
+   */
+  async archiveFinished(stamp: string): Promise<{ ids: string[]; path: string | null }> {
+    return this.withLock(async () => {
+      const all = await this.all()
+      const running = all.find((record) => !TERMINAL.includes(record.machine.operation.phase))
+      if (running !== undefined) {
+        throw new AtomicCoreError(
+          'MANAGED_OPERATION_CONFLICT',
+          'A change to this environment is still running; finish or cancel it before resetting.',
+          running.machine.operation.operation_id
+        )
+      }
+      if (all.length === 0) return { ids: [], path: null }
+      const archive = join(this.paths.root, 'operations-archive', stamp)
+      await this.fs.mkdir(archive, { recursive: true })
+      const ids: string[] = []
+      for (const record of all) {
+        const id = record.machine.operation.operation_id
+        const file = this.paths.operationFile(id)
+        for (const path of [file, `${file}.bak`]) {
+          if (await this.exists(path)) await this.fs.rename(path, join(archive, basename(path)))
+        }
+        ids.push(id)
+      }
+      return { ids, path: archive }
+    })
   }
 
   /**

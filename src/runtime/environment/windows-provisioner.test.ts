@@ -891,7 +891,7 @@ describe('the pinned manifest — spec "Окружение Windows закреп�
 
 describe('the guest recipe — spec "Гость готовится тем же рецептом без повышения прав"', () => {
   it.each([
-    ['an x64 PC', (): FakeWindowsMachine => wslWindows(), MANIFEST, 'x86_64'],
+    ['an x64 PC', (): FakeWindowsMachine => wslWindows(), MANIFEST, 'x86_64', 'linux/amd64'],
     [
       'an arm64 PC',
       (): FakeWindowsMachine => {
@@ -911,10 +911,11 @@ describe('the guest recipe — spec "Гость готовится тем же �
       },
       ARM_MANIFEST,
       'aarch64',
+      'linux/arm64',
     ],
   ] as const)(
     'a fresh distribution on %s: Docker and the toolkit by the Linux recipe for its architecture as guest root, the GPU checked, on to the pull — no relogin',
-    async (_label, machineOf, manifest, arch) => {
+    async (_label, machineOf, manifest, arch, platform) => {
       const machine = machineOf()
       const h = harness(machine, { manifests: manifestsOf(manifest) })
       const store = memoryStore()
@@ -961,6 +962,12 @@ describe('the guest recipe — spec "Гость готовится тем же �
       // The GPU check ran in the guest on the card, after the small image came in through the Engine API.
       const runs = h.windows.wslCalls.filter((argv) => argv.includes('run') && argv.includes('--gpus'))
       expect(runs[0]).toEqual(expect.arrayContaining([`device=${GPU}`, 'nvidia-smi']))
+      // The GPU-check image of the machine's own platform: an amd64 one cannot run in an arm64 guest.
+      const other = platform === 'linux/arm64' ? 'linux/amd64' : 'linux/arm64'
+      const mentions = (digest: string) =>
+        h.windows.wslCalls.some((argv) => argv.some((arg) => arg.includes(digest)))
+      expect(mentions(DESCRIPTOR.probe_image[platform].digest)).toBe(true)
+      expect(mentions(DESCRIPTOR.probe_image[other].digest)).toBe(false)
       expect(h.windows.wslCalls.some((argv) => argv.includes('curl'))).toBe(true)
       expect(phases).toContain('pulling-image')
       expect(phases).not.toContain('relogin-required')
@@ -1002,6 +1009,23 @@ describe('the engine image through the guest’s Engine API (design D4)', () => 
     expect(installed?.installation.status).toBe('ready')
     expect(installed?.platform).toBe('linux/amd64')
     expect(installed?.image).toEqual(ENGINE)
+  })
+
+  it('on Windows on Arm pulls, verifies and records the arm64 engine image', async () => {
+    const ARM = DESCRIPTOR.image['linux/arm64']
+    const machine = { ...importedWindows(), machine: 'arm64' }
+    const h = harness(machine, { record: RECORD })
+    const provisioner = createWindowsProvisioner(h.deps)
+
+    await provisioner.pull(consented(), () => undefined, signal)
+    expect(machine.wsl.guests?.['AtomicChat']?.host?.images).toContain(`${ARM.repository}@${ARM.digest}`)
+    expect(machine.wsl.guests?.['AtomicChat']?.host?.images).not.toContain(ENGINE_REF)
+
+    await provisioner.verify(consented(), signal)
+    await provisioner.activate(consented(), signal)
+    const installed = await h.deps.installations.read('tensorrt-llm')
+    expect(installed?.platform).toBe('linux/arm64')
+    expect(installed?.image).toEqual(ARM)
   })
 
   it('a digest the guest does not hold fails verification', async () => {

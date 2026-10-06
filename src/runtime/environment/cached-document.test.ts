@@ -93,6 +93,61 @@ describe('createCachedDocuments', () => {
     expect(network).not.toHaveBeenCalled()
   })
 
+  it('says in the log why it fell back and which cached document stands in, once per reason', async () => {
+    const fs = new FakeManagedFs()
+    await documents(fs, serve(raw(A))).latest()
+    const onWarn = vi.fn()
+    const offlineDocs = documents(fs, offline, onWarn)
+    await offlineDocs.latest()
+    await offlineDocs.latest()
+    expect(onWarn).toHaveBeenCalledTimes(1)
+    expect(onWarn.mock.calls[0]?.[0]).toBe(
+      'Toy document from https://conf.test/toy.json could not be read (offline); using the cached toy-a.'
+    )
+
+    const statusWarn = vi.fn()
+    await documents(
+      fs,
+      vi.fn(async () => new Response('', { status: 404 })),
+      statusWarn
+    ).latest()
+    expect(statusWarn.mock.calls[0]?.[0]).toContain('could not be read (HTTP 404)')
+
+    const invalidWarn = vi.fn()
+    await documents(fs, serve('{"nope":1}'), invalidWarn).latest()
+    expect(invalidWarn.mock.calls[0]?.[0]).toContain('is not a valid toy document (not a toy)')
+
+    const tooNewWarn = vi.fn()
+    await documents(fs, serve(raw(TOO_NEW)), tooNewWarn).latest()
+    expect(tooNewWarn.mock.calls[0]?.[0]).toContain('is toy-z, which needs core 2.0.0 (this is 1.2.0)')
+  })
+
+  it('a fresh fetch from conf writes nothing to the log', async () => {
+    const onWarn = vi.fn()
+    await documents(new FakeManagedFs(), serve(raw(A)), onWarn).latest()
+    expect(onWarn).not.toHaveBeenCalled()
+  })
+
+  it('names an override of the source once, even when it serves a valid document', async () => {
+    const onWarn = vi.fn()
+    const pinned = createCachedDocuments(KIND, {
+      env: { ATOMIC_TOY_URL: 'https://conf.test/pinned/toy.json' },
+      fetch: serve(raw(B)),
+      readFile: () => Promise.reject(new Error('no file:// in these tests')),
+      fs: new FakeManagedFs(),
+      coreVersion: '1.2.0',
+      url: 'https://conf.test/toy.json',
+      onWarn,
+    })
+    expect(await pinned.latest()).toEqual({ kind: 'fresh', document: B })
+    await pinned.latest()
+    expect(onWarn.mock.calls).toEqual([
+      [
+        'Toy document source is overridden by ATOMIC_TOY_URL=https://conf.test/pinned/toy.json; https://conf.test/toy.json is not read.',
+      ],
+    ])
+  })
+
   it('a failed cache write is reported and never fails the resolution', async () => {
     const fs = new FakeManagedFs()
     fs.rename = async () => {
@@ -101,6 +156,61 @@ describe('createCachedDocuments', () => {
     const onWarn = vi.fn()
     expect(await documents(fs, serve(raw(A)), onWarn).latest()).toEqual({ kind: 'fresh', document: A })
     expect(onWarn.mock.calls[0]?.[0]).toBe('Could not cache toy document toy-a: disk full')
+  })
+})
+
+describe('createCachedDocuments: what it says about odd failures', () => {
+  /* eslint-disable @typescript-eslint/only-throw-error -- these cases are exactly a non-Error being thrown */
+  it('names a fetch that rejects with something other than an Error', async () => {
+    const onWarn = vi.fn()
+    const rejects: DocumentFetch = vi.fn(async () => {
+      throw 'socket hang up'
+    })
+    expect(await documents(new FakeManagedFs(), rejects, onWarn).latest()).toEqual({ kind: 'none' })
+    expect(onWarn.mock.calls[0]?.[0]).toContain('could not be read (socket hang up)')
+  })
+
+  it('names a cache write that fails with something other than an Error', async () => {
+    const fs = new FakeManagedFs()
+    fs.rename = async () => {
+      throw 'EPERM'
+    }
+    const onWarn = vi.fn()
+    expect(await documents(fs, serve(raw(A)), onWarn).latest()).toEqual({ kind: 'fresh', document: A })
+    expect(onWarn.mock.calls[0]?.[0]).toBe('Could not cache toy document toy-a: EPERM')
+  })
+
+  it('names a parser that rejects with something other than an Error, or answers nothing at all', async () => {
+    const make = (parse: CachedDocumentKind<Toy>['parse']) =>
+      createCachedDocuments(
+        { ...KIND, parse },
+        {
+          env: {},
+          fetch: serve(raw(A)),
+          readFile: () => Promise.reject(new Error('no file://')),
+          fs: new FakeManagedFs(),
+          coreVersion: '1.2.0',
+          url: 'https://conf.test/toy.json',
+          onWarn,
+        }
+      )
+    const onWarn = vi.fn()
+    await make(() => {
+      throw 'bad shape'
+    }).latest()
+    await make(() => null as unknown as Toy).latest()
+    expect(onWarn.mock.calls.map((call) => call[0])).toEqual([
+      expect.stringContaining('is not a valid toy document (bad shape)'),
+      expect.stringContaining('is not a valid toy document (unreadable)'),
+    ])
+  })
+  /* eslint-enable @typescript-eslint/only-throw-error */
+
+  it('a latest.json whose id is not a string points at nothing', async () => {
+    const fs = new FakeManagedFs()
+    await documents(fs, serve(raw(A))).latest()
+    fs.files.set('/root/toys/latest.json', '{"toy_id": 7}')
+    expect(await documents(fs, offline).latestCached()).toBeNull()
   })
 })
 

@@ -1000,12 +1000,15 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
     return { machine, context }
   }
 
-  it('offers the provider on Windows x64 with its WSL context, none on Windows on ARM or without it', async () => {
+  it('offers the provider on Windows x64 and on Windows on Arm with its WSL context, none without it or on another CPU', async () => {
     const { context } = windowsContext(true)
-    const runtime = wireTensorrtLlm(options({ platform: 'win32', windows: context }))
-    expect(runtime).toBeInstanceOf(TensorrtLlmRuntime)
-    await runtime?.shutdown()
-    expect(wireTensorrtLlm(options({ platform: 'win32', arch: 'arm64', windows: context }))).toBeNull()
+    for (const arch of ['x64', 'arm64']) {
+      // Windows on Arm (NVIDIA RTX Spark N1X, 2026-10-06): its own manifest and the linux/arm64 images.
+      const runtime = wireTensorrtLlm(options({ platform: 'win32', arch, windows: context }))
+      expect(runtime).toBeInstanceOf(TensorrtLlmRuntime)
+      await runtime?.shutdown()
+    }
+    expect(wireTensorrtLlm(options({ platform: 'win32', arch: 'ia32', windows: context }))).toBeNull()
     expect(wireTensorrtLlm(options({ platform: 'win32' }))).toBeNull()
   })
 
@@ -1058,6 +1061,32 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
       code: 'wsl-vm-memory',
       params: { vm_memory_bytes: String(16_000_000 * 1024), wslconfig_memory: '16GB' },
     })
+  })
+
+  it('checks models on Windows on Arm too, and on no CPU the descriptor has no image for', async () => {
+    const { context } = windowsContext(true)
+    const on = (arch: string) =>
+      wireTensorrtLlmModelCheck('win32', {
+        descriptors: {
+          forInstallation: async () => ({ kind: 'available', descriptor }),
+          cachedForNewSetup: async () => ({ kind: 'available', descriptor }),
+        },
+        installations: { list: async () => [] },
+        host: cardless as WireTensorrtLlmModelCheckOptions['host'],
+        settings: () => ({}),
+        arch,
+        windows: context,
+      })
+    expect(on('ia32')).toBeNull()
+    const result = await on('arm64')?.({
+      repository: 'acme/model',
+      revision: 'deadbeef',
+      config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
+      hf_quant_config_json: null,
+      files: [{ path: 'model.safetensors', size: 2_000_000_000, sha256: null }],
+    })
+    expect(result?.checked_gpu_id).toBe('GPU-aaaa')
+    expect(result?.verdict.ok).toBe(true)
   })
 
   it('checks a model before the import against the cards Windows sees, with no VM to warn about', async () => {

@@ -243,4 +243,15 @@ export function registerEnvironmentRoutes(
     const operation = await service().begin(id(params['environmentId'], 'environmentId'), beginBody(body))
     sendJson(res, 202, operation)
   })
+
+  // Archive the finished operations so the next setup starts from a fresh plan; installs nothing,
+  // removes nothing installed. 409 (`MANAGED_OPERATION_CONFLICT`) while an operation still runs.
+  router.post(p('/environments/:environmentId/reset'), async (_req, res, { params }) => {
+    sendJson(res, 200, await service().reset(id(params['environmentId'], 'environmentId')))
+  })
+
+  // Read-only: what a person pastes into a support message (`EnvironmentDiagnostics`).
+  router.get(p('/environments/:environmentId/diagnostics'), async (_req, res, { params }) => {
+    sendJson(res, 200, await service().diagnostics(id(params['environmentId'], 'environmentId')))
+  })
 }

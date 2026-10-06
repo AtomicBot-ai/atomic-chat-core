@@ -171,35 +171,53 @@ export function createCachedDocuments<T>(
   const coreVersion = options.coreVersion ?? CORE_VERSION
   const timeoutMs = options.timeoutMs ?? DOCUMENT_FETCH_TIMEOUT_MS
   const onWarn = options.onWarn ?? ((): void => undefined)
+  // `latest()` runs on every probe: the same warning is written once per process, not per call.
+  const warned = new Set<string>()
+  const warnOnce = (message: string): void => {
+    if (warned.has(message)) return
+    warned.add(message)
+    onWarn(message)
+  }
 
   const sourceUrl = (): string => {
     const override = options.env[kind.urlEnv]
-    if (override !== undefined && override.trim() !== '') return override.trim()
+    if (override !== undefined && override.trim() !== '') {
+      // A pinned source silently hides every newer document conf publishes (a test machine kept a
+      // commit-pinned descriptor URL and never saw the next one, 2026-10-06): say so in the log.
+      warnOnce(
+        `${kind.label} source is overridden by ${kind.urlEnv}=${override.trim()}; ${options.url} is not read.`
+      )
+      return override.trim()
+    }
     return options.url
   }
 
   /** `JSON.parse` + shape validation; `null` for anything that fails either. */
-  const parse = (raw: string): T | null => {
+  const parse = (raw: string): T | null => parseWithProblem(raw).document
+
+  const parseWithProblem = (raw: string): { document: T | null; problem: string | null } => {
     try {
-      return kind.parse(JSON.parse(raw))
-    } catch {
-      return null
+      return { document: kind.parse(JSON.parse(raw)), problem: null }
+    } catch (error) {
+      return { document: null, problem: error instanceof Error ? error.message : String(error) }
     }
   }
 
-  /** `file://…` via `readFile`, `https://…` via `fetch`; `null` on any failure or another scheme. */
-  const readSource = async (url: string): Promise<string | null> => {
+  /**
+   * `file://…` via `readFile`, `https://…` via `fetch`; on any failure or another scheme no text,
+   * and why, for the warning `latest()` writes when it falls back.
+   */
+  const readSource = async (url: string): Promise<{ raw: string } | { problem: string }> => {
     try {
-      if (url.startsWith('file://')) return await options.readFile(fileURLToPath(url))
+      if (url.startsWith('file://')) return { raw: await options.readFile(fileURLToPath(url)) }
       if (url.startsWith('https://')) {
         const response = await options.fetch(url, timeoutMs)
-        if (!response.ok) return null
-        return await response.text()
+        if (!response.ok) return { problem: `HTTP ${response.status}` }
+        return { raw: await response.text() }
       }
-      onWarn(`${kind.label} source "${url}" is neither file:// nor https://; ignoring it.`)
-      return null
-    } catch {
-      return null
+      return { problem: 'the source is neither file:// nor https://' }
+    } catch (error) {
+      return { problem: error instanceof Error ? error.message : String(error) }
     }
   }
 
@@ -235,8 +253,11 @@ export function createCachedDocuments<T>(
 
   return {
     async latest(): Promise<LatestDocument<T>> {
-      const raw = await readSource(sourceUrl())
-      const fetched = raw === null ? null : parse(raw)
+      const url = sourceUrl()
+      const source = await readSource(url)
+      const raw = 'raw' in source ? source.raw : null
+      const parsed = raw === null ? null : parseWithProblem(raw)
+      const fetched = parsed?.document ?? null
 
       // `raw !== null` always holds when `fetched` does; spelling it out is what lets `accept` cache
       // the exact bytes received — the literal published document, not a re-serialization.
@@ -256,6 +277,18 @@ export function createCachedDocuments<T>(
       }
 
       const previous = await latestCached()
+      // Falling back is never an error to the caller, but it must not be invisible either.
+      const why =
+        'problem' in source
+          ? `could not be read (${source.problem})`
+          : fetched === null
+            ? `is not a valid ${kind.label.toLowerCase()} (${parsed?.problem ?? 'unreadable'})`
+            : `is ${kind.id(fetched)}, which needs core ${kind.minimumCoreVersion(fetched)} (this is ${coreVersion})`
+      warnOnce(
+        `${kind.label} from ${url} ${why}; ${
+          previous === null ? 'none is cached' : `using the cached ${kind.id(previous)}`
+        }.`
+      )
       if (previous !== null) return { kind: 'cached', document: previous }
       // Parsed fine, but this build is too old for it, and nothing was ever accepted before.
       if (fetched !== null) return { kind: 'too-new', id: kind.id(fetched) }

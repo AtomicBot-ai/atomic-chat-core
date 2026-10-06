@@ -208,8 +208,9 @@ describe('latest', () => {
     expect(result).toEqual({ kind: 'available', manifest: MANIFEST_R1 })
     expect(fetch).not.toHaveBeenCalled()
     expect(onWarn.mock.calls[0]?.[0]).toContain(
-      'Environment manifest source "http://example.test/linux.json"'
+      'Environment manifest source is overridden by ATOMIC_ENVIRONMENT_MANIFEST_URL=http://example.test/linux.json'
     )
+    expect(onWarn.mock.calls[1]?.[0]).toContain('neither file:// nor https://); using the cached linux-r1')
   })
 
   it('a manifest one scope accepted is what the other scope reads without a network (one shared root)', async () => {

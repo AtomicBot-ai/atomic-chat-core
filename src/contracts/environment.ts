@@ -175,6 +175,74 @@ export interface EnvironmentSnapshot {
    * environment is the host itself. Additive: a client that predates it ignores the key.
    */
   distribution: EnvironmentDistribution | null
+  /**
+   * Environment variables that move where this core reads its conf documents or keeps its managed
+   * state (`ATOMIC_RUNTIME_DESCRIPTOR_URL`, `ATOMIC_ENVIRONMENT_MANIFEST_URL`,
+   * `ATOMIC_CORE_MANAGED_ROOT`), as this process sees them; empty when none is set. A test machine
+   * kept a commit-pinned descriptor URL and never saw the next descriptor (2026-10-06): a client
+   * shows these so such a machine says so on screen. Additive: an older client ignores the key.
+   */
+  source_overrides: EnvironmentSourceOverride[]
+}
+
+/** One environment variable that overrides a managed-runtime source, and its value. */
+export interface EnvironmentSourceOverride {
+  variable: string
+  value: string
+}
+
+/**
+ * What `POST /environments/:environmentId/reset` did: the finished operations it moved out of the
+ * operations directory (into `operations-archive/<time>/` beside it), so no finished setup or removal is shown
+ * or resumed any more and the next setup starts from a fresh plan. Nothing installed — the
+ * distribution, images, models, cached documents, installation records — is touched.
+ */
+export interface EnvironmentResetResult {
+  environment_id: string
+  archived_operation_ids: string[]
+  /** Where they went, for a person who wants them back; null when nothing was archived. */
+  archive_path: string | null
+}
+
+/**
+ * `GET /environments/:environmentId/diagnostics`: what a person pastes into a support message — the
+ * snapshot, which conf documents this core reads and from where, what it has cached, every operation
+ * on disk and the managed-runtime code's recent warnings. Read-only.
+ */
+export interface EnvironmentDiagnostics {
+  generated_at: string
+  core_version: string
+  platform: string
+  arch: string
+  environment: EnvironmentSnapshot | null
+  sources: EnvironmentDocumentSource[]
+  operations: EnvironmentOperationSummary[]
+  /** The last warnings the managed-runtime code logged, newest last: document fallbacks, cache failures. */
+  recent_warnings: string[]
+}
+
+/** One conf document a core reads: where from, whether that is overridden, and what it has cached. */
+export interface EnvironmentDocumentSource {
+  document: 'runtime-descriptor' | 'environment-manifest'
+  url: string
+  default_url: string
+  /** The variable that set `url`, or null when it is `default_url`. */
+  overridden_by: string | null
+  latest_cached_id: string | null
+  cached_ids: string[]
+}
+
+/** An operation on disk, reduced to what explains it. */
+export interface EnvironmentOperationSummary {
+  operation_id: string
+  kind: ManagedOperationKind
+  target: ManagedOperationTarget
+  phase: ManagedPhase
+  checkpoint: string | null
+  revision: number
+  consented_descriptor_id: string | null
+  plan_descriptor_id: string | null
+  error: ErrorBody | null
 }
 
 /**
