@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { deleteTensorrtLlmModelFiles } from './delete.js'
+import { deleteManagedModelFiles } from './delete.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -30,14 +30,14 @@ async function writeCache(descriptorId: string, id: string, bytes: number): Prom
   return dir
 }
 
-describe('deleteTensorrtLlmModelFiles', () => {
+describe('deleteManagedModelFiles', () => {
   it('removes the model folder and its caches under every descriptor, and counts the bytes it freed', async () => {
     const dir = await writeModel('acme/m', 1000)
     const r1 = await writeCache('trt-r1', 'acme/m', 300)
     const r2 = await writeCache('trt-r2', 'acme/m', 200)
     const other = await writeCache('trt-r1', 'acme/other', 50)
 
-    expect(await deleteTensorrtLlmModelFiles(data.layout.managed, { id: 'acme/m', dir })).toEqual({
+    expect(await deleteManagedModelFiles(data.layout.managed, { id: 'acme/m', dir })).toEqual({
       freedBytes: 1500,
       engineCachesRemoved: 2,
     })
@@ -52,7 +52,7 @@ describe('deleteTensorrtLlmModelFiles', () => {
     await writeFile(outside, Buffer.alloc(5000))
     await symlink(outside, join(dir, 'link.bin'))
 
-    const freed = await deleteTensorrtLlmModelFiles(data.layout.managed, { id: 'acme/m', dir })
+    const freed = await deleteManagedModelFiles(data.layout.managed, { id: 'acme/m', dir })
     expect(freed).toEqual({ freedBytes: 1000, engineCachesRemoved: 0 })
     expect(existsSync(dir)).toBe(false)
     // The symlink went with the folder; what it pointed at did not.
@@ -61,17 +61,17 @@ describe('deleteTensorrtLlmModelFiles', () => {
 
   it('answers zero for a folder already gone', async () => {
     expect(
-      await deleteTensorrtLlmModelFiles(data.layout.managed, { id: 'acme/m', dir: modelDir('acme/m') })
+      await deleteManagedModelFiles(data.layout.managed, { id: 'acme/m', dir: modelDir('acme/m') })
     ).toEqual({ freedBytes: 0, engineCachesRemoved: 0 })
   })
 })
 
-describe('deleteTensorrtLlmModelFiles with file operations of its own (Windows, change add-tensorrt-llm-windows)', () => {
+describe('deleteManagedModelFiles with file operations of its own (Windows, change add-tensorrt-llm-windows)', () => {
   it('sizes the caches and the model in one go and removes them in one go, caches first in the list', async () => {
     const dir = await writeModel('acme/m', 1000)
     const r1 = await writeCache('trt-r1', 'acme/m', 300)
     const calls: string[][] = []
-    const freed = await deleteTensorrtLlmModelFiles(
+    const freed = await deleteManagedModelFiles(
       data.layout.managed,
       { id: 'acme/m', dir },
       {

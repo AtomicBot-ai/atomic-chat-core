@@ -45,7 +45,7 @@ import type {
   ModelCheckInput,
   ResolvedCheckpoint,
 } from '../managed-models/compatibility.js'
-import type { TensorrtLlmModel } from './model-dir.js'
+import type { ManagedModel } from '../managed-models/model-dir.js'
 import type { JsonObject } from '../managed-models/quant-format.js'
 
 const CONFIG_FILE = 'config.json'
@@ -173,7 +173,7 @@ export interface VerifyModelFilesOptions {
  * `model.yml`'s possibly-stale copy.
  */
 export async function verifyModelFilesAndCompatibility(
-  model: Pick<TensorrtLlmModel, 'dir' | 'repository' | 'revision' | 'files'>,
+  model: Pick<ManagedModel, 'dir' | 'repository' | 'revision' | 'files'>,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
   hostMemory: HostMemory,

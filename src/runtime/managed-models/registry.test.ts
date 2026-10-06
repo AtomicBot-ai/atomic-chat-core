@@ -3,16 +3,16 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { TensorrtLlmModelRegistry } from './registry.js'
+import { ManagedModelRegistry } from './registry.js'
 
 let data: TmpDataFolder
 let modelsDir: string
-let registry: TensorrtLlmModelRegistry
+let registry: ManagedModelRegistry
 
 beforeEach(async () => {
   data = await makeTmpDataFolder('trt-registry-')
   modelsDir = data.layout.provider('tensorrt-llm').modelsDir
-  registry = new TensorrtLlmModelRegistry(modelsDir)
+  registry = new ManagedModelRegistry(modelsDir)
 })
 afterEach(() => data.cleanup())
 
@@ -34,7 +34,7 @@ files:
     sha256: ${'a'.repeat(64)}
 `
 
-describe('TensorrtLlmModelRegistry', () => {
+describe('ManagedModelRegistry', () => {
   it('lists a model that has a model.yml', async () => {
     const dir = await install('Qwen/Qwen3-8B-FP8', QWEN)
     const entries = await registry.list()
@@ -102,7 +102,7 @@ describe('TensorrtLlmModelRegistry', () => {
 describe('a root core learns only at scan time (change add-tensorrt-llm-windows, task 2.8)', () => {
   it('scans the root it is given each time, and lists nothing while there is none (Windows before the import)', async () => {
     let root: string | null = null
-    const lazy = new TensorrtLlmModelRegistry(async () => root)
+    const lazy = new ManagedModelRegistry(async () => root)
     expect(await lazy.list()).toEqual([])
     await install('acme/m', QWEN)
     root = modelsDir

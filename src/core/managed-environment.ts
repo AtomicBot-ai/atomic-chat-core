@@ -52,7 +52,7 @@ import type {
   WindowsProvisionerParts,
 } from '../runtime/environment/index.js'
 import { removeEngineCaches } from '../runtime/managed-text/index.js'
-import { guestModelFiles } from '../runtime/tensorrt-llm/index.js'
+import { guestModelFiles } from '../runtime/managed-models/index.js'
 import {
   createDistributionKeeper,
   directoryGuestMount,

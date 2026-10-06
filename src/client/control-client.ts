@@ -27,7 +27,7 @@ import type {
   RequirementPlan,
   ResumeOperation,
   RuntimeDescriptorSummary,
-  TensorrtLlmModelLocation,
+  ManagedModelLocation,
   LlamacppProviderId,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
@@ -582,7 +582,7 @@ export class CoreClient {
    * On Windows that is a `\\wsl.localhost\…` path; before Atomic Chat's distribution exists the answer
    * is 422 `MANAGED_ADAPTER_UNAVAILABLE`, and where the provider is not offered 404 `PROVIDER_NOT_FOUND`.
    */
-  tensorrtLlmModelLocation(): Promise<TensorrtLlmModelLocation> {
+  tensorrtLlmModelLocation(): Promise<ManagedModelLocation> {
     return this.call('/models/tensorrt-llm/location')
   }
 

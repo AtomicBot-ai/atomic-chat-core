@@ -25,7 +25,7 @@ import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { tensorrtLlmAdapter } from '../tensorrt-llm/adapter.js'
 import type { TensorrtLlmHostFacts } from '../tensorrt-llm/host-facts.js'
 import type { ReadyInstallation } from '../tensorrt-llm/installation.js'
-import { readTensorrtLlmModel } from '../tensorrt-llm/model-dir.js'
+import { readManagedModel } from '../managed-models/model-dir.js'
 import { checkTensorrtLlmModel } from '../tensorrt-llm/check.js'
 import type { HostMemory } from '../managed-models/index.js'
 import { TENSORRT_LLM_ENGINE } from '../tensorrt-llm/engine.js'
@@ -151,7 +151,7 @@ function build(
       withDocker instanceof Error ? Promise.reject(withDocker) : withDocker ? made : Promise.resolve(null),
     readyInstallation: () => installation(),
     hostFacts: async () => facts,
-    model: (id) => readTensorrtLlmModel(data.layout.provider('tensorrt-llm').modelsDir, id),
+    model: (id) => readManagedModel(data.layout.provider('tensorrt-llm').modelsDir, id),
     settings: () => stored,
     ...over,
   })

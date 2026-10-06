@@ -1,15 +1,15 @@
 /**
  * Reading an installed `tensorrt-llm` model's directory under `<data>/tensorrt-llm/models/`: its
- * `model.yml` (`parseTensorrtLlmModelYml`, task 2.16 — the TRT-specific schema documented in
+ * `model.yml` (`parseManagedModelYml`, task 2.16 — the TRT-specific schema documented in
  * `docs/contracts.md`: `repository`, `revision`, `architectures`, `quantization`, `files` with
  * `path`/`size`/`sha256`) and the few derived facts a load needs — the first architecture (for the
  * descriptor's `model_families` entry) and the weight bytes (for the readiness timeout). The app and
  * the CLI write the directory and its `model.yml` last (spec `tensorrt-llm-models`); a directory
  * without one is a download still in progress and is not a model.
  *
- * `readTensorrtLlmModel` is the single-id lookup `TensorrtLlmRuntime.load` uses (task 2.14); the full
+ * `readManagedModel` is the single-id lookup `TensorrtLlmRuntime.load` uses (task 2.14); the full
  * `ModelRegistry` scan across every installed model (`registry.ts`, task 2.16) shares
- * `parseTensorrtLlmModelYml` with it, so both agree about what `model.yml` means.
+ * `parseManagedModelYml` with it, so both agree about what `model.yml` means.
  */
 import { readFile } from 'node:fs/promises'
 import { join, relative, isAbsolute } from 'node:path'
@@ -20,8 +20,8 @@ import { weightBytes } from './compatibility.js'
 import type { CheckpointFile } from './compatibility.js'
 
 /** `model.yml`'s own fields, parsed and typed; nothing here is derived. */
-export interface TensorrtLlmModelYmlDocument {
-  /** `null` when `model.yml` does not carry one (tolerated: `readTensorrtLlmModel`'s own contract). */
+export interface ManagedModelYmlDocument {
+  /** `null` when `model.yml` does not carry one (tolerated: `readManagedModel`'s own contract). */
   repository: string | null
   revision: string | null
   architectures: string[]
@@ -29,7 +29,7 @@ export interface TensorrtLlmModelYmlDocument {
   files: CheckpointFile[]
 }
 
-export interface TensorrtLlmModel {
+export interface ManagedModel {
   id: string
   /** The checkpoint directory as core sees it; mounted read-only into the container. */
   dir: string
@@ -130,14 +130,14 @@ function fileList(raw: unknown, path: string): CheckpointFile[] {
  * `model.yml`'s codec (`parse` only — the app and the CLI write it, core never does, spec
  * `tensorrt-llm-models`): `MANAGED_METADATA_INVALID` when `text` is not valid YAML or not a mapping.
  * `repository`/`revision`/`architectures`/`quantization` tolerate absence or the wrong type by
- * reading as `null`/`[]`, the same way `readTensorrtLlmModel`'s own tests already expect for a bare
+ * reading as `null`/`[]`, the same way `readManagedModel`'s own tests already expect for a bare
  * `model.yml` — a model missing optional metadata is still a model, not a broken one. `files` is the
  * one field held to a stricter rule (task 2.16w round 1, finding 4): the array itself may be absent
  * (`[]`), but once present every entry must be well-formed (`fileList`/`parseFileEntry`) —
  * silently dropping a malformed entry would leave a shard unverified, a checkpoint's weight bytes
  * under-counted, or an `hf_quant_config.json` entry quietly lost.
  */
-export function parseTensorrtLlmModelYml(text: string, path: string): TensorrtLlmModelYmlDocument {
+export function parseManagedModelYml(text: string, path: string): ManagedModelYmlDocument {
   let yml: unknown
   try {
     yml = parse(text)
@@ -161,7 +161,7 @@ export function parseTensorrtLlmModelYml(text: string, path: string): TensorrtLl
 }
 
 /** `MODEL_NOT_FOUND` without a readable `model.yml`; `MANAGED_METADATA_INVALID` when it is not a mapping. */
-export async function readTensorrtLlmModel(modelsDir: string, modelId: string): Promise<TensorrtLlmModel> {
+export async function readManagedModel(modelsDir: string, modelId: string): Promise<ManagedModel> {
   const dir = assertModelId(modelsDir, modelId)
   const path = join(dir, MODEL_YML)
   let text: string
@@ -174,7 +174,7 @@ export async function readTensorrtLlmModel(modelsDir: string, modelId: string): 
       path
     )
   }
-  const yml = parseTensorrtLlmModelYml(text, path)
+  const yml = parseManagedModelYml(text, path)
   return {
     id: modelId,
     dir,

@@ -60,7 +60,7 @@ import { checkCheckpointMemory, selectLaunchGpu } from '../managed-models/index.
 import type { ManagedCheckEngine, ResolvedCheckpoint } from '../managed-models/index.js'
 import type { TensorrtLlmHostFacts } from '../tensorrt-llm/host-facts.js'
 import type { ReadyInstallation } from '../tensorrt-llm/installation.js'
-import type { TensorrtLlmModel } from '../tensorrt-llm/model-dir.js'
+import type { ManagedModel } from '../managed-models/model-dir.js'
 import { verifyModelFilesAndCompatibility } from '../tensorrt-llm/prelaunch.js'
 import type { ManagedEngineSettings, ManagedEngineSpec } from './spec.js'
 
@@ -76,7 +76,7 @@ export interface ManagedTextRuntimeDeps {
   readyInstallation: () => Promise<ReadyInstallation>
   /** The cards and SELinux, asked right before each load: a card can disappear between two loads. */
   hostFacts: () => Promise<TensorrtLlmHostFacts>
-  model: (modelId: string) => Promise<TensorrtLlmModel>
+  model: (modelId: string) => Promise<ManagedModel>
   /** The provider's stored settings (`settings.get(<provider>)`), read at every load. */
   settings: () => Record<string, unknown>
   /**
@@ -121,7 +121,7 @@ const NONE: ManagedTextCapabilities = {
 }
 
 /** `capabilities()`'s own lookup, off `model.yml`'s architecture: no disk verification runs for it. */
-function familyOf(ready: ReadyInstallation, model: TensorrtLlmModel): ModelFamilySupport | null {
+function familyOf(ready: ReadyInstallation, model: ManagedModel): ModelFamilySupport | null {
   if (model.architecture === null) return null
   return ready.descriptor.model_families[model.architecture] ?? null
 }

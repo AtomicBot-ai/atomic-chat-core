@@ -1259,9 +1259,21 @@
     "functions": 100,
     "lines": 99
   },
+  "src/runtime/managed-models/model-dir.ts": {
+    "statements": 98,
+    "branches": 98,
+    "functions": 100,
+    "lines": 98
+  },
   "src/runtime/managed-models/quant-format.ts": {
     "statements": 100,
     "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/runtime/managed-models/registry.ts": {
+    "statements": 100,
+    "branches": 93,
     "functions": 100,
     "lines": 100
   },
@@ -1415,21 +1427,9 @@
     "functions": 100,
     "lines": 97
   },
-  "src/runtime/tensorrt-llm/model-dir.ts": {
-    "statements": 98,
-    "branches": 98,
-    "functions": 100,
-    "lines": 98
-  },
   "src/runtime/tensorrt-llm/prelaunch.ts": {
     "statements": 100,
     "branches": 94,
-    "functions": 100,
-    "lines": 100
-  },
-  "src/runtime/tensorrt-llm/registry.ts": {
-    "statements": 100,
-    "branches": 93,
     "functions": 100,
     "lines": 100
   },

@@ -12,30 +12,30 @@
  * downloading and writes `model.yml` for appears on the very next `list()` with no restart needed
  * (spec "Модель докачана в app"). `model.yml` itself is a different shape from llama.cpp's
  * (`repository`, `revision`, `files`, `architectures`, `quantization` — no `model_path`), which is
- * why this is its own registry rather than a reuse of the llama.cpp one; `parseTensorrtLlmModelYml`
+ * why this is its own registry rather than a reuse of the llama.cpp one; `parseManagedModelYml`
  * (`model-dir.ts`) is the one parser both this scan and the single-id load-path lookup
- * (`readTensorrtLlmModel`) share, so they can never disagree about what a `model.yml` means.
+ * (`readManagedModel`) share, so they can never disagree about what a `model.yml` means.
  */
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { MODEL_YML, modelIdFromDir } from '../../config/index.js'
-import { parseTensorrtLlmModelYml } from './model-dir.js'
-import type { TensorrtLlmModelYmlDocument } from './model-dir.js'
+import { parseManagedModelYml } from './model-dir.js'
+import type { ManagedModelYmlDocument } from './model-dir.js'
 
-export interface TensorrtLlmModelEntry {
+export interface ManagedModelEntry {
   id: string
   /** Directory holding `model.yml`. */
   dir: string
-  yml: TensorrtLlmModelYmlDocument
+  yml: ManagedModelYmlDocument
 }
 
 /** Scan errors are collected rather than thrown: one broken model must not hide the rest of the list. */
-export interface TensorrtLlmScanResult {
-  entries: TensorrtLlmModelEntry[]
+export interface ManagedModelScanResult {
+  entries: ManagedModelEntry[]
   skipped: Array<{ dir: string; error: string }>
 }
 
-export class TensorrtLlmModelRegistry {
+export class ManagedModelRegistry {
   /**
    * The models root, or how to learn it at each scan (change `add-tensorrt-llm-windows`, task 2.8): on
    * Windows it is a folder in Atomic Chat's WSL distribution, known only once that exists — `null`
@@ -43,8 +43,8 @@ export class TensorrtLlmModelRegistry {
    */
   constructor(private readonly modelsDir: string | (() => Promise<string | null>)) {}
 
-  async scan(): Promise<TensorrtLlmScanResult> {
-    const result: TensorrtLlmScanResult = { entries: [], skipped: [] }
+  async scan(): Promise<ManagedModelScanResult> {
+    const result: ManagedModelScanResult = { entries: [], skipped: [] }
     const root =
       typeof this.modelsDir === 'string' ? this.modelsDir : await this.modelsDir().catch(() => null)
     if (root === null) return result
@@ -58,7 +58,7 @@ export class TensorrtLlmModelRegistry {
           result.entries.push({
             id: modelIdFromDir(root, dir),
             dir,
-            yml: parseTensorrtLlmModelYml(text, ymlPath),
+            yml: parseManagedModelYml(text, ymlPath),
           })
         } catch (e) {
           result.skipped.push({ dir, error: (e as Error).message })
@@ -72,7 +72,7 @@ export class TensorrtLlmModelRegistry {
     return result
   }
 
-  async list(): Promise<TensorrtLlmModelEntry[]> {
+  async list(): Promise<ManagedModelEntry[]> {
     return (await this.scan()).entries
   }
 }

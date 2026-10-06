@@ -42,7 +42,7 @@ import {
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
-import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
+import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
@@ -187,7 +187,7 @@ export async function createAtomicCore(
       fetch: options.fetch ?? fetch,
       emit: (name, payload) => emitter.emit(name, payload),
     })
-    const registries = new Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>([
+    const registries = new Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>([
       [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
     ])

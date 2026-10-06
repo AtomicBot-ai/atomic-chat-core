@@ -14,11 +14,8 @@ import { raceLoadCancel } from '../runtime/shared/index.js'
 import type { ExternalSessions, LocalRuntime } from '../runtime/shared/index.js'
 import { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
 import type { ManagedEngineSpec } from '../runtime/managed-engines/index.js'
-import {
-  NVIDIA_SMI_GPU_QUERY,
-  TENSORRT_LLM_ENGINE,
-  TensorrtLlmModelRegistry,
-} from '../runtime/tensorrt-llm/index.js'
+import { NVIDIA_SMI_GPU_QUERY, TENSORRT_LLM_ENGINE } from '../runtime/tensorrt-llm/index.js'
+import { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import { FakeDocker } from '../../test/helpers/fake-docker-exec.js'
 import { readRuntimeFixture } from '../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -540,7 +537,7 @@ describe('managedModelDeleter', () => {
         return found === undefined ? new Map() : only(found)
       },
       sessions: sessions as never,
-      registry: new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      registry: new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
       paths: data.layout.managed,
     })
   }
@@ -576,9 +573,9 @@ describe('managedModelDeleter', () => {
     expect(existsSync(modelFolder())).toBe(false)
     // Another model's cache and folder stay.
     expect(existsSync(other)).toBe(true)
-    expect(await new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir).list()).toEqual(
-      [expect.objectContaining({ id: 'acme/other' })]
-    )
+    expect(await new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir).list()).toEqual([
+      expect.objectContaining({ id: 'acme/other' }),
+    ])
     // The hold is lifted: the id can be downloaded and loaded again.
     await installModel(MODEL)
     await expect(sessions.acquire('tensorrt-llm', MODEL, {})).resolves.toMatchObject({ created: true })
@@ -602,7 +599,7 @@ describe('managedModelDeleter', () => {
           ['test-engine', second.runtime],
         ]),
       sessions: (() => facade) as never,
-      registry: new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      registry: new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
       paths: data.layout.managed,
     })(MODEL)
 
@@ -632,7 +629,7 @@ describe('managedModelDeleter', () => {
     const deleted = await managedModelDeleter({
       runtimes: () => only(runtime),
       sessions: (() => sessions) as never,
-      registry: new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      registry: new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
       paths: data.layout.managed,
       windowsFiles: async () => ({
         paths: data.layout.managed,

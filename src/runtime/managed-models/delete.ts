@@ -13,7 +13,7 @@ import type { ManagedScopePaths } from '../../config/index.js'
 import { engineCacheDirsOf, removeEngineCaches } from '../managed-text/index.js'
 import type { ModelFileOps } from './guest-files.js'
 
-export interface DeletedTensorrtLlmModelFiles {
+export interface DeletedManagedModelFiles {
   freedBytes: number
   engineCachesRemoved: number
 }
@@ -43,11 +43,11 @@ async function bytesUnder(path: string, seen: Set<string>): Promise<number> {
  * WSL guest, and are sized and removed by commands there (`guestModelFiles`) — all caches and the model
  * in one call each, the caches listed first. Without it, the walk below, as on Linux.
  */
-export async function deleteTensorrtLlmModelFiles(
+export async function deleteManagedModelFiles(
   paths: ManagedScopePaths,
   model: { id: string; dir: string },
   files?: ModelFileOps
-): Promise<DeletedTensorrtLlmModelFiles> {
+): Promise<DeletedManagedModelFiles> {
   if (files !== undefined) {
     const caches = await engineCacheDirsOf(paths, model.id)
     const sizes = await files.sizes([...caches, model.dir])

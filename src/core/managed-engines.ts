@@ -25,11 +25,7 @@
  */
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreEvents, LocalProviderId } from '../contracts/index.js'
-import type {
-  ModelCompatibility,
-  TensorrtLlmModelDeletion,
-  TensorrtLlmModelLocation,
-} from '../contracts/index.js'
+import type { ModelCompatibility, ManagedModelDeletion, ManagedModelLocation } from '../contracts/index.js'
 import type { DataLayout, ManagedScopePaths } from '../config/index.js'
 import {
   RECONCILE_BUDGET_MS,
@@ -72,20 +68,22 @@ import {
 import type { ManagedEngineSettings, ManagedEngineSpec } from '../runtime/managed-engines/index.js'
 import {
   TENSORRT_LLM_ENGINE,
-  TensorrtLlmModelRegistry,
   containerPlatformFor,
-  deleteTensorrtLlmModelFiles,
-  guestModelFiles,
-  guestModelsRoot,
-  linuxModelLocation,
   probeTensorrtLlmGpus,
   probeTensorrtLlmGpusAndMemory,
   probeTensorrtLlmHost,
-  readTensorrtLlmModel,
   resolveReadyInstallation,
-  windowsModelLocation,
 } from '../runtime/tensorrt-llm/index.js'
-import type { ModelFileOps } from '../runtime/tensorrt-llm/index.js'
+import {
+  ManagedModelRegistry,
+  deleteManagedModelFiles,
+  guestModelFiles,
+  guestModelsRoot,
+  linuxModelLocation,
+  readManagedModel,
+  windowsModelLocation,
+} from '../runtime/managed-models/index.js'
+import type { ModelFileOps } from '../runtime/managed-models/index.js'
 import {
   ensureGuestScope,
   guestScopePaths,
@@ -274,7 +272,7 @@ export function wireManagedEngine<S extends ManagedEngineSettings>(
         nvidiaSmi: 'nvidia-smi',
         readFile: options.host.probeDeps.readFile,
       }),
-    model: (modelId) => readTensorrtLlmModel(options.layout.provider('tensorrt-llm').modelsDir, modelId),
+    model: (modelId) => readManagedModel(options.layout.provider('tensorrt-llm').modelsDir, modelId),
     settings: options.settings,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
   })
@@ -353,7 +351,7 @@ function wireWindowsManagedEngine<S extends ManagedEngineSettings>(
     model: async (modelId) => {
       const guest = await windowsGuest(context, options.layout)
       if (guest === null) throw notImported(engine.label)
-      return readTensorrtLlmModel(guest.modelsRoot, modelId)
+      return readManagedModel(guest.modelsRoot, modelId)
     },
     settings: options.settings,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
@@ -392,7 +390,7 @@ export function tensorrtLlmModelLocation(
   platform: NodeJS.Platform,
   layout: DataLayout,
   windows?: WindowsManagedContext
-): () => Promise<TensorrtLlmModelLocation> {
+): () => Promise<ManagedModelLocation> {
   if (platform === 'win32' && windows !== undefined) {
     return () =>
       windowsModelLocation({
@@ -411,11 +409,11 @@ export function tensorrtLlmModelRegistry(
   platform: NodeJS.Platform,
   layout: DataLayout,
   windows?: WindowsManagedContext
-): TensorrtLlmModelRegistry {
+): ManagedModelRegistry {
   if (platform === 'win32' && windows !== undefined) {
-    return new TensorrtLlmModelRegistry(async () => (await windowsGuest(windows, layout))?.modelsRoot ?? null)
+    return new ManagedModelRegistry(async () => (await windowsGuest(windows, layout))?.modelsRoot ?? null)
   }
-  return new TensorrtLlmModelRegistry(layout.provider('tensorrt-llm').modelsDir)
+  return new ManagedModelRegistry(layout.provider('tensorrt-llm').modelsDir)
 }
 
 /** `windowsModelFiles` bound to one context and layout: the deleter's `windowsFiles` on Windows. */
@@ -628,7 +626,7 @@ export interface ManagedModelDeleterOptions {
   /** Read at deletion time, like `managedSessionUnloader`'s: the providers are registered late. */
   runtimes: () => ReadonlyMap<string, ManagedTextRuntime>
   sessions: () => Pick<AtomicCore, 'cancelLoad' | 'unload'>
-  registry: Pick<TensorrtLlmModelRegistry, 'list'>
+  registry: Pick<ManagedModelRegistry, 'list'>
   /** This scope's managed paths: where the model's engine caches live. */
   paths: ManagedScopePaths
   /**
@@ -649,7 +647,7 @@ export interface ManagedModelDeleterOptions {
  */
 export function managedModelDeleter(
   options: ManagedModelDeleterOptions
-): (modelId: string) => Promise<TensorrtLlmModelDeletion> {
+): (modelId: string) => Promise<ManagedModelDeletion> {
   return async (modelId) => {
     const providers = [...options.runtimes().values()]
     if (providers.length === 0) {
@@ -683,8 +681,8 @@ export function managedModelDeleter(
       const guest = options.windowsFiles === undefined ? null : await options.windowsFiles()
       const files =
         guest === null
-          ? await deleteTensorrtLlmModelFiles(options.paths, model)
-          : await deleteTensorrtLlmModelFiles(guest.paths, model, guest.files)
+          ? await deleteManagedModelFiles(options.paths, model)
+          : await deleteManagedModelFiles(guest.paths, model, guest.files)
       return {
         model_id: modelId,
         was_loaded: wasLoaded,

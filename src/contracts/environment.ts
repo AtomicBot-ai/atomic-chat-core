@@ -814,7 +814,7 @@ export interface ModelCheckWarning {
  * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a, spec `tensorrt-llm-models` "Модель
  * удаляется через core"): what the deletion removed, once the model's container stop was confirmed.
  */
-export interface TensorrtLlmModelDeletion {
+export interface ManagedModelDeletion {
   model_id: string
   /** Whether a session or a load of the model had to be stopped first. */
   was_loaded: boolean
@@ -832,7 +832,7 @@ export interface TensorrtLlmModelDeletion {
  * on Windows. `free_bytes` is the space left for new models there — on Windows the smaller of the
  * guest's and the Windows volume's that holds the distribution — or null when it could not be read.
  */
-export interface TensorrtLlmModelLocation {
+export interface ManagedModelLocation {
   root: string
   free_bytes: number | null
 }

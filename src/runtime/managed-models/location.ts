@@ -10,7 +10,7 @@
  * such folder: `MANAGED_ADAPTER_UNAVAILABLE`, and no download starts.
  */
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { TensorrtLlmModelLocation } from '../../contracts/index.js'
+import type { ManagedModelLocation } from '../../contracts/index.js'
 import { freeBytesAtNearest, parseDfAvail } from '../environment/index.js'
 import type { WindowsEnvironmentRecord } from '../environment/index.js'
 import {
@@ -25,7 +25,7 @@ import {
 export async function linuxModelLocation(
   root: string,
   freeBytes: (path: string) => Promise<number | null> = freeBytesAtNearest
-): Promise<TensorrtLlmModelLocation> {
+): Promise<ManagedModelLocation> {
   return { root, free_bytes: await freeBytes(root).catch(() => null) }
 }
 
@@ -47,7 +47,7 @@ export function guestModelsRoot(scopeKey: string): string {
 
 export async function windowsModelLocation(
   deps: WindowsModelLocationDeps
-): Promise<TensorrtLlmModelLocation> {
+): Promise<ManagedModelLocation> {
   const record = await deps.records.read()
   if (record === null) {
     throw new AtomicCoreError(
