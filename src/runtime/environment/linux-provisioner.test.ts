@@ -613,6 +613,119 @@ describe('probing a Linux host for a setup', () => {
   })
 })
 
+/**
+ * Two engines on one host (change `add-vllm-runtime`, task 2.2; spec `managed-runtime-environment`,
+ * "Блокеры движка оцениваются по его дескриптору", "Второй движок ставится на готовое окружение").
+ * The second engine is test data: the TensorRT-LLM fixture under another engine id and image.
+ */
+describe('a second managed engine', () => {
+  const SECOND = parseRuntimeDescriptor({
+    ...(readRuntimeFixture('tensorrt-llm-1.2.1-r2.json') as Record<string, unknown>),
+    descriptor_id: 'second-engine-1.0-r1',
+    engine_id: 'second-engine',
+    adapter_id: 'second-engine',
+    minimum_driver_version: '575.51.03',
+    image: {
+      'linux/amd64': { repository: 'docker.io/example/second-engine', digest: `sha256:${'1'.repeat(64)}` },
+      'linux/arm64': { repository: 'docker.io/example/second-engine', digest: `sha256:${'2'.repeat(64)}` },
+    },
+  })
+  const TRT_615 = { ...DESCRIPTOR, minimum_driver_version: '615.00' }
+  const SECOND_TARGET = {
+    kind: 'runtime' as const,
+    installation_id: 'second-engine',
+    engine_id: 'second-engine',
+  }
+  const byEngine: Record<string, RuntimeDescriptor> = { 'tensorrt-llm': TRT_615, 'second-engine': SECOND }
+  const descriptors: RuntimeDescriptorProvider = {
+    engines: [
+      TENSORRT_LLM_DESCRIPTOR_SOURCE,
+      { engine_id: 'second-engine', label: 'Second', url: 'https://conf/second.json' },
+    ],
+    forNewSetup: async (engineId) => ({
+      kind: 'available',
+      descriptor: byEngine[engineId] as RuntimeDescriptor,
+    }),
+    cachedForNewSetup: async (engineId) => ({
+      kind: 'available',
+      descriptor: byEngine[engineId] as RuntimeDescriptor,
+    }),
+    forInstallation: async (id) => {
+      const found = [TRT_615, SECOND].find((descriptor) => descriptor.descriptor_id === id)
+      return found === undefined
+        ? { kind: 'unsupported', error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'not cached') }
+        : { kind: 'available', descriptor: found }
+    },
+  }
+  const probeFor = (state: FakeLinuxHostState, target: BeginOperation['target']) =>
+    createLinuxProvisioner(harness(state, { descriptors }).deps).probe(
+      fresh({ target, descriptor_id: null }),
+      signal
+    )
+
+  it('Драйвер ниже порога только одного движка: driver 580 blocks TensorRT-LLM (615) and not the other (575)', async () => {
+    const host = { ...readyHost(), driver: '580.95.05' }
+    const trt = await probeFor(host, TARGET)
+    const second = await probeFor(host, SECOND_TARGET)
+
+    expect(trt.plan.availability).toBe('prerequisite-blocked')
+    expect(trt.plan.blockers).toContainEqual(
+      expect.objectContaining({ reason: 'driver-too-old', message: expect.stringContaining('615') })
+    )
+    expect(trt.plan.blockers.find((b) => b.reason === 'driver-too-old')?.message).toContain('580.95.05')
+    expect(second.plan.blockers).toEqual([])
+    expect(second.plan.descriptor_id).toBe(SECOND.descriptor_id)
+  })
+
+  it('Нет драйвера: both engines get the same environment blocker', async () => {
+    const host = { ...readyHost(), driver: null as unknown as string }
+    const trt = await probeFor(host, TARGET)
+    const second = await probeFor(host, SECOND_TARGET)
+
+    expect(trt.plan.blockers.map((b) => b.reason)).toContain('driver-missing')
+    expect(second.plan.blockers).toEqual(trt.plan.blockers)
+  })
+
+  it('plans the engine not yet installed on a host prepared by the other: no system change, no elevation', async () => {
+    const h = harness(readyHost(), { descriptors })
+    await createLinuxProvisioner(h.deps).activate(record(), signal)
+    const answer = await createLinuxProvisioner(h.deps).probe(
+      fresh({ target: SECOND_TARGET, descriptor_id: null }),
+      signal
+    )
+
+    expect(answer.host_step).toBeNull()
+    expect(answer.plan.system_changes).toEqual([])
+    expect(answer.plan.requires_elevation).toBe(false)
+    expect(answer.plan.blockers).toEqual([])
+    expect(answer.plan.image_digest).toBe(SECOND.image['linux/amd64'].digest)
+  })
+
+  it('Сбой установки второго движка: a failed pull of its image leaves the ready installation of the other untouched', async () => {
+    const h = harness(readyHost(), {
+      descriptors,
+      pull: vi.fn(async () => {
+        throw new Error('toomanyrequests: You have reached your pull rate limit')
+      }),
+    })
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    const before = await h.installations.read('tensorrt-llm')
+    const second = record({ target: SECOND_TARGET, descriptor_id: SECOND.descriptor_id }, {})
+    second.machine.consented = {
+      ...(second.machine.consented as NonNullable<PersistedOperation['machine']['consented']>),
+      descriptor_id: SECOND.descriptor_id,
+      image_digest: SECOND.image['linux/amd64'].digest,
+      target: SECOND_TARGET,
+    }
+
+    await expect(provisioner.pull(second, () => undefined, signal)).rejects.toThrow('toomanyrequests')
+    expect(await h.installations.read('tensorrt-llm')).toEqual(before)
+    expect(before?.installation.status).toBe('ready')
+    expect(await h.installations.read('second-engine')).toBeNull()
+  })
+})
+
 describe('the environment manifest (change extract-environment-manifest)', () => {
   const UBUNTU_24_04 = { id: 'ubuntu', version_id: '24.04', arch: 'x86_64' } as const
   /** Conf before Ubuntu 24.04 was qualified, and the manifest that then added it. */

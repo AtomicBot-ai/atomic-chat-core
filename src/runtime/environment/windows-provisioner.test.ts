@@ -236,6 +236,7 @@ const harness = (
     record?: WindowsEnvironmentRecord | null
     manifests?: EnvironmentManifestProvider<'windows'>
     rootfsTampered?: boolean
+    descriptors?: RuntimeDescriptorProvider
   } = {}
 ): Harness => {
   const windows = fakeWindows(machine)
@@ -258,7 +259,7 @@ const harness = (
   }
   const deps: WindowsProvisionerDeps = {
     host: windows.host,
-    descriptors,
+    descriptors: options.descriptors ?? descriptors,
     environmentManifests: options.manifests ?? manifestsOf(MANIFEST),
     records: {
       read: async () => current,
@@ -1058,6 +1059,95 @@ describe('the engine image through the guest’s Engine API (design D4)', () => 
     expect(await h.deps.installations.read('tensorrt-llm')).toBeNull()
     // The distribution itself stays: removing the engine is not removing the environment.
     expect((machine.wsl.distributions ?? []).map((d) => d.name)).toContain('AtomicChat')
+  })
+})
+
+/**
+ * A second managed engine into the same distribution (change `add-vllm-runtime`, task 2.2; spec
+ * `managed-runtime-environment`, "Второй движок ставится на готовое окружение"). The second engine
+ * is test data: the TensorRT-LLM fixture under another engine id and image.
+ */
+describe('a second managed engine on Windows', () => {
+  const SECOND = parseRuntimeDescriptor({
+    ...(readRuntimeFixture('tensorrt-llm-1.2.1-r2.json') as Record<string, unknown>),
+    descriptor_id: 'second-engine-1.0-r1',
+    engine_id: 'second-engine',
+    adapter_id: 'second-engine',
+    image: {
+      'linux/amd64': { repository: 'docker.io/example/second-engine', digest: `sha256:${'1'.repeat(64)}` },
+      'linux/arm64': { repository: 'docker.io/example/second-engine', digest: `sha256:${'2'.repeat(64)}` },
+    },
+  })
+  const SECOND_TARGET = {
+    kind: 'runtime' as const,
+    installation_id: 'second-engine',
+    engine_id: 'second-engine',
+  }
+  const byEngine: Record<string, RuntimeDescriptor> = { 'tensorrt-llm': DESCRIPTOR, 'second-engine': SECOND }
+  const descriptors: RuntimeDescriptorProvider = {
+    engines: [
+      TENSORRT_LLM_DESCRIPTOR_SOURCE,
+      { engine_id: 'second-engine', label: 'Second', url: 'https://conf/second.json' },
+    ],
+    forNewSetup: async (engineId) => ({
+      kind: 'available',
+      descriptor: byEngine[engineId] as RuntimeDescriptor,
+    }),
+    cachedForNewSetup: async (engineId) => ({
+      kind: 'available',
+      descriptor: byEngine[engineId] as RuntimeDescriptor,
+    }),
+    forInstallation: async (id) => {
+      const found = [DESCRIPTOR, SECOND].find((descriptor) => descriptor.descriptor_id === id)
+      return found === undefined
+        ? { kind: 'unsupported', error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'not cached') }
+        : { kind: 'available', descriptor: found }
+    },
+  }
+  const consentedSecond = (): PersistedOperation => {
+    const base = record({ target: SECOND_TARGET, descriptor_id: SECOND.descriptor_id })
+    return {
+      ...base,
+      machine: {
+        ...base.machine,
+        consented: {
+          plan_digest: `sha256:${'c'.repeat(64)}`,
+          descriptor_id: SECOND.descriptor_id,
+          image_digest: SECOND.image['linux/amd64'].digest,
+          environment_manifest_id: 'windows-r1',
+          target: SECOND_TARGET,
+        },
+      },
+    }
+  }
+
+  it('vLLM после TensorRT-LLM на Windows: no UAC, no restart, no import; the image goes into the same distribution and TensorRT-LLM stays ready', async () => {
+    const machine = importedWindows()
+    const h = harness(machine, { record: RECORD, descriptors })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.activate(consented(), signal)
+
+    const { plan, host_step } = await provisioner.probe(
+      record({ target: SECOND_TARGET, descriptor_id: null }),
+      signal
+    )
+    expect(host_step).toBeNull()
+    expect(plan.blockers).toEqual([])
+    expect(plan.requires_elevation).toBe(false)
+    expect(plan.may_require_reboot).toBe(false)
+    expect(plan.system_changes).toEqual([])
+    expect(plan.descriptor_id).toBe(SECOND.descriptor_id)
+
+    const second = consentedSecond()
+    await provisioner.pull(second, () => undefined, signal)
+    expect(machine.wsl.guests?.['AtomicChat']?.host?.images).toContain(
+      `${SECOND.image['linux/amd64'].repository}@${SECOND.image['linux/amd64'].digest}`
+    )
+    await provisioner.verify(second, signal)
+    await provisioner.activate(second, signal)
+    expect(h.downloads).toEqual([])
+    expect((await h.deps.installations.read('second-engine'))?.installation.status).toBe('ready')
+    expect((await h.deps.installations.read('tensorrt-llm'))?.installation.status).toBe('ready')
   })
 })
 
