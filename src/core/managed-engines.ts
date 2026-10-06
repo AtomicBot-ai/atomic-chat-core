@@ -63,7 +63,8 @@ import {
   createDesktopManagedDeployment,
   createWslManagedDeployment,
 } from '../runtime/managed-text/index.js'
-import type { GpuClaimHook } from '../runtime/shared/index.js'
+import type { GpuClaimHook, SessionRoutePolicy } from '../runtime/shared/index.js'
+import { VLLM_ENGINE } from '../runtime/vllm/index.js'
 import { checkManagedModel } from '../runtime/managed-models/index.js'
 import {
   ManagedEngineRegistry,
@@ -112,7 +113,13 @@ import type { CoreLogger } from './types.js'
 export function managedEngineRegistry(): ManagedEngineRegistry {
   const registry = new ManagedEngineRegistry()
   registry.register(TENSORRT_LLM_ENGINE)
+  registry.register(VLLM_ENGINE)
   return registry
+}
+
+/** A managed provider's route policy for a session it did not start (one the app registered). */
+export function managedExternalRoutePolicy(provider: string): SessionRoutePolicy | undefined {
+  return managedEngineRegistry().get(provider)?.routePolicy(null)
 }
 
 /**

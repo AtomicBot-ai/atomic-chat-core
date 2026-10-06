@@ -22,6 +22,7 @@ import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
   leftoverContainers,
+  managedEngineRegistry,
   managedModelDeleter,
   managedModelExclusivity,
   managedSessionUnloader,
@@ -393,6 +394,17 @@ const otherCoreCanClaim = async (modelId: string): Promise<boolean> =>
     },
     () => false
   )
+
+describe('managedEngineRegistry (change add-vllm-runtime, task 3.4)', () => {
+  it('registers TensorRT-LLM and vLLM, each under its own provider id, with its own descriptor source', () => {
+    const registry = managedEngineRegistry()
+    expect(registry.list().map((spec) => spec.engine_id)).toEqual(['tensorrt-llm', 'vllm'])
+    expect(registry.descriptorSources().map((source) => source.url)).toEqual([
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/tensorrt-llm.json',
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/vllm.json',
+    ])
+  })
+})
 
 describe('managedSessionUnloader', () => {
   it('unloads through the facade — stop confirmed, cross-process claim released — and holds loads off until released (final review M-1)', async () => {

@@ -188,7 +188,7 @@ describe('taking ownership', () => {
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
     expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
     expect(() => core.runtime('ollama' as never)).toThrow(
-      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp, tensorrt-llm' })
+      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp, tensorrt-llm, vllm' })
     )
   })
 
@@ -230,6 +230,15 @@ describe('taking ownership', () => {
       dockerPath: null,
     })
     expect(linux.runtime('tensorrt-llm')).toBeDefined()
+    // vLLM is a managed engine of the same registry (change add-vllm-runtime, task 3.4).
+    expect(linux.runtime('vllm')).toBeDefined()
+    expect(await call(linux, '/models/vllm/m/load', 'POST')).toMatchObject({
+      body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
+    })
+    expect(await call(linux, '/models/vllm/m/capabilities')).toMatchObject({
+      status: 200,
+      body: { modelId: 'm', tools: false, vision: false },
+    })
     // No docker CLI on this "Linux": the load is refused before anything else is asked of the machine.
     expect(await call(linux, '/models/tensorrt-llm/m/load', 'POST')).toMatchObject({
       body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
@@ -256,6 +265,7 @@ describe('taking ownership', () => {
     })
     cores.push(mac)
     expect(() => mac.runtime('tensorrt-llm')).toThrow(/Unknown provider/)
+    expect(() => mac.runtime('vllm')).toThrow(/Unknown provider/)
     for (const [path, method] of [
       ['/models/tensorrt-llm/m/load', 'POST'],
       ['/models/tensorrt-llm/m/unload', 'POST'],

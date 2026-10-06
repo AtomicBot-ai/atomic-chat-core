@@ -30,7 +30,7 @@ import type { ModelRegistry } from '../models/index.js'
 import { RemoteAccessManager } from '../remote-access/index.js'
 import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
-import { tensorrtLlmRoutePolicy } from '../runtime/tensorrt-llm/index.js'
+import { managedExternalRoutePolicy } from './managed-engines.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
@@ -177,7 +177,7 @@ export class AtomicCore {
       increaseCtx: (provider, modelId, reason) => this.increaseCtx(provider, modelId, reason),
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
       // A `tensorrt-llm` session another process registered still only serves the declared routes.
-      externalPolicy: (provider) => (provider === 'tensorrt-llm' ? tensorrtLlmRoutePolicy(null) : undefined),
+      externalPolicy: managedExternalRoutePolicy,
     })
     this.remoteAccess = new RemoteAccessManager({
       ...parts.remoteAccess,
