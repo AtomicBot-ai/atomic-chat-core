@@ -246,6 +246,8 @@ export interface WireManagedEngineOptions {
   log: CoreLogger
   /** Core's GPU residency (spec `gpu-residency`): the provider's `stopping-previous` stage. */
   claimGpu?: GpuClaimHook
+  /** One store model, one managed provider (`managedModelExclusivity`, design D11). */
+  releaseModelElsewhere?: (modelId: string, signal: AbortSignal) => Promise<void>
   /**
    * The uid:gid this core runs as (`process.getuid`/`getgid`, read by `create.ts`, never here): every
    * model container runs as it, so the engine cache stays removable (final review I-1). Null where the
@@ -326,6 +328,7 @@ export function wireManagedEngine<S extends ManagedEngineSettings>(
     model: (modelId) => readManagedModel(options.layout.managedModelsDir, modelId),
     settings: options.settings,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
+    ...(options.releaseModelElsewhere ? { releaseModelElsewhere: options.releaseModelElsewhere } : {}),
   })
 }
 
@@ -406,6 +409,7 @@ function wireWindowsManagedEngine<S extends ManagedEngineSettings>(
     },
     settings: options.settings,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
+    ...(options.releaseModelElsewhere ? { releaseModelElsewhere: options.releaseModelElsewhere } : {}),
   })
 }
 
@@ -671,6 +675,38 @@ export function managedSessionUnloader(
     } catch (error) {
       release()
       throw error
+    }
+  }
+}
+
+/**
+ * One store model, one managed provider (change `add-vllm-runtime`, design D11; spec
+ * `managed-model-store`, "Одна модель хранилища загружена не более чем в одном managed-провайдере"):
+ * before `provider` loads `modelId`, every other managed provider that has it loaded or loading lets it
+ * go — a load cancelled, a session unloaded through the facade with its container's stop confirmed,
+ * so its cross-process claim is released as with any client's unload. A stop Docker will not confirm
+ * rejects with `MANAGED_STOP_UNCONFIRMED`, and the new load does not start: two live sessions of one
+ * id would make `:1337`'s routing by id ambiguous and hold the weights twice.
+ */
+export function managedModelExclusivity(
+  runtimes: () => ReadonlyMap<string, ManagedTextRuntime>,
+  sessions: () => Pick<AtomicCore, 'cancelLoad' | 'unload'>
+): (provider: string, modelId: string) => Promise<void> {
+  return async (provider, modelId) => {
+    for (const [other, runtime] of runtimes()) {
+      if (other === provider) continue
+      if (!runtime.residentModels().includes(modelId) && !runtime.isLoading(modelId)) continue
+      const facade = sessions()
+      facade.cancelLoad(other as LocalProviderId, modelId)
+      const result = await facade.unload(other as LocalProviderId, modelId)
+      if (!result.success || runtime.residentModels().includes(modelId)) {
+        throw new AtomicCoreError(
+          'MANAGED_STOP_UNCONFIRMED',
+          result.error ??
+            `${modelId} is loaded in ${other}, and its container did not confirm its stop; it was not loaded in ${provider}.`,
+          modelId
+        )
+      }
     }
   }
 }

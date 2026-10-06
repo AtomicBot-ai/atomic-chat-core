@@ -85,6 +85,13 @@ export interface ManagedTextRuntimeDeps {
    * provider's other models, itself.
    */
   claimGpu?: GpuClaimHook
+  /**
+   * One store model, one managed provider (change `add-vllm-runtime`, design D11): run first in the
+   * `stopping-previous` stage, it unloads the same model from every other managed provider (or cancels
+   * its load there) with a confirmed stop, and rejects with `MANAGED_STOP_UNCONFIRMED` otherwise —
+   * which refuses this load before any container exists. Absent: no other managed provider to ask.
+   */
+  releaseModelElsewhere?: (modelId: string, signal: AbortSignal) => Promise<void>
 }
 
 /**
@@ -472,7 +479,8 @@ export class ManagedTextRuntime<
   }
 
   /**
-   * The `stopping-previous` stage. With core's residency: its claim on `gpuId`, which stops every other
+   * The `stopping-previous` stage. First, the same model in any other managed provider is unloaded
+   * (`releaseModelElsewhere`). Then, with core's residency: its claim on `gpuId`, which stops every other
    * model of this provider (one session at a time) and every other engine on that card, each with a
    * confirmed exit, and refuses with `GPU_BUSY` while one will not stop. Without it: every other
    * model of this provider, loading or loaded, stopped with confirmation. Either way the load holds its
@@ -489,6 +497,8 @@ export class ManagedTextRuntime<
     const hold = () => {
       this.claimed.add(load.generation)
     }
+    // The same model in another managed provider goes first, before any card is claimed for it.
+    await this.deps.releaseModelElsewhere?.(load.modelId, signal)
     if (this.deps.claimGpu) {
       const claim = {
         model_id: load.modelId,

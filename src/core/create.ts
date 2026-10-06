@@ -70,6 +70,7 @@ import {
   leftoverContainers,
   managedEngineRegistry,
   managedModelDeleter,
+  managedModelExclusivity,
   managedSessionUnloader,
   managedModelLocation,
   managedModelRegistry,
@@ -466,6 +467,7 @@ export async function createAtomicCore(
     // design D3): offered on Linux and on Windows with Atomic Chat's WSL distribution, absent elsewhere.
     // `engine_id` is the provider id, so each runtime registers under its own engine id.
     const managedRuntimes = new Map<string, ManagedTextRuntime>()
+    const releaseElsewhere = managedModelExclusivity(() => managedRuntimes, facade)
     const managedModelChecks: Record<string, (body: unknown) => Promise<ModelCompatibility>> = {}
     for (const engine of managedEngines.list()) {
       const provider = engine.provider as LocalProviderId
@@ -487,6 +489,8 @@ export async function createAtomicCore(
         emit: (name, payload) => emitter.emit(name, payload),
         log,
         claimGpu: gpuResidency.hook(provider),
+        // One store model, one managed provider (design D11): another engine lets it go first.
+        releaseModelElsewhere: (modelId) => releaseElsewhere(engine.provider, modelId),
         // The engine container runs as this core's own user (final review I-1, ADR
         // 2026-09-29-the-engine-container-runs-as-the-invoking-user).
         containerUser:

@@ -23,6 +23,7 @@ import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
   leftoverContainers,
   managedModelDeleter,
+  managedModelExclusivity,
   managedSessionUnloader,
   managedModelLocation,
   managedModelRegistry,
@@ -499,6 +500,63 @@ describe('managedSessionUnloader', () => {
     expect(second.events).toEqual(['stopped:b'])
     expect(trt.runtime.getLoadedModels()).toEqual(['a'])
     removal.release?.()
+  })
+})
+
+describe('managedModelExclusivity (change add-vllm-runtime, task 2.6)', () => {
+  const facadeOver = (trt: ReturnType<typeof provider>, second: ReturnType<typeof provider>) => ({
+    cancelLoad: (provider: string, modelId: string) =>
+      (provider === 'test-engine' ? second : trt).sessions.cancelLoad(provider as LocalProviderId, modelId),
+    unload: (provider: string, modelId: string) =>
+      (provider === 'test-engine' ? second : trt).sessions.unload(provider as LocalProviderId, modelId),
+  })
+
+  it('Та же модель другим движком: unloads it from the other provider with a confirmed stop, and nothing else', async () => {
+    const trt = provider(() => true)
+    const second = provider(() => true, SECOND_ENGINE)
+    await trt.sessions.acquire('tensorrt-llm', 'm', {})
+    await trt.sessions.acquire('tensorrt-llm', 'other', {})
+    const runtimes = new Map<string, ManagedTextRuntime>([
+      ['tensorrt-llm', trt.runtime],
+      ['test-engine', second.runtime],
+    ])
+    const release = managedModelExclusivity(
+      () => runtimes,
+      () => facadeOver(trt, second) as never
+    )
+
+    await release('test-engine', 'm')
+    expect(trt.events).toEqual(['stopped:m'])
+    expect(trt.runtime.getLoadedModels()).toEqual(['other'])
+    expect(await otherCoreCanClaim('m')).toBe(true)
+  })
+
+  it('refuses with MANAGED_STOP_UNCONFIRMED when the other provider will not confirm the stop', async () => {
+    const trt = provider(() => false)
+    const second = provider(() => true, SECOND_ENGINE)
+    await trt.sessions.acquire('tensorrt-llm', 'm', {})
+    const runtimes = new Map<string, ManagedTextRuntime>([
+      ['tensorrt-llm', trt.runtime],
+      ['test-engine', second.runtime],
+    ])
+    await expect(
+      managedModelExclusivity(
+        () => runtimes,
+        () => facadeOver(trt, second) as never
+      )('test-engine', 'm')
+    ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED' })
+    expect(trt.runtime.getLoadedModels()).toEqual(['m'])
+  })
+
+  it('does nothing when no other provider holds the model', async () => {
+    const trt = provider(() => true)
+    const runtimes = only(trt.runtime)
+    const facade = () => {
+      throw new Error('never asked')
+    }
+    await expect(
+      managedModelExclusivity(() => runtimes, facade)('tensorrt-llm', 'm')
+    ).resolves.toBeUndefined()
   })
 })
 

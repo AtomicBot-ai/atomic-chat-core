@@ -587,6 +587,39 @@ describe('ManagedTextRuntime (tensorrt-llm): the memory check runs after evictio
   })
 })
 
+/** Change `add-vllm-runtime`, task 2.6 (design D11): one store model, one managed provider. */
+describe('ManagedTextRuntime: the same model in another managed provider', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
+  it('Та же модель другим движком: asks the other providers to let the model go before its container is created', async () => {
+    const order: string[] = []
+    const releaseModelElsewhere = async (modelId: string) => {
+      order.push(`release:${modelId}`)
+    }
+    build({ releaseModelElsewhere })
+    const created = docker.calls.length
+    await runtime.load('qwen3')
+    order.push(
+      ...docker.calls
+        .slice(created)
+        .filter((argv) => argv[0] === 'create')
+        .map(() => 'create')
+    )
+    expect(order).toEqual(['release:qwen3', 'create'])
+    expect(progress().map((p) => p.stage)).toContain('stopping-previous')
+  })
+
+  it('without a confirmed stop elsewhere, the load is refused with MANAGED_STOP_UNCONFIRMED and no container is created', async () => {
+    build({
+      releaseModelElsewhere: async (modelId) => {
+        throw new AtomicCoreError('MANAGED_STOP_UNCONFIRMED', 'The other container did not stop.', modelId)
+      },
+    })
+    const error = await rejection(runtime.load('qwen3'))
+    expect(error.code).toBe('MANAGED_STOP_UNCONFIRMED')
+    expect(docker.calls.some((argv) => argv[0] === 'create')).toBe(false)
+  })
+})
+
 describe('ManagedTextRuntime (tensorrt-llm): sessions', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('publishes a container session: null pid, a generation, the gateway port and key', async () => {
