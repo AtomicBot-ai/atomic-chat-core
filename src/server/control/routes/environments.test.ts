@@ -133,6 +133,25 @@ class FakeEnvironments implements ManagedEnvironmentControl {
       operation({ phase: 'preparing-environment' })
     )
   }
+  async reset(environmentId: string) {
+    return this.record(`reset ${environmentId}`, {
+      environment_id: environmentId,
+      archived_operation_ids: ['op-1'],
+      archive_path: '/managed/operations/archive/t',
+    })
+  }
+  async diagnostics(environmentId: string) {
+    return this.record(`diagnostics ${environmentId}`, {
+      generated_at: '2026-10-06T00:00:00.000Z',
+      core_version: '0.9.5',
+      platform: 'win32',
+      arch: 'arm64',
+      environment: null,
+      sources: [],
+      operations: [],
+      recent_warnings: [],
+    })
+  }
 }
 
 let h: ControlHarness
@@ -186,6 +205,25 @@ describe('reaching the managed runtime', () => {
     await h.get('/atomic/v1/environments/operations/op-1')
     await post('/environments/env-1/operations', begin())
     expect(environments.calls).toEqual(['get op-1', 'begin env-1 req-1 setup'])
+  })
+})
+
+describe('resetting and diagnosing an environment', () => {
+  it('resets one environment and answers what it archived', async () => {
+    const res = await post('/environments/default/reset')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ environment_id: 'default', archived_operation_ids: ['op-1'] })
+    expect(environments.calls).toEqual(['reset default'])
+  })
+
+  it('answers 409 while an operation still runs, and the diagnostics report read-only', async () => {
+    environments.failWith = new AtomicCoreError('MANAGED_OPERATION_CONFLICT', 'still running')
+    expect((await post('/environments/default/reset')).status).toBe(409)
+    environments.failWith = undefined
+    const report = await h.get('/atomic/v1/environments/default/diagnostics')
+    expect(report.status).toBe(200)
+    expect(await report.json()).toMatchObject({ core_version: '0.9.5', operations: [] })
+    expect(environments.calls).toEqual(['reset default', 'diagnostics default'])
   })
 })
 

@@ -133,6 +133,14 @@ beforeEach(async () => {
         environmentCalls.push(`probe:${input.descriptor_id}`)
         return { plan_digest: OPERATION.plan_digest } as RequirementPlan
       },
+      reset: async (environmentId) => {
+        environmentCalls.push(`reset:${environmentId}`)
+        return { environment_id: environmentId, archived_operation_ids: [], archive_path: null }
+      },
+      diagnostics: async (environmentId) => {
+        environmentCalls.push(`diagnostics:${environmentId}`)
+        throw new Error('not used')
+      },
       descriptor: async (descriptorId) => {
         environmentCalls.push(`descriptor:${descriptorId}`)
         return {
