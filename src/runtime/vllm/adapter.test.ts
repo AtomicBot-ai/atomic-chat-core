@@ -4,6 +4,7 @@ import type { ManagedLaunchContext } from '../managed-text/index.js'
 import { ManagedRequestRefusal, ManagedTextAdapterRegistry } from '../managed-text/index.js'
 import {
   VLLM_CONTEXT_OVERFLOW_BODIES,
+  VLLM_FREE_MEMORY_DEVICE_LOG,
   VLLM_FREE_MEMORY_LOG,
   VLLM_KV_TOO_SMALL_LOG,
   VLLM_OOM_LOG,
@@ -338,6 +339,11 @@ describe('Этапы и таймаут загрузки vLLM', () => {
     const free = vllmAdapter.classifyExit(VLLM_FREE_MEMORY_LOG, 1)
     expect(free.kind).toBe('out-of-memory')
     expect(free.numbers).toMatchObject({ free_gib: 5.84, total_gib: 7.63 })
+    // vLLM 0.31 names the device; before, this fell through to "exited with code 1" (Windows acceptance).
+    const named = vllmAdapter.classifyExit(VLLM_FREE_MEMORY_DEVICE_LOG, 1)
+    expect(named.kind).toBe('out-of-memory')
+    expect(named.numbers).toEqual({ free_gib: 6.89, total_gib: 8, utilization: 0.9081, requested_gib: 7.26 })
+    expect(named.message).toMatch(/6\.89 GiB of 8\.0 GiB free.*7\.26 GiB/)
     const kv = vllmAdapter.classifyExit(VLLM_KV_TOO_SMALL_LOG, 1)
     expect(kv.kind).toBe('out-of-memory')
     expect(kv.numbers).toMatchObject({ max_model_len: 32768, kv_cache_tokens: 2720 })

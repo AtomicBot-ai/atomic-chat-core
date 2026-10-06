@@ -41,6 +41,17 @@ export const VLLM_FREE_MEMORY_LOG = [
   'ValueError: Free memory on device (5.84/7.63 GiB) on startup is less than desired GPU memory utilization (0.9, 6.87 GiB). Decrease GPU memory utilization or reduce GPU memory used by other processes.',
 ].join('\n')
 
+/**
+ * The same check as vLLM 0.31 words it, with the device named — the real line from the Windows
+ * acceptance (RTX 4070 Laptop under WSL, 2026-10-06), where every model failed with it.
+ */
+export const VLLM_FREE_MEMORY_DEVICE_LOG = [
+  '(EngineCore pid=184) INFO 10-06 18:38:34 [gpu_worker.py:479] Using V2 Model Runner',
+  '(EngineCore pid=184) ERROR 10-06 18:38:34 [core.py:1433] EngineCore failed to start.',
+  '(EngineCore pid=184) ERROR 10-06 18:38:34 [core.py:1433] ValueError: Free memory on device cuda:0 (6.89/8.0 GiB) on startup is less than desired GPU memory utilization (0.9081, 7.26 GiB). Decrease GPU memory utilization or reduce GPU memory used by other processes.',
+  'RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}',
+].join('\n')
+
 /** `max_model_len` larger than the KV cache holds. */
 export const VLLM_KV_TOO_SMALL_LOG = [
   '(EngineCore_DP0 pid=212) INFO 10-06 12:00:31 [gpu_worker.py:298] Available KV cache memory: 0.25 GiB',

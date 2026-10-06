@@ -583,8 +583,11 @@ ATOMIC_LIVE=1 npx vitest run --project live test/live/vllm.test.ts
 ### What to carry into the change (task 6.1)
 
 - `<out>/summary.json`: first and second load times, `--kv-cache-memory-bytes`,
-  `--gpu-memory-utilization`, `--shm-size`. Compare the card's used memory during the load with the
-  core's estimate (weights + KV + 2 GiB): the overhead and the 512 MiB margin are first estimates.
+  `--gpu-memory-utilization`, `--shm-size`, the card's free memory before the load
+  (`gpu_free_bytes_before_load`, core's last probe) and vLLM's own reading at its start check
+  (`vllm_free_gib_at_start_check`) — their difference is what vLLM's CUDA context takes on this host.
+  Compare the card's used memory during the load with the core's estimate (weights + KV + 2 GiB): the
+  overhead and the 512 MiB margin of the memory check are first estimates.
 - `<out>/vllm-start.log`: the engine's real start log. Replace the constructed lines in
   `test/helpers/vllm-log-fixtures.ts` with its decisive lines, and adjust the adapter's stage markers and
   exit classification where they differ.

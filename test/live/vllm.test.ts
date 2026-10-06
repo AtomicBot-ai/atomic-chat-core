@@ -34,6 +34,7 @@ import type { LiveCore, OperationView } from '../helpers/live-core.js'
 import { inspectContainer, ownContainers } from '../helpers/live-engine.js'
 import { prepareCuratedModel, readDescriptor } from '../helpers/live-hf-model.js'
 import type { CuratedModel, PreparedModel } from '../helpers/live-hf-model.js'
+import type { GpuFacts } from '../../src/contracts/index.js'
 
 const NVIDIA_SMI = '/usr/bin/nvidia-smi'
 const ENABLED = process.env['ATOMIC_LIVE'] === '1' && process.platform === 'linux' && existsSync(NVIDIA_SMI)
@@ -208,6 +209,11 @@ describe.skipIf(!ENABLED)('live vLLM (ATOMIC_LIVE=1)', () => {
         log,
         provider: 'vllm',
       })
+      // Free on the card as core last probed it, before the container: with vLLM's own reading at its
+      // start check (below) it shows what vLLM's CUDA context takes on this host.
+      const environments = await core().api.get<{ environments: { gpus: GpuFacts[] }[] }>('/environments')
+      const card = environments.body.environments[0]?.gpus.find((gpu) => gpu.gpu_id === GPU)
+      S.summary['gpu_free_bytes_before_load'] = card?.free_vram_bytes ?? null
       const first = await load()
       S.summary['first_load_ms'] = first.ms
       const server = await core().api.post<{ port: number }>('/server/start', { port: 0 })
@@ -239,6 +245,9 @@ describe.skipIf(!ENABLED)('live vLLM (ATOMIC_LIVE=1)', () => {
       // The engine's own first-start log, for test/helpers/vllm-log-fixtures.ts (task 6.1).
       const logs = await core().api.get<{ log_tail: string }>(`/models/vllm/${S.model?.id}/logs`)
       writeFileSync(join(S.out, 'vllm-start.log'), logs.body.log_tail)
+      // vLLM's own free-memory reading at its start check, after its CUDA context exists.
+      const atCheck = /Initial free memory ([\d.]+) GiB/.exec(logs.body.log_tail)
+      S.summary['vllm_free_gib_at_start_check'] = atCheck === null ? null : Number(atCheck[1])
     },
     5 * MIN
   )

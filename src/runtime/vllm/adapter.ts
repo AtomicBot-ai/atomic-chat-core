@@ -183,8 +183,9 @@ export function vllmReadinessTimeoutMs(weightBytes: number, settings: VllmSettin
 
 const OOM =
   /CUDA out of memory\. Tried to allocate ([\d.]+) ?(GiB|MiB|KiB).*?of which ([\d.]+) ?(GiB|MiB|KiB|bytes) is free/
+// vLLM 0.31 names the device (`on device cuda:0 (6.89/8.0 GiB)`); earlier releases did not.
 const FREE_BELOW_SHARE =
-  /Free memory on device \(([\d.]+)\/([\d.]+) GiB\) on startup is less than desired GPU memory utilization \(([\d.]+), ([\d.]+) GiB\)/
+  /Free memory on device(?: [^\s(]+)? \(([\d.]+)\/([\d.]+) GiB\) on startup is less than desired GPU memory utilization \(([\d.]+), ([\d.]+) GiB\)/
 const KV_TOO_SMALL =
   /max seq len \((\d+)\).*?\(([\d.]+) GiB KV cache is needed, which is larger than the available KV cache memory \(([\d.]+) GiB\)\.(?: Based on the available memory, the estimated maximum model length is (\d+)\.)?/
 const UNSUPPORTED_ARCHITECTURE = /Model architectures \[([^\]]*)\] are not supported for now/
@@ -223,7 +224,9 @@ export function classifyVllmExit(log: string, exitCode: number | null): ManagedE
   if (free !== null) {
     return {
       kind: 'out-of-memory',
-      message: `The GPU had ${free[1]} GiB of ${free[2]} GiB free when vLLM started, less than the ${free[4]} GiB it was given.`,
+      message:
+        `The GPU had ${free[1]} GiB of ${free[2]} GiB free once vLLM had started, less than the ${free[4]} GiB ` +
+        `the model's weights and KV cache need. Free GPU memory, or lower the context length or concurrent requests.`,
       numbers: {
         free_gib: Number(free[1]),
         total_gib: Number(free[2]),
