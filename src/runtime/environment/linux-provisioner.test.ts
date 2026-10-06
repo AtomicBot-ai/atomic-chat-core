@@ -659,7 +659,10 @@ describe('a second managed engine', () => {
   }
   const probeFor = (state: FakeLinuxHostState, target: BeginOperation['target']) =>
     createLinuxProvisioner(harness(state, { descriptors }).deps).probe(
-      fresh({ target, descriptor_id: null }),
+      fresh({
+        target,
+        descriptor_id: (target.kind === 'runtime' ? byEngine[target.engine_id] : TRT_615)?.descriptor_id,
+      }),
       signal
     )
 
@@ -690,7 +693,7 @@ describe('a second managed engine', () => {
     const h = harness(readyHost(), { descriptors })
     await createLinuxProvisioner(h.deps).activate(record(), signal)
     const answer = await createLinuxProvisioner(h.deps).probe(
-      fresh({ target: SECOND_TARGET, descriptor_id: null }),
+      fresh({ target: SECOND_TARGET, descriptor_id: SECOND.descriptor_id }),
       signal
     )
 

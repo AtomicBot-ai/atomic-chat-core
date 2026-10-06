@@ -1128,7 +1128,7 @@ describe('a second managed engine on Windows', () => {
     await provisioner.activate(consented(), signal)
 
     const { plan, host_step } = await provisioner.probe(
-      record({ target: SECOND_TARGET, descriptor_id: null }),
+      record({ target: SECOND_TARGET, descriptor_id: SECOND.descriptor_id }),
       signal
     )
     expect(host_step).toBeNull()
