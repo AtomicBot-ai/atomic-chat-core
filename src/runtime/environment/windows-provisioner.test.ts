@@ -23,7 +23,7 @@ import type { FakeWslGuest } from '../../../test/helpers/fake-wsl.mjs'
 import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { parseRuntimeDescriptor } from './descriptor.js'
-import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { TENSORRT_LLM_DESCRIPTOR_SOURCE, type RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { parseWindowsEnvironmentManifest } from './environment-manifest.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
@@ -248,6 +248,7 @@ const harness = (
   const leases = { count: 0, peak: 0 }
   let current = options.record ?? null
   const descriptors: RuntimeDescriptorProvider = {
+    engines: [TENSORRT_LLM_DESCRIPTOR_SOURCE],
     forNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
     forInstallation: async (id) =>
       id === DESCRIPTOR.descriptor_id

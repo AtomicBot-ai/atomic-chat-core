@@ -360,8 +360,14 @@ export interface ManagedSharedPaths {
   operationFile(operationId: string): string
   /** `<descriptorsDir>/<encoded descriptor_id>.json`: the canonical bytes of one accepted descriptor. */
   descriptorFile(descriptorId: string): string
-  /** Points at the `descriptor_id` of the newest descriptor a fresh setup would use. */
+  /**
+   * The legacy single pointer, written by cores before change `add-vllm-runtime`: it only ever
+   * named a TensorRT-LLM descriptor, and is still read as that engine's pointer when
+   * `descriptorLatestFileFor('tensorrt-llm')` does not exist yet (design D2). Never written now.
+   */
   descriptorLatestFile: string
+  /** `<descriptorsDir>/latest-<engine_id>.json`: the newest descriptor a fresh setup of that engine would use. */
+  descriptorLatestFileFor(engineId: string): string
   /** Accepted environment manifests, cached by `manifest_id` (change `extract-environment-manifest`). */
   environmentManifestsDir: string
   /** `<environmentManifestsDir>/<encoded manifest_id>.json`: the bytes of one accepted manifest. */
@@ -387,6 +393,7 @@ export function managedSharedPaths(root: string): ManagedSharedPaths {
     operationFile: (operationId) => join(operationsDir, `${encodeManagedId(operationId)}.json`),
     descriptorFile: (descriptorId) => join(descriptorsDir, `${encodeManagedId(descriptorId)}.json`),
     descriptorLatestFile: join(descriptorsDir, 'latest.json'),
+    descriptorLatestFileFor: (engineId) => join(descriptorsDir, `latest-${encodeManagedId(engineId)}.json`),
     environmentManifestsDir,
     environmentManifestFile: (manifestId) =>
       join(environmentManifestsDir, `${encodeManagedId(manifestId)}.json`),

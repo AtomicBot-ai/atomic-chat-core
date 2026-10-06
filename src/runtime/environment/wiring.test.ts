@@ -13,7 +13,7 @@ import type {
   Sha256Digest,
 } from '../../contracts/index.js'
 import type { DataFolderEnv } from '../../config/index.js'
-import { RUNTIME_DESCRIPTOR_URL_ENV } from './descriptor-provider.js'
+import { RUNTIME_DESCRIPTOR_URL_ENV, TENSORRT_LLM_DESCRIPTOR_SOURCE } from './descriptor-provider.js'
 import { ENVIRONMENT_MANIFEST_URL_ENV } from './environment-manifest-provider.js'
 import { fakeWindows } from '../../../test/helpers/fake-windows-host.js'
 import type { DescriptorProviderResult, RuntimeDescriptorProvider } from './descriptor-provider.js'
@@ -266,7 +266,7 @@ describe('resetting the environment and reporting on it', () => {
       onWarn: (message) => warnings.push(message),
     })
     wired.push(managed)
-    await managed.descriptors.forNewSetup()
+    await managed.descriptors.forNewSetup('tensorrt-llm')
 
     const report = await managed.service.diagnostics('default')
     expect(report.platform).toBe('linux')
@@ -306,7 +306,7 @@ describe('resetting the environment and reporting on it', () => {
       fetch: (() => Promise.reject(new Error(`offline ${(attempt += 1)}`))) as typeof fetch,
     })
     wired.push(managed)
-    for (let i = 0; i < 35; i += 1) await managed.descriptors.forNewSetup()
+    for (let i = 0; i < 35; i += 1) await managed.descriptors.forNewSetup('tensorrt-llm')
 
     const report = await managed.service.diagnostics('default')
     expect(report.recent_warnings).toHaveLength(30)
@@ -422,7 +422,7 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     })
     wired.push(managed)
 
-    const result = await managed.descriptors.forNewSetup()
+    const result = await managed.descriptors.forNewSetup('tensorrt-llm')
     expect(result.kind).toBe('available')
     if (result.kind === 'available') {
       expect(result.descriptor.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
@@ -447,7 +447,7 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     })
     wired.push(managed)
 
-    const result = await managed.descriptors.forNewSetup()
+    const result = await managed.descriptors.forNewSetup('tensorrt-llm')
     expect(result.kind).toBe('unsupported')
   })
 
@@ -469,7 +469,7 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     wired.push(managed)
     // Seeds the cache the way a real setup probe eventually will (task 2.4); recover() itself
     // never fetches, so this is what makes "latest accepted" non-empty for it to read.
-    await managed.descriptors.forNewSetup()
+    await managed.descriptors.forNewSetup('tensorrt-llm')
 
     await managed.recover()
 
@@ -489,7 +489,7 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     await expect(managed.service.descriptor('tensorrt-llm-1.2.1-r2')).rejects.toMatchObject({
       code: 'MANAGED_METADATA_INVALID',
     })
-    await managed.descriptors.forNewSetup()
+    await managed.descriptors.forNewSetup('tensorrt-llm')
     const summary = await managed.service.descriptor('tensorrt-llm-1.2.1-r2')
     expect(summary.descriptor_id).toBe('tensorrt-llm-1.2.1-r2')
     expect(summary.notices.length).toBeGreaterThan(0)
@@ -522,6 +522,7 @@ describe('resolveMinimumAppVersion', () => {
     forInstallation?: RuntimeDescriptorProvider['forInstallation']
     cachedForNewSetup?: RuntimeDescriptorProvider['cachedForNewSetup']
   }): RuntimeDescriptorProvider => ({
+    engines: [TENSORRT_LLM_DESCRIPTOR_SOURCE],
     forNewSetup: () => {
       throw new Error('resolveMinimumAppVersion must never call forNewSetup (it would reach the network)')
     },
@@ -559,6 +560,33 @@ describe('resolveMinimumAppVersion', () => {
   })
 })
 
+describe('resolveMinimumAppVersion over several engines (change add-vllm-runtime, D12)', () => {
+  it('Два движка требуют разные версии app: tensorrt-llm 2.0.49 and a second engine 2.2.0 → 2.2.0', async () => {
+    const versions: Record<string, string> = { 'tensorrt-llm': '2.0.49', 'vllm': '2.2.0' }
+    const descriptors: RuntimeDescriptorProvider = {
+      engines: [
+        TENSORRT_LLM_DESCRIPTOR_SOURCE,
+        { engine_id: 'vllm', label: 'vLLM', url: 'https://conf/vllm.json' },
+      ],
+      forNewSetup: async () => {
+        throw new Error('never')
+      },
+      forInstallation: async () => {
+        throw new Error('no installation is pinned')
+      },
+      cachedForNewSetup: async (engineId) => ({
+        kind: 'available',
+        descriptor: { minimum_app_version: versions[engineId] } as unknown as RuntimeDescriptor,
+      }),
+    }
+
+    expect(await resolveMinimumAppVersion(descriptors, [])).toBe('2.2.0')
+    versions['tensorrt-llm'] = '2.10.0'
+    // Numeric, not lexicographic.
+    expect(await resolveMinimumAppVersion(descriptors, [])).toBe('2.10.0')
+  })
+})
+
 describe('resolveMinimumAppVersion picks the provider engine’s own installation (carry item 4)', () => {
   it('ignores a pinned installation of another engine', async () => {
     const forInstallation = vi.fn(async () => ({
@@ -566,6 +594,7 @@ describe('resolveMinimumAppVersion picks the provider engine’s own installatio
       descriptor: { minimum_app_version: '1.0.0' } as unknown as RuntimeDescriptor,
     }))
     const descriptors: RuntimeDescriptorProvider = {
+      engines: [TENSORRT_LLM_DESCRIPTOR_SOURCE],
       forNewSetup: async () => {
         throw new Error('never')
       },

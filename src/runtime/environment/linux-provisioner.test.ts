@@ -24,7 +24,7 @@ import { dataLayout } from '../../config/index.js'
 import type { ExecutionRecord } from '../container/index.js'
 import { removeEngineCaches } from '../managed-text/index.js'
 import { parseRuntimeDescriptor } from './descriptor.js'
-import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { TENSORRT_LLM_DESCRIPTOR_SOURCE, type RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { parseLinuxEnvironmentManifest } from './environment-manifest.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
@@ -139,6 +139,7 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
   const calls: string[] = []
   const installations = new InstallationStore(root)
   const descriptors: RuntimeDescriptorProvider = {
+    engines: [TENSORRT_LLM_DESCRIPTOR_SOURCE],
     forNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
     forInstallation: async (id) =>
       id === DESCRIPTOR.descriptor_id

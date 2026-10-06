@@ -224,6 +224,8 @@ export interface EnvironmentDiagnostics {
 /** One conf document a core reads: where from, whether that is overridden, and what it has cached. */
 export interface EnvironmentDocumentSource {
   document: 'runtime-descriptor' | 'environment-manifest'
+  /** A runtime descriptor's engine: each managed engine has its own source (change `add-vllm-runtime`). */
+  engine_id?: string
   url: string
   default_url: string
   /** The variable that set `url`, or null when it is `default_url`. */

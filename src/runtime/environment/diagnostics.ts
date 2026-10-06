@@ -32,9 +32,16 @@ export const SOURCE_OVERRIDE_VARIABLES: readonly string[] = [
   MANAGED_ROOT_ENV,
 ]
 
-/** The ones set to something other than blank in `env`, in a fixed order. */
+/**
+ * The ones set to something other than blank in `env`: the fixed ones in their order, then every
+ * per-engine descriptor override (`ATOMIC_RUNTIME_DESCRIPTOR_URL_<ENGINE>`, change `add-vllm-runtime`)
+ * in name order.
+ */
 export function sourceOverrides(env: Record<string, string | undefined>): EnvironmentSourceOverride[] {
-  return SOURCE_OVERRIDE_VARIABLES.flatMap((variable) => {
+  const perEngine = Object.keys(env)
+    .filter((variable) => variable.startsWith(`${RUNTIME_DESCRIPTOR_URL_ENV}_`))
+    .sort()
+  return [...SOURCE_OVERRIDE_VARIABLES, ...perEngine].flatMap((variable) => {
     const value = env[variable]?.trim()
     return value === undefined || value === '' ? [] : [{ variable, value }]
   })
@@ -56,17 +63,29 @@ export function summarizeOperation(record: PersistedOperation): EnvironmentOpera
   }
 }
 
-/** What one conf document's cache folder holds: the `latest.json` pointer and every cached id. */
-async function cacheOf(dir: string, idField: string): Promise<{ latest: string | null; ids: string[] }> {
+/**
+ * What one conf document's cache folder holds: the pointer (the first of `pointers` that names an
+ * id) and every cached id. A descriptor's pointer is per engine, `latest-<engine_id>.json`.
+ */
+async function cacheOf(
+  dir: string,
+  idField: string,
+  pointers: readonly string[]
+): Promise<{ latest: string | null; ids: string[] }> {
   let latest: string | null = null
-  try {
-    const pointer = JSON.parse(await readFile(join(dir, 'latest.json'), 'utf8')) as Record<string, unknown>
-    if (typeof pointer[idField] === 'string') latest = pointer[idField] as string
-  } catch {
-    latest = null
+  for (const name of pointers) {
+    try {
+      const pointer = JSON.parse(await readFile(join(dir, name), 'utf8')) as Record<string, unknown>
+      if (typeof pointer[idField] === 'string') {
+        latest = pointer[idField] as string
+        break
+      }
+    } catch {
+      continue
+    }
   }
   const ids = (await readdir(dir).catch(() => [] as string[]))
-    .filter((name) => name.endsWith('.json') && name !== 'latest.json')
+    .filter((name) => name.endsWith('.json') && name !== 'latest.json' && !name.startsWith('latest-'))
     .map((name) => decodeURIComponent(name.slice(0, -'.json'.length)))
     .sort()
   return { latest, ids }
@@ -74,8 +93,11 @@ async function cacheOf(dir: string, idField: string): Promise<{ latest: string |
 
 export interface DocumentSourceInput {
   document: EnvironmentDocumentSource['document']
+  /** A runtime descriptor's engine: its pointer is `latest-<engine_id>.json`. */
+  engineId?: string
   defaultUrl: string
-  variable: string
+  /** The variables that override the source, the first one set winning. */
+  variables: readonly string[]
   cacheDir: string
   idField: string
 }
@@ -85,14 +107,22 @@ export async function documentSource(
   input: DocumentSourceInput,
   env: Record<string, string | undefined>
 ): Promise<EnvironmentDocumentSource> {
-  const override = env[input.variable]?.trim()
-  const overridden = override !== undefined && override !== ''
-  const cache = await cacheOf(input.cacheDir, input.idField)
+  const variable = input.variables.find((name) => (env[name]?.trim() ?? '') !== '')
+  const override = variable === undefined ? undefined : env[variable]?.trim()
+  // TensorRT-LLM's pointer was `latest.json` before change `add-vllm-runtime`; it still counts.
+  const pointers =
+    input.engineId === undefined
+      ? ['latest.json']
+      : input.engineId === 'tensorrt-llm'
+        ? [`latest-${input.engineId}.json`, 'latest.json']
+        : [`latest-${input.engineId}.json`]
+  const cache = await cacheOf(input.cacheDir, input.idField, pointers)
   return {
     document: input.document,
-    url: overridden ? override : input.defaultUrl,
+    ...(input.engineId === undefined ? {} : { engine_id: input.engineId }),
+    url: override ?? input.defaultUrl,
     default_url: input.defaultUrl,
-    overridden_by: overridden ? input.variable : null,
+    overridden_by: variable ?? null,
     latest_cached_id: cache.latest,
     cached_ids: cache.ids,
   }

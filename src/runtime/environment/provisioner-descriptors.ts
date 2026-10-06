@@ -12,8 +12,18 @@
  */
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ManagedBlocker, RuntimeDescriptor } from '../../contracts/index.js'
-import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { TENSORRT_LLM_ENGINE_ID, type RuntimeDescriptorProvider } from './descriptor-provider.js'
 import type { PersistedOperation } from './store.js'
+
+/**
+ * Whose descriptor an operation plans with (change `add-vllm-runtime`, design D12): a runtime
+ * target names its engine. An environment-only setup names none and keeps planning with
+ * TensorRT-LLM's, as it always has.
+ */
+export function engineOfOperation(record: PersistedOperation): string {
+  const target = record.machine.operation.target
+  return target.kind === 'runtime' ? target.engine_id : TENSORRT_LLM_ENGINE_ID
+}
 
 const unavailable = (message: string, details?: string): ManagedBlocker => ({
   code: 'MANAGED_METADATA_INVALID',
@@ -39,7 +49,7 @@ export async function descriptorForProbe(
     const pinned = await descriptors.forInstallation(preferred)
     if (pinned.kind === 'available') return { descriptor: pinned.descriptor }
   }
-  const latest = await descriptors.forNewSetup()
+  const latest = await descriptors.forNewSetup(engineOfOperation(record))
   if (latest.kind === 'available') return { descriptor: latest.descriptor }
   return { blocker: unavailable(latest.error.message, latest.error.details) }
 }

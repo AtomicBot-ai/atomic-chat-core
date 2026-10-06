@@ -2,7 +2,7 @@
  * `POST /atomic/v1/models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`, "Проверка
  * совместимости без сети"): wires the pure `checkModelCompatibility` (`compatibility.ts`) to the
  * pinned descriptor of the ready installation — or, "если движок не установлен", the latest accepted
- * cached descriptor (`descriptors.cachedForNewSetup()`) — and to the host's GPUs and memory.
+ * cached descriptor (`descriptors.cachedForNewSetup(engine)`) — and to the host's GPUs and memory.
  * Never fetches: `descriptorForCheck` below only ever reads `forInstallation`/`cachedForNewSetup`,
  * both cache-only (`descriptor-provider.ts`), and `hostFacts` is the check route's own Docker-free
  * probe (`probeTensorrtLlmGpusAndMemory`, `host-facts.ts`) — matching the spec's "Core MUST NOT
@@ -145,7 +145,7 @@ async function descriptorForCheck(
   const resolved =
     ready !== undefined
       ? await deps.descriptors.forInstallation(ready.active_descriptor_id as string)
-      : await deps.descriptors.cachedForNewSetup()
+      : await deps.descriptors.cachedForNewSetup(TENSORRT_LLM_ENGINE_ID)
   if (resolved.kind !== 'available') throw resolved.error
   return resolved.descriptor
 }
