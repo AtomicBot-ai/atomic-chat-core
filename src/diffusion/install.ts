@@ -11,12 +11,14 @@
 import { chmod, mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import type {
+  AtomicCoreError,
   DiffusionBackend,
   DiffusionBackendInstallRecord,
   DiffusionEngineId,
   DiffusionModelFile,
   FinalizeBackendInstallArgs,
 } from '../contracts/index.js'
+import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import { buildProcessEnv, spawnManaged } from '../runtime/shared/index.js'
 import { locate, samePath } from './containment.js'
 import { diffusionError, ioError } from './errors.js'
@@ -36,6 +38,20 @@ export const PROBE_TIMEOUT_MS = 120_000
 export const PROBE_SPAWN_ATTEMPTS = 3
 export const PROBE_SPAWN_RETRY_DELAY_MS = 1_000
 const PROBE_MARKERS = ['stable-diffusion.cpp', '--cfg-scale']
+/**
+ * NTSTATUS codes a Windows process ends with when the loader gives up before `main`, so it prints
+ * nothing of its own. Upstream's Windows ROCm archive, for one, imports `amdhip64_7.dll` and
+ * `hipblas.dll` from an installed HIP SDK without shipping them.
+ */
+const WINDOWS_LOADER_FAILURES = new Map([
+  [0xc000_0135, 'STATUS_DLL_NOT_FOUND'],
+  [0xc000_0138, 'STATUS_ORDINAL_NOT_FOUND'],
+  [0xc000_0139, 'STATUS_ENTRYPOINT_NOT_FOUND'],
+  [0xc000_007b, 'STATUS_INVALID_IMAGE_FORMAT'],
+  [0xc000_0142, 'STATUS_DLL_INIT_FAILED'],
+])
+/** What glibc's `ld.so` and macOS `dyld` print when a library is missing, lowercase. */
+const LOADER_MARKERS = ['error while loading shared libraries', 'library not loaded']
 
 export function serverBinaryName(platform: NodeJS.Platform): string {
   return platform === 'win32' ? 'sd-server.exe' : 'sd-server'
@@ -138,6 +154,44 @@ export function probeOutputIsSdcpp(text: string): boolean {
   return PROBE_MARKERS.some((marker) => lower.includes(marker))
 }
 
+/** `exit code 1`, `exit code 0xC0000135 (STATUS_DLL_NOT_FOUND)`, `signal SIGSEGV`. */
+function describeProbeExit(exit: ExitInfo, platform: NodeJS.Platform): string {
+  if (exit.code === null) return exit.signal === null ? 'unknown status' : `signal ${String(exit.signal)}`
+  const code = exit.code >>> 0
+  if (platform !== 'win32' || code < 0x8000_0000) return `exit code ${exit.code}`
+  const name = WINDOWS_LOADER_FAILURES.get(code)
+  return `exit code 0x${code.toString(16).toUpperCase()}${name ? ` (${name})` : ''}`
+}
+
+/**
+ * The verdict on a finished `--help` run: nothing when the output is stable-diffusion.cpp's,
+ * otherwise the error to raise. A binary the OS loader could not start is a missing runtime, not
+ * the wrong program, so the exit code and the loader's own words are read before the output is.
+ */
+export function probeVerdict(
+  binary: string,
+  text: string,
+  exit: ExitInfo,
+  platform: NodeJS.Platform
+): AtomicCoreError | undefined {
+  if (probeOutputIsSdcpp(text)) return undefined
+  const output = [...text].slice(0, 800).join('')
+  const status = `${binary}: ${describeProbeExit(exit, platform)}`
+  const lower = text.toLowerCase()
+  const loaderFailed =
+    (platform === 'win32' && exit.code !== null && WINDOWS_LOADER_FAILURES.has(exit.code >>> 0)) ||
+    LOADER_MARKERS.some((marker) => lower.includes(marker))
+  if (loaderFailed)
+    return diffusionError(
+      'ENGINE_INSTALL_FAILED',
+      'The image engine could not load a library it needs.',
+      output.trim() === '' ? status : `${status}\n${output}`
+    )
+  if (text.trim() === '')
+    return diffusionError('ENGINE_INSTALL_FAILED', 'The image engine exited without printing anything.', status)
+  return diffusionError('ENGINE_INSTALL_FAILED', 'The downloaded binary is not stable-diffusion.cpp.', output)
+}
+
 function couldNotStart(binary: string, error: Error) {
   return diffusionError(
     'ENGINE_INSTALL_FAILED',
@@ -208,13 +262,9 @@ async function probeOnce(
     // Give the pipes a tick to flush their last lines.
     await sleep(10)
     const { stdout, stderr } = proc.output()
-    const text = stdout + stderr
-    if (probeOutputIsSdcpp(text)) return
-    throw diffusionError(
-      'ENGINE_INSTALL_FAILED',
-      'The downloaded binary is not stable-diffusion.cpp.',
-      [...text].slice(0, 800).join('')
-    )
+    const verdict = probeVerdict(binary, stdout + stderr, outcome, platform)
+    if (verdict) throw verdict
+    return
   }
 }
 
