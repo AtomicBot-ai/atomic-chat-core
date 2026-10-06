@@ -164,6 +164,16 @@ const TENSORRT_LLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
   cuda_graphs: 'string',
   kv_cache_dtype: 'string',
   load_timeout_seconds: 'number',
+  enable_prefix_caching: 'boolean',
+  overlap_scheduler: 'boolean',
+  capacity_scheduler_policy: 'string',
+  dtype: 'string',
+  // '' is "the model's own", so these stay strings; the provider's settings parse them.
+  default_temperature: 'string',
+  default_top_p: 'string',
+  default_top_k: 'string',
+  default_min_p: 'string',
+  default_repetition_penalty: 'string',
 }
 
 /** `VllmProviderConfig`: the card's UUID and the two dropdowns as text, every other key a number. */

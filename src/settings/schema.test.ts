@@ -52,7 +52,7 @@ describe('settingsSchema', () => {
     ['llamacpp', 31],
     ['mlx', 11],
     ['foundation-models', 0],
-    ['tensorrt-llm', 9],
+    ['tensorrt-llm', 18],
     ['vllm', 19],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
@@ -137,6 +137,15 @@ describe('defaultSettingValues', () => {
       cuda_graphs: 'auto',
       kv_cache_dtype: 'auto',
       load_timeout_seconds: 0,
+      enable_prefix_caching: true,
+      overlap_scheduler: true,
+      capacity_scheduler_policy: 'guaranteed_no_evict',
+      dtype: 'auto',
+      default_temperature: '',
+      default_top_p: '',
+      default_top_k: '',
+      default_min_p: '',
+      default_repetition_penalty: '',
     })
     // vLLM (change add-vllm-runtime): no memory fraction — core sizes the KV cache in bytes itself.
     expect(defaultSettingValues('vllm')).toEqual({

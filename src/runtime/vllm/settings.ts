@@ -6,6 +6,11 @@
  * by a setting: `trust_remote_code`, request logging, an API key — no key here reaches it.
  */
 import { AtomicCoreError } from '../../contracts/index.js'
+import {
+  GENERATION_DEFAULT_KEYS,
+  readGenerationDefaults,
+  type GenerationDefaults,
+} from '../managed-text/generation-defaults.js'
 
 export interface VllmSettings {
   /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */
@@ -40,22 +45,7 @@ export interface VllmSettings {
   generation: VllmGenerationDefaults
 }
 
-export interface VllmGenerationDefaults {
-  temperature?: number
-  top_p?: number
-  top_k?: number
-  min_p?: number
-  repetition_penalty?: number
-}
-
-/** The stored key of each generation default, by its vLLM name. */
-const GENERATION_KEYS = {
-  temperature: 'default_temperature',
-  top_p: 'default_top_p',
-  top_k: 'default_top_k',
-  min_p: 'default_min_p',
-  repetition_penalty: 'default_repetition_penalty',
-} as const
+export type VllmGenerationDefaults = GenerationDefaults
 
 const KEYS = [
   'gpu_id',
@@ -72,7 +62,7 @@ const KEYS = [
   'dtype',
   'seed',
   'async_scheduling',
-  ...Object.values(GENERATION_KEYS),
+  ...Object.values(GENERATION_DEFAULT_KEYS),
 ] as const
 
 const DEFAULTS: VllmSettings = {
@@ -126,15 +116,6 @@ function yesNo(key: string, value: unknown): boolean {
   return invalid(key, value, 'must be true or false')
 }
 
-/** vLLM's own bounds of each sampling parameter (`SamplingParams._verify_args`). */
-const GENERATION_RULES: Record<keyof VllmGenerationDefaults, (key: string, value: unknown) => number> = {
-  temperature: (key, value) => decimal(key, value, (n) => n >= 0 && n <= 2, 'from 0 to 2'),
-  top_p: (key, value) => decimal(key, value, (n) => n > 0 && n <= 1, 'above 0 and up to 1'),
-  top_k: (key, value) => integer(key, value, -1, 1_000_000),
-  min_p: (key, value) => decimal(key, value, (n) => n >= 0 && n <= 1, 'from 0 to 1'),
-  repetition_penalty: (key, value) => decimal(key, value, (n) => n > 0 && n <= 10, 'above 0 and up to 10'),
-}
-
 function oneOf<T extends string>(key: string, value: unknown, allowed: readonly T[]): T {
   return allowed.includes(value as T)
     ? (value as T)
@@ -186,11 +167,7 @@ export function validateVllmSettings(raw: Record<string, unknown>): VllmSettings
     settings.seed = integer('seed', raw['seed'], 1, 2_147_483_647)
   if (raw['async_scheduling'] !== undefined)
     settings.async_scheduling = yesNo('async_scheduling', raw['async_scheduling'])
-  const generation: VllmGenerationDefaults = {}
-  for (const [name, key] of Object.entries(GENERATION_KEYS) as [keyof VllmGenerationDefaults, string][]) {
-    if (raw[key] !== undefined && raw[key] !== null) generation[name] = GENERATION_RULES[name](key, raw[key])
-  }
-  settings.generation = generation
+  settings.generation = readGenerationDefaults('vllm', raw)
   if (settings.max_output_tokens >= settings.context_length) {
     invalid(
       'max_output_tokens',
@@ -221,7 +198,7 @@ export function vllmSettings(
   if (merged['kv_cache_max_tokens'] === 0) merged['kv_cache_max_tokens'] = null
   if (merged['max_num_batched_tokens'] === 0) merged['max_num_batched_tokens'] = null
   if (merged['seed'] === 0) merged['seed'] = null
-  for (const key of Object.values(GENERATION_KEYS)) {
+  for (const key of Object.values(GENERATION_DEFAULT_KEYS)) {
     if (typeof merged[key] === 'string' && merged[key].trim() === '') merged[key] = null
   }
   return validateVllmSettings(merged)

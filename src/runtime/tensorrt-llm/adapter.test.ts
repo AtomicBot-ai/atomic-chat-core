@@ -1372,3 +1372,79 @@ describe('classifyReady: a ready engine that cannot hold one sequence of its con
     expect(tensorrtLlmAdapter.classifyReady!('INFO: Application startup complete.', at(4096))).toBeNull()
   })
 })
+
+describe('the further LLM API options and sampling defaults the settings set (owner, change add-vllm-runtime)', () => {
+  const optionsOf = (stored: Record<string, unknown>) =>
+    parseYaml(
+      tensorrtLlmAdapter.buildLaunch(baseContext({ settings: tensorrtLlmAdapter.validateSettings(stored) }))
+        .files?.['llm-api-options.yaml'] ?? ''
+    ) as Record<string, unknown>
+
+  it('writes nothing for an option left at the engine default', () => {
+    const plain = optionsOf({})
+    expect(plain).not.toHaveProperty('dtype')
+    expect(plain).not.toHaveProperty('disable_overlap_scheduler')
+    expect(plain).not.toHaveProperty('scheduler_config')
+    expect(plain['kv_cache_config']).not.toHaveProperty('enable_block_reuse')
+  })
+
+  it('writes each option the person changed, under the LLM API name', () => {
+    expect(
+      optionsOf({
+        enable_prefix_caching: false,
+        overlap_scheduler: false,
+        capacity_scheduler_policy: 'max_utilization',
+        dtype: 'float16',
+      })
+    ).toMatchObject({
+      kv_cache_config: { enable_block_reuse: false },
+      disable_overlap_scheduler: true,
+      scheduler_config: { capacity_scheduler_policy: 'MAX_UTILIZATION' },
+      dtype: 'float16',
+    })
+  })
+
+  it('refuses an unknown value with INVALID_ARGUMENT', () => {
+    for (const raw of [
+      { capacity_scheduler_policy: 'static' },
+      { dtype: 'float8' },
+      { overlap_scheduler: 'maybe' },
+      { default_temperature: 5 },
+    ]) {
+      expect(() => tensorrtLlmAdapter.validateSettings(raw), JSON.stringify(raw)).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+      )
+    }
+  })
+
+  it('restarts the engine for a changed option, not for a sampling default the gateway applies', () => {
+    const key = (raw: Record<string, unknown>) =>
+      JSON.stringify(tensorrtLlmAdapter.restartKey?.(tensorrtLlmAdapter.validateSettings(raw)))
+    for (const changed of [
+      { enable_prefix_caching: false },
+      { overlap_scheduler: false },
+      { capacity_scheduler_policy: 'max_utilization' },
+      { dtype: 'bfloat16' },
+    ]) {
+      expect(key(changed), JSON.stringify(changed)).not.toBe(key({}))
+    }
+    expect(key({ default_temperature: 0.3 })).toBe(key({}))
+  })
+
+  it('writes the sampling defaults into a request that sets none, and leaves the request’s own alone', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({ default_temperature: '0.6', default_top_k: 20 })
+    expect(
+      tensorrtLlmRewriteRequestBody('/v1/chat/completions', { messages: [], temperature: 1 }, settings)
+    ).toMatchObject({ temperature: 1, top_k: 20 })
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { prompt: 'hi' }, settings)).toMatchObject({
+      temperature: 0.6,
+      top_k: 20,
+    })
+    const none = tensorrtLlmRewriteRequestBody(
+      '/v1/completions',
+      { prompt: 'hi' },
+      tensorrtLlmAdapter.validateSettings({})
+    )
+    expect(none).not.toHaveProperty('temperature')
+  })
+})
