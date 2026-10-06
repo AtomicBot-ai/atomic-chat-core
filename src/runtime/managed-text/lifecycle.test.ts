@@ -352,6 +352,28 @@ describe('ManagedTextLifecycle: stages and timeout', () => {
     expect(order).toEqual(['stop-previous', 'before-create with 0 containers'])
   })
 
+  it('hands what beforeCreate answers to the adapter as its launch plan, and a launch shm_size to docker create (change add-vllm-runtime)', async () => {
+    const seen: unknown[] = []
+    const delta: ManagedTextAdapter<Record<string, never>> = {
+      ...beta,
+      id: 'delta-plan-engine',
+      buildLaunch: (context) => {
+        seen.push(context.plan)
+        return { engine: { container_port: 9000 }, argv: ['delta'], shm_size: '4g' }
+      },
+    }
+    await build({}, [delta])
+    await lifecycle.load(
+      request_({
+        installation: { ...request_().installation, adapter_id: 'delta-plan-engine' },
+        beforeCreate: async () => ({ kvCacheMemoryBytes: 123, gpuMemoryUtilization: 0.5 }),
+      })
+    )
+    expect(seen).toEqual([{ kvCacheMemoryBytes: 123, gpuMemoryUtilization: 0.5 }])
+    const create = docker.calls.find((argv) => argv[0] === 'create') ?? []
+    expect(create).toContain('--shm-size=4g')
+  })
+
   it('a beforeCreate that throws refuses the load with no container ever created', async () => {
     await build()
     const error = await rejection(
