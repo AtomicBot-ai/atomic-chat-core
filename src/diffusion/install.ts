@@ -188,7 +188,11 @@ export function probeVerdict(
       output.trim() === '' ? status : `${status}\n${output}`
     )
   if (text.trim() === '')
-    return diffusionError('ENGINE_INSTALL_FAILED', 'The image engine exited without printing anything.', status)
+    return diffusionError(
+      'ENGINE_INSTALL_FAILED',
+      'The image engine exited without printing anything.',
+      status
+    )
   return diffusionError('ENGINE_INSTALL_FAILED', 'The downloaded binary is not stable-diffusion.cpp.', output)
 }
 
