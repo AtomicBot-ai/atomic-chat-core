@@ -1600,6 +1600,36 @@ describe('helpers', () => {
     expect(imageMatchesDigest(null, IMAGE)).toBe(false)
   })
 
+  it('matches a Docker Hub image in the short form Docker reports it in (vLLM live run on Windows)', () => {
+    const digest = 'sha256:b18abb2df97b8f798e81862bd93f872ea18613372e2c3adc0cc2ac21e66ac12f' as const
+    const hub = { repository: 'docker.io/vllm/vllm-openai', digest }
+    // `docker image inspect` drops the registry of a Docker Hub image from RepoDigests.
+    expect(imageMatchesDigest({ RepoDigests: [`vllm/vllm-openai@${digest}`] }, hub)).toBe(true)
+    expect(imageMatchesDigest({ RepoDigests: [`docker.io/vllm/vllm-openai@${digest}`] }, hub)).toBe(true)
+    expect(
+      imageMatchesDigest(
+        { RepoDigests: [`vllm/vllm-openai@${digest}`] },
+        { ...hub, repository: 'index.docker.io/vllm/vllm-openai' }
+      )
+    ).toBe(true)
+    // An official image goes by its bare name.
+    expect(
+      imageMatchesDigest(
+        { RepoDigests: [`ubuntu@${digest}`] },
+        { repository: 'docker.io/library/ubuntu', digest }
+      )
+    ).toBe(true)
+    // The digest and the repository still have to be the ones pinned.
+    expect(imageMatchesDigest({ RepoDigests: ['vllm/vllm-openai@sha256:0'] }, hub)).toBe(false)
+    expect(imageMatchesDigest({ RepoDigests: [`someone/vllm-openai@${digest}`] }, hub)).toBe(false)
+    expect(
+      imageMatchesDigest(
+        { RepoDigests: [`vllm/vllm-openai@${digest}`] },
+        { repository: 'ghcr.io/vllm/vllm-openai', digest }
+      )
+    ).toBe(false)
+  })
+
   it('gives a relogin its own code and keeps the blocker structured', () => {
     expect(toManagedBlocker({ reason: 'relogin-required', message: 'm', commands: ['c'] })).toEqual({
       code: 'MANAGED_RELOGIN_REQUIRED',

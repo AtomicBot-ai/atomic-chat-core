@@ -191,10 +191,32 @@ export function pickGpu(gpus: GpuFacts[], minimumComputeCapability: string): Gpu
   )
 }
 
-/** Whether `inspectImage`'s answer names exactly `image` among its repo digests. */
+/**
+ * A repository as Docker names it in `RepoDigests`: a Docker Hub image without its registry
+ * (`docker.io/vllm/vllm-openai` → `vllm/vllm-openai`) and an official one by its bare name
+ * (`docker.io/library/ubuntu` → `ubuntu`); every other registry as written (`nvcr.io/…`).
+ */
+export function dockerRepositoryName(repository: string): string {
+  const short = repository.replace(/^(?:docker\.io|index\.docker\.io|registry-1\.docker\.io)\//, '')
+  if (short === repository) return repository
+  return short.replace(/^library\/(?=[^/]+$)/, '')
+}
+
+/**
+ * Whether `inspectImage`'s answer names exactly `image` among its repo digests. The digest must be
+ * the pinned one; the repository is compared in the form Docker reports it in, since Docker drops
+ * the registry of a Docker Hub image (vLLM's `docker.io/vllm/vllm-openai`, change
+ * `add-vllm-runtime`; found in the live run on Windows).
+ */
 export function imageMatchesDigest(inspected: unknown, image: PlatformImage): boolean {
   const digests = (inspected as { RepoDigests?: unknown } | null)?.RepoDigests
-  return Array.isArray(digests) && digests.includes(`${image.repository}@${image.digest}`)
+  if (!Array.isArray(digests)) return false
+  const expected = `${dockerRepositoryName(image.repository)}@${image.digest}`
+  return digests.some((entry) => {
+    if (typeof entry !== 'string') return false
+    const at = entry.lastIndexOf('@')
+    return at > 0 && `${dockerRepositoryName(entry.slice(0, at))}${entry.slice(at)}` === expected
+  })
 }
 
 const blockedPlan = (
