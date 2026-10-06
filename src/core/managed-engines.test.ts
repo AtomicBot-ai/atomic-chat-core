@@ -21,6 +21,7 @@ import { readRuntimeFixture } from '../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
+  createStoreMigration,
   leftoverContainers,
   managedEngineRegistry,
   managedModelDeleter,
@@ -406,6 +407,41 @@ describe('managedEngineRegistry (change add-vllm-runtime, task 3.4)', () => {
   })
 })
 
+describe('createStoreMigration on Linux (change add-vllm-runtime, D5)', () => {
+  const model = async (root: string, id: string) => {
+    await mkdir(join(root, id), { recursive: true })
+    await writeFile(join(root, id, 'model.yml'), `repository: ${id}\n`)
+  }
+
+  it('moves the old root’s models, logs what moved and each conflict, and keeps the result for the diagnostics', async () => {
+    await model(data.layout.legacyTensorrtLlmModelsDir, 'acme-a')
+    await model(data.layout.legacyTensorrtLlmModelsDir, 'acme-b')
+    await model(data.layout.managedModelsDir, 'acme-b')
+    const logged: string[] = []
+    const migration = createStoreMigration((level, message) => logged.push(`${level}: ${message}`))
+    expect(migration.current()).toBeNull()
+    await migration.onLinux(data.layout)
+    expect(migration.current()).toMatchObject({ moved: ['acme-a'], conflicts: [{ model_id: 'acme-b' }] })
+    expect(logged).toEqual([
+      expect.stringMatching(/^info: Moved 1 model\(s\) into the managed model store: acme-a\.$/),
+      expect.stringMatching(/^warn: Model acme-b was not moved: /),
+    ])
+  })
+
+  it('a failed move is a warning, never a failed start', async () => {
+    await model(data.layout.legacyTensorrtLlmModelsDir, 'acme-a')
+    // The store's place is taken by a file: nothing can be moved under it.
+    await writeFile(data.layout.managedModelsDir, 'not a folder')
+    const logged: string[] = []
+    const migration = createStoreMigration((level, message) => logged.push(`${level}: ${message}`))
+    await expect(migration.onLinux(data.layout)).resolves.toBeUndefined()
+    expect(logged).toEqual([
+      expect.stringMatching(/^warn: Moving models into the managed model store failed/),
+    ])
+    expect(migration.current()).toBeNull()
+  })
+})
+
 describe('managedSessionUnloader', () => {
   it('unloads through the facade — stop confirmed, cross-process claim released — and holds loads off until released (final review M-1)', async () => {
     const { runtime, events, sessions } = provider(() => true)
@@ -537,7 +573,7 @@ describe('managedModelExclusivity (change add-vllm-runtime, task 2.6)', () => {
       () => facadeOver(trt, second) as never
     )
 
-    await release('test-engine', 'm')
+    await release('test-engine')('m')
     expect(trt.events).toEqual(['stopped:m'])
     expect(trt.runtime.getLoadedModels()).toEqual(['other'])
     expect(await otherCoreCanClaim('m')).toBe(true)
@@ -555,9 +591,34 @@ describe('managedModelExclusivity (change add-vllm-runtime, task 2.6)', () => {
       managedModelExclusivity(
         () => runtimes,
         () => facadeOver(trt, second) as never
-      )('test-engine', 'm')
+      )('test-engine')('m')
     ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED' })
     expect(trt.runtime.getLoadedModels()).toEqual(['m'])
+  })
+
+  it('refuses with MANAGED_STOP_UNCONFIRMED when the facade answers an unload that did not succeed', async () => {
+    const trt = provider(() => true)
+    await trt.sessions.acquire('tensorrt-llm', 'm', {})
+    const refusing = {
+      cancelLoad: () => false,
+      unload: async () => ({ success: false, error: 'the container would not stop' }),
+    }
+    await expect(
+      managedModelExclusivity(
+        () => only(trt.runtime),
+        () => refusing as never
+      )('test-engine')('m')
+    ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED', message: 'the container would not stop' })
+    const silent = { cancelLoad: () => false, unload: async () => ({ success: false }) }
+    await expect(
+      managedModelExclusivity(
+        () => only(trt.runtime),
+        () => silent as never
+      )('test-engine')('m')
+    ).rejects.toMatchObject({
+      code: 'MANAGED_STOP_UNCONFIRMED',
+      message: expect.stringContaining('not loaded in test-engine'),
+    })
   })
 
   it('does nothing when no other provider holds the model', async () => {
@@ -567,7 +628,7 @@ describe('managedModelExclusivity (change add-vllm-runtime, task 2.6)', () => {
       throw new Error('never asked')
     }
     await expect(
-      managedModelExclusivity(() => runtimes, facade)('tensorrt-llm', 'm')
+      managedModelExclusivity(() => runtimes, facade)('tensorrt-llm')('m')
     ).resolves.toBeUndefined()
   })
 })
@@ -1142,6 +1203,33 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
     }
     return { machine, context }
   }
+
+  it('moves this scope’s TensorRT-LLM models into the guest’s store once, logs and keeps the result, and tries again after a failure (change add-vllm-runtime, D5)', async () => {
+    const { context } = windowsContext(true)
+    let failures = 1
+    const flaky: WindowsManagedContext = {
+      ...context,
+      records: {
+        read: async () => {
+          if (failures-- > 0) throw new Error('the record could not be read')
+          return context.records.read()
+        },
+      },
+    }
+    const logged: string[] = []
+    const migration = createStoreMigration((level, message) => logged.push(`${level}: ${message}`))
+    migration.onWindows(flaky)
+    await vi.waitFor(() => expect(logged.some((line) => line.includes('failed'))).toBe(true))
+    expect(migration.current()).toBeNull()
+
+    migration.onWindows(flaky)
+    await vi.waitFor(() => expect(migration.current()?.moved).toEqual(['acme/m']))
+    expect(logged.some((line) => line.startsWith('info: Moved 1 model(s)'))).toBe(true)
+    const guest = context.wsl.distribution('AtomicChat')
+    const exists = async (path: string) => (await guest.exec(['test', '-e', path])).code === 0
+    expect(await exists(`${GUEST}/managed-models/acme/m/model.yml`)).toBe(true)
+    expect(await exists(`${GUEST}/models/tensorrt-llm/acme/m/model.yml`)).toBe(false)
+  })
 
   it('offers the provider on Windows x64 and on Windows on Arm with its WSL context, none without it or on another CPU', async () => {
     const { context } = windowsContext(true)

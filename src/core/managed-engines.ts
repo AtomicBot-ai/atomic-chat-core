@@ -89,6 +89,7 @@ import {
   legacyGuestModelsRoot,
   linuxModelLocation,
   migrateTensorrtLlmModels,
+  nodeStoreMigrationFs,
   readManagedModel,
   windowsModelLocation,
 } from '../runtime/managed-models/index.js'
@@ -196,6 +197,51 @@ export function windowsStoreMigration(
     })
   )
   return windowsMigrations.get(context) as Promise<ManagedStoreMigration | null>
+}
+
+/**
+ * The move of TensorRT-LLM's models into the managed model store, as `create.ts` runs it (change
+ * `add-vllm-runtime`, design D5): on Linux (and any data folder off Windows) at startup, before the
+ * environment and the engines are wired, under the core's lock on its data folder; on Windows in the
+ * guest, once the managed providers exist, before the first look at the store. What it did is logged
+ * and kept for the environment diagnostics (`current`); a failure is a warning, never a failed start.
+ */
+export function createStoreMigration(log: CoreLogger): {
+  current: () => ManagedStoreMigration | null
+  onLinux: (layout: DataLayout) => Promise<void>
+  onWindows: (context: WindowsManagedContext) => void
+} {
+  let current: ManagedStoreMigration | null = null
+  const record = (result: ManagedStoreMigration): void => {
+    current = result
+    if (result.moved.length > 0) {
+      log(
+        'info',
+        `Moved ${result.moved.length} model(s) into the managed model store: ${result.moved.join(', ')}.`
+      )
+    }
+    for (const conflict of result.conflicts) {
+      log(
+        'warn',
+        `Model ${conflict.model_id} was not moved: ${conflict.target} already exists; ${conflict.source} is left as it is.`
+      )
+    }
+  }
+  const failed = (error: unknown): void =>
+    log('warn', `Moving models into the managed model store failed: ${String(error)}`)
+  return {
+    current: () => current,
+    onLinux: async (layout) => {
+      await migrateTensorrtLlmModels({
+        from: layout.legacyTensorrtLlmModelsDir,
+        to: layout.managedModelsDir,
+        fs: nodeStoreMigrationFs,
+      }).then(record, failed)
+    },
+    onWindows: (context) => {
+      void windowsStoreMigration(context, record).catch(failed)
+    },
+  }
 }
 
 async function windowsGuest(
@@ -689,7 +735,7 @@ export function managedSessionUnloader(
 /**
  * One store model, one managed provider (change `add-vllm-runtime`, design D11; spec
  * `managed-model-store`, "Одна модель хранилища загружена не более чем в одном managed-провайдере"):
- * before `provider` loads `modelId`, every other managed provider that has it loaded or loading lets it
+ * for each `provider`, its runtime's `releaseModelElsewhere` — before it loads `modelId`, every other managed provider that has it loaded or loading lets it
  * go — a load cancelled, a session unloaded through the facade with its container's stop confirmed,
  * so its cross-process claim is released as with any client's unload. A stop Docker will not confirm
  * rejects with `MANAGED_STOP_UNCONFIRMED`, and the new load does not start: two live sessions of one
@@ -698,8 +744,8 @@ export function managedSessionUnloader(
 export function managedModelExclusivity(
   runtimes: () => ReadonlyMap<string, ManagedTextRuntime>,
   sessions: () => Pick<AtomicCore, 'cancelLoad' | 'unload'>
-): (provider: string, modelId: string) => Promise<void> {
-  return async (provider, modelId) => {
+): (provider: string) => (modelId: string) => Promise<void> {
+  return (provider) => async (modelId) => {
     for (const [other, runtime] of runtimes()) {
       if (other === provider) continue
       if (!runtime.residentModels().includes(modelId) && !runtime.isLoading(modelId)) continue

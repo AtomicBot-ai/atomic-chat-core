@@ -181,9 +181,9 @@ export interface WireManagedRuntimesOptions {
    * The managed engines whose descriptors this core reads, one source each (change
    * `add-vllm-runtime`, D2); defaults to TensorRT-LLM alone. The owner passes its engine registry's.
    */
-  engines?: readonly DescriptorSource[]
+  engines?: readonly DescriptorSource[] | undefined
   /** The move of TensorRT-LLM's models into the managed model store, for the diagnostics (D5). */
-  storeMigration?: () => ManagedStoreMigration | null
+  storeMigration?: (() => ManagedStoreMigration | null) | undefined
   /** Where both providers report a rejected source or a non-fatal cache write failure. */
   onWarn?: (message: string) => void
 }
@@ -236,7 +236,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
   })
 
   const descriptors = createRuntimeDescriptorProvider({
-    ...(options.engines === undefined ? {} : { engines: options.engines }),
+    engines: options.engines,
     env: options.env.env,
     fetch: descriptorFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
@@ -424,7 +424,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
         ],
         operations: () => store.listAll(),
         recentWarnings: () => [...recentWarnings],
-        storeMigration: () => options.storeMigration?.() ?? null,
+        storeMigration: options.storeMigration,
       }),
     emit: (name, payload) => {
       // Keep the snapshot and the event stream describing the same thing: a client that reconnects

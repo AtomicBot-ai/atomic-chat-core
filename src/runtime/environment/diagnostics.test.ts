@@ -233,5 +233,15 @@ describe('what a stuck machine shows', () => {
       },
     })
     expect(broken.operations).toEqual([])
+    expect(broken.store_migration).toBeNull()
+
+    // The move of TensorRT-LLM's models into the store, as the core did it (change add-vllm-runtime).
+    const migration = { from: '/old', to: '/store', moved: ['a'], conflicts: [] }
+    const moved = await buildEnvironmentDiagnostics({
+      ...base,
+      operations: async () => [],
+      storeMigration: () => migration,
+    })
+    expect(moved.store_migration).toEqual(migration)
   })
 })

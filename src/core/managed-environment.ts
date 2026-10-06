@@ -76,9 +76,9 @@ export interface WireManagedEnvironmentOptions {
   onWarn?: (message: string) => void
   fetch?: typeof fetch
   /** The managed engine registry's descriptor sources (change `add-vllm-runtime`, D2); TensorRT-LLM alone when omitted. */
-  engines?: readonly DescriptorSource[]
+  engines?: readonly DescriptorSource[] | undefined
   /** The move of TensorRT-LLM's models into the managed model store, for the diagnostics (D5). */
-  storeMigration?: () => ManagedStoreMigration | null
+  storeMigration?: (() => ManagedStoreMigration | null) | undefined
   /** `AtomicCoreOptions.dockerPath`: the docker CLI, or null for none. Omitted: the system directories. */
   dockerPath?: string | null
   unloadEngineSessions?: UnloadEngineSessions
@@ -261,8 +261,8 @@ function wireWindowsEnvironment(
     newId: options.newId,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-    ...(options.engines === undefined ? {} : { engines: options.engines }),
-    ...(options.storeMigration === undefined ? {} : { storeMigration: options.storeMigration }),
+    engines: options.engines,
+    storeMigration: options.storeMigration,
     windows: parts,
   })
   return {
@@ -310,8 +310,8 @@ export function wireManagedEnvironment(options: WireManagedEnvironmentOptions): 
     newId: options.newId,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-    ...(options.engines === undefined ? {} : { engines: options.engines }),
-    ...(options.storeMigration === undefined ? {} : { storeMigration: options.storeMigration }),
+    engines: options.engines,
+    storeMigration: options.storeMigration,
     linux: linuxProvisionerParts(options, host, containers),
   })
   return { managed, containers, platform, host, arch: process.arch }

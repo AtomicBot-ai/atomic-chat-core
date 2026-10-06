@@ -513,6 +513,16 @@ describe('a descriptor per engine', () => {
     expect((await descriptors.cachedForNewSetup('vllm')).kind).toBe('unsupported')
   })
 
+  it('an unreadable pointer of its own is no pointer: the legacy one is not consulted past it', async () => {
+    const fs = new FakeManagedFs()
+    fs.files.set(PATHS.descriptorFile(DESCRIPTOR_A.descriptor_id), RAW_A)
+    fs.files.set(PATHS.descriptorLatestFileFor('tensorrt-llm'), '{ not json')
+    fs.files.set(PATHS.descriptorLatestFile, JSON.stringify({ descriptor_id: DESCRIPTOR_A.descriptor_id }))
+    expect((await provider({ fs, engines: ENGINES }).cachedForNewSetup('tensorrt-llm')).kind).toBe(
+      'unsupported'
+    )
+  })
+
   it('a legacy latest.json naming another engine’s descriptor is not a TensorRT-LLM pointer', async () => {
     const fs = new FakeManagedFs()
     fs.files.set(PATHS.descriptorFile(DESCRIPTOR_SECOND.descriptor_id), RAW_SECOND)

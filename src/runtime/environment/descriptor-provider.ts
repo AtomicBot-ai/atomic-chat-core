@@ -107,7 +107,7 @@ export interface DescriptorProviderOptions {
   /** This build's own version; defaults to `CORE_VERSION`. A test pins it to check the gate. */
   coreVersion?: string
   /** The engines core has an adapter for, each with its source; defaults to TensorRT-LLM alone. */
-  engines?: readonly DescriptorSource[]
+  engines?: readonly DescriptorSource[] | undefined
   timeoutMs?: number
   /** A rejected source scheme or a failed cache write is never fatal; this is where it is reported. */
   onWarn?: (message: string) => void
@@ -184,6 +184,7 @@ export function createRuntimeDescriptorProvider(
 ): RuntimeDescriptorProvider {
   const paths = managedSharedPaths(options.root)
   const engines = options.engines ?? [TENSORRT_LLM_DESCRIPTOR_SOURCE]
+
   const shared = {
     env: options.env,
     fetch: options.fetch,

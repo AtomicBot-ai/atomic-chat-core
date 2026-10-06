@@ -140,7 +140,7 @@ export interface DiagnosticsInput {
   operations: () => Promise<PersistedOperation[]>
   recentWarnings: () => string[]
   /** The move of TensorRT-LLM's models into the managed model store (change `add-vllm-runtime`, D5). */
-  storeMigration?: () => ManagedStoreMigration | null
+  storeMigration?: (() => ManagedStoreMigration | null) | undefined
 }
 
 export async function buildEnvironmentDiagnostics(input: DiagnosticsInput): Promise<EnvironmentDiagnostics> {
