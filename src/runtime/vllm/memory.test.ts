@@ -118,7 +118,9 @@ describe('the memory share and the launch plan', () => {
     const plan = vllmLaunchPlan(vllmSettings({}), model, card({ free_vram_bytes: 6.5 * GiB }), HOST)
     expect(plan.gpuMemoryUtilization).toBe(0.625)
     expect(plan.kvCacheMemoryBytes).toBeNull()
-    expect(startCheckPasses(6.5 * GiB - VLLM_CUDA_CONTEXT_MEASURED, 8 * GiB, plan.gpuMemoryUtilization)).toBe(true)
+    expect(startCheckPasses(6.5 * GiB - VLLM_CUDA_CONTEXT_MEASURED, 8 * GiB, plan.gpuMemoryUtilization)).toBe(
+      true
+    )
   })
 
   it('the Windows acceptance card: 7.76 GiB free before the container, 6.89 GiB at vLLM’s check — the start check passes', () => {

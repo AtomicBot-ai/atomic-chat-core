@@ -160,7 +160,6 @@ describe('createCachedDocuments', () => {
 })
 
 describe('createCachedDocuments: what it says about odd failures', () => {
-  /* eslint-disable @typescript-eslint/only-throw-error -- these cases are exactly a non-Error being thrown */
   it('names a fetch that rejects with something other than an Error', async () => {
     const onWarn = vi.fn()
     const rejects: DocumentFetch = vi.fn(async () => {
@@ -204,7 +203,6 @@ describe('createCachedDocuments: what it says about odd failures', () => {
       expect.stringContaining('is not a valid toy document (unreadable)'),
     ])
   })
-  /* eslint-enable @typescript-eslint/only-throw-error */
 
   it('a latest.json whose id is not a string points at nothing', async () => {
     const fs = new FakeManagedFs()
