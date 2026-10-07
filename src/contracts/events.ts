@@ -12,6 +12,7 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { EngineBuildChangedEvent } from './engine-builds.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { ModelSetup } from './model-setup.js'
@@ -172,6 +173,12 @@ export interface CoreEvents {
    */
   'environment:changed': EnvironmentSnapshot
   'environment:operation': EnvironmentOperation
+
+  /**
+   * An sd.cpp or MLX build was installed, removed, or cleaned up at start (spec `engine-builds`):
+   * re-read `POST /engine-builds/:engine/catalog` instead of polling it.
+   */
+  'engine-build:changed': EngineBuildChangedEvent
 
   /**
    * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). `state` on every
