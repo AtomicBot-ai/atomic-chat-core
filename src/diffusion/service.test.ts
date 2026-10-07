@@ -746,7 +746,10 @@ describe.skipIf(!posix)('generating', () => {
   // `activate_install` (`session.rs`, app commit ec1fd3ea7), reached through the core's engine-builds install.
   it('installs a new engine under the load lock: the running job is cancelled, the old server unloaded', async () => {
     const h = await loadedService({ stepMs: 400 })
-    const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    // Long enough to still run while the install unpacks and probes the new build before its activation.
+    const { jobId } = await h.service.generate(
+      sampleRequest({ batchSize: 1, width: 32, height: 32, steps: 40 })
+    )
     await waitFor(() => h.service.getJob(jobId)?.state === 'generating')
     await (await engineBuilds(h, 'master-900-abcdef0')).install('sd-cpp', { task_id: 'update' })
     expect(h.service.getJob(jobId)?.state).toBe('cancelled')
