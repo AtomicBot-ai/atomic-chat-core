@@ -34,6 +34,14 @@ describe('pathOf / withPathDir', () => {
     expect(withPathDir({}, '/opt/homebrew/bin', 'darwin')).toEqual({ PATH: '/opt/homebrew/bin' })
   })
 
+  it('prefers PATH itself when Windows keeps both spellings', () => {
+    expect(pathOf({ Path: 'C:\\Windows', PATH: '/usr/bin' })).toBe('/usr/bin')
+    expect(withPathDir({ Path: 'C:\\Windows', PATH: 'C:\\x' }, 'C:\\ffmpeg', 'win32')).toEqual({
+      Path: 'C:\\Windows',
+      PATH: 'C:\\ffmpeg;C:\\x',
+    })
+  })
+
   it('leaves a PATH that already has the folder as it is', () => {
     const env = { PATH: '/usr/bin:/opt/homebrew/bin' }
     expect(withPathDir(env, '/opt/homebrew/bin', 'darwin')).toBe(env)

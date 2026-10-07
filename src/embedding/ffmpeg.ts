@@ -8,7 +8,7 @@
  */
 
 import { stat } from 'node:fs/promises'
-import { join, win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
 
 /** Where installers put `ffmpeg` outside a login shell's PATH, per platform. */
 export const FFMPEG_EXTRA_DIRS: Readonly<Partial<Record<NodeJS.Platform, readonly string[]>>> = {
@@ -16,9 +16,18 @@ export const FFMPEG_EXTRA_DIRS: Readonly<Partial<Record<NodeJS.Platform, readonl
   linux: ['/usr/local/bin', '/usr/bin', '/snap/bin'],
 }
 
+/**
+ * The key of `env`'s PATH: `PATH` itself when there is one (as `buildProcessEnv` reads it on
+ * Windows too), else the first spelling of it (Windows keeps `Path`).
+ */
+function pathKey(env: NodeJS.ProcessEnv): string | undefined {
+  if (env['PATH'] !== undefined) return 'PATH'
+  return Object.keys(env).find((k) => k.toUpperCase() === 'PATH')
+}
+
 /** The PATH variable of `env`, whatever its case (Windows spells it `Path`). */
 export function pathOf(env: NodeJS.ProcessEnv): string {
-  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH')
+  const key = pathKey(env)
   return (key !== undefined ? env[key] : undefined) ?? ''
 }
 
@@ -42,7 +51,7 @@ export function withPathDir(
   platform: NodeJS.Platform
 ): NodeJS.ProcessEnv {
   const separator = platform === 'win32' ? ';' : ':'
-  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH'
+  const key = pathKey(env) ?? 'PATH'
   const current = env[key] ?? ''
   if (current.split(separator).includes(dir)) return env
   return { ...env, [key]: current === '' ? dir : `${dir}${separator}${current}` }
@@ -61,7 +70,8 @@ export async function findFfmpegDir(
   isFile: (path: string) => Promise<boolean> = defaultIsFile
 ): Promise<string | undefined> {
   const exe = platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-  const joinIn = platform === 'win32' ? win32.join : join
+  // The platform's own separator, not the host's: a Linux path checked on a Windows host stays `/`.
+  const joinIn = platform === 'win32' ? win32.join : posix.join
   for (const dir of ffmpegSearchDirs(platform, pathOf(env))) if (await isFile(joinIn(dir, exe))) return dir
   return undefined
 }

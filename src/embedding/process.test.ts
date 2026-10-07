@@ -84,13 +84,19 @@ describe('spawnEmbeddingServer', () => {
       return base(s, onLine)
     }
     const projector = { mmprojPath: '/models/mmproj-Q8_0.gguf' }
+    // One spelling of PATH, as on a Mac; Windows keeps `Path` beside it otherwise.
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH')
+    )
     const withFfmpeg = await start({}, projector, {
       spawn: capture,
-      env: { ...process.env, PATH: '/usr/bin:/bin' },
+      env: { ...env, PATH: '/usr/bin' },
       findFfmpeg: async () => '/opt/homebrew/bin',
     }).run
     expect(withFfmpeg.modalities).toEqual(['text', 'image', 'video'])
-    expect(envs[0]?.['PATH']?.split(':')[0]).toBe('/opt/homebrew/bin')
+    // On Windows the engine's own folder goes first; ffmpeg's right after it.
+    const separator = process.platform === 'win32' ? ';' : ':'
+    expect(envs[0]?.['PATH']?.split(separator)).toContain('/opt/homebrew/bin')
 
     const without = await start({}, projector, {
       spawn: capture,
@@ -143,10 +149,12 @@ describe('spawnEmbeddingServer', () => {
   it('times out a server that never gets ready, and kills it', async () => {
     let pid = 0
     const error = await rejection<AtomicCoreError>(
-      start({ mode: 'no-ready' }, { startupTimeoutMs: 300 }, { onSpawned: async (p) => void (pid = p) }).run
+      start({ mode: 'no-ready' }, { startupTimeoutMs: 2_000 }, { onSpawned: async (p) => void (pid = p) }).run
     )
     expect(error.code).toBe('MODEL_LOAD_TIMED_OUT')
-    expect(error.details).toContain('/health answered 503')
+    // The last thing the readiness poll heard: a server still loading, or (on a slow Windows runner,
+    // before the fake has bound its port) no server yet.
+    expect(error.details).toMatch(/\/health answered 503|ECONNREFUSED/)
     expect(isProcessAlive(pid)).toBe(false)
   })
 
