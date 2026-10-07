@@ -495,6 +495,47 @@ describe.skipIf(!POSIX)('EngineBuildsService.install (task 3.1)', () => {
     expect(archiveRequests()).toEqual([])
   })
 
+  it('activates under the load lock, then keeps a build a session still runs from and retires it on the next install', async () => {
+    const h = harness()
+    const install = async (tag: string) => {
+      h.setSd(
+        sdManifest(
+          tag,
+          serve(tag, { 'linux-vulkan-x64': { name: `${tag}.tar.gz`, body: await archive(tag, SD_OK) } })
+        )
+      )
+      return h.service.install('sd-cpp', { task_id: tag })
+    }
+    const dirOf = (tag: string) => join(data.layout.diffusion.backendsDir, tag, 'linux-vulkan-x64')
+    await install('master-883-137f740')
+    // A server whose exit could not be confirmed still runs from master-883.
+    h.hosts['sd-cpp'].used = [dirOf('master-883-137f740')]
+
+    const second = await install('master-900-aaaaaaa')
+    expect(second).toMatchObject({
+      retired: [],
+      kept_in_use: [{ tag: 'master-883-137f740', backend_id: 'linux-vulkan-x64', origin: 'downloaded' }],
+    })
+    expect(await ls(data.layout.diffusion.backendsDir)).toEqual(['master-883-137f740', 'master-900-aaaaaaa'])
+    const catalog = await h.service.catalog('sd-cpp')
+    expect(catalog.installed.map((b) => [b.tag, b.in_use, b.active])).toEqual(
+      expect.arrayContaining([
+        ['master-883-137f740', true, false],
+        ['master-900-aaaaaaa', false, true],
+      ])
+    )
+
+    h.hosts['sd-cpp'].used = []
+    expect(await install('master-901-bbbbbbb')).toMatchObject({
+      retired: expect.arrayContaining([
+        { tag: 'master-883-137f740', backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
+        { tag: 'master-900-aaaaaaa', backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
+      ]),
+      kept_in_use: [],
+    })
+    expect(await ls(data.layout.diffusion.backendsDir)).toEqual(['master-901-bbbbbbb'])
+  })
+
   it('refuses a host no build fits', async () => {
     const h = harness({ facts: { osType: 'macos', arch: 'x86_64', cpuExtensions: [], gpus: [] } })
     const tag = 'mlxvlm-macos-arm64-1234567'
