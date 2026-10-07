@@ -119,6 +119,11 @@ export interface FakeManagedHost {
   pulls: string[]
   /** While true, an engine image pull sends one progress line and then never finishes. */
   holdEnginePull: boolean
+  /**
+   * A pull of an image whose reference contains this text fails the way Docker Hub's rate limit does
+   * (change `add-vllm-runtime`): one progress line, then an `error` line. Null: every pull succeeds.
+   */
+  failPullsOf: string | null
   /** Free space before the engine image; what `DockerRootDir` reports is this minus what the image took. */
   setFreeDisk(bytes: number): void
   /** The engine image finished landing (e.g. while the core was down): present, and its bytes used. */
@@ -233,6 +238,7 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
         : [],
     pulls: [],
     holdEnginePull: false,
+    failPullsOf: null,
     setFreeDisk: (bytes) => {
       baseFree = bytes
       writeFree()
@@ -302,6 +308,11 @@ export async function fakeManagedHost(initial: FakeLinuxHostState): Promise<Fake
     // The layers land in DockerRootDir as they download: half of the image is on the disk now.
     if (engine) engineUses(Math.floor(REQUIRED_DISK_BYTES / 2))
     if (engine && host.holdEnginePull) return // the core dies with this pull in flight
+    if (host.failPullsOf !== null && ref.includes(host.failPullsOf)) {
+      const message = 'toomanyrequests: You have reached your unauthenticated pull rate limit.'
+      res.end(`${JSON.stringify({ errorDetail: { message }, error: message })}\n`)
+      return
+    }
     setTimeout(() => line(2_000_000), 300)
     setTimeout(() => {
       line(4_000_000)

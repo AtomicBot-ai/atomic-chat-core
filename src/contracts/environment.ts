@@ -219,11 +219,28 @@ export interface EnvironmentDiagnostics {
   operations: EnvironmentOperationSummary[]
   /** The last warnings the managed-runtime code logged, newest last: document fallbacks, cache failures. */
   recent_warnings: string[]
+  /**
+   * What this core's move of TensorRT-LLM's models into the managed model store did at its start
+   * (change `add-vllm-runtime`, design D5); null before it ran or where there is nothing to move.
+   */
+  store_migration?: ManagedStoreMigration | null
+}
+
+/** The move of TensorRT-LLM's models into the managed model store, as it went. */
+export interface ManagedStoreMigration {
+  from: string
+  to: string
+  /** Ids moved, in order. */
+  moved: string[]
+  /** Ids already in the store: neither folder was touched. */
+  conflicts: { model_id: string; source: string; target: string }[]
 }
 
 /** One conf document a core reads: where from, whether that is overridden, and what it has cached. */
 export interface EnvironmentDocumentSource {
   document: 'runtime-descriptor' | 'environment-manifest'
+  /** A runtime descriptor's engine: each managed engine has its own source (change `add-vllm-runtime`). */
+  engine_id?: string
   url: string
   default_url: string
   /** The variable that set `url`, or null when it is `default_url`. */
@@ -812,7 +829,7 @@ export interface ModelCheckWarning {
  * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a, spec `tensorrt-llm-models` "Модель
  * удаляется через core"): what the deletion removed, once the model's container stop was confirmed.
  */
-export interface TensorrtLlmModelDeletion {
+export interface ManagedModelDeletion {
   model_id: string
   /** Whether a session or a load of the model had to be stopped first. */
   was_loaded: boolean
@@ -830,7 +847,7 @@ export interface TensorrtLlmModelDeletion {
  * on Windows. `free_bytes` is the space left for new models there — on Windows the smaller of the
  * guest's and the Windows volume's that holds the distribution — or null when it could not be read.
  */
-export interface TensorrtLlmModelLocation {
+export interface ManagedModelLocation {
   root: string
   free_bytes: number | null
 }

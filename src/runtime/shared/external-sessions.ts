@@ -49,6 +49,7 @@ const PROVIDERS: ReadonlySet<string> = new Set([
   'mlx',
   'foundation-models',
   'tensorrt-llm',
+  'vllm',
 ])
 
 export interface ExternalSessionsOptions {

@@ -15,6 +15,17 @@
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 
+/**
+ * What real Docker writes in `RepoDigests` for a reference it pulled: a Docker Hub image without its
+ * registry (`docker.io/vllm/vllm-openai@…` → `vllm/vllm-openai@…`, `docker.io/library/ubuntu@…` →
+ * `ubuntu@…`); every other registry as it was named.
+ */
+function reportedRepoDigest(ref) {
+  const short = ref.replace(/^(?:docker\.io|index\.docker\.io|registry-1\.docker\.io)\//, '')
+  if (short === ref) return ref
+  return short.replace(/^library\/(?=[^/]+@)/, '')
+}
+
 const SOCKET = 'unix:///var/run/docker.sock'
 
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' })
@@ -83,7 +94,7 @@ function docker(state, args) {
       const ref = rest[2]
       if (rest[1] === 'inspect') {
         return images.includes(ref)
-          ? ok(`${JSON.stringify([{ Id: 'sha256:fake', RepoDigests: [ref] }])}\n`)
+          ? ok(`${JSON.stringify([{ Id: 'sha256:fake', RepoDigests: [reportedRepoDigest(ref)] }])}\n`)
           : fail(1, `Error: No such image: ${ref}\n`, '[]\n')
       }
       if (rest[1] === 'rm') {

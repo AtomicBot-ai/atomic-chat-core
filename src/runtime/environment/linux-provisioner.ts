@@ -68,6 +68,7 @@ import type { EffectFinding, EffectInventory } from './recovery.js'
 import type { EnvironmentProvisioner, HostStepVerdict, ProvisionerProbe } from './service.js'
 import type { EffectIntent } from './state.js'
 import type { PersistedOperation } from './store.js'
+import { otherEngines, storeModelsChange } from './store-models.js'
 
 /** The privileged recipe, as the host module builds it (`src/host/recipes`, task 2.5). Injected. */
 export interface HostRecipeBinding {
@@ -126,8 +127,11 @@ export interface LinuxProvisionerDeps {
   environmentId: string
   /** Removes this scope's engine caches of one descriptor (`removeEngineCaches`, task 2.12). */
   removeEngineCaches: (descriptorId: string) => Promise<void>
-  /** Removes this scope's downloaded models of one engine; only for `retain_models: false`. */
-  removeModels: (engineId: string) => Promise<void>
+  /**
+   * Removes this scope's managed model store; only for `retain_models: false`, and only when no other
+   * managed engine's installation is left (change `add-vllm-runtime`, D13).
+   */
+  removeStoreModels: () => Promise<void>
   unloadEngineSessions?: UnloadEngineSessions
   onAssessment?: (view: HostView) => void
   newId?: () => string
@@ -187,10 +191,32 @@ export function pickGpu(gpus: GpuFacts[], minimumComputeCapability: string): Gpu
   )
 }
 
-/** Whether `inspectImage`'s answer names exactly `image` among its repo digests. */
+/**
+ * A repository as Docker names it in `RepoDigests`: a Docker Hub image without its registry
+ * (`docker.io/vllm/vllm-openai` → `vllm/vllm-openai`) and an official one by its bare name
+ * (`docker.io/library/ubuntu` → `ubuntu`); every other registry as written (`nvcr.io/…`).
+ */
+export function dockerRepositoryName(repository: string): string {
+  const short = repository.replace(/^(?:docker\.io|index\.docker\.io|registry-1\.docker\.io)\//, '')
+  if (short === repository) return repository
+  return short.replace(/^library\/(?=[^/]+$)/, '')
+}
+
+/**
+ * Whether `inspectImage`'s answer names exactly `image` among its repo digests. The digest must be
+ * the pinned one; the repository is compared in the form Docker reports it in, since Docker drops
+ * the registry of a Docker Hub image (vLLM's `docker.io/vllm/vllm-openai`, change
+ * `add-vllm-runtime`; found in the live run on Windows).
+ */
 export function imageMatchesDigest(inspected: unknown, image: PlatformImage): boolean {
   const digests = (inspected as { RepoDigests?: unknown } | null)?.RepoDigests
-  return Array.isArray(digests) && digests.includes(`${image.repository}@${image.digest}`)
+  if (!Array.isArray(digests)) return false
+  const expected = `${dockerRepositoryName(image.repository)}@${image.digest}`
+  return digests.some((entry) => {
+    if (typeof entry !== 'string') return false
+    const at = entry.lastIndexOf('@')
+    return at > 0 && `${dockerRepositoryName(entry.slice(0, at))}${entry.slice(at)}` === expected
+  })
 }
 
 const blockedPlan = (
@@ -327,6 +353,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
     }
     const existing = await deps.installations.read(target.installation_id)
     const retainModels = record.request.retain_models !== false
+    const usedBy = await otherEngines(deps.installations, target)
     const changes: ManagedSystemChange[] = [
       {
         code: 'unload-sessions',
@@ -356,9 +383,7 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
               params: { descriptor_id: existing.installation.active_descriptor_id ?? '' },
             },
           ]),
-      ...(retainModels
-        ? []
-        : [{ code: 'remove-models', text: `Delete the downloaded ${target.engine_id} models.` }]),
+      ...storeModelsChange(retainModels, usedBy),
       { code: 'remove-installation', text: 'Forget the installation.' },
     ]
     const plan: RequirementPlan = {
@@ -885,7 +910,12 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
 
         const descriptorId = existing?.installation.active_descriptor_id ?? null
         if (descriptorId !== null) await deps.removeEngineCaches(descriptorId)
-        if (record.request.retain_models === false) await deps.removeModels(target.engine_id)
+        if (
+          record.request.retain_models === false &&
+          (await otherEngines(deps.installations, target)).length === 0
+        ) {
+          await deps.removeStoreModels()
+        }
         await deps.installations.remove(target.installation_id)
       } finally {
         hold.release?.()

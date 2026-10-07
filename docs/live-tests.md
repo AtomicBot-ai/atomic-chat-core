@@ -529,3 +529,69 @@ Attach the results to the conf PR that merges `windows.json` into main, with the
 WSL version, card, driver) and every value above that a ruling left to this acceptance
 (`atomic-chat-spec/openspec/changes/add-tensorrt-llm-windows/rulings/core.md`). A failure is fixed in
 core or in a new `windows-rN` before the merge, never after.
+
+## TensorRT-LLM regression after the managed-engine generalization (change `add-vllm-runtime`)
+
+The generalization (a registry of managed engines, one model store, one naming rule, a descriptor per
+engine) must not change what a TensorRT-LLM user sees, apart from where models live. Unit tests and
+e2e prove the logic (`trt-verdict-invariant.test.ts`, `test/e2e/{tensorrt-llm-provider,
+managed-model-store}.test.ts`); this run proves it on the machine of the engine test above, with a core
+built from the branch and an existing TensorRT-LLM installation and models from a release before it.
+
+1. **The move**: before the update, note `ls <data>/tensorrt-llm/models` and the engine caches
+   (`<data>/atomic-core/managed-runtimes/caches/<descriptor>/`). Start the new core once: every folder
+   with `model.yml` is now in `<data>/managed-models/` under the same id, a folder without one stayed,
+   `<data>/tensorrt-llm/models` is gone once empty, and the core log says what moved. On Windows the same
+   in the guest (`/var/lib/atomic-chat/scopes/<key>/managed-models`), after the first model list.
+2. **The cache survives**: load a moved model that was loaded before the update; its readiness time is
+   the warm one, not a first build, and `docker inspect` shows the same cache folder mounted.
+3. **The descriptor pointer**: with the network off, the plan for a new setup names the same TensorRT-LLM
+   descriptor as before the update (read through the old `descriptors/latest.json`); after one online
+   probe, `descriptors/latest-tensorrt-llm.json` exists.
+4. **The check**: `POST /models/tensorrt-llm/check` on the curated list gives the same verdicts as the
+   previous core (`ok` versus `MODEL_INCOMPATIBLE`); an AWQ or GPTQ repository is refused naming its
+   format (`autoawq_w4a16`, `gptq_w4a16`) and `tensorrt-llm`.
+5. **Delete and remove**: `DELETE /managed-models/<id>` of a loaded model stops it first; removing the
+   engine with "delete models" deletes `<data>/managed-models` when no other engine is installed.
+
+Record the numbers (moved folders, first-load time before and after) under the change's `rulings/` in
+atomic-chat-spec.
+
+## vLLM (change `add-vllm-runtime`)
+
+`test/live/vllm.test.ts` runs the real `vllm/vllm-openai` image on a Linux host whose container
+environment is already prepared (the install test above, or TensorRT-LLM set up through the app): it
+sets the vLLM engine up if it is not `ready` (no privileged step; it stops if one would be needed),
+downloads the curated `Qwen/Qwen3.5-2B` into the managed model store, loads it, and checks chat and
+streaming through `:1337`, thinking off (the answer in `content`) and on (`reasoning_content`), a tool
+call, `context_length_exceeded`, the container's env (`VLLM_NO_USAGE_STATS`, `DO_NOT_TRACK`,
+`HF_HUB_OFFLINE`), argv (no `--trust-remote-code`) and mounts, and a faster second start from the
+compile cache.
+
+### Run
+
+conf's `runtimes/vllm.json` is not in main until this acceptance passes (design D15): the test reads the
+copy in `test/fixtures/runtimes/vllm.json`, or `ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM`.
+
+```bash
+npm run build:bin
+ATOMIC_LIVE=1 npx vitest run --project live test/live/vllm.test.ts
+```
+
+`ATOMIC_LIVE_GPU=<uuid>` pins a card; `ATOMIC_LIVE_OUT` sets where the report lands.
+
+### What to carry into the change (task 6.1)
+
+- `<out>/summary.json`: first and second load times, `--kv-cache-memory-bytes` (null unless the KV
+  cache size is set), the KV cache vLLM gave itself (`vllm_kv_cache_gib`),
+  `--gpu-memory-utilization`, `--shm-size`, the card's free memory before the load
+  (`gpu_free_bytes_before_load`, core's last probe) and vLLM's own reading at its start check
+  (`vllm_free_gib_at_start_check`) — their difference is what vLLM's CUDA context takes on this host.
+  Compare the card's used memory during the load with the core's estimate (weights + KV + 2 GiB): the
+  overhead and the 512 MiB margin of the memory check are first estimates.
+- `<out>/vllm-start.log`: the engine's real start log. Replace the constructed lines in
+  `test/helpers/vllm-log-fixtures.ts` with its decisive lines, and adjust the adapter's stage markers and
+  exit classification where they differ.
+- Which quantization rows of the descriptor actually start on compute capability 8.9 (an AWQ model of
+  the curated list), the driver floor, and whether `qwen3`'s parser needs the reasoning-into-content
+  rewrite (ruling core 3.2): all into `rulings/` of the change, and the descriptor in conf's branch.

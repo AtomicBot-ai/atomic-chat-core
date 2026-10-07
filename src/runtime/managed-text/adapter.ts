@@ -66,6 +66,13 @@ export interface ManagedLaunchContext<S> {
   gpuTotalVramBytes?: number | null
   /** The chosen card's compute capability (`"8.9"`), or `null` when unknown. */
   gpuComputeCapability?: string | null
+  /**
+   * What the provider's `beforeCreate` check answered right before this launch (change
+   * `add-vllm-runtime`, design D9): numbers taken from the card as it stands after the previous
+   * sessions stopped, shaped by and for one engine (vLLM's KV bytes and memory share). Absent for an
+   * engine whose provider plans nothing.
+   */
+  plan?: unknown
 }
 
 export interface ManagedEngineLaunch {
@@ -81,6 +88,12 @@ export interface ManagedEngineLaunch {
    * container runs can change them; the name `heartbeat` is the watchdog's and is refused.
    */
   files?: Readonly<Record<string, string>>
+  /**
+   * `--shm-size` for this engine's container (`<n>k|m|g`, at most the executor's 16g ceiling); absent,
+   * the executor's default (2g). vLLM V1 passes tensors between its API server and engine core through
+   * shared memory (change `add-vllm-runtime`, design D8).
+   */
+  shm_size?: string
 }
 
 export type ManagedExitKind = 'out-of-memory' | 'unsupported-model' | 'other'

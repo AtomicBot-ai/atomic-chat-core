@@ -11,7 +11,7 @@ import {
 import { readLinuxProbeFixture } from '../../../test/helpers/linux-probe-fixtures.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { parseMemAvailableBytes } from './host-facts.js'
-import type { JsonObject } from './quant-format.js'
+import type { JsonObject } from '../managed-models/quant-format.js'
 import {
   checkModelCompatibility,
   checkModelCompatibilityFiles,
@@ -176,7 +176,7 @@ describe('checkModelCompatibility', () => {
       error: {
         code: 'MODEL_INCOMPATIBLE',
         message:
-          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU.',
+          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU: they need 82.4 GiB, 79.7 GiB is free.',
         details:
           'weight_bytes=79000000000 kv_reserve_bytes=7900000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=1610612736 needed_bytes=88510612736 free_bytes=85532850176',
       },
@@ -230,7 +230,7 @@ describe('checkModelCompatibility', () => {
       error: {
         code: 'MODEL_INCOMPATIBLE',
         message:
-          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU.',
+          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU: they need 42.5 GiB, 20.5 GiB is free.',
         details:
           'weight_bytes=40000000000 kv_reserve_bytes=4000000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=1610612736 needed_bytes=45610612736 free_bytes=22000000000',
       },

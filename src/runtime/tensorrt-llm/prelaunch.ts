@@ -32,21 +32,21 @@ import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ErrorBody, GpuFacts, RuntimeDescriptor } from '../../contracts/index.js'
 import {
-  checkModelCompatibilityFiles,
+  checkCheckpointFiles,
   normalizeWeightNames,
   safetensorsHeaderLength,
   safetensorsTensorNames,
   weightSafetensorsFiles,
-} from './compatibility.js'
+} from '../managed-models/compatibility.js'
 import type {
   CheckpointFile,
   HostMemory,
-  MemorySizingInputs,
+  ManagedCheckEngine,
   ModelCheckInput,
   ResolvedCheckpoint,
-} from './compatibility.js'
-import type { TensorrtLlmModel } from './model-dir.js'
-import type { JsonObject } from './quant-format.js'
+} from '../managed-models/compatibility.js'
+import type { ManagedModel } from '../managed-models/model-dir.js'
+import type { JsonObject } from '../managed-models/quant-format.js'
 
 const CONFIG_FILE = 'config.json'
 const HF_QUANT_CONFIG_FILE = 'hf_quant_config.json'
@@ -80,7 +80,7 @@ async function assertFilesOnDisk(dir: string, files: readonly CheckpointFile[]):
     if (size === undefined) {
       throw new AtomicCoreError(
         'MODEL_FILE_NOT_FOUND',
-        `The tensorrt-llm model is missing a file recorded in model.yml: ${file.path}`,
+        `The model is missing a file recorded in model.yml: ${file.path}`,
         path
       )
     }
@@ -158,7 +158,8 @@ async function weightNamesOnDisk(
 export interface VerifyModelFilesOptions {
   /** The card this load is about to use; already resolved (and possibly substituted) by the caller. */
   gpuId: string
-  memory: MemorySizingInputs
+  /** The engine's hooks for the shared check (its memory rule, its checkpoint quirks). */
+  engine: ManagedCheckEngine
 }
 
 /**
@@ -172,7 +173,7 @@ export interface VerifyModelFilesOptions {
  * `model.yml`'s possibly-stale copy.
  */
 export async function verifyModelFilesAndCompatibility(
-  model: Pick<TensorrtLlmModel, 'dir' | 'repository' | 'revision' | 'files'>,
+  model: Pick<ManagedModel, 'dir' | 'repository' | 'revision' | 'files'>,
   descriptor: RuntimeDescriptor,
   gpus: readonly GpuFacts[],
   hostMemory: HostMemory,
@@ -184,7 +185,7 @@ export async function verifyModelFilesAndCompatibility(
   if (configJson === null) {
     throw new AtomicCoreError(
       'MODEL_FILE_NOT_FOUND',
-      'The tensorrt-llm model has no config.json in its directory.',
+      'The model has no config.json in its directory.',
       join(model.dir, CONFIG_FILE)
     )
   }
@@ -203,7 +204,7 @@ export async function verifyModelFilesAndCompatibility(
     gpu_id: options.gpuId,
     ...(weightNames === undefined ? {} : { weight_names: weightNames }),
   }
-  const result = checkModelCompatibilityFiles(input, descriptor, gpus, hostMemory, options.memory)
+  const result = checkCheckpointFiles(input, descriptor, gpus, hostMemory, options.engine)
   if (!result.ok) {
     // `FilesCheckResult`'s own type guarantees `result.verdict.verdict` is the failed branch here.
     const { code, message, details } = (result.verdict.verdict as { ok: false; error: ErrorBody }).error

@@ -21,7 +21,6 @@ import { join } from 'node:path'
 import { managedSharedPaths, managedSharedRoot, nodeDataFolderEnv } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { CoreEvents } from '../contracts/index.js'
-import { AtomicCoreError } from '../contracts/index.js'
 import {
   createGuestRecipeRunner,
   ENABLE_WSL_BINDING,
@@ -52,18 +51,19 @@ import type {
   WindowsProvisionerParts,
 } from '../runtime/environment/index.js'
 import { removeEngineCaches } from '../runtime/managed-text/index.js'
-import { guestModelFiles } from '../runtime/tensorrt-llm/index.js'
+import { guestModelFiles, guestModelsRoot } from '../runtime/managed-models/index.js'
 import {
   createDistributionKeeper,
   directoryGuestMount,
   guestScopePaths,
-  guestScopeRoot,
   guestScopeKeyReader,
   WSL_LOCALHOST_MOUNT,
   type DistributionKeeper,
   type GuestMount,
 } from '../runtime/wsl/index.js'
-import type { WindowsTensorrtLlmContext } from './tensorrt-llm.js'
+import type { DescriptorSource } from '../runtime/environment/index.js'
+import type { ManagedStoreMigration } from '../contracts/index.js'
+import type { WindowsManagedContext } from './managed-engines.js'
 
 export interface WireManagedEnvironmentOptions {
   env: NodeJS.ProcessEnv
@@ -75,6 +75,10 @@ export interface WireManagedEnvironmentOptions {
   log: ReconcileLogger
   onWarn?: (message: string) => void
   fetch?: typeof fetch
+  /** The managed engine registry's descriptor sources (change `add-vllm-runtime`, D2); TensorRT-LLM alone when omitted. */
+  engines?: readonly DescriptorSource[] | undefined
+  /** The move of TensorRT-LLM's models into the managed model store, for the diagnostics (D5). */
+  storeMigration?: (() => ManagedStoreMigration | null) | undefined
   /** `AtomicCoreOptions.dockerPath`: the docker CLI, or null for none. Omitted: the system directories. */
   dockerPath?: string | null
   unloadEngineSessions?: UnloadEngineSessions
@@ -91,18 +95,7 @@ export interface ManagedEnvironment {
   /** `process.arch`, or `x64` on the Windows test machine (which stands in for a Windows x64 PC). */
   arch: string
   /** Windows only: what the `tensorrt-llm` provider reaches Atomic Chat's WSL distribution through. */
-  windows?: WindowsTensorrtLlmContext
-}
-
-/** An engine id becomes one folder name under the data folder; anything else is refused. */
-const ENGINE_FOLDER = /^[a-z0-9][a-z0-9._-]{0,63}$/
-
-/** `<data>/<engine>/models`, this scope's downloaded models of one engine (design, Persistence). */
-export function engineModelsDir(layout: DataLayout, engineId: string): string {
-  if (!ENGINE_FOLDER.test(engineId) || engineId.includes('..')) {
-    throw new AtomicCoreError('INVALID_ARGUMENT', 'Not an engine id.', engineId)
-  }
-  return join(layout.root, engineId, 'models')
+  windows?: WindowsManagedContext
 }
 
 /**
@@ -126,8 +119,9 @@ export function linuxProvisionerParts(
     removeEngineCaches: async (descriptorId) => {
       await removeEngineCaches(options.layout.managed, { descriptorId })
     },
-    removeModels: (engineId) =>
-      rm(engineModelsDir(options.layout, engineId), { recursive: true, force: true }),
+    // The managed model store, every engine's (change `add-vllm-runtime`, D13): the provisioner asks only
+    // when no other engine's installation is left.
+    removeStoreModels: () => rm(options.layout.managedModelsDir, { recursive: true, force: true }),
     unloadEngineSessions: options.unloadEngineSessions ?? NOTHING_LOADED,
   }
 }
@@ -177,7 +171,7 @@ export function windowsProvisionerParts(input: WindowsPartsInput): WindowsProvis
     const key = await input.scopeKey()
     return {
       paths: guestScopePaths(input.layout.managed, name, key, input.mount),
-      models: (engineId: string) => input.mount.hostPath(name, `${guestScopeRoot(key)}/models/${engineId}`),
+      store: input.mount.hostPath(name, guestModelsRoot(key)),
       files: guestModelFiles(wsl.distribution(name), input.mount),
     }
   }
@@ -200,12 +194,9 @@ export function windowsProvisionerParts(input: WindowsPartsInput): WindowsProvis
       const files = await guestFiles()
       if (files !== null) await files.files.remove([files.paths.descriptorCachesDir(descriptorId)])
     },
-    removeModels: async (engineId) => {
-      if (!ENGINE_FOLDER.test(engineId) || engineId.includes('..')) {
-        throw new AtomicCoreError('INVALID_ARGUMENT', 'Not an engine id.', engineId)
-      }
+    removeStoreModels: async () => {
       const files = await guestFiles()
-      if (files !== null) await files.files.remove([files.models(engineId)])
+      if (files !== null) await files.files.remove([files.store])
     },
     unloadEngineSessions: input.unloadEngineSessions,
     fetch: input.fetch,
@@ -270,6 +261,8 @@ function wireWindowsEnvironment(
     newId: options.newId,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    engines: options.engines,
+    storeMigration: options.storeMigration,
     windows: parts,
   })
   return {
@@ -317,6 +310,8 @@ export function wireManagedEnvironment(options: WireManagedEnvironmentOptions): 
     newId: options.newId,
     ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    engines: options.engines,
+    storeMigration: options.storeMigration,
     linux: linuxProvisionerParts(options, host, containers),
   })
   return { managed, containers, platform, host, arch: process.arch }

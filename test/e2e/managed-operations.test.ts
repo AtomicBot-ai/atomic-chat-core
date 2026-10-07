@@ -647,7 +647,7 @@ describe.skipIf(POSIX_FAKES_UNAVAILABLE)(
       }))
       const cache = join(dataFolder, 'atomic-core', 'managed-runtimes', 'caches', DESCRIPTOR_ID, 'some-model')
       await mkdir(cache, { recursive: true })
-      const model = join(dataFolder, 'tensorrt-llm', 'models', 'some-model')
+      const model = join(dataFolder, 'managed-models', 'some-model')
       await mkdir(model, { recursive: true })
 
       const second = await start()
@@ -722,6 +722,103 @@ describe.skipIf(POSIX_FAKES_UNAVAILABLE)('an image the user already had', () => 
       (await poll(ready, started.operation_id, (o) => o.phase === 'removed' || o.phase === 'failed')).phase
     ).toBe('removed')
     expect(host.state().images).toEqual([PROBE_IMAGE])
+  })
+})
+
+/**
+ * A second managed engine on the same machine (change `add-vllm-runtime`, task 3.4; spec
+ * `managed-runtime-environment`, "Второй движок ставится на готовое окружение", "Блокеры движка
+ * оцениваются по его дескриптору"): vLLM's descriptor is the conf fixture, read from a local file.
+ */
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)('vLLM next to TensorRT-LLM through the compiled core', () => {
+  const VLLM_DESCRIPTOR = new URL('../fixtures/runtimes/vllm.json', import.meta.url)
+  const VLLM_ID = (JSON.parse(readFileSync(VLLM_DESCRIPTOR, 'utf8')) as { descriptor_id: string })
+    .descriptor_id
+  const VLLM_TARGET = { kind: 'runtime' as const, installation_id: 'vllm', engine_id: 'vllm' }
+  const startBoth = () => start({ ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM: VLLM_DESCRIPTOR.href })
+
+  /** TensorRT-LLM installed the usual way, then the free space for vLLM's image too. */
+  async function withTensorrtLlm(ready: ReadyLine): Promise<void> {
+    const asking = await beginAndApprove(ready, 'req-trt')
+    expect(
+      (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
+    ).toBe('ready')
+    host?.setFreeDisk(200 * 1024 ** 3)
+  }
+
+  async function setupVllm(ready: ReadyLine): Promise<Operation> {
+    const started = (await (
+      await post(ready, '/environments/default/operations', {
+        request_id: 'req-vllm',
+        target: VLLM_TARGET,
+        kind: 'setup',
+        descriptor_id: VLLM_ID,
+      })
+    ).json()) as Operation
+    const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+      expected_revision: asking.revision,
+      approved_plan_digest: asking.plan_digest,
+    })
+    return poll(ready, started.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')
+  }
+
+  const installationsOf = async (ready: ReadyLine) =>
+    Object.fromEntries(
+      ((await snapshot(ready)).environments[0]?.installations ?? []).map((i) => [i.installation_id, i.status])
+    )
+
+  it('setup vllm на готовом окружении: no host step, no elevation, its own image; TensorRT-LLM stays ready', async () => {
+    host = await fakeManagedHost(readyState())
+    const { ready } = await startBoth()
+    await withTensorrtLlm(ready)
+
+    const plan = (await (
+      await post(ready, '/environments/probe', { descriptor_id: VLLM_ID, target: VLLM_TARGET })
+    ).json()) as {
+      requires_elevation: boolean
+      system_changes: unknown[]
+      blockers: unknown[]
+      descriptor_id: string
+    }
+    expect(plan).toMatchObject({
+      requires_elevation: false,
+      system_changes: [],
+      blockers: [],
+      descriptor_id: VLLM_ID,
+    })
+
+    const done = await setupVllm(ready)
+    expect(done.phase, JSON.stringify(done.error)).toBe('ready')
+    expect(host.pulls.some((ref) => ref.includes('vllm/vllm-openai'))).toBe(true)
+    expect(await installationsOf(ready)).toEqual({ 'tensorrt-llm': 'ready', 'vllm': 'ready' })
+  })
+
+  it('сбой setup vllm при ready TensorRT-LLM: the vLLM operation fails, TensorRT-LLM stays ready', async () => {
+    host = await fakeManagedHost(readyState())
+    const { ready } = await startBoth()
+    await withTensorrtLlm(ready)
+    host.failPullsOf = 'vllm/vllm-openai'
+
+    const done = await setupVllm(ready)
+    expect(done.phase).toBe('failed')
+    expect(JSON.stringify(done.error)).toContain('toomanyrequests')
+    expect(await installationsOf(ready)).toEqual({ 'tensorrt-llm': 'ready' })
+  })
+
+  it('блокер драйвера только у одного движка: driver 580 blocks TensorRT-LLM’s release, not vLLM’s', async () => {
+    host = await fakeManagedHost({ ...readyState(), driver: '580.95.05' })
+    host.setFreeDisk(200 * 1024 ** 3)
+    const { ready } = await startBoth()
+    const trt = (await (
+      await post(ready, '/environments/probe', { descriptor_id: DESCRIPTOR_ID, target: TARGET })
+    ).json()) as { availability: string; blockers: { reason?: string }[] }
+    const vllm = (await (
+      await post(ready, '/environments/probe', { descriptor_id: VLLM_ID, target: VLLM_TARGET })
+    ).json()) as { availability: string; blockers: { reason?: string }[] }
+    expect(trt.availability).toBe('prerequisite-blocked')
+    expect(trt.blockers.map((b) => b.reason)).toContain('driver-too-old')
+    expect(vllm.blockers.map((b) => b.reason)).not.toContain('driver-too-old')
   })
 })
 

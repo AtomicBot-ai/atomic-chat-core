@@ -36,7 +36,8 @@ import type {
   RequirementPlan,
   ResumeOperation,
   RuntimeDescriptorSummary,
-  TensorrtLlmModelLocation,
+  ManagedModelDeletion,
+  ManagedModelLocation,
   LlamacppProviderId,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
@@ -588,13 +589,24 @@ export class CoreClient {
   }
 
   /**
-   * Where `tensorrt-llm` models go on this machine and how much room is left (change
-   * `add-tensorrt-llm-windows`, design D6): download, check and write `model.yml` only under `root`.
-   * On Windows that is a `\\wsl.localhost\…` path; before Atomic Chat's distribution exists the answer
-   * is 422 `MANAGED_ADAPTER_UNAVAILABLE`, and where the provider is not offered 404 `PROVIDER_NOT_FOUND`.
+   * Where the managed engines' models go on this machine and how much room is left (spec
+   * `managed-model-store`): download, check and write `model.yml` only under `root`. On Windows that is
+   * a `\\wsl.localhost\…` path; before Atomic Chat's distribution exists the answer is 422
+   * `MANAGED_ADAPTER_UNAVAILABLE`, and where no managed provider is offered 404 `PROVIDER_NOT_FOUND`.
    */
-  tensorrtLlmModelLocation(): Promise<TensorrtLlmModelLocation> {
-    return this.call('/models/tensorrt-llm/location')
+  managedModelLocation(): Promise<ManagedModelLocation> {
+    return this.call('/managed-models/location')
+  }
+
+  /**
+   * Delete a model of the managed store: core stops it in whichever managed provider holds it, then
+   * removes every engine cache of it and its folder. The id is sent as it is — a nested id keeps its
+   * `/` — and an id the store does not have is 404 `MODEL_NOT_FOUND`.
+   */
+  deleteManagedModel(modelId: string): Promise<ManagedModelDeletion> {
+    return this.call(`/managed-models/${modelId.split('/').map(encodeURIComponent).join('/')}`, {
+      method: 'DELETE',
+    })
   }
 
   /**

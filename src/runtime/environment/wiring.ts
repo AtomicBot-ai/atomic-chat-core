@@ -32,17 +32,17 @@ import type {
   EnvironmentSnapshot,
   ExecutorKind,
   ManagedAvailability,
+  ManagedStoreMigration,
   RuntimeInstallation,
 } from '../../contracts/index.js'
 import { processStartId } from '../../lock/index.js'
+import { compareVersions } from '../../backend/index.js'
 import {
   createRuntimeDescriptorProvider,
-  DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL,
   descriptorFetchFromFetch,
-  RUNTIME_DESCRIPTOR_URL_ENV,
-  TENSORRT_LLM_ENGINE_ID,
+  runtimeDescriptorUrlEnvs,
 } from './descriptor-provider.js'
-import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import type { DescriptorSource, RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { buildEnvironmentDiagnostics, sourceOverrides } from './diagnostics.js'
 import {
   createEnvironmentManifestProvider,
@@ -109,27 +109,33 @@ export function provisionerFor(
 }
 
 /**
- * `EnvironmentSnapshot.minimum_app_version`: the descriptor currently in effect for this
- * environment, network-free (spec `runtime-descriptor-catalog`, "Минимальные версии соблюдаются").
- * The installation of the provider's own engine (`engineId`) pinned to a descriptor wins — that is
- * the release actually running — otherwise the latest descriptor this core has ever accepted into
- * its cache; `null` when neither resolves. Never calls `fetch` or `readFile`: both `forInstallation`
- * and `cachedForNewSetup` are cache-only, so this is safe to call on every refresh.
+ * `EnvironmentSnapshot.minimum_app_version`: the highest of the descriptors currently in effect, one
+ * per engine, network-free (spec `runtime-descriptor-catalog`, "Минимальные версии соблюдаются";
+ * change `add-vllm-runtime`, D12). For each engine the provider has a source for, its installation
+ * pinned to a descriptor wins — that is the release actually running — otherwise the latest
+ * descriptor of that engine this core has ever accepted into its cache; `null` when no engine
+ * resolves. Never calls `fetch` or `readFile`: both `forInstallation` and `cachedForNewSetup` are
+ * cache-only, so this is safe to call on every refresh.
  */
 export async function resolveMinimumAppVersion(
   descriptors: RuntimeDescriptorProvider,
-  installations: readonly RuntimeInstallation[],
-  engineId: string = TENSORRT_LLM_ENGINE_ID
+  installations: readonly RuntimeInstallation[]
 ): Promise<string | null> {
-  const pinned = installations.find(
-    (installation): installation is RuntimeInstallation & { active_descriptor_id: string } =>
-      installation.engine_id === engineId && installation.active_descriptor_id !== null
-  )
-  const resolved =
-    pinned !== undefined
-      ? await descriptors.forInstallation(pinned.active_descriptor_id)
-      : await descriptors.cachedForNewSetup()
-  return resolved.kind === 'available' ? resolved.descriptor.minimum_app_version : null
+  let highest: string | null = null
+  for (const { engine_id: engineId } of descriptors.engines) {
+    const pinned = installations.find(
+      (installation): installation is RuntimeInstallation & { active_descriptor_id: string } =>
+        installation.engine_id === engineId && installation.active_descriptor_id !== null
+    )
+    const resolved =
+      pinned !== undefined
+        ? await descriptors.forInstallation(pinned.active_descriptor_id)
+        : await descriptors.cachedForNewSetup(engineId)
+    if (resolved.kind !== 'available') continue
+    const version = resolved.descriptor.minimum_app_version
+    if (highest === null || compareVersions(version, highest) > 0) highest = version
+  }
+  return highest
 }
 
 /**
@@ -171,6 +177,13 @@ export interface WireManagedRuntimesOptions {
   ownerPid?: number
   /** What the descriptor and environment manifest providers fetch with; defaults to the global `fetch`. */
   fetch?: typeof fetch
+  /**
+   * The managed engines whose descriptors this core reads, one source each (change
+   * `add-vllm-runtime`, D2); defaults to TensorRT-LLM alone. The owner passes its engine registry's.
+   */
+  engines?: readonly DescriptorSource[] | undefined
+  /** The move of TensorRT-LLM's models into the managed model store, for the diagnostics (D5). */
+  storeMigration?: (() => ManagedStoreMigration | null) | undefined
   /** Where both providers report a rejected source or a non-fatal cache write failure. */
   onWarn?: (message: string) => void
 }
@@ -223,6 +236,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
   })
 
   const descriptors = createRuntimeDescriptorProvider({
+    engines: options.engines,
     env: options.env.env,
     fetch: descriptorFetchFromFetch(options.fetch ?? fetch),
     readFile: (path) => nodeReadFile(path, 'utf8'),
@@ -390,23 +404,27 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
         environment: view[0] === undefined ? null : { ...view[0] },
         env: options.env.env,
         documents: [
-          {
-            document: 'runtime-descriptor',
-            defaultUrl: DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL,
-            variable: RUNTIME_DESCRIPTOR_URL_ENV,
+          // One source per engine (change `add-vllm-runtime`, D12): where each engine's descriptor
+          // comes from and which one it last accepted.
+          ...descriptors.engines.map((source) => ({
+            document: 'runtime-descriptor' as const,
+            engineId: source.engine_id,
+            defaultUrl: source.url,
+            variables: runtimeDescriptorUrlEnvs(source.engine_id),
             cacheDir: sharedPaths.descriptorsDir,
             idField: 'descriptor_id',
-          },
+          })),
           {
             document: 'environment-manifest',
             defaultUrl: manifestDefaultUrl,
-            variable: ENVIRONMENT_MANIFEST_URL_ENV,
+            variables: [ENVIRONMENT_MANIFEST_URL_ENV],
             cacheDir: sharedPaths.environmentManifestsDir,
             idField: 'manifest_id',
           },
         ],
         operations: () => store.listAll(),
         recentWarnings: () => [...recentWarnings],
+        storeMigration: options.storeMigration,
       }),
     emit: (name, payload) => {
       // Keep the snapshot and the event stream describing the same thing: a client that reconnects

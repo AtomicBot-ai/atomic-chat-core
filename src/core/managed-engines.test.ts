@@ -12,33 +12,36 @@ import type { LinuxProbeDeps } from '../runtime/environment/index.js'
 import type { ManagedTextLifecycle } from '../runtime/managed-text/index.js'
 import { raceLoadCancel } from '../runtime/shared/index.js'
 import type { ExternalSessions, LocalRuntime } from '../runtime/shared/index.js'
-import {
-  NVIDIA_SMI_GPU_QUERY,
-  TensorrtLlmModelRegistry,
-  TensorrtLlmRuntime,
-} from '../runtime/tensorrt-llm/index.js'
+import { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
+import type { ManagedEngineSpec } from '../runtime/managed-engines/index.js'
+import { NVIDIA_SMI_GPU_QUERY, TENSORRT_LLM_ENGINE } from '../runtime/tensorrt-llm/index.js'
+import { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import { FakeDocker } from '../../test/helpers/fake-docker-exec.js'
 import { readRuntimeFixture } from '../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
+  createStoreMigration,
   leftoverContainers,
-  tensorrtLlmModelDeleter,
-  tensorrtLlmModelLocation,
-  tensorrtLlmModelRegistry,
+  windowsStoreMigration,
+  managedEngineRegistry,
+  managedModelDeleter,
+  managedModelExclusivity,
+  managedSessionUnloader,
+  managedModelLocation,
+  managedModelRegistry,
   windowsDeployment,
   windowsModelFiles,
   windowsModelFilesFor,
   wiredExec,
-  tensorrtLlmSessionUnloader,
-  wireTensorrtLlm,
-  wireTensorrtLlmModelCheck,
-} from './tensorrt-llm.js'
+  wireManagedEngine,
+  wireManagedModelCheck,
+} from './managed-engines.js'
 import type {
-  WindowsTensorrtLlmContext,
-  WireTensorrtLlmModelCheckOptions,
-  WireTensorrtLlmOptions,
-} from './tensorrt-llm.js'
+  WindowsManagedContext,
+  WireManagedModelCheckOptions,
+  WireManagedEngineOptions,
+} from './managed-engines.js'
 import { fakeWindows } from '../../test/helpers/fake-windows-host.js'
 import { createDistributionKeeper, directoryGuestMount } from '../runtime/wsl/index.js'
 import { LocalSessions } from './sessions.js'
@@ -75,7 +78,7 @@ function handle(wired: () => Promise<ManagedContainers | null>): ManagedContaine
 
 const noDocker = handle(async () => null)
 
-const options = (over: Partial<WireTensorrtLlmOptions> = {}): WireTensorrtLlmOptions => ({
+const options = (over: Partial<WireManagedEngineOptions> = {}): WireManagedEngineOptions => ({
   platform: 'linux',
   arch: 'x64',
   layout: data.layout,
@@ -89,7 +92,7 @@ const options = (over: Partial<WireTensorrtLlmOptions> = {}): WireTensorrtLlmOpt
   },
   installations: new InstallationStore(join(data.root, 'managed')),
   containers: noDocker,
-  host: cardless as WireTensorrtLlmOptions['host'],
+  host: cardless as WireManagedEngineOptions['host'],
   trustedHosts: [],
   settings: () => ({}),
   emit: () => {},
@@ -130,19 +133,19 @@ async function installModel(id: string): Promise<void> {
   await writeFile(join(dir, 'model.yml'), 'architectures: [LlamaForCausalLM]\n')
 }
 
-describe('wireTensorrtLlm', () => {
+describe('wireManagedEngine (tensorrt-llm)', () => {
   it.each<NodeJS.Platform>(['darwin', 'win32', 'freebsd'])('offers no provider on %s', (platform) => {
-    expect(wireTensorrtLlm(options({ platform }))).toBeNull()
+    expect(wireManagedEngine(TENSORRT_LLM_ENGINE, options({ platform }))).toBeNull()
   })
 
   it('offers the provider on Linux', async () => {
-    const runtime = wireTensorrtLlm(options())
-    expect(runtime).toBeInstanceOf(TensorrtLlmRuntime)
+    const runtime = wireManagedEngine(TENSORRT_LLM_ENGINE, options())
+    expect(runtime).toBeInstanceOf(ManagedTextRuntime)
     await runtime?.shutdown()
   })
 
   it('refuses a load with MANAGED_ADAPTER_UNAVAILABLE on a Linux host with no docker CLI', async () => {
-    const runtime = wireTensorrtLlm(options()) as TensorrtLlmRuntime
+    const runtime = wireManagedEngine(TENSORRT_LLM_ENGINE, options()) as ManagedTextRuntime
     await expect(runtime.load('m')).rejects.toMatchObject({ code: 'MANAGED_ADAPTER_UNAVAILABLE' })
   })
 
@@ -151,7 +154,8 @@ describe('wireTensorrtLlm', () => {
     await readyInstallation(installations)
     const docker = new FakeDocker()
     const journal = await ExecutionJournal.open(data.layout)
-    const runtime = wireTensorrtLlm(
+    const runtime = wireManagedEngine(
+      TENSORRT_LLM_ENGINE,
       options({
         installations,
         descriptors: { forInstallation: async () => ({ kind: 'available', descriptor }) },
@@ -163,7 +167,7 @@ describe('wireTensorrtLlm', () => {
           reconciled: { stopped: [], removed: [], kept: [] } as unknown as ManagedContainers['reconciled'],
         })),
       })
-    ) as TensorrtLlmRuntime
+    ) as ManagedTextRuntime
     await expect(runtime.load('not-installed')).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
 
     await installModel('m')
@@ -185,7 +189,8 @@ describe('wireTensorrtLlm', () => {
     const journal = await ExecutionJournal.open(data.layout)
     let installed = false
     let wirings = 0
-    const runtime = wireTensorrtLlm(
+    const runtime = wireManagedEngine(
+      TENSORRT_LLM_ENGINE,
       options({
         installations,
         descriptors: { forInstallation: async () => ({ kind: 'available', descriptor }) },
@@ -194,7 +199,7 @@ describe('wireTensorrtLlm', () => {
           return installed ? ({ exec: withInfo(docker), journal } as unknown as ManagedContainers) : null
         }),
       })
-    ) as TensorrtLlmRuntime
+    ) as ManagedTextRuntime
     await expect(runtime.load('m')).rejects.toMatchObject({
       code: 'MANAGED_ADAPTER_UNAVAILABLE',
       message: expect.stringContaining('Docker is not installed'),
@@ -214,7 +219,8 @@ describe('wireTensorrtLlm', () => {
     await installModel('m')
     const journal = await ExecutionJournal.open(data.layout)
     const docker = new FakeDocker()
-    const runtime = wireTensorrtLlm(
+    const runtime = wireManagedEngine(
+      TENSORRT_LLM_ENGINE,
       options({
         installations,
         descriptors: { forInstallation: async () => ({ kind: 'available', descriptor }) },
@@ -222,7 +228,7 @@ describe('wireTensorrtLlm', () => {
         // the probe asks the executor the lifecycle was built over, never a second lookup).
         containers: handle(async () => ({ exec: docker.exec, journal }) as unknown as ManagedContainers),
       })
-    ) as TensorrtLlmRuntime
+    ) as ManagedTextRuntime
     await expect(runtime.load('m')).rejects.toMatchObject({
       code: 'MANAGED_PREREQUISITE_BLOCKED',
       message: expect.stringContaining('docker info'),
@@ -235,24 +241,26 @@ describe('wireTensorrtLlm', () => {
   it('reads installations from the shared root: none there refuses the load before any docker call', async () => {
     const docker = new FakeDocker()
     const journal = await ExecutionJournal.open(data.layout)
-    const runtime = wireTensorrtLlm(
+    const runtime = wireManagedEngine(
+      TENSORRT_LLM_ENGINE,
       options({
         containers: handle(async () => ({ exec: docker.exec, journal }) as unknown as ManagedContainers),
       })
-    ) as TensorrtLlmRuntime
+    ) as ManagedTextRuntime
     await expect(runtime.load('m')).rejects.toMatchObject({ code: 'MANAGED_ADAPTER_UNAVAILABLE' })
     expect(docker.calls).toEqual([])
     await runtime.shutdown()
   })
 })
 
-describe('wireTensorrtLlm: a container runtime that failed to initialise', () => {
+describe('wireManagedEngine: a container runtime that failed to initialise', () => {
   it('refuses a load naming the failure and its cause, not a missing docker CLI', async () => {
-    const runtime = wireTensorrtLlm(
+    const runtime = wireManagedEngine(
+      TENSORRT_LLM_ENGINE,
       options({
         containers: handle(() => Promise.reject(new Error('journal unreadable'))),
       })
-    ) as TensorrtLlmRuntime
+    ) as ManagedTextRuntime
     await expect(runtime.load('m')).rejects.toMatchObject({
       code: 'MANAGED_ADAPTER_UNAVAILABLE',
       message: expect.stringContaining('failed to initialise'),
@@ -263,7 +271,7 @@ describe('wireTensorrtLlm: a container runtime that failed to initialise', () =>
 })
 
 /**
- * A real, on-disk model directory for `provider()`'s fake `model:` dep: `TensorrtLlmRuntime.load`
+ * A real, on-disk model directory for `provider()`'s fake `model:` dep: `ManagedTextRuntime.load`
  * now runs the pre-launch check (task 2.16) before `lifecycle.load`, which re-reads `config.json`
  * and re-verifies the file listing from real disk — a `dir` that does not exist would refuse every
  * `runtime.load('m')` call below with `MODEL_FILE_NOT_FOUND` before it ever reached the fake
@@ -284,7 +292,7 @@ beforeEach(async () => {
  * A provider over a lifecycle that loads instantly and whose stop Docker confirms unless told not
  * to: the real lifecycle's confirmed stop is `runtime.test.ts`'s and `lifecycle.test.ts`'s.
  */
-function provider(stopConfirms: () => boolean) {
+function provider(stopConfirms: () => boolean, engine: ManagedEngineSpec = TENSORRT_LLM_ENGINE as never) {
   const loaded = new Set<string>()
   const loading = new Set<string>()
   const events: string[] = []
@@ -318,7 +326,7 @@ function provider(stopConfirms: () => boolean) {
     },
     shutdown: async () => undefined,
   } as unknown as ManagedTextLifecycle
-  const runtime = new TensorrtLlmRuntime({
+  const runtime = new ManagedTextRuntime(engine, {
     lifecycle: async () => lifecycle,
     readyInstallation: async () => ({
       installation: {} as never,
@@ -352,7 +360,7 @@ function provider(stopConfirms: () => boolean) {
     settings: () => ({}),
   })
   // The facade's own per-model transitions and cross-process model claims, over this runtime.
-  const runtimes = new Map<LocalProviderId, LocalRuntime>([['tensorrt-llm', runtime]])
+  const runtimes = new Map<LocalProviderId, LocalRuntime>([[engine.provider as LocalProviderId, runtime]])
   const sessions = new LocalSessions({
     layout: data.layout,
     instanceId: 'core-1',
@@ -366,6 +374,19 @@ function provider(stopConfirms: () => boolean) {
   return { runtime, events, sessions, hold }
 }
 
+/** The managed runtimes of a core that offers only this one. */
+const only = (runtime: ManagedTextRuntime): ReadonlyMap<string, ManagedTextRuntime> =>
+  new Map([[runtime.engine.provider, runtime]])
+
+/** A second managed engine: TensorRT-LLM's spec under another provider id (change `add-vllm-runtime`). */
+const SECOND_ENGINE = {
+  ...TENSORRT_LLM_ENGINE,
+  engine_id: 'test-engine',
+  provider: 'test-engine',
+  label: 'Test engine',
+  descriptor: { engine_id: 'test-engine', label: 'Test engine', url: 'https://conf/test-engine.json' },
+} as unknown as ManagedEngineSpec
+
 /** Whether another core instance could claim model `m` now: only once this one released it. */
 const otherCoreCanClaim = async (modelId: string): Promise<boolean> =>
   acquireModelClaim(data.layout, 'tensorrt-llm', modelId, 'core-2').then(
@@ -376,13 +397,59 @@ const otherCoreCanClaim = async (modelId: string): Promise<boolean> =>
     () => false
   )
 
-describe('tensorrtLlmSessionUnloader', () => {
+describe('managedEngineRegistry (change add-vllm-runtime, task 3.4)', () => {
+  it('registers TensorRT-LLM and vLLM, each under its own provider id, with its own descriptor source', () => {
+    const registry = managedEngineRegistry()
+    expect(registry.list().map((spec) => spec.engine_id)).toEqual(['tensorrt-llm', 'vllm'])
+    expect(registry.descriptorSources().map((source) => source.url)).toEqual([
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/tensorrt-llm.json',
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/vllm.json',
+    ])
+  })
+})
+
+describe('createStoreMigration on Linux (change add-vllm-runtime, D5)', () => {
+  const model = async (root: string, id: string) => {
+    await mkdir(join(root, id), { recursive: true })
+    await writeFile(join(root, id, 'model.yml'), `repository: ${id}\n`)
+  }
+
+  it('moves the old root’s models, logs what moved and each conflict, and keeps the result for the diagnostics', async () => {
+    await model(data.layout.legacyTensorrtLlmModelsDir, 'acme-a')
+    await model(data.layout.legacyTensorrtLlmModelsDir, 'acme-b')
+    await model(data.layout.managedModelsDir, 'acme-b')
+    const logged: string[] = []
+    const migration = createStoreMigration((level, message) => logged.push(`${level}: ${message}`))
+    expect(migration.current()).toBeNull()
+    await migration.onLinux(data.layout)
+    expect(migration.current()).toMatchObject({ moved: ['acme-a'], conflicts: [{ model_id: 'acme-b' }] })
+    expect(logged).toEqual([
+      expect.stringMatching(/^info: Moved 1 model\(s\) into the managed model store: acme-a\.$/),
+      expect.stringMatching(/^warn: Model acme-b was not moved: /),
+    ])
+  })
+
+  it('a failed move is a warning, never a failed start', async () => {
+    await model(data.layout.legacyTensorrtLlmModelsDir, 'acme-a')
+    // The store's place is taken by a file: nothing can be moved under it.
+    await writeFile(data.layout.managedModelsDir, 'not a folder')
+    const logged: string[] = []
+    const migration = createStoreMigration((level, message) => logged.push(`${level}: ${message}`))
+    await expect(migration.onLinux(data.layout)).resolves.toBeUndefined()
+    expect(logged).toEqual([
+      expect.stringMatching(/^warn: Moving models into the managed model store failed/),
+    ])
+    expect(migration.current()).toBeNull()
+  })
+})
+
+describe('managedSessionUnloader', () => {
   it('unloads through the facade — stop confirmed, cross-process claim released — and holds loads off until released (final review M-1)', async () => {
     const { runtime, events, sessions } = provider(() => true)
     await sessions.acquire('tensorrt-llm', 'm', {})
     expect(await otherCoreCanClaim('m')).toBe(false)
-    const unload = tensorrtLlmSessionUnloader(
-      () => runtime,
+    const unload = managedSessionUnloader(
+      () => only(runtime),
       () => sessions
     )
     const removal = await unload('tensorrt-llm')
@@ -402,8 +469,8 @@ describe('tensorrtLlmSessionUnloader', () => {
     hold.gate = new Promise(() => {})
     const pending = sessions.acquire('tensorrt-llm', 'slow', {}).catch((e: unknown) => e)
     await vi.waitFor(() => expect(runtime.isLoading('slow')).toBe(true))
-    const removal = await tensorrtLlmSessionUnloader(
-      () => runtime,
+    const removal = await managedSessionUnloader(
+      () => only(runtime),
       () => sessions
     )('tensorrt-llm')
     expect(await pending).toMatchObject({ code: 'MODEL_LOAD_CANCELLED' })
@@ -416,8 +483,8 @@ describe('tensorrtLlmSessionUnloader', () => {
     let confirms = false
     const { runtime, sessions } = provider(() => confirms)
     await sessions.acquire('tensorrt-llm', 'm', {})
-    const unload = tensorrtLlmSessionUnloader(
-      () => runtime,
+    const unload = managedSessionUnloader(
+      () => only(runtime),
       () => sessions
     )
     await expect(unload('tensorrt-llm')).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED' })
@@ -440,27 +507,134 @@ describe('tensorrtLlmSessionUnloader', () => {
       unload: async () => ({ success: false, error: 'the container would not stop' }),
     }
     await expect(
-      tensorrtLlmSessionUnloader(
-        () => runtime,
+      managedSessionUnloader(
+        () => only(runtime),
         () => refusing
       )('tensorrt-llm')
     ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED', message: 'the container would not stop' })
     await expect(sessions.acquire('tensorrt-llm', 'm', {})).resolves.toMatchObject({ created: false })
   })
 
-  it.each<[string, string, () => LocalRuntime | undefined]>([
-    ['another engine', 'vllm', () => provider(() => true).runtime],
-    ['a core that offers no tensorrt-llm provider', 'tensorrt-llm', () => undefined],
-    ['a provider that is not the tensorrt-llm one', 'tensorrt-llm', () => ({}) as LocalRuntime],
-  ])('reports nothing unloaded for %s', async (_label, engineId, runtime) => {
+  it.each<[string, string, () => ReadonlyMap<string, ManagedTextRuntime>]>([
+    ['another engine', 'vllm', () => only(provider(() => true).runtime)],
+    ['a core that offers no managed provider', 'tensorrt-llm', () => new Map()],
+  ])('reports nothing unloaded for %s', async (_label, engineId, runtimes) => {
     const facade = () => {
       throw new Error('never asked')
     }
-    expect(await tensorrtLlmSessionUnloader(runtime, facade)(engineId)).toEqual({ unloaded: 0 })
+    expect(await managedSessionUnloader(runtimes, facade)(engineId)).toEqual({ unloaded: 0 })
+  })
+
+  it('unloads the engine being removed and only it, whichever managed engine that is (change add-vllm-runtime, task 2.4)', async () => {
+    const trt = provider(() => true)
+    const second = provider(() => true, SECOND_ENGINE)
+    await trt.sessions.acquire('tensorrt-llm', 'a', {})
+    await second.sessions.acquire('test-engine' as LocalProviderId, 'b', {})
+    const runtimes = new Map<string, ManagedTextRuntime>([
+      ['tensorrt-llm', trt.runtime],
+      ['test-engine', second.runtime],
+    ])
+    const facade = {
+      cancelLoad: (provider: string, modelId: string) =>
+        (provider === 'test-engine' ? second : trt).sessions.cancelLoad(provider as LocalProviderId, modelId),
+      unload: (provider: string, modelId: string) =>
+        (provider === 'test-engine' ? second : trt).sessions.unload(provider as LocalProviderId, modelId),
+    }
+
+    const removal = await managedSessionUnloader(
+      () => runtimes,
+      () => facade as never
+    )('test-engine')
+    expect(removal.unloaded).toBe(1)
+    expect(second.events).toEqual(['stopped:b'])
+    expect(trt.runtime.getLoadedModels()).toEqual(['a'])
+    removal.release?.()
   })
 })
 
-describe('tensorrtLlmModelDeleter', () => {
+describe('managedModelExclusivity (change add-vllm-runtime, task 2.6)', () => {
+  const facadeOver = (trt: ReturnType<typeof provider>, second: ReturnType<typeof provider>) => ({
+    cancelLoad: (provider: string, modelId: string) =>
+      (provider === 'test-engine' ? second : trt).sessions.cancelLoad(provider as LocalProviderId, modelId),
+    unload: (provider: string, modelId: string) =>
+      (provider === 'test-engine' ? second : trt).sessions.unload(provider as LocalProviderId, modelId),
+  })
+
+  it('Та же модель другим движком: unloads it from the other provider with a confirmed stop, and nothing else', async () => {
+    const trt = provider(() => true)
+    const second = provider(() => true, SECOND_ENGINE)
+    await trt.sessions.acquire('tensorrt-llm', 'm', {})
+    await trt.sessions.acquire('tensorrt-llm', 'other', {})
+    const runtimes = new Map<string, ManagedTextRuntime>([
+      ['tensorrt-llm', trt.runtime],
+      ['test-engine', second.runtime],
+    ])
+    const release = managedModelExclusivity(
+      () => runtimes,
+      () => facadeOver(trt, second) as never
+    )
+
+    await release('test-engine')('m')
+    expect(trt.events).toEqual(['stopped:m'])
+    expect(trt.runtime.getLoadedModels()).toEqual(['other'])
+    expect(await otherCoreCanClaim('m')).toBe(true)
+  })
+
+  it('refuses with MANAGED_STOP_UNCONFIRMED when the other provider will not confirm the stop', async () => {
+    const trt = provider(() => false)
+    const second = provider(() => true, SECOND_ENGINE)
+    await trt.sessions.acquire('tensorrt-llm', 'm', {})
+    const runtimes = new Map<string, ManagedTextRuntime>([
+      ['tensorrt-llm', trt.runtime],
+      ['test-engine', second.runtime],
+    ])
+    await expect(
+      managedModelExclusivity(
+        () => runtimes,
+        () => facadeOver(trt, second) as never
+      )('test-engine')('m')
+    ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED' })
+    expect(trt.runtime.getLoadedModels()).toEqual(['m'])
+  })
+
+  it('refuses with MANAGED_STOP_UNCONFIRMED when the facade answers an unload that did not succeed', async () => {
+    const trt = provider(() => true)
+    await trt.sessions.acquire('tensorrt-llm', 'm', {})
+    const refusing = {
+      cancelLoad: () => false,
+      unload: async () => ({ success: false, error: 'the container would not stop' }),
+    }
+    await expect(
+      managedModelExclusivity(
+        () => only(trt.runtime),
+        () => refusing as never
+      )('test-engine')('m')
+    ).rejects.toMatchObject({ code: 'MANAGED_STOP_UNCONFIRMED', message: 'the container would not stop' })
+    const silent = { cancelLoad: () => false, unload: async () => ({ success: false }) }
+    await expect(
+      managedModelExclusivity(
+        () => only(trt.runtime),
+        () => silent as never
+      )('test-engine')('m')
+    ).rejects.toMatchObject({
+      code: 'MANAGED_STOP_UNCONFIRMED',
+      message: expect.stringContaining('not loaded in test-engine'),
+    })
+  })
+
+  it('does nothing when no other provider holds the model', async () => {
+    const trt = provider(() => true)
+    const runtimes = only(trt.runtime)
+    const facade = () => {
+      throw new Error('never asked')
+    }
+    await expect(
+      managedModelExclusivity(() => runtimes, facade)('tensorrt-llm')('m')
+    ).resolves.toBeUndefined()
+  })
+})
+
+describe('managedModelDeleter', () => {
   const MODEL = 'acme/m'
   const modelFolder = () => join(data.layout.provider('tensorrt-llm').modelsDir, 'acme', 'm')
 
@@ -486,13 +660,16 @@ describe('tensorrtLlmModelDeleter', () => {
   }
 
   function deleter(
-    runtime: () => LocalRuntime | undefined,
+    runtime: () => ManagedTextRuntime | undefined,
     sessions: () => Pick<LocalSessions, 'cancelLoad' | 'unload'>
   ) {
-    return tensorrtLlmModelDeleter({
-      runtime,
+    return managedModelDeleter({
+      runtimes: () => {
+        const found = runtime()
+        return found === undefined ? new Map() : only(found)
+      },
       sessions: sessions as never,
-      registry: new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      registry: new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
       paths: data.layout.managed,
     })
   }
@@ -528,12 +705,40 @@ describe('tensorrtLlmModelDeleter', () => {
     expect(existsSync(modelFolder())).toBe(false)
     // Another model's cache and folder stay.
     expect(existsSync(other)).toBe(true)
-    expect(await new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir).list()).toEqual(
-      [expect.objectContaining({ id: 'acme/other' })]
-    )
+    expect(await new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir).list()).toEqual([
+      expect.objectContaining({ id: 'acme/other' }),
+    ])
     // The hold is lifted: the id can be downloaded and loaded again.
     await installModel(MODEL)
     await expect(sessions.acquire('tensorrt-llm', MODEL, {})).resolves.toMatchObject({ created: true })
+  })
+
+  it('stops the model in whichever managed provider holds it, before any file goes (change add-vllm-runtime, task 2.4)', async () => {
+    const trt = provider(() => true)
+    const second = provider(() => true, SECOND_ENGINE)
+    await installModel(MODEL)
+    await second.sessions.acquire('test-engine' as LocalProviderId, MODEL, {})
+    const facade = {
+      cancelLoad: (provider: string, modelId: string) =>
+        (provider === 'test-engine' ? second : trt).sessions.cancelLoad(provider as LocalProviderId, modelId),
+      unload: (provider: string, modelId: string) =>
+        (provider === 'test-engine' ? second : trt).sessions.unload(provider as LocalProviderId, modelId),
+    }
+    const deleted = await managedModelDeleter({
+      runtimes: () =>
+        new Map<string, ManagedTextRuntime>([
+          ['tensorrt-llm', trt.runtime],
+          ['test-engine', second.runtime],
+        ]),
+      sessions: (() => facade) as never,
+      registry: new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      paths: data.layout.managed,
+    })(MODEL)
+
+    expect(deleted).toMatchObject({ model_id: MODEL, was_loaded: true })
+    expect(second.events).toEqual([`stopped:${MODEL}`])
+    expect(trt.events).toEqual([])
+    expect(existsSync(modelFolder())).toBe(false)
   })
 
   it('deletes a model that is not loaded, with was_loaded false and no cache to remove', async () => {
@@ -553,10 +758,10 @@ describe('tensorrtLlmModelDeleter', () => {
     const { runtime, sessions } = provider(() => true)
     await installModel(MODEL)
     const calls: string[] = []
-    const deleted = await tensorrtLlmModelDeleter({
-      runtime: () => runtime,
+    const deleted = await managedModelDeleter({
+      runtimes: () => only(runtime),
       sessions: (() => sessions) as never,
-      registry: new TensorrtLlmModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
+      registry: new ManagedModelRegistry(data.layout.provider('tensorrt-llm').modelsDir),
       paths: data.layout.managed,
       windowsFiles: async () => ({
         paths: data.layout.managed,
@@ -668,7 +873,7 @@ describe('tensorrtLlmModelDeleter', () => {
     expect(existsSync(join(modelFolder(), 'model.yml'))).toBe(true)
   })
 
-  it('answers PROVIDER_NOT_FOUND where the core offers no tensorrt-llm provider', async () => {
+  it('answers PROVIDER_NOT_FOUND where the core offers no managed provider', async () => {
     await installModel(MODEL)
     const facade = () => {
       throw new Error('never asked')
@@ -818,13 +1023,11 @@ describe('leftoverContainers', () => {
   })
 })
 
-describe('wireTensorrtLlmModelCheck', () => {
+describe('wireManagedModelCheck (tensorrt-llm)', () => {
   const SMI = 'GPU-aaaa, NVIDIA RTX 4090, 8.9, 24564, 24000, 581.42\n'
   const MEMINFO = 'MemAvailable: 65536000 kB\n'
 
-  function checkOptions(
-    over: Partial<WireTensorrtLlmModelCheckOptions> = {}
-  ): WireTensorrtLlmModelCheckOptions {
+  function checkOptions(over: Partial<WireManagedModelCheckOptions> = {}): WireManagedModelCheckOptions {
     return {
       descriptors: {
         forInstallation: async () => ({ kind: 'available', descriptor }),
@@ -857,11 +1060,11 @@ describe('wireTensorrtLlmModelCheck', () => {
   })
 
   it.each<NodeJS.Platform>(['darwin', 'win32', 'freebsd'])('offers no check on %s', (platform) => {
-    expect(wireTensorrtLlmModelCheck(platform, checkOptions())).toBeNull()
+    expect(wireManagedModelCheck(platform, TENSORRT_LLM_ENGINE, checkOptions())).toBeNull()
   })
 
   it('checks against the latest cached descriptor when nothing is installed, using only nvidia-smi and /proc/meminfo', async () => {
-    const check = wireTensorrtLlmModelCheck('linux', checkOptions())
+    const check = wireManagedModelCheck('linux', TENSORRT_LLM_ENGINE, checkOptions())
     const result = await check?.(checkBody())
     expect(result?.verdict).toEqual({ ok: true })
     expect(result?.checked_gpu_id).toBe('GPU-aaaa')
@@ -886,7 +1089,7 @@ describe('wireTensorrtLlmModelCheck', () => {
       platform: 'linux/amd64',
       installed_at: '2026-09-29T00:00:00.000Z',
     })
-    const check = wireTensorrtLlmModelCheck('linux', checkOptions({ installations }))
+    const check = wireManagedModelCheck('linux', TENSORRT_LLM_ENGINE, checkOptions({ installations }))
     const result = await check?.(checkBody())
     expect(result?.verdict).toEqual({ ok: true })
   })
@@ -898,25 +1101,27 @@ describe('wireTensorrtLlmModelCheck', () => {
       // 19 GB + the 20% reserve + the engine's 1.5 GiB runtime overhead fits 24000 MiB free.
       files: [{ path: 'model.safetensors', size: 19_000_000_000, sha256: null }],
     })
-    const atDefault = wireTensorrtLlmModelCheck('linux', checkOptions())
+    const atDefault = wireManagedModelCheck('linux', TENSORRT_LLM_ENGINE, checkOptions())
     expect((await atDefault?.(bigWeights))?.verdict).toEqual({ ok: true })
 
-    const atLowerFraction = wireTensorrtLlmModelCheck(
+    const atLowerFraction = wireManagedModelCheck(
       'linux',
+      TENSORRT_LLM_ENGINE,
       checkOptions({ settings: () => ({ kv_cache_free_gpu_memory_fraction: 0.1 }) })
     )
     expect((await atLowerFraction?.(bigWeights))?.verdict.ok).toBe(false)
   })
 
   it('refuses a malformed body with INVALID_ARGUMENT before ever asking the host anything', async () => {
-    const check = wireTensorrtLlmModelCheck('linux', checkOptions())
+    const check = wireManagedModelCheck('linux', TENSORRT_LLM_ENGINE, checkOptions())
     await expect(check?.({})).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
     expect(hostCalls).toEqual([])
   })
 
   it("answers the descriptor provider's own error when nothing is installed and nothing was ever cached", async () => {
-    const check = wireTensorrtLlmModelCheck(
+    const check = wireManagedModelCheck(
       'linux',
+      TENSORRT_LLM_ENGINE,
       checkOptions({
         descriptors: {
           forInstallation: async () => ({ kind: 'available', descriptor }),
@@ -990,7 +1195,7 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
       volume_free_bytes: 400_000_000_000,
       vhdx_bytes: null,
     })
-    const context: WindowsTensorrtLlmContext = {
+    const context: WindowsManagedContext = {
       records: { read: async () => (imported ? RECORD : null) },
       wsl: machine.wsl,
       keeper: (name) => createDistributionKeeper(machine.wsl.distribution(name)),
@@ -1000,51 +1205,90 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
     return { machine, context }
   }
 
+  it('moves this scope’s TensorRT-LLM models into the guest’s store once, logs and keeps the result, and tries again after a failure (change add-vllm-runtime, D5)', async () => {
+    const { context } = windowsContext(true)
+    let failures = 1
+    const flaky: WindowsManagedContext = {
+      ...context,
+      records: {
+        read: async () => {
+          if (failures-- > 0) throw new Error('the record could not be read')
+          return context.records.read()
+        },
+      },
+    }
+    const logged: string[] = []
+    const migration = createStoreMigration((level, message) => logged.push(`${level}: ${message}`))
+    // Watching starts nothing: a core start never boots WSL for the move.
+    migration.onWindows(flaky)
+    expect(failures).toBe(1)
+    // The first look fails to move, and is answered anyway: the store is used as it is.
+    await expect(windowsStoreMigration(flaky)).resolves.toBeNull()
+    expect(logged.some((line) => line.includes('failed'))).toBe(true)
+    expect(migration.current()).toBeNull()
+
+    expect((await windowsStoreMigration(flaky))?.moved).toEqual(['acme/m'])
+    expect(migration.current()?.moved).toEqual(['acme/m'])
+    expect(logged.some((line) => line.startsWith('info: Moved 1 model(s)'))).toBe(true)
+    const guest = context.wsl.distribution('AtomicChat')
+    const exists = async (path: string) => (await guest.exec(['test', '-e', path])).code === 0
+    expect(await exists(`${GUEST}/managed-models/acme/m/model.yml`)).toBe(true)
+    expect(await exists(`${GUEST}/models/tensorrt-llm/acme/m/model.yml`)).toBe(false)
+  })
+
   it('offers the provider on Windows x64 and on Windows on Arm with its WSL context, none without it or on another CPU', async () => {
     const { context } = windowsContext(true)
     for (const arch of ['x64', 'arm64']) {
       // Windows on Arm (NVIDIA RTX Spark N1X, 2026-10-06): its own manifest and the linux/arm64 images.
-      const runtime = wireTensorrtLlm(options({ platform: 'win32', arch, windows: context }))
-      expect(runtime).toBeInstanceOf(TensorrtLlmRuntime)
+      const runtime = wireManagedEngine(
+        TENSORRT_LLM_ENGINE,
+        options({ platform: 'win32', arch, windows: context })
+      )
+      expect(runtime).toBeInstanceOf(ManagedTextRuntime)
       await runtime?.shutdown()
     }
-    expect(wireTensorrtLlm(options({ platform: 'win32', arch: 'ia32', windows: context }))).toBeNull()
-    expect(wireTensorrtLlm(options({ platform: 'win32' }))).toBeNull()
+    expect(
+      wireManagedEngine(TENSORRT_LLM_ENGINE, options({ platform: 'win32', arch: 'ia32', windows: context }))
+    ).toBeNull()
+    expect(wireManagedEngine(TENSORRT_LLM_ENGINE, options({ platform: 'win32' }))).toBeNull()
   })
 
   it('refuses a load before the distribution exists, without a docker call', async () => {
     const { context, machine } = windowsContext(false)
-    const runtime = wireTensorrtLlm(options({ platform: 'win32', windows: context })) as TensorrtLlmRuntime
+    const runtime = wireManagedEngine(
+      TENSORRT_LLM_ENGINE,
+      options({ platform: 'win32', windows: context })
+    ) as ManagedTextRuntime
     await expect(runtime.load('acme/m')).rejects.toMatchObject({ code: 'MANAGED_ADAPTER_UNAVAILABLE' })
     expect(machine.wslCalls.some((argv) => argv.includes('/usr/bin/docker'))).toBe(false)
   })
 
   it('answers the models root in the guest and the smaller free space, and MANAGED_ADAPTER_UNAVAILABLE before the import', async () => {
-    expect(await tensorrtLlmModelLocation('win32', data.layout, windowsContext(true).context)()).toEqual({
-      root: `\\\\wsl.localhost\\AtomicChat${GUEST.replaceAll('/', '\\')}\\models\\tensorrt-llm`,
+    expect(await managedModelLocation('win32', data.layout, windowsContext(true).context)()).toEqual({
+      root: `\\\\wsl.localhost\\AtomicChat${GUEST.replaceAll('/', '\\')}\\managed-models`,
       free_bytes: 400_000_000_000,
     })
     await expect(
-      tensorrtLlmModelLocation('win32', data.layout, windowsContext(false).context)()
+      managedModelLocation('win32', data.layout, windowsContext(false).context)()
     ).rejects.toMatchObject({
       code: 'MANAGED_ADAPTER_UNAVAILABLE',
     })
   })
 
-  it('on Linux the location is <data>/tensorrt-llm/models, as before', async () => {
-    const location = await tensorrtLlmModelLocation('linux', data.layout)()
-    expect(location.root).toBe(data.layout.provider('tensorrt-llm').modelsDir)
+  it('on Linux the location is the store, <data>/managed-models (change add-vllm-runtime)', async () => {
+    const location = await managedModelLocation('linux', data.layout)()
+    expect(location.root).toBe(join(data.root, 'managed-models'))
   })
 
   it('checks a model against the VM’s memory, warning when the weights do not fit (spec "Памяти VM меньше, чем весов")', async () => {
     const { context } = windowsContext(true)
-    const check = wireTensorrtLlmModelCheck('win32', {
+    const check = wireManagedModelCheck('win32', TENSORRT_LLM_ENGINE, {
       descriptors: {
         forInstallation: async () => ({ kind: 'available', descriptor }),
         cachedForNewSetup: async () => ({ kind: 'available', descriptor }),
       },
       installations: { list: async () => [] },
-      host: cardless as WireTensorrtLlmModelCheckOptions['host'],
+      host: cardless as WireManagedModelCheckOptions['host'],
       settings: () => ({}),
       windows: context,
     })
@@ -1066,13 +1310,13 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
   it('checks models on Windows on Arm too, and on no CPU the descriptor has no image for', async () => {
     const { context } = windowsContext(true)
     const on = (arch: string) =>
-      wireTensorrtLlmModelCheck('win32', {
+      wireManagedModelCheck('win32', TENSORRT_LLM_ENGINE, {
         descriptors: {
           forInstallation: async () => ({ kind: 'available', descriptor }),
           cachedForNewSetup: async () => ({ kind: 'available', descriptor }),
         },
         installations: { list: async () => [] },
-        host: cardless as WireTensorrtLlmModelCheckOptions['host'],
+        host: cardless as WireManagedModelCheckOptions['host'],
         settings: () => ({}),
         arch,
         windows: context,
@@ -1091,13 +1335,13 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
 
   it('checks a model before the import against the cards Windows sees, with no VM to warn about', async () => {
     const { context, machine: windows } = windowsContext(false)
-    const check = wireTensorrtLlmModelCheck('win32', {
+    const check = wireManagedModelCheck('win32', TENSORRT_LLM_ENGINE, {
       descriptors: {
         forInstallation: async () => ({ kind: 'available', descriptor }),
         cachedForNewSetup: async () => ({ kind: 'available', descriptor }),
       },
       installations: { list: async () => [] },
-      host: cardless as WireTensorrtLlmModelCheckOptions['host'],
+      host: cardless as WireManagedModelCheckOptions['host'],
       settings: () => ({}),
       windows: context,
     })
@@ -1116,7 +1360,7 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
   it('a load on Windows reads the model under the guest root and the cards in the guest, then starts its container there', async () => {
     const { context, machine: windows } = windowsContext(true)
     const mounted = { ...context, mount: directoryGuestMount(join(data.root, 'guest-fs')) }
-    const root = mounted.mount.hostPath('AtomicChat', `${GUEST}/models/tensorrt-llm/acme/m`)
+    const root = mounted.mount.hostPath('AtomicChat', `${GUEST}/managed-models/acme/m`)
     await mkdir(root, { recursive: true })
     await writeFile(
       join(root, 'config.json'),
@@ -1131,7 +1375,8 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
     await readyInstallation(store)
     const docker = new FakeDocker()
     const journal = await ExecutionJournal.open(data.layout)
-    const runtime = wireTensorrtLlm(
+    const runtime = wireManagedEngine(
+      TENSORRT_LLM_ENGINE,
       options({
         platform: 'win32',
         windows: mounted,
@@ -1145,7 +1390,7 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
           reconciled: { removed: [], unconfirmed: [], failed: [], skipped: [] } as never,
         })),
       })
-    ) as TensorrtLlmRuntime
+    ) as ManagedTextRuntime
     // The fake docker has no `docker port`: the load stops right after its container started.
     await expect(runtime.load('acme/m')).rejects.toBeDefined()
     expect(docker.calls.some((argv) => argv[0] === 'create')).toBe(true)
@@ -1183,7 +1428,7 @@ describe('tensorrt-llm on Windows x64 (change add-tensorrt-llm-windows, task 2.8
   })
 
   it('lists models from the guest root once the distribution exists, nothing before', async () => {
-    const registry = tensorrtLlmModelRegistry('win32', data.layout, windowsContext(false).context)
+    const registry = managedModelRegistry('win32', data.layout, windowsContext(false).context)
     expect(await registry.list()).toEqual([])
   })
 })

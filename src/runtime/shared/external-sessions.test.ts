@@ -72,6 +72,10 @@ describe('ExternalSessions', () => {
       generation: 2,
       sessions: 1,
     })
+    expect(sessions.publish('app', 3, [{ provider: 'vllm', model_id: 'v', port: 3 }])).toEqual({
+      generation: 3,
+      sessions: 1,
+    })
   })
 
   it('asks the owner to grow a context and resolves with its answer, once', async () => {

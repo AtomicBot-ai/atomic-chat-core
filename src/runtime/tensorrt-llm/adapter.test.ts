@@ -314,7 +314,7 @@ describe('buildLaunch', () => {
       // A desktop's concurrency, not trtllm-serve's 2048: hybrid (Mamba) models reserve their
       // recurrent state per sequence up front (adapter.ts, TENSORRT_LLM_MAX_BATCH_SIZE).
       '--max_batch_size',
-      '8',
+      '1',
       '--kv_cache_free_gpu_memory_fraction',
       String(TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION),
       // Always present: the KV cache is always bounded in tokens (see the KV tests below).
@@ -382,7 +382,7 @@ describe('buildLaunch', () => {
   it('leaves guided decoding out for a family without structured output, or no family at all', () => {
     for (const f of [family(), null]) {
       const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ family: f }))
-      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 65536\n' })
+      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 8192\n' })
     }
   })
 
@@ -1370,5 +1370,81 @@ describe('classifyReady: a ready engine that cannot hold one sequence of its con
 
   it('is fit when the log carries no capacity line at all (another engine build)', () => {
     expect(tensorrtLlmAdapter.classifyReady!('INFO: Application startup complete.', at(4096))).toBeNull()
+  })
+})
+
+describe('the further LLM API options and sampling defaults the settings set (owner, change add-vllm-runtime)', () => {
+  const optionsOf = (stored: Record<string, unknown>) =>
+    parseYaml(
+      tensorrtLlmAdapter.buildLaunch(baseContext({ settings: tensorrtLlmAdapter.validateSettings(stored) }))
+        .files?.['llm-api-options.yaml'] ?? ''
+    ) as Record<string, unknown>
+
+  it('writes nothing for an option left at the engine default', () => {
+    const plain = optionsOf({})
+    expect(plain).not.toHaveProperty('dtype')
+    expect(plain).not.toHaveProperty('disable_overlap_scheduler')
+    expect(plain).not.toHaveProperty('scheduler_config')
+    expect(plain['kv_cache_config']).not.toHaveProperty('enable_block_reuse')
+  })
+
+  it('writes each option the person changed, under the LLM API name', () => {
+    expect(
+      optionsOf({
+        enable_prefix_caching: false,
+        overlap_scheduler: false,
+        capacity_scheduler_policy: 'max_utilization',
+        dtype: 'float16',
+      })
+    ).toMatchObject({
+      kv_cache_config: { enable_block_reuse: false },
+      disable_overlap_scheduler: true,
+      scheduler_config: { capacity_scheduler_policy: 'MAX_UTILIZATION' },
+      dtype: 'float16',
+    })
+  })
+
+  it('refuses an unknown value with INVALID_ARGUMENT', () => {
+    for (const raw of [
+      { capacity_scheduler_policy: 'static' },
+      { dtype: 'float8' },
+      { overlap_scheduler: 'maybe' },
+      { default_temperature: 5 },
+    ]) {
+      expect(() => tensorrtLlmAdapter.validateSettings(raw), JSON.stringify(raw)).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+      )
+    }
+  })
+
+  it('restarts the engine for a changed option, not for a sampling default the gateway applies', () => {
+    const key = (raw: Record<string, unknown>) =>
+      JSON.stringify(tensorrtLlmAdapter.restartKey?.(tensorrtLlmAdapter.validateSettings(raw)))
+    for (const changed of [
+      { enable_prefix_caching: false },
+      { overlap_scheduler: false },
+      { capacity_scheduler_policy: 'max_utilization' },
+      { dtype: 'bfloat16' },
+    ]) {
+      expect(key(changed), JSON.stringify(changed)).not.toBe(key({}))
+    }
+    expect(key({ default_temperature: 0.3 })).toBe(key({}))
+  })
+
+  it('writes the sampling defaults into a request that sets none, and leaves the request’s own alone', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({ default_temperature: '0.6', default_top_k: 20 })
+    expect(
+      tensorrtLlmRewriteRequestBody('/v1/chat/completions', { messages: [], temperature: 1 }, settings)
+    ).toMatchObject({ temperature: 1, top_k: 20 })
+    expect(tensorrtLlmRewriteRequestBody('/v1/completions', { prompt: 'hi' }, settings)).toMatchObject({
+      temperature: 0.6,
+      top_k: 20,
+    })
+    const none = tensorrtLlmRewriteRequestBody(
+      '/v1/completions',
+      { prompt: 'hi' },
+      tensorrtLlmAdapter.validateSettings({})
+    )
+    expect(none).not.toHaveProperty('temperature')
   })
 })

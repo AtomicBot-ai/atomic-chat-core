@@ -32,8 +32,8 @@ import type { ModelRegistry } from '../models/index.js'
 import { RemoteAccessManager } from '../remote-access/index.js'
 import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
-import { tensorrtLlmRoutePolicy } from '../runtime/tensorrt-llm/index.js'
-import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
+import { managedExternalRoutePolicy } from './managed-engines.js'
+import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
 import { captureReport, loadFailureReport } from '../telemetry/index.js'
@@ -63,7 +63,7 @@ export interface AtomicCoreParts {
    * (task 2.16w round 1, finding 2) has its own, a different `model.yml` schema entirely, so this
    * map holds either. `AtomicCore.registry`'s overloads narrow the return type back per provider.
    */
-  registries: Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>
+  registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>
   control: ControlServer
   log: CoreLogger
   controlToken: string
@@ -122,7 +122,7 @@ export class AtomicCore {
   readonly externalSessions: ExternalSessions
   private readonly lock: InstanceLock
   private readonly runtimes: Map<LocalProviderId, LocalRuntime>
-  private readonly registries: Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>
+  private readonly registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>
   private readonly log: CoreLogger
   private readonly appLeaseTimer: NodeJS.Timeout | undefined
   private readonly errors: ErrorSink | undefined
@@ -184,7 +184,7 @@ export class AtomicCore {
       increaseCtx: (provider, modelId, reason) => this.increaseCtx(provider, modelId, reason),
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
       // A `tensorrt-llm` session another process registered still only serves the declared routes.
-      externalPolicy: (provider) => (provider === 'tensorrt-llm' ? tensorrtLlmRoutePolicy(null) : undefined),
+      externalPolicy: managedExternalRoutePolicy,
     })
     this.remoteAccess = new RemoteAccessManager({
       ...parts.remoteAccess,
@@ -242,15 +242,16 @@ export class AtomicCore {
 
   /**
    * The per-provider model listing (task 2.16w round 1, finding 2): `ModelRegistry` for every
-   * llama.cpp/MLX provider, `TensorrtLlmModelRegistry` for `'tensorrt-llm'` — a fresh scan of
-   * `<data>/tensorrt-llm/models` on every `list()`, so a model the app finishes downloading appears
-   * with no restart, the same guarantee the llama.cpp registry already gives. `unknownProvider` when
-   * this core does not offer the provider at all (`tensorrt-llm` off Linux, for instance).
+   * llama.cpp/MLX provider, `ManagedModelRegistry` for a managed one (`tensorrt-llm`, `vllm`) — the
+   * same scan of the managed model store for every one of them, fresh on every `list()`, so a model
+   * the app finishes downloading appears with no restart, the same guarantee the llama.cpp registry
+   * already gives. `unknownProvider` when this core does not offer the provider at all (a managed one
+   * off Linux and Windows, for instance).
    */
-  registry(provider?: Exclude<LocalProviderId, 'tensorrt-llm'>): ModelRegistry
-  registry(provider: 'tensorrt-llm'): TensorrtLlmModelRegistry
-  registry(provider: LocalProviderId): ModelRegistry | TensorrtLlmModelRegistry
-  registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry | TensorrtLlmModelRegistry {
+  registry(provider?: Exclude<LocalProviderId, 'tensorrt-llm' | 'vllm'>): ModelRegistry
+  registry(provider: 'tensorrt-llm' | 'vllm'): ManagedModelRegistry
+  registry(provider: LocalProviderId): ModelRegistry | ManagedModelRegistry
+  registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry | ManagedModelRegistry {
     const registry = this.registries.get(provider)
     if (!registry) throw unknownProvider(provider, this.registries.keys())
     return registry

@@ -255,6 +255,56 @@ describe('checkTensorrtLlmModel', () => {
   })
 })
 
+/** Change `add-vllm-runtime`, task 2.3: the shared naming rule and a descriptor per engine. */
+describe('checkTensorrtLlmModel next to another managed engine', () => {
+  it('Формат, который читает только vLLM: a GPTQ checkpoint is refused naming the format and tensorrt-llm', async () => {
+    const result = await checkTensorrtLlmModel(
+      body({
+        config_json: {
+          architectures: ['LlamaForCausalLM'],
+          dtype: 'float16',
+          quantization_config: { quant_method: 'gptq', bits: 4, sym: true, group_size: 128 },
+        },
+      }),
+      deps()
+    )
+    expect(result.quantization_format).toBe('gptq_w4a16')
+    expect(result.verdict).toMatchObject({
+      ok: false,
+      error: { code: 'MODEL_INCOMPATIBLE', details: 'gptq_w4a16' },
+    })
+    if (!result.verdict.ok)
+      expect(result.verdict.error.message).toContain('tensorrt-llm does not support "gptq_w4a16"')
+  })
+
+  it('Дескриптор другого движка не используется: not installed, it checks by its own last accepted descriptor, never vLLM’s', async () => {
+    const vllm = descriptor({
+      descriptor_id: 'vllm-0.31.0-cu129-r1',
+      engine_id: 'vllm',
+      supported_architectures: [],
+    })
+    const cachedForNewSetup = vi.fn(async (engineId: string) =>
+      AVAILABLE(engineId === 'vllm' ? vllm : descriptor())
+    )
+    const forInstallation = vi.fn(async () => AVAILABLE(vllm))
+    const result = await checkTensorrtLlmModel(
+      body(),
+      deps({
+        // vLLM is installed and ready; its installation is not this engine's.
+        installations: {
+          list: async () => [
+            record({ installation_id: 'vllm', engine_id: 'vllm', active_descriptor_id: vllm.descriptor_id }),
+          ],
+        },
+        descriptors: { forInstallation, cachedForNewSetup },
+      })
+    )
+    expect(result.verdict).toEqual({ ok: true })
+    expect(cachedForNewSetup).toHaveBeenCalledWith('tensorrt-llm')
+    expect(forInstallation).not.toHaveBeenCalled()
+  })
+})
+
 describe('checkTensorrtLlmModel: the stored default fraction is the one the launch passes', () => {
   // A Qwen3-1.7B-shaped checkpoint (28 layers, 8 KV heads, head_dim 128, bf16 KV) at the stored
   // default context of 8192: KV_bytes = 2 x 28 x 8 x 128 x 2 x 8192 = 939,524,096. At the default

@@ -14,8 +14,9 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { PlatformImage, RuntimeDescriptor, RuntimeInstallation } from '../../contracts/index.js'
 import type { InstallationStore, RuntimeDescriptorProvider } from '../environment/index.js'
 
-/** The engine a `tensorrt-llm` load needs an installation of (the descriptor's own `engine_id`). */
+/** The engine a load needs an installation of when the caller names none (the descriptor's own `engine_id`). */
 const ENGINE_ID = 'tensorrt-llm'
+const LABELS: Record<string, string> = { 'tensorrt-llm': 'TensorRT-LLM' }
 
 export type ContainerPlatform = 'linux/amd64' | 'linux/arm64'
 
@@ -39,6 +40,10 @@ export interface ResolveReadyInstallationDeps {
   descriptors: Pick<RuntimeDescriptorProvider, 'forInstallation'>
   /** This host's container platform; null when the CPU has no published image. */
   platform: ContainerPlatform | null
+  /** The managed engine the load is for (change `add-vllm-runtime`); `tensorrt-llm` when omitted. */
+  engineId?: string
+  /** That engine in messages; defaults to its known name, else its id. */
+  label?: string
 }
 
 function unavailable(message: string, details?: string): AtomicCoreError {
@@ -48,23 +53,25 @@ function unavailable(message: string, details?: string): AtomicCoreError {
 export async function resolveReadyInstallation(
   deps: ResolveReadyInstallationDeps
 ): Promise<ReadyInstallation> {
+  const engineId = deps.engineId ?? ENGINE_ID
+  const label = deps.label ?? LABELS[engineId] ?? engineId
   const ours = (await deps.installations.list())
     .map((record) => record.installation)
-    .filter((i) => i.engine_id === ENGINE_ID)
+    .filter((i) => i.engine_id === engineId)
   const ready = ours.find((i) => i.status === 'ready' && i.active_descriptor_id !== null)
   if (ready === undefined) {
     const status = ours.map((i) => `${i.installation_id}: ${i.status}`).join(', ')
     throw unavailable(
       ours.length === 0
-        ? 'The TensorRT-LLM engine is not installed; set it up before loading a model.'
-        : 'The TensorRT-LLM engine is not ready; finish or repair its setup before loading a model.',
+        ? `The ${label} engine is not installed; set it up before loading a model.`
+        : `The ${label} engine is not ready; finish or repair its setup before loading a model.`,
       status === '' ? undefined : status
     )
   }
   const resolved = await deps.descriptors.forInstallation(ready.active_descriptor_id as string)
   if (resolved.kind !== 'available') throw resolved.error
   const { descriptor } = resolved
-  if (descriptor.engine_id !== ENGINE_ID) {
+  if (descriptor.engine_id !== engineId) {
     throw new AtomicCoreError(
       'MANAGED_METADATA_INVALID',
       'The installation is pinned to a descriptor of another engine.',
@@ -72,7 +79,7 @@ export async function resolveReadyInstallation(
     )
   }
   if (deps.platform === null) {
-    throw unavailable('TensorRT-LLM publishes no image for this CPU architecture.')
+    throw unavailable(`${label} publishes no image for this CPU architecture.`)
   }
   return { installation: ready, descriptor, image: descriptor.image[deps.platform] }
 }

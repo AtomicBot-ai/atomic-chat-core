@@ -19,9 +19,11 @@ import type { ReadyLine } from '../helpers/compiled-core.js'
 const { BIN } = core
 const MiB = 2 ** 20
 const APPLE_SILICON = process.platform === 'darwin' && process.arch === 'arm64'
-// What an M4 Pro with 24 GiB lists on macOS 26: Metal lets the GPU use about three quarters of RAM.
-const METAL_FREE_MIB = 18185
-const METAL_DEVICE = `MTL0: Apple M4 Pro (18186 MiB, ${METAL_FREE_MIB} MiB free);BLAS: Accelerate (0 MiB, 0 MiB free)`
+// Metal lets the GPU use about three quarters of RAM (an M4 Pro with 24 GiB lists 18186 MiB on
+// macOS 26). Sized from this machine's RAM, not one Mac's, so the margin core adds — Metal's free
+// memory less half of RAM — clears the 1 GiB floor below which core leaves fit alone, on any Mac.
+const METAL_FREE_MIB = Math.floor((totalmem() / MiB) * 0.75)
+const METAL_DEVICE = `MTL0: Apple M4 Pro (${METAL_FREE_MIB + 1} MiB, ${METAL_FREE_MIB} MiB free);BLAS: Accelerate (0 MiB, 0 MiB free)`
 
 let dataFolder: string
 const daemons: ChildProcess[] = []

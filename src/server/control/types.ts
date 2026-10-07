@@ -57,8 +57,8 @@ import type {
   LocalProviderId,
   ManagedHostReceipt,
   ModelCompatibility,
-  TensorrtLlmModelDeletion,
-  TensorrtLlmModelLocation,
+  ManagedModelDeletion,
+  ManagedModelLocation,
   ProbeEnvironmentInput,
   RemoteAccessStatus,
   RequirementPlan,
@@ -426,22 +426,26 @@ export interface ControlServerDeps {
   /** Absent in a core without the setup wired; its routes then answer `INVALID_ARGUMENT`. */
   modelSetups?: ModelSetupControl
   /**
-   * `POST /models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`): whether a Hugging
-   * Face checkpoint the caller has not downloaded yet would run, computed without touching the
-   * network. Absent off Linux, where the `tensorrt-llm` provider is not offered at all.
+   * `POST /models/:provider/check` (spec `managed-model-store`, "Проверка совместимости одинакова по
+   * форме для всех managed-движков"): for each managed provider this core offers, whether a Hugging
+   * Face checkpoint the caller has not downloaded yet would run on it, computed without touching the
+   * network. A provider absent here (any non-managed one, or every managed one off Linux and
+   * Windows) answers `PROVIDER_NOT_FOUND`.
    */
-  tensorrtLlmModelCheck?: (body: unknown) => Promise<ModelCompatibility>
+  managedModelChecks?: Readonly<Record<string, (body: unknown) => Promise<ModelCompatibility>>>
   /**
-   * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a): stop the model with Docker's
-   * confirmation, then remove every engine cache of it and its folder. Absent off Linux.
+   * `DELETE /managed-models/:id` (spec `managed-model-store`, "Модель хранилища удаляется через core"):
+   * stop the model in whichever managed provider holds it, with Docker's confirmation, then remove every
+   * engine cache of it and its folder. Absent where no managed provider is offered.
    */
-  tensorrtLlmModelDelete?: (modelId: string) => Promise<TensorrtLlmModelDeletion>
+  managedModelDelete?: (modelId: string) => Promise<ManagedModelDeletion>
   /**
-   * `GET /models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8): where clients put
-   * `tensorrt-llm` models and how much room is left. Absent where the provider is not offered;
-   * `MANAGED_ADAPTER_UNAVAILABLE` on Windows before Atomic Chat's distribution exists.
+   * `GET /managed-models/location` (spec `managed-model-store`, "Core сообщает расположение
+   * хранилища"): where clients put the managed engines' models and how much room is left. Absent where
+   * no managed provider is offered; `MANAGED_ADAPTER_UNAVAILABLE` on Windows before Atomic Chat's
+   * distribution exists.
    */
-  tensorrtLlmModelLocation?: () => Promise<TensorrtLlmModelLocation>
+  managedModelLocation?: () => Promise<ManagedModelLocation>
   /**
    * Whether Apple's on-device model can run here: the server's own `--check` token (`available`,
    * `notEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, `unavailable`, `binaryNotFound`).

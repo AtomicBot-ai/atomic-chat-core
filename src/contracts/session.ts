@@ -13,7 +13,7 @@
  * llama.cpp providers and never becomes the default for an ordinary model.
  */
 export type LocalProviderId =
-  'llamacpp-upstream' | 'llamacpp' | 'atomic-prism' | 'mlx' | 'foundation-models' | 'tensorrt-llm'
+  'llamacpp-upstream' | 'llamacpp' | 'atomic-prism' | 'mlx' | 'foundation-models' | 'tensorrt-llm' | 'vllm'
 
 export interface RuntimeDeviceInfo {
   /** Backends in load order, deduped, e.g. ["CUDA", "CPU"]. */

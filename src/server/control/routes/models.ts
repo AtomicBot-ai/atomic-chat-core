@@ -86,56 +86,59 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
     sendJson(res, 200, await deps.models.validateGguf(body.path))
   })
 
-  // Whether a checkpoint the caller has not downloaded yet would run on tensorrt-llm (task 2.16,
-  // spec `tensorrt-llm-models`): no network, no filesystem read of any model directory. Absent off
-  // Linux, where the provider is not offered at all.
-  router.post(p('/models/tensorrt-llm/check'), async (req, res) => {
-    if (!deps.tensorrtLlmModelCheck) {
+  // Whether a checkpoint the caller has not downloaded yet would run on a managed provider (spec
+  // `managed-model-store`): one route, one shape, every managed engine's own descriptor and memory
+  // rule. No network, no filesystem read of any model directory. A provider with no check — not a
+  // managed one, or not offered on this platform — is not found.
+  router.post(p('/models/:provider/check'), async (req, res, { params }) => {
+    const provider = params['provider'] as string
+    const check = Object.hasOwn(deps.managedModelChecks ?? {}, provider)
+      ? deps.managedModelChecks?.[provider]
+      : undefined
+    if (check === undefined) {
       return sendError(
         res,
-        new AtomicCoreError(
-          'PROVIDER_NOT_FOUND',
-          'tensorrt-llm is not available in this build.',
-          'tensorrt-llm'
-        )
+        new AtomicCoreError('PROVIDER_NOT_FOUND', `${provider} has no model check in this build.`, provider)
       )
     }
     const body = await readJsonBody(req)
-    sendJson(res, 200, await deps.tensorrtLlmModelCheck(body))
+    sendJson(res, 200, await check(body))
   })
 
-  // Where clients put tensorrt-llm models and how much room is left (change `add-tensorrt-llm-windows`,
-  // task 2.8, design D6): on Windows a path into Atomic Chat's WSL distribution, which only core knows.
-  // Registered before the deletion route, so a GET here is never read as a model id.
-  router.get(p('/models/tensorrt-llm/location'), async (_req, res) => {
-    if (!deps.tensorrtLlmModelLocation) {
+  // Where clients put the managed engines' models and how much room is left (spec
+  // `managed-model-store`, "Core сообщает расположение хранилища"): on Windows a path into Atomic
+  // Chat's WSL distribution, which only core knows. Registered before the deletion route, so a GET here
+  // is never read as a model id.
+  router.get(p('/managed-models/location'), async (_req, res) => {
+    if (!deps.managedModelLocation) {
       return sendError(
         res,
         new AtomicCoreError(
           'PROVIDER_NOT_FOUND',
-          'tensorrt-llm is not available in this build.',
-          'tensorrt-llm'
+          'No managed engine is available in this build.',
+          'managed-models'
         )
       )
     }
-    sendJson(res, 200, await deps.tensorrtLlmModelLocation())
+    sendJson(res, 200, await deps.managedModelLocation())
   })
 
-  // Deleting a downloaded tensorrt-llm model (task 2.24, spec `tensorrt-llm-models`): only core knows
-  // whether it is loaded and owns its engine caches, so clients never remove its folder themselves.
-  // The id is taken as sent, never percent-decoded: `Qwen%2FQwen3-1.7B` is not `Qwen/Qwen3-1.7B`.
-  router.delete(p('/models/tensorrt-llm/*modelId'), async (_req, res, { params }) => {
-    if (!deps.tensorrtLlmModelDelete) {
+  // Deleting a model of the store (spec "Модель хранилища удаляется через core"): only core knows
+  // whether any managed provider has it loaded and owns every engine's caches of it, so clients never
+  // remove its folder themselves. The id is taken as sent, never percent-decoded: `Qwen%2FQwen3-1.7B`
+  // is not `Qwen/Qwen3-1.7B`.
+  router.delete(p('/managed-models/*modelId'), async (_req, res, { params }) => {
+    if (!deps.managedModelDelete) {
       return sendError(
         res,
         new AtomicCoreError(
           'PROVIDER_NOT_FOUND',
-          'tensorrt-llm is not available in this build.',
-          'tensorrt-llm'
+          'No managed engine is available in this build.',
+          'managed-models'
         )
       )
     }
-    sendJson(res, 200, await deps.tensorrtLlmModelDelete(params['modelId'] as string))
+    sendJson(res, 200, await deps.managedModelDelete(params['modelId'] as string))
   })
 
   router.get(p('/runtimes/foundation-models/availability'), async (req, res) => {

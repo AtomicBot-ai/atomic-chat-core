@@ -30,6 +30,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'mlx': 'mlx',
   'tensorrt-llm': 'tensorrt-llm',
   'atomic-prism': 'prism-llama.cpp',
+  'vllm': 'vllm',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */

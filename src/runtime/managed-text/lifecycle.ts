@@ -274,8 +274,11 @@ export interface ManagedLoadRequest {
    * whatever `stopPrevious` freed is actually free — free VRAM on the chosen card, for
    * `tensorrt-llm`, re-probed fresh rather than trusted from a snapshot taken before eviction.
    * Throwing refuses the load with no container ever created, the same as `stopPrevious` throwing.
+   * What it answers is the engine's launch plan (`ManagedLaunchContext.plan`, change
+   * `add-vllm-runtime`): numbers a launch takes from the card as it stands right then, such as vLLM's
+   * KV cache in bytes and its share of the card's memory.
    */
-  beforeCreate?: () => Promise<void>
+  beforeCreate?: () => Promise<unknown>
   /** The saved card was gone, so `gpuUuid` is a replacement: every progress event of this load says so. */
   gpuSubstituted?: { requested_gpu_id: string; gpu_id: string }
 }
@@ -678,6 +681,13 @@ export class ManagedTextLifecycle {
         progress('stopping-previous')
         await raceLoadCancel(request.stopPrevious(signal, entry.generation), signal)
       }
+      // Once, after stopPrevious and before anything of the container exists — never repeated on a
+      // port-bind retry, since it is about whether the card has room, not about the host port.
+      let plan: unknown = undefined
+      if (request.beforeCreate) {
+        plan = await raceLoadCancel(request.beforeCreate(), signal)
+        this.checkAborted(signal)
+      }
       progress('starting-container')
       const cacheDir = await ensureEngineCacheDir(
         this.deps.paths,
@@ -699,6 +709,7 @@ export class ManagedTextLifecycle {
         unifiedMemory: request.unifiedMemory === true,
         gpuTotalVramBytes: request.gpuTotalVramBytes ?? null,
         gpuComputeCapability: request.gpuComputeCapability ?? null,
+        ...(plan === undefined ? {} : { plan }),
       })
       await writeWatchdogScript(this.deps.paths.watchdogScript)
       await mkdir(entry.heartbeatDir, { recursive: true })
@@ -861,14 +872,14 @@ export class ManagedTextLifecycle {
         ...watchdogEnv({ heartbeatFile: `${CONTAINER_HEARTBEAT_PATH}/${HEARTBEAT_FILE}` }),
       },
       command: ['--', ...launch.argv],
+      ...(launch.shm_size === undefined ? {} : { shmSize: launch.shm_size }),
     }
   }
 
   /**
    * `docker create` + journal + `docker start`. Core picked the host port, so another process can
    * bind it before Docker does; that one failure is retried with a new port (bounded), everything
-   * else fails the load. `beforeCreate` runs once, before the first attempt — never repeated on a
-   * port-bind retry — since it is about whether the card has room, not about the host port.
+   * else fails the load. (`beforeCreate` ran once before the launch was built.)
    */
   private async createAndStart(
     entry: Entry,
@@ -877,10 +888,6 @@ export class ManagedTextLifecycle {
     cacheDir: string,
     signal: AbortSignal
   ): Promise<PreparedLaunch> {
-    if (request.beforeCreate) {
-      await raceLoadCancel(request.beforeCreate(), signal)
-      this.checkAborted(signal)
-    }
     for (let attempt = 1; ; attempt++) {
       const prepared = await this.deps.deployment.prepareLaunch(launch.engine, entry.heartbeatDir)
       this.checkAborted(signal)

@@ -1,16 +1,17 @@
 /**
- * Where `tensorrt-llm` models live, as clients must use it (change `add-tensorrt-llm-windows`, task
- * 2.8, design D6; spec `tensorrt-llm-models` "Core сообщает расположение моделей"). One answer, from
- * core, on every platform, so a client never derives the folder itself: on Linux the data folder's own
- * `<data>/tensorrt-llm/models` as before; on Windows the scope's folder in Atomic Chat's WSL
- * distribution, `\\wsl.localhost\<distribution>\var\lib\atomic-chat\scopes\<scope_key>\models\tensorrt-llm`,
- * created (and handed to uid 1000) before a client writes into it. The free space on Windows is the
- * smaller of the guest's own and the Windows volume's that holds the distribution's disk image: the
- * guest's disk can grow only as far as that volume lets it. Before the distribution exists there is no
- * such folder: `MANAGED_ADAPTER_UNAVAILABLE`, and no download starts.
+ * Where the managed engines' models live, as clients must use it (spec `managed-model-store`, "Core
+ * сообщает расположение хранилища"; change `add-vllm-runtime`, design D4 — before it, `tensorrt-llm`'s
+ * own folder, change `add-tensorrt-llm-windows`, task 2.8). One answer, from core, on every platform,
+ * so a client never derives the folder itself: on Linux the data folder's `<data>/managed-models`; on
+ * Windows the scope's folder in Atomic Chat's WSL distribution,
+ * `\\wsl.localhost\<distribution>\var\lib\atomic-chat\scopes\<scope_key>\managed-models`, created
+ * (and handed to uid 1000) before a client writes into it. The free space on Windows is the smaller of
+ * the guest's own and the Windows volume's that holds the distribution's disk image: the guest's disk
+ * can grow only as far as that volume lets it. Before the distribution exists there is no such
+ * folder: `MANAGED_ADAPTER_UNAVAILABLE`, and no download starts.
  */
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { TensorrtLlmModelLocation } from '../../contracts/index.js'
+import type { ManagedModelLocation } from '../../contracts/index.js'
 import { freeBytesAtNearest, parseDfAvail } from '../environment/index.js'
 import type { WindowsEnvironmentRecord } from '../environment/index.js'
 import {
@@ -21,11 +22,11 @@ import {
   type WslDistributionTransport,
 } from '../wsl/index.js'
 
-/** Linux: `<data>/tensorrt-llm/models`, with the free space of the volume it is (or will be) on. */
+/** Linux: `<data>/managed-models`, with the free space of the volume it is (or will be) on. */
 export async function linuxModelLocation(
   root: string,
   freeBytes: (path: string) => Promise<number | null> = freeBytesAtNearest
-): Promise<TensorrtLlmModelLocation> {
+): Promise<ManagedModelLocation> {
   return { root, free_bytes: await freeBytes(root).catch(() => null) }
 }
 
@@ -40,14 +41,17 @@ export interface WindowsModelLocationDeps {
   mount?: GuestMount
 }
 
-/** The guest folder of this scope's `tensorrt-llm` models. */
+/** The guest folder of this scope's model store, every managed engine's. */
 export function guestModelsRoot(scopeKey: string): string {
+  return `${guestScopeRoot(scopeKey)}/managed-models`
+}
+
+/** Where this scope's TensorRT-LLM models lived in the guest before the store (design D5). */
+export function legacyGuestModelsRoot(scopeKey: string): string {
   return `${guestScopeRoot(scopeKey)}/models/tensorrt-llm`
 }
 
-export async function windowsModelLocation(
-  deps: WindowsModelLocationDeps
-): Promise<TensorrtLlmModelLocation> {
+export async function windowsModelLocation(deps: WindowsModelLocationDeps): Promise<ManagedModelLocation> {
   const record = await deps.records.read()
   if (record === null) {
     throw new AtomicCoreError(

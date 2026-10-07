@@ -24,7 +24,7 @@ import { dataLayout } from '../../config/index.js'
 import type { ExecutionRecord } from '../container/index.js'
 import { removeEngineCaches } from '../managed-text/index.js'
 import { parseRuntimeDescriptor } from './descriptor.js'
-import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { TENSORRT_LLM_DESCRIPTOR_SOURCE, type RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { parseLinuxEnvironmentManifest } from './environment-manifest.js'
 import type { EnvironmentManifestProvider } from './environment-manifest-provider.js'
 import { InstallationStore } from './installations.js'
@@ -139,6 +139,7 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
   const calls: string[] = []
   const installations = new InstallationStore(root)
   const descriptors: RuntimeDescriptorProvider = {
+    engines: [TENSORRT_LLM_DESCRIPTOR_SOURCE],
     forNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
     forInstallation: async (id) =>
       id === DESCRIPTOR.descriptor_id
@@ -177,8 +178,8 @@ const harness = (state: FakeLinuxHostState, over: Partial<LinuxProvisionerDeps> 
     removeEngineCaches: async (descriptorId) => {
       calls.push(`caches:${descriptorId}`)
     },
-    removeModels: async (engineId) => {
-      calls.push(`models:${engineId}`)
+    removeStoreModels: async () => {
+      calls.push('models')
     },
     unloadEngineSessions: async (engineId) => {
       calls.push(`unload:${engineId}`)
@@ -609,6 +610,119 @@ describe('probing a Linux host for a setup', () => {
     const answer = await createLinuxProvisioner(h.deps).probe(record(), signal)
     expect(answer.host_step).toBeNull()
     expect(answer.plan.blockers[0]?.code).toBe('MANAGED_HOST_STEP_INVALID')
+  })
+})
+
+/**
+ * Two engines on one host (change `add-vllm-runtime`, task 2.2; spec `managed-runtime-environment`,
+ * "Блокеры движка оцениваются по его дескриптору", "Второй движок ставится на готовое окружение").
+ * The second engine is test data: the TensorRT-LLM fixture under another engine id and image.
+ */
+describe('a second managed engine', () => {
+  const SECOND = parseRuntimeDescriptor({
+    ...(readRuntimeFixture('tensorrt-llm-1.2.1-r2.json') as Record<string, unknown>),
+    descriptor_id: 'second-engine-1.0-r1',
+    engine_id: 'second-engine',
+    adapter_id: 'second-engine',
+    minimum_driver_version: '575.51.03',
+    image: {
+      'linux/amd64': { repository: 'docker.io/example/second-engine', digest: `sha256:${'1'.repeat(64)}` },
+      'linux/arm64': { repository: 'docker.io/example/second-engine', digest: `sha256:${'2'.repeat(64)}` },
+    },
+  })
+  const TRT_615 = { ...DESCRIPTOR, minimum_driver_version: '615.00' }
+  const SECOND_TARGET = {
+    kind: 'runtime' as const,
+    installation_id: 'second-engine',
+    engine_id: 'second-engine',
+  }
+  const byEngine: Record<string, RuntimeDescriptor> = { 'tensorrt-llm': TRT_615, 'second-engine': SECOND }
+  const descriptors: RuntimeDescriptorProvider = {
+    engines: [
+      TENSORRT_LLM_DESCRIPTOR_SOURCE,
+      { engine_id: 'second-engine', label: 'Second', url: 'https://conf/second.json' },
+    ],
+    forNewSetup: async (engineId) => ({
+      kind: 'available',
+      descriptor: byEngine[engineId] as RuntimeDescriptor,
+    }),
+    cachedForNewSetup: async (engineId) => ({
+      kind: 'available',
+      descriptor: byEngine[engineId] as RuntimeDescriptor,
+    }),
+    forInstallation: async (id) => {
+      const found = [TRT_615, SECOND].find((descriptor) => descriptor.descriptor_id === id)
+      return found === undefined
+        ? { kind: 'unsupported', error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'not cached') }
+        : { kind: 'available', descriptor: found }
+    },
+  }
+  const probeFor = (state: FakeLinuxHostState, target: typeof TARGET | typeof SECOND_TARGET) =>
+    createLinuxProvisioner(harness(state, { descriptors }).deps).probe(
+      fresh({ target, descriptor_id: (byEngine[target.engine_id] as RuntimeDescriptor).descriptor_id }),
+      signal
+    )
+
+  it('Драйвер ниже порога только одного движка: driver 580 blocks TensorRT-LLM (615) and not the other (575)', async () => {
+    const host = { ...readyHost(), driver: '580.95.05' }
+    const trt = await probeFor(host, TARGET)
+    const second = await probeFor(host, SECOND_TARGET)
+
+    expect(trt.plan.availability).toBe('prerequisite-blocked')
+    expect(trt.plan.blockers).toContainEqual(
+      expect.objectContaining({ reason: 'driver-too-old', message: expect.stringContaining('615') })
+    )
+    expect(trt.plan.blockers.find((b) => b.reason === 'driver-too-old')?.message).toContain('580.95.05')
+    expect(second.plan.blockers).toEqual([])
+    expect(second.plan.descriptor_id).toBe(SECOND.descriptor_id)
+  })
+
+  it('Нет драйвера: both engines get the same environment blocker', async () => {
+    const host = { ...readyHost(), driver: null as unknown as string }
+    const trt = await probeFor(host, TARGET)
+    const second = await probeFor(host, SECOND_TARGET)
+
+    expect(trt.plan.blockers.map((b) => b.reason)).toContain('driver-missing')
+    expect(second.plan.blockers).toEqual(trt.plan.blockers)
+  })
+
+  it('plans the engine not yet installed on a host prepared by the other: no system change, no elevation', async () => {
+    const h = harness(readyHost(), { descriptors })
+    await createLinuxProvisioner(h.deps).activate(record(), signal)
+    const answer = await createLinuxProvisioner(h.deps).probe(
+      fresh({ target: SECOND_TARGET, descriptor_id: SECOND.descriptor_id }),
+      signal
+    )
+
+    expect(answer.host_step).toBeNull()
+    expect(answer.plan.system_changes).toEqual([])
+    expect(answer.plan.requires_elevation).toBe(false)
+    expect(answer.plan.blockers).toEqual([])
+    expect(answer.plan.image_digest).toBe(SECOND.image['linux/amd64'].digest)
+  })
+
+  it('Сбой установки второго движка: a failed pull of its image leaves the ready installation of the other untouched', async () => {
+    const h = harness(readyHost(), {
+      descriptors,
+      pull: vi.fn(async () => {
+        throw new Error('toomanyrequests: You have reached your pull rate limit')
+      }),
+    })
+    const provisioner = createLinuxProvisioner(h.deps)
+    await provisioner.activate(record(), signal)
+    const before = await h.installations.read('tensorrt-llm')
+    const second = record({ target: SECOND_TARGET, descriptor_id: SECOND.descriptor_id }, {})
+    second.machine.consented = {
+      ...(second.machine.consented as NonNullable<PersistedOperation['machine']['consented']>),
+      descriptor_id: SECOND.descriptor_id,
+      image_digest: SECOND.image['linux/amd64'].digest,
+      target: SECOND_TARGET,
+    }
+
+    await expect(provisioner.pull(second, () => undefined, signal)).rejects.toThrow('toomanyrequests')
+    expect(await h.installations.read('tensorrt-llm')).toEqual(before)
+    expect(before?.installation.status).toBe('ready')
+    expect(await h.installations.read('second-engine')).toBeNull()
   })
 })
 
@@ -1313,7 +1427,47 @@ describe('removing the installation', () => {
   it('deletes the models only when asked to', async () => {
     const { h, provisioner } = await installed(readyHost())
     await provisioner.remove(removal({ retain_models: false }), signal)
-    expect(h.calls).toContain('models:tensorrt-llm')
+    expect(h.calls).toContain('models')
+  })
+
+  /** Another engine's ready installation next to TensorRT-LLM's (change add-vllm-runtime, D13). */
+  const withSecond = async (h: Harness): Promise<void> => {
+    const trt = await h.installations.read('tensorrt-llm')
+    await h.installations.write({
+      ...(trt as NonNullable<typeof trt>),
+      installation: {
+        ...(trt as NonNullable<typeof trt>).installation,
+        installation_id: 'vllm',
+        engine_id: 'vllm',
+        active_descriptor_id: 'vllm-0.31.0-cu129-r1',
+      },
+    })
+  }
+
+  it('Удаление одного из двух движков с моделями: the plan says the models stay for vLLM, and they do', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    await withSecond(h)
+    const { plan } = await provisioner.probe(removal({ retain_models: false }), signal)
+    const codes = plan.system_changes.map((change) => change.code)
+    expect(codes).not.toContain('remove-models')
+    expect(plan.system_changes.find((change) => change.code === 'keep-models')).toMatchObject({
+      params: { engines: 'vllm' },
+    })
+
+    await provisioner.remove(removal({ retain_models: false }), signal)
+    expect(h.calls).not.toContain('models')
+    expect(h.calls).toContain(`caches:${DESCRIPTOR.descriptor_id}`)
+    expect(await h.installations.read('tensorrt-llm')).toBeNull()
+    expect((await h.installations.read('vllm'))?.installation.status).toBe('ready')
+  })
+
+  it('Удаление последнего движка с моделями: the plan deletes the store’s models, and the removal does', async () => {
+    const { h, provisioner } = await installed(readyHost())
+    const { plan } = await provisioner.probe(removal({ retain_models: false }), signal)
+    expect(plan.system_changes.map((change) => change.code)).toContain('remove-models')
+    expect(plan.system_changes.map((change) => change.code)).not.toContain('keep-models')
+    await provisioner.remove(removal({ retain_models: false }), signal)
+    expect(h.calls).toContain('models')
   })
 
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
@@ -1444,6 +1598,36 @@ describe('helpers', () => {
     expect(imageMatchesDigest({ RepoDigests: [IMAGE_REF] }, IMAGE)).toBe(true)
     expect(imageMatchesDigest({ RepoDigests: ['other@sha256:1'] }, IMAGE)).toBe(false)
     expect(imageMatchesDigest(null, IMAGE)).toBe(false)
+  })
+
+  it('matches a Docker Hub image in the short form Docker reports it in (vLLM live run on Windows)', () => {
+    const digest = 'sha256:b18abb2df97b8f798e81862bd93f872ea18613372e2c3adc0cc2ac21e66ac12f' as const
+    const hub = { repository: 'docker.io/vllm/vllm-openai', digest }
+    // `docker image inspect` drops the registry of a Docker Hub image from RepoDigests.
+    expect(imageMatchesDigest({ RepoDigests: [`vllm/vllm-openai@${digest}`] }, hub)).toBe(true)
+    expect(imageMatchesDigest({ RepoDigests: [`docker.io/vllm/vllm-openai@${digest}`] }, hub)).toBe(true)
+    expect(
+      imageMatchesDigest(
+        { RepoDigests: [`vllm/vllm-openai@${digest}`] },
+        { ...hub, repository: 'index.docker.io/vllm/vllm-openai' }
+      )
+    ).toBe(true)
+    // An official image goes by its bare name.
+    expect(
+      imageMatchesDigest(
+        { RepoDigests: [`ubuntu@${digest}`] },
+        { repository: 'docker.io/library/ubuntu', digest }
+      )
+    ).toBe(true)
+    // The digest and the repository still have to be the ones pinned.
+    expect(imageMatchesDigest({ RepoDigests: ['vllm/vllm-openai@sha256:0'] }, hub)).toBe(false)
+    expect(imageMatchesDigest({ RepoDigests: [`someone/vllm-openai@${digest}`] }, hub)).toBe(false)
+    expect(
+      imageMatchesDigest(
+        { RepoDigests: [`vllm/vllm-openai@${digest}`] },
+        { repository: 'ghcr.io/vllm/vllm-openai', digest }
+      )
+    ).toBe(false)
   })
 
   it('gives a relogin its own code and keeps the blocker structured', () => {

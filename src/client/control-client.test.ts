@@ -137,7 +137,13 @@ beforeEach(async () => {
       logout: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
       models: async () => [],
     },
-    tensorrtLlmModelLocation: async () => ({ root: '/data/tensorrt-llm/models', free_bytes: 123 }),
+    managedModelLocation: async () => ({ root: '/data/managed-models', free_bytes: 123 }),
+    managedModelDelete: async (modelId) => ({
+      model_id: modelId,
+      was_loaded: false,
+      freed_bytes: 7,
+      engine_caches_removed: 0,
+    }),
     environments: {
       list: async () => {
         environmentCalls.push('list')
@@ -842,9 +848,16 @@ describe('managed environments (task 2.6)', () => {
     })
     expect(receipted.phase).toBe('preparing-environment')
     expect((await client.cancelEnvironmentOperation('op-1')).phase).toBe('cancelled')
-    expect(await client.tensorrtLlmModelLocation()).toEqual({
-      root: '/data/tensorrt-llm/models',
+    expect(await client.managedModelLocation()).toEqual({
+      root: '/data/managed-models',
       free_bytes: 123,
+    })
+    // The id travels as it is: a nested id keeps its slash, nothing is percent-encoded for it.
+    expect(await client.deleteManagedModel('Qwen/Qwen3.5-2B')).toEqual({
+      model_id: 'Qwen/Qwen3.5-2B',
+      was_loaded: false,
+      freed_bytes: 7,
+      engine_caches_removed: 0,
     })
     const descriptor = await client.environmentDescriptor('tensorrt-llm-1.2.1-r1')
     expect(descriptor).toMatchObject({ descriptor_id: 'tensorrt-llm-1.2.1-r1', notices: ['NVIDIA terms'] })

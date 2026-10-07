@@ -140,7 +140,7 @@ describe('what a stuck machine shows', () => {
     const input = {
       document: 'runtime-descriptor' as const,
       defaultUrl: 'https://conf/main/tensorrt-llm.json',
-      variable: 'ATOMIC_RUNTIME_DESCRIPTOR_URL',
+      variables: ['ATOMIC_RUNTIME_DESCRIPTOR_URL'],
       cacheDir: dir,
       idField: 'descriptor_id',
     }
@@ -161,6 +161,47 @@ describe('what a stuck machine shows', () => {
       latest_cached_id: null,
       cached_ids: [],
     })
+  })
+
+  it('reports each engine’s descriptor source and its own pointer (change add-vllm-runtime)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-diag-'))
+    await writeFile(join(dir, 'latest.json'), '{ "descriptor_id": "tensorrt-llm-1.3.0rc29-r2" }\n')
+    await writeFile(join(dir, 'latest-vllm.json'), '{ "descriptor_id": "vllm-0.31.0-cu129-r1" }\n')
+    await writeFile(join(dir, 'tensorrt-llm-1.3.0rc29-r2.json'), '{}')
+    await writeFile(join(dir, 'vllm-0.31.0-cu129-r1.json'), '{}')
+    const vllm = {
+      document: 'runtime-descriptor' as const,
+      engineId: 'vllm',
+      defaultUrl: 'https://conf/main/vllm.json',
+      variables: ['ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM'],
+      cacheDir: dir,
+      idField: 'descriptor_id',
+    }
+    const env = { ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM: 'file:///dev/vllm.json' }
+
+    expect(await documentSource(vllm, env)).toEqual({
+      document: 'runtime-descriptor',
+      engine_id: 'vllm',
+      url: 'file:///dev/vllm.json',
+      default_url: 'https://conf/main/vllm.json',
+      overridden_by: 'ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM',
+      latest_cached_id: 'vllm-0.31.0-cu129-r1',
+      cached_ids: ['tensorrt-llm-1.3.0rc29-r2', 'vllm-0.31.0-cu129-r1'],
+    })
+    // TensorRT-LLM has no pointer of its own yet: the legacy one is still its.
+    expect(
+      await documentSource(
+        { ...vllm, engineId: 'tensorrt-llm', variables: ['ATOMIC_RUNTIME_DESCRIPTOR_URL'] },
+        env
+      )
+    ).toMatchObject({
+      engine_id: 'tensorrt-llm',
+      overridden_by: null,
+      latest_cached_id: 'tensorrt-llm-1.3.0rc29-r2',
+    })
+    expect(sourceOverrides(env)).toEqual([
+      { variable: 'ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM', value: 'file:///dev/vllm.json' },
+    ])
   })
 
   it('summarizes every operation on disk, and survives an unreadable directory', async () => {
@@ -192,5 +233,15 @@ describe('what a stuck machine shows', () => {
       },
     })
     expect(broken.operations).toEqual([])
+    expect(broken.store_migration).toBeNull()
+
+    // The move of TensorRT-LLM's models into the store, as the core did it (change add-vllm-runtime).
+    const migration = { from: '/old', to: '/store', moved: ['a'], conflicts: [] }
+    const moved = await buildEnvironmentDiagnostics({
+      ...base,
+      operations: async () => [],
+      storeMigration: () => migration,
+    })
+    expect(moved.store_migration).toEqual(migration)
   })
 })

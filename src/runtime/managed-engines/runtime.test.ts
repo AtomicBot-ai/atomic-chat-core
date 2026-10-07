@@ -1,5 +1,6 @@
 /**
- * The `tensorrt-llm` LocalRuntime over the real managed-text lifecycle and the real TensorRT-LLM
+ * `ManagedTextRuntime` with the TensorRT-LLM engine spec (change `add-vllm-runtime`, design D3; before
+ * it, the `tensorrt-llm` LocalRuntime) over the real managed-text lifecycle and the real TensorRT-LLM
  * adapter, with an in-process fake `docker` (`test/helpers/fake-docker-exec.ts`), a fake readiness
  * probe and a fake clock. What is under test here is the provider's own part: which card a load gets,
  * what refuses a load before any container exists, one session at a time, cancel, logs and
@@ -7,7 +8,7 @@
  */
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { CoreEvents, GpuFacts } from '../../contracts/index.js'
 import { ExecutionJournal, startHeartbeatTicker } from '../container/index.js'
@@ -21,16 +22,18 @@ import { FakeDocker } from '../../../test/helpers/fake-docker-exec.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { tensorrtLlmAdapter } from './adapter.js'
-import type { TensorrtLlmHostFacts } from './host-facts.js'
-import type { ReadyInstallation } from './installation.js'
-import { readTensorrtLlmModel } from './model-dir.js'
-import { checkTensorrtLlmModel } from './check.js'
-import type { HostMemory } from './compatibility.js'
-import { TensorrtLlmRuntime } from './runtime.js'
-import type { TensorrtLlmRuntimeDeps } from './runtime.js'
+import { tensorrtLlmAdapter } from '../tensorrt-llm/adapter.js'
+import type { TensorrtLlmHostFacts } from '../tensorrt-llm/host-facts.js'
+import type { ReadyInstallation } from '../tensorrt-llm/installation.js'
+import { readManagedModel } from '../managed-models/model-dir.js'
+import { checkTensorrtLlmModel } from '../tensorrt-llm/check.js'
+import type { HostMemory } from '../managed-models/index.js'
+import { TENSORRT_LLM_ENGINE } from '../tensorrt-llm/engine.js'
+import type { TensorrtLlmSettings } from '../tensorrt-llm/adapter.js'
+import { ManagedTextRuntime } from './runtime.js'
+import type { ManagedTextRuntimeDeps } from './runtime.js'
 import type { GpuClaim } from '../shared/index.js'
-import { TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES } from './compatibility.js'
+import { TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES } from '../tensorrt-llm/compatibility.js'
 import { skipOnWindows } from '../../../test/helpers/platform.js'
 
 const descriptor = parseRuntimeDescriptor(readRuntimeFixture('tensorrt-llm.json'))
@@ -60,7 +63,7 @@ let clock: number
 let emitted: Emitted[]
 let readyAt: number | null
 let onProbe: ((now: number) => void) | undefined
-let runtime: TensorrtLlmRuntime
+let runtime: ManagedTextRuntime<TensorrtLlmSettings>
 let stored: Record<string, unknown>
 let facts: TensorrtLlmHostFacts
 let installation: () => Promise<ReadyInstallation>
@@ -104,9 +107,9 @@ async function installModel(id: string, architecture: string): Promise<void> {
 }
 
 function build(
-  over: Partial<TensorrtLlmRuntimeDeps> = {},
+  over: Partial<ManagedTextRuntimeDeps> = {},
   withDocker: boolean | Error = true
-): TensorrtLlmRuntime {
+): ManagedTextRuntime<TensorrtLlmSettings> {
   const adapters = new ManagedTextAdapterRegistry()
   adapters.register(tensorrtLlmAdapter)
   let port = 43_000
@@ -143,12 +146,12 @@ function build(
         timings: { pollIntervalMs: 1_000, monitorIntervalMs: 60_000, heartbeatReadyTimeoutMs: 2_000 },
       })
   ))
-  runtime = new TensorrtLlmRuntime({
+  runtime = new ManagedTextRuntime(TENSORRT_LLM_ENGINE, {
     lifecycle: () =>
       withDocker instanceof Error ? Promise.reject(withDocker) : withDocker ? made : Promise.resolve(null),
     readyInstallation: () => installation(),
     hostFacts: async () => facts,
-    model: (id) => readTensorrtLlmModel(data.layout.provider('tensorrt-llm').modelsDir, id),
+    model: (id) => readManagedModel(data.layout.provider('tensorrt-llm').modelsDir, id),
     settings: () => stored,
     ...over,
   })
@@ -197,7 +200,7 @@ afterEach(async () => {
   await data.cleanup()
 })
 
-describe('TensorrtLlmRuntime: which card', () => {
+describe('ManagedTextRuntime (tensorrt-llm): which card', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('runs on the saved card when the probe still finds it', async () => {
     build()
@@ -319,7 +322,7 @@ describe('TensorrtLlmRuntime: which card', () => {
   })
 })
 
-describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
+describe('ManagedTextRuntime (tensorrt-llm): a unified-memory card (GB10)', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   const GB10: GpuFacts = {
     gpu_id: 'GPU-d991dc71-7825-0bf8-3339-cb2e7ead6a32',
@@ -353,12 +356,12 @@ describe('TensorrtLlmRuntime: a unified-memory card (GB10)', () => {
     facts = { gpus: [LARGE], selinux: false, memory: NO_HOST_MEMORY }
     await runtime.load('qwen3')
     expect(await readFile(optionsFile(), 'utf8')).toBe(
-      'guided_decoding_backend: xgrammar\nkv_cache_config:\n  max_tokens: 65536\n'
+      'guided_decoding_backend: xgrammar\nkv_cache_config:\n  max_tokens: 8192\n'
     )
   })
 })
 
-describe('TensorrtLlmRuntime: refused before a container exists', () => {
+describe('ManagedTextRuntime (tensorrt-llm): refused before a container exists', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('answers MANAGED_ADAPTER_UNAVAILABLE when the engine installation is not ready', async () => {
     build()
@@ -417,7 +420,7 @@ describe('TensorrtLlmRuntime: refused before a container exists', () => {
   })
 })
 
-describe('TensorrtLlmRuntime: pre-launch check (task 2.16, spec "Проверка файлов при загрузке")', () => {
+describe('ManagedTextRuntime (tensorrt-llm): pre-launch check (task 2.16, spec "Проверка файлов при загрузке")', () => {
   const modelDir = () => join(data.layout.provider('tensorrt-llm').modelsDir, 'qwen3')
 
   it('refuses with MODEL_FILE_NOT_FOUND, naming the file, when a shard was deleted after download; no container is created', async () => {
@@ -448,7 +451,7 @@ describe('TensorrtLlmRuntime: pre-launch check (task 2.16, spec "Проверк�
   })
 })
 
-describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (task 2.16w round 1, finding 1, Critical)', () => {
+describe('ManagedTextRuntime (tensorrt-llm): the memory check runs after eviction, not before (task 2.16w round 1, finding 1, Critical)', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   // needed = weights (2,000) + the 10% weight-fraction fallback reserve (200) + the engine's runtime
   // overhead (no MLP shape in config.json, so no activation term).
@@ -584,7 +587,69 @@ describe('TensorrtLlmRuntime: the memory check runs after eviction, not before (
   })
 })
 
-describe('TensorrtLlmRuntime: sessions', () => {
+/** Change `add-vllm-runtime`, task 2.6 (design D11): one store model, one managed provider. */
+/** Change `add-vllm-runtime`, task 3.3 (design D9): the engine's launch plan from the re-probed card. */
+describe('ManagedTextRuntime: an engine’s launch plan', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
+  it('is made once the memory check passed, from the card as it stands after the previous sessions stopped', async () => {
+    const launchPlan = vi.fn((_settings: unknown, _resolved: unknown, gpu: GpuFacts) => ({
+      free: gpu.free_vram_bytes,
+    }))
+    build()
+    runtime = new ManagedTextRuntime(
+      { ...TENSORRT_LLM_ENGINE, launchPlan } as typeof TENSORRT_LLM_ENGINE,
+      {
+        lifecycle: () => lastLifecycle,
+        readyInstallation: () => installation(),
+        hostFacts: async () => facts,
+        model: (id: string) => readManagedModel(data.layout.provider('tensorrt-llm').modelsDir, id),
+        settings: () => stored,
+        stopPrevious: undefined,
+        releaseModelElsewhere: async () => {
+          // The card the load picked frees up once the previous sessions are gone.
+          facts = { ...facts, gpus: facts.gpus.map((gpu) => ({ ...gpu, free_vram_bytes: 23_000 * MiB })) }
+        },
+      } as never
+    )
+    await runtime.load('qwen3')
+    expect(launchPlan).toHaveBeenCalledTimes(1)
+    expect(launchPlan.mock.calls[0]?.[2]).toMatchObject({ free_vram_bytes: 23_000 * MiB })
+  })
+})
+
+describe('ManagedTextRuntime: the same model in another managed provider', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
+  it('Та же модель другим движком: asks the other providers to let the model go before its container is created', async () => {
+    const order: string[] = []
+    const releaseModelElsewhere = async (modelId: string) => {
+      order.push(`release:${modelId}`)
+    }
+    build({ releaseModelElsewhere })
+    const created = docker.calls.length
+    await runtime.load('qwen3')
+    order.push(
+      ...docker.calls
+        .slice(created)
+        .filter((argv) => argv[0] === 'create')
+        .map(() => 'create')
+    )
+    expect(order).toEqual(['release:qwen3', 'create'])
+    expect(progress().map((p) => p.stage)).toContain('stopping-previous')
+  })
+
+  it('without a confirmed stop elsewhere, the load is refused with MANAGED_STOP_UNCONFIRMED and no container is created', async () => {
+    build({
+      releaseModelElsewhere: async (modelId) => {
+        throw new AtomicCoreError('MANAGED_STOP_UNCONFIRMED', 'The other container did not stop.', modelId)
+      },
+    })
+    const error = await rejection(runtime.load('qwen3'))
+    expect(error.code).toBe('MANAGED_STOP_UNCONFIRMED')
+    expect(docker.calls.some((argv) => argv[0] === 'create')).toBe(false)
+  })
+})
+
+describe('ManagedTextRuntime (tensorrt-llm): sessions', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('publishes a container session: null pid, a generation, the gateway port and key', async () => {
     build()
@@ -826,7 +891,7 @@ describe('TensorrtLlmRuntime: sessions', () => {
   })
 })
 
-describe('TensorrtLlmRuntime: what a session can do', () => {
+describe('ManagedTextRuntime (tensorrt-llm): what a session can do', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it("gates tools on the descriptor's parser for the model's family", async () => {
     build()
@@ -869,7 +934,7 @@ describe('TensorrtLlmRuntime: what a session can do', () => {
   })
 })
 
-describe('TensorrtLlmRuntime: logs', () => {
+describe('ManagedTextRuntime (tensorrt-llm): logs', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it("serves the loaded container's log, then a failed attempt's log until the next load", async () => {
     build()

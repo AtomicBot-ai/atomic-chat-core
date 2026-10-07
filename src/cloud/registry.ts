@@ -25,6 +25,7 @@ const LOCAL_PROVIDERS = new Set([
   'mlx',
   'foundation-models',
   'tensorrt-llm',
+  'vllm',
 ])
 
 export interface CustomHeader {
