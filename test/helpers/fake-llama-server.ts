@@ -54,6 +54,15 @@ export interface FakeLlamaOptions {
    * decision server. `true` for the defaults (API version 1, router calibrated, no delays).
    */
   decision?: boolean | FakeDecisionOptions
+  /** Embedding mode (`--embedding`): what the projector reads and whether the model refuses vectors. */
+  embedding?: FakeEmbeddingOptions
+}
+
+export interface FakeEmbeddingOptions {
+  /** With `--mmproj`, `/props.modalities` says `audio` as well as `vision`. */
+  audio?: boolean
+  /** `/v1/embeddings` answers 400, as llama.cpp does for a model without pooling. */
+  refuse?: boolean
 }
 
 export interface FakeDecisionOptions {
@@ -100,6 +109,8 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
     if (d.noConvert) env['FAKE_DECISION_NO_CONVERT'] = '1'
     if (d.upstream) env['FAKE_DECISION_UPSTREAM'] = '1'
   }
+  if (options.embedding?.audio) env['FAKE_EMBEDDING_AUDIO'] = '1'
+  if (options.embedding?.refuse) env['FAKE_EMBEDDING_REFUSE'] = '1'
   return env
 }
 
@@ -128,4 +139,10 @@ export function fakeDecisionSpawn(options: FakeLlamaOptions = {}) {
   const withDecision = { ...options, decision: options.decision ?? true }
   return (spec: SpawnSpec, onLine: (stream: 'stdout' | 'stderr', line: string) => void): ManagedProcess =>
     spawnManaged(rewrite(spec, withDecision), onLine, { captureOutput: false })
+}
+
+/** The embedding module's spawn seam: the fake as a stock llama.cpp started with `--embedding`. */
+export function fakeEmbeddingSpawn(options: FakeLlamaOptions = {}) {
+  return (spec: SpawnSpec, onLine: (stream: 'stdout' | 'stderr', line: string) => void): ManagedProcess =>
+    spawnManaged(rewrite(spec, options), onLine, { captureOutput: false })
 }

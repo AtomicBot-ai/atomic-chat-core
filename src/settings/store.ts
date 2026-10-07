@@ -25,8 +25,14 @@
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { AtomicCoreError, DEFAULT_SERVER_SETTINGS } from '../contracts/index.js'
-import type { DecisionSettings, LocalProviderId, ServerSettings } from '../contracts/index.js'
+import type {
+  DecisionSettings,
+  EmbeddingSettings,
+  LocalProviderId,
+  ServerSettings,
+} from '../contracts/index.js'
 import { decisionSettingsOf, parseDecisionSettingsPatch } from './decision.js'
+import { embeddingSettingsOf, parseEmbeddingSettingsPatch } from './embedding.js'
 import { LOCAL_PROVIDER_IDS, canonicalizeSettingValues, defaultSettingValues } from './schema.js'
 import { classifyImport, legacyHash, planImport } from './import.js'
 import type { ImportOutcome, Resolutions } from './import.js'
@@ -76,7 +82,7 @@ export interface SettingsDocument {
   [extra: string]: unknown
 }
 
-export type SettingsScope = LocalProviderId | 'server' | 'cloud' | 'decision' | 'state'
+export type SettingsScope = LocalProviderId | 'server' | 'cloud' | 'decision' | 'embedding' | 'state'
 
 /** What `onChange` listeners receive; the events module maps it onto `settings:changed`. */
 export interface SettingsChange {
@@ -324,6 +330,28 @@ export class SettingsStore {
       doc['decision'] = target
       return applyPatch(target, checked as Record<string, unknown>, (key, value) => ({
         scope: 'decision',
+        key,
+        value,
+      }))
+    })
+  }
+
+  /** The embedding model's section, defaults filled in. Absent from a file until the first write, like `decision`. */
+  get embedding(): EmbeddingSettings {
+    return embeddingSettingsOf(this.doc['embedding'])
+  }
+
+  /** Apply a checked patch to `embedding` (`INVALID_ARGUMENT` for an unknown key or a bad value). */
+  async updateEmbedding(patch: Record<string, unknown>, options: UpdateOptions = {}): Promise<UpdateResult> {
+    const checked = parseEmbeddingSettingsPatch(patch)
+    return this.mutate(options, (doc) => {
+      const raw = doc['embedding']
+      const section =
+        typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+      const target: Record<string, unknown> = { ...section, ...embeddingSettingsOf(section) }
+      doc['embedding'] = target
+      return applyPatch(target, checked as Record<string, unknown>, (key, value) => ({
+        scope: 'embedding',
         key,
         value,
       }))

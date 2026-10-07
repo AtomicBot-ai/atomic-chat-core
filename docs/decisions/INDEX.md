@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-07** — [Embedding models are their own core module, served by name on /v1/embeddings](2026-10-07-embedding-models-are-their-own-core-module.md) — `src/embedding/`: one upstream `llama-server --embedding` (b11454 for EmbeddingGemma 2, b11240 with a projector), readiness by a real vector and `/props.modalities`, `/v1/embeddings` by `model` with inline-media / modality / `dimensions` checks, listed in `/v1/models`; RAG untouched.
 - **2026-10-06** — [vLLM runs `vllm serve` with its KV cache in bytes and its memory share sized by core](2026-10-06-vllm-runs-vllm-serve-with-memory-sized-by-core.md) — the `vllm` adapter, `beforeCreate` now hands an engine its launch plan.
 - **2026-10-06** — [Managed engines are registered specs, and an engine id is its provider id](2026-10-06-managed-engines-are-registered-specs-and-engine-id-is-the-provider-id.md) — `ManagedEngineSpec`, `ManagedEngineRegistry`, `ManagedTextRuntime(spec)`, `wireManagedEngine`.
 - **2026-10-06** — [One model store for every managed engine; TensorRT-LLM's models move into it at startup](2026-10-06-one-model-store-for-every-managed-engine-and-trt-models-move-into-it.md) — `<data>/managed-models`, `GET /managed-models/location`, `DELETE /managed-models/:id` replace the `tensorrt-llm` routes.

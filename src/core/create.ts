@@ -43,6 +43,7 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
+import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
@@ -601,6 +602,21 @@ export async function createAtomicCore(
       ...(options.decision ? { overrides: options.decision } : {}),
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
+    // The embedding model the public `/v1/embeddings` serves by name: its own process too, started
+    // with the decision model below.
+    const embedding = wireEmbedding({
+      layout,
+      settings,
+      journal,
+      instanceId: lock.instanceId,
+      emit: (name, payload) => emitter.emit(name, payload),
+      on: (name, listener) => emitter.on(name, listener),
+      log: runtimeLog,
+      platform,
+      env,
+      ...(options.embedding ? { overrides: options.embedding } : {}),
+      ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
 
     const control = await ControlServer.start(
       {
@@ -687,6 +703,7 @@ export async function createAtomicCore(
             // The core emits no `backend:download-finished` for its own installs, so the decision
             // module hears about a new TurboQuant build here: it may be the first to serve `--decision`.
             noticeEngineInstall(decision, provider, result.installed)
+            noticeEmbeddingEngineInstall(embedding, provider, result.installed)
             return result
           },
           remove: (provider, version, backend) =>
@@ -729,6 +746,14 @@ export async function createAtomicCore(
               ...(request.timeout_ms !== undefined ? { timeoutMs: request.timeout_ms } : {}),
               ...(request.truncation !== undefined ? { truncation: request.truncation } : {}),
             }),
+        },
+        embedding: {
+          status: () => embedding.getStatus(),
+          config: () => embedding.getConfig(),
+          configure: (patch) => embedding.configure(patch),
+          load: () => embedding.load(),
+          unload: () => embedding.unload(),
+          embed: (body) => embedding.embed(body),
         },
         settings: {
           get: (provider) => settings.get(provider),
@@ -812,6 +837,7 @@ export async function createAtomicCore(
       managed,
       managedTrustedHosts,
       decision,
+      embedding,
       errors: reporter,
       telemetry: reporter,
       remoteAccess: await wireRemoteAccess({
@@ -848,6 +874,7 @@ export async function createAtomicCore(
     await reapTunnelOrphan(layout.legacyRemoteAccessTunnel, { log: warn })
     // An enabled and configured decision model starts now; its shutdown belongs to the facade.
     decision.start()
+    embedding.start()
     await lock.publish(control.host, control.port)
     log('info', `core ${CORE_VERSION} owns ${layout.root} (control ${control.url})`)
     return core
