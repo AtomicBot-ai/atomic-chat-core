@@ -44,9 +44,10 @@ import {
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
+import { EngineBuildsService, EngineManifestSource, manifestKinds } from '../engine-builds/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
-import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
+import { Downloader, availableDiskSpace, defaultAvailableSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
@@ -286,6 +287,8 @@ export async function createAtomicCore(
           registry: mlxRegistry,
           instanceId: lock.instanceId,
           resourcesDir: options.resourcesDir,
+          // The newest of the installer's `mlx-server` and the ones the core downloaded, per load.
+          resolveBinary: () => engineBuilds.resolveMlxBinary(),
           readSettings: async () => settings.get('mlx'),
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
@@ -463,6 +466,36 @@ export async function createAtomicCore(
       claimGpu: gpuResidency.hook(DIFFUSION_GPU_PROVIDER),
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
+
+    // sd.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads conf's
+    // manifests, installs, activates and removes them; image generation and the MLX runtime lend it
+    // their load locks and their sessions.
+    const engineManifestKinds = manifestKinds(layout)
+    const mlxRuntime = runtimes.get('mlx')
+    const engineBuilds = new EngineBuildsService({
+      dataFolder: layout.root,
+      roots: { 'sd-cpp': layout.diffusion.backendsDir, 'mlx': layout.provider('mlx').backendsDir },
+      failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+      resourcesDir: options.resourcesDir,
+      platform,
+      downloader,
+      manifests: {
+        'sd-cpp': new EngineManifestSource(engineManifestKinds['sd-cpp'], { env, fetchFor, log }),
+        'mlx': new EngineManifestSource(engineManifestKinds.mlx, { env, fetchFor, log }),
+      },
+      hardware: () => hardware.facts(),
+      hosts: {
+        'sd-cpp': diffusion.engineHost(),
+        // Off macOS there is no MLX runtime: nothing runs, so nothing to hold off or unload.
+        'mlx':
+          mlxRuntime instanceof MlxRuntime
+            ? mlxRuntime.engineHost()
+            : { exclusive: (fn) => fn(), inUse: async () => [], activate: async () => {} },
+      },
+      availableSpace: defaultAvailableSpace,
+      emit: (name, payload) => emitter.emit(name, payload),
+      log,
     })
 
     // The managed container environment and the one Docker executor of this core (task 2.6). The
@@ -713,6 +746,7 @@ export async function createAtomicCore(
           stop: () => (core as AtomicCore).stopRemoteAccess(),
         },
         diffusion,
+        engineBuilds,
         decision: {
           status: () => decision.getStatus(),
           config: () => decision.getConfig(),
@@ -838,6 +872,9 @@ export async function createAtomicCore(
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
+    // Before the first load (design D5): downloaded engine builds no newer than the installer's, the
+    // ones a session kept on the last install, the leftovers of an interrupted install.
+    await engineBuilds.startupCleanup()
     // A model setup a stopped core left mid-way becomes `interrupted`, resumable from its files.
     await modelSetups.recover().catch((e: unknown) => warn(`model setup recovery: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.

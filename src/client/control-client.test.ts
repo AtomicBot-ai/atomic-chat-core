@@ -12,6 +12,7 @@ import type {
   ModelSetup,
 } from '../contracts/index.js'
 import { fakeCatalog } from '../../test/helpers/control-harness.js'
+import { fakeEngineBuildsControl } from '../../test/helpers/fake-engine-builds-control.js'
 import type {
   EnvironmentOperation,
   EnvironmentSnapshot,
@@ -43,6 +44,7 @@ let loadFailure: Error | undefined
 let inspecting = false
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
+const engineBuildCalls: string[] = []
 const environmentCalls: string[] = []
 const setupCalls: string[] = []
 
@@ -79,6 +81,7 @@ const OPERATION: EnvironmentOperation = {
 }
 
 beforeEach(async () => {
+  engineBuildCalls.length = 0
   emitter = new CoreEmitter({ instanceId: 'client-test-instance' })
   clients = new ClientRegistry()
   sessions = []
@@ -345,6 +348,7 @@ beforeEach(async () => {
       },
     },
     diffusion: fakeDiffusionControl(diffusionCalls),
+    engineBuilds: fakeEngineBuildsControl(engineBuildCalls),
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -775,6 +779,35 @@ describe('backend advisor', () => {
     })
 
     await expect(client.backendCatalog('mlx' as 'llamacpp', {})).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+  })
+})
+
+describe('engine builds', () => {
+  it('reads the catalog and the update check, installs under a task id and removes a build', async () => {
+    expect(await client.engineBuildCatalog('mlx', { force: true })).toMatchObject({
+      engine: 'mlx',
+      host_backend_id: 'macos-arm64',
+    })
+    expect(await client.checkEngineBuildUpdates('sd-cpp')).toEqual({
+      update_needed: false,
+      current: null,
+      target: null,
+    })
+    expect(await client.installEngineBuild('sd-cpp', { task_id: 'task-1' })).toMatchObject({
+      installed: true,
+    })
+    expect(await client.removeEngineBuild('sd-cpp', 'master-900-aaaaaaa', 'macos-arm64')).toEqual({
+      removed: true,
+    })
+    expect(engineBuildCalls).toEqual([
+      'engine-builds catalog mlx {"force":true}',
+      'engine-builds updates sd-cpp {}',
+      'engine-builds install sd-cpp {"task_id":"task-1"}',
+      'engine-builds remove sd-cpp master-900-aaaaaaa macos-arm64',
+    ])
+    await expect(client.installEngineBuild('mlx', { task_id: '' })).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
     })
   })

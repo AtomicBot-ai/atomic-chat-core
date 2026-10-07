@@ -26,6 +26,7 @@ import type {
   SessionSummary,
 } from '../../src/server/control/index.js'
 import { fakeDiffusionControl } from './fake-diffusion-control.js'
+import { fakeEngineBuildsControl } from './fake-engine-builds-control.js'
 import type { FakeDiffusionControl } from './fake-diffusion-control.js'
 import { fakeSettingsControl } from './fake-settings-control.js'
 import type { FakeSettingsControl } from './fake-settings-control.js'
@@ -241,6 +242,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       },
     },
     diffusion: harness.diffusion,
+    engineBuilds: fakeEngineBuildsControl(calls),
     externalSessions: {
       publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),
       heartbeat: () => ({ alive: true }),

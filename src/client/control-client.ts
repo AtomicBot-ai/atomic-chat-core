@@ -12,6 +12,14 @@ import type { ChatGptStatus } from '../credentials/index.js'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import type {
+  EngineBuildCatalog,
+  EngineBuildCatalogRequest,
+  EngineBuildId,
+  EngineBuildInstallRequest,
+  EngineBuildInstallResult,
+  EngineBuildRemoveResult,
+  EngineBuildUpdateCheck,
+  EngineBuildUpdateCheckRequest,
   BackendCatalogRequest,
   BackendCatalogResponse,
   BackendRecommendationRequest,
@@ -202,6 +210,41 @@ export class CoreClient {
     request: BackendUpdateCheckRequest = {}
   ): Promise<BackendUpdateCheckResponse> {
     return this.call(`/backends/${provider}/updates`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** sd.cpp or MLX: the accepted manifest, the build this host would install, what is installed. */
+  engineBuildCatalog(
+    engine: EngineBuildId,
+    request: EngineBuildCatalogRequest = {}
+  ): Promise<EngineBuildCatalog> {
+    return this.call(`/engine-builds/${engine}/catalog`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** Is a strictly newer build published? Never installs anything: the client picks the moment. */
+  checkEngineBuildUpdates(
+    engine: EngineBuildId,
+    request: EngineBuildUpdateCheckRequest = {}
+  ): Promise<EngineBuildUpdateCheck> {
+    return this.call(`/engine-builds/${engine}/updates`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /**
+   * Install the host's build of the current manifest and make it active, unloading what ran from
+   * another build. Answers when done; progress is `download:progress` under `request.task_id`, and
+   * `cancelDownload(task_id)` stops it.
+   */
+  installEngineBuild(
+    engine: EngineBuildId,
+    request: EngineBuildInstallRequest
+  ): Promise<EngineBuildInstallResult> {
+    return this.call(`/engine-builds/${engine}/install`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** A downloaded build only; `BACKEND_IN_USE` while a session runs from it. */
+  removeEngineBuild(engine: EngineBuildId, tag: string, backendId: string): Promise<EngineBuildRemoveResult> {
+    return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
+      method: 'DELETE',
+    })
   }
 
   hardwareOverride(): Promise<{ override: HardwareOverride | null }> {

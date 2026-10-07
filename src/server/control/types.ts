@@ -6,6 +6,16 @@
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
+  EngineBuildCatalog,
+  EngineBuildCatalogRequest,
+  EngineBuildId,
+  EngineBuildInstallRequest,
+  EngineBuildInstallResult,
+  EngineBuildRemoveResult,
+  EngineBuildUpdateCheck,
+  EngineBuildUpdateCheckRequest,
+} from '../../contracts/index.js'
+import type {
   BeginOperation,
   DecisionDecideRequest,
   DecisionOutcome,
@@ -252,6 +262,21 @@ export interface RemoteAccessControl {
  * Image generation (stage 7h): the app's twenty `DiffusionService` operations, one route each. The
  * routes parse and validate the bodies; what arrives here is already typed.
  */
+/**
+ * sd.cpp and MLX builds the core installs itself (`/engine-builds/:engine/…`, spec `engine-builds`).
+ * The route has already checked `engine` and the body.
+ */
+export interface EngineBuildControl {
+  catalog: (engine: EngineBuildId, request: EngineBuildCatalogRequest) => Promise<EngineBuildCatalog>
+  checkUpdates: (
+    engine: EngineBuildId,
+    request: EngineBuildUpdateCheckRequest
+  ) => Promise<EngineBuildUpdateCheck>
+  /** Answers once the build is installed and active, which can take as long as the download. */
+  install: (engine: EngineBuildId, request: EngineBuildInstallRequest) => Promise<EngineBuildInstallResult>
+  remove: (engine: EngineBuildId, tag: string, backendId: string) => Promise<EngineBuildRemoveResult>
+}
+
 export interface DiffusionControl {
   configure: (config: DiffusionConfig) => Promise<DiffusionStatus>
   getStatus: () => Promise<DiffusionStatus>
@@ -397,6 +422,7 @@ export interface ControlServerDeps {
   disk: DiskControl
   remoteAccess: RemoteAccessControl
   diffusion: DiffusionControl
+  engineBuilds: EngineBuildControl
   /** The decision model; without it the `/decision/*` routes answer `DECISION_UNAVAILABLE`. */
   decision?: DecisionControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
