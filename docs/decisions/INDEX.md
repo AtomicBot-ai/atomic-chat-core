@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-07** — [The core owns the sd.cpp and MLX engine builds: manifest, install, update and removal](2026-10-07-the-core-owns-sdcpp-and-mlx-engine-builds.md) — `/engine-builds/:engine/…`, `src/engine-builds/`; supersedes the engine-download part of 2026-09-17 (image generation module), follows 2026-09-27; the diffusion `…/backends` routes are removed.
 - **2026-10-06** — [vLLM runs `vllm serve` with its KV cache in bytes and its memory share sized by core](2026-10-06-vllm-runs-vllm-serve-with-memory-sized-by-core.md) — the `vllm` adapter, `beforeCreate` now hands an engine its launch plan.
 - **2026-10-06** — [Managed engines are registered specs, and an engine id is its provider id](2026-10-06-managed-engines-are-registered-specs-and-engine-id-is-the-provider-id.md) — `ManagedEngineSpec`, `ManagedEngineRegistry`, `ManagedTextRuntime(spec)`, `wireManagedEngine`.
 - **2026-10-06** — [One model store for every managed engine; TensorRT-LLM's models move into it at startup](2026-10-06-one-model-store-for-every-managed-engine-and-trt-models-move-into-it.md) — `<data>/managed-models`, `GET /managed-models/location`, `DELETE /managed-models/:id` replace the `tensorrt-llm` routes.
