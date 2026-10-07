@@ -2,12 +2,11 @@
  * Image generation: one route per operation of the app's `DiffusionService`, in its camelCase
  * (ADR 2026-09-17-diffusion-speaks-the-apps-camelcase-and-error-codes-verbatim). File-system paths
  * travel in bodies, never in the URL. Lists and lookups that may be empty are wrapped
- * (`{backends}`, `{files}`, `{job}`, `{item}`) so a `null` never stands alone as a body.
+ * (`{files}`, `{job}`, `{item}`) so a `null` never stands alone as a body.
  */
 
 import {
   parseDiffusionConfig,
-  parseFinalizeArgs,
   parseGalleryFlags,
   parseGalleryListOptions,
   parseImageGenerateRequest,
@@ -54,17 +53,8 @@ export function registerDiffusionRoutes(
     sendJson(res, 200, await diffusion.setOutputDir(requireString(await readJsonBody(req), 'path')))
   )
 
-  // --- engine binary ---------------------------------------------------------------------------
-  router.post(p('/diffusion/backends/finalize'), async (req, res) =>
-    sendJson(res, 200, await diffusion.finalizeBackendInstall(parseFinalizeArgs(await readJsonBody(req))))
-  )
-  router.get(p('/diffusion/backends'), async (_req, res) =>
-    sendJson(res, 200, { backends: await diffusion.listInstalledBackends() })
-  )
-  router.post(p('/diffusion/backends/remove'), async (req, res) => {
-    await diffusion.removeBackend(requireString(await readJsonBody(req), 'dir'))
-    sendJson(res, 200, {})
-  })
+  // The engine binary is installed, listed and removed through `/engine-builds/sd-cpp/…`
+  // (change `move-sdcpp-mlx-install-to-core`); `finalize` is gone with the app's own installer.
 
   // --- model files -----------------------------------------------------------------------------
   router.get(p('/diffusion/model-files'), async (_req, res) =>

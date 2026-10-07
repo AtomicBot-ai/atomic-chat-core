@@ -47,13 +47,11 @@ import type {
   ManagedModelDeletion,
   ManagedModelLocation,
   LlamacppProviderId,
-  DiffusionBackendInstallRecord,
   DiffusionCancelResult,
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
   ErrorCode,
-  FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
   GalleryListOptions,
@@ -375,19 +373,6 @@ export class CoreClient {
   /** An empty path restores `<data>/images`. */
   setDiffusionOutputDir(path: string): Promise<DiffusionStatus> {
     return this.call('/diffusion/output-dir', { method: 'PUT', body: JSON.stringify({ path }) })
-  }
-
-  finalizeDiffusionBackend(args: FinalizeBackendInstallArgs): Promise<DiffusionBackendInstallRecord> {
-    return this.call('/diffusion/backends/finalize', { method: 'POST', body: JSON.stringify(args) })
-  }
-
-  async listDiffusionBackends(): Promise<DiffusionBackendInstallRecord[]> {
-    return (await this.call<{ backends: DiffusionBackendInstallRecord[] }>('/diffusion/backends')).backends
-  }
-
-  /** Refuses (`BACKEND_IN_USE`) while a model runs from that tree. */
-  async removeDiffusionBackend(dir: string): Promise<void> {
-    await this.call('/diffusion/backends/remove', { method: 'POST', body: JSON.stringify({ dir }) })
   }
 
   async listDiffusionModelFiles(): Promise<DiffusionModelFile[]> {

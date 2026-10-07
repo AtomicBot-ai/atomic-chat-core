@@ -598,24 +598,13 @@ describe('recreate', () => {
 })
 
 describe('image generation', () => {
-  it('drives the twenty operations, unwrapping the lists and the lookups', async () => {
+  it('drives the operations, unwrapping the lists and the lookups', async () => {
     diffusionCalls.length = 0
     expect((await client.configureDiffusion({ dataFolder: '/tmp/data', idleUnloadSecs: 0 })).configured).toBe(
       true
     )
     expect((await client.diffusionStatus()).outputDir).toBe('/tmp/data/images')
     expect((await client.setDiffusionOutputDir('/pics')).outputDir).toBe('/pics')
-    const record = await client.finalizeDiffusionBackend({
-      dir: '/d',
-      tag: 't',
-      backendId: 'cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-    })
-    expect(record.dir).toBe('/d')
-    expect(record.sha256).toBeNull()
-    expect((await client.listDiffusionBackends()).map((b) => b.backendId)).toEqual(['macos-arm64'])
-    await client.removeDiffusionBackend('/d')
     expect((await client.listDiffusionModelFiles()).map((f) => f.relativePath)).toEqual(['z-image/z.gguf'])
     await client.deleteDiffusionModelFile('/m/z.gguf')
     const loaded = await client.loadDiffusionModel({
@@ -656,8 +645,6 @@ describe('image generation', () => {
     expect(diffusionCalls).toEqual([
       'diffusion configure {"dataFolder":"/tmp/data","idleUnloadSecs":0}',
       'diffusion setOutputDir /pics',
-      'diffusion finalize {"dir":"/d","tag":"t","backendId":"cpu","backend":"cpu","engine":"sd-cpp"}',
-      'diffusion removeBackend /d',
       'diffusion deleteModelFile /m/z.gguf',
       'diffusion loadModel z-image:q4_k_m',
       'diffusion touchIdle',

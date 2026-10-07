@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FixtureHttpServer } from '../../test/helpers/fixture-http-server.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -15,6 +15,9 @@ import { parseMlxManifest, parseSdcppManifest } from './manifest.js'
 import type { ManifestRead, MlxManifest, SdcppManifest } from './manifest.js'
 import { EngineBuildsService, parseEngineBuildId } from './service.js'
 import type { EngineHost } from './service.js'
+
+/** Real child processes (the probes): under a loaded machine a first exec of a fresh script is slow. */
+vi.setConfig({ testTimeout: 20_000 })
 
 const POSIX = process.platform !== 'win32'
 const server = new FixtureHttpServer()

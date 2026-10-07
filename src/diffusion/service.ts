@@ -13,7 +13,6 @@ import type {
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
-  FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
   GalleryListOptions,
@@ -46,11 +45,9 @@ import { startIdleTask } from './idle.js'
 import {
   deleteModelFile,
   ensureDirs,
-  finalizeBackendInstall,
   listInstalledBackends,
   listModelFiles,
   readInstallRecord,
-  removeBackend,
 } from './install.js'
 import {
   cancelJob,
@@ -271,28 +268,9 @@ export class DiffusionService {
   // --- engine binary -------------------------------------------------------------------------------
 
   /**
-   * Under the load lock, so no load or respawn runs across it: finalize, cancel a running job, and
-   * unload a model whose tree the new install replaces.
-   */
-  finalizeBackendInstall(args: FinalizeBackendInstallArgs): Promise<DiffusionBackendInstallRecord> {
-    return this.deps.loadLock.run(async () => {
-      const record = await finalizeBackendInstall(this.state.paths.backendsDir, args, {
-        platform: this.platform,
-        log: this.deps.log,
-        now: this.deps.now,
-      })
-      if (this.state.activeJobId !== undefined)
-        await cancelJob(this.deps, this.state.activeJobId).catch(() => undefined)
-      await activateInstall(this.deps, record)
-      await emitState(this.deps, 'install')
-      return record
-    })
-  }
-
-  /**
    * What the core's engine-builds module needs of image generation (openspec change
    * `move-sdcpp-mlx-install-to-core`, task 3.2): the load lock, the build directories in use, and
-   * the activation `finalize` used to do — cancel the running job, unload a model whose build the new
+   * the activation the app's `finalize` call used to trigger — cancel the running job, unload a model whose build the new
    * one replaces (`engine-updated`), report the install.
    */
   engineHost(): EngineHost {
@@ -321,20 +299,9 @@ export class DiffusionService {
         else await activateInstall(this.deps, record)
         await emitState(this.deps, 'install')
       },
+      // The `install` part of the status changed: the reason the removed route used to report.
+      changed: (reason) => emitState(this.deps, reason),
     }
-  }
-
-  listInstalledBackends(): Promise<DiffusionBackendInstallRecord[]> {
-    return listInstalledBackends(this.state.paths.backendsDir, this.platform)
-  }
-
-  async removeBackend(dir: string): Promise<void> {
-    const inUse = [this.state.session?.spec.binaryDir, this.state.spec?.binaryDir]
-    for (const used of inUse)
-      if (used !== undefined && (await samePath(used, dir, this.platform)))
-        throw diffusionError('BACKEND_IN_USE', 'Unload the image model before removing its engine.')
-    await removeBackend(this.state.paths.backendsDir, dir, this.platform)
-    await emitState(this.deps, 'uninstall')
   }
 
   // --- model files ---------------------------------------------------------------------------------

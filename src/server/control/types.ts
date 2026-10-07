@@ -25,7 +25,6 @@ import type {
   RouterScoreResponse,
   SystemoneResponse,
   DeviceInfo,
-  DiffusionBackendInstallRecord,
   DiffusionCancelResult,
   DiffusionConfig,
   DiffusionModelFile,
@@ -41,7 +40,6 @@ import type {
   ModelSetupPlan,
   ModelSetupPlanRequest,
   ModelSetupStartRequest,
-  FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
   GalleryListOptions,
@@ -281,9 +279,6 @@ export interface DiffusionControl {
   configure: (config: DiffusionConfig) => Promise<DiffusionStatus>
   getStatus: () => Promise<DiffusionStatus>
   setOutputDir: (path: string) => Promise<DiffusionStatus>
-  finalizeBackendInstall: (args: FinalizeBackendInstallArgs) => Promise<DiffusionBackendInstallRecord>
-  listInstalledBackends: () => Promise<DiffusionBackendInstallRecord[]>
-  removeBackend: (dir: string) => Promise<void>
   listModelFiles: () => Promise<DiffusionModelFile[]>
   deleteModelFile: (path: string) => Promise<void>
   /** Answers once the server serves the model, which can take minutes. */

@@ -7,22 +7,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { DiffusionBackendInstallRecord, FinalizeBackendInstallArgs } from '../contracts/index.js'
+import type { DiffusionBackendInstallRecord } from '../contracts/index.js'
 import {
   cliBinaryName,
   deleteModelFile,
   ensureDirs,
-  finalizeBackendInstall,
   INSTALL_RECORD,
   isOwned,
   listInstalledBackends,
   listModelFiles,
   OWNER_MARKER,
+  prepareSdcppTree,
   probeBinary,
   probeOutputIsSdcpp,
   probeVerdict,
   readInstallRecord,
-  removeBackend,
   serverBinaryName,
   writeInstallRecord,
 } from './install.js'
@@ -161,54 +160,6 @@ describe('listInstalledBackends', () => {
   })
 })
 
-describe('removeBackend', () => {
-  it('refuses trees it does not own, trees outside the root, and the root itself', async () => {
-    const unowned = join(root, 'tag', 'cpu')
-    await mkdir(unowned, { recursive: true })
-    const notOurs = await refusal(removeBackend(root, unowned))
-    expect(notOurs.toJSON()).toEqual({
-      code: 'INVALID_REQUEST',
-      message: 'Refusing to delete a directory Atomic Chat did not install.',
-      details: `${unowned} has no .atomic-owned marker`,
-    })
-    expect(await exists(unowned)).toBe(true)
-
-    await writeFile(join(outside, OWNER_MARKER), 'x')
-    const elsewhere = await refusal(removeBackend(root, outside))
-    expect(elsewhere.toJSON()).toEqual({
-      code: 'INVALID_REQUEST',
-      message: 'That directory is not a diffusion backend install.',
-      details: outside,
-    })
-    expect(await exists(outside)).toBe(true)
-
-    expect((await refusal(removeBackend(root, root))).code).toBe('INVALID_REQUEST')
-    expect(await exists(root)).toBe(true)
-  })
-
-  it('deletes an owned tree and its empty tag directory, and is quiet about one already gone', async () => {
-    const owned = join(root, 'tag', 'cpu')
-    await mkdir(join(owned, 'lib'), { recursive: true })
-    await writeFile(join(owned, 'lib', 'x.so'), 'x')
-    await writeInstallRecord(owned, record(owned))
-    await removeBackend(root, owned)
-    expect(await exists(owned)).toBe(false)
-    expect(await exists(join(root, 'tag'))).toBe(false)
-    expect(await exists(root)).toBe(true)
-    await expect(removeBackend(root, owned)).resolves.toBeUndefined()
-  })
-
-  it('keeps a tag directory that still holds another backend', async () => {
-    for (const id of ['cpu', 'vulkan']) {
-      const dir = join(root, 'tag', id)
-      await mkdir(dir, { recursive: true })
-      await writeInstallRecord(dir, record(dir, { backendId: id }))
-    }
-    await removeBackend(root, join(root, 'tag', 'cpu'))
-    expect(await exists(join(root, 'tag', 'vulkan'))).toBe(true)
-  })
-})
-
 describe('model files', () => {
   it('are listed relative to the root and deleted only inside it', async () => {
     const family = join(root, 'z-image')
@@ -267,78 +218,37 @@ describe('model files', () => {
   })
 })
 
-const args = (
-  dir: string,
-  overrides: Partial<FinalizeBackendInstallArgs> = {}
-): FinalizeBackendInstallArgs => ({
-  dir,
-  tag: 'tag',
-  backendId: 'cpu',
-  backend: 'cpu',
-  engine: 'sd-cpp',
-  ...overrides,
-})
-
-describe('finalizeBackendInstall', () => {
-  it('needs a tree inside the backends root that holds sd-server', async () => {
+describe('prepareSdcppTree', () => {
+  it('needs sd-server in the tree', async () => {
     const dir = join(root, 'tag', 'cpu')
-    const missing = await refusal(finalizeBackendInstall(root, args(dir)))
-    expect(missing.toJSON()).toEqual({
-      code: 'ENGINE_INSTALL_FAILED',
-      message: 'The engine directory does not exist.',
-      details: dir,
-    })
     await mkdir(dir, { recursive: true })
-    const noServer = await refusal(finalizeBackendInstall(root, args(dir)))
+    const noServer = await refusal(prepareSdcppTree(dir))
     expect(noServer.code).toBe('ENGINE_INSTALL_FAILED')
     expect(noServer.message).toBe('The archive did not contain sd-server.')
-
-    await writeFile(join(outside, SERVER), 'x')
-    const elsewhere = await refusal(finalizeBackendInstall(root, args(outside)))
-    expect(elsewhere.code).toBe('INVALID_REQUEST')
-    expect(elsewhere.message).toBe('The engine directory is outside the diffusion backends folder.')
   })
 
-  it.skipIf(!posix)('makes the binaries executable, probes the CLI and writes the record', async () => {
+  it.skipIf(!posix)('makes the binaries executable and probes the CLI, else the server', async () => {
     const dir = join(root, 'tag', 'cpu')
     await mkdir(dir, { recursive: true })
-    // Not executable on purpose: finalize must chmod before probing.
+    // Not executable on purpose: the tree must be chmod-ed before the probe.
     await writeFile(join(dir, SERVER), '#!/bin/sh\necho server\n')
     await writeFile(join(dir, CLI), "#!/bin/sh\necho 'usage: sd-cli [options]'\necho '  --cfg-scale SCALE'\n")
     const log: string[] = []
-    const written = await finalizeBackendInstall(root, args(dir, { sha256: 'ff' }), {
-      now: () => 4242,
-      log: (_level, msg) => log.push(msg),
-    })
-    expect(written).toEqual({
-      tag: 'tag',
-      backendId: 'cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-      sha256: 'ff',
-      installedAtMs: 4242,
-      dir,
-    })
-    expect(await readInstallRecord(dir)).toEqual(written)
-    expect(await listInstalledBackends(root)).toHaveLength(1)
+    await prepareSdcppTree(dir, { log: (_level, msg) => log.push(msg) })
     expect((await stat(join(dir, SERVER))).mode & 0o111).toBe(0o111)
     expect(log.some((line) => line.startsWith('engine probe passed in '))).toBe(true)
 
-    // A binary that is not sd.cpp fails the probe and leaves no record; without a CLI the server is probed.
+    // A binary that is not sd.cpp fails the probe; without a CLI the server is probed.
     const bad = join(root, 'tag', 'bad')
     await mkdir(bad, { recursive: true })
     await writeFile(join(bad, SERVER), "#!/bin/sh\necho 'llama-server usage'\n")
-    const error = await refusal(
-      finalizeBackendInstall(root, args(bad, { backendId: 'bad' }), { log: (_l, m) => log.push(m) })
-    )
+    const error = await refusal(prepareSdcppTree(bad, { log: (_l, m) => log.push(m) }))
     expect(error.toJSON()).toEqual({
       code: 'ENGINE_INSTALL_FAILED',
       message: 'The downloaded binary is not stable-diffusion.cpp.',
       details: 'llama-server usage\n',
     })
-    expect(await isOwned(bad)).toBe(false)
     expect(log.at(-1)).toContain('engine probe failed after ')
-    expect(log.at(-1)).toContain('The downloaded binary is not stable-diffusion.cpp.')
   })
 })
 

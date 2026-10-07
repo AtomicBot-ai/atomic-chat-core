@@ -6,7 +6,6 @@
  */
 
 import type {
-  DiffusionBackend,
   DiffusionConfig,
   DiffusionEngineId,
   DiffusionFamilyDefaults,
@@ -15,7 +14,6 @@ import type {
   DiffusionModelFiles,
   DiffusionOffloadPolicy,
   DiffusionVideoDefaults,
-  FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryListOptions,
   ImageGenerateRequest,
@@ -32,7 +30,6 @@ import { IMAGE_WORKFLOWS, VIDEO_WORKFLOWS } from './workflow.js'
 const U32_MAX = 0xffff_ffff
 
 const ENGINES: readonly DiffusionEngineId[] = ['sd-cpp', 'diffusers']
-const BACKENDS: readonly DiffusionBackend[] = ['cpu', 'metal', 'cuda', 'vulkan', 'rocm']
 const OFFLOADS: readonly DiffusionOffloadPolicy[] = ['none', 'group', 'model']
 const MODALITIES: readonly DiffusionModality[] = ['image', 'video']
 
@@ -280,19 +277,6 @@ export function parseDiffusionConfig(body: unknown): DiffusionConfig {
   copyOptional(config, 'videoOutputDir', source, 'videoOutputDir', string)
   copyOptional(config, 'idleUnloadSecs', source, 'idleUnloadSecs', u64)
   return config
-}
-
-export function parseFinalizeArgs(body: unknown): FinalizeBackendInstallArgs {
-  const source = fields(body, 'args')
-  const args: FinalizeBackendInstallArgs = {
-    dir: string(source['dir'], 'dir'),
-    tag: string(source['tag'], 'tag'),
-    backendId: string(source['backendId'], 'backendId'),
-    backend: oneOf(source['backend'], BACKENDS, 'backend'),
-    engine: oneOf(source['engine'], ENGINES, 'engine'),
-  }
-  copyOptional(args, 'sha256', source, 'sha256', string)
-  return args
 }
 
 export function parseGalleryListOptions(body: unknown): GalleryListOptions {

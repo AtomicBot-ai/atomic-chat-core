@@ -119,6 +119,38 @@ async function loadRequest(
   }
 }
 
+/** The core's engine-builds module with this service as its sd.cpp host; the "download" copies a tarball of the fake. */
+async function engineBuilds(h: Harness, tag: string) {
+  const src = join(dataFolder, 'archive-src', tag)
+  await writeFakeSdLaunchers(src)
+  const archive = join(dataFolder, 'archive-src', `${tag}.tar.gz`)
+  await tarCreate({ gzip: true, cwd: src, file: archive }, ['sd-server', 'sd-cli'])
+  const manifest = parseSdcppManifest({
+    tag_name: tag,
+    download_base: 'https://mirror.test/releases',
+    assets: [{ backend: 'macos-arm64', name: 'sd.tar.gz', sha256: 'a'.repeat(64), size: 1 }],
+  })
+  return new EngineBuildsService({
+    dataFolder,
+    roots: { 'sd-cpp': layout.diffusion.backendsDir, 'mlx': layout.provider('mlx').backendsDir },
+    failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+    platform: process.platform,
+    downloader: {
+      download: async (_task: string, items: DownloadItem[]) => {
+        for (const item of items) await writeFile(item.save_path, await readFile(archive))
+      },
+    },
+    manifests: {
+      'sd-cpp': { read: async () => ({ manifest, source: 'remote', fetched_at: 1, error: null }) },
+      'mlx': { read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }) },
+    },
+    hardware: async () => ({ osType: 'macos', arch: 'arm64', cpuExtensions: [], gpus: [] }),
+    hosts: { 'sd-cpp': h.service.engineHost(), 'mlx': h.service.engineHost() },
+    availableSpace: async () => undefined,
+    emit: () => {},
+  })
+}
+
 const exists = (path: string) =>
   stat(path).then(
     () => true,
@@ -191,7 +223,7 @@ describe('configure', () => {
 })
 
 describe.skipIf(!posix)('the engine and the model', () => {
-  it('finalizes an unpacked tree, lists it, loads a model on it and unloads', async () => {
+  it('serves an installed tree: loads a model on it, refuses its removal while loaded, and unloads', async () => {
     const h = harness()
     await h.service.configure({ dataFolder })
     const dir = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'fake-cpu')
@@ -205,16 +237,8 @@ describe.skipIf(!posix)('the engine and the model', () => {
       state: 'failed',
       error: { code: 'ENGINE_MISSING' },
     })
-    const record = await h.service.finalizeBackendInstall({
-      dir,
-      tag: 'master-849-d04e895',
-      backendId: 'fake-cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-    })
+    const record = await installFakeSdEngine(layout, { tag: 'master-849-d04e895', backendId: 'fake-cpu' })
     expect(record.dir).toBe(dir)
-    expect(h.reasons()).toEqual(['load-blocked', 'install'])
-    expect(await h.service.listInstalledBackends()).toEqual([record])
     expect((await h.service.getStatus()).install).toMatchObject({
       state: 'installed',
       backendId: 'fake-cpu',
@@ -251,7 +275,7 @@ describe.skipIf(!posix)('the engine and the model', () => {
     })
     expect(isProcessAlive(loaded.pid)).toBe(true)
     expect(h.journal).toEqual([{ op: 'add', pid: loaded.pid, modelId: 'z-image:q4_k_m' }])
-    expect(h.reasons()).toEqual(['load-blocked', 'install', 'load', 'loaded'])
+    expect(h.reasons()).toEqual(['load-blocked', 'load', 'loaded'])
     const status = await h.service.getStatus()
     expect(status.model).toEqual({ state: 'loaded', loaded })
     expect(status.install).toMatchObject({ dir })
@@ -263,7 +287,10 @@ describe.skipIf(!posix)('the engine and the model', () => {
     h.service.touchIdle()
 
     // The engine and the model files are in use now.
-    await expect(h.service.removeBackend(dir)).rejects.toMatchObject({ code: 'BACKEND_IN_USE' })
+    const builds = await engineBuilds(h, 'master-849-d04e895')
+    await expect(builds.remove('sd-cpp', 'master-849-d04e895', 'fake-cpu')).rejects.toMatchObject({
+      code: 'BACKEND_IN_USE',
+    })
     await expect(h.service.deleteModelFile(request.files.diffusionModel)).rejects.toMatchObject({
       code: 'BACKEND_IN_USE',
       message: 'That file belongs to the loaded image model. Unload it first.',
@@ -278,9 +305,10 @@ describe.skipIf(!posix)('the engine and the model', () => {
     expect(h.reasons().slice(-2)).toEqual(['unload', 'unload'])
     expect((await h.service.getStatus()).model).toEqual({ state: 'unloaded', loaded: null })
     await h.service.deleteModelFile(request.files.diffusionModel)
-    await h.service.removeBackend(dir)
+    expect(await builds.remove('sd-cpp', 'master-849-d04e895', 'fake-cpu')).toEqual({ removed: true })
     expect(await exists(dir)).toBe(false)
     expect(h.reasons().at(-1)).toBe('uninstall')
+    expect((await h.service.getStatus()).install).toMatchObject({ state: 'not-installed' })
     // Unloading nothing is fine.
     await h.service.unloadModel()
   })
@@ -289,16 +317,19 @@ describe.skipIf(!posix)('the engine and the model', () => {
   it('blocks a modern family on an old engine, then loads it on a compatible tree of that backend', async () => {
     const h = harness()
     await h.service.configure({ dataFolder })
+    // Installed one after the other, newest last (`installedAtMs`), as the core's install leaves them.
+    let installedAtMs = 1
     const install = async (tag: string) => {
-      const dir = join(layout.diffusion.backendsDir, tag, 'fake-cpu')
-      await writeFakeSdLaunchers(dir)
-      return h.service.finalizeBackendInstall({
-        dir,
-        tag,
-        backendId: 'fake-cpu',
-        backend: 'cpu',
-        engine: 'sd-cpp',
-      })
+      const engine = await installFakeSdEngine(layout, { tag, backendId: 'fake-cpu' })
+      const record = JSON.parse(await readFile(join(engine.dir, 'install.json'), 'utf8')) as Record<
+        string,
+        unknown
+      >
+      await writeFile(
+        join(engine.dir, 'install.json'),
+        JSON.stringify({ ...record, installedAtMs: ++installedAtMs })
+      )
+      return engine
     }
     await install('master-849-d04e895')
     const request = { ...(await loadRequest()), modelId: 'qwen-image-2.1:q4_k', family: 'qwen-image-2.1' }
@@ -327,15 +358,7 @@ describe.skipIf(!posix)('the engine and the model', () => {
   it('checks and protects the vision projector like any other side file', async () => {
     const h = harness()
     await h.service.configure({ dataFolder })
-    const dir = join(layout.diffusion.backendsDir, 'master-883-137f740', 'fake-cpu')
-    await writeFakeSdLaunchers(dir)
-    await h.service.finalizeBackendInstall({
-      dir,
-      tag: 'master-883-137f740',
-      backendId: 'fake-cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-    })
+    await installFakeSdEngine(layout, { tag: 'master-883-137f740', backendId: 'fake-cpu' })
     const request = await loadRequest()
     const missing = join(dataFolder, 'nope', 'mmproj.gguf')
     await expect(
@@ -385,37 +408,6 @@ describe.skipIf(!posix)('the engine and the model', () => {
  * it like conf does.
  */
 describe.skipIf(!posix)('engine builds through the core', () => {
-  async function engineBuilds(h: Harness, tag: string) {
-    const src = join(dataFolder, 'archive-src', tag)
-    await writeFakeSdLaunchers(src)
-    const archive = join(dataFolder, 'archive-src', `${tag}.tar.gz`)
-    await tarCreate({ gzip: true, cwd: src, file: archive }, ['sd-server', 'sd-cli'])
-    const manifest = parseSdcppManifest({
-      tag_name: tag,
-      download_base: 'https://mirror.test/releases',
-      assets: [{ backend: 'macos-arm64', name: 'sd.tar.gz', sha256: 'a'.repeat(64), size: 1 }],
-    })
-    return new EngineBuildsService({
-      dataFolder,
-      roots: { 'sd-cpp': layout.diffusion.backendsDir, 'mlx': layout.provider('mlx').backendsDir },
-      failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
-      platform: process.platform,
-      downloader: {
-        download: async (_task: string, items: DownloadItem[]) => {
-          for (const item of items) await writeFile(item.save_path, await readFile(archive))
-        },
-      },
-      manifests: {
-        'sd-cpp': { read: async () => ({ manifest, source: 'remote', fetched_at: 1, error: null }) },
-        'mlx': { read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }) },
-      },
-      hardware: async () => ({ osType: 'macos', arch: 'arm64', cpuExtensions: [], gpus: [] }),
-      hosts: { 'sd-cpp': h.service.engineHost(), 'mlx': h.service.engineHost() },
-      availableSpace: async () => undefined,
-      emit: () => {},
-    })
-  }
-
   it('an update while a model is loaded unloads it with engine-updated, retires the old build, and the next load uses the new one', async () => {
     const h = harness()
     await h.service.configure({ dataFolder })
@@ -751,25 +743,20 @@ describe.skipIf(!posix)('generating', () => {
     expect((await h.service.getStatus()).model.state).toBe('unloaded')
   })
 
-  // `finalize_backend_install` + `activate_install` (`commands.rs`/`session.rs`, app commit ec1fd3ea7).
-  it('finalizes a new engine under the load lock: the running job is cancelled, the old server unloaded', async () => {
+  // `activate_install` (`session.rs`, app commit ec1fd3ea7), reached through the core's engine-builds install.
+  it('installs a new engine under the load lock: the running job is cancelled, the old server unloaded', async () => {
     const h = await loadedService({ stepMs: 400 })
     const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
     await waitFor(() => h.service.getJob(jobId)?.state === 'generating')
-    const dir = join(layout.diffusion.backendsDir, 'master-900-abcdef0', 'fake-cpu')
-    await writeFakeSdLaunchers(dir)
-    const record = await h.service.finalizeBackendInstall({
-      dir,
-      tag: 'master-900-abcdef0',
-      backendId: 'fake-cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-    })
+    await (await engineBuilds(h, 'master-900-abcdef0')).install('sd-cpp', { task_id: 'update' })
     expect(h.service.getJob(jobId)?.state).toBe('cancelled')
     expect(isProcessAlive(h.loaded.pid)).toBe(false)
     const status = await h.service.getStatus()
     expect(status.model.state).toBe('unloaded')
-    expect(status.install).toMatchObject({ tag: 'master-900-abcdef0', dir: record.dir })
+    expect(status.install).toMatchObject({
+      tag: 'master-900-abcdef0',
+      dir: join(layout.diffusion.backendsDir, 'master-900-abcdef0', 'macos-arm64'),
+    })
     expect(h.reasons().slice(-2)).toEqual(['engine-updated', 'install'])
     // Nothing is left to respawn the old binary from.
     await expect(h.service.generate(sampleRequest())).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })

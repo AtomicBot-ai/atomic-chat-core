@@ -593,7 +593,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('engine output', () => {
 describe.skipIf(process.platform === 'win32')('image generation through the owner', () => {
   it('wires the diffusion service to the control API, the journal, the events and the shutdown order', async () => {
     const { dataLayout } = await import('../config/index.js')
-    const { writeFakeSdLaunchers, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
+    const { installFakeSdEngine, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
     const { isProcessAlive } = await import('../runtime/shared/index.js')
     const layout = dataLayout(data.root)
     const logs: string[] = []
@@ -617,17 +617,8 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
     })
     expect((await client.configureDiffusion({ dataFolder: data.root })).configured).toBe(true)
 
-    const dir = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'fake-cpu')
-    await writeFakeSdLaunchers(dir, { stepMs: 5 })
-    const record = await client.finalizeDiffusionBackend({
-      dir,
-      tag: 'master-849-d04e895',
-      backendId: 'fake-cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-    })
-    expect(record.dir).toBe(dir)
-    expect(logs.some((line) => line.startsWith('info: engine probe passed'))).toBe(true)
+    // An engine build as the core's engine-builds install leaves it (marker and record).
+    await installFakeSdEngine(layout, { tag: 'master-849-d04e895', backendId: 'fake-cpu', stepMs: 5 })
 
     const diffusionModel = await writeFakeSdModel(layout)
     const loaded = await client.loadDiffusionModel({
@@ -720,22 +711,6 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
     expect(events).toContain('diffusion:progress')
     expect(events).not.toContain('diffusion:error')
 
-    // A failed engine probe is logged as a warning through the owner's logger.
-    const bad = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'bad')
-    await writeFakeSdLaunchers(bad)
-    const { writeFile } = await import('node:fs/promises')
-    await writeFile(join(bad, 'sd-cli'), "#!/bin/sh\necho 'llama-server usage'\n")
-    await expect(
-      client.finalizeDiffusionBackend({
-        dir: bad,
-        tag: 'master-849-d04e895',
-        backendId: 'bad',
-        backend: 'cpu',
-        engine: 'sd-cpp',
-      })
-    ).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED' })
-    expect(logs.some((line) => line.startsWith('warn: engine probe failed'))).toBe(true)
-
     await core.shutdown()
     expect(isProcessAlive(loaded.pid)).toBe(false)
   })
@@ -744,7 +719,7 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
 describe.skipIf(process.platform === 'win32')('video generation through the owner', () => {
   it('serves /v1/videos from the same session: queue, poll, download, list, delete', async () => {
     const { dataLayout } = await import('../config/index.js')
-    const { writeFakeSdLaunchers, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
+    const { installFakeSdEngine, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
     const { fileURLToPath } = await import('node:url')
     const layout = dataLayout(data.root)
     const core = await AtomicCore.create({
@@ -782,14 +757,11 @@ describe.skipIf(process.platform === 'win32')('video generation through the owne
     ] as const)
       core.events.on(name, () => events.push(name))
     await client.configureDiffusion({ dataFolder: data.root })
-    const dir = join(layout.diffusion.backendsDir, 'master-883-137f740', 'fake-cpu')
-    await writeFakeSdLaunchers(dir, { stepMs: 5, modes: ['img_gen', 'vid_gen'] })
-    await client.finalizeDiffusionBackend({
-      dir,
+    await installFakeSdEngine(layout, {
       tag: 'master-883-137f740',
       backendId: 'fake-cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
+      stepMs: 5,
+      modes: ['img_gen', 'vid_gen'],
     })
     const diffusionModel = await writeFakeSdModel(layout, 'ltx-2/ltx.gguf')
     await client.loadDiffusionModel({

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
 import {
   parseDiffusionConfig,
-  parseFinalizeArgs,
   parseGalleryFlags,
   parseGalleryListOptions,
   parseImageGenerateRequest,
@@ -199,24 +198,6 @@ describe('the small bodies', () => {
     expect(refusal(() => parseDiffusionConfig({}))).toBe('dataFolder: expected a string')
     expect(refusal(() => parseDiffusionConfig({ dataFolder: '/d', idleUnloadSecs: -5 }))).toBe(
       'idleUnloadSecs: expected a whole number, zero or more'
-    )
-  })
-
-  it('reads the arguments of a finished engine install', () => {
-    const args = {
-      dir: '/d/b',
-      tag: 'master-849-d04e895',
-      backendId: 'macos-arm64',
-      backend: 'metal',
-      engine: 'sd-cpp',
-    }
-    expect(parseFinalizeArgs(args)).toEqual(args)
-    expect(parseFinalizeArgs({ ...args, sha256: 'abc' })).toEqual({ ...args, sha256: 'abc' })
-    expect(refusal(() => parseFinalizeArgs({ ...args, backend: 'opencl' }))).toBe(
-      'backend: expected one of cpu, metal, cuda, vulkan, rocm'
-    )
-    expect(refusal(() => parseFinalizeArgs({ ...args, engine: undefined }))).toBe(
-      'engine: expected one of sd-cpp, diffusers'
     )
   })
 

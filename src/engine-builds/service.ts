@@ -75,6 +75,8 @@ export interface EngineHost {
    * `exclusive`.
    */
   activate(dir: string, replaced: boolean): Promise<void>
+  /** A build went without an install: `uninstall` or `startup-cleanup`. sd.cpp re-reports its state. */
+  changed?(reason: 'uninstall' | 'startup-cleanup'): Promise<void>
 }
 
 /** One build on disk as this module sees it. */
@@ -392,7 +394,10 @@ export class EngineBuildsService {
         )
       return removeOwnedBuild(this.deps.roots[engine], dir, this.deps.platform)
     })
-    if (removed) this.deps.emit('engine-build:changed', { engine, reason: 'uninstall' })
+    if (removed) {
+      await this.deps.hosts[engine].changed?.('uninstall')
+      this.deps.emit('engine-build:changed', { engine, reason: 'uninstall' })
+    }
     return { removed }
   }
 
@@ -432,7 +437,10 @@ export class EngineBuildsService {
           this.deps.log?.('warn', `The ${engine} startup cleanup failed: ${String(error)}`)
           return 0
         })
-      if (removed > 0) this.deps.emit('engine-build:changed', { engine, reason: 'startup-cleanup' })
+      if (removed > 0) {
+        await this.deps.hosts[engine].changed?.('startup-cleanup')
+        this.deps.emit('engine-build:changed', { engine, reason: 'startup-cleanup' })
+      }
     }
   }
 

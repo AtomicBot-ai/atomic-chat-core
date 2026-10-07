@@ -1,6 +1,6 @@
 import { chmod, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
@@ -12,6 +12,9 @@ import {
   removeOwnedBuild,
   writeMlxInstallRecord,
 } from './builds.js'
+
+/** Real child processes (the probes): under a loaded machine a first exec of a fresh script is slow. */
+vi.setConfig({ testTimeout: 20_000 })
 
 let data: TmpDataFolder
 let root: string
