@@ -61,6 +61,8 @@ export interface FakeLlamaOptions {
 export interface FakeEmbeddingOptions {
   /** With `--mmproj`, `/props.modalities` says `audio` as well as `vision`. */
   audio?: boolean
+  /** With `--mmproj`, `/props.modalities` says `video` too. */
+  video?: boolean
   /** `/v1/embeddings` answers 400, as llama.cpp does for a model without pooling. */
   refuse?: boolean
 }
@@ -110,6 +112,7 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
     if (d.upstream) env['FAKE_DECISION_UPSTREAM'] = '1'
   }
   if (options.embedding?.audio) env['FAKE_EMBEDDING_AUDIO'] = '1'
+  if (options.embedding?.video) env['FAKE_EMBEDDING_VIDEO'] = '1'
   if (options.embedding?.refuse) env['FAKE_EMBEDDING_REFUSE'] = '1'
   return env
 }

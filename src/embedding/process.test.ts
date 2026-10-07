@@ -76,6 +76,37 @@ describe('spawnEmbeddingServer', () => {
     expect(open.status).toBe(401)
   })
 
+  it('offers video only when ffmpeg is there to decode it, and puts it on the PATH', async () => {
+    const envs: Array<Record<string, string>> = []
+    const base = fakeEmbeddingSpawn({ embedding: { video: true } })
+    const capture: SpawnEmbeddingDeps['spawn'] = (s, onLine) => {
+      envs.push(s.env as Record<string, string>)
+      return base(s, onLine)
+    }
+    const projector = { mmprojPath: '/models/mmproj-Q8_0.gguf' }
+    const withFfmpeg = await start({}, projector, {
+      spawn: capture,
+      env: { ...process.env, PATH: '/usr/bin:/bin' },
+      findFfmpeg: async () => '/opt/homebrew/bin',
+    }).run
+    expect(withFfmpeg.modalities).toEqual(['text', 'image', 'video'])
+    expect(envs[0]?.['PATH']?.split(':')[0]).toBe('/opt/homebrew/bin')
+
+    const without = await start({}, projector, {
+      spawn: capture,
+      findFfmpeg: async () => undefined,
+    }).run
+    expect(without.modalities).toEqual(['text', 'image'])
+    // A search that fails is no ffmpeg, not a failed start.
+    const failing = await start({}, projector, {
+      spawn: capture,
+      findFfmpeg: async () => {
+        throw new Error('EACCES')
+      },
+    }).run
+    expect(failing.modalities).toEqual(['text', 'image'])
+  })
+
   it('reads image and audio from a projector', async () => {
     const vision = await start({}, { mmprojPath: '/models/mmproj-Q8_0.gguf', imageMaxTokens: 280 }).run
     expect(vision.modalities).toEqual(['text', 'image'])

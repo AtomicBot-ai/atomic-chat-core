@@ -5,7 +5,10 @@
  *  - media by reference: llama-server fetches an `http(s)` URL itself (and a `file://` one with
  *    `--media-path`), so an API open to the LAN would fetch whatever a client names. Only inline media
  *    (`data:` URLs, bare base64) is passed;
- *  - media the running model cannot read: the engine answers a 500 for it, a client error is a 400;
+ *  - media the running model cannot read: the engine answers a 500 for it, a client error is a 400
+ *    (for video, which also needs `ffmpeg` on this computer, the message says so);
+ *  - a content part sent as an input of its own, outside `{content: [...]}`: llama.cpp refuses it
+ *    with a message about prompt shapes, this one names the fix;
  *  - a `dimensions` the model does not produce: the engine ignores the field, and a client that asked
  *    for 256 numbers would store 768 without knowing (the model's shorter Matryoshka lengths are the
  *    client's to cut, as the app's catalog says).
@@ -25,6 +28,9 @@ const PART_MODALITY: Readonly<Record<string, EmbeddingModality>> = {
   input_video: 'video',
   video_url: 'video',
 }
+
+/** Every content part type the engine reads, for spotting one sent outside `content`. */
+const PART_TYPES: ReadonlySet<string> = new Set(['text', ...Object.keys(PART_MODALITY)])
 
 /** A reference rather than inline bytes: anything with a scheme other than `data:`. */
 export function isMediaReference(value: string): boolean {
@@ -60,7 +66,9 @@ function checkParts(
     if (!modalities.includes(modality))
       return {
         ok: false,
-        message: `The running embedding model does not read ${modality === 'image' ? 'images' : modality} (${where}.content[${i}].type is "${type}").`,
+        message:
+          `The running embedding model does not read ${modality === 'image' ? 'images' : modality} (${where}.content[${i}].type is "${type}").` +
+          (modality === 'video' ? ' Video input also needs ffmpeg installed on this computer.' : ''),
         param: `${where}.content[${i}]`,
       }
     if (mediaValues(part, type).some(isMediaReference))
@@ -93,6 +101,12 @@ export function checkEmbeddingRequest(
   for (const [i, item] of items.entries()) {
     if (!isRecord(item)) continue
     const where = Array.isArray(input) ? `input[${i}]` : 'input'
+    if (typeof item['type'] === 'string' && item['content'] === undefined && PART_TYPES.has(item['type']))
+      return {
+        ok: false,
+        message: `${where} is a content part on its own; wrap it in an input item: {"content": [${JSON.stringify({ type: item['type'] })}]}.`,
+        param: where,
+      }
     const content = item['content']
     if (Array.isArray(content)) {
       const verdict = checkParts(content, where, modalities)

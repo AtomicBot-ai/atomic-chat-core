@@ -56,6 +56,7 @@
  *                     In embedding mode a `/v1/embeddings` input may be a `{content: [parts]}` item: its
  *                     vector's first number is the count of its parts, a text item's is its length.
  *                     Every `/v1/embeddings` answer carries `x-fake-body-sha256` of the raw body it received.
+ *   FAKE_EMBEDDING_VIDEO   1 → with `--embedding --mmproj`, `/props.modalities` also says `video`
  *   FAKE_EMBEDDING_REFUSE  1 → `/v1/embeddings` answers 400 (a pooling the OpenAI endpoint cannot
  *                     serve), as llama.cpp does for a model without pooling
  *   FAKE_DECISION_NO_CONVERT   1 → a build from before the converter: `-h` does not list
@@ -211,6 +212,7 @@ function startServer() {
         modalities: {
           vision: embeddingProjector,
           audio: embeddingProjector && process.env.FAKE_EMBEDDING_AUDIO === '1',
+          video: embeddingProjector && process.env.FAKE_EMBEDDING_VIDEO === '1',
         },
       })
     }

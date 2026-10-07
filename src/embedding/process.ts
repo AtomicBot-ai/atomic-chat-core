@@ -26,6 +26,7 @@ import {
 } from '../runtime/shared/index.js'
 import type { BackendOutputSink, ManagedProcess, SpawnSpec } from '../runtime/shared/index.js'
 import { buildEmbeddingArgs, embeddingEnv, EMBEDDING_HOST } from './args.js'
+import { findFfmpegDir, withPathDir } from './ffmpeg.js'
 import type { EmbeddingLaunchSpec } from './args.js'
 import { checkEmbeddingReadiness, READINESS_REQUEST_TIMEOUT_MS } from './readiness.js'
 
@@ -73,6 +74,8 @@ export interface SpawnEmbeddingDeps {
   apiKey?: () => string
   /** Test seam: start the child (the fake engine in tests). */
   spawn?: (spec: SpawnSpec, onData: (stream: 'stdout' | 'stderr', line: string) => void) => ManagedProcess
+  /** The folder holding `ffmpeg` (`findFfmpegDir`); without one the process is offered no video. */
+  findFfmpeg?: (platform: NodeJS.Platform, env: NodeJS.ProcessEnv) => Promise<string | undefined>
   pollIntervalMs?: number
   sleep?: (ms: number) => Promise<void>
   now?: () => number
@@ -100,7 +103,10 @@ export async function spawnEmbeddingServer(
   deps: SpawnEmbeddingDeps
 ): Promise<EmbeddingProcessHandle> {
   const platform = deps.platform ?? process.platform
-  const baseEnv = deps.env ?? process.env
+  const inherited = deps.env ?? process.env
+  // Video decodes through `ffmpeg` on the process's PATH (see `ffmpeg.ts`).
+  const ffmpegDir = await (deps.findFfmpeg ?? findFfmpegDir)(platform, inherited).catch(() => undefined)
+  const baseEnv = ffmpegDir !== undefined ? withPathDir(inherited, ffmpegDir, platform) : inherited
   const log = deps.log ?? (() => {})
   const sleep = deps.sleep ?? defaultSleep
   const now = deps.now ?? Date.now
@@ -191,9 +197,12 @@ export async function spawnEmbeddingServer(
       READINESS_REQUEST_TIMEOUT_MS
     )
     if (result.kind === 'ready') {
+      // The projector may read clips, but without `ffmpeg` the engine cannot decode one.
+      const modalities =
+        ffmpegDir === undefined ? result.modalities.filter((m) => m !== 'video') : result.modalities
       log(
         'info',
-        `the embedding model ${spec.modelId} is ready on port ${port} (${result.dims} dimensions, ${result.modalities.join(', ')})`
+        `the embedding model ${spec.modelId} is ready on port ${port} (${result.dims} dimensions, ${modalities.join(', ')})`
       )
       return {
         pid: proc.pid,
@@ -203,7 +212,7 @@ export async function spawnEmbeddingServer(
         baseUrl,
         modelId: spec.modelId,
         dims: result.dims,
-        modalities: result.modalities,
+        modalities,
         tail: () => [...tail],
         exitStatus: () => exit,
         exited: proc.exited,

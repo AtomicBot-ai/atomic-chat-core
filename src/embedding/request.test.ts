@@ -94,6 +94,37 @@ describe('checkEmbeddingRequest', () => {
     expect(checkEmbeddingRequest([1], textOnly, 768)).toMatchObject({ ok: false })
   })
 
+  it('names the fix for a part sent outside content, and ffmpeg for video', () => {
+    const bare = checkEmbeddingRequest(
+      { input: [{ type: 'image_url', image_url: { url: PNG } }] },
+      multimodal,
+      768
+    )
+    expect(bare).toMatchObject({ ok: false, param: 'input[0]' })
+    expect(!bare.ok && bare.message).toContain(
+      'wrap it in an input item: {"content": [{"type":"image_url"}]}'
+    )
+    expect(checkEmbeddingRequest({ input: { type: 'text', text: 'x' } }, textOnly, 768)).toMatchObject({
+      ok: false,
+      param: 'input',
+    })
+    // An object input that is not a part (the legacy prompt shape) is the engine's to judge.
+    expect(checkEmbeddingRequest({ input: [{ type: 'mystery' }] }, textOnly, 768)).toEqual({ ok: true })
+    const video = checkEmbeddingRequest(
+      { input: [{ content: [{ type: 'video_url', video_url: { url: 'data:video/mp4;base64,AAAA' } }] }] },
+      multimodal,
+      768
+    )
+    expect(!video.ok && video.message).toContain('needs ffmpeg installed on this computer')
+    expect(
+      checkEmbeddingRequest(
+        { input: [{ content: [{ type: 'input_video', input_video: { data: 'AAAA' } }] }] },
+        ['text', 'image', 'video'],
+        768
+      )
+    ).toEqual({ ok: true })
+  })
+
   it('leaves part types it does not know to the engine', () => {
     expect(
       checkEmbeddingRequest(

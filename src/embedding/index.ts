@@ -7,6 +7,7 @@
  */
 export * from './args.js'
 export * from './engine.js'
+export * from './ffmpeg.js'
 export * from './model-facts.js'
 export * from './process.js'
 export * from './readiness.js'
