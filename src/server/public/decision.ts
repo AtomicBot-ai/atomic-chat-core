@@ -44,7 +44,7 @@ export function decisionErrorBody(status: number, reason: string, message: strin
 }
 
 /** Read the body up to `limit`; past it, drain (so Bun delivers the refusal) and answer `undefined`. */
-async function readCapped(ex: Exchange, limit: number): Promise<Buffer | undefined> {
+export async function readCapped(ex: Exchange, limit: number): Promise<Buffer | undefined> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of ex.req) {

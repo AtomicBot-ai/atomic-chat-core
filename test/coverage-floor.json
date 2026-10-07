@@ -605,6 +605,60 @@
     "functions": 100,
     "lines": 96
   },
+  "src/embedding/args.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/embedding/engine.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/embedding/ffmpeg.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/embedding/model-facts.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/embedding/process.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 81,
+    "lines": 100
+  },
+  "src/embedding/readiness.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/embedding/request.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/embedding/service.ts": {
+    "statements": 97,
+    "branches": 92,
+    "functions": 95,
+    "lines": 97
+  },
+  "src/embedding/wiring.ts": {
+    "statements": 100,
+    "branches": 83,
+    "functions": 84,
+    "lines": 100
+  },
   "src/events/emitter.ts": {
     "statements": 98,
     "branches": 94,
@@ -1493,6 +1547,12 @@
     "functions": 100,
     "lines": 100
   },
+  "src/server/control/routes/embedding.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/control/routes/environments.ts": {
     "statements": 97,
     "branches": 90,
@@ -1576,6 +1636,12 @@
     "branches": 87,
     "functions": 100,
     "lines": 100
+  },
+  "src/server/public/embedding.ts": {
+    "statements": 99,
+    "branches": 85,
+    "functions": 100,
+    "lines": 99
   },
   "src/server/public/errors.ts": {
     "statements": 100,
@@ -1700,6 +1766,12 @@
   "src/settings/decision.ts": {
     "statements": 100,
     "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/settings/embedding.ts": {
+    "statements": 100,
+    "branches": 98,
     "functions": 100,
     "lines": 100
   },

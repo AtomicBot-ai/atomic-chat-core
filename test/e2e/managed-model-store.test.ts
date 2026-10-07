@@ -157,7 +157,14 @@ const control = (ready: ReadyLine, path: string, init: RequestInit = {}) =>
 const post = (ready: ReadyLine, path: string, body: unknown = {}) =>
   control(ready, path, { method: 'POST', body: JSON.stringify(body) })
 
-describe('the managed model store', () => {
+/**
+ * The fakes here are POSIX shell scripts (`docker`, `nvidia-smi`), which Windows cannot start: the
+ * Windows path runs through its own fake `wsl.exe` (managed-windows.test.ts), as in
+ * managed-operations.test.ts.
+ */
+const POSIX_FAKES_UNAVAILABLE = process.platform === 'win32'
+
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)('the managed model store', () => {
   it('Обновление с двумя моделями TRT: both move into the store at startup, are listed and load with their engine cache kept', async () => {
     await installModel(legacyRoot(), 'llama-3')
     await installModel(legacyRoot(), 'qwen3')

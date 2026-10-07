@@ -15,6 +15,7 @@ import type {
 import type { EngineBuildChangedEvent } from './engine-builds.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
+import type { EmbeddingErrorEvent, EmbeddingStateEvent } from './embedding.js'
 import type { ModelSetup } from './model-setup.js'
 import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo, SessionLoadStage } from './session.js'
@@ -89,7 +90,7 @@ export interface CoreEvents {
   }
 
   'settings:changed': {
-    provider: LocalProviderId | 'server' | 'cloud' | 'decision'
+    provider: LocalProviderId | 'server' | 'cloud' | 'decision' | 'embedding'
     key: string
     value: unknown
   }
@@ -187,6 +188,14 @@ export interface CoreEvents {
    */
   'decision:state': DecisionStateEvent
   'decision:error': DecisionErrorEvent
+
+  /**
+   * The embedding model (ADR 2026-10-07-embedding-models-are-their-own-core-module), the same pair:
+   * `state` on every status change (the whole `EmbeddingStatus`, like `GET /embedding/status`),
+   * `error` for a failure nobody is awaiting.
+   */
+  'embedding:state': EmbeddingStateEvent
+  'embedding:error': EmbeddingErrorEvent
 
   /**
    * Every write of a model setup (`src/contracts/model-setup.ts`), the whole record: keep the one

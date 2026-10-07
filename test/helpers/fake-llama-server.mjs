@@ -51,6 +51,14 @@
  *                     `["decisions"]` (and `image` input with `--mmproj`), `/props` has no decision
  *                     block, `/v1/router/score` is a 404, and `/v1/systemone` answers only `answers`
  *                     and `usage`, as upstream does.
+ *   FAKE_EMBEDDING_AUDIO   1 → with `--embedding --mmproj`, `/props.modalities` also says `audio` (the
+ *                     projector has an audio encoder); with `--mmproj` alone it says `vision` only.
+ *                     In embedding mode a `/v1/embeddings` input may be a `{content: [parts]}` item: its
+ *                     vector's first number is the count of its parts, a text item's is its length.
+ *                     Every `/v1/embeddings` answer carries `x-fake-body-sha256` of the raw body it received.
+ *   FAKE_EMBEDDING_VIDEO   1 → with `--embedding --mmproj`, `/props.modalities` also says `video`
+ *   FAKE_EMBEDDING_REFUSE  1 → `/v1/embeddings` answers 400 (a pooling the OpenAI endpoint cannot
+ *                     serve), as llama.cpp does for a model without pooling
  *   FAKE_DECISION_NO_CONVERT   1 → a build from before the converter: `-h` does not list
  *                     `--decision-convert-cache`, and `-m <folder>` fails the load with exit 1.
  *                     Otherwise `-m <folder>` is a laya checkpoint (it needs `rl_agent_config.json`):
@@ -195,13 +203,19 @@ function startServer() {
       return json(200, { object: 'list', data: [{ id: modelAlias, object: 'model', owned_by: 'llamacpp' }] })
     if (unauthorized(req))
       return json(401, { error: { message: 'Invalid API key', type: 'authentication_error' } })
-    if (url.pathname === '/props')
+    if (url.pathname === '/props') {
+      const embeddingProjector = argv.includes('--embedding') && argv.includes('--mmproj')
       return json(200, {
         default_generation_settings: { n_ctx: 4096 },
         total_slots: 1,
         chat_template: '{{ messages }}',
-        modalities: { vision: false, audio: false },
+        modalities: {
+          vision: embeddingProjector,
+          audio: embeddingProjector && process.env.FAKE_EMBEDDING_AUDIO === '1',
+          video: embeddingProjector && process.env.FAKE_EMBEDDING_VIDEO === '1',
+        },
       })
+    }
     // Real llama-server serves Prometheus metrics at its root (with `--metrics`), behind the key.
     if (url.pathname === '/metrics') {
       res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' })
@@ -211,14 +225,25 @@ function startServer() {
     if (url.pathname === '/apply-template')
       return readBody(req).then((b) => json(200, { prompt: JSON.stringify(b?.messages ?? []) }))
     if (url.pathname === '/embedding' || url.pathname === '/v1/embeddings')
-      return readBody(req).then((body) => {
+      return readRawBody(req).then(({ raw, body }) => {
+        // The bytes it received, so a test can prove a passthrough left them alone.
+        res.setHeader('x-fake-body-sha256', createHash('sha256').update(raw).digest('hex'))
         if (!argv.includes('--embedding'))
           return json(501, { error: { message: 'embedding mode is disabled' } })
+        if (process.env.FAKE_EMBEDDING_REFUSE === '1')
+          return json(400, {
+            error: {
+              code: 400,
+              message: "Pooling type 'none' is not OAI compatible",
+              type: 'invalid_request_error',
+            },
+          })
         const input = Array.isArray(body?.input) ? body.input : [body?.input]
+        const first = (item) => (Array.isArray(item?.content) ? item.content.length : String(item).length)
         return json(200, {
           object: 'list',
           model: modelAlias,
-          data: input.map((text, index) => ({ embedding: [String(text).length, 0.2, 0.3], index })),
+          data: input.map((item, index) => ({ embedding: [first(item), 0.2, 0.3], index })),
           usage: { prompt_tokens: input.length, total_tokens: input.length },
         })
       })
@@ -246,6 +271,23 @@ function startServer() {
     process.exit(0)
   })
 }
+
+/** The body as bytes, and parsed (`{}` when it is not JSON). */
+const readRawBody = (req) =>
+  new Promise((resolve) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks)
+      let body = {}
+      try {
+        body = raw.length ? JSON.parse(raw.toString('utf8')) : {}
+      } catch {
+        body = {}
+      }
+      resolve({ raw, body })
+    })
+  })
 
 const readBody = (req) =>
   new Promise((resolve) => {

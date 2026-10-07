@@ -22,6 +22,7 @@ import type {
 } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { DecisionService } from '../decision/index.js'
+import type { EmbeddingService } from '../embedding/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import type { ManagedRuntimes } from '../runtime/environment/index.js'
@@ -86,6 +87,8 @@ export interface AtomicCoreParts {
   managedTrustedHosts: string[]
   /** The decision model: its own module and process, outside the sessions registry. */
   decision: DecisionService
+  /** The embedding model the public `/v1/embeddings` serves by name: its own module and process too. */
+  embedding: EmbeddingService
   /** Where a failed load and the public server's failures are reported; absent, nothing is. */
   errors?: ErrorSink | undefined
   /** The same reporter, for a host that changes consent, user or tags at run time. */
@@ -146,6 +149,8 @@ export class AtomicCore {
    * fail-open; it survives model switches and the chat auto-unload.
    */
   readonly decision: DecisionService
+  /** The embedding model (`llama-server --embedding`) the public `/v1/embeddings` serves by name. */
+  readonly embedding: EmbeddingService
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -166,6 +171,7 @@ export class AtomicCore {
     this.diffusion = parts.diffusion
     this.managed = parts.managed
     this.decision = parts.decision
+    this.embedding = parts.embedding
     this.errors = parts.errors
     this.telemetry = parts.telemetry
     this.localSessions = new LocalSessions({
@@ -207,6 +213,7 @@ export class AtomicCore {
         images: this.diffusion.imagesBackend(),
         videos: this.diffusion.videosBackend(),
         decision: this.decision.publicBackend(),
+        embedding: this.embedding.publicBackend(),
         errors: parts.errors,
       }),
     })
@@ -362,6 +369,7 @@ export class AtomicCore {
       await this.publicServer.stop()
       // The public server no longer forwards to it; the decision process goes next.
       await this.decision.shutdown()
+      await this.embedding.shutdown()
       // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
       await this.diffusion.shutdown()
       // Whatever a managed-runtime operation is doing stops here; its intent stays on disk for the

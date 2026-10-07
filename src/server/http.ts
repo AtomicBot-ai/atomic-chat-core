@@ -176,6 +176,9 @@ export function statusForCode(code: ErrorCode): number {
     case 'DECISION_ENGINE_UNSUPPORTED':
     case 'DECISION_CHECKPOINT_INCOMPLETE':
     case 'DECISION_MODEL_NOT_CHAT':
+    case 'EMBEDDING_NOT_CONFIGURED':
+    case 'EMBEDDING_ENGINE_UNSUPPORTED':
+    case 'EMBEDDING_MODEL_NOT_EMBEDDING':
     case 'MODEL_SETUP_PLAN_STALE':
       return 409
     case 'QUEUE_FULL':
@@ -210,6 +213,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':
     case 'DECISION_UNAVAILABLE':
+    case 'EMBEDDING_UNAVAILABLE':
       return 503
     case 'MODEL_LOAD_TIMED_OUT':
     case 'SERVER_START_TIMED_OUT':
