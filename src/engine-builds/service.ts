@@ -79,6 +79,13 @@ export interface EngineHost {
   changed?(reason: 'uninstall' | 'startup-cleanup'): Promise<void>
 }
 
+/** The host of an engine with no runtime in this core (MLX off macOS): nothing runs, so nothing to hold. */
+export const IDLE_ENGINE_HOST: EngineHost = {
+  exclusive: (fn) => fn(),
+  inUse: async () => [],
+  activate: async () => {},
+}
+
 /** One build on disk as this module sees it. */
 interface Build extends EngineBuildRef {
   /** For a bundled MLX build, `resources-dir`; otherwise the build's own directory. */

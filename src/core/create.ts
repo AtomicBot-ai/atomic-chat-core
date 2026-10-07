@@ -44,7 +44,12 @@ import {
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
-import { EngineBuildsService, EngineManifestSource, manifestKinds } from '../engine-builds/index.js'
+import {
+  EngineBuildsService,
+  EngineManifestSource,
+  IDLE_ENGINE_HOST,
+  manifestKinds,
+} from '../engine-builds/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
 import { Downloader, availableDiskSpace, defaultAvailableSpace, policyFetchFor } from '../downloads/index.js'
@@ -488,10 +493,7 @@ export async function createAtomicCore(
       hosts: {
         'sd-cpp': diffusion.engineHost(),
         // Off macOS there is no MLX runtime: nothing runs, so nothing to hold off or unload.
-        'mlx':
-          mlxRuntime instanceof MlxRuntime
-            ? mlxRuntime.engineHost()
-            : { exclusive: (fn) => fn(), inUse: async () => [], activate: async () => {} },
+        'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),

@@ -13,7 +13,7 @@ import type { DownloaderEventName } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { parseMlxManifest, parseSdcppManifest } from './manifest.js'
 import type { ManifestRead, MlxManifest, SdcppManifest } from './manifest.js'
-import { EngineBuildsService, parseEngineBuildId } from './service.js'
+import { EngineBuildsService, IDLE_ENGINE_HOST, parseEngineBuildId } from './service.js'
 import type { EngineHost } from './service.js'
 
 /** Real child processes (the probes): under a loaded machine a first exec of a fresh script is slow. */
@@ -193,6 +193,14 @@ function harness(
 const ls = (dir: string) => readdir(dir).catch(() => [] as string[])
 const archiveRequests = () =>
   server.requests.filter((r) => r.method === 'GET' && r.path.startsWith('/releases/'))
+
+describe('IDLE_ENGINE_HOST', () => {
+  it('runs what it is handed, holds nothing and activates nothing', async () => {
+    expect(await IDLE_ENGINE_HOST.exclusive(async () => 7)).toBe(7)
+    expect(await IDLE_ENGINE_HOST.inUse()).toEqual([])
+    await expect(IDLE_ENGINE_HOST.activate('/x', false)).resolves.toBeUndefined()
+  })
+})
 
 describe('parseEngineBuildId', () => {
   it('knows sd-cpp and mlx only', () => {
