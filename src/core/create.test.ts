@@ -1550,3 +1550,51 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
     })
   }
 )
+
+describe('engine builds through the owner', () => {
+  it('cleans up at start, says so, and answers the catalog from the manifest it is pointed at', async () => {
+    // Two sd.cpp builds a previous core left (one kept in use on its last install): the older goes.
+    const own = async (tag: string, installedAtMs: number) => {
+      const dir = join(data.root, 'diffusion', 'backends', tag, 'macos-arm64')
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'sd-server'), 'bin')
+      await writeFile(join(dir, '.atomic-owned'), 'atomic-chat\n')
+      await writeFile(
+        join(dir, 'install.json'),
+        JSON.stringify({
+          tag,
+          backendId: 'macos-arm64',
+          backend: 'metal',
+          engine: 'sd-cpp',
+          sha256: null,
+          installedAtMs,
+        })
+      )
+    }
+    await own('master-883-137f740', 1)
+    await own('master-900-abcdef0', 2)
+    const manifest = join(data.root, 'sdcpp-manifest.json')
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        tag_name: 'master-901-abcdef0',
+        download_base: 'https://mirror.atomic.invalid/releases',
+        assets: [{ backend: 'macos-arm64', name: 'sd.zip', sha256: 'a'.repeat(64), size: 1 }],
+      })
+    )
+    const core = await createCore({
+      env: { ...process.env, ATOMIC_SDCPP_MANIFEST_URL: pathToFileURL(manifest).href },
+    })
+    // Emitted before anyone could subscribe: read back from the replay ring.
+    expect(
+      (core.events.replayAfter(0) ?? [])
+        .filter((record) => record.name === 'engine-build:changed')
+        .map((r) => r.payload)
+    ).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
+    expect(await readdir(join(data.root, 'diffusion', 'backends'))).toEqual(['master-900-abcdef0'])
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const catalog = await client.engineBuildCatalog('sd-cpp', { force: true })
+    expect(catalog.manifest).toMatchObject({ tag: 'master-901-abcdef0', source: 'remote' })
+    expect(catalog.installed.map((b) => b.tag)).toEqual(['master-900-abcdef0'])
+  })
+})
