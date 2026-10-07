@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-07** — [Embedding models are their own core module, served by name on /v1/embeddings](2026-10-07-embedding-models-are-their-own-core-module.md) — `src/embedding/`: one upstream `llama-server --embedding` (b11454 for EmbeddingGemma 2, b11240 with a projector), readiness by a real vector and `/props.modalities`, `/v1/embeddings` by `model` with inline-media / modality / `dimensions` checks, listed in `/v1/models`; RAG untouched.
 - **2026-10-06** — [Run upstream decision GGUFs on stock llama.cpp, chosen by the model file](2026-10-06-run-decision-models-on-upstream-llamacpp.md) — extends the 2026-09-30 decision module: `<arch>.decision.type` → `llamacpp-upstream` at the type's build floor (b11370 / clef b11371 / clef + images b11418), readiness by `output_modalities`, no router (501 `UNSUPPORTED_ENDPOINT`), `mmproj_path` and `ctx_size` settings.
 - **2026-10-05** — [PrismML provider: a per-file compatibility gate and one recoverable model setup](2026-10-05-prismml-provider-compatibility-gate-and-model-setup.md) — implements the record below: conf manifest with candidate/approved, update reasons, offline load gate on every llama.cpp provider, `/models/setup-plan` + `/model-setups`, core 0.10.0.
 - **2026-10-05** — [Use PrismML llama.cpp for desktop Bonsai](2026-10-05-use-prismml-llamacpp-for-desktop-bonsai.md) — implementation direction: isolated provider, shared GGUF storage, model-aware routing and onboarding; Metal on Mac, no new MLX path.

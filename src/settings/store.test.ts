@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { AtomicCoreError, DEFAULT_DECISION_SETTINGS, DEFAULT_SERVER_SETTINGS } from '../contracts/index.js'
+import {
+  AtomicCoreError,
+  DEFAULT_DECISION_SETTINGS,
+  DEFAULT_EMBEDDING_SETTINGS,
+  DEFAULT_SERVER_SETTINGS,
+} from '../contracts/index.js'
 import {
   EMPTY_PROVIDER_STATE,
   SETTINGS_FILE_VERSION,
@@ -471,5 +476,47 @@ describe('decision section', () => {
     expect(store.decision).toMatchObject({ enabled: true, threads: 0 })
     await store.updateDecision({ threads: 2 })
     expect(onDisk(fs)['decision']).toMatchObject({ enabled: true, threads: 2, from_the_future: 1 })
+  })
+})
+
+describe('embedding section', () => {
+  it('reads defaults and keeps a fresh file without the section', async () => {
+    const { fs, store } = await openFresh()
+    expect(store.embedding).toEqual(DEFAULT_EMBEDDING_SETTINGS)
+    expect(onDisk(fs)['embedding']).toBeUndefined()
+  })
+
+  it('writes a checked patch in full and reports it under the embedding scope', async () => {
+    const { fs, store } = await openFresh()
+    const changes: SettingsChange[] = []
+    store.onChange((c) => changes.push(c))
+    const result = await store.updateEmbedding({ enabled: true, pooling: 'CLS' })
+    expect(result).toEqual({ revision: 1, changed: ['enabled', 'pooling'] })
+    expect(onDisk(fs)['embedding']).toEqual({ ...DEFAULT_EMBEDDING_SETTINGS, enabled: true, pooling: 'cls' })
+    expect(changes.map((c) => [c.scope, c.key, c.value])).toEqual([
+      ['embedding', 'enabled', true],
+      ['embedding', 'pooling', 'cls'],
+    ])
+    await expect(store.updateEmbedding({ pooling: 'rank' })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+  })
+
+  it("keeps a newer core's keys, and replaces a section that is not an object", async () => {
+    const fs = new FakeFs()
+    fs.files.set(
+      PATH,
+      JSON.stringify({ version: 1, revision: 3, embedding: { ctx_size: 'lots', from_the_future: 1 } })
+    )
+    const store = await SettingsStore.open(PATH, { fs, now: () => NOW })
+    await store.updateEmbedding({ ctx_size: 4096 })
+    expect(onDisk(fs)['embedding']).toMatchObject({ ctx_size: 4096, from_the_future: 1 })
+
+    const broken = new FakeFs()
+    broken.files.set(PATH, JSON.stringify({ version: 1, revision: 1, embedding: ['not', 'an', 'object'] }))
+    const fixed = await SettingsStore.open(PATH, { fs: broken, now: () => NOW })
+    expect(fixed.embedding).toEqual(DEFAULT_EMBEDDING_SETTINGS)
+    await fixed.updateEmbedding({ enabled: true })
+    expect(onDisk(broken)['embedding']).toEqual({ ...DEFAULT_EMBEDDING_SETTINGS, enabled: true })
   })
 })

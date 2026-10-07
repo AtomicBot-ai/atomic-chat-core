@@ -13,7 +13,7 @@ import {
   FAKE_LLAMA_SCRIPT,
   installFakeBackend,
 } from '../../test/helpers/fake-backend-pack.js'
-import { BPW, bonsaiLikeGguf } from '../../test/helpers/gguf-builder.js'
+import { BPW, bonsaiLikeGguf, buildGguf } from '../../test/helpers/gguf-builder.js'
 import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
@@ -950,6 +950,93 @@ describe('the decision model through the owner', () => {
     for (let i = 0; i < 200 && core.decision.getStatus().state !== 'ready'; i++)
       await new Promise((resolve) => setTimeout(resolve, 20))
     expect(core.decision.getStatus()).toMatchObject({ state: 'ready', enabled: true })
+  })
+})
+
+describe('the embedding model through the owner', () => {
+  const control = (core: AtomicCore, method: string, path: string, body?: unknown) =>
+    fetch(`${core.control.url}/atomic/v1/embedding/${path}`, {
+      method,
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  const gemma2 = () =>
+    buildGguf({
+      metadata: { 'general.architecture': 'gemma-embedding2', 'gemma-embedding2.pooling_type': 1 },
+      tensors: [],
+    })
+
+  it('runs it outside the sessions, journals it, serves it by name on /v1 and stops it with the core', async () => {
+    const { fakeEmbeddingSpawn } = await import('../../test/helpers/fake-llama-server.js')
+    await data.writeBackend('llamacpp-upstream', 'b11463', 'macos-arm64')
+    await writeFile(join(data.root, 'gemma.gguf'), gemma2())
+    const core = await createCore({ embedding: { spawn: fakeEmbeddingSpawn() } })
+    const events: string[] = []
+    for (const name of ['embedding:state', 'embedding:error', 'settings:changed'] as const)
+      core.events.on(name, () => events.push(name))
+    expect(await (await control(core, 'GET', 'status')).json()).toMatchObject({ state: 'disabled' })
+    expect(await (await control(core, 'GET', 'config')).json()).toMatchObject({ config: { enabled: false } })
+
+    const configured = await control(core, 'PUT', 'config', {
+      enabled: true,
+      model_path: 'gemma.gguf',
+      model_id: 'embeddinggemma-2',
+    })
+    expect(await configured.json()).toMatchObject({ config: { enabled: true, model_path: 'gemma.gguf' } })
+    const ready = (await (await control(core, 'POST', 'load')).json()) as {
+      state: string
+      pid: number
+      dims: number
+    }
+    expect(ready).toMatchObject({ state: 'ready', dims: 3 })
+    expect(events).toContain('settings:changed')
+    expect(events).toContain('embedding:state')
+    expect(core.sessions()).toEqual([])
+    const journal = JSON.parse(await readFile(data.layout.core.processes, 'utf8')) as {
+      processes: Array<{ provider: string; pid: number }>
+    }
+    expect(journal.processes).toContainEqual(
+      expect.objectContaining({ provider: 'embedding', pid: ready.pid })
+    )
+
+    const embedded = await control(core, 'POST', 'embed', { input: ['hello'] })
+    expect(await embedded.json()).toMatchObject({
+      status: 200,
+      body: { data: [{ embedding: [5, 0.2, 0.3] }] },
+    })
+
+    const served = await core.startPublicServer({ port: 0 })
+    const base = `http://127.0.0.1:${served.port}/v1`
+    const viaApi = await fetch(`${base}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'embeddinggemma-2', input: 'hi' }),
+    })
+    expect(await viaApi.json()).toMatchObject({ data: [{ embedding: [2, 0.2, 0.3] }] })
+    const models = (await (await fetch(`${base}/models`)).json()) as { data: Array<{ id: string }> }
+    expect(models.data.map((m) => m.id)).toEqual(['embeddinggemma-2'])
+
+    expect(await (await control(core, 'POST', 'unload')).json()).toMatchObject({ state: 'idle' })
+    expect(isProcessAlive(ready.pid)).toBe(false)
+    await core.shutdown()
+  })
+
+  it('starts an enabled model when the owner comes up, and stops it on shutdown', async () => {
+    const { fakeEmbeddingSpawn } = await import('../../test/helpers/fake-llama-server.js')
+    await data.writeBackend('llamacpp-upstream', 'b11463', 'macos-arm64')
+    await writeFile(join(data.root, 'gemma.gguf'), gemma2())
+    await mkdir(data.layout.core.dir, { recursive: true })
+    await writeFile(
+      data.layout.core.settings,
+      JSON.stringify({ version: 1, revision: 1, embedding: { enabled: true, model_path: 'gemma.gguf' } })
+    )
+    const core = await createCore({ embedding: { spawn: fakeEmbeddingSpawn() } })
+    for (let i = 0; i < 200 && core.embedding.getStatus().state !== 'ready'; i++)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    const status = core.embedding.getStatus()
+    expect(status).toMatchObject({ state: 'ready', enabled: true, model_id: 'gemma' })
+    await core.shutdown()
+    expect(isProcessAlive(status.pid as number)).toBe(false)
   })
 })
 

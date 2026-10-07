@@ -63,6 +63,7 @@ export const NON_TEXT_GGUF_ARCHITECTURES = new Set([
   'jina-bert-v3',
   'eurobert',
   'gemma-embedding',
+  'gemma-embedding2',
   'llama-embed',
   't5encoder',
 ])

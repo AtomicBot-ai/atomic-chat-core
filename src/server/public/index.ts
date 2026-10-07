@@ -21,6 +21,7 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { LocalApiServerState } from '../../contracts/index.js'
 import { captureReport, internalErrorReport } from '../../telemetry/index.js'
 import { DECISION_ROUTES, serveDecision } from './decision.js'
+import { serveEmbeddingIfOwned } from './embedding.js'
 import { answer, newExchange } from './exchange.js'
 import { serveForward } from './forward.js'
 import { serveImagesGenerations } from './images.js'
@@ -39,6 +40,8 @@ export type {
   CtxIncreaseOutcome,
   DecisionBackend,
   DecisionTarget,
+  EmbeddingBackend,
+  EmbeddingTarget,
   ImagesBackend,
   LocalTarget,
   PublicServerConfig,
@@ -175,6 +178,8 @@ export async function handlePublicRequest(
     // so it is answered in full here and never reaches the generic forwarder.
     if (path === '/chat/completions' && deps.chatgpt && (await serveSubscriptionIfOwned(ex, deps.chatgpt)))
       return
+    // The embedding module's model is served by its own process; any other `model` goes on as before.
+    if (path === '/embeddings' && deps.embedding && (await serveEmbeddingIfOwned(ex, deps.embedding))) return
     if (FORWARDED.has(path)) return serveForward(ex)
     // Served here, never forwarded: the image model is the core's own, and it is not in `/models`.
     if (path === '/images/generations') {

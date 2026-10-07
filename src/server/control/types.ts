@@ -12,6 +12,9 @@ import type {
   DecisionScoreRequest,
   DecisionSettings,
   DecisionStatus,
+  EmbeddingEmbedResponse,
+  EmbeddingSettings,
+  EmbeddingStatus,
   RouterScoreResponse,
   SystemoneResponse,
   DeviceInfo,
@@ -307,6 +310,23 @@ export interface DecisionControl {
   decide: (request: DecisionDecideRequest) => Promise<DecisionOutcome<SystemoneResponse>>
 }
 
+/**
+ * The embedding model (ADR 2026-10-07-embedding-models-are-their-own-core-module), shaped like the
+ * decision model's control: status, a checked settings patch the process follows, load and unload, and
+ * one request to the running model for the app.
+ */
+export interface EmbeddingControl {
+  status: () => EmbeddingStatus
+  config: () => EmbeddingSettings
+  /** A checked patch of the `embedding` settings section; the process follows (start, restart or stop). */
+  configure: (patch: Record<string, unknown>) => Promise<EmbeddingStatus>
+  /** Start now and answer once ready; a failure is an error with the start's code. */
+  load: () => Promise<EmbeddingStatus>
+  unload: () => Promise<EmbeddingStatus>
+  /** One `/v1/embeddings` body to the running model (started when idle); the engine's answer as it came. */
+  embed: (body: Record<string, unknown>) => Promise<EmbeddingEmbedResponse>
+}
+
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
 export interface ExternalSessionControl {
   publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
@@ -399,6 +419,8 @@ export interface ControlServerDeps {
   diffusion: DiffusionControl
   /** The decision model; without it the `/decision/*` routes answer `DECISION_UNAVAILABLE`. */
   decision?: DecisionControl
+  /** The embedding model; without it the `/embedding/*` routes answer `EMBEDDING_UNAVAILABLE`. */
+  embedding?: EmbeddingControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /** Absent in a core without the setup wired; its routes then answer `INVALID_ARGUMENT`. */

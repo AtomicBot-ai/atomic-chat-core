@@ -14,6 +14,12 @@ Stage 5 providers, each opt-in on its own:
   `llama-server` b11370 or newer, its whole folder is copied), `ATOMIC_LIVE_UPSTREAM_DECISION_MODEL` (an upstream decision
   GGUF, e.g. `ggml-org/Julia-1-GGUF` Q8_0, 168 MB), optional `ATOMIC_LIVE_UPSTREAM_DECISION_TAG` (default `b11436`). Checks
   the module picks the upstream pack, answers `/v1/systemone` through the public server and refuses the router with 501.
+- Embedding model (`test/live/embedding-upstream.test.ts`): `ATOMIC_LIVE_EMBEDDING_BIN` (an upstream `llama-server`, b11454 or
+  newer for EmbeddingGemma 2; its whole folder is copied), `ATOMIC_LIVE_EMBEDDING_MODEL` (an embedding GGUF, e.g.
+  `unsloth/embeddinggemma-2-GGUF` Q8_0, 310 MB), optional `ATOMIC_LIVE_EMBEDDING_MMPROJ` (its projector, 555 MB) and
+  `ATOMIC_LIVE_EMBEDDING_TAG` (default `b11463`). Checks `/v1/embeddings` by the model's name: text ranking, the image of a
+  red square nearer "red" than "blue", audio with an audio encoder (400 without), a link refused, `dimensions` refused,
+  `/v1/models`, and another name left to the sessions.
 - MLX (`test/live/mlx.test.ts`, macOS): `ATOMIC_LIVE_MLX_RESOURCES` (folder with `mlx-server`), `ATOMIC_LIVE_MLX_MODEL`
   (an MLX model folder).
 - Foundation Models (`test/live/foundation-models.test.ts`, macOS 26): `ATOMIC_LIVE_FM_RESOURCES` (folder with

@@ -11,6 +11,7 @@ import type { JsonValue } from '../shims/index.js'
 import { answer, connectTimeoutMs, header } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { readBody, sendUpstream } from './wire.js'
+import { EMBEDDING_OWNED_BY } from './embedding.js'
 import type { LocalProvider } from '../../router/index.js'
 
 /**
@@ -58,6 +59,11 @@ export function servedModels(ex: Exchange): Array<{ id: string; ownedBy: string;
 
 export function serveModels(ex: Exchange): void {
   const data = servedModels(ex).map((m) => ({ id: m.id, object: 'model', created: 1, owned_by: m.ownedBy }))
+  // The embedding module's model, while it is turned on: OpenAI clients pick their embedding model from
+  // this list. Not in `servedModels`, which also feeds Muse Code's catalogue of chat models.
+  const embedding = ex.deps.embedding?.modelId() ?? null
+  if (embedding !== null && !data.some((m) => m.id === embedding))
+    data.push({ id: embedding, object: 'model', created: 1, owned_by: EMBEDDING_OWNED_BY })
   answer(ex, 200, serdeToString({ object: 'list', data }), [['Content-Type', 'application/json']])
 }
 
