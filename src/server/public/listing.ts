@@ -28,6 +28,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'llamacpp-upstream': 'llama.cpp-upstream',
   'mlx': 'mlx',
   'tensorrt-llm': 'tensorrt-llm',
+  'atomic-prism': 'prism-llama.cpp',
   'vllm': 'vllm',
 }
 
@@ -124,7 +125,10 @@ export async function serveMetrics(ex: Exchange): Promise<void> {
     return
   }
 
-  const session = ex.deps.findLocal('llamacpp', modelId) ?? ex.deps.findLocal('llamacpp-upstream', modelId)
+  const session =
+    ex.deps.findLocal('llamacpp', modelId) ??
+    ex.deps.findLocal('llamacpp-upstream', modelId) ??
+    ex.deps.findLocal('atomic-prism', modelId)
   if (!session) {
     answer(ex, 404, `No running llama.cpp session for model '${modelId}'`)
     return

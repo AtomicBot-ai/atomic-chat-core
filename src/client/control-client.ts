@@ -21,6 +21,15 @@ import type {
   BeginOperation,
   CoreEventName,
   EnvironmentOperation,
+  ModelCompatibilityRequest,
+  ModelCompatibilityResponse,
+  PrismFamiliesResponse,
+  ModelSetup,
+  ModelSetupList,
+  ModelSetupPlan,
+  ModelSetupPlanRequest,
+  ModelSetupStartRequest,
+  ProxyConfig,
   EnvironmentSnapshot,
   ManagedHostReceipt,
   ProbeEnvironmentInput,
@@ -94,6 +103,8 @@ export interface CoreSnapshot {
    */
   environments?: EnvironmentSnapshot[]
   environment_operations?: EnvironmentOperation[]
+  /** Model setups; optional for a core that predates them. */
+  model_setups?: ModelSetup[]
 }
 
 export interface CoreEventMessage {
@@ -643,6 +654,52 @@ export class CoreClient {
     return this.call(`/environments/operations/${encodeURIComponent(operationId)}/host-step-result`, {
       method: 'POST',
       body: JSON.stringify(receipt),
+    })
+  }
+
+  // ── Model compatibility and setup ────────────────────────────────────────────────────────────
+
+  /** What a file needs and whether this core runs it; for a Hub file, before it is downloaded. */
+  modelCompatibility(request: ModelCompatibilityRequest): Promise<ModelCompatibilityResponse> {
+    return this.call('/models/compatibility', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** The Bonsai families the conf model rules name, each with the files the Hub may offer. */
+  prismFamilies(): Promise<PrismFamiliesResponse> {
+    return this.call('/models/atomic-prism/families')
+  }
+
+  /** What a setup would install and download, what blocks it, and the digest `startModelSetup` takes. */
+  modelSetupPlan(request: ModelSetupPlanRequest): Promise<ModelSetupPlan> {
+    return this.call('/models/setup-plan', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /**
+   * Start a setup from the plan the user saw, or get back the one this `request_id` started. A plan
+   * that changed since is 409 `MODEL_SETUP_PLAN_STALE`, with the new plan in `details`.
+   */
+  startModelSetup(request: ModelSetupStartRequest): Promise<ModelSetup> {
+    return this.call('/model-setups', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  async modelSetups(): Promise<ModelSetup[]> {
+    return (await this.call<ModelSetupList>('/model-setups')).setups
+  }
+
+  modelSetup(setupId: string): Promise<ModelSetup> {
+    return this.call(`/model-setups/${encodeURIComponent(setupId)}`)
+  }
+
+  /** Stop a setup; what was downloaded stays for `resumeModelSetup`. */
+  cancelModelSetup(setupId: string): Promise<ModelSetup> {
+    return this.call(`/model-setups/${encodeURIComponent(setupId)}/cancel`, { method: 'POST' })
+  }
+
+  /** Run an interrupted, failed or cancelled setup again, planned afresh. */
+  resumeModelSetup(setupId: string, options: { proxy?: ProxyConfig | null } = {}): Promise<ModelSetup> {
+    return this.call(`/model-setups/${encodeURIComponent(setupId)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify(options),
     })
   }
 

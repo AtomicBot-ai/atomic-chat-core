@@ -113,7 +113,7 @@ describe('backends', () => {
     expect(bad.err.join('')).toContain('Unknown backends subcommand')
     const provider = io()
     expect(await backendsCommand(['list', '--provider', 'mlx', ...folder()], provider)).toBe(2)
-    expect(provider.err.join('')).toContain('llamacpp-upstream or llamacpp')
+    expect(provider.err.join('')).toContain('llamacpp-upstream, llamacpp or atomic-prism')
     const mode = io()
     expect(await backendsCommand(['recommend', '--mode', 'now', ...folder()], mode)).toBe(2)
     expect(mode.err.join('')).toContain('refresh or recheck')

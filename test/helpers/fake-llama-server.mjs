@@ -46,6 +46,11 @@
  *   FAKE_DECISION_DELAY_MS     milliseconds before each systemone / router answer
  *   FAKE_DECISION_LOAD_MS      `/health` answers 503 for this long after the start (the engine loading)
  *   FAKE_DECISION_NO_CAPABILITY  1 → `/v1/models` lists no `decision` capability (not a decision server)
+ *   FAKE_DECISION_UPSTREAM     1 → stock llama.cpp b11370+ with an upstream decision GGUF: a decision
+ *                     server without `--decision`, `/v1/models` lists `architecture.output_modalities`
+ *                     `["decisions"]` (and `image` input with `--mmproj`), `/props` has no decision
+ *                     block, `/v1/router/score` is a 404, and `/v1/systemone` answers only `answers`
+ *                     and `usage`, as upstream does.
  *   FAKE_DECISION_NO_CONVERT   1 → a build from before the converter: `-h` does not list
  *                     `--decision-convert-cache`, and `-m <folder>` fails the load with exit 1.
  *                     Otherwise `-m <folder>` is a laya checkpoint (it needs `rl_agent_config.json`):
@@ -98,7 +103,8 @@ if (argv.includes('-h') || argv.includes('--help')) {
   }
   process.exit(0)
 }
-const decisionMode = argv.includes('--decision')
+const upstreamDecision = decisionBuild && process.env.FAKE_DECISION_UPSTREAM === '1'
+const decisionMode = argv.includes('--decision') || upstreamDecision
 if (decisionMode && !decisionBuild) {
   err('error: invalid argument: --decision')
   process.exit(1)
@@ -494,7 +500,7 @@ function convertCheckpoint() {
 }
 
 function startDecisionServer() {
-  const converted = convertCheckpoint()
+  const converted = upstreamDecision ? {} : convertCheckpoint()
   const startedAt = Date.now()
   const loadMs = Number(process.env.FAKE_DECISION_LOAD_MS ?? '0')
   const delayMs = Number(process.env.FAKE_DECISION_DELAY_MS ?? '0')
@@ -555,6 +561,22 @@ function startDecisionServer() {
         return loaded()
           ? send(200, { status: 'ok', ok: true, model: alias, layout: 'laya' })
           : send(503, { error: { code: 503, message: 'Loading model', type: 'unavailable_error' } })
+      if (upstreamDecision && (url.pathname === '/v1/models' || url.pathname === '/models'))
+        return send(200, {
+          object: 'list',
+          data: [
+            {
+              id: alias,
+              object: 'model',
+              owned_by: 'llamacpp',
+              architecture: {
+                input_modalities: argv.includes('--mmproj') ? ['text', 'image'] : ['text'],
+                output_modalities: process.env.FAKE_DECISION_NO_CAPABILITY === '1' ? ['text'] : ['decisions'],
+              },
+            },
+          ],
+          models: [{ name: alias, model: alias, capabilities: ['completion'] }],
+        })
       if (url.pathname === '/v1/models' || url.pathname === '/models')
         return send(200, {
           object: 'list',
@@ -572,6 +594,8 @@ function startDecisionServer() {
         return send(503, { error: { code: 503, message: 'Loading model', type: 'unavailable_error' } })
       if (unauthorized(req))
         return send(401, { error: { code: 401, message: 'Invalid API Key', type: 'authentication_error' } })
+      if (upstreamDecision && url.pathname === '/props' && req.method === 'GET')
+        return send(200, { model_alias: alias, model_path: modelPath, build_info: 'b11436-fake' })
       if (url.pathname === '/props' && req.method === 'GET')
         return send(200, {
           model_alias: alias,
@@ -612,7 +636,7 @@ function startDecisionServer() {
         })
       const isSystemone = url.pathname === '/v1/systemone'
       const isRouter = url.pathname === '/v1/router/score'
-      if (!(isSystemone || isRouter) || req.method !== 'POST')
+      if (!(isSystemone || (isRouter && !upstreamDecision)) || req.method !== 'POST')
         return send(404, { error: { code: 404, message: 'File Not Found', type: 'not_found_error' } })
       if (isRouter && !routerServes)
         return fail(501, 'ROUTER_NOT_CALIBRATED', 'this model has no router calibration')
@@ -671,6 +695,8 @@ function startDecisionServer() {
             )
         }
         const n = raw.length
+        if (upstreamDecision)
+          return send(200, { answers, usage: { input_tokens: n, output_tokens: 0 } }, bodyHeaders)
         send(
           200,
           {

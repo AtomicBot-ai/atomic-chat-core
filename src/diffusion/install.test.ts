@@ -20,6 +20,7 @@ import {
   OWNER_MARKER,
   probeBinary,
   probeOutputIsSdcpp,
+  probeVerdict,
   readInstallRecord,
   removeBackend,
   serverBinaryName,
@@ -379,6 +380,27 @@ describe.skipIf(!posix)('probeBinary', () => {
     await script(onStderr, "echo 'stable-diffusion.cpp version 1' 1>&2; exit 1")
     await expect(probeBinary(onStderr, { spawnRetryDelayMs: 0 })).resolves.toBeUndefined()
   })
+
+  it('names a missing library and a silent exit for what they are', async () => {
+    const missing = join(root, 'missing-lib')
+    await script(
+      missing,
+      "echo 'sd-cli: error while loading shared libraries: libhipblas.so.3: cannot open shared object file' 1>&2; exit 127"
+    )
+    const error = await refusal(probeBinary(missing, { spawnRetryDelayMs: 0 }))
+    expect(error.code).toBe('ENGINE_INSTALL_FAILED')
+    expect(error.message).toBe('The image engine could not load a library it needs.')
+    expect(error.details).toContain(`${missing}: exit code 127\nsd-cli: error while loading shared libraries`)
+
+    const silent = join(root, 'silent')
+    await script(silent, 'exit 3')
+    const quiet = await refusal(probeBinary(silent, { spawnRetryDelayMs: 0 }))
+    expect(quiet.toJSON()).toEqual({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'The image engine exited without printing anything.',
+      details: `${silent}: exit code 3`,
+    })
+  })
 })
 
 describe('the small helpers', () => {
@@ -386,6 +408,92 @@ describe('the small helpers', () => {
     expect(probeOutputIsSdcpp('stable-diffusion.cpp v1')).toBe(true)
     expect(probeOutputIsSdcpp('  --cfg-scale SCALE  unconditional guidance')).toBe(true)
     expect(probeOutputIsSdcpp('usage: llama-server')).toBe(false)
+  })
+
+  it('tell a runtime the loader could not find from the wrong program', () => {
+    const missing = 'The image engine could not load a library it needs.'
+    const silent = 'The image engine exited without printing anything.'
+    const cases: [string, string, number | null, string | null, NodeJS.Platform, object | undefined][] = [
+      ['sd.cpp, whatever the exit', '  --cfg-scale SCALE', 1, null, 'win32', undefined],
+      // Upstream's Windows ROCm archive on a host without the HIP SDK: no output at all.
+      [
+        'a DLL the loader cannot find',
+        '',
+        0xc000_0135,
+        null,
+        'win32',
+        { message: missing, details: 'sd-cli: exit code 0xC0000135 (STATUS_DLL_NOT_FOUND)' },
+      ],
+      [
+        'an NTSTATUS handed over signed',
+        '',
+        0xc000_0139 | 0,
+        null,
+        'win32',
+        { message: missing, details: 'sd-cli: exit code 0xC0000139 (STATUS_ENTRYPOINT_NOT_FOUND)' },
+      ],
+      [
+        'a DLL built for another machine',
+        '',
+        0xc000_007b,
+        null,
+        'win32',
+        { message: missing, details: 'sd-cli: exit code 0xC000007B (STATUS_INVALID_IMAGE_FORMAT)' },
+      ],
+      [
+        'ld.so missing a soname',
+        'sd-cli: error while loading shared libraries: libhipblas.so.3\n',
+        127,
+        null,
+        'linux',
+        {
+          message: missing,
+          details: 'sd-cli: exit code 127\nsd-cli: error while loading shared libraries: libhipblas.so.3\n',
+        },
+      ],
+      [
+        'dyld missing a dylib',
+        'dyld[7]: Library not loaded: @rpath/libsd.dylib\n',
+        null,
+        'SIGABRT',
+        'darwin',
+        {
+          message: missing,
+          details: 'sd-cli: signal SIGABRT\ndyld[7]: Library not loaded: @rpath/libsd.dylib\n',
+        },
+      ],
+      [
+        'a silent crash on Windows',
+        '',
+        0xc000_0005,
+        null,
+        'win32',
+        { message: silent, details: 'sd-cli: exit code 0xC0000005' },
+      ],
+      [
+        'the same number off Windows',
+        '',
+        0xc000_0135,
+        null,
+        'linux',
+        { message: silent, details: 'sd-cli: exit code 3221225781' },
+      ],
+      ['a silent clean exit', ' \n', 0, null, 'darwin', { message: silent, details: 'sd-cli: exit code 0' }],
+      [
+        'another program',
+        'usage: llama-server\n',
+        0,
+        null,
+        'win32',
+        { message: 'The downloaded binary is not stable-diffusion.cpp.', details: 'usage: llama-server\n' },
+      ],
+    ]
+    for (const [label, text, code, signal, platform, expected] of cases) {
+      const verdict = probeVerdict('sd-cli', text, { code, signal }, platform)
+      expect(verdict?.toJSON(), label).toEqual(
+        expected === undefined ? undefined : { code: 'ENGINE_INSTALL_FAILED', ...expected }
+      )
+    }
   })
 
   it('name the binaries per platform', () => {

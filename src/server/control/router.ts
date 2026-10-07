@@ -18,6 +18,7 @@ import { registerExternalSessionRoutes } from './routes/external-sessions.js'
 import { registerHardwareRoutes } from './routes/hardware.js'
 import { registerLifecycleRoutes, registerShutdownRoute } from './routes/lifecycle.js'
 import { registerModelRoutes } from './routes/models.js'
+import { registerModelSetupRoutes } from './routes/model-setups.js'
 import { registerPublicServerRoutes } from './routes/public-server.js'
 import { registerRemoteAccessRoutes } from './routes/remote-access.js'
 import { registerSettingsRoutes } from './routes/settings.js'
@@ -46,6 +47,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
     optimal_backends: deps.backends.optimalSnapshot(),
     environments: deps.environmentsSnapshot?.() ?? [],
     environment_operations: deps.environmentOperations?.() ?? [],
+    model_setups: deps.modelSetups?.snapshot() ?? [],
   })
   const ctx: ControlRouteContext = { p, now, startedAt, snapshot, self }
 
@@ -54,6 +56,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerLifecycleRoutes(router, deps, ctx)
   registerClientRoutes(router, deps, ctx)
   registerModelRoutes(router, deps, ctx)
+  registerModelSetupRoutes(router, deps, ctx)
   registerBackendRoutes(router, deps, ctx)
   registerHardwareRoutes(router, deps, ctx)
   registerDiskRoutes(router, deps, ctx)

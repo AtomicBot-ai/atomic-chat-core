@@ -32,6 +32,14 @@ describe('dataLayout', () => {
     expect(layout.managedModelsDir).toBe(native('/data/managed-models'))
     expect(layout.provider('tensorrt-llm').modelsDir).toBe(native('/data/managed-models'))
   })
+  it('gives atomic-prism its own packs and the shared GGUF tree', () => {
+    const prism = layout.provider('atomic-prism')
+    expect(prism.modelsDir).toBe(native('/data/llamacpp/models'))
+    expect(prism.backendsDir).toBe(native('/data/atomic-prism/backends'))
+    expect(prism.tmpDir).toBe(native('/data/atomic-prism/tmp'))
+    expect(prism.libDir).toBeUndefined()
+    expect(layout.core.prismSetupsDir).toBe(native('/data/atomic-core/prism-setups'))
+  })
   it('puts every new file under <data>/atomic-core and keeps the legacy files at the root', () => {
     expect(layout.core.settings).toBe(native('/data/atomic-core/settings.json'))
     expect(layout.core.instanceLock).toBe(native('/data/atomic-core/instance.lock'))

@@ -34,6 +34,21 @@ export interface ModelYml {
   dflash_draft_path?: string
   source?: ImportedModelSource
   capabilities?: string[]
+  /**
+   * Written by a model setup for a file only one engine runs (PrismML Bonsai). Absent means any
+   * llama.cpp provider; the load gate still reads the header either way.
+   */
+  atomic_runtime?: ModelYmlAtomicRuntime
+}
+
+export interface ModelYmlAtomicRuntime {
+  provider: 'atomic-prism'
+  /** Engine capabilities the file needs (`pq2_0`, `hadamard`, …). */
+  requires?: string[]
+  /** Oldest PrismML build that runs it. */
+  min_build?: number
+  /** Conf model-rules family id. */
+  family?: string
 }
 
 /** Key order the app's serde_yaml writer produces; `writeModelYml` must emit keys in this order. */
@@ -53,4 +68,5 @@ export const MODEL_YML_KEY_ORDER: readonly (keyof ModelYml)[] = [
   'dflash_draft_path',
   'source',
   'capabilities',
+  'atomic_runtime',
 ]

@@ -1,5 +1,6 @@
 /**
- * Spawning one `llama-server --decision` and waiting until it is a decision model this core can use.
+ * Spawning one decision `llama-server` (the fork's `--decision`, or stock llama.cpp for an upstream
+ * decision GGUF) and waiting until it is a decision model this core can use.
  *
  * Borrowed from the runtimes, as the image engine does: `spawnManaged`, `randomFreePort`,
  * `buildProcessEnv`, the backend-output sink, and the journal hooks (the caller writes the record
@@ -23,10 +24,18 @@ import {
   spawnManaged,
 } from '../runtime/shared/index.js'
 import type { BackendOutputSink, ManagedProcess, SpawnSpec } from '../runtime/shared/index.js'
-import { buildDecisionArgs, commandSummary, decisionEnv, DECISION_HOST, withoutDecisionEnv } from './args.js'
-import type { DecisionLaunchSpec } from './args.js'
+import {
+  buildDecisionArgs,
+  buildUpstreamDecisionArgs,
+  commandSummary,
+  decisionEnv,
+  DECISION_HOST,
+  withoutDecisionEnv,
+} from './args.js'
+import type { DecisionLaunchSpec, UpstreamDecisionLaunch } from './args.js'
 import type { DecisionHttp } from './http.js'
-import { checkReadiness } from './readiness.js'
+import { UPSTREAM_DECISION_DEFAULT_CTX } from './model-facts.js'
+import { checkReadiness, READINESS_REQUEST_TIMEOUT_MS } from './readiness.js'
 
 /** SIGTERM → this long → SIGKILL. The engine cancels its queue on SIGTERM, so this is rarely used. */
 export const DECISION_TERMINATE_GRACE_MS = 5_000
@@ -37,6 +46,17 @@ export const DECISION_TAIL_CAPACITY = 100
 export interface DecisionServerSpec extends Omit<DecisionLaunchSpec, 'port'> {
   engine: DecisionEngineInfo
   startupTimeoutMs: number
+  /** How an upstream engine (`engine.dialect === 'upstream'`) runs the model; ignored by the fork. */
+  upstream?: UpstreamDecisionLaunch
+}
+
+/** The argv for `spec` on `port`: the fork's `--decision`, or stock llama.cpp for an upstream GGUF. */
+export function decisionArgsFor(spec: DecisionServerSpec, port: number): string[] {
+  if (spec.engine.dialect !== 'upstream') return buildDecisionArgs({ ...spec, port })
+  return buildUpstreamDecisionArgs(
+    { ...spec, port },
+    spec.upstream ?? { ctxSize: UPSTREAM_DECISION_DEFAULT_CTX, wholePromptUbatch: false }
+  )
 }
 
 /** A running decision process that passed the readiness chain. */
@@ -111,7 +131,7 @@ export async function spawnDecisionServer(
     )
   })
   const apiKey = (deps.apiKey ?? (() => randomBytes(24).toString('base64url')))()
-  const args = buildDecisionArgs({ ...spec, port })
+  const args = decisionArgsFor(spec, port)
   log('info', `starting the decision model: ${commandSummary(exe, args)}`)
   const { env, cwd } = buildProcessEnv({
     platform,
@@ -182,7 +202,13 @@ export async function spawnDecisionServer(
           [lastDetail, ...tail.slice(-10)].filter(Boolean).join('\n') || undefined
         )
       )
-    const result = await checkReadiness(deps.http, baseUrl, apiKey)
+    const result = await checkReadiness(
+      deps.http,
+      baseUrl,
+      apiKey,
+      READINESS_REQUEST_TIMEOUT_MS,
+      spec.engine.dialect
+    )
     if (result.kind === 'ready') {
       log(
         'info',
@@ -207,7 +233,9 @@ export async function spawnDecisionServer(
         DECISION_TERMINATE_GRACE_MS,
         new AtomicCoreError(
           'DECISION_ENGINE_UNSUPPORTED',
-          'The engine started but does not serve decision API version 1.',
+          spec.engine.dialect === 'upstream'
+            ? 'The engine started but does not serve the model as a decision model.'
+            : 'The engine started but does not serve decision API version 1.',
           `${exe}: ${result.detail}`
         )
       )

@@ -69,6 +69,11 @@ export interface FakeDecisionOptions {
   noCapability?: boolean
   /** A build from before the converter: no `--decision-convert-cache`, `-m <folder>` fails. */
   noConvert?: boolean
+  /**
+   * Stock llama.cpp b11370+ with an upstream decision GGUF: decision without `--decision`, readiness
+   * through `architecture.output_modalities`, no `/props.decision`, no router.
+   */
+  upstream?: boolean
 }
 
 function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
@@ -93,6 +98,7 @@ function fakeEnv(options: FakeLlamaOptions): Record<string, string> {
     if (d.loadMs) env['FAKE_DECISION_LOAD_MS'] = String(d.loadMs)
     if (d.noCapability) env['FAKE_DECISION_NO_CAPABILITY'] = '1'
     if (d.noConvert) env['FAKE_DECISION_NO_CONVERT'] = '1'
+    if (d.upstream) env['FAKE_DECISION_UPSTREAM'] = '1'
   }
   return env
 }

@@ -26,6 +26,8 @@ const ENGINE: DecisionEngineInfo = {
   version_backend: 'b10269-1.7.0/macos-arm64',
   fork_version: '1.7.0',
   version_gate: true,
+  dialect: 'turboquant',
+  provider: 'llamacpp',
 }
 
 const CARD: ExecutorCard = {
@@ -77,6 +79,7 @@ function harness(over: Partial<DecisionServiceDeps> = {}, settings: Partial<Deci
     log: () => {},
     fileExists: async () => true,
     inspectModel: async () => ({ kind: 'file' }),
+    readModelFacts: async () => ({ dialect: 'turboquant' }),
     pruneConvertCache: async () => {},
     schedule: (fn, ms) => {
       const timer = { fn, ms, cancelled: false }
@@ -889,5 +892,144 @@ describe('DecisionService with a checkpoint folder', () => {
     await h.service.configure({ convert_type: 'f32' })
     await h.service.load()
     expect(h.spawns.map((s) => s.convert?.type)).toEqual(['f16', 'f32'])
+  })
+})
+
+describe('DecisionService with an upstream decision GGUF', () => {
+  const UPSTREAM_ENGINE: DecisionEngineInfo = {
+    path: join(PACK_DIR, 'llama-server'),
+    version_backend: 'b11436/macos-arm64',
+    fork_version: null,
+    version_gate: true,
+    dialect: 'upstream',
+    provider: 'llamacpp-upstream',
+  }
+  const upstreamHandle = (pid: number): DecisionProcessHandle => ({
+    ...stubHandle(pid),
+    props: { api_version: 1, endpoints: ['/v1/systemone'], source: 'gguf' },
+  })
+
+  it('asks for a stock build at the model floor and starts it with its projector and context', async () => {
+    const needs: unknown[] = []
+    const h = harness(
+      {
+        readModelFacts: async () => ({ dialect: 'upstream', decisionType: 'clef', contextTrain: 262144 }),
+        resolveEngine: async (_path, need) => {
+          needs.push(need)
+          return UPSTREAM_ENGINE
+        },
+        spawn: async (spec) => {
+          h.spawns.push(spec)
+          return upstreamHandle(80)
+        },
+      },
+      {
+        model_path: 'decision/models/clef-flash/Clef-Flash-Q4_K_M.gguf',
+        mmproj_path: 'decision/models/clef-flash/mmproj-Clef-Flash-Q8_0.gguf',
+        spec_path: 'never/checked.json',
+      }
+    )
+    expect(await h.service.load()).toMatchObject({ state: 'ready', engine: { dialect: 'upstream' } })
+    expect(needs).toEqual([{ dialect: 'upstream', minBuild: 11418 }])
+    expect(h.spawns[0]).toMatchObject({
+      modelPath: join('/data', 'decision/models/clef-flash/Clef-Flash-Q4_K_M.gguf'),
+      upstream: {
+        mmprojPath: join('/data', 'decision/models/clef-flash/mmproj-Clef-Flash-Q8_0.gguf'),
+        ctxSize: 8192,
+        wholePromptUbatch: true,
+      },
+    })
+    // The spec is the fork's: it is neither checked nor passed for an upstream model.
+    expect(h.spawns[0]?.specPath).toBeUndefined()
+  })
+
+  it('keeps the projector away from the fork and the text-only floor without one', async () => {
+    const needs: unknown[] = []
+    const fork = harness(
+      {
+        resolveEngine: async (_path, need) => {
+          needs.push(need)
+          return ENGINE
+        },
+        spawn: async (spec) => {
+          fork.spawns.push(spec)
+          return stubHandle(81)
+        },
+      },
+      { mmproj_path: 'stray/mmproj.gguf' }
+    )
+    await fork.service.load()
+    expect(fork.spawns[0]?.upstream).toBeUndefined()
+    const text = harness({
+      readModelFacts: async () => ({ dialect: 'upstream', decisionType: 'lev' }),
+      resolveEngine: async (_path, need) => {
+        needs.push(need)
+        return UPSTREAM_ENGINE
+      },
+      spawn: async () => upstreamHandle(82),
+    })
+    await text.service.load()
+    expect(needs).toEqual([{ checkpointDir: false }, { dialect: 'upstream', minBuild: 11370 }])
+  })
+
+  it('refuses a projector that is not on disk before any engine is looked for', async () => {
+    let resolved = 0
+    const h = harness(
+      {
+        readModelFacts: async () => ({ dialect: 'upstream', decisionType: 'openjev' }),
+        fileExists: async (path) => !path.endsWith('mmproj.gguf'),
+        resolveEngine: async () => {
+          resolved++
+          return UPSTREAM_ENGINE
+        },
+      },
+      { mmproj_path: 'decision/models/openjev/mmproj.gguf' }
+    )
+    await expect(h.service.load()).rejects.toMatchObject({
+      code: 'MODEL_FILE_NOT_FOUND',
+      message: 'The decision model projector does not exist.',
+    })
+    expect(resolved).toBe(0)
+  })
+
+  it('answers the router as unsupported without a request: upstream serves systemone only', async () => {
+    const h = harness({
+      readModelFacts: async () => ({ dialect: 'upstream', decisionType: 'laya' }),
+      spawn: async () => upstreamHandle(83),
+    })
+    await h.service.load()
+    const outcome = await h.service.scoreCandidates('t', 'c', [{ id: 'a', card: CARD }])
+    expect(outcome).toMatchObject({
+      unavailable: true,
+      reason: 'unsupported',
+      message: 'The running decision model does not serve /v1/router/score.',
+    })
+    const target = await h.service.publicBackend().acquire(1_000)
+    expect(target).toMatchObject({ ok: true, endpoints: ['/v1/systemone'] })
+    if (target.ok) target.release()
+  })
+
+  it('retries after an install of the provider its model needs, and ignores the other one', async () => {
+    let installed = false
+    let resolves = 0
+    const h = harness({
+      readModelFacts: async () => ({ dialect: 'upstream', decisionType: 'kev' }),
+      resolveEngine: async () => {
+        resolves++
+        if (!installed) throw new AtomicCoreError('DECISION_ENGINE_UNSUPPORTED', 'Update llama.cpp')
+        return UPSTREAM_ENGINE
+      },
+      spawn: async () => upstreamHandle(84),
+    })
+    await expect(h.service.load()).rejects.toMatchObject({ code: 'DECISION_ENGINE_UNSUPPORTED' })
+    installed = true
+    await h.service.onEnginesChanged('llamacpp')
+    await tick()
+    expect(resolves).toBe(1)
+    expect(h.service.getStatus().state).toBe('unsupported')
+    await h.service.onEnginesChanged('llamacpp-upstream')
+    await tick()
+    await tick()
+    expect(h.service.getStatus()).toMatchObject({ state: 'ready', pid: 84 })
   })
 })

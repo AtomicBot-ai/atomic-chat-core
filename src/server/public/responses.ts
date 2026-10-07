@@ -52,6 +52,7 @@ export async function serveResponses(ex: Exchange): Promise<void> {
   const session =
     ex.deps.findLocal('llamacpp', modelId) ??
     ex.deps.findLocal('llamacpp-upstream', modelId) ??
+    ex.deps.findLocal('atomic-prism', modelId) ??
     ex.deps.findLocal('mlx', modelId)
   if (!session) {
     // A session that declares its routes and has no Responses API says so, rather than "not found".

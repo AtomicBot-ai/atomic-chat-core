@@ -45,6 +45,7 @@ interface Registration {
 const PROVIDERS: ReadonlySet<string> = new Set([
   'llamacpp',
   'llamacpp-upstream',
+  'atomic-prism',
   'mlx',
   'foundation-models',
   'tensorrt-llm',

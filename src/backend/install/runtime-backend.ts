@@ -8,11 +8,16 @@ import { canonicalProviderDefaults } from '../../settings/index.js'
 import type { SettingsStore } from '../../settings/index.js'
 import { rustArch } from '../../hardware/index.js'
 import type { HardwareFactsSource } from '../../hardware/index.js'
+import { prismTagBuild } from '../catalog/index.js'
 import { discoverBackendBinary, resolveBackendExe, scanInstalledBackends } from '../installed/index.js'
 import {
   determineBestBackend,
+  determineBestPrismBackend,
+  determinePrismSupportedBackends,
   determineSupportedBackends,
   filterBackendsBySupport,
+  filterPrismBackendsBySupport,
+  getPrismSupportedFeatures,
   getSupportedFeatures,
 } from '../select/index.js'
 import {
@@ -105,6 +110,17 @@ export async function selectInstalledBackend(
     const compatible = filterTurboquantBackendsBySupport(installed, supported)
     if (compatible.length === 0) return undefined
     selected = determineBestTurboquantBackend(compatible, gpus)
+  } else if (provider === 'atomic-prism') {
+    const rocm = osType === 'linux' ? await probeRocm() : undefined
+    const features = getPrismSupportedFeatures(osType, cpuExtensions, gpus, rocm)
+    // A pack under another release train's tag was not installed from the Prism manifest.
+    const prismPacks = installed.filter((pack) => prismTagBuild(pack.version) !== null)
+    const compatible = filterPrismBackendsBySupport(
+      prismPacks,
+      determinePrismSupportedBackends(osType, arch, features)
+    )
+    if (compatible.length === 0) return undefined
+    selected = determineBestPrismBackend(compatible, gpus)
   } else {
     const features = getSupportedFeatures(osType, cpuExtensions, gpus)
     const supported = determineSupportedBackends(osType, arch, features)

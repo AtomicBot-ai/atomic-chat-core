@@ -10,6 +10,10 @@ Stage 5 providers, each opt-in on its own:
 - TurboQuant (`test/live/turboquant.test.ts`): `ATOMIC_LIVE_TURBOQUANT_BIN` (a fork `llama-server`, its whole
   `build/bin` is copied), `ATOMIC_LIVE_TURBOQUANT_MODEL` (a GGUF), optional `ATOMIC_LIVE_TURBOQUANT_TAG`. Checks the
   running process was started with `--cache-type-k/v turbo3`, answers through `/v1`, grows its context.
+- Upstream decision model (`test/live/decision-upstream.test.ts`): `ATOMIC_LIVE_UPSTREAM_DECISION_BIN` (an upstream
+  `llama-server` b11370 or newer, its whole folder is copied), `ATOMIC_LIVE_UPSTREAM_DECISION_MODEL` (an upstream decision
+  GGUF, e.g. `ggml-org/Julia-1-GGUF` Q8_0, 168 MB), optional `ATOMIC_LIVE_UPSTREAM_DECISION_TAG` (default `b11436`). Checks
+  the module picks the upstream pack, answers `/v1/systemone` through the public server and refuses the router with 501.
 - MLX (`test/live/mlx.test.ts`, macOS): `ATOMIC_LIVE_MLX_RESOURCES` (folder with `mlx-server`), `ATOMIC_LIVE_MLX_MODEL`
   (an MLX model folder).
 - Foundation Models (`test/live/foundation-models.test.ts`, macOS 26): `ATOMIC_LIVE_FM_RESOURCES` (folder with

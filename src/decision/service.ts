@@ -1,6 +1,7 @@
 /**
- * The decision module's surface: one `llama-server --decision` process at most, its lifecycle, and
- * the calls the rest of the core makes to it.
+ * The decision module's surface: one decision `llama-server` at most (the fork's `--decision`, or
+ * stock llama.cpp for an upstream decision GGUF), its lifecycle, and the calls the rest of the core
+ * makes to it.
  *
  * Outside the sessions registry on purpose (ADR 2026-09-30-the-decision-model-is-its-own-core-module):
  * a chat model switch unloads every other local session and the chat auto-unload policy would treat
@@ -13,7 +14,7 @@
  *  - start and stop are serialized, and a stop aborts a start still waiting for readiness;
  *  - a process that dies after it was ready is restarted with backoff, at most `MAX_RESTARTS` times in
  *    a row; a start that fails is not retried until a setting changes, `load` is asked for, or a
- *    TurboQuant build is installed (`onEnginesChanged`); an `unsupported` module is also retried in
+ *    TurboQuant or llama.cpp build is installed (`onEnginesChanged`); an `unsupported` module is also retried in
  *    the background by a call, at most once per `UNSUPPORTED_RETRY_MS`, quietly (no `starting` on the
  *    way, and no event at all when it lands where it was);
  *  - the engine builds readiness refused are tried again after each of those three triggers (a build
@@ -27,6 +28,7 @@ import { AtomicCoreError } from '../contracts/index.js'
 import type {
   CoreEvents,
   DecisionEngineInfo,
+  DecisionEngineProvider,
   DecisionErrorEvent,
   DecisionOutcome,
   DecisionQuestion,
@@ -43,8 +45,11 @@ import type { DecisionModelSource } from '../models/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import type { DecisionBackend, DecisionTarget } from '../server/index.js'
 import { DECISION_CONVERT_CACHE_DIR, decisionThreads, resolveDataPath } from './args.js'
-import type { ThreadFacts } from './args.js'
+import type { ThreadFacts, UpstreamDecisionLaunch } from './args.js'
 import type { EngineRequirements } from './engine.js'
+import { readDecisionModelFacts, upstreamCtxSize, WHOLE_PROMPT_DECISION_TYPES } from './model-facts.js'
+import type { DecisionModelFacts } from './model-facts.js'
+import { upstreamMinBuild } from './upstream-version.js'
 import { nextRestartCount, restartDelayMs, shouldGiveUp } from './backoff.js'
 import { DecisionAbortedError, DecisionTimeoutError } from './http.js'
 import type { DecisionHttp } from './http.js'
@@ -118,6 +123,8 @@ export interface DecisionServiceDeps {
   fileExists?: (path: string) => Promise<boolean>
   /** What the model path is: a GGUF file, a checkpoint folder, or nothing. */
   inspectModel?: (path: string) => Promise<DecisionModelSource>
+  /** Which engine a GGUF needs, from its header (`readDecisionModelFacts`). */
+  readModelFacts?: (path: string) => Promise<DecisionModelFacts>
   /** Where checkpoint folders are converted to. Default: `<dataFolder>/decision/gguf-cache`. */
   convertCacheDir?: string
   /**
@@ -176,9 +183,21 @@ function describeExit(exit: ExitInfo): string {
 
 /** The settings a running process was started with; any change means a restart. */
 function launchKey(settings: DecisionSettings): string {
-  const { model_path, model_id, spec_path, threads, allow_uncalibrated, engine_path, convert_type } = settings
+  const {
+    model_path,
+    mmproj_path,
+    ctx_size,
+    model_id,
+    spec_path,
+    threads,
+    allow_uncalibrated,
+    engine_path,
+    convert_type,
+  } = settings
   return JSON.stringify([
     model_path,
+    mmproj_path,
+    ctx_size,
     model_id,
     spec_path,
     threads,
@@ -204,6 +223,8 @@ export class DecisionService {
   private lastLaunchKey: string | undefined
   /** When a call last retried an `unsupported` module; a quiet retry that changes nothing emits nothing. */
   private lastQuietRetry = Number.NEGATIVE_INFINITY
+  /** The provider the configured model last needed: an install of another one cannot help it. */
+  private neededProvider: DecisionEngineProvider | undefined
   private loading: Promise<DecisionProcessHandle> | undefined
   private loadAbort: AbortController | undefined
   private cancelRestart: (() => void) | undefined
@@ -294,17 +315,20 @@ export class DecisionService {
   }
 
   /**
-   * A llama.cpp (TurboQuant) build was installed: a module that is `unsupported` or `failed` tries
-   * again, since the new build may be the first that serves `--decision`. Any other state is left as
-   * it is.
+   * A TurboQuant or llama.cpp build was installed: a module that is `unsupported` or `failed` tries
+   * again, since the new build may be the first that serves the model (`--decision`, or an upstream
+   * build at the model's floor). Any other state is left as it is, and so is everything when
+   * `provider` is not the one the model needs (known once a start has read the model).
    */
-  async onEnginesChanged(): Promise<DecisionStatus> {
+  async onEnginesChanged(provider?: string): Promise<DecisionStatus> {
     const settings = this.deps.readSettings()
     if (this.stopping || !settings.enabled) return this.getStatus()
+    if (provider !== undefined && this.neededProvider !== undefined && provider !== this.neededProvider)
+      return this.getStatus()
     // The new build may replace one readiness refused, or a refusal may no longer hold.
     this.deps.forgetRejectedEngines?.()
     if (this.state.state !== 'unsupported' && this.state.state !== 'failed') return this.getStatus()
-    this.deps.log('info', 'a TurboQuant build was installed; trying the decision model again')
+    this.deps.log('info', 'an engine build was installed; trying the decision model again')
     return this.reconcile()
   }
 
@@ -507,16 +531,42 @@ export class DecisionService {
       // Hugging Face snapshot is a commit hash.
       const modelId = settings.model_id !== '' ? settings.model_id : checkpointDir ? basename(modelPath) : ''
       const exists = this.deps.fileExists ?? defaultFileExists
-      const specPath = resolveDataPath(this.deps.dataFolder, settings.spec_path)
+      const facts: DecisionModelFacts = checkpointDir
+        ? { dialect: 'turboquant' }
+        : await (this.deps.readModelFacts ?? readDecisionModelFacts)(modelPath)
+      this.neededProvider = facts.dialect === 'upstream' ? 'llamacpp-upstream' : 'llamacpp'
+      // The spec belongs to the fork, the projector to upstream: each is checked only where it is used.
+      const specPath =
+        facts.dialect === 'turboquant' ? resolveDataPath(this.deps.dataFolder, settings.spec_path) : undefined
       if (specPath !== undefined && !(await exists(specPath)))
         throw new AtomicCoreError('MODEL_FILE_NOT_FOUND', 'The decision spec file does not exist.', specPath)
+      const mmprojPath =
+        facts.dialect === 'upstream' ? resolveDataPath(this.deps.dataFolder, settings.mmproj_path) : undefined
+      if (mmprojPath !== undefined && !(await exists(mmprojPath)))
+        throw new AtomicCoreError(
+          'MODEL_FILE_NOT_FOUND',
+          'The decision model projector does not exist.',
+          mmprojPath
+        )
       if (!quiet) this.setState({ state: mode === 'restart' ? 'restarting' : 'starting', error: null })
       const threads = decisionThreads({ setting: settings.threads, ...(await this.deps.cpu()) })
       const onEngine = (chosen: DecisionEngineInfo) => {
         engine = chosen
         if (!quiet) this.setState({ engine })
       }
-      const needs: EngineRequirements = { checkpointDir }
+      let needs: EngineRequirements = { checkpointDir }
+      let upstream: UpstreamDecisionLaunch | undefined
+      if (facts.dialect === 'upstream') {
+        needs = {
+          dialect: 'upstream',
+          minBuild: upstreamMinBuild(facts.decisionType, mmprojPath !== undefined),
+        }
+        upstream = {
+          ...(mmprojPath !== undefined ? { mmprojPath } : {}),
+          ctxSize: upstreamCtxSize(settings.ctx_size, facts.contextTrain),
+          wholePromptUbatch: WHOLE_PROMPT_DECISION_TYPES.has(facts.decisionType),
+        }
+      }
       const handle = await this.spawnOnFirstGoodEngine(settings, needs, abort.signal, onEngine, (engine) => ({
         engine,
         modelPath,
@@ -525,6 +575,7 @@ export class DecisionService {
         ...(checkpointDir
           ? { convert: { cacheDir: this.convertCacheDir, type: settings.convert_type } }
           : {}),
+        ...(upstream !== undefined ? { upstream } : {}),
         threads,
         allowUncalibrated: settings.allow_uncalibrated,
         startupTimeoutMs: settings.startup_timeout_secs * 1000,
@@ -696,6 +747,9 @@ export class DecisionService {
         else this.retryUnsupported(settings)
         return unavailable(refusal.reason, refusal.message, elapsed())
       }
+      // An engine that lists its endpoints and not this one (upstream serves `/v1/systemone` only).
+      if (Array.isArray(handle.props.endpoints) && !handle.props.endpoints.includes(path))
+        return unavailable('unsupported', `The running decision model does not serve ${path}.`, elapsed())
       // The process says it will refuse the router (no calibration, no `--decision-allow-uncalibrated`):
       // answer that without a round trip. `capabilities` is not the signal, since `router_score` is
       // missing from it even when the flag makes the router available.
@@ -769,10 +823,12 @@ export class DecisionService {
     }
     this.inFlight++
     let released = false
+    const endpoints = handle.props.endpoints
     return {
       ok: true,
       port: handle.port,
       apiKey: handle.apiKey,
+      ...(Array.isArray(endpoints) ? { endpoints: [...endpoints] } : {}),
       release: () => {
         if (released) return
         released = true

@@ -28,11 +28,13 @@ import { HardwareService, nodeProbeDeps, probeSystemInfo, probeUnifiedMemory } f
 import {
   BackendAdvisor,
   BackendService,
+  PrismCatalogService,
   TurboquantCatalogService,
   ensureBackend,
   ensureTurboquantCudart,
   ensureUpstreamCudart,
   ManifestSessionCache,
+  probeLinuxRocmHost,
   OptimalBackendStore,
   fetchLiveManifest,
   manifestTransportFromFetch,
@@ -57,6 +59,9 @@ import {
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
+import { compatibilityFor, wireModelSetups } from './model-setup/index.js'
+import type { ModelSetupWiringDeps } from './model-setup/index.js'
+import { currentPrismPack, wirePrismCompatibility } from './prism.js'
 import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
@@ -192,10 +197,11 @@ export async function createAtomicCore(
     const registries = new Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>([
       [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
+      ['atomic-prism', new ModelRegistry(layout, 'atomic-prism')],
     ])
-    // Both llama.cpp providers run through one runtime class; what differs — backend ids, the
+    // The three llama.cpp providers run through one runtime class; what differs — backend ids, the
     // argument rules and Windows CUDA runtime repair — is decided by the provider it is given.
-    const llamacppRuntime = (provider: 'llamacpp' | 'llamacpp-upstream') =>
+    const llamacppRuntime = (provider: LlamacppProviderId) =>
       new LlamacppRuntime({
         layout,
         registry: registries.get(provider) as ModelRegistry,
@@ -219,6 +225,8 @@ export async function createAtomicCore(
                 '_'
               )
               const deps = { layout, downloader, platform, log: (message: string) => log('warn', message) }
+              // A PrismML pack is installed with its CUDA runtime in place; there is nothing to repair.
+              if (provider === 'atomic-prism') return Promise.resolve()
               const repair =
                 provider === 'llamacpp'
                   ? ensureTurboquantCudart(repairBackend, backendDir, taskId, deps)
@@ -239,6 +247,7 @@ export async function createAtomicCore(
         // never auto-unloaded, never evicted by GPU residency, never evicting.
         transcriptionModelId: TRANSCRIPTION_MODEL_ID,
         claimGpu: (claim, signal) => gpuResidency.hook(provider)(claim, signal),
+        checkCompatibility: (target) => prismCompatibility.gate(provider, target),
         unifiedMemory: async () =>
           probeUnifiedMemory(
             nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
@@ -252,6 +261,7 @@ export async function createAtomicCore(
     const runtimes = new Map<LocalProviderId, LocalRuntime>([
       [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
       ['llamacpp', llamacppRuntime('llamacpp')],
+      ['atomic-prism', llamacppRuntime('atomic-prism')],
     ])
     // The facade, constructed last: what GPU residency and an engine removal stop a session through,
     // exactly as a client's unload would. Read when they act, never before.
@@ -327,6 +337,30 @@ export async function createAtomicCore(
       platform,
       log: (level, message) => log(level, message),
     })
+    // Test hooks (docs/contracts.md "Test hooks"): where the PrismML manifest, the model rules and
+    // model files are read from. Unset in production.
+    const prismManifestUrl = env['ATOMIC_PRISM_MANIFEST_URL']
+    const prismRulesUrl = env['ATOMIC_PRISM_MODEL_RULES_URL']
+    const hfEndpoint = env['ATOMIC_HF_ENDPOINT']
+    const prismCatalog = new PrismCatalogService({
+      layout,
+      fetchFor,
+      ...(prismManifestUrl ? { url: prismManifestUrl } : {}),
+      log,
+    })
+    // One compatibility service for the control routes and every llama.cpp load gate; the gate
+    // reads only what is cached, so a load never waits on the network for it.
+    const prismCompatibility = wirePrismCompatibility({
+      layout,
+      settings,
+      hardware,
+      prismCatalog,
+      fetch: fetchFor(),
+      ...(prismRulesUrl ? { rulesUrl: prismRulesUrl } : {}),
+      env,
+      log,
+    })
+    const allowPrismCandidates = () => settings.get('atomic-prism')['allow_candidate_builds'] === true
     const advisors = new Map<LlamacppProviderId, BackendAdvisor>()
     const backendAdvisor = (provider: LlamacppProviderId): BackendAdvisor => {
       const existing = advisors.get(provider)
@@ -341,6 +375,8 @@ export async function createAtomicCore(
         fetchFor,
         manifestCache,
         turboquantCatalog,
+        prismCatalog,
+        allowCandidateBuilds: allowPrismCandidates,
         // The Windows tier check runs `--list-devices` on the installed pack of that tier.
         listDevices: async (installed) => {
           const exePath = await resolveBackendExe(layout, provider, installed.version, installed.backend)
@@ -363,6 +399,7 @@ export async function createAtomicCore(
         provider,
         downloader,
         optimalStore,
+        prismCatalog,
         readManifest: async (proxy) => {
           const cached = manifestCache.get()
           if (cached) return cached
@@ -376,6 +413,43 @@ export async function createAtomicCore(
       backendServices.set(provider, created)
       return created
     }
+    // One model-setup runner per core: it owns the in-memory table of runs and the shared engine
+    // installs that a cancel works from. The records survive a restart as `interrupted`.
+    const modelFile = async (provider: LocalProviderId, modelId: string) => {
+      const registry = registries.get(provider)
+      if (!(registry instanceof ModelRegistry)) throw unknownProvider(provider, registries.keys())
+      const yml = await registry.read(modelId)
+      return {
+        modelPath: registry.resolvePaths(yml).modelPath,
+        ...(yml.model_sha256 ? { sha256: yml.model_sha256 } : {}),
+      }
+    }
+    const modelSetupDeps: ModelSetupWiringDeps = {
+      layout,
+      compatibility: prismCompatibility,
+      prismCatalog,
+      hardware: () => hardware.facts(),
+      offer: () => ({ coreVersion: CORE_VERSION, allowCandidates: allowPrismCandidates() }),
+      currentPack: () => currentPrismPack({ layout, settings, hardware }),
+      installEngine: (version, backend, opts) =>
+        backendService('atomic-prism').install(version, backend, opts),
+      selectEngine: (versionBackend) => settings.update('atomic-prism', { version_backend: versionBackend }),
+      downloader,
+      register: async (provider, modelId, yml) => {
+        await (registries.get(provider) as ModelRegistry).write(modelId, yml)
+      },
+      modelFile,
+      emit: (name, payload) => emitter.emit(name, payload),
+      freeBytes: () => availableDiskSpace(layout.root, undefined),
+      fetchFor,
+      newId: () => randomUUID(),
+      ...(hfEndpoint ? { hfEndpoint } : {}),
+      env,
+      platform,
+      ...(platform === 'linux' ? { rocmProbe: () => probeLinuxRocmHost() } : {}),
+      log,
+    }
+    const modelSetups = wireModelSetups(modelSetupDeps)
 
     const diffusion = wireDiffusion({
       layout,
@@ -588,6 +662,17 @@ export async function createAtomicCore(
           embed: (provider, modelId, input, ubatchSize) =>
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
+        modelSetups: {
+          compatibility: (request) => compatibilityFor(modelSetupDeps, request),
+          plan: (request) => modelSetups.plan(request),
+          families: () => prismCompatibility.families(),
+          start: (request) => modelSetups.start(request),
+          list: () => modelSetups.list(),
+          get: (setupId) => modelSetups.get(setupId),
+          cancel: (setupId) => modelSetups.cancel(setupId),
+          resume: (setupId, opts) => modelSetups.resume(setupId, opts),
+          snapshot: () => modelSetups.snapshot(),
+        },
         managedModelChecks,
         ...(managedModelDelete !== null ? { managedModelDelete } : {}),
         // Where clients put tensorrt-llm models (change `add-tensorrt-llm-windows`, task 2.8): wherever
@@ -753,6 +838,8 @@ export async function createAtomicCore(
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
+    // A model setup a stopped core left mid-way becomes `interrupted`, resumable from its files.
+    await modelSetups.recover().catch((e: unknown) => warn(`model setup recovery: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

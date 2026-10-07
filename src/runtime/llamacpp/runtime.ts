@@ -143,6 +143,12 @@ export interface LlamacppRuntimeOptions {
    */
   claimGpu?: GpuClaimHook | undefined
   /**
+   * Refuses a file this engine cannot run (a PrismML-only Bonsai file on stock llama.cpp), by
+   * throwing. Asked before the auto-unload, so a refused load never costs the user the chat model.
+   */
+  checkCompatibility?:
+    ((target: { modelId: string; modelPath: string; sha256?: string }) => Promise<void>) | undefined
+  /**
    * Read a model's GGUF metadata. A seam because the model's trained context comes from here, and
    * it is what decides when the context ladder has nowhere left to climb — untestable otherwise
    * without hand-building a GGUF file.
@@ -253,6 +259,8 @@ export class LlamacppRuntime implements LocalRuntime {
     const settings = await this.options.readSettings()
     throwIfLoadCancelled(opts.signal)
     await this.assertNotDecisionModel(modelId, opts)
+    throwIfLoadCancelled(opts.signal)
+    await this.assertCompatible(modelId, opts)
     throwIfLoadCancelled(opts.signal)
     const config: LlamacppConfigInput = { ...settings.config }
     if (opts.exePath) config.version_backend = opts.versionBackend ?? 'cli/llama-server'
@@ -392,6 +400,20 @@ export class LlamacppRuntime implements LocalRuntime {
         `"${modelId}" is a decision model and cannot be loaded for chat. Decision models run in the decision module (settings: decision.model_path).`,
         path
       )
+  }
+
+  private async assertCompatible(modelId: string, opts: LoadOptions): Promise<void> {
+    const { registry, checkCompatibility } = this.options
+    if (!checkCompatibility) return
+    const yml = opts.modelPath === undefined ? await registry.read(modelId).catch(() => undefined) : undefined
+    const configured = opts.modelPath ?? yml?.model_path
+    if (!configured) return
+    const modelPath = registry.resolvePaths({ model_path: configured } as never).modelPath
+    await checkCompatibility({
+      modelId,
+      modelPath,
+      ...(yml?.model_sha256 ? { sha256: yml.model_sha256 } : {}),
+    })
   }
 
   private enqueueLoad<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {

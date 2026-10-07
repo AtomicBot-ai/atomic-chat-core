@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
+import type { AtomicCoreError } from '../contracts/index.js'
 import { checkSpecTypeSupport } from '../runtime/llamacpp/index.js'
 import { fakeLlamaSpawnRaw } from '../../test/helpers/fake-llama-server.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -53,6 +54,8 @@ describe('DecisionEngineResolver', () => {
       version_backend: 'b10300-1.7.0/macos-arm64',
       fork_version: '1.7.0',
       version_gate: true,
+      dialect: 'turboquant',
+      provider: 'llamacpp',
     })
     expect(probes).toEqual([packs[1]!.path])
   })
@@ -208,6 +211,8 @@ describe('DecisionEngineResolver', () => {
       version_backend: null,
       fork_version: null,
       version_gate: null,
+      dialect: 'turboquant',
+      provider: null,
     })
     await expect(r.resolve('/missing/llama-server')).rejects.toMatchObject({
       code: 'DECISION_ENGINE_UNSUPPORTED',
@@ -234,5 +239,75 @@ describe('DecisionEngineResolver', () => {
     await expect(
       new DecisionEngineResolver({ layout, platform: 'darwin', probe: probeWith(false) }).resolve()
     ).rejects.toMatchObject({ code: 'DECISION_ENGINE_UNSUPPORTED' })
+  })
+})
+
+describe('DecisionEngineResolver for upstream decision GGUFs', () => {
+  const upstream = (packs: Record<string, InstalledEnginePack[]>, probes: string[] = []) =>
+    new DecisionEngineResolver({
+      layout: dataLayout(data.root),
+      listPacks: async (provider) => packs[provider] ?? [],
+      mtime: async () => 1,
+      probe: async (exe) => {
+        probes.push(exe)
+        return true
+      },
+    })
+
+  it('takes the newest stock build at the floor, without a -h probe', async () => {
+    const probes: string[] = []
+    const r = upstream(
+      {
+        'llamacpp-upstream': [pack('b11344', 'macos-arm64'), pack('b11436', 'macos-arm64')],
+        'llamacpp': [pack('b10269-1.7.0', 'macos-arm64')],
+      },
+      probes
+    )
+    expect(await r.resolve('', { dialect: 'upstream', minBuild: 11418 })).toEqual({
+      path: '/packs/b11436/macos-arm64/llama-server',
+      version_backend: 'b11436/macos-arm64',
+      fork_version: null,
+      version_gate: true,
+      dialect: 'upstream',
+      provider: 'llamacpp-upstream',
+    })
+    expect(probes).toEqual([])
+  })
+
+  it('names the build to update to when every installed one is older', async () => {
+    const r = upstream({ 'llamacpp-upstream': [pack('b11344', 'macos-arm64')] })
+    const error = await rejection<AtomicCoreError>(r.resolve('', { dialect: 'upstream', minBuild: 11370 }))
+    expect(error).toMatchObject({
+      code: 'DECISION_ENGINE_UNSUPPORTED',
+      message:
+        'No installed llama.cpp build can run the decision model. Update llama.cpp to b11370 or newer.',
+      details: 'b11344/macos-arm64: older than b11370',
+    })
+  })
+
+  it('skips a build readiness refused, and says so when none is left', async () => {
+    const r = upstream({
+      'llamacpp-upstream': [pack('b11436', 'macos-arm64'), pack('b11400', 'macos-arm64')],
+    })
+    await r.reject('/packs/b11436/macos-arm64/llama-server', 'no decisions in /v1/models')
+    expect((await r.resolve('', { dialect: 'upstream' })).version_backend).toBe('b11400/macos-arm64')
+    await r.reject('/packs/b11400/macos-arm64/llama-server', 'no decisions in /v1/models')
+    const error = await rejection<AtomicCoreError>(r.resolve('', { dialect: 'upstream' }))
+    expect(error.message).toContain('every build at b11370 or newer was refused at readiness')
+  })
+
+  it('runs an explicit engine path for upstream as long as the file is there', async () => {
+    const r = new DecisionEngineResolver({
+      layout: dataLayout(data.root),
+      listPacks: async () => {
+        throw new Error('an explicit engine must not scan')
+      },
+      mtime: async (path) => (path === '/opt/llama-server' ? 5 : undefined),
+      probe: async () => false,
+    })
+    expect(await r.resolve('/opt/llama-server', { dialect: 'upstream' })).toMatchObject({
+      dialect: 'upstream',
+      provider: null,
+    })
   })
 })

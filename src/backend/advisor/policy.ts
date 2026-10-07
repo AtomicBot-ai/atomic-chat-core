@@ -1,6 +1,7 @@
 /**
- * What differs between the two llama.cpp providers when the advisor answers — one table per
- * provider, pure. `advisor.ts` composes a policy with hardware, catalog, store and clock.
+ * What differs between the llama.cpp providers when the advisor answers — one table per provider
+ * (upstream, TurboQuant, PrismML), pure. `advisor.ts` composes a policy with hardware, catalog,
+ * store and clock.
  *
  * Every entry is the function the provider's extension called (upstream:
  * `extensions/llamacpp-upstream-extension/src/{backend,index}.ts` + `tauri-plugin-llamacpp-upstream`;
@@ -17,17 +18,26 @@ import { resolveConcreteOptimalBackend } from '../optimal/index.js'
 import type { AlreadyOptimalRule, ConcreteBackendResolver, OptimalRecordPolicy } from '../optimal/index.js'
 import {
   checkBackendForUpdates,
+  checkPrismBackendForUpdates,
   checkTurboquantBackendForUpdates,
   detectIdealBackendType,
+  detectIdealPrismBackendType,
   detectIdealTurboquantBackendType,
   determineBestBackend,
+  determineBestPrismBackend,
+  determinePrismSupportedBackends,
   determineSupportedBackends,
   filterBackendsBySupport,
+  filterPrismBackendsBySupport,
+  findLatestPrismVersionForBackend,
   findLatestTurboquantVersionForBackend,
   findLatestVersionForBackend,
   getBackendCategory,
+  getPrismBackendCategory,
+  getPrismSupportedFeatures,
   getSupportedFeatures,
   listSupportedBackends,
+  mergePrismBackends,
   staticLatestVariants,
 } from '../select/index.js'
 import {
@@ -210,11 +220,56 @@ export const TURBOQUANT_POLICY: BackendProviderPolicy = {
   },
 }
 
+/**
+ * PrismML (`atomic-prism`). Its catalog is already filtered to offered releases (approved, not
+ * withdrawn, runnable by this core) before the policy sees it, so every resolved target may be
+ * offered. A tag bump never changes the backend id, and the category rule keeps a CUDA 12.4 user from
+ * being nudged to 12.8.
+ */
+export const PRISM_POLICY: BackendProviderPolicy = {
+  provider: 'atomic-prism',
+  features: (osType, cpuExtensions, gpus, rocm) =>
+    getPrismSupportedFeatures(osType, cpuExtensions, gpus, rocm),
+  supportedBackends: determinePrismSupportedBackends,
+  merge: mergePrismBackends,
+  filterBySupport: (merged, supported) => filterPrismBackendsBySupport(merged, supported),
+  determineBest: determineBestPrismBackend,
+  findLatest: findLatestPrismVersionForBackend,
+  staticVariants: () => [],
+  getCategory: getPrismBackendCategory,
+  alreadyOptimalRule: 'category',
+  noCatalogEntryWrites: 'record',
+  normalizeId: (backend) => stripBom(backend),
+  sameFamily: (currentType, targetType) => currentType === targetType,
+  acceptsUpdateTarget: () => true,
+  checkUpdates: checkPrismBackendForUpdates,
+  resolveSentinel: (backendId, available) => findLatestPrismVersionForBackend(available, backendId),
+  detect: (input) =>
+    detectIdealPrismBackendType({
+      osType: input.osType,
+      arch: input.arch,
+      cpuExtensions: input.cpuExtensions,
+      gpus: input.gpus,
+      ...(input.rocm ? { rocm: input.rocm } : {}),
+      listAvailableBackends: input.listAvailableBackends,
+      ...(input.onWarn ? { onWarn: input.onWarn } : {}),
+    }),
+  resolveConcrete: async (idealType, _current, deps) => {
+    try {
+      return findLatestPrismVersionForBackend(await deps.listSupportedBackends(), idealType)
+    } catch (err) {
+      deps.onWarn?.(`resolveConcrete: ${err instanceof Error ? err.message : String(err)}`)
+      return null
+    }
+  },
+}
+
 export function policyFor(provider: LlamacppProviderId): BackendProviderPolicy {
+  if (provider === 'atomic-prism') return PRISM_POLICY
   return provider === 'llamacpp' ? TURBOQUANT_POLICY : UPSTREAM_POLICY
 }
 
 /** The provider ids the advisor answers for; anything else is a caller error. */
 export function isLlamacppProviderId(value: unknown): value is LlamacppProviderId {
-  return value === 'llamacpp-upstream' || value === 'llamacpp'
+  return value === 'llamacpp-upstream' || value === 'llamacpp' || value === 'atomic-prism'
 }

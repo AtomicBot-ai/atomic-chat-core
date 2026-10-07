@@ -7,7 +7,7 @@ import type { FakeLlamaOptions } from '../../test/helpers/fake-llama-server.js'
 import { isProcessAlive } from '../runtime/shared/index.js'
 import { createDecisionHttp, DecisionTimeoutError } from './http.js'
 import type { DecisionHttp } from './http.js'
-import { earlyExitError, spawnDecisionServer } from './process.js'
+import { decisionArgsFor, earlyExitError, spawnDecisionServer } from './process.js'
 import type { DecisionProcessHandle, DecisionServerSpec } from './process.js'
 
 /** The error a promise rejects with; a promise that resolves fails the test. */
@@ -37,6 +37,8 @@ const spec = (over: Partial<DecisionServerSpec> = {}): DecisionServerSpec => ({
     version_backend: null,
     fork_version: null,
     version_gate: null,
+    dialect: 'turboquant',
+    provider: null,
   },
   modelPath: '/models/laya-multilingual-Q8_0.gguf',
   modelId: 'atomic/router-laya',
@@ -205,5 +207,57 @@ describe('earlyExitError', () => {
     expect(error.message).toContain('signal SIGSEGV')
     expect(error.details?.split('\n')).toHaveLength(20)
     expect(earlyExitError({ code: 1, signal: null }, []).details).toBeUndefined()
+  })
+})
+
+describe('spawnDecisionServer on upstream llama.cpp', () => {
+  const upstreamEngine = {
+    path: join(PACK_DIR, 'llama-server'),
+    version_backend: 'b11436/macos-arm64',
+    fork_version: null,
+    version_gate: true,
+    dialect: 'upstream' as const,
+    provider: 'llamacpp-upstream' as const,
+  }
+
+  it('starts stock llama.cpp without --decision and is ready once /v1/models lists decisions', async () => {
+    const { run } = start(
+      { decision: { upstream: true } },
+      {
+        engine: upstreamEngine,
+        modelPath: '/models/Clef-Flash-Q4_K_M.gguf',
+        modelId: 'clef-flash',
+        upstream: { mmprojPath: '/models/mmproj.gguf', ctxSize: 4096, wholePromptUbatch: true },
+      }
+    )
+    const handle = await run
+    expect(handle.props).toMatchObject({
+      endpoints: ['/v1/systemone'],
+      model_id: 'clef-flash',
+      input_modalities: ['text', 'image'],
+    })
+    expect(handle.capabilities).toEqual(['decision', 'systemone'])
+    const answer = await fetch(`${handle.baseUrl}/v1/systemone`, {
+      method: 'POST',
+      headers: { 'authorization': `Bearer ${handle.apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ state: 'hi', questions: { q: { type: 'noul', instructions: 'greeting?' } } }),
+    })
+    expect(await answer.json()).toMatchObject({ answers: { q: { noul: 0.75 } }, usage: { output_tokens: 0 } })
+  })
+
+  it('refuses a stock server whose model is not a decision model', async () => {
+    const { run } = start({ decision: { upstream: true, noCapability: true } }, { engine: upstreamEngine })
+    await expect(run).rejects.toMatchObject({
+      code: 'DECISION_ENGINE_UNSUPPORTED',
+      message: 'The engine started but does not serve the model as a decision model.',
+    })
+  })
+
+  it('builds the argv by dialect', () => {
+    expect(decisionArgsFor(spec(), 7)[0]).toBe('--decision')
+    const argv = decisionArgsFor(spec({ engine: upstreamEngine }), 7)
+    expect(argv).not.toContain('--decision')
+    expect(argv.slice(0, 2)).toEqual(['-m', '/models/laya-multilingual-Q8_0.gguf'])
+    expect(argv).toEqual(expect.arrayContaining(['-c', '8192']))
   })
 })

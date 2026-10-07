@@ -21,6 +21,7 @@ import type { SettingsStore } from '../settings/index.js'
 const LOCAL_PROVIDERS = new Set([
   'llamacpp',
   'llamacpp-upstream',
+  'atomic-prism',
   'mlx',
   'foundation-models',
   'tensorrt-llm',
