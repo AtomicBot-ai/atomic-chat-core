@@ -74,7 +74,8 @@ describe('installStaged', () => {
     expect(order).toEqual(['verify server', 'record'])
     expect(await readdir(tagDir())).toEqual(['backend'])
     expect((await readdir(join(tagDir(), 'backend'))).sort()).toEqual(['.atomic-owned', 'server'])
-    expect(downloader.seen[0]?.[0]).toMatchObject({ sha256: 'a'.repeat(64), size: 100 })
+    // The task id names the downloader's validation event, not the staging folder.
+    expect(downloader.seen[0]?.[0]).toMatchObject({ sha256: 'a'.repeat(64), size: 100, model_id: 'task' })
   })
 
   it('swaps an existing target on a reinstall', async () => {
@@ -106,6 +107,16 @@ describe('installStaged', () => {
       code,
     })
     expect(await readdir(tagDir()).catch(() => [])).toEqual([])
+  })
+
+  it('codes a plain failure as ENGINE_INSTALL_FAILED and keeps the build already there', async () => {
+    await mkdir(join(tagDir(), 'backend'), { recursive: true })
+    await writeFile(join(tagDir(), 'backend', 'current'), 'keep')
+    await expect(
+      installStaged(plan({ record: async () => Promise.reject(new Error('EACCES: nope')) }))
+    ).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED', details: expect.stringMatching(/EACCES/) })
+    expect(await readdir(tagDir())).toEqual(['backend'])
+    expect(await readdir(join(tagDir(), 'backend'))).toEqual(['current'])
   })
 
   it('removes the staging when the probe fails, keeping the build already there', async () => {

@@ -196,14 +196,6 @@ export function probeVerdict(
   return diffusionError('ENGINE_INSTALL_FAILED', 'The downloaded binary is not stable-diffusion.cpp.', output)
 }
 
-function couldNotStart(binary: string, error: Error) {
-  return diffusionError(
-    'ENGINE_INSTALL_FAILED',
-    'The image engine could not be started.',
-    `${binary}: ${error.message}`
-  )
-}
-
 /**
  * Run `<binary> --help` and check that the output is stable-diffusion.cpp's. A spawn failure is
  * retried (a scanner may still be holding the file); a binary that never answers is killed.
@@ -230,6 +222,36 @@ async function probeOnce(
   timeoutMs: number,
   deps: InstallDeps
 ): Promise<void> {
+  const { exit, text } = await runHelpProbe(binary, {
+    platform,
+    timeoutMs,
+    deps,
+    noResponse: 'The image engine did not respond to --help.',
+    couldNotStart: 'The image engine could not be started.',
+  })
+  const verdict = probeVerdict(binary, text, exit, platform)
+  if (verdict) throw verdict
+}
+
+export interface HelpProbeOptions {
+  platform: NodeJS.Platform
+  timeoutMs: number
+  deps: Pick<InstallDeps, 'env' | 'spawnRetryDelayMs' | 'log'>
+  /** The `ENGINE_INSTALL_FAILED` message for a binary that never answers, and for one that never starts. */
+  noResponse: string
+  couldNotStart: string
+}
+
+/**
+ * Run `<binary> --help` from its own folder and answer how it exited and what it printed. A spawn
+ * failure is retried (a scanner may still be holding the freshly written file); a binary that never
+ * answers is killed. Shared by every engine probe (sd.cpp here, `mlx-server` in `engine-builds/`).
+ */
+export async function runHelpProbe(
+  binary: string,
+  options: HelpProbeOptions
+): Promise<{ exit: ExitInfo; text: string }> {
+  const { platform, timeoutMs, deps } = options
   const { env, cwd } = buildProcessEnv({
     platform,
     baseEnv: deps.env ?? process.env,
@@ -249,13 +271,14 @@ async function probeOnce(
       await proc.terminate(0)
       throw diffusionError(
         'ENGINE_INSTALL_FAILED',
-        'The image engine did not respond to --help.',
+        options.noResponse,
         `${binary} timed out after ${Math.round(timeoutMs / 1000)}s`
       )
     }
     const failure = proc.spawnFailure()
     if (failure) {
-      if (attempt >= PROBE_SPAWN_ATTEMPTS) throw couldNotStart(binary, failure)
+      if (attempt >= PROBE_SPAWN_ATTEMPTS)
+        throw diffusionError('ENGINE_INSTALL_FAILED', options.couldNotStart, `${binary}: ${failure.message}`)
       deps.log?.(
         'warn',
         `engine probe did not start (attempt ${attempt}/${PROBE_SPAWN_ATTEMPTS}): ${failure.message}`
@@ -266,9 +289,7 @@ async function probeOnce(
     // Give the pipes a tick to flush their last lines.
     await sleep(10)
     const { stdout, stderr } = proc.output()
-    const verdict = probeVerdict(binary, stdout + stderr, outcome, platform)
-    if (verdict) throw verdict
-    return
+    return { exit: outcome, text: stdout + stderr }
   }
 }
 

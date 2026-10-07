@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { AtomicCoreError } from '../../../contracts/index.js'
+import { fakeEngineBuildsControl } from '../../../../test/helpers/fake-engine-builds-control.js'
 import { startControlHarness as start } from '../../../../test/helpers/control-harness.js'
 import type { ControlHarness } from '../../../../test/helpers/control-harness.js'
 
@@ -67,6 +69,24 @@ describe('engine-builds routes', () => {
     expect(await errorOf(unknown)).toMatchObject({ code: 'INVALID_ARGUMENT' })
     expect((await post('mlx/catalog', [1])).status).toBe(400)
     expect(h.calls).toEqual([])
+  })
+
+  it('answers a second install of the same engine with 409', async () => {
+    const busy = await start({
+      engineBuilds: {
+        ...fakeEngineBuildsControl([]),
+        install: async () => {
+          throw new AtomicCoreError('ENGINE_INSTALL_IN_PROGRESS', 'busy')
+        },
+      },
+    })
+    const res = await busy.get('/atomic/v1/engine-builds/sd-cpp/install', {
+      method: 'POST',
+      body: JSON.stringify({ task_id: 't' }),
+    })
+    expect(res.status).toBe(409)
+    expect((await errorOf(res)).code).toBe('ENGINE_INSTALL_IN_PROGRESS')
+    await busy.server.close()
   })
 
   it('knows sd-cpp and mlx only', async () => {

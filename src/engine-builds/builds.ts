@@ -13,9 +13,8 @@ import { chmod, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/pr
 import { dirname, join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import { locate, samePath } from '../diffusion/containment.js'
-import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/install.js'
+import { INSTALL_RECORD, OWNER_MARKER, runHelpProbe } from '../diffusion/install.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
-import { buildProcessEnv, spawnManaged } from '../runtime/shared/index.js'
 import { isDateTime } from './manifest.js'
 
 export const MLX_SERVER_BINARY = 'mlx-server'
@@ -173,41 +172,18 @@ export async function probeMlxServer(
   if (!(await isFile(binary)))
     throw new AtomicCoreError('ENGINE_INSTALL_FAILED', 'The archive did not contain mlx-server.', binary)
   await chmod(binary, 0o755)
-  const { env, cwd } = buildProcessEnv({
+  const { exit, text } = await runHelpProbe(binary, {
     platform: deps.platform ?? process.platform,
-    baseEnv: deps.env ?? process.env,
-    exeDir: dir,
-    cuda: { libDirs: [], binDirs: [] },
-    userEnv: {},
+    timeoutMs: deps.timeoutMs ?? MLX_PROBE_TIMEOUT_MS,
+    deps: { ...(deps.env ? { env: deps.env } : {}) },
+    noResponse: 'mlx-server did not respond to --help.',
+    couldNotStart: 'mlx-server could not be started.',
   })
-  const proc = spawnManaged({ exe: binary, args: ['--help'], env, cwd })
-  const timeoutMs = deps.timeoutMs ?? MLX_PROBE_TIMEOUT_MS
-  let timer: NodeJS.Timeout | undefined
-  const timedOut = new Promise<'timeout'>((resolve) => {
-    timer = setTimeout(() => resolve('timeout'), timeoutMs)
-  })
-  const outcome = await Promise.race([proc.exited, timedOut])
-  clearTimeout(timer)
-  if (outcome === 'timeout') {
-    await proc.terminate(0)
-    throw new AtomicCoreError(
-      'ENGINE_INSTALL_FAILED',
-      'mlx-server did not respond to --help.',
-      `${binary} timed out after ${Math.round(timeoutMs / 1000)}s`
-    )
-  }
-  const failure = proc.spawnFailure()
-  if (failure)
-    throw new AtomicCoreError('ENGINE_INSTALL_FAILED', 'mlx-server could not be started.', failure.message)
-  // Give the pipes a tick to flush their last lines.
-  await new Promise((resolve) => setTimeout(resolve, 10))
-  const { stdout, stderr } = proc.output()
-  const text = `${stdout}${stderr}`
-  if (mlxProbePassed(text, outcome)) return
+  if (mlxProbePassed(text, exit)) return
   throw new AtomicCoreError(
     'ENGINE_INSTALL_FAILED',
     'The downloaded mlx-server does not run on this Mac.',
-    `${describeExit(outcome)}\n${[...text].slice(0, 800).join('')}`.trim()
+    `${describeExit(exit)}\n${[...text].slice(0, 800).join('')}`.trim()
   )
 }
 

@@ -10,7 +10,7 @@
  * nobody removed.
  */
 
-import { mkdir, rename, rm } from 'node:fs/promises'
+import { mkdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { ProxyConfig } from '../contracts/index.js'
@@ -72,6 +72,8 @@ export async function installStaged(plan: StagedInstall): Promise<{ replaced: bo
       save_path: join(downloads, archive.name),
       sha256: archive.sha256,
       size: archive.size,
+      // What the downloader names its `model:validation-started` after; without it, the staging folder.
+      model_id: plan.taskId,
       ...(plan.proxy ? { proxy: plan.proxy } : {}),
     }))
     await plan.downloader.download(plan.taskId, items).catch((error: unknown) => {
@@ -89,24 +91,38 @@ export async function installStaged(plan: StagedInstall): Promise<{ replaced: bo
     await plan.verify(staging)
     await plan.record(staging)
 
-    await mkdir(dirname(plan.target), { recursive: true })
-    const retired = `${plan.target}.retired-${stamp}`
-    let replaced = false
-    try {
-      await rename(plan.target, retired)
-      replaced = true
-    } catch {
-      // No previous tree: the usual case.
-    }
-    await rename(staging, plan.target)
-    // A session may still hold files of the old tree open (Windows refuses the delete); the next
-    // install or start picks the leftovers up.
-    if (replaced) await rm(retired, { recursive: true, force: true }).catch(() => {})
-    return { replaced }
+    return { replaced: await swapInto(staging, plan.target, `${plan.target}.retired-${stamp}`) }
   } catch (error) {
     await cleanup()
+    throw error instanceof AtomicCoreError
+      ? error
+      : new AtomicCoreError('ENGINE_INSTALL_FAILED', 'Could not install the engine build.', String(error))
+  }
+}
+
+/**
+ * Put `staging` at `target`; a tree already there (a forced reinstall) goes to `retired` first and
+ * is deleted after, or put back when the new one cannot take its place — the installed build is
+ * never lost to a failed swap. `true` when a tree was replaced.
+ */
+async function swapInto(staging: string, target: string, retired: string): Promise<boolean> {
+  await mkdir(dirname(target), { recursive: true })
+  const existed = await stat(target).then(
+    () => true,
+    () => false
+  )
+  // Not caught: a tree that is there but cannot be moved aside fails the install as it is.
+  if (existed) await rename(target, retired)
+  try {
+    await rename(staging, target)
+  } catch (error) {
+    if (existed) await rename(retired, target).catch(() => {})
     throw error
   }
+  // A session may still hold files of the old tree open (Windows refuses the delete); the next
+  // install or start picks the leftovers up.
+  if (existed) await rm(retired, { recursive: true, force: true }).catch(() => {})
+  return existed
 }
 
 /** The downloader speaks in message strings; the install surface speaks in codes (design D9). */

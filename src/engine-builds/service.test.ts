@@ -675,6 +675,26 @@ describe('MLX from two origins (task 3.3)', () => {
     expect(await h.service.resolveMlxBinary()).toBe(join(resources(), 'mlx-server'))
   })
 
+  it('does not install a build as recent as the installer one: the installer would still run', async () => {
+    await bundle(AUG)
+    const h = harness({ facts: MAC_ARM, resourcesDir: resources() })
+    const tag = 'mlxvlm-macos-arm64-abcdef0'
+    h.setMlx(
+      mlxManifest(
+        tag,
+        AUG.published_at,
+        serve(tag, { 'macos-arm64': { name: 'mlx.tar.gz', body: await archive('m', MLX_OK) } })
+      )
+    )
+    expect(await h.service.install('mlx', { task_id: 't', force: true })).toMatchObject({
+      installed: false,
+      reason: 'already-installed',
+      build: { origin: 'bundled' },
+    })
+    expect(archiveRequests()).toEqual([])
+    expect(h.hosts.mlx.calls).toEqual([])
+  })
+
   it('at start keeps a download newer than the installer, and reports nothing when nothing went', async () => {
     await bundle(AUG)
     await download('mlxvlm-macos-arm64-aaaaaaa', '2026-10-02T00:00:00Z')
@@ -686,6 +706,19 @@ describe('MLX from two origins (task 3.3)', () => {
 })
 
 describe('startup cleanup of sd.cpp', () => {
+  it('clears the leftovers of an interrupted install without reporting a change', async () => {
+    const leftover = join(
+      data.layout.diffusion.backendsDir,
+      'master-900-aaaaaaa',
+      'linux-vulkan-x64.incoming-7'
+    )
+    await mkdir(leftover, { recursive: true })
+    const h = harness()
+    await h.service.startupCleanup()
+    expect(await ls(join(data.layout.diffusion.backendsDir, 'master-900-aaaaaaa'))).toEqual([])
+    expect(h.changed).toEqual([])
+  })
+
   it('removes the builds a session kept on the last install, and the leftovers of an interrupted one', async () => {
     const root = data.layout.diffusion.backendsDir
     const build = async (tag: string, installedAtMs: number) => {

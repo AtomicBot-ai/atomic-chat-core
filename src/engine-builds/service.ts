@@ -244,8 +244,12 @@ export class EngineBuildsService {
     const present = builds.find(
       (build) => build.tag === tag && build.backend_id === choice.backend_id && build.origin === 'downloaded'
     )
-    // A bundled MLX build of the manifest's tag is that build already; a copy of it would never run.
-    const bundledSame = builds.some((build) => build.origin === 'bundled' && build.tag === tag)
+    // A bundled MLX build of the manifest's tag, or one as recent, is that build already: on a tie the
+    // installer's build runs, so a copy would never be started (and startup cleanup would delete it).
+    const bundledSame = builds.some(
+      (build) =>
+        build.origin === 'bundled' && (build.tag === tag || compareBuilds(engine, build, target) === 0)
+    )
     if ((present && !request.force) || bundledSame)
       return {
         installed: false,
@@ -415,7 +419,9 @@ export class EngineBuildsService {
     for (const engine of ['sd-cpp', 'mlx'] as const) {
       const removed = await this.deps.hosts[engine]
         .exclusive(async () => {
-          let count = await this.removeLeftovers(engine)
+          // Leftovers of an interrupted install were never a build: they change nothing a client sees.
+          await this.removeLeftovers(engine)
+          let count = 0
           const builds = await this.builds(engine)
           const active = this.activeOf(engine, builds)
           const inUse = await this.deps.hosts[engine].inUse()
@@ -445,16 +451,12 @@ export class EngineBuildsService {
   }
 
   /** `<root>/<tag>/<backend>.incoming-<n>[.download]` and `.retired-<n>`: only ever this module's. */
-  private async removeLeftovers(engine: EngineBuildId): Promise<number> {
+  private async removeLeftovers(engine: EngineBuildId): Promise<void> {
     const root = this.deps.roots[engine]
-    let count = 0
     for (const tag of await readdir(root).catch(() => [] as string[]))
       for (const name of await readdir(join(root, tag)).catch(() => [] as string[]))
-        if (/\.(incoming|retired)-\d+(\.download)?$/.test(name)) {
+        if (/\.(incoming|retired)-\d+(\.download)?$/.test(name))
           await rm(join(root, tag, name), { recursive: true, force: true }).catch(() => {})
-          count++
-        }
-    return count
   }
 
   // --- what is on disk -------------------------------------------------------------------------
