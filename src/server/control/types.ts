@@ -12,6 +12,9 @@ import type {
   DecisionScoreRequest,
   DecisionSettings,
   DecisionStatus,
+  EmbeddingEmbedResponse,
+  EmbeddingSettings,
+  EmbeddingStatus,
   RouterScoreResponse,
   SystemoneResponse,
   DeviceInfo,
@@ -24,6 +27,13 @@ import type {
   EnvironmentOperation,
   EnvironmentResetResult,
   EnvironmentSnapshot,
+  ModelCompatibilityRequest,
+  ModelCompatibilityResponse,
+  PrismFamiliesResponse,
+  ModelSetup,
+  ModelSetupPlan,
+  ModelSetupPlanRequest,
+  ModelSetupStartRequest,
   FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
@@ -47,8 +57,8 @@ import type {
   LocalProviderId,
   ManagedHostReceipt,
   ModelCompatibility,
-  TensorrtLlmModelDeletion,
-  TensorrtLlmModelLocation,
+  ManagedModelDeletion,
+  ManagedModelLocation,
   ProbeEnvironmentInput,
   RemoteAccessStatus,
   RequirementPlan,
@@ -300,6 +310,23 @@ export interface DecisionControl {
   decide: (request: DecisionDecideRequest) => Promise<DecisionOutcome<SystemoneResponse>>
 }
 
+/**
+ * The embedding model (ADR 2026-10-07-embedding-models-are-their-own-core-module), shaped like the
+ * decision model's control: status, a checked settings patch the process follows, load and unload, and
+ * one request to the running model for the app.
+ */
+export interface EmbeddingControl {
+  status: () => EmbeddingStatus
+  config: () => EmbeddingSettings
+  /** A checked patch of the `embedding` settings section; the process follows (start, restart or stop). */
+  configure: (patch: Record<string, unknown>) => Promise<EmbeddingStatus>
+  /** Start now and answer once ready; a failure is an error with the start's code. */
+  load: () => Promise<EmbeddingStatus>
+  unload: () => Promise<EmbeddingStatus>
+  /** One `/v1/embeddings` body to the running model (started when idle); the engine's answer as it came. */
+  embed: (body: Record<string, unknown>) => Promise<EmbeddingEmbedResponse>
+}
+
 /** Engines another process owns, registered so the public server can route to them (stage 4d). */
 export interface ExternalSessionControl {
   publish: (owner: string, generation: number, sessions: unknown) => { generation: number; sessions: number }
@@ -325,6 +352,21 @@ export interface ChatGptControl {
   cancelLogin: () => void
   logout: () => Promise<ChatGptStatus>
   models: () => Promise<SubscriptionModel[]>
+}
+
+/** Model compatibility and the model setup (PrismML Bonsai and every other Hub GGUF). */
+export interface ModelSetupControl {
+  compatibility: (request: ModelCompatibilityRequest) => Promise<ModelCompatibilityResponse>
+  plan: (request: ModelSetupPlanRequest) => Promise<ModelSetupPlan>
+  /** The Bonsai families the conf model rules name, for the Hub's PrismML list. */
+  families: () => Promise<PrismFamiliesResponse>
+  start: (request: ModelSetupStartRequest) => Promise<ModelSetup>
+  list: () => Promise<ModelSetup[]>
+  get: (setupId: string) => Promise<ModelSetup>
+  cancel: (setupId: string) => Promise<ModelSetup>
+  resume: (setupId: string, options: { proxy?: ProxyConfig | null }) => Promise<ModelSetup>
+  /** In memory, for the control snapshot. */
+  snapshot: () => ModelSetup[]
 }
 
 export interface ControlServerDeps {
@@ -377,25 +419,33 @@ export interface ControlServerDeps {
   diffusion: DiffusionControl
   /** The decision model; without it the `/decision/*` routes answer `DECISION_UNAVAILABLE`. */
   decision?: DecisionControl
+  /** The embedding model; without it the `/embedding/*` routes answer `EMBEDDING_UNAVAILABLE`. */
+  embedding?: EmbeddingControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
+  /** Absent in a core without the setup wired; its routes then answer `INVALID_ARGUMENT`. */
+  modelSetups?: ModelSetupControl
   /**
-   * `POST /models/tensorrt-llm/check` (task 2.16, spec `tensorrt-llm-models`): whether a Hugging
-   * Face checkpoint the caller has not downloaded yet would run, computed without touching the
-   * network. Absent off Linux, where the `tensorrt-llm` provider is not offered at all.
+   * `POST /models/:provider/check` (spec `managed-model-store`, "Проверка совместимости одинакова по
+   * форме для всех managed-движков"): for each managed provider this core offers, whether a Hugging
+   * Face checkpoint the caller has not downloaded yet would run on it, computed without touching the
+   * network. A provider absent here (any non-managed one, or every managed one off Linux and
+   * Windows) answers `PROVIDER_NOT_FOUND`.
    */
-  tensorrtLlmModelCheck?: (body: unknown) => Promise<ModelCompatibility>
+  managedModelChecks?: Readonly<Record<string, (body: unknown) => Promise<ModelCompatibility>>>
   /**
-   * `DELETE /models/tensorrt-llm/:id` (task 2.24, design D12a): stop the model with Docker's
-   * confirmation, then remove every engine cache of it and its folder. Absent off Linux.
+   * `DELETE /managed-models/:id` (spec `managed-model-store`, "Модель хранилища удаляется через core"):
+   * stop the model in whichever managed provider holds it, with Docker's confirmation, then remove every
+   * engine cache of it and its folder. Absent where no managed provider is offered.
    */
-  tensorrtLlmModelDelete?: (modelId: string) => Promise<TensorrtLlmModelDeletion>
+  managedModelDelete?: (modelId: string) => Promise<ManagedModelDeletion>
   /**
-   * `GET /models/tensorrt-llm/location` (change `add-tensorrt-llm-windows`, task 2.8): where clients put
-   * `tensorrt-llm` models and how much room is left. Absent where the provider is not offered;
-   * `MANAGED_ADAPTER_UNAVAILABLE` on Windows before Atomic Chat's distribution exists.
+   * `GET /managed-models/location` (spec `managed-model-store`, "Core сообщает расположение
+   * хранилища"): where clients put the managed engines' models and how much room is left. Absent where
+   * no managed provider is offered; `MANAGED_ADAPTER_UNAVAILABLE` on Windows before Atomic Chat's
+   * distribution exists.
    */
-  tensorrtLlmModelLocation?: () => Promise<TensorrtLlmModelLocation>
+  managedModelLocation?: () => Promise<ManagedModelLocation>
   /**
    * Whether Apple's on-device model can run here: the server's own `--check` token (`available`,
    * `notEligible`, `appleIntelligenceNotEnabled`, `modelNotReady`, `unavailable`, `binaryNotFound`).
@@ -434,6 +484,8 @@ export interface ControlSnapshot {
   /** The managed container runtimes this user has, and the changes in flight on them. */
   environments: EnvironmentSnapshot[]
   environment_operations: EnvironmentOperation[]
+  /** Model setups, the running ones and those left to resume or read. */
+  model_setups: ModelSetup[]
 }
 
 /**

@@ -52,7 +52,8 @@ describe('settingsSchema', () => {
     ['llamacpp', 31],
     ['mlx', 11],
     ['foundation-models', 0],
-    ['tensorrt-llm', 9],
+    ['tensorrt-llm', 18],
+    ['vllm', 20],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -129,11 +130,64 @@ describe('defaultSettingValues', () => {
       context_length: 8192,
       max_output_tokens: 4096,
       kv_cache_free_gpu_memory_fraction: 0.8,
-      max_batch_size: 8,
+      // One request at a time by default (owner's decision, change add-vllm-runtime): the KV cache is
+      // sized for one full context, which is what fits a desktop card.
+      max_batch_size: 1,
       kv_cache_max_tokens: 0,
       cuda_graphs: 'auto',
       kv_cache_dtype: 'auto',
       load_timeout_seconds: 0,
+      enable_prefix_caching: true,
+      overlap_scheduler: true,
+      capacity_scheduler_policy: 'guaranteed_no_evict',
+      dtype: 'auto',
+      default_temperature: '',
+      default_top_p: '',
+      default_top_k: '',
+      default_min_p: '',
+      default_repetition_penalty: '',
+    })
+    // vLLM (change add-vllm-runtime): KV cache size and memory share are 0 — vLLM's own and core's auto.
+    expect(defaultSettingValues('vllm')).toEqual({
+      gpu_id: '',
+      context_length: 8192,
+      max_output_tokens: 4096,
+      max_num_seqs: 1,
+      kv_cache_memory_gib: 0,
+      gpu_memory_utilization: 0,
+      cuda_graphs: 'auto',
+      kv_cache_dtype: 'auto',
+      load_timeout_seconds: 0,
+      // Every further `vllm serve` option this provider passes ('' / 0: the engine's or the model's own).
+      max_num_batched_tokens: 0,
+      enable_prefix_caching: true,
+      cpu_offload_gb: 0,
+      dtype: 'auto',
+      seed: 0,
+      async_scheduling: false,
+      default_temperature: '',
+      default_top_p: '',
+      default_top_k: '',
+      default_min_p: '',
+      default_repetition_penalty: '',
+    })
+  })
+
+  it('canonicalizes vllm values to their wire types', () => {
+    expect(
+      canonicalizeSettingValues('vllm', {
+        gpu_id: 'GPU-1',
+        context_length: '4096',
+        max_num_seqs: '4',
+        cuda_graphs: 'off',
+        load_timeout_seconds: '600',
+      })
+    ).toEqual({
+      gpu_id: 'GPU-1',
+      context_length: 4096,
+      max_num_seqs: 4,
+      cuda_graphs: 'off',
+      load_timeout_seconds: 600,
     })
   })
 

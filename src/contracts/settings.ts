@@ -121,13 +121,38 @@ export interface TensorrtLlmProviderConfig {
   load_timeout_seconds: number
 }
 
+/**
+ * `vllm` (change `add-vllm-runtime`, spec `vllm-runtime`): stored values. The engine's share of the card
+ * is core's own unless `gpu_memory_utilization` fixes it (design D9); the KV cache is vLLM's own unless
+ * `kv_cache_memory_gib` fixes it.
+ */
+export interface VllmProviderConfig {
+  /** The card's UUID; `''` picks the card with the most free memory at load time. */
+  gpu_id: string
+  context_length: number
+  max_output_tokens: number
+  /** `--max-num-seqs`: requests served at once. */
+  max_num_seqs: number
+  /** `--kv-cache-memory-bytes`, in GiB; `0` lets vLLM size the KV cache from its share of the card. */
+  kv_cache_memory_gib: number
+  /** `--gpu-memory-utilization`; `0` (auto) lets core compute it from the card's free memory. */
+  gpu_memory_utilization: number
+  /** `auto` (on only on cards with 12 GB or more), `on` or `off` (`--enforce-eager`). */
+  cuda_graphs: 'auto' | 'on' | 'off'
+  /** `auto` (the model's own precision) or `fp8` (Ada and newer; ignored on older cards). */
+  kv_cache_dtype: 'auto' | 'fp8'
+  load_timeout_seconds: number
+}
+
 export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
   ? MlxConfig
   : P extends 'foundation-models'
     ? FoundationModelsConfig
     : P extends 'tensorrt-llm'
       ? TensorrtLlmProviderConfig
-      : LlamacppConfig
+      : P extends 'vllm'
+        ? VllmProviderConfig
+        : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

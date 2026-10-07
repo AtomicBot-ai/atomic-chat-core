@@ -16,18 +16,22 @@
  */
 
 import type { LocalProviderId, SettingDescriptor } from '../contracts/index.js'
+import atomicPrismSchema from './schema/atomic-prism.json' with { type: 'json' }
 import foundationModelsSchema from './schema/foundation-models.json' with { type: 'json' }
 import llamacppUpstreamSchema from './schema/llamacpp-upstream.json' with { type: 'json' }
 import llamacppSchema from './schema/llamacpp.json' with { type: 'json' }
 import mlxSchema from './schema/mlx.json' with { type: 'json' }
 import tensorrtLlmSchema from './schema/tensorrt-llm.json' with { type: 'json' }
+import vllmSchema from './schema/vllm.json' with { type: 'json' }
 
 export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'llamacpp-upstream',
   'llamacpp',
+  'atomic-prism',
   'mlx',
   'foundation-models',
   'tensorrt-llm',
+  'vllm',
 ]
 
 const CONTROLLER_TYPES = new Set(['checkbox', 'input', 'dropdown', 'slider'])
@@ -55,9 +59,11 @@ function toDescriptors(provider: LocalProviderId, raw: unknown): SettingDescript
 const SCHEMAS: Record<LocalProviderId, readonly SettingDescriptor[]> = {
   'llamacpp-upstream': toDescriptors('llamacpp-upstream', llamacppUpstreamSchema),
   'llamacpp': toDescriptors('llamacpp', llamacppSchema),
+  'atomic-prism': toDescriptors('atomic-prism', atomicPrismSchema),
   'mlx': toDescriptors('mlx', mlxSchema),
   'foundation-models': toDescriptors('foundation-models', foundationModelsSchema),
   'tensorrt-llm': toDescriptors('tensorrt-llm', tensorrtLlmSchema),
+  'vllm': toDescriptors('vllm', vllmSchema),
 }
 
 /** The descriptor array as the app registers it (deep copy — callers may mutate `options`/`value`). */
@@ -161,14 +167,51 @@ const TENSORRT_LLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
   cuda_graphs: 'string',
   kv_cache_dtype: 'string',
   load_timeout_seconds: 'number',
+  enable_prefix_caching: 'boolean',
+  overlap_scheduler: 'boolean',
+  capacity_scheduler_policy: 'string',
+  dtype: 'string',
+  // '' is "the model's own", so these stay strings; the provider's settings parse them.
+  default_temperature: 'string',
+  default_top_p: 'string',
+  default_top_k: 'string',
+  default_min_p: 'string',
+  default_repetition_penalty: 'string',
+}
+
+/** `VllmProviderConfig`: the card's UUID and the two dropdowns as text, every other key a number. */
+const VLLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
+  gpu_id: 'string',
+  context_length: 'number',
+  max_output_tokens: 'number',
+  max_num_seqs: 'number',
+  kv_cache_memory_gib: 'number',
+  gpu_memory_utilization: 'number',
+  cuda_graphs: 'string',
+  kv_cache_dtype: 'string',
+  load_timeout_seconds: 'number',
+  max_num_batched_tokens: 'number',
+  enable_prefix_caching: 'boolean',
+  cpu_offload_gb: 'number',
+  dtype: 'string',
+  seed: 'number',
+  async_scheduling: 'boolean',
+  // '' is "the model's own", so these stay strings; the provider's settings parse them.
+  default_temperature: 'string',
+  default_top_p: 'string',
+  default_top_k: 'string',
+  default_min_p: 'string',
+  default_repetition_penalty: 'string',
 }
 
 export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<string, CanonicalValueType>>> = {
   'llamacpp-upstream': LLAMACPP_VALUE_TYPES,
   'llamacpp': LLAMACPP_VALUE_TYPES,
+  'atomic-prism': { ...LLAMACPP_VALUE_TYPES, allow_candidate_builds: 'boolean' },
   'mlx': MLX_VALUE_TYPES,
   'foundation-models': FOUNDATION_MODELS_VALUE_TYPES,
   'tensorrt-llm': TENSORRT_LLM_VALUE_TYPES,
+  'vllm': VLLM_VALUE_TYPES,
 }
 
 /**

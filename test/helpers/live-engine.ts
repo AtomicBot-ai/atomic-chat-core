@@ -48,6 +48,15 @@ export interface ContainerFacts {
   heartbeat_source: string | null
   /** The load generation, read off the heartbeat mount (`.../heartbeats/<generation>`). */
   generation: string | null
+  /** Its whole environment (change `add-vllm-runtime`: what reaches the engine, not only the watchdog's). */
+  env: Record<string, string>
+  /** Every mount: where it lands in the container, where it comes from, and whether it is writable. */
+  mounts: { destination: string; source: string; rw: boolean }[]
+  privileged: boolean
+  ipc_mode: string | null
+  restart_policy: string | null
+  /** The host addresses its ports are published on (`127.0.0.1` only, for a model container). */
+  published_host_ips: string[]
 }
 
 interface InspectEntry {
@@ -57,6 +66,10 @@ interface InspectEntry {
     Memory?: number
     MemorySwap?: number
     ShmSize?: number
+    Privileged?: boolean
+    IpcMode?: string
+    RestartPolicy?: { Name?: string } | null
+    PortBindings?: Record<string, Array<{ HostIp?: string }> | null> | null
     DeviceRequests?: Array<{ DeviceIDs?: string[] | null }> | null
   }
   Config?: {
@@ -65,7 +78,7 @@ interface InspectEntry {
     Labels?: Record<string, string> | null
     User?: string
   }
-  Mounts?: Array<{ Source?: string; Destination?: string }> | null
+  Mounts?: Array<{ Source?: string; Destination?: string; RW?: boolean }> | null
 }
 
 /**
@@ -103,9 +116,12 @@ export function containerFacts(inspectJson: string): ContainerFacts | null {
   if (entry === undefined || entry === null || typeof entry.Id !== 'string') return null
   const running = entry.State?.Running === true
   const env: Record<string, string> = {}
+  const allEnv: Record<string, string> = {}
   for (const pair of entry.Config?.Env ?? []) {
     const at = pair.indexOf('=')
-    if (at > 0 && pair.startsWith('ATOMIC_WATCHDOG_')) env[pair.slice(0, at)] = pair.slice(at + 1)
+    if (at <= 0) continue
+    allEnv[pair.slice(0, at)] = pair.slice(at + 1)
+    if (pair.startsWith('ATOMIC_WATCHDOG_')) env[pair.slice(0, at)] = pair.slice(at + 1)
   }
   const heartbeat = (entry.Mounts ?? []).find((m) => m.Destination === CONTAINER_HEARTBEAT_PATH)
   const engineCache = (entry.Mounts ?? []).find((m) => m.Destination === CONTAINER_ENGINE_CACHE_PATH)
@@ -130,6 +146,18 @@ export function containerFacts(inspectJson: string): ContainerFacts | null {
       heartbeat?.Source === undefined || heartbeat.Source === ''
         ? null
         : decodeName(basename(heartbeat.Source)),
+    env: allEnv,
+    mounts: (entry.Mounts ?? []).map((m) => ({
+      destination: m.Destination ?? '',
+      source: m.Source ?? '',
+      rw: m.RW === true,
+    })),
+    privileged: entry.HostConfig?.Privileged === true,
+    ipc_mode: entry.HostConfig?.IpcMode ?? null,
+    restart_policy: entry.HostConfig?.RestartPolicy?.Name ?? null,
+    published_host_ips: Object.values(entry.HostConfig?.PortBindings ?? {}).flatMap((bindings) =>
+      (bindings ?? []).map((binding) => binding.HostIp ?? '')
+    ),
   }
 }
 

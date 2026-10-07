@@ -12,11 +12,35 @@ describe('tensorrtLlmSettings', () => {
       context_length: 8192,
       max_output_tokens: 4096,
       kv_cache_free_gpu_memory_fraction: 0.8,
-      max_batch_size: 8,
+      max_batch_size: 1,
       kv_cache_max_tokens: null,
       cuda_graphs: 'auto',
       kv_cache_dtype: 'auto',
       load_timeout_seconds: null,
+      enable_prefix_caching: true,
+      overlap_scheduler: true,
+      capacity_scheduler_policy: 'guaranteed_no_evict',
+      dtype: 'auto',
+      generation: {},
+    })
+  })
+
+  it('reads the further options and the sampling defaults, "" as not set', () => {
+    expect(
+      tensorrtLlmSettings({
+        enable_prefix_caching: false,
+        overlap_scheduler: false,
+        capacity_scheduler_policy: 'max_utilization',
+        dtype: 'bfloat16',
+        default_top_p: '0.9',
+        default_min_p: '',
+      })
+    ).toMatchObject({
+      enable_prefix_caching: false,
+      overlap_scheduler: false,
+      capacity_scheduler_policy: 'max_utilization',
+      dtype: 'bfloat16',
+      generation: { top_p: 0.9 },
     })
   })
 
@@ -52,8 +76,12 @@ describe('tensorrtLlmSettings', () => {
     const settings = tensorrtLlmSettings(stored(), { context_length: 16384, ctx_size: 4, foo: 'bar' })
     expect(settings.context_length).toBe(16384)
     expect(Object.keys(settings).sort()).toEqual([
+      'capacity_scheduler_policy',
       'context_length',
       'cuda_graphs',
+      'dtype',
+      'enable_prefix_caching',
+      'generation',
       'gpu_id',
       'kv_cache_dtype',
       'kv_cache_free_gpu_memory_fraction',
@@ -61,6 +89,7 @@ describe('tensorrtLlmSettings', () => {
       'load_timeout_seconds',
       'max_batch_size',
       'max_output_tokens',
+      'overlap_scheduler',
     ])
   })
 

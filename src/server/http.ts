@@ -144,6 +144,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'MODEL_MISSING':
     case 'SIDE_FILE_MISSING':
     case 'MANAGED_OPERATION_NOT_FOUND':
+    case 'MODEL_SETUP_NOT_FOUND':
       return 404
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
@@ -174,6 +175,10 @@ export function statusForCode(code: ErrorCode): number {
     case 'DECISION_ENGINE_UNSUPPORTED':
     case 'DECISION_CHECKPOINT_INCOMPLETE':
     case 'DECISION_MODEL_NOT_CHAT':
+    case 'EMBEDDING_NOT_CONFIGURED':
+    case 'EMBEDDING_ENGINE_UNSUPPORTED':
+    case 'EMBEDDING_MODEL_NOT_EMBEDDING':
+    case 'MODEL_SETUP_PLAN_STALE':
       return 409
     case 'QUEUE_FULL':
       return 429
@@ -198,12 +203,16 @@ export function statusForCode(code: ErrorCode): number {
     case 'MANAGED_HOST_STEP_INVALID':
     case 'MANAGED_METADATA_INVALID':
       return 400
-    // Understood, well-formed, and asking for an engine this build has no adapter for.
+    // Understood, well-formed, and asking for an engine this build has no adapter for, or asking a
+    // provider to run a file it cannot (or a file nothing runs any more).
     case 'MANAGED_ADAPTER_UNAVAILABLE':
+    case 'MODEL_ENGINE_INCOMPATIBLE':
+    case 'MODEL_FORMAT_LEGACY':
       return 422
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':
     case 'DECISION_UNAVAILABLE':
+    case 'EMBEDDING_UNAVAILABLE':
       return 503
     case 'MODEL_LOAD_TIMED_OUT':
     case 'SERVER_START_TIMED_OUT':

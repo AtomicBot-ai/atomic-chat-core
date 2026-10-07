@@ -74,11 +74,11 @@ describe('cpuFactsOf', () => {
 })
 
 describe('noticeEngineInstall', () => {
-  it('retries only on a finished TurboQuant install, and swallows a failed retry', async () => {
-    const calls: string[] = []
+  it('retries on a finished TurboQuant or llama.cpp install, naming it, and swallows a failed retry', async () => {
+    const calls: Array<string | undefined> = []
     const service = {
-      onEnginesChanged: async () => {
-        calls.push('retry')
+      onEnginesChanged: async (provider?: string) => {
+        calls.push(provider)
         throw new Error('settings unreadable')
       },
     } as unknown as Pick<DecisionService, 'onEnginesChanged'>
@@ -86,11 +86,12 @@ describe('noticeEngineInstall', () => {
     const onUnhandled = (reason: unknown) => void unhandled.push(reason)
     process.on('unhandledRejection', onUnhandled)
     try {
-      noticeEngineInstall(service, 'llamacpp-upstream', true)
+      noticeEngineInstall(service, 'atomic-prism', true)
       noticeEngineInstall(service, 'llamacpp', false)
       expect(calls).toEqual([])
       noticeEngineInstall(service, 'llamacpp', true)
-      expect(calls).toEqual(['retry'])
+      noticeEngineInstall(service, 'llamacpp-upstream', true)
+      expect(calls).toEqual(['llamacpp', 'llamacpp-upstream'])
       await new Promise((r) => setTimeout(r, 20))
       expect(unhandled).toEqual([])
     } finally {

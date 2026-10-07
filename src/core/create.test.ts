@@ -1,12 +1,19 @@
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { c as tarCreate } from 'tar'
 import { describe, expect, it, vi } from 'vitest'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../test/helpers/fake-backend-pack.js'
+import {
+  CAN_INSTALL_FAKE_BACKEND,
+  FAKE_LLAMA_SCRIPT,
+  installFakeBackend,
+} from '../../test/helpers/fake-backend-pack.js'
+import { BPW, bonsaiLikeGguf, buildGguf } from '../../test/helpers/gguf-builder.js'
 import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
@@ -188,7 +195,9 @@ describe('taking ownership', () => {
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
     expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
     expect(() => core.runtime('ollama' as never)).toThrow(
-      expect.objectContaining({ details: 'available: llamacpp-upstream, llamacpp, tensorrt-llm' })
+      expect.objectContaining({
+        details: 'available: llamacpp-upstream, llamacpp, atomic-prism, tensorrt-llm, vllm',
+      })
     )
   })
 
@@ -230,6 +239,15 @@ describe('taking ownership', () => {
       dockerPath: null,
     })
     expect(linux.runtime('tensorrt-llm')).toBeDefined()
+    // vLLM is a managed engine of the same registry (change add-vllm-runtime, task 3.4).
+    expect(linux.runtime('vllm')).toBeDefined()
+    expect(await call(linux, '/models/vllm/m/load', 'POST')).toMatchObject({
+      body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
+    })
+    expect(await call(linux, '/models/vllm/m/capabilities')).toMatchObject({
+      status: 200,
+      body: { modelId: 'm', tools: false, vision: false },
+    })
     // No docker CLI on this "Linux": the load is refused before anything else is asked of the machine.
     expect(await call(linux, '/models/tensorrt-llm/m/load', 'POST')).toMatchObject({
       body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
@@ -256,13 +274,16 @@ describe('taking ownership', () => {
     })
     cores.push(mac)
     expect(() => mac.runtime('tensorrt-llm')).toThrow(/Unknown provider/)
+    expect(() => mac.runtime('vllm')).toThrow(/Unknown provider/)
     for (const [path, method] of [
       ['/models/tensorrt-llm/m/load', 'POST'],
       ['/models/tensorrt-llm/m/unload', 'POST'],
       ['/models/tensorrt-llm/m/load/cancel', 'POST'],
       ['/models/tensorrt-llm/m/capabilities', 'GET'],
       ['/models/tensorrt-llm/m/logs', 'GET'],
-      ['/models/tensorrt-llm/m', 'DELETE'],
+      // The model store's routes (change add-vllm-runtime): no managed provider, no store.
+      ['/managed-models/m', 'DELETE'],
+      ['/managed-models/location', 'GET'],
     ] as const) {
       expect(await call(mac, path, method)).toMatchObject({
         status: 404,
@@ -279,7 +300,9 @@ describe('taking ownership', () => {
       dockerPath: null,
     })
 
-    const modelsDir = linux.layout.provider('tensorrt-llm').modelsDir
+    // The managed model store (change add-vllm-runtime): the provider's models are the store's.
+    const modelsDir = linux.layout.managedModelsDir
+    expect(linux.layout.provider('tensorrt-llm').modelsDir).toBe(modelsDir)
     // A directory with files but no model.yml is not shown at all (spec "Недокачанный каталог").
     await mkdir(join(modelsDir, 'downloading'), { recursive: true })
     await writeFile(join(modelsDir, 'downloading', 'model.safetensors'), 'partial')
@@ -295,7 +318,7 @@ describe('taking ownership', () => {
     // Deleted through core only (task 2.24): an id the registry does not list is an error, a listed
     // one that never loaded goes with its folder, and an unload of an unknown id is not a stop.
     const del = (id: string) =>
-      fetch(`${linux.control.url}/atomic/v1/models/tensorrt-llm/${id}`, {
+      fetch(`${linux.control.url}/atomic/v1/managed-models/${id}`, {
         method: 'DELETE',
         headers: { authorization: `Bearer ${linux.controlToken}` },
       }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }))
@@ -944,6 +967,93 @@ describe('the decision model through the owner', () => {
   })
 })
 
+describe('the embedding model through the owner', () => {
+  const control = (core: AtomicCore, method: string, path: string, body?: unknown) =>
+    fetch(`${core.control.url}/atomic/v1/embedding/${path}`, {
+      method,
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  const gemma2 = () =>
+    buildGguf({
+      metadata: { 'general.architecture': 'gemma-embedding2', 'gemma-embedding2.pooling_type': 1 },
+      tensors: [],
+    })
+
+  it('runs it outside the sessions, journals it, serves it by name on /v1 and stops it with the core', async () => {
+    const { fakeEmbeddingSpawn } = await import('../../test/helpers/fake-llama-server.js')
+    await data.writeBackend('llamacpp-upstream', 'b11463', 'macos-arm64')
+    await writeFile(join(data.root, 'gemma.gguf'), gemma2())
+    const core = await createCore({ embedding: { spawn: fakeEmbeddingSpawn() } })
+    const events: string[] = []
+    for (const name of ['embedding:state', 'embedding:error', 'settings:changed'] as const)
+      core.events.on(name, () => events.push(name))
+    expect(await (await control(core, 'GET', 'status')).json()).toMatchObject({ state: 'disabled' })
+    expect(await (await control(core, 'GET', 'config')).json()).toMatchObject({ config: { enabled: false } })
+
+    const configured = await control(core, 'PUT', 'config', {
+      enabled: true,
+      model_path: 'gemma.gguf',
+      model_id: 'embeddinggemma-2',
+    })
+    expect(await configured.json()).toMatchObject({ config: { enabled: true, model_path: 'gemma.gguf' } })
+    const ready = (await (await control(core, 'POST', 'load')).json()) as {
+      state: string
+      pid: number
+      dims: number
+    }
+    expect(ready).toMatchObject({ state: 'ready', dims: 3 })
+    expect(events).toContain('settings:changed')
+    expect(events).toContain('embedding:state')
+    expect(core.sessions()).toEqual([])
+    const journal = JSON.parse(await readFile(data.layout.core.processes, 'utf8')) as {
+      processes: Array<{ provider: string; pid: number }>
+    }
+    expect(journal.processes).toContainEqual(
+      expect.objectContaining({ provider: 'embedding', pid: ready.pid })
+    )
+
+    const embedded = await control(core, 'POST', 'embed', { input: ['hello'] })
+    expect(await embedded.json()).toMatchObject({
+      status: 200,
+      body: { data: [{ embedding: [5, 0.2, 0.3] }] },
+    })
+
+    const served = await core.startPublicServer({ port: 0 })
+    const base = `http://127.0.0.1:${served.port}/v1`
+    const viaApi = await fetch(`${base}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'embeddinggemma-2', input: 'hi' }),
+    })
+    expect(await viaApi.json()).toMatchObject({ data: [{ embedding: [2, 0.2, 0.3] }] })
+    const models = (await (await fetch(`${base}/models`)).json()) as { data: Array<{ id: string }> }
+    expect(models.data.map((m) => m.id)).toEqual(['embeddinggemma-2'])
+
+    expect(await (await control(core, 'POST', 'unload')).json()).toMatchObject({ state: 'idle' })
+    expect(isProcessAlive(ready.pid)).toBe(false)
+    await core.shutdown()
+  })
+
+  it('starts an enabled model when the owner comes up, and stops it on shutdown', async () => {
+    const { fakeEmbeddingSpawn } = await import('../../test/helpers/fake-llama-server.js')
+    await data.writeBackend('llamacpp-upstream', 'b11463', 'macos-arm64')
+    await writeFile(join(data.root, 'gemma.gguf'), gemma2())
+    await mkdir(data.layout.core.dir, { recursive: true })
+    await writeFile(
+      data.layout.core.settings,
+      JSON.stringify({ version: 1, revision: 1, embedding: { enabled: true, model_path: 'gemma.gguf' } })
+    )
+    const core = await createCore({ embedding: { spawn: fakeEmbeddingSpawn() } })
+    for (let i = 0; i < 200 && core.embedding.getStatus().state !== 'ready'; i++)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    const status = core.embedding.getStatus()
+    expect(status).toMatchObject({ state: 'ready', enabled: true, model_id: 'gemma' })
+    await core.shutdown()
+    expect(isProcessAlive(status.pid as number)).toBe(false)
+  })
+})
+
 describe('error reporting', () => {
   it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
     const captured: ErrorReport[] = []
@@ -1381,3 +1491,177 @@ describe('managed runtime environment', () => {
     }
   })
 })
+
+const PRISM_HOST_BACKEND =
+  process.platform === 'darwin'
+    ? `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
+    : process.platform === 'linux' && process.arch === 'x64'
+      ? 'linux-cpu-x64'
+      : null
+
+describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
+  'PrismML model setup through the owner',
+  () => {
+    it('wires the verdict, the plan, the setup, its engine install and registration, and PrismML updates', async () => {
+      const tag = 'prism-b10754-2459f68'
+      const repo = 'atomic-unit/Bonsai-gguf'
+      const revision = 'c'.repeat(40)
+      const file = 'Bonsai-PQ2_0.gguf'
+      const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex')
+      const gguf = bonsaiLikeGguf({
+        weightType: 142,
+        bitsPerWeight: BPW.pq2_0,
+        metadata: { 'prism.hadamard.version': 1 },
+      })
+
+      const scratch = await mkdtemp(join(tmpdir(), 'atomic-core-prism-unit-'))
+      const packDir = join(scratch, `llama-${tag}`)
+      await mkdir(packDir, { recursive: true })
+      await writeFile(
+        join(packDir, 'llama-server'),
+        `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "version: 10754 (2459f68)" >&2; exit 0; fi\n` +
+          `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_LLAMA_SCRIPT)} "$@"\n`
+      )
+      await chmod(join(packDir, 'llama-server'), 0o755)
+      await tarCreate({ gzip: true, file: join(scratch, 'pack.tar.gz'), cwd: scratch }, [`llama-${tag}`])
+      const pack = await readFile(join(scratch, 'pack.tar.gz'))
+      await rm(scratch, { recursive: true, force: true })
+
+      const asset = `llama-${tag}-bin-${PRISM_HOST_BACKEND}.tar.gz`
+      const served: Record<string, Buffer> = {
+        'http://conf.test/manifest.json': Buffer.from(
+          JSON.stringify({
+            schema_version: 1,
+            updated_at: '2026-10-05T00:00:00Z',
+            upstream_repo: 'PrismML-Eng/llama.cpp',
+            download_base: 'http://packs.test',
+            releases: [
+              {
+                tag,
+                commit: '2459f68b5c0eb26261fd5a81682004b93cd645ba',
+                published_at: '2026-10-02T00:00:00Z',
+                min_core_version: '0.1.0',
+                notes_url: `https://example.test/${tag}`,
+                capabilities: ['pq2_0', 'hadamard'],
+                assets: [
+                  {
+                    backend: PRISM_HOST_BACKEND,
+                    name: asset,
+                    size: pack.length,
+                    sha256: sha(pack),
+                    validation: 'approved',
+                  },
+                ],
+              },
+            ],
+          })
+        ),
+        'http://conf.test/rules.json': Buffer.from(
+          JSON.stringify({
+            schema_version: 1,
+            updated_at: '2026-10-05T00:00:00Z',
+            rules_version: 3,
+            tensor_types: { '142': 'pq2_0' },
+            metadata_capabilities: { 'prism.hadamard.version': 'hadamard' },
+            upstream_capabilities: ['q1_0'],
+            families: [
+              {
+                id: 'unit-bonsai',
+                title: 'Unit Bonsai',
+                repo,
+                revision,
+                default_packing: 'pq2_0',
+                files: [
+                  {
+                    file,
+                    size: gguf.length,
+                    sha256: sha(gguf),
+                    packing: 'pq2_0',
+                    treatment: 'prism_required',
+                    requires: ['pq2_0', 'hadamard'],
+                    min_prism_build: 10754,
+                    default: true,
+                  },
+                ],
+              },
+            ],
+          })
+        ),
+        [`http://packs.test/${tag}/${asset}`]: pack,
+        [`http://hub.test/${repo}/resolve/${revision}/${file}`]: gguf,
+      }
+      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+        const body = served[String(input instanceof Request ? input.url : input)]
+        return body
+          ? new Response(new Uint8Array(body), {
+              status: 200,
+              headers: { 'content-length': String(body.length) },
+            })
+          : new Response('not found', { status: 404 })
+      }) as typeof fetch
+
+      const core = await createCore({
+        fetch: fetchImpl,
+        env: {
+          ...process.env,
+          ATOMIC_PRISM_MANIFEST_URL: 'http://conf.test/manifest.json',
+          ATOMIC_PRISM_MODEL_RULES_URL: 'http://conf.test/rules.json',
+          ATOMIC_HF_ENDPOINT: 'http://hub.test',
+        },
+      })
+      const call = (path: string, body?: unknown) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          method: body === undefined ? 'GET' : 'POST',
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        })
+
+      const verdict = (await (await call('/models/compatibility', { repo, file })).json()) as {
+        outcome: string
+      }
+      expect(verdict.outcome).toBe('engine_required')
+      const plan = (await (await call('/models/setup-plan', { repo, file })).json()) as {
+        digest: string
+        blockers: unknown[]
+      }
+      expect(plan.blockers).toEqual([])
+
+      const started = await call('/model-setups', {
+        repo,
+        file,
+        request_id: 'unit-1',
+        plan_digest: plan.digest,
+      })
+      expect(started.status).toBe(202)
+      const { setup_id: setupId } = (await started.json()) as { setup_id: string }
+      let stage = ''
+      const deadline = Date.now() + 15_000
+      while (!['ready', 'failed', 'cancelled'].includes(stage) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        stage = ((await (await call(`/model-setups/${setupId}`)).json()) as { stage: string }).stage
+      }
+      expect(stage).toBe('ready')
+      expect(((await (await call('/model-setups')).json()) as { setups: unknown[] }).setups).toHaveLength(1)
+      expect(core.settings.get('atomic-prism')['version_backend']).toBe(`${tag}/${PRISM_HOST_BACKEND}`)
+
+      // A finished setup is neither cancelled nor resumed; the answer is the record as it is.
+      for (const action of ['cancel', 'resume']) {
+        const answered = await call(`/model-setups/${setupId}/${action}`, {})
+        expect(answered.status).toBe(200)
+        expect(await answered.json()).toMatchObject({ setup_id: setupId, stage: 'ready' })
+      }
+
+      const onDisk = (await (
+        await call('/models/compatibility', {
+          model_id: 'atomic-unit/Bonsai-PQ2_0',
+          provider: 'atomic-prism',
+        })
+      ).json()) as { outcome: string }
+      expect(onDisk.outcome).toBe('compatible')
+
+      const updates = await call('/backends/atomic-prism/updates', {})
+      expect(updates.status).toBe(200)
+      expect(await updates.json()).toMatchObject({ provider: 'atomic-prism', update_needed: false })
+    })
+  }
+)

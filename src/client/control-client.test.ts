@@ -9,6 +9,7 @@ import type {
   BackendCatalogRequest,
   BackendRecommendationRequest,
   BackendUpdateCheckRequest,
+  ModelSetup,
 } from '../contracts/index.js'
 import { fakeCatalog } from '../../test/helpers/control-harness.js'
 import type {
@@ -43,6 +44,19 @@ let inspecting = false
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
 const environmentCalls: string[] = []
+const setupCalls: string[] = []
+
+const SETUP = {
+  setup_id: 's1',
+  request_id: 'r1',
+  revision: 0,
+  stage: 'queued',
+  request: { repo: 'o/r', file: 'f.gguf' },
+  plan: { digest: 'd', model_id: 'o/f' },
+  task_ids: { model: 'model-setup-s1-model' },
+  created_at: 1,
+  updated_at: 1,
+} as unknown as ModelSetup
 
 const OPERATION: EnvironmentOperation = {
   schema_version: 1,
@@ -123,7 +137,13 @@ beforeEach(async () => {
       logout: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
       models: async () => [],
     },
-    tensorrtLlmModelLocation: async () => ({ root: '/data/tensorrt-llm/models', free_bytes: 123 }),
+    managedModelLocation: async () => ({ root: '/data/managed-models', free_bytes: 123 }),
+    managedModelDelete: async (modelId) => ({
+      model_id: modelId,
+      was_loaded: false,
+      freed_bytes: 7,
+      engine_caches_removed: 0,
+    }),
     environments: {
       list: async () => {
         environmentCalls.push('list')
@@ -176,6 +196,45 @@ beforeEach(async () => {
     },
     environmentsSnapshot: () => [{ environment_id: 'default' } as EnvironmentSnapshot],
     environmentOperations: () => [OPERATION],
+    modelSetups: {
+      compatibility: async (request) => {
+        setupCalls.push(`compatibility:${request.repo}`)
+        return {
+          outcome: 'engine_required',
+          provider: 'atomic-prism',
+          requires: ['pq2_0'],
+          evidence: 'rules',
+          rules_version: 1,
+          reason: 'r',
+        }
+      },
+      plan: async (request) => {
+        setupCalls.push(`plan:${request.file}`)
+        return SETUP.plan
+      },
+      families: async () => {
+        setupCalls.push('families')
+        return { rules_version: 2, families: [] }
+      },
+      start: async (request) => {
+        setupCalls.push(`start:${request.request_id}:${request.plan_digest}`)
+        return SETUP
+      },
+      list: async () => [SETUP],
+      get: async (id) => {
+        setupCalls.push(`get:${id}`)
+        return SETUP
+      },
+      cancel: async (id) => {
+        setupCalls.push(`cancel:${id}`)
+        return { ...SETUP, stage: 'cancelled' }
+      },
+      resume: async (id, options) => {
+        setupCalls.push(`resume:${id}:${JSON.stringify(options.proxy)}`)
+        return SETUP
+      },
+      snapshot: () => [SETUP],
+    },
     backends: {
       list: async () => [],
       install: async (_p: string, version: string, backend: string) => ({
@@ -730,6 +789,33 @@ describe('request', () => {
   })
 })
 
+describe('model compatibility and setup', () => {
+  it('drives compatibility, plan, start, list, get, cancel and resume, and reads the snapshot field', async () => {
+    setupCalls.length = 0
+    expect((await client.modelCompatibility({ repo: 'o/r', file: 'f.gguf' })).outcome).toBe('engine_required')
+    expect((await client.modelSetupPlan({ repo: 'o/r', file: 'f.gguf' })).digest).toBe('d')
+    expect(await client.prismFamilies()).toEqual({ rules_version: 2, families: [] })
+    expect(
+      (await client.startModelSetup({ repo: 'o/r', file: 'f.gguf', request_id: 'r1', plan_digest: 'd' }))
+        .setup_id
+    ).toBe('s1')
+    expect(await client.modelSetups()).toEqual([SETUP])
+    expect((await client.modelSetup('s1')).stage).toBe('queued')
+    expect((await client.cancelModelSetup('s1')).stage).toBe('cancelled')
+    await client.resumeModelSetup('s1')
+    expect((await client.snapshot()).model_setups).toEqual([SETUP])
+    expect(setupCalls).toEqual([
+      'compatibility:o/r',
+      'plan:f.gguf',
+      'families',
+      'start:r1:d',
+      'get:s1',
+      'cancel:s1',
+      'resume:s1:null',
+    ])
+  })
+})
+
 describe('managed environments (task 2.6)', () => {
   it('drives probe, begin, get, resume, the host-step receipt and cancel, and reads the snapshot fields', async () => {
     environmentCalls.length = 0
@@ -762,9 +848,16 @@ describe('managed environments (task 2.6)', () => {
     })
     expect(receipted.phase).toBe('preparing-environment')
     expect((await client.cancelEnvironmentOperation('op-1')).phase).toBe('cancelled')
-    expect(await client.tensorrtLlmModelLocation()).toEqual({
-      root: '/data/tensorrt-llm/models',
+    expect(await client.managedModelLocation()).toEqual({
+      root: '/data/managed-models',
       free_bytes: 123,
+    })
+    // The id travels as it is: a nested id keeps its slash, nothing is percent-encoded for it.
+    expect(await client.deleteManagedModel('Qwen/Qwen3.5-2B')).toEqual({
+      model_id: 'Qwen/Qwen3.5-2B',
+      was_loaded: false,
+      freed_bytes: 7,
+      engine_caches_removed: 0,
     })
     const descriptor = await client.environmentDescriptor('tensorrt-llm-1.2.1-r1')
     expect(descriptor).toMatchObject({ descriptor_id: 'tensorrt-llm-1.2.1-r1', notices: ['NVIDIA terms'] })

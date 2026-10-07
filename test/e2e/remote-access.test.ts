@@ -166,6 +166,9 @@ function hostRequest(port: number, host: string, dial = '127.0.0.1'): Promise<nu
     socket.setEncoding('utf8')
     socket.on('data', (chunk: string) => (raw += chunk))
     socket.on('error', reject)
+    // A VPN address (a utun interface on macOS) can swallow the dial without ever answering; give
+    // up on it instead of hanging the test, so the caller's catch moves to the next address.
+    socket.setTimeout(3000, () => socket.destroy(new Error(`no answer from ${dial}:${port}`)))
     socket.on('close', () => resolve(Number(raw.split(' ')[1])))
     socket.write(`GET /v1/models HTTP/1.1\r\nhost: ${host}\r\nconnection: close\r\n\r\n`)
   })

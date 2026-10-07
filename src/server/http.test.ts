@@ -85,6 +85,15 @@ describe('error envelope', () => {
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
   })
 
+  it.each([
+    ['MODEL_SETUP_NOT_FOUND', 404],
+    ['MODEL_SETUP_PLAN_STALE', 409],
+    ['MODEL_ENGINE_INCOMPATIBLE', 422],
+    ['MODEL_FORMAT_LEGACY', 422],
+  ] satisfies Array<[ErrorCode, number]>)('maps the model-setup code %s to %i', (code, status) => {
+    expect(statusForCode(code)).toBe(status)
+  })
+
   it('maps the image-generation codes: the caller can fix 4xx, and nothing acts on the status', () => {
     const table: Array<[ErrorCode, number]> = [
       ['INVALID_REQUEST', 400],

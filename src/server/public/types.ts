@@ -12,6 +12,7 @@ import type {
   DiffusionFamilyDefaults,
   DiffusionFamilyRanges,
   DiffusionModality,
+  EmbeddingModality,
   GalleryListOptions,
   GalleryVideoItem,
   ImageGenerateRequest,
@@ -111,6 +112,11 @@ export type DecisionTarget =
       port: number
       /** The process's own bearer key; the client's key for this server never reaches it. */
       apiKey: string
+      /**
+       * The engine paths the process serves (`/props.decision.endpoints`, or the core's for upstream);
+       * absent when it did not say, and then every route is forwarded.
+       */
+      endpoints?: readonly string[]
       /** Called once the answer has been relayed (or abandoned): the idle unload counts from here. */
       release: () => void
     }
@@ -125,6 +131,34 @@ export interface DecisionBackend {
   acquire: (waitMs: number, signal?: AbortSignal) => Promise<DecisionTarget>
   /** The configured model's id for the request log, `null` when none is set. */
   modelId?: () => string | null
+}
+
+/** The running embedding process as `/embeddings` needs it: where to forward, with which key, and what it takes. */
+export type EmbeddingTarget =
+  | {
+      ok: true
+      port: number
+      /** The process's own bearer key; the client's key for this server never reaches it. */
+      apiKey: string
+      /** The `-a` the process answers with. */
+      modelId: string
+      /** Length of the vectors it returns. */
+      dims: number
+      /** What one input may hold. */
+      modalities: readonly EmbeddingModality[]
+      /** Called once the answer has been relayed (or abandoned): the idle unload counts from here. */
+      release: () => void
+    }
+  | { ok: false; reason: string; message: string }
+
+export interface EmbeddingBackend {
+  /**
+   * The running embedding process. When the module is enabled but not running it is started first;
+   * while it is starting or restarting this waits up to `waitMs`, and stops when `signal` fires.
+   */
+  acquire: (waitMs: number, signal?: AbortSignal) => Promise<EmbeddingTarget>
+  /** The name the module serves (`model` in a request), `null` when it is off or has no model. */
+  modelId: () => string | null
 }
 
 export interface PublicServerDeps {
@@ -160,6 +194,11 @@ export interface PublicServerDeps {
   videos?: VideosBackend
   /** The decision model, for `/systemone` and `/router/score`; without it those routes answer 503. */
   decision?: DecisionBackend
+  /**
+   * The embedding model, for `/embeddings` requests that name it; every other `/embeddings` request
+   * goes to the sessions and cloud providers as before.
+   */
+  embedding?: EmbeddingBackend
   /** Where a request that failed on our side, or a failing local engine, is reported. */
   errors?: ErrorSink | undefined
 }

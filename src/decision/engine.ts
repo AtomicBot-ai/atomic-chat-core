@@ -20,18 +20,24 @@
  * A checkpoint folder needs one more flag, `--decision-convert-cache`: a build from before the
  * converter lists `--decision` but fails the load of a folder with `MODEL_LOAD_FAILED`, and the
  * search would never reach a build that can run it.
+ *
+ * An upstream decision GGUF (`<arch>.decision.type`, `dialect: 'upstream'`) is run by the stock
+ * llama.cpp provider instead. Upstream has no flag to probe, so its gate is the build number in the
+ * tag (`upstream-version.ts`): only packs at or above the model's floor are tried, newest first, and
+ * readiness (`/v1/models` lists `decisions`) has the last word, with the same `reject` skip.
  */
 
 import { stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { DecisionEngineInfo } from '../contracts/index.js'
+import type { DecisionDialect, DecisionEngineInfo, DecisionEngineProvider } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import { resolveBackendExe, scanInstalledBackends } from '../backend/index.js'
 import { checkSpecTypeSupport } from '../runtime/llamacpp/index.js'
 import { buildProcessEnv, discoverCudaPaths, nodeCudaProbeEnv } from '../runtime/shared/index.js'
-import { orderEngineCandidates } from './engine-candidates.js'
+import { orderEngineCandidates, orderUpstreamCandidates } from './engine-candidates.js'
 import type { InstalledEnginePack } from './engine-candidates.js'
+import { UPSTREAM_DECISION_MIN_BUILD } from './upstream-version.js'
 
 /** The flag the `-h` output must contain. */
 export const DECISION_FLAG = '--decision'
@@ -39,21 +45,32 @@ export const DECISION_FLAG = '--decision'
 export const DECISION_CONVERT_FLAG = '--decision-convert-cache'
 
 export interface EngineRequirements {
+  /** The engine the model needs; default `turboquant`. */
+  dialect?: DecisionDialect
   /** The model is a checkpoint folder: the build must also list `DECISION_CONVERT_FLAG`. */
   checkpointDir?: boolean
+  /** Upstream only: the oldest build that serves the model (`upstreamMinBuild`). */
+  minBuild?: number
 }
 
 const REFUSED_AT_READINESS = 'refused at readiness'
 
-/** The TurboQuant provider: the only one whose builds carry the decision role. */
+/** The TurboQuant provider: the one whose builds serve `--decision` and the router. */
 export const DECISION_ENGINE_PROVIDER = 'llamacpp' as const
+/** The stock llama.cpp provider: its builds from b11370 on serve upstream decision GGUFs. */
+export const UPSTREAM_DECISION_ENGINE_PROVIDER = 'llamacpp-upstream' as const
+/** Every provider an install of which may let a decision model start. */
+export const DECISION_ENGINE_PROVIDERS: readonly DecisionEngineProvider[] = [
+  DECISION_ENGINE_PROVIDER,
+  UPSTREAM_DECISION_ENGINE_PROVIDER,
+]
 
 export interface EngineResolverDeps {
   layout: DataLayout
   platform?: NodeJS.Platform
   env?: NodeJS.ProcessEnv
-  /** Every installed pack with its executable. Default: a scan of `<data>/llamacpp/backends`. */
-  listPacks?: () => Promise<InstalledEnginePack[]>
+  /** Every installed pack of `provider` with its executable. Default: a scan of `<data>/<provider>/backends`. */
+  listPacks?: (provider: DecisionEngineProvider) => Promise<InstalledEnginePack[]>
   /** Whether `exe -h` lists `flag` (`DECISION_FLAG`, `DECISION_CONVERT_FLAG`); rejects when the probe could not run. */
   probe?: (exe: string, flag: string) => Promise<boolean>
   /** Modification time of a file, `undefined` when it does not exist. */
@@ -84,18 +101,19 @@ export class DecisionEngineResolver {
    * installed pack that does. `DECISION_ENGINE_UNSUPPORTED` names every pack it tried and why.
    */
   async resolve(enginePath = '', needs: EngineRequirements = {}): Promise<DecisionEngineInfo> {
+    if (needs.dialect === 'upstream')
+      return this.resolveUpstream(enginePath, needs.minBuild ?? UPSTREAM_DECISION_MIN_BUILD)
     const flags = needs.checkpointDir ? [DECISION_FLAG, DECISION_CONVERT_FLAG] : [DECISION_FLAG]
     if (enginePath !== '') {
       const reason = await this.check(enginePath, flags)
-      if (reason === undefined)
-        return { path: enginePath, version_backend: null, fork_version: null, version_gate: null }
+      if (reason === undefined) return explicitEngine(enginePath, 'turboquant')
       throw new AtomicCoreError(
         'DECISION_ENGINE_UNSUPPORTED',
         'The configured engine does not serve the decision model.',
         `${enginePath}: ${reason}`
       )
     }
-    const packs = await (this.deps.listPacks ?? (() => this.scan()))()
+    const packs = await this.packsOf(DECISION_ENGINE_PROVIDER)
     const tried: string[] = []
     let refusedAtReadiness = 0
     for (const candidate of orderEngineCandidates(packs)) {
@@ -114,6 +132,43 @@ export class DecisionEngineResolver {
       tried.length > 0
         ? tried.join('\n')
         : `no TurboQuant build in ${this.deps.layout.provider(DECISION_ENGINE_PROVIDER).backendsDir}`
+    )
+  }
+
+  /**
+   * An upstream decision GGUF: `enginePath` when given (it only has to exist, and not be refused at
+   * readiness), otherwise the newest installed upstream pack at or above `minBuild`. Older packs are
+   * named in the error, which tells the user which build to update to.
+   */
+  private async resolveUpstream(enginePath: string, minBuild: number): Promise<DecisionEngineInfo> {
+    if (enginePath !== '') {
+      const reason = await this.check(enginePath, [])
+      if (reason === undefined) return explicitEngine(enginePath, 'upstream')
+      throw new AtomicCoreError(
+        'DECISION_ENGINE_UNSUPPORTED',
+        'The configured engine does not serve the decision model.',
+        `${enginePath}: ${reason}`
+      )
+    }
+    const { eligible, tooOld } = orderUpstreamCandidates(
+      await this.packsOf(UPSTREAM_DECISION_ENGINE_PROVIDER),
+      minBuild
+    )
+    const tried: string[] = []
+    for (const candidate of eligible) {
+      const reason = await this.check(candidate.path, [])
+      if (reason === undefined) return candidate.info
+      tried.push(`${candidate.info.version_backend}: ${reason}`)
+    }
+    for (const pack of tooOld) tried.push(`${pack.version}/${pack.backend}: older than b${minBuild}`)
+    throw new AtomicCoreError(
+      'DECISION_ENGINE_UNSUPPORTED',
+      eligible.length > 0
+        ? `No installed llama.cpp build can run the decision model: every build at b${minBuild} or newer was ${REFUSED_AT_READINESS}.`
+        : `No installed llama.cpp build can run the decision model. Update llama.cpp to b${minBuild} or newer.`,
+      tried.length > 0
+        ? tried.join('\n')
+        : `no llama.cpp build in ${this.deps.layout.provider(UPSTREAM_DECISION_ENGINE_PROVIDER).backendsDir}`
     )
   }
 
@@ -172,19 +227,22 @@ export class DecisionEngineResolver {
     return checkSpecTypeSupport(exe, flag, env, cwd)
   }
 
-  private async scan(): Promise<InstalledEnginePack[]> {
+  private packsOf(provider: DecisionEngineProvider): Promise<InstalledEnginePack[]> {
+    return this.deps.listPacks ? this.deps.listPacks(provider) : this.scan(provider)
+  }
+
+  private async scan(provider: DecisionEngineProvider): Promise<InstalledEnginePack[]> {
     const { layout } = this.deps
     const packs: InstalledEnginePack[] = []
-    for (const pack of await scanInstalledBackends(layout, DECISION_ENGINE_PROVIDER, this.platform)) {
-      const path = await resolveBackendExe(
-        layout,
-        DECISION_ENGINE_PROVIDER,
-        pack.version,
-        pack.backend,
-        this.platform
-      )
+    for (const pack of await scanInstalledBackends(layout, provider, this.platform)) {
+      const path = await resolveBackendExe(layout, provider, pack.version, pack.backend, this.platform)
       if (path) packs.push({ version: pack.version, backend: pack.backend, path })
     }
     return packs
   }
+}
+
+/** An explicit `engine_path`: nothing is known about it but the file and the dialect it is started for. */
+function explicitEngine(path: string, dialect: DecisionDialect): DecisionEngineInfo {
+  return { path, version_backend: null, fork_version: null, version_gate: null, dialect, provider: null }
 }

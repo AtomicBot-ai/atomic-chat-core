@@ -12,10 +12,16 @@
  * and counts as still loading: the refusal is remembered (`DecisionEngineResolver.reject`), so it
  * must not come from a slow answer. The parsers are pure; `checkReadiness` does one round of the
  * chain over the injected HTTP.
+ *
+ * Upstream llama.cpp has no `/props.decision` and no `decision` capability: its `/v1/models` entry
+ * carries `architecture.output_modalities`, `["decisions"]` for a decision model and `["text"]` for
+ * anything else. So an upstream process is ready once `/v1/models` lists `decisions`, and its props
+ * are filled in by the core (`upstreamProps`): the request contract it shares with the fork, the one
+ * endpoint it serves, and whether it reads images.
  */
 
 import { DECISION_API_VERSION } from '../contracts/index.js'
-import type { DecisionCapability, DecisionProps } from '../contracts/index.js'
+import type { DecisionCapability, DecisionDialect, DecisionProps } from '../contracts/index.js'
 import type { DecisionHttp } from './http.js'
 
 export const HEALTH_PATH = '/health'
@@ -95,6 +101,48 @@ export function judgeDecisionEndpoint(
   return { kind: 'ready', props: decision, capabilities }
 }
 
+/** What an upstream decision process serves: `/v1/systemone` only, no router. */
+export const UPSTREAM_DECISION_ENDPOINTS: readonly string[] = ['/v1/systemone']
+
+/** The first `data` entry's `architecture.<key>` (upstream b11370 on); `[]` when there is none. */
+export function modalitiesOf(body: unknown, key: 'input_modalities' | 'output_modalities'): string[] {
+  const list = isRecord(body) ? body['data'] : undefined
+  if (!Array.isArray(list)) return []
+  for (const entry of list) {
+    const arch = isRecord(entry) ? entry['architecture'] : undefined
+    const values = isRecord(arch) ? arch[key] : undefined
+    if (Array.isArray(values)) return values.filter((v): v is string => typeof v === 'string')
+  }
+  return []
+}
+
+/** The props the core stands in for an upstream process, which has no `/props.decision`. */
+export function upstreamProps(body: unknown): DecisionProps {
+  const list = isRecord(body) ? body['data'] : undefined
+  const first = Array.isArray(list) && isRecord(list[0]) ? list[0] : undefined
+  const id = typeof first?.['id'] === 'string' ? first['id'] : undefined
+  return {
+    api_version: DECISION_API_VERSION,
+    endpoints: [...UPSTREAM_DECISION_ENDPOINTS],
+    source: 'gguf',
+    ...(id !== undefined ? { model_id: id } : {}),
+    input_modalities: modalitiesOf(body, 'input_modalities'),
+  }
+}
+
+/** The verdict on an upstream `/v1/models` answer after health. Pure, like `judgeDecisionEndpoint`. */
+export function judgeUpstreamDecisionEndpoint(models: { status: number; text: string }): ReadinessResult {
+  const body = models.status === 200 ? parseJson(models.text) : undefined
+  if (body === undefined) return { kind: 'loading', detail: notAVerdict(MODELS_PATH, models) }
+  const outputs = modalitiesOf(body, 'output_modalities')
+  if (!outputs.includes('decisions'))
+    return {
+      kind: 'unsupported',
+      detail: `${MODELS_PATH} does not list the "decisions" output modality (got ${JSON.stringify(outputs)})`,
+    }
+  return { kind: 'ready', props: upstreamProps(body), capabilities: ['decision', 'systemone'] }
+}
+
 /** Why an answer is not a verdict, for the timeout's details. */
 function notAVerdict(path: string, answer: { status: number; text: string }): string {
   if (answer.status === 0) return `${path}: ${answer.text}`
@@ -110,7 +158,8 @@ export async function checkReadiness(
   http: DecisionHttp,
   baseUrl: string,
   apiKey: string,
-  timeoutMs = READINESS_REQUEST_TIMEOUT_MS
+  timeoutMs = READINESS_REQUEST_TIMEOUT_MS,
+  dialect: DecisionDialect = 'turboquant'
 ): Promise<ReadinessResult> {
   const get = (path: string) =>
     http.request(`${baseUrl}${path}`, { method: 'GET', apiKey, timeoutMs }).catch((error: unknown) => ({
@@ -123,6 +172,7 @@ export async function checkReadiness(
       kind: 'loading',
       detail: health.status === 0 ? health.text : `${HEALTH_PATH} answered ${health.status}`,
     }
+  if (dialect === 'upstream') return judgeUpstreamDecisionEndpoint(await get(MODELS_PATH))
   const [models, props] = [await get(MODELS_PATH), await get(PROPS_PATH)]
   return judgeDecisionEndpoint(models, props)
 }

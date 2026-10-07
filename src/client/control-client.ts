@@ -21,13 +21,23 @@ import type {
   BeginOperation,
   CoreEventName,
   EnvironmentOperation,
+  ModelCompatibilityRequest,
+  ModelCompatibilityResponse,
+  PrismFamiliesResponse,
+  ModelSetup,
+  ModelSetupList,
+  ModelSetupPlan,
+  ModelSetupPlanRequest,
+  ModelSetupStartRequest,
+  ProxyConfig,
   EnvironmentSnapshot,
   ManagedHostReceipt,
   ProbeEnvironmentInput,
   RequirementPlan,
   ResumeOperation,
   RuntimeDescriptorSummary,
-  TensorrtLlmModelLocation,
+  ManagedModelDeletion,
+  ManagedModelLocation,
   LlamacppProviderId,
   DiffusionBackendInstallRecord,
   DiffusionCancelResult,
@@ -93,6 +103,8 @@ export interface CoreSnapshot {
    */
   environments?: EnvironmentSnapshot[]
   environment_operations?: EnvironmentOperation[]
+  /** Model setups; optional for a core that predates them. */
+  model_setups?: ModelSetup[]
 }
 
 export interface CoreEventMessage {
@@ -577,13 +589,24 @@ export class CoreClient {
   }
 
   /**
-   * Where `tensorrt-llm` models go on this machine and how much room is left (change
-   * `add-tensorrt-llm-windows`, design D6): download, check and write `model.yml` only under `root`.
-   * On Windows that is a `\\wsl.localhost\…` path; before Atomic Chat's distribution exists the answer
-   * is 422 `MANAGED_ADAPTER_UNAVAILABLE`, and where the provider is not offered 404 `PROVIDER_NOT_FOUND`.
+   * Where the managed engines' models go on this machine and how much room is left (spec
+   * `managed-model-store`): download, check and write `model.yml` only under `root`. On Windows that is
+   * a `\\wsl.localhost\…` path; before Atomic Chat's distribution exists the answer is 422
+   * `MANAGED_ADAPTER_UNAVAILABLE`, and where no managed provider is offered 404 `PROVIDER_NOT_FOUND`.
    */
-  tensorrtLlmModelLocation(): Promise<TensorrtLlmModelLocation> {
-    return this.call('/models/tensorrt-llm/location')
+  managedModelLocation(): Promise<ManagedModelLocation> {
+    return this.call('/managed-models/location')
+  }
+
+  /**
+   * Delete a model of the managed store: core stops it in whichever managed provider holds it, then
+   * removes every engine cache of it and its folder. The id is sent as it is — a nested id keeps its
+   * `/` — and an id the store does not have is 404 `MODEL_NOT_FOUND`.
+   */
+  deleteManagedModel(modelId: string): Promise<ManagedModelDeletion> {
+    return this.call(`/managed-models/${modelId.split('/').map(encodeURIComponent).join('/')}`, {
+      method: 'DELETE',
+    })
   }
 
   /**
@@ -631,6 +654,52 @@ export class CoreClient {
     return this.call(`/environments/operations/${encodeURIComponent(operationId)}/host-step-result`, {
       method: 'POST',
       body: JSON.stringify(receipt),
+    })
+  }
+
+  // ── Model compatibility and setup ────────────────────────────────────────────────────────────
+
+  /** What a file needs and whether this core runs it; for a Hub file, before it is downloaded. */
+  modelCompatibility(request: ModelCompatibilityRequest): Promise<ModelCompatibilityResponse> {
+    return this.call('/models/compatibility', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** The Bonsai families the conf model rules name, each with the files the Hub may offer. */
+  prismFamilies(): Promise<PrismFamiliesResponse> {
+    return this.call('/models/atomic-prism/families')
+  }
+
+  /** What a setup would install and download, what blocks it, and the digest `startModelSetup` takes. */
+  modelSetupPlan(request: ModelSetupPlanRequest): Promise<ModelSetupPlan> {
+    return this.call('/models/setup-plan', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /**
+   * Start a setup from the plan the user saw, or get back the one this `request_id` started. A plan
+   * that changed since is 409 `MODEL_SETUP_PLAN_STALE`, with the new plan in `details`.
+   */
+  startModelSetup(request: ModelSetupStartRequest): Promise<ModelSetup> {
+    return this.call('/model-setups', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  async modelSetups(): Promise<ModelSetup[]> {
+    return (await this.call<ModelSetupList>('/model-setups')).setups
+  }
+
+  modelSetup(setupId: string): Promise<ModelSetup> {
+    return this.call(`/model-setups/${encodeURIComponent(setupId)}`)
+  }
+
+  /** Stop a setup; what was downloaded stays for `resumeModelSetup`. */
+  cancelModelSetup(setupId: string): Promise<ModelSetup> {
+    return this.call(`/model-setups/${encodeURIComponent(setupId)}/cancel`, { method: 'POST' })
+  }
+
+  /** Run an interrupted, failed or cancelled setup again, planned afresh. */
+  resumeModelSetup(setupId: string, options: { proxy?: ProxyConfig | null } = {}): Promise<ModelSetup> {
+    return this.call(`/model-setups/${encodeURIComponent(setupId)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify(options),
     })
   }
 

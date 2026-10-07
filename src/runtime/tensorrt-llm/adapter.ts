@@ -119,8 +119,20 @@
  *   ("Долгий первый старт": a 30 GB model starting in three minutes must not time out).
  */
 import { AtomicCoreError } from '../../contracts/index.js'
+import {
+  readGenerationDefaults,
+  withGenerationDefaults,
+  type GenerationDefaults,
+} from '../managed-text/generation-defaults.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
-import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION, ManagedRequestRefusal } from '../managed-text/index.js'
+import {
+  MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
+  ManagedRequestRefusal,
+  asksForStructuredOutput,
+  asksForTools,
+  reasoningIntoContent,
+  thinkingRequested,
+} from '../managed-text/index.js'
 import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION, tensorrtLlmUnifiedKvMaxTokens } from './kv-cache.js'
 import type {
   ManagedEngineLaunch,
@@ -175,6 +187,16 @@ export interface TensorrtLlmSettings {
   kv_cache_dtype: 'auto' | 'fp8'
   /** Seconds. `null` leaves `readinessTimeoutMs`'s own weight-based estimate in force. */
   load_timeout_seconds: number | null
+  /** `kv_cache_config.enable_block_reuse` (the engine's own default: on). */
+  enable_prefix_caching: boolean
+  /** `false` writes `disable_overlap_scheduler: true` (the engine's own default: overlap on). */
+  overlap_scheduler: boolean
+  /** `scheduler_config.capacity_scheduler_policy`, written only when not the engine's default. */
+  capacity_scheduler_policy: 'guaranteed_no_evict' | 'max_utilization'
+  /** The LLM API `dtype` of unquantized weights; `auto` writes nothing. */
+  dtype: 'auto' | 'float16' | 'bfloat16' | 'float32'
+  /** Sampling defaults the session gateway writes into a request that sets none. */
+  generation: GenerationDefaults
 }
 
 function invalid(message: string, value: unknown): never {
@@ -224,6 +246,13 @@ function validateChoice<T extends string>(
     invalid(`tensorrt-llm ${label} must be one of ${choices.join(', ')}.`, value)
   }
   return value as T
+}
+
+function validateFlag(value: unknown, label: string, fallback: boolean): boolean {
+  if (value === undefined || value === null) return fallback
+  if (value === true || value === 'true') return true
+  if (value === false || value === 'false') return false
+  return invalid(`tensorrt-llm ${label} must be true or false.`, value)
 }
 
 function validateLoadTimeoutOverride(value: unknown): number | null {
@@ -290,6 +319,16 @@ export function validateTensorrtLlmSettings(raw: unknown): TensorrtLlmSettings {
     cuda_graphs: validateChoice(r['cuda_graphs'], 'cuda_graphs', ['auto', 'on', 'off'] as const, 'auto'),
     kv_cache_dtype: validateChoice(r['kv_cache_dtype'], 'kv_cache_dtype', ['auto', 'fp8'] as const, 'auto'),
     load_timeout_seconds: validateLoadTimeoutOverride(r['load_timeout_seconds']),
+    enable_prefix_caching: validateFlag(r['enable_prefix_caching'], 'enable_prefix_caching', true),
+    overlap_scheduler: validateFlag(r['overlap_scheduler'], 'overlap_scheduler', true),
+    capacity_scheduler_policy: validateChoice(
+      r['capacity_scheduler_policy'],
+      'capacity_scheduler_policy',
+      ['guaranteed_no_evict', 'max_utilization'] as const,
+      'guaranteed_no_evict'
+    ),
+    dtype: validateChoice(r['dtype'], 'dtype', ['auto', 'float16', 'bfloat16', 'float32'] as const, 'auto'),
+    generation: readGenerationDefaults('tensorrt-llm', r),
   }
 }
 
@@ -322,22 +361,39 @@ export const TENSORRT_LLM_CONTAINER_PORT = 8000
 export const TENSORRT_LLM_API_OPTIONS_FILE = 'llm-api-options.yaml'
 export const TENSORRT_LLM_GUIDED_DECODING_OPTIONS = 'guided_decoding_backend: xgrammar\n'
 
-/** The option file's text, or `null` when no key applies (no file, no flag). */
+/**
+ * The option file's text, or `null` when no key applies (no file, no flag). The settings' further
+ * options are written only when they differ from the engine's own default, so a launch with the
+ * defaults stays what it was (`llm_args.py`: `KvCacheConfig.enable_block_reuse` default `True`,
+ * `TorchLlmArgs.disable_overlap_scheduler` default `False`, `SchedulerConfig.capacity_scheduler_policy`
+ * default `GUARANTEED_NO_EVICT`, `dtype` default `"auto"`).
+ */
 function llmApiOptions(
   guided: boolean,
   kvMaxTokens: number | null,
   kvFp8 = false,
-  cudaGraphsOff = false
+  cudaGraphsOff = false,
+  settings?: Pick<
+    TensorrtLlmSettings,
+    'enable_prefix_caching' | 'overlap_scheduler' | 'capacity_scheduler_policy' | 'dtype'
+  >
 ): string | null {
   const lines: string[] = []
   if (guided) lines.push(TENSORRT_LLM_GUIDED_DECODING_OPTIONS.trimEnd())
-  if (kvMaxTokens !== null || kvFp8) {
+  const noBlockReuse = settings?.enable_prefix_caching === false
+  if (kvMaxTokens !== null || kvFp8 || noBlockReuse) {
     lines.push('kv_cache_config:')
     if (kvMaxTokens !== null) lines.push(`  max_tokens: ${kvMaxTokens}`)
     if (kvFp8) lines.push('  dtype: fp8')
+    if (noBlockReuse) lines.push('  enable_block_reuse: false')
   }
   // `null` turns CUDA graphs off on the PyTorch backend (`llm_args.py`, `cuda_graph_config`).
   if (cudaGraphsOff) lines.push('cuda_graph_config: null')
+  if (settings?.overlap_scheduler === false) lines.push('disable_overlap_scheduler: true')
+  if (settings?.capacity_scheduler_policy === 'max_utilization') {
+    lines.push('scheduler_config:', '  capacity_scheduler_policy: MAX_UTILIZATION')
+  }
+  if (settings !== undefined && settings.dtype !== 'auto') lines.push(`dtype: ${settings.dtype}`)
   return lines.length === 0 ? null : `${lines.join('\n')}\n`
 }
 
@@ -360,9 +416,11 @@ function supportsFp8Kv(computeCapability: string | null | undefined): boolean {
  * recurrent layers (Qwen3.5, hybrid Mamba) the engine reserves the recurrent state for every one of
  * those sequences up front: on an 8 GB card Qwen3.5-2B failed with "The V2 Mamba GPU cache quota is
  * too small … need at least 20696801280 bytes" (Windows live acceptance, 1.3.0rc29). Attention-only
- * models only lose queueing beyond this many concurrent requests.
+ * models only lose queueing beyond this many concurrent requests. One by default (owner's decision,
+ * change `add-vllm-runtime`): the KV cache is then sized for one full context, which is what fits a
+ * desktop card; a person who runs agents in parallel raises it.
  */
-export const TENSORRT_LLM_MAX_BATCH_SIZE = 8
+export const TENSORRT_LLM_MAX_BATCH_SIZE = 1
 export const TENSORRT_LLM_MAX_MAX_BATCH_SIZE = 256
 export const TENSORRT_LLM_MAX_KV_CACHE_MAX_TOKENS = 16_777_216
 
@@ -431,7 +489,8 @@ export function buildTensorrtLlmLaunch(
         ? tensorrtLlmUnifiedKvMaxTokens(settings.context_length)
         : settings.context_length * settings.max_batch_size),
     kvFp8,
-    cudaGraphsOff
+    cudaGraphsOff,
+    settings
   )
   if (options !== null) {
     argv.push('--extra_llm_api_options', `${generationFilesPath}/${TENSORRT_LLM_API_OPTIONS_FILE}`)
@@ -929,31 +988,6 @@ function readCandidateField(body: Record<string, unknown>, key: string): Candida
 }
 
 /**
- * What asks for tool calls: a non-empty `tools` list, or a `tool_choice` other than `"none"`. An
- * empty list and `"none"` ask for nothing, so they pass (the same rule `:1337` applies).
- */
-function asksForTools(body: Record<string, unknown>): boolean {
-  const tools = body['tools']
-  const choice = body['tool_choice']
-  return (
-    (Array.isArray(tools) && tools.length > 0) ||
-    (choice !== undefined && choice !== null && choice !== 'none')
-  )
-}
-
-/**
- * `response_format` asking for constrained output: anything but `{"type": "text"}` — OpenAI's
- * `json_schema`/`json_object`, `trtllm-serve`'s own `json`/`regex`/`ebnf`/`structural_tag`
- * (`openai_protocol.py`'s `ResponseFormat`), and any type this core does not know (final review I-2).
- * The same rule `:1337` applies (`server/public/policy.ts`).
- */
-function asksForStructuredOutput(body: Record<string, unknown>): boolean {
-  const format = body['response_format']
-  if (format === null || typeof format !== 'object' || Array.isArray(format)) return false
-  return (format as { type?: unknown }).type !== 'text'
-}
-
-/**
  * Refuses, on the session gateway itself, what this session cannot do (findings-2.14-r1.md item 1;
  * spec "запрос с `tools` к этой модели получает ошибку о неподдерживаемой возможности, а не молча
  * игнорируется"): tool calls without a tool-call parser, JSON output without structured-output support
@@ -1034,39 +1068,8 @@ function unwrapJsonSchemaFormat(format: unknown): unknown {
  */
 export const TENSORRT_LLM_REASONING_AT_START_PARSERS: ReadonlySet<string> = new Set(['qwen3_5'])
 
-/** Whether a chat request turned thinking on (`chat_template_kwargs.enable_thinking`, or top level). */
-function thinkingRequested(body: unknown): boolean {
-  if (body === null || typeof body !== 'object') return false
-  const record = body as Record<string, unknown>
-  const kwargs = record['chat_template_kwargs']
-  if (
-    kwargs !== null &&
-    typeof kwargs === 'object' &&
-    (kwargs as Record<string, unknown>)['enable_thinking'] === true
-  )
-    return true
-  return record['enable_thinking'] === true
-}
-
-/** Moves `reasoning_content` into `content` on every choice's `message` and stream `delta`. */
-export function tensorrtLlmReasoningIntoContent(json: Record<string, unknown>): Record<string, unknown> {
-  const choices = json['choices']
-  if (!Array.isArray(choices)) return json
-  for (const choice of choices) {
-    if (choice === null || typeof choice !== 'object') continue
-    for (const key of ['message', 'delta']) {
-      const part = (choice as Record<string, unknown>)[key]
-      if (part === null || typeof part !== 'object') continue
-      const record = part as Record<string, unknown>
-      const reasoning = record['reasoning_content']
-      if (typeof reasoning !== 'string' || reasoning === '') continue
-      const content = typeof record['content'] === 'string' ? (record['content'] as string) : ''
-      record['content'] = content + reasoning
-      record['reasoning_content'] = null
-    }
-  }
-  return json
-}
+/** Moves a no-thinking reply filed as reasoning back into `content` (the shared rule, `request-rules.ts`). */
+export const tensorrtLlmReasoningIntoContent = reasoningIntoContent
 
 /** The response rewrite for a chat request with thinking off on a reasoning-at-start parser. */
 export function tensorrtLlmRewriteResponseFor(
@@ -1077,7 +1080,7 @@ export function tensorrtLlmRewriteResponseFor(
   if (route !== '/v1/chat/completions') return null
   const parser = family?.reasoning_parser ?? null
   if (parser === null || !TENSORRT_LLM_REASONING_AT_START_PARSERS.has(parser)) return null
-  return thinkingRequested(requestBody) ? null : tensorrtLlmReasoningIntoContent
+  return thinkingRequested(requestBody) ? null : reasoningIntoContent
 }
 
 /**
@@ -1129,11 +1132,13 @@ export function tensorrtLlmRewriteRequestBody(
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return body
   const client = body as Record<string, unknown>
   if (capabilities !== undefined) refuseUnsupported(client, capabilities)
-  const obj =
+  let obj =
     'response_format' in client
       ? { ...client, response_format: unwrapJsonSchemaFormat(client['response_format']) }
       : client
   const cap = settings.max_output_tokens
+  // trtllm-serve has no launch option for sampling defaults; a request that sets none gets them here.
+  obj = withGenerationDefaults(obj, settings.generation)
 
   if (route === '/v1/completions') {
     const field = readCandidateField(obj, 'max_tokens')
@@ -1215,5 +1220,9 @@ export const tensorrtLlmAdapter: ManagedTextAdapter<TensorrtLlmSettings> = {
     settings.kv_cache_max_tokens,
     settings.cuda_graphs,
     settings.kv_cache_dtype,
+    settings.enable_prefix_caching,
+    settings.overlap_scheduler,
+    settings.capacity_scheduler_policy,
+    settings.dtype,
   ],
 }

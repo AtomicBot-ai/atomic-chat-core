@@ -13,6 +13,7 @@
 import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import type { ReadyLine } from '../contracts/index.js'
 import type {
+  LlamacppProviderId,
   LocalApiServerState,
   LocalProviderId,
   RemoteAccessStatus,
@@ -21,6 +22,7 @@ import type {
 } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
 import type { DecisionService } from '../decision/index.js'
+import type { EmbeddingService } from '../embedding/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import type { ManagedRuntimes } from '../runtime/environment/index.js'
@@ -30,8 +32,8 @@ import type { ModelRegistry } from '../models/index.js'
 import { RemoteAccessManager } from '../remote-access/index.js'
 import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
-import { tensorrtLlmRoutePolicy } from '../runtime/tensorrt-llm/index.js'
-import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
+import { managedExternalRoutePolicy } from './managed-engines.js'
+import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
 import { captureReport, loadFailureReport } from '../telemetry/index.js'
@@ -61,7 +63,7 @@ export interface AtomicCoreParts {
    * (task 2.16w round 1, finding 2) has its own, a different `model.yml` schema entirely, so this
    * map holds either. `AtomicCore.registry`'s overloads narrow the return type back per provider.
    */
-  registries: Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>
+  registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>
   control: ControlServer
   log: CoreLogger
   controlToken: string
@@ -85,6 +87,8 @@ export interface AtomicCoreParts {
   managedTrustedHosts: string[]
   /** The decision model: its own module and process, outside the sessions registry. */
   decision: DecisionService
+  /** The embedding model the public `/v1/embeddings` serves by name: its own module and process too. */
+  embedding: EmbeddingService
   /** Where a failed load and the public server's failures are reported; absent, nothing is. */
   errors?: ErrorSink | undefined
   /** The same reporter, for a host that changes consent, user or tags at run time. */
@@ -118,7 +122,7 @@ export class AtomicCore {
   readonly externalSessions: ExternalSessions
   private readonly lock: InstanceLock
   private readonly runtimes: Map<LocalProviderId, LocalRuntime>
-  private readonly registries: Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>
+  private readonly registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>
   private readonly log: CoreLogger
   private readonly appLeaseTimer: NodeJS.Timeout | undefined
   private readonly errors: ErrorSink | undefined
@@ -145,6 +149,8 @@ export class AtomicCore {
    * fail-open; it survives model switches and the chat auto-unload.
    */
   readonly decision: DecisionService
+  /** The embedding model (`llama-server --embedding`) the public `/v1/embeddings` serves by name. */
+  readonly embedding: EmbeddingService
 
   private constructor(parts: AtomicCoreParts) {
     this.layout = parts.layout
@@ -165,6 +171,7 @@ export class AtomicCore {
     this.diffusion = parts.diffusion
     this.managed = parts.managed
     this.decision = parts.decision
+    this.embedding = parts.embedding
     this.errors = parts.errors
     this.telemetry = parts.telemetry
     this.localSessions = new LocalSessions({
@@ -177,7 +184,7 @@ export class AtomicCore {
       increaseCtx: (provider, modelId, reason) => this.increaseCtx(provider, modelId, reason),
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
       // A `tensorrt-llm` session another process registered still only serves the declared routes.
-      externalPolicy: (provider) => (provider === 'tensorrt-llm' ? tensorrtLlmRoutePolicy(null) : undefined),
+      externalPolicy: managedExternalRoutePolicy,
     })
     this.remoteAccess = new RemoteAccessManager({
       ...parts.remoteAccess,
@@ -206,6 +213,7 @@ export class AtomicCore {
         images: this.diffusion.imagesBackend(),
         videos: this.diffusion.videosBackend(),
         decision: this.decision.publicBackend(),
+        embedding: this.embedding.publicBackend(),
         errors: parts.errors,
       }),
     })
@@ -234,15 +242,16 @@ export class AtomicCore {
 
   /**
    * The per-provider model listing (task 2.16w round 1, finding 2): `ModelRegistry` for every
-   * llama.cpp/MLX provider, `TensorrtLlmModelRegistry` for `'tensorrt-llm'` — a fresh scan of
-   * `<data>/tensorrt-llm/models` on every `list()`, so a model the app finishes downloading appears
-   * with no restart, the same guarantee the llama.cpp registry already gives. `unknownProvider` when
-   * this core does not offer the provider at all (`tensorrt-llm` off Linux, for instance).
+   * llama.cpp/MLX provider, `ManagedModelRegistry` for a managed one (`tensorrt-llm`, `vllm`) — the
+   * same scan of the managed model store for every one of them, fresh on every `list()`, so a model
+   * the app finishes downloading appears with no restart, the same guarantee the llama.cpp registry
+   * already gives. `unknownProvider` when this core does not offer the provider at all (a managed one
+   * off Linux and Windows, for instance).
    */
-  registry(provider?: Exclude<LocalProviderId, 'tensorrt-llm'>): ModelRegistry
-  registry(provider: 'tensorrt-llm'): TensorrtLlmModelRegistry
-  registry(provider: LocalProviderId): ModelRegistry | TensorrtLlmModelRegistry
-  registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry | TensorrtLlmModelRegistry {
+  registry(provider?: Exclude<LocalProviderId, 'tensorrt-llm' | 'vllm'>): ModelRegistry
+  registry(provider: 'tensorrt-llm' | 'vllm'): ManagedModelRegistry
+  registry(provider: LocalProviderId): ModelRegistry | ManagedModelRegistry
+  registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry | ManagedModelRegistry {
     const registry = this.registries.get(provider)
     if (!registry) throw unknownProvider(provider, this.registries.keys())
     return registry
@@ -255,7 +264,7 @@ export class AtomicCore {
   }
 
   /** A llama.cpp runtime, for what only llama.cpp has (devices, runtime device info, context size). */
-  llamacpp(provider: 'llamacpp' | 'llamacpp-upstream' = 'llamacpp-upstream'): LlamacppRuntime {
+  llamacpp(provider: LlamacppProviderId = 'llamacpp-upstream'): LlamacppRuntime {
     const runtime = this.runtime(provider)
     if (!(runtime instanceof LlamacppRuntime)) throw unknownProvider(provider, this.runtimes.keys())
     return runtime
@@ -360,6 +369,7 @@ export class AtomicCore {
       await this.publicServer.stop()
       // The public server no longer forwards to it; the decision process goes next.
       await this.decision.shutdown()
+      await this.embedding.shutdown()
       // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
       await this.diffusion.shutdown()
       // Whatever a managed-runtime operation is doing stops here; its intent stays on disk for the

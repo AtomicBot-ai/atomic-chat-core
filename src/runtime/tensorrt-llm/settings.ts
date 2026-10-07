@@ -9,6 +9,7 @@
  */
 import { validateTensorrtLlmSettings } from './adapter.js'
 import type { TensorrtLlmSettings } from './adapter.js'
+import { GENERATION_DEFAULT_KEYS } from '../managed-text/generation-defaults.js'
 
 const KEYS = [
   'gpu_id',
@@ -20,6 +21,11 @@ const KEYS = [
   'cuda_graphs',
   'kv_cache_dtype',
   'load_timeout_seconds',
+  'enable_prefix_caching',
+  'overlap_scheduler',
+  'capacity_scheduler_policy',
+  'dtype',
+  ...Object.values(GENERATION_DEFAULT_KEYS),
 ] as const
 
 /**

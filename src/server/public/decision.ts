@@ -10,7 +10,9 @@
  * and the engine's answer (its error envelope included) comes back unchanged.
  *
  * When the module cannot answer, the route says why in the engine's own envelope, with 503, so a
- * client handles one shape: `{"error": {"code", "type", "reason": "UNAVAILABLE", "message"}}`.
+ * client handles one shape: `{"error": {"code", "type", "reason": "UNAVAILABLE", "message"}}`. A
+ * route the running engine does not serve (the router on upstream llama.cpp) gets 501 with
+ * `"reason": "UNSUPPORTED_ENDPOINT"` in the same envelope.
  */
 
 import { decisionPromptPreview, decisionReplyFields } from './decision-preview.js'
@@ -42,7 +44,7 @@ export function decisionErrorBody(status: number, reason: string, message: strin
 }
 
 /** Read the body up to `limit`; past it, drain (so Bun delivers the refusal) and answer `undefined`. */
-async function readCapped(ex: Exchange, limit: number): Promise<Buffer | undefined> {
+export async function readCapped(ex: Exchange, limit: number): Promise<Buffer | undefined> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of ex.req) {
@@ -110,6 +112,23 @@ export async function serveDecision(ex: Exchange, waitMs = DECISION_START_WAIT_M
   const target = await backend.acquire(waitMs, gone)
   if (!target.ok)
     return unavailableAnswer(ex, `The decision model is not available (${target.reason}). ${target.message}`)
+  // Upstream llama.cpp serves `/v1/systemone` only: the router is the fork's, so say that instead of
+  // relaying the engine's bare 404.
+  if (target.endpoints !== undefined && !target.endpoints.includes(upstreamPath)) {
+    target.release()
+    ex.trace.errorKind = 'local_model_error'
+    return answer(
+      ex,
+      501,
+      decisionErrorBody(
+        501,
+        'UNSUPPORTED_ENDPOINT',
+        `The running decision model does not serve ${upstreamPath}.`,
+        'not_supported_error'
+      ),
+      JSON_HEADERS
+    )
+  }
   try {
     let upstream
     try {

@@ -63,8 +63,12 @@ function guestCommand(state, name, user, command, args, input) {
     case 'false':
       return result(1)
     case 'test': {
+      // A folder exists when it was made, or when any file lives under it.
       const path = args[args.length - 1]
-      const exists = path in files || (guest.dirs ?? []).includes(path)
+      const exists =
+        path in files ||
+        (guest.dirs ?? []).includes(path) ||
+        Object.keys(files).some((file) => file.startsWith(`${path}/`))
       return result(exists ? 0 : 1)
     }
     case 'cat': {
@@ -118,7 +122,9 @@ function guestCommand(state, name, user, command, args, input) {
       // Every guest path the core mounts resolves to itself in this fake.
       return result(0, `${args[args.length - 1]}\n`)
     case 'find': {
-      // `find <root> -name model.yml -printf '%h\n'`: the folder of every model.yml under root.
+      // `find <root> -name model.yml … -printf '%h\n'`: the folder of every model.yml under root. Any
+      // other `find` (pruning empty folders) has nothing to do here: the fake keeps no empty folders.
+      if (!args.includes('-printf')) return result(0)
       const root = args[0]
       const dirs = Object.keys(files)
         .filter((path) => path.startsWith(`${root}/`) && path.endsWith('/model.yml'))
@@ -132,15 +138,28 @@ function guestCommand(state, name, user, command, args, input) {
       return result(0, paths.map((path) => `${sizes[path] ?? 0}\t${path}\n`).join(''))
     }
     case 'mv': {
+      // A file, or a folder with everything under it (`mv -T <dir> <dir>`).
       const [from, to] = args.filter((a) => !a.startsWith('-'))
-      if (!(from in files)) return result(1, '', `mv: cannot stat '${from}'\n`)
-      const next = { ...files, [to]: files[from] }
-      delete next[from]
+      const under = Object.keys(files).filter((file) => file.startsWith(`${from}/`))
+      if (!(from in files) && under.length === 0) return result(1, '', `mv: cannot stat '${from}'\n`)
+      const next = { ...files }
+      if (from in files) {
+        next[to] = files[from]
+        delete next[from]
+      }
+      for (const file of under) {
+        next[`${to}${file.slice(from.length)}`] = files[file]
+        delete next[file]
+      }
       return result(0, '', '', { next: withGuest(state, name, { ...guest, files: next }) })
     }
     case 'rm': {
+      // `rm -rf -- <path>...`: a file, or a folder with everything under it.
       const next = { ...files }
-      for (const path of args.filter((a) => !a.startsWith('-'))) delete next[path]
+      for (const path of args.filter((a) => !a.startsWith('-'))) {
+        delete next[path]
+        for (const file of Object.keys(next)) if (file.startsWith(`${path}/`)) delete next[file]
+      }
       return result(0, '', '', { next: withGuest(state, name, { ...guest, files: next }) })
     }
     case 'timeout': {

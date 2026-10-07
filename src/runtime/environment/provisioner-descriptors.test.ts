@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import type { RuntimeDescriptor } from '../../contracts/index.js'
 import { parseRuntimeDescriptor } from './descriptor.js'
-import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
+import { TENSORRT_LLM_DESCRIPTOR_SOURCE, type RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { descriptorForProbe, pinnedDescriptor } from './provisioner-descriptors.js'
 import type { PersistedOperation } from './store.js'
 
@@ -13,6 +13,7 @@ const provider = (
   cached: RuntimeDescriptor[],
   latest: RuntimeDescriptor | null
 ): RuntimeDescriptorProvider => ({
+  engines: [TENSORRT_LLM_DESCRIPTOR_SOURCE],
   forInstallation: async (id) => {
     const found = cached.find((d) => d.descriptor_id === id)
     return found === undefined
@@ -26,9 +27,21 @@ const provider = (
   cachedForNewSetup: async () => ({ kind: 'available', descriptor: DESCRIPTOR }),
 })
 
-const operation = (consented: string | null, requested: string | null): PersistedOperation =>
+const operation = (
+  consented: string | null,
+  requested: string | null,
+  engineId: string | null = 'tensorrt-llm'
+): PersistedOperation =>
   ({
-    machine: { consented: consented === null ? null : { descriptor_id: consented } },
+    machine: {
+      consented: consented === null ? null : { descriptor_id: consented },
+      operation: {
+        target:
+          engineId === null
+            ? { kind: 'environment' }
+            : { kind: 'runtime', installation_id: engineId, engine_id: engineId },
+      },
+    },
     requirement_plan: null,
     request: requested === null ? {} : { descriptor_id: requested },
   }) as unknown as PersistedOperation
@@ -51,6 +64,14 @@ describe('descriptorForProbe', () => {
     expect(await descriptorForProbe(provider([], NEWER), operation(null, 'gone'))).toEqual({
       descriptor: NEWER,
     })
+  })
+
+  it("before a consent, the newest descriptor is the target engine's own (change add-vllm-runtime, D12)", async () => {
+    const descriptors = provider([], NEWER)
+    const forNewSetup = vi.spyOn(descriptors, 'forNewSetup')
+    await descriptorForProbe(descriptors, operation(null, null, 'vllm'))
+    await descriptorForProbe(descriptors, operation(null, null, null))
+    expect(forNewSetup.mock.calls).toEqual([['vllm'], ['tensorrt-llm']])
   })
 
   it('none to be had: a blocker naming the missing metadata', async () => {

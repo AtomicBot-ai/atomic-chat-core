@@ -120,7 +120,7 @@ describe('dispatch', () => {
     expect(
       await runCli(['backends', 'list', '--provider', 'mlx', '--data-folder', data.root], backends)
     ).toBe(2)
-    expect(backends.err.join('')).toContain('llamacpp-upstream or llamacpp')
+    expect(backends.err.join('')).toContain('llamacpp-upstream, llamacpp or atomic-prism')
   })
 
   it('routes `server status` and returns its exit code', async () => {

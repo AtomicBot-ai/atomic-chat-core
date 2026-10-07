@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { LlamacppProviderId, LocalProviderId } from '../contracts/index.js'
+import type { LlamacppProviderId, LocalProviderId, ModelCompatibility } from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
@@ -28,11 +28,13 @@ import { HardwareService, nodeProbeDeps, probeSystemInfo, probeUnifiedMemory } f
 import {
   BackendAdvisor,
   BackendService,
+  PrismCatalogService,
   TurboquantCatalogService,
   ensureBackend,
   ensureTurboquantCudart,
   ensureUpstreamCudart,
   ManifestSessionCache,
+  probeLinuxRocmHost,
   OptimalBackendStore,
   fetchLiveManifest,
   manifestTransportFromFetch,
@@ -41,9 +43,10 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
+import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
-import type { TensorrtLlmModelRegistry } from '../runtime/tensorrt-llm/index.js'
-import { TensorrtLlmRuntime } from '../runtime/tensorrt-llm/index.js'
+import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
+import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
 import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
@@ -57,20 +60,26 @@ import {
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
+import { compatibilityFor, wireModelSetups } from './model-setup/index.js'
+import type { ModelSetupWiringDeps } from './model-setup/index.js'
+import { currentPrismPack, wirePrismCompatibility } from './prism.js'
 import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
 import {
   leftoverContainers,
-  tensorrtLlmModelDeleter,
-  tensorrtLlmModelLocation,
-  tensorrtLlmModelRegistry,
-  tensorrtLlmSessionUnloader,
+  managedEngineRegistry,
+  managedModelDeleter,
+  managedModelExclusivity,
+  managedSessionUnloader,
+  managedModelLocation,
+  managedModelRegistry,
+  createStoreMigration,
   windowsModelFilesFor,
   wiredExec,
-  wireTensorrtLlm,
-  wireTensorrtLlmModelCheck,
-} from './tensorrt-llm.js'
+  wireManagedEngine,
+  wireManagedModelCheck,
+} from './managed-engines.js'
 import { LOCAL_PROVIDER } from './types.js'
 import type { AtomicCoreOptions, CoreLoadOptions } from './types.js'
 
@@ -186,13 +195,14 @@ export async function createAtomicCore(
       fetch: options.fetch ?? fetch,
       emit: (name, payload) => emitter.emit(name, payload),
     })
-    const registries = new Map<LocalProviderId, ModelRegistry | TensorrtLlmModelRegistry>([
+    const registries = new Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>([
       [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
+      ['atomic-prism', new ModelRegistry(layout, 'atomic-prism')],
     ])
-    // Both llama.cpp providers run through one runtime class; what differs — backend ids, the
+    // The three llama.cpp providers run through one runtime class; what differs — backend ids, the
     // argument rules and Windows CUDA runtime repair — is decided by the provider it is given.
-    const llamacppRuntime = (provider: 'llamacpp' | 'llamacpp-upstream') =>
+    const llamacppRuntime = (provider: LlamacppProviderId) =>
       new LlamacppRuntime({
         layout,
         registry: registries.get(provider) as ModelRegistry,
@@ -216,6 +226,8 @@ export async function createAtomicCore(
                 '_'
               )
               const deps = { layout, downloader, platform, log: (message: string) => log('warn', message) }
+              // A PrismML pack is installed with its CUDA runtime in place; there is nothing to repair.
+              if (provider === 'atomic-prism') return Promise.resolve()
               const repair =
                 provider === 'llamacpp'
                   ? ensureTurboquantCudart(repairBackend, backendDir, taskId, deps)
@@ -236,6 +248,7 @@ export async function createAtomicCore(
         // never auto-unloaded, never evicted by GPU residency, never evicting.
         transcriptionModelId: TRANSCRIPTION_MODEL_ID,
         claimGpu: (claim, signal) => gpuResidency.hook(provider)(claim, signal),
+        checkCompatibility: (target) => prismCompatibility.gate(provider, target),
         unifiedMemory: async () =>
           probeUnifiedMemory(
             nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
@@ -244,9 +257,12 @@ export async function createAtomicCore(
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
       })
+    // The managed engines this core can run (change `add-vllm-runtime`, design D3).
+    const managedEngines = managedEngineRegistry()
     const runtimes = new Map<LocalProviderId, LocalRuntime>([
       [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
       ['llamacpp', llamacppRuntime('llamacpp')],
+      ['atomic-prism', llamacppRuntime('atomic-prism')],
     ])
     // The facade, constructed last: what GPU residency and an engine removal stop a session through,
     // exactly as a client's unload would. Read when they act, never before.
@@ -322,6 +338,30 @@ export async function createAtomicCore(
       platform,
       log: (level, message) => log(level, message),
     })
+    // Test hooks (docs/contracts.md "Test hooks"): where the PrismML manifest, the model rules and
+    // model files are read from. Unset in production.
+    const prismManifestUrl = env['ATOMIC_PRISM_MANIFEST_URL']
+    const prismRulesUrl = env['ATOMIC_PRISM_MODEL_RULES_URL']
+    const hfEndpoint = env['ATOMIC_HF_ENDPOINT']
+    const prismCatalog = new PrismCatalogService({
+      layout,
+      fetchFor,
+      ...(prismManifestUrl ? { url: prismManifestUrl } : {}),
+      log,
+    })
+    // One compatibility service for the control routes and every llama.cpp load gate; the gate
+    // reads only what is cached, so a load never waits on the network for it.
+    const prismCompatibility = wirePrismCompatibility({
+      layout,
+      settings,
+      hardware,
+      prismCatalog,
+      fetch: fetchFor(),
+      ...(prismRulesUrl ? { rulesUrl: prismRulesUrl } : {}),
+      env,
+      log,
+    })
+    const allowPrismCandidates = () => settings.get('atomic-prism')['allow_candidate_builds'] === true
     const advisors = new Map<LlamacppProviderId, BackendAdvisor>()
     const backendAdvisor = (provider: LlamacppProviderId): BackendAdvisor => {
       const existing = advisors.get(provider)
@@ -336,6 +376,8 @@ export async function createAtomicCore(
         fetchFor,
         manifestCache,
         turboquantCatalog,
+        prismCatalog,
+        allowCandidateBuilds: allowPrismCandidates,
         // The Windows tier check runs `--list-devices` on the installed pack of that tier.
         listDevices: async (installed) => {
           const exePath = await resolveBackendExe(layout, provider, installed.version, installed.backend)
@@ -358,6 +400,7 @@ export async function createAtomicCore(
         provider,
         downloader,
         optimalStore,
+        prismCatalog,
         readManifest: async (proxy) => {
           const cached = manifestCache.get()
           if (cached) return cached
@@ -371,6 +414,43 @@ export async function createAtomicCore(
       backendServices.set(provider, created)
       return created
     }
+    // One model-setup runner per core: it owns the in-memory table of runs and the shared engine
+    // installs that a cancel works from. The records survive a restart as `interrupted`.
+    const modelFile = async (provider: LocalProviderId, modelId: string) => {
+      const registry = registries.get(provider)
+      if (!(registry instanceof ModelRegistry)) throw unknownProvider(provider, registries.keys())
+      const yml = await registry.read(modelId)
+      return {
+        modelPath: registry.resolvePaths(yml).modelPath,
+        ...(yml.model_sha256 ? { sha256: yml.model_sha256 } : {}),
+      }
+    }
+    const modelSetupDeps: ModelSetupWiringDeps = {
+      layout,
+      compatibility: prismCompatibility,
+      prismCatalog,
+      hardware: () => hardware.facts(),
+      offer: () => ({ coreVersion: CORE_VERSION, allowCandidates: allowPrismCandidates() }),
+      currentPack: () => currentPrismPack({ layout, settings, hardware }),
+      installEngine: (version, backend, opts) =>
+        backendService('atomic-prism').install(version, backend, opts),
+      selectEngine: (versionBackend) => settings.update('atomic-prism', { version_backend: versionBackend }),
+      downloader,
+      register: async (provider, modelId, yml) => {
+        await (registries.get(provider) as ModelRegistry).write(modelId, yml)
+      },
+      modelFile,
+      emit: (name, payload) => emitter.emit(name, payload),
+      freeBytes: () => availableDiskSpace(layout.root, undefined),
+      fetchFor,
+      newId: () => randomUUID(),
+      ...(hfEndpoint ? { hfEndpoint } : {}),
+      env,
+      platform,
+      ...(platform === 'linux' ? { rocmProbe: () => probeLinuxRocmHost() } : {}),
+      log,
+    }
+    const modelSetups = wireModelSetups(modelSetupDeps)
 
     const diffusion = wireDiffusion({
       layout,
@@ -390,6 +470,11 @@ export async function createAtomicCore(
     // `tensorrt-llm` provider (task 2.14) takes `managedContainers`, never a second executor, and the
     // environment's machine (`managedHost`: the e2e stand-in under `ATOMIC_MANAGED_TEST_HOST`, whose
     // platform counts as Linux). A removal unloads the provider's loaded model first.
+    // TensorRT-LLM's models move into the managed model store before anything lists or loads one
+    // (change `add-vllm-runtime`, design D5), under this core's lock on its data folder. On Linux the
+    // old root is in the data folder; on Windows it is in the guest and moves on first use (below).
+    const storeMigration = createStoreMigration(log)
+    if (process.platform !== 'win32') await storeMigration.onLinux(layout)
     const {
       managed,
       containers: managedContainers,
@@ -408,7 +493,9 @@ export async function createAtomicCore(
       onWarn: (message) => log('warn', message),
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.dockerPath !== undefined ? { dockerPath: options.dockerPath } : {}),
-      unloadEngineSessions: tensorrtLlmSessionUnloader(() => runtimes.get('tensorrt-llm'), facade),
+      engines: managedEngines.descriptorSources(),
+      storeMigration: storeMigration.current,
+      unloadEngineSessions: managedSessionUnloader(() => managedRuntimes, facade),
     })
     // Containers a previous core left that startup reconcile could not confirm stopped: they hold every
     // card for GPU residency until a retried stop is confirmed.
@@ -421,67 +508,83 @@ export async function createAtomicCore(
       ...(managedWindows === undefined ? {} : { exec: wiredExec }),
     })
 
-    // `tensorrt-llm`: Linux only (spec "регистрировать провайдер `tensorrt-llm` только на Linux").
-    // Shared by the runtime below and `wireTensorrtLlmModelCheck`: one settings reader, not two.
-    const tensorrtLlmSettingsOf = (): Record<string, unknown> => settings.get('tensorrt-llm')
-    const tensorrtLlm = wireTensorrtLlm({
-      platform: managedPlatform,
-      arch: managedArch,
-      ...(managedWindows === undefined ? {} : { windows: managedWindows }),
-      layout,
-      instanceId: lock.instanceId,
-      scope,
-      descriptors: managed.descriptors,
-      installations: managed.installations,
-      containers: managedContainers,
-      host: managedHost,
-      trustedHosts: managedTrustedHosts,
-      settings: tensorrtLlmSettingsOf,
-      emit: (name, payload) => emitter.emit(name, payload),
-      log,
-      claimGpu: gpuResidency.hook('tensorrt-llm'),
-      // The engine container runs as this core's own user (final review I-1, ADR
-      // 2026-09-29-the-engine-container-runs-as-the-invoking-user).
-      containerUser:
-        process.getuid !== undefined && process.getgid !== undefined
-          ? { uid: process.getuid(), gid: process.getgid() }
-          : null,
-    })
-    if (tensorrtLlm !== null) runtimes.set('tensorrt-llm', tensorrtLlm)
-    // `core.registry('tensorrt-llm')` (task 2.16w round 1, finding 2): the same Linux-only gate as
-    // the runtime above, so the two are never offered one without the other.
-    const tensorrtLlmRegistry = tensorrtLlmModelRegistry(managedPlatform, layout, managedWindows)
-    if (tensorrtLlm !== null) registries.set('tensorrt-llm', tensorrtLlmRegistry)
-    /** The `tensorrt-llm` runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
-    const tensorrtLlmOr = (provider: string): TensorrtLlmRuntime => {
-      const runtime = runtimes.get('tensorrt-llm')
-      if (!(runtime instanceof TensorrtLlmRuntime)) throw unknownProvider(provider, runtimes.keys())
+    // Every engine of the managed engine registry, wired the same way (change `add-vllm-runtime`,
+    // design D3): offered on Linux and on Windows with Atomic Chat's WSL distribution, absent elsewhere.
+    // `engine_id` is the provider id, so each runtime registers under its own engine id.
+    const managedRuntimes = new Map<string, ManagedTextRuntime>()
+    const releaseElsewhere = managedModelExclusivity(() => managedRuntimes, facade)
+    const managedModelChecks: Record<string, (body: unknown) => Promise<ModelCompatibility>> = {}
+    for (const engine of managedEngines.list()) {
+      const provider = engine.provider as LocalProviderId
+      // Shared by the runtime and its model check: one settings reader, not two.
+      const settingsOf = (): Record<string, unknown> => settings.get(provider)
+      const runtime = wireManagedEngine(engine, {
+        platform: managedPlatform,
+        arch: managedArch,
+        ...(managedWindows === undefined ? {} : { windows: managedWindows }),
+        layout,
+        instanceId: lock.instanceId,
+        scope,
+        descriptors: managed.descriptors,
+        installations: managed.installations,
+        containers: managedContainers,
+        host: managedHost,
+        trustedHosts: managedTrustedHosts,
+        settings: settingsOf,
+        emit: (name, payload) => emitter.emit(name, payload),
+        log,
+        claimGpu: gpuResidency.hook(provider),
+        // One store model, one managed provider (design D11): another engine lets it go first.
+        releaseModelElsewhere: releaseElsewhere(engine.provider),
+        // The engine container runs as this core's own user (final review I-1, ADR
+        // 2026-09-29-the-engine-container-runs-as-the-invoking-user).
+        containerUser:
+          process.getuid !== undefined && process.getgid !== undefined
+            ? { uid: process.getuid(), gid: process.getgid() }
+            : null,
+      })
+      if (runtime !== null) {
+        runtimes.set(provider, runtime)
+        managedRuntimes.set(engine.provider, runtime)
+      }
+      // `POST /models/<engine>/check`: composed apart from the runtime (its own deps, never Docker), so
+      // a compatibility question answers the same whether or not the engine is even installed yet.
+      const check = wireManagedModelCheck(managedPlatform, engine, {
+        descriptors: managed.descriptors,
+        installations: managed.installations,
+        host: managedHost,
+        settings: settingsOf,
+        arch: managedArch,
+        ...(managedWindows === undefined ? {} : { windows: managedWindows }),
+      })
+      if (check !== null) managedModelChecks[engine.provider] = check
+    }
+    // The managed models' registry: the same gate as the runtimes, so the two are never offered one
+    // without the other.
+    const storeRegistry = managedModelRegistry(managedPlatform, layout, managedWindows)
+    for (const provider of managedRuntimes.keys()) registries.set(provider as LocalProviderId, storeRegistry)
+    // Windows moves this scope's TensorRT-LLM models into the store in the guest before the first look
+    // at it (`windowsStoreMigration`); the outcome goes to the environment diagnostics.
+    if (managedWindows !== undefined && managedRuntimes.size > 0) storeMigration.onWindows(managedWindows)
+    /** A managed runtime, or `PROVIDER_NOT_FOUND` where this core does not offer it. */
+    const managedOr = (provider: string): ManagedTextRuntime => {
+      const runtime = managedRuntimes.get(provider)
+      if (runtime === undefined) throw unknownProvider(provider, runtimes.keys())
       return runtime
     }
-    // `POST /models/tensorrt-llm/check` (task 2.16): composed apart from the runtime above (its own
-    // deps, never Docker), so a compatibility question answers the same whether or not the engine is
-    // even installed yet. `null` off Linux, same gate as `wireTensorrtLlm`.
-    // `DELETE /models/tensorrt-llm/:id` (task 2.24): wherever the provider itself is offered.
-    const tensorrtLlmModelDelete =
-      tensorrtLlm === null
+    // Deleting a downloaded model: wherever a managed provider is offered.
+    const managedModelDelete =
+      managedRuntimes.size === 0
         ? null
-        : tensorrtLlmModelDeleter({
-            runtime: () => runtimes.get('tensorrt-llm'),
+        : managedModelDeleter({
+            runtimes: () => managedRuntimes,
             sessions: facade,
-            registry: tensorrtLlmRegistry,
+            registry: storeRegistry,
             paths: layout.managed,
             ...(managedWindows === undefined
               ? {}
               : { windowsFiles: windowsModelFilesFor(managedWindows, layout) }),
           })
-    const tensorrtLlmModelCheck = wireTensorrtLlmModelCheck(managedPlatform, {
-      descriptors: managed.descriptors,
-      installations: managed.installations,
-      host: managedHost,
-      settings: tensorrtLlmSettingsOf,
-      arch: managedArch,
-      ...(managedWindows === undefined ? {} : { windows: managedWindows }),
-    })
 
     // The decision model: its own process outside the sessions registry. Started (in the background,
     // nothing waits for it) only once the facade exists, below.
@@ -497,6 +600,21 @@ export async function createAtomicCore(
       platform,
       env,
       ...(options.decision ? { overrides: options.decision } : {}),
+      ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
+    // The embedding model the public `/v1/embeddings` serves by name: its own process too, started
+    // with the decision model below.
+    const embedding = wireEmbedding({
+      layout,
+      settings,
+      journal,
+      instanceId: lock.instanceId,
+      emit: (name, payload) => emitter.emit(name, payload),
+      on: (name, listener) => emitter.on(name, listener),
+      log: runtimeLog,
+      platform,
+      env,
+      ...(options.embedding ? { overrides: options.embedding } : {}),
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
@@ -532,11 +650,11 @@ export async function createAtomicCore(
         },
         models: {
           capabilities: async (provider, modelId) =>
-            provider === 'tensorrt-llm'
-              ? tensorrtLlmOr(provider).capabilities(modelId)
+            managedEngines.has(provider)
+              ? managedOr(provider).capabilities(modelId)
               : capabilities.capabilities(provider as LocalProviderId, modelId),
           logs: async (provider, modelId) => {
-            if (provider === 'tensorrt-llm') return tensorrtLlmOr(provider).logs(modelId)
+            if (managedEngines.has(provider)) return managedOr(provider).logs(modelId)
             if (!runtimes.has(provider as LocalProviderId)) throw unknownProvider(provider, runtimes.keys())
             throw new AtomicCoreError(
               'INVALID_ARGUMENT',
@@ -560,12 +678,23 @@ export async function createAtomicCore(
           embed: (provider, modelId, input, ubatchSize) =>
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
-        ...(tensorrtLlmModelCheck !== null ? { tensorrtLlmModelCheck } : {}),
-        ...(tensorrtLlmModelDelete !== null ? { tensorrtLlmModelDelete } : {}),
+        modelSetups: {
+          compatibility: (request) => compatibilityFor(modelSetupDeps, request),
+          plan: (request) => modelSetups.plan(request),
+          families: () => prismCompatibility.families(),
+          start: (request) => modelSetups.start(request),
+          list: () => modelSetups.list(),
+          get: (setupId) => modelSetups.get(setupId),
+          cancel: (setupId) => modelSetups.cancel(setupId),
+          resume: (setupId, opts) => modelSetups.resume(setupId, opts),
+          snapshot: () => modelSetups.snapshot(),
+        },
+        managedModelChecks,
+        ...(managedModelDelete !== null ? { managedModelDelete } : {}),
         // Where clients put tensorrt-llm models (change `add-tensorrt-llm-windows`, task 2.8): wherever
         // the provider itself is offered.
-        ...(tensorrtLlm !== null
-          ? { tensorrtLlmModelLocation: tensorrtLlmModelLocation(managedPlatform, layout, managedWindows) }
+        ...(managedRuntimes.size > 0
+          ? { managedModelLocation: managedModelLocation(managedPlatform, layout, managedWindows) }
           : {}),
         backends: {
           list: (provider, current) => backendService(provider as LocalProviderId).listInstalled(current),
@@ -574,6 +703,7 @@ export async function createAtomicCore(
             // The core emits no `backend:download-finished` for its own installs, so the decision
             // module hears about a new TurboQuant build here: it may be the first to serve `--decision`.
             noticeEngineInstall(decision, provider, result.installed)
+            noticeEmbeddingEngineInstall(embedding, provider, result.installed)
             return result
           },
           remove: (provider, version, backend) =>
@@ -616,6 +746,14 @@ export async function createAtomicCore(
               ...(request.timeout_ms !== undefined ? { timeoutMs: request.timeout_ms } : {}),
               ...(request.truncation !== undefined ? { truncation: request.truncation } : {}),
             }),
+        },
+        embedding: {
+          status: () => embedding.getStatus(),
+          config: () => embedding.getConfig(),
+          configure: (patch) => embedding.configure(patch),
+          load: () => embedding.load(),
+          unload: () => embedding.unload(),
+          embed: (body) => embedding.embed(body),
         },
         settings: {
           get: (provider) => settings.get(provider),
@@ -699,6 +837,7 @@ export async function createAtomicCore(
       managed,
       managedTrustedHosts,
       decision,
+      embedding,
       errors: reporter,
       telemetry: reporter,
       remoteAccess: await wireRemoteAccess({
@@ -725,6 +864,8 @@ export async function createAtomicCore(
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
+    // A model setup a stopped core left mid-way becomes `interrupted`, resumable from its files.
+    await modelSetups.recover().catch((e: unknown) => warn(`model setup recovery: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the
@@ -733,6 +874,7 @@ export async function createAtomicCore(
     await reapTunnelOrphan(layout.legacyRemoteAccessTunnel, { log: warn })
     // An enabled and configured decision model starts now; its shutdown belongs to the facade.
     decision.start()
+    embedding.start()
     await lock.publish(control.host, control.port)
     log('info', `core ${CORE_VERSION} owns ${layout.root} (control ${control.url})`)
     return core

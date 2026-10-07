@@ -18,7 +18,15 @@ import type { RemoteProvider } from '../router/index.js'
 import type { SettingsStore } from '../settings/index.js'
 
 /** Engines the core runs itself; registering one as a cloud provider would shadow its sessions. */
-const LOCAL_PROVIDERS = new Set(['llamacpp', 'llamacpp-upstream', 'mlx', 'foundation-models', 'tensorrt-llm'])
+const LOCAL_PROVIDERS = new Set([
+  'llamacpp',
+  'llamacpp-upstream',
+  'atomic-prism',
+  'mlx',
+  'foundation-models',
+  'tensorrt-llm',
+  'vllm',
+])
 
 export interface CustomHeader {
   header: string

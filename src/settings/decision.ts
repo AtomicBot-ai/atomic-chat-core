@@ -18,6 +18,9 @@ type Kind = 'boolean' | 'string' | { min: number; max: number } | { oneOf: reado
 const SCHEMA: Record<keyof DecisionSettings, Kind> = {
   enabled: 'boolean',
   model_path: 'string',
+  mmproj_path: 'string',
+  // 0 = automatic; past 1 Mi tokens no decision prompt is real, only an allocation that fails.
+  ctx_size: { min: 0, max: 1 << 20 },
   model_id: 'string',
   spec_path: 'string',
   threads: { min: 0, max: 256 },

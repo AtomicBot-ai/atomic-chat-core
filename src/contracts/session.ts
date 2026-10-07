@@ -7,8 +7,13 @@
 /**
  * `tensorrt-llm` runs in a container on Linux only (openspec change `add-tensorrt-llm-linux`); a core
  * on any other platform never offers it, and its sessions carry `pid: null`.
+ *
+ * `atomic-prism` is PrismML's llama.cpp fork, the only engine that runs Bonsai's Prism packings
+ * (`PQ2_0`, `PTQ1_0`, the Hadamard transform). It shares the GGUF model tree with the two other
+ * llama.cpp providers and never becomes the default for an ordinary model.
  */
-export type LocalProviderId = 'llamacpp-upstream' | 'llamacpp' | 'mlx' | 'foundation-models' | 'tensorrt-llm'
+export type LocalProviderId =
+  'llamacpp-upstream' | 'llamacpp' | 'atomic-prism' | 'mlx' | 'foundation-models' | 'tensorrt-llm' | 'vllm'
 
 export interface RuntimeDeviceInfo {
   /** Backends in load order, deduped, e.g. ["CUDA", "CPU"]. */

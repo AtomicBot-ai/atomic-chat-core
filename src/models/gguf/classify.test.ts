@@ -5,6 +5,7 @@ import {
   effectiveCtxSize,
   isDecisionGguf,
   NON_TEXT_GGUF_ARCHITECTURES,
+  upstreamDecisionTypeOf,
   hasEmbeddedMtp,
   isEmbeddingGguf,
   isMtpCapable,
@@ -104,6 +105,10 @@ describe('isDecisionGguf', () => {
     // A reader that keeps typed values may hand the key over as a non-string.
     [{ 'general.architecture': 7, 'decision.layout': 1 }, true],
     [{ 'general.architecture': 'qwen35', 'decision.layout': null }, false],
+    // Upstream llama.cpp's own stamp (b11370 on), under the architecture's prefix.
+    [{ 'general.architecture': 'modern-bert', 'modern-bert.decision.type': 'laya' }, true],
+    [{ 'general.architecture': 'qwen35', 'qwen35.decision.type': 'openjev' }, true],
+    [{ 'general.architecture': 'qwen35', 'llama.decision.type': 'openjev' }, false],
     [{ 'general.architecture': 'qwen35' }, false],
     [{ 'general.architecture': 'bert' }, false],
     [{}, false],
@@ -147,5 +152,21 @@ describe('classifyProjector', () => {
     })
     expect(classifyProjector({ 'general.architecture': 'clip' })).toEqual({ vision: true, audio: false })
     expect(classifyProjector(undefined)).toEqual({ vision: true, audio: false })
+  })
+})
+
+describe('upstreamDecisionTypeOf', () => {
+  it.each([
+    [{ 'general.architecture': 'clef', 'clef.decision.type': 'clef' }, 'clef'],
+    [{ 'general.architecture': 'qwen35', 'qwen35.decision.type': ' Nimble ' }, 'nimble'],
+    [{ 'general.architecture': 'qwen35', 'qwen35.decision.type': '' }, undefined],
+    [{ 'general.architecture': 'laya' }, undefined],
+    [{ 'qwen35.decision.type': 'lev' }, undefined],
+    [null, undefined],
+  ])('%j → %s', (m, e) => expect(upstreamDecisionTypeOf(m)).toBe(e))
+
+  it('keeps an upstream decision GGUF out of the embedding models', () => {
+    const julia = { 'general.architecture': 'modern-bert', 'modern-bert.decision.type': 'laya' }
+    expect(isEmbeddingGguf(julia)).toBe(false)
   })
 })

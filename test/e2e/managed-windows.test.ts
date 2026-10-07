@@ -302,7 +302,7 @@ describe.skipIf(!existsSync(core.BIN))('the managed environment on Windows throu
     await installEngine(ready)
 
     // The app downloads into the root core names: a folder in the guest (here, the folder standing in for it).
-    const location = (await (await control(ready, '/models/tensorrt-llm/location')).json()) as {
+    const location = (await (await control(ready, '/managed-models/location')).json()) as {
       root: string
     }
     const dir = join(location.root, 'acme', 'llama')

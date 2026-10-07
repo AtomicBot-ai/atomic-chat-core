@@ -70,7 +70,7 @@ const resolvePolicy = (policy: OptimalRecordPolicy | undefined) => ({
  */
 export function parseOptimalBackendCache(
   raw: string | null | undefined,
-  provider: 'llamacpp-upstream' | 'llamacpp' = OPTIMAL_BACKEND_PROVIDER
+  provider: LlamacppProviderId = OPTIMAL_BACKEND_PROVIDER
 ): OptimalBackendCacheRecord | null {
   if (!raw) return null
   try {

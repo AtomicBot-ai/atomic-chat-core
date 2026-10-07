@@ -80,6 +80,24 @@ export type CoreErrorCode =
   | 'DECISION_CHECKPOINT_INCOMPLETE'
   /** A decision model was asked to load as a chat or embedding session; it runs only in the decision module. */
   | 'DECISION_MODEL_NOT_CHAT'
+  /** The embedding model is turned off, or no model file is configured for it. */
+  | 'EMBEDDING_NOT_CONFIGURED'
+  /** No installed llama.cpp build is new enough for the embedding model; the message names the build. */
+  | 'EMBEDDING_ENGINE_UNSUPPORTED'
+  /** The embedding model is not running right now (starting, failed or stopped). */
+  | 'EMBEDDING_UNAVAILABLE'
+  /** `embedding.model_path` is not an embedding GGUF (a chat, decision or reranker model). */
+  | 'EMBEDDING_MODEL_NOT_EMBEDDING'
+  /**
+   * The file cannot run on the requested engine (a PrismML-only Bonsai file on stock llama.cpp, or a
+   * build too old for it); `details` is the JSON compatibility verdict. Never retried elsewhere.
+   */
+  | 'MODEL_ENGINE_INCOMPATIBLE'
+  /** A legacy layout no current engine runs (Bonsai Q2_0 group-128); `details` names the replacement. */
+  | 'MODEL_FORMAT_LEGACY'
+  /** A model setup was started from a plan whose inputs changed since it was computed; plan again. */
+  | 'MODEL_SETUP_PLAN_STALE'
+  | 'MODEL_SETUP_NOT_FOUND'
 
 /**
  * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the

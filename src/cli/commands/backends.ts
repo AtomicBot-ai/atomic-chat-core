@@ -40,7 +40,7 @@ export async function backendsCommand(argv: string[], io: CliIo): Promise<number
   }
   const provider = values.provider ?? 'llamacpp-upstream'
   if (!isLlamacppProviderId(provider)) {
-    io.stderr(`--provider must be llamacpp-upstream or llamacpp, not ${provider}\n`)
+    io.stderr(`--provider must be llamacpp-upstream, llamacpp or atomic-prism, not ${provider}\n`)
     return 2
   }
   const mode = values.mode ?? 'recheck'

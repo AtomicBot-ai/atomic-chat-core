@@ -6,3 +6,4 @@ test/fixtures/
 *.md
 *.generated.ts
 .claude/
+.superpowers/

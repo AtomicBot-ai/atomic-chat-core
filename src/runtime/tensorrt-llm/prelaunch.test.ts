@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { GpuFacts, RuntimeDescriptor, Sha256Digest } from '../../contracts/index.js'
 import type { CheckpointFile, HostMemory } from './compatibility.js'
+import { tensorrtLlmCheckEngine } from './compatibility.js'
 import { verifyModelFilesAndCompatibility } from './prelaunch.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
@@ -69,7 +70,7 @@ async function writeCheckpoint(
 const model = () => ({ dir, repository: 'acme/model', revision: 'deadbeef', files })
 const gpus = [gpu({ gpu_id: 'gpu-0' })]
 const memory = { contextLength: 8192, kvCacheFreeGpuMemoryFraction: 0.9 }
-const options = { gpuId: 'gpu-0', memory }
+const options = { gpuId: 'gpu-0', engine: tensorrtLlmCheckEngine(memory) }
 
 describe('verifyModelFilesAndCompatibility', () => {
   it('passes and returns the resolved checkpoint when every file matches and config.json checks out', async () => {

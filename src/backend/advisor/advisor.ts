@@ -41,14 +41,22 @@ import {
   archSuffixFor,
   BUNDLED_MANIFEST_BASELINE,
   fetchLiveManifest,
+  findPrismRelease,
   ManifestSessionCache,
   manifestTransportFromFetch,
   parseManifestForPlatform,
+  prismArchiveSources,
+  prismAssetOffered,
+  PrismCatalogService,
+  prismCatalogToBackends,
+  prismTagBuild,
   TurboquantCatalogService,
   turboquantCatalogToBackends,
   withHardTimeout,
 } from '../catalog/index.js'
-import type { TurboquantRelease } from '../catalog/index.js'
+import type { PrismManifest, PrismOfferOptions, PrismRelease, TurboquantRelease } from '../catalog/index.js'
+import { findLatestPrismVersionForBackend } from '../select/index.js'
+import { CORE_VERSION } from '../../version.js'
 import { scanInstalledBackends } from '../installed/index.js'
 import { recheckOptimalBackend, refreshOptimalBackendCache } from '../optimal/index.js'
 import type { OptimalBackendStore, OptimalState } from '../optimal/index.js'
@@ -62,7 +70,7 @@ import type {
   OptimalBackendCacheRecord,
   TierHealth,
 } from '../types.js'
-import { stripBom } from '../version.js'
+import { compareVersions, stripBom } from '../version.js'
 import { policyFor, recordPolicyOf } from './policy.js'
 import type { BackendProviderPolicy } from './policy.js'
 
@@ -84,6 +92,12 @@ export interface BackendAdvisorDeps {
   manifestCache?: ManifestSessionCache
   /** TurboQuant: the release-index service; built from `layout` + `fetchFor` when absent. */
   turboquantCatalog?: TurboquantCatalogService
+  /** PrismML: the conf manifest service; built from `layout` + `fetchFor` when absent. */
+  prismCatalog?: PrismCatalogService
+  /** PrismML: the user's `allow_candidate_builds`; absent = verified builds only. */
+  allowCandidateBuilds?: () => boolean | Promise<boolean>
+  /** PrismML: the version `min_core_version` is compared with; defaults to this core's. */
+  coreVersion?: string
   /** Every pack on disk; defaults to the directory scan. */
   installed?: () => Promise<BackendVersion[]>
   /** Windows + upstream: `<exe> --list-devices` for an installed build; absent = tiers stay unverified. */
@@ -99,7 +113,7 @@ export interface BackendAdvisorDeps {
 interface RemoteCatalog {
   remote: BackendVersion[]
   source: BackendCatalogSource
-  releases?: TurboquantRelease[]
+  releases?: BackendCatalogRelease[]
 }
 
 interface FetchOptions {
@@ -113,6 +127,7 @@ export class BackendAdvisor {
   private readonly policy: BackendProviderPolicy
   private readonly manifestCache: ManifestSessionCache
   private readonly turboquant: TurboquantCatalogService
+  private readonly prism: PrismCatalogService
   private inFlightRecommend: Promise<BackendRecommendationResponse> | null = null
 
   constructor(private readonly deps: BackendAdvisorDeps) {
@@ -126,6 +141,14 @@ export class BackendAdvisor {
         fetchFor: deps.fetchFor,
         ...(deps.now ? { now: deps.now } : {}),
         ...(deps.platform ? { platform: deps.platform } : {}),
+        ...(deps.log ? { log: deps.log } : {}),
+      })
+    this.prism =
+      deps.prismCatalog ??
+      new PrismCatalogService({
+        layout: deps.layout,
+        fetchFor: deps.fetchFor,
+        ...(deps.now ? { now: deps.now } : {}),
         ...(deps.log ? { log: deps.log } : {}),
       })
   }
@@ -194,7 +217,7 @@ export class BackendAdvisor {
       latest_by_type: latestByType,
       static_variants: this.policy.staticVariants(osType, current, arch),
       source,
-      ...(releases ? { releases: releases.map(toCatalogRelease) } : {}),
+      ...(releases ? { releases } : {}),
     }
   }
 
@@ -214,7 +237,16 @@ export class BackendAdvisor {
       return {
         remote: turboquantCatalogToBackends(catalog, supported),
         source: catalog.source,
-        releases: catalog.releases,
+        releases: catalog.releases.map(toCatalogRelease),
+      }
+    }
+    if (this.provider === 'atomic-prism') {
+      const { manifest, source } = await this.prismManifest(options)
+      const offer = await this.prismOfferOptions()
+      return {
+        remote: prismCatalogToBackends(manifest, offer),
+        source,
+        releases: prismCatalogReleases(manifest, offer),
       }
     }
 
@@ -410,6 +442,17 @@ export class BackendAdvisor {
    * `same_family` (a tag bump must never move anyone between backend families) and `offer`.
    */
   async checkUpdates(request: BackendUpdateCheckRequest = {}): Promise<BackendUpdateCheckResponse> {
+    const response = await this.checkUpdatesOf(request)
+    if (this.provider !== 'atomic-prism' || response.current_kind !== 'concrete') return response
+    const { manifest } = await this.prismManifest({
+      force: false,
+      appVersion: null,
+      proxy: request.proxy ?? null,
+    })
+    return prismUpdateResponse(response, manifest, await this.prismOfferOptions(), request.requires_build)
+  }
+
+  private async checkUpdatesOf(request: BackendUpdateCheckRequest): Promise<BackendUpdateCheckResponse> {
     const current = stripBom(request.current ?? (await this.currentVersionBackend()))
     const kind = classifyCurrent(current)
     const catalog = await this.catalog({
@@ -486,8 +529,28 @@ export class BackendAdvisor {
     }
   }
 
+  private prismManifest(
+    options: FetchOptions
+  ): Promise<{ manifest: PrismManifest; source: BackendCatalogSource }> {
+    return this.prism.catalog({ force: options.force, proxy: options.proxy })
+  }
+
+  private async prismOfferOptions(): Promise<PrismOfferOptions> {
+    let allowCandidates = false
+    try {
+      allowCandidates = (await this.deps.allowCandidateBuilds?.()) === true
+    } catch (err) {
+      this.log(
+        'warn',
+        `catalog: allow_candidate_builds unreadable: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    return { coreVersion: this.deps.coreVersion ?? CORE_VERSION, allowCandidates }
+  }
+
   private async rocmFacts(osType: string): Promise<RocmHostProbe | undefined> {
-    if (this.provider !== 'llamacpp' || osType !== 'linux') return undefined
+    if ((this.provider !== 'llamacpp' && this.provider !== 'atomic-prism') || osType !== 'linux')
+      return undefined
     try {
       return await (this.deps.rocmProbe ?? probeLinuxRocmHost)()
     } catch (err) {
@@ -547,6 +610,85 @@ export function recommendationOf(
     provider,
     version: version ?? '',
     backendId: backendId ?? '',
+  }
+}
+
+/**
+ * The Prism releases this core can run, newest first, each with only its offered packs. A withdrawn
+ * release stays listed (flagged, no variants) so the app can explain why it is not offered.
+ */
+export function prismCatalogReleases(
+  manifest: PrismManifest,
+  offer: PrismOfferOptions
+): BackendCatalogRelease[] {
+  return [...manifest.releases]
+    .filter((r) => compareVersions(offer.coreVersion, r.min_core_version) >= 0)
+    .sort((a, b) => (prismTagBuild(b.tag) ?? 0) - (prismTagBuild(a.tag) ?? 0))
+    .map((r) => ({
+      tag: r.tag,
+      notes_url: r.notes_url,
+      ...(r.notes !== undefined ? { notes: r.notes } : {}),
+      ...(r.withdrawn ? { withdrawn: r.withdrawn } : {}),
+      variants: r.withdrawn
+        ? []
+        : r.assets
+            .filter((a) => prismAssetOffered(r, a, offer))
+            .map((a) => ({ id: a.backend, asset: a.name, size: a.size, validation: a.validation })),
+    }))
+}
+
+/**
+ * The PrismML additions to an update answer: `current_withdrawn` whenever the installed release was
+ * pulled; when it was and no newer build exists, the newest offered build of the same backend
+ * (possibly an older tag) becomes the offer; `reason` (`model_requires` when the caller's required
+ * build is reached, `withdrawn`, else `newer`), the target's notes and its download size.
+ */
+export function prismUpdateResponse(
+  response: BackendUpdateCheckResponse,
+  manifest: PrismManifest,
+  offer: PrismOfferOptions,
+  requiresBuild?: number
+): BackendUpdateCheckResponse {
+  const [currentTag = '', backend = ''] = response.current.split('/')
+  const currentRelease = findPrismRelease(manifest, currentTag)
+  const withdrawn = currentRelease?.withdrawn
+  let out: BackendUpdateCheckResponse = withdrawn
+    ? { ...response, current_withdrawn: withdrawn }
+    : { ...response }
+
+  if (!out.offer && withdrawn) {
+    const others = prismCatalogToBackends(manifest, offer).filter((b) => b.version !== currentTag)
+    const target = findLatestPrismVersionForBackend(others, backend)
+    if (target) {
+      out = {
+        ...out,
+        update_needed: true,
+        new_version: target.split('/')[0] ?? '',
+        target_backend: target,
+        same_family: true,
+        offer: target,
+      }
+    }
+  }
+  if (!out.offer) return out
+
+  const targetTag = out.offer.split('/')[0] ?? ''
+  const target: PrismRelease | undefined = findPrismRelease(manifest, targetTag)
+  const currentBuild = prismTagBuild(currentTag) ?? -1
+  const targetBuild = prismTagBuild(targetTag) ?? -1
+  const reason =
+    requiresBuild !== undefined && currentBuild < requiresBuild && targetBuild >= requiresBuild
+      ? 'model_requires'
+      : withdrawn
+        ? 'withdrawn'
+        : 'newer'
+  const sources = prismArchiveSources(manifest, targetTag, backend)
+  return {
+    ...out,
+    reason,
+    ...(target ? { notes_url: target.notes_url } : {}),
+    ...(target?.notes !== undefined ? { notes: target.notes } : {}),
+    ...(sources ? { download_size: sources.reduce((sum, s) => sum + s.size, 0) } : {}),
   }
 }
 

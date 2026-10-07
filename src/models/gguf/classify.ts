@@ -63,6 +63,7 @@ export const NON_TEXT_GGUF_ARCHITECTURES = new Set([
   'jina-bert-v3',
   'eurobert',
   'gemma-embedding',
+  'gemma-embedding2',
   'llama-embed',
   't5encoder',
 ])
@@ -71,18 +72,34 @@ export const NON_TEXT_GGUF_ARCHITECTURES = new Set([
 export const DECISION_GGUF_ARCHITECTURES = new Set(['laya'])
 
 /**
- * A decision model: served by `llama-server --decision` in the decision module, never as a chat or
- * embedding session. Either the architecture is one (`laya`) or the file is stamped with a decision
- * spec (`decision.layout`, the mirror key of `decision.spec`, which any architecture can carry: an
- * Arbiter or JevK5 GGUF stays `qwen35` underneath). Checked before `isEmbeddingGguf`, which it
- * excludes: `laya` is deliberately not in `NON_TEXT_GGUF_ARCHITECTURES`, because that would load it
- * with `--embedding --pooling mean`.
+ * `<general.architecture>.decision.type` of a GGUF: the key upstream llama.cpp (b11370 on) reads to
+ * serve the file on `/v1/systemone` (`laya`, `openjev`, `lev`, `kev`, `nimble`, `clef`, and whatever
+ * a newer build adds). `undefined` when the file has none. The fork never writes it: its own GGUFs
+ * carry `decision.layout` or the `laya` architecture.
+ */
+export function upstreamDecisionTypeOf(metadata: Meta): string | undefined {
+  if (!metadata) return undefined
+  const raw = metadata['general.architecture']
+  const arch = typeof raw === 'string' ? raw.trim() : ''
+  if (arch === '') return undefined
+  const type = metadata[`${arch}.decision.type`]
+  return typeof type === 'string' && type.trim() !== '' ? type.trim().toLowerCase() : undefined
+}
+
+/**
+ * A decision model: served by the decision module, never as a chat or embedding session. Either the
+ * architecture is one (`laya`), the file is stamped with a decision spec (`decision.layout`, the
+ * mirror key of `decision.spec`, which any architecture can carry: an Arbiter or JevK5 GGUF stays
+ * `qwen35` underneath), or it is an upstream decision GGUF (`<arch>.decision.type`). Checked before
+ * `isEmbeddingGguf`, which it excludes: `laya` is deliberately not in `NON_TEXT_GGUF_ARCHITECTURES`,
+ * because that would load it with `--embedding --pooling mean`.
  */
 export function isDecisionGguf(metadata: Meta): boolean {
   if (!metadata) return false
   const raw = metadata['general.architecture']
   const arch = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
   if (DECISION_GGUF_ARCHITECTURES.has(arch)) return true
+  if (upstreamDecisionTypeOf(metadata) !== undefined) return true
   const layout = metadata['decision.layout']
   return typeof layout === 'string' ? layout.trim() !== '' : layout !== undefined && layout !== null
 }

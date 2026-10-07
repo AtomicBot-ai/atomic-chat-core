@@ -6,7 +6,6 @@ import { dataLayout } from '../config/index.js'
 import { createManagedContainersHandle } from '../runtime/container/index.js'
 import { realLinuxHost } from '../runtime/environment/index.js'
 import {
-  engineModelsDir,
   linuxProvisionerParts,
   testGuestRecipe,
   windowsProvisionerParts,
@@ -75,17 +74,6 @@ describe('wireManagedEnvironment', () => {
   })
 })
 
-describe('engineModelsDir', () => {
-  it('is the engine’s models folder in this scope, and refuses anything that could climb out', async () => {
-    const layout = dataLayout(join(dir, 'data'))
-    expect(engineModelsDir(layout, 'tensorrt-llm')).toBe(join(dir, 'data', 'tensorrt-llm', 'models'))
-    expect(() => engineModelsDir(layout, '..')).toThrow()
-    expect(() => engineModelsDir(layout, 'a/b')).toThrow()
-    expect(() => engineModelsDir(layout, 'x..y')).toThrow()
-    expect(await readdir(dir)).not.toContain('tensorrt-llm')
-  })
-})
-
 describe('linuxProvisionerParts', () => {
   it('hands the provisioner this core’s one executor, and removes only this scope’s caches and models', async () => {
     const layout = dataLayout(join(dir, 'data'))
@@ -107,16 +95,16 @@ describe('linuxProvisionerParts', () => {
 
     const cache = join(layout.managed.cachesDir, 'd-1', 'model')
     const other = join(layout.managed.cachesDir, 'd-2', 'model')
-    const models = join(layout.root, 'tensorrt-llm', 'models', 'm')
+    const models = join(layout.managedModelsDir, 'm')
     await Promise.all([
       mkdir(cache, { recursive: true }),
       mkdir(other, { recursive: true }),
       mkdir(models, { recursive: true }),
     ])
     await parts.removeEngineCaches('d-1')
-    await parts.removeModels('tensorrt-llm')
+    await parts.removeStoreModels()
     expect(await readdir(layout.managed.cachesDir)).toEqual(['d-2'])
-    expect(await readdir(join(layout.root, 'tensorrt-llm'))).toEqual([])
+    expect(existsSync(layout.managedModelsDir)).toBe(false)
 
     const none = linuxProvisionerParts(
       { layout },
@@ -248,19 +236,18 @@ describe('windowsProvisionerParts', () => {
     }
   }
 
-  it('removes this scope’s caches of a descriptor and its models of an engine with the guest’s rm, and nothing before the import', async () => {
+  it('removes this scope’s caches of a descriptor and its model store with the guest’s rm, and nothing before the import', async () => {
     const { windows, parts: imported } = parts(RECORD)
     await imported.removeEngineCaches('trt-r1')
-    await imported.removeModels('tensorrt-llm')
+    await imported.removeStoreModels()
     const rms = windows.wslCalls.filter((argv) => argv.includes('rm'))
     expect(rms.map((argv) => argv[argv.length - 1])).toEqual([
       '/var/lib/atomic-chat/scopes/k1/caches/trt-r1',
-      '/var/lib/atomic-chat/scopes/k1/models/tensorrt-llm',
+      '/var/lib/atomic-chat/scopes/k1/managed-models',
     ])
-    await expect(imported.removeModels('../etc')).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
     const { windows: none, parts: before } = parts(null)
     await before.removeEngineCaches('trt-r1')
-    await before.removeModels('tensorrt-llm')
+    await before.removeStoreModels()
     expect(none.wslCalls).toEqual([])
   })
 

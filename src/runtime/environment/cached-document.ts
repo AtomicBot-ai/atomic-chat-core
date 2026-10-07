@@ -89,8 +89,11 @@ const NODE_FS: DocumentCacheFs = {
 export interface CachedDocumentKind<T> {
   /** Names the document in warnings: "Runtime descriptor", "Environment manifest". */
   label: string
-  /** The variable that overrides the source, e.g. `ATOMIC_RUNTIME_DESCRIPTOR_URL`. */
-  urlEnv: string
+  /**
+   * The variable that overrides the source, e.g. `ATOMIC_RUNTIME_DESCRIPTOR_URL`; or several, the
+   * first one set winning (a descriptor's per-engine variable, then the legacy one).
+   */
+  urlEnv: string | readonly string[]
   /** Throws on anything that is not a valid document of this kind. */
   parse(input: unknown): T
   /** The document's immutable id field, e.g. `descriptor_id`; also the key `latest.json` holds. */
@@ -101,6 +104,11 @@ export interface CachedDocumentKind<T> {
   cacheDir: string
   cacheFile(id: string): string
   latestFile: string
+  /**
+   * Pointers an older core wrote, read in order only while `latestFile` does not exist yet; a
+   * pointer whose document `parse` rejects (another engine's descriptor) counts as absent.
+   */
+  legacyLatestFiles?: readonly string[]
 }
 
 export interface CachedDocumentOptions {
@@ -179,13 +187,15 @@ export function createCachedDocuments<T>(
     onWarn(message)
   }
 
+  const urlEnvs: readonly string[] = typeof kind.urlEnv === 'string' ? [kind.urlEnv] : kind.urlEnv
   const sourceUrl = (): string => {
-    const override = options.env[kind.urlEnv]
-    if (override !== undefined && override.trim() !== '') {
+    for (const variable of urlEnvs) {
+      const override = options.env[variable]
+      if (override === undefined || override.trim() === '') continue
       // A pinned source silently hides every newer document conf publishes (a test machine kept a
       // commit-pinned descriptor URL and never saw the next one, 2026-10-06): say so in the log.
       warnOnce(
-        `${kind.label} source is overridden by ${kind.urlEnv}=${override.trim()}; ${options.url} is not read.`
+        `${kind.label} source is overridden by ${variable}=${override.trim()}; ${options.url} is not read.`
       )
       return override.trim()
     }
@@ -229,17 +239,34 @@ export function createCachedDocuments<T>(
     }
   }
 
-  const latestCached = async (): Promise<T | null> => {
+  /** The id a pointer file names: `undefined` when the file is absent, `null` when it is unreadable. */
+  const pointedId = async (file: string): Promise<string | null | undefined> => {
+    let text: string
     try {
-      const pointer = JSON.parse(await fs.readFile(kind.latestFile, 'utf8')) as Record<string, unknown>
-      const id = pointer[kind.idField]
-      return typeof id === 'string' ? await cached(id) : null
+      text = await fs.readFile(file, 'utf8')
+    } catch {
+      return undefined
+    }
+    try {
+      const id = (JSON.parse(text) as Record<string, unknown>)[kind.idField]
+      return typeof id === 'string' ? id : null
     } catch {
       return null
     }
   }
 
-  /** Cache the accepted document's exact bytes by its own id, and repoint `latest.json` at it. */
+  const latestCached = async (): Promise<T | null> => {
+    const current = await pointedId(kind.latestFile)
+    if (current !== undefined) return current === null ? null : await cached(current)
+    for (const legacy of kind.legacyLatestFiles ?? []) {
+      const id = await pointedId(legacy)
+      const document = typeof id === 'string' ? await cached(id) : null
+      if (document !== null) return document
+    }
+    return null
+  }
+
+  /** Cache the accepted document's exact bytes by its own id, and repoint `latestFile` at it. */
   const accept = async (raw: string, document: T): Promise<void> => {
     const id = kind.id(document)
     await atomicWrite(fs, kind.cacheDir, kind.cacheFile(id), raw)

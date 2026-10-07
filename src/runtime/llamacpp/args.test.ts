@@ -5,6 +5,7 @@ import {
   buildLlamaArgs,
   isTurboquantVersion,
   parseBuildNumber,
+  parsePrismBuildNumber,
   parseExtraArgs,
   parseVersionBackend,
   planLlamaArgs,
@@ -270,5 +271,48 @@ describe('TurboQuant provider', () => {
     }
     expect(buildLlamaArgs(cfg, input('llamacpp')).join(' ')).not.toContain('--spec-type')
     expect(buildLlamaArgs(cfg, input('llamacpp-upstream')).join(' ')).toContain('--spec-type')
+  })
+})
+
+describe('PrismML provider', () => {
+  const prism = { ...input, provider: 'atomic-prism' as const }
+
+  it.each([
+    ['prism-b10754-2459f68', 10754],
+    ['prism-b1-abcdef0', 1],
+    ['b10754', undefined],
+    ['prism-b10754', undefined],
+    ['prism-b10754-XYZ1234', undefined],
+  ])('parsePrismBuildNumber(%s) = %s', (tag, build) => {
+    expect(parsePrismBuildNumber(tag)).toBe(build)
+  })
+
+  it('reads the build from the Prism tag for the build gates', () => {
+    const argv = buildLlamaArgs({ ...base(), version_backend: 'prism-b10754-2459f68/macos-arm64' }, prism)
+    expect(argv).toEqual(expect.arrayContaining(['--flash-attn', 'auto', '--fit', 'off']))
+    expect(argv).not.toContain('--load-mode')
+  })
+
+  it('never emits turbo cache types, speculative decoding or a multi-GPU split', () => {
+    const plan = planLlamaArgs(
+      {
+        ...base(),
+        version_backend: 'prism-b10754-2459f68/linux-cuda-12.8-x64',
+        flash_attn: 'on',
+        cache_type_k: 'turbo3',
+        cache_type_v: 'turbo3',
+        mtp: true,
+        dflash: true,
+        dflash_spec_supported: true,
+        dflash_draft_path: '/d.gguf',
+        split_mode: 'row',
+        main_gpu: 1,
+      },
+      prism
+    )
+    const line = plan.argv.join(' ')
+    expect(line).not.toMatch(/turbo|--spec-type|--model-draft|--split-mode|--main-gpu/)
+    expect(line).toContain('--cache-type-k q8_0')
+    expect(plan.warnings.join('\n')).toMatch(/Speculative decoding is not available on PrismML/)
   })
 })

@@ -9,6 +9,11 @@
  * one whose name contains `stuck` never stops: `docker stop` fails the way a daemon that timed out
  * does, and the container keeps running (GPU residency's "Контейнер не останавливается").
  *
+ * A container whose command is `vllm serve …` (change `add-vllm-runtime`) runs `fake-vllm-engine.mjs`
+ * instead and logs vLLM's start-up lines; one for a model whose folder name contains `oom` exits
+ * before it is ready with vLLM's out-of-memory traceback. Every container keeps the `docker create`
+ * arguments it was made with (`args`), so a test can inspect its env, argv and mounts.
+ *
  *   FAKE_DOCKER_STATE  the JSON file holding the container table (required)
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -17,6 +22,7 @@ import { fileURLToPath } from 'node:url'
 
 const statePath = process.env.FAKE_DOCKER_STATE
 const ENGINE = fileURLToPath(new URL('./fake-model-engine.mjs', import.meta.url))
+const VLLM_ENGINE = fileURLToPath(new URL('./fake-vllm-engine.mjs', import.meta.url))
 const db = existsSync(statePath)
   ? JSON.parse(readFileSync(statePath, 'utf8'))
   : { n: 0, containers: {}, calls: [] }
@@ -59,11 +65,16 @@ if (sub === 'create') {
   // The `--user` the core ran the container as (final review I-1), or null for the image's own.
   const user = args.includes('--user') ? args[args.indexOf('--user') + 1] : null
   const newId = `fakectr${String(++db.n).padStart(8, '0')}`
+  const vllm = args.some((a, i) => a === 'vllm' && args[i + 1] === 'serve')
   db.containers[newId] = {
     status: 'created',
     hostPort: Number(hostPort),
+    engine: vllm ? 'vllm' : 'tensorrt-llm',
+    model,
+    args,
     slow: /slow/.test(model),
     stuck: /stuck/.test(model),
+    oom: /oom/.test(model),
     gpus,
     user,
     pid: null,
@@ -90,14 +101,40 @@ if (!c) {
   done(1)
 }
 if (sub === 'start') {
-  const child = spawn(process.execPath, [ENGINE, String(c.hostPort), c.slow ? 'slow' : 'ready'], {
+  if (c.engine === 'vllm' && c.oom) {
+    // vLLM dies while it loads the weights: the container is gone before it ever answers /health.
+    c.status = 'exited'
+    c.exitCode = 1
+    c.logs.push(
+      stamp(
+        '(EngineCore_DP0 pid=212) INFO [gpu_model_runner.py:2338] Starting to load model /atomic/model...'
+      ),
+      stamp(
+        'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.17 GiB. GPU 0 has a total capacity of 7.63 GiB of which 512.00 MiB is free.'
+      )
+    )
+    console.log(id)
+    done()
+  }
+  const engine = c.engine === 'vllm' ? VLLM_ENGINE : ENGINE
+  const child = spawn(process.execPath, [engine, String(c.hostPort), c.slow ? 'slow' : 'ready'], {
     detached: true,
     stdio: 'ignore',
   })
   child.unref()
   c.pid = child.pid
   c.status = 'running'
-  c.logs.push(stamp('[TRT-LLM] fake engine starting'), stamp('Loading safetensors weights in parallel'))
+  if (c.engine === 'vllm') {
+    c.logs.push(
+      stamp('INFO [api_server.py:1880] vLLM API server version 0.31.0'),
+      stamp(
+        '(EngineCore_DP0 pid=212) INFO [gpu_model_runner.py:2338] Starting to load model /atomic/model...'
+      ),
+      stamp('INFO:     Application startup complete.')
+    )
+  } else {
+    c.logs.push(stamp('[TRT-LLM] fake engine starting'), stamp('Loading safetensors weights in parallel'))
+  }
   console.log(id)
   done()
 }

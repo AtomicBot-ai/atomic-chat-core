@@ -52,7 +52,15 @@ describe('modelIdsMatch', () => {
 })
 
 describe('LOCAL_SEARCH_ORDER', () => {
-  it('searches TurboQuant, then upstream, then MLX, then TensorRT-LLM last so no existing route moves', () => {
-    expect(LOCAL_SEARCH_ORDER).toEqual(['llamacpp', 'llamacpp-upstream', 'mlx', 'tensorrt-llm'])
+  it('searches TurboQuant, upstream, MLX, TensorRT-LLM, PrismML, then vLLM last so no existing route moves', () => {
+    // vllm after atomic-prism, which core 0.10.0 shipped (change add-vllm-runtime, D11).
+    expect(LOCAL_SEARCH_ORDER).toEqual([
+      'llamacpp',
+      'llamacpp-upstream',
+      'mlx',
+      'tensorrt-llm',
+      'atomic-prism',
+      'vllm',
+    ])
   })
 })
