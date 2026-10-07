@@ -272,6 +272,25 @@ async function probeOnce(
   }
 }
 
+/**
+ * An unpacked tree made runnable and checked: `sd-server` present, the executables marked as such,
+ * and `sd-cli` (else `sd-server`) answering `--help` as stable-diffusion.cpp. Throws
+ * `ENGINE_INSTALL_FAILED` otherwise.
+ */
+export async function prepareSdcppTree(dir: string, deps: InstallDeps = {}): Promise<void> {
+  const platform = deps.platform ?? process.platform
+  const server = join(dir, serverBinaryName(platform))
+  if (!(await isFile(server)))
+    throw diffusionError('ENGINE_INSTALL_FAILED', 'The archive did not contain sd-server.', server)
+  const cli = join(dir, cliBinaryName(platform))
+  await setExecutable(server, deps)
+  await setExecutable(cli, deps)
+  // Some release layouts ship a bare `sd` too.
+  await setExecutable(join(dir, platform === 'win32' ? 'sd.exe' : 'sd'), deps)
+
+  await probeBinary((await isFile(cli)) ? cli : server, deps)
+}
+
 /** Finalise a tree the app extracted: permissions, probe, then marker and record. */
 export async function finalizeBackendInstall(
   backendsRoot: string,
@@ -288,16 +307,7 @@ export async function finalizeBackendInstall(
       'The engine directory is outside the diffusion backends folder.',
       dir
     )
-  const server = join(dir, serverBinaryName(platform))
-  if (!(await isFile(server)))
-    throw diffusionError('ENGINE_INSTALL_FAILED', 'The archive did not contain sd-server.', server)
-  const cli = join(dir, cliBinaryName(platform))
-  await setExecutable(server, deps)
-  await setExecutable(cli, deps)
-  // Some release layouts ship a bare `sd` too.
-  await setExecutable(join(dir, platform === 'win32' ? 'sd.exe' : 'sd'), deps)
-
-  await probeBinary((await isFile(cli)) ? cli : server, deps)
+  await prepareSdcppTree(dir, deps)
 
   const record: DiffusionBackendInstallRecord = {
     tag: args.tag,
