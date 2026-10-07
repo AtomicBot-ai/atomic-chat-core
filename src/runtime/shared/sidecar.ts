@@ -59,6 +59,7 @@ export class SidecarTable<Extra = unknown> {
   private readonly unloading = new Map<string, Promise<UnloadResult>>()
   /** Sessions out of the table whose process has not exited yet: they still hold what they held. */
   private readonly terminating = new Map<string, SessionInfo>()
+  private readonly terminatingExes = new Map<string, string>()
   private loadTail: Promise<void> = Promise.resolve()
   private closing = false
   private readonly shutdownController = new AbortController()
@@ -98,6 +99,29 @@ export class SidecarTable<Extra = unknown> {
   /** Sessions being stopped whose process has not exited yet (GPU residency reports them `stopping`). */
   stopping(): SessionInfo[] {
     return [...this.terminating.values()].map((info) => ({ ...info }))
+  }
+
+  /**
+   * The executables running for this provider: every session's, and every one still being stopped.
+   * The engine-builds module keeps a build these run from.
+   */
+  runningExes(): string[] {
+    const exes = [...this.sessions.values()].map((session) => session.exe)
+    for (const exe of this.terminatingExes.values()) exes.push(exe)
+    return [...new Set(exes)]
+  }
+
+  /**
+   * Run `fn` in the provider's load queue: after every load already queued, and before any load
+   * asked for meanwhile. What an engine install or removal holds while it swaps builds.
+   */
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.loadTail.then(fn)
+    this.loadTail = run.then(
+      () => {},
+      () => {}
+    )
+    return run
   }
 
   /** Ports sessions already hold, so a new load never picks one of them. */
@@ -225,6 +249,7 @@ export class SidecarTable<Extra = unknown> {
     if (!session) return { success: true }
     this.sessions.delete(modelId)
     this.terminating.set(modelId, session.info)
+    this.terminatingExes.set(modelId, session.exe)
     try {
       await session.process.terminate(graceMs)
       if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
@@ -241,7 +266,10 @@ export class SidecarTable<Extra = unknown> {
       else if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       return { success: false, error: (e as Error).message }
     } finally {
-      if (this.terminating.get(modelId) === session.info) this.terminating.delete(modelId)
+      if (this.terminating.get(modelId) === session.info) {
+        this.terminating.delete(modelId)
+        this.terminatingExes.delete(modelId)
+      }
     }
   }
 

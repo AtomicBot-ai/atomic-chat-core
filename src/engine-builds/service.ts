@@ -18,6 +18,7 @@
  * same task id; only the last build's failure reaches the client.
  */
 
+import { readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import type {
@@ -393,6 +394,59 @@ export class EngineBuildsService {
     })
     if (removed) this.deps.emit('engine-build:changed', { engine, reason: 'uninstall' })
     return { removed }
+  }
+
+  // --- start -----------------------------------------------------------------------------------
+
+  /**
+   * Before the first load (design D3, D5): every downloaded build that is not the active one goes —
+   * the ones a session kept on the last install, and for MLX the downloads no newer than the build
+   * the installer brought (an app update that ships a newer `mlx-server`). Leftovers of an install
+   * the process did not live to finish (`*.incoming-*`, `*.retired-*`) go too. Under each engine's
+   * load lock; nothing runs yet, so nothing is in use. One `startup-cleanup` per engine that lost a
+   * build.
+   */
+  async startupCleanup(): Promise<void> {
+    for (const engine of ['sd-cpp', 'mlx'] as const) {
+      const removed = await this.deps.hosts[engine]
+        .exclusive(async () => {
+          let count = await this.removeLeftovers(engine)
+          const builds = await this.builds(engine)
+          const active = this.activeOf(engine, builds)
+          const inUse = await this.deps.hosts[engine].inUse()
+          for (const build of builds) {
+            if (build.origin !== 'downloaded' || build === active || (await this.isUsed(build, inUse)))
+              continue
+            try {
+              if (await removeOwnedBuild(this.deps.roots[engine], build.dir, this.deps.platform)) count++
+            } catch (error) {
+              this.deps.log?.(
+                'warn',
+                `Could not remove ${build.tag}/${build.backend_id} at start: ${String(error)}`
+              )
+            }
+          }
+          return count
+        })
+        .catch((error: unknown) => {
+          this.deps.log?.('warn', `The ${engine} startup cleanup failed: ${String(error)}`)
+          return 0
+        })
+      if (removed > 0) this.deps.emit('engine-build:changed', { engine, reason: 'startup-cleanup' })
+    }
+  }
+
+  /** `<root>/<tag>/<backend>.incoming-<n>[.download]` and `.retired-<n>`: only ever this module's. */
+  private async removeLeftovers(engine: EngineBuildId): Promise<number> {
+    const root = this.deps.roots[engine]
+    let count = 0
+    for (const tag of await readdir(root).catch(() => [] as string[]))
+      for (const name of await readdir(join(root, tag)).catch(() => [] as string[]))
+        if (/\.(incoming|retired)-\d+(\.download)?$/.test(name)) {
+          await rm(join(root, tag, name), { recursive: true, force: true }).catch(() => {})
+          count++
+        }
+    return count
   }
 
   // --- what is on disk -------------------------------------------------------------------------

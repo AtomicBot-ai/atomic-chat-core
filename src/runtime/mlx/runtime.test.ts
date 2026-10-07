@@ -261,15 +261,85 @@ describe('MlxRuntime', () => {
       code: 'BINARY_NOT_FOUND',
     })
     const binary = join('/resources/bin', 'mlx-server')
-    await expect(runtime({}, {}, { exists: () => false }).load('m')).rejects.toMatchObject({
+    // Spec `engine-builds`: the error names installing the engine, not a path inside the app.
+    const missing = await runtime({}, {}, { exists: () => false })
+      .load('m')
+      .then(
+        () => ({ code: '', message: '' }),
+        (e: unknown) => e as { code: string; message: string }
+      )
+    expect(missing).toMatchObject({
       code: 'BINARY_NOT_FOUND',
-      message: `MLX server binary not found at: ${binary}`,
+      message: expect.stringMatching(/MLX is not installed/),
     })
+    expect(missing.message).toMatch(/install the MLX engine/i)
+    expect(missing.message).not.toContain('/resources')
     await expect(runtime({}, {}, { exists: (path) => path === binary }).load('m')).rejects.toMatchObject({
       code: 'MODEL_FILE_NOT_FOUND',
       message: expect.stringContaining('Model file not found at: '),
     })
     await expect(runtime().load('nope')).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
+  })
+
+  it('starts the build the resolver names, asking again on every load', async () => {
+    await writeMlxModel('m')
+    const exes: string[] = []
+    const spawn = fakeSidecarSpawn({ kind: 'mlx' })
+    const names = ['/data/mlx/backends/a/macos-arm64/mlx-server', '/resources/bin/mlx-server']
+    const r = runtime(
+      {},
+      {},
+      {
+        resolveBinary: async () => names.shift(),
+        spawn: (spec, opts) => {
+          exes.push(spec.exe)
+          return spawn(spec, opts)
+        },
+      }
+    )
+    await r.load('m')
+    await r.unload('m')
+    await r.load('m')
+    expect(exes).toEqual(['/data/mlx/backends/a/macos-arm64/mlx-server', '/resources/bin/mlx-server'])
+    // Nothing left to resolve and nothing in the resources folder: not installed.
+    await r.unload('m')
+    await expect(
+      runtime({}, {}, { resolveBinary: async () => undefined, resourcesDir: undefined }).load('m')
+    ).rejects.toMatchObject({
+      code: 'BINARY_NOT_FOUND',
+      message: expect.stringMatching(/MLX is not installed/),
+    })
+  })
+
+  it('lends the engine-builds module its load queue, the builds sessions run from, and an activation that unloads the others', async () => {
+    await writeMlxModel('a')
+    await writeMlxModel('b')
+    const r = runtime({ auto_unload: false })
+    const host = r.engineHost()
+    await r.load('a')
+    await r.load('b', { exePath: '/data/mlx/backends/t/macos-arm64/mlx-server' })
+    expect((await host.inUse()).sort()).toEqual(['/data/mlx/backends/t/macos-arm64', '/resources/bin'])
+
+    // A load asked for while the host holds the queue starts only after it.
+    const order: string[] = []
+    let release!: () => void
+    const held = host.exclusive(async () => {
+      order.push('exclusive')
+      await new Promise<void>((resolve) => (release = resolve))
+      order.push('released')
+    })
+    await waitFor(() => order.length === 1)
+    await writeMlxModel('c')
+    const loading = r.load('c').then(() => order.push('loaded c'))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(order).toEqual(['exclusive'])
+    release()
+    await held
+    await loading
+    expect(order).toEqual(['exclusive', 'released', 'loaded c'])
+
+    await host.exclusive(() => host.activate('/data/mlx/backends/t/macos-arm64', false))
+    expect(r.getLoadedModels()).toEqual(['b'])
   })
 
   it('classifies a crash during load and a server that never comes up', async () => {

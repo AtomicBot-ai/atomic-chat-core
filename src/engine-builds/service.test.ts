@@ -560,3 +560,158 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
+
+describe('MLX from two origins (task 3.3)', () => {
+  const resources = () => join(data.root, 'resources')
+  async function bundle(meta?: { tag: string; published_at: string }): Promise<void> {
+    await mkdir(resources(), { recursive: true })
+    await writeFile(join(resources(), 'mlx-server'), 'bin')
+    if (meta) await writeFile(join(resources(), 'mlx-server.json'), JSON.stringify(meta))
+  }
+  async function download(tag: string, publishedAt: string): Promise<string> {
+    const dir = join(data.layout.provider('mlx').backendsDir, tag, 'macos-arm64')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'mlx-server'), 'bin')
+    await writeFile(join(dir, '.atomic-owned'), 'atomic-chat\n')
+    await writeFile(
+      join(dir, 'install.json'),
+      JSON.stringify({ tag, backendId: 'macos-arm64', sha256: null, installedAtMs: 1, publishedAt })
+    )
+    return dir
+  }
+  const AUG = { tag: 'mlxvlm-macos-arm64-07ba5a1', published_at: '2026-08-28T10:38:38Z' }
+
+  it.each([
+    ['only the installer', async (): Promise<void> => bundle(AUG), 'bundled'],
+    [
+      'only a download',
+      async (): Promise<void> => void (await download('mlxvlm-macos-arm64-aaaaaaa', '2026-09-10T00:00:00Z')),
+      'downloaded',
+    ],
+    [
+      'a newer download',
+      async () => {
+        await bundle(AUG)
+        await download('mlxvlm-macos-arm64-aaaaaaa', '2026-10-02T00:00:00Z')
+      },
+      'downloaded',
+    ],
+    [
+      'a newer installer',
+      async () => {
+        await bundle({ ...AUG, published_at: '2026-10-02T00:00:00Z' })
+        await download('mlxvlm-macos-arm64-aaaaaaa', '2026-09-10T00:00:00Z')
+      },
+      'bundled',
+    ],
+    [
+      'a tie, which the installer wins',
+      async () => {
+        await bundle(AUG)
+        await download('mlxvlm-macos-arm64-aaaaaaa', AUG.published_at)
+      },
+      'bundled',
+    ],
+    [
+      'an installer without metadata, older than any download',
+      async () => {
+        await bundle()
+        await download('mlxvlm-macos-arm64-aaaaaaa', '2000-01-01T00:00:00Z')
+      },
+      'downloaded',
+    ],
+    ['nothing', async () => {}, null],
+  ] as const)('resolves %s', async (_name, setup, origin) => {
+    await setup()
+    const h = harness({ facts: MAC_ARM, resourcesDir: resources() })
+    const binary = await h.service.resolveMlxBinary()
+    if (origin === null) expect(binary).toBeUndefined()
+    else if (origin === 'bundled') expect(binary).toBe(join(resources(), 'mlx-server'))
+    else
+      expect(binary).toBe(
+        join(
+          data.layout.provider('mlx').backendsDir,
+          'mlxvlm-macos-arm64-aaaaaaa',
+          'macos-arm64',
+          'mlx-server'
+        )
+      )
+  })
+
+  it('lists the installer build as active and not removable, and refuses to remove it', async () => {
+    await bundle(AUG)
+    const h = harness({ facts: MAC_ARM, resourcesDir: resources() })
+    const catalog = await h.service.catalog('mlx')
+    expect(catalog.installed).toEqual([
+      {
+        tag: AUG.tag,
+        backend_id: 'macos-arm64',
+        origin: 'bundled',
+        installed_at_ms: null,
+        published_at: AUG.published_at,
+        removable: false,
+        in_use: false,
+        active: true,
+      },
+    ])
+    expect(catalog.active).toMatchObject({ origin: 'bundled' })
+    await expect(h.service.remove('mlx', AUG.tag, 'macos-arm64')).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+    })
+  })
+
+  it('at start removes the downloads no newer than the installer, and says so', async () => {
+    await bundle({ ...AUG, published_at: '2026-10-02T00:00:00Z' })
+    const older = await download('mlxvlm-macos-arm64-aaaaaaa', '2026-09-10T00:00:00Z')
+    const same = await download('mlxvlm-macos-arm64-bbbbbbb', '2026-10-02T00:00:00Z')
+    const h = harness({ facts: MAC_ARM, resourcesDir: resources() })
+    await h.service.startupCleanup()
+    expect(await ls(data.layout.provider('mlx').backendsDir)).toEqual([])
+    expect(h.changed).toEqual([{ engine: 'mlx', reason: 'startup-cleanup' }])
+    expect([older, same].length).toBe(2)
+    expect(await h.service.resolveMlxBinary()).toBe(join(resources(), 'mlx-server'))
+  })
+
+  it('at start keeps a download newer than the installer, and reports nothing when nothing went', async () => {
+    await bundle(AUG)
+    await download('mlxvlm-macos-arm64-aaaaaaa', '2026-10-02T00:00:00Z')
+    const h = harness({ facts: MAC_ARM, resourcesDir: resources() })
+    await h.service.startupCleanup()
+    expect(await ls(data.layout.provider('mlx').backendsDir)).toEqual(['mlxvlm-macos-arm64-aaaaaaa'])
+    expect(h.changed).toEqual([])
+  })
+})
+
+describe('startup cleanup of sd.cpp', () => {
+  it('removes the builds a session kept on the last install, and the leftovers of an interrupted one', async () => {
+    const root = data.layout.diffusion.backendsDir
+    const build = async (tag: string, installedAtMs: number) => {
+      const dir = join(root, tag, 'linux-vulkan-x64')
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'sd-server'), 'bin')
+      await writeFile(join(dir, '.atomic-owned'), 'atomic-chat\n')
+      await writeFile(
+        join(dir, 'install.json'),
+        JSON.stringify({
+          tag,
+          backendId: 'linux-vulkan-x64',
+          backend: 'vulkan',
+          engine: 'sd-cpp',
+          sha256: null,
+          installedAtMs,
+        })
+      )
+      return dir
+    }
+    await build('master-883-137f740', 1)
+    const active = await build('master-900-aaaaaaa', 2)
+    await mkdir(`${active}.incoming-5`, { recursive: true })
+    await mkdir(`${active}.incoming-5.download`, { recursive: true })
+    await mkdir(join(root, 'master-900-aaaaaaa', 'foreign'), { recursive: true })
+    const h = harness()
+    await h.service.startupCleanup()
+    expect(await ls(root)).toEqual(['master-900-aaaaaaa'])
+    expect((await ls(join(root, 'master-900-aaaaaaa'))).sort()).toEqual(['foreign', 'linux-vulkan-x64'])
+    expect(h.changed).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
+  })
+})
