@@ -1644,7 +1644,8 @@ describe('engine builds through the owner', () => {
     const own = async (tag: string, installedAtMs: number) => {
       const dir = join(data.root, 'diffusion', 'backends', tag, 'macos-arm64')
       await mkdir(dir, { recursive: true })
-      await writeFile(join(dir, 'sd-server'), 'bin')
+      // The server binary the listing looks for: `sd-server.exe` on Windows.
+      await writeFile(join(dir, process.platform === 'win32' ? 'sd-server.exe' : 'sd-server'), 'bin')
       await writeFile(join(dir, '.atomic-owned'), 'atomic-chat\n')
       await writeFile(
         join(dir, 'install.json'),

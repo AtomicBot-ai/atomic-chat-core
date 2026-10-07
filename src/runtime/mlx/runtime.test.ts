@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fakeSidecarSpawn } from '../../../test/helpers/fake-sidecar-server.js'
 import type { FakeSidecarOptions } from '../../../test/helpers/fake-sidecar-server.js'
 import { scriptSpawn } from '../../../test/helpers/script-spawn.js'
@@ -318,7 +318,10 @@ describe('MlxRuntime', () => {
     const host = r.engineHost()
     await r.load('a')
     await r.load('b', { exePath: '/data/mlx/backends/t/macos-arm64/mlx-server' })
-    expect((await host.inUse()).sort()).toEqual(['/data/mlx/backends/t/macos-arm64', '/resources/bin'])
+    // The resources path is joined with the platform's separator (`\\resources\\bin` on Windows).
+    expect((await host.inUse()).sort()).toEqual(
+      ['/data/mlx/backends/t/macos-arm64', dirname(join('/resources/bin', 'mlx-server'))].sort()
+    )
 
     // A load asked for while the host holds the queue starts only after it.
     const order: string[] = []
