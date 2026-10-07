@@ -715,3 +715,59 @@ describe('startup cleanup of sd.cpp', () => {
     expect(h.changed).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
   })
 })
+
+describe.skipIf(!POSIX)('EngineBuildsService.remove (task 3.4)', () => {
+  async function installed(h: ReturnType<typeof harness>, tag: string) {
+    h.setSd(
+      sdManifest(
+        tag,
+        serve(tag, { 'linux-vulkan-x64': { name: `${tag}.tar.gz`, body: await archive(tag, SD_OK) } })
+      )
+    )
+    await h.service.install('sd-cpp', { task_id: tag })
+    return join(data.layout.diffusion.backendsDir, tag, 'linux-vulkan-x64')
+  }
+
+  it('removes a downloaded build under the load lock and says so', async () => {
+    const h = harness()
+    await installed(h, 'master-900-aaaaaaa')
+    const order: string[] = []
+    const host = h.hosts['sd-cpp']
+    const exclusive = host.exclusive.bind(host)
+    host.exclusive = <T>(fn: () => Promise<T>) => {
+      order.push('lock')
+      return exclusive(fn)
+    }
+    expect(await h.service.remove('sd-cpp', 'master-900-aaaaaaa', 'linux-vulkan-x64')).toEqual({
+      removed: true,
+    })
+    expect(order).toEqual(['lock'])
+    expect(await ls(data.layout.diffusion.backendsDir)).toEqual([])
+    expect(h.changed.at(-1)).toEqual({ engine: 'sd-cpp', reason: 'uninstall' })
+  })
+
+  it('refuses a build in use, a folder it did not mark and anything outside its root; a missing build is removed: false', async () => {
+    const h = harness()
+    const dir = await installed(h, 'master-900-aaaaaaa')
+    h.hosts['sd-cpp'].used = [dir]
+    await expect(h.service.remove('sd-cpp', 'master-900-aaaaaaa', 'linux-vulkan-x64')).rejects.toMatchObject({
+      code: 'BACKEND_IN_USE',
+    })
+    expect(await ls(join(data.layout.diffusion.backendsDir, 'master-900-aaaaaaa'))).toEqual([
+      'linux-vulkan-x64',
+    ])
+
+    await mkdir(join(data.layout.diffusion.backendsDir, 'master-1-aaaaaaa', 'hand-made'), { recursive: true })
+    await expect(h.service.remove('sd-cpp', 'master-1-aaaaaaa', 'hand-made')).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+    })
+    await expect(h.service.remove('sd-cpp', '..', 'models')).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+    })
+    const before = h.changed.length
+    expect(await h.service.remove('mlx', 'mlxvlm-macos-arm64-0000000', 'macos-arm64')).toEqual({
+      removed: false,
+    })
+    expect(h.changed).toHaveLength(before)
+  })
+})

@@ -446,6 +446,27 @@ describe.skipIf(!posix)('engine builds through the core', () => {
     await h.service.unloadModel()
   })
 
+  it('a removal asked for during a load waits for it under the load lock, then refuses the build in use', async () => {
+    const h = harness()
+    await h.service.configure({ dataFolder })
+    const engine = await installFakeSdEngine(layout, {
+      tag: 'master-883-137f740',
+      backendId: 'macos-arm64',
+      loadMs: 600,
+    })
+    const builds = await engineBuilds(h, 'master-883-137f740')
+    const loading = h.service.loadModel(await loadRequest())
+    await sleep(100)
+    const removal = builds.remove('sd-cpp', 'master-883-137f740', 'macos-arm64').catch((e: unknown) => e)
+    const loaded = await loading
+    expect(await removal).toMatchObject({ code: 'BACKEND_IN_USE' })
+    expect(await exists(engine.dir)).toBe(true)
+    expect(isProcessAlive(loaded.pid)).toBe(true)
+    await h.service.unloadModel()
+    expect(await builds.remove('sd-cpp', 'master-883-137f740', 'macos-arm64')).toEqual({ removed: true })
+    expect(await exists(engine.dir)).toBe(false)
+  })
+
   it('reports the build of a spec kept after a crash as in use, and an idle unload frees it', async () => {
     const h = harness()
     await h.service.configure({ dataFolder })
