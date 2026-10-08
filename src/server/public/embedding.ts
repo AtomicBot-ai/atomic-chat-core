@@ -7,20 +7,29 @@
  * sessions) exactly as before, with the body already read handed over in `ex.body`.
  *
  * A request served here is started for (an enabled module that is idle starts and is waited on), then
- * checked (`checkEmbeddingRequest`: no media links, no media the model cannot read, no `dimensions`
- * it does not produce) and passed through byte for byte with the process's own key. The engine's
- * answer, its error envelope included, comes back unchanged. The answers the core writes itself use
- * the OpenAI error shape, like the rest of `/v1`.
+ * checked (`checkEmbeddingRequest`: no media links, no inline media the engine would fail to parse, no
+ * media the model cannot read, no `dimensions` it does not produce) and passed through byte for byte
+ * with the process's own key. The engine's answer, its error envelope included, comes back unchanged,
+ * except its 500 for media it could not decode: that is the client's input, so it becomes a 400 naming
+ * the field (`undecodableMediaVerdict`). The answers the core writes itself use the OpenAI error shape,
+ * with `param` when a field is at fault, like the rest of `/v1`.
  */
 
-import { checkEmbeddingRequest } from '../../embedding/index.js'
+import { checkEmbeddingRequest, undecodableMediaVerdict } from '../../embedding/index.js'
 import type { EmbeddingBackend } from './types.js'
 import { readCapped } from './decision.js'
 import { structuredErrorJson } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, header } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { endpointFromPath } from './trace.js'
-import { relay, sendUpstream, UpstreamUnreachable } from './wire.js'
+import {
+  readUpstreamText,
+  relay,
+  relayedHeaders,
+  sendUpstream,
+  sendWhole,
+  UpstreamUnreachable,
+} from './wire.js'
 
 /** Inline images and audio are base64: a few of them make a body far larger than a text one. */
 export const MAX_EMBEDDING_BODY_BYTES = 64 * 1024 * 1024
@@ -96,7 +105,7 @@ export async function serveEmbeddingIfOwned(
       answer(
         ex,
         400,
-        structuredErrorJson(verdict.message, 'invalid_request_error', 'invalid_value'),
+        structuredErrorJson(verdict.message, 'invalid_request_error', 'invalid_value', verdict.param),
         JSON_HEADERS
       )
       return true
@@ -130,6 +139,29 @@ export async function serveEmbeddingIfOwned(
       return true
     }
     trace.upstreamStatus = upstream.status
+    if (upstream.status === 500) {
+      // A 500 is read whole: the engine's word for media it could not decode makes it the client's error.
+      const text = await readUpstreamText(upstream)
+      const undecodable = undecodableMediaVerdict(upstream.status, text, parsed.json, target.modalities)
+      if (undecodable !== undefined) {
+        trace.errorKind = 'bad_request'
+        answer(
+          ex,
+          400,
+          structuredErrorJson(
+            undecodable.message,
+            'invalid_request_error',
+            'invalid_value',
+            undecodable.param
+          ),
+          JSON_HEADERS
+        )
+        return true
+      }
+      trace.errorKind = 'local_model_error'
+      sendWhole(ex.res, upstream.status, relayedHeaders(upstream, ex.cors), text)
+      return true
+    }
     if (upstream.status >= 400) trace.errorKind = 'local_model_error'
     await relay(ex.res, upstream, ex.cors)
     return true

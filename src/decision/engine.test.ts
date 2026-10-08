@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
-import type { AtomicCoreError } from '../contracts/index.js'
+import { AtomicCoreError } from '../contracts/index.js'
 import { checkSpecTypeSupport } from '../runtime/llamacpp/index.js'
 import { fakeLlamaSpawnRaw } from '../../test/helpers/fake-llama-server.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -120,8 +120,27 @@ describe('DecisionEngineResolver', () => {
       expect(await r().resolve(exe, { checkpointDir: true })).toMatchObject({ path: exe })
       await help([`  ${DECISION_FLAG}`])
       await expect(r().resolve(exe, { checkpointDir: true })).rejects.toMatchObject({
+        code: 'DECISION_ENGINE_UNSUPPORTED',
         details: `${exe}: ${DECISION_CONVERT_FLAG} is not in its -h output`,
       })
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'takes a -h that crashed for no evidence: the start fails, the engine is not called unsupported',
+    async () => {
+      const exe = await data.writeBackend(
+        'llamacpp',
+        'b10298-2.0.0',
+        'macos-arm64',
+        "#!/bin/sh\necho 'dyld: Library not loaded: libggml.dylib' >&2\nexit 134\n"
+      )
+      const error = await rejection<AtomicCoreError>(
+        new DecisionEngineResolver({ layout: dataLayout(data.root), platform: 'darwin' }).resolve()
+      )
+      expect(error.code).toBe('MODEL_LOAD_FAILED')
+      expect(error.details).toContain(`${exe} exited with code 134 after`)
+      expect(error.details).toContain('dyld: Library not loaded: libggml.dylib')
     }
   )
 
@@ -145,6 +164,7 @@ describe('DecisionEngineResolver', () => {
       },
     })
     await expect(r.resolve()).rejects.toMatchObject({
+      code: 'MODEL_LOAD_FAILED',
       details: expect.stringContaining('probe failed: spawn EACCES'),
     })
     crash = false
@@ -154,6 +174,78 @@ describe('DecisionEngineResolver', () => {
     mtime = 2
     await r.resolve()
     expect(calls).toBe(3)
+  })
+
+  it('fails with the probe timeout, not as unsupported, when the only build could not be checked', async () => {
+    const r = new DecisionEngineResolver({
+      layout: dataLayout(data.root),
+      listPacks: async () => [pack('b10298-2.0.0', 'macos-arm64')],
+      mtime: async () => 1,
+      probe: async () => {
+        throw new AtomicCoreError(
+          'MODEL_LOAD_TIMED_OUT',
+          'Timed out while probing llama.cpp backend capabilities.',
+          'llama-server -h did not finish within 30s'
+        )
+      },
+    })
+    const error = await rejection<AtomicCoreError>(r.resolve())
+    expect(error.code).toBe('MODEL_LOAD_TIMED_OUT')
+    expect(error.message).toBe(
+      'Could not check whether the installed engine serves the decision model: Timed out while probing llama.cpp backend capabilities.'
+    )
+    expect(error.message).not.toContain('Install')
+    expect(error.details).toBe(
+      'b10298-2.0.0/macos-arm64: probe failed: Timed out while probing llama.cpp backend capabilities. (llama-server -h did not finish within 30s)'
+    )
+  })
+
+  it('does not call the engines unsupported while one of them could not be checked', async () => {
+    const packs = [pack('b10400-2.1.0', 'cpu'), pack('b10269-1.6.0', 'cpu')]
+    const r = new DecisionEngineResolver({
+      layout: dataLayout(data.root),
+      listPacks: async () => packs,
+      mtime: async () => 1,
+      probe: async (exe) => {
+        if (exe === packs[0]!.path) throw new Error('spawn EBUSY')
+        return false
+      },
+    })
+    const error = await rejection<AtomicCoreError>(r.resolve())
+    expect(error.code).toBe('MODEL_LOAD_FAILED')
+    expect(error.details).toContain('b10400-2.1.0/cpu: probe failed: spawn EBUSY')
+    expect(error.details).toContain(`b10269-1.6.0/cpu: ${DECISION_FLAG} is not in its -h output`)
+  })
+
+  it('runs a lower build that passes when a higher one could not be checked', async () => {
+    const packs = [pack('b10400-2.1.0', 'cpu'), pack('b10300-2.0.0', 'cpu')]
+    const r = new DecisionEngineResolver({
+      layout: dataLayout(data.root),
+      listPacks: async () => packs,
+      mtime: async () => 1,
+      probe: async (exe) => {
+        if (exe === packs[0]!.path) throw new Error('timed out')
+        return true
+      },
+    })
+    expect((await r.resolve()).path).toBe(packs[1]!.path)
+  })
+
+  it('fails an explicit engine path whose probe could not run with the probe error', async () => {
+    const r = new DecisionEngineResolver({
+      layout: dataLayout(data.root),
+      mtime: async () => 1,
+      probe: async () => {
+        throw new AtomicCoreError(
+          'MODEL_LOAD_TIMED_OUT',
+          'Timed out while probing llama.cpp backend capabilities.'
+        )
+      },
+    })
+    await expect(r.resolve('/opt/llama-server')).rejects.toMatchObject({
+      code: 'MODEL_LOAD_TIMED_OUT',
+      details: '/opt/llama-server: probe failed: Timed out while probing llama.cpp backend capabilities.',
+    })
   })
 
   it('skips a build that readiness rejected until its file changes', async () => {

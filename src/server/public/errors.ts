@@ -55,8 +55,11 @@ export function isComputeBackendError(status: number, body: string): boolean {
   ].some((p) => b.includes(p))
 }
 
-export function structuredErrorJson(message: string, type: string, code: string): string {
-  return serdeToString({ error: { message, type, code } })
+/** The OpenAI error envelope; `param` names the request field at fault, when there is one. */
+export function structuredErrorJson(message: string, type: string, code: string, param?: string): string {
+  return serdeToString({
+    error: param === undefined ? { message, type, code } : { message, type, param, code },
+  })
 }
 
 export function computeErrorEnvelope(oom: boolean): string {

@@ -153,6 +153,66 @@ describe('POST /v1/embeddings for the embedding module', () => {
     expect(log).toEqual(['acquire 60000', 'release'])
   })
 
+  it('names the field of inline media the engine would not read, in the OpenAI shape', async () => {
+    let reached = false
+    const upstream = await startUpstream((_req, _body, res) => {
+      reached = true
+      res.end('{}')
+    })
+    const { fake } = backend(() => ready(upstream.port))
+    const { server } = await publicWith({ embedding: fake })
+    const body = {
+      model: 'embeddinggemma-2',
+      input: [{ content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,...' } }] }],
+    }
+    const res = await post(server.port, JSON.stringify(body))
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({
+      error: {
+        message: expect.stringContaining('placeholder'),
+        type: 'invalid_request_error',
+        param: 'input[0].content[0].image_url.url',
+        code: 'invalid_value',
+      },
+    })
+    expect(reached).toBe(false)
+  })
+
+  it('answers 400 for the engine 500 about media it could not decode, and relays any other 500', async () => {
+    let says = 'Failed to load image or audio file'
+    const upstream = await startUpstream((_req, _body, res) => {
+      res.writeHead(500, { 'content-type': 'application/json', 'x-engine': 'llama.cpp' })
+      res.end(JSON.stringify({ error: { code: 500, message: says, type: 'server_error' } }))
+    })
+    const { fake, log } = backend(() => ready(upstream.port))
+    const { server, events } = await publicWith({ embedding: fake })
+    const body = JSON.stringify({
+      model: 'embeddinggemma-2',
+      input: [{ content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAAAAAA' } }] }],
+    })
+
+    const res = await post(server.port, body)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({
+      error: {
+        message: expect.stringContaining('could not be decoded as an image, audio or video file'),
+        type: 'invalid_request_error',
+        param: 'input[0].content[0].image_url.url',
+        code: 'invalid_value',
+      },
+    })
+    expect(events.at(-1)).toMatchObject({ phase: 'finished', observation: { status: 400 } })
+
+    says = 'Compute error'
+    const other = await post(server.port, body)
+    expect(other.status).toBe(500)
+    expect(other.headers.get('x-engine')).toBe('llama.cpp')
+    expect(await other.json()).toEqual({
+      error: { code: 500, message: 'Compute error', type: 'server_error' },
+    })
+    expect(log).toEqual(['acquire 60000', 'release', 'acquire 60000', 'release'])
+  })
+
   it('answers 503 in the OpenAI shape when the model cannot be reached', async () => {
     const off = backend(() => ({
       ok: false,
