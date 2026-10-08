@@ -431,7 +431,11 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     // A later installation pinned to this id resolves from the cache this wiring just wrote,
     // with no further reads of the file:// source.
     const pinned = await managed.descriptors.forInstallation('tensorrt-llm-1.2.1-r2')
-    expect(pinned).toEqual(result)
+    expect(result).toMatchObject({ source: 'remote' })
+    expect(pinned).toEqual({
+      kind: 'available',
+      descriptor: result.kind === 'available' ? result.descriptor : null,
+    })
   })
 
   it('has nothing cached and no network by default: forNewSetup is honestly unsupported', async () => {
