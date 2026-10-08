@@ -13,7 +13,7 @@ import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder 
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
 import { EmbedService, ModelCapabilityService, ModelRegistry } from '../models/index.js'
-import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
+import { LlamacppRuntime, processPackDirs } from '../runtime/llamacpp/index.js'
 import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
@@ -409,6 +409,22 @@ export async function createAtomicCore(
         downloader,
         optimalStore,
         prismCatalog,
+        resourcesDir: options.resourcesDir,
+        // Read when a removal or update acts: the runtime's load queue and what its sessions, the
+        // decision model and the embedding model run from (change `unify-engine-lifecycle`, 2.4).
+        host: {
+          exclusive: (fn) => {
+            const runtime = runtimes.get(provider)
+            return runtime instanceof LlamacppRuntime ? runtime.exclusive(fn) : fn()
+          },
+          inUse: async () => {
+            const runtime = runtimes.get(provider)
+            return [
+              ...(runtime instanceof LlamacppRuntime ? runtime.buildDirsInUse() : []),
+              ...processPackDirs([decision.getStatus(), embedding.getStatus()]),
+            ]
+          },
+        },
         readManifest: async (proxy) => {
           const cached = manifestCache.get()
           if (cached) return cached
@@ -742,9 +758,7 @@ export async function createAtomicCore(
             return result
           },
           remove: (provider, version, backend) =>
-            backendService(provider as LocalProviderId).remove(
-              version,
-              backend,
+            backendService(provider as LocalProviderId).remove(version, backend, () =>
               String(settings.get(provider as LocalProviderId)['version_backend'] ?? '')
             ),
           cancel: (taskId) => downloader.cancel(taskId),

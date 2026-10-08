@@ -592,6 +592,126 @@ describe('remove', () => {
   })
 })
 
+describe('remove under the provider lock', () => {
+  const pack = (version: string, backend: string) =>
+    join(data.layout.provider('llamacpp-upstream').backendsDir, version, backend)
+
+  function guarded(over: Partial<ConstructorParameters<typeof BackendService>[0]> = {}) {
+    return new BackendService({
+      layout: data.layout,
+      provider: 'llamacpp-upstream',
+      downloader: fakeDownloader() as never,
+      readManifest: async () => MANIFEST,
+      platform: 'darwin',
+      now: () => 1,
+      verifyMacBackend: async () => {},
+      ...over,
+    })
+  }
+
+  it('refuses a pack a session, the decision model or the embedding model runs from', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    const s = guarded({ host: { exclusive: (fn) => fn(), inUse: async () => [pack('b6100', 'macos-arm64')] } })
+
+    await expect(s.remove('b6100', 'macos-arm64', 'b6325/macos-arm64')).rejects.toMatchObject({
+      code: 'BACKEND_IN_USE',
+    })
+    expect(await s.listInstalled()).toHaveLength(1)
+  })
+
+  it("refuses the installer's pack, with the reason in details", async () => {
+    const resources = join(data.root, 'resources')
+    await mkdir(join(resources, 'bin'), { recursive: true })
+    await mkdir(join(resources, 'llamacpp-backend-upstream'), { recursive: true })
+    await writeFile(join(resources, 'llamacpp-backend-upstream', 'version.txt'), 'b6100\n')
+    await writeFile(join(resources, 'llamacpp-backend-upstream', 'backend.txt'), 'macos-arm64\n')
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    const s = guarded({ resourcesDir: join(resources, 'bin') })
+
+    await expect(s.remove('b6100', 'macos-arm64')).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      details: 'bundled',
+    })
+    expect(await s.bundledPack()).toEqual({ version: 'b6100', backend: 'macos-arm64' })
+    expect(await s.listInstalled()).toHaveLength(1)
+  })
+
+  it('refuses the active pack as INVALID_REQUEST when asked to, reading the selection inside the lock', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    let selected = 'b6325/macos-arm64'
+    const s = guarded({
+      host: {
+        exclusive: async (fn) => {
+          selected = 'b6100/macos-arm64'
+          return fn()
+        },
+        inUse: async () => [],
+      },
+    })
+    await expect(
+      s.remove('b6100', 'macos-arm64', () => selected, { refuseActiveAs: 'INVALID_REQUEST' })
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST', details: 'active' })
+  })
+
+  it('waits for the load in flight before deleting', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    let release!: () => void
+    const loading = new Promise<void>((resolve) => (release = resolve))
+    const steps: string[] = []
+    const s = guarded({
+      host: {
+        exclusive: async (fn) => {
+          await loading
+          steps.push('load finished')
+          return fn()
+        },
+        inUse: async () => [],
+      },
+    })
+    const removal = s.remove('b6100', 'macos-arm64').then((removed) => {
+      steps.push('removed')
+      return removed
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(await s.listInstalled()).toHaveLength(1)
+    release()
+    expect(await removal).toBe(true)
+    expect(steps).toEqual(['load finished', 'removed'])
+  })
+
+  it('refuses a removal or an install while an update or activation of the provider runs', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    const s = guarded()
+    let finish!: () => void
+    const operation = s.operate(
+      'update',
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        })
+    )
+    await expect(s.remove('b6100', 'macos-arm64')).rejects.toMatchObject({ code: 'ENGINE_INSTALL_IN_PROGRESS' })
+    await expect(s.install('b6325', 'macos-arm64', { taskId: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_IN_PROGRESS',
+    })
+    await expect(s.operate('activate', async () => {})).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_IN_PROGRESS',
+    })
+    finish()
+    await operation
+    expect(await s.remove('b6100', 'macos-arm64')).toBe(true)
+  })
+
+  it('lets the operation that holds the provider install', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6325', 'macos-arm64')
+    const s = guarded()
+    const result = await s.operate('update', (operation) =>
+      s.install('b6325', 'macos-arm64', { taskId: 't', operation })
+    )
+    expect(result).toMatchObject({ version: 'b6325', installed: false })
+  })
+})
+
 describe('what the manifest gives the download', () => {
   it('falls back to the published CDN when there is no manifest at all', async () => {
     const downloader = fakeDownloader()

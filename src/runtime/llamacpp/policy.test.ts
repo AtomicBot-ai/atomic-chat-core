@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   classifyBackendMismatch,
@@ -10,6 +11,8 @@ import {
   isRecoverableLoadError,
   isUnsupportedNoAvxCpu,
   modelLoadReadyTimeoutSecs,
+  packDirOfExe,
+  processPackDirs,
   parseBuildNumberStrict,
   parseEnvString,
   runtimeRanOnCpu,
@@ -152,5 +155,30 @@ describe('env, timeout, errors', () => {
     expect(isRecoverableLoadError(codedLoadError('CPU_NO_AVX', 'x'))).toBe(true)
     expect(isRecoverableLoadError({ code: 'OUT_OF_MEMORY' })).toBe(false)
     expect(isRecoverableLoadError(null)).toBe(false)
+  })
+})
+
+describe('packDirOfExe', () => {
+  it('climbs out of build/bin, or one level for a flat pack', () => {
+    const pack = join('data', 'llamacpp-upstream', 'backends', 'b6325', 'macos-arm64')
+    expect(packDirOfExe(join(pack, 'build', 'bin', 'llama-server'))).toBe(pack)
+    expect(packDirOfExe(join(pack, 'llama-server'))).toBe(pack)
+  })
+})
+
+describe('processPackDirs', () => {
+  it('names the pack of a decision or embedding process that runs, starts or restarts', () => {
+    const pack = (version: string) => join('data', 'llamacpp', 'backends', version, 'win-cpu-x64')
+    const exe = (version: string) => join(pack(version), 'build', 'bin', 'llama-server.exe')
+    expect(
+      processPackDirs([
+        { state: 'ready', engine: { path: exe('b1') } },
+        { state: 'starting', engine: { path: exe('b2') } },
+        { state: 'restarting', engine: { path: exe('b3') } },
+        { state: 'idle', engine: { path: exe('b4') } },
+        { state: 'failed', engine: { path: exe('b5') } },
+        { state: 'ready', engine: null },
+      ])
+    ).toEqual([pack('b1'), pack('b2'), pack('b3')])
   })
 })
