@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-08** — [The core applies engine updates on a client's command and owns llama.cpp's version_backend](2026-10-08-the-core-applies-engine-updates-and-owns-version-backend.md) — `/engines/{versions,:e/update,:e/builds/:v/:variant[/activate]}`, `engine:changed`, `src/engines/`; supersedes the "does not write `version_backend`" clause of 2026-09-27; managed engines reinstall as remove → setup; the installer's llama.cpp packs are `bundled`.
 - **2026-10-07** — [The core owns the sd.cpp and MLX engine builds: manifest, install, update and removal](2026-10-07-the-core-owns-sdcpp-and-mlx-engine-builds.md) — `/engine-builds/:engine/…`, `src/engine-builds/`; supersedes the engine-download part of 2026-09-17 (image generation module), follows 2026-09-27; the diffusion `…/backends` routes are removed.
 - **2026-10-07** — [Embedding models are their own core module, served by name on /v1/embeddings](2026-10-07-embedding-models-are-their-own-core-module.md) — `src/embedding/`: one upstream `llama-server --embedding` (b11454 for EmbeddingGemma 2, b11240 with a projector), readiness by a real vector and `/props.modalities`, `/v1/embeddings` by `model` with inline-media / modality / `dimensions` checks, listed in `/v1/models`; RAG untouched.
 - **2026-10-06** — [vLLM runs `vllm serve` with its KV cache in bytes and its memory share sized by core](2026-10-06-vllm-runs-vllm-serve-with-memory-sized-by-core.md) — the `vllm` adapter, `beforeCreate` now hands an engine its launch plan.
