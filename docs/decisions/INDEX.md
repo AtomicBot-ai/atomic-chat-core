@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-08** — [A generating image or video job is never evicted by a chat load](2026-10-08-a-generating-media-job-is-never-evicted-by-a-chat-load.md) — an occupant may report `busy` + `remedy`; diffusion does while a live job runs, and residency refuses the claim with `GPU_BUSY` instead of stopping it.
 - **2026-10-08** — [A decision engine probe that could not run is not an unsupported engine](2026-10-08-a-decision-probe-that-could-not-run-is-not-unsupported.md) — `-h` gets 30 s through `runHelp`; a probe that timed out, could not start or crashed fails the start with its own code (`MODEL_LOAD_TIMED_OUT` / `MODEL_LOAD_FAILED`, state `failed`), never `DECISION_ENGINE_UNSUPPORTED`.
 - **2026-10-08** — [Malformed or undecodable embedding media is a 400 that names the field](2026-10-08-embedding-media-errors-are-client-errors.md) — `checkEmbeddingRequest` checks the media string llama-server reads (data: URL form, standard base64, placeholders); the engine's 500 for undecodable media becomes a 400 with `param`.
 - **2026-10-07** — [Embedding models are their own core module, served by name on /v1/embeddings](2026-10-07-embedding-models-are-their-own-core-module.md) — `src/embedding/`: one upstream `llama-server --embedding` (b11454 for EmbeddingGemma 2, b11240 with a projector), readiness by a real vector and `/props.modalities`, `/v1/embeddings` by `model` with inline-media / modality / `dimensions` checks, listed in `/v1/models`; RAG untouched.

@@ -107,6 +107,74 @@ describe('GpuResidency.claim', () => {
     expect(error.details).toBe('holder=diffusion/flux state=stop-unconfirmed cards=all')
   })
 
+  // ATO-549: a chat model loading while a clip was generating stopped sd-server and lost the clip.
+  it('refuses a load over a session that is generating, and stops nothing at all', async () => {
+    const m = machine()
+    m.add('mlx', 'chat')
+    m.add('diffusion', 'wan', {
+      busy: 'Wan 2.2 is generating a video',
+      remedy: 'Wait for the video to finish, or stop it, then try again.',
+    })
+    let granted = false
+    const error = await rejection(
+      m.residency.claim(
+        { provider: 'llamacpp', model_id: 'c', cards: 'all', auxiliary: false },
+        undefined,
+        () => {
+          granted = true
+        }
+      )
+    )
+    expect(error.code).toBe('GPU_BUSY')
+    expect(error.message).toBe(
+      'Wan 2.2 is generating a video; loading another model on the same GPU would cancel it. ' +
+        'Wait for the video to finish, or stop it, then try again.'
+    )
+    expect(error.details).toBe('holder=diffusion/wan state=ready cards=all busy=true')
+    expect(m.evicted).toEqual([])
+    expect(granted).toBe(false)
+  })
+
+  it('refuses when a job starts while an earlier stop is awaited, before stopping that session', async () => {
+    const m = machine()
+    const chat = m.add('mlx', 'chat')
+    const image = m.add('diffusion', 'flux')
+    chat.evict = async () => {
+      m.evicted.push('mlx/chat')
+      m.occupants.splice(m.occupants.indexOf(chat), 1)
+      image.busy = 'Flux is generating an image'
+    }
+    const error = await rejection(
+      m.residency.claim({ provider: 'llamacpp', model_id: 'c', cards: 'all', auxiliary: false })
+    )
+    expect(error.message).toMatch(/^Flux is generating an image; loading another model/)
+    expect(error.message).toMatch(/Wait for it to finish, or stop it, then try again\.$/)
+    expect(m.evicted).toEqual(['mlx/chat'])
+  })
+
+  it('refuses over a job that started on a server spawning while the other stops were awaited', async () => {
+    const m = machine()
+    const chat = m.add('mlx', 'chat')
+    chat.evict = async () => {
+      m.evicted.push('mlx/chat')
+      m.occupants.splice(m.occupants.indexOf(chat), 1)
+      // A clip submitted meanwhile respawns sd-server: it holds the GPU as loading, with its job.
+      m.add('diffusion', 'wan', { state: 'loading', busy: 'Wan 2.2 is generating a video' })
+    }
+    const error = await rejection(
+      m.residency.claim({ provider: 'llamacpp', model_id: 'c', cards: 'all', auxiliary: false })
+    )
+    expect(error.details).toBe('holder=diffusion/wan state=loading cards=all busy=true')
+    expect(m.evicted).toEqual(['mlx/chat'])
+  })
+
+  it('stops an idle image model as before', async () => {
+    const m = machine()
+    m.add('diffusion', 'flux')
+    await m.residency.claim({ provider: 'llamacpp', model_id: 'c', cards: 'all', auxiliary: false })
+    expect(m.evicted).toEqual(['diffusion/flux'])
+  })
+
   it('lets the load start when an eviction rejected but its session is gone all the same', async () => {
     const m = machine()
     const flaky = m.add('mlx', 'm')

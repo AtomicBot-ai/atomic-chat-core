@@ -12,13 +12,15 @@
  * A claim that cannot free its card is refused with `GPU_BUSY` naming what still holds it: an
  * eviction that rejected, or "succeeded" while its session is still listed (a `stop-unconfirmed`
  * container, a process that would not die), leaves the card reserved, and the next claim tries to
- * stop it again.
+ * stop it again. A session that reports `busy` (an image or video job) is never stopped: the claim is
+ * refused before anything is, and is asked again right before each stop, since a job can start while
+ * an earlier stop is awaited.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
 import { raceLoadCancel, throwIfLoadCancelled } from '../../runtime/index.js'
 import type { GpuClaimHook } from '../../runtime/index.js'
-import { claimsGpu, gpuBusyError, gpuEvictions } from './policy.js'
+import { busyHolder, claimsGpu, gpuBusyError, gpuEvictions, gpuWorkingError } from './policy.js'
 import type { GpuOccupant, GpuRequest } from './policy.js'
 
 /** An occupant with the one way to stop it: resolves once its exit is confirmed. */
@@ -66,8 +68,14 @@ export class GpuResidency {
     const release = await this.turn(signal)
     try {
       const causes = new Map<string, string>()
-      for (const occupant of gpuEvictions(request, this.deps.occupants())) {
+      const evictions = gpuEvictions(request, this.deps.occupants())
+      // All or nothing: a refusal over a busy session leaves every other one where it was.
+      const working = busyHolder(evictions)
+      if (working?.busy !== undefined) throw gpuWorkingError(working, working.busy)
+      for (const occupant of evictions) {
         throwIfLoadCancelled(signal)
+        const now = this.deps.occupants().find((current) => key(current) === key(occupant))
+        if (now?.busy !== undefined) throw gpuWorkingError(now, now.busy)
         // A load cancelled while it waits for a stop stops waiting; the stop itself goes on.
         const stopped = occupant.evict().catch((error: unknown) => {
           causes.set(key(occupant), reason(error))
@@ -76,7 +84,10 @@ export class GpuResidency {
       }
       throwIfLoadCancelled(signal)
       const [holder] = gpuEvictions(request, this.deps.occupants())
-      if (holder !== undefined) throw gpuBusyError(holder, causes.get(key(holder)))
+      if (holder !== undefined)
+        throw holder.busy !== undefined
+          ? gpuWorkingError(holder, holder.busy)
+          : gpuBusyError(holder, causes.get(key(holder)))
       granted?.()
     } finally {
       release()

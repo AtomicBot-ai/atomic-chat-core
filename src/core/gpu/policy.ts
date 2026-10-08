@@ -11,6 +11,11 @@
  * count so a busy model cannot be evicted — costs a proxy in front of every local request, and
  * switching models is something the user just asked for.
  *
+ * One exception, which costs no proxy because the engine already knows it: a session that reports
+ * `busy` — an image or video job, minutes of work a stop would throw away — is not stopped. The claim
+ * is refused with `GPU_BUSY` saying what it is generating (`gpuWorkingError`), so loading a chat model
+ * never silently cancels a clip (ATO-549).
+ *
  * Which card a session holds is the engine's own claim: llama.cpp and MLX chat and diffusion spread
  * a model over every card, so they hold all of them; `tensorrt-llm` holds the one it was started on;
  * a CPU-only session holds none. Embedding and transcription sessions are outside the rule both ways
@@ -76,6 +81,11 @@ export function gpuEvictions<T extends GpuOccupant>(request: GpuRequest, occupan
 
 const describeCards = (cards: GpuCards): string => (cards === 'all' ? 'all' : cards.join(','))
 
+/** The first of `evictions` whose stop would throw work away; the claim is refused over it. */
+export function busyHolder<T extends GpuOccupant>(evictions: readonly T[]): T | undefined {
+  return evictions.find((occupant) => occupant.busy !== undefined)
+}
+
 /** What a refusal suggests when the occupant has nothing better to say. */
 const DEFAULT_REMEDY = 'Try again once it has stopped.'
 
@@ -92,5 +102,21 @@ export function gpuBusyError(holder: GpuOccupant, cause?: string): AtomicCoreErr
       (holder.remedy ?? DEFAULT_REMEDY),
     `holder=${id} state=${holder.state} cards=${describeCards(holder.cards)}` +
       (cause === undefined ? '' : ` cause=${cause}`)
+  )
+}
+
+/** What a refusal over a busy session suggests when it has nothing better to say. */
+const BUSY_REMEDY = 'Wait for it to finish, or stop it, then try again.'
+
+/**
+ * The refusal of a load whose card `holder` holds with work in progress (`busy`): what it is doing, that
+ * loading here would cancel it, and how to free the card. Nothing was stopped.
+ */
+export function gpuWorkingError(holder: GpuOccupant, busy: string): AtomicCoreError {
+  const id = `${holder.provider}/${holder.model_id}`
+  return new AtomicCoreError(
+    'GPU_BUSY',
+    `${busy}; loading another model on the same GPU would cancel it. ` + (holder.remedy ?? BUSY_REMEDY),
+    `holder=${id} state=${holder.state} cards=${describeCards(holder.cards)} busy=true`
   )
 }
