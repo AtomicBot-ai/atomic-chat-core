@@ -7,8 +7,13 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { AtomicCoreError } from '../contracts/index.js'
-import type { LlamacppProviderId, LocalProviderId, ModelCompatibility } from '../contracts/index.js'
+import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
+import type {
+  EngineBuildId,
+  LlamacppProviderId,
+  LocalProviderId,
+  ModelCompatibility,
+} from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
@@ -685,20 +690,22 @@ export async function createAtomicCore(
     // the system that installs it. Every part is read when a command arrives.
     const engineHandles: EngineHandle[] = []
     for (const engine of hostEngines(platform, [...managedRuntimes.keys()])) {
-      if (engine === 'llamacpp-upstream' || engine === 'llamacpp' || engine === 'atomic-prism') {
+      const kind = ENGINE_KINDS[engine]
+      if (kind === 'llamacpp') {
+        const provider = engine as LlamacppProviderId
         engineHandles.push(
           new LlamacppEngine({
-            engine,
-            backends: backendService(engine),
-            advisor: backendAdvisor(engine),
-            currentVersionBackend: () => String(settings.get(engine)['version_backend'] ?? ''),
+            engine: provider,
+            backends: backendService(provider),
+            advisor: backendAdvisor(provider),
+            currentVersionBackend: () => String(settings.get(provider)['version_backend'] ?? ''),
             selectVersionBackend: async (versionBackend) => {
-              await settings.update(engine, { version_backend: versionBackend })
+              await settings.update(provider, { version_backend: versionBackend })
             },
             // The facade's unload, as a client's would go: it also lets go of the model's claims.
             unloadSessions: async () => {
-              for (const modelId of runtimes.get(engine)?.getLoadedModels() ?? []) {
-                const result = await (core as AtomicCore).unload(engine, modelId)
+              for (const modelId of runtimes.get(provider)?.getLoadedModels() ?? []) {
+                const result = await (core as AtomicCore).unload(provider, modelId)
                 if (!result.success)
                   throw new AtomicCoreError(
                     'LLAMA_CPP_PROCESS_ERROR',
@@ -708,14 +715,14 @@ export async function createAtomicCore(
             },
             emit: (name, payload) => emitter.emit(name, payload),
             onInstalled: (installed) => {
-              noticeEngineInstall(decision, engine, installed)
-              noticeEmbeddingEngineInstall(embedding, engine, installed)
+              noticeEngineInstall(decision, provider, installed)
+              noticeEmbeddingEngineInstall(embedding, provider, installed)
             },
             log: (level, message) => log(level, message),
           })
         )
-      } else if (engine === 'sd-cpp' || engine === 'mlx') {
-        engineHandles.push(new EngineBuildEngine({ engine, builds: engineBuilds }))
+      } else if (kind === 'engine-build') {
+        engineHandles.push(new EngineBuildEngine({ engine: engine as EngineBuildId, builds: engineBuilds }))
       } else {
         const runtime = managedRuntimes.get(engine)
         if (runtime !== undefined)

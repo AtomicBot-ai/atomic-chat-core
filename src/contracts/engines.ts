@@ -28,6 +28,17 @@ export type EngineId = (typeof ENGINE_IDS)[number]
 /** Which system underneath installs the engine. */
 export type EngineKind = 'llamacpp' | 'engine-build' | 'managed'
 
+/** The kind of every engine: what decides its update body, who picks its active build, how it applies. */
+export const ENGINE_KINDS: Readonly<Record<EngineId, EngineKind>> = {
+  'llamacpp-upstream': 'llamacpp',
+  'llamacpp': 'llamacpp',
+  'atomic-prism': 'llamacpp',
+  'sd-cpp': 'engine-build',
+  'mlx': 'engine-build',
+  'tensorrt-llm': 'managed',
+  'vllm': 'managed',
+}
+
 /**
  * Who picks the build the next load runs: `client` — any installed build can be made active
  * (llama.cpp, `version_backend`); `core` — the core's own rule (sd.cpp and MLX: the newest; a

@@ -124,6 +124,12 @@ describe('llamacppVersions', () => {
     ])
   })
 
+  it('reads version_backend with a BOM as the active build', async () => {
+    const entry = await llamacppVersions(llama({ current: () => '\uFEFFb11443/win-cuda12-x64' }), {})
+    expect(entry.active).toEqual({ version: 'b11443', variant: 'win-cuda12-x64' })
+    expect(entry.builds[0]?.active).toBe(true)
+  })
+
   it('reports an active build that is also in use as active', async () => {
     const entry = await llamacppVersions(llama({ inUse: async () => true }), {})
     expect(entry.builds[0]).toMatchObject({ active: true, in_use: true, not_removable_reason: 'active' })

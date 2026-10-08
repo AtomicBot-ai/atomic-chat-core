@@ -50,13 +50,18 @@ export class ManagedEngine implements EngineHandle {
     this.engine = deps.engine
   }
 
-  /** The installation `installation_id` = `engine_id` (the clients' convention), with a pinned descriptor. */
+  /**
+   * The installation `installation_id` = `engine_id` (the clients' convention), ready and pinned to a
+   * descriptor; one being removed (`removing`, possibly by the other scope's core) is not offered.
+   */
   private async installation(): Promise<InstallationRecord | null> {
     const records = await this.deps.installations()
     return (
       records.find(
         (record) =>
-          record.installation.engine_id === this.engine && record.installation.active_descriptor_id !== null
+          record.installation.engine_id === this.engine &&
+          record.installation.status === 'ready' &&
+          record.installation.active_descriptor_id !== null
       ) ?? null
     )
   }

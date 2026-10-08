@@ -3,6 +3,7 @@ import type { CoreEvents } from './events.js'
 import {
   ENGINE_CHANGED_REASONS,
   ENGINE_IDS,
+  ENGINE_KINDS,
   ENGINE_UPDATE_BLOCKED_REASONS,
   ENGINE_NOT_REMOVABLE_REASONS,
 } from './engines.js'
@@ -20,6 +21,15 @@ describe('engine lifecycle contracts', () => {
       'tensorrt-llm',
       'vllm',
     ])
+  })
+
+  it('names the system that installs each engine', () => {
+    expect(Object.keys(ENGINE_KINDS)).toEqual([...ENGINE_IDS])
+    expect(ENGINE_IDS.filter((engine) => ENGINE_KINDS[engine] === 'managed')).toEqual([
+      'tensorrt-llm',
+      'vllm',
+    ])
+    expect(ENGINE_IDS.filter((engine) => ENGINE_KINDS[engine] === 'engine-build')).toEqual(['sd-cpp', 'mlx'])
   })
 
   it('keeps the reasons clients match on verbatim', () => {

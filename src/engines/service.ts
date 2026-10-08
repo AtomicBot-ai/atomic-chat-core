@@ -5,7 +5,7 @@
  * of all of them and sends each command to the one it names.
  */
 
-import { AtomicCoreError, ENGINE_IDS } from '../contracts/index.js'
+import { AtomicCoreError, ENGINE_IDS, ENGINE_KINDS } from '../contracts/index.js'
 import type {
   EngineActivateResult,
   EngineBuildDeleteResult,
@@ -50,7 +50,7 @@ export interface EngineRemoveOptions {
 export function hostEngines(platform: NodeJS.Platform, managed: readonly string[]): EngineId[] {
   return ENGINE_IDS.filter((engine) => {
     if (engine === 'mlx') return platform === 'darwin'
-    if (engine === 'tensorrt-llm' || engine === 'vllm') return managed.includes(engine)
+    if (ENGINE_KINDS[engine] === 'managed') return managed.includes(engine)
     return true
   })
 }

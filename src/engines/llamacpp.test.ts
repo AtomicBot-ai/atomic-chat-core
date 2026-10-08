@@ -271,6 +271,20 @@ describe('LlamacppEngine.update', () => {
   })
 })
 
+describe('LlamacppEngine install failures', () => {
+  it("keeps the downloader's message, where the disk tags the app parses live", async () => {
+    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
+    const { engine, backends } = await setup()
+    backends.install = async () => {
+      throw new Error('Error: [disk_full] No space left on device')
+    }
+    await expect(engine.update({ task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'Error: [disk_full] No space left on device',
+    })
+  })
+})
+
 describe('LlamacppEngine.remove', () => {
   it('deletes an inactive pack and says so on engine:changed', async () => {
     await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')

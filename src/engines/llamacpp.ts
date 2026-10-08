@@ -44,7 +44,7 @@ export interface LlamacppEngineDeps {
     | 'exclusive'
     | 'listInstalled'
     | 'bundledPack'
-    | 'inUse'
+    | 'busyChecker'
     | 'retireOthers'
     | 'remove'
   >
@@ -72,13 +72,16 @@ function parseKey(versionBackend: string): EngineBuildKey | null {
   return { version, variant }
 }
 
-/** The downloader speaks in message strings; this surface speaks in codes, like `engine-builds`. */
+/**
+ * The downloader speaks in message strings; this surface speaks in codes, like `engine-builds`. The
+ * message stays as it was: the app reads the disk tags (`[disk_full]` …) out of it.
+ */
 function installError(error: unknown): AtomicCoreError {
   if (error instanceof AtomicCoreError) return error
   const message = error instanceof Error ? error.message : String(error)
   if (message === DOWNLOAD_CANCELLED)
     return new AtomicCoreError('CANCELLED', 'The engine update was cancelled.')
-  return new AtomicCoreError('ENGINE_INSTALL_FAILED', 'Could not install the engine build.', message)
+  return new AtomicCoreError('ENGINE_INSTALL_FAILED', message)
 }
 
 export class LlamacppEngine implements EngineHandle {
@@ -91,6 +94,8 @@ export class LlamacppEngine implements EngineHandle {
 
   versions(request: EngineVersionsRequest): Promise<EngineVersions> {
     const { deps } = this
+    // One look at what runs, for every pack of this answer.
+    let busy: ReturnType<typeof deps.backends.busyChecker> | undefined
     return llamacppVersions(
       {
         engine: deps.engine,
@@ -99,7 +104,7 @@ export class LlamacppEngine implements EngineHandle {
         catalog: (r) => deps.advisor.catalog(r),
         listInstalled: (current) => deps.backends.listInstalled(current),
         bundledPack: () => deps.backends.bundledPack(),
-        inUse: (version, backend) => deps.backends.inUse(version, backend),
+        inUse: async (version, backend) => (await (busy ??= deps.backends.busyChecker()))(version, backend),
       },
       request
     )

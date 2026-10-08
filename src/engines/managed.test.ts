@@ -136,3 +136,22 @@ describe('ManagedEngine.remove', () => {
     expect(begun).toEqual([])
   })
 })
+
+describe('ManagedEngine and an installation that is not ready', () => {
+  it('describes no build and offers nothing while the installation is being removed', async () => {
+    const { handle } = engine({
+      installations: async () => [
+        {
+          installation: {
+            installation_id: 'vllm',
+            engine_id: 'vllm',
+            active_descriptor_id: 'vllm-0.31.0-r1',
+            status: 'removing',
+          },
+          platform: 'linux/amd64',
+        } as InstallationRecord,
+      ],
+    })
+    expect(await handle.versions({})).toMatchObject({ builds: [], active: null, update: { needed: false } })
+  })
+})

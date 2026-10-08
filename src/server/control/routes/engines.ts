@@ -10,7 +10,7 @@
  * app_version?}` for the managed ones, which answer `202` with the operation they began.
  */
 
-import { AtomicCoreError, ENGINE_IDS } from '../../../contracts/index.js'
+import { AtomicCoreError, ENGINE_IDS, ENGINE_KINDS } from '../../../contracts/index.js'
 import type {
   EngineId,
   EngineReinstallRequest,
@@ -32,9 +32,6 @@ const ID_SHAPE = /^[^/\\]{1,200}$/
 const SEGMENT_SHAPE = /^[A-Za-z0-9._-]{1,200}$/
 /** A managed engine's build variant is its image platform (`linux%2Famd64` in the path). */
 const PLATFORM_SHAPE = /^linux\/(amd64|arm64)$/
-
-const MANAGED: readonly EngineId[] = ['tensorrt-llm', 'vllm']
-const LLAMACPP: readonly EngineId[] = ['llamacpp-upstream', 'llamacpp', 'atomic-prism']
 
 function engineOf(raw: string | undefined): EngineId {
   if (raw === undefined || !(ENGINE_IDS as readonly string[]).includes(raw))
@@ -66,7 +63,7 @@ function segment(value: unknown, name: string): string {
 }
 
 function variantOf(engine: EngineId, value: string | undefined): string {
-  if (MANAGED.includes(engine)) {
+  if (ENGINE_KINDS[engine] === 'managed') {
     if (value === undefined || !PLATFORM_SHAPE.test(value))
       return invalid(
         'A managed engine build is named by its image platform: linux/amd64 or linux/arm64.',
@@ -103,7 +100,7 @@ export function parseEngineVersionsBody(raw: unknown): EngineVersionsRequest {
 
 export function parseEngineUpdateBody(engine: EngineId, raw: unknown): EngineUpdateRequest {
   const body = object(raw)
-  if (MANAGED.includes(engine)) {
+  if (ENGINE_KINDS[engine] === 'managed') {
     known(body, ['request_id', 'app_version'])
     const request: EngineReinstallRequest = {
       request_id: id(body['request_id'], 'request_id'),
@@ -118,7 +115,7 @@ export function parseEngineUpdateBody(engine: EngineId, raw: unknown): EngineUpd
     ...appVersion(body),
   }
   if (body['target'] !== undefined) {
-    if (!LLAMACPP.includes(engine))
+    if (ENGINE_KINDS[engine] !== 'llamacpp')
       invalid(`The core picks the ${engine} build for this computer; an update takes no target.`)
     const target = object(body['target'], 'target')
     known(target, ['version', 'variant'])
