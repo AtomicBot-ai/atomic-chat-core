@@ -536,6 +536,38 @@ export class BackendService {
   }
 
   /**
+   * After an update made `keep` active (design D5): delete the other versions of the same backend,
+   * except the installer's pack and the ones something still runs from, which are reported as kept.
+   * Packs of other backends stay (a CPU pack kept as a fallback). Inside the update's operation and
+   * its `exclusive` turn; a pack that cannot be deleted (Windows holding a file open) is kept too.
+   */
+  async retireOthers(
+    keep: { version: string; backend: string },
+    operation: BackendOperation
+  ): Promise<{ retired: InstalledBackendPack[]; kept: InstalledBackendPack[] }> {
+    if (operation !== this.operation) throw this.busy()
+    const bundled = await this.bundledPack()
+    const retired: InstalledBackendPack[] = []
+    const kept: InstalledBackendPack[] = []
+    for (const pack of await this.listInstalled()) {
+      if (pack.backend !== keep.backend || pack.version === keep.version) continue
+      if (bundled && bundled.version === pack.version && bundled.backend === pack.backend) continue
+      if (await this.inUse(pack.version, pack.backend)) {
+        kept.push(pack)
+        continue
+      }
+      try {
+        await rm(pack.path, { recursive: true, force: true })
+        retired.push(pack)
+      } catch (error) {
+        this.deps.log?.(`Could not retire ${pack.version}/${pack.backend}: ${String(error)}`)
+        kept.push(pack)
+      }
+    }
+    return { retired, kept }
+  }
+
+  /**
    * Delete a pack. Silent when it is not there — the end state is what was asked for. Refuses ids that
    * would leave the backends directory, the pack the provider's settings select, the installer's pack
    * (`INVALID_REQUEST`, `details: bundled`: it comes back at the next launch) and a pack something runs
