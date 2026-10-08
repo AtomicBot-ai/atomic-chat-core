@@ -210,6 +210,20 @@ describe.skipIf(!ENABLED)('a real upstream llama.cpp embedding model', () => {
         { content: [{ type: 'image_url', image_url: { url: 'http://127.0.0.1:1/x.png' } }] },
       ])
       expect(link.status).toBe(400)
+
+      // Malformed or undecodable media is the client's error, named by its field, not the engine's 500.
+      const field = 'input[0].content[0].image_url.url'
+      const media = (url: string) => [{ content: [{ type: 'image_url', image_url: { url } }] }]
+      expect(await embed(media('data:image/png;base64,...'))).toMatchObject({
+        status: 400,
+        body: { error: { param: field, message: expect.stringContaining('placeholder') } },
+      })
+      expect(
+        await embed(media(`data:image/png;base64,${Buffer.alloc(64, 7).toString('base64')}`))
+      ).toMatchObject({
+        status: 400,
+        body: { error: { param: field, message: expect.stringContaining('could not be decoded') } },
+      })
     }
 
     await core.embedding.unload()
