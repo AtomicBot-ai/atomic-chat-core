@@ -7,6 +7,7 @@
 
 import { AtomicCoreError, ENGINE_IDS } from '../contracts/index.js'
 import type {
+  EngineActivateResult,
   EngineBuildDeleteResult,
   EngineId,
   EngineKind,
@@ -32,6 +33,8 @@ export interface EngineHandle {
     variant: string,
     options: EngineRemoveOptions
   ): Promise<EngineBuildDeleteResult | EngineOperationStarted>
+  /** Only where the client picks the active build (`active_choice: client`, llama.cpp). */
+  activate?(version: string, variant: string): Promise<EngineActivateResult>
 }
 
 export interface EngineRemoveOptions {
@@ -94,6 +97,18 @@ export class EnginesService {
     options: EngineRemoveOptions = {}
   ): Promise<EngineBuildDeleteResult | EngineOperationStarted> {
     return this.handle(engine).remove(version, variant, options)
+  }
+
+  /** `POST /engines/:engine/builds/:version/:variant/activate`. */
+  async activate(engine: string, version: string, variant: string): Promise<EngineActivateResult> {
+    const handle = this.handle(engine)
+    if (handle.activate === undefined)
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `The core picks the active ${engine} build; it cannot be chosen.`,
+        engine
+      )
+    return handle.activate(version, variant)
   }
 
   /** `POST /engines/versions`: every engine at once; one engine's failure is its own `error`. */

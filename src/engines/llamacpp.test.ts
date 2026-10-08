@@ -300,3 +300,59 @@ describe('LlamacppEngine.remove', () => {
     expect(changed()).toEqual([])
   })
 })
+
+describe('LlamacppEngine.activate', () => {
+  it('switches to an installed pack while a model runs: the model is unloaded, both packs stay', async () => {
+    await data.writeBackend(PROVIDER, 'b11500', 'win-cuda12-x64')
+    await data.writeBackend(PROVIDER, 'b11400', 'win-vulkan-x64')
+    await data.writeModel('demo')
+    const { engine, settingsWrites, fetcher } = await setup({ current: 'b11500/win-cuda12-x64' })
+    await runtime!.load('demo')
+
+    expect(await engine.activate('b11400', 'win-vulkan-x64')).toEqual({
+      activated: true,
+      active: { version: 'b11400', variant: 'win-vulkan-x64' },
+    })
+    expect(settingsWrites).toEqual(['b11400/win-vulkan-x64'])
+    expect(runtime!.getLoadedModels()).toEqual([])
+    expect(await installed()).toEqual(['b11400/win-vulkan-x64', 'b11500/win-cuda12-x64'])
+    expect(fetcher.calls).toEqual([])
+    expect(changed()).toEqual([{ engine: PROVIDER, reason: 'activate' }])
+  })
+
+  it('answers already-active without unloading anything', async () => {
+    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
+    await data.writeModel('demo')
+    const { engine, settingsWrites } = await setup()
+    await runtime!.load('demo')
+    expect(await engine.activate('b11443', 'macos-arm64')).toEqual({
+      activated: false,
+      reason: 'already-active',
+      active: { version: 'b11443', variant: 'macos-arm64' },
+    })
+    expect(runtime!.getLoadedModels()).toEqual(['demo'])
+    expect(settingsWrites).toEqual([])
+    expect(changed()).toEqual([])
+  })
+
+  it('refuses a pack that is not installed, leaving version_backend alone', async () => {
+    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
+    const { engine, current } = await setup()
+    await expect(engine.activate('b11600', 'macos-arm64')).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      details: 'not-installed',
+    })
+    expect(current()).toBe('b11443/macos-arm64')
+  })
+
+  it('refuses an activation while an update of the provider runs', async () => {
+    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
+    await data.writeBackend(PROVIDER, 'b11400', 'macos-arm64')
+    const { engine } = await setup()
+    const update = engine.update({ task_id: 't' })
+    await expect(engine.activate('b11400', 'macos-arm64')).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_IN_PROGRESS',
+    })
+    await update
+  })
+})

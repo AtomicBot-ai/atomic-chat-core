@@ -90,3 +90,26 @@ describe('EnginesService.remove', () => {
     await expect(service.remove('tensorrt-llm', 'x', 'y')).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
   })
 })
+
+describe('EnginesService.activate', () => {
+  it('refuses an engine whose active build the core picks', async () => {
+    const service = new EnginesService({ engines: [fakeHandle('sd-cpp', 'engine-build')] })
+    await expect(service.activate('sd-cpp', 'master-900-a', 'macos-arm64')).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+  })
+
+  it('sends the activation to a llama.cpp engine', async () => {
+    const service = new EnginesService({
+      engines: [
+        fakeHandle('llamacpp', 'llamacpp', {
+          activate: async (version, variant) => ({ activated: true, active: { version, variant } }),
+        }),
+      ],
+    })
+    expect(await service.activate('llamacpp', 'b1', 'win-cpu-x64')).toEqual({
+      activated: true,
+      active: { version: 'b1', variant: 'win-cpu-x64' },
+    })
+  })
+})

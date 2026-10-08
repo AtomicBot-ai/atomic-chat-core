@@ -20,6 +20,7 @@
 import { AtomicCoreError } from '../contracts/index.js'
 import type {
   CoreEvents,
+  EngineActivateResult,
   EngineBuildDeleteResult,
   EngineBuildKey,
   EngineSwapUpdateRequest,
@@ -150,6 +151,34 @@ export class LlamacppEngine implements EngineHandle {
     })
     this.deps.emit('engine:changed', { engine: this.engine, reason: 'update' })
     return { updated: true, active: target, retired: retired.map(keyOf), kept_in_use: kept.map(keyOf) }
+  }
+
+  /**
+   * `POST /engines/:engine/builds/:version/:variant/activate` (design D11): steps 2, 3 and 5 of an
+   * update — write `version_backend` and unload the provider's sessions in the load queue's turn, then
+   * `engine:changed {reason: activate}` — with nothing downloaded and nothing removed. Under the same
+   * operation slot as an update, so the two never race on the setting.
+   */
+  activate(version: string, variant: string): Promise<EngineActivateResult> {
+    const target = { version, variant }
+    return this.deps.backends.operate('activate', async () => {
+      const active = parseKey(this.deps.currentVersionBackend())
+      if (active !== null && active.version === version && active.variant === variant)
+        return { activated: false, reason: 'already-active', active: target }
+      const packs = await this.deps.backends.listInstalled()
+      if (!packs.some((pack) => pack.version === version && pack.backend === variant))
+        throw new AtomicCoreError(
+          'INVALID_REQUEST',
+          `${version}/${variant} is not installed.`,
+          'not-installed'
+        )
+      await this.deps.backends.exclusive(async () => {
+        await this.deps.selectVersionBackend(`${version}/${variant}`)
+        await this.unload()
+      })
+      this.deps.emit('engine:changed', { engine: this.engine, reason: 'activate' })
+      return { activated: true, active: target }
+    })
   }
 
   /**
