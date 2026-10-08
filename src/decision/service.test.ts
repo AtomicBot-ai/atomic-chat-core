@@ -382,6 +382,26 @@ describe('DecisionService lifecycle', () => {
     expect(await h.service.scoreCandidates('t', 'c', [])).toMatchObject({ reason: 'unsupported' })
   })
 
+  it('reports an engine that could not be checked as failed, not unsupported, and a load tries it again', async () => {
+    let probeTimesOut = true
+    const h = harness({
+      resolveEngine: async () => {
+        if (probeTimesOut)
+          throw new AtomicCoreError(
+            'MODEL_LOAD_TIMED_OUT',
+            'Could not check whether the installed engine serves the decision model: Timed out while probing llama.cpp backend capabilities.',
+            'b10298-2.0.0/macos-arm64: probe failed: Timed out while probing llama.cpp backend capabilities.'
+          )
+        return ENGINE
+      },
+      spawn: async () => stubHandle(63),
+    })
+    await expect(h.service.load()).rejects.toMatchObject({ code: 'MODEL_LOAD_TIMED_OUT' })
+    expect(h.service.getStatus()).toMatchObject({ state: 'failed', error: { code: 'MODEL_LOAD_TIMED_OUT' } })
+    probeTimesOut = false
+    expect(await h.service.load()).toMatchObject({ state: 'ready', pid: 63, error: null })
+  })
+
   it('restarts a process that died after it was ready, with backoff, and gives up after MAX_RESTARTS', async () => {
     const handles: Array<ReturnType<typeof stubHandle>> = []
     let failRestarts = false

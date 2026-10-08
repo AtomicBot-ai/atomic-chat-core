@@ -3,7 +3,7 @@
  *
  * The gate has three steps, cheapest first. The release tag orders the installed packs
  * (`engine-candidates.ts`); `llama-server -h` must list `--decision` (the same probe the llama.cpp
- * runtime uses for `draft-dflash`, `checkSpecTypeSupport`); and once the process runs,
+ * runtime runs for `draft-dflash`, `runHelp`); and once the process runs,
  * `/props.decision.api_version` must be 1 (`readiness.ts`). Only the first passing pack is used; a
  * pack that passed `-h` but failed readiness is handed back through `reject` and skipped, so the next
  * `resolve` finds a valid lower-ranked build (a newer tag on API version 2, a dev build with an
@@ -16,6 +16,13 @@
  * settings: which provider runs chat has nothing to do with which binary can run the decision model.
  * Probe results are remembered per executable, modification time and flag, so a start after an idle
  * unload does not pay for `-h` again, and a pack replaced by an update is probed afresh.
+ *
+ * Only a help screen that ran to its end is evidence. A probe that timed out, could not start the
+ * process, or ended in a crash proves nothing about the build: when no build passed and one of them
+ * could not be checked, the start fails with the probe's own code (`MODEL_LOAD_TIMED_OUT`,
+ * `MODEL_LOAD_FAILED`, so the module is `failed` and the advice is a retry), never
+ * `DECISION_ENGINE_UNSUPPORTED` and its advice to install a build the user already has
+ * (ADR 2026-10-08-a-decision-probe-that-could-not-run-is-not-unsupported).
  *
  * A checkpoint folder needs one more flag, `--decision-convert-cache`: a build from before the
  * converter lists `--decision` but fails the load of a folder with `MODEL_LOAD_FAILED`, and the
@@ -32,8 +39,9 @@ import { dirname } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { DecisionDialect, DecisionEngineInfo, DecisionEngineProvider } from '../contracts/index.js'
 import type { DataLayout } from '../config/index.js'
+import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import { resolveBackendExe, scanInstalledBackends } from '../backend/index.js'
-import { checkSpecTypeSupport } from '../runtime/llamacpp/index.js'
+import { probeOutputTail, runHelp } from '../runtime/llamacpp/index.js'
 import { buildProcessEnv, discoverCudaPaths, nodeCudaProbeEnv } from '../runtime/shared/index.js'
 import { orderEngineCandidates, orderUpstreamCandidates } from './engine-candidates.js'
 import type { InstalledEnginePack } from './engine-candidates.js'
@@ -43,6 +51,12 @@ import { UPSTREAM_DECISION_MIN_BUILD } from './upstream-version.js'
 export const DECISION_FLAG = '--decision'
 /** The flag a build that can convert a checkpoint folder (`-m DIR`) lists as well. */
 export const DECISION_CONVERT_FLAG = '--decision-convert-cache'
+/**
+ * The budget of one `-h`. The llama.cpp runtime's 5 s is too short here: a pack's first run after an
+ * install or an update can spend longer than that in the system's checks before `main`, and the
+ * answer is remembered, so a slow first probe is paid once.
+ */
+export const DECISION_PROBE_TIMEOUT_MS = 30_000
 
 export interface EngineRequirements {
   /** The engine the model needs; default `turboquant`. */
@@ -54,6 +68,12 @@ export interface EngineRequirements {
 }
 
 const REFUSED_AT_READINESS = 'refused at readiness'
+
+/** Why a build cannot be used. `probeError`: its probe could not run, which is no evidence either way. */
+interface Refusal {
+  reason: string
+  probeError?: AtomicCoreError
+}
 
 /** The TurboQuant provider: the one whose builds serve `--decision` and the router. */
 export const DECISION_ENGINE_PROVIDER = 'llamacpp' as const
@@ -71,7 +91,10 @@ export interface EngineResolverDeps {
   env?: NodeJS.ProcessEnv
   /** Every installed pack of `provider` with its executable. Default: a scan of `<data>/<provider>/backends`. */
   listPacks?: (provider: DecisionEngineProvider) => Promise<InstalledEnginePack[]>
-  /** Whether `exe -h` lists `flag` (`DECISION_FLAG`, `DECISION_CONVERT_FLAG`); rejects when the probe could not run. */
+  /**
+   * Whether `exe -h` lists `flag` (`DECISION_FLAG`, `DECISION_CONVERT_FLAG`); rejects when the probe
+   * could not run or proved nothing (timed out, crashed).
+   */
   probe?: (exe: string, flag: string) => Promise<boolean>
   /** Modification time of a file, `undefined` when it does not exist. */
   mtime?: (path: string) => Promise<number | undefined>
@@ -105,23 +128,29 @@ export class DecisionEngineResolver {
       return this.resolveUpstream(enginePath, needs.minBuild ?? UPSTREAM_DECISION_MIN_BUILD)
     const flags = needs.checkpointDir ? [DECISION_FLAG, DECISION_CONVERT_FLAG] : [DECISION_FLAG]
     if (enginePath !== '') {
-      const reason = await this.check(enginePath, flags)
-      if (reason === undefined) return explicitEngine(enginePath, 'turboquant')
+      const refusal = await this.check(enginePath, flags)
+      if (refusal === undefined) return explicitEngine(enginePath, 'turboquant')
+      const tried = [`${enginePath}: ${refusal.reason}`]
+      if (refusal.probeError) throw notChecked(refusal.probeError, tried)
       throw new AtomicCoreError(
         'DECISION_ENGINE_UNSUPPORTED',
         'The configured engine does not serve the decision model.',
-        `${enginePath}: ${reason}`
+        tried[0]
       )
     }
     const packs = await this.packsOf(DECISION_ENGINE_PROVIDER)
     const tried: string[] = []
     let refusedAtReadiness = 0
+    let unchecked: AtomicCoreError | undefined
     for (const candidate of orderEngineCandidates(packs)) {
-      const reason = await this.check(candidate.path, flags)
-      if (reason === undefined) return candidate.info
-      if (reason.startsWith(REFUSED_AT_READINESS)) refusedAtReadiness++
-      tried.push(`${candidate.info.version_backend}: ${reason}`)
+      const refusal = await this.check(candidate.path, flags)
+      if (refusal === undefined) return candidate.info
+      if (refusal.reason.startsWith(REFUSED_AT_READINESS)) refusedAtReadiness++
+      unchecked ??= refusal.probeError
+      tried.push(`${candidate.info.version_backend}: ${refusal.reason}`)
     }
+    // A build that could not be checked may be the one that serves the model.
+    if (unchecked) throw notChecked(unchecked, tried)
     // A build that lists `--decision` and was refused at readiness is already 1.7.0-like: telling the
     // user to install 1.7.0 would send them after what they have.
     throw new AtomicCoreError(
@@ -142,12 +171,12 @@ export class DecisionEngineResolver {
    */
   private async resolveUpstream(enginePath: string, minBuild: number): Promise<DecisionEngineInfo> {
     if (enginePath !== '') {
-      const reason = await this.check(enginePath, [])
-      if (reason === undefined) return explicitEngine(enginePath, 'upstream')
+      const refusal = await this.check(enginePath, [])
+      if (refusal === undefined) return explicitEngine(enginePath, 'upstream')
       throw new AtomicCoreError(
         'DECISION_ENGINE_UNSUPPORTED',
         'The configured engine does not serve the decision model.',
-        `${enginePath}: ${reason}`
+        `${enginePath}: ${refusal.reason}`
       )
     }
     const { eligible, tooOld } = orderUpstreamCandidates(
@@ -156,9 +185,9 @@ export class DecisionEngineResolver {
     )
     const tried: string[] = []
     for (const candidate of eligible) {
-      const reason = await this.check(candidate.path, [])
-      if (reason === undefined) return candidate.info
-      tried.push(`${candidate.info.version_backend}: ${reason}`)
+      const refusal = await this.check(candidate.path, [])
+      if (refusal === undefined) return candidate.info
+      tried.push(`${candidate.info.version_backend}: ${refusal.reason}`)
     }
     for (const pack of tooOld) tried.push(`${pack.version}/${pack.backend}: older than b${minBuild}`)
     throw new AtomicCoreError(
@@ -191,12 +220,12 @@ export class DecisionEngineResolver {
   }
 
   /** `undefined` when `exe` lists every one of `flags`, otherwise why not. */
-  private async check(exe: string, flags: readonly string[]): Promise<string | undefined> {
+  private async check(exe: string, flags: readonly string[]): Promise<Refusal | undefined> {
     const mtime = await (this.deps.mtime ?? defaultMtime)(exe)
-    if (mtime === undefined) return 'no such file'
+    if (mtime === undefined) return { reason: 'no such file' }
     const key = `${exe}\u0000${mtime}`
     const refused = this.rejected.get(key)
-    if (refused !== undefined) return `${REFUSED_AT_READINESS}: ${refused}`
+    if (refused !== undefined) return { reason: `${REFUSED_AT_READINESS}: ${refused}` }
     const probe = this.deps.probe ?? ((path: string, flag: string) => this.probeHelp(path, flag))
     for (const flag of flags) {
       const flagKey = `${key}\u0000${flag}`
@@ -206,12 +235,14 @@ export class DecisionEngineResolver {
           supported = await probe(exe, flag)
         } catch (error) {
           // A probe that could not run is not remembered: the next start tries again.
-          return `probe failed: ${error instanceof Error ? error.message : String(error)}`
+          const probeError = asProbeError(error)
+          const details = probeError.details ? ` (${probeError.details})` : ''
+          return { reason: `probe failed: ${probeError.message}${details}`, probeError }
         }
         this.probed.set(flagKey, supported)
         this.deps.log?.('debug', `decision probe ${exe}: ${supported ? 'lists' : 'no'} ${flag}`)
       }
-      if (!supported) return `${flag} is not in its -h output`
+      if (!supported) return { reason: `${flag} is not in its -h output` }
     }
     return undefined
   }
@@ -224,7 +255,20 @@ export class DecisionEngineResolver {
       cuda: discoverCudaPaths(nodeCudaProbeEnv(this.platform, this.env)),
       userEnv: {},
     })
-    return checkSpecTypeSupport(exe, flag, env, cwd)
+    const help = await runHelp(exe, env, cwd, { timeoutMs: DECISION_PROBE_TIMEOUT_MS })
+    const seconds = (help.elapsedMs / 1000).toFixed(1)
+    this.deps.log?.('debug', `decision probe ${exe}: -h finished in ${seconds}s`)
+    if (help.output.includes(flag)) return true
+    // `-h` prints the help and exits 0. Anything else (a crash, a library that would not load) printed
+    // no help at all, and the flag missing from it proves nothing.
+    if (help.exit.code !== 0)
+      throw new AtomicCoreError(
+        'MODEL_LOAD_FAILED',
+        'llama-server -h did not finish normally.',
+        `${exe} exited with ${describeExit(help.exit)} after ${seconds}s` +
+          `: ${probeOutputTail(help.output) || 'no output'}`
+      )
+    return false
   }
 
   private packsOf(provider: DecisionEngineProvider): Promise<InstalledEnginePack[]> {
@@ -240,6 +284,30 @@ export class DecisionEngineResolver {
     }
     return packs
   }
+}
+
+/** A probe failure as the core error it is; anything else thrown means the probe could not run. */
+function asProbeError(error: unknown): AtomicCoreError {
+  if (error instanceof AtomicCoreError) return error
+  return new AtomicCoreError('MODEL_LOAD_FAILED', error instanceof Error ? error.message : String(error))
+}
+
+/**
+ * No build was shown to serve the model, and `cause` kept one from being checked: the start failed,
+ * with the probe's code, and every build tried is in the details.
+ */
+function notChecked(cause: AtomicCoreError, tried: readonly string[]): AtomicCoreError {
+  return new AtomicCoreError(
+    cause.code,
+    `Could not check whether the installed engine serves the decision model: ${cause.message}`,
+    tried.join('\n')
+  )
+}
+
+function describeExit(exit: ExitInfo): string {
+  if (exit.code !== null) return `code ${exit.code}`
+  if (exit.signal !== null) return `signal ${exit.signal}`
+  return 'an unknown status'
 }
 
 /** An explicit `engine_path`: nothing is known about it but the file and the dialect it is started for. */
