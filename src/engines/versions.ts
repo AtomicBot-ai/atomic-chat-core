@@ -155,19 +155,15 @@ export async function llamacppVersions(
   const current = deps.current().trim()
   const proxy = request.proxy ?? null
   const appVersion = request.app_version ?? null
-  // The update check reads the catalog itself, with `force`; the second read is served from that.
-  const updates = await deps.checkUpdates({
-    current,
+  // The catalog is read first, with `force`, and its source is what this answer reports; the update
+  // check reads the catalog again and is served from that read.
+  const catalog = await deps.catalog({
+    current_backend: current,
     force: request.force ?? false,
     app_version: appVersion,
     proxy,
   })
-  const catalog = await deps.catalog({
-    current_backend: current,
-    force: false,
-    app_version: appVersion,
-    proxy,
-  })
+  const updates = await deps.checkUpdates({ current, force: false, app_version: appVersion, proxy })
   const [packs, bundled] = await Promise.all([deps.listInstalled(current), deps.bundledPack()])
   const active = updates.current_kind === 'concrete' ? keyOf(current) : null
 
@@ -333,7 +329,8 @@ export async function managedVersions(
   const { descriptor } = latestRead
   const latest: EngineAvailableBuild = {
     version: descriptor.descriptor_id,
-    variant: deps.platform,
+    // The platform the installation pulled was the host's choice; a setup after a removal pulls the same.
+    variant: record?.platform ?? deps.platform,
     download_bytes: descriptor.download_bytes,
   }
   const newer = installedId !== null && isNewerDescriptor(deps.engine, descriptor.descriptor_id, installedId)

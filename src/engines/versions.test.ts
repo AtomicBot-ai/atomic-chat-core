@@ -201,7 +201,7 @@ describe('llamacppVersions', () => {
     expect(entry.update.needed).toBe(true)
   })
 
-  it('reads the source with force once, and asks the update check with the same request', async () => {
+  it('reads the catalog with force first, then asks the update check from that read', async () => {
     const seen: unknown[] = []
     await llamacppVersions(
       llama({
@@ -217,11 +217,11 @@ describe('llamacppVersions', () => {
       { force: true, app_version: '2.1.0' }
     )
     expect(seen).toEqual([
-      ['updates', { current: 'b11443/win-cuda12-x64', force: true, app_version: '2.1.0', proxy: null }],
       [
         'catalog',
-        { current_backend: 'b11443/win-cuda12-x64', force: false, app_version: '2.1.0', proxy: null },
+        { current_backend: 'b11443/win-cuda12-x64', force: true, app_version: '2.1.0', proxy: null },
       ],
+      ['updates', { current: 'b11443/win-cuda12-x64', force: false, app_version: '2.1.0', proxy: null }],
     ])
   })
 
@@ -429,6 +429,12 @@ describe('managedVersions', () => {
       expect(entry.update.needed, id).toBe(false)
       expect(entry.source).toBe('cache')
     }
+  })
+
+  it("names the offer by the installation's platform, which the host decided, not this process's arch", async () => {
+    const entry = await managedVersions(managed({ platform: 'linux/arm64' }), {})
+    expect(entry.latest?.variant).toBe('linux/amd64')
+    expect(entry.update.target?.variant).toBe('linux/amd64')
   })
 
   it('has no builds and offers nothing while the engine is not installed', async () => {
