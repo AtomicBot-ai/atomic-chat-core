@@ -20,6 +20,7 @@ import { AtomicCore, CORE_VERSION } from './index.js'
 import type { BackendOutputSink } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
+import type { EngineVersionsResponse } from '../contracts/index.js'
 import { ExecutionJournal } from '../runtime/container/index.js'
 import { isProcessAlive } from '../runtime/index.js'
 import { skipTestOnWindows } from '../../test/helpers/platform.js'
@@ -515,6 +516,39 @@ describe('taking ownership', () => {
       'https://github.com/ggml-org/llama.cpp/releases/download/b1/llama-b1-bin-macos-arm64.tar.gz'
     )
     expect(warnings.some((message) => message.includes('Backend manifest returned 404'))).toBe(true)
+  })
+})
+
+describe('POST /engines/versions on the owner (change unify-engine-lifecycle, 4.1)', () => {
+  it('answers every engine of this host without the network, from what is on disk', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    const offline = (async () => {
+      throw new Error('offline')
+    }) as unknown as typeof fetch
+    const core = await createCore({ fetch: offline })
+    await core.settings.update('llamacpp-upstream', { version_backend: 'b6100/macos-arm64' })
+    const res = await fetch(`${core.control.url}/atomic/v1/engines/versions`, {
+      method: 'POST',
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ app_version: '2.1.0' }),
+    })
+    expect(res.status).toBe(200)
+    const { engines } = (await res.json()) as EngineVersionsResponse
+    const names = engines.map((entry) => entry.engine)
+    expect(names.slice(0, 4)).toEqual(['llamacpp-upstream', 'llamacpp', 'atomic-prism', 'sd-cpp'])
+    expect(names.includes('mlx')).toBe(process.platform === 'darwin')
+    expect(engines[0]).toMatchObject({
+      kind: 'llamacpp',
+      active_choice: 'client',
+      active: { version: 'b6100', variant: 'macos-arm64' },
+      builds: [
+        { version: 'b6100', variant: 'macos-arm64', origin: 'downloaded', active: true, removable: false },
+      ],
+    })
+    expect(engines.find((entry) => entry.engine === 'sd-cpp')).toMatchObject({
+      kind: 'engine-build',
+      active_choice: 'core',
+    })
   })
 })
 

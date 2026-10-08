@@ -14,6 +14,13 @@ import type {
   EngineBuildRemoveResult,
   EngineBuildUpdateCheck,
   EngineBuildUpdateCheckRequest,
+  EngineActivateResult,
+  EngineBuildDeleteResult,
+  EngineOperationStarted,
+  EngineUpdateRequest,
+  EngineUpdateResult,
+  EngineVersionsRequest,
+  EngineVersionsResponse,
 } from '../../contracts/index.js'
 import type {
   BeginOperation,
@@ -278,6 +285,27 @@ export interface EngineBuildControl {
   remove: (engine: EngineBuildId, tag: string, backendId: string) => Promise<EngineBuildRemoveResult>
 }
 
+/**
+ * The `/engines` layer (change `unify-engine-lifecycle`): the versions of every engine of this host
+ * and one command each to update, activate and remove a build. The route has already checked the
+ * engine's name and the body; whether this host has the engine is the layer's answer.
+ */
+export interface EngineControl {
+  versions: (request: EngineVersionsRequest) => Promise<EngineVersionsResponse>
+  /** A managed engine answers with the operation it began (`202`); the others once applied. */
+  update: (
+    engine: string,
+    request: EngineUpdateRequest
+  ) => Promise<EngineUpdateResult | EngineOperationStarted>
+  remove: (
+    engine: string,
+    version: string,
+    variant: string,
+    options: { retainModels?: boolean }
+  ) => Promise<EngineBuildDeleteResult | EngineOperationStarted>
+  activate: (engine: string, version: string, variant: string) => Promise<EngineActivateResult>
+}
+
 export interface DiffusionControl {
   configure: (config: DiffusionConfig) => Promise<DiffusionStatus>
   getStatus: () => Promise<DiffusionStatus>
@@ -438,6 +466,8 @@ export interface ControlServerDeps {
   remoteAccess: RemoteAccessControl
   diffusion: DiffusionControl
   engineBuilds: EngineBuildControl
+  /** Absent in a core built without the `/engines` layer; its routes then say so. */
+  engines?: EngineControl
   /** The decision model; without it the `/decision/*` routes answer `DECISION_UNAVAILABLE`. */
   decision?: DecisionControl
   /** The embedding model; without it the `/embedding/*` routes answer `EMBEDDING_UNAVAILABLE`. */

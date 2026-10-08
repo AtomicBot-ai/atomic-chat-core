@@ -43,6 +43,15 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
+import {
+  EngineBuildEngine,
+  EnginesService,
+  LlamacppEngine,
+  ManagedEngine,
+  hostEngines,
+} from '../engines/index.js'
+import type { EngineHandle } from '../engines/index.js'
+import { DEFAULT_ENVIRONMENT_ID } from '../runtime/environment/index.js'
 import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
 import {
@@ -672,6 +681,59 @@ export async function createAtomicCore(
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
+    // The `/engines` layer (change `unify-engine-lifecycle`): one handle per engine of this host, over
+    // the system that installs it. Every part is read when a command arrives.
+    const engineHandles: EngineHandle[] = []
+    for (const engine of hostEngines(platform, [...managedRuntimes.keys()])) {
+      if (engine === 'llamacpp-upstream' || engine === 'llamacpp' || engine === 'atomic-prism') {
+        engineHandles.push(
+          new LlamacppEngine({
+            engine,
+            backends: backendService(engine),
+            advisor: backendAdvisor(engine),
+            currentVersionBackend: () => String(settings.get(engine)['version_backend'] ?? ''),
+            selectVersionBackend: async (versionBackend) => {
+              await settings.update(engine, { version_backend: versionBackend })
+            },
+            // The facade's unload, as a client's would go: it also lets go of the model's claims.
+            unloadSessions: async () => {
+              for (const modelId of runtimes.get(engine)?.getLoadedModels() ?? []) {
+                const result = await (core as AtomicCore).unload(engine, modelId)
+                if (!result.success)
+                  throw new AtomicCoreError(
+                    'LLAMA_CPP_PROCESS_ERROR',
+                    result.error ?? `The unload of ${modelId} failed.`
+                  )
+              }
+            },
+            emit: (name, payload) => emitter.emit(name, payload),
+            onInstalled: (installed) => {
+              noticeEngineInstall(decision, engine, installed)
+              noticeEmbeddingEngineInstall(embedding, engine, installed)
+            },
+            log: (level, message) => log(level, message),
+          })
+        )
+      } else if (engine === 'sd-cpp' || engine === 'mlx') {
+        engineHandles.push(new EngineBuildEngine({ engine, builds: engineBuilds }))
+      } else {
+        const runtime = managedRuntimes.get(engine)
+        if (runtime !== undefined)
+          engineHandles.push(
+            new ManagedEngine({
+              engine,
+              environmentId: DEFAULT_ENVIRONMENT_ID,
+              platform: managedArch === 'arm64' ? 'linux/arm64' : 'linux/amd64',
+              installations: () => managed.installations.list(),
+              newSetup: (engineId) => managed.descriptors.forNewSetup(engineId),
+              residentModels: () => runtime.residentModels(),
+              environment: managed.service,
+            })
+          )
+      }
+    }
+    const engines = new EnginesService({ engines: engineHandles })
+
     const control = await ControlServer.start(
       {
         token,
@@ -783,6 +845,7 @@ export async function createAtomicCore(
         },
         diffusion,
         engineBuilds,
+        engines,
         decision: {
           status: () => decision.getStatus(),
           config: () => decision.getConfig(),
