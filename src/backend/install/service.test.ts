@@ -611,7 +611,9 @@ describe('remove under the provider lock', () => {
 
   it('refuses a pack a session, the decision model or the embedding model runs from', async () => {
     await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
-    const s = guarded({ host: { exclusive: (fn) => fn(), inUse: async () => [pack('b6100', 'macos-arm64')] } })
+    const s = guarded({
+      host: { exclusive: (fn) => fn(), inUse: async () => [pack('b6100', 'macos-arm64')] },
+    })
 
     await expect(s.remove('b6100', 'macos-arm64', 'b6325/macos-arm64')).rejects.toMatchObject({
       code: 'BACKEND_IN_USE',
@@ -690,7 +692,9 @@ describe('remove under the provider lock', () => {
           finish = resolve
         })
     )
-    await expect(s.remove('b6100', 'macos-arm64')).rejects.toMatchObject({ code: 'ENGINE_INSTALL_IN_PROGRESS' })
+    await expect(s.remove('b6100', 'macos-arm64')).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_IN_PROGRESS',
+    })
     await expect(s.install('b6325', 'macos-arm64', { taskId: 't' })).rejects.toMatchObject({
       code: 'ENGINE_INSTALL_IN_PROGRESS',
     })
@@ -709,6 +713,37 @@ describe('remove under the provider lock', () => {
       s.install('b6325', 'macos-arm64', { taskId: 't', operation })
     )
     expect(result).toMatchObject({ version: 'b6325', installed: false })
+  })
+})
+
+describe('what the service says it changed (change unify-engine-lifecycle, 3.7)', () => {
+  /** A downloader that writes an upstream Linux pack archive. */
+  const packDownloader = () => ({
+    download: vi.fn(async (_task: string, items: Array<{ save_path: string }>) => {
+      const fixture = join(data.root, 'pack-fixture')
+      await mkdir(join(fixture, 'build', 'bin'), { recursive: true })
+      await writeFile(join(fixture, 'build', 'bin', 'llama-server'), '#!/bin/sh\nexit 0\n')
+      for (const item of items) await tarCreate({ gzip: true, cwd: fixture, file: item.save_path }, ['build'])
+    }),
+  })
+
+  it('reports an install and a removal, and nothing for an install an update makes', async () => {
+    const reasons: string[] = []
+    const s = new BackendService({
+      layout: data.layout,
+      provider: 'llamacpp-upstream',
+      downloader: packDownloader() as never,
+      readManifest: async () => null,
+      platform: 'linux',
+      now: () => 1,
+      onChanged: (reason) => reasons.push(reason),
+    })
+    expect((await s.install('b6325', 'linux-cpu-x64', { taskId: 't' })).installed).toBe(true)
+    expect((await s.install('b6325', 'linux-cpu-x64', { taskId: 't' })).installed).toBe(false)
+    expect(await s.remove('b6325', 'linux-cpu-x64')).toBe(true)
+    expect(await s.remove('b6325', 'linux-cpu-x64')).toBe(false)
+    await s.operate('update', (operation) => s.install('b6400', 'linux-cpu-x64', { taskId: 'u', operation }))
+    expect(reasons).toEqual(['install', 'uninstall'])
   })
 })
 

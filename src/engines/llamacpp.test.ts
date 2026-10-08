@@ -108,6 +108,7 @@ async function setup(options: Setup = {}) {
     platform: 'linux',
     now: () => 1,
     resourcesDir,
+    onChanged: (reason) => events.push({ name: 'engine:changed', payload: { engine: PROVIDER, reason } }),
     host: {
       exclusive: (fn) => live.exclusive(fn),
       inUse: async () => [...live.buildDirsInUse(), ...busy],

@@ -187,10 +187,10 @@ export class LlamacppEngine implements EngineHandle {
    * something runs from (`BACKEND_IN_USE`).
    */
   async remove(version: string, variant: string): Promise<EngineBuildDeleteResult> {
+    // `engine:changed {reason: uninstall}` comes from the backend service, for this route and `/backends`.
     const removed = await this.deps.backends.remove(version, variant, this.deps.currentVersionBackend, {
       refuseActiveAs: 'INVALID_REQUEST',
     })
-    if (removed) this.deps.emit('engine:changed', { engine: this.engine, reason: 'uninstall' })
     return { removed }
   }
 

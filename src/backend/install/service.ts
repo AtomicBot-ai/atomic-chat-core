@@ -193,6 +193,11 @@ export interface BackendServiceDeps {
   host?: BackendHost
   /** The desktop's `resources/bin`, beside which the installer's pack sits; absent on `atc`. */
   resourcesDir?: string | undefined
+  /**
+   * A pack was installed or removed (`engine:changed`, change `unify-engine-lifecycle`, design D8).
+   * Not for an install an update makes: the update reports itself once it has switched.
+   */
+  onChanged?: (reason: 'install' | 'uninstall') => void
   log?: (message: string) => void
 }
 
@@ -410,6 +415,7 @@ export class BackendService {
       )
     }
 
+    if (options.operation === undefined) this.deps.onChanged?.('install')
     return { version, backend, installed: true, path: target }
   }
 
@@ -608,6 +614,7 @@ export class BackendService {
         )
         const existed = await this.isInstalled(pack.version, pack.backend)
         await rm(target, { recursive: true, force: true })
+        if (existed) this.deps.onChanged?.('uninstall')
         return existed
       })
     )

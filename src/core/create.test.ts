@@ -518,6 +518,23 @@ describe('taking ownership', () => {
   })
 })
 
+describe('engine:changed from the llama.cpp backend routes (change unify-engine-lifecycle, 3.7)', () => {
+  it('is published when DELETE /backends removes a pack, and refused packs publish nothing', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    const core = await createCore()
+    const seen: unknown[] = []
+    core.events.on('engine:changed', (payload) => seen.push(payload))
+    const remove = (version: string) =>
+      fetch(`${core.control.url}/atomic/v1/backends/llamacpp-upstream/${version}/macos-arm64`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      })
+    expect(await (await remove('b6100')).json()).toEqual({ removed: true })
+    expect(await (await remove('b6100')).json()).toEqual({ removed: false })
+    expect(seen).toEqual([{ engine: 'llamacpp-upstream', reason: 'uninstall' }])
+  })
+})
+
 describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('engine output', () => {
   it('reaches backendOutput from llama.cpp, tagged with the provider and model', async () => {
     await data.writeModel('demo')
@@ -1677,6 +1694,12 @@ describe('engine builds through the owner', () => {
     expect(
       (core.events.replayAfter(0) ?? [])
         .filter((record) => record.name === 'engine-build:changed')
+        .map((r) => r.payload)
+    ).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
+    // The same change for the clients of change `unify-engine-lifecycle`.
+    expect(
+      (core.events.replayAfter(0) ?? [])
+        .filter((record) => record.name === 'engine:changed')
         .map((r) => r.payload)
     ).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
     expect(await readdir(join(data.root, 'diffusion', 'backends'))).toEqual(['master-900-abcdef0'])

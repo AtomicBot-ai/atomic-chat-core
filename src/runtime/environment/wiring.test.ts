@@ -880,7 +880,8 @@ describe('a reinstall reaches every client as engine:changed (change unify-engin
       provisioner: fakeProvisioner(),
     })
     wired.push(managed)
-    const changed = () => events.filter((event) => event.name === 'engine:changed').map((event) => event.payload)
+    const changed = () =>
+      events.filter((event) => event.name === 'engine:changed').map((event) => event.payload)
 
     await managed.service.beginReinstall('default', {
       request_id: 'upd-1',
@@ -900,6 +901,41 @@ describe('a reinstall reaches every client as engine:changed (change unify-engin
     expect(changed()).toEqual([
       { engine: 'vllm', reason: 'reinstall' },
       { engine: 'vllm', reason: 'reinstall' },
+    ])
+  })
+})
+
+describe('a setup or a removal outside a reinstall reaches every client as engine:changed (3.7)', () => {
+  it('publishes install when a setup is ready and uninstall when a removal is done', async () => {
+    const events: Array<{ name: string; payload: unknown }> = []
+    let serial = 0
+    const managed = wireManagedRuntimes({
+      env: env('linux'),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: ((name: string, payload: unknown) => events.push({ name, payload })) as never,
+      newId: () => `id-${(serial += 1)}`,
+      provisioner: fakeProvisioner(),
+    })
+    wired.push(managed)
+    const target = { kind: 'runtime' as const, installation_id: 'vllm', engine_id: 'vllm' }
+    await managed.service.begin('default', {
+      request_id: 'a',
+      target,
+      kind: 'setup',
+      approved_plan_digest: DIGEST,
+    })
+    await managed.service.idle()
+    await managed.service.begin('default', {
+      request_id: 'b',
+      target,
+      kind: 'remove',
+      approved_plan_digest: DIGEST,
+    })
+    await managed.service.idle()
+    expect(events.filter((event) => event.name === 'engine:changed').map((event) => event.payload)).toEqual([
+      { engine: 'vllm', reason: 'install' },
+      { engine: 'vllm', reason: 'uninstall' },
     ])
   })
 })

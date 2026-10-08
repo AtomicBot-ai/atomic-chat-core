@@ -148,6 +148,7 @@ function harness(
   }
   const events: Array<{ name: string; payload: unknown }> = []
   const changed: Array<CoreEvents['engine-build:changed']> = []
+  const engineChanged: Array<CoreEvents['engine:changed']> = []
   const rewrite: typeof fetch = (input, init) => {
     const url = String(input)
       .replace(MIRROR, server.url('/releases'))
@@ -178,7 +179,10 @@ function harness(
     hardware: async () => opts.facts ?? LINUX_VULKAN,
     hosts,
     availableSpace: async () => opts.space,
-    emit: (_name, payload) => changed.push(payload),
+    emit: (name, payload) =>
+      name === 'engine-build:changed'
+        ? changed.push(payload as CoreEvents['engine-build:changed'])
+        : engineChanged.push(payload as CoreEvents['engine:changed']),
     now: () => (clock += 1),
   })
   const setSd = (manifest: SdcppManifest) => {
@@ -187,7 +191,7 @@ function harness(
   const setMlx = (manifest: MlxManifest) => {
     manifests.mlx = { manifest, source: 'remote', fetched_at: 1, error: null }
   }
-  return { service, downloader, events, changed, hosts, setSd, setMlx, manifests }
+  return { service, downloader, events, changed, engineChanged, hosts, setSd, setMlx, manifests }
 }
 
 const ls = (dir: string) => readdir(dir).catch(() => [] as string[])
@@ -789,6 +793,24 @@ describe.skipIf(!POSIX)('EngineBuildsService.remove (task 3.4)', () => {
     expect(order).toEqual(['lock'])
     expect(await ls(data.layout.diffusion.backendsDir)).toEqual([])
     expect(h.changed.at(-1)).toEqual({ engine: 'sd-cpp', reason: 'uninstall' })
+  })
+
+  it('says every install, removal and cleanup at start on engine:changed too, with the same reason', async () => {
+    const h = harness()
+    const first = await installed(h, 'master-883-aaaaaaa')
+    h.hosts['sd-cpp'].used = [first]
+    const second = await installed(h, 'master-900-bbbbbbb')
+    h.hosts['sd-cpp'].used = []
+    await h.service.startupCleanup()
+    await h.service.remove('sd-cpp', 'master-900-bbbbbbb', 'linux-vulkan-x64')
+    expect(second).toContain('master-900-bbbbbbb')
+    expect(h.engineChanged).toEqual(h.changed)
+    expect(h.engineChanged.map((event) => event.reason)).toEqual([
+      'install',
+      'install',
+      'startup-cleanup',
+      'uninstall',
+    ])
   })
 
   it('refuses the active build when the caller asks, with the reason in details', async () => {

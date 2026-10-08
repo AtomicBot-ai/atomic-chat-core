@@ -206,6 +206,8 @@ interface HarnessIdentity {
   fs?: FakeManagedFs
   /** Where the start and the end of a reinstall chain are reported. */
   onReinstall?: (engineId: string, moment: 'started' | 'finished') => void
+  /** Where a setup or a removal outside a reinstall reports what it changed. */
+  onInstallationChanged?: (engineId: string, change: 'install' | 'uninstall') => void
 }
 
 const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessIdentity = {}) => {
@@ -241,6 +243,9 @@ const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessId
     ...(identity.now === undefined ? {} : { now: identity.now }),
     ...(identity.descriptors === undefined ? {} : { descriptors: identity.descriptors }),
     ...(identity.onReinstall === undefined ? {} : { onReinstall: identity.onReinstall }),
+    ...(identity.onInstallationChanged === undefined
+      ? {}
+      : { onInstallationChanged: identity.onInstallationChanged }),
   })
   return { service, store, events, fs }
 }
@@ -1170,5 +1175,25 @@ describe('reinstall: remove, then setup (change unify-engine-lifecycle, 3.4)', (
     })
     await expect(service.get('op-2')).rejects.toMatchObject({ code: 'MANAGED_OPERATION_NOT_FOUND' })
     expect(moments).toEqual(['vllm started', 'vllm finished'])
+  })
+})
+
+describe('what a setup or a removal changed (change unify-engine-lifecycle, 3.7)', () => {
+  it('reports a finished setup as install and a finished removal as uninstall, a failed one as nothing', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A), host_step: null })
+    const changes: string[] = []
+    let n = 0
+    const { service } = harness(provisioner, {
+      newOperationId: () => `op-${(n += 1)}`,
+      onInstallationChanged: (engine, change) => changes.push(`${engine} ${change}`),
+    })
+    await service.begin('env-1', begin({ approved_plan_digest: PLAN_A }))
+    await settle(service)
+    await service.begin('env-1', begin({ request_id: 'req-2', kind: 'remove', approved_plan_digest: PLAN_A }))
+    await settle(service)
+    provisioner.failures.set('remove', new Error('docker went away'))
+    await service.begin('env-1', begin({ request_id: 'req-3', kind: 'remove', approved_plan_digest: PLAN_A }))
+    await settle(service)
+    expect(changes).toEqual(['tensorrt-llm install', 'tensorrt-llm uninstall'])
   })
 })

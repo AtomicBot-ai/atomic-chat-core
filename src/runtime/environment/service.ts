@@ -139,6 +139,11 @@ export interface EnvironmentServiceOptions {
    * another, or the removal ended without `removed`. Called with the engine id.
    */
   onReinstall?: (engineId: string, moment: 'started' | 'finished') => void
+  /**
+   * A setup outside a reinstall ended `ready` (`install`), or such a removal ended `removed`
+   * (`uninstall`): the engine's installed build changed. Called with the engine id.
+   */
+  onInstallationChanged?: (engineId: string, change: 'install' | 'uninstall') => void
 }
 
 /** What `beginReinstall` takes: the client's idempotency key, the installation, the release to set up. */
@@ -411,6 +416,11 @@ export class EnvironmentService {
       else if (engine !== null) this.options.onReinstall?.(engine, 'finished')
     }
     if (record.reinstall_of !== undefined && engine !== null) this.options.onReinstall?.(engine, 'finished')
+    if (record.follow_up !== undefined || record.reinstall_of !== undefined || engine === null) return
+    if (operation.kind === 'setup' && operation.phase === 'ready')
+      this.options.onInstallationChanged?.(engine, 'install')
+    if (operation.kind === 'remove' && operation.phase === 'removed')
+      this.options.onInstallationChanged?.(engine, 'uninstall')
   }
 
   async get(operationId: string): Promise<EnvironmentOperation> {

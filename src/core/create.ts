@@ -410,6 +410,9 @@ export async function createAtomicCore(
         optimalStore,
         prismCatalog,
         resourcesDir: options.resourcesDir,
+        // An install or removal by any route; an update and an activation report themselves.
+        onChanged: (reason) =>
+          emitter.emit('engine:changed', { engine: provider as LlamacppProviderId, reason }),
         // Read when a removal or update acts: the runtime's load queue and what its sessions, the
         // decision model and the embedding model run from (change `unify-engine-lifecycle`, 2.4).
         host: {

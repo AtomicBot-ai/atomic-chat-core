@@ -115,7 +115,11 @@ export interface EngineBuildsDeps {
   hardware: () => Promise<Pick<HardwareFacts, 'osType' | 'arch' | 'cpuExtensions' | 'gpus'>>
   hosts: Record<EngineBuildId, EngineHost>
   availableSpace: (path: string) => Promise<number | undefined>
-  emit: (name: 'engine-build:changed', payload: CoreEvents['engine-build:changed']) => void
+  /**
+   * `engine-build:changed`, and the same change as `engine:changed` (change `unify-engine-lifecycle`,
+   * design D8): the desktop releases out there listen to the first, this change's to the second.
+   */
+  emit: <K extends 'engine-build:changed' | 'engine:changed'>(name: K, payload: CoreEvents[K]) => void
   now?: () => number
   log?: (level: 'info' | 'warn', message: string) => void
   /** Test seams for the two probes. */
@@ -348,7 +352,7 @@ export class EngineBuildsService {
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
     const { retired, kept } = await this.activateAndRetire(engine, dir, replaced)
-    this.deps.emit('engine-build:changed', { engine, reason: 'install' })
+    this.changed(engine, 'install')
     return { installed: true, build, retired, kept_in_use: kept }
   }
 
@@ -382,6 +386,11 @@ export class EngineBuildsService {
       }
       return { retired, kept }
     })
+  }
+
+  private changed(engine: EngineBuildId, reason: CoreEvents['engine-build:changed']['reason']): void {
+    this.deps.emit('engine-build:changed', { engine, reason })
+    this.deps.emit('engine:changed', { engine, reason })
   }
 
   // --- removal ---------------------------------------------------------------------------------
@@ -423,7 +432,7 @@ export class EngineBuildsService {
     })
     if (removed) {
       await this.deps.hosts[engine].changed?.('uninstall')
-      this.deps.emit('engine-build:changed', { engine, reason: 'uninstall' })
+      this.changed(engine, 'uninstall')
     }
     return { removed }
   }
@@ -468,7 +477,7 @@ export class EngineBuildsService {
         })
       if (removed > 0) {
         await this.deps.hosts[engine].changed?.('startup-cleanup')
-        this.deps.emit('engine-build:changed', { engine, reason: 'startup-cleanup' })
+        this.changed(engine, 'startup-cleanup')
       }
     }
   }

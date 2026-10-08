@@ -399,6 +399,10 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
       if ((ENGINE_IDS as readonly string[]).includes(engineId))
         options.emit('engine:changed', { engine: engineId as EngineId, reason: 'reinstall' })
     },
+    onInstallationChanged: (engineId, change) => {
+      if ((ENGINE_IDS as readonly string[]).includes(engineId))
+        options.emit('engine:changed', { engine: engineId as EngineId, reason: change })
+    },
     onReset: (archivedIds) => {
       for (const id of archivedIds) operations.delete(id)
       publish()
