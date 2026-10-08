@@ -386,8 +386,17 @@ export class EngineBuildsService {
 
   // --- removal ---------------------------------------------------------------------------------
 
-  /** Only a downloaded, marked build; under the engine's load lock, so it never races a load. */
-  async remove(engine: EngineBuildId, tag: string, backendId: string): Promise<EngineBuildRemoveResult> {
+  /**
+   * Only a downloaded, marked build; under the engine's load lock, so it never races a load.
+   * `refuseActive` (`DELETE /engines/…`, change `unify-engine-lifecycle`) also refuses the build the
+   * next load would use, judged inside that lock; `DELETE /engine-builds/…` keeps allowing it.
+   */
+  async remove(
+    engine: EngineBuildId,
+    tag: string,
+    backendId: string,
+    options: { refuseActive?: boolean } = {}
+  ): Promise<EngineBuildRemoveResult> {
     const host = this.deps.hosts[engine]
     const removed = await host.exclusive(async () => {
       const builds = await this.builds(engine)
@@ -395,7 +404,14 @@ export class EngineBuildsService {
         (build) => build.origin === 'bundled' && build.tag === tag && build.backend_id === backendId
       )
       if (bundled)
-        throw new AtomicCoreError('INVALID_REQUEST', 'The build that ships with the app cannot be removed.')
+        throw new AtomicCoreError(
+          'INVALID_REQUEST',
+          'The build that ships with the app cannot be removed.',
+          'bundled'
+        )
+      const active = this.activeOf(engine, builds)
+      if (options.refuseActive && active && active.tag === tag && active.backend_id === backendId)
+        throw new AtomicCoreError('INVALID_REQUEST', 'The active build cannot be removed.', 'active')
       const dir = join(this.deps.roots[engine], tag, backendId)
       const build = builds.find((candidate) => candidate.tag === tag && candidate.backend_id === backendId)
       if (build && (await this.isUsed(build, await host.inUse())))

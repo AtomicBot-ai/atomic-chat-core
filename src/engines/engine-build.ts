@@ -7,6 +7,7 @@
 
 import { AtomicCoreError } from '../contracts/index.js'
 import type {
+  EngineBuildDeleteResult,
   EngineBuildId,
   EngineBuildKey,
   EngineBuildRef,
@@ -75,5 +76,10 @@ export class EngineBuildEngine implements EngineHandle {
       retired: [],
       kept_in_use: [],
     }
+  }
+
+  /** Never the active build: judged inside `engine-builds`' load lock, like its other refusals. */
+  remove(version: string, variant: string): Promise<EngineBuildDeleteResult> {
+    return this.deps.builds.remove(this.engine, version, variant, { refuseActive: true })
   }
 }

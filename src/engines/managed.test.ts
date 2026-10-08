@@ -103,3 +103,36 @@ describe('ManagedEngine.update', () => {
     ])
   })
 })
+
+describe('ManagedEngine.remove', () => {
+  it('begins the removal with the plan it consents to, keeping the models by default', async () => {
+    const { handle, begun } = engine()
+    expect(await handle.remove('vllm-0.31.0-r1', 'linux/amd64', {})).toEqual({ operation_id: 'op-2' })
+    expect(begun).toEqual([
+      {
+        request_id: expect.stringMatching(/.+/),
+        target: { kind: 'runtime', installation_id: 'vllm', engine_id: 'vllm' },
+        kind: 'remove',
+        retain_models: true,
+        approved_plan_digest: `sha256:${'c'.repeat(64)}`,
+      },
+    ])
+  })
+
+  it('removes the models too when asked', async () => {
+    const { handle, begun } = engine()
+    await handle.remove('vllm-0.31.0-r1', 'linux/amd64', { retainModels: false })
+    expect(begun[0]?.retain_models).toBe(false)
+  })
+
+  it('answers removed: false for a release that is not the one installed', async () => {
+    const { handle, begun } = engine()
+    expect(await handle.remove('vllm-0.30.0-r1', 'linux/amd64', {})).toEqual({ removed: false })
+    expect(
+      await engine({ installations: async () => [] }).handle.remove('vllm-0.31.0-r1', 'linux/amd64', {})
+    ).toEqual({
+      removed: false,
+    })
+    expect(begun).toEqual([])
+  })
+})

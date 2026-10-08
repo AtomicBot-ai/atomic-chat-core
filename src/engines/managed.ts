@@ -6,8 +6,10 @@
  * that asks for consent. There is no update in place: the provisioners do not implement `kind: update`.
  */
 
+import { randomUUID } from 'node:crypto'
 import { AtomicCoreError } from '../contracts/index.js'
 import type {
+  EngineBuildDeleteResult,
   EngineId,
   EngineOperationStarted,
   EngineUpdateRequest,
@@ -20,7 +22,7 @@ import type {
   InstallationRecord,
   RuntimeDescriptorProvider,
 } from '../runtime/environment/index.js'
-import type { EngineHandle } from './service.js'
+import type { EngineHandle, EngineRemoveOptions } from './service.js'
 import { managedVersions } from './versions.js'
 import type { LatestDescriptor } from './versions.js'
 
@@ -36,6 +38,8 @@ export interface ManagedEngineDeps {
   /** The engine's models loaded right now. */
   residentModels: () => readonly string[]
   environment: Pick<EnvironmentService, 'beginReinstall' | 'planRemoval' | 'begin'>
+  /** The request id of a removal asked for through `DELETE`, which has no body to carry one. */
+  newId?: () => string
 }
 
 export class ManagedEngine implements EngineHandle {
@@ -97,6 +101,36 @@ export class ManagedEngine implements EngineHandle {
       request_id: request.request_id,
       target: { kind: 'runtime', installation_id: this.engine, engine_id: this.engine },
       descriptor_id: target.version,
+    })
+    return { operation_id: removal.operation_id }
+  }
+
+  /**
+   * `DELETE /engines/:engine/builds/:version/:variant`: the durable removal of the installation, the
+   * request itself being the consent (the plan it approves is the one the removal's probe computes).
+   * `202` with the operation; a release that is not the one installed is `removed: false`.
+   */
+  async remove(
+    version: string,
+    variant: string,
+    options: EngineRemoveOptions
+  ): Promise<EngineBuildDeleteResult | EngineOperationStarted> {
+    const record = await this.installation()
+    if (
+      record === null ||
+      record.installation.active_descriptor_id !== version ||
+      record.platform !== variant
+    )
+      return { removed: false }
+    const target = { kind: 'runtime' as const, installation_id: this.engine, engine_id: this.engine }
+    const retainModels = options.retainModels ?? true
+    const plan = await this.deps.environment.planRemoval(this.deps.environmentId, target, retainModels)
+    const removal = await this.deps.environment.begin(this.deps.environmentId, {
+      request_id: (this.deps.newId ?? randomUUID)(),
+      target,
+      kind: 'remove',
+      retain_models: retainModels,
+      approved_plan_digest: plan.plan_digest,
     })
     return { operation_id: removal.operation_id }
   }

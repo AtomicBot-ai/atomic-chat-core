@@ -45,6 +45,7 @@ function fakeHandle(engine: EngineId, kind: EngineKind, over: Partial<EngineHand
     kind,
     versions: async () => entry,
     update: async () => ({ updated: false, reason: 'no-update', active: null, retired: [], kept_in_use: [] }),
+    remove: async () => ({ removed: false }),
     ...over,
   }
 }
@@ -66,5 +67,26 @@ describe('EnginesService.versions', () => {
     const response = await service.versions({ force: true })
     expect(response.engines.map((entry) => entry.engine)).toEqual(['llamacpp-upstream', 'mlx'])
     expect(seen).toEqual([{ force: true }])
+  })
+})
+
+describe('EnginesService.remove', () => {
+  it('sends the removal to the engine it names, options included, and refuses any other engine', async () => {
+    const seen: unknown[] = []
+    const service = new EnginesService({
+      engines: [
+        fakeHandle('vllm', 'managed', {
+          remove: async (version, variant, options) => {
+            seen.push([version, variant, options])
+            return { operation_id: 'op-1' }
+          },
+        }),
+      ],
+    })
+    expect(await service.remove('vllm', 'vllm-0.31.0-r1', 'linux/amd64', { retainModels: false })).toEqual({
+      operation_id: 'op-1',
+    })
+    expect(seen).toEqual([['vllm-0.31.0-r1', 'linux/amd64', { retainModels: false }]])
+    await expect(service.remove('tensorrt-llm', 'x', 'y')).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
   })
 })

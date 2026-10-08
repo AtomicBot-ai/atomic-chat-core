@@ -20,6 +20,7 @@
 import { AtomicCoreError } from '../contracts/index.js'
 import type {
   CoreEvents,
+  EngineBuildDeleteResult,
   EngineBuildKey,
   EngineSwapUpdateRequest,
   EngineUpdateRequest,
@@ -37,7 +38,14 @@ export interface LlamacppEngineDeps {
   engine: LlamacppProviderId
   backends: Pick<
     BackendService,
-    'operate' | 'install' | 'exclusive' | 'listInstalled' | 'bundledPack' | 'inUse' | 'retireOthers'
+    | 'operate'
+    | 'install'
+    | 'exclusive'
+    | 'listInstalled'
+    | 'bundledPack'
+    | 'inUse'
+    | 'retireOthers'
+    | 'remove'
   >
   advisor: Pick<BackendAdvisor, 'catalog' | 'checkUpdates'>
   /** The provider's `version_backend` in the core's settings. */
@@ -142,6 +150,19 @@ export class LlamacppEngine implements EngineHandle {
     })
     this.deps.emit('engine:changed', { engine: this.engine, reason: 'update' })
     return { updated: true, active: target, retired: retired.map(keyOf), kept_in_use: kept.map(keyOf) }
+  }
+
+  /**
+   * `DELETE /engines/:engine/builds/:version/:variant`: in the load queue's turn, so it waits for a load
+   * in flight; never the active pack (`INVALID_REQUEST`, `active`), the installer's (`bundled`) or one
+   * something runs from (`BACKEND_IN_USE`).
+   */
+  async remove(version: string, variant: string): Promise<EngineBuildDeleteResult> {
+    const removed = await this.deps.backends.remove(version, variant, this.deps.currentVersionBackend, {
+      refuseActiveAs: 'INVALID_REQUEST',
+    })
+    if (removed) this.deps.emit('engine:changed', { engine: this.engine, reason: 'uninstall' })
+    return { removed }
   }
 
   /**

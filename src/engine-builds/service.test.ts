@@ -668,6 +668,7 @@ describe('MLX from two origins (task 3.3)', () => {
     expect(catalog.active).toMatchObject({ origin: 'bundled' })
     await expect(h.service.remove('mlx', AUG.tag, 'macos-arm64')).rejects.toMatchObject({
       code: 'INVALID_REQUEST',
+      details: 'bundled',
     })
   })
 
@@ -788,6 +789,17 @@ describe.skipIf(!POSIX)('EngineBuildsService.remove (task 3.4)', () => {
     expect(order).toEqual(['lock'])
     expect(await ls(data.layout.diffusion.backendsDir)).toEqual([])
     expect(h.changed.at(-1)).toEqual({ engine: 'sd-cpp', reason: 'uninstall' })
+  })
+
+  it('refuses the active build when the caller asks, with the reason in details', async () => {
+    const h = harness()
+    await installed(h, 'master-900-aaaaaaa')
+    await expect(
+      h.service.remove('sd-cpp', 'master-900-aaaaaaa', 'linux-vulkan-x64', { refuseActive: true })
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST', details: 'active' })
+    expect(await ls(join(data.layout.diffusion.backendsDir, 'master-900-aaaaaaa'))).toEqual([
+      'linux-vulkan-x64',
+    ])
   })
 
   it('refuses a build in use, a folder it did not mark and anything outside its root; a missing build is removed: false', async () => {

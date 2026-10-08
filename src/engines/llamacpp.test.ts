@@ -269,3 +269,34 @@ describe('LlamacppEngine.update', () => {
     })
   })
 })
+
+describe('LlamacppEngine.remove', () => {
+  it('deletes an inactive pack and says so on engine:changed', async () => {
+    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
+    await data.writeBackend(PROVIDER, 'b11400', 'macos-arm64')
+    const { engine } = await setup()
+    expect(await engine.remove('b11400', 'macos-arm64')).toEqual({ removed: true })
+    expect(await installed()).toEqual(['b11443/macos-arm64'])
+    expect(changed()).toEqual([{ engine: PROVIDER, reason: 'uninstall' }])
+  })
+
+  it('refuses the active pack as INVALID_REQUEST with the reason, and a pack in use as BACKEND_IN_USE', async () => {
+    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
+    await data.writeBackend(PROVIDER, 'b11400', 'macos-arm64')
+    const { engine } = await setup({ busy: [packDir('b11400', 'macos-arm64')] })
+    await expect(engine.remove('b11443', 'macos-arm64')).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      details: 'active',
+    })
+    await expect(engine.remove('b11400', 'macos-arm64')).rejects.toMatchObject({ code: 'BACKEND_IN_USE' })
+    expect(await installed()).toEqual(['b11400/macos-arm64', 'b11443/macos-arm64'])
+    expect(changed()).toEqual([])
+  })
+
+  it('answers removed: false for a pack that is not there, and publishes nothing', async () => {
+    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
+    const { engine } = await setup()
+    expect(await engine.remove('b11000', 'macos-arm64')).toEqual({ removed: false })
+    expect(changed()).toEqual([])
+  })
+})

@@ -137,3 +137,16 @@ describe('updating sd.cpp and MLX through the dispatcher', () => {
     })
   })
 })
+
+describe('removing an sd.cpp or MLX build through the dispatcher', () => {
+  it('removes through engine-builds, refusing the active build there', async () => {
+    const seen: unknown[] = []
+    const deps = builds(new Error('unused'))
+    deps.remove = async (engine, tag, backendId, options) => {
+      seen.push([engine, tag, backendId, options])
+      return { removed: true }
+    }
+    expect(await service(deps).remove('mlx', 'v0', 'macos-arm64', {})).toEqual({ removed: true })
+    expect(seen).toEqual([['mlx', 'v0', 'macos-arm64', { refuseActive: true }]])
+  })
+})

@@ -7,6 +7,7 @@
 
 import { AtomicCoreError, ENGINE_IDS } from '../contracts/index.js'
 import type {
+  EngineBuildDeleteResult,
   EngineId,
   EngineKind,
   EngineOperationStarted,
@@ -25,6 +26,17 @@ export interface EngineHandle {
   versions(request: EngineVersionsRequest): Promise<EngineVersions>
   /** `swap` engines answer once applied; a managed engine answers with the operation it began. */
   update(request: EngineUpdateRequest): Promise<EngineUpdateResult | EngineOperationStarted>
+  /** One build; a managed engine answers with the removal it began. */
+  remove(
+    version: string,
+    variant: string,
+    options: EngineRemoveOptions
+  ): Promise<EngineBuildDeleteResult | EngineOperationStarted>
+}
+
+export interface EngineRemoveOptions {
+  /** A managed engine only: keep its models (the default). */
+  retainModels?: boolean
 }
 
 /**
@@ -72,6 +84,16 @@ export class EnginesService {
     request: EngineUpdateRequest
   ): Promise<EngineUpdateResult | EngineOperationStarted> {
     return this.handle(engine).update(request)
+  }
+
+  /** `DELETE /engines/:engine/builds/:version/:variant`. */
+  async remove(
+    engine: string,
+    version: string,
+    variant: string,
+    options: EngineRemoveOptions = {}
+  ): Promise<EngineBuildDeleteResult | EngineOperationStarted> {
+    return this.handle(engine).remove(version, variant, options)
   }
 
   /** `POST /engines/versions`: every engine at once; one engine's failure is its own `error`. */
