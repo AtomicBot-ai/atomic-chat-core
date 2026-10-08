@@ -866,3 +866,40 @@ describe('environmentAvailability before a probe', () => {
     expect(environmentAvailability(true, null, [])).toBe('setup-required')
   })
 })
+
+describe('a reinstall reaches every client as engine:changed (change unify-engine-lifecycle, 3.4)', () => {
+  it('publishes reason reinstall when the chain begins and when its setup ends', async () => {
+    const events: Array<{ name: string; payload: unknown }> = []
+    let serial = 0
+    const managed = wireManagedRuntimes({
+      env: env('linux'),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: ((name: string, payload: unknown) => events.push({ name, payload })) as never,
+      newId: () => `id-${(serial += 1)}`,
+      provisioner: fakeProvisioner(),
+    })
+    wired.push(managed)
+    const changed = () => events.filter((event) => event.name === 'engine:changed').map((event) => event.payload)
+
+    await managed.service.beginReinstall('default', {
+      request_id: 'upd-1',
+      target: { kind: 'runtime', installation_id: 'vllm', engine_id: 'vllm' },
+      descriptor_id: 'vllm-0.32.0-r1',
+    })
+    await managed.service.idle()
+    expect(changed()).toEqual([{ engine: 'vllm', reason: 'reinstall' }])
+
+    const setup = managed.operations().find((operation) => operation.request_id === 'upd-1:setup')
+    expect(setup?.phase).toBe('awaiting-consent')
+    await managed.service.resume(setup!.operation_id, {
+      expected_revision: setup!.revision,
+      approved_plan_digest: DIGEST,
+    })
+    await managed.service.idle()
+    expect(changed()).toEqual([
+      { engine: 'vllm', reason: 'reinstall' },
+      { engine: 'vllm', reason: 'reinstall' },
+    ])
+  })
+})

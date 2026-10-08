@@ -134,6 +134,18 @@ export interface EnvironmentServiceOptions {
   diagnostics?: () => Promise<EnvironmentDiagnostics>
   /** The archive folder's name for a reset: a sortable UTC time by default. */
   resetStamp?: () => string
+  /**
+   * A reinstall (`beginReinstall`) began, or its chain ended: the setup it began finished one way or
+   * another, or the removal ended without `removed`. Called with the engine id.
+   */
+  onReinstall?: (engineId: string, moment: 'started' | 'finished') => void
+}
+
+/** What `beginReinstall` takes: the client's idempotency key, the installation, the release to set up. */
+export interface BeginReinstall {
+  request_id: string
+  target: Extract<BeginOperation['target'], { kind: 'runtime' }>
+  descriptor_id: string
 }
 
 const unsupported = (input: {
@@ -299,20 +311,106 @@ export class EnvironmentService {
    * here instead (task 2.6), and the new request goes ahead.
    */
   async begin(environmentId: string, input: BeginOperation): Promise<EnvironmentOperation> {
+    return (await this.beginWith(environmentId, input)).record.machine.operation
+  }
+
+  private async beginWith(
+    environmentId: string,
+    input: BeginOperation,
+    chain: Pick<PersistedOperation, 'follow_up' | 'reinstall_of'> = {}
+  ): Promise<{ record: PersistedOperation; created: boolean }> {
     const fingerprint = beginFingerprint(input)
     let result: { record: PersistedOperation; created: boolean }
     try {
-      result = await this.options.store.createOrGet(environmentId, input, fingerprint)
+      result = await this.options.store.createOrGet(environmentId, input, fingerprint, chain)
     } catch (error) {
       if (!(await this.endAbandonedBlocker(error))) throw error
-      result = await this.options.store.createOrGet(environmentId, input, fingerprint)
+      result = await this.options.store.createOrGet(environmentId, input, fingerprint, chain)
     }
     if (result.created) {
       // Announced from its first state, so the snapshot and the event stream both show it at once.
       this.announce(result.record.machine.operation)
       this.dispatch(result.record)
     }
-    return result.record.machine.operation
+    return result
+  }
+
+  /**
+   * The plan a removal of `target` would show, computed as the removal's own probe computes it: what
+   * a caller consenting on the user's behalf approves (a reinstall, `DELETE /engines/…`). Changes
+   * nothing.
+   */
+  async planRemoval(
+    environmentId: string,
+    target: BeginOperation['target'],
+    retainModels: boolean
+  ): Promise<RequirementPlan> {
+    if (this.options.provisioner === null) return unsupported({ environment_id: environmentId, target })
+    const record = this.speculative(
+      environmentId,
+      { target },
+      { kind: 'remove', retain_models: retainModels }
+    )
+    const controller = new AbortController()
+    return (await this.options.provisioner.probe(record, controller.signal)).plan
+  }
+
+  /**
+   * Reinstall an engine from a newer release (change `unify-engine-lifecycle`, design D6): a removal
+   * that keeps the models, approved here — the client's call to update is the consent to remove — and
+   * on disk the setup that follows it. The setup is begun by this core once the removal ends
+   * `removed` (or by the next core, if this one stops first), and it asks for consent like any
+   * setup: the new image is tens of gigabytes. A retried request answers the same removal.
+   */
+  async beginReinstall(environmentId: string, input: BeginReinstall): Promise<EnvironmentOperation> {
+    const plan = await this.planRemoval(environmentId, input.target, true)
+    const { record, created } = await this.beginWith(
+      environmentId,
+      {
+        request_id: input.request_id,
+        target: input.target,
+        kind: 'remove',
+        retain_models: true,
+        approved_plan_digest: plan.plan_digest,
+      },
+      {
+        follow_up: {
+          kind: 'setup',
+          descriptor_id: input.descriptor_id,
+          request_id: `${input.request_id}:setup`,
+        },
+      }
+    )
+    if (created) this.options.onReinstall?.(input.target.engine_id, 'started')
+    return record.machine.operation
+  }
+
+  /** The setup a `removed` reinstall names; idempotent by its request id, across cores and restarts. */
+  private async beginFollowUp(record: PersistedOperation): Promise<void> {
+    const follow = record.follow_up
+    if (follow === undefined || this.stopped) return
+    await this.beginWith(
+      record.machine.operation.environment_id,
+      {
+        request_id: follow.request_id,
+        target: record.request.target,
+        kind: 'setup',
+        descriptor_id: follow.descriptor_id,
+      },
+      { reinstall_of: record.machine.operation.operation_id }
+    )
+  }
+
+  /** A finished operation that is part of a reinstall moves the chain on, or ends it. */
+  private async afterFinished(operation: EnvironmentOperation): Promise<void> {
+    const record = await this.options.store.read(operation.operation_id).catch(() => null)
+    if (record === null) return
+    const engine = operation.target.kind === 'runtime' ? operation.target.engine_id : null
+    if (record.follow_up !== undefined) {
+      if (operation.phase === 'removed') await this.beginFollowUp(record)
+      else if (engine !== null) this.options.onReinstall?.(engine, 'finished')
+    }
+    if (record.reinstall_of !== undefined && engine !== null) this.options.onReinstall?.(engine, 'finished')
   }
 
   async get(operationId: string): Promise<EnvironmentOperation> {
@@ -478,6 +576,13 @@ export class EnvironmentService {
         continue
       }
     }
+    // A reinstall whose removal ended `removed` while no core was there to begin its setup. Begun by
+    // its derived request id, so one that exists already (this core's, or the other scope's) is
+    // answered instead of started again.
+    for (const record of await this.options.store.listAll().catch(() => [] as PersistedOperation[])) {
+      if (record.follow_up === undefined || record.machine.operation.phase !== 'removed') continue
+      await this.beginFollowUp(record).catch(() => undefined)
+    }
   }
 
   /** Stop what is in flight. The intent stays on disk, so the next core resumes from it. */
@@ -505,12 +610,17 @@ export class EnvironmentService {
   }
 
   /** A record shaped like the one a real operation would have, for a probe that starts nothing. */
-  private speculative(environmentId: string, input: ProbeEnvironmentInput): PersistedOperation {
+  private speculative(
+    environmentId: string,
+    input: Pick<ProbeEnvironmentInput, 'target'> & { descriptor_id?: string },
+    as: Pick<BeginOperation, 'kind' | 'retain_models'> = { kind: 'setup' }
+  ): PersistedOperation {
     const request: BeginOperation = {
       request_id: 'probe',
       target: input.target,
-      kind: 'setup',
-      descriptor_id: input.descriptor_id,
+      kind: as.kind,
+      ...(input.descriptor_id !== undefined ? { descriptor_id: input.descriptor_id } : {}),
+      ...(as.retain_models !== undefined ? { retain_models: as.retain_models } : {}),
     }
     return {
       machine: {
@@ -520,7 +630,7 @@ export class EnvironmentService {
           request_id: 'probe',
           environment_id: environmentId,
           target: input.target,
-          kind: 'setup',
+          kind: as.kind,
           instance_id: this.options.instanceId,
           revision: 0,
           phase: 'checking',
@@ -582,9 +692,18 @@ export class EnvironmentService {
    * finished operation is forgotten, so this map stays as small as what is in flight.
    */
   private announce(operation: EnvironmentOperation): void {
-    if (TERMINAL.includes(operation.phase)) this.latest.delete(operation.operation_id)
+    const finished = TERMINAL.includes(operation.phase)
+    if (finished) this.latest.delete(operation.operation_id)
     else this.latest.set(operation.operation_id, operation)
     this.options.emit?.('environment:operation', operation)
+    if (finished) this.track(this.afterFinished(operation))
+  }
+
+  /** Work that `idle()` and `shutdown()` wait for, like a dispatched effect. */
+  private track(work: Promise<void>): void {
+    const task = work.catch(() => undefined)
+    this.running.add(task)
+    void task.finally(() => this.running.delete(task))
   }
 
   /** `current` is the pull `pulling` started at, still: same phase, same revision. Unknown counts as still. */

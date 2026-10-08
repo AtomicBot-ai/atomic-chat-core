@@ -16,6 +16,7 @@ import { parseRuntimeDescriptor } from './descriptor.js'
 import type { RuntimeDescriptorProvider } from './descriptor-provider.js'
 import { EnvironmentService, type EnvironmentProvisioner } from './service.js'
 import { OperationStore } from './store.js'
+import { managedSharedPaths } from '../../config/index.js'
 
 /**
  * A `/proc/<pid>/stat` line whose start-tick field is `ticks` — just enough of the real shape for
@@ -201,10 +202,14 @@ interface HarnessIdentity {
   now?: () => number
   /** The descriptor cache the descriptor read answers from (task 2.22); none when omitted. */
   descriptors?: Pick<RuntimeDescriptorProvider, 'forInstallation'>
+  /** Another harness's files: a second core started on the same shared root. */
+  fs?: FakeManagedFs
+  /** Where the start and the end of a reinstall chain are reported. */
+  onReinstall?: (engineId: string, moment: 'started' | 'finished') => void
 }
 
 const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessIdentity = {}) => {
-  const fs = new FakeManagedFs()
+  const fs = identity.fs ?? new FakeManagedFs()
   let n = 0
   const events: EnvironmentOperation[] = []
   const store = new OperationStore({
@@ -235,6 +240,7 @@ const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessId
     identityDeps: identity.identityDeps ?? { alive: () => false },
     ...(identity.now === undefined ? {} : { now: identity.now }),
     ...(identity.descriptors === undefined ? {} : { descriptors: identity.descriptors }),
+    ...(identity.onReinstall === undefined ? {} : { onReinstall: identity.onReinstall }),
   })
   return { service, store, events, fs }
 }
@@ -1050,5 +1056,119 @@ describe('reading a cached runtime descriptor (task 2.22)', () => {
     await expect(bare.service.descriptor(DESCRIPTOR.descriptor_id)).rejects.toMatchObject({
       code: 'MANAGED_ADAPTER_UNAVAILABLE',
     })
+  })
+})
+
+describe('reinstall: remove, then setup (change unify-engine-lifecycle, 3.4)', () => {
+  const VLLM = { kind: 'runtime' as const, installation_id: 'vllm', engine_id: 'vllm' }
+  const ids = (...names: string[]) => {
+    const queue = [...names]
+    return () => queue.shift() ?? 'op-x'
+  }
+
+  it('removes without stopping at consent, then begins the setup, which waits for consent', async () => {
+    // The removal plan, the removal's own probe, then the setup's plan.
+    const provisioner = new FakeProvisioner(
+      { plan: plan(PLAN_A, { target: VLLM }), host_step: null },
+      { plan: plan(PLAN_A, { target: VLLM }), host_step: null },
+      { plan: plan(PLAN_B, { target: VLLM, descriptor_id: 'vllm-0.32.0-r1' }), host_step: null }
+    )
+    const moments: string[] = []
+    const { service, store } = harness(provisioner, {
+      newOperationId: ids('op-1', 'op-2'),
+      onReinstall: (engine, moment) => moments.push(`${engine} ${moment}`),
+    })
+
+    const removal = await service.beginReinstall('env-1', {
+      request_id: 'upd-1',
+      target: VLLM,
+      descriptor_id: 'vllm-0.32.0-r1',
+    })
+    expect(removal).toMatchObject({ operation_id: 'op-1', kind: 'remove', approved_plan_digest: PLAN_A })
+    await settle(service)
+
+    expect((await service.get('op-1')).phase).toBe('removed')
+    expect(await store.read('op-1')).toMatchObject({
+      request: { kind: 'remove', retain_models: true },
+      follow_up: { kind: 'setup', descriptor_id: 'vllm-0.32.0-r1', request_id: 'upd-1:setup' },
+    })
+    const setup = await service.get('op-2')
+    expect(setup).toMatchObject({
+      kind: 'setup',
+      request_id: 'upd-1:setup',
+      phase: 'awaiting-consent',
+      target: VLLM,
+    })
+    expect((await store.read('op-2'))?.request.descriptor_id).toBe('vllm-0.32.0-r1')
+    expect(provisioner.calls).toEqual(['probe', 'probe', 'remove', 'probe'])
+    expect(moments).toEqual(['vllm started'])
+
+    // The user approves the new release; the chain ends with the setup.
+    await service.resume('op-2', { expected_revision: setup.revision, approved_plan_digest: PLAN_B })
+    await settle(service)
+    expect((await service.get('op-2')).phase).toBe('ready')
+    expect(moments).toEqual(['vllm started', 'vllm finished'])
+  })
+
+  it('answers a retried update with the same removal and starts nothing twice', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A, { target: VLLM }), host_step: null })
+    const { service } = harness(provisioner, { newOperationId: ids('op-1', 'op-2', 'op-3') })
+    const input = { request_id: 'upd-1', target: VLLM, descriptor_id: 'vllm-0.32.0-r1' }
+    const first = await service.beginReinstall('env-1', input)
+    await settle(service)
+    const again = await service.beginReinstall('env-1', input)
+    await settle(service)
+    expect(again.operation_id).toBe(first.operation_id)
+    await expect(service.get('op-3')).rejects.toMatchObject({ code: 'MANAGED_OPERATION_NOT_FOUND' })
+  })
+
+  it('begins the same setup exactly once when a core restarts after removed', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A, { target: VLLM }), host_step: null })
+    const first = harness(provisioner, { newOperationId: ids('op-1', 'op-2') })
+    await first.service.beginReinstall('env-1', {
+      request_id: 'upd-1',
+      target: VLLM,
+      descriptor_id: 'vllm-0.32.0-r1',
+    })
+    await settle(first.service)
+    // The core stopped between the removal and the setup: the setup was never written.
+    const setupFile = managedSharedPaths('/shared').operationFile('op-2')
+    first.fs.files.delete(setupFile)
+    first.fs.files.delete(`${setupFile}.bak`)
+
+    const next = harness(provisioner, { fs: first.fs, newOperationId: ids('op-3', 'op-4') })
+    await next.service.recover('core-2')
+    await settle(next.service)
+    await next.service.recover('core-2')
+    await settle(next.service)
+
+    expect(await next.service.get('op-3')).toMatchObject({ kind: 'setup', request_id: 'upd-1:setup' })
+    await expect(next.service.get('op-4')).rejects.toMatchObject({ code: 'MANAGED_OPERATION_NOT_FOUND' })
+  })
+
+  it('begins no setup when the removal fails, and ends the chain there', async () => {
+    const provisioner = new FakeProvisioner({ plan: plan(PLAN_A, { target: VLLM }), host_step: null })
+    provisioner.failures.set(
+      'remove',
+      new AtomicCoreError('MANAGED_STOP_UNCONFIRMED', 'The vLLM container did not confirm it stopped.')
+    )
+    const moments: string[] = []
+    const { service } = harness(provisioner, {
+      newOperationId: ids('op-1', 'op-2'),
+      onReinstall: (engine, moment) => moments.push(`${engine} ${moment}`),
+    })
+    await service.beginReinstall('env-1', {
+      request_id: 'upd-1',
+      target: VLLM,
+      descriptor_id: 'vllm-0.32.0-r1',
+    })
+    await settle(service)
+
+    expect(await service.get('op-1')).toMatchObject({
+      phase: 'failed',
+      error: { code: 'MANAGED_STOP_UNCONFIRMED' },
+    })
+    await expect(service.get('op-2')).rejects.toMatchObject({ code: 'MANAGED_OPERATION_NOT_FOUND' })
+    expect(moments).toEqual(['vllm started', 'vllm finished'])
   })
 })

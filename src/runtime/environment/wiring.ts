@@ -26,7 +26,9 @@ import { readFile as nodeReadFile } from 'node:fs/promises'
 import { managedSharedPaths, managedSharedRoot } from '../../config/index.js'
 import { CORE_VERSION } from '../../version.js'
 import type { DataFolderEnv } from '../../config/index.js'
+import { ENGINE_IDS } from '../../contracts/index.js'
 import type {
+  EngineId,
   CoreEvents,
   EnvironmentOperation,
   EnvironmentSnapshot,
@@ -391,6 +393,12 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
     // `GET …/environments/descriptors/:id` (task 2.22) reads this cache, never the network.
     descriptors,
     readSnapshot: async () => view,
+    // A reinstall's start and end change what is installed for every client (change
+    // `unify-engine-lifecycle`, design D6, D8): one event for any engine's set of builds.
+    onReinstall: (engineId) => {
+      if ((ENGINE_IDS as readonly string[]).includes(engineId))
+        options.emit('engine:changed', { engine: engineId as EngineId, reason: 'reinstall' })
+    },
     onReset: (archivedIds) => {
       for (const id of archivedIds) operations.delete(id)
       publish()
