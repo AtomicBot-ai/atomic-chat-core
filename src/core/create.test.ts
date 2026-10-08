@@ -552,6 +552,128 @@ describe('POST /engines/versions on the owner (change unify-engine-lifecycle, 4.
   })
 })
 
+describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)(
+  '/engines commands on the owner (change unify-engine-lifecycle, 4.1)',
+  () => {
+    it('activates another pack while a model runs, updates to a pack on disk and refuses the active one', async () => {
+      await installFakeBackend(data.layout, { version: 'b6325', backend: 'macos-arm64' })
+      await installFakeBackend(data.layout, { version: 'b6300', backend: 'macos-arm64' })
+      await data.writeModel('demo')
+      const core = await createCore()
+      await core.settings.update('llamacpp-upstream', { version_backend: 'b6325/macos-arm64', fit: false })
+      await core.load('llamacpp-upstream', 'demo')
+      const reasons: string[] = []
+      core.events.on('engine:changed', (payload) => reasons.push(payload.reason))
+      const call = (method: string, path: string, body?: unknown) =>
+        fetch(`${core.control.url}/atomic/v1/engines/${path}`, {
+          method,
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        })
+
+      const activated = await call('POST', 'llamacpp-upstream/builds/b6300/macos-arm64/activate')
+      expect(await activated.json()).toEqual({
+        activated: true,
+        active: { version: 'b6300', variant: 'macos-arm64' },
+      })
+      expect(core.sessions()).toEqual([])
+      expect(core.settings.get('llamacpp-upstream')['version_backend']).toBe('b6300/macos-arm64')
+
+      // A target already on disk installs nothing, then switches and retires the other version.
+      const updated = await call('POST', 'llamacpp-upstream/update', {
+        task_id: 'engine-update-llamacpp-upstream-b6325',
+        target: { version: 'b6325', variant: 'macos-arm64' },
+      })
+      expect(await updated.json()).toEqual({
+        updated: true,
+        active: { version: 'b6325', variant: 'macos-arm64' },
+        retired: [{ version: 'b6300', variant: 'macos-arm64' }],
+        kept_in_use: [],
+      })
+
+      const active = await call('DELETE', 'llamacpp-upstream/builds/b6325/macos-arm64')
+      expect(active.status).toBe(400)
+      expect(await active.json()).toMatchObject({ error: { code: 'INVALID_REQUEST', details: 'active' } })
+      expect(reasons).toEqual(['activate', 'update'])
+    })
+  }
+)
+
+describe('the managed engines in /engines/versions on a Linux owner (change unify-engine-lifecycle, 4.1)', () => {
+  it('answers the installed release, the newer one conf publishes, and no-update for an engine not installed', async () => {
+    const managedRoot = join(data.root, 'managed-root')
+    const record = join(managedRoot, 'installations', 'vllm', 'installation.json')
+    await mkdir(join(record, '..'), { recursive: true })
+    await writeFile(
+      record,
+      JSON.stringify({
+        schema_version: 1,
+        installation: {
+          installation_id: 'vllm',
+          engine_id: 'vllm',
+          environment_id: 'default',
+          active_descriptor_id: 'vllm-0.30.0-r1',
+          candidate_descriptor_id: null,
+          availability: 'supported',
+          status: 'ready',
+        },
+        image: { repository: 'vllm/vllm-openai', digest: `sha256:${'b'.repeat(64)}` },
+        platform: 'linux/amd64',
+        installed_at: '2026-10-01T00:00:00Z',
+      })
+    )
+    const vllm = join(data.root, 'vllm-0.31.0-r1.json')
+    const published = JSON.parse(
+      await readFile(new URL('../../test/fixtures/runtimes/vllm.json', import.meta.url), 'utf8')
+    ) as Record<string, unknown>
+    await writeFile(vllm, JSON.stringify({ ...published, descriptor_id: 'vllm-0.31.0-r1' }))
+    const offline = (async () => {
+      throw new Error('offline')
+    }) as unknown as typeof fetch
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+      fetch: offline,
+      env: {
+        ...process.env,
+        ATOMIC_CORE_MANAGED_ROOT: managedRoot,
+        ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM: pathToFileURL(vllm).href,
+        ATOMIC_RUNTIME_DESCRIPTOR_URL: pathToFileURL(join(managedRoot, 'no-descriptor.json')).href,
+      },
+    })
+    cores.push(linux)
+    const call = (path: string, body: unknown) =>
+      fetch(`${linux.control.url}/atomic/v1/engines/${path}`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${linux.controlToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as unknown }))
+
+    const { engines } = (await call('versions', { app_version: '99.0.0' })).body as EngineVersionsResponse
+    expect(engines.find((entry) => entry.engine === 'vllm')).toMatchObject({
+      kind: 'managed',
+      builds: [{ version: 'vllm-0.30.0-r1', variant: 'linux/amd64', origin: 'managed', in_use: false }],
+      update: {
+        needed: true,
+        target: { version: 'vllm-0.31.0-r1', variant: 'linux/amd64' },
+        apply: 'reinstall',
+      },
+      source: 'remote',
+    })
+    expect(engines.find((entry) => entry.engine === 'tensorrt-llm')).toMatchObject({
+      kind: 'managed',
+      builds: [],
+      error: { code: 'MANAGED_METADATA_INVALID' },
+    })
+    expect(await call('tensorrt-llm/update', { request_id: 'upd-1' })).toEqual({
+      status: 200,
+      body: { updated: false, reason: 'no-update', active: null, retired: [], kept_in_use: [] },
+    })
+  })
+})
+
 describe('engine:changed from the llama.cpp backend routes (change unify-engine-lifecycle, 3.7)', () => {
   it('is published when DELETE /backends removes a pack, and refused packs publish nothing', async () => {
     await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
