@@ -40,7 +40,13 @@ function fakeHandle(engine: EngineId, kind: EngineKind, over: Partial<EngineHand
     source_error: null,
     error: null,
   }
-  return { engine, kind, versions: async () => entry, ...over }
+  return {
+    engine,
+    kind,
+    versions: async () => entry,
+    update: async () => ({ updated: false, reason: 'no-update', active: null, retired: [], kept_in_use: [] }),
+    ...over,
+  }
 }
 
 describe('EnginesService.versions', () => {

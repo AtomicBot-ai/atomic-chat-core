@@ -22,6 +22,7 @@ import type {
   CoreEvents,
   EngineBuildKey,
   EngineSwapUpdateRequest,
+  EngineUpdateRequest,
   EngineUpdateResult,
   EngineVersions,
   EngineVersionsRequest,
@@ -96,7 +97,9 @@ export class LlamacppEngine implements EngineHandle {
   }
 
   /** `POST /engines/:engine/update`. Answers once applied, which can take as long as the download. */
-  update(request: EngineSwapUpdateRequest): Promise<EngineUpdateResult> {
+  async update(request: EngineUpdateRequest): Promise<EngineUpdateResult> {
+    if (!('task_id' in request))
+      throw new AtomicCoreError('INVALID_ARGUMENT', `An update of ${this.engine} needs task_id.`)
     return this.deps.backends.operate('update', (operation) => this.updateHeld(request, operation))
   }
 
