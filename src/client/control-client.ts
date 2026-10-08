@@ -18,6 +18,14 @@ import type {
   EngineBuildInstallRequest,
   EngineBuildInstallResult,
   EngineBuildRemoveResult,
+  EngineActivateResult,
+  EngineBuildDeleteResult,
+  EngineId,
+  EngineOperationStarted,
+  EngineUpdateRequest,
+  EngineUpdateResult,
+  EngineVersionsRequest,
+  EngineVersionsResponse,
   EngineBuildUpdateCheck,
   EngineBuildUpdateCheckRequest,
   BackendCatalogRequest,
@@ -243,6 +251,54 @@ export class CoreClient {
     return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
       method: 'DELETE',
     })
+  }
+
+  // --- the /engines layer (change `unify-engine-lifecycle`) ------------------------------------
+
+  /** What every engine of this host has installed, runs and could move to. Reads only. */
+  engineVersions(request: EngineVersionsRequest = {}): Promise<EngineVersionsResponse> {
+    return this.call('/engines/versions', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /**
+   * Apply an update. llama.cpp, sd.cpp and MLX answer once applied (progress under `task_id`,
+   * `cancelDownload(task_id)` stops it); a managed engine answers with the removal that begins its
+   * reinstall, followed on `environment:operation`.
+   */
+  updateEngine(
+    engine: EngineId,
+    request: EngineUpdateRequest
+  ): Promise<EngineUpdateResult | EngineOperationStarted> {
+    return this.call(`/engines/${engine}/update`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** llama.cpp only: make an installed build the one the next load runs; the provider's models unload. */
+  activateEngineBuild(engine: EngineId, version: string, variant: string): Promise<EngineActivateResult> {
+    return this.call(
+      `/engines/${engine}/builds/${encodeURIComponent(version)}/${encodeURIComponent(variant)}/activate`,
+      {
+        method: 'POST',
+      }
+    )
+  }
+
+  /**
+   * Remove one build (`removeEngineBuild` is the older `/engine-builds` route). A managed engine
+   * answers with its removal; `retain_models` keeps its models (the default).
+   */
+  deleteEngineBuild(
+    engine: EngineId,
+    version: string,
+    variant: string,
+    options: { retain_models?: boolean } = {}
+  ): Promise<EngineBuildDeleteResult | EngineOperationStarted> {
+    const query = options.retain_models === undefined ? '' : `?retain_models=${options.retain_models}`
+    return this.call(
+      `/engines/${engine}/builds/${encodeURIComponent(version)}/${encodeURIComponent(variant)}${query}`,
+      {
+        method: 'DELETE',
+      }
+    )
   }
 
   hardwareOverride(): Promise<{ override: HardwareOverride | null }> {
