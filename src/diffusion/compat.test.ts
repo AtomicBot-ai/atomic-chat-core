@@ -24,8 +24,8 @@ const codeOf = (fn: () => unknown): string | undefined => {
 describe('checkEngineCompatibility', () => {
   // The tag table of `modern_families_require_a_compatible_engine_without_switching_backends`
   // (`session.rs`, app commit ec1fd3ea7).
-  it('holds Qwen Image 2.1 and Krea 2 Turbo to build 883 and fails closed on odd tags', () => {
-    for (const family of ['qwen-image-2.1', 'krea-2-turbo']) {
+  it('holds Qwen Image 2.1, its Turbo and Krea 2 Turbo to build 883 and fails closed on odd tags', () => {
+    for (const family of ['qwen-image-2.1', 'qwen-image-2.1-turbo', 'krea-2-turbo']) {
       for (const tag of ['unknown', 'master-882-abcdef0', 'master-883', 'master-883-', 'master-x83-abc'])
         expect(
           codeOf(() => checkEngineCompatibility(family, tag)),
@@ -74,7 +74,7 @@ describe('selectModelInstall', () => {
 
   it('takes the first compatible install of the selected backend', () => {
     const records = [old, current]
-    for (const family of ['qwen-image-2.1', 'krea-2-turbo'])
+    for (const family of ['qwen-image-2.1', 'qwen-image-2.1-turbo', 'krea-2-turbo'])
       expect(selectModelInstall(records, 'sd-cpp', family).tag, family).toBe('master-883-137f740')
     for (const family of ['qwen-image', 'z-image', 'flux.1', 'flux.2-klein'])
       expect(selectModelInstall(records, 'sd-cpp', family).tag, family).toBe('master-849-d04e895')

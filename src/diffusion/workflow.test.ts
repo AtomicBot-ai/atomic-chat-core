@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   defaultStrength,
   IMAGE_WORKFLOWS,
+  isQwenImage21,
   usesInitImage,
   usesMask,
   usesReferences,
@@ -24,6 +25,7 @@ describe('workflowsForFamily', () => {
     expect(klein).toContain('edit')
     expect(klein).toHaveLength(7)
     expect(workflowsForFamily('qwen-image-2.1')).toEqual(['create', 'reference', 'edit'])
+    expect(workflowsForFamily('qwen-image-2.1-turbo')).toEqual(['create', 'reference', 'edit'])
     expect(workflowsForFamily('krea-2-turbo')).toEqual(['create'])
     expect(workflowsForFamily('wan2.2-ti2v-5b')).toEqual(['create'])
     expect(workflowsForFamily('unknown')).toEqual(['create'])
@@ -35,14 +37,26 @@ describe('workflowsForFamily', () => {
   })
 })
 
+describe('isQwenImage21', () => {
+  it('covers Qwen Image 2.1 and its Turbo, and nothing else', () => {
+    expect(isQwenImage21('qwen-image-2.1')).toBe(true)
+    expect(isQwenImage21('qwen-image-2.1-turbo')).toBe(true)
+    for (const family of ['qwen-image', 'krea-2-turbo', 'flux.2-klein', 'qwen-image-2.1-other', ''])
+      expect(isQwenImage21(family), family).toBe(false)
+  })
+})
+
 describe('workflowsForSpec', () => {
   // Port of `qwen_image_2_1_reference_workflows_require_the_vision_projector` (`session.rs`).
   it('drops the reference workflows of Qwen Image 2.1 loaded without its vision projector', () => {
     const files = { diffusionModel: '/models/qwen-image-2.1.gguf', llm: '/models/qwen3-vl-8b.gguf' }
-    expect(workflowsForSpec({ family: 'qwen-image-2.1', files })).toEqual(['create'])
-    expect(
-      workflowsForSpec({ family: 'qwen-image-2.1', files: { ...files, llmVision: '/models/mmproj.gguf' } })
-    ).toEqual(['create', 'reference', 'edit'])
+    for (const family of ['qwen-image-2.1', 'qwen-image-2.1-turbo']) {
+      expect(workflowsForSpec({ family, files }), family).toEqual(['create'])
+      expect(
+        workflowsForSpec({ family, files: { ...files, llmVision: '/models/mmproj.gguf' } }),
+        family
+      ).toEqual(['create', 'reference', 'edit'])
+    }
   })
 
   it('leaves every other family to workflowsForFamily', () => {

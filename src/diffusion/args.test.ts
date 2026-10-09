@@ -276,6 +276,30 @@ describe('buildImgGenRequest', () => {
     })
   })
 
+  it('sends a distilled schedule at exactly its step count, closed by the 0 sd.cpp runs to', () => {
+    const turbo: DiffusionFamilyDefaults = {
+      ...PLAIN,
+      samplingMethod: 'euler',
+      sigmas: [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568],
+    }
+    const body = buildImgGenRequest(request({ workflow: 'edit' }), turbo, 1, { refs: ['REF'] })
+    expect(body['sample_params']).toEqual({
+      sample_steps: 8,
+      sample_method: 'euler',
+      custom_sigmas: [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0],
+      guidance: { txt_cfg: 1.0 },
+    })
+    expect(body['ref_images']).toEqual(['REF'])
+    // The catalog's list is left as it was.
+    expect(turbo.sigmas).toHaveLength(8)
+    // Another step count runs the engine's own schedule.
+    const six = buildImgGenRequest(request({ steps: 6 }), turbo, 1, NO_INPUTS)
+    expect(six['sample_params']).not.toHaveProperty('custom_sigmas')
+    expect(buildImgGenRequest(request(), PLAIN, 1, NO_INPUTS)['sample_params']).not.toHaveProperty(
+      'custom_sigmas'
+    )
+  })
+
   it('sends each workflow its own images', () => {
     const full: ResolvedInputs = { init: 'INIT', mask: 'MASK', refs: ['INIT', 'REF2'] }
     const withWorkflow = (workflow: ImageWorkflowId, strength?: number) =>
@@ -514,7 +538,8 @@ describe('buildVidGenRequest', () => {
       sample_params: {
         sample_steps: 8,
         sample_method: 'euler',
-        custom_sigmas: [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875],
+        // One sigma per step from the catalog, and the closing 0 sd.cpp needs to run all eight.
+        custom_sigmas: [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0],
         guidance: { txt_cfg: 1.0 },
       },
     })

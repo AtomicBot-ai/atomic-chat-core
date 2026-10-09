@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-09** — [A distilled schedule closes on 0, and Qwen Image 2.1 Turbo runs as Qwen Image 2.1](2026-10-09-a-distilled-schedule-closes-on-zero-and-qwen-image-2-1-turbo-joins-its-family.md) — `custom_sigmas` gets the closing 0 sd.cpp needs to run every step, in `img_gen` as in `vid_gen`; `isQwenImage21` gives `qwen-image-2.1-turbo` the workflows, projector rule and build-883 floor of `qwen-image-2.1`.
 - **2026-10-09** — [A build that dies while loading is skipped, and the user's own llama.cpp build goes first](2026-10-09-a-build-that-dies-while-loading-is-skipped-and-the-picked-build-goes-first.md) — `spawnOnFirstGoodEngine` falls back on `MODEL_LOAD_FAILED` too and fails with the crash when no build is left; `orderUpstreamCandidates` tries the picked `version_backend` first.
 - **2026-10-09** — [Calibrate the video decode apart from the steps](2026-10-09-calibrate-the-video-decode-apart-from-the-steps.md) — M1 Metal decode factor 87 from a measured M1 Max; recipes record `decodeMs`; the history multiplier splits into `sampling` and `decode`.
 - **2026-10-08** — [A generating image or video job is never evicted by a chat load](2026-10-08-a-generating-media-job-is-never-evicted-by-a-chat-load.md) — an occupant may report `busy` + `remedy`; diffusion does while a live job runs, and residency refuses the claim with `GPU_BUSY` instead of stopping it.

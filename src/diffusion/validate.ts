@@ -10,6 +10,7 @@ import { diffusionError } from './errors.js'
 import { MAX_BATCH } from './types.js'
 import type { ServerSpec } from './types.js'
 import {
+  isQwenImage21,
   usesMask,
   usesReferences,
   videoWorkflowsForFamily,
@@ -137,7 +138,7 @@ export async function validateRequest(
 
   const workflow = workflowOf(request)
   if (workflow === 'create') return
-  if (spec.family === 'qwen-image-2.1' && usesReferences(workflow) && spec.files.llmVision === undefined)
+  if (isQwenImage21(spec.family) && usesReferences(workflow) && spec.files.llmVision === undefined)
     throw diffusionError(
       'SIDE_FILE_MISSING',
       'Qwen Image 2.1 editing needs its Qwen3-VL vision projector.',

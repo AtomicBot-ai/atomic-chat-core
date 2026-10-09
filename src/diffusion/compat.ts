@@ -7,9 +7,13 @@
 import type { DiffusionBackendInstallRecord, DiffusionEngineId } from '../contracts/index.js'
 import { diffusionError } from './errors.js'
 
-/** The first upstream build that runs Qwen Image 2.1 and Krea 2 Turbo. */
+/** The first upstream build that runs Qwen Image 2.1 (and its Turbo) and Krea 2 Turbo. */
 export const MIN_MODERN_FAMILY_BUILD = 883
-const MODERN_FAMILIES: ReadonlySet<string> = new Set(['qwen-image-2.1', 'krea-2-turbo'])
+const MODERN_FAMILIES: ReadonlySet<string> = new Set([
+  'qwen-image-2.1',
+  'qwen-image-2.1-turbo',
+  'krea-2-turbo',
+])
 
 /** `master-<build>-<hash>` → the build number; anything else → undefined. */
 function buildOf(tag: string): number | undefined {
