@@ -703,6 +703,24 @@ describe.skipIf(!posix)('generating', () => {
     expect(h.journal.filter((j) => j.op === 'add')).toHaveLength(2)
   })
 
+  // ATO-549: residency refuses a chat load over a busy session instead of stopping the job.
+  it('reports the server as busy while a job runs, and not once a cancel was asked for', async () => {
+    const h = await loadedService({ stepMs: 400 })
+    const [idle] = h.service.gpuOccupancy()
+    expect(idle?.busy).toBeUndefined()
+    const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    const [busy] = h.service.gpuOccupancy()
+    expect(busy).toMatchObject({
+      state: 'ready',
+      busy: `${h.loaded.displayName} is generating an image`,
+      remedy: 'Wait for the image to finish, or stop it, then try again.',
+    })
+    await waitFor(() => h.service.getJob(jobId)?.state === 'generating')
+    const cancelling = h.service.cancelJob(jobId)
+    expect(h.service.gpuOccupancy()[0]?.busy).toBeUndefined()
+    await cancelling
+  })
+
   it('an unload asked for while a respawn waits for a teardown aborts the GPU claim that respawn then starts (final review M-9)', async () => {
     const aborted: boolean[] = []
     const h = harness({
@@ -876,6 +894,19 @@ describe.skipIf(!posix)('generating video', () => {
     const loaded = await h.service.loadModel(request)
     return { ...h, loaded, request }
   }
+
+  it('reports a clip being generated as a busy video job', async () => {
+    const h = await loadedVideoService({ stepMs: 200 })
+    const { jobId } = await h.service.generateVideo(
+      sampleVideoRequest({ width: 64, height: 32, frames: 9, steps: 4 })
+    )
+    expect(h.service.gpuOccupancy()[0]).toMatchObject({
+      busy: `${h.loaded.displayName} is generating a video`,
+      remedy: 'Wait for the video to finish, or stop it, then try again.',
+    })
+    await waitFor(() => h.service.getVideoJob(jobId)?.state === 'completed', 10_000)
+    expect(h.service.gpuOccupancy()[0]?.busy).toBeUndefined()
+  })
 
   it('runs a clip into the videos folder with its sidecar, takes a poster, and serves the video gallery', async () => {
     const h = await loadedVideoService()

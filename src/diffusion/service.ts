@@ -75,7 +75,7 @@ import {
   videoCapabilities,
 } from './session.js'
 import type { DiffusionEmitter, DiffusionLogger } from './session.js'
-import { DiffusionState } from './state.js'
+import { DiffusionState, isTerminalJobState } from './state.js'
 import { DEFAULT_STARTUP_TIMEOUT_SECS } from './types.js'
 import type { ServerSpec } from './types.js'
 import { stripDataUrl, validateVideoRequest } from './validate.js'
@@ -118,6 +118,9 @@ export interface DiffusionServiceDeps {
    */
   claimGpu?: GpuClaimHook
 }
+
+/** A live job, as GPU residency reports it. */
+type Working = Required<Pick<GpuOccupancy, 'busy' | 'remedy'>>
 
 const isFile = (path: string): Promise<boolean> =>
   stat(path).then(
@@ -662,21 +665,36 @@ export class DiffusionService {
 
   /**
    * The GPU the resident, stopping (exit not yet confirmed) or starting `sd-server` holds, for core's
-   * residency rule.
+   * residency rule. The resident or starting one is `busy` while a job runs on it that nobody asked to
+   * cancel: residency then refuses a chat load instead of stopping the clip (ATO-549).
    */
   gpuOccupancy(): GpuOccupancy[] {
-    const held = (spec: ServerSpec, state: GpuOccupancy['state']): GpuOccupancy => ({
+    const held = (spec: ServerSpec, state: GpuOccupancy['state'], working?: Working): GpuOccupancy => ({
       model_id: spec.modelId,
       cards: diffusionGpuCards(spec),
       auxiliary: false,
       state,
+      ...(working ?? {}),
     })
     const out: GpuOccupancy[] = []
     const { session, stopping, starting } = this.state
-    if (session && session.server.exitStatus() === undefined) out.push(held(session.spec, 'ready'))
+    if (session && session.server.exitStatus() === undefined)
+      out.push(held(session.spec, 'ready', this.working(session.spec)))
     if (stopping) out.push(held(stopping.spec, 'stopping'))
-    if (starting) out.push(held(starting, 'loading'))
+    if (starting) out.push(held(starting, 'loading', this.working(starting)))
     return out
+  }
+
+  /** What the active job is making on `spec`, for a refused claim; none when no job is live. */
+  private working(spec: ServerSpec): Working | undefined {
+    const id = this.state.activeJobId
+    const record = id === undefined ? undefined : this.state.record(id)
+    if (!record || record.cancel.requested || isTerminalJobState(record.job.state)) return undefined
+    const video = record.kind === 'video'
+    return {
+      busy: `${spec.displayName} is generating ${video ? 'a video' : 'an image'}`,
+      remedy: `Wait for the ${video ? 'video' : 'image'} to finish, or stop it, then try again.`,
+    }
   }
 
   /** The session's claim hook over core's: abortable by an unload, whatever signal the caller had. */

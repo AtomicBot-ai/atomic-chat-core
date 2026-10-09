@@ -32,6 +32,13 @@ export interface GpuOccupancy {
   state: GpuOccupancyState
   /** What the user can do when this session will not stop (a `GPU_BUSY` names it); a default otherwise. */
   remedy?: string
+  /**
+   * Work in progress that a stop would throw away, said for the user ("Wan 2.2 is generating a
+   * video"): an image or video job, minutes of it. Residency refuses a claim with `GPU_BUSY` rather
+   * than stop a busy session; `remedy` then says how to free the card. Unset for a session that only
+   * holds a model, or answers chat: those are stopped as before.
+   */
+  busy?: string
 }
 
 /** What a load is about to take, asked of core before anything is started. */
