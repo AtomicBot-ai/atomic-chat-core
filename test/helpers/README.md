@@ -11,6 +11,10 @@
   bind race (`startFailures`) or never confirm a stop (`stopConfirms = false`). For the managed-text
   lifecycle's unit tests; its integration test runs a real spawned fake `docker` instead.
 - `tmp-data-folder.ts` — creates a throwaway `<data>` with the app's layout (`llamacpp/models/...`).
+- `watchdog-harness.ts` — the container watchdog's entrypoint script run for real under `/bin/sh` (or
+  `dash`): fake engine scripts, `runWatchdog`, a per-test temp dir (`useTmpDir`) and pid helpers that never
+  signal pid 0 or below. Shared by `src/runtime/container/watchdog.script-*.test.ts`, which split the script's
+  real-time scenarios across vitest workers.
 - `compiled-core.ts` — drives the compiled binaries from `test/e2e/`: a daemon on a data folder, the
   control API with its token, a fake `llama-server` pack, reaping of journalled children. No imports from `src/`.
 - `compiled-diffusion.ts` — the same for image generation: an owned fake engine tree, model files, the
