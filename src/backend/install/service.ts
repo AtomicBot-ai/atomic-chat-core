@@ -56,15 +56,47 @@ import { parseBackendVersion, parseBinaryVersion } from '../version.js'
 
 const execFileAsync = promisify(execFile)
 
+/**
+ * How long a pack's `llama-server --version` may take. The first launch of a pack is from a path
+ * the system has never seen: macOS checks the unsigned binary and its libraries before it runs
+ * (17.9 s for upstream b10809 on an M-series Mac, 0.07 s of it CPU), and PrismML's Metal build
+ * compiles its shaders on top (15.7 s). The former 15 s left every such install failing.
+ */
+export const LAUNCH_CHECK_TIMEOUT_MS = 120_000
+
+/** `Command failed` alone says nothing: name the exit code or the signal, and what it printed. */
+function launchFailure(error: unknown): Error {
+  const e = error as { code?: unknown; signal?: unknown; killed?: unknown; stderr?: unknown }
+  const how = e.signal
+    ? `signal ${String(e.signal)}${e.killed ? ', timed out' : ''}`
+    : `exit code ${String(e.code)}`
+  const said = String(e.stderr ?? '')
+    .trim()
+    .split('\n')
+    .slice(-3)
+    .join(' | ')
+  return new Error(`llama-server --version failed (${how})${said ? `: ${said}` : ''}`)
+}
+
 /** Same launch gate as the former macOS extension, run on staging before replacing a working pack. */
-export async function verifyMacBackendBinary(staging: string, version: string): Promise<void> {
+export async function verifyMacBackendBinary(
+  staging: string,
+  version: string,
+  timeoutMs = LAUNCH_CHECK_TIMEOUT_MS
+): Promise<void> {
   const bin = join(staging, 'build', 'bin')
   // The former Rust gate made every build/bin file executable, not just the main server.
   for (const entry of await readdir(bin, { withFileTypes: true })) {
     if (entry.isFile()) await chmod(join(bin, entry.name), 0o755)
   }
   const executable = join(bin, 'llama-server')
-  const { stdout, stderr } = await execFileAsync(executable, ['--version'], { timeout: 15_000 })
+  let stdout: string
+  let stderr: string
+  try {
+    ;({ stdout, stderr } = await execFileAsync(executable, ['--version'], { timeout: timeoutMs }))
+  } catch (error) {
+    throw launchFailure(error)
+  }
   const expected = parseBackendVersion(version)
   if (expected !== 0 && parseBinaryVersion(`${stdout}\n${stderr}`) !== expected) {
     throw new Error(`backend did not report build ${version}`)
@@ -94,9 +126,9 @@ export async function mergeCudartIntoBin(staging: string): Promise<void> {
  * How long a PrismML pack's `llama-server --version` may take. Its macOS build initialises Metal
  * while it parses its arguments and compiles its shaders at runtime, and the shader cache follows
  * the executable's path, which is new on every install: the first run took 15.7 s on an M-series
- * Mac (0.05 s the second time), past the 15 s the upstream gate allows.
+ * Mac (0.05 s the second time). The same allowance as every pack's (`LAUNCH_CHECK_TIMEOUT_MS`).
  */
-export const PRISM_LAUNCH_CHECK_TIMEOUT_MS = 120_000
+export const PRISM_LAUNCH_CHECK_TIMEOUT_MS = LAUNCH_CHECK_TIMEOUT_MS
 
 /**
  * The launch gate of a PrismML pack, on every platform: the server must start and report the build
@@ -125,17 +157,7 @@ export async function verifyPrismBackendBinary(
       cwd: bin,
     }))
   } catch (error) {
-    // `Command failed` alone says nothing: name the exit code or the signal, and what it printed.
-    const e = error as { code?: unknown; signal?: unknown; killed?: unknown; stderr?: unknown }
-    const how = e.signal
-      ? `signal ${String(e.signal)}${e.killed ? ', timed out' : ''}`
-      : `exit code ${String(e.code)}`
-    const said = String(e.stderr ?? '')
-      .trim()
-      .split('\n')
-      .slice(-3)
-      .join(' | ')
-    throw new Error(`llama-server --version failed (${how})${said ? `: ${said}` : ''}`)
+    throw launchFailure(error)
   }
   if (parseBinaryVersion(`${stdout}\n${stderr}`) !== expected) {
     throw new Error(`backend did not report build ${expected}`)

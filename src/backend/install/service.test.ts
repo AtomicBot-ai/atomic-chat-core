@@ -126,6 +126,10 @@ describe('install', () => {
       await expect(verifyMacBackendBinary(staging, 'b6325')).resolves.toBeUndefined()
       expect((await stat(helper)).mode & 0o111).toBe(0o111)
       await expect(verifyMacBackendBinary(staging, 'b6326')).rejects.toThrow(/did not report/)
+      // A first launch from a new path waits on the system's check of an unsigned binary: well past
+      // 15 s on some Macs, with the process idle. A launch that runs out of time says so.
+      await writeFile(exe, '#!/bin/sh\nsleep 5\necho "version: 6325 (test)"\n')
+      await expect(verifyMacBackendBinary(staging, 'b6325', 200)).rejects.toThrow(/timed out/)
     }
   )
   it('does not download a pack that is already there', async () => {
