@@ -511,6 +511,11 @@ export interface VideoRecipe {
   }
   createdAtMs: number
   durationMs: number
+  /**
+   * From the last sampling step to the saved clip: the VAE decode and the file's encoding. Absent
+   * for a clip made before it was recorded, or when no sampling step was seen.
+   */
+  decodeMs?: number
 }
 
 export interface GalleryVideoItem {

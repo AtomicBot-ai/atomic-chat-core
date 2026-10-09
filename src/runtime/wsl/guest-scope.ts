@@ -59,10 +59,22 @@ export function guestScopeKeyReader(file: string, newKey: () => string = randomU
   }
 }
 
-/** `models/tensorrt-llm`, `caches`, `heartbeats`, `watchdog` under the scope's guest root, owned by uid 1000. */
+/**
+ * `managed-models`, `models/tensorrt-llm`, `caches`, `heartbeats`, `watchdog` under the scope's guest root,
+ * owned by uid 1000 — and the folders directly in `managed-models` too: the store migration creates a
+ * moved model's parent (`managed-models/<org>`) as root, and a folder root owns there refuses every
+ * later download into it through `\\wsl.localhost` (`EACCES`, Windows `os error 5`).
+ */
 export async function ensureGuestScope(transport: WslDistributionTransport, scopeKey: string): Promise<void> {
   const root = guestScopeRoot(scopeKey)
-  const leaves = [`${root}/models/tensorrt-llm`, `${root}/caches`, `${root}/heartbeats`, `${root}/watchdog`]
+  const store = `${root}/managed-models`
+  const leaves = [
+    store,
+    `${root}/models/tensorrt-llm`,
+    `${root}/caches`,
+    `${root}/heartbeats`,
+    `${root}/watchdog`,
+  ]
   const run = async (argv: string[]): Promise<void> => {
     const output = await transport.exec(argv, { user: 'root', timeoutMs: 120_000 })
     if (output.code !== 0) {
@@ -76,4 +88,22 @@ export async function ensureGuestScope(transport: WslDistributionTransport, scop
   await run(['mkdir', '-p', ...leaves])
   // Not recursive: the folders, never every file of every model under them.
   await run(['chown', GUEST_SCOPE_OWNER, root, `${root}/models`, ...leaves])
+  // Only folders root owns, one level down: the model folders below them already belong to uid 1000.
+  await run([
+    'find',
+    store,
+    '-mindepth',
+    '1',
+    '-maxdepth',
+    '1',
+    '-type',
+    'd',
+    '-user',
+    'root',
+    '-exec',
+    'chown',
+    GUEST_SCOPE_OWNER,
+    '{}',
+    '+',
+  ])
 }

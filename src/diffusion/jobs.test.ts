@@ -991,6 +991,7 @@ describe('a video job', () => {
   it('goes through vid_gen, reports on its own events, and saves one clip with its sidecar', async () => {
     const webm = await webmFixture()
     let polls = 0
+    let decoding = false
     const port = await stub((method, path, body) => {
       if (method === 'POST' && path === '/sdcpp/v1/vid_gen') {
         const sent = JSON.parse(body) as Record<string, unknown>
@@ -1002,7 +1003,7 @@ describe('a video job', () => {
       }
       if (method === 'GET' && path === '/sdcpp/v1/jobs/job_v') {
         polls += 1
-        if (polls < 10)
+        if (polls < 10 || !decoding)
           return json(200, { id: 'job_v', kind: 'vid_gen', status: 'generating', result: null, error: null })
         return json(200, {
           id: 'job_v',
@@ -1034,6 +1035,10 @@ describe('a video job', () => {
     await expect(startImageJob(h.deps, sampleRequest())).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
     await sleep(30)
     h.server.say('|==>     | 3/8 - 1.0s/it')
+    // Seen apart, so step 3 is reported before the decode starts.
+    await sleep(60)
+    h.server.say('|========| 8/8 - 1.0s/it')
+    decoding = true
 
     const result = await done
     if (!result.ok) throw new Error(result.error.message)
@@ -1048,8 +1053,14 @@ describe('a video job', () => {
     expect(item?.posterPath).toBeNull()
     expect([item?.frameCount, item?.fps, item?.recipe.frames, item?.recipe.seed]).toEqual([25, 24, 25, 1234])
     expect(item?.recipe.model.filename).toBe('ltx-2.3-22b-distilled-Q4_K_M.gguf')
+    // The decode is timed from the last sampling step, for the history's own calibration.
+    expect(item?.recipe.decodeMs).toBeTypeOf('number')
+    expect(item?.recipe.decodeMs).toBeLessThanOrEqual(item?.recipe.durationMs as number)
     expect((await readFile(item?.path as string)).equals(webm)).toBe(true)
-    expect(await stat(join(dataFolder, 'videos', `${id}.json`))).toBeDefined()
+    const sidecar = JSON.parse(await readFile(join(dataFolder, 'videos', `${id}.json`), 'utf8')) as {
+      decodeMs?: number
+    }
+    expect(sidecar.decodeMs).toBe(item?.recipe.decodeMs)
     expect(h.state.videoJob(id)?.state).toBe('completed')
     expect(h.state.job(id)).toBeUndefined()
 

@@ -114,6 +114,47 @@ describe('orderUpstreamCandidates', () => {
     expect(upstreamBackendPreference(backend)).toBe(rank)
   )
 
+  // A ROCm pack beside the recommended Vulkan one ranked first, and on a card its rocBLAS does not
+  // know it crashed on the first product: the build the user runs chat on is known to work here.
+  describe('with the build the user picked for llamacpp-upstream', () => {
+    const packs = [
+      pack('b11463', 'win-hip-radeon-x64'),
+      pack('b11463', 'win-vulkan-x64'),
+      pack('b11463', 'win-cpu-x64'),
+      pack('b11454', 'win-vulkan-x64'),
+      pack('b11454', 'win-hip-radeon-x64'),
+    ]
+    const order = (preferred: string, minBuild = 11454) =>
+      orderUpstreamCandidates(packs, minBuild, preferred).eligible.map((c) => c.info.version_backend)
+
+    it('tries that build first, even when a newer release is installed', () =>
+      expect(order('b11454/win-vulkan-x64')).toEqual([
+        'b11454/win-vulkan-x64',
+        'b11463/win-vulkan-x64',
+        'b11463/win-hip-radeon-x64',
+        'b11463/win-cpu-x64',
+        'b11454/win-hip-radeon-x64',
+      ]))
+
+    it('prefers its backend inside a release when the build itself is too old or gone', () => {
+      expect(order('b11454/win-vulkan-x64', 11463)).toEqual([
+        'b11463/win-vulkan-x64',
+        'b11463/win-hip-radeon-x64',
+        'b11463/win-cpu-x64',
+      ])
+      expect(order('b11400/win-vulkan-x64')[0]).toBe('b11463/win-vulkan-x64')
+    })
+
+    it('keeps the release and GPU order when nothing is picked', () =>
+      expect(order('')).toEqual([
+        'b11463/win-hip-radeon-x64',
+        'b11463/win-vulkan-x64',
+        'b11463/win-cpu-x64',
+        'b11454/win-hip-radeon-x64',
+        'b11454/win-vulkan-x64',
+      ]))
+  })
+
   it('orders two packs of one build and one rank by their id', () => {
     const { eligible } = orderUpstreamCandidates(
       [pack('b11436', 'win-cuda-13.4-x64'), pack('b11436', 'win-cuda-12.4-x64')],

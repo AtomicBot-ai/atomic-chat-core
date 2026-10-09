@@ -656,9 +656,12 @@ export async function createAtomicCore(
 
     // The decision model: its own process outside the sessions registry. Started (in the background,
     // nothing waits for it) only once the facade exists, below.
+    // Both start on the user's own llama.cpp build first when it is new enough: it runs on this machine.
+    const upstreamBackend = () => String(settings.get('llamacpp-upstream')['version_backend'] ?? '')
     const decision = wireDecision({
       layout,
       settings,
+      upstreamBackend,
       journal,
       instanceId: lock.instanceId,
       hardware,
@@ -675,6 +678,7 @@ export async function createAtomicCore(
     const embedding = wireEmbedding({
       layout,
       settings,
+      upstreamBackend,
       journal,
       instanceId: lock.instanceId,
       emit: (name, payload) => emitter.emit(name, payload),

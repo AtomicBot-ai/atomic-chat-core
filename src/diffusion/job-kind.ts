@@ -40,6 +40,8 @@ export interface SaveContext<Req> {
   /** The seed the job ran with (the batch seed for images). */
   seed: number
   startedAt: number
+  /** When the decode began (the last sampling step), when the tracker saw it. */
+  decodeStartedAt?: number | undefined
 }
 
 export type Emit = DiffusionEmitter

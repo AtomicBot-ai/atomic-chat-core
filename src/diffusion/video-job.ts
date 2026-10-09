@@ -85,13 +85,14 @@ export async function saveVideoOutput(
   ctx: SaveContext<VideoGenerateRequest>,
   decoded: DecodedVideo
 ): Promise<{ items: GalleryVideoItem[]; bytes: Buffer[] }> {
-  const { id, request, spec, seed, startedAt } = ctx
+  const { id, request, spec, seed, startedAt, decodeStartedAt } = ctx
   if (!isWebm(decoded.bytes))
     throw diffusionError('INVALID_OUTPUT', 'The video engine returned something that is not a WebM.')
   const video = spec.defaults.video
   const frames = request.frames ?? video?.frames ?? decoded.frameCount
   const fps = request.fps ?? video?.fps ?? decoded.fps
   const createdAtMs = deps.now()
+  const durationMs = Math.max(createdAtMs - startedAt, 0)
   const recipe: VideoRecipe = {
     jobId: id,
     prompt: request.prompt,
@@ -124,7 +125,11 @@ export async function saveVideoOutput(
       cpuFallback: spec.cpuFallback,
     },
     createdAtMs,
-    durationMs: Math.max(createdAtMs - startedAt, 0),
+    durationMs,
+    // What the history calibrates the decode with, apart from the steps.
+    ...(decodeStartedAt === undefined
+      ? {}
+      : { decodeMs: Math.min(Math.max(createdAtMs - decodeStartedAt, 0), durationMs) }),
   }
   const saved = await deps.videoGallery.save(deps.state.videoOutputDir(), recipe, decoded.bytes)
   deps.videoSaved?.()
