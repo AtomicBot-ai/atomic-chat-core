@@ -192,13 +192,16 @@ describe('what a snapshot shows', () => {
     // Finished: nothing is in flight on the environment any more.
     expect(managed.environments()[0]?.active_operation_id).toBeNull()
     // And every state it passed through was announced, so a client can follow from the snapshot.
-    expect(events.map((event) => event.phase)).toEqual([
+    // Only the operation's own events: the snapshot refresh after it ends (`environment:changed`)
+    // runs beside `idle()`, which also waits for the finished operation's record, so it may land
+    // before or after `idle()` returns.
+    const announced = events.filter((event) => event.name === 'environment:operation')
+    expect(announced.map((event) => event.phase)).toEqual([
       'checking',
       'preparing-environment',
       'verifying',
       'ready',
     ])
-    expect(events.every((event) => event.name === 'environment:operation')).toBe(true)
   })
 
   it('points at the operation that is still waiting on the user', async () => {

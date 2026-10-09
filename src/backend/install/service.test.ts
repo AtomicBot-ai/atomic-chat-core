@@ -730,12 +730,17 @@ describe('remove under the provider lock', () => {
 })
 
 describe('what the service says it changed (change unify-engine-lifecycle, 3.7)', () => {
-  /** A downloader that writes an upstream Linux pack archive. */
+  /**
+   * A downloader that writes an upstream Linux pack archive. It carries `llama-server.exe` too: the
+   * install checks the name for the service's platform (Linux), while `isInstalled` looks for the
+   * host's, so on a Windows runner a Linux-only pack would never count as installed.
+   */
   const packDownloader = () => ({
     download: vi.fn(async (_task: string, items: Array<{ save_path: string }>) => {
       const fixture = join(data.root, 'pack-fixture')
       await mkdir(join(fixture, 'build', 'bin'), { recursive: true })
-      await writeFile(join(fixture, 'build', 'bin', 'llama-server'), '#!/bin/sh\nexit 0\n')
+      for (const exe of ['llama-server', 'llama-server.exe'])
+        await writeFile(join(fixture, 'build', 'bin', exe), '#!/bin/sh\nexit 0\n')
       for (const item of items) await tarCreate({ gzip: true, cwd: fixture, file: item.save_path }, ['build'])
     }),
   })

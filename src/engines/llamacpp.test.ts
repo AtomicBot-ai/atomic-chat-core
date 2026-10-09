@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -150,18 +150,25 @@ async function setup(options: Setup = {}) {
   return { engine, backends, fetcher, settingsWrites, current: () => current }
 }
 
-/** The packs on disk, as `<version>/<backend>`. */
-const installed = async () =>
-  (
-    await new BackendService({
-      layout: data.layout,
-      provider: PROVIDER,
-      downloader: downloader() as never,
-      readManifest: async () => null,
-    }).listInstalled()
-  )
-    .map((pack) => `${pack.version}/${pack.backend}`)
-    .sort()
+/**
+ * The packs on disk, as `<version>/<backend>`: every `<version>/<backend>/build`. Read from the
+ * folders, not through `listInstalled()`, which looks for `llama-server` by the host's name: the
+ * engine here installs as Linux (`llama-server`) while `data.writeBackend` seeds by the host
+ * (`llama-server.exe` on Windows), so on a Windows runner it would see only half of them.
+ */
+const installed = async () => {
+  const root = data.layout.provider(PROVIDER).backendsDir
+  const isDir = (path: string) =>
+    stat(path).then(
+      (s) => s.isDirectory(),
+      () => false
+    )
+  const packs: string[] = []
+  for (const version of await readdir(root).catch(() => []))
+    for (const backend of await readdir(join(root, version)).catch(() => []))
+      if (await isDir(join(root, version, backend, 'build'))) packs.push(`${version}/${backend}`)
+  return packs.sort()
+}
 const changed = () =>
   events.filter((e) => e.name === 'engine:changed').map((e) => e.payload as CoreEvents['engine:changed'])
 
