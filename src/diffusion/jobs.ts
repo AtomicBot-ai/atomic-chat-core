@@ -549,7 +549,14 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
         const decoded = kind.decode(job)
         const { items, bytes } = await kind.save(
           deps,
-          { id, request, spec: view.spec, seed, startedAt: started },
+          {
+            id,
+            request,
+            spec: view.spec,
+            seed,
+            startedAt: started,
+            decodeStartedAt: tracker.decodeStartedAt(),
+          },
           decoded
         )
         const record = state.anyJob(id) as Job | undefined

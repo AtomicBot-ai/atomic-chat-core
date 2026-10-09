@@ -42,6 +42,7 @@ export class ProgressTracker {
   private current: ImageJobPhase = 'queued'
   private readonly startedAt: number
   private firstStepAt: number | undefined
+  private decodingAt: number | undefined
   private firstStepDone = 0
   private dirty = true
   /** Tiles left in an announced VAE pass; its bar is not the sampler's. */
@@ -121,8 +122,16 @@ export class ProgressTracker {
       this.firstStepAt = this.now()
       this.firstStepDone = this.done()
     }
-    if (this.step === this.steps && this.batchIndex + 1 === this.batch) this.current = 'decoding'
+    if (this.step === this.steps && this.batchIndex + 1 === this.batch) {
+      this.current = 'decoding'
+      this.decodingAt ??= this.now()
+    }
     this.dirty = true
+  }
+
+  /** When the last sampling step was seen, which starts the decode; undefined before it. */
+  decodeStartedAt(): number | undefined {
+    return this.decodingAt
   }
 
   private done(): number {

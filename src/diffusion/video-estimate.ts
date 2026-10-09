@@ -456,6 +456,20 @@ export const STEP_OVERHEAD_SECONDS = 0.3
  */
 export const METAL_DECODE_FACTOR = 10
 
+/**
+ * `METAL_DECODE_FACTOR` for an Apple GPU generation measured to differ. M1: an M1 Max decoded a Wan
+ * 2.2 TI2V 5B clip at 832×480 × 25 frames in one graph in 2488 s and 2594 s, 8.6–8.9 times the table
+ * at the default factor (2026-09-30 and 2026-10-08 runs, ADR
+ * 2026-10-09-calibrate-the-video-decode-apart-from-the-steps).
+ */
+export const METAL_DECODE_FACTOR_BY_GENERATION: Readonly<Record<string, number>> = { m1: 87 }
+
+/** The Metal decode factor for this machine's chip. */
+export function metalDecodeFactor(system: SystemInfo): number {
+  const generation = appleChip(system.cpu.name)?.split(' ')[0]
+  return (generation && METAL_DECODE_FACTOR_BY_GENERATION[generation]) || METAL_DECODE_FACTOR
+}
+
 /** Whether the decode runs on the Metal device: not on the CPU fallback, and not under `model` offload. */
 const decodesOnMetal = (input: Pick<VideoEstimateInput, 'backend' | 'cpuFallback' | 'offload'>): boolean =>
   input.backend === 'metal' && !input.cpuFallback && input.offload !== 'model'
@@ -477,7 +491,7 @@ export function heuristicParts(input: VideoEstimateInput): {
   const pixelFrames = input.width * input.height * input.frames
   const decode =
     ((profile.decodeSeconds * pixelFrames * decodeLayout(input, profile).work) / speed) *
-    (decodesOnMetal(input) ? METAL_DECODE_FACTOR : 1)
+    (decodesOnMetal(input) ? metalDecodeFactor(input.system) : 1)
   return {
     encodeSeconds: profile.encodeSeconds / speed,
     stepSeconds: (pass * passesPerStep(input.cfgScale)) / speed + STEP_OVERHEAD_SECONDS,
@@ -495,15 +509,26 @@ export function heuristicSeconds(input: VideoEstimateInput): number {
 const wholeSeconds = (value: number): number => Math.max(Math.round(value), 1)
 
 /**
+ * How many times the heuristic this machine's clips took: `sampling` for the text encoders and the
+ * steps, `decode` for the VAE decode.
+ */
+export interface VideoHistoryMultiplier {
+  sampling: number
+  decode: number
+}
+
+/**
  * The estimate and the forecast for `input`. With `multiplier` (this machine's clips ran that many
  * times the heuristic) the middle moves and the range narrows to `HISTORY_BAND`. Undefined when the
  * machine's memory is unknown, which leaves nothing to compare against.
  */
-export function estimateVideoCost(input: VideoEstimateInput, multiplier?: number): VideoCost | undefined {
+export function estimateVideoCost(
+  input: VideoEstimateInput,
+  multiplier?: VideoHistoryMultiplier
+): VideoCost | undefined {
   const memory = estimateVideoMemory(input)
   if (!memory) return undefined
   const parts = heuristicParts(input)
-  const k = multiplier ?? 1
   const basis: VideoEstimateBasis = multiplier === undefined ? 'heuristic' : 'history'
   const [below, above] =
     basis === 'history'
@@ -511,9 +536,9 @@ export function estimateVideoCost(input: VideoEstimateInput, multiplier?: number
       : parts.known
         ? [1 / HEURISTIC_SPREAD, HEURISTIC_SPREAD]
         : [1 / UNKNOWN_SPREAD, UNKNOWN_SPREAD]
-  const encodeSeconds = parts.encodeSeconds * k
-  const stepSeconds = parts.stepSeconds * k
-  const decodeSeconds = parts.decodeSeconds * k
+  const encodeSeconds = parts.encodeSeconds * (multiplier?.sampling ?? 1)
+  const stepSeconds = parts.stepSeconds * (multiplier?.sampling ?? 1)
+  const decodeSeconds = parts.decodeSeconds * (multiplier?.decode ?? 1)
   const totalSeconds = encodeSeconds + Math.max(input.steps, 1) * stepSeconds + decodeSeconds
   const low = wholeSeconds(totalSeconds * below)
   const seconds =

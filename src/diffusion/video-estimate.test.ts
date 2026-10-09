@@ -18,6 +18,7 @@ import {
   machineSpeed,
   memoryPool,
   METAL_DECODE_FACTOR,
+  METAL_DECODE_FACTOR_BY_GENERATION,
   OUTPUT_BYTES_PER_PIXEL_FRAME,
   OVERHEAD_BYTES,
   passesPerStep,
@@ -345,6 +346,29 @@ describe('the time model', () => {
     )
   })
 
+  it('prices an M1 decode on Metal at the factor measured on an M1 Max', () => {
+    // The RC 2.2.1 retest clip: one graph, 2488 s and 2594 s on a 64 GB M1 Max.
+    const clip = wan({
+      width: 832,
+      height: 480,
+      frames: 25,
+      steps: 1,
+      offload: 'none',
+      decodeTiling: { tilesX: 1, tilesY: 1 },
+      system: mac(64, 'Apple M1 Max'),
+    })
+    const table = (VIDEO_FAMILY_PROFILES['wan2.2-ti2v-5b']?.decodeSeconds as number) * 832 * 480 * 25
+    const speed = APPLE_SILICON_SPEED['m1 max'] as number
+    const factor = METAL_DECODE_FACTOR_BY_GENERATION['m1'] as number
+    expect(heuristicParts(clip).decodeSeconds).toBeCloseTo((table * factor) / speed, 6)
+    expect(heuristicParts(clip).decodeSeconds).toBeGreaterThan(2400)
+    expect(heuristicParts(clip).decodeSeconds).toBeLessThan(2700)
+    // Other generations keep the factor measured on the M3 Pro to M4 Pro class.
+    const m2 = heuristicParts({ ...clip, system: mac(64, 'Apple M2 Max') })
+    const m2Speed = APPLE_SILICON_SPEED['m2 max'] as number
+    expect(m2.decodeSeconds).toBeCloseTo((table * METAL_DECODE_FACTOR) / m2Speed, 6)
+  })
+
   it('grows with frames and with steps', () => {
     expect(heuristicSeconds(wan({ frames: 25 }))).toBeLessThan(heuristicSeconds(wan({ frames: 49 })))
     expect(heuristicSeconds(wan({ steps: 10 }))).toBeLessThan(heuristicSeconds(wan({ steps: 20 })))
@@ -385,7 +409,9 @@ describe('the time model', () => {
 
   it('moves the middle by the history multiplier and narrows the range', () => {
     const plain = estimateVideoCost(wan()) as NonNullable<ReturnType<typeof estimateVideoCost>>
-    const history = estimateVideoCost(wan(), 2) as NonNullable<ReturnType<typeof estimateVideoCost>>
+    const history = estimateVideoCost(wan(), { sampling: 2, decode: 2 }) as NonNullable<
+      ReturnType<typeof estimateVideoCost>
+    >
     expect(history.estimate.basis).toBe('history')
     expect(history.forecast.totalSeconds).toBeCloseTo(plain.forecast.totalSeconds * 2, 9)
     expect(history.estimate.seconds).toEqual({
@@ -393,6 +419,16 @@ describe('the time model', () => {
       high: Math.round(history.forecast.totalSeconds * 1.25),
     })
     expect(history.forecast.stepSecondsHigh).toBeCloseTo(history.forecast.stepSeconds * 1.25, 9)
+  })
+
+  it('scales the sampling and the decode by their own multipliers', () => {
+    const plain = estimateVideoCost(wan()) as NonNullable<ReturnType<typeof estimateVideoCost>>
+    const history = estimateVideoCost(wan(), { sampling: 1.5, decode: 9 }) as NonNullable<
+      ReturnType<typeof estimateVideoCost>
+    >
+    expect(history.forecast.encodeSeconds).toBeCloseTo(plain.forecast.encodeSeconds * 1.5, 9)
+    expect(history.forecast.stepSeconds).toBeCloseTo(plain.forecast.stepSeconds * 1.5, 9)
+    expect(history.forecast.decodeSeconds).toBeCloseTo(plain.forecast.decodeSeconds * 9, 9)
   })
 
   it('never answers zero seconds', () => {

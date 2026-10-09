@@ -59,8 +59,11 @@ describe('ProgressTracker', () => {
     p = t.snapshot()
     expect([p.step, p.batchIndex]).toEqual([1, 1])
     expect(p.fraction).toBeCloseTo(0.625, 9)
+    expect(t.decodeStartedAt()).toBeUndefined()
+    clock += 1_000
     t.onLine('4/4')
     expect(t.snapshot().phase).toBe('decoding')
+    expect(t.decodeStartedAt()).toBe(clock)
     expect(t.snapshot().fraction).toBeCloseTo(0.98, 9)
     expect(t.snapshot().etaSeconds).toBeNull()
     // A later phase reusing the count does not roll the batch over.

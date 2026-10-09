@@ -7,8 +7,8 @@
  */
 
 import type { VideoRecipe } from '../contracts/index.js'
-import { estimateVideoMemory, heuristicSeconds, planDecodeTiling } from './video-estimate.js'
-import type { VideoEstimateInput } from './video-estimate.js'
+import { estimateVideoMemory, heuristicParts, planDecodeTiling } from './video-estimate.js'
+import type { VideoEstimateInput, VideoHistoryMultiplier } from './video-estimate.js'
 
 /** At most this many clips, the newest first. */
 export const HISTORY_LIMIT = 5
@@ -64,22 +64,45 @@ function median(values: readonly number[]): number {
 }
 
 /**
- * The median of `actual / heuristic` over the clips that speak for this request, within
- * `HISTORY_MULTIPLIER_RANGE`; undefined when there are none.
+ * The median of `actual / heuristic` over the clips that speak for this request, for the sampling
+ * and for the decode apart, each within `HISTORY_MULTIPLIER_RANGE`; undefined when there are none.
+ * A clip that recorded its `decodeMs` calibrates the two separately: a single-graph decode on Metal
+ * can be most of a short clip's time and miss the table by far more than the steps do, so one ratio
+ * for both under-forecasts a few-step clip. An older clip has only its total, which stands for both.
  */
 export function historyMultiplier(
   recipes: readonly VideoRecipe[],
   input: VideoEstimateInput
-): number | undefined {
-  const ratios = historyRecipes(recipes, input)
-    .map((recipe) => {
-      const predicted = heuristicSeconds(recipeInput(input, recipe))
-      return predicted > 0 ? recipe.durationMs / 1000 / predicted : undefined
-    })
-    .filter((ratio): ratio is number => ratio !== undefined && Number.isFinite(ratio))
-  if (ratios.length === 0) return undefined
+): VideoHistoryMultiplier | undefined {
+  const sampling: number[] = []
+  const decode: number[] = []
+  for (const recipe of historyRecipes(recipes, input)) {
+    const clip = recipeInput(input, recipe)
+    const parts = heuristicParts(clip)
+    const samplingSeconds = parts.encodeSeconds + Math.max(clip.steps, 1) * parts.stepSeconds
+    const seconds = recipe.durationMs / 1000
+    if (recipe.decodeMs !== undefined && samplingSeconds > 0 && parts.decodeSeconds > 0) {
+      const decodeSeconds = recipe.decodeMs / 1000
+      sampling.push((seconds - decodeSeconds) / samplingSeconds)
+      decode.push(decodeSeconds / parts.decodeSeconds)
+      continue
+    }
+    const predicted = samplingSeconds + parts.decodeSeconds
+    if (predicted > 0) {
+      sampling.push(seconds / predicted)
+      decode.push(seconds / predicted)
+    }
+  }
   const [min, max] = HISTORY_MULTIPLIER_RANGE
-  return Math.min(Math.max(median(ratios), min), max)
+  const calibrated = (ratios: number[]): number | undefined => {
+    const finite = ratios.filter(Number.isFinite)
+    return finite.length === 0 ? undefined : Math.min(Math.max(median(finite), min), max)
+  }
+  const samplingK = calibrated(sampling)
+  const decodeK = calibrated(decode)
+  return samplingK === undefined || decodeK === undefined
+    ? undefined
+    : { sampling: samplingK, decode: decodeK }
 }
 
 /**

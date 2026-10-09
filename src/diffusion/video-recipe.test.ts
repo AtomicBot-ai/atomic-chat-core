@@ -36,6 +36,16 @@ describe('serializeVideoRecipe', () => {
     expect(parseVideoRecipe(bare)).toEqual(sampleVideoRecipe())
     expect(RECIPE_SIDECAR_SUFFIX).toBe('.json')
   })
+
+  it('writes the decode time last when the clip has one, and reads a clip without it', () => {
+    const timed = { ...sampleVideoRecipe(), decodeMs: 900 }
+    const text = serializeVideoRecipe(timed)
+    expect(Object.keys(JSON.parse(text) as object).slice(-2)).toEqual(['durationMs', 'decodeMs'])
+    expect(parseVideoRecipe(text)).toEqual(timed)
+    // A malformed decode time costs the clip only its decode time.
+    const odd = JSON.stringify({ ...(JSON.parse(text) as object), decodeMs: 'slow' })
+    expect(parseVideoRecipe(odd)).toEqual(sampleVideoRecipe())
+  })
 })
 
 describe('parseVideoRecipe', () => {

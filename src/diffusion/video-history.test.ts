@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { SystemInfo, VideoRecipe } from '../contracts/index.js'
 import { jobId, sampleVideoRecipe } from '../../test/helpers/diffusion-fixtures.js'
 import { VIDEO_VAE_TILING_PIXEL_FRAMES } from './args.js'
-import { estimateVideoCost, heuristicSeconds, planDecodeTiling } from './video-estimate.js'
+import { estimateVideoCost, heuristicParts, heuristicSeconds, planDecodeTiling } from './video-estimate.js'
 import type { VideoEstimateInput } from './video-estimate.js'
 import {
   HISTORY_LIMIT,
@@ -101,7 +101,8 @@ describe('historyMultiplier', () => {
       clip(3, 2, { width: 512, height: 768 }),
     ]
     const k = historyMultiplier(recipes, input())
-    expect(k).toBeCloseTo(2, 3)
+    expect(k?.sampling).toBeCloseTo(2, 3)
+    expect(k?.decode).toBeCloseTo(2, 3)
     const heuristic = estimateVideoCost(input()) as NonNullable<ReturnType<typeof estimateVideoCost>>
     const history = estimateVideoCost(input(), k) as NonNullable<ReturnType<typeof estimateVideoCost>>
     expect(history.estimate.basis).toBe('history')
@@ -113,10 +114,29 @@ describe('historyMultiplier', () => {
   })
 
   it('takes the median, and keeps it within ×0.1..×10', () => {
-    expect(historyMultiplier([clip(1, 1), clip(2, 3), clip(3, 100)], input())).toBeCloseTo(3, 3)
-    expect(historyMultiplier([clip(1, 1), clip(2, 3)], input())).toBeCloseTo(2, 3)
-    expect(historyMultiplier([clip(1, 50)], input())).toBe(10)
-    expect(historyMultiplier([clip(1, 0.01)], input())).toBe(0.1)
+    const k = (recipes: VideoRecipe[]) => historyMultiplier(recipes, input())?.sampling
+    expect(k([clip(1, 1), clip(2, 3), clip(3, 100)])).toBeCloseTo(3, 3)
+    expect(k([clip(1, 1), clip(2, 3)])).toBeCloseTo(2, 3)
+    expect(k([clip(1, 50)])).toBe(10)
+    expect(k([clip(1, 0.01)])).toBe(0.1)
+  })
+
+  it('calibrates the decode apart from the sampling for clips that recorded it', () => {
+    // Steps at 1.5 times the table, the decode at 9 times: a few-step request then forecasts a
+    // decode nine times the table, not the blended ratio of the clips.
+    const timed = (n: number, steps: number): VideoRecipe => {
+      const recipe = sampleVideoRecipe({ jobId: jobId(n), createdAtMs: 1_000 + n, steps })
+      const parts = heuristicParts(recipeInput(input(), recipe))
+      const samplingMs = (parts.encodeSeconds + steps * parts.stepSeconds) * 1.5 * 1000
+      const decodeMs = Math.round(parts.decodeSeconds * 9 * 1000)
+      return { ...recipe, durationMs: Math.round(samplingMs) + decodeMs, decodeMs }
+    }
+    const k = historyMultiplier([timed(1, 22), timed(2, 30)], input())
+    expect(k?.sampling).toBeCloseTo(1.5, 2)
+    expect(k?.decode).toBeCloseTo(9, 2)
+    const oneStep = input({ steps: 1 })
+    const cost = estimateVideoCost(oneStep, historyMultiplier([timed(1, 22), timed(2, 30)], oneStep))
+    expect(cost?.forecast.decodeSeconds).toBeCloseTo(heuristicParts(oneStep).decodeSeconds * 9, 1)
   })
 })
 

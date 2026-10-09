@@ -74,6 +74,7 @@ export function serializeVideoRecipe(recipe: VideoRecipe): string {
     },
     createdAtMs: recipe.createdAtMs,
     durationMs: recipe.durationMs,
+    ...(recipe.decodeMs === undefined ? {} : { decodeMs: recipe.decodeMs }),
   }
   return `${JSON.stringify(ordered, null, 2)}\n`
 }
@@ -153,5 +154,7 @@ export function parseVideoRecipe(text: string): VideoRecipe | undefined {
     },
     createdAtMs: raw['createdAtMs'] as number,
     durationMs: raw['durationMs'] as number,
+    // Older clips have none; a malformed one is dropped rather than the clip.
+    ...(isWhole(raw['decodeMs']) ? { decodeMs: raw['decodeMs'] as number } : {}),
   }
 }
