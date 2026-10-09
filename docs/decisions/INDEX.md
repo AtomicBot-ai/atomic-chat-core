@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-09** — [Run CI's unit and e2e suites as parallel jobs, and split the watchdog script tests](2026-10-09-run-ci-unit-and-e2e-as-parallel-jobs.md) — `gate`, `unit` and `e2e` start together; the watchdog's real-time script tests are four files on separate workers (local `npm test` 64 s → 32 s).
 - **2026-10-09** — [A build that dies while loading is skipped, and the user's own llama.cpp build goes first](2026-10-09-a-build-that-dies-while-loading-is-skipped-and-the-picked-build-goes-first.md) — `spawnOnFirstGoodEngine` falls back on `MODEL_LOAD_FAILED` too and fails with the crash when no build is left; `orderUpstreamCandidates` tries the picked `version_backend` first.
 - **2026-10-09** — [Calibrate the video decode apart from the steps](2026-10-09-calibrate-the-video-decode-apart-from-the-steps.md) — M1 Metal decode factor 87 from a measured M1 Max; recipes record `decodeMs`; the history multiplier splits into `sampling` and `decode`.
 - **2026-10-08** — [A generating image or video job is never evicted by a chat load](2026-10-08-a-generating-media-job-is-never-evicted-by-a-chat-load.md) — an occupant may report `busy` + `remedy`; diffusion does while a live job runs, and residency refuses the claim with `GPU_BUSY` instead of stopping it.
