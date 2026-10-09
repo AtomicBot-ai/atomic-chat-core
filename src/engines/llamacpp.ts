@@ -8,9 +8,11 @@
  *   2. in the load queue's turn, write `version_backend` (clients get `settings:changed`), so the
  *      next load, the desktop's automatic reload included, starts from the new pack;
  *   3. unload the provider's sessions, as an ordinary unload would;
- *   4. delete the other versions of the same variant, but not the installer's pack and not one
- *      something still runs from (`kept_in_use`);
- *   5. `engine:changed {reason: update}`.
+ *   4. `engine:changed {reason: update}`.
+ *
+ * Nothing is deleted: the old build stays installed, to switch back to or to remove from the list of
+ * builds (a decision during the acceptance of the change, which replaced the retirement of design
+ * D5). `retired` and `kept_in_use` are therefore always empty.
  *
  * A failure or a cancel before step 2 changes nothing: the pack moves into place only once complete,
  * and the setting still names the old one. The whole update holds the provider's operation slot, so
@@ -39,14 +41,7 @@ export interface LlamacppEngineDeps {
   engine: LlamacppProviderId
   backends: Pick<
     BackendService,
-    | 'operate'
-    | 'install'
-    | 'exclusive'
-    | 'listInstalled'
-    | 'bundledPack'
-    | 'busyChecker'
-    | 'retireOthers'
-    | 'remove'
+    'operate' | 'install' | 'exclusive' | 'listInstalled' | 'bundledPack' | 'busyChecker' | 'remove'
   >
   advisor: Pick<BackendAdvisor, 'catalog' | 'checkUpdates'>
   /** The provider's `version_backend` in the core's settings. */
@@ -60,11 +55,6 @@ export interface LlamacppEngineDeps {
   onInstalled?: (installed: boolean) => void
   log?: (level: 'info' | 'warn', message: string) => void
 }
-
-const keyOf = (pack: { version: string; backend: string }): EngineBuildKey => ({
-  version: pack.version,
-  variant: pack.backend,
-})
 
 function parseKey(versionBackend: string): EngineBuildKey | null {
   const [version, variant, ...rest] = versionBackend.trim().split('/')
@@ -149,17 +139,16 @@ export class LlamacppEngine implements EngineHandle {
     }
     this.deps.onInstalled?.(installed)
 
-    const { retired, kept } = await this.deps.backends.exclusive(async () => {
+    await this.deps.backends.exclusive(async () => {
       await this.deps.selectVersionBackend(`${target.version}/${target.variant}`)
       await this.unload()
-      return this.deps.backends.retireOthers({ version: target.version, backend: target.variant }, operation)
     })
     this.deps.emit('engine:changed', { engine: this.engine, reason: 'update' })
-    return { updated: true, active: target, retired: retired.map(keyOf), kept_in_use: kept.map(keyOf) }
+    return { updated: true, active: target, retired: [], kept_in_use: [] }
   }
 
   /**
-   * `POST /engines/:engine/builds/:version/:variant/activate` (design D11): steps 2, 3 and 5 of an
+   * `POST /engines/:engine/builds/:version/:variant/activate` (design D11): steps 2, 3 and 4 of an
    * update — write `version_backend` and unload the provider's sessions in the load queue's turn, then
    * `engine:changed {reason: activate}` — with nothing downloaded and nothing removed. Under the same
    * operation slot as an update, so the two never race on the setting.
@@ -228,8 +217,8 @@ export class LlamacppEngine implements EngineHandle {
   }
 
   /**
-   * The switch is already written when this runs: a session that does not stop keeps its old pack in
-   * use (and on disk, through `kept_in_use`), and the answer still says the update applied.
+   * The switch is already written when this runs: a session that does not stop keeps running from its
+   * old pack, which stays on disk, and the answer still says the update applied.
    */
   private async unload(): Promise<void> {
     try {

@@ -17,11 +17,13 @@ title: "The core applies engine updates on a client's command and owns llama.cpp
   `DELETE /engines/:e/builds/:v/:variant`, `POST /engines/:e/builds/:v/:variant/activate`, and `engine:changed` from
   every path that changes a build. The client still chooses the moment; the core applies.
   - **llama.cpp:** the core installs, then in the load queue's turn writes `version_backend` (clients mirror it on
-    `settings:changed`), unloads the provider's sessions through the facade, and retires the other versions of the
-    same variant. Activation is the same without the install and the retirement. **This replaces "the core does not
+    `settings:changed`), and unloads the provider's sessions through the facade. Activation is the same without the
+    install. **No update deletes a build, on any engine** (sd.cpp and MLX installs and the start neither): the old
+    ones stay listed, inactive, until the user removes them; `retired` and `kept_in_use` stay in the answers, always
+    empty (decided at the change's acceptance, 2026-10-09, replacing its design D5). **This replaces "the core does not
     write `version_backend`" of ADR 2026-09-27**; the rest of that record stands.
   - **The installer's packs:** a pack named by `<resources-dir>/../llamacpp-backend-upstream/{version.txt,
-    backend.txt}` (and `…/llamacpp-backend/…` for TurboQuant) is `bundled`: never retired, never removed — the app
+    backend.txt}` (and `…/llamacpp-backend/…` for TurboQuant) is `bundled`: never removed — the app
     copies it back at every start. `atc` passes no `--resources-dir` and has none.
   - **Busy packs:** a pack a session, the decision model or the embedding model runs from is never removed
     (`BACKEND_IN_USE`), on `/engines` and on `DELETE /backends` alike; removal waits for a load in flight. One

@@ -41,7 +41,6 @@ import {
 } from '../catalog/index.js'
 import type { PrismCatalogService } from '../catalog/index.js'
 import {
-  backendTypeEquivalents,
   deletableBackendPack,
   getBackendDir,
   listInstalledBackendPacks,
@@ -573,40 +572,6 @@ export class BackendService {
   async setOptimalCache(record: OptimalState['optimal'], expectedRevision: number): Promise<OptimalUpdate> {
     if (!this.deps.optimalStore) throw new Error('Optimal-backend store is not configured')
     return this.deps.optimalStore.set(this.deps.provider, record, expectedRevision)
-  }
-
-  /**
-   * After an update made `keep` active (design D5): delete the other versions of the same backend
-   * (by `backendTypeEquivalents`: `ubuntu-x64` on disk is `linux-cpu-x64`),
-   * except the installer's pack and the ones something still runs from, which are reported as kept.
-   * Packs of other backends stay (a CPU pack kept as a fallback). Inside the update's operation and
-   * its `exclusive` turn; a pack that cannot be deleted (Windows holding a file open) is kept too.
-   */
-  async retireOthers(
-    keep: { version: string; backend: string },
-    operation: BackendOperation
-  ): Promise<{ retired: InstalledBackendPack[]; kept: InstalledBackendPack[] }> {
-    if (operation !== this.operation) throw this.busy()
-    const bundled = await this.bundledPack()
-    const busy = await this.busyChecker()
-    const retired: InstalledBackendPack[] = []
-    const kept: InstalledBackendPack[] = []
-    for (const pack of await this.listInstalled()) {
-      if (!backendTypeEquivalents(keep.backend).has(pack.backend) || pack.version === keep.version) continue
-      if (bundled && bundled.version === pack.version && bundled.backend === pack.backend) continue
-      if (await busy(pack.version, pack.backend)) {
-        kept.push(pack)
-        continue
-      }
-      try {
-        await rm(pack.path, { recursive: true, force: true })
-        retired.push(pack)
-      } catch (error) {
-        this.deps.log?.(`Could not retire ${pack.version}/${pack.backend}: ${String(error)}`)
-        kept.push(pack)
-      }
-    }
-    return { retired, kept }
   }
 
   /**

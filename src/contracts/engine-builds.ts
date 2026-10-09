@@ -98,9 +98,12 @@ export interface EngineBuildInstallResult {
   installed: boolean
   reason?: 'already-installed' | 'active-is-newer'
   build: EngineBuildRef
-  /** Other downloaded builds removed after the new one became active. */
+  /**
+   * Always empty since change `unify-engine-lifecycle`: an install deletes no other build, and neither
+   * does the start. Kept in the shape for the clients that already read it.
+   */
   retired: EngineBuildRef[]
-  /** Builds left because a session still runs from them; removed on a later install or start. */
+  /** Always empty, like `retired`. */
   kept_in_use: EngineBuildRef[]
   /**
    * sd.cpp: builds higher on this host's ladder that unpacked but failed their probe on the way down
@@ -115,5 +118,6 @@ export interface EngineBuildRemoveResult {
 
 export interface EngineBuildChangedEvent {
   engine: EngineBuildId
+  /** `startup-cleanup` is no longer sent: the start removes no build. Kept for the vendored clients. */
   reason: 'install' | 'uninstall' | 'startup-cleanup'
 }

@@ -175,9 +175,12 @@ export interface EngineUpdateResult {
   updated: boolean
   reason?: EngineUpdateNotAppliedReason
   active: EngineBuildKey | null
-  /** Builds removed after the new one became active. */
+  /**
+   * Always empty: an update deletes no build, the old ones stay to switch back to or remove. Kept in
+   * the shape for the clients that already read it.
+   */
   retired: EngineBuildKey[]
-  /** Builds left on disk because something still runs from them. */
+  /** Always empty, like `retired`. */
   kept_in_use: EngineBuildKey[]
 }
 

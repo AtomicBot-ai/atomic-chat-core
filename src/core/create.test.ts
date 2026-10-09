@@ -579,7 +579,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)(
       expect(core.sessions()).toEqual([])
       expect(core.settings.get('llamacpp-upstream')['version_backend']).toBe('b6300/macos-arm64')
 
-      // A target already on disk installs nothing, then switches and retires the other version.
+      // A target already on disk installs nothing, then switches; the other version stays.
       const updated = await call('POST', 'llamacpp-upstream/update', {
         task_id: 'engine-update-llamacpp-upstream-b6325',
         target: { version: 'b6325', variant: 'macos-arm64' },
@@ -587,7 +587,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)(
       expect(await updated.json()).toEqual({
         updated: true,
         active: { version: 'b6325', variant: 'macos-arm64' },
-        retired: [{ version: 'b6300', variant: 'macos-arm64' }],
+        retired: [],
         kept_in_use: [],
       })
 
@@ -1812,8 +1812,8 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
 )
 
 describe('engine builds through the owner', () => {
-  it('cleans up at start, says so, and answers the catalog from the manifest it is pointed at', async () => {
-    // Two sd.cpp builds a previous core left (one kept in use on its last install): the older goes.
+  it('keeps every build at start, says nothing, and answers the catalog from the manifest it is pointed at', async () => {
+    // Two sd.cpp builds a previous core left: both stay, the newer one active.
     const own = async (tag: string, installedAtMs: number) => {
       const dir = join(data.root, 'diffusion', 'backends', tag, 'macos-arm64')
       await mkdir(dir, { recursive: true })
@@ -1851,17 +1851,22 @@ describe('engine builds through the owner', () => {
       (core.events.replayAfter(0) ?? [])
         .filter((record) => record.name === 'engine-build:changed')
         .map((r) => r.payload)
-    ).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
-    // The same change for the clients of change `unify-engine-lifecycle`.
+    ).toEqual([])
     expect(
       (core.events.replayAfter(0) ?? [])
         .filter((record) => record.name === 'engine:changed')
         .map((r) => r.payload)
-    ).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
-    expect(await readdir(join(data.root, 'diffusion', 'backends'))).toEqual(['master-900-abcdef0'])
+    ).toEqual([])
+    expect((await readdir(join(data.root, 'diffusion', 'backends'))).sort()).toEqual([
+      'master-883-137f740',
+      'master-900-abcdef0',
+    ])
     const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
     const catalog = await client.engineBuildCatalog('sd-cpp', { force: true })
     expect(catalog.manifest).toMatchObject({ tag: 'master-901-abcdef0', source: 'remote' })
-    expect(catalog.installed.map((b) => b.tag)).toEqual(['master-900-abcdef0'])
+    expect(catalog.installed.map((b) => [b.tag, b.active])).toEqual([
+      ['master-900-abcdef0', true],
+      ['master-883-137f740', false],
+    ])
   })
 })

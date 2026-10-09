@@ -11,7 +11,11 @@
  * this module only orders the steps:
  *
  *   install = (per-engine lock) → manifest → host build → refuse a downgrade → staged install →
- *             [under the engine's load lock] activate → retire the other downloaded builds
+ *             [under the engine's load lock] activate
+ *
+ * No install deletes another build, and neither does the start (change `unify-engine-lifecycle`, a
+ * decision during its acceptance): the old ones stay listed, inactive, for the user to remove. The
+ * `retired` and `kept_in_use` of an install answer are therefore always empty.
  *
  * sd.cpp walks down the host's ladder when a build unpacks but fails its probe (design D7): the pair
  * is remembered in `<data>/diffusion/failed-backends.json` and the next build is installed under the
@@ -351,41 +355,10 @@ export class EngineBuildsService {
             }),
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
-    const { retired, kept } = await this.activateAndRetire(engine, dir, replaced)
-    this.changed(engine, 'install')
-    return { installed: true, build, retired, kept_in_use: kept }
-  }
-
-  /**
-   * Under the engine's load lock: make the new build active, then remove every other downloaded
-   * build no session runs from. The bundled build is never touched.
-   */
-  private activateAndRetire(
-    engine: EngineBuildId,
-    dir: string,
-    replaced: boolean
-  ): Promise<{ retired: EngineBuildRef[]; kept: EngineBuildRef[] }> {
     const host = this.deps.hosts[engine]
-    return host.exclusive(async () => {
-      await host.activate(dir, replaced)
-      const inUse = await host.inUse()
-      const retired: EngineBuildRef[] = []
-      const kept: EngineBuildRef[] = []
-      for (const build of await this.builds(engine)) {
-        if (build.origin !== 'downloaded' || (await samePath(build.dir, dir, this.deps.platform))) continue
-        if (await this.isUsed(build, inUse)) {
-          kept.push(ref(build))
-          continue
-        }
-        try {
-          await removeOwnedBuild(this.deps.roots[engine], build.dir, this.deps.platform)
-          retired.push(ref(build))
-        } catch (error) {
-          this.deps.log?.('warn', `Could not retire ${build.tag}/${build.backend_id}: ${String(error)}`)
-        }
-      }
-      return { retired, kept }
-    })
+    await host.exclusive(() => host.activate(dir, replaced))
+    this.changed(engine, 'install')
+    return { installed: true, build, retired: [], kept_in_use: [] }
   }
 
   private changed(engine: EngineBuildId, reason: CoreEvents['engine-build:changed']['reason']): void {
@@ -440,46 +413,17 @@ export class EngineBuildsService {
   // --- start -----------------------------------------------------------------------------------
 
   /**
-   * Before the first load (design D3, D5): every downloaded build that is not the active one goes —
-   * the ones a session kept on the last install, and for MLX the downloads no newer than the build
-   * the installer brought (an app update that ships a newer `mlx-server`). Leftovers of an install
-   * the process did not live to finish (`*.incoming-*`, `*.retired-*`) go too. Under each engine's
-   * load lock; nothing runs yet, so nothing is in use. One `startup-cleanup` per engine that lost a
-   * build.
+   * Before the first load: the leftovers of an install the process did not live to finish
+   * (`*.incoming-*`, `*.retired-*`). They were never a build, so no client hears of it; a build on
+   * disk, active or not, always stays. Under each engine's load lock.
    */
   async startupCleanup(): Promise<void> {
-    for (const engine of ['sd-cpp', 'mlx'] as const) {
-      const removed = await this.deps.hosts[engine]
-        .exclusive(async () => {
-          // Leftovers of an interrupted install were never a build: they change nothing a client sees.
-          await this.removeLeftovers(engine)
-          let count = 0
-          const builds = await this.builds(engine)
-          const active = this.activeOf(engine, builds)
-          const inUse = await this.deps.hosts[engine].inUse()
-          for (const build of builds) {
-            if (build.origin !== 'downloaded' || build === active || (await this.isUsed(build, inUse)))
-              continue
-            try {
-              if (await removeOwnedBuild(this.deps.roots[engine], build.dir, this.deps.platform)) count++
-            } catch (error) {
-              this.deps.log?.(
-                'warn',
-                `Could not remove ${build.tag}/${build.backend_id} at start: ${String(error)}`
-              )
-            }
-          }
-          return count
-        })
+    for (const engine of ['sd-cpp', 'mlx'] as const)
+      await this.deps.hosts[engine]
+        .exclusive(() => this.removeLeftovers(engine))
         .catch((error: unknown) => {
           this.deps.log?.('warn', `The ${engine} startup cleanup failed: ${String(error)}`)
-          return 0
         })
-      if (removed > 0) {
-        await this.deps.hosts[engine].changed?.('startup-cleanup')
-        this.changed(engine, 'startup-cleanup')
-      }
-    }
   }
 
   /** `<root>/<tag>/<backend>.incoming-<n>[.download]` and `.retired-<n>`: only ever this module's. */

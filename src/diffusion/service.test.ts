@@ -408,7 +408,7 @@ describe.skipIf(!posix)('the engine and the model', () => {
  * it like conf does.
  */
 describe.skipIf(!posix)('engine builds through the core', () => {
-  it('an update while a model is loaded unloads it with engine-updated, retires the old build, and the next load uses the new one', async () => {
+  it('an update while a model is loaded unloads it with engine-updated, keeps the old build, and the next load uses the new one', async () => {
     const h = harness()
     await h.service.configure({ dataFolder })
     const old = await installFakeSdEngine(layout, { tag: 'master-883-137f740', backendId: 'macos-arm64' })
@@ -423,12 +423,12 @@ describe.skipIf(!posix)('engine builds through the core', () => {
     expect(result).toEqual({
       installed: true,
       build: { tag: 'master-900-abcdef0', backend_id: 'macos-arm64', origin: 'downloaded' },
-      retired: [{ tag: 'master-883-137f740', backend_id: 'macos-arm64', origin: 'downloaded' }],
+      retired: [],
       kept_in_use: [],
     })
     expect(isProcessAlive(loaded.pid)).toBe(false)
     expect(h.reasons().slice(-2)).toEqual(['engine-updated', 'install'])
-    expect(await exists(old.dir)).toBe(false)
+    expect(await exists(old.dir)).toBe(true)
     const next = await h.service.loadModel(request)
     expect((await h.service.getStatus()).install).toMatchObject({ tag: 'master-900-abcdef0' })
     expect(await h.service.engineHost().inUse()).toEqual([

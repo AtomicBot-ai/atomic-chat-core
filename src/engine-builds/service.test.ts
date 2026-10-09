@@ -510,7 +510,7 @@ describe.skipIf(!POSIX)('EngineBuildsService.install (task 3.1)', () => {
     expect(archiveRequests()).toEqual([])
   })
 
-  it('activates under the load lock, then keeps a build a session still runs from and retires it on the next install', async () => {
+  it('activates under the load lock and deletes no other build, used or not', async () => {
     const h = harness()
     const install = async (tag: string) => {
       h.setSd(
@@ -527,10 +527,7 @@ describe.skipIf(!POSIX)('EngineBuildsService.install (task 3.1)', () => {
     h.hosts['sd-cpp'].used = [dirOf('master-883-137f740')]
 
     const second = await install('master-900-aaaaaaa')
-    expect(second).toMatchObject({
-      retired: [],
-      kept_in_use: [{ tag: 'master-883-137f740', backend_id: 'linux-vulkan-x64', origin: 'downloaded' }],
-    })
+    expect(second).toMatchObject({ retired: [], kept_in_use: [] })
     expect(await ls(data.layout.diffusion.backendsDir)).toEqual(['master-883-137f740', 'master-900-aaaaaaa'])
     const catalog = await h.service.catalog('sd-cpp')
     expect(catalog.installed.map((b) => [b.tag, b.in_use, b.active])).toEqual(
@@ -541,14 +538,13 @@ describe.skipIf(!POSIX)('EngineBuildsService.install (task 3.1)', () => {
     )
 
     h.hosts['sd-cpp'].used = []
-    expect(await install('master-901-bbbbbbb')).toMatchObject({
-      retired: expect.arrayContaining([
-        { tag: 'master-883-137f740', backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
-        { tag: 'master-900-aaaaaaa', backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
-      ]),
-      kept_in_use: [],
-    })
-    expect(await ls(data.layout.diffusion.backendsDir)).toEqual(['master-901-bbbbbbb'])
+    expect(await install('master-901-bbbbbbb')).toMatchObject({ retired: [], kept_in_use: [] })
+    expect(await ls(data.layout.diffusion.backendsDir)).toEqual([
+      'master-883-137f740',
+      'master-900-aaaaaaa',
+      'master-901-bbbbbbb',
+    ])
+    expect((await h.service.catalog('sd-cpp')).active).toMatchObject({ tag: 'master-901-bbbbbbb' })
   })
 
   it('refuses a host no build fits', async () => {
@@ -676,15 +672,17 @@ describe('MLX from two origins (task 3.3)', () => {
     })
   })
 
-  it('at start removes the downloads no newer than the installer, and says so', async () => {
+  it('at start keeps the downloads no newer than the installer, which stays the active build', async () => {
     await bundle({ ...AUG, published_at: '2026-10-02T00:00:00Z' })
-    const older = await download('mlxvlm-macos-arm64-aaaaaaa', '2026-09-10T00:00:00Z')
-    const same = await download('mlxvlm-macos-arm64-bbbbbbb', '2026-10-02T00:00:00Z')
+    await download('mlxvlm-macos-arm64-aaaaaaa', '2026-09-10T00:00:00Z')
+    await download('mlxvlm-macos-arm64-bbbbbbb', '2026-10-02T00:00:00Z')
     const h = harness({ facts: MAC_ARM, resourcesDir: resources() })
     await h.service.startupCleanup()
-    expect(await ls(data.layout.provider('mlx').backendsDir)).toEqual([])
-    expect(h.changed).toEqual([{ engine: 'mlx', reason: 'startup-cleanup' }])
-    expect([older, same].length).toBe(2)
+    expect(await ls(data.layout.provider('mlx').backendsDir)).toEqual([
+      'mlxvlm-macos-arm64-aaaaaaa',
+      'mlxvlm-macos-arm64-bbbbbbb',
+    ])
+    expect(h.changed).toEqual([])
     expect(await h.service.resolveMlxBinary()).toBe(join(resources(), 'mlx-server'))
   })
 
@@ -732,7 +730,7 @@ describe('startup cleanup of sd.cpp', () => {
     expect(h.changed).toEqual([])
   })
 
-  it('removes the builds a session kept on the last install, and the leftovers of an interrupted one', async () => {
+  it('removes the leftovers of an interrupted install and never a build', async () => {
     const root = data.layout.diffusion.backendsDir
     const build = async (tag: string, installedAtMs: number) => {
       const dir = join(root, tag, 'linux-vulkan-x64')
@@ -759,9 +757,9 @@ describe('startup cleanup of sd.cpp', () => {
     await mkdir(join(root, 'master-900-aaaaaaa', 'foreign'), { recursive: true })
     const h = harness()
     await h.service.startupCleanup()
-    expect(await ls(root)).toEqual(['master-900-aaaaaaa'])
+    expect(await ls(root)).toEqual(['master-883-137f740', 'master-900-aaaaaaa'])
     expect((await ls(join(root, 'master-900-aaaaaaa'))).sort()).toEqual(['foreign', 'linux-vulkan-x64'])
-    expect(h.changed).toEqual([{ engine: 'sd-cpp', reason: 'startup-cleanup' }])
+    expect(h.changed).toEqual([])
   })
 })
 
@@ -795,7 +793,7 @@ describe.skipIf(!POSIX)('EngineBuildsService.remove (task 3.4)', () => {
     expect(h.changed.at(-1)).toEqual({ engine: 'sd-cpp', reason: 'uninstall' })
   })
 
-  it('says every install, removal and cleanup at start on engine:changed too, with the same reason', async () => {
+  it('says every install and removal on engine:changed too, with the same reason; the start removes no build to say', async () => {
     const h = harness()
     const first = await installed(h, 'master-883-aaaaaaa')
     h.hosts['sd-cpp'].used = [first]
@@ -805,12 +803,7 @@ describe.skipIf(!POSIX)('EngineBuildsService.remove (task 3.4)', () => {
     await h.service.remove('sd-cpp', 'master-900-bbbbbbb', 'linux-vulkan-x64')
     expect(second).toContain('master-900-bbbbbbb')
     expect(h.engineChanged).toEqual(h.changed)
-    expect(h.engineChanged.map((event) => event.reason)).toEqual([
-      'install',
-      'install',
-      'startup-cleanup',
-      'uninstall',
-    ])
+    expect(h.engineChanged.map((event) => event.reason)).toEqual(['install', 'install', 'uninstall'])
   })
 
   it('refuses the active build when the caller asks, with the reason in details', async () => {

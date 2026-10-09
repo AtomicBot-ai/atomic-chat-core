@@ -4,9 +4,9 @@
  * proxy, the fake engines inside them.
  *
  *   - sd.cpp: catalog → install → a newer manifest offered as an update → installed while a model is
- *     loaded (unloaded with `engine-updated`, the old build retired) → removed.
+ *     loaded (unloaded with `engine-updated`, the old build kept) → removed.
  *   - MLX: the installer's build active → a newer one installed → the next load starts it → a restart
- *     with an installer newer still removes the download.
+ *     with an installer newer still makes the installer's build active and keeps the download.
  *
  * No imports from `src/`. POSIX only: the fake engines are shell launchers.
  */
@@ -122,17 +122,13 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('sd.cpp builds
       update_needed: true,
       target: { tag: 'master-900-abcdef0', backend_id: host },
     })
-    const update = await json<{ retired: Array<{ tag: string }> }>(
+    const update = await json(
       await post(ready, '/engine-builds/sd-cpp/install', { task_id: 'sd-update', proxy })
     )
-    expect(update).toMatchObject({
-      installed: true,
-      retired: [{ tag: 'master-883-137f740', backend_id: host, origin: 'downloaded' }],
-      kept_in_use: [],
-    })
+    expect(update).toMatchObject({ installed: true, retired: [], kept_in_use: [] })
     await waitFor(() => sd.stateReasons(events).includes('engine-updated'), 'the engine-updated state event')
     await waitFor(() => !sd.alive(loaded.pid), 'the old server to be gone')
-    expect(existsSync(oldDir)).toBe(false)
+    expect(existsSync(oldDir)).toBe(true)
     expect((await sd.sdStatus(ctx, ready)).install).toMatchObject({ tag: 'master-900-abcdef0' })
 
     // A rolled-back manifest is neither offered nor installed.
@@ -160,7 +156,7 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('sd.cpp builds
       )
     ).toEqual({ removed: true })
     const after = await json<Catalog>(await post(ready, '/engine-builds/sd-cpp/catalog'))
-    expect(after.installed).toEqual([])
+    expect(after.installed.map((build) => build.tag)).toEqual(['master-883-137f740'])
     expect(mirror.seen.filter((path) => path.endsWith('/sd.tar.gz'))).toEqual([
       '/releases/master-883-137f740/sd.tar.gz',
       '/releases/master-900-abcdef0/sd.tar.gz',
@@ -264,7 +260,7 @@ describe.skipIf(!existsSync(BIN) || process.platform !== 'darwin' || process.arc
       expect(existsSync(bundledArgv)).toBe(false)
       expect((await post(ready, '/models/mlx/e2e-mlx/unload')).status).toBe(200)
 
-      // The app updates and brings a newer mlx-server: the download goes at the next start.
+      // The app updates and brings a newer mlx-server: it is active at the next start, the download stays.
       await post(ready, '/shutdown', { force: true })
       await waitFor(
         () => first.child.exitCode !== null || first.child.signalCode !== null,
@@ -272,7 +268,7 @@ describe.skipIf(!existsSync(BIN) || process.platform !== 'darwin' || process.arc
       )
       await installerMeta('2026-11-01T00:00:00Z')
       const second = await core.startDaemon(folder, ctx.daemons, ['--resources-dir', resources], env)
-      expect(existsSync(downloadedDir)).toBe(false)
+      expect(existsSync(downloadedDir)).toBe(true)
       expect(
         (await json<Catalog>(await post(second.ready, '/engine-builds/mlx/catalog'))).active
       ).toMatchObject({

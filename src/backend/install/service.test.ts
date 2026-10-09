@@ -1,4 +1,4 @@
-import { chmod, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -666,25 +666,6 @@ describe('remove under the provider lock', () => {
         refuseActiveAs: 'INVALID_REQUEST',
       })
     ).rejects.toMatchObject({ code: 'INVALID_REQUEST', details: 'active' })
-  })
-
-  it('retires the other versions of an equivalent backend id, and keeps one it cannot delete', async () => {
-    await data.writeBackend('llamacpp-upstream', 'b6100', 'ubuntu-x64')
-    await data.writeBackend('llamacpp-upstream', 'b6200', 'linux-cpu-x64')
-    await data.writeBackend('llamacpp-upstream', 'b6325', 'linux-cpu-x64')
-    const s = guarded({ platform: 'linux' })
-    const locked = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b6200')
-    if (process.platform !== 'win32') await chmod(locked, 0o555)
-    try {
-      const { retired, kept } = await s.operate('update', (operation) =>
-        s.retireOthers({ version: 'b6325', backend: 'linux-cpu-x64' }, operation)
-      )
-      expect(retired.map((p) => `${p.version}/${p.backend}`)).toEqual(['b6100/ubuntu-x64'])
-      if (process.platform !== 'win32')
-        expect(kept.map((p) => `${p.version}/${p.backend}`)).toEqual(['b6200/linux-cpu-x64'])
-    } finally {
-      if (process.platform !== 'win32') await chmod(locked, 0o755)
-    }
   })
 
   it('waits for the load in flight before deleting', async () => {

@@ -166,7 +166,7 @@ const changed = () =>
   events.filter((e) => e.name === 'engine:changed').map((e) => e.payload as CoreEvents['engine:changed'])
 
 describe('LlamacppEngine.update', () => {
-  it('installs the offer, writes version_backend, unloads the model and retires the old pack', async () => {
+  it('installs the offer, writes version_backend, unloads the model and keeps the old pack', async () => {
     await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
     await data.writeModel('demo')
     const { engine, settingsWrites, fetcher } = await setup()
@@ -177,28 +177,18 @@ describe('LlamacppEngine.update', () => {
     expect(result).toEqual({
       updated: true,
       active: { version: 'b11500', variant: 'macos-arm64' },
-      retired: [{ version: 'b11443', variant: 'macos-arm64' }],
+      retired: [],
       kept_in_use: [],
     })
     expect(fetcher.calls).toEqual(['engine-update-llamacpp-upstream-b11500'])
     expect(settingsWrites).toEqual(['b11500/macos-arm64'])
     expect(runtime!.getLoadedModels()).toEqual([])
-    expect(await installed()).toEqual(['b11500/macos-arm64'])
+    // An update deletes nothing: the old build stays to switch back to, or to remove from the list.
+    expect(await installed()).toEqual(['b11443/macos-arm64', 'b11500/macos-arm64'])
     expect(changed()).toEqual([{ engine: PROVIDER, reason: 'update' }])
   })
 
-  it('keeps an old pack the decision model runs from', async () => {
-    await data.writeBackend(PROVIDER, 'b11443', 'macos-arm64')
-    const { engine } = await setup({ busy: [packDir('b11443', 'macos-arm64')] })
-
-    const result = await engine.update({ task_id: 't' })
-
-    expect(result.kept_in_use).toEqual([{ version: 'b11443', variant: 'macos-arm64' }])
-    expect(result.retired).toEqual([])
-    expect(await installed()).toEqual(['b11443/macos-arm64', 'b11500/macos-arm64'])
-  })
-
-  it("switches the variant to the catalog's newest and leaves the installer's pack alone", async () => {
+  it("switches the variant to the catalog's newest and leaves every other pack alone", async () => {
     await data.writeBackend(PROVIDER, 'b11443', 'win-cpu-x64')
     await data.writeBackend(PROVIDER, 'b11300', 'win-cuda12-x64')
     const { engine, settingsWrites } = await setup({
@@ -216,10 +206,14 @@ describe('LlamacppEngine.update', () => {
     expect(result).toMatchObject({
       updated: true,
       active: { version: 'b11500', variant: 'win-cuda12-x64' },
-      retired: [{ version: 'b11300', variant: 'win-cuda12-x64' }],
+      retired: [],
     })
     expect(settingsWrites).toEqual(['b11500/win-cuda12-x64'])
-    expect(await installed()).toEqual(['b11443/win-cpu-x64', 'b11500/win-cuda12-x64'])
+    expect(await installed()).toEqual([
+      'b11300/win-cuda12-x64',
+      'b11443/win-cpu-x64',
+      'b11500/win-cuda12-x64',
+    ])
   })
 
   it('leaves the setting and the packs as they were when the download is cancelled', async () => {

@@ -243,14 +243,12 @@ describe.skipIf(!existsSync(BIN) || !POSIX || NO_BUILD_FOR_HOST)('llama.cpp thro
     expect(await update.json()).toEqual({
       updated: true,
       active: { version: 'b99999', variant: fixture.backend },
-      retired: [{ version: 'b6325', variant: fixture.backend }],
+      retired: [],
       kept_in_use: [],
     })
     expect(await sessions(ready)).toEqual([])
     expect(await versionBackend(ready)).toBe(`b99999/${fixture.backend}`)
-    expect(existsSync(join(dataFolder, 'llamacpp-upstream', 'backends', 'b6325', fixture.backend))).toBe(
-      false
-    )
+    expect(existsSync(join(dataFolder, 'llamacpp-upstream', 'backends', 'b6325', fixture.backend))).toBe(true)
     await eventually(
       () =>
         seen.some(
