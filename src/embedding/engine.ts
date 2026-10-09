@@ -2,12 +2,12 @@
  * Finding a stock llama.cpp `llama-server` new enough for the embedding model: the I/O half of the
  * engine gate, the upstream half of the decision module's (`DecisionEngineResolver.resolveUpstream`).
  *
- * The installed packs of `llamacpp-upstream` are read from its folder directly, not through the
- * provider's settings: which build runs chat has nothing to do with which can run the embedding
- * model. The release tag is the gate (`orderUpstreamCandidates`): only packs at or above the model's
- * floor, newest first, GPU before CPU. Readiness has the last word; a pack it refuses is handed back
- * through `reject` and skipped until the file changes or the owner calls `forgetRejected` (a build
- * was installed, the user asked for a load, the launch settings changed).
+ * The installed packs of `llamacpp-upstream` are read from its folder directly: any of them may run
+ * the embedding model. The release tag is the gate (`orderUpstreamCandidates`): only packs at or above
+ * the model's floor, the build the user picked for chat first (it is known to run on this machine),
+ * then newest first, GPU before CPU. Readiness has the last word; a pack it refuses, or one that dies
+ * while loading, is handed back through `reject` and skipped until the file changes or the owner calls
+ * `forgetRejected` (a build was installed, the user asked for a load, the launch settings changed).
  */
 
 import { stat } from 'node:fs/promises'
@@ -30,6 +30,11 @@ export interface EmbeddingEngineResolverDeps {
   listPacks?: () => Promise<InstalledEnginePack[]>
   /** Modification time of a file, `undefined` when it does not exist. */
   mtime?: (path: string) => Promise<number | undefined>
+  /**
+   * The `llamacpp-upstream` build the user picked (`version_backend`, `b11463/win-vulkan-x64`): tried
+   * first when it can run the model (`orderUpstreamCandidates`).
+   */
+  preferredUpstream?: () => string
   log?: (level: 'info' | 'warn' | 'debug', msg: string) => void
 }
 
@@ -63,7 +68,11 @@ export class EmbeddingEngineResolver {
         `${enginePath}: ${reason}`
       )
     }
-    const { eligible, tooOld } = orderUpstreamCandidates(await this.packs(), minBuild)
+    const { eligible, tooOld } = orderUpstreamCandidates(
+      await this.packs(),
+      minBuild,
+      this.deps.preferredUpstream?.() ?? ''
+    )
     const tried: string[] = []
     for (const candidate of eligible) {
       const reason = await this.check(candidate.path)

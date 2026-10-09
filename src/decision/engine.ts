@@ -98,6 +98,11 @@ export interface EngineResolverDeps {
   probe?: (exe: string, flag: string) => Promise<boolean>
   /** Modification time of a file, `undefined` when it does not exist. */
   mtime?: (path: string) => Promise<number | undefined>
+  /**
+   * The `llamacpp-upstream` build the user picked (`version_backend`, `b11463/win-vulkan-x64`): tried
+   * first when it can run the model (`orderUpstreamCandidates`).
+   */
+  preferredUpstream?: () => string
   log?: (level: 'info' | 'warn' | 'debug', msg: string) => void
 }
 
@@ -181,7 +186,8 @@ export class DecisionEngineResolver {
     }
     const { eligible, tooOld } = orderUpstreamCandidates(
       await this.packsOf(UPSTREAM_DECISION_ENGINE_PROVIDER),
-      minBuild
+      minBuild,
+      this.deps.preferredUpstream?.() ?? ''
     )
     const tried: string[] = []
     for (const candidate of eligible) {

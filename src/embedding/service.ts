@@ -28,7 +28,13 @@ import type {
   EmbeddingState,
   EmbeddingStatus,
 } from '../contracts/index.js'
-import { nextRestartCount, resolveDataPath, restartDelayMs, shouldGiveUp } from '../decision/index.js'
+import {
+  nextRestartCount,
+  resolveDataPath,
+  restartDelayMs,
+  shouldGiveUp,
+  spawnOnFirstGoodEngine,
+} from '../decision/index.js'
 import type { DecisionHttp } from '../decision/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import type { EmbeddingBackend, EmbeddingTarget } from '../server/index.js'
@@ -47,8 +53,6 @@ import { EMBEDDINGS_PATH } from './readiness.js'
 
 /** How often a request may retry an `unsupported` module in the background. */
 export const UNSUPPORTED_RETRY_MS = 5 * 60_000
-/** Engine builds a start may skip after readiness refused them, before it gives up. */
-export const MAX_ENGINE_ATTEMPTS = 8
 /** The control route's own request budget, once the model runs. */
 export const EMBED_REQUEST_TIMEOUT_MS = 120_000
 
@@ -522,36 +526,31 @@ export class EmbeddingService {
   }
 
   /**
-   * Resolve an engine and spawn it; a build that readiness refuses as unsupported is handed to
-   * `rejectEngine` and the next one is tried. An explicit `engine_path` has nothing to fall back to.
+   * Resolve an engine and spawn it; a build that readiness refuses as unsupported or that dies while
+   * loading (a ROCm build without kernels for the card) is handed to `rejectEngine` and the next one is
+   * tried (`spawnOnFirstGoodEngine`). An explicit `engine_path` has nothing to fall back to.
    */
-  private async spawnOnFirstGoodEngine(
+  private spawnOnFirstGoodEngine(
     settings: EmbeddingSettings,
     minBuild: number,
     signal: AbortSignal,
     onEngine: (engine: EmbeddingEngineInfo) => void,
     specFor: (engine: EmbeddingEngineInfo) => EmbeddingServerSpec
   ): Promise<EmbeddingProcessHandle> {
-    for (let attempt = 1; ; attempt++) {
-      const engine = await this.deps.resolveEngine(settings.engine_path, minBuild)
-      onEngine(engine)
-      if (signal.aborted)
-        throw new AtomicCoreError('EMBEDDING_UNAVAILABLE', 'The embedding model start was stopped.')
-      try {
-        return await this.deps.spawn(specFor(engine), signal)
-      } catch (error) {
-        const fallback =
-          error instanceof AtomicCoreError &&
-          error.code === 'EMBEDDING_ENGINE_UNSUPPORTED' &&
-          settings.engine_path === '' &&
-          this.deps.rejectEngine !== undefined &&
-          attempt < MAX_ENGINE_ATTEMPTS
-        if (!fallback) throw error
-        const why = error.details ?? error.message
-        this.deps.log('warn', `embedding engine ${engine.path} refused at readiness, trying the next: ${why}`)
-        await this.deps.rejectEngine?.(engine.path, why)
-      }
-    }
+    return spawnOnFirstGoodEngine({
+      label: 'embedding',
+      resolve: () => this.deps.resolveEngine(settings.engine_path, minBuild),
+      onEngine,
+      throwIfStopped: () => {
+        if (signal.aborted)
+          throw new AtomicCoreError('EMBEDDING_UNAVAILABLE', 'The embedding model start was stopped.')
+      },
+      spawn: (engine) => this.deps.spawn(specFor(engine), signal),
+      unsupportedCode: 'EMBEDDING_ENGINE_UNSUPPORTED',
+      explicit: settings.engine_path !== '',
+      ...(this.deps.rejectEngine ? { reject: this.deps.rejectEngine } : {}),
+      log: this.deps.log,
+    })
   }
 
   private onExit(handle: EmbeddingProcessHandle, exit: ExitInfo): void {

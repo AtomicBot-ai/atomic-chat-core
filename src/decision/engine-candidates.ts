@@ -14,8 +14,11 @@
  *     without its runtime libraries.
  *
  * Upstream packs (`<data>/llamacpp-upstream/backends/`, `orderUpstreamCandidates`): only tags at or
- * above the model's floor, newest first, then GPU packs before CPU ones: upstream decision models run
- * up to 27B parameters and are started on the GPU when the pack has one.
+ * above the model's floor. The build the user runs `llamacpp-upstream` chat on goes first when it is
+ * one of them: it is the one known to work on this machine, and a GPU kind the user did not pick (a
+ * ROCm pack beside the recommended Vulkan one) may not run on this card at all. Then newest first,
+ * the picked build's backend first inside a release, then GPU packs before CPU ones: upstream
+ * decision models run up to 27B parameters and are started on the GPU when the pack has one.
  */
 
 import { meetsForkVersion, parseForkSemver, formatSemver } from './engine-version.js'
@@ -88,9 +91,14 @@ export interface UpstreamCandidates {
   tooOld: InstalledEnginePack[]
 }
 
+/**
+ * `preferred` is the `llamacpp-upstream` build the user picked (`version_backend`, `b11463/win-vulkan-x64`);
+ * empty or not installed, the order is the release's and the GPU kind's alone.
+ */
 export function orderUpstreamCandidates(
   packs: readonly InstalledEnginePack[],
-  minBuild: number
+  minBuild: number,
+  preferred = ''
 ): UpstreamCandidates {
   const eligible: EngineCandidate[] = []
   const tooOld: InstalledEnginePack[] = []
@@ -111,9 +119,18 @@ export function orderUpstreamCandidates(
       },
     })
   }
+  const picked = preferred.trim()
+  const pickedBackend = picked.slice(picked.indexOf('/') + 1)
+  const rank = (pack: EngineCandidate, key: (pack: EngineCandidate) => boolean) => (key(pack) ? 0 : 1)
   eligible.sort((a, b) => {
+    const exact = (pack: EngineCandidate) => picked !== '' && pack.info.version_backend === picked
+    const first = rank(a, exact) - rank(b, exact)
+    if (first !== 0) return first
     const build = (upstreamBuildOf(b.version) ?? 0) - (upstreamBuildOf(a.version) ?? 0)
     if (build !== 0) return build
+    const sameKind = (pack: EngineCandidate) => picked.includes('/') && pack.backend === pickedBackend
+    const kind = rank(a, sameKind) - rank(b, sameKind)
+    if (kind !== 0) return kind
     const backend = upstreamBackendPreference(a.backend) - upstreamBackendPreference(b.backend)
     return backend !== 0 ? backend : a.backend.localeCompare(b.backend)
   })
