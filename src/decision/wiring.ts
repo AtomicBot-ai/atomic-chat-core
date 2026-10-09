@@ -26,6 +26,8 @@ export interface WireDecisionOptions {
     readonly decision: DecisionSettings
     updateDecision(patch: Record<string, unknown>): Promise<unknown>
   }
+  /** The `llamacpp-upstream` build the user picked (`version_backend`): tried first when it can run the model. */
+  upstreamBackend?: () => string
   journal: Pick<ProcessJournal, 'add' | 'remove'>
   instanceId: string
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
@@ -109,6 +111,7 @@ export function wireDecision(options: WireDecisionOptions): DecisionService {
   const journal = decisionJournal(options.journal, options.instanceId)
   const resolver = new DecisionEngineResolver({
     layout: options.layout,
+    ...(options.upstreamBackend ? { preferredUpstream: options.upstreamBackend } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.overrides?.listPacks ? { listPacks: options.overrides.listPacks } : {}),

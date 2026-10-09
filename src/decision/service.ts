@@ -47,6 +47,7 @@ import type { DecisionBackend, DecisionTarget } from '../server/index.js'
 import { DECISION_CONVERT_CACHE_DIR, decisionThreads, resolveDataPath } from './args.js'
 import type { ThreadFacts, UpstreamDecisionLaunch } from './args.js'
 import type { EngineRequirements } from './engine.js'
+import { spawnOnFirstGoodEngine } from './engine-fallback.js'
 import { readDecisionModelFacts, upstreamCtxSize, WHOLE_PROMPT_DECISION_TYPES } from './model-facts.js'
 import type { DecisionModelFacts } from './model-facts.js'
 import { upstreamMinBuild } from './upstream-version.js'
@@ -75,8 +76,6 @@ export const SYSTEMONE_PATH = '/v1/systemone'
  * and, for a pack not probed yet, one `-h`.
  */
 export const UNSUPPORTED_RETRY_MS = 5 * 60_000
-/** Engine builds a start may skip after readiness refused them, before it gives up. */
-export const MAX_ENGINE_ATTEMPTS = 8
 
 export type DecisionEmitter = <K extends 'decision:state' | 'decision:error'>(
   name: K,
@@ -627,38 +626,32 @@ export class DecisionService {
   }
 
   /**
-   * Resolve an engine and spawn it; a resolved build that readiness refuses as unsupported (an API
-   * version this core does not speak, a dev build with an unfinished decision API) is handed to
-   * `rejectEngine` and the next one is tried, so a valid lower-ranked build still runs. An explicit
-   * `engine_path` has nothing to fall back to: its refusal ends the start.
+   * Resolve an engine and spawn it; a build that readiness refuses as unsupported (an API version this
+   * core does not speak, a dev build with an unfinished decision API) or that dies while loading is
+   * handed to `rejectEngine` and the next one is tried, so a valid lower-ranked build still runs
+   * (`spawnOnFirstGoodEngine`). An explicit `engine_path` has nothing to fall back to.
    */
-  private async spawnOnFirstGoodEngine(
+  private spawnOnFirstGoodEngine(
     settings: DecisionSettings,
     needs: EngineRequirements,
     signal: AbortSignal,
     onEngine: (engine: DecisionEngineInfo) => void,
     specFor: (engine: DecisionEngineInfo) => DecisionServerSpec
   ): Promise<DecisionProcessHandle> {
-    for (let attempt = 1; ; attempt++) {
-      const engine = await this.deps.resolveEngine(settings.engine_path, needs)
-      onEngine(engine)
-      if (signal.aborted)
-        throw new AtomicCoreError('DECISION_UNAVAILABLE', 'The decision model start was stopped.')
-      try {
-        return await this.deps.spawn(specFor(engine), signal)
-      } catch (error) {
-        const fallback =
-          error instanceof AtomicCoreError &&
-          error.code === 'DECISION_ENGINE_UNSUPPORTED' &&
-          settings.engine_path === '' &&
-          this.deps.rejectEngine !== undefined &&
-          attempt < MAX_ENGINE_ATTEMPTS
-        if (!fallback) throw error
-        const why = error.details ?? error.message
-        this.deps.log('warn', `decision engine ${engine.path} refused at readiness, trying the next: ${why}`)
-        await this.deps.rejectEngine?.(engine.path, why)
-      }
-    }
+    return spawnOnFirstGoodEngine({
+      label: 'decision',
+      resolve: () => this.deps.resolveEngine(settings.engine_path, needs),
+      onEngine,
+      throwIfStopped: () => {
+        if (signal.aborted)
+          throw new AtomicCoreError('DECISION_UNAVAILABLE', 'The decision model start was stopped.')
+      },
+      spawn: (engine) => this.deps.spawn(specFor(engine), signal),
+      unsupportedCode: 'DECISION_ENGINE_UNSUPPORTED',
+      explicit: settings.engine_path !== '',
+      ...(this.deps.rejectEngine ? { reject: this.deps.rejectEngine } : {}),
+      log: this.deps.log,
+    })
   }
 
   private onExit(handle: DecisionProcessHandle, exit: ExitInfo): void {

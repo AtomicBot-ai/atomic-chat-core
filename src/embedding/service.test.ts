@@ -11,6 +11,7 @@ import type { DecisionHttp } from '../decision/index.js'
 import { isProcessAlive } from '../runtime/shared/index.js'
 import { parseEmbeddingSettingsPatch } from '../settings/index.js'
 import type { EmbeddingModelFacts } from './model-facts.js'
+import { EmbeddingEngineResolver } from './engine.js'
 import { spawnEmbeddingServer } from './process.js'
 import type { EmbeddingProcessHandle, EmbeddingServerSpec } from './process.js'
 import {
@@ -368,6 +369,86 @@ describe('EmbeddingService lifecycle', () => {
     await h.service.load()
     expect(rejected).toEqual(['/packs/0/llama-server'])
     expect(h.service.getStatus()).toMatchObject({ state: 'ready', engine: { path: '/packs/1/llama-server' } })
+  })
+
+  // A ROCm build whose rocBLAS lacks the card's kernels loads the model and dies on its first product
+  // (exit 9, hipErrorInvalidKernelFile); the start used to stop there with the Vulkan build untried.
+  describe('a build that dies while loading', () => {
+    const packs = [
+      { version: 'b11463', backend: 'win-hip-radeon-x64', path: 'C:/packs/hip/llama-server.exe' },
+      { version: 'b11463', backend: 'win-vulkan-x64', path: 'C:/packs/vulkan/llama-server.exe' },
+    ]
+    const crash = () =>
+      new AtomicCoreError(
+        'MODEL_LOAD_FAILED',
+        'The embedding model exited with code 9 while loading.',
+        "rocBLAS error from hip error code: 'hipErrorInvalidKernelFile':218"
+      )
+    const resolverOver = (dies: (path: string) => boolean, preferred = ''): Partial<EmbeddingServiceDeps> => {
+      const resolver = new EmbeddingEngineResolver({
+        layout: {} as never,
+        listPacks: async () => packs,
+        mtime: async () => 1,
+        preferredUpstream: () => preferred,
+      })
+      return {
+        resolveEngine: (enginePath, minBuild) => resolver.resolve(enginePath, minBuild),
+        rejectEngine: (exe, why) => resolver.reject(exe, why),
+        forgetRejectedEngines: () => resolver.forgetRejected(),
+        spawn: async (spec) => {
+          if (dies(spec.engine.path)) throw crash()
+          return { ...stubHandle(7), exe: spec.engine.path }
+        },
+      }
+    }
+
+    it('is handed back and the next build runs', async () => {
+      const h = harness(resolverOver((path) => path.includes('/hip/')))
+      await h.service.load()
+      expect(h.service.getStatus()).toMatchObject({
+        state: 'ready',
+        engine: { version_backend: 'b11463/win-vulkan-x64' },
+      })
+    })
+
+    it('fails the start with its own crash when no other build runs, every build named', async () => {
+      const h = harness(resolverOver(() => true))
+      const error = await rejection<AtomicCoreError>(h.service.load())
+      expect(error).toMatchObject({
+        code: 'MODEL_LOAD_FAILED',
+        message: 'The embedding model exited with code 9 while loading.',
+      })
+      expect(error.details).toContain(
+        'b11463/win-hip-radeon-x64: refused at readiness: The embedding model exited'
+      )
+      expect(error.details).toContain(
+        'b11463/win-vulkan-x64: refused at readiness: The embedding model exited'
+      )
+      expect(error.details).toContain('hipErrorInvalidKernelFile')
+      expect(h.service.getStatus().state).toBe('failed')
+    })
+
+    it('is not tried at all when the build the user picked for chat runs', async () => {
+      const tried: string[] = []
+      const over = resolverOver((path) => {
+        tried.push(path)
+        return path.includes('/hip/')
+      }, 'b11463/win-vulkan-x64')
+      const h = harness(over)
+      await h.service.load()
+      expect(tried).toEqual(['C:/packs/vulkan/llama-server.exe'])
+    })
+
+    it('ends the start when the settings name the engine: nothing to fall back to', async () => {
+      const h = harness(
+        resolverOver(() => true),
+        { engine_path: 'C:/packs/hip/llama-server.exe' }
+      )
+      expect(await rejection<AtomicCoreError>(h.service.load())).toMatchObject({
+        code: 'MODEL_LOAD_FAILED',
+        details: "rocBLAS error from hip error code: 'hipErrorInvalidKernelFile':218",
+      })
+    })
   })
 
   it('restarts with backoff after a crash, and gives up after too many', async () => {

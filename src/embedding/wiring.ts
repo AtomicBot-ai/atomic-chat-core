@@ -25,6 +25,8 @@ export interface WireEmbeddingOptions {
     readonly embedding: EmbeddingSettings
     updateEmbedding(patch: Record<string, unknown>): Promise<unknown>
   }
+  /** The `llamacpp-upstream` build the user picked (`version_backend`): tried first when it can run the model. */
+  upstreamBackend?: () => string
   journal: Pick<ProcessJournal, 'add' | 'remove'>
   instanceId: string
   emit: <K extends keyof CoreEvents>(name: K, payload: CoreEvents[K]) => void
@@ -89,6 +91,7 @@ export function wireEmbedding(options: WireEmbeddingOptions): EmbeddingService {
   const journal = embeddingJournal(options.journal, options.instanceId)
   const resolver = new EmbeddingEngineResolver({
     layout: options.layout,
+    ...(options.upstreamBackend ? { preferredUpstream: options.upstreamBackend } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
     ...(options.overrides?.listPacks ? { listPacks: options.overrides.listPacks } : {}),
     log: options.log,
