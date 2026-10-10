@@ -427,12 +427,31 @@ describe('buildLaunch', () => {
     expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 16384\n' })
   })
 
-  it('lets an explicit kv_cache_max_tokens win over both the discrete and the unified-memory default', () => {
+  it('lets an explicit kv_cache_max_tokens win over both the discrete and the unified-memory default, in whole blocks', () => {
     for (const unifiedMemory of [false, true]) {
       const settings = tensorrtLlmAdapter.validateSettings({ kv_cache_max_tokens: 30000 })
       const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ settings, unifiedMemory }))
-      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 30000\n' })
+      expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 30016\n' })
     }
+  })
+
+  it('asks for whole KV blocks: a 2096-token context gets 2112 tokens, not the 2080 the engine would round 2096 down to', () => {
+    // RTX 5090 Laptop, 2026-10-09: max_tokens 2096 became 65 blocks, "max sequence length=2080", and
+    // the readiness check refused every model as out of memory with 17 GiB free.
+    const settings = tensorrtLlmAdapter.validateSettings({ context_length: 2096, max_output_tokens: 1024 })
+    const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ settings }))
+    expect(flagValue(launch.argv, '--max_seq_len')).toBe('2096')
+    expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 2112\n' })
+  })
+
+  it('gives each sequence of the batch whole blocks of its own', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({
+      context_length: 2096,
+      max_output_tokens: 1024,
+      max_batch_size: 2,
+    })
+    const launch = tensorrtLlmAdapter.buildLaunch(baseContext({ settings }))
+    expect(launch.files).toEqual({ 'llm-api-options.yaml': 'kv_cache_config:\n  max_tokens: 4224\n' })
   })
 
   it('turns CUDA graphs off under auto on a card below 12 GiB, and keeps them when the card reports no size (unified memory)', () => {
@@ -458,6 +477,21 @@ describe('buildLaunch', () => {
     expect(graphsOff('auto', 12 * GiB)).toBe(false)
     expect(graphsOff('on', 8 * GiB)).toBe(false)
     expect(graphsOff('off', 24 * GiB)).toBe(true)
+  })
+
+  it("follows the launch plan's CUDA graphs over the card's size: a 24 GiB card with no room for them leaves them off", () => {
+    const graphsOff = (plan: unknown) =>
+      'cuda_graph_config' in
+      (parseYaml(
+        tensorrtLlmAdapter.buildLaunch(baseContext({ gpuTotalVramBytes: 24 * GiB, plan })).files?.[
+          'llm-api-options.yaml'
+        ] ?? ''
+      ) as Record<string, unknown>)
+    expect(graphsOff({ cudaGraphs: false })).toBe(true)
+    expect(graphsOff({ cudaGraphs: true })).toBe(false)
+    // Another engine's plan, or none, is not this one's: the card's size decides.
+    expect(graphsOff({ gpuMemoryUtilization: 0.9 })).toBe(false)
+    expect(graphsOff(undefined)).toBe(false)
   })
 
   it('writes an FP8 KV cache only on compute capability 8.9 or newer, and never under auto', () => {
@@ -1446,5 +1480,15 @@ describe('the further LLM API options and sampling defaults the settings set (ow
       tensorrtLlmAdapter.validateSettings({})
     )
     expect(none).not.toHaveProperty('temperature')
+  })
+})
+
+describe('tensorrtLlmAdapter.generationProbe', () => {
+  it('asks the OpenAI model list for the name and one non-streamed token of chat', () => {
+    expect(tensorrtLlmAdapter.generationProbe).toEqual({
+      modelsPath: '/v1/models',
+      path: '/v1/chat/completions',
+      body: { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1, stream: false },
+    })
   })
 })
