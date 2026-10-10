@@ -326,3 +326,11 @@ describe("the host's keyring through the core (AtomicCoreOptions.publicApiKeys)"
     expect((await fetch(`http://127.0.0.1:${state.port}/v1/models`)).status).toBe(200)
   })
 })
+
+describe('the terminal options through the core', () => {
+  it('starts with parallel download streams and a bounded remote header read, and lists no downloads while idle', async () => {
+    const core = await createCore({ downloadStreams: 4, remoteGgufTimeoutMs: 20_000 })
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    expect((await client.snapshot()).downloads).toEqual([])
+  })
+})
