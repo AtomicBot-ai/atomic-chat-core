@@ -3,6 +3,7 @@
  * snapshot shape it answers with. Types and shared constants only.
  */
 
+import type { DownloadProgress } from '../../downloads/downloader.js'
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
@@ -418,6 +419,8 @@ export interface ModelSetupControl {
 }
 
 export interface ControlServerDeps {
+  /** Running downloads' last progress, for the snapshot (`Downloader.snapshot`); absent is none. */
+  downloads?: () => DownloadProgress[]
   /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
   environments?: ManagedEnvironmentControl
   /** The snapshot's view of them, kept in memory so it needs no disk read. */
@@ -530,7 +533,8 @@ export interface ControlSnapshot {
   sessions: SessionSummary[]
   server: LocalApiServerState
   clients: ReturnType<ClientRegistry['list']>
-  downloads: unknown[]
+  /** Running downloads' last progress, so a client that reconnects mid-transfer need not wait for an event. */
+  downloads: DownloadProgress[]
   optimal_backends: Record<string, OptimalState>
   /** The managed container runtimes this user has, and the changes in flight on them. */
   environments: EnvironmentSnapshot[]

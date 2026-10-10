@@ -41,6 +41,22 @@ export interface AtomicCoreOptions {
    * system directories (`/usr/bin`, `/usr/local/bin`, `/bin`), never `PATH`; `null` means none.
    */
   dockerPath?: string | null
+  /**
+   * The host's keyring for the public API (a terminal that hands every client its own key), read for
+   * every request: a client must present one of these, and a revoked key is refused on the next
+   * request. An empty list refuses every client; `undefined` keeps `server.api_key`.
+   */
+  publicApiKeys?: () => readonly string[] | undefined
+  /**
+   * Parallel byte-range streams for a hash-pinned file of at least 32 MiB (at most 4); one when
+   * unset. A server without ranges falls back to one stream.
+   */
+  downloadStreams?: number
+  /**
+   * How long reading a remote GGUF header for a model check may take in all (a terminal that must not
+   * hang on a slow or broken mirror); past it the check goes on without the header. Unset waits.
+   */
+  remoteGgufTimeoutMs?: number
   fetch?: typeof fetch
   env?: NodeJS.ProcessEnv
   /** 'owner' takes the instance lock; 'auto' is the same today — attaching is the CLI's job. */

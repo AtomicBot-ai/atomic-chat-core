@@ -52,6 +52,8 @@ import type { AtomicCoreOptions, CoreLoadOptions, CoreLogger } from './types.js'
 
 /** Everything `create()` wires before the facade exists; see `create.ts`. */
 export interface AtomicCoreParts {
+  /** `AtomicCoreOptions.publicApiKeys`, handed to every public listener. */
+  publicApiKeys?: () => readonly string[] | undefined
   layout: DataLayout
   events: CoreEmitter
   settings: SettingsStore
@@ -201,6 +203,7 @@ export class AtomicCore {
       remoteAccess: this.remoteAccess,
       liveTrustedHosts: parts.managedTrustedHosts,
       serverDeps: () => ({
+        ...(parts.publicApiKeys ? { apiKeys: parts.publicApiKeys } : {}),
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
         providers: () => this.cloud.routing(),

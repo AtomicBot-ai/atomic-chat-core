@@ -46,7 +46,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
     sessions: deps.sessions(),
     server: deps.publicServer.status(),
     clients: deps.clients.list(),
-    downloads: [],
+    downloads: deps.downloads?.() ?? [],
     optimal_backends: deps.backends.optimalSnapshot(),
     environments: deps.environmentsSnapshot?.() ?? [],
     environment_operations: deps.environmentOperations?.() ?? [],

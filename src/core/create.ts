@@ -210,6 +210,7 @@ export async function createAtomicCore(
     // One downloader per core process: it owns the active-task table that `cancel` works from, so
     // two of them would each know only half of what is running.
     const downloader = new Downloader({
+      ...(options.downloadStreams !== undefined ? { streams: options.downloadStreams } : {}),
       dataFolder: layout.root,
       platform: process.platform,
       fetch: options.fetch ?? fetch,
@@ -374,6 +375,9 @@ export async function createAtomicCore(
     // One compatibility service for the control routes and every llama.cpp load gate; the gate
     // reads only what is cached, so a load never waits on the network for it.
     const prismCompatibility = wirePrismCompatibility({
+      ...(options.remoteGgufTimeoutMs !== undefined
+        ? { remoteGgufTimeoutMs: options.remoteGgufTimeoutMs }
+        : {}),
       layout,
       settings,
       hardware,
@@ -912,6 +916,7 @@ export async function createAtomicCore(
           logout: () => chatgpt.logout(),
           models: () => listSubscriptionModels(chatgptBackend),
         },
+        downloads: () => downloader.snapshot(),
         publicServer: {
           setInspecting: (enabled) => {
             ;(core as AtomicCore).inspecting = enabled
@@ -944,6 +949,7 @@ export async function createAtomicCore(
       appLeaseTimer.unref()
     }
     core = construct({
+      ...(options.publicApiKeys !== undefined ? { publicApiKeys: options.publicApiKeys } : {}),
       layout,
       events: emitter,
       settings,
