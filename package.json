@@ -8,7 +8,7 @@
     "node": ">=22.0.0"
   },
   "bin": {
-    "atomic-chat-core": "./dist/cli/bin.js"
+    "atomic-chat-core": "dist/cli/bin.js"
   },
   "exports": {
     ".": {
