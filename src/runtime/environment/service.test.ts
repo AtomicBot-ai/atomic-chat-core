@@ -225,7 +225,13 @@ const harness = (provisioner: EnvironmentProvisioner | null, identity: HarnessId
     // Fast and deterministic: these tests are about operation flow, not about which real OS
     // process is still running, and the vitest worker's own pid would otherwise make every
     // record's "owner" look alive forever, since it is the one writing them.
-    ownerIdentity: async () => ({ pid: 4242, startId: identity.ownerStartId ?? 'harness:owner' }),
+    // `null` is a value here — no start id was recorded — not "use the default": with `??` it became
+    // 'harness:owner', and the verdict then read the start time of whatever real process held pid
+    // 4242 on the machine running the suite (`mismatch` on a macOS runner that had one, 2026-10-10).
+    ownerIdentity: async () => ({
+      pid: 4242,
+      startId: identity.ownerStartId === undefined ? 'harness:owner' : identity.ownerStartId,
+    }),
   })
   const service = new EnvironmentService({
     store,
@@ -733,6 +739,30 @@ describe('a live owner is left alone (finding 1)', () => {
     await settle(service)
 
     expect((await service.get('op-1')).revision).toBe(before.revision)
+  })
+})
+
+describe('the harness itself', () => {
+  it('records no start id when told null, so a real pid 4242 on the machine cannot turn unknown into mismatch', async () => {
+    // What a macOS release runner had on 2026-10-10: some process at pid 4242, started at another
+    // time. With no start id recorded the verdict must stay `unknown` without reading it at all.
+    let probed = false
+    const { service, store } = harness(null, {
+      ownerStartId: null,
+      identityDeps: {
+        alive: () => true,
+        platform: 'linux',
+        readText: async () => {
+          probed = true
+          return fakeProcStat(12_345)
+        },
+      },
+    })
+    await store.createOrGet('env-1', begin(), PLAN_A)
+    const before = await service.get('op-1')
+    await service.recover('core-2')
+    expect((await service.get('op-1')).revision).toBe(before.revision)
+    expect(probed).toBe(false)
   })
 })
 
