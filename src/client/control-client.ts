@@ -12,6 +12,22 @@ import type { ChatGptStatus } from '../credentials/index.js'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import type {
+  EngineBuildCatalog,
+  EngineBuildCatalogRequest,
+  EngineBuildId,
+  EngineBuildInstallRequest,
+  EngineBuildInstallResult,
+  EngineBuildRemoveResult,
+  EngineActivateResult,
+  EngineBuildDeleteResult,
+  EngineId,
+  EngineOperationStarted,
+  EngineUpdateRequest,
+  EngineUpdateResult,
+  EngineVersionsRequest,
+  EngineVersionsResponse,
+  EngineBuildUpdateCheck,
+  EngineBuildUpdateCheckRequest,
   BackendCatalogRequest,
   BackendCatalogResponse,
   BackendRecommendationRequest,
@@ -39,13 +55,11 @@ import type {
   ManagedModelDeletion,
   ManagedModelLocation,
   LlamacppProviderId,
-  DiffusionBackendInstallRecord,
   DiffusionCancelResult,
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
   ErrorCode,
-  FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
   GalleryListOptions,
@@ -204,6 +218,89 @@ export class CoreClient {
     return this.call(`/backends/${provider}/updates`, { method: 'POST', body: JSON.stringify(request) })
   }
 
+  /** sd.cpp or MLX: the accepted manifest, the build this host would install, what is installed. */
+  engineBuildCatalog(
+    engine: EngineBuildId,
+    request: EngineBuildCatalogRequest = {}
+  ): Promise<EngineBuildCatalog> {
+    return this.call(`/engine-builds/${engine}/catalog`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** Is a strictly newer build published? Never installs anything: the client picks the moment. */
+  checkEngineBuildUpdates(
+    engine: EngineBuildId,
+    request: EngineBuildUpdateCheckRequest = {}
+  ): Promise<EngineBuildUpdateCheck> {
+    return this.call(`/engine-builds/${engine}/updates`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /**
+   * Install the host's build of the current manifest and make it active, unloading what ran from
+   * another build. Answers when done; progress is `download:progress` under `request.task_id`, and
+   * `cancelDownload(task_id)` stops it.
+   */
+  installEngineBuild(
+    engine: EngineBuildId,
+    request: EngineBuildInstallRequest
+  ): Promise<EngineBuildInstallResult> {
+    return this.call(`/engine-builds/${engine}/install`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** A downloaded build only; `BACKEND_IN_USE` while a session runs from it. */
+  removeEngineBuild(engine: EngineBuildId, tag: string, backendId: string): Promise<EngineBuildRemoveResult> {
+    return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  // --- the /engines layer (change `unify-engine-lifecycle`) ------------------------------------
+
+  /** What every engine of this host has installed, runs and could move to. Reads only. */
+  engineVersions(request: EngineVersionsRequest = {}): Promise<EngineVersionsResponse> {
+    return this.call('/engines/versions', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /**
+   * Apply an update. llama.cpp, sd.cpp and MLX answer once applied (progress under `task_id`,
+   * `cancelDownload(task_id)` stops it); a managed engine answers with the removal that begins its
+   * reinstall, followed on `environment:operation`.
+   */
+  updateEngine(
+    engine: EngineId,
+    request: EngineUpdateRequest
+  ): Promise<EngineUpdateResult | EngineOperationStarted> {
+    return this.call(`/engines/${engine}/update`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  /** llama.cpp only: make an installed build the one the next load runs; the provider's models unload. */
+  activateEngineBuild(engine: EngineId, version: string, variant: string): Promise<EngineActivateResult> {
+    return this.call(
+      `/engines/${engine}/builds/${encodeURIComponent(version)}/${encodeURIComponent(variant)}/activate`,
+      {
+        method: 'POST',
+      }
+    )
+  }
+
+  /**
+   * Remove one build (`removeEngineBuild` is the older `/engine-builds` route). A managed engine
+   * answers with its removal; `retain_models` keeps its models (the default).
+   */
+  deleteEngineBuild(
+    engine: EngineId,
+    version: string,
+    variant: string,
+    options: { retain_models?: boolean } = {}
+  ): Promise<EngineBuildDeleteResult | EngineOperationStarted> {
+    const query = options.retain_models === undefined ? '' : `?retain_models=${options.retain_models}`
+    return this.call(
+      `/engines/${engine}/builds/${encodeURIComponent(version)}/${encodeURIComponent(variant)}${query}`,
+      {
+        method: 'DELETE',
+      }
+    )
+  }
+
   hardwareOverride(): Promise<{ override: HardwareOverride | null }> {
     return this.call('/hardware/override')
   }
@@ -332,19 +429,6 @@ export class CoreClient {
   /** An empty path restores `<data>/images`. */
   setDiffusionOutputDir(path: string): Promise<DiffusionStatus> {
     return this.call('/diffusion/output-dir', { method: 'PUT', body: JSON.stringify({ path }) })
-  }
-
-  finalizeDiffusionBackend(args: FinalizeBackendInstallArgs): Promise<DiffusionBackendInstallRecord> {
-    return this.call('/diffusion/backends/finalize', { method: 'POST', body: JSON.stringify(args) })
-  }
-
-  async listDiffusionBackends(): Promise<DiffusionBackendInstallRecord[]> {
-    return (await this.call<{ backends: DiffusionBackendInstallRecord[] }>('/diffusion/backends')).backends
-  }
-
-  /** Refuses (`BACKEND_IN_USE`) while a model runs from that tree. */
-  async removeDiffusionBackend(dir: string): Promise<void> {
-    await this.call('/diffusion/backends/remove', { method: 'POST', body: JSON.stringify({ dir }) })
   }
 
   async listDiffusionModelFiles(): Promise<DiffusionModelFile[]> {

@@ -272,7 +272,7 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       const modelFile = await sd.writeSdFile(ctx, 'ltx-2/ltx.gguf')
       const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
       await sd.configure(ctx, ready)
-      await sd.finalizeEngine(ctx, ready, dir)
+      await sd.ownEngine(dir)
       const events = await sd.collectEvents(ctx, ready)
       const refused = await control(ctx, ready, '/diffusion/model/load', {
         method: 'POST',

@@ -27,13 +27,14 @@
  *   ATOMIC_LIVE_SD_VIDEO_FAMILY=ltx-2                                     (optional; or wan2.2-ti2v-5b)
  *   ATOMIC_LIVE_SD_VIDEO_MODE_FLAG=1                                      (optional; also pass -M vid_gen to sd-server)
  *
- * The engine tree is copied into the temporary data folder (finalize refuses trees outside it); the
+ * The engine tree is copied into the temporary data folder (installs live under `<data>`); the
  * model files are read where they are. Nothing is written outside the temporary folder.
  */
 import { spawnSync } from 'node:child_process'
 import { cp, mkdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { prepareSdcppTree, writeInstallRecord } from '../../src/diffusion/install.js'
 import { CoreClient } from '../../src/client/index.js'
 import type { CoreEvents, ImageJob, VideoJob } from '../../src/contracts/index.js'
 import { AtomicCore } from '../../src/core/index.js'
@@ -41,6 +42,20 @@ import { decodePng, isWebm, parseVideoRecipe, readPngHeader } from '../../src/di
 import { isProcessAlive } from '../../src/runtime/shared/index.js'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
+
+/** Probe a copied engine tree for real, then mark it installed the way the engine-builds install does. */
+async function ownLiveEngine(dir: string): Promise<void> {
+  await prepareSdcppTree(dir)
+  await writeInstallRecord(dir, {
+    tag: TAG,
+    backendId: 'live',
+    backend: process.platform === 'darwin' ? 'metal' : 'cpu',
+    engine: 'sd-cpp',
+    sha256: null,
+    installedAtMs: Date.now(),
+    dir,
+  })
+}
 
 const ENGINE = process.env['ATOMIC_LIVE_SD_ENGINE'] ?? ''
 const MODEL = process.env['ATOMIC_LIVE_SD_MODEL'] ?? ''
@@ -124,17 +139,13 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
   }, 130_000)
 
   it(
-    'finalizes the tree, loads the model, generates, cancels and unloads',
+    'installs the tree, loads the model, generates, cancels and unloads',
     async () => {
-      const record = await client.finalizeDiffusionBackend({
-        dir: engineDir,
-        tag: TAG,
-        backendId: 'live',
-        backend: process.platform === 'darwin' ? 'metal' : 'cpu',
-        engine: 'sd-cpp',
-      })
-      expect(record.dir).toBe(engineDir)
-      expect((await client.listDiffusionBackends()).map((b) => b.backendId)).toEqual(['live'])
+      // What the core's engine-builds install does once the archive is unpacked: the real probe,
+      // then the marker and the record.
+      await ownLiveEngine(engineDir)
+      const catalog = await client.engineBuildCatalog('sd-cpp')
+      expect(catalog.installed.map((b) => b.backend_id)).toEqual(['live'])
 
       const files = {
         diffusionModel: MODEL,
@@ -317,13 +328,7 @@ describe.skipIf(!VIDEO_ENABLED)('a real stable-diffusion.cpp engine serving vide
     ] as const)
       videoCore.events.on(name, (payload) => videoEvents.push({ name, payload }))
     await videoClient.configureDiffusion({ dataFolder: videoData.root, idleUnloadSecs: 0 })
-    await videoClient.finalizeDiffusionBackend({
-      dir,
-      tag: TAG,
-      backendId: 'live',
-      backend: process.platform === 'darwin' ? 'metal' : 'cpu',
-      engine: 'sd-cpp',
-    })
+    await ownLiveEngine(dir)
   }, 120_000)
 
   afterAll(async () => {

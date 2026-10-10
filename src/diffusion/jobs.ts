@@ -543,6 +543,10 @@ async function pollJob<Req, Job extends JobCommon<Item, Progress>, Item, Progres
         break
       case 'completed': {
         setJobState(deps, id, 'generating')
+        // What the engine logged up to now, and the decode it finished, before the phase moves on.
+        drain()
+        tracker.finishDecode()
+        report()
         tracker.setPhase('saving')
         setProgress(deps, id, kind, tracker, model)
         await retireAfterGpuFault()

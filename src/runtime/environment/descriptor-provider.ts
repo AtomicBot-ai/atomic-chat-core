@@ -114,7 +114,16 @@ export interface DescriptorProviderOptions {
 }
 
 export type DescriptorProviderResult =
-  { kind: 'available'; descriptor: RuntimeDescriptor } | { kind: 'unsupported'; error: AtomicCoreError }
+  | {
+      kind: 'available'
+      descriptor: RuntimeDescriptor
+      /**
+       * `forNewSetup` only: `remote` — accepted from this fetch; `cache` — the fallback to the last
+       * accepted one. What `POST /engines/versions` reports as its source (change `unify-engine-lifecycle`).
+       */
+      source?: 'remote' | 'cache'
+    }
+  | { kind: 'unsupported'; error: AtomicCoreError }
 
 /** Give the descriptor provider a clear API: one path for a pinned installation, one for a fresh setup. */
 export interface RuntimeDescriptorProvider {
@@ -249,8 +258,9 @@ export function createRuntimeDescriptorProvider(
       const latest = await entry.documents.latest()
       switch (latest.kind) {
         case 'fresh':
+          return { kind: 'available', descriptor: latest.document, source: 'remote' }
         case 'cached':
-          return { kind: 'available', descriptor: latest.document }
+          return { kind: 'available', descriptor: latest.document, source: 'cache' }
         case 'too-new':
           return { kind: 'unsupported', error: updateRequired(entry.source.label, latest.id) }
         case 'none':

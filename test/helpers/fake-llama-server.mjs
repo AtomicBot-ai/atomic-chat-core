@@ -254,6 +254,11 @@ function startServer() {
       return readBody(req).then((b) => completions(b, res))
     return json(404, { error: { message: `no route ${url.pathname}`, type: 'not_found' } })
   })
+  // A port taken between the core's probe and this bind: say what llama-server says, and exit.
+  server.on('error', (error) => {
+    err(`start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: ${port} (${error.code})`)
+    process.exit(1)
+  })
   server.listen(port, '127.0.0.1', () => {
     const bound = server.address().port
     const delay = Number(process.env.FAKE_LLAMA_DELAY ?? '0')

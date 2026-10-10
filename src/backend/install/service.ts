@@ -24,6 +24,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
+import { samePath } from '../../diffusion/containment.js'
 import type { LocalProviderId } from '../../contracts/index.js'
 import type { DataLayout } from '../../config/index.js'
 import { validateProxyConfig } from '../../downloads/index.js'
@@ -39,7 +40,12 @@ import {
   resolveBackendArchiveSource,
 } from '../catalog/index.js'
 import type { PrismCatalogService } from '../catalog/index.js'
-import { deletableBackendPack, getBackendDir, listInstalledBackendPacks } from '../installed/index.js'
+import {
+  deletableBackendPack,
+  getBackendDir,
+  listInstalledBackendPacks,
+  readBundledLlamacppPack,
+} from '../installed/index.js'
 import { scanInstalledBackends } from '../installed/index.js'
 import { llamaServerExeName } from '../../config/index.js'
 import type { InstalledBackendPack, UpstreamManifest } from '../types.js'
@@ -49,15 +55,47 @@ import { parseBackendVersion, parseBinaryVersion } from '../version.js'
 
 const execFileAsync = promisify(execFile)
 
+/**
+ * How long a pack's `llama-server --version` may take. The first launch of a pack is from a path
+ * the system has never seen: macOS checks the unsigned binary and its libraries before it runs
+ * (17.9 s for upstream b10809 on an M-series Mac, 0.07 s of it CPU), and PrismML's Metal build
+ * compiles its shaders on top (15.7 s). The former 15 s left every such install failing.
+ */
+export const LAUNCH_CHECK_TIMEOUT_MS = 120_000
+
+/** `Command failed` alone says nothing: name the exit code or the signal, and what it printed. */
+function launchFailure(error: unknown): Error {
+  const e = error as { code?: unknown; signal?: unknown; killed?: unknown; stderr?: unknown }
+  const how = e.signal
+    ? `signal ${String(e.signal)}${e.killed ? ', timed out' : ''}`
+    : `exit code ${String(e.code)}`
+  const said = String(e.stderr ?? '')
+    .trim()
+    .split('\n')
+    .slice(-3)
+    .join(' | ')
+  return new Error(`llama-server --version failed (${how})${said ? `: ${said}` : ''}`)
+}
+
 /** Same launch gate as the former macOS extension, run on staging before replacing a working pack. */
-export async function verifyMacBackendBinary(staging: string, version: string): Promise<void> {
+export async function verifyMacBackendBinary(
+  staging: string,
+  version: string,
+  timeoutMs = LAUNCH_CHECK_TIMEOUT_MS
+): Promise<void> {
   const bin = join(staging, 'build', 'bin')
   // The former Rust gate made every build/bin file executable, not just the main server.
   for (const entry of await readdir(bin, { withFileTypes: true })) {
     if (entry.isFile()) await chmod(join(bin, entry.name), 0o755)
   }
   const executable = join(bin, 'llama-server')
-  const { stdout, stderr } = await execFileAsync(executable, ['--version'], { timeout: 15_000 })
+  let stdout: string
+  let stderr: string
+  try {
+    ;({ stdout, stderr } = await execFileAsync(executable, ['--version'], { timeout: timeoutMs }))
+  } catch (error) {
+    throw launchFailure(error)
+  }
   const expected = parseBackendVersion(version)
   if (expected !== 0 && parseBinaryVersion(`${stdout}\n${stderr}`) !== expected) {
     throw new Error(`backend did not report build ${version}`)
@@ -87,9 +125,9 @@ export async function mergeCudartIntoBin(staging: string): Promise<void> {
  * How long a PrismML pack's `llama-server --version` may take. Its macOS build initialises Metal
  * while it parses its arguments and compiles its shaders at runtime, and the shader cache follows
  * the executable's path, which is new on every install: the first run took 15.7 s on an M-series
- * Mac (0.05 s the second time), past the 15 s the upstream gate allows.
+ * Mac (0.05 s the second time). The same allowance as every pack's (`LAUNCH_CHECK_TIMEOUT_MS`).
  */
-export const PRISM_LAUNCH_CHECK_TIMEOUT_MS = 120_000
+export const PRISM_LAUNCH_CHECK_TIMEOUT_MS = LAUNCH_CHECK_TIMEOUT_MS
 
 /**
  * The launch gate of a PrismML pack, on every platform: the server must start and report the build
@@ -118,17 +156,7 @@ export async function verifyPrismBackendBinary(
       cwd: bin,
     }))
   } catch (error) {
-    // `Command failed` alone says nothing: name the exit code or the signal, and what it printed.
-    const e = error as { code?: unknown; signal?: unknown; killed?: unknown; stderr?: unknown }
-    const how = e.signal
-      ? `signal ${String(e.signal)}${e.killed ? ', timed out' : ''}`
-      : `exit code ${String(e.code)}`
-    const said = String(e.stderr ?? '')
-      .trim()
-      .split('\n')
-      .slice(-3)
-      .join(' | ')
-    throw new Error(`llama-server --version failed (${how})${said ? `: ${said}` : ''}`)
+    throw launchFailure(error)
   }
   if (parseBinaryVersion(`${stdout}\n${stderr}`) !== expected) {
     throw new Error(`backend did not report build ${expected}`)
@@ -179,7 +207,45 @@ export interface BackendServiceDeps {
   prismCatalog?: Pick<PrismCatalogService, 'catalog'>
   /** Test seam for the PrismML launch gate. */
   verifyPrismBackend?: (staging: string, version: string) => Promise<void>
+  /**
+   * What runs this provider's packs (change `unify-engine-lifecycle`, task 2.4): the runtime's load
+   * queue, and the pack directories its sessions and the decision and embedding models run from.
+   * Absent — nothing runs (a test, a provider with no runtime).
+   */
+  host?: BackendHost
+  /** The desktop's `resources/bin`, beside which the installer's pack sits; absent on `atc`. */
+  resourcesDir?: string | undefined
+  /**
+   * A pack was installed or removed (`engine:changed`, change `unify-engine-lifecycle`, design D8).
+   * Not for an install an update makes: the update reports itself once it has switched.
+   */
+  onChanged?: (reason: 'install' | 'uninstall') => void
   log?: (message: string) => void
+}
+
+export interface BackendHost {
+  /** Run `fn` once the load in flight is done, with every new load held until it returns. */
+  exclusive<T>(fn: () => Promise<T>): Promise<T>
+  /** The pack directories something runs from right now. */
+  inUse(): Promise<string[]>
+}
+
+const IDLE_HOST: BackendHost = { exclusive: (fn) => fn(), inUse: async () => [] }
+
+/** An update, activation or removal of one provider's builds; at most one runs at a time. */
+export type BackendOperationKind = 'update' | 'activate' | 'remove'
+
+/** Held by the operation running; an install that carries it is part of that operation. */
+export interface BackendOperation {
+  readonly kind: BackendOperationKind
+}
+
+export interface RemoveBackendOptions {
+  /**
+   * The code the selected pack is refused with: `INVALID_ARGUMENT` on `DELETE /backends` (as it was),
+   * `INVALID_REQUEST` with `details: active` on `DELETE /engines`.
+   */
+  refuseActiveAs?: 'INVALID_ARGUMENT' | 'INVALID_REQUEST'
 }
 
 interface DownloadPlan {
@@ -194,6 +260,8 @@ export interface InstallBackendOptions {
   taskId: string
   /** Reinstall even when the pack is already on disk. */
   force?: boolean
+  /** The update this install belongs to; without it an install is refused while one runs. */
+  operation?: BackendOperation
   /** Current app proxy policy; never persisted. */
   proxy?: ProxyConfig | null
   /**
@@ -212,7 +280,65 @@ export interface InstallBackendResult {
 }
 
 export class BackendService {
+  private operation: BackendOperation | null = null
+
   constructor(private readonly deps: BackendServiceDeps) {}
+
+  private get host(): BackendHost {
+    return this.deps.host ?? IDLE_HOST
+  }
+
+  /**
+   * Run one update, activation or removal of this provider's builds. A second one, or an install
+   * from outside it, is refused with `ENGINE_INSTALL_IN_PROGRESS` rather than queued: the caller
+   * asked for a change against a state that is about to be different.
+   */
+  async operate<T>(kind: BackendOperationKind, fn: (operation: BackendOperation) => Promise<T>): Promise<T> {
+    if (this.operation !== null) throw this.busy()
+    const operation: BackendOperation = { kind }
+    this.operation = operation
+    try {
+      return await fn(operation)
+    } finally {
+      this.operation = null
+    }
+  }
+
+  /** Run `fn` with this provider's loads held off (inside an operation). */
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    return this.host.exclusive(fn)
+  }
+
+  private busy(): AtomicCoreError {
+    return new AtomicCoreError(
+      'ENGINE_INSTALL_IN_PROGRESS',
+      `The ${this.deps.provider} engine is being ${this.operation?.kind === 'remove' ? 'changed' : 'updated'}; wait for that to finish.`
+    )
+  }
+
+  /** The installer's pack of this provider, which the core never deletes; `null` on `atc`. */
+  bundledPack(): Promise<{ version: string; backend: string } | null> {
+    return readBundledLlamacppPack(this.deps.resourcesDir, this.deps.provider)
+  }
+
+  /** Whether something runs from this pack right now. */
+  async inUse(version: string, backend: string): Promise<boolean> {
+    return (await this.busyChecker())(version, backend)
+  }
+
+  /**
+   * One look at what runs now, asked about many packs: the busy directories are read once (the
+   * runtime's sessions, the decision and embedding models), not once per pack.
+   */
+  async busyChecker(): Promise<(version: string, backend: string) => Promise<boolean>> {
+    const used = await this.host.inUse()
+    const platform = this.deps.platform ?? process.platform
+    return async (version, backend) => {
+      const dir = getBackendDir(this.deps.layout.provider(this.deps.provider), backend, version)
+      for (const busy of used) if (await samePath(busy, dir, platform)) return true
+      return false
+    }
+  }
 
   /**
    * Every backend pack on disk — what the updater screen lists.
@@ -246,6 +372,7 @@ export class BackendService {
     backend: string,
     options: InstallBackendOptions
   ): Promise<InstallBackendResult> {
+    if (this.operation !== null && options.operation !== this.operation) throw this.busy()
     if (options.proxy) {
       const problem = validateProxyConfig(options.proxy)
       if (problem) throw new Error(problem)
@@ -321,6 +448,7 @@ export class BackendService {
       )
     }
 
+    if (options.operation === undefined) this.deps.onChanged?.('install')
     return { version, backend, installed: true, path: target }
   }
 
@@ -446,18 +574,50 @@ export class BackendService {
     return this.deps.optimalStore.set(this.deps.provider, record, expectedRevision)
   }
 
-  /** Remove an installed pack. Silent when it is not there — the end state is what was asked for. */
   /**
-   * Delete a pack. Refuses ids that would leave the backends directory and the pack the provider's
-   * settings select: the app's extensions checked this themselves, and the CLI never did.
+   * Delete a pack. Silent when it is not there — the end state is what was asked for. Refuses ids that
+   * would leave the backends directory, the pack the provider's settings select, the installer's pack
+   * (`INVALID_REQUEST`, `details: bundled`: it comes back at the next launch) and a pack something runs
+   * from (`BACKEND_IN_USE`). Runs as an operation and in the load queue's turn, so it waits for a load
+   * in flight and no load starts from a pack half-deleted; the selection is read inside that turn.
    */
-  async remove(version: string, backend: string, currentVersionBackend = ''): Promise<boolean> {
-    const pack = deletableBackendPack(currentVersionBackend, version, backend)
-    version = pack.version
-    backend = pack.backend
-    const target = getBackendDir(this.deps.layout.provider(this.deps.provider), backend, version)
-    const existed = await this.isInstalled(version, backend)
-    await rm(target, { recursive: true, force: true })
-    return existed
+  async remove(
+    version: string,
+    backend: string,
+    currentVersionBackend: string | (() => string) = '',
+    options: RemoveBackendOptions = {}
+  ): Promise<boolean> {
+    const pack = deletableBackendPack('', version, backend)
+    return this.operate('remove', () =>
+      this.host.exclusive(async () => {
+        const current =
+          typeof currentVersionBackend === 'function' ? currentVersionBackend() : currentVersionBackend
+        if (options.refuseActiveAs === 'INVALID_REQUEST') {
+          if (`${pack.version}/${pack.backend}` === current.trim())
+            throw new AtomicCoreError('INVALID_REQUEST', 'The active build cannot be removed.', 'active')
+        } else deletableBackendPack(current, pack.version, pack.backend)
+        const bundled = await this.bundledPack()
+        if (bundled && bundled.version === pack.version && bundled.backend === pack.backend)
+          throw new AtomicCoreError(
+            'INVALID_REQUEST',
+            'The build that ships with the app cannot be removed.',
+            'bundled'
+          )
+        if (await this.inUse(pack.version, pack.backend))
+          throw new AtomicCoreError(
+            'BACKEND_IN_USE',
+            'Unload the model running from this build before removing it.'
+          )
+        const target = getBackendDir(
+          this.deps.layout.provider(this.deps.provider),
+          pack.backend,
+          pack.version
+        )
+        const existed = await this.isInstalled(pack.version, pack.backend)
+        await rm(target, { recursive: true, force: true })
+        if (existed) this.deps.onChanged?.('uninstall')
+        return existed
+      })
+    )
   }
 }

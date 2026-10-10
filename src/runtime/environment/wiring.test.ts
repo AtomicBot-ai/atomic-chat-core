@@ -192,13 +192,16 @@ describe('what a snapshot shows', () => {
     // Finished: nothing is in flight on the environment any more.
     expect(managed.environments()[0]?.active_operation_id).toBeNull()
     // And every state it passed through was announced, so a client can follow from the snapshot.
-    expect(events.map((event) => event.phase)).toEqual([
+    // Only the operation's own events: the snapshot refresh after it ends (`environment:changed`)
+    // runs beside `idle()`, which also waits for the finished operation's record, so it may land
+    // before or after `idle()` returns.
+    const announced = events.filter((event) => event.name === 'environment:operation')
+    expect(announced.map((event) => event.phase)).toEqual([
       'checking',
       'preparing-environment',
       'verifying',
       'ready',
     ])
-    expect(events.every((event) => event.name === 'environment:operation')).toBe(true)
   })
 
   it('points at the operation that is still waiting on the user', async () => {
@@ -431,7 +434,11 @@ describe('the descriptor provider this wiring builds (task 2.3)', () => {
     // A later installation pinned to this id resolves from the cache this wiring just wrote,
     // with no further reads of the file:// source.
     const pinned = await managed.descriptors.forInstallation('tensorrt-llm-1.2.1-r2')
-    expect(pinned).toEqual(result)
+    expect(result).toMatchObject({ source: 'remote' })
+    expect(pinned).toEqual({
+      kind: 'available',
+      descriptor: result.kind === 'available' ? result.descriptor : null,
+    })
   })
 
   it('has nothing cached and no network by default: forNewSetup is honestly unsupported', async () => {
@@ -860,5 +867,78 @@ describe('environmentAvailability before a probe', () => {
       'prerequisite-blocked'
     )
     expect(environmentAvailability(true, null, [])).toBe('setup-required')
+  })
+})
+
+describe('a reinstall reaches every client as engine:changed (change unify-engine-lifecycle, 3.4)', () => {
+  it('publishes reason reinstall when the chain begins and when its setup ends', async () => {
+    const events: Array<{ name: string; payload: unknown }> = []
+    let serial = 0
+    const managed = wireManagedRuntimes({
+      env: env('linux'),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: ((name: string, payload: unknown) => events.push({ name, payload })) as never,
+      newId: () => `id-${(serial += 1)}`,
+      provisioner: fakeProvisioner(),
+    })
+    wired.push(managed)
+    const changed = () =>
+      events.filter((event) => event.name === 'engine:changed').map((event) => event.payload)
+
+    await managed.service.beginReinstall('default', {
+      request_id: 'upd-1',
+      target: { kind: 'runtime', installation_id: 'vllm', engine_id: 'vllm' },
+      descriptor_id: 'vllm-0.32.0-r1',
+    })
+    await managed.service.idle()
+    expect(changed()).toEqual([{ engine: 'vllm', reason: 'reinstall' }])
+
+    const setup = managed.operations().find((operation) => operation.request_id === 'upd-1:setup')
+    expect(setup?.phase).toBe('awaiting-consent')
+    await managed.service.resume(setup!.operation_id, {
+      expected_revision: setup!.revision,
+      approved_plan_digest: DIGEST,
+    })
+    await managed.service.idle()
+    expect(changed()).toEqual([
+      { engine: 'vllm', reason: 'reinstall' },
+      { engine: 'vllm', reason: 'reinstall' },
+    ])
+  })
+})
+
+describe('a setup or a removal outside a reinstall reaches every client as engine:changed (3.7)', () => {
+  it('publishes install when a setup is ready and uninstall when a removal is done', async () => {
+    const events: Array<{ name: string; payload: unknown }> = []
+    let serial = 0
+    const managed = wireManagedRuntimes({
+      env: env('linux'),
+      instanceId: 'core-1',
+      platform: 'linux',
+      emit: ((name: string, payload: unknown) => events.push({ name, payload })) as never,
+      newId: () => `id-${(serial += 1)}`,
+      provisioner: fakeProvisioner(),
+    })
+    wired.push(managed)
+    const target = { kind: 'runtime' as const, installation_id: 'vllm', engine_id: 'vllm' }
+    await managed.service.begin('default', {
+      request_id: 'a',
+      target,
+      kind: 'setup',
+      approved_plan_digest: DIGEST,
+    })
+    await managed.service.idle()
+    await managed.service.begin('default', {
+      request_id: 'b',
+      target,
+      kind: 'remove',
+      approved_plan_digest: DIGEST,
+    })
+    await managed.service.idle()
+    expect(events.filter((event) => event.name === 'engine:changed').map((event) => event.payload)).toEqual([
+      { engine: 'vllm', reason: 'install' },
+      { engine: 'vllm', reason: 'uninstall' },
+    ])
   })
 })

@@ -13,7 +13,6 @@ import type {
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
-  FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
   GalleryListOptions,
@@ -33,6 +32,7 @@ import type {
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
 import type { BackendOutputSink } from '../runtime/shared/index.js'
+import type { EngineHost } from '../engine-builds/service.js'
 import type { ImagesBackend, VideosBackend } from '../server/index.js'
 import { selectModelInstall } from './compat.js'
 import { samePath } from './containment.js'
@@ -45,10 +45,9 @@ import { startIdleTask } from './idle.js'
 import {
   deleteModelFile,
   ensureDirs,
-  finalizeBackendInstall,
   listInstalledBackends,
   listModelFiles,
-  removeBackend,
+  readInstallRecord,
 } from './install.js'
 import {
   cancelJob,
@@ -272,35 +271,40 @@ export class DiffusionService {
   // --- engine binary -------------------------------------------------------------------------------
 
   /**
-   * Under the load lock, so no load or respawn runs across it: finalize, cancel a running job, and
-   * unload a model whose tree the new install replaces.
+   * What the core's engine-builds module needs of image generation (openspec change
+   * `move-sdcpp-mlx-install-to-core`, task 3.2): the load lock, the build directories in use, and
+   * the activation the app's `finalize` call used to trigger — cancel the running job, unload a model whose build the new
+   * one replaces (`engine-updated`), report the install.
    */
-  finalizeBackendInstall(args: FinalizeBackendInstallArgs): Promise<DiffusionBackendInstallRecord> {
-    return this.deps.loadLock.run(async () => {
-      const record = await finalizeBackendInstall(this.state.paths.backendsDir, args, {
-        platform: this.platform,
-        log: this.deps.log,
-        now: this.deps.now,
-      })
-      if (this.state.activeJobId !== undefined)
-        await cancelJob(this.deps, this.state.activeJobId).catch(() => undefined)
-      await activateInstall(this.deps, record)
-      await emitState(this.deps, 'install')
-      return record
-    })
-  }
-
-  listInstalledBackends(): Promise<DiffusionBackendInstallRecord[]> {
-    return listInstalledBackends(this.state.paths.backendsDir, this.platform)
-  }
-
-  async removeBackend(dir: string): Promise<void> {
-    const inUse = [this.state.session?.spec.binaryDir, this.state.spec?.binaryDir]
-    for (const used of inUse)
-      if (used !== undefined && (await samePath(used, dir, this.platform)))
-        throw diffusionError('BACKEND_IN_USE', 'Unload the image model before removing its engine.')
-    await removeBackend(this.state.paths.backendsDir, dir, this.platform)
-    await emitState(this.deps, 'uninstall')
+  engineHost(): EngineHost {
+    return {
+      exclusive: (fn) => this.deps.loadLock.run(fn),
+      inUse: async () => {
+        const dirs: string[] = []
+        // A resident server, a spec kept after an idle unload or a crash, a server still exiting.
+        for (const dir of [
+          this.state.session?.spec.binaryDir,
+          this.state.spec?.binaryDir,
+          this.state.stopping?.spec.binaryDir,
+        ])
+          if (dir !== undefined && !dirs.includes(dir)) dirs.push(dir)
+        return dirs
+      },
+      activate: async (dir, replaced) => {
+        const record = await readInstallRecord(dir)
+        if (!record) throw ioError('The new engine build has no install record.', dir)
+        if (this.state.activeJobId !== undefined)
+          await cancelJob(this.deps, this.state.activeJobId).catch(() => undefined)
+        const spec = this.state.spec
+        // The same directory with a fresh tree: what runs from it is the old binary.
+        if (replaced && spec && (await samePath(spec.binaryDir, dir, this.platform)))
+          await unload(this.deps, 'engine-updated')
+        else await activateInstall(this.deps, record)
+        await emitState(this.deps, 'install')
+      },
+      // The `install` part of the status changed: the reason the removed route used to report.
+      changed: (reason) => emitState(this.deps, reason),
+    }
   }
 
   // --- model files ---------------------------------------------------------------------------------

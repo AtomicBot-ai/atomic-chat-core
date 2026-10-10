@@ -20,8 +20,10 @@ import {
   backendOutputReporter,
   buildProcessEnv,
   discoverCudaPaths,
+  exitedOnTakenPort,
   nodeCudaProbeEnv,
   randomFreePort,
+  retryOnTakenPort,
   spawnManaged,
 } from '../runtime/shared/index.js'
 import type { BackendOutputSink, ManagedProcess, SpawnSpec } from '../runtime/shared/index.js'
@@ -98,7 +100,26 @@ export function embeddingEarlyExitError(exit: ExitInfo, tail: readonly string[])
   )
 }
 
+/**
+ * Start the embedding model, on another port when the one picked was taken before the engine could
+ * bind it (`retryOnTakenPort`): an exit while loading that says so is that race, not the model.
+ */
 export async function spawnEmbeddingServer(
+  spec: EmbeddingServerSpec,
+  deps: SpawnEmbeddingDeps
+): Promise<EmbeddingProcessHandle> {
+  return retryOnTakenPort(
+    () => spawnEmbeddingServerOnce(spec, deps),
+    (error) =>
+      error instanceof AtomicCoreError &&
+      error.code === 'MODEL_LOAD_FAILED' &&
+      exitedOnTakenPort(error.details),
+    (attempt) =>
+      deps.log?.('warn', `the embedding model's port was taken while it started; retrying (${attempt})`)
+  )
+}
+
+async function spawnEmbeddingServerOnce(
   spec: EmbeddingServerSpec,
   deps: SpawnEmbeddingDeps
 ): Promise<EmbeddingProcessHandle> {

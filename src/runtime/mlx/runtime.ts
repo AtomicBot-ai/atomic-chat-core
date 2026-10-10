@@ -20,7 +20,7 @@
  */
 
 import { existsSync } from 'node:fs'
-import { join, win32 } from 'node:path'
+import { dirname, join, win32 } from 'node:path'
 import type { DataLayout } from '../../config/index.js'
 import type { SessionInfo, UnloadResult } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
@@ -47,6 +47,7 @@ import {
   throwIfLoadCancelled,
 } from '../shared/index.js'
 import type { BackendOutputSink } from '../shared/index.js'
+import type { EngineHost } from '../../engine-builds/service.js'
 import { buildMlxServerArgs, normalizeMlxModelPath } from './args.js'
 import { asNumber, buildMlxConfig, selectMlxDraftSettings } from './config.js'
 import type { MlxDraftKind, MlxExtensionConfigInput } from './config.js'
@@ -101,6 +102,11 @@ export interface MlxRuntimeOptions {
    * an MLX model holds the whole Apple GPU — from the other engines. Absent, nothing is asked.
    */
   claimGpu?: GpuClaimHook | undefined
+  /**
+   * Which `mlx-server` the next load starts, asked on every load: the newest of the installer's and
+   * the ones the core downloaded (`EngineBuildsService.resolveMlxBinary`). Absent, `resourcesDir`.
+   */
+  resolveBinary?: () => Promise<string | undefined>
   /** Test seams. */
   spawn?: typeof spawnAndAwaitReady
   exists?: (path: string) => boolean
@@ -132,6 +138,25 @@ export class MlxRuntime implements LocalRuntime {
 
   list(): SessionInfo[] {
     return this.table.list()
+  }
+
+  /**
+   * What the engine-builds module needs of MLX (openspec change `move-sdcpp-mlx-install-to-core`,
+   * design D3, D5): the load queue, the build folders sessions run from, and an activation that
+   * unloads every session not started from the new build. Calling the install is the client's
+   * consent to that unload.
+   */
+  engineHost(): EngineHost {
+    return {
+      exclusive: (fn) => this.table.exclusive(fn),
+      inUse: async () => [...new Set(this.table.runningExes().map((exe) => dirname(exe)))],
+      activate: async (dir) => {
+        for (const modelId of this.table.getLoadedModels()) {
+          const exe = this.table.get(modelId)?.exe
+          if (exe !== undefined && dirname(exe) !== dir) await this.table.unload(modelId)
+        }
+      },
+    }
   }
 
   findSession(modelId: string): SessionInfo | undefined {
@@ -201,8 +226,8 @@ export class MlxRuntime implements LocalRuntime {
       this.emit('core:log', { level: 'warn', msg: message })
     )
     const { modelPath } = registry.resolvePaths(yml)
-    const exe = opts.exePath ?? this.binaryPath()
-    if (!exe || !this.exists(exe)) throw mlxBinaryMissing(exe ?? join('<resources-dir>', MLX_SERVER_BINARY))
+    const exe = opts.exePath ?? (await this.options.resolveBinary?.()) ?? this.binaryPath()
+    if (!exe || !this.exists(exe)) throw mlxBinaryMissing(exe)
     if (!this.exists(modelPath)) throw mlxModelMissing(modelPath)
 
     const port = opts.port ?? (await randomFreePort(this.table.usedPorts()))

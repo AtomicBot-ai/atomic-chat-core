@@ -129,6 +129,17 @@ export class ProgressTracker {
     this.dirty = true
   }
 
+  /**
+   * The engine said the job completed: a decode it was tiling is over, every tile drawn. The last
+   * redraw can arrive after the status that says so (stdout and the HTTP poll race), or not at all,
+   * and the bar would end one tile short.
+   */
+  finishDecode(): void {
+    if (this.current !== 'decoding' || !this.decode || this.decode.done === this.decode.total) return
+    this.decode = { done: this.decode.total, total: this.decode.total }
+    this.dirty = true
+  }
+
   /** When the last sampling step was seen, which starts the decode; undefined before it. */
   decodeStartedAt(): number | undefined {
     return this.decodingAt

@@ -17,7 +17,12 @@ describe('mlx errors', () => {
       message: 'The MLX model took too long to load and timed out.',
       details: 'Timeout: 600s\n\nStderr:\nloading',
     })
-    expect(mlxBinaryMissing('/b').message).toBe('MLX server binary not found at: /b')
+    expect(mlxBinaryMissing('/b').toJSON()).toEqual({
+      code: 'BINARY_NOT_FOUND',
+      message: 'MLX is not installed. Install the MLX engine, then load the model again.',
+      details: 'mlx-server not found; looked at /b',
+    })
+    expect(mlxBinaryMissing().details).toBeUndefined()
     expect(mlxModelMissing('/m').message).toBe('Model file not found at: /m')
   })
 })

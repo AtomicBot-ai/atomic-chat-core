@@ -5,9 +5,10 @@
  * is `../managed-models/compatibility.ts`, the same for every managed engine. What is TensorRT-LLM's
  * own lives here as the two hooks of `tensorrtLlmCheckEngine`:
  *
- *   - `memoryNeed`: weights plus the KV reserve divided by `kv_cache_free_gpu_memory_fraction`
- *     (`trtllm-serve`'s semantics: it spends only that fraction of what is free after the weights),
- *     bounded by tokens on a unified-memory card, plus the runtime and the activation peak;
+ *   - `memoryNeed`: weights plus an allowance for the engine's own layout of them, plus the KV
+ *     reserve divided by `kv_cache_free_gpu_memory_fraction` (`trtllm-serve`'s semantics: it spends
+ *     only that fraction of what is free after the weights), bounded by tokens on a unified-memory
+ *     card, plus the runtime and the activation peak;
  *   - `checkpointProblems`: shapes of supported architectures this image's loader cannot read
  *     (Nemotron-H with dense MLP layers, a DeepseekV3Gate MoE without its correction bias).
  *
@@ -21,9 +22,11 @@ import {
   checkCheckpoint,
   checkCheckpointFiles,
   checkCheckpointMemory,
+  freeMemoryBytes,
   isUnifiedMemory,
   kvCacheBytes,
   positiveNumberField,
+  type CheckpointMemoryInputs,
   type CheckpointProblem,
   type FilesCheckResult,
   type HostMemory,
@@ -35,6 +38,12 @@ import {
 } from '../managed-models/compatibility.js'
 import type { JsonObject } from '../managed-models/quant-format.js'
 import { TENSORRT_LLM_ENGINE_ID } from '../environment/index.js'
+import {
+  TENSORRT_LLM_CUDA_GRAPHS_RESERVE_BYTES,
+  tensorrtLlmCudaGraphsOn,
+  type TensorrtLlmCudaGraphsSetting,
+  type TensorrtLlmLaunchPlan,
+} from './cuda-graphs.js'
 import { tensorrtLlmUnifiedKvMaxTokens } from './kv-cache.js'
 
 export * from '../managed-models/compatibility.js'
@@ -149,9 +158,26 @@ export function kvCacheReserveBytes(
 /**
  * What `trtllm-serve` holds outside torch on any card: the CUDA context, cuBLAS/cuDNN workspaces,
  * NCCL buffers. Measured 1.14–1.62 GiB on an RTX 4070 Laptop (Windows live acceptance, 2026-10-03,
- * "Memory used outside torch"); the check takes the high end, never the low one.
+ * "Memory used outside torch"), then 1.6–1.8 GiB on an RTX 5090 Laptop (2026-10-09, the logged
+ * figure less the 0.32 GiB other processes held); the check takes the high end with headroom.
  */
-export const TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES = 1.5 * 1024 ** 3
+export const TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES = 2 * 1024 ** 3
+
+/**
+ * The share of the checkpoint's weight bytes added for the engine's own layout of them, which is not
+ * the checkpoint's: the 1.3.0rc29 loader keeps Qwen3.5's linear-attention `in_proj_qkvz` in bf16
+ * whatever the checkpoint stores (`_add_qkvz_bf16_workaround`), and skips `mtp.*` layers. Measured on
+ * the RTX 5090 Laptop (2026-10-09): Qwen3.8-27B-NVFP4 held 21.71 GiB for 20.42 GiB of files (+6.3%),
+ * NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 18.23 GiB for 20.08 (−9.2%, 2.49 GiB of MTP unread).
+ * 5% refuses the first on that card's 23.57 GiB free, which otherwise spilled into shared memory
+ * under WDDM and never got ready, and still passes the second, which loads.
+ */
+export const TENSORRT_LLM_WEIGHT_LAYOUT_ALLOWANCE = 0.05
+
+/** Bytes added to the checkpoint's weights for the engine's own layout of them. */
+export function weightLayoutAllowanceBytes(weightBytesTotal: number): number {
+  return Math.ceil(Math.max(weightBytesTotal, 0) * TENSORRT_LLM_WEIGHT_LAYOUT_ALLOWANCE)
+}
 
 /**
  * Bytes of activation peak per prompt token per MLP intermediate element: the engine profiles a
@@ -196,9 +222,12 @@ export interface MemorySizingInputs {
    * adapter's default. */
   contextLength: number
   kvCacheFreeGpuMemoryFraction: number
+  /** The provider's `cuda_graphs`. Only `on` adds the graphs' memory: `auto` turns them off where
+   *  they would not fit (`tensorrtLlmLaunchPlan`), `off` never captures them. Absent is `auto`. */
+  cudaGraphs?: TensorrtLlmCudaGraphsSetting
 }
 
-/** TensorRT-LLM's memory rule on `gpu`: its weights plus that card's own kind of KV reserve plus the engine. */
+/** TensorRT-LLM's memory rule on `gpu`: its weights as the engine lays them out, plus that card's own kind of KV reserve, plus the engine. */
 export function tensorrtLlmMemoryNeed(
   gpu: GpuFacts,
   checkpoint: { weightBytesTotal: number; configJson: JsonObject; hfQuantConfigJson: JsonObject | null },
@@ -214,7 +243,10 @@ export function tensorrtLlmMemoryNeed(
     unified
   )
   const overheadBytes = engineOverheadBytes(checkpoint.configJson, memory.contextLength)
-  const neededBytes = checkpoint.weightBytesTotal + reserve.reserveBytes + overheadBytes
+  const layoutBytes = weightLayoutAllowanceBytes(checkpoint.weightBytesTotal)
+  const cudaGraphsBytes = memory.cudaGraphs === 'on' ? TENSORRT_LLM_CUDA_GRAPHS_RESERVE_BYTES : 0
+  const neededBytes =
+    checkpoint.weightBytesTotal + layoutBytes + reserve.reserveBytes + overheadBytes + cudaGraphsBytes
   // The token bound the launch writes, on a card where it writes one (adapter.ts).
   const kvTokens =
     unified && reserve.basis === 'config'
@@ -223,8 +255,26 @@ export function tensorrtLlmMemoryNeed(
   return {
     neededBytes,
     kvReserveBasis: reserve.basis,
-    details: `weight_bytes=${checkpoint.weightBytesTotal} kv_reserve_bytes=${reserve.reserveBytes} kv_reserve_basis=${reserve.basis}${kvTokens} engine_overhead_bytes=${overheadBytes} needed_bytes=${neededBytes}`,
+    details: `weight_bytes=${checkpoint.weightBytesTotal} weight_layout_bytes=${layoutBytes} kv_reserve_bytes=${reserve.reserveBytes} kv_reserve_basis=${reserve.basis}${kvTokens} engine_overhead_bytes=${overheadBytes}${cudaGraphsBytes > 0 ? ` cuda_graphs_bytes=${cudaGraphsBytes}` : ''} needed_bytes=${neededBytes}`,
   }
+}
+
+/**
+ * The launch plan `beforeCreate` hands the adapter (`ManagedEngineSpec.launchPlan`), from the card
+ * re-probed once the previous sessions stopped and the memory check passed: `auto` captures CUDA
+ * graphs only when they fit in what the card has free beyond everything else the check counts.
+ */
+export function tensorrtLlmLaunchPlan(
+  memory: MemorySizingInputs,
+  checkpoint: CheckpointMemoryInputs,
+  gpu: GpuFacts,
+  host: HostMemory
+): TensorrtLlmLaunchPlan {
+  const setting = memory.cudaGraphs ?? 'auto'
+  if (setting !== 'auto') return { cudaGraphs: setting === 'on' }
+  const withoutGraphs = tensorrtLlmMemoryNeed(gpu, checkpoint, { ...memory, cudaGraphs: 'off' })
+  const headroomBytes = freeMemoryBytes(gpu, host) - withoutGraphs.neededBytes
+  return { cudaGraphs: tensorrtLlmCudaGraphsOn('auto', gpu.total_vram_bytes, headroomBytes) }
 }
 
 /** The skeleton's hooks for TensorRT-LLM, sized by the provider's settings. */

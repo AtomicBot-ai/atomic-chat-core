@@ -103,7 +103,8 @@ export class PublicServerLifecycle {
     if (!this.publicServer || !this.publicConfig || this.stopping) return undefined
     return {
       origin: dialOrigin(this.publicServer.host, this.publicServer.port),
-      hasApiKey: this.publicConfig.apiKey !== '',
+      // The listener's own answer: a host keyring requires a key even when `server.api_key` is empty.
+      hasApiKey: this.publicServer.state().requires_api_key,
     }
   }
 
@@ -140,7 +141,7 @@ export class PublicServerLifecycle {
             host: server.host,
             port: server.port,
             prefix: server.prefix,
-            requiresApiKey: requested.apiKey !== '',
+            requiresApiKey: server.state().requires_api_key,
           },
           (message) => this.deps.log('warn', message)
         )

@@ -98,6 +98,8 @@ export type CoreErrorCode =
   /** A model setup was started from a plan whose inputs changed since it was computed; plan again. */
   | 'MODEL_SETUP_PLAN_STALE'
   | 'MODEL_SETUP_NOT_FOUND'
+  /** Another install of the same engine build (sd.cpp, MLX) is running; wait for it. */
+  | 'ENGINE_INSTALL_IN_PROGRESS'
 
 /**
  * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the

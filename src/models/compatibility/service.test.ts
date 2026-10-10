@@ -53,6 +53,21 @@ describe('ModelCompatibilityService.check', () => {
       expect.objectContaining({ token: 'tok' })
     )
   })
+  it('bounds the remote read only when the core was given a timeout', async () => {
+    const bounded = vi.fn(async () => PQ2)
+    const svc = new ModelCompatibilityService({
+      rules: { rules: vi.fn(async () => RULES), cachedRules: vi.fn(async () => RULES) },
+      installedPrism: async () => ({ build: null }),
+      fetch: (async () => new Response()) as typeof fetch,
+      inspectRemote: bounded,
+      remoteTimeoutMs: 20_000,
+    })
+    await svc.check({ repo: 'someone/fork', file: 'x.gguf', inspectRemote: true })
+    expect(bounded).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ timeoutMs: 20_000 }))
+    const unbounded = make()
+    await unbounded.svc.check({ repo: 'someone/fork', file: 'x.gguf', inspectRemote: true })
+    expect((unbounded.inspectRemote.mock.calls[0] as unknown[])[1]).not.toHaveProperty('timeoutMs')
+  })
   it('is inspection_required without a rule and without a header to read', async () => {
     const { svc } = make()
     expect((await svc.check({ repo: 'someone/fork', file: 'x.gguf' })).outcome).toBe('inspection_required')

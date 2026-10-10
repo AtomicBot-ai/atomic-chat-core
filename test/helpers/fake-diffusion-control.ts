@@ -234,20 +234,6 @@ export function fakeDiffusionControl(calls: string[]): FakeDiffusionControl {
       note(`setOutputDir ${path}`)
       return { ...FAKE_DIFFUSION_STATUS, outputDir: path }
     },
-    finalizeBackendInstall: async (args) => {
-      note(`finalize ${JSON.stringify(args)}`)
-      return {
-        ...FAKE_INSTALL_RECORD,
-        dir: args.dir,
-        tag: args.tag,
-        backendId: args.backendId,
-        sha256: args.sha256 ?? null,
-      }
-    },
-    listInstalledBackends: async () => [FAKE_INSTALL_RECORD],
-    removeBackend: async (dir) => {
-      note(`removeBackend ${dir}`)
-    },
     listModelFiles: async () => [
       { path: '/tmp/data/diffusion/models/z-image/z.gguf', relativePath: 'z-image/z.gguf', bytes: 5 },
     ],

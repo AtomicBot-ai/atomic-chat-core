@@ -19,8 +19,10 @@ import {
   backendOutputReporter,
   buildProcessEnv,
   discoverCudaPaths,
+  exitedOnTakenPort,
   nodeCudaProbeEnv,
   randomFreePort,
+  retryOnTakenPort,
   spawnManaged,
 } from '../runtime/shared/index.js'
 import type { BackendOutputSink, ManagedProcess, SpawnSpec } from '../runtime/shared/index.js'
@@ -112,7 +114,26 @@ export function earlyExitError(exit: ExitInfo, tail: readonly string[]): AtomicC
   )
 }
 
+/**
+ * Start the decision model, on another port when the one picked was taken before the engine could
+ * bind it (`retryOnTakenPort`): an exit while loading that says so is that race, not the model.
+ */
 export async function spawnDecisionServer(
+  spec: DecisionServerSpec,
+  deps: SpawnDecisionDeps
+): Promise<DecisionProcessHandle> {
+  return retryOnTakenPort(
+    () => spawnDecisionServerOnce(spec, deps),
+    (error) =>
+      error instanceof AtomicCoreError &&
+      error.code === 'MODEL_LOAD_FAILED' &&
+      exitedOnTakenPort(error.details),
+    (attempt) =>
+      deps.log?.('warn', `the decision model's port was taken while it started; retrying (${attempt})`)
+  )
+}
+
+async function spawnDecisionServerOnce(
   spec: DecisionServerSpec,
   deps: SpawnDecisionDeps
 ): Promise<DecisionProcessHandle> {

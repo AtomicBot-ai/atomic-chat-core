@@ -62,6 +62,21 @@ export interface PersistedOperation {
    */
   owner_pid: number | null
   owner_process_start_id: string | null
+  /**
+   * A removal that is the first half of a reinstall (change `unify-engine-lifecycle`, design D6):
+   * once it ends `removed`, the core begins this setup itself, under this request id — after a
+   * restart too, so an app closed between the two halves does not leave the engine uninstalled.
+   * Absent on every other operation.
+   */
+  follow_up?: OperationFollowUp
+  /** The setup a reinstall began: the operation id of the removal it follows. */
+  reinstall_of?: string
+}
+
+export interface OperationFollowUp {
+  kind: 'setup'
+  descriptor_id: string
+  request_id: string
 }
 
 /** The slice of `node:fs/promises` the store needs; tests pass an in-memory fake. */
@@ -206,7 +221,8 @@ export class OperationStore {
   async createOrGet(
     environmentId: string,
     input: BeginOperation,
-    requestDigest: Sha256Digest
+    requestDigest: Sha256Digest,
+    chain: Pick<PersistedOperation, 'follow_up' | 'reinstall_of'> = {}
   ): Promise<{ record: PersistedOperation; created: boolean }> {
     return this.withLock(async () => {
       const existing = await this.all()
@@ -259,6 +275,7 @@ export class OperationStore {
         // `write` stamps this store's own identity before the record reaches disk.
         owner_pid: null,
         owner_process_start_id: null,
+        ...chain,
       }
       const stamped = await this.write(record, true)
       return { record: stamped, created: true }

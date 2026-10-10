@@ -12,6 +12,8 @@ import type {
   ModelSetup,
 } from '../contracts/index.js'
 import { fakeCatalog } from '../../test/helpers/control-harness.js'
+import { fakeEngineBuildsControl } from '../../test/helpers/fake-engine-builds-control.js'
+import { fakeEnginesControl } from '../../test/helpers/fake-engines-control.js'
 import type {
   EnvironmentOperation,
   EnvironmentSnapshot,
@@ -43,6 +45,8 @@ let loadFailure: Error | undefined
 let inspecting = false
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
+const engineBuildCalls: string[] = []
+const engineCalls: string[] = []
 const environmentCalls: string[] = []
 const setupCalls: string[] = []
 
@@ -79,6 +83,8 @@ const OPERATION: EnvironmentOperation = {
 }
 
 beforeEach(async () => {
+  engineBuildCalls.length = 0
+  engineCalls.length = 0
   emitter = new CoreEmitter({ instanceId: 'client-test-instance' })
   clients = new ClientRegistry()
   sessions = []
@@ -345,6 +351,8 @@ beforeEach(async () => {
       },
     },
     diffusion: fakeDiffusionControl(diffusionCalls),
+    engineBuilds: fakeEngineBuildsControl(engineBuildCalls),
+    engines: fakeEnginesControl(engineCalls),
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -594,24 +602,13 @@ describe('recreate', () => {
 })
 
 describe('image generation', () => {
-  it('drives the twenty operations, unwrapping the lists and the lookups', async () => {
+  it('drives the operations, unwrapping the lists and the lookups', async () => {
     diffusionCalls.length = 0
     expect((await client.configureDiffusion({ dataFolder: '/tmp/data', idleUnloadSecs: 0 })).configured).toBe(
       true
     )
     expect((await client.diffusionStatus()).outputDir).toBe('/tmp/data/images')
     expect((await client.setDiffusionOutputDir('/pics')).outputDir).toBe('/pics')
-    const record = await client.finalizeDiffusionBackend({
-      dir: '/d',
-      tag: 't',
-      backendId: 'cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-    })
-    expect(record.dir).toBe('/d')
-    expect(record.sha256).toBeNull()
-    expect((await client.listDiffusionBackends()).map((b) => b.backendId)).toEqual(['macos-arm64'])
-    await client.removeDiffusionBackend('/d')
     expect((await client.listDiffusionModelFiles()).map((f) => f.relativePath)).toEqual(['z-image/z.gguf'])
     await client.deleteDiffusionModelFile('/m/z.gguf')
     const loaded = await client.loadDiffusionModel({
@@ -652,8 +649,6 @@ describe('image generation', () => {
     expect(diffusionCalls).toEqual([
       'diffusion configure {"dataFolder":"/tmp/data","idleUnloadSecs":0}',
       'diffusion setOutputDir /pics',
-      'diffusion finalize {"dir":"/d","tag":"t","backendId":"cpu","backend":"cpu","engine":"sd-cpp"}',
-      'diffusion removeBackend /d',
       'diffusion deleteModelFile /m/z.gguf',
       'diffusion loadModel z-image:q4_k_m',
       'diffusion touchIdle',
@@ -775,6 +770,70 @@ describe('backend advisor', () => {
     })
 
     await expect(client.backendCatalog('mlx' as 'llamacpp', {})).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+  })
+})
+
+describe('engine builds', () => {
+  it('reads the catalog and the update check, installs under a task id and removes a build', async () => {
+    expect(await client.engineBuildCatalog('mlx', { force: true })).toMatchObject({
+      engine: 'mlx',
+      host_backend_id: 'macos-arm64',
+    })
+    expect(await client.checkEngineBuildUpdates('sd-cpp')).toEqual({
+      update_needed: false,
+      current: null,
+      target: null,
+    })
+    expect(await client.installEngineBuild('sd-cpp', { task_id: 'task-1' })).toMatchObject({
+      installed: true,
+    })
+    expect(await client.removeEngineBuild('sd-cpp', 'master-900-aaaaaaa', 'macos-arm64')).toEqual({
+      removed: true,
+    })
+    expect(engineBuildCalls).toEqual([
+      'engine-builds catalog mlx {"force":true}',
+      'engine-builds updates sd-cpp {}',
+      'engine-builds install sd-cpp {"task_id":"task-1"}',
+      'engine-builds remove sd-cpp master-900-aaaaaaa macos-arm64',
+    ])
+    await expect(client.installEngineBuild('mlx', { task_id: '' })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+  })
+})
+
+describe('engines', () => {
+  it('reads the versions, updates, activates and deletes a build, a managed variant encoded', async () => {
+    expect(await client.engineVersions({ force: true, app_version: '2.1.0' })).toMatchObject({
+      engines: [{ engine: 'llamacpp-upstream' }],
+    })
+    expect(
+      await client.updateEngine('llamacpp-upstream', { task_id: 'engine-update-llamacpp-upstream-b11500' })
+    ).toMatchObject({ updated: true })
+    expect(await client.updateEngine('vllm', { request_id: 'upd-1' })).toEqual({ operation_id: 'op-1' })
+    expect(await client.activateEngineBuild('llamacpp', 'b9100-1.7.0', 'win-cuda-12-x64')).toEqual({
+      activated: true,
+      active: { version: 'b9100-1.7.0', variant: 'win-cuda-12-x64' },
+    })
+    expect(await client.deleteEngineBuild('llamacpp', 'b9000-1.6.0', 'win-cuda-12-x64')).toEqual({
+      removed: true,
+    })
+    expect(
+      await client.deleteEngineBuild('vllm', 'vllm-0.31.0-r1', 'linux/amd64', { retain_models: false })
+    ).toEqual({ operation_id: 'op-2' })
+    expect(engineCalls).toEqual([
+      'engines versions {"force":true,"app_version":"2.1.0"}',
+      'engines update llamacpp-upstream {"task_id":"engine-update-llamacpp-upstream-b11500"}',
+      'engines update vllm {"request_id":"upd-1"}',
+      'engines activate llamacpp b9100-1.7.0 win-cuda-12-x64',
+      'engines remove llamacpp b9000-1.6.0 win-cuda-12-x64 {}',
+      'engines remove vllm vllm-0.31.0-r1 linux/amd64 {"retainModels":false}',
+    ])
+    await expect(
+      client.updateEngine('sd-cpp', { task_id: 't', target: { variant: 'x' } })
+    ).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
     })
   })

@@ -162,6 +162,11 @@ export interface EmbeddingBackend {
 }
 
 export interface PublicServerDeps {
+  /**
+   * The host's keyring (`AtomicCoreOptions.publicApiKeys`), read for every request; `undefined`
+   * keeps `server.api_key`. The keys never appear in a snapshot or the server state.
+   */
+  apiKeys?: () => readonly string[] | undefined
   /** The session `provider` serves for `modelId`, matched with the proxy's `.`/`_` rule. */
   findLocal: (provider: LocalProvider, modelId: string) => LocalTarget | undefined
   /** Every loaded session, in `LOCAL_SEARCH_ORDER` provider order. */
@@ -204,6 +209,8 @@ export interface PublicServerDeps {
 }
 
 export interface PublicServerConfig {
+  /** This request's keyring, when the host keeps one (`PublicServerDeps.apiKeys`); see `HostAndKeyConfig`. */
+  apiKeys?: readonly string[]
   host: string
   port: number
   /** Normalised: `''` or `/segment` without a trailing slash. */

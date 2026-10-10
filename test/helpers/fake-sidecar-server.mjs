@@ -35,6 +35,12 @@ const err = (line) => process.stderr.write(`${line}\n`)
 if (process.env.FAKE_SIDECAR_ARGV) appendFileSync(process.env.FAKE_SIDECAR_ARGV, `${JSON.stringify(argv)}\n`)
 if (process.env.FAKE_SIDECAR_PID_FILE) appendFileSync(process.env.FAKE_SIDECAR_PID_FILE, `${process.pid}\n`)
 
+// The engine-builds install probes a downloaded `mlx-server` with `--help` (argparse's usage, exit 0).
+if (kind === 'mlx' && argv.includes('--help')) {
+  out('usage: mlx-server [-h] [--host HOST] [--port PORT] [--model MODEL]')
+  process.exit(0)
+}
+
 if (kind === 'fm' && argv.includes('--check')) {
   out(process.env.FAKE_FM_CHECK ?? 'available')
   process.exit(0)

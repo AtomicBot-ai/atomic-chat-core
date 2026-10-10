@@ -14,6 +14,8 @@ import { registerEmbeddingRoutes } from './routes/embedding.js'
 import { registerDiffusionRoutes } from './routes/diffusion.js'
 import { registerDiffusionVideoRoutes } from './routes/diffusion-video.js'
 import { registerDiskRoutes } from './routes/disk.js'
+import { registerEngineBuildRoutes } from './routes/engine-builds.js'
+import { registerEngineRoutes } from './routes/engines.js'
 import { registerEnvironmentRoutes } from './routes/environments.js'
 import { registerExternalSessionRoutes } from './routes/external-sessions.js'
 import { registerHardwareRoutes } from './routes/hardware.js'
@@ -44,7 +46,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
     sessions: deps.sessions(),
     server: deps.publicServer.status(),
     clients: deps.clients.list(),
-    downloads: [],
+    downloads: deps.downloads?.() ?? [],
     optimal_backends: deps.backends.optimalSnapshot(),
     environments: deps.environmentsSnapshot?.() ?? [],
     environment_operations: deps.environmentOperations?.() ?? [],
@@ -59,6 +61,8 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerModelRoutes(router, deps, ctx)
   registerModelSetupRoutes(router, deps, ctx)
   registerBackendRoutes(router, deps, ctx)
+  registerEngineBuildRoutes(router, deps, ctx)
+  registerEngineRoutes(router, deps, ctx)
   registerHardwareRoutes(router, deps, ctx)
   registerDiskRoutes(router, deps, ctx)
   registerEnvironmentRoutes(router, deps, ctx)

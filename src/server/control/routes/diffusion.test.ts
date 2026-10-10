@@ -5,7 +5,6 @@ import {
   FAKE_CAPABILITIES,
   FAKE_DIFFUSION_STATUS,
   FAKE_GALLERY_ITEM,
-  FAKE_INSTALL_RECORD,
   FAKE_JOB,
   FAKE_LOADED_MODEL,
 } from '../../../../test/helpers/fake-diffusion-control.js'
@@ -58,28 +57,15 @@ describe('configuration and status', () => {
   })
 })
 
-describe('the engine and the model files', () => {
-  it('finalizes, lists and removes engine trees', async () => {
-    const args = { dir: '/d', tag: 't', backendId: 'cpu', backend: 'cpu', engine: 'sd-cpp', sha256: 'ff' }
-    const finalized = await h.get('/atomic/v1/diffusion/backends/finalize', json(args))
-    expect(await finalized.json()).toEqual({
-      ...FAKE_INSTALL_RECORD,
-      dir: '/d',
-      tag: 't',
-      backendId: 'cpu',
-      sha256: 'ff',
-    })
-    expect(await (await h.get('/atomic/v1/diffusion/backends')).json()).toEqual({
-      backends: [FAKE_INSTALL_RECORD],
-    })
-    const removed = await h.get('/atomic/v1/diffusion/backends/remove', json({ dir: '/d' }))
-    expect(removed.status).toBe(200)
-    expect(await removed.json()).toEqual({})
-    expect((await h.get('/atomic/v1/diffusion/backends/finalize', json({ dir: '/d' }))).status).toBe(400)
-    expect(diffusionCalls()).toEqual([
-      `diffusion finalize ${JSON.stringify(args)}`,
-      'diffusion removeBackend /d',
-    ])
+describe('the model files', () => {
+  it('no longer serves the engine routes the engine-builds module replaced', async () => {
+    for (const [path, method] of [
+      ['/atomic/v1/diffusion/backends/finalize', 'POST'],
+      ['/atomic/v1/diffusion/backends', 'GET'],
+      ['/atomic/v1/diffusion/backends/remove', 'POST'],
+    ] as const)
+      expect((await h.get(path, { method })).status, path).toBe(404)
+    expect(diffusionCalls()).toEqual([])
   })
 
   it('lists and deletes model files', async () => {
