@@ -56,6 +56,43 @@ export async function randomFreePort(usedPorts: Iterable<number>, opts: PortOpti
   throw new Error(PORT_EXHAUSTED_MESSAGE)
 }
 
+/**
+ * What `llama-server` prints when its port was taken between `randomFreePort`'s probe and its own
+ * bind ("couldn't bind HTTP server socket, hostname: …, port: …"), and what a Node server says.
+ */
+const PORT_TAKEN = /couldn't bind HTTP server socket|address already in use|EADDRINUSE/i
+
+/** How many ports a start tries when each one is taken before the engine can bind it. */
+export const PORT_TAKEN_ATTEMPTS = 3
+
+/** Whether an engine that exited while starting did so because its port was already taken. */
+export function exitedOnTakenPort(details: string | undefined): boolean {
+  return details !== undefined && PORT_TAKEN.test(details)
+}
+
+/**
+ * `start` again, on a port it picks anew, while it fails because its port was taken (the probe is
+ * racy by nature: another process can bind the port between the probe and the engine's own bind).
+ * `portTaken` reads the failure; anything else, or the last attempt's failure, is thrown as it is.
+ */
+export async function retryOnTakenPort<T>(
+  start: () => Promise<T>,
+  portTaken: (error: unknown) => boolean,
+  onRetry: (attempt: number) => void = () => {},
+  attempts = PORT_TAKEN_ATTEMPTS
+): Promise<T> {
+  const attempt = async (n: number): Promise<T> => {
+    try {
+      return await start()
+    } catch (error) {
+      if (n >= attempts || !portTaken(error)) throw error
+      onRetry(n)
+      return attempt(n + 1)
+    }
+  }
+  return attempt(1)
+}
+
 /** Secret the extension has always used for session keys (`index.ts:531`). */
 export const DEFAULT_API_SECRET = 'JustAskNow'
 

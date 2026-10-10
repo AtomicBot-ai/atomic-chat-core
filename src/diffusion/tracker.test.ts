@@ -191,6 +191,33 @@ describe('ProgressTracker', () => {
     expect(t.decodeTiles(), 'only while decoding').toBeUndefined()
   })
 
+  it('finishes a tiled decode when the engine says the job completed, even without the last redraw', () => {
+    const t = new ProgressTracker(2, 1)
+    t.onLine('[INFO   ] stable-diffusion.cpp:5705 - generating video: 1/1 - seed 7')
+    for (let step = 1; step <= 2; step++) t.onLine(`|==>   | ${step}/2 - 9.0s/it`)
+    t.onLine('[VERBOSE] tiling.cpp:203  - processing 3 tiles')
+    t.onLine('|==>   | 2/3 - 60.00s/it')
+    t.takeDirty()
+    // The completed status arrived before the 3/3 redraw did.
+    t.finishDecode()
+    expect(t.decodeTiles()).toEqual({ done: 3, total: 3 })
+    expect(t.takeDirty()).toBe(true)
+    t.finishDecode()
+    expect(t.takeDirty(), 'a finished decode is not news twice').toBe(false)
+  })
+
+  it('leaves finishDecode a no-op outside a tiled decode', () => {
+    const t = new ProgressTracker(2, 1)
+    t.finishDecode()
+    expect(t.decodeTiles()).toBeUndefined()
+    t.onLine('[INFO   ] stable-diffusion.cpp:5705 - generating video: 1/1 - seed 7')
+    for (let step = 1; step <= 2; step++) t.onLine(`|==>   | ${step}/2 - 9.0s/it`)
+    t.takeDirty()
+    t.finishDecode()
+    expect(t.decodeTiles(), 'a single-graph decode has no tiles').toBeUndefined()
+    expect(t.takeDirty()).toBe(false)
+  })
+
   it('remembers what the server said, but not its redraws', () => {
     const t = new ProgressTracker(8, 1)
     t.onLine('|==>   | 1/8 - 12.0s/it')

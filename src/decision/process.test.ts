@@ -1,10 +1,12 @@
+import { createServer as createNetServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { fakeDecisionSpawn } from '../../test/helpers/fake-llama-server.js'
 import type { FakeLlamaOptions } from '../../test/helpers/fake-llama-server.js'
-import { isProcessAlive } from '../runtime/shared/index.js'
+import { isProcessAlive, randomFreePort } from '../runtime/shared/index.js'
 import { createDecisionHttp, DecisionTimeoutError } from './http.js'
 import type { DecisionHttp } from './http.js'
 import { decisionArgsFor, earlyExitError, spawnDecisionServer } from './process.js'
@@ -66,6 +68,34 @@ function start(options: FakeLlamaOptions = {}, over: Partial<DecisionServerSpec>
 }
 
 describe('spawnDecisionServer', () => {
+  it('starts again on another port when the one it picked was taken before the engine could bind it', async () => {
+    // Another program on the port: it takes connections and drops them, it speaks no HTTP.
+    const holder = createNetServer((socket) => socket.destroy())
+    await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve))
+    const taken = (holder.address() as AddressInfo).port
+    const free = await randomFreePort([taken])
+    const ports = [taken, free]
+    const warnings: string[] = []
+    try {
+      const { run, events } = start(
+        {},
+        {},
+        {
+          freePort: async () => ports.shift() as number,
+          log: (level: string, message: string) => {
+            if (level === 'warn') warnings.push(message)
+          },
+        }
+      )
+      const handle = await run
+      expect(handle.port).toBe(free)
+      expect(events).toEqual(['spawned true true', 'gone', 'spawned true true'])
+      expect(warnings.some((w) => w.includes('port was taken while it started; retrying (1)'))).toBe(true)
+    } finally {
+      await new Promise<void>((resolve) => holder.close(() => resolve()))
+    }
+  })
+
   it('starts the engine, passes the readiness chain and keeps the key out of argv', async () => {
     const { run, events, lines } = start()
     const handle = await run
