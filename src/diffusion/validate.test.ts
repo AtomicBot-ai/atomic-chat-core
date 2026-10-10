@@ -206,6 +206,14 @@ describe('validateRequest', () => {
         validateRequest(r, withVision, deps),
         `${workflow} on Qwen Image 2.1 with --llm_vision`
       ).resolves.toBeUndefined()
+      const turbo = spec({ family: 'qwen-image-2.1-turbo' })
+      expect((await refusal(r, turbo)).code, `${workflow} on Qwen Image 2.1 Turbo without --llm_vision`).toBe(
+        'SIDE_FILE_MISSING'
+      )
+      await expect(
+        validateRequest(r, { ...withVision, family: 'qwen-image-2.1-turbo' }, deps),
+        `${workflow} on Qwen Image 2.1 Turbo with --llm_vision`
+      ).resolves.toBeUndefined()
       const badRef = await refusal({ ...r, referenceImages: [{ path: '/nonexistent/ref.png' }] }, klein)
       expect(badRef.code).toBe('INVALID_REQUEST')
       await expect(
