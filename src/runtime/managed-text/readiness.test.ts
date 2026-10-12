@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { probeReadiness } from './readiness.js'
+import { probeGeneration, probeReadiness } from './readiness.js'
 
 const servers: Server[] = []
 afterEach(async () => {
@@ -79,5 +79,84 @@ describe('probeReadiness', () => {
     await probeReadiness(fakeFetch, { base_url: 'http://127.0.0.1:1' }, probe, 1_000)
     expect(init?.redirect).toBe('manual')
     expect(init?.signal).toBeInstanceOf(AbortSignal)
+  })
+})
+
+describe('probeGeneration', () => {
+  const generation = {
+    modelsPath: '/v1/models',
+    path: '/v1/chat/completions',
+    body: { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1 },
+  }
+  /** An engine whose model list answers `models` and whose chat answers `chat`. */
+  const engine = (models: () => Response, chat: () => Response = () => Response.json({ choices: [] })) =>
+    (async (url: string | URL | Request) =>
+      String(url).endsWith('/v1/models') ? models() : chat()) as typeof fetch
+  const target = { base_url: 'http://engine.invalid' }
+  const list = (data: unknown) => () => Response.json({ object: 'list', data })
+
+  it('is ok when the engine generates', async () => {
+    expect(await probeGeneration(engine(list([{ id: 'm' }])), target, generation, 1_000)).toEqual({
+      kind: 'ok',
+    })
+  })
+
+  it('is ok for a 2xx body that is not JSON at all', async () => {
+    const outcome = await probeGeneration(
+      engine(list([{ id: 'm' }]), () => new Response('H', { status: 200 })),
+      target,
+      generation,
+      1_000
+    )
+    expect(outcome).toEqual({ kind: 'ok' })
+  })
+
+  it.each([
+    ['a list that is not an object', () => Response.json('nope')],
+    ['a list with no data array', () => Response.json({ object: 'list' })],
+    ['an empty list', list([])],
+    ['an entry with an empty id', list([{ id: '' }])],
+    ['an entry with no id', list([{}])],
+    ['a body that is not JSON', () => new Response('<html>', { status: 200 })],
+    ['a refused model list', () => new Response('no', { status: 503 })],
+  ])('is unanswered, with no request sent, for %s', async (_label, models) => {
+    let chats = 0
+    const outcome = await probeGeneration(
+      engine(models, () => {
+        chats++
+        return Response.json({})
+      }),
+      target,
+      generation,
+      1_000
+    )
+    expect(outcome.kind).toBe('unanswered')
+    expect(chats).toBe(0)
+  })
+
+  it('is unanswered when the connection fails', async () => {
+    const refused = (async () => {
+      throw new TypeError('fetch failed')
+    }) as typeof fetch
+    expect(await probeGeneration(refused, target, generation, 1_000)).toEqual({
+      kind: 'unanswered',
+      reason: 'TypeError: fetch failed',
+    })
+  })
+
+  it('is refused with the status and at most 2000 characters of the body', async () => {
+    const outcome = await probeGeneration(
+      engine(list([{ id: 'm' }]), () => new Response('x'.repeat(5_000), { status: 500 })),
+      target,
+      generation,
+      1_000
+    )
+    expect(outcome).toEqual({ kind: 'refused', status: 500, body: 'x'.repeat(2_000) })
+  })
+
+  it('gives up after its timeout, as unanswered, against a real server that never answers', async () => {
+    const base = await serve(() => {})
+    const outcome = await probeGeneration(fetch, { base_url: base }, generation, 50)
+    expect(outcome.kind).toBe('unanswered')
   })
 })

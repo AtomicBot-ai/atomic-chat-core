@@ -20,11 +20,34 @@ export const TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION = 0.8
 export const TENSORRT_LLM_UNIFIED_KV_CONTEXTS = 2
 
 /**
+ * Tokens in one KV-cache block: `KvCacheConfig.tokens_per_block`'s default in 1.3.0rc29, logged by
+ * both cache managers ("tokens per block=32", "KVCacheV2Scheduler: tokens_per_block=32"). The engine
+ * turns `kv_cache_config.max_tokens` into whole blocks, rounding down: 2096 tokens became 65 blocks,
+ * a 2080-token sequence for a 2096-token context, and the readiness check refused the load as out of
+ * memory on a card with 17 GiB free (RTX 5090 Laptop, 2026-10-09). Re-check with each engine image.
+ */
+export const TENSORRT_LLM_TOKENS_PER_BLOCK = 32
+
+/** `tokens` rounded up to whole KV-cache blocks: what the engine keeps when asked for at least that many. */
+export function tensorrtLlmWholeBlockTokens(tokens: number): number {
+  return Math.ceil(tokens / TENSORRT_LLM_TOKENS_PER_BLOCK) * TENSORRT_LLM_TOKENS_PER_BLOCK
+}
+
+/**
+ * The `kv_cache_config.max_tokens` that holds `sequences` sequences at full context at once: each
+ * sequence takes whole blocks of its own, so the blocks are counted per sequence before multiplying
+ * (2 × 2096 tokens is 131 blocks, but two 2096-token sequences need 66 each).
+ */
+export function tensorrtLlmKvTokens(contextLength: number, sequences: number): number {
+  return sequences * tensorrtLlmWholeBlockTokens(contextLength)
+}
+
+/**
  * The `kv_cache_config.max_tokens` a unified-memory launch writes, and the token count its memory
  * check reserves KV for. On a unified-memory card (GB10/DGX Spark) "free GPU memory" is the system's
  * free RAM, so `--kv_cache_free_gpu_memory_fraction` alone would hand most of the machine's memory to
  * the KV cache whatever the context length; this bounds it to what the configured context needs.
  */
 export function tensorrtLlmUnifiedKvMaxTokens(contextLength: number): number {
-  return contextLength * TENSORRT_LLM_UNIFIED_KV_CONTEXTS
+  return tensorrtLlmKvTokens(contextLength, TENSORRT_LLM_UNIFIED_KV_CONTEXTS)
 }

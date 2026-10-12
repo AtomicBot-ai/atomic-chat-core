@@ -7,13 +7,18 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { AtomicCoreError } from '../contracts/index.js'
-import type { LlamacppProviderId, LocalProviderId, ModelCompatibility } from '../contracts/index.js'
+import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
+import type {
+  EngineBuildId,
+  LlamacppProviderId,
+  LocalProviderId,
+  ModelCompatibility,
+} from '../contracts/index.js'
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
 import { EmbedService, ModelCapabilityService, ModelRegistry } from '../models/index.js'
-import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
+import { LlamacppRuntime, processPackDirs } from '../runtime/llamacpp/index.js'
 import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
@@ -43,11 +48,26 @@ import {
   selectInstalledBackend,
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
+import {
+  EngineBuildEngine,
+  EnginesService,
+  LlamacppEngine,
+  ManagedEngine,
+  hostEngines,
+} from '../engines/index.js'
+import type { EngineHandle } from '../engines/index.js'
+import { DEFAULT_ENVIRONMENT_ID } from '../runtime/environment/index.js'
 import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
+import {
+  EngineBuildsService,
+  EngineManifestSource,
+  IDLE_ENGINE_HOST,
+  manifestKinds,
+} from '../engine-builds/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
-import { Downloader, availableDiskSpace, policyFetchFor } from '../downloads/index.js'
+import { Downloader, availableDiskSpace, defaultAvailableSpace, policyFetchFor } from '../downloads/index.js'
 import type { ProxyConfig } from '../downloads/index.js'
 import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-access/index.js'
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
@@ -190,6 +210,7 @@ export async function createAtomicCore(
     // One downloader per core process: it owns the active-task table that `cancel` works from, so
     // two of them would each know only half of what is running.
     const downloader = new Downloader({
+      ...(options.downloadStreams !== undefined ? { streams: options.downloadStreams } : {}),
       dataFolder: layout.root,
       platform: process.platform,
       fetch: options.fetch ?? fetch,
@@ -287,6 +308,8 @@ export async function createAtomicCore(
           registry: mlxRegistry,
           instanceId: lock.instanceId,
           resourcesDir: options.resourcesDir,
+          // The newest of the installer's `mlx-server` and the ones the core downloaded, per load.
+          resolveBinary: () => engineBuilds.resolveMlxBinary(),
           readSettings: async () => settings.get('mlx'),
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
@@ -352,6 +375,9 @@ export async function createAtomicCore(
     // One compatibility service for the control routes and every llama.cpp load gate; the gate
     // reads only what is cached, so a load never waits on the network for it.
     const prismCompatibility = wirePrismCompatibility({
+      ...(options.remoteGgufTimeoutMs !== undefined
+        ? { remoteGgufTimeoutMs: options.remoteGgufTimeoutMs }
+        : {}),
       layout,
       settings,
       hardware,
@@ -401,6 +427,25 @@ export async function createAtomicCore(
         downloader,
         optimalStore,
         prismCatalog,
+        resourcesDir: options.resourcesDir,
+        // An install or removal by any route; an update and an activation report themselves.
+        onChanged: (reason) =>
+          emitter.emit('engine:changed', { engine: provider as LlamacppProviderId, reason }),
+        // Read when a removal or update acts: the runtime's load queue and what its sessions, the
+        // decision model and the embedding model run from (change `unify-engine-lifecycle`, 2.4).
+        host: {
+          exclusive: (fn) => {
+            const runtime = runtimes.get(provider)
+            return runtime instanceof LlamacppRuntime ? runtime.exclusive(fn) : fn()
+          },
+          inUse: async () => {
+            const runtime = runtimes.get(provider)
+            return [
+              ...(runtime instanceof LlamacppRuntime ? runtime.buildDirsInUse() : []),
+              ...processPackDirs([decision.getStatus(), embedding.getStatus()]),
+            ]
+          },
+        },
         readManifest: async (proxy) => {
           const cached = manifestCache.get()
           if (cached) return cached
@@ -464,6 +509,33 @@ export async function createAtomicCore(
       claimGpu: gpuResidency.hook(DIFFUSION_GPU_PROVIDER),
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
+
+    // sd.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads conf's
+    // manifests, installs, activates and removes them; image generation and the MLX runtime lend it
+    // their load locks and their sessions.
+    const engineManifestKinds = manifestKinds(layout)
+    const mlxRuntime = runtimes.get('mlx')
+    const engineBuilds = new EngineBuildsService({
+      dataFolder: layout.root,
+      roots: { 'sd-cpp': layout.diffusion.backendsDir, 'mlx': layout.provider('mlx').backendsDir },
+      failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+      resourcesDir: options.resourcesDir,
+      platform,
+      downloader,
+      manifests: {
+        'sd-cpp': new EngineManifestSource(engineManifestKinds['sd-cpp'], { env, fetchFor, log }),
+        'mlx': new EngineManifestSource(engineManifestKinds.mlx, { env, fetchFor, log }),
+      },
+      hardware: () => hardware.facts(),
+      hosts: {
+        'sd-cpp': diffusion.engineHost(),
+        // Off macOS there is no MLX runtime: nothing runs, so nothing to hold off or unload.
+        'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
+      },
+      availableSpace: defaultAvailableSpace,
+      emit: (name, payload) => emitter.emit(name, payload),
+      log,
     })
 
     // The managed container environment and the one Docker executor of this core (task 2.6). The
@@ -622,6 +694,61 @@ export async function createAtomicCore(
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
+    // The `/engines` layer (change `unify-engine-lifecycle`): one handle per engine of this host, over
+    // the system that installs it. Every part is read when a command arrives.
+    const engineHandles: EngineHandle[] = []
+    for (const engine of hostEngines(platform, [...managedRuntimes.keys()])) {
+      const kind = ENGINE_KINDS[engine]
+      if (kind === 'llamacpp') {
+        const provider = engine as LlamacppProviderId
+        engineHandles.push(
+          new LlamacppEngine({
+            engine: provider,
+            backends: backendService(provider),
+            advisor: backendAdvisor(provider),
+            currentVersionBackend: () => String(settings.get(provider)['version_backend'] ?? ''),
+            selectVersionBackend: async (versionBackend) => {
+              await settings.update(provider, { version_backend: versionBackend })
+            },
+            // The facade's unload, as a client's would go: it also lets go of the model's claims.
+            unloadSessions: async () => {
+              for (const modelId of runtimes.get(provider)?.getLoadedModels() ?? []) {
+                const result = await (core as AtomicCore).unload(provider, modelId)
+                if (!result.success)
+                  throw new AtomicCoreError(
+                    'LLAMA_CPP_PROCESS_ERROR',
+                    result.error ?? `The unload of ${modelId} failed.`
+                  )
+              }
+            },
+            emit: (name, payload) => emitter.emit(name, payload),
+            onInstalled: (installed) => {
+              noticeEngineInstall(decision, provider, installed)
+              noticeEmbeddingEngineInstall(embedding, provider, installed)
+            },
+            log: (level, message) => log(level, message),
+          })
+        )
+      } else if (kind === 'engine-build') {
+        engineHandles.push(new EngineBuildEngine({ engine: engine as EngineBuildId, builds: engineBuilds }))
+      } else {
+        const runtime = managedRuntimes.get(engine)
+        if (runtime !== undefined)
+          engineHandles.push(
+            new ManagedEngine({
+              engine,
+              environmentId: DEFAULT_ENVIRONMENT_ID,
+              platform: managedArch === 'arm64' ? 'linux/arm64' : 'linux/amd64',
+              installations: () => managed.installations.list(),
+              newSetup: (engineId) => managed.descriptors.forNewSetup(engineId),
+              residentModels: () => runtime.residentModels(),
+              environment: managed.service,
+            })
+          )
+      }
+    }
+    const engines = new EnginesService({ engines: engineHandles })
+
     const control = await ControlServer.start(
       {
         token,
@@ -711,9 +838,7 @@ export async function createAtomicCore(
             return result
           },
           remove: (provider, version, backend) =>
-            backendService(provider as LocalProviderId).remove(
-              version,
-              backend,
+            backendService(provider as LocalProviderId).remove(version, backend, () =>
               String(settings.get(provider as LocalProviderId)['version_backend'] ?? '')
             ),
           cancel: (taskId) => downloader.cancel(taskId),
@@ -734,6 +859,8 @@ export async function createAtomicCore(
           stop: () => (core as AtomicCore).stopRemoteAccess(),
         },
         diffusion,
+        engineBuilds,
+        engines,
         decision: {
           status: () => decision.getStatus(),
           config: () => decision.getConfig(),
@@ -789,6 +916,7 @@ export async function createAtomicCore(
           logout: () => chatgpt.logout(),
           models: () => listSubscriptionModels(chatgptBackend),
         },
+        downloads: () => downloader.snapshot(),
         publicServer: {
           setInspecting: (enabled) => {
             ;(core as AtomicCore).inspecting = enabled
@@ -821,6 +949,7 @@ export async function createAtomicCore(
       appLeaseTimer.unref()
     }
     core = construct({
+      ...(options.publicApiKeys !== undefined ? { publicApiKeys: options.publicApiKeys } : {}),
       layout,
       events: emitter,
       settings,
@@ -868,6 +997,9 @@ export async function createAtomicCore(
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
+    // Before the first load (design D5): downloaded engine builds no newer than the installer's, the
+    // ones a session kept on the last install, the leftovers of an interrupted install.
+    await engineBuilds.startupCleanup()
     // A model setup a stopped core left mid-way becomes `interrupted`, resumable from its files.
     await modelSetups.recover().catch((e: unknown) => warn(`model setup recovery: ${String(e)}`))
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.

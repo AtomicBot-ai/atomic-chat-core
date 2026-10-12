@@ -36,7 +36,12 @@ export interface ModelCompatibilityServiceDeps {
   hfToken?: () => string | undefined
   /** Replaced in tests. */
   inspectLocal?: (path: string) => Promise<GgufEvidence>
-  inspectRemote?: (url: string, options: { fetch: typeof fetch; token?: string }) => Promise<GgufEvidence>
+  inspectRemote?: (
+    url: string,
+    options: { fetch: typeof fetch; token?: string; timeoutMs?: number }
+  ) => Promise<GgufEvidence>
+  /** How long a remote header read may take in all (`AtomicCoreOptions.remoteGgufTimeoutMs`); none when unset. */
+  remoteTimeoutMs?: number
   log?: (level: 'info' | 'warn', message: string) => void
 }
 
@@ -172,6 +177,7 @@ export class ModelCompatibilityService {
           {
             fetch: this.deps.fetch,
             ...(token ? { token } : {}),
+            ...(this.deps.remoteTimeoutMs !== undefined ? { timeoutMs: this.deps.remoteTimeoutMs } : {}),
           }
         )
       }

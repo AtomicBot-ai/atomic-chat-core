@@ -59,6 +59,34 @@ describe('backend routes', () => {
     expect(await res.json()).toEqual({ removed: true })
   })
 
+  it("answers the removal refusals with their codes: in use 409, the installer's pack 400", async () => {
+    const { AtomicCoreError } = await import('../../../contracts/index.js')
+    const refusals = [
+      new AtomicCoreError('BACKEND_IN_USE', 'Unload the model running from this build before removing it.'),
+      new AtomicCoreError(
+        'INVALID_REQUEST',
+        'The build that ships with the app cannot be removed.',
+        'bundled'
+      ),
+      new AtomicCoreError('ENGINE_INSTALL_IN_PROGRESS', 'The llamacpp-upstream engine is being updated.'),
+    ]
+    h.backends.remove = async () => {
+      throw refusals.shift()
+    }
+    const remove = () =>
+      h.get('/atomic/v1/backends/llamacpp-upstream/b6100/win-cpu-x64', { method: 'DELETE' })
+
+    const inUse = await remove()
+    expect(inUse.status).toBe(409)
+    expect(await inUse.json()).toMatchObject({ error: { code: 'BACKEND_IN_USE' } })
+    const bundled = await remove()
+    expect(bundled.status).toBe(400)
+    expect(await bundled.json()).toMatchObject({ error: { code: 'INVALID_REQUEST', details: 'bundled' } })
+    const busy = await remove()
+    expect(busy.status).toBe(409)
+    expect(await busy.json()).toMatchObject({ error: { code: 'ENGINE_INSTALL_IN_PROGRESS' } })
+  })
+
   it('passes proxy policy to install without changing its response', async () => {
     let seen: unknown
     h.backends.install = async (_provider, version, backend, options) => {

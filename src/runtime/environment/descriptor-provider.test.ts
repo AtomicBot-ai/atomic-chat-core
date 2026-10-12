@@ -88,7 +88,7 @@ describe('forNewSetup', () => {
     const fetch = okFetch(RAW_A)
     const result = await provider({ fetch, fs }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A, source: 'remote' })
     expect(fetch).toHaveBeenCalledWith(DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL, expect.any(Number))
     expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')) ?? 'null')).toEqual(
       JSON.parse(RAW_A)
@@ -103,7 +103,7 @@ describe('forNewSetup', () => {
     await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
     const result = await provider({ fetch: failingFetch(), fs }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A, source: 'cache' })
   })
 
   it('no network and no cache: unsupported with MANAGED_METADATA_INVALID', async () => {
@@ -122,7 +122,7 @@ describe('forNewSetup', () => {
     await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
     const result = await provider({ fetch: notOkFetch(503), fs }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
   })
 
   it('an invalid fetched document falls back to the previous cache without error', async () => {
@@ -131,7 +131,7 @@ describe('forNewSetup', () => {
     const brokenJson = okFetch('{ not json')
     const result = await provider({ fetch: brokenJson, fs }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
   })
 
   it('a fetched document that fails schema validation falls back to the previous cache', async () => {
@@ -140,7 +140,7 @@ describe('forNewSetup', () => {
     const wrongShape = okFetch(JSON.stringify({ not: 'a descriptor' }))
     const result = await provider({ fetch: wrongShape, fs }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
   })
 
   it('too-new core requirement: keeps using the previous accepted descriptor', async () => {
@@ -148,7 +148,7 @@ describe('forNewSetup', () => {
     await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
     const result = await provider({ fetch: okFetch(RAW_TOO_NEW), fs }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
     // The too-new document must not have been accepted into the cache.
     expect(fs.files.has(PATHS.descriptorFile('tensorrt-llm-1.4.0-r1'))).toBe(false)
   })
@@ -179,7 +179,7 @@ describe('forNewSetup', () => {
       fs,
     }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(readFile).toHaveBeenCalledTimes(1)
     expect(unreachableFetch).not.toHaveBeenCalled()
     expect(fs.files.has(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2'))).toBe(true)
@@ -235,7 +235,7 @@ describe('forNewSetup', () => {
       onWarn,
     }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(onWarn).toHaveBeenCalledTimes(1)
     expect(onWarn.mock.calls[0]?.[0]).toContain('tensorrt-llm-1.2.1-r2')
   })
@@ -247,8 +247,8 @@ describe('forNewSetup', () => {
       provider({ fetch: okFetch(RAW_B), fs }).forNewSetup('tensorrt-llm'),
     ])
 
-    expect(resultA).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
-    expect(resultB).toEqual({ kind: 'available', descriptor: DESCRIPTOR_B })
+    expect(resultA).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(resultB).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_B })
     // Both landed on disk, uncorrupted, and no stray .tmp file was left behind by either.
     expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')) ?? 'null')).toEqual(
       JSON.parse(RAW_A)
@@ -272,7 +272,7 @@ describe('cachedForNewSetup', () => {
     await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
     const result = await provider({ fs }).cachedForNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(unreachableFetch).not.toHaveBeenCalled()
   })
 
@@ -302,7 +302,7 @@ describe('readSource scheme restriction (via forNewSetup)', () => {
       onWarn,
     }).forNewSetup('tensorrt-llm')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(unreachableFetch).not.toHaveBeenCalled()
     // The override itself, then why it gave nothing and what stands in.
     expect(onWarn).toHaveBeenCalledTimes(2)
@@ -336,7 +336,7 @@ describe('forInstallation', () => {
     await seedAccepted(fs, RAW_A, DESCRIPTOR_A)
     const result = await provider({ fs }).forInstallation('tensorrt-llm-1.2.1-r2')
 
-    expect(result).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(result).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(unreachableFetch).not.toHaveBeenCalled()
   })
 
@@ -347,7 +347,7 @@ describe('forInstallation', () => {
     // conf now serves B; a fresh setup accepts and caches it, moving "latest" forward.
     const freshFetch = okFetch(RAW_B)
     const fresh = await provider({ fetch: freshFetch, fs }).forNewSetup('tensorrt-llm')
-    expect(fresh).toEqual({ kind: 'available', descriptor: DESCRIPTOR_B })
+    expect(fresh).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_B })
 
     // The installation still on A resolves purely from cache: no network call for it, ever.
     const aFetch: DescriptorFetch = vi.fn(async () => {
@@ -355,7 +355,7 @@ describe('forInstallation', () => {
     })
     const pinned = await provider({ fetch: aFetch, fs }).forInstallation('tensorrt-llm-1.2.1-r2')
 
-    expect(pinned).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(pinned).toMatchObject({ kind: 'available', descriptor: DESCRIPTOR_A })
     expect(aFetch).not.toHaveBeenCalled()
     // A's own cache entry is untouched by B's arrival.
     expect(JSON.parse(fs.files.get(PATHS.descriptorFile('tensorrt-llm-1.2.1-r2')) ?? 'null')).toEqual(
@@ -420,11 +420,11 @@ describe('a descriptor per engine', () => {
     const fetch = routedFetch({ [DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL]: RAW_A, [SECOND.url]: RAW_SECOND })
     const descriptors = provider({ fetch, fs, engines: ENGINES })
 
-    expect(await descriptors.forNewSetup('vllm')).toEqual({
+    expect(await descriptors.forNewSetup('vllm')).toMatchObject({
       kind: 'available',
       descriptor: DESCRIPTOR_SECOND,
     })
-    expect(await descriptors.forNewSetup('tensorrt-llm')).toEqual({
+    expect(await descriptors.forNewSetup('tensorrt-llm')).toMatchObject({
       kind: 'available',
       descriptor: DESCRIPTOR_A,
     })
@@ -445,7 +445,10 @@ describe('a descriptor per engine', () => {
     )
 
     const offline = provider({ fetch: failingFetch(), fs, engines: ENGINES })
-    expect(await offline.forNewSetup('tensorrt-llm')).toEqual({ kind: 'available', descriptor: DESCRIPTOR_A })
+    expect(await offline.forNewSetup('tensorrt-llm')).toMatchObject({
+      kind: 'available',
+      descriptor: DESCRIPTOR_A,
+    })
     expect(await offline.cachedForNewSetup('tensorrt-llm')).toEqual({
       kind: 'available',
       descriptor: DESCRIPTOR_A,
@@ -464,13 +467,13 @@ describe('a descriptor per engine', () => {
     const missing = await descriptors.forNewSetup('vllm')
     expect(missing.kind).toBe('unsupported')
     if (missing.kind === 'unsupported') expect(missing.error.code).toBe('MANAGED_METADATA_INVALID')
-    expect(await descriptors.forNewSetup('tensorrt-llm')).toEqual({
+    expect(await descriptors.forNewSetup('tensorrt-llm')).toMatchObject({
       kind: 'available',
       descriptor: DESCRIPTOR_A,
     })
 
     bodies[SECOND.url] = RAW_SECOND
-    expect(await descriptors.forNewSetup('vllm')).toEqual({
+    expect(await descriptors.forNewSetup('vllm')).toMatchObject({
       kind: 'available',
       descriptor: DESCRIPTOR_SECOND,
     })
@@ -492,7 +495,7 @@ describe('a descriptor per engine', () => {
       onWarn: (message) => warnings.push(message),
     })
 
-    expect(await descriptors.forNewSetup('tensorrt-llm')).toEqual({
+    expect(await descriptors.forNewSetup('tensorrt-llm')).toMatchObject({
       kind: 'available',
       descriptor: DESCRIPTOR_A,
     })
@@ -550,11 +553,11 @@ describe('a descriptor per engine', () => {
     })
 
     expect(runtimeDescriptorUrlEnv('vllm')).toBe('ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM')
-    expect(await descriptors.forNewSetup('vllm')).toEqual({
+    expect(await descriptors.forNewSetup('vllm')).toMatchObject({
       kind: 'available',
       descriptor: DESCRIPTOR_SECOND,
     })
-    expect(await descriptors.forNewSetup('tensorrt-llm')).toEqual({
+    expect(await descriptors.forNewSetup('tensorrt-llm')).toMatchObject({
       kind: 'available',
       descriptor: DESCRIPTOR_A,
     })

@@ -1,3 +1,5 @@
+import { createServer as createNetServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +8,7 @@ import { fakeEmbeddingSpawn } from '../../test/helpers/fake-llama-server.js'
 import type { FakeLlamaOptions } from '../../test/helpers/fake-llama-server.js'
 import { createDecisionHttp } from '../decision/index.js'
 import type { AtomicCoreError } from '../contracts/index.js'
-import { isProcessAlive } from '../runtime/shared/index.js'
+import { isProcessAlive, randomFreePort } from '../runtime/shared/index.js'
 import type { SpawnSpec } from '../runtime/shared/index.js'
 import { embeddingEarlyExitError, spawnEmbeddingServer } from './process.js'
 import type { EmbeddingProcessHandle, EmbeddingServerSpec, SpawnEmbeddingDeps } from './process.js'
@@ -64,6 +66,34 @@ function start(
 }
 
 describe('spawnEmbeddingServer', () => {
+  it('starts again on another port when the one it picked was taken before the engine could bind it', async () => {
+    // Another program on the port: it takes connections and drops them, it speaks no HTTP.
+    const holder = createNetServer((socket) => socket.destroy())
+    await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve))
+    const taken = (holder.address() as AddressInfo).port
+    const free = await randomFreePort([taken])
+    const ports = [taken, free]
+    const warnings: string[] = []
+    try {
+      const { run, events } = start(
+        {},
+        {},
+        {
+          freePort: async () => ports.shift() as number,
+          log: (level: string, message: string) => {
+            if (level === 'warn') warnings.push(message)
+          },
+        }
+      )
+      const handle = await run
+      expect(handle.port).toBe(free)
+      expect(events).toEqual(['spawned true true', 'gone', 'spawned true true'])
+      expect(warnings.some((w) => w.includes('port was taken while it started; retrying (1)'))).toBe(true)
+    } finally {
+      await new Promise<void>((resolve) => holder.close(() => resolve()))
+    }
+  })
+
   it('starts the engine and reads the vector length and the text-only modality', async () => {
     const { run, events, lines } = start()
     const handle = await run

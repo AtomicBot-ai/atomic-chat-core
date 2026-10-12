@@ -19,6 +19,8 @@ import { isConcreteVersionBackend, parseVersionBackend } from '../runtime/llamac
 import type { SettingsStore } from '../settings/index.js'
 
 export interface PrismWiringDeps {
+  /** `AtomicCoreOptions.remoteGgufTimeoutMs`. */
+  remoteGgufTimeoutMs?: number
   layout: DataLayout
   settings: Pick<SettingsStore, 'get'>
   hardware: HardwareFactsSource
@@ -76,6 +78,7 @@ export function wirePrismCompatibility(deps: PrismWiringDeps): ModelCompatibilit
     installedPrism: (options) => installedPrism(deps, options),
     fetch: deps.fetch,
     hfToken: () => hfToken(deps.env ?? process.env),
+    ...(deps.remoteGgufTimeoutMs !== undefined ? { remoteTimeoutMs: deps.remoteGgufTimeoutMs } : {}),
     ...(deps.log ? { log: deps.log } : {}),
   })
 }

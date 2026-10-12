@@ -190,8 +190,13 @@ export function preflight(req: IncomingMessage, config: PublicServerConfig): Ear
 
 /** What {@link hostAndKeyGate} needs: a shape `PublicServerConfig` also satisfies. */
 export interface HostAndKeyConfig {
-  /** Key clients must present; empty disables the check. */
+  /** Key clients must present; empty disables the check. Ignored when `apiKeys` is set. */
   apiKey: string
+  /**
+   * The host's keyring (`AtomicCoreOptions.publicApiKeys`): when set, a client must present one of
+   * these and `apiKey` is ignored. An empty list refuses every client; an empty entry matches nothing.
+   */
+  apiKeys?: readonly string[]
   /** Hosts allowed besides the built-in loopback names; `*` allows every host. */
   trustedHosts: readonly string[]
 }
@@ -207,12 +212,16 @@ export function hostAndKeyGate(req: IncomingMessage, config: HostAndKeyConfig): 
   if (!isValidHost(host, config.trustedHosts))
     return { status: 403, headers: [], body: hostMessage(host), kind: 'host' }
 
-  if (config.apiKey !== '') {
+  const keys = config.apiKeys ?? (config.apiKey !== '' ? [config.apiKey] : undefined)
+  if (keys !== undefined) {
     // `Bearer ` is matched exactly, case included, as the proxy does.
     const auth = header(req, 'authorization')
-    const bearerOk =
-      auth.startsWith('Bearer ') && timingSafeEqualString(auth.slice('Bearer '.length), config.apiKey)
-    const keyOk = timingSafeEqualString(header(req, 'x-api-key'), config.apiKey)
+    const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined
+    const xApiKey = header(req, 'x-api-key')
+    const matches = (presented: string) =>
+      keys.some((key) => key !== '' && timingSafeEqualString(presented, key))
+    const bearerOk = bearer !== undefined && matches(bearer)
+    const keyOk = matches(xApiKey)
     if (!bearerOk && !keyOk) {
       return { status: 401, headers: [], body: 'Invalid or missing authorization token', kind: 'auth' }
     }

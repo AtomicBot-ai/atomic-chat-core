@@ -93,7 +93,7 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('the videos fa
     const imageFile = await sd.writeSdFile(ctx)
     const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
     await sd.configure(ctx, ready)
-    await sd.finalizeEngine(ctx, ready, dir)
+    await sd.ownEngine(dir)
     const port = await startServer(ready)
 
     const noPrompt = await create(port, { seconds: 4 })

@@ -4,6 +4,7 @@
  * preflight, backend-mismatch classification, env parsing, readiness timeout, load-error shaping.
  */
 
+import { basename, dirname } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ErrorCode, RuntimeDeviceInfo } from '../../contracts/index.js'
 
@@ -222,4 +223,29 @@ export function isRecoverableLoadError(err: unknown): boolean {
 /** The extension's `codedLoadError`, as an `AtomicCoreError`. */
 export function codedLoadError(code: ErrorCode, message: string, details?: string): AtomicCoreError {
   return new AtomicCoreError(code, message, details)
+}
+
+/**
+ * The pack directory an executable belongs to: `<pack>/build/bin/<exe>` three levels up, the legacy
+ * flat `<pack>/<exe>` one level up. What "this build is in use" is compared on.
+ */
+export function packDirOfExe(exePath: string): string {
+  const bin = dirname(exePath)
+  const build = dirname(bin)
+  return basename(bin) === 'bin' && basename(build) === 'build' ? dirname(build) : bin
+}
+
+/**
+ * The packs the decision and embedding processes run from: those running, starting or restarting
+ * (a restart reuses its build). They are outside the sessions table, and a pack they run from is as
+ * busy as one a session runs from.
+ */
+export function processPackDirs(
+  statuses: ReadonlyArray<{ state: string; engine: { path: string } | null }>
+): string[] {
+  return statuses
+    .filter(
+      (status) => status.state === 'ready' || status.state === 'starting' || status.state === 'restarting'
+    )
+    .flatMap((status) => (status.engine ? [packDirOfExe(status.engine.path)] : []))
 }

@@ -3,9 +3,10 @@
  * under `<data>/diffusion/models/`. Port of `install.rs` in `tauri-plugin-atomic-diffusion` (app
  * commit `767ff6350`).
  *
- * The download and the extraction happen in the app, through its ordinary download pipeline. This
- * module finalises a tree (permissions, sanity probe, ownership marker, install record) and refuses
- * to delete anything it did not mark as its own.
+ * The download, the extraction and the removal of a build are the engine-builds module's
+ * (`src/engine-builds/`, change `move-sdcpp-mlx-install-to-core`). This module keeps what both
+ * share with image generation: the install record and its marker, the probe that a tree is
+ * stable-diffusion.cpp, the listing a load picks its build from, and the model-file store.
  */
 
 import { chmod, mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises'
@@ -16,11 +17,10 @@ import type {
   DiffusionBackendInstallRecord,
   DiffusionEngineId,
   DiffusionModelFile,
-  FinalizeBackendInstallArgs,
 } from '../contracts/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import { buildProcessEnv, spawnManaged } from '../runtime/shared/index.js'
-import { locate, samePath } from './containment.js'
+import { locate } from './containment.js'
 import { diffusionError, ioError } from './errors.js'
 
 export const OWNER_MARKER = '.atomic-owned'
@@ -196,14 +196,6 @@ export function probeVerdict(
   return diffusionError('ENGINE_INSTALL_FAILED', 'The downloaded binary is not stable-diffusion.cpp.', output)
 }
 
-function couldNotStart(binary: string, error: Error) {
-  return diffusionError(
-    'ENGINE_INSTALL_FAILED',
-    'The image engine could not be started.',
-    `${binary}: ${error.message}`
-  )
-}
-
 /**
  * Run `<binary> --help` and check that the output is stable-diffusion.cpp's. A spawn failure is
  * retried (a scanner may still be holding the file); a binary that never answers is killed.
@@ -230,6 +222,36 @@ async function probeOnce(
   timeoutMs: number,
   deps: InstallDeps
 ): Promise<void> {
+  const { exit, text } = await runHelpProbe(binary, {
+    platform,
+    timeoutMs,
+    deps,
+    noResponse: 'The image engine did not respond to --help.',
+    couldNotStart: 'The image engine could not be started.',
+  })
+  const verdict = probeVerdict(binary, text, exit, platform)
+  if (verdict) throw verdict
+}
+
+export interface HelpProbeOptions {
+  platform: NodeJS.Platform
+  timeoutMs: number
+  deps: Pick<InstallDeps, 'env' | 'spawnRetryDelayMs' | 'log'>
+  /** The `ENGINE_INSTALL_FAILED` message for a binary that never answers, and for one that never starts. */
+  noResponse: string
+  couldNotStart: string
+}
+
+/**
+ * Run `<binary> --help` from its own folder and answer how it exited and what it printed. A spawn
+ * failure is retried (a scanner may still be holding the freshly written file); a binary that never
+ * answers is killed. Shared by every engine probe (sd.cpp here, `mlx-server` in `engine-builds/`).
+ */
+export async function runHelpProbe(
+  binary: string,
+  options: HelpProbeOptions
+): Promise<{ exit: ExitInfo; text: string }> {
+  const { platform, timeoutMs, deps } = options
   const { env, cwd } = buildProcessEnv({
     platform,
     baseEnv: deps.env ?? process.env,
@@ -249,13 +271,14 @@ async function probeOnce(
       await proc.terminate(0)
       throw diffusionError(
         'ENGINE_INSTALL_FAILED',
-        'The image engine did not respond to --help.',
+        options.noResponse,
         `${binary} timed out after ${Math.round(timeoutMs / 1000)}s`
       )
     }
     const failure = proc.spawnFailure()
     if (failure) {
-      if (attempt >= PROBE_SPAWN_ATTEMPTS) throw couldNotStart(binary, failure)
+      if (attempt >= PROBE_SPAWN_ATTEMPTS)
+        throw diffusionError('ENGINE_INSTALL_FAILED', options.couldNotStart, `${binary}: ${failure.message}`)
       deps.log?.(
         'warn',
         `engine probe did not start (attempt ${attempt}/${PROBE_SPAWN_ATTEMPTS}): ${failure.message}`
@@ -266,28 +289,17 @@ async function probeOnce(
     // Give the pipes a tick to flush their last lines.
     await sleep(10)
     const { stdout, stderr } = proc.output()
-    const verdict = probeVerdict(binary, stdout + stderr, outcome, platform)
-    if (verdict) throw verdict
-    return
+    return { exit: outcome, text: stdout + stderr }
   }
 }
 
-/** Finalise a tree the app extracted: permissions, probe, then marker and record. */
-export async function finalizeBackendInstall(
-  backendsRoot: string,
-  args: FinalizeBackendInstallArgs,
-  deps: InstallDeps = {}
-): Promise<DiffusionBackendInstallRecord> {
+/**
+ * An unpacked tree made runnable and checked: `sd-server` present, the executables marked as such,
+ * and `sd-cli` (else `sd-server`) answering `--help` as stable-diffusion.cpp. Throws
+ * `ENGINE_INSTALL_FAILED` otherwise.
+ */
+export async function prepareSdcppTree(dir: string, deps: InstallDeps = {}): Promise<void> {
   const platform = deps.platform ?? process.platform
-  const { dir } = args
-  if (!(await isDirectory(dir)))
-    throw diffusionError('ENGINE_INSTALL_FAILED', 'The engine directory does not exist.', dir)
-  if ((await locate(dir, backendsRoot, platform)) === 'outside')
-    throw diffusionError(
-      'INVALID_REQUEST',
-      'The engine directory is outside the diffusion backends folder.',
-      dir
-    )
   const server = join(dir, serverBinaryName(platform))
   if (!(await isFile(server)))
     throw diffusionError('ENGINE_INSTALL_FAILED', 'The archive did not contain sd-server.', server)
@@ -298,18 +310,6 @@ export async function finalizeBackendInstall(
   await setExecutable(join(dir, platform === 'win32' ? 'sd.exe' : 'sd'), deps)
 
   await probeBinary((await isFile(cli)) ? cli : server, deps)
-
-  const record: DiffusionBackendInstallRecord = {
-    tag: args.tag,
-    backendId: args.backendId,
-    backend: args.backend,
-    engine: args.engine,
-    sha256: args.sha256 ?? null,
-    installedAtMs: (deps.now ?? Date.now)(),
-    dir,
-  }
-  await writeInstallRecord(dir, record)
-  return record
 }
 
 /** Every `<root>/<tag>/<backendId>/install.json` with its marker and its server binary, newest first. */
@@ -336,33 +336,6 @@ const isEmptyDir = (dir: string): Promise<boolean> =>
     (names) => names.length === 0,
     () => false
   )
-
-/**
- * Delete an installed tree. Refuses trees without the ownership marker and anything outside the
- * backends root; whether the tree is in use is the caller's question.
- */
-export async function removeBackend(
-  backendsRoot: string,
-  dir: string,
-  platform: NodeJS.Platform = process.platform
-): Promise<void> {
-  if ((await locate(dir, backendsRoot, platform)) !== 'inside')
-    throw diffusionError('INVALID_REQUEST', 'That directory is not a diffusion backend install.', dir)
-  if (!(await isDirectory(dir))) return
-  if (!(await isOwned(dir)))
-    throw diffusionError(
-      'INVALID_REQUEST',
-      'Refusing to delete a directory Atomic Chat did not install.',
-      `${dir} has no ${OWNER_MARKER} marker`
-    )
-  await rm(dir, { recursive: true, force: true }).catch((error: unknown) => {
-    throw ioError('Could not remove the engine directory.', error)
-  })
-  // Drop the now-empty `<tag>` parent so the listing stays tidy.
-  const parent = dirname(dir)
-  if (!(await samePath(parent, backendsRoot, platform)) && (await isEmptyDir(parent)))
-    await rmdir(parent).catch(() => {})
-}
 
 /**
  * Regular files under the models root, recursively, with `/`-separated relative paths. Hidden files

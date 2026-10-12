@@ -91,7 +91,7 @@ import {
   resolveReadinessTimeoutMs,
   stripDockerTimestamps,
 } from './load-policy.js'
-import { probeReadiness } from './readiness.js'
+import { probeGeneration, probeReadiness } from './readiness.js'
 import type { BackendTarget, ManagedDeployment, PreparedLaunch } from './types.js'
 
 /** The heartbeat file's name inside its generation's directory (and inside the container). */
@@ -128,6 +128,8 @@ export interface ManagedLifecycleTimings {
   guestProbeEveryPolls: number
   /** WSL: how many times a load publishes the port again when another program holds it on Windows. */
   republishAttempts: number
+  /** The adapter's one-token test request after readiness (`ManagedGenerationProbe`), both of its calls. */
+  generationProbeTimeoutMs: number
 }
 
 export const DEFAULT_MANAGED_LIFECYCLE_TIMINGS: ManagedLifecycleTimings = {
@@ -141,6 +143,7 @@ export const DEFAULT_MANAGED_LIFECYCLE_TIMINGS: ManagedLifecycleTimings = {
   forwardingConfirmPolls: 3,
   guestProbeEveryPolls: 5,
   republishAttempts: 1,
+  generationProbeTimeoutMs: 120_000,
 }
 
 export type ManagedLifecycleLogger = (level: 'info' | 'warn' | 'error', message: string) => void
@@ -745,6 +748,8 @@ export class ManagedTextLifecycle {
 
       const refusal = await this.readyRefusal(entry, settings)
       if (refusal !== null) throw refusal
+      const unserved = await this.generationRefusal(entry, prepared.target)
+      if (unserved !== null) throw unserved
 
       const apiKey = generateGatewayKey()
       const adapter = entry.adapter
@@ -1046,6 +1051,48 @@ export class ManagedTextLifecycle {
     )
   }
 
+  /**
+   * The adapter's test request (`ManagedGenerationProbe`) on an engine that just got ready, as the
+   * load's error when the engine answered it with one; null when it generated, or when it did not
+   * answer at all — slow or unreachable is not proof it cannot serve, and a real request will say.
+   */
+  private async generationRefusal(entry: Entry, target: BackendTarget): Promise<ManagedLoadError | null> {
+    const { adapter } = entry
+    if (adapter.generationProbe === undefined || entry.containerId === undefined) return null
+    const outcome = await probeGeneration(
+      this.fetchFn,
+      target,
+      adapter.generationProbe,
+      this.timings.generationProbeTimeoutMs
+    )
+    if (outcome.kind === 'ok') return null
+    if (outcome.kind === 'unanswered') {
+      this.log(
+        'warn',
+        `managed-text: ${entry.modelId}'s test request got no answer (${outcome.reason}); starting it anyway`
+      )
+      return null
+    }
+    const tail = await this.tail(entry.containerId).catch(() => '')
+    const classified = adapter.classifyExit(tail, null)
+    // `other` is worded for an exit; this engine is running, it just cannot generate.
+    const classification =
+      classified.kind === 'other'
+        ? {
+            ...classified,
+            message:
+              adapter.describeStreamFailure?.(tail) ??
+              `The engine started but failed its first test request (HTTP ${outcome.status}).`,
+          }
+        : classified
+    return new ManagedLoadError(
+      exitErrorCode(classification.kind),
+      classification.message,
+      exitFailureDetails(`HTTP ${outcome.status}: ${outcome.body}\n${tail}`, classification.excerpt),
+      classification
+    )
+  }
+
   private async tail(containerId: string): Promise<string> {
     return stripDockerTimestamps(await containerLogs(this.deps.exec, containerId, this.timings.logTailLines))
   }
@@ -1065,6 +1112,14 @@ export class ManagedTextLifecycle {
       failure instanceof AtomicCoreError
         ? { code: failure.code, message: failure.message }
         : { code: 'MODEL_LOAD_FAILED' as ErrorCode, message: String(failure) }
+    // The engine's own log is the container's and goes with it; core's log keeps why the load failed
+    // and the lines that said so, for after the next load or a restart has dropped the last attempt.
+    const excerpt = failure instanceof ManagedLoadError ? failure.classification?.excerpt : undefined
+    this.log(
+      error.code === 'MODEL_LOAD_CANCELLED' ? 'info' : 'warn',
+      `managed-text: loading ${entry.modelId} failed: [${error.code}] ${error.message}` +
+        (excerpt === undefined || excerpt.trim() === '' ? '' : `\n${excerpt}`)
+    )
     this.lastAttempts.set(entry.modelId, {
       model_id: entry.modelId,
       generation: entry.generation,

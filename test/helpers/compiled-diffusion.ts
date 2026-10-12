@@ -1,6 +1,6 @@
 /**
  * Driving image generation on the compiled binary: an owned engine tree whose `sd-server` is the
- * fake, model files, the control calls of the app's sequence (config → finalize → load), the job
+ * fake, model files, the control calls of the app's sequence (config → install → load), the job
  * poll, the process journal and a structured reader of the control event stream.
  *
  * Nothing here imports from `src/` (see `compiled-core.ts`): the engine tree is written by hand with
@@ -125,8 +125,8 @@ export interface EngineOptions {
 
 /**
  * An engine tree under `<data>/diffusion/backends/<tag>/<backendId>/` whose `sd-server` and `sd-cli`
- * launch the fake with `env` baked in. Not yet owned: `finalizeEngine` writes the marker and record
- * the way the app's install does. Rewriting the launchers of a finalized tree changes what the next
+ * launch the fake with `env` baked in. Not yet owned: `ownEngine` writes the marker and record
+ * the way the core's install does. Rewriting the launchers of an owned tree changes what the next
  * spawn runs, so one daemon can play several modes.
  */
 export async function writeSdEngine(ctx: SdContext, options: EngineOptions = {}): Promise<string> {
@@ -341,31 +341,34 @@ export async function configure(ctx: SdContext, ready: ReadyLine, extra: Record<
   )
 }
 
-export interface FinalizeOptions {
+export interface OwnOptions {
   tag?: string
   backendId?: string
   backend?: string
 }
 
-/** `POST /diffusion/backends/finalize` on `dir`, the way the app's installer ends an install. */
-export async function finalizeEngine(
-  ctx: SdContext,
-  ready: ReadyLine,
+/**
+ * Mark `dir` as an installed engine build: the `.atomic-owned` marker and the `install.json` the
+ * core's engine-builds install writes (and the app's `finalize` wrote before it). A running core
+ * reads installs at every load, so a tree owned this way is the newest install from then on. An
+ * update that unloads a resident model goes through `/engine-builds/sd-cpp/install` instead
+ * (`test/e2e/engine-builds.test.ts`).
+ */
+export async function ownEngine(
   dir: string,
-  options: FinalizeOptions = {}
+  options: OwnOptions = {}
 ): Promise<{ dir: string; tag: string; backendId: string; backend: string }> {
-  return json(
-    await control(ctx, ready, '/diffusion/backends/finalize', {
-      method: 'POST',
-      body: JSON.stringify({
-        dir,
-        tag: options.tag ?? OLD_TAG,
-        backendId: options.backendId ?? BACKEND_ID,
-        backend: options.backend ?? 'cpu',
-        engine: 'sd-cpp',
-      }),
-    })
-  )
+  const record = {
+    tag: options.tag ?? OLD_TAG,
+    backendId: options.backendId ?? BACKEND_ID,
+    backend: options.backend ?? 'cpu',
+    engine: 'sd-cpp',
+    sha256: null,
+    installedAtMs: Date.now(),
+  }
+  await writeFile(join(dir, '.atomic-owned'), 'atomic-chat\n')
+  await writeFile(join(dir, 'install.json'), JSON.stringify(record, null, 2))
+  return { dir, tag: record.tag, backendId: record.backendId, backend: record.backend }
 }
 
 export interface OwnerOptions extends EngineOptions {
@@ -382,7 +385,7 @@ export interface OwnerOptions extends EngineOptions {
 }
 
 /**
- * Set up an owner with an engine finalized and a model loaded, the app's own sequence over the
+ * Set up an owner with an engine installed and a model loaded, the app's own sequence over the
  * control API; answers the ready line, the engine directory, the pid and the model file.
  */
 export async function loadedOwner(ctx: SdContext, options: OwnerOptions = {}) {
@@ -395,7 +398,7 @@ export async function loadedOwner(ctx: SdContext, options: OwnerOptions = {}) {
   const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons, [], options.daemonEnv ?? {})
   const configured = await configure(ctx, ready, options.config)
   expect(configured).toMatchObject({ configured: true, install: { state: 'not-installed' } })
-  const record = await finalizeEngine(ctx, ready, dir, options)
+  const record = await ownEngine(dir, options)
   expect(record.dir).toBe(dir)
   const files = { diffusionModel: modelFile, ...options.files }
   const request = options.video ? sdVideoLoadRequest(files, options.load) : sdLoadRequest(files, options.load)

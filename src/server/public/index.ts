@@ -135,10 +135,11 @@ function configFor(
   listener: PublicServerConfig,
   deps: PublicServerDeps
 ): PublicServerConfig {
+  // The host's keyring is read for every request: a key it revokes is refused on the next one.
+  const keys = deps.apiKeys?.()
+  const keyed = keys === undefined ? listener : { ...listener, apiKeys: keys }
   const dynamic = deps.dynamicTrustedHosts?.(req.socket.localAddress) ?? []
-  return dynamic.length === 0
-    ? listener
-    : { ...listener, trustedHosts: [...listener.trustedHosts, ...dynamic] }
+  return dynamic.length === 0 ? keyed : { ...keyed, trustedHosts: [...keyed.trustedHosts, ...dynamic] }
 }
 
 export async function handlePublicRequest(
@@ -229,7 +230,8 @@ export async function handlePublicRequest(
 export class PublicServer {
   private constructor(
     private readonly server: Server,
-    private readonly config: PublicServerConfig
+    private readonly config: PublicServerConfig,
+    private readonly keyring?: () => readonly string[] | undefined
   ) {}
 
   static async start(deps: PublicServerDeps, options: PublicServerOptions = {}): Promise<PublicServer> {
@@ -282,7 +284,7 @@ export class PublicServer {
     }
     const address = server.address()
     if (typeof address === 'object' && address) config.port = address.port
-    return new PublicServer(server, config)
+    return new PublicServer(server, config, deps.apiKeys)
   }
 
   get host(): string {
@@ -307,7 +309,7 @@ export class PublicServer {
       host: this.host,
       port: this.port,
       prefix: this.prefix,
-      requires_api_key: this.config.apiKey.length > 0,
+      requires_api_key: this.keyring?.() !== undefined || this.config.apiKey.length > 0,
       pid: process.pid,
     }
   }

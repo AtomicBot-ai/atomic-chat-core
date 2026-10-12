@@ -238,10 +238,13 @@ export function readGgufTensorSummary(
  */
 export async function readGgufTensorSummaryChunked(
   readPrefix: (byteLength: number) => Promise<Uint8Array>,
-  options: { fileSize?: number; chunkSize?: number; maxBytes?: number } = {}
+  options: { fileSize?: number; chunkSize?: number; maxBytes?: number; growth?: 'linear' | 'doubling' } = {}
 ): Promise<GgufTensorSummary> {
   const chunk = options.chunkSize ?? 4 * 1024 * 1024
   const max = options.maxBytes ?? 64 * 1024 * 1024
+  // `linear` adds a chunk per read; `doubling` starts small and doubles, for a reader that pays per
+  // request (HTTP ranges): a 64 KiB header takes one request, a 12 MiB one eight.
+  const next = (want: number) => (options.growth === 'doubling' ? want * 2 : want + chunk)
   let want = chunk
   for (;;) {
     const limit = Math.min(want, max)
@@ -256,7 +259,7 @@ export async function readGgufTensorSummaryChunked(
       if (bytes.byteLength < limit || want >= max) {
         throw new GgufParseError('Could not read the GGUF tensor table within the read budget')
       }
-      want += chunk
+      want = next(want)
     }
   }
 }

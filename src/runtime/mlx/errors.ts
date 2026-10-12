@@ -80,8 +80,17 @@ export function mlxTimeout(timeoutSecs: number, stderr: string): AtomicCoreError
   )
 }
 
-export function mlxBinaryMissing(path: string): AtomicCoreError {
-  return new AtomicCoreError('BINARY_NOT_FOUND', `MLX server binary not found at: ${path}`)
+/**
+ * No `mlx-server` anywhere: not in the installer, not installed by the core. The way out is installing
+ * the engine (`POST /engine-builds/mlx/install`), so that is what the message says; where the core
+ * looked goes in `details` (spec `engine-builds`, "Две точки происхождения mlx-server").
+ */
+export function mlxBinaryMissing(lookedAt?: string): AtomicCoreError {
+  return new AtomicCoreError(
+    'BINARY_NOT_FOUND',
+    'MLX is not installed. Install the MLX engine, then load the model again.',
+    lookedAt ? `mlx-server not found; looked at ${lookedAt}` : undefined
+  )
 }
 
 export function mlxModelMissing(path: string): AtomicCoreError {

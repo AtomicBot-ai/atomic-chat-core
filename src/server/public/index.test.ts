@@ -72,3 +72,37 @@ describe('error reports', () => {
     expect(captured).toEqual([expect.objectContaining({ source: 'public_server', level: 'error' })])
   })
 })
+
+describe("the host's keyring", () => {
+  const models = (port: number, key?: string) =>
+    fetch(
+      `http://127.0.0.1:${port}/v1/models`,
+      key === undefined ? {} : { headers: { authorization: `Bearer ${key}` } }
+    )
+
+  it('is read for every request: a revoked key is refused on the next one, without a restart', async () => {
+    let keys: readonly string[] | undefined = ['alpha', 'beta']
+    const server = await startPublic({ apiKeys: () => keys })
+    expect((await models(server.port, 'alpha')).status).toBe(200)
+    keys = ['beta']
+    expect((await models(server.port, 'alpha')).status).toBe(401)
+    expect((await models(server.port, 'beta')).status).toBe(200)
+    keys = []
+    expect((await models(server.port, 'beta')).status).toBe(401)
+  })
+
+  it('falls back to the listener key while it answers undefined', async () => {
+    const server = await startPublic({ apiKeys: () => undefined }, { apiKey: 'secret' })
+    expect((await models(server.port, 'secret')).status).toBe(200)
+    expect(server.state().requires_api_key).toBe(true)
+    const open = await startPublic({ apiKeys: () => undefined })
+    expect((await models(open.port)).status).toBe(200)
+    expect(open.state().requires_api_key).toBe(false)
+  })
+
+  it('makes the state say a key is required even with no listener key, and never shows the keys', async () => {
+    const server = await startPublic({ apiKeys: () => ['alpha'] })
+    expect(server.state().requires_api_key).toBe(true)
+    expect(JSON.stringify(server.state())).not.toContain('alpha')
+  })
+})

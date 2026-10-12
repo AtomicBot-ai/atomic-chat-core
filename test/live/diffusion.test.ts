@@ -11,9 +11,11 @@
  *   ATOMIC_LIVE_SD_VAE=/path/to/vae.safetensors   (optional; FLUX.2 also needs ATOMIC_LIVE_SD_VAE_FORMAT=flux2)
  *   ATOMIC_LIVE_SD_LLM=/path/to/text-encoder      (optional; the family's LLM text encoder)
  *   ATOMIC_LIVE_SD_LLM_VISION=/path/to/mmproj     (optional; Qwen Image 2.1's Qwen3-VL projector — with
- *                                                  it and ATOMIC_LIVE_SD_FAMILY=qwen-image-2.1 a reference
- *                                                  generation from the first output is run as well)
- *   ATOMIC_LIVE_SD_FAMILY=flux.2-klein            (optional; default flux.2-klein, 4 steps, cfg 1)
+ *                                                  it and ATOMIC_LIVE_SD_FAMILY=qwen-image-2.1 or
+ *                                                  qwen-image-2.1-turbo a reference generation from the
+ *                                                  first output is run as well)
+ *   ATOMIC_LIVE_SD_FAMILY=flux.2-klein            (optional; default flux.2-klein, 4 steps, cfg 1;
+ *                                                  qwen-image-2.1-turbo runs its own 8-step schedule)
  *   ATOMIC_LIVE_SD_TAG=master-883-137f740         (optional; the engine's release tag, as the app records it)
  *
  * The video block runs when a video model is named as well (LTX-2.3 distilled by default):
@@ -25,13 +27,14 @@
  *   ATOMIC_LIVE_SD_VIDEO_FAMILY=ltx-2                                     (optional; or wan2.2-ti2v-5b)
  *   ATOMIC_LIVE_SD_VIDEO_MODE_FLAG=1                                      (optional; also pass -M vid_gen to sd-server)
  *
- * The engine tree is copied into the temporary data folder (finalize refuses trees outside it); the
+ * The engine tree is copied into the temporary data folder (installs live under `<data>`); the
  * model files are read where they are. Nothing is written outside the temporary folder.
  */
 import { spawnSync } from 'node:child_process'
 import { cp, mkdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { prepareSdcppTree, writeInstallRecord } from '../../src/diffusion/install.js'
 import { CoreClient } from '../../src/client/index.js'
 import type { CoreEvents, ImageJob, VideoJob } from '../../src/contracts/index.js'
 import { AtomicCore } from '../../src/core/index.js'
@@ -40,6 +43,20 @@ import { isProcessAlive } from '../../src/runtime/shared/index.js'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
 
+/** Probe a copied engine tree for real, then mark it installed the way the engine-builds install does. */
+async function ownLiveEngine(dir: string): Promise<void> {
+  await prepareSdcppTree(dir)
+  await writeInstallRecord(dir, {
+    tag: TAG,
+    backendId: 'live',
+    backend: process.platform === 'darwin' ? 'metal' : 'cpu',
+    engine: 'sd-cpp',
+    sha256: null,
+    installedAtMs: Date.now(),
+    dir,
+  })
+}
+
 const ENGINE = process.env['ATOMIC_LIVE_SD_ENGINE'] ?? ''
 const MODEL = process.env['ATOMIC_LIVE_SD_MODEL'] ?? ''
 const VAE = process.env['ATOMIC_LIVE_SD_VAE'] ?? ''
@@ -47,6 +64,17 @@ const VAE_FORMAT = process.env['ATOMIC_LIVE_SD_VAE_FORMAT'] ?? ''
 const LLM = process.env['ATOMIC_LIVE_SD_LLM'] ?? ''
 const LLM_VISION = process.env['ATOMIC_LIVE_SD_LLM_VISION'] ?? ''
 const FAMILY = process.env['ATOMIC_LIVE_SD_FAMILY'] ?? 'flux.2-klein'
+/** Qwen Image 2.1 and its Turbo edit with the vision projector. */
+const EDITS = LLM_VISION !== '' && (FAMILY === 'qwen-image-2.1' || FAMILY === 'qwen-image-2.1-turbo')
+/** A distilled family's own schedule (the catalog's, one sigma per step); any other runs 4 steps. */
+const IMAGE_SCHEDULES: Record<string, { steps: number; sigmas: number[] }> = {
+  'qwen-image-2.1-turbo': {
+    steps: 8,
+    sigmas: [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568],
+  },
+}
+const SCHEDULE = IMAGE_SCHEDULES[FAMILY]
+const STEPS = SCHEDULE?.steps ?? 4
 const ENABLED =
   process.env['ATOMIC_LIVE'] === '1' && ENGINE !== '' && MODEL !== '' && process.platform !== 'win32'
 /** The build app v2.0.42 ships, and the oldest that runs Qwen Image 2.1 and Krea 2 Turbo. */
@@ -111,17 +139,13 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
   }, 130_000)
 
   it(
-    'finalizes the tree, loads the model, generates, cancels and unloads',
+    'installs the tree, loads the model, generates, cancels and unloads',
     async () => {
-      const record = await client.finalizeDiffusionBackend({
-        dir: engineDir,
-        tag: TAG,
-        backendId: 'live',
-        backend: process.platform === 'darwin' ? 'metal' : 'cpu',
-        engine: 'sd-cpp',
-      })
-      expect(record.dir).toBe(engineDir)
-      expect((await client.listDiffusionBackends()).map((b) => b.backendId)).toEqual(['live'])
+      // What the core's engine-builds install does once the archive is unpacked: the real probe,
+      // then the marker and the record.
+      await ownLiveEngine(engineDir)
+      const catalog = await client.engineBuildCatalog('sd-cpp')
+      expect(catalog.installed.map((b) => b.backend_id)).toEqual(['live'])
 
       const files = {
         diffusionModel: MODEL,
@@ -136,7 +160,13 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
         modality: 'image',
         displayName: 'Live model',
         files,
-        defaults: { steps: 4, cfgScale: 1.0, width: 1024, height: 1024 },
+        defaults: {
+          steps: STEPS,
+          cfgScale: 1.0,
+          width: 1024,
+          height: 1024,
+          ...(SCHEDULE ? { samplingMethod: 'euler', sigmas: SCHEDULE.sigmas } : {}),
+        },
         ranges: { steps: [1, 50], dims: [256, 2048], dimMultiple: 16 },
         offload: 'none',
         startupTimeoutSecs: 600,
@@ -151,7 +181,7 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
         prompt: 'a small red cube on a white table, studio photo',
         width: 256,
         height: 256,
-        steps: 4,
+        steps: STEPS,
         cfgScale: 1.0,
         batchSize: 1,
         seed: 7,
@@ -172,18 +202,18 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
       const progress = events
         .filter((e) => e.name === 'diffusion:progress')
         .map((e) => (e.payload as CoreEvents['diffusion:progress']).progress)
-      expect(progress.some((p) => p.phase === 'sampling' && p.totalSteps === 4 && p.step >= 1)).toBe(true)
+      expect(progress.some((p) => p.phase === 'sampling' && p.totalSteps === STEPS && p.step >= 1)).toBe(true)
       expect(progress.some((p) => p.phase === 'saving')).toBe(true)
       expect(events.filter((e) => e.name === 'diffusion:error')).toEqual([])
 
       // With the vision projector, Qwen Image 2.1 also edits: a reference generation from the first output.
-      if (LLM_VISION && FAMILY === 'qwen-image-2.1') {
+      if (EDITS) {
         expect(capabilities.workflows).toEqual(expect.arrayContaining(['reference', 'edit']))
         const referenced = await client.generateImage({
           prompt: 'the same cube, now blue',
           width: 256,
           height: 256,
-          steps: 4,
+          steps: STEPS,
           cfgScale: 1.0,
           batchSize: 1,
           seed: 9,
@@ -209,9 +239,7 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
       expect(body.atomic.seed).toBe(8)
       const served2 = await decodePng(Buffer.from(body.data[0]?.b64_json ?? '', 'base64'))
       expect([served2.width, served2.height]).toEqual([256, 256])
-      expect((await client.listGallery({ offset: 0, limit: 10 })).total).toBe(
-        LLM_VISION && FAMILY === 'qwen-image-2.1' ? 3 : 2
-      )
+      expect((await client.listGallery({ offset: 0, limit: 10 })).total).toBe(EDITS ? 3 : 2)
 
       // A hard cancel of a long job stops the server (unless the engine cancels natively), and the next job respawns it.
       const long = await client.generateImage({
@@ -300,13 +328,7 @@ describe.skipIf(!VIDEO_ENABLED)('a real stable-diffusion.cpp engine serving vide
     ] as const)
       videoCore.events.on(name, (payload) => videoEvents.push({ name, payload }))
     await videoClient.configureDiffusion({ dataFolder: videoData.root, idleUnloadSecs: 0 })
-    await videoClient.finalizeDiffusionBackend({
-      dir,
-      tag: TAG,
-      backendId: 'live',
-      backend: process.platform === 'darwin' ? 'metal' : 'cpu',
-      engine: 'sd-cpp',
-    })
+    await ownLiveEngine(dir)
   }, 120_000)
 
   afterAll(async () => {

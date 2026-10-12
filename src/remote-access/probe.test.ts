@@ -59,6 +59,22 @@ describe('probeOnce', () => {
     expect(await probeOnce(fetch, await stub(200, huge), 2000)).toBe('foreign')
   })
 
+  it('treats an answer with no body, or one that breaks off mid-body, as foreign', async () => {
+    const empty = (async () => new Response(null, { status: 200 })) as typeof fetch
+    expect(await probeOnce(empty, 'http://edge.invalid', 2000)).toBe('foreign')
+    const broken = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"info":'))
+            controller.error(new Error('connection reset'))
+          },
+        }),
+        { status: 200 }
+      )) as typeof fetch
+    expect(await probeOnce(broken, 'http://edge.invalid', 2000)).toBe('foreign')
+  })
+
   it('reports no answer at all as unreachable: a refused port, a server that never answers, an abort', async () => {
     expect(await probeOnce(fetch, 'http://127.0.0.1:9', 2000)).toBe('unreachable')
     const silent = createServer(() => {})
@@ -225,6 +241,22 @@ describe('PublicProber', () => {
       fetchFor: () => async () => {
         // Something answers, but not this server: the prober would wait and ask again.
         setTimeout(() => stop.abort(), 20)
+        return new Response('error code: 1033', { status: 530 })
+      },
+      timings: { ...fast, edgeRetryDelayMs: 60_000 },
+    })
+    const started = Date.now()
+    expect(await prober.verify(TUNNEL, 120_000, stop.signal)).toBe(false)
+    expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  it('does not wait between rounds at all once it was told to stop during an answer', async () => {
+    // The stop lands while the edge answers, before the wait starts: the wait must not begin.
+    const stop = new AbortController()
+    const prober = new PublicProber({
+      edgeAddresses: async () => [{ host: '127.0.0.1', port: 9 }],
+      fetchFor: () => async () => {
+        stop.abort()
         return new Response('error code: 1033', { status: 530 })
       },
       timings: { ...fast, edgeRetryDelayMs: 60_000 },

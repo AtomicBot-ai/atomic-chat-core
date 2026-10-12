@@ -76,6 +76,40 @@ describe('hostAndKeyGate', () => {
     expect(hostAndKeyGate(req({ host: 'evil.example' }), open)?.status).toBe(403)
   })
 
+  describe("the host's keyring (apiKeys)", () => {
+    const bearer = (key: string) => req({ host: '127.0.0.1', authorization: `Bearer ${key}` })
+
+    it('without one, the listener key decides, as before', () => {
+      expect(hostAndKeyGate(bearer('secret'), config)).toBeUndefined()
+      expect(hostAndKeyGate(req({ host: '127.0.0.1' }), { apiKey: '', trustedHosts: [] })).toBeUndefined()
+    })
+
+    it('replaces the listener key: any key of the list passes, the listener key alone does not', () => {
+      const keyed = { ...config, apiKeys: ['alpha', 'beta'] }
+      expect(hostAndKeyGate(bearer('alpha'), keyed)).toBeUndefined()
+      expect(hostAndKeyGate(req({ 'host': '127.0.0.1', 'x-api-key': 'beta' }), keyed)).toBeUndefined()
+      expect(hostAndKeyGate(bearer('secret'), keyed)?.status).toBe(401)
+    })
+
+    it('requires a key even when the listener has none', () => {
+      const keyed = { apiKey: '', trustedHosts: [], apiKeys: ['alpha'] }
+      expect(hostAndKeyGate(req({ host: '127.0.0.1' }), keyed)?.status).toBe(401)
+      expect(hostAndKeyGate(bearer('alpha'), keyed)).toBeUndefined()
+    })
+
+    it('refuses every client when the list is empty', () => {
+      const closed = { ...config, apiKeys: [] }
+      expect(hostAndKeyGate(bearer('secret'), closed)?.status).toBe(401)
+      expect(hostAndKeyGate(req({ host: '127.0.0.1' }), closed)?.status).toBe(401)
+    })
+
+    it('never lets an empty entry match a missing key', () => {
+      const keyed = { ...config, apiKeys: [''] }
+      expect(hostAndKeyGate(req({ 'host': '127.0.0.1', 'x-api-key': '' }), keyed)?.status).toBe(401)
+      expect(hostAndKeyGate(bearer(''), keyed)?.status).toBe(401)
+    })
+  })
+
   it('never returns CORS headers or a hidden-path 404: callers with no docs paths get only host/key', () => {
     const refused = hostAndKeyGate(req({}), config)
     expect(refused?.headers).toEqual([])

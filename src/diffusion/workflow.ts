@@ -46,18 +46,26 @@ export function defaultStrength(workflow: ImageWorkflowId): number {
 }
 
 /**
+ * Qwen Image 2.1 and its 8-step Turbo checkpoint: one architecture, the same text encoder, vision
+ * projector and VAE, so the same workflows and the same engine floor.
+ */
+export function isQwenImage21(family: string): boolean {
+  return family === 'qwen-image-2.1' || family === 'qwen-image-2.1-turbo'
+}
+
+/**
  * img2img and masking are generic in sd.cpp (the init image is VAE-encoded and noised to `strength`,
  * a mask blends latents), so the established base families get them; a distilled model such as
  * Krea 2 Turbo keeps to its verified Create. Reference-guided generation and instruction edits need
- * a model trained on reference images: FLUX.2 Klein and Qwen Image 2.1, which also needs its vision
- * projector loaded (`workflowsForSpec`). Anything else, video families included, only creates.
+ * a model trained on reference images: FLUX.2 Klein and Qwen Image 2.1 (Turbo included, which the
+ * official checkpoint trains for editing), which also needs its vision projector loaded
+ * (`workflowsForSpec`). Anything else, video families included, only creates.
  */
 export function workflowsForFamily(family: string): ImageWorkflowId[] {
+  if (isQwenImage21(family)) return ['create', 'reference', 'edit']
   switch (family) {
     case 'flux.2-klein':
       return ['create', 'transform', 'inpaint', 'extend', 'upscale', 'reference', 'edit']
-    case 'qwen-image-2.1':
-      return ['create', 'reference', 'edit']
     case 'krea-2-turbo':
       return ['create']
     case 'z-image':
@@ -73,7 +81,7 @@ export function workflowsForFamily(family: string): ImageWorkflowId[] {
 /** The workflows the loaded server can actually run: Qwen Image 2.1 without `llmVision` only creates. */
 export function workflowsForSpec(spec: Pick<ServerSpec, 'family' | 'files'>): ImageWorkflowId[] {
   const workflows = workflowsForFamily(spec.family)
-  if (spec.family === 'qwen-image-2.1' && spec.files.llmVision === undefined)
+  if (isQwenImage21(spec.family) && spec.files.llmVision === undefined)
     return workflows.filter((workflow) => !usesReferences(workflow))
   return workflows
 }

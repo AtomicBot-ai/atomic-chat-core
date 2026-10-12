@@ -20,6 +20,7 @@ import { AtomicCore, CORE_VERSION } from './index.js'
 import type { BackendOutputSink } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
+import type { EngineVersionsResponse } from '../contracts/index.js'
 import { ExecutionJournal } from '../runtime/container/index.js'
 import { isProcessAlive } from '../runtime/index.js'
 import { skipTestOnWindows } from '../../test/helpers/platform.js'
@@ -518,6 +519,178 @@ describe('taking ownership', () => {
   })
 })
 
+describe('POST /engines/versions on the owner (change unify-engine-lifecycle, 4.1)', () => {
+  it('answers every engine of this host without the network, from what is on disk', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    const offline = (async () => {
+      throw new Error('offline')
+    }) as unknown as typeof fetch
+    const core = await createCore({ fetch: offline })
+    await core.settings.update('llamacpp-upstream', { version_backend: 'b6100/macos-arm64' })
+    const res = await fetch(`${core.control.url}/atomic/v1/engines/versions`, {
+      method: 'POST',
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ app_version: '2.1.0' }),
+    })
+    expect(res.status).toBe(200)
+    const { engines } = (await res.json()) as EngineVersionsResponse
+    const names = engines.map((entry) => entry.engine)
+    expect(names.slice(0, 4)).toEqual(['llamacpp-upstream', 'llamacpp', 'atomic-prism', 'sd-cpp'])
+    expect(names.includes('mlx')).toBe(process.platform === 'darwin')
+    expect(engines[0]).toMatchObject({
+      kind: 'llamacpp',
+      active_choice: 'client',
+      active: { version: 'b6100', variant: 'macos-arm64' },
+      builds: [
+        { version: 'b6100', variant: 'macos-arm64', origin: 'downloaded', active: true, removable: false },
+      ],
+    })
+    expect(engines.find((entry) => entry.engine === 'sd-cpp')).toMatchObject({
+      kind: 'engine-build',
+      active_choice: 'core',
+    })
+  })
+})
+
+describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)(
+  '/engines commands on the owner (change unify-engine-lifecycle, 4.1)',
+  () => {
+    it('activates another pack while a model runs, updates to a pack on disk and refuses the active one', async () => {
+      await installFakeBackend(data.layout, { version: 'b6325', backend: 'macos-arm64' })
+      await installFakeBackend(data.layout, { version: 'b6300', backend: 'macos-arm64' })
+      await data.writeModel('demo')
+      const core = await createCore()
+      await core.settings.update('llamacpp-upstream', { version_backend: 'b6325/macos-arm64', fit: false })
+      await core.load('llamacpp-upstream', 'demo')
+      const reasons: string[] = []
+      core.events.on('engine:changed', (payload) => reasons.push(payload.reason))
+      const call = (method: string, path: string, body?: unknown) =>
+        fetch(`${core.control.url}/atomic/v1/engines/${path}`, {
+          method,
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        })
+
+      const activated = await call('POST', 'llamacpp-upstream/builds/b6300/macos-arm64/activate')
+      expect(await activated.json()).toEqual({
+        activated: true,
+        active: { version: 'b6300', variant: 'macos-arm64' },
+      })
+      expect(core.sessions()).toEqual([])
+      expect(core.settings.get('llamacpp-upstream')['version_backend']).toBe('b6300/macos-arm64')
+
+      // A target already on disk installs nothing, then switches; the other version stays.
+      const updated = await call('POST', 'llamacpp-upstream/update', {
+        task_id: 'engine-update-llamacpp-upstream-b6325',
+        target: { version: 'b6325', variant: 'macos-arm64' },
+      })
+      expect(await updated.json()).toEqual({
+        updated: true,
+        active: { version: 'b6325', variant: 'macos-arm64' },
+        retired: [],
+        kept_in_use: [],
+      })
+
+      const active = await call('DELETE', 'llamacpp-upstream/builds/b6325/macos-arm64')
+      expect(active.status).toBe(400)
+      expect(await active.json()).toMatchObject({ error: { code: 'INVALID_REQUEST', details: 'active' } })
+      expect(reasons).toEqual(['activate', 'update'])
+    })
+  }
+)
+
+describe('the managed engines in /engines/versions on a Linux owner (change unify-engine-lifecycle, 4.1)', () => {
+  it('answers the installed release, the newer one conf publishes, and no-update for an engine not installed', async () => {
+    const managedRoot = join(data.root, 'managed-root')
+    const record = join(managedRoot, 'installations', 'vllm', 'installation.json')
+    await mkdir(join(record, '..'), { recursive: true })
+    await writeFile(
+      record,
+      JSON.stringify({
+        schema_version: 1,
+        installation: {
+          installation_id: 'vllm',
+          engine_id: 'vllm',
+          environment_id: 'default',
+          active_descriptor_id: 'vllm-0.30.0-r1',
+          candidate_descriptor_id: null,
+          availability: 'supported',
+          status: 'ready',
+        },
+        image: { repository: 'vllm/vllm-openai', digest: `sha256:${'b'.repeat(64)}` },
+        platform: 'linux/amd64',
+        installed_at: '2026-10-01T00:00:00Z',
+      })
+    )
+    const vllm = join(data.root, 'vllm-0.31.0-r1.json')
+    const published = JSON.parse(
+      await readFile(new URL('../../test/fixtures/runtimes/vllm.json', import.meta.url), 'utf8')
+    ) as Record<string, unknown>
+    await writeFile(vllm, JSON.stringify({ ...published, descriptor_id: 'vllm-0.31.0-r1' }))
+    const offline = (async () => {
+      throw new Error('offline')
+    }) as unknown as typeof fetch
+    const linux = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      dockerPath: null,
+      fetch: offline,
+      env: {
+        ...process.env,
+        ATOMIC_CORE_MANAGED_ROOT: managedRoot,
+        ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM: pathToFileURL(vllm).href,
+        ATOMIC_RUNTIME_DESCRIPTOR_URL: pathToFileURL(join(managedRoot, 'no-descriptor.json')).href,
+      },
+    })
+    cores.push(linux)
+    const call = (path: string, body: unknown) =>
+      fetch(`${linux.control.url}/atomic/v1/engines/${path}`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${linux.controlToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as unknown }))
+
+    const { engines } = (await call('versions', { app_version: '99.0.0' })).body as EngineVersionsResponse
+    expect(engines.find((entry) => entry.engine === 'vllm')).toMatchObject({
+      kind: 'managed',
+      builds: [{ version: 'vllm-0.30.0-r1', variant: 'linux/amd64', origin: 'managed', in_use: false }],
+      update: {
+        needed: true,
+        target: { version: 'vllm-0.31.0-r1', variant: 'linux/amd64' },
+        apply: 'reinstall',
+      },
+      source: 'remote',
+    })
+    expect(engines.find((entry) => entry.engine === 'tensorrt-llm')).toMatchObject({
+      kind: 'managed',
+      builds: [],
+      error: { code: 'MANAGED_METADATA_INVALID' },
+    })
+    expect(await call('tensorrt-llm/update', { request_id: 'upd-1' })).toEqual({
+      status: 200,
+      body: { updated: false, reason: 'no-update', active: null, retired: [], kept_in_use: [] },
+    })
+  })
+})
+
+describe('engine:changed from the llama.cpp backend routes (change unify-engine-lifecycle, 3.7)', () => {
+  it('is published when DELETE /backends removes a pack, and refused packs publish nothing', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b6100', 'macos-arm64')
+    const core = await createCore()
+    const seen: unknown[] = []
+    core.events.on('engine:changed', (payload) => seen.push(payload))
+    const remove = (version: string) =>
+      fetch(`${core.control.url}/atomic/v1/backends/llamacpp-upstream/${version}/macos-arm64`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      })
+    expect(await (await remove('b6100')).json()).toEqual({ removed: true })
+    expect(await (await remove('b6100')).json()).toEqual({ removed: false })
+    expect(seen).toEqual([{ engine: 'llamacpp-upstream', reason: 'uninstall' }])
+  })
+})
+
 describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('engine output', () => {
   it('reaches backendOutput from llama.cpp, tagged with the provider and model', async () => {
     await data.writeModel('demo')
@@ -593,7 +766,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('engine output', () => {
 describe.skipIf(process.platform === 'win32')('image generation through the owner', () => {
   it('wires the diffusion service to the control API, the journal, the events and the shutdown order', async () => {
     const { dataLayout } = await import('../config/index.js')
-    const { writeFakeSdLaunchers, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
+    const { installFakeSdEngine, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
     const { isProcessAlive } = await import('../runtime/shared/index.js')
     const layout = dataLayout(data.root)
     const logs: string[] = []
@@ -617,17 +790,8 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
     })
     expect((await client.configureDiffusion({ dataFolder: data.root })).configured).toBe(true)
 
-    const dir = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'fake-cpu')
-    await writeFakeSdLaunchers(dir, { stepMs: 5 })
-    const record = await client.finalizeDiffusionBackend({
-      dir,
-      tag: 'master-849-d04e895',
-      backendId: 'fake-cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
-    })
-    expect(record.dir).toBe(dir)
-    expect(logs.some((line) => line.startsWith('info: engine probe passed'))).toBe(true)
+    // An engine build as the core's engine-builds install leaves it (marker and record).
+    await installFakeSdEngine(layout, { tag: 'master-849-d04e895', backendId: 'fake-cpu', stepMs: 5 })
 
     const diffusionModel = await writeFakeSdModel(layout)
     const loaded = await client.loadDiffusionModel({
@@ -720,22 +884,6 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
     expect(events).toContain('diffusion:progress')
     expect(events).not.toContain('diffusion:error')
 
-    // A failed engine probe is logged as a warning through the owner's logger.
-    const bad = join(layout.diffusion.backendsDir, 'master-849-d04e895', 'bad')
-    await writeFakeSdLaunchers(bad)
-    const { writeFile } = await import('node:fs/promises')
-    await writeFile(join(bad, 'sd-cli'), "#!/bin/sh\necho 'llama-server usage'\n")
-    await expect(
-      client.finalizeDiffusionBackend({
-        dir: bad,
-        tag: 'master-849-d04e895',
-        backendId: 'bad',
-        backend: 'cpu',
-        engine: 'sd-cpp',
-      })
-    ).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED' })
-    expect(logs.some((line) => line.startsWith('warn: engine probe failed'))).toBe(true)
-
     await core.shutdown()
     expect(isProcessAlive(loaded.pid)).toBe(false)
   })
@@ -744,7 +892,7 @@ describe.skipIf(process.platform === 'win32')('image generation through the owne
 describe.skipIf(process.platform === 'win32')('video generation through the owner', () => {
   it('serves /v1/videos from the same session: queue, poll, download, list, delete', async () => {
     const { dataLayout } = await import('../config/index.js')
-    const { writeFakeSdLaunchers, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
+    const { installFakeSdEngine, writeFakeSdModel } = await import('../../test/helpers/fake-sd-server.js')
     const { fileURLToPath } = await import('node:url')
     const layout = dataLayout(data.root)
     const core = await AtomicCore.create({
@@ -782,14 +930,11 @@ describe.skipIf(process.platform === 'win32')('video generation through the owne
     ] as const)
       core.events.on(name, () => events.push(name))
     await client.configureDiffusion({ dataFolder: data.root })
-    const dir = join(layout.diffusion.backendsDir, 'master-883-137f740', 'fake-cpu')
-    await writeFakeSdLaunchers(dir, { stepMs: 5, modes: ['img_gen', 'vid_gen'] })
-    await client.finalizeDiffusionBackend({
-      dir,
+    await installFakeSdEngine(layout, {
       tag: 'master-883-137f740',
       backendId: 'fake-cpu',
-      backend: 'cpu',
-      engine: 'sd-cpp',
+      stepMs: 5,
+      modes: ['img_gen', 'vid_gen'],
     })
     const diffusionModel = await writeFakeSdModel(layout, 'ltx-2/ltx.gguf')
     await client.loadDiffusionModel({
@@ -1665,3 +1810,63 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
     })
   }
 )
+
+describe('engine builds through the owner', () => {
+  it('keeps every build at start, says nothing, and answers the catalog from the manifest it is pointed at', async () => {
+    // Two sd.cpp builds a previous core left: both stay, the newer one active.
+    const own = async (tag: string, installedAtMs: number) => {
+      const dir = join(data.root, 'diffusion', 'backends', tag, 'macos-arm64')
+      await mkdir(dir, { recursive: true })
+      // The server binary the listing looks for: `sd-server.exe` on Windows.
+      await writeFile(join(dir, process.platform === 'win32' ? 'sd-server.exe' : 'sd-server'), 'bin')
+      await writeFile(join(dir, '.atomic-owned'), 'atomic-chat\n')
+      await writeFile(
+        join(dir, 'install.json'),
+        JSON.stringify({
+          tag,
+          backendId: 'macos-arm64',
+          backend: 'metal',
+          engine: 'sd-cpp',
+          sha256: null,
+          installedAtMs,
+        })
+      )
+    }
+    await own('master-883-137f740', 1)
+    await own('master-900-abcdef0', 2)
+    const manifest = join(data.root, 'sdcpp-manifest.json')
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        tag_name: 'master-901-abcdef0',
+        download_base: 'https://mirror.atomic.invalid/releases',
+        assets: [{ backend: 'macos-arm64', name: 'sd.zip', sha256: 'a'.repeat(64), size: 1 }],
+      })
+    )
+    const core = await createCore({
+      env: { ...process.env, ATOMIC_SDCPP_MANIFEST_URL: pathToFileURL(manifest).href },
+    })
+    // Emitted before anyone could subscribe: read back from the replay ring.
+    expect(
+      (core.events.replayAfter(0) ?? [])
+        .filter((record) => record.name === 'engine-build:changed')
+        .map((r) => r.payload)
+    ).toEqual([])
+    expect(
+      (core.events.replayAfter(0) ?? [])
+        .filter((record) => record.name === 'engine:changed')
+        .map((r) => r.payload)
+    ).toEqual([])
+    expect((await readdir(join(data.root, 'diffusion', 'backends'))).sort()).toEqual([
+      'master-883-137f740',
+      'master-900-abcdef0',
+    ])
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const catalog = await client.engineBuildCatalog('sd-cpp', { force: true })
+    expect(catalog.manifest).toMatchObject({ tag: 'master-901-abcdef0', source: 'remote' })
+    expect(catalog.installed.map((b) => [b.tag, b.active])).toEqual([
+      ['master-900-abcdef0', true],
+      ['master-883-137f740', false],
+    ])
+  })
+})

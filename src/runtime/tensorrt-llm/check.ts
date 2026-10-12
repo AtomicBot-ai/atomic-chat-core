@@ -29,6 +29,7 @@ export const TENSORRT_LLM_MODEL_CHECK: ManagedModelCheckEngine = {
     return tensorrtLlmCheckEngine({
       contextLength: resolved.context_length,
       kvCacheFreeGpuMemoryFraction: resolved.kv_cache_free_gpu_memory_fraction,
+      cudaGraphs: resolved.cuda_graphs,
     })
   },
 }

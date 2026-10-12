@@ -233,6 +233,20 @@ async function beginAndApprove(ready: ReadyLine, requestId = 'req-1'): Promise<O
 const snapshot = async (ready: ReadyLine): Promise<Snapshot> =>
   (await (await control(ready, '/snapshot')).json()) as Snapshot
 
+/**
+ * Wait until the snapshot lists an installation: a finished setup re-reads the installations beside
+ * the operation's `ready`, not before it, so a snapshot read right after `ready` can still miss it.
+ */
+async function snapshotWithInstallation(ready: ReadyLine, ms = 5_000): Promise<Snapshot> {
+  const deadline = Date.now() + ms
+  let current = await snapshot(ready)
+  while (current.environments[0]?.installations[0] === undefined && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50))
+    current = await snapshot(ready)
+  }
+  return current
+}
+
 describe.skipIf(POSIX_FAKES_UNAVAILABLE)(
   'setting up the managed engine through the compiled core (task 2.6)',
   () => {
@@ -791,7 +805,8 @@ describe.skipIf(POSIX_FAKES_UNAVAILABLE)('vLLM next to TensorRT-LLM through the 
     const done = await setupVllm(ready)
     expect(done.phase, JSON.stringify(done.error)).toBe('ready')
     expect(host.pulls.some((ref) => ref.includes('vllm/vllm-openai'))).toBe(true)
-    expect(await installationsOf(ready)).toEqual({ 'tensorrt-llm': 'ready', 'vllm': 'ready' })
+    // The installations are re-read beside the operation's `ready`, not before it.
+    await expect.poll(() => installationsOf(ready)).toEqual({ 'tensorrt-llm': 'ready', 'vllm': 'ready' })
   })
 
   it('сбой setup vllm при ready TensorRT-LLM: the vLLM operation fails, TensorRT-LLM stays ready', async () => {
@@ -973,7 +988,7 @@ describe.skipIf(POSIX_FAKES_UNAVAILABLE)('what the app shows before consent (tas
     expect(
       (await poll(ready, asking.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')).phase
     ).toBe('ready')
-    const installation = (await snapshot(ready)).environments[0]?.installations[0]
+    const installation = (await snapshotWithInstallation(ready)).environments[0]?.installations[0]
     expect(installation?.active_descriptor_id).toBe(DESCRIPTOR_ID)
 
     const answered = await control(ready, `/environments/descriptors/${installation?.active_descriptor_id}`)

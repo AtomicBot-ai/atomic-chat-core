@@ -442,6 +442,112 @@ describe('ManagedTextLifecycle: an adapter refuses a container that got ready (c
   })
 })
 
+describe('ManagedTextLifecycle: a ready engine must generate (generationProbe)', () => {
+  skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
+  const probing: ManagedTextAdapter<{ ctx: number }> = {
+    ...alpha,
+    id: 'probing-engine',
+    generationProbe: {
+      modelsPath: '/v1/models',
+      path: '/v1/chat/completions',
+      body: { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1, stream: false },
+    },
+  }
+  const probingInstallation = { ...request_().installation, adapter_id: 'probing-engine' }
+  let sent: unknown[]
+  let logged: string[]
+
+  /** The engine: ready at once, a model list from `models`, and `chat` for the test request. */
+  async function buildEngine(
+    chat: () => Response,
+    models: () => Response = () => Response.json({ object: 'list', data: [{ id: '/atomic/model' }] })
+  ): Promise<void> {
+    sent = []
+    logged = []
+    const engine = (async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url)
+      probed.push(href)
+      if (href.endsWith('/v1/models')) return models()
+      if (href.endsWith('/v1/chat/completions')) {
+        sent.push(JSON.parse(String(init?.body)))
+        return chat()
+      }
+      return new Response('', { status: 200 })
+    }) as typeof fetch
+    await build({ fetch: engine, log: (level, message) => logged.push(`${level}: ${message}`) }, [probing])
+  }
+
+  it('asks for one token of the model the engine names, and loads when it gets one', async () => {
+    await buildEngine(() => Response.json({ choices: [{ message: { content: 'H' } }] }))
+    await lifecycle.load(request_({ installation: probingInstallation }))
+    expect(sent).toEqual([
+      { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1, stream: false, model: '/atomic/model' },
+    ])
+    expect(docker.containers.size).toBe(1)
+  })
+
+  it('fails a load whose engine answers the test request with an error, classified from its log', async () => {
+    await buildEngine(() => new Response('{"error":{"message":"CUDA out of memory"}}', { status: 500 }))
+    docker.bootLog = [
+      'engine up',
+      'CUDA out of memory. Tried to allocate 0.02 GiB',
+      'Application startup complete.',
+    ]
+    const error = await rejection(lifecycle.load(request_({ installation: probingInstallation })))
+    expect(error).toBeInstanceOf(ManagedLoadError)
+    expect(error.code).toBe('OUT_OF_MEMORY')
+    expect(error.message).toBe('The GPU ran out of memory (tried to allocate 0.02 GiB).')
+    expect(error.details).toContain('HTTP 500: {"error":{"message":"CUDA out of memory"}}')
+    expect(docker.containers.size).toBe(0)
+    expect(lifecycle.findSession('org/model-a')).toBeUndefined()
+    expect(lifecycle.lastAttempt('org/model-a')?.error.code).toBe('OUT_OF_MEMORY')
+  })
+
+  it('words an unclassified refusal for a running engine, not an exit', async () => {
+    await buildEngine(() => new Response('bad request', { status: 400 }))
+    docker.bootLog = ['engine up', 'Application startup complete.']
+    const error = await rejection(lifecycle.load(request_({ installation: probingInstallation })))
+    expect(error.code).toBe('MODEL_LOAD_FAILED')
+    expect(error.message).toBe('The engine started but failed its first test request (HTTP 400).')
+  })
+
+  it('counts an error object in a 2xx answer as a refusal', async () => {
+    await buildEngine(() => Response.json({ error: { message: 'boom' } }))
+    const error = await rejection(lifecycle.load(request_({ installation: probingInstallation })))
+    expect(error.code).toBe('MODEL_LOAD_FAILED')
+    expect(docker.containers.size).toBe(0)
+  })
+
+  it('loads anyway, with a warning, when the engine names no model to ask about', async () => {
+    await buildEngine(
+      () => Response.json({ choices: [] }),
+      () => new Response('not found', { status: 404 })
+    )
+    await lifecycle.load(request_({ installation: probingInstallation }))
+    expect(sent).toEqual([])
+    expect(docker.containers.size).toBe(1)
+    expect(
+      logged.some((line) => line.startsWith("warn: managed-text: org/model-a's test request got no answer"))
+    ).toBe(true)
+  })
+
+  it('loads anyway when the test request is redirected: a redirect proves nothing', async () => {
+    await buildEngine(() => new Response(null, { status: 307, headers: { location: 'http://elsewhere/' } }))
+    await lifecycle.load(request_({ installation: probingInstallation }))
+    expect(docker.containers.size).toBe(1)
+  })
+
+  it("writes why the load failed, and the lines that said so, to core's log", async () => {
+    await buildEngine(() => new Response('{"error":{}}', { status: 500 }))
+    docker.bootLog = ['engine up', 'CUDA out of memory. Tried to allocate 0.02 GiB']
+    await rejection(lifecycle.load(request_({ installation: probingInstallation })))
+    expect(logged).toContain(
+      'warn: managed-text: loading org/model-a failed: [OUT_OF_MEMORY] The GPU ran out of memory (tried to allocate 0.02 GiB).\n' +
+        'CUDA out of memory. Tried to allocate 0.02 GiB'
+    )
+  })
+})
+
 describe('ManagedTextLifecycle: early exit', () => {
   skipOnWindows('a Linux Docker desktop: on Windows the core mounts paths inside its WSL guest')
   it('a container exit fails within seconds with the classification, its numbers and the log tail', async () => {

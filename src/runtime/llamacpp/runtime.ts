@@ -70,7 +70,7 @@ import { classifyProcessOutput } from './errors.js'
 import type { ExitInfo } from './errors.js'
 import { autoUnloadTargets, llamaGpuFootprint, nextRetry, planLlamaLoad } from './load-plan.js'
 import type { LlamacppEngineSettings, LoadPlan, LoadPlanDeps } from './load-plan.js'
-import { classifyBackendMismatch, formatLoadError, isConcreteVersionBackend } from './policy.js'
+import { classifyBackendMismatch, formatLoadError, isConcreteVersionBackend, packDirOfExe } from './policy.js'
 import { checkSpecTypeSupport, DFLASH_SPEC_TYPE } from './probe.js'
 import { RuntimeDeviceAccumulator } from './runtime-device.js'
 
@@ -237,6 +237,25 @@ export class LlamacppRuntime implements LocalRuntime {
 
   isLoading(modelId: string): boolean {
     return this.loading.has(modelId)
+  }
+
+  /**
+   * The pack directories the sessions run from, the ones still stopping included: what an engine
+   * removal must leave alone (change `unify-engine-lifecycle`, task 2.4). `<pack>/build/bin/<exe>`,
+   * or the legacy flat `<pack>/<exe>`.
+   */
+  buildDirsInUse(): string[] {
+    const sessions = [...this.sessions.values(), ...[...this.stopping.values()].map(({ session }) => session)]
+    return [...new Set(sessions.map((session) => packDirOfExe(session.plan.exePath)))]
+  }
+
+  /**
+   * Run `fn` in the load queue's turn: it starts once the load in flight is done, and every load asked
+   * for meanwhile waits for it. An engine update or removal switches or deletes a build in here, so no
+   * load ever starts from a build half-way through either.
+   */
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    return this.enqueueLoad(fn)
   }
 
   /** Load a model, or join the load already in flight for it. */

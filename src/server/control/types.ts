@@ -3,8 +3,26 @@
  * snapshot shape it answers with. Types and shared constants only.
  */
 
+import type { DownloadProgress } from '../../downloads/downloader.js'
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
+import type {
+  EngineBuildCatalog,
+  EngineBuildCatalogRequest,
+  EngineBuildId,
+  EngineBuildInstallRequest,
+  EngineBuildInstallResult,
+  EngineBuildRemoveResult,
+  EngineBuildUpdateCheck,
+  EngineBuildUpdateCheckRequest,
+  EngineActivateResult,
+  EngineBuildDeleteResult,
+  EngineOperationStarted,
+  EngineUpdateRequest,
+  EngineUpdateResult,
+  EngineVersionsRequest,
+  EngineVersionsResponse,
+} from '../../contracts/index.js'
 import type {
   BeginOperation,
   DecisionDecideRequest,
@@ -18,7 +36,6 @@ import type {
   RouterScoreResponse,
   SystemoneResponse,
   DeviceInfo,
-  DiffusionBackendInstallRecord,
   DiffusionCancelResult,
   DiffusionConfig,
   DiffusionModelFile,
@@ -34,7 +51,6 @@ import type {
   ModelSetupPlan,
   ModelSetupPlanRequest,
   ModelSetupStartRequest,
-  FinalizeBackendInstallArgs,
   GalleryFlags,
   GalleryImageItem,
   GalleryListOptions,
@@ -255,13 +271,46 @@ export interface RemoteAccessControl {
  * Image generation (stage 7h): the app's twenty `DiffusionService` operations, one route each. The
  * routes parse and validate the bodies; what arrives here is already typed.
  */
+/**
+ * sd.cpp and MLX builds the core installs itself (`/engine-builds/:engine/…`, spec `engine-builds`).
+ * The route has already checked `engine` and the body.
+ */
+export interface EngineBuildControl {
+  catalog: (engine: EngineBuildId, request: EngineBuildCatalogRequest) => Promise<EngineBuildCatalog>
+  checkUpdates: (
+    engine: EngineBuildId,
+    request: EngineBuildUpdateCheckRequest
+  ) => Promise<EngineBuildUpdateCheck>
+  /** Answers once the build is installed and active, which can take as long as the download. */
+  install: (engine: EngineBuildId, request: EngineBuildInstallRequest) => Promise<EngineBuildInstallResult>
+  remove: (engine: EngineBuildId, tag: string, backendId: string) => Promise<EngineBuildRemoveResult>
+}
+
+/**
+ * The `/engines` layer (change `unify-engine-lifecycle`): the versions of every engine of this host
+ * and one command each to update, activate and remove a build. The route has already checked the
+ * engine's name and the body; whether this host has the engine is the layer's answer.
+ */
+export interface EngineControl {
+  versions: (request: EngineVersionsRequest) => Promise<EngineVersionsResponse>
+  /** A managed engine answers with the operation it began (`202`); the others once applied. */
+  update: (
+    engine: string,
+    request: EngineUpdateRequest
+  ) => Promise<EngineUpdateResult | EngineOperationStarted>
+  remove: (
+    engine: string,
+    version: string,
+    variant: string,
+    options: { retainModels?: boolean }
+  ) => Promise<EngineBuildDeleteResult | EngineOperationStarted>
+  activate: (engine: string, version: string, variant: string) => Promise<EngineActivateResult>
+}
+
 export interface DiffusionControl {
   configure: (config: DiffusionConfig) => Promise<DiffusionStatus>
   getStatus: () => Promise<DiffusionStatus>
   setOutputDir: (path: string) => Promise<DiffusionStatus>
-  finalizeBackendInstall: (args: FinalizeBackendInstallArgs) => Promise<DiffusionBackendInstallRecord>
-  listInstalledBackends: () => Promise<DiffusionBackendInstallRecord[]>
-  removeBackend: (dir: string) => Promise<void>
   listModelFiles: () => Promise<DiffusionModelFile[]>
   deleteModelFile: (path: string) => Promise<void>
   /** Answers once the server serves the model, which can take minutes. */
@@ -370,6 +419,8 @@ export interface ModelSetupControl {
 }
 
 export interface ControlServerDeps {
+  /** Running downloads' last progress, for the snapshot (`Downloader.snapshot`); absent is none. */
+  downloads?: () => DownloadProgress[]
   /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
   environments?: ManagedEnvironmentControl
   /** The snapshot's view of them, kept in memory so it needs no disk read. */
@@ -417,6 +468,9 @@ export interface ControlServerDeps {
   disk: DiskControl
   remoteAccess: RemoteAccessControl
   diffusion: DiffusionControl
+  engineBuilds: EngineBuildControl
+  /** Absent in a core built without the `/engines` layer; its routes then say so. */
+  engines?: EngineControl
   /** The decision model; without it the `/decision/*` routes answer `DECISION_UNAVAILABLE`. */
   decision?: DecisionControl
   /** The embedding model; without it the `/embedding/*` routes answer `EMBEDDING_UNAVAILABLE`. */
@@ -479,7 +533,8 @@ export interface ControlSnapshot {
   sessions: SessionSummary[]
   server: LocalApiServerState
   clients: ReturnType<ClientRegistry['list']>
-  downloads: unknown[]
+  /** Running downloads' last progress, so a client that reconnects mid-transfer need not wait for an event. */
+  downloads: DownloadProgress[]
   optimal_backends: Record<string, OptimalState>
   /** The managed container runtimes this user has, and the changes in flight on them. */
   environments: EnvironmentSnapshot[]

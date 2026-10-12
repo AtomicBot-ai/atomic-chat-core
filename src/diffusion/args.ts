@@ -193,10 +193,23 @@ export const VAE_TILING_AREA = 1024 * 1024
 export const VIDEO_VAE_TILING_PIXEL_FRAMES = VAE_TILING_AREA * 8
 
 /**
+ * A distilled family's fixed schedule as sd.cpp takes it, or undefined when the request asks for
+ * another step count and sd.cpp builds its own. The catalog lists one sigma per step; sd.cpp runs
+ * `custom_sigmas.length - 1` steps (`GenerationRequest` in its `src/pipeline/request.cpp`), so the
+ * closing 0 is appended here. Without it the last step never runs and the output keeps the noise of
+ * the last listed sigma.
+ */
+function customSigmas(defaults: DiffusionFamilyDefaults, steps: number): number[] | undefined {
+  if (defaults.sigmas === undefined || defaults.sigmas.length !== steps) return undefined
+  return [...defaults.sigmas, 0]
+}
+
+/**
  * The `POST /sdcpp/v1/img_gen` body. The whole batch goes in one request; guidance is split the way
  * sd.cpp expects (CFG → `txt_cfg`, FLUX distilled → `distilled_guidance`). Only set keys are sent,
- * so the server's own defaults apply to the rest. The workflow decides which images go in. sd.cpp
- * resizes the init image to `width`×`height` itself, which is how Upscale works.
+ * so the server's own defaults apply to the rest. `custom_sigmas` goes in when the family ships a
+ * fixed schedule for exactly this many steps (Qwen Image 2.1 Turbo). The workflow decides which
+ * images go in. sd.cpp resizes the init image to `width`×`height` itself, which is how Upscale works.
  *
  * sd.cpp reads integers with `is_number_integer()` and floats with `is_number()`, so `1` for a
  * `cfgScale` of 1.0 is accepted (checked in its `common.cpp`).
@@ -216,6 +229,8 @@ export function buildImgGenRequest(
   if (method) sampleParams['sample_method'] = method
   const shift = request.flowShift ?? defaults.flowShift
   if (shift !== undefined) sampleParams['flow_shift'] = shift
+  const sigmas = customSigmas(defaults, request.steps)
+  if (sigmas !== undefined) sampleParams['custom_sigmas'] = sigmas
   sampleParams['guidance'] = guidance
 
   const body: Record<string, unknown> = {
@@ -264,8 +279,8 @@ export function buildVidGenRequest(
   if (method) sampleParams['sample_method'] = method
   const shift = request.flowShift ?? defaults.flowShift
   if (shift !== undefined) sampleParams['flow_shift'] = shift
-  if (defaults.sigmas !== undefined && defaults.sigmas.length === request.steps)
-    sampleParams['custom_sigmas'] = [...defaults.sigmas]
+  const sigmas = customSigmas(defaults, request.steps)
+  if (sigmas !== undefined) sampleParams['custom_sigmas'] = sigmas
   sampleParams['guidance'] = guidance
 
   const video = defaults.video

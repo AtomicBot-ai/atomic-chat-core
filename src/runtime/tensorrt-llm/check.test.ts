@@ -5,7 +5,7 @@ import type { DescriptorProviderResult, InstallationRecord } from '../environmen
 import { canonicalizeSettingValues, defaultSettingValues } from '../../settings/index.js'
 import { checkTensorrtLlmModel, parseModelCheckInput } from './check.js'
 import type { ModelCheckDeps } from './check.js'
-import { engineOverheadBytes } from './compatibility.js'
+import { engineOverheadBytes, weightLayoutAllowanceBytes } from './compatibility.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
 const NO_HOST_MEMORY = { availableBytes: 0, totalBytes: 0 }
@@ -215,14 +215,14 @@ describe('checkTensorrtLlmModel', () => {
   })
 
   it('reads the kv_cache_free_gpu_memory_fraction from stored settings and passes it to the pure check', async () => {
-    // 69 GB weights with no KV shape in config.json (the weights x (1 - fraction) fallback), an 80 GB
-    // card: ok at the default 0.8 fraction (69 + 13.8 GB + 1.5 GiB engine overhead), a shortage at a
-    // much lower one (69 + 34.5 GB).
+    // 66 GB weights with no KV shape in config.json (the weights x (1 - fraction) fallback), an 80 GB
+    // card: ok at the default 0.8 fraction (66 + 3.3 GB layout allowance + 13.2 GB + 2 GiB engine
+    // overhead), a shortage at a much lower one (66 + 3.3 + 33 GB).
     const bigModelBody = body({
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
       files: [
-        { path: 'model-00001-of-00002.safetensors', size: 34_500_000_000, sha256: 'a'.repeat(64) },
-        { path: 'model-00002-of-00002.safetensors', size: 34_500_000_000, sha256: 'b'.repeat(64) },
+        { path: 'model-00001-of-00002.safetensors', size: 33_000_000_000, sha256: 'a'.repeat(64) },
+        { path: 'model-00002-of-00002.safetensors', size: 33_000_000_000, sha256: 'b'.repeat(64) },
       ],
     })
     const datacenterDescriptor = descriptor({
@@ -310,7 +310,8 @@ describe('checkTensorrtLlmModel: the stored default fraction is the one the laun
   // default context of 8192: KV_bytes = 2 x 28 x 8 x 128 x 2 x 8192 = 939,524,096. At the default
   // fraction 0.8 the reserve is exactly 1,174,405,120, so weights + reserve = 2,174,405,120 bytes; at
   // the old 0.9 it would be 1,043,915,663 and a card 1 byte short of the 0.8 figure would still pass.
-  // The engine's own overhead (runtime + activations at that context) comes on top.
+  // The engine's layout allowance on the weights and its own overhead (runtime + activations at that
+  // context) come on top.
   const qwen3Config = {
     architectures: ['LlamaForCausalLM'],
     dtype: 'bfloat16',
@@ -320,7 +321,11 @@ describe('checkTensorrtLlmModel: the stored default fraction is the one the laun
     head_dim: 128,
     hidden_size: 2048,
   }
-  const NEEDED_AT_DEFAULT = 1_000_000_000 + 1_174_405_120 + engineOverheadBytes(qwen3Config, 8192)
+  const NEEDED_AT_DEFAULT =
+    1_000_000_000 +
+    weightLayoutAllowanceBytes(1_000_000_000) +
+    1_174_405_120 +
+    engineOverheadBytes(qwen3Config, 8192)
   const qwen3Body = body({ config_json: qwen3Config })
   const storedDefaults = () => canonicalizeSettingValues('tensorrt-llm', defaultSettingValues('tensorrt-llm'))
 

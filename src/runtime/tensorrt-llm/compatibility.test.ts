@@ -22,11 +22,16 @@ import {
   normalizeWeightName,
   normalizeWeightNames,
   selectLaunchGpu,
+  TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES,
+  tensorrtLlmLaunchPlan,
+  tensorrtLlmMemoryNeed,
   weightBytes,
+  weightLayoutAllowanceBytes,
   type CheckpointFile,
   type HostMemory,
   type ModelCheckInput,
 } from './compatibility.js'
+import { TENSORRT_LLM_CUDA_GRAPHS_RESERVE_BYTES } from './cuda-graphs.js'
 import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './kv-cache.js'
 
 const digest = (hex: string): Sha256Digest => `sha256:${hex}`
@@ -131,13 +136,13 @@ describe('checkModelCompatibility', () => {
       free_vram_bytes: 85_532_850_176, // an H100 reports 81,559 MiB free (conf README note)
     })
 
-  it('a 75 GB FP8 checkpoint on an 80 GB datacenter card fits once the KV reserve is added, with no consumer-card cap', () => {
+  it('a 72 GB FP8 checkpoint on an 80 GB datacenter card fits once the KV reserve is added, with no consumer-card cap', () => {
     const descriptor = baseDescriptor()
     const selected = datacenterCard()
     const input = baseInput({
       config_json: { architectures: ['LlamaForCausalLM'] },
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
-      files: weightFiles(75_000_000_000),
+      files: weightFiles(72_000_000_000),
     })
 
     const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
@@ -146,9 +151,10 @@ describe('checkModelCompatibility', () => {
     })
 
     expect(result.quantization_format).toBe('fp8')
-    expect(result.weight_bytes).toBe(75_000_000_000)
+    expect(result.weight_bytes).toBe(72_000_000_000)
     expect(result.checked_gpu_id).toBe('gpu-0')
-    // 75,000,000,000 + 10% reserve (7,500,000,000) = 82,500,000,000 < 85,532,850,176 free.
+    // 72,000,000,000 + 5% layout allowance (3,600,000,000) + 10% reserve (7,200,000,000) + the 2 GiB
+    // runtime overhead = 84,947,483,648 < 85,532,850,176 free.
     expect(result.verdict).toEqual({ ok: true })
   })
 
@@ -168,28 +174,29 @@ describe('checkModelCompatibility', () => {
 
     expect(result.weight_bytes).toBe(79_000_000_000)
     // No KV-cache shape in config.json: falls back to the weight-proportional rule.
-    // 79,000,000,000 + 10% reserve (7,900,000,000) + the engine's 1.5 GiB runtime overhead (no MLP
-    // shape in config.json, so no activation term) = 88,510,612,736 > 85,532,850,176 free.
+    // 79,000,000,000 + 5% layout allowance (3,950,000,000) + 10% reserve (7,900,000,000) + the
+    // engine's 2 GiB runtime overhead (no MLP shape in config.json, so no activation term)
+    // = 92,997,483,648 > 85,532,850,176 free.
     expect(result.kv_reserve_basis).toBe('weight_fraction')
     expect(result.verdict).toEqual({
       ok: false,
       error: {
         code: 'MODEL_INCOMPATIBLE',
         message:
-          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU: they need 82.4 GiB, 79.7 GiB is free.',
+          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU: they need 86.6 GiB, 79.7 GiB is free.',
         details:
-          'weight_bytes=79000000000 kv_reserve_bytes=7900000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=1610612736 needed_bytes=88510612736 free_bytes=85532850176',
+          'weight_bytes=79000000000 weight_layout_bytes=3950000000 kv_reserve_bytes=7900000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=2147483648 needed_bytes=92997483648 free_bytes=85532850176',
       },
     })
   })
 
-  it('the same 75 GB FP8 checkpoint that fits at the default 0.9 fraction becomes a real shortage at a lower configured fraction (more headroom requested)', () => {
+  it('the same 72 GB FP8 checkpoint that fits at the default 0.9 fraction becomes a real shortage at a lower configured fraction (more headroom requested)', () => {
     const descriptor = baseDescriptor()
     const selected = datacenterCard()
     const input = baseInput({
       config_json: { architectures: ['LlamaForCausalLM'] },
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
-      files: weightFiles(75_000_000_000),
+      files: weightFiles(72_000_000_000),
     })
 
     const atDefault = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
@@ -199,7 +206,7 @@ describe('checkModelCompatibility', () => {
     expect(atDefault.verdict).toEqual({ ok: true })
 
     // 0.5 leaves half of post-weight memory unspent as headroom: reserve becomes 50% of weights
-    // (37,500,000,000), so 75,000,000,000 + 37,500,000,000 = 112,500,000,000 > 85,532,850,176 free.
+    // (36,000,000,000), so 72,000,000,000 + 36,000,000,000 = 108,000,000,000 > 85,532,850,176 free.
     const atLowerFraction = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
       contextLength: 8192,
       kvCacheFreeGpuMemoryFraction: 0.5,
@@ -207,14 +214,14 @@ describe('checkModelCompatibility', () => {
     expect(atLowerFraction.verdict.ok).toBe(false)
   })
 
-  it("40 GB of weights: does not fit the selected card (22 GB free) but fits a second card (46 GB free), with the selected card's own numbers reported", () => {
+  it("40 GB of weights: does not fit the selected card (22 GB free) but fits a second card (50 GB free), with the selected card's own numbers reported", () => {
     const descriptor = baseDescriptor()
     const selected = gpu({
       gpu_id: 'gpu-a',
       total_vram_bytes: 40_000_000_000,
       free_vram_bytes: 22_000_000_000,
     })
-    const other = gpu({ gpu_id: 'gpu-b', total_vram_bytes: 46_000_000_000, free_vram_bytes: 46_000_000_000 })
+    const other = gpu({ gpu_id: 'gpu-b', total_vram_bytes: 50_000_000_000, free_vram_bytes: 50_000_000_000 })
     const input = baseInput({ files: weightFiles(40_000_000_000), gpu_id: 'gpu-a' })
 
     const result = checkModelCompatibility(input, descriptor, [selected, other], memAvailable(0), {
@@ -223,16 +230,16 @@ describe('checkModelCompatibility', () => {
     })
 
     expect(result.checked_gpu_id).toBe('gpu-a')
-    // 40,000,000,000 + 10% reserve (4,000,000,000) + 1.5 GiB engine overhead = 45,610,612,736 >
-    // 22,000,000,000 free on gpu-a, and < 46,000,000,000 on gpu-b.
+    // 40,000,000,000 + 5% layout allowance (2,000,000,000) + 10% reserve (4,000,000,000) + 2 GiB
+    // engine overhead = 48,147,483,648 > 22,000,000,000 free on gpu-a, and < 50,000,000,000 on gpu-b.
     expect(result.verdict).toEqual({
       ok: false,
       error: {
         code: 'MODEL_INCOMPATIBLE',
         message:
-          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU: they need 42.5 GiB, 20.5 GiB is free.',
+          'The checkpoint, the engine runtime memory and the KV-cache reserve do not fit the selected GPU: they need 44.8 GiB, 20.5 GiB is free.',
         details:
-          'weight_bytes=40000000000 kv_reserve_bytes=4000000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=1610612736 needed_bytes=45610612736 free_bytes=22000000000',
+          'weight_bytes=40000000000 weight_layout_bytes=2000000000 kv_reserve_bytes=4000000000 kv_reserve_basis=weight_fraction engine_overhead_bytes=2147483648 needed_bytes=48147483648 free_bytes=22000000000',
       },
     })
     expect(result.fits_other_gpus).toEqual(['gpu-b'])
@@ -949,7 +956,7 @@ describe('the 2026-09-29 VM run: Qwen3-1.7B bf16 on an RTX 4070 Laptop (7.70 GiB
 })
 
 describe('checkModelCompatibility: the real KV-cache formula (finding 6)', () => {
-  it('a 75 GB FP8 checkpoint (70B-class shape) still fits an 80 GB datacenter card at the default context length', () => {
+  it('a 72 GB FP8 checkpoint (70B-class shape) still fits an 80 GB datacenter card at the default context length', () => {
     const descriptor = baseDescriptor()
     const selected = gpu({
       gpu_id: 'gpu-0',
@@ -960,7 +967,7 @@ describe('checkModelCompatibility: the real KV-cache formula (finding 6)', () =>
     const input = baseInput({
       config_json: { architectures: ['LlamaForCausalLM'], ...SEVENTY_B_SHAPE },
       hf_quant_config_json: { quantization: { quant_algo: 'FP8' } },
-      files: weightFiles(75_000_000_000),
+      files: weightFiles(72_000_000_000),
     })
 
     const result = checkModelCompatibility(input, descriptor, [selected], memAvailable(0), {
@@ -1040,7 +1047,7 @@ describe('checkModelCompatibilityFiles / checkModelMemory: the pre-launch split 
     const descriptor = baseDescriptor()
     const input = baseInput({
       config_json: { architectures: ['LlamaForCausalLM'], dtype: 'bfloat16' },
-      files: weightFiles(20_000_000_000),
+      files: weightFiles(18_000_000_000),
     })
 
     // A stale snapshot, taken while a previous model still holds the card: not enough free memory.
@@ -1302,7 +1309,8 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
   const weights = 16_000_000_000
   const kv = kvCacheBytes(shape, null, 2 * 8192) as number
   const overhead = engineOverheadBytes(shape, 8192)
-  const need = weights + kv + overhead
+  const layout = weightLayoutAllowanceBytes(weights)
+  const need = weights + layout + kv + overhead
   const memory = {
     contextLength: 8192,
     kvCacheFreeGpuMemoryFraction: TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
@@ -1315,7 +1323,7 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
   })
   const input = baseInput({ config_json: shape, files: weightFiles(weights) })
 
-  it('fits at exactly weights + KV(2 x context) + engine overhead of MemAvailable, and is refused one byte below', () => {
+  it('fits at exactly weights + layout allowance + KV(2 x context) + engine overhead of MemAvailable, and is refused one byte below', () => {
     const files = checkModelCompatibilityFiles(input, descriptor, [gb10], memAvailable(0), memory)
     if (!files.ok) throw new Error('expected the files check to pass')
     expect(checkModelMemory(files.resolved, descriptor, [gb10], memAvailable(need), memory).verdict).toEqual({
@@ -1325,7 +1333,7 @@ describe('checkModelMemory on a unified-memory card: the same bound the launch w
     expect(short.verdict.ok).toBe(false)
     if (!short.verdict.ok) {
       expect(short.verdict.error.details).toBe(
-        `weight_bytes=${weights} kv_reserve_bytes=${kv} kv_reserve_basis=config kv_max_tokens=16384 ` +
+        `weight_bytes=${weights} weight_layout_bytes=${layout} kv_reserve_bytes=${kv} kv_reserve_basis=config kv_max_tokens=16384 ` +
           `engine_overhead_bytes=${overhead} needed_bytes=${need} free_bytes=${need - 1}`
       )
     }
@@ -1551,11 +1559,12 @@ describe('normalizeWeightName', () => {
 describe('engineOverheadBytes: what trtllm-serve takes beyond weights and KV cache (Windows acceptance, 2026-10-03)', () => {
   const ministral = { architectures: ['MistralForCausalLM'], intermediate_size: 14336, hidden_size: 4096 }
 
-  it('is the 1.5 GiB runtime overhead plus an activation peak that grows with the context length', () => {
+  it('is the runtime overhead plus an activation peak that grows with the context length', () => {
     const GiB = 1024 ** 3
+    const runtime = TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES
     // Measured: 0.91 GiB of activations at 8192 tokens, 0.46 GiB at 4096 (Ministral-3b, RTX 4070 Laptop).
-    expect((engineOverheadBytes(ministral, 8192) - 1.5 * GiB) / GiB).toBeCloseTo(0.93, 1)
-    expect((engineOverheadBytes(ministral, 4096) - 1.5 * GiB) / GiB).toBeCloseTo(0.47, 1)
+    expect((engineOverheadBytes(ministral, 8192) - runtime) / GiB).toBeCloseTo(0.93, 1)
+    expect((engineOverheadBytes(ministral, 4096) - runtime) / GiB).toBeCloseTo(0.47, 1)
   })
 
   it('falls back to 4 x hidden_size, a VLM text_config, and to the runtime overhead alone', () => {
@@ -1565,7 +1574,7 @@ describe('engineOverheadBytes: what trtllm-serve takes beyond weights and KV cac
     expect(engineOverheadBytes({ text_config: { intermediate_size: 4096 } }, 1000)).toBe(
       engineOverheadBytes({ intermediate_size: 4096 }, 1000)
     )
-    expect(engineOverheadBytes({}, 8192)).toBe(1.5 * 1024 ** 3)
+    expect(engineOverheadBytes({}, 8192)).toBe(TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES)
   })
 
   it('refuses Ministral-3b bf16 on an 8 GB card that the weights alone would fit', () => {
@@ -1588,5 +1597,157 @@ describe('engineOverheadBytes: what trtllm-serve takes beyond weights and KV cac
       { contextLength: 4096, kvCacheFreeGpuMemoryFraction: 0.8 }
     )
     expect(result.verdict.ok).toBe(false)
+  })
+})
+
+describe('tensorrtLlmMemoryNeed: the weights as the engine lays them out (RTX 5090 Laptop, 2026-10-09)', () => {
+  // The card as the environment probe read it, with what Windows itself held taken off.
+  const laptop5090 = gpu({
+    gpu_id: 'GPU-14654ba4-b86a-30d2-f892-3c7b44d7d512',
+    compute_capability: '12.0',
+    total_vram_bytes: 25_651_314_688,
+    free_vram_bytes: 25_309_478_912,
+  })
+  const sizing = { contextLength: 4096, kvCacheFreeGpuMemoryFraction: 0.8 }
+  const free = laptop5090.free_vram_bytes as number
+
+  it('refuses Qwen3.8-27B-NVFP4, which held 21.71 GiB of weights for 20.42 GiB of files and never got ready', () => {
+    const need = tensorrtLlmMemoryNeed(
+      laptop5090,
+      {
+        weightBytesTotal: 21_921_697_280,
+        configJson: {
+          architectures: ['Qwen3_5ForConditionalGeneration'],
+          text_config: {
+            num_hidden_layers: 64,
+            num_attention_heads: 24,
+            num_key_value_heads: 4,
+            head_dim: 256,
+            hidden_size: 5120,
+            intermediate_size: 17408,
+            layer_types: Array.from({ length: 64 }, (_, index) =>
+              index % 4 === 3 ? 'full_attention' : 'linear_attention'
+            ),
+          },
+        },
+        hfQuantConfigJson: null,
+      },
+      sizing
+    )
+    expect(need.neededBytes).toBeGreaterThan(free)
+  })
+
+  it('still passes NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, which loaded and peaked at 21.47 GiB', () => {
+    const need = tensorrtLlmMemoryNeed(
+      laptop5090,
+      {
+        weightBytesTotal: 21_561_882_284,
+        configJson: {
+          architectures: ['NemotronHForCausalLM'],
+          num_hidden_layers: 52,
+          num_attention_heads: 32,
+          num_key_value_heads: 2,
+          head_dim: 128,
+          hidden_size: 2688,
+          intermediate_size: 1856,
+        },
+        hfQuantConfigJson: null,
+      },
+      sizing
+    )
+    expect(need.neededBytes).toBeLessThanOrEqual(free)
+  })
+
+  it('adds 5% of the weight bytes and reports it', () => {
+    expect(weightLayoutAllowanceBytes(20_000_000_000)).toBe(1_000_000_000)
+    expect(weightLayoutAllowanceBytes(0)).toBe(0)
+    const need = tensorrtLlmMemoryNeed(
+      laptop5090,
+      { weightBytesTotal: 20_000_000_000, configJson: {}, hfQuantConfigJson: null },
+      sizing
+    )
+    expect(need.details).toContain('weight_bytes=20000000000 weight_layout_bytes=1000000000 ')
+  })
+})
+
+describe('CUDA graphs in the memory check and the launch plan (RTX 5090 Laptop, 2026-10-09)', () => {
+  const laptop5090 = gpu({
+    gpu_id: 'GPU-14654ba4-b86a-30d2-f892-3c7b44d7d512',
+    compute_capability: '12.0',
+    total_vram_bytes: 25_651_314_688,
+    free_vram_bytes: 25_309_478_912,
+  })
+  const host: HostMemory = { availableBytes: 13 * 1024 ** 3, totalBytes: 16 * 1024 ** 3 }
+  const free = laptop5090.free_vram_bytes as number
+  const nemotron = {
+    weightBytesTotal: 21_561_882_284,
+    configJson: {
+      architectures: ['NemotronHForCausalLM'],
+      num_hidden_layers: 52,
+      num_attention_heads: 32,
+      num_key_value_heads: 2,
+      head_dim: 128,
+      hidden_size: 2688,
+      intermediate_size: 1856,
+    },
+    hfQuantConfigJson: null,
+  }
+  const qwen3_8b = {
+    weightBytesTotal: 6_397_066_384,
+    configJson: {
+      architectures: ['Qwen3ForCausalLM'],
+      num_hidden_layers: 36,
+      num_attention_heads: 32,
+      num_key_value_heads: 8,
+      head_dim: 128,
+      hidden_size: 4096,
+      intermediate_size: 12288,
+    },
+    hfQuantConfigJson: null,
+  }
+  const sizing = (cudaGraphs?: 'auto' | 'on' | 'off') => ({
+    contextLength: 2048,
+    kvCacheFreeGpuMemoryFraction: 0.8,
+    ...(cudaGraphs === undefined ? {} : { cudaGraphs }),
+  })
+
+  it('leaves them off under auto for Nemotron: it fits the card, the graphs beside it do not (26.37 GiB peak with them)', () => {
+    expect(tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('auto')).neededBytes).toBeLessThanOrEqual(free)
+    expect(tensorrtLlmLaunchPlan(sizing('auto'), nemotron, laptop5090, host)).toEqual({ cudaGraphs: false })
+    expect(tensorrtLlmLaunchPlan(sizing(), nemotron, laptop5090, host)).toEqual({ cudaGraphs: false })
+  })
+
+  it('keeps them under auto for Qwen3-8B on the same card, which has room to spare', () => {
+    expect(tensorrtLlmLaunchPlan(sizing('auto'), qwen3_8b, laptop5090, host)).toEqual({ cudaGraphs: true })
+  })
+
+  it('leaves them off under auto on a card below 12 GiB, whatever room it has', () => {
+    const small = gpu({
+      gpu_id: 'GPU-small',
+      total_vram_bytes: 8 * 1024 ** 3,
+      free_vram_bytes: 8 * 1024 ** 3,
+    })
+    const tiny = { weightBytesTotal: 1, configJson: {}, hfQuantConfigJson: null }
+    expect(tensorrtLlmLaunchPlan(sizing('auto'), tiny, small, host)).toEqual({ cudaGraphs: false })
+  })
+
+  it('follows an explicit on or off without looking at the card', () => {
+    expect(tensorrtLlmLaunchPlan(sizing('on'), nemotron, laptop5090, host)).toEqual({ cudaGraphs: true })
+    expect(tensorrtLlmLaunchPlan(sizing('off'), qwen3_8b, laptop5090, host)).toEqual({ cudaGraphs: false })
+  })
+
+  it('counts the graphs when they are on, so the check refuses Nemotron with them instead of starting a model that cannot answer', () => {
+    const off = tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('off'))
+    const on = tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('on'))
+    expect(on.neededBytes - off.neededBytes).toBe(TENSORRT_LLM_CUDA_GRAPHS_RESERVE_BYTES)
+    expect(on.neededBytes).toBeGreaterThan(free)
+    expect(on.details).toContain(`cuda_graphs_bytes=${TENSORRT_LLM_CUDA_GRAPHS_RESERVE_BYTES} needed_bytes=`)
+    expect(off.details).not.toContain('cuda_graphs_bytes')
+  })
+
+  it('adds nothing for auto: auto turns the graphs off where they would not fit', () => {
+    expect(tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('auto')).neededBytes).toBe(
+      tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('off')).neededBytes
+    )
   })
 })

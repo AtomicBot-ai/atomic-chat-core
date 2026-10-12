@@ -8,6 +8,10 @@
  * - `Range: bytes=N-` → 206 + validated `Content-Range`; 200/416 → restart from 0; 408/429/5xx retry
  * - 5 retries per stall, counter reset after every 1 MiB of fresh progress
  * - combined progress `{transferred,total}` after resume, every 10 MiB per file, per file end, task end
+ *   (with `streams` > 1 also every 250 ms while bytes flow: a terminal draws from it, the app's bar
+ *   does not, and the app never sets `streams`)
+ * - with `streams` > 1, a hash-pinned file of at least 32 MiB downloads over byte ranges in parallel
+ *   (`segmented.ts`), falling back to one stream when the server cannot serve ranges
  * - verification (size, sha256) after all files; on failure the file and its directory (non-recursive)
  *   are removed and the task fails; cancel keeps every partial and finished file
  * - preflight: Windows path limit, free space with 512 MiB headroom (skipped when unknown)
@@ -40,6 +44,7 @@ import {
   validateProxyConfig,
 } from './protocol.js'
 import { policyFetchFor } from './proxy-fetch.js'
+import { downloadSegments, SEGMENTED_MIN_BYTES } from './segmented.js'
 import { verifyDownloadedFile } from './verify.js'
 import type { VerifyDeps } from './verify.js'
 
@@ -61,6 +66,10 @@ export interface DownloadOptions {
 export const DOWNLOAD_CANCELLED = 'Download cancelled'
 
 export interface DownloaderDeps {
+  /** Parallel byte-range streams for a hash-pinned file of at least 32 MiB (`segmented.ts`); one by default. */
+  streams?: number
+  /** Milliseconds, for the time-based progress cadence `streams` > 1 adds. */
+  now?: () => number
   dataFolder: string
   platform: NodeJS.Platform
   fetch: typeof fetch
@@ -85,7 +94,20 @@ type StageReport = (kind: DownloadStage['kind'], attempt: number) => void
 interface Task {
   controller: AbortController
   superseded: boolean
+  /** The last combined progress this task reported, for `snapshot()`. */
+  progress?: DownloadProgress
 }
+
+/** One running task's combined progress, as its last `download:progress` event said. */
+export interface DownloadProgress {
+  taskId: string
+  transferred: number
+  total: number
+  percent: number
+}
+
+/** With `streams` > 1, progress is also reported this often while bytes flow. */
+export const TIMED_PROGRESS_INTERVAL_MS = 250
 
 export async function defaultAvailableSpace(path: string): Promise<number | undefined> {
   let probe = path
@@ -142,7 +164,7 @@ const isInside = (child: string, parent: string) => {
 export class Downloader {
   private readonly tasks = new Map<string, Task>()
   private readonly deps: Required<
-    Pick<DownloaderDeps, 'fetchFor' | 'availableSpace' | 'sleep' | 'retryBaseMs' | 'log'>
+    Pick<DownloaderDeps, 'fetchFor' | 'availableSpace' | 'sleep' | 'retryBaseMs' | 'log' | 'now'>
   > &
     DownloaderDeps
 
@@ -153,6 +175,7 @@ export class Downloader {
       sleep: defaultSleep,
       retryBaseMs: 1000,
       log: () => {},
+      now: Date.now,
       ...deps,
     }
   }
@@ -160,6 +183,16 @@ export class Downloader {
   /** Task ids currently running. */
   active(): string[] {
     return [...this.tasks.keys()]
+  }
+
+  /**
+   * Every running task's last combined progress (zeros before its first report): what a client that
+   * reconnects mid-transfer reads from the control snapshot instead of waiting for the next event.
+   */
+  snapshot(): DownloadProgress[] {
+    return [...this.tasks.entries()].map(
+      ([taskId, task]) => task.progress ?? { taskId, transferred: 0, total: 0, percent: 0 }
+    )
   }
 
   /** Cancel a running task. Keeps partials and finished files. */
@@ -241,7 +274,10 @@ export class Downloader {
     const emitProgress = () => {
       const transferred = [...progress.values()].reduce((a, b) => a + b, 0)
       const percent = totalSize > 0 ? Math.min(100, (transferred / totalSize) * 100) : 0
-      this.deps.emit('download:progress', { taskId, transferred, total: totalSize, percent })
+      const current = { taskId, transferred, total: totalSize, percent }
+      const task = this.tasks.get(taskId)
+      if (task !== undefined && task.controller.signal === signal) task.progress = current
+      this.deps.emit('download:progress', current)
     }
 
     const results = await Promise.all(
@@ -428,6 +464,35 @@ export class Downloader {
     })
 
     const expectedSize = expectedDownloadSize(item.size, fileSize)
+    const streams = this.deps.streams ?? 1
+    if (!shouldResume && item.sha256 && expectedSize >= SEGMENTED_MIN_BYTES && streams > 1) {
+      reportStage('connecting', 0)
+      const done = await downloadSegments({
+        url: item.url,
+        destination: savePath,
+        size: expectedSize,
+        sha256: item.sha256,
+        streams,
+        fetch: fetchImpl,
+        headers,
+        signal,
+        sleep: this.deps.sleep,
+        retryBaseMs: this.deps.retryBaseMs,
+        now: this.deps.now,
+        progress: (bytes) => {
+          progress.set(fileId, bytes)
+          emitProgress()
+        },
+      }).catch((e: unknown) => {
+        if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
+        throw new Error(`Download failed for '${item.url}': ${(e as Error).message}`)
+      })
+      if (done) {
+        await rm(urlPath, { force: true }).catch(() => {})
+        return savePath
+      }
+      this.deps.log('info', `Ranges are unavailable for '${item.url}'; downloading in one stream`)
+    }
     let res: Response
     let totalTransferred = 0
 
@@ -507,6 +572,10 @@ export class Downloader {
 
     let body = res.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() })
     let reader = body.getReader()
+    // The app's bar is fed every 10 MiB and nothing more; a client that asked for parallel streams
+    // also gets a report every `TIMED_PROGRESS_INTERVAL_MS` while bytes flow.
+    const timedProgress = streams > 1
+    let reportedAt = this.deps.now()
     let delta = 0
     let retryCount = 0
     let sinceReset = 0
@@ -533,7 +602,11 @@ export class Downloader {
             retryCount = 0
             sinceReset = 0
           }
-          if (delta >= PROGRESS_EMIT_INTERVAL_BYTES) {
+          if (
+            delta >= PROGRESS_EMIT_INTERVAL_BYTES ||
+            (timedProgress && this.deps.now() - reportedAt >= TIMED_PROGRESS_INTERVAL_MS)
+          ) {
+            reportedAt = this.deps.now()
             progress.set(fileId, totalTransferred)
             emitProgress()
             delta = 0

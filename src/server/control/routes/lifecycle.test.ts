@@ -68,6 +68,24 @@ describe('events stream', () => {
     controller.abort()
   })
 
+  it('relays an engine build change to every subscriber', async () => {
+    const controller = new AbortController()
+    const readers = await Promise.all(
+      [1, 2].map(async () =>
+        (
+          (await h.get('/atomic/v1/events', { signal: controller.signal })).body as ReadableStream<Uint8Array>
+        ).getReader()
+      )
+    )
+    h.emitter.emit('engine-build:changed', { engine: 'mlx', reason: 'install' })
+    for (const reader of readers) {
+      const frame = await readFrame(reader)
+      expect(frame).toContain('event: engine-build:changed')
+      expect(frame).toContain('{"engine":"mlx","reason":"install"}')
+    }
+    controller.abort()
+  })
+
   it('keeps an idle SSE client alive with heartbeat comments', async () => {
     const controller = new AbortController()
     const res = await h.get('/atomic/v1/events', { signal: controller.signal })

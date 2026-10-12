@@ -4,7 +4,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BPW, bonsaiLikeGguf } from '../../../test/helpers/gguf-builder.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
-import { hfResolveUrl, inspectLocalGguf, inspectRemoteGguf } from './inspect.js'
+import { GgufParseError } from '../gguf/index.js'
+import {
+  hfResolveUrl,
+  inspectLocalGguf,
+  inspectRemoteGguf,
+  REMOTE_GGUF_FIRST_BYTES,
+  REMOTE_GGUF_MAX_BYTES,
+} from './inspect.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -74,6 +81,45 @@ describe('inspectRemoteGguf', () => {
     const whole = (async () =>
       new Response(FILE, { status: 200, headers: { 'content-length': String(10 ** 10) } })) as typeof fetch
     await expect(inspectRemoteGguf('https://hf/x', { fetch: whole })).rejects.toThrow(/range request/)
+  })
+  it('asks for 64 KiB first and doubles each time the tensor table needs more', async () => {
+    const ranges: string[] = []
+    const base = rangeFetch()
+    await inspectRemoteGguf('https://hf/x', {
+      fetch: (async (u: string, init?: RequestInit) => {
+        ranges.push(new Headers(init?.headers).get('range') ?? '')
+        return base(u, init)
+      }) as typeof fetch,
+    })
+    expect(ranges[0]).toBe(`bytes=0-${REMOTE_GGUF_FIRST_BYTES - 1}`)
+    const sizes = ranges.map((range) => Number(/bytes=0-(\d+)/.exec(range)?.[1]) + 1)
+    for (let i = 1; i < sizes.length; i++) expect(sizes[i]).toBe((sizes[i - 1] as number) * 2)
+    expect(REMOTE_GGUF_MAX_BYTES).toBe(64 * 1024 * 1024)
+  })
+  it('gives up with GgufParseError when the table does not fit the byte budget', async () => {
+    await expect(
+      inspectRemoteGguf('https://hf/x', { fetch: rangeFetch(), maxBytes: 128 })
+    ).rejects.toBeInstanceOf(GgufParseError)
+  })
+  it('gives up after timeoutMs in all, saying so, when the mirror does not answer', async () => {
+    const hanging = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) =>
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      )) as typeof fetch
+    await expect(inspectRemoteGguf('https://hf/x', { fetch: hanging, timeoutMs: 30 })).rejects.toThrow(
+      'Reading the GGUF header of https://hf/x took longer than 0.03 seconds'
+    )
+  })
+  it('waits for a slow mirror when no timeoutMs is given', async () => {
+    const base = rangeFetch()
+    const slow = (async (u: string, init?: RequestInit) => {
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect(init?.signal?.aborted).toBe(false)
+      return base(u, init)
+    }) as typeof fetch
+    expect((await inspectRemoteGguf('https://hf/x', { fetch: slow })).metadataKeys).toContain(
+      'general.architecture'
+    )
   })
   it('accepts a whole small file answered with 200', async () => {
     const small = (async () =>

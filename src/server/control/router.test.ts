@@ -24,6 +24,22 @@ describe('health, snapshot and sessions', () => {
     expect(sessions.sessions).toHaveLength(1)
   })
 
+  it("lists the running downloads' last progress, and none when the owner wires no downloader", async () => {
+    const empty = (await (await h.get('/atomic/v1/snapshot')).json()) as ControlSnapshot
+    expect(empty.downloads).toEqual([])
+    const own = await start({
+      downloads: () => [{ taskId: 'engine-install', transferred: 5, total: 10, percent: 50 }],
+    })
+    try {
+      const snapshot = (await (await own.get('/atomic/v1/snapshot')).json()) as ControlSnapshot
+      expect(snapshot.downloads).toEqual([
+        { taskId: 'engine-install', transferred: 5, total: 10, percent: 50 },
+      ])
+    } finally {
+      own.server.close()
+    }
+  })
+
   it('captures optimal state and cursor in the same snapshot', async () => {
     h.backends.optimalSnapshot = () => ({ 'llamacpp-upstream': { revision: 7, optimal: null } })
     h.emitter.emit('backend:optimal-changed', { provider: 'llamacpp-upstream', revision: 7, optimal: null })

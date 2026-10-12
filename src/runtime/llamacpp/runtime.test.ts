@@ -1141,3 +1141,61 @@ describe('autoIncreaseCtx', () => {
     expect(payloads('session:ctx-increased')).toEqual([])
   })
 })
+
+describe('builds in use and the exclusive turn', () => {
+  it('names the pack directory a session runs from, until it is unloaded', async () => {
+    await data.writeModel('demo')
+    const runtime = await makeRuntime()
+    expect(runtime.buildDirsInUse()).toEqual([])
+    await runtime.load('demo')
+    expect(runtime.buildDirsInUse()).toEqual([
+      join(data.layout.provider('llamacpp-upstream').backendsDir, 'b6325', 'macos-arm64'),
+    ])
+    await runtime.unload('demo')
+    expect(runtime.buildDirsInUse()).toEqual([])
+  })
+
+  it('waits for the load in flight and holds the next one until it is done', async () => {
+    await data.writeModel('first')
+    await data.writeModel('second')
+    const exePath = await data.writeBackend('llamacpp-upstream', 'b6325', 'macos-arm64')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const runtime = await makeRuntime({
+      ensureBackendReady: async (backend, version) => {
+        await gate
+        return { backend, version, exePath }
+      },
+    })
+    const order: string[] = []
+    const first = runtime.load('first').then(() => order.push('first loaded'))
+    let finish!: () => void
+    const held = new Promise<void>((resolve) => (finish = resolve))
+    const turn = runtime.exclusive(async () => {
+      order.push(`exclusive with ${runtime.getLoadedModels().join(',')}`)
+      await held
+      order.push('exclusive done')
+      return 7
+    })
+    const second = runtime.load('second').then(() => order.push('second loaded'))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(order).toEqual([])
+    release()
+    await first
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // The turn began once the first load was a session, and the second load has not started.
+    expect([...order].sort()).toEqual(['exclusive with first', 'first loaded'])
+    expect(runtime.getLoadedModels()).toEqual(['first'])
+    finish()
+    expect(await turn).toBe(7)
+    await second
+    expect(order.slice(2)).toEqual(['exclusive done', 'second loaded'])
+  })
+
+  it('lets the next load run after a turn that failed', async () => {
+    await data.writeModel('demo')
+    const runtime = await makeRuntime()
+    await expect(runtime.exclusive(async () => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
+    await expect(runtime.load('demo')).resolves.toMatchObject({ model_id: 'demo' })
+  })
+})

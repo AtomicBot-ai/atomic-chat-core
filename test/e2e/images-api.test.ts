@@ -79,7 +79,7 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('the images fa
     const modelFile = await sd.writeSdFile(ctx)
     const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
     await sd.configure(ctx, ready)
-    await sd.finalizeEngine(ctx, ready, dir)
+    await sd.ownEngine(dir)
     const port = await startServer(ready)
 
     // The format is checked before the model: a `url` request is a 400 even with nothing loaded.

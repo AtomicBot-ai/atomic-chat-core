@@ -151,6 +151,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'MODEL_LOAD_CANCELLED':
     case 'REMOTE_ACCESS_SERVER_STOPPED':
     case 'REMOTE_ACCESS_OPERATION_IN_PROGRESS':
+    case 'ENGINE_INSTALL_IN_PROGRESS':
     case 'REMOTE_ACCESS_STOP_FAILED':
     case 'JOB_BUSY':
     case 'BACKEND_IN_USE':

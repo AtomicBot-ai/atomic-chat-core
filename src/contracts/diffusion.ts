@@ -322,15 +322,6 @@ export interface DiffusionBackendInstallRecord {
   dir: string
 }
 
-export interface FinalizeBackendInstallArgs {
-  dir: string
-  tag: string
-  backendId: string
-  backend: DiffusionBackend
-  engine: DiffusionEngineId
-  sha256?: string
-}
-
 /** Sent by the app once per core generation, before anything else. */
 export interface DiffusionConfig {
   /** Must be the core's own data folder. */

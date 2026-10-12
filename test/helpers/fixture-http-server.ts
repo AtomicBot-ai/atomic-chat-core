@@ -67,22 +67,24 @@ export class FixtureHttpServer {
       return
     }
     let start = 0
+    let end = file.body.length - 1
     let status = 200
     const headers: Record<string, string> = {}
     if (range && file.ranges !== false) {
-      const m = /^bytes=(\d+)-$/.exec(range)
+      // `bytes=N-` (resume) or `bytes=N-M` (one bounded range of a parallel download).
+      const m = /^bytes=(\d+)-(\d*)$/.exec(range)
       if (m) {
         start = Number(m[1])
         if (start >= file.body.length) {
           res.writeHead(416).end()
           return
         }
+        if (m[2] !== '') end = Math.min(end, Number(m[2]))
         status = 206
-        headers['content-range'] =
-          file.badContentRange ?? `bytes ${start}-${file.body.length - 1}/${file.body.length}`
+        headers['content-range'] = file.badContentRange ?? `bytes ${start}-${end}/${file.body.length}`
       }
     }
-    const slice = file.body.subarray(start)
+    const slice = file.body.subarray(start, end + 1)
     headers['content-length'] = String(slice.length)
     res.writeHead(status, headers)
     const dropsLeft = this.drops.get(path) ?? file.dropTimes ?? 0

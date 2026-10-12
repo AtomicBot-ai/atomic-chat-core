@@ -12,6 +12,8 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { EngineBuildChangedEvent } from './engine-builds.js'
+import type { EngineChangedEvent } from './engines.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { EmbeddingErrorEvent, EmbeddingStateEvent } from './embedding.js'
@@ -173,6 +175,20 @@ export interface CoreEvents {
    */
   'environment:changed': EnvironmentSnapshot
   'environment:operation': EnvironmentOperation
+
+  /**
+   * An sd.cpp or MLX build was installed, removed, or cleaned up at start (spec `engine-builds`):
+   * re-read `POST /engine-builds/:engine/catalog` instead of polling it.
+   */
+  'engine-build:changed': EngineBuildChangedEvent
+
+  /**
+   * The set or the active build of any engine changed (change `unify-engine-lifecycle`, design D8):
+   * published by every route that installs, activates or removes a build, `/backends` and
+   * `/engine-builds` included. Re-read `POST /engines/versions`. `engine-build:changed` stays for
+   * the desktop releases that listen to it.
+   */
+  'engine:changed': EngineChangedEvent
 
   /**
    * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). `state` on every

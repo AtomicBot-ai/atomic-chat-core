@@ -133,7 +133,13 @@ import {
   reasoningIntoContent,
   thinkingRequested,
 } from '../managed-text/index.js'
-import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION, tensorrtLlmUnifiedKvMaxTokens } from './kv-cache.js'
+import { tensorrtLlmCudaGraphsOn, type TensorrtLlmLaunchPlan } from './cuda-graphs.js'
+import {
+  TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
+  tensorrtLlmKvTokens,
+  tensorrtLlmUnifiedKvMaxTokens,
+  tensorrtLlmWholeBlockTokens,
+} from './kv-cache.js'
 import type {
   ManagedEngineLaunch,
   ManagedExitClassification,
@@ -397,10 +403,7 @@ function llmApiOptions(
   return lines.length === 0 ? null : `${lines.join('\n')}\n`
 }
 
-/** Below this much card memory `cuda_graphs: auto` leaves CUDA graphs off: they took about 2 GB on
- *  an 8 GB card in the Windows live acceptance (Qwen3.5-2B, "Memory used outside torch … 2.12 GiB").
- *  A card that reports no size of its own is a unified-memory one (GB10): it keeps them. */
-export const TENSORRT_LLM_CUDA_GRAPHS_MIN_VRAM_BYTES = 12 * 1024 ** 3
+export { TENSORRT_LLM_CUDA_GRAPHS_MIN_VRAM_BYTES } from './cuda-graphs.js'
 
 /** FP8 KV cache needs compute capability 8.9 (Ada) or newer. */
 function supportsFp8Kv(computeCapability: string | null | undefined): boolean {
@@ -427,6 +430,15 @@ export const TENSORRT_LLM_MAX_KV_CACHE_MAX_TOKENS = 16_777_216
 /** The container binds every interface; only the host-side publication (design D1/D11) is
  *  loopback-restricted, by the executor, not by the engine's own bind address. */
 const CONTAINER_BIND_HOST = '0.0.0.0'
+
+/** `ManagedLaunchContext.plan` as this engine's own plan, or undefined when there is none. */
+function launchPlanOf(plan: unknown): TensorrtLlmLaunchPlan | undefined {
+  return typeof plan === 'object' &&
+    plan !== null &&
+    typeof (plan as TensorrtLlmLaunchPlan).cudaGraphs === 'boolean'
+    ? (plan as TensorrtLlmLaunchPlan)
+    : undefined
+}
 
 /** Builds `trtllm-serve serve <model-dir> ...` (task 2.13; flags sourced from `serve.py`, see the
  *  file header). `serve` is named explicitly rather than relying on the CLI's default-command
@@ -477,17 +489,22 @@ export function buildTensorrtLlmLaunch(
   // Windows live acceptance with Qwen3.5-2B). Room for every sequence the batch admits at full context;
   // the engine takes the smaller of this and the free-memory fraction, so attention-only models keep
   // the memory they had. A unified-memory card keeps its own, tighter bound.
-  const vram = context.gpuTotalVramBytes ?? null
-  const cudaGraphsOff =
-    settings.cuda_graphs === 'off' ||
-    (settings.cuda_graphs === 'auto' && vram !== null && vram < TENSORRT_LLM_CUDA_GRAPHS_MIN_VRAM_BYTES)
+  // CUDA graphs: the plan `beforeCreate` made on the card as it stands now (`tensorrtLlmLaunchPlan`:
+  // `auto` keeps them only where they fit beside the model); without one, the card's size alone.
+  const cudaGraphsOff = !(
+    launchPlanOf(context.plan)?.cudaGraphs ??
+    tensorrtLlmCudaGraphsOn(settings.cuda_graphs, context.gpuTotalVramBytes ?? null)
+  )
   const kvFp8 = settings.kv_cache_dtype === 'fp8' && supportsFp8Kv(context.gpuComputeCapability)
+  // In whole blocks: the engine rounds `max_tokens` down to them, and a sequence one block short of
+  // the context is a load the readiness check refuses (`kv-cache.ts`).
   const options = llmApiOptions(
     family?.structured_output === true,
-    settings.kv_cache_max_tokens ??
-      (context.unifiedMemory
+    settings.kv_cache_max_tokens !== null
+      ? tensorrtLlmWholeBlockTokens(settings.kv_cache_max_tokens)
+      : context.unifiedMemory
         ? tensorrtLlmUnifiedKvMaxTokens(settings.context_length)
-        : settings.context_length * settings.max_batch_size),
+        : tensorrtLlmKvTokens(settings.context_length, settings.max_batch_size),
     kvFp8,
     cudaGraphsOff,
     settings
@@ -1195,6 +1212,13 @@ export const tensorrtLlmAdapter: ManagedTextAdapter<TensorrtLlmSettings> = {
   id: 'tensorrt-llm',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/health', expectedStatus: 200 },
+  // `/health` answers before anything has been generated, and a hybrid model's cache manager logs no
+  // `max sequence length=` line for `classifyReady` to read: one token proves the engine can serve.
+  generationProbe: {
+    modelsPath: '/v1/models',
+    path: '/v1/chat/completions',
+    body: { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1, stream: false },
+  },
   routes: TENSORRT_LLM_ROUTES,
   rewritableRoutes: TENSORRT_LLM_REWRITABLE_ROUTES,
   stageMarkers: STAGE_MARKERS,

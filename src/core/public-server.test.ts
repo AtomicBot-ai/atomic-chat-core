@@ -300,3 +300,37 @@ describe('externally registered sessions on the public server', () => {
     expect(await embeddings.json()).toMatchObject({ error: { code: 'unsupported_endpoint' } })
   })
 })
+
+describe("the host's keyring through the core (AtomicCoreOptions.publicApiKeys)", () => {
+  it('guards every public request with it, says a key is required, and writes that to the state file', async () => {
+    let keys: readonly string[] = ['alpha']
+    const core = await createCore({ publicApiKeys: () => keys })
+    const state = await core.startPublicServer({ port: 0, writeStateFile: true })
+    const models = (key: string) =>
+      fetch(`http://127.0.0.1:${state.port}/v1/models`, { headers: { authorization: `Bearer ${key}` } })
+
+    expect(state.requires_api_key).toBe(true)
+    expect((await models('alpha')).status).toBe(200)
+    keys = ['beta']
+    expect((await models('alpha')).status).toBe(401)
+    const written = JSON.parse(await readFile(data.layout.serverStateFile, 'utf8')) as {
+      requires_api_key: boolean
+    }
+    expect(written.requires_api_key).toBe(true)
+  })
+
+  it('leaves a core without one exactly as it was: no key configured, none required', async () => {
+    const core = await createCore()
+    const state = await core.startPublicServer({ port: 0 })
+    expect(state.requires_api_key).toBe(false)
+    expect((await fetch(`http://127.0.0.1:${state.port}/v1/models`)).status).toBe(200)
+  })
+})
+
+describe('the terminal options through the core', () => {
+  it('starts with parallel download streams and a bounded remote header read, and lists no downloads while idle', async () => {
+    const core = await createCore({ downloadStreams: 4, remoteGgufTimeoutMs: 20_000 })
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    expect((await client.snapshot()).downloads).toEqual([])
+  })
+})

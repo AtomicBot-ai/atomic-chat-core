@@ -998,7 +998,7 @@ describe('a video job', () => {
         expect(sent['video_frames']).toBe(25)
         expect(sent['fps']).toBe(24)
         expect(sent['output_format']).toBe('webm')
-        expect((sent['sample_params'] as Record<string, unknown>)['custom_sigmas']).toHaveLength(8)
+        expect((sent['sample_params'] as Record<string, unknown>)['custom_sigmas']).toHaveLength(9)
         return json(202, { id: 'job_v', kind: 'vid_gen', status: 'queued', poll_url: '/sdcpp/v1/jobs/job_v' })
       }
       if (method === 'GET' && path === '/sdcpp/v1/jobs/job_v') {

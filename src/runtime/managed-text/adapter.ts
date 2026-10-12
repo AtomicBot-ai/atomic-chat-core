@@ -40,6 +40,22 @@ export interface ManagedReadinessProbe {
   expectedStatus: number
 }
 
+/**
+ * A one-token generation sent straight to the engine once it answers its readiness probe and its log
+ * passed `classifyReady`: an engine can answer `/health` with no memory left to generate with
+ * (NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 on a 24 GB card with CUDA graphs on: ready, then every
+ * request "CUDA out of memory … 0 bytes is free"). OpenAI-shaped: the model's name is read off
+ * `modelsPath` (`data[0].id`), so the request names the model the engine itself serves.
+ */
+export interface ManagedGenerationProbe {
+  /** Absolute path of the engine's model list, joined onto the internal `BackendTarget`. */
+  modelsPath: string
+  /** Absolute path the request is POSTed to, joined onto the internal `BackendTarget`. */
+  path: string
+  /** The JSON body, without `model`. */
+  body: Record<string, unknown>
+}
+
 /** What an adapter is told when it builds a launch. Container paths are fixed by the executor. */
 export interface ManagedLaunchContext<S> {
   modelId: string
@@ -150,6 +166,8 @@ export interface ManagedTextAdapter<S = unknown> {
   /** Matches the descriptor's `adapter_contract_version`. */
   readonly contractVersion: number
   readonly readiness: ManagedReadinessProbe
+  /** Optional: the request that proves a ready engine can generate (`ManagedGenerationProbe`). */
+  readonly generationProbe?: ManagedGenerationProbe
   readonly stageMarkers: readonly ManagedStageMarker[]
   /**
    * Every method+path this engine serves through the session gateway. A path with no matching
