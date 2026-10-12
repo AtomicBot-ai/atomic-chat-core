@@ -20,6 +20,7 @@ import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
+import { storedZip } from '../helpers/backend-install-e2e.js'
 import { FixtureHttpServer } from '../helpers/fixture-http-server.js'
 import { BPW, bonsaiLikeGguf } from '../helpers/gguf-builder.js'
 
@@ -58,10 +59,10 @@ afterEach(async () => {
 
 const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex')
 
-/** The pack as PrismML ships it: one `llama-prism-*` directory; `--version` names the tag's build. */
-async function prismPack(): Promise<Buffer> {
+/** A runnable POSIX fixture in either layout; Windows flat packs are covered by the unit suite. */
+async function prismPack(flat = false): Promise<Buffer> {
   const top = join(scratch, 'pack')
-  const dir = join(top, `llama-${TAG}`)
+  const dir = flat ? top : join(top, `llama-${TAG}`)
   await mkdir(dir, { recursive: true })
   const exe = join(dir, 'llama-server')
   await writeFile(
@@ -71,13 +72,20 @@ async function prismPack(): Promise<Buffer> {
   )
   await chmod(exe, 0o755)
   const archive = join(scratch, 'pack.tar.gz')
-  await tarCreate({ gzip: true, file: archive, cwd: top }, [`llama-${TAG}`])
+  await tarCreate({ gzip: true, file: archive, cwd: top }, [flat ? 'llama-server' : `llama-${TAG}`])
   return readFile(archive)
 }
 
 /** Serve the manifest, the rules, the pack and the model; returns the daemon's test hooks. */
-async function serveFixtures(gguf: Buffer, ggufDelayMs = 0): Promise<NodeJS.ProcessEnv> {
-  const pack = await prismPack()
+async function serveFixtures(
+  gguf: Buffer,
+  ggufDelayMs = 0,
+  withCompanion = false
+): Promise<NodeJS.ProcessEnv> {
+  const pack = await prismPack(withCompanion)
+  // A harmless manifest-declared companion exercises the Windows ZIP ordering on a POSIX binary.
+  const companionName = 'prism-fixture-runtime.zip'
+  const companion = storedZip('fixture-runtime.txt', Buffer.from('fixture runtime'))
   const assetName = `llama-${TAG}-bin-${PRISM_BACKEND}.tar.gz`
   const manifest = {
     schema_version: 1,
@@ -99,7 +107,20 @@ async function serveFixtures(gguf: Buffer, ggufDelayMs = 0): Promise<NodeJS.Proc
             size: pack.length,
             sha256: sha256(pack),
             validation: 'approved',
+            ...(withCompanion ? { companion_backend: 'fixture-runtime' } : {}),
           },
+          ...(withCompanion
+            ? [
+                {
+                  backend: 'fixture-runtime',
+                  name: companionName,
+                  size: companion.length,
+                  sha256: sha256(companion),
+                  validation: 'approved',
+                  companion: true,
+                },
+              ]
+            : []),
         ],
       },
     ],
@@ -137,6 +158,7 @@ async function serveFixtures(gguf: Buffer, ggufDelayMs = 0): Promise<NodeJS.Proc
   server.files.set('/conf/manifest.json', { body: Buffer.from(JSON.stringify(manifest)) })
   server.files.set('/conf/rules.json', { body: Buffer.from(JSON.stringify(rules)) })
   server.files.set(`/releases/${TAG}/${assetName}`, { body: pack })
+  if (withCompanion) server.files.set(`/releases/${TAG}/${companionName}`, { body: companion })
   server.files.set(`/hf/${REPO}/resolve/${REVISION}/${FILE}`, {
     body: gguf,
     ...(ggufDelayMs ? { delayMs: ggufDelayMs } : {}),
@@ -201,8 +223,8 @@ async function plan(ready: ReadyLine): Promise<{ digest: string; engine: unknown
 describe.skipIf(!existsSync(BIN) || process.platform === 'win32' || PRISM_BACKEND === null)(
   'PrismML model setup',
   () => {
-    it('reports, plans and sets up a Prism-only file, refuses it upstream and loads it on atomic-prism', async () => {
-      const env = await serveFixtures(bonsai())
+    it('sets up a Prism-only file with a flat pack and companion, refuses it upstream and loads it on atomic-prism', async () => {
+      const env = await serveFixtures(bonsai(), 0, true)
       await core.writeFakeBackend(dataFolder)
       const { ready } = await core.startDaemon(dataFolder, daemons, [], env)
       await prepare(ready)
@@ -232,7 +254,11 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32' || PRISM_BACKEN
       })
 
       const body = { repo: REPO, file: FILE, request_id: 'e2e-1', plan_digest: planned.digest }
-      const stale = await call(ready, '/model-setups', { ...body, request_id: 'e2e-0', plan_digest: 'stale' })
+      const stale = await call(ready, '/model-setups', {
+        ...body,
+        request_id: 'e2e-0',
+        plan_digest: 'stale',
+      })
       expect(stale.status).toBe(409)
       expect(((await stale.json()) as { error: { code: string } }).error.code).toBe('MODEL_SETUP_PLAN_STALE')
 
@@ -251,11 +277,10 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32' || PRISM_BACKEN
       expect(yml).toContain(`model_path: llamacpp/models/${MODEL_ID}/${FILE}`)
       expect(yml).toContain('atomic_runtime:')
       expect(yml).toContain('provider: atomic-prism')
-      expect(
-        existsSync(
-          join(dataFolder, 'atomic-prism', 'backends', TAG, PRISM_BACKEND!, 'build', 'bin', 'llama-server')
-        )
-      ).toBe(true)
+      const bin = join(dataFolder, 'atomic-prism', 'backends', TAG, PRISM_BACKEND!, 'build', 'bin')
+      expect(existsSync(join(bin, 'llama-server'))).toBe(true)
+      expect(await readFile(join(bin, 'fixture-runtime.txt'), 'utf8')).toBe('fixture runtime')
+      expect(existsSync(join(bin, 'prism-fixture-runtime.zip'))).toBe(false)
       const settings = (await (await call(ready, '/settings/atomic-prism')).json()) as {
         values?: Record<string, unknown>
       }
