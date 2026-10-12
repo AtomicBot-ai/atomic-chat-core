@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { getPrismSupportedFeatures, PRISM_MANIFEST_BASELINE } from '../../backend/index.js'
@@ -130,6 +130,16 @@ function harness(
 
 const start = (h: Harness, requestId = 'r1', plan = bonsaiPlan()) =>
   h.service.start({ ...REQUEST, request_id: requestId, plan_digest: plan.digest })
+
+/** Until each setup's stored record shows `stage`: a run gets there through disk writes, which a
+ *  slow runner takes longer than any fixed sleep to finish (10 ms failed on Windows CI). */
+const untilStage = (h: Harness, stage: ModelSetup['stage'], ...setupIds: string[]) =>
+  vi.waitFor(
+    async () => {
+      for (const id of setupIds) expect((await h.service.get(id)).stage).toBe(stage)
+    },
+    { timeout: 10_000, interval: 10 }
+  )
 
 describe('task ids and error bodies', () => {
   it.each([
@@ -271,7 +281,9 @@ describe('ModelSetupService', () => {
     await start(h, 'r1')
     next = other
     await h.service.start({ ...REQUEST, model_id: 'me/other', request_id: 'r2', plan_digest: other.digest })
-    await new Promise((r) => setTimeout(r, 10))
+    // Both runs record `installing_engine` and only then ask for the install: past this point an
+    // unshared install would have been a second call.
+    await untilStage(h, 'installing_engine', 's1', 's2')
     expect(installs).toBe(1)
     const cancelled = await h.service.cancel('s1')
     expect(cancelled).toMatchObject({ stage: 'cancelled', stopped_at: 'installing_engine' })
@@ -329,7 +341,7 @@ describe('ModelSetupService', () => {
   it('recover marks a run a stopped core left as interrupted; resume plans again and finishes', async () => {
     const first = harness({ installEngine: () => new Promise(() => {}) })
     await start(first)
-    await new Promise((r) => setTimeout(r, 10))
+    await untilStage(first, 'installing_engine', 's1')
 
     const h = harness()
     await h.service.recover()
