@@ -401,12 +401,14 @@ export class BackendService {
         await extractArchive(archive, staging)
         await rm(archive, { force: true })
       }
-      await normalizeBackendLayout(staging, llamaServerExeName(platform))
-      await mergeCudartIntoBin(staging)
+      // A flat pack moves every staging entry into build/bin during normalisation. Consume the
+      // companion ZIPs first, while their download paths still point at the staging root.
       for (const companion of plan.companions ?? []) {
         await mergeCompanionIntoBin(staging, companion)
         await rm(companion, { force: true })
       }
+      await normalizeBackendLayout(staging, llamaServerExeName(platform))
+      await mergeCudartIntoBin(staging)
 
       const verify =
         this.deps.provider === 'atomic-prism'

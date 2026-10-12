@@ -420,10 +420,12 @@ describe('install on the PrismML provider', () => {
         capabilities: ['pq2_0'],
         ...(withdrawn ? { withdrawn: { reason: 'broken' } } : {}),
         assets: [
-          asset('win-cuda-12.4-x64', `llama-${TAG}-bin-win-cuda-12.4-x64.zip`, {
-            companion_backend: 'win-cudart-12.4-x64',
-          }),
-          asset('win-cudart-12.4-x64', 'cudart-llama-bin-win-cuda-12.4-x64.zip', { companion: true }),
+          ...['12.4', '13.3'].flatMap((cuda) => [
+            asset(`win-cuda-${cuda}-x64`, `llama-${TAG}-bin-win-cuda-${cuda}-x64.zip`, {
+              companion_backend: `win-cudart-${cuda}-x64`,
+            }),
+            asset(`win-cudart-${cuda}-x64`, `cudart-llama-bin-win-cuda-${cuda}-x64.zip`, { companion: true }),
+          ]),
           asset('linux-cpu-x64', `llama-${TAG}-bin-ubuntu-x64.tar.gz`),
         ],
       },
@@ -446,29 +448,34 @@ describe('install on the PrismML provider', () => {
       verifyPrismBackend: options.verify ?? (async () => {}),
     })
 
-  it('installs a Windows CUDA pack and its runtime into one build/bin, with hashes, under one task', async () => {
+  it.each(
+    ['12.4', '13.3'].flatMap((cuda) => [
+      { cuda, layout: 'flat', entry: 'llama-server.exe' },
+      { cuda, layout: 'nested', entry: `llama-${TAG}/llama-server.exe` },
+      { cuda, layout: 'build/bin', entry: 'build/bin/llama-server.exe' },
+    ])
+  )('installs a $layout Windows CUDA $cuda pack and its runtime under one task', async ({ cuda, entry }) => {
+    const backend = `win-cuda-${cuda}-x64`
+    const runtime = `cudart64_${cuda.split('.')[0]}.dll`
     const items: Array<{ url: string; save_path: string; sha256?: string; size?: number }> = []
     const downloader = {
       download: vi.fn(async (task: string, given: typeof items) => {
         expect(task).toBe('prism-task')
         items.push(...given)
-        await writeFile(given[0]!.save_path, storedZip(`llama-${TAG}/llama-server.exe`, Buffer.from('exe')))
-        await writeFile(given[1]!.save_path, storedZip('cudart64_12.dll', Buffer.from('dll')))
+        await writeFile(given[0]!.save_path, storedZip(entry, Buffer.from('exe')))
+        await writeFile(given[1]!.save_path, storedZip(runtime, Buffer.from('dll')))
       }),
     }
-    const result = await prism(downloader as never).install(TAG, 'win-cuda-12.4-x64', {
+    const result = await prism(downloader as never).install(TAG, backend, {
       taskId: 'prism-task',
     })
     expect(items.map((i) => i.url)).toEqual([
-      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-win-cuda-12.4-x64.zip`,
-      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/cudart-llama-bin-win-cuda-12.4-x64.zip`,
+      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-${backend}.zip`,
+      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/cudart-llama-bin-win-cuda-${cuda}-x64.zip`,
     ])
     expect(items.every((i) => i.sha256?.length === 64 && i.size === 3)).toBe(true)
-    expect(result.path).toBe(join(data.layout.provider('atomic-prism').backendsDir, TAG, 'win-cuda-12.4-x64'))
-    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
-      'cudart64_12.dll',
-      'llama-server.exe',
-    ])
+    expect(result.path).toBe(join(data.layout.provider('atomic-prism').backendsDir, TAG, backend))
+    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([runtime, 'llama-server.exe'])
     expect(await readdir(result.path)).toEqual(['build'])
   })
 
