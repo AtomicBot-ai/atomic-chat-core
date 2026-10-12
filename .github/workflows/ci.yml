@@ -104,6 +104,10 @@ jobs:
       - run: npm run build
       - run: npm run build:bin
       - run: npm run test:e2e
+        env:
+          # As in `unit`: all three of macos-14's vCPUs. The e2e suites mostly wait on the compiled
+          # binary and its fake engines. Empty elsewhere, which leaves Vitest's default.
+          VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: atomic-chat-core-${{ matrix.os }}
