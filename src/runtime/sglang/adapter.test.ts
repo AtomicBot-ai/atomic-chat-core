@@ -4,6 +4,7 @@ import type { ManagedLaunchContext } from '../managed-text/index.js'
 import { ManagedRequestRefusal, ManagedTextAdapterRegistry } from '../managed-text/index.js'
 import {
   SGLANG_CONTEXT_OVERFLOW_BODIES,
+  SGLANG_CONTEXT_TOO_LONG_LOG,
   SGLANG_NOT_ENOUGH_MEMORY_LOG,
   SGLANG_NO_KV_MEMORY_LOG,
   SGLANG_OOM_LOG,
@@ -428,6 +429,13 @@ describe('Этапы и таймаут загрузки SGLang', () => {
     expect(empty.kind).toBe('out-of-memory')
     expect(empty.numbers).toEqual({ mem_fraction_static: 0.7 })
     expect(empty.message).toMatch(/0\.7/)
+  })
+
+  it('classifies a context setting longer than the model’s own, with both numbers and what to change', () => {
+    const tooLong = sglangAdapter.classifyExit(SGLANG_CONTEXT_TOO_LONG_LOG, 1)
+    expect(tooLong.kind).toBe('other')
+    expect(tooLong.numbers).toEqual({ context_length: 8192, model_context_length: 4096 })
+    expect(tooLong.message).toMatch(/context length 8192 .*model.*4096.*Lower the context length/)
   })
 
   it('classifies an unknown architecture and anything else', () => {

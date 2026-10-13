@@ -25,10 +25,12 @@
  */
 import type { GpuFacts } from '../../contracts/index.js'
 import {
+  checkpointIsMultimodal,
   freeMemoryBytes,
   isUnifiedMemory,
   kvCacheQuantAlgo,
   readKvCacheShape,
+  supportsFp8KvCache,
   totalMemoryBytes,
   type CheckpointMemoryInputs,
   type HostMemory,
@@ -57,13 +59,6 @@ export const SGLANG_MAX_MEM_FRACTION_STATIC = 0.95
 const FALLBACK_KV_WEIGHT_SHARE = 0.25
 const FALLBACK_KV_MIN_BYTES = GiB
 
-/** Compute capability 8.9 (Ada) and newer. */
-function supportsFp8Kv(computeCapability: string): boolean {
-  const [major, minor] = computeCapability.split('.').map((part) => Number.parseInt(part, 10))
-  if (major === undefined || Number.isNaN(major)) return false
-  return major > 8 || (major === 8 && (minor ?? 0) >= 9)
-}
-
 /**
  * The KV cache the memory check counts: the KV token limit when set, else context × parallel
  * requests, × the bytes per token over the model's attention layers — and whether the model's shape
@@ -83,7 +78,7 @@ export function sglangKvCacheBytes(
     }
   }
   const fp8 =
-    (settings.kv_cache_dtype === 'fp8' && supportsFp8Kv(gpu.compute_capability)) ||
+    (settings.kv_cache_dtype === 'fp8' && supportsFp8KvCache(gpu.compute_capability)) ||
     kvCacheQuantAlgo(checkpoint.configJson, checkpoint.hfQuantConfigJson)?.toUpperCase() === 'FP8'
   const perToken = 2 * shape.numHiddenLayers * shape.numKeyValueHeads * shape.headDim * (fp8 ? 1 : 2)
   const tokens = settings.max_total_tokens ?? settings.context_length * settings.max_running_requests
@@ -137,15 +132,6 @@ export function sglangMemFractionStatic(settings: SglangSettings, gpu: GpuFacts,
   return Math.floor(clamped * 10_000) / 10_000
 }
 
-/** A vision or audio part in the checkpoint: a multimodal architecture, or its encoder's config. */
-function isMultimodal(configJson: JsonObject): boolean {
-  const architectures = Array.isArray(configJson['architectures']) ? configJson['architectures'] : []
-  return (
-    architectures.some((name) => typeof name === 'string' && name.endsWith('ForConditionalGeneration')) ||
-    ['vision_config', 'audio_config', 'vision_tower'].some((key) => key in configJson)
-  )
-}
-
 /** The launch plan `beforeCreate` hands the adapter, from the card re-probed right before the container. */
 export function sglangLaunchPlan(
   settings: SglangSettings,
@@ -155,7 +141,7 @@ export function sglangLaunchPlan(
 ): SglangLaunchPlan {
   return {
     memFractionStatic: settings.mem_fraction_static ?? sglangMemFractionStatic(settings, gpu, host),
-    multimodal: isMultimodal(checkpoint.configJson),
+    multimodal: checkpointIsMultimodal(checkpoint.configJson),
   }
 }
 

@@ -29,6 +29,7 @@
  */
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
+import { supportsFp8KvCache } from '../managed-models/index.js'
 import { withGenerationDefaults } from '../managed-text/generation-defaults.js'
 import {
   MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
@@ -77,14 +78,6 @@ function isPlan(value: unknown): value is SglangLaunchPlan {
     plan['memFractionStatic'] < 1 &&
     typeof plan['multimodal'] === 'boolean'
   )
-}
-
-/** Compute capability 8.9 (Ada) and newer: FP8 KV cache. Unknown or older: the model's own precision. */
-function supportsFp8Kv(computeCapability: string | null | undefined): boolean {
-  if (computeCapability === null || computeCapability === undefined) return false
-  const [major, minor] = computeCapability.split('.').map((part) => Number.parseInt(part, 10))
-  if (major === undefined || Number.isNaN(major)) return false
-  return major > 8 || (major === 8 && (minor ?? 0) >= 9)
 }
 
 /**
@@ -155,7 +148,7 @@ export function buildSglangLaunch(context: ManagedLaunchContext<SglangSettings>)
   if (settings.dtype !== 'auto') argv.push('--dtype', settings.dtype)
   if (settings.seed !== null) argv.push('--random-seed', String(settings.seed))
   argv.push(...cudaGraphArgs(settings))
-  if (settings.kv_cache_dtype === 'fp8' && supportsFp8Kv(context.gpuComputeCapability)) {
+  if (settings.kv_cache_dtype === 'fp8' && supportsFp8KvCache(context.gpuComputeCapability)) {
     argv.push('--kv-cache-dtype', 'fp8_e4m3')
   }
   // The checkpoint's own "text only" declaration, which every class of the descriptor honours (no
@@ -173,8 +166,9 @@ export function buildSglangLaunch(context: ManagedLaunchContext<SglangSettings>)
       HF_HUB_OFFLINE: '1',
       TRANSFORMERS_OFFLINE: '1',
       DO_NOT_TRACK: '1',
-      // A request that names no output gets this, then whatever room the context has left: SGLang's
-      // scheduler clips rather than refuses, so a long prompt is not refused for the cap's room.
+      // A chat request that names no output gets this, then whatever room the context has left:
+      // SGLang's scheduler clips rather than refuses, so a long prompt is not refused for the cap's
+      // room. (Completions keep OpenAI's default of 16, which SGLang applies before this.)
       SGLANG_MAX_NEW_TOKENS_LIMIT: String(settings.max_output_tokens),
       ...cacheEnv(context.engineCachePath),
     },
@@ -202,6 +196,8 @@ const NO_KV_MEMORY =
 /** `model_executor/pool_configurator.py`: a KV pool of no tokens. */
 const EMPTY_POOL =
   /Not enough memory\. Please try to increase --mem-fraction-static\.(?: Current value: mem_fraction_static=([\d.]+))?/
+/** `configs/model_config.py::_derive_context_length`: the setting is longer than the model's own context. */
+const CONTEXT_TOO_LONG = /context_length \((\d+)\) is greater than the derived context_length \((\d+)\)/
 const UNSUPPORTED_ARCHITECTURE = /Model architectures \[([^\]]*)\] are not supported for now/
 const ANY_OOM = /out of memory/i
 
@@ -249,6 +245,17 @@ export function classifySglangExit(log: string, exitCode: number | null): Manage
         free_gib: round(toGiB(Number(oom[3]), oom[4] as string)),
       },
       excerpt: oom[0],
+    }
+  }
+  const tooLong = CONTEXT_TOO_LONG.exec(log)
+  if (tooLong !== null) {
+    return {
+      kind: 'other',
+      message:
+        `The context length ${tooLong[1]} is longer than the model supports (${tooLong[2]} tokens). ` +
+        `Lower the context length in the SGLang settings to ${tooLong[2]} or less.`,
+      numbers: { context_length: Number(tooLong[1]), model_context_length: Number(tooLong[2]) },
+      excerpt: tooLong[0],
     }
   }
   const arch = UNSUPPORTED_ARCHITECTURE.exec(log)
@@ -302,9 +309,9 @@ export const SGLANG_REWRITABLE_ROUTES: readonly ManagedRoute[] = [
 const REWRITABLE = new Set(SGLANG_REWRITABLE_ROUTES.map((route) => route.path))
 
 /**
- * Caps the output a request asks for at `max_output_tokens` (one key, as the client sent it); a
+ * Caps the output a request asks for at `max_output_tokens` (one key, as the client sent it); a chat
  * request that asks for none is capped by `SGLANG_MAX_NEW_TOKENS_LIMIT` instead, within the room the
- * context has left. Writes the sampling defaults a request does not set: SGLang's OpenAI path fills
+ * context has left (a completions request that names none gets OpenAI's 16, SGLang's own default). Writes the sampling defaults a request does not set: SGLang's OpenAI path fills
  * every sampling value before `--preferred-sampling-params` would apply. Refuses what the session
  * cannot do with `:1337`'s own wording and code: tools without a parser, structured output the family
  * does not declare, images.

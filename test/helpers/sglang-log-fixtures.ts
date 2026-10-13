@@ -70,3 +70,8 @@ export const SGLANG_CONTEXT_OVERFLOW_BODIES = {
   total:
     '{"object":"error","message":"Requested token count exceeds the model\'s maximum context length of 8192 tokens. You requested a total of 9100 tokens: 8100 tokens from the input messages and 1000 tokens for the completion. Please reduce the number of tokens in the input messages or the completion to fit within the limit.","type":"BadRequestError","param":null,"code":400}',
 }
+
+/** `configs/model_config.py::_derive_context_length`: the context setting is longer than the model's own. */
+export const SGLANG_CONTEXT_TOO_LONG_LOG = [
+  "ValueError: Warning: User-specified context_length (8192) is greater than the derived context_length (4096). This may lead to incorrect model outputs or CUDA errors. Note that the derived context_length may differ from max_position_embeddings in the model's config. To allow overriding this maximum, set the env var SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1",
+].join('\n')
