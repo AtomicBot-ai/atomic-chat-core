@@ -421,6 +421,12 @@ export const sglangAdapter: ManagedTextAdapter<SglangSettings> = {
   id: 'sglang',
   contractVersion: MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   readiness: { path: '/health', expectedStatus: 200 },
+  // `/health` alone is not proof the engine can serve (spec: ready only after one generated token).
+  generationProbe: {
+    modelsPath: '/v1/models',
+    path: '/v1/chat/completions',
+    body: { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1, stream: false },
+  },
   routes: SGLANG_ROUTES,
   rewritableRoutes: SGLANG_REWRITABLE_ROUTES,
   stageMarkers: STAGE_MARKERS,

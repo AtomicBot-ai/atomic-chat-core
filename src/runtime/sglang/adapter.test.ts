@@ -51,6 +51,15 @@ describe('the sglang adapter', () => {
     expect(registry.resolve('sglang', 1)).toBe(sglangAdapter)
     expect(sglangAdapter.readiness).toEqual({ path: '/health', expectedStatus: 200 })
   })
+
+  // Scenario "Движок отвечает на health, но не генерирует": ready only once one token was generated.
+  it('proves a ready engine generates: one token through the chat route before ready', () => {
+    expect(sglangAdapter.generationProbe).toEqual({
+      modelsPath: '/v1/models',
+      path: '/v1/chat/completions',
+      body: { messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1, stream: false },
+    })
+  })
 })
 
 describe('buildLaunch: argv', () => {
