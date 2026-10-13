@@ -12,7 +12,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { AtomicCoreError } from '../contracts/index.js'
+import { AtomicCoreError, MEDIA_DIALECT_KIND, MEDIA_DIALECTS } from '../contracts/index.js'
+import type { CloudProviderMedia, CloudProviderMediaModel, MediaDialect } from '../contracts/index.js'
 import type { ApiKeyStore } from '../credentials/index.js'
 import type { RemoteProvider } from '../router/index.js'
 import type { SettingsStore } from '../settings/index.js'
@@ -39,6 +40,8 @@ export interface CloudProviderView {
   base_url: string | null
   custom_headers: CustomHeader[]
   models: string[]
+  /** The image and video models enabled for this provider; absent when none were registered. */
+  media?: CloudProviderMedia
   has_api_key: boolean
 }
 
@@ -49,6 +52,8 @@ export interface CloudProviderInput {
   base_url?: string | null
   custom_headers?: CustomHeader[]
   models?: string[]
+  /** Absent keeps what is stored; `null` clears it (the same rule as `api_key`). */
+  media?: CloudProviderMedia | null
 }
 
 interface StoredProvider {
@@ -56,8 +61,75 @@ interface StoredProvider {
   base_url: string | null
   custom_headers: CustomHeader[]
   models: string[]
+  media?: CloudProviderMedia
 }
 
+const isDialect = (value: unknown): value is MediaDialect =>
+  typeof value === 'string' && (MEDIA_DIALECTS as readonly string[]).includes(value)
+
+/**
+ * The media part of a stored record, read as leniently as the rest: an entry this core does not
+ * understand (a dialect it has no adapter for) is dropped, not the provider.
+ */
+export function readStoredMedia(raw: unknown): CloudProviderMedia | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const fields = raw as Record<string, unknown>
+  const models: CloudProviderMediaModel[] = []
+  const seen = new Set<string>()
+  for (const item of Array.isArray(fields['models']) ? fields['models'] : []) {
+    const entry = item as Record<string, unknown> | null
+    const id = entry?.['id']
+    const kind = entry?.['kind']
+    if (typeof id !== 'string' || id === '' || (kind !== 'image' && kind !== 'video')) continue
+    if (seen.has(`${kind}:${id}`)) continue
+    seen.add(`${kind}:${id}`)
+    models.push({ id, kind })
+  }
+  const media: CloudProviderMedia = { models }
+  if (isDialect(fields['image_api']) && MEDIA_DIALECT_KIND[fields['image_api']] === 'image')
+    media.image_api = fields['image_api']
+  if (isDialect(fields['video_api']) && MEDIA_DIALECT_KIND[fields['video_api']] === 'video')
+    media.video_api = fields['video_api']
+  return media
+}
+
+/** The media part of a registration, checked strictly: a malformed one is refused. */
+function checkedMedia(media: unknown): CloudProviderMedia {
+  if (media === null || typeof media !== 'object' || Array.isArray(media))
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'media must be an object')
+  const fields = media as Record<string, unknown>
+  if (!Array.isArray(fields['models']))
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'media.models must be a list of {id, kind}')
+  for (const item of fields['models']) {
+    const entry = item as Record<string, unknown> | null
+    if (
+      typeof entry?.['id'] !== 'string' ||
+      entry['id'] === '' ||
+      (entry['kind'] !== 'image' && entry['kind'] !== 'video')
+    )
+      throw new AtomicCoreError('INVALID_ARGUMENT', 'media.models must be a list of {id, kind}')
+  }
+  for (const [key, kind] of [
+    ['image_api', 'image'],
+    ['video_api', 'video'],
+  ] as const) {
+    const value = fields[key]
+    if (value === undefined || value === null) continue
+    if (!isDialect(value) || MEDIA_DIALECT_KIND[value] !== kind)
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `media.${key} must be one of the ${kind} adapters`,
+        String(value)
+      )
+  }
+  return readStoredMedia(media) as CloudProviderMedia
+}
+
+/**
+ * What the key is bound to. Media stays out on purpose: an adapter derives every media URL from
+ * `base_url`, so the media list never changes where the key goes, and a record registered before
+ * media existed keeps its key.
+ */
 function binding(provider: StoredProvider): string {
   return createHash('sha256')
     .update(JSON.stringify([provider.provider, provider.base_url, provider.custom_headers, provider.models]))
@@ -78,6 +150,7 @@ export class CloudRegistry {
       const baseUrl = raw['base_url']
       const headers = Array.isArray(raw['custom_headers']) ? raw['custom_headers'] : []
       const models = Array.isArray(raw['models']) ? raw['models'] : []
+      const media = readStoredMedia(raw['media'])
       return [
         {
           provider,
@@ -88,6 +161,7 @@ export class CloudRegistry {
               typeof (h as CustomHeader)?.value === 'string'
           ),
           models: models.filter((m): m is string => typeof m === 'string'),
+          ...(media ? { media } : {}),
         },
       ]
     })
@@ -101,9 +175,13 @@ export class CloudRegistry {
     return this.list().find((p) => p.provider === provider)
   }
 
-  /** Register or replace a provider. Everything but the key is replaced wholesale, as the app does. */
+  /**
+   * Register or replace a provider. Everything but the key and the media is replaced wholesale, as
+   * the app does; the key and the media are kept when the input leaves them out.
+   */
   async upsert(input: CloudProviderInput): Promise<CloudProviderView> {
     const provider = validate(input)
+    const media = input.media === undefined || input.media === null ? input.media : checkedMedia(input.media)
     const next: StoredProvider = {
       provider,
       base_url: input.base_url === undefined || input.base_url === null ? null : input.base_url.trim(),
@@ -113,6 +191,8 @@ export class CloudRegistry {
     return this.serialize(async () => {
       const list = this.stored()
       const at = list.findIndex((p) => p.provider === provider)
+      const kept = media === undefined ? list[at]?.media : (media ?? undefined)
+      if (kept) next.media = kept
       if (at >= 0) list[at] = next
       else list.push(next)
       const oldKey = this.keys.record(provider)
@@ -175,6 +255,7 @@ export class CloudRegistry {
               baseUrl: p.base_url,
               customHeaders: p.custom_headers,
               models: p.models,
+              ...(p.media ? { media: p.media } : {}),
             },
           ],
         ]

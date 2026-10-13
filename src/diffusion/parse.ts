@@ -20,6 +20,9 @@ import type {
   ImageSource,
   ImageWorkflowId,
   LoadDiffusionModelRequest,
+  MediaTarget,
+  RemoteImageOptions,
+  RemoteVideoOptions,
   VideoGenerateRequest,
   VideoWorkflowId,
 } from '../contracts/index.js'
@@ -211,6 +214,38 @@ function parseSource(value: unknown, field: string): ImageSource {
   return invalid(field, 'an image: {path} or {base64}')
 }
 
+/** `{provider, model}`: which provider's model a request is for. */
+export function parseMediaTarget(value: unknown, field: string): MediaTarget {
+  const source = fields(value, field)
+  const provider = string(source['provider'], `${field}.provider`).trim()
+  const model = string(source['model'], `${field}.model`).trim()
+  if (provider === '') invalid(`${field}.provider`, 'a provider id')
+  if (model === '') invalid(`${field}.model`, 'a model id')
+  return { provider, model }
+}
+
+function parseRemoteImageOptions(value: unknown, field: string): RemoteImageOptions {
+  const source = fields(value, field)
+  const options: RemoteImageOptions = {}
+  for (const key of ['size', 'aspectRatio', 'resolution', 'quality', 'background', 'outputFormat'] as const)
+    copyOptional(options, key, source, `${field}.${key}`, string)
+  return options
+}
+
+function parseRemoteVideoOptions(value: unknown, field: string): RemoteVideoOptions {
+  const source = fields(value, field)
+  const options: RemoteVideoOptions = {}
+  copyOptional(options, 'durationSecs', source, `${field}.durationSecs`, (v, f) => {
+    const seconds = number(v, f)
+    if (seconds <= 0) invalid(f, 'a number of seconds above zero')
+    return seconds
+  })
+  for (const key of ['resolution', 'aspectRatio', 'size'] as const)
+    copyOptional(options, key, source, `${field}.${key}`, string)
+  copyOptional(options, 'generateAudio', source, `${field}.generateAudio`, boolean)
+  return options
+}
+
 export function parseImageGenerateRequest(body: unknown): ImageGenerateRequest {
   const source = fields(body, 'request')
   const request: ImageGenerateRequest = {
@@ -236,6 +271,8 @@ export function parseImageGenerateRequest(body: unknown): ImageGenerateRequest {
     return value.map((item, index) => parseSource(item, `${field}[${index}]`))
   })
   copyOptional(request, 'strength', source, 'strength', number)
+  copyOptional(request, 'target', source, 'target', parseMediaTarget)
+  copyOptional(request, 'remote', source, 'remote', parseRemoteImageOptions)
   return request
 }
 
@@ -260,6 +297,8 @@ export function parseVideoGenerateRequest(body: unknown): VideoGenerateRequest {
   )
   copyOptional(request, 'initImage', source, 'initImage', parseSource)
   copyOptional(request, 'endImage', source, 'endImage', parseSource)
+  copyOptional(request, 'target', source, 'target', parseMediaTarget)
+  copyOptional(request, 'remote', source, 'remote', parseRemoteVideoOptions)
   return request
 }
 

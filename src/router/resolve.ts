@@ -6,6 +6,8 @@
  * See PLAN.md §3.2. Public API of this module is exported from this file only.
  */
 
+import type { CloudProviderMedia, MediaKind, MediaTarget } from '../contracts/index.js'
+
 /** A cloud provider the app registered: where to send its models and with which credentials. */
 export interface RemoteProvider {
   /** Registry key, e.g. `openai`, `openrouter`. */
@@ -15,6 +17,8 @@ export interface RemoteProvider {
   customHeaders: Array<{ header: string; value: string }>
   /** Model ids the user has enabled for this provider. */
   models: string[]
+  /** The image and video models enabled for this provider; never part of chat routing. */
+  media?: CloudProviderMedia
 }
 
 export type LocalProvider =
@@ -77,4 +81,28 @@ export function modelIdsMatch(a: string, b: string): boolean {
     return false
   }
   return true
+}
+
+/**
+ * The provider that serves the image or video model a client names, among the enabled media models
+ * only (chat models never match). Two rules, in order:
+ * 1. `<provider>/<model>` where `<provider>` is registered and lists `<model>` (`openrouter/google/veo-3.1`);
+ * 2. the first provider, in registration order, that lists the whole id.
+ */
+export function resolveRemoteMedia(
+  modelId: string,
+  kind: MediaKind,
+  providers: ReadonlyMap<string, RemoteProvider>
+): MediaTarget | undefined {
+  const lists = (config: RemoteProvider, id: string): boolean =>
+    config.media?.models.some((model) => model.kind === kind && model.id === id) ?? false
+  const slash = modelId.indexOf('/')
+  if (slash > 0) {
+    const named = providers.get(modelId.slice(0, slash))
+    const rest = modelId.slice(slash + 1)
+    if (named && lists(named, rest)) return { provider: named.provider, model: rest }
+  }
+  for (const config of providers.values())
+    if (lists(config, modelId)) return { provider: config.provider, model: modelId }
+  return undefined
 }

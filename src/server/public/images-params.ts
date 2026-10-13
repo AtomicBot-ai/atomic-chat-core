@@ -169,6 +169,23 @@ export function mapError(code: DiffusionErrorCode): MappedError {
       return { status: 500, type: 'server_error', code: 'insufficient_memory' }
     case 'CANCELLED':
       return { status: 500, type: 'server_error', code: 'cancelled' }
+    case 'REMOTE_NOT_CONFIGURED':
+      return { status: 404, type: 'invalid_request_error', code: 'model_not_found' }
+    case 'REMOTE_REJECTED':
+    case 'REMOTE_UNSUPPORTED':
+      return { status: 400, type: 'invalid_request_error', code: 'invalid_request' }
+    case 'REMOTE_CONTENT_BLOCKED':
+      return { status: 400, type: 'invalid_request_error', code: 'content_policy_violation' }
+    case 'REMOTE_RATE_LIMITED':
+      return { status: 429, type: 'rate_limit_error', code: 'rate_limit_exceeded' }
+    case 'REMOTE_QUOTA':
+      return { status: 402, type: 'insufficient_quota', code: 'insufficient_quota' }
+    case 'REMOTE_AUTH_FAILED':
+      return { status: 502, type: 'server_error', code: 'upstream_auth_failed' }
+    case 'REMOTE_UNAVAILABLE':
+      return { status: 502, type: 'server_error', code: 'upstream_error' }
+    case 'REMOTE_TIMEOUT':
+      return { status: 504, type: 'server_error', code: 'timeout' }
     default:
       return { status: 500, type: 'server_error', code: 'server_error' }
   }
@@ -178,6 +195,6 @@ export function mapError(code: DiffusionErrorCode): MappedError {
 export function errorKindFor(status: number): string {
   if (status === 400) return 'bad_request'
   if (status === 429) return 'busy'
-  if (status === 503) return 'not_found'
+  if (status === 503 || status === 404) return 'not_found'
   return 'upstream'
 }

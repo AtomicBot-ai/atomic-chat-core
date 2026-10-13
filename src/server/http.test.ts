@@ -122,6 +122,21 @@ describe('error envelope', () => {
     for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)
   })
 
+  it("maps the remote media codes: a provider's refusal is never the caller's 401", () => {
+    const table: Array<[ErrorCode, number]> = [
+      ['REMOTE_NOT_CONFIGURED', 409],
+      ['REMOTE_AUTH_FAILED', 502],
+      ['REMOTE_UNAVAILABLE', 502],
+      ['REMOTE_TIMEOUT', 504],
+      ['REMOTE_QUOTA', 402],
+      ['REMOTE_RATE_LIMITED', 429],
+      ['REMOTE_REJECTED', 422],
+      ['REMOTE_CONTENT_BLOCKED', 422],
+      ['REMOTE_UNSUPPORTED', 422],
+    ]
+    for (const [code, status] of table) expect(statusForCode(code), code).toBe(status)
+  })
+
   it('maps the managed-runtime codes: every conflict is 409, an unsupported engine is 422', () => {
     const table: Array<[ErrorCode, number]> = [
       ['MANAGED_OPERATION_NOT_FOUND', 404],

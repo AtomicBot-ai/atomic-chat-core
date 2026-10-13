@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiKeyStore } from '../credentials/index.js'
 import { SettingsStore } from '../settings/index.js'
-import { CloudRegistry } from './registry.js'
+import { CloudRegistry, readStoredMedia } from './registry.js'
 
 let dir: string
 let settings: SettingsStore
@@ -220,5 +220,96 @@ describe('CloudRegistry', () => {
         has_api_key: false,
       },
     ])
+  })
+})
+
+describe('CloudRegistry media', () => {
+  const media = {
+    image_api: 'openai-images' as const,
+    models: [{ id: 'gpt-image-2', kind: 'image' as const }],
+  }
+
+  it('keeps the key bound after a media-only change, and media out of chat routing', async () => {
+    await registry.upsert({
+      provider: 'openai',
+      api_key: 'sk',
+      base_url: 'https://api.openai.com/v1',
+      models: ['gpt-5'],
+    })
+    await registry.upsert({
+      provider: 'openai',
+      base_url: 'https://api.openai.com/v1',
+      models: ['gpt-5'],
+      media,
+    })
+    const routed = registry.routing().get('openai')
+    expect(routed?.apiKey).toBe('sk')
+    expect(routed?.models).toEqual(['gpt-5'])
+    expect(routed?.media).toEqual(media)
+  })
+
+  it('keeps stored media when a registration leaves it out, clears it on null', async () => {
+    await registry.upsert({ provider: 'p', models: [], media })
+    await registry.upsert({ provider: 'p', models: ['m'] })
+    expect(registry.get('p')?.media).toEqual(media)
+    await registry.upsert({ provider: 'p', models: ['m'], media: null })
+    expect(registry.get('p')?.media).toBeUndefined()
+  })
+
+  it("does not touch another provider's media when one is registered", async () => {
+    await registry.upsert({ provider: 'a', models: [], media })
+    await registry.upsert({ provider: 'b', models: ['x'] })
+    expect(registry.get('a')?.media).toEqual(media)
+  })
+
+  it('refuses malformed media, and an adapter of the wrong kind', async () => {
+    await expect(
+      registry.upsert({ provider: 'p', media: { models: [{ id: '', kind: 'image' }] } })
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    await expect(
+      registry.upsert({ provider: 'p', media: { video_api: 'openai-images', models: [] } })
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+  })
+})
+
+describe('readStoredMedia', () => {
+  it('drops what it cannot read and keeps the rest', () => {
+    expect(
+      readStoredMedia({
+        image_api: 'some-future-api',
+        video_api: 'gemini-veo',
+        models: [
+          { id: 'a', kind: 'image' },
+          { id: 'a', kind: 'image' },
+          { id: 'b', kind: 'audio' },
+          { id: 'v', kind: 'video' },
+        ],
+      })
+    ).toEqual({
+      video_api: 'gemini-veo',
+      models: [
+        { id: 'a', kind: 'image' },
+        { id: 'v', kind: 'video' },
+      ],
+    })
+    expect(readStoredMedia('nope')).toBeUndefined()
+    expect(readStoredMedia({ image_api: 'a1111', video_api: 'a1111' })).toEqual({
+      image_api: 'a1111',
+      models: [],
+    })
+  })
+
+  it('refuses media that is not an object, or models that are not a list', async () => {
+    await expect(registry.upsert({ provider: 'p', media: 'x' as never })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    await expect(registry.upsert({ provider: 'p', media: { models: 'x' } as never })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
+    await expect(
+      registry.upsert({ provider: 'p', media: { models: [{ id: 'a', kind: 'audio' }] } as never })
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
   })
 })

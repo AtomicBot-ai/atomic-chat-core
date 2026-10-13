@@ -12,6 +12,8 @@ import {
   BLANK_SCAN_LIMIT,
   FLAGS_FILE,
   Gallery,
+  imagePath,
+  imageSidecarPath,
   isBlankOutput,
   isValidId,
   makeId,
@@ -396,5 +398,61 @@ describe('the flags file', () => {
     expect(await readdir(dir)).toEqual([FLAGS_FILE])
     const error = await refusal(writeFlags(join(dir, 'missing'), new Map()))
     expect(error.message).toBe('Could not write to the images folder.')
+  })
+})
+
+describe('remote images', () => {
+  const JPEG = Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x30, 0x00, 0x40]),
+    Buffer.alloc(16),
+  ])
+  const remoteRecipe = (n: number) =>
+    sampleRecipe({
+      jobId: jobId(n),
+      model: { modelId: 'grok-imagine-image-2.0', family: 'xai', displayName: 'Grok Imagine', filename: '' },
+      engine: { kind: 'remote', provider: 'xai', api: 'xai-images' },
+    })
+
+  it('keeps a JPEG as it came with a sidecar recipe, lists, flags, exports and deletes it', async () => {
+    const gallery = new Gallery()
+    const saved = await gallery.saveRemote(dir, remoteRecipe(1), JPEG, 'image/jpeg')
+    const id = makeId(jobId(1), 0)
+    expect(saved.item).toMatchObject({
+      id,
+      path: imagePath(dir, id, '.jpg'),
+      thumbnailPath: null,
+      width: 64,
+      height: 48,
+    })
+    expect(await exists(imageSidecarPath(dir, id))).toBe(true)
+    const page = await gallery.list(dir, { offset: 0, limit: 10 })
+    expect(page.items.map((item) => item.id)).toEqual([id])
+    expect(page.items[0]?.recipe.engine).toEqual({ kind: 'remote', provider: 'xai', api: 'xai-images' })
+    expect((await gallery.setFlags(dir, id, { pinned: true })).pinned).toBe(true)
+    await gallery.export(dir, id, join(dir, 'out', 'copy.jpg'))
+    expect(await readFile(join(dir, 'out', 'copy.jpg'))).toEqual(JPEG)
+    await gallery.delete(dir, [id])
+    expect(await exists(imagePath(dir, id, '.jpg'))).toBe(false)
+    expect(await exists(imageSidecarPath(dir, id))).toBe(false)
+  })
+
+  it('splices the recipe into a provider PNG like a local one', async () => {
+    const gallery = new Gallery()
+    const png = await paintedPng(32, 32)
+    const saved = await gallery.saveRemote(dir, remoteRecipe(2), png, 'image/png')
+    expect(saved.item.path.endsWith('.png')).toBe(true)
+    expect((await gallery.get(dir, saved.item.id))?.recipe.engine.kind).toBe('remote')
+  })
+
+  it('leaves a JPEG without a sidecar alone, and refuses an image type it does not keep', async () => {
+    const gallery = new Gallery()
+    const id = makeId(jobId(3), 0)
+    await writeFile(imagePath(dir, id, '.jpg'), JPEG)
+    expect((await gallery.list(dir, { offset: 0, limit: 10 })).total).toBe(0)
+    await gallery.delete(dir, [id])
+    expect(await exists(imagePath(dir, id, '.jpg'))).toBe(true)
+    expect((await refusal(gallery.saveRemote(dir, remoteRecipe(4), JPEG, 'image/gif'))).code).toBe(
+      'INVALID_OUTPUT'
+    )
   })
 })

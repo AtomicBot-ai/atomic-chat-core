@@ -189,10 +189,18 @@ export function videoStatusOf(state: VideoJob['state']): OpenAiVideoStatus {
 const seconds = (frames: number, fps: number): string =>
   fps > 0 ? String(Math.round((frames / fps) * 100) / 100) : '0'
 
+/** A clip's size as the API writes it: the file's when known, else what was asked. */
+function sizeOf(width: number, height: number, request: VideoGenerateRequest): string {
+  if (width > 0 && height > 0) return `${width}x${height}`
+  return request.remote?.size ?? request.remote?.resolution ?? `${width}x${height}`
+}
+
 export function videoObjectFromJob(job: VideoJob): OpenAiVideo {
   const item = job.outputs[0]
   const fps = job.request.fps ?? item?.fps ?? 0
   const frames = item?.frameCount ?? job.request.frames ?? 0
+  // A provider's clip says its length in seconds, not in frames.
+  const remoteSeconds = item?.recipe.durationSecs ?? job.request.remote?.durationSecs
   const error =
     job.state === 'cancelled'
       ? { code: 'cancelled', message: job.error?.message ?? 'Generation was cancelled.' }
@@ -211,8 +219,10 @@ export function videoObjectFromJob(job: VideoJob): OpenAiVideo {
     created_at: Math.floor(job.createdAtMs / 1000),
     completed_at: job.finishedAtMs === undefined ? null : Math.floor(job.finishedAtMs / 1000),
     expires_at: null,
-    seconds: seconds(frames, fps),
-    size: `${job.request.width}x${job.request.height}`,
+    seconds: remoteSeconds !== undefined ? String(remoteSeconds) : seconds(frames, fps),
+    size: item
+      ? sizeOf(item.width, item.height, job.request)
+      : sizeOf(job.request.width, job.request.height, job.request),
     prompt: job.request.prompt,
     remixed_from_video_id: null,
     error,
@@ -236,7 +246,8 @@ export function videoObjectFromItem(item: GalleryVideoItem): OpenAiVideo {
     created_at: Math.floor(item.createdAtMs / 1000),
     completed_at: Math.floor((item.createdAtMs + item.recipe.durationMs) / 1000),
     expires_at: null,
-    seconds: seconds(item.frameCount, item.fps),
+    seconds:
+      item.recipe.durationSecs !== undefined ? String(item.durationSecs) : seconds(item.frameCount, item.fps),
     size: `${item.width}x${item.height}`,
     prompt: item.recipe.prompt,
     remixed_from_video_id: null,

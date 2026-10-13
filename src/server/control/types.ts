@@ -22,6 +22,9 @@ import type {
   EngineUpdateResult,
   EngineVersionsRequest,
   EngineVersionsResponse,
+  MediaCatalogView,
+  MediaKind,
+  MediaProviderModels,
 } from '../../contracts/index.js'
 import type {
   BeginOperation,
@@ -385,6 +388,12 @@ export interface ExternalSessionControl {
   answerCtx: (owner: string, requestId: string, outcome: unknown) => boolean
 }
 
+/** Remote media (ADR 2026-10-13-remote-media-shares-the-diffusion-job-table): the catalog and a provider's models. */
+export interface MediaControl {
+  catalog: () => Promise<MediaCatalogView>
+  providerModels: (provider: string, kind: MediaKind) => Promise<MediaProviderModels>
+}
+
 /** Cloud providers the public server routes to (PLAN.md §4, stage 4c). Keys are never read back. */
 export interface CloudControl {
   list: () => CloudProviderView[]
@@ -475,6 +484,8 @@ export interface ControlServerDeps {
   decision?: DecisionControl
   /** The embedding model; without it the `/embedding/*` routes answer `EMBEDDING_UNAVAILABLE`. */
   embedding?: EmbeddingControl
+  /** Remote media; without it the `/media/*` routes answer `REMOTE_NOT_CONFIGURED`. */
+  media?: MediaControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
   /** Absent in a core without the setup wired; its routes then answer `INVALID_ARGUMENT`. */

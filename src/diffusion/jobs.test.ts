@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
-import type { CoreEvents, VideoJob } from '../contracts/index.js'
+import type { CoreEvents, LocalRecipeEngine, VideoJob } from '../contracts/index.js'
 import {
   fakeServer,
   paintedPng,
@@ -254,7 +254,7 @@ describe('a completed job', () => {
     expect(outcome.job.outputs[1]?.recipe.seed).toBe(1235)
     expect(outcome.job.outputs[1]?.recipe.batchSeed).toBe(1234)
     expect(outcome.job.outputs[0]?.recipe.samplingMethod).toBe('euler')
-    expect(outcome.job.outputs[0]?.recipe.engine.tag).toBe('test-tag')
+    expect((outcome.job.outputs[0]?.recipe.engine as LocalRecipeEngine | undefined)?.tag).toBe('test-tag')
     expect(outcome.job.outputs[0]?.recipe.model.filename).toBe('z-image-turbo-Q4_K_M.gguf')
     expect(outcome.job.outputs[0]?.path.startsWith(join(dataFolder, 'images'))).toBe(true)
     expect((await stat(outcome.job.outputs[0]?.path as string)).isFile()).toBe(true)
@@ -778,7 +778,10 @@ describe('the server dying', () => {
     expect(h.state.spec?.cpuFallback).toBe(true)
     expect(h.reasons()).toContain('cpu-fallback')
     expect(h.log.some((line) => line.includes('restarting sd-server on the CPU backend'))).toBe(true)
-    if (result.ok) expect(result.outcome.job.outputs[0]?.recipe.engine.cpuFallback).toBe(true)
+    if (result.ok)
+      expect(
+        (result.outcome.job.outputs[0]?.recipe.engine as LocalRecipeEngine | undefined)?.cpuFallback
+      ).toBe(true)
 
     // A second abort, now on the CPU, is the end.
     const again = await startImageJob(h.deps, sampleRequest({ batchSize: 1 }))
@@ -829,7 +832,10 @@ describe('the server dying', () => {
     expect(h.reasons()).toContain('offload-fallback')
     expect(h.errors(), 'the retried shortage is not reported').toEqual([])
     expect(h.log.some((line) => line.includes('restarting sd-server under group'))).toBe(true)
-    if (result.ok) expect(result.outcome.job.outputs[0]?.recipe.engine.offload).toBe('group')
+    if (result.ok)
+      expect((result.outcome.job.outputs[0]?.recipe.engine as LocalRecipeEngine | undefined)?.offload).toBe(
+        'group'
+      )
   })
 
   it('a job the GPU could not fit is retried under the fallback, and failing there fails it', async () => {

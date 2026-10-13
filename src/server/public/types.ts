@@ -19,6 +19,7 @@ import type {
   ImageJob,
   VideoGalleryPage,
   VideoGenerateRequest,
+  MediaTarget,
   VideoJob,
 } from '../../contracts/index.js'
 import type { LocalProvider, RemoteProvider } from '../../router/index.js'
@@ -73,6 +74,8 @@ export interface ImagesBackend {
   }>
   /** Give up on a job the client no longer waits for. */
   cancel: (jobId: string) => Promise<unknown>
+  /** The provider and model a `model` names among the enabled remote image models. */
+  find?: (model: string) => MediaTarget | undefined
 }
 
 /** The resident video model as `/videos` needs it, plus the two places a video lives: the runner and the gallery. */
@@ -94,6 +97,8 @@ export interface VideosBackend {
       { ok: true; outcome: { job: VideoJob; images: Buffer[] } } | { ok: false; error: DiffusionErrorBody }
     >
   }>
+  /** The provider and model a `model` names among the enabled remote video models. */
+  find?: (model: string) => MediaTarget | undefined
   /** The runner's record of a job, while it keeps one. */
   job: (id: string) => VideoJob | null
   /** Every video job the runner remembers, newest first. */

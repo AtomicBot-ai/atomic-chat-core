@@ -6,21 +6,20 @@
  */
 
 import type {
-  DiffusionBackend,
-  DiffusionEngineId,
-  DiffusionOffloadPolicy,
+  RemoteVideoOptions,
+  VideoOutputFormat,
   VideoRecipe,
   VideoWorkflowId,
 } from '../contracts/index.js'
+import { orderedEngine, parseRecipeEngine } from './recipe.js'
 import { VIDEO_WORKFLOWS } from './workflow.js'
 
 export const RECIPE_SIDECAR_SUFFIX = '.json'
 
 type Fields = Record<string, unknown>
 
-const ENGINES: readonly DiffusionEngineId[] = ['sd-cpp', 'diffusers']
-const BACKENDS: readonly DiffusionBackend[] = ['cpu', 'metal', 'cuda', 'vulkan', 'rocm']
-const OFFLOADS: readonly DiffusionOffloadPolicy[] = ['none', 'group', 'model']
+const OUTPUT_FORMATS: readonly VideoOutputFormat[] = ['webm', 'mp4']
+const REMOTE_VIDEO_STRINGS = ['resolution', 'aspectRatio', 'size'] as const
 
 const isObject = (value: unknown): value is Fields =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -65,18 +64,46 @@ export function serializeVideoRecipe(recipe: VideoRecipe): string {
       displayName: recipe.model.displayName,
       filename: recipe.model.filename,
     },
-    engine: {
-      kind: recipe.engine.kind,
-      backend: recipe.engine.backend,
-      tag: recipe.engine.tag,
-      offload: recipe.engine.offload,
-      cpuFallback: recipe.engine.cpuFallback,
-    },
+    engine: orderedEngine(recipe.engine),
     createdAtMs: recipe.createdAtMs,
     durationMs: recipe.durationMs,
     ...(recipe.decodeMs === undefined ? {} : { decodeMs: recipe.decodeMs }),
+    ...(recipe.durationSecs === undefined ? {} : { durationSecs: recipe.durationSecs }),
+    ...(recipe.remote === undefined ? {} : { remote: orderedRemoteVideo(recipe.remote) }),
   }
   return `${JSON.stringify(ordered, null, 2)}\n`
+}
+
+function orderedRemoteVideo(options: RemoteVideoOptions): RemoteVideoOptions {
+  const out: RemoteVideoOptions = {}
+  if (options.durationSecs !== undefined) out.durationSecs = options.durationSecs
+  for (const key of REMOTE_VIDEO_STRINGS) if (options[key] !== undefined) out[key] = options[key]
+  if (options.generateAudio !== undefined) out.generateAudio = options.generateAudio
+  return out
+}
+
+/** A remote clip's extra settings, or `undefined` when the value is not such an object. */
+function parseRemoteVideo(value: unknown): RemoteVideoOptions | null | undefined {
+  if (value === undefined || value === null) return null
+  if (!isObject(value)) return undefined
+  const out: RemoteVideoOptions = {}
+  const duration = value['durationSecs']
+  if (duration !== undefined && duration !== null) {
+    if (!isNumber(duration)) return undefined
+    out.durationSecs = duration
+  }
+  for (const key of REMOTE_VIDEO_STRINGS) {
+    const item = value[key]
+    if (item === undefined || item === null) continue
+    if (!isString(item)) return undefined
+    out[key] = item
+  }
+  const audio = value['generateAudio']
+  if (audio !== undefined && audio !== null) {
+    if (typeof audio !== 'boolean') return undefined
+    out.generateAudio = audio
+  }
+  return out
 }
 
 /** The recipe out of a sidecar, or `undefined` when the text is not one. */
@@ -93,6 +120,8 @@ export function parseVideoRecipe(text: string): VideoRecipe | undefined {
   const guidance = optional(raw['guidance'], isNumber)
   const samplingMethod = optional(raw['samplingMethod'], isString)
   const flowShift = optional(raw['flowShift'], isNumber)
+  const parsedEngine = parseRecipeEngine(engine)
+  const remote = parseRemoteVideo(raw['remote'])
   const ok =
     isString(raw['jobId']) &&
     isString(raw['prompt']) &&
@@ -105,23 +134,20 @@ export function parseVideoRecipe(text: string): VideoRecipe | undefined {
     isNumber(raw['cfgScale']) &&
     isI64(raw['seed']) &&
     among<VideoWorkflowId>(raw['workflow'], VIDEO_WORKFLOWS) &&
-    raw['outputFormat'] === 'webm' &&
+    among(raw['outputFormat'], OUTPUT_FORMATS) &&
     isString(model['modelId']) &&
     isString(model['family']) &&
     isString(model['displayName']) &&
     isString(model['filename']) &&
-    among(engine['kind'], ENGINES) &&
-    among(engine['backend'], BACKENDS) &&
-    isString(engine['tag']) &&
-    among(engine['offload'], OFFLOADS) &&
-    typeof engine['cpuFallback'] === 'boolean' &&
+    parsedEngine !== undefined &&
+    remote !== undefined &&
     isWhole(raw['createdAtMs']) &&
     isWhole(raw['durationMs']) &&
     negativePrompt !== undefined &&
     guidance !== undefined &&
     samplingMethod !== undefined &&
     flowShift !== undefined
-  if (!ok) return undefined
+  if (!ok || parsedEngine === undefined || remote === undefined) return undefined
   return {
     jobId: raw['jobId'] as string,
     prompt: raw['prompt'] as string,
@@ -138,23 +164,21 @@ export function parseVideoRecipe(text: string): VideoRecipe | undefined {
     samplingMethod,
     flowShift,
     workflow: raw['workflow'] as VideoWorkflowId,
-    outputFormat: 'webm',
+    outputFormat: raw['outputFormat'] as VideoOutputFormat,
     model: {
       modelId: model['modelId'] as string,
       family: model['family'] as string,
       displayName: model['displayName'] as string,
       filename: model['filename'] as string,
     },
-    engine: {
-      kind: engine['kind'] as DiffusionEngineId,
-      backend: engine['backend'] as DiffusionBackend,
-      tag: engine['tag'] as string,
-      offload: engine['offload'] as DiffusionOffloadPolicy,
-      cpuFallback: engine['cpuFallback'] as boolean,
-    },
+    engine: parsedEngine,
     createdAtMs: raw['createdAtMs'] as number,
     durationMs: raw['durationMs'] as number,
     // Older clips have none; a malformed one is dropped rather than the clip.
     ...(isWhole(raw['decodeMs']) ? { decodeMs: raw['decodeMs'] as number } : {}),
+    ...(isNumber(raw['durationSecs']) && raw['durationSecs'] >= 0
+      ? { durationSecs: raw['durationSecs'] }
+      : {}),
+    ...(remote === null ? {} : { remote }),
   }
 }

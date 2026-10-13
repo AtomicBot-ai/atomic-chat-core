@@ -11,6 +11,7 @@ import { registerClientRoutes } from './routes/clients.js'
 import { registerCloudRoutes } from './routes/cloud.js'
 import { registerDecisionRoutes } from './routes/decision.js'
 import { registerEmbeddingRoutes } from './routes/embedding.js'
+import { registerMediaRoutes } from './routes/media.js'
 import { registerDiffusionRoutes } from './routes/diffusion.js'
 import { registerDiffusionVideoRoutes } from './routes/diffusion-video.js'
 import { registerDiskRoutes } from './routes/disk.js'
@@ -75,6 +76,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerDiffusionVideoRoutes(router, deps, ctx)
   registerDecisionRoutes(router, deps, ctx)
   registerEmbeddingRoutes(router, deps, ctx)
+  registerMediaRoutes(router, deps, ctx)
   registerTelemetryRoutes(router, deps, ctx)
   registerShutdownRoute(router, deps, ctx)
 

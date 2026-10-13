@@ -172,12 +172,27 @@ describe('the error envelope', () => {
     expect(mapError('OUT_OF_MEMORY').code).toBe('insufficient_memory')
     expect(mapError('CANCELLED')).toEqual({ status: 500, type: 'server_error', code: 'cancelled' })
     expect(mapError('ENGINE_CRASHED')).toEqual({ status: 500, type: 'server_error', code: 'server_error' })
-    expect([400, 429, 503, 500, 504].map(errorKindFor)).toEqual([
+    expect([400, 429, 503, 500, 504, 404].map(errorKindFor)).toEqual([
       'bad_request',
       'busy',
       'not_found',
       'upstream',
       'upstream',
+      'not_found',
     ])
+  })
+
+  it.each([
+    ['REMOTE_NOT_CONFIGURED', 404, 'model_not_found'],
+    ['REMOTE_REJECTED', 400, 'invalid_request'],
+    ['REMOTE_UNSUPPORTED', 400, 'invalid_request'],
+    ['REMOTE_CONTENT_BLOCKED', 400, 'content_policy_violation'],
+    ['REMOTE_RATE_LIMITED', 429, 'rate_limit_exceeded'],
+    ['REMOTE_QUOTA', 402, 'insufficient_quota'],
+    ['REMOTE_AUTH_FAILED', 502, 'upstream_auth_failed'],
+    ['REMOTE_UNAVAILABLE', 502, 'upstream_error'],
+    ['REMOTE_TIMEOUT', 504, 'timeout'],
+  ] as const)('maps the remote code %s to %i %s', (code, status, mapped) => {
+    expect(mapError(code)).toMatchObject({ status, code: mapped })
   })
 })

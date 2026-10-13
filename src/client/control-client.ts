@@ -82,6 +82,9 @@ import type {
   RemoteAccessStatus,
   SessionInfo,
   UnloadResult,
+  MediaCatalogView,
+  MediaKind,
+  MediaProviderModels,
 } from '../contracts/index.js'
 
 export interface CoreClientOptions {
@@ -593,6 +596,16 @@ export class CoreClient {
 
   removeCloudProvider(provider: string): Promise<{ removed: true }> {
     return this.call(`/cloud/providers/${encodeURIComponent(provider)}`, { method: 'DELETE' })
+  }
+
+  /** The remote media catalog: cloud and self-hosted providers' image and video models. */
+  mediaCatalog(): Promise<MediaCatalogView> {
+    return this.call('/media/catalog')
+  }
+
+  /** A provider's image or video models: the catalog's, with its live listing merged in. */
+  mediaProviderModels(provider: string, kind: MediaKind): Promise<MediaProviderModels> {
+    return this.call(`/media/providers/${encodeURIComponent(provider)}/models?kind=${kind}`)
   }
 
   chatgptStatus(): Promise<ChatGptStatus> {

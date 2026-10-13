@@ -181,6 +181,11 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
       operationId: 'createVideo',
       tags: ['Videos'],
     })
+    // And the JSON edits route a provider's image models answer.
+    expect(spec.paths['/images/edits']?.post).toMatchObject({
+      operationId: 'createImageEdit',
+      tags: ['Images'],
+    })
 
     for (const [path, fixture] of [
       ['/docs/swagger-ui.css', 'docs_css_served'],

@@ -135,6 +135,10 @@ beforeEach(async () => {
       }),
       remove: async () => {},
     },
+    media: {
+      catalog: async () => ({ catalog_version: 1, origin: 'baseline', dialects: {}, providers: {} }),
+      providerModels: async (provider, kind) => ({ provider, kind, api: null, models: [], live: false }),
+    },
     chatgpt: {
       status: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
       startLogin: async () => ({ authorize_url: 'https://auth.example/authorize' }),
@@ -546,6 +550,24 @@ describe('cloud providers and the ChatGPT subscription', () => {
     expect(await client.chatgptCancelLogin()).toEqual({ cancelled: true })
     expect(await client.chatgptModels()).toEqual({ models: [] })
     expect(await client.chatgptLogout()).toMatchObject({ connected: false })
+  })
+})
+
+describe('remote media', () => {
+  it("reads the catalog and a provider's models of one kind", async () => {
+    expect(await client.mediaCatalog()).toEqual({
+      catalog_version: 1,
+      origin: 'baseline',
+      dialects: {},
+      providers: {},
+    })
+    expect(await client.mediaProviderModels('open/router', 'video')).toEqual({
+      provider: 'open/router',
+      kind: 'video',
+      api: null,
+      models: [],
+      live: false,
+    })
   })
 })
 

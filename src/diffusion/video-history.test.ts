@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { SystemInfo, VideoRecipe } from '../contracts/index.js'
+import type { LocalRecipeEngine, SystemInfo, VideoRecipe } from '../contracts/index.js'
 import { jobId, sampleVideoRecipe } from '../../test/helpers/diffusion-fixtures.js'
 import { VIDEO_VAE_TILING_PIXEL_FRAMES } from './args.js'
 import { estimateVideoCost, heuristicParts, heuristicSeconds, planDecodeTiling } from './video-estimate.js'
@@ -50,9 +50,9 @@ describe('historyRecipes', () => {
     const recipes = [
       clip(1, 2),
       clip(2, 2, { model: { ...sampleVideoRecipe().model, family: 'wan2.2-ti2v-5b' } }),
-      clip(3, 2, { engine: { ...sampleVideoRecipe().engine, backend: 'cuda' } }),
-      clip(4, 2, { engine: { ...sampleVideoRecipe().engine, offload: 'none' } }),
-      clip(5, 2, { engine: { ...sampleVideoRecipe().engine, cpuFallback: true } }),
+      clip(3, 2, { engine: { ...(sampleVideoRecipe().engine as LocalRecipeEngine), backend: 'cuda' } }),
+      clip(4, 2, { engine: { ...(sampleVideoRecipe().engine as LocalRecipeEngine), offload: 'none' } }),
+      clip(5, 2, { engine: { ...(sampleVideoRecipe().engine as LocalRecipeEngine), cpuFallback: true } }),
       // 1216×704 × 257 frames at this model's weights is more than 64 GB of unified memory holds.
       clip(6, 2, { width: 1216, height: 704, frames: 257, frameCount: 257 }),
       clip(7, 2),

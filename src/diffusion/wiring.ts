@@ -10,6 +10,7 @@ import { processStartId } from '../lock/index.js'
 import type { ProcessJournal } from '../lock/index.js'
 import type { BackendOutputSink, GpuClaimHook } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
+import type { RemoteMediaGateway } from './remote-job.js'
 import type { DiffusionServiceDeps } from './service.js'
 
 export interface WireDiffusionOptions {
@@ -26,6 +27,8 @@ export interface WireDiffusionOptions {
   env?: NodeJS.ProcessEnv
   /** Core's GPU residency (task 2.15), asked before every `sd-server` spawn. */
   claimGpu?: GpuClaimHook
+  /** Cloud and self-hosted providers' image and video models. */
+  remoteMedia?: RemoteMediaGateway
   /** Test seams, straight through to the service. */
   overrides?: Pick<
     DiffusionServiceDeps,
@@ -73,6 +76,7 @@ export function wireDiffusion(options: WireDiffusionOptions): DiffusionService {
     ...(options.platform ? { platform: options.platform } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
+    ...(options.remoteMedia ? { remoteMedia: options.remoteMedia } : {}),
     ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     ...options.overrides,
   })

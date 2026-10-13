@@ -1199,6 +1199,32 @@ describe('the embedding model through the owner', () => {
   })
 })
 
+describe('remote media through the owner', () => {
+  it('answers the catalog and a registered provider’s models over control', async () => {
+    const fake = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.endsWith('/images/models')) return new Response('{}', { status: 404 })
+      if (url === 'https://api.openai.example/v1/models')
+        return new Response(JSON.stringify({ data: [{ id: 'gpt-image-9' }, { id: 'gpt-5' }] }))
+      throw new Error('offline')
+    }) as typeof fetch
+    const core = await createCore({ fetch: fake })
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const catalog = await client.mediaCatalog()
+    expect(catalog.origin).toBe('baseline')
+    expect(catalog.providers['openai']?.image?.api).toBe('openai-images')
+    await client.setCloudProvider('openai', {
+      api_key: 'sk',
+      base_url: 'https://api.openai.example/v1',
+      models: [],
+      media: { models: [{ id: 'gpt-image-2', kind: 'image' }] },
+    })
+    const models = await client.mediaProviderModels('openai', 'image')
+    expect(models.live).toBe(true)
+    expect(models.models.map((m) => m.id)).toContain('gpt-image-9')
+  })
+})
+
 describe('error reporting', () => {
   it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
     const captured: ErrorReport[] = []
