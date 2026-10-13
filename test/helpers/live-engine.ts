@@ -6,7 +6,7 @@
  *
  * Every Docker call goes through `sudoDocker`/`sudoDockerAsync`, the same root view of the system
  * daemon the install test uses. Nothing here starts, stops or removes a container; `docker exec` is
- * used for one read-only `df` inside the engine container.
+ * used for read-only `df` and `cat /proc/net/tcp*` inside the engine container.
  *
  * No imports from `src/`: the live test drives the compiled binary only.
  */
@@ -315,10 +315,10 @@ export async function inspectContainer(id: string): Promise<ContainerFacts | nul
 }
 
 /**
- * The `tensorrt-llm` containers one core instance created (its `atomic.instance_id` label), newest
- * first, full ids; `all` includes exited ones.
+ * The containers of one managed engine (`atomic.engine_id`, `tensorrt-llm` unless named) one core
+ * instance created (its `atomic.instance_id` label), newest first, full ids; `all` includes exited ones.
  */
-export function ownContainers(instanceId: string, all = false): string[] {
+export function ownContainers(instanceId: string, all = false, engineId = 'tensorrt-llm'): string[] {
   const out = sudoDocker([
     'ps',
     ...(all ? ['-a'] : []),
@@ -326,7 +326,7 @@ export function ownContainers(instanceId: string, all = false): string[] {
     '--filter',
     `label=atomic.instance_id=${instanceId}`,
     '--filter',
-    'label=atomic.engine_id=tensorrt-llm',
+    `label=atomic.engine_id=${engineId}`,
     '--format',
     '{{.ID}}',
   ])
@@ -336,6 +336,61 @@ export function ownContainers(instanceId: string, all = false): string[] {
         .map((l) => l.trim())
         .filter(Boolean)
     : []
+}
+
+/** A TCP connection's remote end, as `/proc/net/tcp{,6}` spells it: address and port, decoded. */
+export interface TcpPeer {
+  address: string
+  port: number
+  state: string
+}
+
+const TCP_STATES: Record<string, string> = { '01': 'ESTABLISHED', '02': 'SYN_SENT', '03': 'SYN_RECV' }
+
+function hexAddress(hex: string): string {
+  if (hex.length === 8) {
+    // IPv4, little-endian.
+    return [6, 4, 2, 0].map((at) => Number.parseInt(hex.slice(at, at + 2), 16)).join('.')
+  }
+  // IPv6: four little-endian 32-bit words.
+  const words = [0, 8, 16, 24].map(
+    (at) =>
+      hex
+        .slice(at, at + 8)
+        .match(/../g)
+        ?.reverse()
+        .join('') ?? ''
+  )
+  const groups = words.join('').match(/.{4}/g) ?? []
+  return groups.map((group) => group.replace(/^0+(?=.)/, '').toLowerCase()).join(':')
+}
+
+const LOOPBACK = /^(127\.|0\.0\.0\.0$|0:0:0:0:0:0:0:[01]$|0:0:0:0:0:ffff:7f)/
+
+/**
+ * Connections a container opened or is opening to anything but itself, from `/proc/net/tcp` and
+ * `/proc/net/tcp6` text (spec `sglang-runtime`, "Контейнер SGLang не обращается в сеть от имени
+ * пользователя"): established and connecting sockets whose remote end is not a loopback address.
+ */
+export function remoteTcpPeers(procNetTcp: string): TcpPeer[] {
+  const peers: TcpPeer[] = []
+  for (const line of procNetTcp.split('\n')) {
+    const fields = line.trim().split(/\s+/)
+    const remote = fields[2]
+    const state = TCP_STATES[fields[3] ?? '']
+    if (remote === undefined || state === undefined || !remote.includes(':')) continue
+    const [hex, port] = remote.split(':')
+    const address = hexAddress(hex ?? '')
+    if (LOOPBACK.test(address)) continue
+    peers.push({ address, port: Number.parseInt(port ?? '0', 16), state })
+  }
+  return peers
+}
+
+/** `remoteTcpPeers` of a running container, read inside it; null when not observable. */
+export async function containerRemotePeers(id: string): Promise<TcpPeer[] | null> {
+  const out = await sudoDockerAsync(['exec', id, 'cat', '/proc/net/tcp', '/proc/net/tcp6'], 30_000)
+  return out.code === 0 ? remoteTcpPeers(out.stdout) : null
 }
 
 /** Bytes in use on the container's `/dev/shm`, from a `df` run inside it; null when not observable. */
