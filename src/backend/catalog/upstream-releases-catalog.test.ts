@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -198,16 +198,12 @@ describe('UpstreamReleasesCatalogService', () => {
   })
 
   it('warns and still serves the live list when the disk cache cannot be written', async () => {
-    const root = data.layout.provider('llamacpp-upstream').root
-    await mkdir(root, { recursive: true })
-    await chmod(root, 0o500)
-    try {
-      const { svc, warnings } = service(() => json(LIVE))
-      expect(await svc.catalog()).toEqual({ catalog: LIVE, source: 'live' })
-      expect(warnings.some((w) => w.includes('failed to write disk cache'))).toBe(true)
-    } finally {
-      await chmod(root, 0o700)
-    }
+    // A non-empty folder where the cache file goes: the rename onto it fails on every OS (a
+    // read-only folder would not do on Windows, where the mode bits do not stop a write).
+    await mkdir(join(upstreamReleasesCachePath(data.layout), 'occupied'), { recursive: true })
+    const { svc, warnings } = service(() => json(LIVE))
+    expect(await svc.catalog()).toEqual({ catalog: LIVE, source: 'live' })
+    expect(warnings.some((w) => w.includes('failed to write disk cache'))).toBe(true)
   })
 
   it('reads a file:// list from disk (the test hook)', async () => {
