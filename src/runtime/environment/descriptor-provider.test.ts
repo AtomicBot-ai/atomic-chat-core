@@ -479,6 +479,21 @@ describe('a descriptor per engine', () => {
     })
   })
 
+  it('Дескриптор SGLang ещё не опубликован: conf main answers 404 for runtimes/sglang.json — only SGLang is unsupported (change add-sglang-runtime)', async () => {
+    const SGLANG = { engine_id: 'sglang', label: 'SGLang', url: defaultDescriptorUrl('sglang') }
+    expect(SGLANG.url).toBe(
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/sglang.json'
+    )
+    const fetch = routedFetch({ [DEFAULT_TENSORRT_LLM_DESCRIPTOR_URL]: RAW_A, [SECOND.url]: RAW_SECOND })
+    const descriptors = provider({ fetch, fs: new FakeManagedFs(), engines: [...ENGINES, SGLANG] })
+
+    const missing = await descriptors.forNewSetup('sglang')
+    expect(missing.kind).toBe('unsupported')
+    expect(fetch).toHaveBeenCalledWith(SGLANG.url, expect.any(Number))
+    expect(await descriptors.forNewSetup('vllm')).toMatchObject({ kind: 'available' })
+    expect(await descriptors.forNewSetup('tensorrt-llm')).toMatchObject({ kind: 'available' })
+  })
+
   it("rejects a document whose engine_id is another engine's, and keeps that engine's previous one", async () => {
     const fs = new FakeManagedFs()
     await seedAccepted(fs, RAW_A, DESCRIPTOR_A)

@@ -837,6 +837,95 @@ describe.skipIf(POSIX_FAKES_UNAVAILABLE)('vLLM next to TensorRT-LLM through the 
   })
 })
 
+/**
+ * A third managed engine on the same machine (change `add-sglang-runtime`, task 2.4; spec
+ * `sglang-desktop`, "Установка SGLang тем же сценарием окружения"; `sglang-runtime`): SGLang's
+ * descriptor is the conf fixture, read from a local file, and its driver floor (580) is its own.
+ */
+describe.skipIf(POSIX_FAKES_UNAVAILABLE)('SGLang next to vLLM through the compiled core', () => {
+  const SGLANG_DESCRIPTOR = new URL('../fixtures/runtimes/sglang.json', import.meta.url)
+  const VLLM_DESCRIPTOR = new URL('../fixtures/runtimes/vllm.json', import.meta.url)
+  const idOf = (url: URL) =>
+    (JSON.parse(readFileSync(url, 'utf8')) as { descriptor_id: string }).descriptor_id
+  const SGLANG_ID = idOf(SGLANG_DESCRIPTOR)
+  const VLLM_ID = idOf(VLLM_DESCRIPTOR)
+  const target = (engine: string) => ({
+    kind: 'runtime' as const,
+    installation_id: engine,
+    engine_id: engine,
+  })
+  const startAll = () =>
+    start({
+      ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM: VLLM_DESCRIPTOR.href,
+      ATOMIC_RUNTIME_DESCRIPTOR_URL_SGLANG: SGLANG_DESCRIPTOR.href,
+    })
+
+  async function setup(ready: ReadyLine, engine: string, descriptorId: string): Promise<Operation> {
+    const started = (await (
+      await post(ready, '/environments/default/operations', {
+        request_id: `req-${engine}`,
+        target: target(engine),
+        kind: 'setup',
+        descriptor_id: descriptorId,
+      })
+    ).json()) as Operation
+    const asking = await poll(ready, started.operation_id, (o) => o.phase === 'awaiting-consent')
+    await post(ready, `/environments/operations/${started.operation_id}/resume`, {
+      expected_revision: asking.revision,
+      approved_plan_digest: asking.plan_digest,
+    })
+    return poll(ready, started.operation_id, (o) => o.phase === 'ready' || o.phase === 'failed')
+  }
+
+  const installationsOf = async (ready: ReadyLine) =>
+    Object.fromEntries(
+      ((await snapshot(ready)).environments[0]?.installations ?? []).map((i) => [i.installation_id, i.status])
+    )
+
+  it('vLLM уже установлен: setup sglang on the ready environment — no host step, no elevation, its own image; vLLM stays ready', async () => {
+    host = await fakeManagedHost(readyState())
+    host.setFreeDisk(200 * 1024 ** 3)
+    const { ready } = await startAll()
+    const vllm = await setup(ready, 'vllm', VLLM_ID)
+    expect(vllm.phase, JSON.stringify(vllm.error)).toBe('ready')
+
+    const plan = (await (
+      await post(ready, '/environments/probe', { descriptor_id: SGLANG_ID, target: target('sglang') })
+    ).json()) as {
+      requires_elevation: boolean
+      system_changes: unknown[]
+      blockers: unknown[]
+      descriptor_id: string
+    }
+    expect(plan).toMatchObject({
+      requires_elevation: false,
+      system_changes: [],
+      blockers: [],
+      descriptor_id: SGLANG_ID,
+    })
+
+    const done = await setup(ready, 'sglang', SGLANG_ID)
+    expect(done.phase, JSON.stringify(done.error)).toBe('ready')
+    expect(host.pulls.some((ref) => ref.includes('lmsysorg/sglang'))).toBe(true)
+    await expect.poll(() => installationsOf(ready)).toEqual({ vllm: 'ready', sglang: 'ready' })
+  })
+
+  it('блокер драйвера только у одного движка: driver 577 blocks SGLang’s release (580), not vLLM’s (575)', async () => {
+    host = await fakeManagedHost({ ...readyState(), driver: '577.00' })
+    host.setFreeDisk(200 * 1024 ** 3)
+    const { ready } = await startAll()
+    const probeOf = async (engine: string, descriptorId: string) =>
+      (await (
+        await post(ready, '/environments/probe', { descriptor_id: descriptorId, target: target(engine) })
+      ).json()) as { availability: string; blockers: { reason?: string }[] }
+    const sglang = await probeOf('sglang', SGLANG_ID)
+    const vllm = await probeOf('vllm', VLLM_ID)
+    expect(sglang.availability).toBe('prerequisite-blocked')
+    expect(sglang.blockers.map((b) => b.reason)).toContain('driver-too-old')
+    expect(vllm.blockers.map((b) => b.reason)).not.toContain('driver-too-old')
+  })
+})
+
 describe('without a Linux host', () => {
   // Windows offers its own (WSL) environment now; `managed-windows.test.ts` drives that one.
   it.skipIf(process.platform === 'linux' || process.platform === 'win32')(

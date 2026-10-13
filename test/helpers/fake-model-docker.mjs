@@ -14,6 +14,11 @@
  * before it is ready with vLLM's out-of-memory traceback. Every container keeps the `docker create`
  * arguments it was made with (`args`), so a test can inspect its env, argv and mounts.
  *
+ * A container whose command is `python3 -m sglang.launch_server …` (change `add-sglang-runtime`) runs
+ * `fake-sglang-engine.mjs` and logs SGLang's start-up lines; one for a model whose folder name contains
+ * `oom` exits before it is ready because its weights left no memory for the KV cache, and one whose
+ * folder name contains `nogen` answers `/health` but fails every generation.
+ *
  *   FAKE_DOCKER_STATE  the JSON file holding the container table (required)
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -23,6 +28,7 @@ import { fileURLToPath } from 'node:url'
 const statePath = process.env.FAKE_DOCKER_STATE
 const ENGINE = fileURLToPath(new URL('./fake-model-engine.mjs', import.meta.url))
 const VLLM_ENGINE = fileURLToPath(new URL('./fake-vllm-engine.mjs', import.meta.url))
+const SGLANG_ENGINE = fileURLToPath(new URL('./fake-sglang-engine.mjs', import.meta.url))
 const db = existsSync(statePath)
   ? JSON.parse(readFileSync(statePath, 'utf8'))
   : { n: 0, containers: {}, calls: [] }
@@ -66,15 +72,17 @@ if (sub === 'create') {
   const user = args.includes('--user') ? args[args.indexOf('--user') + 1] : null
   const newId = `fakectr${String(++db.n).padStart(8, '0')}`
   const vllm = args.some((a, i) => a === 'vllm' && args[i + 1] === 'serve')
+  const sglang = args.includes('sglang.launch_server')
   db.containers[newId] = {
     status: 'created',
     hostPort: Number(hostPort),
-    engine: vllm ? 'vllm' : 'tensorrt-llm',
+    engine: vllm ? 'vllm' : sglang ? 'sglang' : 'tensorrt-llm',
     model,
     args,
     slow: /slow/.test(model),
     stuck: /stuck/.test(model),
     oom: /oom/.test(model),
+    nogen: /nogen/.test(model),
     gpus,
     user,
     pid: null,
@@ -116,8 +124,25 @@ if (sub === 'start') {
     console.log(id)
     done()
   }
-  const engine = c.engine === 'vllm' ? VLLM_ENGINE : ENGINE
-  const child = spawn(process.execPath, [engine, String(c.hostPort), c.slow ? 'slow' : 'ready'], {
+  if (c.engine === 'sglang' && c.oom) {
+    // SGLang's KV budget check, right after the weights: the container is gone before /health answers.
+    c.status = 'exited'
+    c.exitCode = 1
+    c.logs.push(
+      stamp('[2026-10-13 12:00:00] Load weight begin. avail mem=6.71 GB'),
+      stamp(
+        '[2026-10-13 12:00:03] Load weight end. elapsed=3.12 s, type=Qwen3ForCausalLM, avail mem=0.61 GB, mem usage=6.10 GB.'
+      ),
+      stamp(
+        'ValueError: Loaded weights leave no GPU memory for the KV cache under --mem-fraction-static=0.75. Raise --mem-fraction-static above 0.812 (minimum viable = 1 - available/pre = 0.8115). If using speculative decoding, draft weights are now counted.'
+      )
+    )
+    console.log(id)
+    done()
+  }
+  const engine = c.engine === 'vllm' ? VLLM_ENGINE : c.engine === 'sglang' ? SGLANG_ENGINE : ENGINE
+  const mode = c.slow ? 'slow' : c.nogen ? 'nogen' : 'ready'
+  const child = spawn(process.execPath, [engine, String(c.hostPort), mode], {
     detached: true,
     stdio: 'ignore',
   })
@@ -131,6 +156,14 @@ if (sub === 'start') {
         '(EngineCore_DP0 pid=212) INFO [gpu_model_runner.py:2338] Starting to load model /atomic/model...'
       ),
       stamp('INFO:     Application startup complete.')
+    )
+  } else if (c.engine === 'sglang') {
+    c.logs.push(
+      stamp('[2026-10-13 12:00:00] Load weight begin. avail mem=6.71 GB'),
+      stamp(
+        '[2026-10-13 12:00:05] Capture decode cuda graph begin. backend=full, num_tokens_per_req=1, bs=[1], avail mem=1.80 GB'
+      ),
+      stamp('[2026-10-13 12:00:09] The server is fired up and ready to roll!')
     )
   } else {
     c.logs.push(stamp('[TRT-LLM] fake engine starting'), stamp('Loading safetensors weights in parallel'))
