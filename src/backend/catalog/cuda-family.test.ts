@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { BUNDLED_MANIFEST_BASELINE } from './bundled-manifest-baseline.js'
+import { UPSTREAM_RELEASES_BASELINE } from './upstream-releases-baseline.js'
+import { upstreamManifestForTag } from './upstream-releases.js'
 import {
   cudaFamilyMajor,
   gpuFamilyConcreteRe,
@@ -13,6 +14,12 @@ import {
 } from './cuda-family.js'
 import { parseManifestForPlatform } from './manifest.js'
 import type { UpstreamManifest } from '../types.js'
+
+// The newest release of the bundled release list, in the legacy manifest's shape.
+const BASELINE_MANIFEST = upstreamManifestForTag(
+  UPSTREAM_RELEASES_BASELINE,
+  UPSTREAM_RELEASES_BASELINE.releases[0]!.tag
+)!
 
 describe('family ids', () => {
   it.each([
@@ -161,8 +168,8 @@ describe('equivalence with scripts/resolve-upstream-backend.mjs resolveCudaFamil
     ],
   }
   it.each([
-    ['win-cuda-13-x64', BUNDLED_MANIFEST_BASELINE],
-    ['win-cuda-12-x64', BUNDLED_MANIFEST_BASELINE],
+    ['win-cuda-13-x64', BASELINE_MANIFEST],
+    ['win-cuda-12-x64', BASELINE_MANIFEST],
     ['win-cuda-13-x64', twoMinors],
     ['win-cuda-12-x64', twoMinors],
   ])('%s resolves to the same concrete id on %o', (backend, manifest) => {

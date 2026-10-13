@@ -1,15 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
-import { BUNDLED_MANIFEST_BASELINE } from './bundled-manifest-baseline.js'
 import {
   archSuffixFor,
-  BUNDLED_BASELINE_TAG,
-  fetchLiveManifest,
   fetchManifestWithFallbacks,
-  fetchRemoteBackends,
   isSupportedBackendOs,
   LLAMACPP_BACKEND_MANIFEST_URL,
-  ManifestSessionCache,
   manifestTransportFromFetch,
   parseManifestForPlatform,
   withHardTimeout,
@@ -222,105 +217,19 @@ describe('fetchManifestWithFallbacks', () => {
     }
     await expect(fetchManifestWithFallbacks([sync])).rejects.toThrow('sync: boom')
   })
-})
-
-describe('fetchLiveManifest', () => {
-  it('caches only a genuinely successful manifest', async () => {
-    const cache = new ManifestSessionCache()
-    const info: string[] = []
-    const live = await fetchLiveManifest({ transports: [okTransport()], cache, onInfo: (m) => info.push(m) })
-    expect(live?.tag_name).toBe('b10205')
-    expect(cache.get()).toEqual(MANIFEST)
-    expect(info.some((m) => m.includes('succeeded via ok'))).toBe(true)
-    expect(info.some((m) => m.includes('differs from the bundled baseline'))).toBe(true)
-  })
-  it.each([
-    ['non-2xx', [{ label: 'x', fetch: async () => jsonResponse({}, 503) }]],
-    ['missing tag_name', [okTransport({ assets: [] })]],
-    ['unparseable body', [{ label: 'x', fetch: async () => new Response('not json', { status: 200 }) }]],
-    ['every transport failing', [failingTransport('a'), failingTransport('b')]],
-  ])('returns null and leaves the cache empty on %s', async (_label, transports) => {
-    const cache = new ManifestSessionCache()
-    const warn: string[] = []
-    expect(await fetchLiveManifest({ transports, cache, onWarn: (m) => warn.push(m) })).toBeNull()
-    expect(cache.get()).toBeNull()
-    expect(warn).toHaveLength(1)
-  })
-})
-
-describe('fetchRemoteBackends', () => {
-  const windows = { osType: 'windows', arch: 'x86_64' }
-
-  it('returns the bundled baseline when every manifest transport fails, without caching it', async () => {
-    const cache = new ManifestSessionCache()
-    const backends = await fetchRemoteBackends({ ...windows, transports: [failingTransport('a')], cache })
-    expect(backends.length).toBeGreaterThan(0)
-    expect(backends.every((b) => b.version === BUNDLED_BASELINE_TAG)).toBe(true)
-    expect(cache.get()).toBeNull()
-  })
-  it('follows a manifest tag newer than the bundled baseline', async () => {
-    const newerTag = `b${Number(BUNDLED_BASELINE_TAG.slice(1)) + 1}`
-    const backends = await fetchRemoteBackends({
-      ...windows,
-      force: true,
-      transports: [
-        okTransport({ tag_name: newerTag, assets: [{ name: `llama-${newerTag}-bin-win-cpu-x64.zip` }] }),
-      ],
-      cache: new ManifestSessionCache(),
-    })
-    expect(backends).toEqual([{ version: newerTag, backend: 'win-cpu-x64', order: 0 }])
-  })
-  it('serves a cached manifest without touching the network, and force refetches', async () => {
-    const cache = new ManifestSessionCache()
-    cache.set(MANIFEST)
-    const t = okTransport({ tag_name: 'b99999', assets: [{ name: 'llama-b99999-bin-win-cpu-x64.zip' }] })
-    const cached = await fetchRemoteBackends({ ...windows, transports: [t], cache })
-    expect(cached.every((b) => b.version === 'b10205')).toBe(true)
-    expect(t.fetch).not.toHaveBeenCalled()
-    const forced = await fetchRemoteBackends({ ...windows, transports: [t], cache, force: true })
-    expect(forced).toEqual([{ version: 'b99999', backend: 'win-cpu-x64', order: 0 }])
-    expect(cache.get()?.tag_name).toBe('b99999')
-  })
-  it('returns the platform catalogs (windows / linux / apple silicon / intel mac / unsupported)', async () => {
-    const run = (osType: string, arch: string) =>
-      fetchRemoteBackends({ osType, arch, transports: [okTransport()], cache: new ManifestSessionCache() })
-    expect((await run('windows', 'x86_64')).map((b) => b.backend).sort()).toEqual([
-      'win-cpu-x64',
-      'win-cuda-12.4-x64',
-      'win-cuda-13.3-x64',
-      'win-vulkan-x64',
-    ])
-    expect((await run('linux', 'x86_64')).map((b) => b.backend).sort()).toEqual([
-      'linux-cpu-x64',
-      'linux-vulkan-x64',
-    ])
-    expect(await run('macos', 'arm64')).toEqual([{ version: 'b10205', backend: 'macos-arm64', order: 0 }])
-    expect(await run('macos', 'x86_64')).toEqual([])
-    expect(await run('android', 'arm64')).toEqual([])
-  })
-  it('falls back to the baseline on macOS when every transport fails', async () => {
-    const backends = await fetchRemoteBackends({
-      osType: 'macos',
-      arch: 'arm64',
-      force: true,
-      transports: [{ label: 'x', fetch: async () => jsonResponse({}, 503) }],
-      cache: new ManifestSessionCache(),
-    })
-    expect(backends).toEqual([{ version: BUNDLED_BASELINE_TAG, backend: 'macos-arm64', order: 0 }])
-  })
-  it('accepts an alternative baseline', async () => {
-    const baseline: UpstreamManifest = {
-      tag_name: 'b5',
-      assets: [{ name: 'llama-b5-bin-macos-arm64.tar.gz' }],
+  it('still reports a reason when the race rejects with something other than an AggregateError', async () => {
+    const any = vi.spyOn(Promise, 'any')
+    try {
+      any.mockRejectedValueOnce(new Error('engine bug'))
+      await expect(fetchManifestWithFallbacks([okTransport()])).rejects.toThrow(
+        'All manifest fetch attempts failed: engine bug'
+      )
+      any.mockRejectedValueOnce('a string')
+      await expect(fetchManifestWithFallbacks([okTransport()])).rejects.toThrow(
+        'All manifest fetch attempts failed: a string'
+      )
+    } finally {
+      any.mockRestore()
     }
-    const backends = await fetchRemoteBackends({
-      osType: 'macos',
-      arch: 'arm64',
-      transports: [failingTransport('x')],
-      cache: new ManifestSessionCache(),
-      baseline,
-    })
-    expect(backends).toEqual([{ version: 'b5', backend: 'macos-arm64', order: 0 }])
-    expect(BUNDLED_MANIFEST_BASELINE.tag_name).toBe(BUNDLED_BASELINE_TAG)
   })
 })

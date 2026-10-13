@@ -1,7 +1,9 @@
 /**
- * The backend index: `atomic-chat-conf/backends/manifest.json`. Port of the manifest half of
- * `extensions/llamacpp-upstream-extension/src/backend.ts` (`parseManifestForPlatform`,
- * `fetchManifestWithFallbacks`, `fetchLiveManifest`, `fetchRemoteBackends`).
+ * The legacy backend index: `atomic-chat-conf/backends/manifest.json`, one upstream tag. Port of
+ * the manifest half of `extensions/llamacpp-upstream-extension/src/backend.ts`
+ * (`parseManifestForPlatform`, `fetchManifestWithFallbacks`). This core reads the release list
+ * (`upstream-releases.ts`) and falls back to this file only when the list is not one it reads; the
+ * parser below reads each listed release, and the transports serve every conf manifest.
  *
  * Why a static manifest and not the GitHub API: the unauthenticated API limit (60 req/hr/IP)
  * dead-ended fresh installs on shared/NAT/VPN networks (ATO-199). raw.githubusercontent.com has no
@@ -13,25 +15,16 @@
  *     direct `@tauri-apps/plugin-http`) become a `ManifestTransport[]`; the core passes one built
  *     from its own `fetch` via `manifestTransportFromFetch`. Order is preserved as documentation —
  *     the app raced all four with `Promise.any`, and so does `fetchManifestWithFallbacks`.
- *   - the module-level `_cachedManifest` becomes a `ManifestSessionCache` the caller owns.
  *   - `getSystemInfo()` becomes `osType` / `arch` parameters.
- *   - `console.*` becomes optional `onInfo` / `onWarn` callbacks.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
 import { linuxBackendForUpstreamInfix } from './archive.js'
-import { BUNDLED_MANIFEST_BASELINE } from './bundled-manifest-baseline.js'
 import type { ArchSuffix, BackendOsType, BackendVersion, UpstreamManifest } from '../types.js'
 
 export const LLAMACPP_BACKEND_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/manifest.json'
 export const MANIFEST_FETCH_TIMEOUT_MS = 8_000
-
-/**
- * Tag of the bundled offline baseline. NOT a pin: a live manifest carrying a newer tag is followed
- * as-is, which is what lets an engine update reach users without an app release.
- */
-export const BUNDLED_BASELINE_TAG = BUNDLED_MANIFEST_BASELINE.tag_name
 
 /** One way of fetching the manifest; `timeoutMs` is the hard budget the transport should honour. */
 export type ManifestFetch = (url: string, timeoutMs: number) => Promise<Response>
@@ -185,122 +178,4 @@ export async function fetchManifestWithFallbacks(
           : String(aggregate)
     throw new AtomicCoreError('IO_ERROR', `All manifest fetch attempts failed: ${reasons}`)
   }
-}
-
-/**
- * In-memory manifest for one session. Populated ONLY by a genuinely successful live fetch, so a
- * later transient stall can reuse the last good manifest. The bundled baseline is never stored:
- * caching it would pin the session to a stale snapshot even after the network recovers (the
- * ATO-243 cache-poisoning regression).
- */
-export class ManifestSessionCache {
-  private manifest: UpstreamManifest | null = null
-
-  get(): UpstreamManifest | null {
-    return this.manifest
-  }
-
-  set(manifest: UpstreamManifest): void {
-    this.manifest = manifest
-  }
-
-  clear(): void {
-    this.manifest = null
-  }
-}
-
-export interface FetchLiveManifestOptions {
-  transports: readonly ManifestTransport[]
-  cache: ManifestSessionCache
-  url?: string
-  timeoutMs?: number
-  onInfo?: (message: string) => void
-  onWarn?: (message: string) => void
-}
-
-/**
- * Fetch the live manifest and cache it for the session, or `null` when it could not be obtained
- * (transport failure, non-2xx, unparseable body, missing `tag_name`). Callers fall back to
- * `BUNDLED_MANIFEST_BASELINE` themselves, keeping the "baseline is never cached" invariant visible.
- * A tag differing from the bundled baseline is followed: the manifest is authoritative.
- */
-export async function fetchLiveManifest(options: FetchLiveManifestOptions): Promise<UpstreamManifest | null> {
-  const url = options.url ?? LLAMACPP_BACKEND_MANIFEST_URL
-  const info = options.onInfo ?? (() => {})
-  const warn = options.onWarn ?? (() => {})
-  try {
-    info(`[fetchRemoteBackends] Fetching ${url}...`)
-    const { label, response } = await fetchManifestWithFallbacks(options.transports, url, options.timeoutMs)
-    info(`[fetchRemoteBackends] Manifest fetch succeeded via ${label}`)
-    if (!response.ok) {
-      warn(
-        `[fetchRemoteBackends] Backend manifest returned ${response.status}; using bundled baseline (not cached, will retry next call)`
-      )
-      return null
-    }
-    const release = (await response.json()) as UpstreamManifest
-    if (!release || typeof release.tag_name !== 'string' || !release.tag_name) {
-      warn(
-        '[fetchRemoteBackends] Manifest missing tag_name; using bundled baseline (not cached, will retry next call)'
-      )
-      return null
-    }
-    if (release.tag_name !== BUNDLED_BASELINE_TAG) {
-      info(
-        `[fetchRemoteBackends] Manifest tag ${release.tag_name} differs from the bundled baseline ${BUNDLED_BASELINE_TAG}; following the manifest`
-      )
-    }
-    options.cache.set(release)
-    return release
-  } catch (err) {
-    warn(
-      `[fetchRemoteBackends] All manifest fetch transports failed; falling back to bundled baseline (not cached, will retry next call). ${
-        err instanceof Error ? err.message : String(err)
-      }`
-    )
-    return null
-  }
-}
-
-export interface FetchRemoteBackendsOptions extends FetchLiveManifestOptions {
-  osType: string
-  arch: string
-  /** "Check for engine updates": drop the session cache so a tag published meanwhile is seen. */
-  force?: boolean
-  /** Offline fallback; defaults to the compiled-in baseline. */
-  baseline?: UpstreamManifest
-}
-
-/**
- * Backend builds available to this host: the session-cached manifest, else a live fetch, else the
- * bundled baseline. Never throws and never returns the baseline through the cache. `[]` for an OS
- * outside windows/linux/macos and for an Intel Mac.
- */
-export async function fetchRemoteBackends(options: FetchRemoteBackendsOptions): Promise<BackendVersion[]> {
-  const { osType, arch, cache } = options
-  if (!isSupportedBackendOs(osType)) return []
-  const archSuffix = archSuffixFor(arch)
-  const info = options.onInfo ?? (() => {})
-
-  if (options.force) {
-    cache.clear()
-  } else {
-    const cached = cache.get()
-    if (cached) {
-      info('[fetchRemoteBackends] Using in-memory manifest cache')
-      return parseManifestForPlatform(cached, osType, archSuffix)
-    }
-  }
-
-  const live = await fetchLiveManifest(options)
-  if (!live)
-    return parseManifestForPlatform(options.baseline ?? BUNDLED_MANIFEST_BASELINE, osType, archSuffix)
-
-  const backends = parseManifestForPlatform(live, osType, archSuffix)
-  info(
-    `[fetchRemoteBackends] Found ${backends.length} remote backends for ${osType}-${archSuffix}: ${backends
-      .map((b) => b.backend)
-      .join(', ')}`
-  )
-  return backends
 }

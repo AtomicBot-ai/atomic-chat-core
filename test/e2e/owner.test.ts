@@ -505,7 +505,7 @@ describe.skipIf(!existsSync(BIN))('the compiled core as an owner', () => {
     )
   })
 
-  it('falls back to ggml-org for a tag absent from the mirror manifest', async () => {
+  it('falls back to ggml-org for a tag absent from the release list', async () => {
     const fixture = await startBackendInstallFixture(dataFolder)
     fixtures.push(fixture)
     const { ready } = await startDaemon()

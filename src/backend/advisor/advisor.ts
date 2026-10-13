@@ -39,12 +39,7 @@ import type {
 import type { HardwareFacts } from '../../hardware/index.js'
 import {
   archSuffixFor,
-  BUNDLED_MANIFEST_BASELINE,
-  fetchLiveManifest,
   findPrismRelease,
-  ManifestSessionCache,
-  manifestTransportFromFetch,
-  parseManifestForPlatform,
   prismArchiveSources,
   prismAssetOffered,
   PrismCatalogService,
@@ -52,9 +47,17 @@ import {
   prismTagBuild,
   TurboquantCatalogService,
   turboquantCatalogToBackends,
+  UpstreamReleasesCatalogService,
+  upstreamRemoteBackends,
   withHardTimeout,
 } from '../catalog/index.js'
-import type { PrismManifest, PrismOfferOptions, PrismRelease, TurboquantRelease } from '../catalog/index.js'
+import type {
+  PrismManifest,
+  PrismOfferOptions,
+  PrismRelease,
+  TurboquantRelease,
+  UpstreamOfferOptions,
+} from '../catalog/index.js'
 import { findLatestPrismVersionForBackend } from '../select/index.js'
 import { CORE_VERSION } from '../../version.js'
 import { scanInstalledBackends } from '../installed/index.js'
@@ -88,15 +91,15 @@ export interface BackendAdvisorDeps {
   emit: (name: 'backend:better-detected', payload: CoreEvents['backend:better-detected']) => void
   /** The `fetch` for a request carrying this proxy policy (`policyFetchFor` in the core). */
   fetchFor: (proxy?: ProxyConfig | null) => typeof fetch
-  /** Upstream: the session manifest cache shared with `BackendService.readManifest`. */
-  manifestCache?: ManifestSessionCache
+  /** Upstream: the release-list service shared with `BackendService.readManifest`; built from `layout` + `fetchFor` when absent. */
+  upstreamCatalog?: UpstreamReleasesCatalogService
   /** TurboQuant: the release-index service; built from `layout` + `fetchFor` when absent. */
   turboquantCatalog?: TurboquantCatalogService
   /** PrismML: the conf manifest service; built from `layout` + `fetchFor` when absent. */
   prismCatalog?: PrismCatalogService
-  /** PrismML: the user's `allow_candidate_builds`; absent = verified builds only. */
+  /** PrismML and upstream: the provider's `allow_candidate_builds`; absent = verified builds only. */
   allowCandidateBuilds?: () => boolean | Promise<boolean>
-  /** PrismML: the version `min_core_version` is compared with; defaults to this core's. */
+  /** PrismML and upstream: the version `min_core_version` is compared with; defaults to this core's. */
   coreVersion?: string
   /** Every pack on disk; defaults to the directory scan. */
   installed?: () => Promise<BackendVersion[]>
@@ -125,7 +128,7 @@ interface FetchOptions {
 export class BackendAdvisor {
   readonly provider: LlamacppProviderId
   private readonly policy: BackendProviderPolicy
-  private readonly manifestCache: ManifestSessionCache
+  private readonly upstream: UpstreamReleasesCatalogService
   private readonly turboquant: TurboquantCatalogService
   private readonly prism: PrismCatalogService
   private inFlightRecommend: Promise<BackendRecommendationResponse> | null = null
@@ -133,7 +136,14 @@ export class BackendAdvisor {
   constructor(private readonly deps: BackendAdvisorDeps) {
     this.provider = deps.provider
     this.policy = policyFor(deps.provider)
-    this.manifestCache = deps.manifestCache ?? new ManifestSessionCache()
+    this.upstream =
+      deps.upstreamCatalog ??
+      new UpstreamReleasesCatalogService({
+        layout: deps.layout,
+        fetchFor: deps.fetchFor,
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(deps.log ? { log: deps.log } : {}),
+      })
     this.turboquant =
       deps.turboquantCatalog ??
       new TurboquantCatalogService({
@@ -242,7 +252,7 @@ export class BackendAdvisor {
     }
     if (this.provider === 'atomic-prism') {
       const { manifest, source } = await this.prismManifest(options)
-      const offer = await this.prismOfferOptions()
+      const offer = await this.offerOptions()
       return {
         remote: prismCatalogToBackends(manifest, offer),
         source,
@@ -250,23 +260,9 @@ export class BackendAdvisor {
       }
     }
 
-    const archSuffix = archSuffixFor(arch)
-    if (options.force) this.manifestCache.clear()
-    const cached = this.manifestCache.get()
-    if (cached) {
-      return { remote: parseManifestForPlatform(cached, osType, archSuffix), source: 'session-cache' }
-    }
-    const live = await fetchLiveManifest({
-      cache: this.manifestCache,
-      transports: [manifestTransportFromFetch('core fetch', this.deps.fetchFor(options.proxy))],
-      onInfo: (message) => this.log('info', message),
-      onWarn: (message) => this.log('warn', message),
-    })
-    if (live) return { remote: parseManifestForPlatform(live, osType, archSuffix), source: 'live' }
-    return {
-      remote: parseManifestForPlatform(BUNDLED_MANIFEST_BASELINE, osType, archSuffix),
-      source: 'bundled-baseline',
-    }
+    const { catalog, source } = await this.upstream.catalog({ force: options.force, proxy: options.proxy })
+    const offer = await this.offerOptions()
+    return { remote: upstreamRemoteBackends(catalog, offer, osType, archSuffixFor(arch)), source }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -449,7 +445,7 @@ export class BackendAdvisor {
       appVersion: null,
       proxy: request.proxy ?? null,
     })
-    return prismUpdateResponse(response, manifest, await this.prismOfferOptions(), request.requires_build)
+    return prismUpdateResponse(response, manifest, await this.offerOptions(), request.requires_build)
   }
 
   private async checkUpdatesOf(request: BackendUpdateCheckRequest): Promise<BackendUpdateCheckResponse> {
@@ -535,7 +531,8 @@ export class BackendAdvisor {
     return this.prism.catalog({ force: options.force, proxy: options.proxy })
   }
 
-  private async prismOfferOptions(): Promise<PrismOfferOptions> {
+  /** `min_core_version` and `allow_candidate_builds`, shared by the PrismML and upstream release lists. */
+  private async offerOptions(): Promise<PrismOfferOptions & UpstreamOfferOptions> {
     let allowCandidates = false
     try {
       allowCandidates = (await this.deps.allowCandidateBuilds?.()) === true
