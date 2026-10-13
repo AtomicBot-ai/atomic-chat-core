@@ -1059,6 +1059,98 @@ describe('the engine image through the guest’s Engine API (design D4)', () => 
 })
 
 /**
+ * Removing an engine after conf published a newer release of it. The removal is about the
+ * installation: it must not be planned as a setup of the newest descriptor, whose "installed from
+ * another descriptor" blocker would stop the removal itself (Windows acceptance, 2026-10-13: an
+ * installed `tensorrt-llm-1.3.0rc29-r2` could not be removed once conf published `-r3`).
+ */
+describe('removing an engine after conf published a newer descriptor', () => {
+  const NEWER = parseRuntimeDescriptor({
+    ...(readRuntimeFixture('tensorrt-llm-1.2.1-r2.json') as Record<string, unknown>),
+    descriptor_id: 'tensorrt-llm-9.9.9-r1',
+  })
+  const descriptors: RuntimeDescriptorProvider = {
+    engines: [TENSORRT_LLM_DESCRIPTOR_SOURCE],
+    forNewSetup: async () => ({ kind: 'available', descriptor: NEWER }),
+    cachedForNewSetup: async () => ({ kind: 'available', descriptor: NEWER }),
+    forInstallation: async (id) => {
+      const found = [DESCRIPTOR, NEWER].find((descriptor) => descriptor.descriptor_id === id)
+      return found === undefined
+        ? { kind: 'unsupported', error: new AtomicCoreError('MANAGED_METADATA_INVALID', 'not cached') }
+        : { kind: 'available', descriptor: found }
+    },
+  }
+
+  it('plans the removal of the installation as it is: no conflict, its own descriptor, no elevation', async () => {
+    const machine = importedWindows()
+    const h = harness(machine, { record: RECORD, descriptors })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.pull(consented(), () => undefined, signal)
+    await provisioner.activate(consented(), signal)
+
+    // What the app sends: a removal names no descriptor.
+    const removal = record({ kind: 'remove', descriptor_id: undefined as never, retain_models: true })
+    const { plan, host_step } = await provisioner.probe(removal, signal)
+
+    expect(plan.blockers).toEqual([])
+    expect(plan.availability).toBe('supported')
+    expect(plan.descriptor_id).toBe(DESCRIPTOR.descriptor_id)
+    expect(plan.requires_elevation).toBe(false)
+    expect(plan.may_require_reboot).toBe(false)
+    expect(plan.download_bytes).toBeNull()
+    expect(plan.system_changes.map((change) => change.code)).toEqual(
+      expect.arrayContaining([
+        'unload-sessions',
+        'remove-image',
+        'remove-engine-caches',
+        'remove-installation',
+      ])
+    )
+    expect(host_step).toBeNull()
+    // Recovery re-checks a consent against the plan of this same operation, not a setup's.
+    expect(await provisioner.inventory.currentPlanDigest?.(removal)).toBe(plan.plan_digest)
+
+    const consentedRemoval: PersistedOperation = {
+      ...removal,
+      requirement_plan: plan,
+      machine: {
+        ...removal.machine,
+        consented: {
+          plan_digest: plan.plan_digest,
+          descriptor_id: plan.descriptor_id,
+          image_digest: plan.image_digest,
+          environment_manifest_id: plan.environment_manifest_id,
+          target: TARGET,
+        },
+      },
+    }
+    const image = DESCRIPTOR.image['linux/amd64']
+    expect(machine.wsl.guests?.['AtomicChat']?.host?.images).toContain(`${image.repository}@${image.digest}`)
+    await provisioner.remove(consentedRemoval, signal)
+    expect(await h.deps.installations.read('tensorrt-llm')).toBeNull()
+    expect(machine.wsl.guests?.['AtomicChat']?.host?.images ?? []).not.toContain(
+      `${image.repository}@${image.digest}`
+    )
+  })
+
+  it('plans the removal that starts an update the same way: the reinstall names the newer release (unify-engine-lifecycle D7)', async () => {
+    const machine = importedWindows()
+    const h = harness(machine, { record: RECORD, descriptors })
+    const provisioner = createWindowsProvisioner(h.deps)
+    await provisioner.pull(consented(), () => undefined, signal)
+    await provisioner.activate(consented(), signal)
+
+    // `beginReinstall` (src/engines/managed.ts): a removal carrying the release the setup after it installs.
+    const reinstall = record({ kind: 'remove', descriptor_id: NEWER.descriptor_id, retain_models: true })
+    const { plan } = await provisioner.probe(reinstall, signal)
+
+    expect(plan.blockers).toEqual([])
+    expect(plan.descriptor_id).toBe(DESCRIPTOR.descriptor_id)
+    expect(plan.system_changes.map((change) => change.code)).toContain('remove-installation')
+  })
+})
+
+/**
  * A second managed engine into the same distribution (change `add-vllm-runtime`, task 2.2; spec
  * `managed-runtime-environment`, "Второй движок ставится на готовое окружение"). The second engine
  * is test data: the TensorRT-LLM fixture under another engine id and image.

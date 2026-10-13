@@ -68,7 +68,8 @@ import type { EffectFinding, EffectInventory } from './recovery.js'
 import type { EnvironmentProvisioner, HostStepVerdict, ProvisionerProbe } from './service.js'
 import type { EffectIntent } from './state.js'
 import type { PersistedOperation } from './store.js'
-import { otherEngines, storeModelsChange } from './store-models.js'
+import { runtimeRemovalPlan } from './runtime-removal-plan.js'
+import { otherEngines } from './store-models.js'
 
 /** The privileged recipe, as the host module builds it (`src/host/recipes`, task 2.5). Injected. */
 export interface HostRecipeBinding {
@@ -351,74 +352,12 @@ export function createLinuxProvisioner(deps: LinuxProvisionerDeps): EnvironmentP
         host_step: null,
       }
     }
-    const existing = await deps.installations.read(target.installation_id)
-    const retainModels = record.request.retain_models !== false
-    const usedBy = await otherEngines(deps.installations, target)
-    const changes: ManagedSystemChange[] = [
-      {
-        code: 'unload-sessions',
-        text: `Unload any loaded ${target.engine_id} model, waiting until its container has stopped.`,
-      },
-      { code: 'remove-containers', text: `Remove this app's own ${target.engine_id} containers.` },
-      ...(existing === null
-        ? []
-        : [
-            {
-              code: 'remove-image',
-              text: `Remove the engine image ${existing.image.repository}@${existing.image.digest}, unless another container still uses it.`,
-              params: { image: `${existing.image.repository}@${existing.image.digest}` },
-            },
-            ...(existing.probe_image === undefined
-              ? []
-              : [
-                  {
-                    code: 'remove-probe-image',
-                    text: `Remove the GPU check image ${existing.probe_image.repository}@${existing.probe_image.digest}, unless something else still uses it.`,
-                    params: { image: `${existing.probe_image.repository}@${existing.probe_image.digest}` },
-                  },
-                ]),
-            {
-              code: 'remove-engine-caches',
-              text: 'Remove the engine caches built for this installation.',
-              params: { descriptor_id: existing.installation.active_descriptor_id ?? '' },
-            },
-          ]),
-      ...storeModelsChange(retainModels, usedBy),
-      { code: 'remove-installation', text: 'Forget the installation.' },
-    ]
-    const plan: RequirementPlan = {
-      plan_digest: canonicalDigest({
-        kind: 'remove',
-        target,
-        installation:
-          existing === null
-            ? null
-            : { descriptor_id: existing.installation.active_descriptor_id, image: existing.image },
-        retain_models: retainModels,
-        system_changes: changes,
-      }),
-      environment_id: deps.environmentId,
+    const plan = await runtimeRemovalPlan({
+      record,
       target,
-      availability: existing === null ? 'setup-required' : 'supported',
-      recipe_id: 'none',
-      recipe_digest: ZERO_DIGEST,
-      descriptor_id: existing?.installation.active_descriptor_id ?? null,
-      // A removal judges nothing against the environment: no manifest is read or pinned.
-      environment_manifest_id: null,
-      image_digest: existing?.image.digest ?? null,
-      adopts_existing_engine: true,
-      system_changes: changes,
-      download_bytes: null,
-      required_disk_bytes: null,
-      // A removal reads nothing off the disk.
-      docker_root_dir: null,
-      free_disk_bytes: null,
-      requires_elevation: false,
-      may_require_relogin: false,
-      may_require_reboot: false,
-      blockers: [],
-      warnings: [],
-    }
+      environmentId: deps.environmentId,
+      installations: deps.installations,
+    })
     return { plan, host_step: null }
   }
 
