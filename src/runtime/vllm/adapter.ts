@@ -35,6 +35,8 @@ import {
   ManagedRequestRefusal,
   asksForStructuredOutput,
   asksForTools,
+  capRequestedOutput,
+  carriesMedia,
   reasoningIntoContent,
   thinkingRequested,
   type ManagedExitClassification,
@@ -299,44 +301,6 @@ export const VLLM_REWRITABLE_ROUTES: readonly ManagedRoute[] = [
 
 const REWRITABLE = new Set(VLLM_REWRITABLE_ROUTES.map((route) => route.path))
 
-function positive(body: Record<string, unknown>, key: string): { present: boolean; value: number } {
-  if (!(key in body) || body[key] === null) return { present: false, value: 0 }
-  const value = body[key]
-  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
-    throw new AtomicCoreError('INVALID_ARGUMENT', `${key} must be a positive integer.`)
-  }
-  return { present: true, value }
-}
-
-/** Any message part that is not text: an image, a video, audio — none of which this engine accepts here. */
-const MEDIA_PART = new Set([
-  'image_url',
-  'input_image',
-  'image',
-  'video_url',
-  'video',
-  'input_audio',
-  'audio_url',
-])
-
-function carriesMedia(body: Record<string, unknown>): boolean {
-  const messages = body['messages']
-  if (!Array.isArray(messages)) return false
-  return messages.some((message) => {
-    const content =
-      message !== null && typeof message === 'object' ? (message as { content?: unknown }).content : null
-    return (
-      Array.isArray(content) &&
-      content.some(
-        (part) =>
-          part !== null &&
-          typeof part === 'object' &&
-          MEDIA_PART.has(String((part as { type?: unknown }).type))
-      )
-    )
-  })
-}
-
 /**
  * Caps the output a request asks for at `max_output_tokens` (one key, as the client sent it); a
  * request that asks for none is capped by vLLM's launch default instead. Refuses what the session cannot do with `:1337`'s own wording
@@ -366,21 +330,8 @@ export function vllmRewriteRequestBody(
       )
     }
   }
-  const cap = settings.max_output_tokens
-  if (route === '/v1/completions') {
-    const field = positive(client, 'max_tokens')
-    return field.present ? { ...client, max_tokens: Math.min(field.value, cap) } : client
-  }
-  const legacy = positive(client, 'max_tokens')
-  const modern = positive(client, 'max_completion_tokens')
-  const asked = [legacy, modern].filter((field) => field.present).map((field) => field.value)
   // Nothing asked: vLLM's launch default (`--override-generation-config`) caps it, within the room left.
-  if (asked.length === 0) return client
-  const rest: Record<string, unknown> = { ...client }
-  delete rest['max_tokens']
-  delete rest['max_completion_tokens']
-  rest[modern.present ? 'max_completion_tokens' : 'max_tokens'] = Math.min(cap, ...asked)
-  return rest
+  return capRequestedOutput(route, client, settings.max_output_tokens)
 }
 
 /** vLLM's 400 wording for a request over the context, current and older, with the limit and the request. */
