@@ -347,13 +347,19 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
     expect(unreachable.status).toBe(503)
   })
 
-  it('answers /v1/responses for a tensorrt-llm model with a clear error', async () => {
-    const { port } = await startUpstream((_req, _body, res) => res.end('{}'))
-    const server = await startPublic({ sessions: [trt(port)] })
-    const res = await postJson(server, '/responses', { model: 'trt', input: 'hi' })
-    expect(res.status).toBe(400)
-    expect(await res.json()).toMatchObject({
-      error: { message: "The model 'trt' does not support the Responses API." },
-    })
-  })
+  // Every managed provider declares its routes and has no Responses API (change add-sglang-runtime,
+  // D1: the lookup reads MANAGED_PROVIDER_IDS, not a chain of provider names).
+  it.each(['tensorrt-llm', 'vllm', 'sglang'] as const)(
+    'answers /v1/responses for a %s model with a clear error',
+    async (provider) => {
+      const { port } = await startUpstream((_req, _body, res) => res.end('{}'))
+      const session = trt(port)
+      const server = await startPublic({ sessions: [{ ...session, provider }] })
+      const res = await postJson(server, '/responses', { model: 'trt', input: 'hi' })
+      expect(res.status).toBe(400)
+      expect(await res.json()).toMatchObject({
+        error: { message: "The model 'trt' does not support the Responses API." },
+      })
+    }
+  )
 })

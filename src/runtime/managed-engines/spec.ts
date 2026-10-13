@@ -12,12 +12,12 @@
  *
  * `engine_id` is the provider id. Core has relied on that in four places (residency leftovers, the
  * models of an engine, the removal's unloader, the descriptor of a load); the registry makes it an
- * invariant, checked when core starts.
+ * invariant, checked when core starts, together with the id being one of `MANAGED_PROVIDER_IDS`.
  */
 import type { SessionRoutePolicy } from '../shared/index.js'
 import type { DescriptorSource } from '../environment/index.js'
 import type { ManagedTextAdapter, ManagedTextCapabilities } from '../managed-text/index.js'
-import type { GpuFacts } from '../../contracts/index.js'
+import { MANAGED_PROVIDER_IDS, isManagedProviderId, type GpuFacts } from '../../contracts/index.js'
 import type {
   CheckpointMemoryInputs,
   HostMemory,
@@ -83,6 +83,13 @@ export class ManagedEngineRegistry {
     if (spec.engine_id !== spec.provider) {
       throw new Error(
         `Managed engine ${spec.label}: engine_id "${spec.engine_id}" must equal its provider id "${spec.provider}".`
+      )
+    }
+    // The provider lists core keeps by hand read `MANAGED_PROVIDER_IDS` (change `add-sglang-runtime`,
+    // D1): an engine missing from it would load and then be invisible to them.
+    if (!isManagedProviderId(spec.engine_id)) {
+      throw new Error(
+        `Managed engine ${spec.engine_id} is not in MANAGED_PROVIDER_IDS (${MANAGED_PROVIDER_IDS.join(', ')}).`
       )
     }
     if (spec.descriptor.engine_id !== spec.engine_id) {

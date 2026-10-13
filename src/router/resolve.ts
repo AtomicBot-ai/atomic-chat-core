@@ -18,14 +18,15 @@ export interface RemoteProvider {
 }
 
 export type LocalProvider =
-  'llamacpp' | 'llamacpp-upstream' | 'mlx' | 'tensorrt-llm' | 'atomic-prism' | 'vllm'
+  'llamacpp' | 'llamacpp-upstream' | 'mlx' | 'tensorrt-llm' | 'atomic-prism' | 'vllm' | 'sglang'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
  * loaded under two engines resolves to the first; changing the order would silently move traffic.
- * `tensorrt-llm`, `atomic-prism` and `vllm` come last, in the order they were added, for exactly
- * that reason: adding a provider moves nothing that already resolved (`vllm` after `atomic-prism`,
- * which core 0.10.0 already shipped; change `add-vllm-runtime`, D11). A Prism-only file never loads
+ * `tensorrt-llm`, `atomic-prism`, `vllm` and `sglang` come last, in the order they were added, for
+ * exactly that reason: adding a provider moves nothing that already resolved (`vllm` after
+ * `atomic-prism`, which core 0.10.0 already shipped; change `add-vllm-runtime`, D11; `sglang` after
+ * `vllm`, change `add-sglang-runtime`, D8). A Prism-only file never loads
  * under another engine (the compatibility gate), so its sessions are found here even near the end of
  * the list; one store model is never loaded in two managed providers at once, so their order never
  * decides between two live sessions of one id.
@@ -37,6 +38,7 @@ export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
   'tensorrt-llm',
   'atomic-prism',
   'vllm',
+  'sglang',
 ]
 
 /**

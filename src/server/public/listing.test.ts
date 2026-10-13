@@ -82,6 +82,7 @@ describe('/models', () => {
       sessions: [
         localSession(1, { provider: 'tensorrt-llm', modelId: 'trt-model' }),
         localSession(2, { provider: 'vllm', modelId: 'vllm-model' }),
+        localSession(3, { provider: 'sglang', modelId: 'sglang-model' }),
       ],
     })
     const res = await fetch(`http://127.0.0.1:${server.port}/v1/models`)
@@ -90,6 +91,7 @@ describe('/models', () => {
       data: [
         { id: 'trt-model', object: 'model', created: 1, owned_by: 'tensorrt-llm' },
         { id: 'vllm-model', object: 'model', created: 1, owned_by: 'vllm' },
+        { id: 'sglang-model', object: 'model', created: 1, owned_by: 'sglang' },
       ],
     })
   })

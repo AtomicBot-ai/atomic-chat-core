@@ -1,6 +1,6 @@
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { AtomicCoreError } from '../contracts/index.js'
+import { AtomicCoreError, MANAGED_PROVIDER_IDS } from '../contracts/index.js'
 import type { DataFolderEnv } from './data-folder.js'
 import {
   backendExeCandidates,
@@ -30,7 +30,11 @@ describe('dataLayout', () => {
     expect(layout.provider('mlx').modelsDir).toBe(native('/data/mlx/models'))
     // One store for every managed engine (change add-vllm-runtime, spec managed-model-store).
     expect(layout.managedModelsDir).toBe(native('/data/managed-models'))
-    expect(layout.provider('tensorrt-llm').modelsDir).toBe(native('/data/managed-models'))
+    for (const provider of MANAGED_PROVIDER_IDS) {
+      expect(layout.provider(provider).modelsDir).toBe(native('/data/managed-models'))
+      expect(layout.provider(provider).backendsDir).toBe(native(`/data/${provider}/backends`))
+    }
+    expect(MANAGED_PROVIDER_IDS).toContain('sglang')
   })
   it('gives atomic-prism its own packs and the shared GGUF tree', () => {
     const prism = layout.provider('atomic-prism')

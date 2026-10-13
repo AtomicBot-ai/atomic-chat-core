@@ -26,6 +26,7 @@ const LOCAL_PROVIDERS = new Set([
   'foundation-models',
   'tensorrt-llm',
   'vllm',
+  'sglang',
 ])
 
 export interface CustomHeader {

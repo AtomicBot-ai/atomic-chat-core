@@ -50,6 +50,7 @@ const PROVIDERS: ReadonlySet<string> = new Set([
   'foundation-models',
   'tensorrt-llm',
   'vllm',
+  'sglang',
 ])
 
 export interface ExternalSessionsOptions {

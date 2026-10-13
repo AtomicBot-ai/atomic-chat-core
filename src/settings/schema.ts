@@ -21,6 +21,7 @@ import foundationModelsSchema from './schema/foundation-models.json' with { type
 import llamacppUpstreamSchema from './schema/llamacpp-upstream.json' with { type: 'json' }
 import llamacppSchema from './schema/llamacpp.json' with { type: 'json' }
 import mlxSchema from './schema/mlx.json' with { type: 'json' }
+import sglangSchema from './schema/sglang.json' with { type: 'json' }
 import tensorrtLlmSchema from './schema/tensorrt-llm.json' with { type: 'json' }
 import vllmSchema from './schema/vllm.json' with { type: 'json' }
 
@@ -32,6 +33,7 @@ export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'foundation-models',
   'tensorrt-llm',
   'vllm',
+  'sglang',
 ]
 
 const CONTROLLER_TYPES = new Set(['checkbox', 'input', 'dropdown', 'slider'])
@@ -64,6 +66,7 @@ const SCHEMAS: Record<LocalProviderId, readonly SettingDescriptor[]> = {
   'foundation-models': toDescriptors('foundation-models', foundationModelsSchema),
   'tensorrt-llm': toDescriptors('tensorrt-llm', tensorrtLlmSchema),
   'vllm': toDescriptors('vllm', vllmSchema),
+  'sglang': toDescriptors('sglang', sglangSchema),
 }
 
 /** The descriptor array as the app registers it (deep copy — callers may mutate `options`/`value`). */
@@ -204,6 +207,29 @@ const VLLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
   default_repetition_penalty: 'string',
 }
 
+/** `SglangProviderConfig`: the card's UUID and the dropdowns as text, the prefix cache a flag, the rest numbers. */
+const SGLANG_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
+  gpu_id: 'string',
+  context_length: 'number',
+  max_output_tokens: 'number',
+  max_running_requests: 'number',
+  mem_fraction_static: 'number',
+  max_total_tokens: 'number',
+  cuda_graphs: 'string',
+  kv_cache_dtype: 'string',
+  load_timeout_seconds: 'number',
+  enable_prefix_caching: 'boolean',
+  chunked_prefill_size: 'number',
+  dtype: 'string',
+  seed: 'number',
+  // '' is "the model's own", so these stay strings; the provider's settings parse them.
+  default_temperature: 'string',
+  default_top_p: 'string',
+  default_top_k: 'string',
+  default_min_p: 'string',
+  default_repetition_penalty: 'string',
+}
+
 export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<string, CanonicalValueType>>> = {
   'llamacpp-upstream': LLAMACPP_VALUE_TYPES,
   'llamacpp': LLAMACPP_VALUE_TYPES,
@@ -212,6 +238,7 @@ export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<stri
   'foundation-models': FOUNDATION_MODELS_VALUE_TYPES,
   'tensorrt-llm': TENSORRT_LLM_VALUE_TYPES,
   'vllm': VLLM_VALUE_TYPES,
+  'sglang': SGLANG_VALUE_TYPES,
 }
 
 /**

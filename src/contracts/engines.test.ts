@@ -8,6 +8,7 @@ import {
   ENGINE_NOT_REMOVABLE_REASONS,
 } from './engines.js'
 import type { EngineChangedEvent, EngineVersions } from './engines.js'
+import { MANAGED_PROVIDER_IDS } from './session.js'
 import * as contracts from './index.js'
 
 describe('engine lifecycle contracts', () => {
@@ -20,15 +21,17 @@ describe('engine lifecycle contracts', () => {
       'mlx',
       'tensorrt-llm',
       'vllm',
+      'sglang',
     ])
   })
 
   it('names the system that installs each engine', () => {
     expect(Object.keys(ENGINE_KINDS)).toEqual([...ENGINE_IDS])
+    // The managed engines are exactly the managed providers, in the same order (change add-sglang-runtime, D1).
     expect(ENGINE_IDS.filter((engine) => ENGINE_KINDS[engine] === 'managed')).toEqual([
-      'tensorrt-llm',
-      'vllm',
+      ...MANAGED_PROVIDER_IDS,
     ])
+    expect([...MANAGED_PROVIDER_IDS]).toEqual(['tensorrt-llm', 'vllm', 'sglang'])
     expect(ENGINE_IDS.filter((engine) => ENGINE_KINDS[engine] === 'engine-build')).toEqual(['sd-cpp', 'mlx'])
   })
 

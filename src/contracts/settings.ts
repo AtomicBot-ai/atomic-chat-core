@@ -144,6 +144,42 @@ export interface VllmProviderConfig {
   load_timeout_seconds: number
 }
 
+/**
+ * `sglang` (change `add-sglang-runtime`, spec `sglang-runtime`, design D6): stored values. `0` and `''`
+ * are "not set" and reach the engine as nothing: SGLang's own value, or core's own memory share.
+ */
+export interface SglangProviderConfig {
+  /** The card's UUID; `''` picks the card with the most free memory at load time. */
+  gpu_id: string
+  context_length: number
+  /** Enforced per request by the session gateway and the engine's default output limit. */
+  max_output_tokens: number
+  /** `--max-running-requests`: requests served at once. */
+  max_running_requests: number
+  /** `--mem-fraction-static`; `0` (auto) lets core compute it from the card's free memory. */
+  mem_fraction_static: number
+  /** `--max-total-tokens`, the KV cache in tokens; `0` lets SGLang size it from its share. */
+  max_total_tokens: number
+  /** `auto` (graphs captured up to `max_running_requests`), `on` (SGLang's own) or `off`. */
+  cuda_graphs: 'auto' | 'on' | 'off'
+  /** `auto` (the model's own precision) or `fp8` (Ada and newer; ignored on older cards). */
+  kv_cache_dtype: 'auto' | 'fp8'
+  load_timeout_seconds: number
+  /** `false` passes `--disable-radix-cache`. */
+  enable_prefix_caching: boolean
+  /** `--chunked-prefill-size`; `0` leaves SGLang's own. */
+  chunked_prefill_size: number
+  dtype: 'auto' | 'float16' | 'bfloat16' | 'float32'
+  /** `--random-seed`; `0` leaves SGLang's own. */
+  seed: number
+  /** Sampling defaults for a request that sets none; `''` is the model's own. */
+  default_temperature: string
+  default_top_p: string
+  default_top_k: string
+  default_min_p: string
+  default_repetition_penalty: string
+}
+
 export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
   ? MlxConfig
   : P extends 'foundation-models'
@@ -152,7 +188,9 @@ export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
       ? TensorrtLlmProviderConfig
       : P extends 'vllm'
         ? VllmProviderConfig
-        : LlamacppConfig
+        : P extends 'sglang'
+          ? SglangProviderConfig
+          : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

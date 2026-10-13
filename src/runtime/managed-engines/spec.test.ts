@@ -10,10 +10,10 @@ import { ManagedEngineRegistry, managedModelCheckOf, type ManagedEngineSpec } fr
 const second = (over: Partial<ManagedEngineSpec> = {}): ManagedEngineSpec =>
   ({
     ...TENSORRT_LLM_ENGINE,
-    engine_id: 'test-engine',
-    provider: 'test-engine',
-    label: 'Test engine',
-    descriptor: { engine_id: 'test-engine', label: 'Test engine', url: 'https://conf/test-engine.json' },
+    engine_id: 'vllm',
+    provider: 'vllm',
+    label: 'Second engine',
+    descriptor: { engine_id: 'vllm', label: 'Second engine', url: 'https://conf/vllm.json' },
     ...over,
   }) as ManagedEngineSpec
 
@@ -22,19 +22,30 @@ describe('ManagedEngineRegistry', () => {
     const registry = new ManagedEngineRegistry()
     registry.register(TENSORRT_LLM_ENGINE)
     registry.register(second())
-    expect(registry.list().map((spec) => spec.engine_id)).toEqual(['tensorrt-llm', 'test-engine'])
-    expect(registry.get('test-engine')?.label).toBe('Test engine')
+    expect(registry.list().map((spec) => spec.engine_id)).toEqual(['tensorrt-llm', 'vllm'])
+    expect(registry.get('vllm')?.label).toBe('Second engine')
     expect(registry.get('llamacpp')).toBeUndefined()
     expect(registry.has('tensorrt-llm')).toBe(true)
-    expect(registry.descriptorSources().map((source) => source.engine_id)).toEqual([
-      'tensorrt-llm',
-      'test-engine',
-    ])
+    expect(registry.descriptorSources().map((source) => source.engine_id)).toEqual(['tensorrt-llm', 'vllm'])
   })
 
   it('регистрация с несовпадающим id падает: provider id other than engine_id', () => {
     expect(() => new ManagedEngineRegistry().register(second({ provider: 'other-provider' }))).toThrow(
-      /engine_id "test-engine" must equal its provider id "other-provider"/
+      /engine_id "vllm" must equal its provider id "other-provider"/
+    )
+  })
+
+  // Change add-sglang-runtime, D1: the provider lists core keeps by hand (the public server's
+  // Responses lookup, the model store's paths, the registry() overloads) read MANAGED_PROVIDER_IDS, so
+  // an engine missing from it would load and then be invisible to them.
+  it('спека вне списка managed-провайдеров: refuses an engine missing from MANAGED_PROVIDER_IDS', () => {
+    const outside = second({
+      engine_id: 'test-engine',
+      provider: 'test-engine',
+      descriptor: { engine_id: 'test-engine', label: 'Test engine', url: 'https://conf/test-engine.json' },
+    })
+    expect(() => new ManagedEngineRegistry().register(outside)).toThrow(
+      /test-engine is not in MANAGED_PROVIDER_IDS \(tensorrt-llm, vllm, sglang\)/
     )
   })
 

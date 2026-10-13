@@ -16,12 +16,14 @@ import {
   serdeToString,
 } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
+import { MANAGED_PROVIDER_IDS } from '../../contracts/index.js'
 import { resolveRemoteProvider } from '../../router/index.js'
 import { answer, clientGone, connectTimeoutMs } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { outboundHeaders, readModelRequest, sseEvent } from './forward.js'
 import { policyRefusal } from './policy.js'
 import type { Backend } from './forward.js'
+import type { LocalTarget } from './types.js'
 import { SseLineReader } from './sse.js'
 import { bodyIndicatesOom, isContextLimitError } from './errors.js'
 import type { RequestTrace } from './trace.js'
@@ -55,8 +57,12 @@ export async function serveResponses(ex: Exchange): Promise<void> {
     ex.deps.findLocal('atomic-prism', modelId) ??
     ex.deps.findLocal('mlx', modelId)
   if (!session) {
-    // A session that declares its routes and has no Responses API says so, rather than "not found".
-    const declared = ex.deps.findLocal('tensorrt-llm', modelId) ?? ex.deps.findLocal('vllm', modelId)
+    // A session that declares its routes and has no Responses API says so, rather than "not found":
+    // every managed provider's, whichever loaded the model (change add-sglang-runtime, D1).
+    const declared = MANAGED_PROVIDER_IDS.reduce<LocalTarget | undefined>(
+      (found, provider) => found ?? ex.deps.findLocal(provider, modelId),
+      undefined
+    )
     const refused = declared?.policy && policyRefusal(declared.policy, ex.path, modelId, json)
     if (refused) {
       trace.errorKind = 'bad_request'
