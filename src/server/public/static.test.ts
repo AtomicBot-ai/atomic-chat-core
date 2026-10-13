@@ -39,6 +39,25 @@ describe('the OpenAPI document', () => {
     )
     expect(operation?.responses['503']).toBeTypeOf('object')
     expect(operation?.responses['504']).toBeTypeOf('object')
+    // A provider's model: its own settings, and the quota and upstream failures it can answer.
+    expect(Object.keys(request.properties)).toEqual(
+      expect.arrayContaining(['quality', 'background', 'output_format', 'aspect_ratio', 'resolution'])
+    )
+    expect(operation?.responses['402']).toBeTypeOf('object')
+    expect(operation?.responses['502']).toBeTypeOf('object')
+
+    // The JSON edits route only providers' models answer.
+    const edits = spec.paths['/images/edits']?.['post']
+    expect(edits?.operationId).toBe('createImageEdit')
+    expect(edits?.requestBody.content['application/json'].schema.$ref).toBe(
+      '#/components/schemas/CreateImageEditDto'
+    )
+    expect(spec.components.schemas['CreateImageEditDto'].required.sort()).toEqual([
+      'images',
+      'model',
+      'prompt',
+    ])
+    expect(edits?.responses['415']).toBeTypeOf('object')
   })
 
   // Stage 9g: the app's document describes the video facade the core serves (`videos.ts`).
@@ -64,12 +83,29 @@ describe('the OpenAPI document', () => {
     expect(spec.paths['/videos/{video_id}']?.['delete']?.operationId).toBe('deleteVideo')
     const content = spec.paths['/videos/{video_id}/content']?.['get']
     expect(content?.operationId).toBe('downloadVideoContent')
-    expect(Object.keys(content?.responses['200'].content).sort()).toEqual(['image/png', 'video/webm'])
+    // A provider's clip is MP4; a local one WebM.
+    expect(Object.keys(content?.responses['200'].content).sort()).toEqual([
+      'image/png',
+      'video/mp4',
+      'video/webm',
+    ])
     const request = spec.components.schemas['CreateVideoDto']
     expect(request.required).toEqual(['prompt'])
     // The served document is re-serialised with sorted keys; compare as sets.
     expect(Object.keys(request.properties).sort()).toEqual(
-      ['model', 'prompt', 'seconds', 'size', 'seed', 'negative_prompt'].sort()
+      [
+        'model',
+        'prompt',
+        'seconds',
+        'size',
+        'seed',
+        'negative_prompt',
+        // What only a provider's model takes.
+        'resolution',
+        'aspect_ratio',
+        'generate_audio',
+        'input_reference',
+      ].sort()
     )
     const video = spec.components.schemas['VideoDto']
     expect(video.properties.status.enum).toEqual(['queued', 'in_progress', 'completed', 'failed'])

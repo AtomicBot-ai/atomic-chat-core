@@ -59,6 +59,7 @@ import type { EngineHandle } from '../engines/index.js'
 import { DEFAULT_ENVIRONMENT_ID } from '../runtime/environment/index.js'
 import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
+import { MEDIA_ADAPTERS, MediaCatalogService, MediaService } from '../media/index.js'
 import {
   EngineBuildsService,
   EngineManifestSource,
@@ -497,6 +498,23 @@ export async function createAtomicCore(
     }
     const modelSetups = wireModelSetups(modelSetupDeps)
 
+    // Cloud and self-hosted providers' image and video models (ADR
+    // 2026-10-13-remote-media-shares-the-diffusion-job-table). `ATOMIC_MEDIA_CATALOG_URL` is a test hook
+    // (docs/contracts.md "Test hooks"): an https or file URL of the catalog to read instead of conf's.
+    const mediaCatalogUrl = env['ATOMIC_MEDIA_CATALOG_URL']
+    const media = new MediaService({
+      catalog: new MediaCatalogService({
+        cachePath: layout.core.mediaCatalogCache,
+        fetch: options.fetch ?? fetch,
+        ...(mediaCatalogUrl ? { url: mediaCatalogUrl } : {}),
+        log,
+      }),
+      providers: () => cloud.routing(),
+      adapters: MEDIA_ADAPTERS,
+      fetch: options.fetch ?? fetch,
+      log: runtimeLog,
+    })
+
     const diffusion = wireDiffusion({
       layout,
       journal,
@@ -507,6 +525,7 @@ export async function createAtomicCore(
       platform,
       env,
       claimGpu: gpuResidency.hook(DIFFUSION_GPU_PROVIDER),
+      remoteMedia: media,
       ...(options.diffusion ? { overrides: options.diffusion } : {}),
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
@@ -906,6 +925,10 @@ export async function createAtomicCore(
           list: () => cloud.list(),
           upsert: (input) => cloud.upsert(input),
           remove: (provider) => cloud.remove(provider),
+        },
+        media: {
+          catalog: () => media.catalogView(),
+          providerModels: (provider, kind) => media.providerModels(provider, kind),
         },
         chatgpt: {
           status: () => chatgpt.status(),

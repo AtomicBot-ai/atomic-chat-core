@@ -12,8 +12,10 @@ import { decodePng, makeChunk, parseHeader, PNG_SIGNATURE } from './png.js'
 import {
   a1111Parameters,
   fmtFloat,
+  orderedEngine,
   PARAMETERS_KEYWORD,
   parseRecipe,
+  parseRecipeEngine,
   RECIPE_KEYWORD,
   serializeRecipe,
   spliceRecipe,
@@ -193,5 +195,58 @@ describe('the embedded JSON', () => {
     expect(
       parseRecipe(broken((r) => ((r['engine'] as Record<string, unknown>)['cpuFallback'] = 'no')))
     ).toBeUndefined()
+  })
+})
+
+describe('remote recipes', () => {
+  const remote = (): ImageRecipe =>
+    recipe({
+      model: { modelId: 'gpt-image-2', family: 'openai', displayName: 'GPT Image 2', filename: '' },
+      engine: { kind: 'remote', provider: 'openai', api: 'openai-images' },
+      remote: { quality: 'high', size: '1024x1024' },
+    })
+
+  it('round-trip with the provider and the remote options, and name the model in parameters', () => {
+    const text = serializeRecipe(remote())
+    expect(JSON.parse(text)).toMatchObject({
+      engine: { kind: 'remote', provider: 'openai', api: 'openai-images' },
+      remote: { size: '1024x1024', quality: 'high' },
+    })
+    expect(parseRecipe(text)).toEqual(remote())
+    expect(a1111Parameters(remote())).toContain('Model: gpt-image-2')
+  })
+
+  it('keep a local recipe without a remote key', () => {
+    expect(Object.keys(JSON.parse(serializeRecipe(recipe())) as object)).not.toContain('remote')
+  })
+
+  it('refuse an adapter this core does not have, or a malformed remote block', () => {
+    expect(parseRecipeEngine({ kind: 'remote', provider: 'x', api: 'not-an-api' })).toBeUndefined()
+    expect(parseRecipeEngine({ kind: 'remote', provider: '', api: 'openai-images' })).toBeUndefined()
+    expect(
+      parseRecipe(JSON.stringify({ ...JSON.parse(serializeRecipe(remote())), remote: { quality: 3 } }))
+    ).toBeUndefined()
+    const base = JSON.parse(serializeRecipe(remote())) as Record<string, unknown>
+    expect(parseRecipe(JSON.stringify({ ...base, remote: 'x' }))).toBeUndefined()
+    expect(parseRecipe(JSON.stringify({ ...base, remote: { quality: null, size: 'auto' } }))?.remote).toEqual(
+      {
+        size: 'auto',
+      }
+    )
+  })
+
+  it('orders an engine of either kind', () => {
+    expect(Object.keys(orderedEngine({ api: 'a1111', provider: 'p', kind: 'remote' }))).toEqual([
+      'kind',
+      'provider',
+      'api',
+    ])
+    expect(Object.keys(orderedEngine(recipe().engine))).toEqual([
+      'kind',
+      'backend',
+      'tag',
+      'offload',
+      'cpuFallback',
+    ])
   })
 })

@@ -60,6 +60,9 @@ import {
   startVideoJob,
 } from './jobs.js'
 import type { JobPlan } from './job-kind.js'
+import { resumeRemoteVideoJobs, startRemoteImageJob, startRemoteVideoJob } from './remote-job.js'
+import type { RemoteMediaGateway } from './remote-job.js'
+import { RemoteJobStore } from './remote-store.js'
 import type { JobDeps, JobOutcome, JobTimings } from './jobs.js'
 import { AsyncMutex } from './mutex.js'
 import { spawnServer } from './server-process.js'
@@ -117,6 +120,10 @@ export interface DiffusionServiceDeps {
    * respawn after a cancel or a crash — to free the GPU of the other engines. Absent, nothing is asked.
    */
   claimGpu?: GpuClaimHook
+  /** Cloud and self-hosted providers' image and video models; absent, a request with a `target` is refused. */
+  remoteMedia?: RemoteMediaGateway
+  /** Remote jobs at once; the runner's default otherwise. */
+  maxRemoteJobs?: number
 }
 
 /** A live job, as GPU residency reports it. */
@@ -213,12 +220,24 @@ export class DiffusionService {
       isFile,
       planVideo: (request, spec) => this.videoCost(request, spec),
       videoSaved: () => this.history.invalidate(),
+      ...(options.remoteMedia
+        ? {
+            remote: {
+              gateway: options.remoteMedia,
+              store: new RemoteJobStore(options.paths.remoteJobsFile),
+              ...(options.maxRemoteJobs !== undefined ? { maxJobs: options.maxRemoteJobs } : {}),
+            },
+          }
+        : {}),
     }
   }
 
-  /** Arm the idle timer; the plugin did this in its setup hook. */
+  /** Arm the idle timer (the plugin did this in its setup hook) and follow the clips a provider still makes. */
   start(): void {
     if (this.idle) return
+    void resumeRemoteVideoJobs(this.deps).catch((error: unknown) =>
+      this.deps.log('warn', `remote video jobs could not be resumed: ${String(error)}`)
+    )
     this.idle = startIdleTask({
       state: this.state,
       loadLock: this.deps.loadLock,
@@ -450,13 +469,25 @@ export class DiffusionService {
   // --- jobs ----------------------------------------------------------------------------------------
 
   async generate(request: ImageGenerateRequest): Promise<{ jobId: string }> {
-    const { id } = await startImageJob(this.deps, request)
+    const { id } = await this.startImage(request)
     return { jobId: id }
   }
 
+  /** A provider's model when the request names one, else the resident model. */
+  private startImage(request: ImageGenerateRequest) {
+    return request.target ? startRemoteImageJob(this.deps, request) : startImageJob(this.deps, request)
+  }
+
+  private startVideo(request: VideoGenerateRequest) {
+    return request.target ? startRemoteVideoJob(this.deps, request) : startVideoJob(this.deps, request)
+  }
+
   /** Run one job to completion; the OpenAI facade's path. */
-  runImageJob(request: ImageGenerateRequest): Promise<JobOutcome> {
-    return runImageJob(this.deps, request)
+  async runImageJob(request: ImageGenerateRequest): Promise<JobOutcome> {
+    if (!request.target) return runImageJob(this.deps, request)
+    const result = await (await startRemoteImageJob(this.deps, request)).done
+    if (result.ok) return result.outcome
+    throw diffusionError(result.error.code, result.error.message, result.error.details)
   }
 
   /** What `POST /v1/images/generations` needs: the resident model, and a job it can await or abandon. */
@@ -468,8 +499,11 @@ export class DiffusionService {
           ? { modelId: spec.modelId, displayName: spec.displayName, defaults: { ...spec.defaults } }
           : undefined
       },
-      start: (request) => startImageJob(this.deps, request),
+      start: (request) => this.startImage(request),
       cancel: (jobId) => cancelJob(this.deps, jobId),
+      ...(this.deps.remote
+        ? { find: (model: string) => this.deps.remote?.gateway.find(model, 'image') }
+        : {}),
     }
   }
 
@@ -488,7 +522,10 @@ export class DiffusionService {
             }
           : undefined
       },
-      start: (request) => startVideoJob(this.deps, request),
+      start: (request) => this.startVideo(request),
+      ...(this.deps.remote
+        ? { find: (model: string) => this.deps.remote?.gateway.find(model, 'video') }
+        : {}),
       job: (id) => this.state.videoJob(id) ?? null,
       jobs: () => this.state.videoJobs(),
       // Any string can come in from a URL: one that is not an id is simply not a clip.
@@ -515,13 +552,16 @@ export class DiffusionService {
   // --- video jobs ----------------------------------------------------------------------------------
 
   async generateVideo(request: VideoGenerateRequest): Promise<{ jobId: string }> {
-    const { id } = await startVideoJob(this.deps, request)
+    const { id } = await this.startVideo(request)
     return { jobId: id }
   }
 
   /** Run one video job to completion; the `/v1/videos` facade's path. */
-  runVideoJob(request: VideoGenerateRequest): Promise<JobOutcome<VideoJob>> {
-    return runVideoJob(this.deps, request)
+  async runVideoJob(request: VideoGenerateRequest): Promise<JobOutcome<VideoJob>> {
+    if (!request.target) return runVideoJob(this.deps, request)
+    const result = await (await startRemoteVideoJob(this.deps, request)).done
+    if (result.ok) return result.outcome
+    throw diffusionError(result.error.code, result.error.message, result.error.details)
   }
 
   /**
@@ -530,6 +570,11 @@ export class DiffusionService {
    * job runs.
    */
   async estimateVideo(request: VideoGenerateRequest): Promise<VideoEstimate> {
+    if (request.target)
+      throw diffusionError(
+        'REMOTE_UNSUPPORTED',
+        'A provider does not say in advance what a clip will cost here.'
+      )
     const spec = this.state.spec
     if (!spec) throw modelNotLoadedError()
     if (spec.modality !== 'video')
@@ -656,6 +701,8 @@ export class DiffusionService {
   /** Owner exit: a multi-gigabyte `sd-server` must not outlive the core. No events, a short grace. */
   async shutdown(): Promise<void> {
     this.state.closing = true
+    // A provider's clip keeps its entry in `remote-jobs.json`; the next core polls it again.
+    for (const id of this.state.jobIds()) this.state.record(id)?.remote?.abort.abort()
     this.idle?.stop()
     this.idle = undefined
     this.loading?.abort()

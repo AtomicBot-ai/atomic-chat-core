@@ -8,6 +8,7 @@
  */
 
 import type { DiffusionErrorCode } from './errors.js'
+import type { MediaDialect, MediaTarget, RemoteImageOptions, RemoteVideoOptions } from './media.js'
 
 /** Which native engine serves generation. Only `sd-cpp` exists in this build. */
 export type DiffusionEngineId = 'sd-cpp' | 'diffusers'
@@ -203,6 +204,13 @@ export interface ImageGenerateRequest {
   referenceImages?: ImageSource[]
   /** Denoise strength 0..1 for the init-image workflows. */
   strength?: number
+  /**
+   * A cloud or self-hosted provider's model instead of the resident one. `width`, `height`, `steps`
+   * and `cfgScale` are still sent; a model whose descriptor has no such control ignores them.
+   */
+  target?: MediaTarget
+  /** What only a remote model takes; ignored without `target`. */
+  remote?: RemoteImageOptions
 }
 
 export interface ImageJobProgress {
@@ -255,21 +263,39 @@ export interface ImageRecipe {
   strength: number | null
   model: {
     modelId: string
+    /** The provider id for a remote model. */
     family: string
     displayName: string
-    /** Basename of the transformer file. */
+    /** Basename of the transformer file; empty for a remote model. */
     filename: string
   }
-  engine: {
-    kind: DiffusionEngineId
-    backend: DiffusionBackend
-    tag: string
-    offload: DiffusionOffloadPolicy
-    cpuFallback: boolean
-  }
+  engine: DiffusionRecipeEngine
+  /** What a remote model was asked besides the fields above; absent for a local one. */
+  remote?: RemoteImageOptions
   createdAtMs: number
   durationMs: number
 }
+
+/** The engine the core ran, as a recipe records it. */
+export interface LocalRecipeEngine {
+  kind: DiffusionEngineId
+  backend: DiffusionBackend
+  tag: string
+  offload: DiffusionOffloadPolicy
+  cpuFallback: boolean
+}
+
+/** A provider's model made it: who, through which adapter. */
+export interface RemoteRecipeEngine {
+  kind: 'remote'
+  provider: string
+  api: MediaDialect
+}
+
+export type DiffusionRecipeEngine = LocalRecipeEngine | RemoteRecipeEngine
+
+export const isRemoteRecipeEngine = (engine: DiffusionRecipeEngine): engine is RemoteRecipeEngine =>
+  engine.kind === 'remote'
 
 export interface GalleryImageItem {
   /** `<jobId>-<index:02>`; also the file stem. */
@@ -351,8 +377,8 @@ export type VideoWorkflowId = 'create' | 'image-to-video'
 export type VideoJobState = ImageJobState
 export type VideoJobPhase = ImageJobPhase
 
-/** The one container sd.cpp writes that the app can play: VP8 in WebM. */
-export type VideoOutputFormat = 'webm'
+/** VP8 in WebM is what sd.cpp writes; providers answer with MP4. */
+export type VideoOutputFormat = 'webm' | 'mp4'
 
 /** What the loaded video model can do; the app gates its form on this. */
 export interface VideoCapabilities {
@@ -395,6 +421,10 @@ export interface VideoGenerateRequest {
   initImage?: ImageSource
   /** Reserved for `image-to-video`: the last frame. */
   endImage?: ImageSource
+  /** A cloud or self-hosted provider's model instead of the resident one. */
+  target?: MediaTarget
+  /** What only a remote model takes; ignored without `target`. */
+  remote?: RemoteVideoOptions
 }
 
 /** Which memory a video generation competes for: Apple's unified memory, a discrete GPU's, or system RAM. */
@@ -497,18 +527,13 @@ export interface VideoRecipe {
   outputFormat: VideoOutputFormat
   model: {
     modelId: string
+    /** The provider id for a remote model. */
     family: string
     displayName: string
-    /** Basename of the transformer file. */
+    /** Basename of the transformer file; empty for a remote model. */
     filename: string
   }
-  engine: {
-    kind: DiffusionEngineId
-    backend: DiffusionBackend
-    tag: string
-    offload: DiffusionOffloadPolicy
-    cpuFallback: boolean
-  }
+  engine: DiffusionRecipeEngine
   createdAtMs: number
   durationMs: number
   /**
@@ -516,6 +541,13 @@ export interface VideoRecipe {
    * for a clip made before it was recorded, or when no sampling step was seen.
    */
   decodeMs?: number
+  /**
+   * The clip's length in seconds as the file says; a remote clip has it instead of `fps` and
+   * `frameCount` (both 0 when the file did not say).
+   */
+  durationSecs?: number
+  /** What a remote model was asked; absent for a local one. */
+  remote?: RemoteVideoOptions
 }
 
 export interface GalleryVideoItem {

@@ -11,6 +11,7 @@ import type {
   DiffusionModelState,
   ImageJob,
   LoadedDiffusionModel,
+  MediaTarget,
   VideoJob,
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
@@ -50,10 +51,21 @@ export interface CancelFlag {
 /** Which runner path a job record belongs to; the job's shape follows. */
 export type JobKindId = 'image' | 'video'
 
+/** A job a cloud or self-hosted provider runs: no `sd-server`, no busy slot, its own cancel. */
+export interface RemoteRecord {
+  target: MediaTarget
+  /** Stops every request and wait of the job. */
+  abort: AbortController
+  /** Asks the provider to stop the job too, once it has one to stop; best effort. */
+  cancelUpstream?: () => Promise<void>
+}
+
 export interface JobRecord {
   kind: JobKindId
   job: ImageJob | VideoJob
   cancel: CancelFlag
+  /** Present for a remote job; the local runner never sees such a record. */
+  remote?: RemoteRecord
   /** The server-side job id once submitted. */
   serverJobId?: string
   /** Video: the parts of the estimate the live ETA works from; never on the wire. */
@@ -198,5 +210,13 @@ export class DiffusionState {
   /** Every job id in memory, oldest first. */
   jobIds(): string[] {
     return [...this.jobOrder]
+  }
+
+  /** Remote jobs not over yet. */
+  liveRemoteJobs(): number {
+    let live = 0
+    for (const record of this.jobs.values())
+      if (record.remote && !isTerminalJobState(record.job.state)) live += 1
+    return live
   }
 }

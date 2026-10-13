@@ -70,7 +70,7 @@ describe('parseVideoRecipe', () => {
       ['seed', 1.5],
       ['seed', 2 ** 64],
       ['workflow', 'transform'],
-      ['outputFormat', 'mp4'],
+      ['outputFormat', 'mov'],
       ['negativePrompt', 7],
       ['guidance', 'x'],
       ['samplingMethod', 1],
@@ -95,5 +95,34 @@ describe('parseVideoRecipe', () => {
     expect(parseVideoRecipe('not json')).toBeUndefined()
     expect(parseVideoRecipe('[]')).toBeUndefined()
     expect(parseVideoRecipe('null')).toBeUndefined()
+  })
+})
+
+describe('remote clips', () => {
+  it('round-trip an MP4 with its provider, length and options', () => {
+    const recipe = sampleVideoRecipe({
+      outputFormat: 'mp4',
+      fps: 0,
+      frameCount: 0,
+      frames: 0,
+      model: {
+        modelId: 'google/veo-3.1-fast',
+        family: 'openrouter',
+        displayName: 'Veo 3.1 Fast',
+        filename: '',
+      },
+      engine: { kind: 'remote', provider: 'openrouter', api: 'openrouter-videos' },
+      durationSecs: 8,
+      remote: { durationSecs: 8, resolution: '720p', aspectRatio: '16:9', generateAudio: true },
+    })
+    const text = serializeVideoRecipe(recipe)
+    expect(Object.keys(JSON.parse(text) as object).slice(-2)).toEqual(['durationSecs', 'remote'])
+    expect(parseVideoRecipe(text)).toEqual(recipe)
+  })
+
+  it('drops a malformed remote block with the clip, and a negative length alone', () => {
+    const base = JSON.parse(serializeVideoRecipe(sampleVideoRecipe())) as Record<string, unknown>
+    expect(parseVideoRecipe(JSON.stringify({ ...base, remote: { generateAudio: 'yes' } }))).toBeUndefined()
+    expect(parseVideoRecipe(JSON.stringify({ ...base, durationSecs: -1 }))).toEqual(sampleVideoRecipe())
   })
 })

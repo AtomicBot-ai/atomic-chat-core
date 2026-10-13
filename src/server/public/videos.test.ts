@@ -376,3 +376,42 @@ describe('GET /v1/videos', () => {
     expect((await get(bare, '/videos')).status).toBe(503)
   })
 })
+
+describe('remote video models', () => {
+  it('queue a clip at the provider a model names, and stream an MP4 with its type', async () => {
+    const fake = fakeVideos()
+    fake.present = false
+    fake.find = (model) => (model === 'google/veo-3.1-fast' ? { provider: 'openrouter', model } : undefined)
+    const { started } = await server(fake)
+    const res = await postJson(started, '/videos', {
+      model: 'google/veo-3.1-fast',
+      prompt: 'waves',
+      seconds: 8,
+      resolution: '720p',
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ status: 'queued', seconds: '8', size: '720p' })
+    expect(fake.requests[0]).toMatchObject({
+      target: { provider: 'openrouter', model: 'google/veo-3.1-fast' },
+      remote: { durationSecs: 8, resolution: '720p' },
+    })
+
+    const mp4 = join(dir, 'clip.mp4')
+    await writeFile(mp4, Buffer.from('mp4-bytes'))
+    const id = 'c'.repeat(32)
+    fake.items.set(
+      id,
+      item(id, {
+        path: mp4,
+        fps: 0,
+        frameCount: 0,
+        durationSecs: 8,
+        recipe: sampleVideoRecipe({ jobId: id, outputFormat: 'mp4', fps: 0, frameCount: 0, durationSecs: 8 }),
+      })
+    )
+    const content = await get(started, `/videos/${id}/content`)
+    expect(content.headers.get('content-type')).toBe('video/mp4')
+    expect(content.headers.get('content-disposition')).toContain(`${id}.mp4`)
+    expect(await (await get(started, `/videos/${id}`)).json()).toMatchObject({ seconds: '8' })
+  })
+})

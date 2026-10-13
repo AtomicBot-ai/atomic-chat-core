@@ -44,6 +44,8 @@ export function historyRecipes(recipes: readonly VideoRecipe[], input: VideoEsti
   return recipes
     .filter(
       (recipe) =>
+        // A provider's clip says nothing about this machine.
+        recipe.engine.kind !== 'remote' &&
         recipe.model.family === input.family &&
         recipe.engine.backend === input.backend &&
         recipe.engine.offload === input.offload &&

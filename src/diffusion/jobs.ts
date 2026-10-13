@@ -31,6 +31,8 @@ import { VIDEO_JOB_KIND } from './video-job.js'
 import type { VideoGallery } from './video-gallery.js'
 import type { AnyJobKind, JobCommon, JobKind, JobPlan, ProgressModel } from './job-kind.js'
 import type { AsyncMutex } from './mutex.js'
+import { cancelRemoteJob } from './remote-job.js'
+import type { RemoteDeps } from './remote-job.js'
 import { classifyExit, diagnosticTail, GpuFaultWatch } from './progress.js'
 import { describeExit, exitCodeOf } from './server-process.js'
 import { loadFromSpec, stopKeepingSpec, takeDownSession, withOffloadFallback } from './session.js'
@@ -80,6 +82,8 @@ export interface JobDeps extends SessionDeps {
   planVideo?: (request: VideoGenerateRequest, spec: ServerSpec) => Promise<JobPlan | undefined>
   /** A clip landed in the video gallery (the estimate's history is stale). */
   videoSaved?: () => void
+  /** Cloud and self-hosted providers' models; absent, a request with a `target` is refused. */
+  remote?: RemoteDeps
 }
 
 export interface JobOutcome<J = ImageJob> {
@@ -107,7 +111,8 @@ function emitJob(deps: JobDeps, id: string): void {
   if (record) kindOf(record.kind).emitJob(deps.emit, structuredClone(record.job))
 }
 
-function setJobState(deps: JobDeps, id: string, next: ImageJobState): void {
+/** Move a job forward (never out of a terminal state), and say so in an event. */
+export function setJobState(deps: JobDeps, id: string, next: ImageJobState): void {
   let changed = false
   deps.state.updateJob(id, (record) => {
     if (record.job.state === next || isTerminalJobState(record.job.state)) return
@@ -621,6 +626,8 @@ export async function cancelJob(
   const { state } = deps
   const record = state.record(id)
   if (!record) throw diffusionError('JOB_NOT_FOUND', 'That job no longer exists.')
+  // A provider's job has no server here to stop.
+  if (record.remote) return cancelRemoteJob(deps, id)
   if (isTerminalJobState(record.job.state))
     return { cancelled: record.job.state === 'cancelled', serverStopped: false }
   record.cancel.requested = true

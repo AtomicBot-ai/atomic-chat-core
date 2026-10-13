@@ -58,6 +58,15 @@ describe('AtomicCoreError', () => {
       'BACKEND_IN_USE',
       'NOT_CONFIGURED',
       'INTERNAL',
+      'REMOTE_NOT_CONFIGURED',
+      'REMOTE_AUTH_FAILED',
+      'REMOTE_REJECTED',
+      'REMOTE_CONTENT_BLOCKED',
+      'REMOTE_RATE_LIMITED',
+      'REMOTE_QUOTA',
+      'REMOTE_UNAVAILABLE',
+      'REMOTE_TIMEOUT',
+      'REMOTE_UNSUPPORTED',
     ])
   })
 
