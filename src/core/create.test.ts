@@ -462,7 +462,61 @@ describe('taking ownership', () => {
     expect(embedding.status).not.toBe(200)
   })
 
-  it('uses the live signed manifest in production backend installation', async () => {
+  it('installs a listed tag from the signed mirror against the release list hash', async () => {
+    const seen: string[] = []
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      seen.push(url)
+      if (url.endsWith('/backends/llamacpp-upstream-releases.json'))
+        return new Response(
+          JSON.stringify({
+            schema_version: 1,
+            download_base: 'https://mirror.example/releases',
+            releases: [
+              {
+                tag: 'b2',
+                min_core_version: '0.0.0',
+                assets: [
+                  {
+                    name: 'llama-b2-bin-macos-arm64.tar.gz',
+                    sha256: 'b'.repeat(64),
+                    size: 12,
+                    validation: 'approved',
+                  },
+                ],
+              },
+              // Not the newest and only a candidate: still downloaded from the mirror against its hash.
+              {
+                tag: 'b1',
+                min_core_version: '0.0.0',
+                assets: [
+                  {
+                    name: 'llama-b1-bin-macos-arm64.tar.gz',
+                    sha256: 'a'.repeat(64),
+                    size: 12,
+                    validation: 'candidate',
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200 }
+        )
+      return new Response('unavailable', { status: 404 })
+    }) as typeof fetch
+    const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, fetch: fetchImpl })
+    cores.push(core)
+    const res = await fetch(`${core.control.url}/atomic/v1/backends/llamacpp-upstream/install`, {
+      method: 'POST',
+      headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ version: 'b1', backend: 'macos-arm64', task_id: 'task-1' }),
+    })
+    expect(res.status).not.toBe(200)
+    expect(seen).toContain('https://mirror.example/releases/b1/llama-b1-bin-macos-arm64.tar.gz')
+    expect(seen.some((url) => url.endsWith('/backends/manifest.json'))).toBe(false)
+  })
+
+  it('falls back to the legacy signed manifest while conf has no release list', async () => {
     const seen: string[] = []
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)
@@ -515,7 +569,9 @@ describe('taking ownership', () => {
     expect(seen).toContain(
       'https://github.com/ggml-org/llama.cpp/releases/download/b1/llama-b1-bin-macos-arm64.tar.gz'
     )
-    expect(warnings.some((message) => message.includes('Backend manifest returned 404'))).toBe(true)
+    expect(
+      warnings.some((message) => /legacy manifest unavailable: .*manifest\.json returned 404/.test(message))
+    ).toBe(true)
   })
 })
 

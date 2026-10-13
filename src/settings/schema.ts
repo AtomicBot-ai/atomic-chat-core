@@ -205,7 +205,7 @@ const VLLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
 }
 
 export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<string, CanonicalValueType>>> = {
-  'llamacpp-upstream': LLAMACPP_VALUE_TYPES,
+  'llamacpp-upstream': { ...LLAMACPP_VALUE_TYPES, allow_candidate_builds: 'boolean' },
   'llamacpp': LLAMACPP_VALUE_TYPES,
   'atomic-prism': { ...LLAMACPP_VALUE_TYPES, allow_candidate_builds: 'boolean' },
   'mlx': MLX_VALUE_TYPES,

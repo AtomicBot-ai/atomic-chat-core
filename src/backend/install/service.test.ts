@@ -197,15 +197,16 @@ describe('install', () => {
       layout: data.layout,
       provider: 'llamacpp-upstream',
       downloader: downloader as never,
-      readManifest: async (proxy) => {
-        seen.push(proxy)
+      readManifest: async (tag, proxy) => {
+        seen.push([tag, proxy])
         return null
       },
       platform: 'win32',
     })
     const proxy = { url: 'http://proxy.example:8080', username: 'user', password: 'secret' }
-    await s.install('b1', 'win-cuda-13.3-x64', { taskId: 't', proxy }).catch(() => {})
-    expect(seen).toEqual([proxy])
+    await s.install('\uFEFFb1', 'win-cuda-13.3-x64', { taskId: 't', proxy }).catch(() => {})
+    // The release list is asked for the very tag being installed.
+    expect(seen).toEqual([['b1', proxy]])
     expect(items).toHaveLength(2)
     expect(items[0]).toMatchObject({ proxy })
     expect(items[1]).toMatchObject({ proxy })

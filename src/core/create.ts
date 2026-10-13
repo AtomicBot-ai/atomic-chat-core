@@ -35,14 +35,13 @@ import {
   BackendService,
   PrismCatalogService,
   TurboquantCatalogService,
+  UpstreamReleasesCatalogService,
+  upstreamManifestForTag,
   ensureBackend,
   ensureTurboquantCudart,
   ensureUpstreamCudart,
-  ManifestSessionCache,
   probeLinuxRocmHost,
   OptimalBackendStore,
-  fetchLiveManifest,
-  manifestTransportFromFetch,
   readRuntimeSettings,
   resolveBackendExe,
   selectInstalledBackend,
@@ -338,7 +337,6 @@ export async function createAtomicCore(
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
     })
-    const manifestCache = new ManifestSessionCache()
     const capabilities = new ModelCapabilityService({
       layout,
       registry: (provider) => registries.get(provider) as ModelRegistry,
@@ -362,11 +360,20 @@ export async function createAtomicCore(
       platform,
       log: (level, message) => log(level, message),
     })
-    // Test hooks (docs/contracts.md "Test hooks"): where the PrismML manifest, the model rules and
-    // model files are read from. Unset in production.
+    // Test hooks (docs/contracts.md "Test hooks"): where the upstream release list, the PrismML
+    // manifest, the model rules and model files are read from. Unset in production.
+    const upstreamReleasesUrl = env['ATOMIC_LLAMACPP_UPSTREAM_RELEASES_URL']
     const prismManifestUrl = env['ATOMIC_PRISM_MANIFEST_URL']
     const prismRulesUrl = env['ATOMIC_PRISM_MODEL_RULES_URL']
     const hfEndpoint = env['ATOMIC_HF_ENDPOINT']
+    // One release list for the advisor and the installs, so a catalog and the download it leads to
+    // read the same hashes.
+    const upstreamCatalog = new UpstreamReleasesCatalogService({
+      layout,
+      fetchFor,
+      ...(upstreamReleasesUrl ? { url: upstreamReleasesUrl } : {}),
+      log,
+    })
     const prismCatalog = new PrismCatalogService({
       layout,
       fetchFor,
@@ -401,10 +408,10 @@ export async function createAtomicCore(
         optimalStore,
         emit: (name, payload) => emitter.emit(name, payload),
         fetchFor,
-        manifestCache,
+        upstreamCatalog,
         turboquantCatalog,
         prismCatalog,
-        allowCandidateBuilds: allowPrismCandidates,
+        allowCandidateBuilds: () => settings.get(provider)['allow_candidate_builds'] === true,
         // The Windows tier check runs `--list-devices` on the installed pack of that tier.
         listDevices: async (installed) => {
           const exePath = await resolveBackendExe(layout, provider, installed.version, installed.backend)
@@ -447,15 +454,8 @@ export async function createAtomicCore(
             ]
           },
         },
-        readManifest: async (proxy) => {
-          const cached = manifestCache.get()
-          if (cached) return cached
-          return fetchLiveManifest({
-            cache: manifestCache,
-            transports: [manifestTransportFromFetch('core fetch', fetchFor(proxy))],
-            onWarn: (message) => log('warn', message),
-          })
-        },
+        readManifest: async (tag, proxy) =>
+          upstreamManifestForTag((await upstreamCatalog.catalog({ proxy: proxy ?? null })).catalog, tag),
       })
       backendServices.set(provider, created)
       return created

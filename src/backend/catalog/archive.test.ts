@@ -19,10 +19,17 @@ import {
   WIN_ROCM_ARCHIVE_BYTES_FALLBACK,
   WIN_ROCM_UNPACKED_BYTES,
 } from './archive.js'
-import { BUNDLED_MANIFEST_BASELINE } from './bundled-manifest-baseline.js'
+import { UPSTREAM_RELEASES_BASELINE } from './upstream-releases-baseline.js'
+import { upstreamManifestForTag } from './upstream-releases.js'
 import { resolveGpuFamilyConcrete } from './cuda-family.js'
 import { parseManifestForPlatform } from './manifest.js'
 import type { UpstreamManifest } from '../types.js'
+
+// The newest release of the bundled release list, in the legacy manifest's shape.
+const BASELINE_MANIFEST = upstreamManifestForTag(
+  UPSTREAM_RELEASES_BASELINE,
+  UPSTREAM_RELEASES_BASELINE.releases[0]!.tag
+)!
 
 describe('getBackendArchiveName / getBackendDownloadUrl (app backend.test.ts)', () => {
   it('uses upstream ubuntu tarball names for Linux backend archives', () => {
@@ -73,23 +80,26 @@ describe('getBackendArchiveName / getBackendDownloadUrl (app backend.test.ts)', 
 })
 
 describe('resolveBackendArchiveSource', () => {
-  const tag = BUNDLED_MANIFEST_BASELINE.tag_name
+  const tag = BASELINE_MANIFEST.tag_name
   it('uses the signed mirror with hash and size when the manifest lists this exact asset', () => {
-    expect(resolveBackendArchiveSource(`\uFEFF${tag}`, 'macos-arm64', BUNDLED_MANIFEST_BASELINE)).toEqual({
-      url: `${BUNDLED_MANIFEST_BASELINE.download_base}/${tag}/llama-${tag}-bin-macos-arm64.tar.gz`,
-      sha256: '165ffa2049ac5cd706978ff64f6cba7a8ab1d8c343e8124c81d17a589a7a14ab',
-      size: 12087659,
+    const name = `llama-${tag}-bin-macos-arm64.tar.gz`
+    const asset = BASELINE_MANIFEST.assets.find((a) => a.name === name)!
+    expect(asset.sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(resolveBackendArchiveSource(`\uFEFF${tag}`, 'macos-arm64', BASELINE_MANIFEST)).toEqual({
+      url: `${BASELINE_MANIFEST.download_base}/${tag}/${name}`,
+      sha256: asset.sha256,
+      size: asset.size,
     })
   })
   it.each([
     ['no manifest', null],
-    ['another tag', { ...BUNDLED_MANIFEST_BASELINE, tag_name: 'b1' }],
-    ['no download_base', { tag_name: tag, assets: BUNDLED_MANIFEST_BASELINE.assets }],
+    ['another tag', { ...BASELINE_MANIFEST, tag_name: 'b1' }],
+    ['no download_base', { tag_name: tag, assets: BASELINE_MANIFEST.assets }],
     [
       'asset without hash',
-      { ...BUNDLED_MANIFEST_BASELINE, assets: [{ name: `llama-${tag}-bin-macos-arm64.tar.gz` }] },
+      { ...BASELINE_MANIFEST, assets: [{ name: `llama-${tag}-bin-macos-arm64.tar.gz` }] },
     ],
-    ['asset missing', { ...BUNDLED_MANIFEST_BASELINE, assets: [] }],
+    ['asset missing', { ...BASELINE_MANIFEST, assets: [] }],
   ])('falls back to the ggml-org CDN without a hash: %s', (_label, manifest) => {
     expect(resolveBackendArchiveSource(tag, 'macos-arm64', manifest as UpstreamManifest | null)).toEqual({
       url: `${GGML_ORG_DOWNLOAD_BASE}/${tag}/llama-${tag}-bin-macos-arm64.tar.gz`,
@@ -210,7 +220,7 @@ function scriptPickSource(manifest: UpstreamManifest | null, tag: string, asset:
 }
 
 describe('equivalence with scripts/resolve-upstream-backend.mjs (its three usage cases)', () => {
-  const manifest = BUNDLED_MANIFEST_BASELINE
+  const manifest = BASELINE_MANIFEST
   const tag = manifest.tag_name
 
   it('--backend macos-arm64 (manifest tag, mirrored)', () => {

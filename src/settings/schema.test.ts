@@ -11,6 +11,7 @@ import {
 
 const UPSTREAM_KEYS = [
   'version_backend',
+  'allow_candidate_builds',
   'mtp',
   'dflash',
   'dflash_block_size',
@@ -48,7 +49,7 @@ const UPSTREAM_KEYS = [
 
 describe('settingsSchema', () => {
   it.each<[LocalProviderId, number]>([
-    ['llamacpp-upstream', 34],
+    ['llamacpp-upstream', 35],
     ['llamacpp', 31],
     ['mlx', 11],
     ['foundation-models', 0],
@@ -58,10 +59,12 @@ describe('settingsSchema', () => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
 
-  it('keeps the app key order for the upstream provider and drops the three DFlash/MTP keys for turboquant', () => {
+  it('keeps the app key order for the upstream provider; turboquant has no DFlash/MTP keys and no candidate opt-in', () => {
     expect(settingsSchema('llamacpp-upstream').map((d) => d.key)).toEqual(UPSTREAM_KEYS)
     expect(settingsSchema('llamacpp').map((d) => d.key)).toEqual(
-      UPSTREAM_KEYS.filter((k) => !['mtp', 'dflash', 'dflash_block_size'].includes(k))
+      UPSTREAM_KEYS.filter(
+        (k) => !['allow_candidate_builds', 'mtp', 'dflash', 'dflash_block_size'].includes(k)
+      )
     )
   })
 
@@ -93,6 +96,7 @@ describe('defaultSettingValues', () => {
     const upstream = defaultSettingValues('llamacpp-upstream')
     expect(upstream).toMatchObject({
       version_backend: 'none',
+      allow_candidate_builds: false,
       mtp: false,
       dflash: false,
       dflash_block_size: 16,

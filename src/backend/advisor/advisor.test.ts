@@ -5,12 +5,13 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { CoreEvents, LlamacppProviderId, ProxyConfig } from '../../contracts/index.js'
 import type { HardwareFacts } from '../../hardware/index.js'
 import {
-  BUNDLED_BASELINE_TAG,
   LLAMACPP_BACKEND_MANIFEST_URL,
-  ManifestSessionCache,
+  LLAMACPP_UPSTREAM_RELEASES_URL,
   PRISM_MANIFEST_URL,
   TURBOQUANT_LATEST_RELEASE_URL,
   TURBOQUANT_LEGACY_MANIFEST_URL,
+  UPSTREAM_RELEASES_BASELINE,
+  UpstreamReleasesCatalogService,
 } from '../catalog/index.js'
 import type { PrismManifest } from '../catalog/index.js'
 import { OptimalBackendStore } from '../optimal/index.js'
@@ -44,6 +45,31 @@ const UPSTREAM_MANIFEST = {
     'macos-arm64.tar.gz',
   ].map((suffix) => ({ name: `llama-${UP}-bin-${suffix}` })),
 }
+/** A legacy-shaped manifest as the release list conf publishes: one release, every archive approved. */
+const listOf = (
+  manifest: { tag_name: string; assets: Array<{ name: string }> },
+  release: {
+    min_core_version?: string
+    validation?: 'candidate' | 'approved'
+    withdrawn?: { reason: string }
+  } = {}
+) => ({
+  schema_version: 1,
+  download_base: 'https://mirror.example/releases',
+  releases: [
+    {
+      tag: manifest.tag_name,
+      min_core_version: release.min_core_version ?? '0.0.0',
+      ...(release.withdrawn ? { withdrawn: release.withdrawn } : {}),
+      assets: manifest.assets.map(({ name }) => ({
+        name,
+        sha256: 'a'.repeat(64),
+        size: 1,
+        validation: release.validation ?? 'approved',
+      })),
+    },
+  ],
+})
 const TQ = 'b10269-1.4.0'
 const TQ_OLD = 'b10018-1.3.0'
 const variants = (ids: string[]) =>
@@ -125,10 +151,11 @@ const offline = () => {
   throw new Error('offline')
 }
 const ONLINE: Record<string, Handler> = {
-  [LLAMACPP_BACKEND_MANIFEST_URL]: () => json(UPSTREAM_MANIFEST),
+  [LLAMACPP_UPSTREAM_RELEASES_URL]: () => json(listOf(UPSTREAM_MANIFEST)),
   [TURBOQUANT_RELEASE_INDEX_URL]: () => json(FORK_INDEX),
 }
 const OFFLINE: Record<string, Handler> = {
+  [LLAMACPP_UPSTREAM_RELEASES_URL]: offline,
   [LLAMACPP_BACKEND_MANIFEST_URL]: offline,
   [TURBOQUANT_RELEASE_INDEX_URL]: offline,
   [TURBOQUANT_LATEST_RELEASE_URL]: offline,
@@ -269,7 +296,7 @@ describe('BackendAdvisor.catalog', () => {
     ])
     expect(catalog.releases).toBeUndefined()
 
-    // The manifest is cached for the session; `force` drops the cache.
+    // The release list is cached for an hour; `force` refetches it.
     expect((await h.advisor.catalog()).source).toBe('session-cache')
     expect(h.fetches).toHaveLength(1)
     expect((await h.advisor.catalog({ force: true })).source).toBe('live')
@@ -280,10 +307,75 @@ describe('BackendAdvisor.catalog', () => {
     const h = await harness('llamacpp-upstream', host('windows', [rtx4090]), { routes: OFFLINE })
     const catalog = await h.advisor.catalog()
     expect(catalog.source).toBe('bundled-baseline')
-    expect(catalog.remote.every((b) => b.version === BUNDLED_BASELINE_TAG)).toBe(true)
+    expect(catalog.remote.every((b) => b.version === UPSTREAM_RELEASES_BASELINE.releases[0]!.tag)).toBe(true)
     expect(catalog.recommended).toMatch(/^b\d+\/win-cuda-13\.\d+-x64$/)
     expect((await h.advisor.catalog()).source).toBe('bundled-baseline')
     expect(h.fetches).toHaveLength(2)
+  })
+
+  it('upstream: each backend from the newest release this core meets, candidates on opt-in only', async () => {
+    const NEXT = 'b10900'
+    const LATEST = 'b11000'
+    const doc = listOf(UPSTREAM_MANIFEST)
+    doc.releases.unshift(
+      // Needs a newer core than this one: skipped.
+      {
+        tag: LATEST,
+        min_core_version: '99.0.0',
+        assets: [
+          {
+            name: `llama-${LATEST}-bin-win-cpu-x64.zip`,
+            sha256: 'b'.repeat(64),
+            size: 1,
+            validation: 'approved',
+          },
+        ],
+      },
+      // CPU approved, Vulkan still a candidate.
+      {
+        tag: NEXT,
+        min_core_version: '0.15.0',
+        assets: [
+          {
+            name: `llama-${NEXT}-bin-win-cpu-x64.zip`,
+            sha256: 'c'.repeat(64),
+            size: 1,
+            validation: 'approved',
+          },
+          {
+            name: `llama-${NEXT}-bin-win-vulkan-x64.zip`,
+            sha256: 'd'.repeat(64),
+            size: 1,
+            validation: 'candidate',
+          },
+        ],
+      }
+    )
+    const routes = { [LLAMACPP_UPSTREAM_RELEASES_URL]: () => json(doc) }
+    const version = async (allow: boolean, backend: string) => {
+      const h = await harness('llamacpp-upstream', host('windows', [rtx4090]), {
+        routes,
+        deps: { coreVersion: '0.15.0', allowCandidateBuilds: () => allow },
+      })
+      return (await h.advisor.catalog()).remote.find((b) => b.backend === backend)?.version
+    }
+    expect(await version(false, 'win-cpu-x64')).toBe(NEXT)
+    expect(await version(false, 'win-vulkan-x64')).toBe(UP)
+    expect(await version(true, 'win-vulkan-x64')).toBe(NEXT)
+    expect(await version(false, 'win-cuda-13.3-x64')).toBe(UP)
+  })
+
+  it('upstream: a release list this core cannot read falls back to the legacy manifest', async () => {
+    const h = await harness('llamacpp-upstream', host('windows', [rtx4090]), {
+      routes: {
+        [LLAMACPP_UPSTREAM_RELEASES_URL]: () => json({ error: 'not found' }, 404),
+        [LLAMACPP_BACKEND_MANIFEST_URL]: () => json(UPSTREAM_MANIFEST),
+      },
+    })
+    const catalog = await h.advisor.catalog()
+    expect(catalog.source).toBe('legacy-manifest')
+    expect(catalog.recommended).toBe(`${UP}/win-cuda-13.3-x64`)
+    expect(h.fetches).toEqual([LLAMACPP_UPSTREAM_RELEASES_URL, LLAMACPP_BACKEND_MANIFEST_URL])
   })
 
   it('fork Windows RTX 4090: the release index, gated by the fork matrix, with the release notes', async () => {
@@ -572,8 +664,8 @@ describe('BackendAdvisor.recommend', () => {
     const h = await harness('llamacpp-upstream', host('linux', [rtx4090]), {
       current: '',
       routes: {
-        [LLAMACPP_BACKEND_MANIFEST_URL]: () =>
-          json({ tag_name: UP, assets: [{ name: `llama-${UP}-bin-ubuntu-x64.tar.gz` }] }),
+        [LLAMACPP_UPSTREAM_RELEASES_URL]: () =>
+          json(listOf({ tag_name: UP, assets: [{ name: `llama-${UP}-bin-ubuntu-x64.tar.gz` }] })),
       },
     })
     const seed: OptimalBackendCacheRecord = {
@@ -612,7 +704,7 @@ describe('BackendAdvisor.recommend', () => {
       recommendedCategory: 'CUDA 13',
     }
     const empty = await harness('llamacpp-upstream', host('windows', [rtx4090]), {
-      routes: { [LLAMACPP_BACKEND_MANIFEST_URL]: () => json({ tag_name: 'b1', assets: [] }) },
+      routes: { [LLAMACPP_UPSTREAM_RELEASES_URL]: () => json(listOf({ tag_name: 'b1', assets: [] })) },
     })
     await empty.store.set('llamacpp-upstream', seed, 0)
     const response = await empty.advisor.recommend({ mode: 'recheck' })
@@ -689,11 +781,11 @@ describe('BackendAdvisor.recommend', () => {
     let release!: (r: Response) => void
     const pending = new Promise<Response>((r) => (release = r))
     const h = await harness('llamacpp-upstream', host('windows', [rtx4090]), {
-      routes: { [LLAMACPP_BACKEND_MANIFEST_URL]: () => pending },
+      routes: { [LLAMACPP_UPSTREAM_RELEASES_URL]: () => pending },
     })
     const a = h.advisor.recommend({ mode: 'recheck' })
     const b = h.advisor.recommend({ mode: 'recheck' })
-    release(json(UPSTREAM_MANIFEST))
+    release(json(listOf(UPSTREAM_MANIFEST)))
     expect(await a).toBe(await b)
     expect(h.fetches).toHaveLength(1)
     expect(h.events).toHaveLength(1)
@@ -879,12 +971,15 @@ describe('BackendAdvisor.checkUpdates', () => {
     expect(h.proxies).toEqual([proxy])
   })
 
-  it('reuses the session cache between checks, and the manifest cache is the one it was given', async () => {
-    const manifestCache = new ManifestSessionCache()
-    manifestCache.set(UPSTREAM_MANIFEST)
+  it('reuses the session cache between checks, and the release list is the one it was given', async () => {
+    const upstreamCatalog = new UpstreamReleasesCatalogService({
+      layout: data.layout,
+      fetchFor: () => (async () => json(listOf(UPSTREAM_MANIFEST))) as unknown as typeof fetch,
+    })
+    await upstreamCatalog.catalog()
     const h = await harness('llamacpp-upstream', host('windows', [rtx4090]), {
       routes: OFFLINE,
-      deps: { manifestCache },
+      deps: { upstreamCatalog },
     })
     const response = await h.advisor.checkUpdates({ current: 'b10405/win-cpu-x64' })
     expect(response.target_backend).toBe(`${UP}/win-cpu-x64`)
