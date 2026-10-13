@@ -64,6 +64,7 @@ import {
   createWslManagedDeployment,
 } from '../runtime/managed-text/index.js'
 import type { GpuClaimHook, SessionRoutePolicy } from '../runtime/shared/index.js'
+import { SGLANG_ENGINE } from '../runtime/sglang/index.js'
 import { VLLM_ENGINE } from '../runtime/vllm/index.js'
 import { checkManagedModel } from '../runtime/managed-models/index.js'
 import {
@@ -115,6 +116,7 @@ export function managedEngineRegistry(): ManagedEngineRegistry {
   const registry = new ManagedEngineRegistry()
   registry.register(TENSORRT_LLM_ENGINE)
   registry.register(VLLM_ENGINE)
+  registry.register(SGLANG_ENGINE)
   return registry
 }
 
