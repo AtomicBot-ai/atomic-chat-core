@@ -22,6 +22,7 @@ export const ENGINE_IDS = [
   'mlx',
   'tensorrt-llm',
   'vllm',
+  'sglang',
 ] as const
 export type EngineId = (typeof ENGINE_IDS)[number]
 
@@ -37,6 +38,7 @@ export const ENGINE_KINDS: Readonly<Record<EngineId, EngineKind>> = {
   'mlx': 'engine-build',
   'tensorrt-llm': 'managed',
   'vllm': 'managed',
+  'sglang': 'managed',
 }
 
 /**

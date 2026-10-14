@@ -390,6 +390,30 @@ function computeCapabilityAtLeast(actual: string, min: string): boolean {
   return !Number.isNaN(compared) && compared >= 0
 }
 
+/**
+ * Whether a card can hold an FP8 KV cache: compute capability 8.9 (Ada) and newer. An unknown or
+ * unparseable capability cannot — the model's own precision is used.
+ */
+export function supportsFp8KvCache(computeCapability: string | null | undefined): boolean {
+  return (
+    computeCapability !== null &&
+    computeCapability !== undefined &&
+    computeCapabilityAtLeast(computeCapability, '8.9')
+  )
+}
+
+/**
+ * A vision or audio part in the checkpoint — a `…ForConditionalGeneration` architecture, or its
+ * encoder's config — which a managed engine runs text only.
+ */
+export function checkpointIsMultimodal(configJson: JsonObject): boolean {
+  const architectures = Array.isArray(configJson['architectures']) ? configJson['architectures'] : []
+  return (
+    architectures.some((name) => typeof name === 'string' && name.endsWith('ForConditionalGeneration')) ||
+    ['vision_config', 'audio_config', 'vision_tower'].some((key) => key in configJson)
+  )
+}
+
 /** The compute-capability rule a checkpoint's format puts on a card. */
 interface FormatRequirement {
   min_compute_capability: string

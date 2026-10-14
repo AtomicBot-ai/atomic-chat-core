@@ -595,3 +595,46 @@ ATOMIC_LIVE=1 npx vitest run --project live test/live/vllm.test.ts
 - Which quantization rows of the descriptor actually start on compute capability 8.9 (an AWQ model of
   the curated list), the driver floor, and whether `qwen3`'s parser needs the reasoning-into-content
   rewrite (ruling core 3.2): all into `rulings/` of the change, and the descriptor in conf's branch.
+
+## SGLang (change `add-sglang-runtime`)
+
+`test/live/sglang.test.ts` runs the real `lmsysorg/sglang` image on a Linux host whose container
+environment is already prepared (the install test above, vLLM or TensorRT-LLM set up through the app):
+it sets the SGLang engine up if it is not `ready` (no privileged step; it stops if one would be needed),
+downloads the curated `Qwen/Qwen3.5-2B` into the managed model store, loads it, and checks chat and
+streaming through `:1337`, thinking off — unasked and turned off — (the answer in `content`) and on
+(`reasoning_content`), a tool call, `context_length_exceeded`, a prompt longer than the context less
+the output limit with no `max_tokens` (answered, not refused), the container's env (`HF_HUB_OFFLINE`,
+`TRANSFORMERS_OFFLINE`, `DO_NOT_TRACK`, `SGLANG_CACHE_DIR` under the engine cache), argv (no
+`--trust-remote-code`, `--log-requests`, API keys or metrics; text only for Qwen3.5) and mounts, no TCP
+connection out of the container (`/proc/net/tcp*` read inside it after the chats), and a faster second
+start from the compile cache.
+
+### Run
+
+conf's `runtimes/sglang.json` is not in main until this acceptance passes (design D9): the test reads
+the copy in `test/fixtures/runtimes/sglang.json`, or `ATOMIC_RUNTIME_DESCRIPTOR_URL_SGLANG`.
+
+```bash
+npm run build:bin
+ATOMIC_LIVE=1 npx vitest run --project live test/live/sglang.test.ts
+```
+
+`ATOMIC_LIVE_GPU=<uuid>` pins a card; `ATOMIC_LIVE_OUT` sets where the report lands.
+
+### What to carry into the change (task 4.1)
+
+- `<out>/summary.json`: first and second load times; `--mem-fraction-static` as passed; the card's free
+  memory before the load (`gpu_free_bytes_before_load`, core's last probe) and SGLang's own readings —
+  free before the weights (`sglang_free_gb_before_weights`: the difference is SGLang's CUDA context on
+  this host), after them, after the KV pool, before graph capture and when ready — its KV pool in tokens
+  (`sglang_max_total_num_tokens`), the CUDA graph flags, `--shm-size` and `/dev/shm` in use. From them:
+  the reserve `R` (2 GiB / 1.25 GiB), the overhead and margin of the memory check, whether `auto`'s
+  prefill graphs fit 8 GB, and whether `shm_size` needs raising. Record each in `rulings/core.md`.
+- `<out>/sglang-start.log`: the engine's real start log. Replace the constructed lines in
+  `test/helpers/sglang-log-fixtures.ts` with its decisive lines, and adjust the adapter's stage markers
+  and exit classification where they differ.
+- `remote_tcp_peers` must be empty; the descriptor's quantization rows that start on compute capability
+  8.9, and whether `qwen3`'s reasoning-into-content rewrite is needed: into `rulings/` of the change, and
+  the descriptor in conf's branch.
+

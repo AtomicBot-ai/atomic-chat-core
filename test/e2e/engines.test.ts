@@ -36,6 +36,7 @@ const POSIX = process.platform !== 'win32'
 // No provider publishes a Linux arm64 build the fixture could name.
 const NO_BUILD_FOR_HOST = process.arch === 'arm64' && process.platform === 'linux'
 const VLLM_DESCRIPTOR_URL = new URL('../fixtures/runtimes/vllm.json', import.meta.url).href
+const SGLANG_DESCRIPTOR_URL = new URL('../fixtures/runtimes/sglang.json', import.meta.url).href
 
 let dataFolder: string
 let managedRoot: string
@@ -327,12 +328,32 @@ describe.skipIf(!existsSync(BIN) || !POSIX)('a managed engine reinstalled throug
       ...(host?.env ?? {}),
       ATOMIC_RUNTIME_DESCRIPTOR_URL: descriptorUrl,
       ATOMIC_RUNTIME_DESCRIPTOR_URL_VLLM: VLLM_DESCRIPTOR_URL,
+      ATOMIC_RUNTIME_DESCRIPTOR_URL_SGLANG: SGLANG_DESCRIPTOR_URL,
     })
   const get = async (ready: ReadyLine, id: string): Promise<Operation> =>
     (await (await control(ready, `/environments/operations/${id}`)).json()) as Operation
   const operations = async (ready: ReadyLine): Promise<Operation[]> =>
     ((await (await control(ready, '/snapshot')).json()) as { environment_operations: Operation[] })
       .environment_operations
+
+  it('/engines/versions lists every managed engine of the host, SGLang last, each with its own latest release', async () => {
+    host = await fakeManagedHost(readyState())
+    const { ready } = await startManaged(DESCRIPTOR_URL)
+    const managed = (await versions(ready, { app_version: '99.0.0' })).filter(
+      (entry) => entry.kind === 'managed'
+    )
+    expect(managed.map((entry) => entry.engine)).toEqual(['tensorrt-llm', 'vllm', 'sglang'])
+    const sglangId = (
+      JSON.parse(readFileSync(fileURLToPath(SGLANG_DESCRIPTOR_URL), 'utf8')) as { descriptor_id: string }
+    ).descriptor_id
+    expect(managed.find((entry) => entry.engine === 'sglang')).toMatchObject({
+      active_choice: 'core',
+      builds: [],
+      active: null,
+      latest: { version: sglangId },
+      update: { apply: 'reinstall' },
+    })
+  })
 
   it('offers the newer descriptor, removes without asking and begins the setup, which waits for consent', async () => {
     host = await fakeManagedHost(readyState())

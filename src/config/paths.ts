@@ -27,7 +27,7 @@
  */
 
 import { join, relative, sep } from 'node:path'
-import { AtomicCoreError } from '../contracts/index.js'
+import { AtomicCoreError, isManagedProviderId } from '../contracts/index.js'
 import type { LocalProviderId } from '../contracts/index.js'
 import { dataDir, type DataFolderEnv } from './data-folder.js'
 
@@ -229,6 +229,18 @@ export function dataLayout(root: string): DataLayout {
     },
     provider(id) {
       const providerRoot = join(root, id)
+      // A managed engine's models are the store's (`<data>/managed-models/<id>/`): a Hugging Face
+      // checkpoint directory plus `model.yml`, written by the app and the CLI, read by core (spec
+      // `managed-model-store`), and the same folder for every managed engine (change
+      // `add-sglang-runtime`, D1: every one of `MANAGED_PROVIDER_IDS`, none named here).
+      if (isManagedProviderId(id)) {
+        return {
+          root: providerRoot,
+          backendsDir: join(providerRoot, 'backends'),
+          tmpDir: join(providerRoot, 'tmp'),
+          modelsDir: join(root, MANAGED_MODELS_DIR),
+        }
+      }
       switch (id) {
         case 'llamacpp':
           return {
@@ -245,17 +257,6 @@ export function dataLayout(root: string): DataLayout {
             backendsDir: join(providerRoot, 'backends'),
             tmpDir: join(providerRoot, 'tmp'),
             modelsDir: join(root, MODELS_ROOT, 'models'),
-          }
-        // A managed engine's models are the store's (`<data>/managed-models/<id>/`): a Hugging Face
-        // checkpoint directory plus `model.yml`, written by the app and the CLI, read by core (spec
-        // `managed-model-store`), and the same folder for every managed engine.
-        case 'tensorrt-llm':
-        case 'vllm':
-          return {
-            root: providerRoot,
-            backendsDir: join(providerRoot, 'backends'),
-            tmpDir: join(providerRoot, 'tmp'),
-            modelsDir: join(root, MANAGED_MODELS_DIR),
           }
         case 'mlx':
         case 'foundation-models':

@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest'
 import type { GpuFacts, RuntimeDescriptor } from '../../contracts/index.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { parseRuntimeDescriptor } from '../environment/index.js'
-import { checkCheckpoint, type CheckpointFile, type ManagedCheckEngine } from './compatibility.js'
+import {
+  checkCheckpoint,
+  checkpointIsMultimodal,
+  supportsFp8KvCache,
+  type CheckpointFile,
+  type ManagedCheckEngine,
+} from './compatibility.js'
 
 /**
  * The check skeleton every managed engine shares (change `add-vllm-runtime`, design D7): the static
@@ -184,5 +190,20 @@ describe('checkCheckpoint (the shared skeleton)', () => {
     expect(() => check(llama({ dtype: 'bfloat16' }), GIB, [])).toThrow(
       /test-engine compatibility cannot be checked/
     )
+  })
+})
+
+describe('the rules vLLM and SGLang share (change add-sglang-runtime)', () => {
+  it('an FP8 KV cache from compute capability 8.9; unknown or unparseable is no', () => {
+    for (const cc of ['8.9', '9.0', '10.0', '12.0']) expect(supportsFp8KvCache(cc), cc).toBe(true)
+    for (const cc of ['8.6', '8.0', 'x', null, undefined])
+      expect(supportsFp8KvCache(cc), String(cc)).toBe(false)
+  })
+
+  it('a checkpoint with a vision or audio part is multimodal, a text-only one is not', () => {
+    expect(checkpointIsMultimodal({ architectures: ['Qwen3_5ForConditionalGeneration'] })).toBe(true)
+    expect(checkpointIsMultimodal({ architectures: ['LlamaForCausalLM'], vision_config: {} })).toBe(true)
+    expect(checkpointIsMultimodal({ architectures: ['LlamaForCausalLM'] })).toBe(false)
+    expect(checkpointIsMultimodal({})).toBe(false)
   })
 })

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  capRequestedOutput,
+  carriesMedia,
   asksForStructuredOutput,
   asksForTools,
   reasoningIntoContent,
@@ -47,5 +49,29 @@ describe('the shared request rules (change add-vllm-runtime)', () => {
       ],
     })
     expect(reasoningIntoContent({ object: 'x' })).toEqual({ object: 'x' })
+  })
+})
+
+describe('media and the output cap, shared by vLLM and SGLang (change add-sglang-runtime)', () => {
+  it('finds an image, a video or audio in any message, and nothing in text', () => {
+    const message = (type: string) => ({ messages: [{ role: 'user', content: [{ type }] }] })
+    for (const type of ['image_url', 'input_image', 'video_url', 'input_audio']) {
+      expect(carriesMedia(message(type)), type).toBe(true)
+    }
+    expect(carriesMedia(message('text'))).toBe(false)
+    expect(carriesMedia({ messages: [{ role: 'user', content: 'hi' }] })).toBe(false)
+    expect(carriesMedia({ prompt: 'x' })).toBe(false)
+  })
+
+  it('caps the output asked for, in the key the client used, and leaves a request that asked for none', () => {
+    expect(capRequestedOutput('/v1/chat/completions', { max_tokens: 50 }, 10)).toEqual({ max_tokens: 10 })
+    expect(
+      capRequestedOutput('/v1/chat/completions', { max_tokens: 5, max_completion_tokens: 50 }, 10)
+    ).toEqual({
+      max_completion_tokens: 5,
+    })
+    expect(capRequestedOutput('/v1/completions', { max_tokens: 5 }, 10)).toEqual({ max_tokens: 5 })
+    expect(capRequestedOutput('/v1/chat/completions', { max_tokens: null }, 10)).toEqual({ max_tokens: null })
+    expect(() => capRequestedOutput('/v1/completions', { max_tokens: 1.5 }, 10)).toThrow(/positive integer/)
   })
 })

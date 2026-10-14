@@ -13,7 +13,20 @@
  * llama.cpp providers and never becomes the default for an ordinary model.
  */
 export type LocalProviderId =
-  'llamacpp-upstream' | 'llamacpp' | 'atomic-prism' | 'mlx' | 'foundation-models' | 'tensorrt-llm' | 'vllm'
+  'llamacpp-upstream' | 'llamacpp' | 'atomic-prism' | 'mlx' | 'foundation-models' | ManagedProviderId
+
+/**
+ * The managed engines — each one a container core runs from a model of the managed model store — in
+ * the order their registry lists them (change `add-sglang-runtime`, D1). The one list every place
+ * that must tell a managed provider from the others reads, rather than naming them one by one; the
+ * managed engine registry refuses, at startup, an engine missing from it.
+ */
+export const MANAGED_PROVIDER_IDS = ['tensorrt-llm', 'vllm', 'sglang'] as const
+export type ManagedProviderId = (typeof MANAGED_PROVIDER_IDS)[number]
+
+export function isManagedProviderId(provider: string): provider is ManagedProviderId {
+  return (MANAGED_PROVIDER_IDS as readonly string[]).includes(provider)
+}
 
 export interface RuntimeDeviceInfo {
   /** Backends in load order, deduped, e.g. ["CUDA", "CPU"]. */

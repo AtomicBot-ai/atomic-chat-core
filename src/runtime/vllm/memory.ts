@@ -25,10 +25,12 @@
  */
 import type { GpuFacts } from '../../contracts/index.js'
 import {
+  checkpointIsMultimodal,
   freeMemoryBytes,
   isUnifiedMemory,
   kvCacheQuantAlgo,
   readKvCacheShape,
+  supportsFp8KvCache,
   totalMemoryBytes,
   type CheckpointMemoryInputs,
   type HostMemory,
@@ -60,13 +62,6 @@ export const VLLM_UNIFIED_KV_CONTEXTS = 2
 const FALLBACK_KV_WEIGHT_SHARE = 0.25
 const FALLBACK_KV_MIN_BYTES = GiB
 
-/** Compute capability 8.9 (Ada) and newer. */
-function supportsFp8Kv(computeCapability: string): boolean {
-  const [major, minor] = computeCapability.split('.').map((part) => Number.parseInt(part, 10))
-  if (major === undefined || Number.isNaN(major)) return false
-  return major > 8 || (major === 8 && (minor ?? 0) >= 9)
-}
-
 /** The tokens the KV cache estimate covers: context × requests (two contexts on unified memory). */
 export function vllmKvTokens(settings: VllmSettings, unifiedMemory: boolean): number {
   return unifiedMemory
@@ -97,7 +92,7 @@ export function vllmKvCacheBytes(
     }
   }
   const fp8 =
-    (settings.kv_cache_dtype === 'fp8' && supportsFp8Kv(gpu.compute_capability)) ||
+    (settings.kv_cache_dtype === 'fp8' && supportsFp8KvCache(gpu.compute_capability)) ||
     kvCacheQuantAlgo(checkpoint.configJson, checkpoint.hfQuantConfigJson)?.toUpperCase() === 'FP8'
   const perToken = 2 * shape.numHiddenLayers * shape.numKeyValueHeads * shape.headDim * (fp8 ? 1 : 2)
   return { bytes: perToken * vllmKvTokens(settings, unifiedMemory), basis: 'config' }
@@ -146,15 +141,6 @@ export function vllmMemoryNeed(
   }
 }
 
-/** A vision or audio part in the checkpoint: a multimodal architecture, or its encoder's config. */
-function isMultimodal(configJson: JsonObject): boolean {
-  const architectures = Array.isArray(configJson['architectures']) ? configJson['architectures'] : []
-  return (
-    architectures.some((name) => typeof name === 'string' && name.endsWith('ForConditionalGeneration')) ||
-    ['vision_config', 'audio_config', 'vision_tower'].some((key) => key in configJson)
-  )
-}
-
 /** `--gpu-memory-utilization` from the card as it stands now (see the file banner). */
 export function vllmGpuMemoryUtilization(gpu: GpuFacts, host: HostMemory): number {
   const total = totalMemoryBytes(gpu, host)
@@ -177,7 +163,7 @@ export function vllmLaunchPlan(
     kvCacheMemoryBytes:
       settings.kv_cache_memory_gib === null ? null : Math.round(settings.kv_cache_memory_gib * GiB),
     gpuMemoryUtilization: settings.gpu_memory_utilization ?? vllmGpuMemoryUtilization(gpu, host),
-    multimodal: isMultimodal(checkpoint.configJson),
+    multimodal: checkpointIsMultimodal(checkpoint.configJson),
   }
 }
 

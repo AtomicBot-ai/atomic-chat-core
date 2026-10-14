@@ -55,6 +55,7 @@ describe('settingsSchema', () => {
     ['foundation-models', 0],
     ['tensorrt-llm', 18],
     ['vllm', 20],
+    ['sglang', 18],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -174,6 +175,59 @@ describe('defaultSettingValues', () => {
       default_top_k: '',
       default_min_p: '',
       default_repetition_penalty: '',
+    })
+  })
+
+  // Change add-sglang-runtime, D6: the form of vLLM's settings. 0 and '' are "not set" — SGLang's own
+  // value, or core's automatic memory share — and are never passed to the engine.
+  it('ships the sglang defaults', () => {
+    expect(defaultSettingValues('sglang')).toEqual({
+      gpu_id: '',
+      context_length: 8192,
+      max_output_tokens: 4096,
+      max_running_requests: 1,
+      mem_fraction_static: 0,
+      max_total_tokens: 0,
+      cuda_graphs: 'auto',
+      kv_cache_dtype: 'auto',
+      load_timeout_seconds: 0,
+      enable_prefix_caching: true,
+      chunked_prefill_size: 0,
+      dtype: 'auto',
+      seed: 0,
+      default_temperature: '',
+      default_top_p: '',
+      default_top_k: '',
+      default_min_p: '',
+      default_repetition_penalty: '',
+    })
+  })
+
+  it('canonicalizes sglang values to their wire types', () => {
+    expect(
+      canonicalizeSettingValues('sglang', {
+        gpu_id: 'GPU-1',
+        context_length: '4096',
+        max_running_requests: '2',
+        mem_fraction_static: '0.7',
+        max_total_tokens: '16384',
+        cuda_graphs: 'off',
+        enable_prefix_caching: 'false',
+        chunked_prefill_size: '2048',
+        seed: '7',
+        default_temperature: '0.6',
+      })
+    ).toEqual({
+      gpu_id: 'GPU-1',
+      context_length: 4096,
+      max_running_requests: 2,
+      mem_fraction_static: 0.7,
+      max_total_tokens: 16384,
+      cuda_graphs: 'off',
+      enable_prefix_caching: false,
+      chunked_prefill_size: 2048,
+      seed: 7,
+      default_temperature: '0.6',
     })
   })
 

@@ -25,6 +25,7 @@ import {
   leftoverContainers,
   windowsStoreMigration,
   managedEngineRegistry,
+  managedExternalRoutePolicy,
   managedModelDeleter,
   managedModelExclusivity,
   managedSessionUnloader,
@@ -397,13 +398,22 @@ const otherCoreCanClaim = async (modelId: string): Promise<boolean> =>
     () => false
   )
 
-describe('managedEngineRegistry (change add-vllm-runtime, task 3.4)', () => {
-  it('registers TensorRT-LLM and vLLM, each under its own provider id, with its own descriptor source', () => {
+describe('managedEngineRegistry (change add-vllm-runtime, task 3.4; add-sglang-runtime, task 2.4)', () => {
+  it('registers TensorRT-LLM, vLLM and SGLang, each under its own provider id, with its own descriptor source', () => {
     const registry = managedEngineRegistry()
-    expect(registry.list().map((spec) => spec.engine_id)).toEqual(['tensorrt-llm', 'vllm'])
+    expect(registry.list().map((spec) => spec.engine_id)).toEqual(['tensorrt-llm', 'vllm', 'sglang'])
     expect(registry.descriptorSources().map((source) => source.url)).toEqual([
       'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/tensorrt-llm.json',
       'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/vllm.json',
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/sglang.json',
+    ])
+  })
+
+  it('an SGLang session the core did not start still serves only SGLang’s declared routes', () => {
+    expect(managedExternalRoutePolicy('sglang')?.routes.map((route) => route.path)).toEqual([
+      '/v1/chat/completions',
+      '/v1/completions',
+      '/v1/models',
     ])
   })
 })

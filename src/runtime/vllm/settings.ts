@@ -5,12 +5,12 @@
  * anything the schema (`src/settings/schema/vllm.json`) would refuse. What the engine is never told
  * by a setting: `trust_remote_code`, request logging, an API key — no key here reaches it.
  */
-import { AtomicCoreError } from '../../contracts/index.js'
 import {
   GENERATION_DEFAULT_KEYS,
   readGenerationDefaults,
   type GenerationDefaults,
 } from '../managed-text/generation-defaults.js'
+import { settingValues } from '../managed-text/setting-values.js'
 
 export interface VllmSettings {
   /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */
@@ -97,41 +97,7 @@ const DEFAULTS: VllmSettings = {
 
 const GPU_UUID = /^(GPU|MIG)-[0-9A-Za-z-]+$/
 
-const invalid = (key: string, value: unknown, why: string): never => {
-  throw new AtomicCoreError(
-    'INVALID_ARGUMENT',
-    `vllm setting ${key} ${why}.`,
-    `${key}=${JSON.stringify(value)}`
-  )
-}
-
-function integer(key: string, value: unknown, min: number, max: number): number {
-  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value
-  if (typeof number !== 'number' || !Number.isInteger(number) || number < min || number > max) {
-    return invalid(key, value, `must be a whole number from ${min} to ${max}`)
-  }
-  return number
-}
-
-function decimal(key: string, value: unknown, inRange: (n: number) => boolean, range: string): number {
-  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value
-  if (typeof number !== 'number' || !Number.isFinite(number) || !inRange(number)) {
-    return invalid(key, value, `must be a number ${range}`)
-  }
-  return number
-}
-
-function yesNo(key: string, value: unknown): boolean {
-  if (value === true || value === 'true') return true
-  if (value === false || value === 'false') return false
-  return invalid(key, value, 'must be true or false')
-}
-
-function oneOf<T extends string>(key: string, value: unknown, allowed: readonly T[]): T {
-  return allowed.includes(value as T)
-    ? (value as T)
-    : invalid(key, value, `must be one of ${allowed.join(', ')}`)
-}
+const { invalid, integer, decimal, yesNo, oneOf } = settingValues('vllm')
 
 /** Validates already-merged values; anything absent takes the schema's default. */
 export function validateVllmSettings(raw: Record<string, unknown>): VllmSettings {

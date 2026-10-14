@@ -63,6 +63,7 @@ import { descriptorForProbe, pinnedDescriptor } from './provisioner-descriptors.
 import type { EffectFinding, EffectInventory } from './recovery.js'
 import type { EffectIntent } from './state.js'
 import type { EnvironmentProvisioner, HostStepVerdict, ProvisionerProbe } from './service.js'
+import { runtimeRemovalPlan } from './runtime-removal-plan.js'
 import type { PersistedOperation } from './store.js'
 import { otherEngines } from './store-models.js'
 import type { WindowsEnvironmentRecord } from './windows-environment-record.js'
@@ -779,6 +780,21 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
     await deps.records.remove()
   }
 
+  // An engine's removal is planned from its installation, as on Linux (`runtime-removal-plan.ts`):
+  // never as a setup of the newest descriptor, which an installed older release would block.
+  const probe = async (record: PersistedOperation): Promise<ProvisionerProbe> => {
+    const target = record.machine.operation.target
+    if (record.request.kind !== 'remove') return setupProbe(record)
+    if (target.kind === 'environment') return environmentRemovalProbe(record)
+    const plan = await runtimeRemovalPlan({
+      record,
+      target,
+      environmentId: deps.environmentId,
+      installations: deps.installations,
+    })
+    return { plan, host_step: null }
+  }
+
   const inventory: EffectInventory = {
     async inspect(effect: EffectIntent, record: PersistedOperation): Promise<EffectFinding> {
       if (record.request.kind === 'remove') return { kind: 'absent' }
@@ -816,15 +832,12 @@ export function createWindowsProvisioner(deps: WindowsProvisionerDeps): Environm
       if (steps.length === 0) return []
       return (await wslReady().catch(() => false)) ? steps : []
     },
-    currentPlanDigest: async (record) =>
-      (await setupProbe(record).catch(() => null))?.plan.plan_digest ?? null,
+    // The plan of this same operation: a removal's consent is checked against a removal plan.
+    currentPlanDigest: async (record) => (await probe(record).catch(() => null))?.plan.plan_digest ?? null,
   }
 
   return {
-    probe: (record) =>
-      record.request.kind === 'remove' && record.machine.operation.target.kind === 'environment'
-        ? environmentRemovalProbe(record)
-        : setupProbe(record),
+    probe,
     async verifyHostStep(record: PersistedOperation): Promise<HostStepVerdict> {
       // The receipt is an assertion; the machine is the evidence (task 2.6's rule, on Windows too).
       const answer = await setupProbe(record)

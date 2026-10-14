@@ -197,7 +197,7 @@ describe('taking ownership', () => {
     expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
     expect(() => core.runtime('ollama' as never)).toThrow(
       expect.objectContaining({
-        details: 'available: llamacpp-upstream, llamacpp, atomic-prism, tensorrt-llm, vllm',
+        details: 'available: llamacpp-upstream, llamacpp, atomic-prism, tensorrt-llm, vllm, sglang',
       })
     )
   })
@@ -249,6 +249,15 @@ describe('taking ownership', () => {
       status: 200,
       body: { modelId: 'm', tools: false, vision: false },
     })
+    // SGLang too (change add-sglang-runtime, task 2.4): "Загрузка без готовой установки".
+    expect(linux.runtime('sglang')).toBeDefined()
+    expect(await call(linux, '/models/sglang/m/load', 'POST')).toMatchObject({
+      body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
+    })
+    expect(await call(linux, '/models/sglang/m/capabilities')).toMatchObject({
+      status: 200,
+      body: { modelId: 'm', tools: false, vision: false },
+    })
     // No docker CLI on this "Linux": the load is refused before anything else is asked of the machine.
     expect(await call(linux, '/models/tensorrt-llm/m/load', 'POST')).toMatchObject({
       body: { error: { code: 'MANAGED_ADAPTER_UNAVAILABLE' } },
@@ -276,6 +285,7 @@ describe('taking ownership', () => {
     cores.push(mac)
     expect(() => mac.runtime('tensorrt-llm')).toThrow(/Unknown provider/)
     expect(() => mac.runtime('vllm')).toThrow(/Unknown provider/)
+    expect(() => mac.runtime('sglang')).toThrow(/Unknown provider/)
     for (const [path, method] of [
       ['/models/tensorrt-llm/m/load', 'POST'],
       ['/models/tensorrt-llm/m/unload', 'POST'],

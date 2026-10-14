@@ -24,6 +24,11 @@ describe('hostEngines', () => {
       'tensorrt-llm',
       'vllm',
     ])
+    expect(hostEngines('linux', ['sglang', 'vllm', 'tensorrt-llm']).slice(-3)).toEqual([
+      'tensorrt-llm',
+      'vllm',
+      'sglang',
+    ])
   })
 })
 
