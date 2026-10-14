@@ -8,6 +8,7 @@ import { jobId, paintedPng, sampleVideoRecipe } from '../../test/helpers/diffusi
 import { FLAGS_FILE, readFlags } from './gallery.js'
 import {
   isValidVideoId,
+  isVideoOf,
   isWebm,
   MAX_POSTER_BYTES,
   VideoGallery,
@@ -251,5 +252,49 @@ describe('listing, flags, deleting and exporting', () => {
     expect(await readFile(videoRecipePath(dir, item.id), 'utf8')).toBe(
       serializeVideoRecipe(sampleVideoRecipe())
     )
+  })
+})
+
+describe('MP4 clips', () => {
+  const MP4 = Buffer.concat([
+    Buffer.from([0, 0, 0, 0x18]),
+    Buffer.from('ftypisom', 'latin1'),
+    Buffer.alloc(32),
+  ])
+  const recipe = (n: number) =>
+    sampleVideoRecipe({
+      jobId: jobId(n),
+      outputFormat: 'mp4',
+      fps: 0,
+      frameCount: 0,
+      durationSecs: 6,
+      engine: { kind: 'remote', provider: 'xai', api: 'xai-videos' },
+    })
+
+  it('are kept as .mp4 beside their sidecar, listed with their recorded length, and removed whole', async () => {
+    const gallery = new VideoGallery()
+    const saved = await gallery.save(dir, recipe(1), MP4)
+    expect(saved.item.path).toBe(videoPath(dir, jobId(1), 'mp4'))
+    expect(saved.item.durationSecs).toBe(6)
+    const page = await gallery.list(dir, { offset: 0, limit: 10 })
+    expect(page.items.map((item) => item.path)).toEqual([videoPath(dir, jobId(1), 'mp4')])
+    expect((await gallery.get(dir, jobId(1)))?.durationSecs).toBe(6)
+    await gallery.delete(dir, [jobId(1)])
+    expect(await exists(videoPath(dir, jobId(1), 'mp4'))).toBe(false)
+    expect(await exists(videoRecipePath(dir, jobId(1)))).toBe(false)
+  })
+
+  it('refuses bytes that are not the container the recipe names, and a file of the wrong container', async () => {
+    const gallery = new VideoGallery()
+    expect((await refusal(gallery.save(dir, recipe(2), await fixture()))).code).toBe('INVALID_OUTPUT')
+    expect(isVideoOf('mp4', MP4)).toBe(true)
+    expect(isVideoOf('webm', MP4)).toBe(false)
+    // A WebM recipe beside an .mp4 file is not a clip of ours.
+    await writeFile(
+      videoRecipePath(dir, jobId(3)),
+      serializeVideoRecipe(sampleVideoRecipe({ jobId: jobId(3) }))
+    )
+    await writeFile(videoPath(dir, jobId(3), 'mp4'), MP4)
+    expect((await gallery.list(dir, { offset: 0, limit: 10 })).total).toBe(0)
   })
 })

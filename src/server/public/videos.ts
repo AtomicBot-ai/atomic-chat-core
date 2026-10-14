@@ -13,7 +13,8 @@ import type { GalleryVideoItem } from '../../contracts/index.js'
 import { answer, invalidJsonMessage } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { errorBody, errorKindFor, mapError, modelMatches, ParamError } from './images-params.js'
-import { IMAGES_BACKEND_LABEL } from './images.js'
+import { IMAGES_BACKEND_LABEL, REMOTE_MEDIA_BACKEND_LABEL } from './images.js'
+import { buildRemoteVideoRequest, parseRemoteVideoParams } from './remote-media.js'
 import type { VideosBackend } from './types.js'
 import {
   allowedVideoMethods,
@@ -28,6 +29,7 @@ import { readBody } from './wire.js'
 
 export const NO_VIDEO_MODEL_MESSAGE = 'No video model loaded. Load a video model in Atomic Chat first.'
 export const VIDEO_CONTENT_TYPE = 'video/webm'
+export const MP4_CONTENT_TYPE = 'video/mp4'
 /** How much of the gallery a listing looks at: the newest clips, which is what a client pages through. */
 export const LIST_SCAN_LIMIT = 1000
 
@@ -65,6 +67,22 @@ async function serveCreate(ex: Exchange, videos: VideosBackend): Promise<void> {
   }
   let started: Awaited<ReturnType<VideosBackend['start']>>
   try {
+    // A cloud or self-hosted provider's model: the provider makes the clip, through the same runner.
+    const named =
+      parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)['model']
+        : undefined
+    const target = typeof named === 'string' && named.trim() !== '' ? videos.find?.(named.trim()) : undefined
+    if (target) {
+      trace.modelId = target.model
+      trace.backend = REMOTE_MEDIA_BACKEND_LABEL
+      started = await videos.start(buildRemoteVideoRequest(parseRemoteVideoParams(parsed), target))
+      void started.done
+      const job = videos.job(started.id)
+      if (!job)
+        return fail(ex, 500, errorBody('The job vanished.', 'server_error', 'server_error', null), 'upstream')
+      return answer(ex, 200, JSON.stringify(videoObjectFromJob(job)), JSON_HEADERS)
+    }
     const params = parseVideoParams(parsed)
     trace.modelId = params.model ?? null
     const loaded = videos.loaded()
@@ -147,8 +165,9 @@ async function serveContent(ex: Exchange, videos: VideosBackend, id: string): Pr
   let name: string
   if (variant === 'video') {
     path = found.item.path
-    type = VIDEO_CONTENT_TYPE
-    name = `${id}.webm`
+    const mp4 = found.item.recipe.outputFormat === 'mp4'
+    type = mp4 ? MP4_CONTENT_TYPE : VIDEO_CONTENT_TYPE
+    name = `${id}.${mp4 ? 'mp4' : 'webm'}`
   } else if (variant === 'thumbnail' && found.item.posterPath) {
     path = found.item.posterPath
     type = 'image/png'

@@ -24,7 +24,7 @@ import { DECISION_ROUTES, serveDecision } from './decision.js'
 import { serveEmbeddingIfOwned } from './embedding.js'
 import { answer, newExchange } from './exchange.js'
 import { serveForward } from './forward.js'
-import { serveImagesGenerations } from './images.js'
+import { serveImagesEdits, serveImagesGenerations } from './images.js'
 import { serveVideos } from './videos.js'
 import { matchVideoPath } from './videos-params.js'
 import { serveSubscriptionIfOwned } from './subscription.js'
@@ -101,6 +101,7 @@ const ALLOWED_METHODS: Record<string, string> = {
   '/embeddings': 'POST',
   '/messages/count_tokens': 'POST',
   '/images/generations': 'POST',
+  '/images/edits': 'POST',
   '/systemone': 'POST',
   '/router/score': 'POST',
 }
@@ -186,6 +187,11 @@ export async function handlePublicRequest(
     if (path === '/images/generations') {
       trace.endpoint = endpointFromPath(path)
       return serveImagesGenerations(ex)
+    }
+    // Only a cloud or self-hosted provider's model edits; the local model is reached from the Images page.
+    if (path === '/images/edits') {
+      trace.endpoint = endpointFromPath(path)
+      return serveImagesEdits(ex)
     }
     // Served by the decision module's own process, byte for byte; never a chat session.
     if (Object.hasOwn(DECISION_ROUTES, path)) {

@@ -10,7 +10,12 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
-import type { CoreEvents, LoadDiffusionModelRequest, SystemInfo } from '../contracts/index.js'
+import type {
+  CoreEvents,
+  LoadDiffusionModelRequest,
+  LocalRecipeEngine,
+  SystemInfo,
+} from '../contracts/index.js'
 import { paintedPng, sampleRequest, sampleVideoRequest } from '../../test/helpers/diffusion-fixtures.js'
 import {
   installFakeSdEngine,
@@ -836,7 +841,9 @@ describe.skipIf(!posix)('generating', () => {
 
     const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
     await waitFor(() => h.service.getJob(jobId)?.state === 'completed')
-    expect(h.service.getJob(jobId)?.outputs[0]?.recipe.engine.offload).toBe('group')
+    expect(
+      (h.service.getJob(jobId)?.outputs[0]?.recipe.engine as LocalRecipeEngine | undefined)?.offload
+    ).toBe('group')
     expect(JSON.parse(await readFile(argvFile, 'utf8'))).toContain('--offload-to-cpu')
     expect((await h.service.getStatus()).model.loaded?.offload).toBe('group')
     expect(h.reasons()).toContain('offload-fallback')

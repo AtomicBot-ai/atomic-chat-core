@@ -1,5 +1,5 @@
 /**
- * The video gallery on disk: `<videoOutputDir>/<jobId>.webm` with its recipe as `<jobId>.json`
+ * The video gallery on disk: `<videoOutputDir>/<jobId>.webm` (or `.mp4`, a provider's clip) with its recipe as `<jobId>.json`
  * beside it, a `<jobId>.thumb.png` poster once the app rendered one, and the same `.flags.json`
  * as the image gallery, in its own folder. The core has no video decoder (AGENTS.md rule 8): it
  * checks the container's magic, writes the bytes as they came, and reads everything it knows about
@@ -16,17 +16,22 @@ import type {
   GalleryListOptions,
   GalleryVideoItem,
   VideoGalleryPage,
+  VideoOutputFormat,
   VideoRecipe,
 } from '../contracts/index.js'
 import { isWithin } from './containment.js'
 import { diffusionError, ioError } from './errors.js'
 import { readFlags, writeAtomic, writeFlags } from './gallery.js'
 import type { FlagMap, GalleryLogger } from './gallery.js'
+import { isMp4 } from './media-header.js'
 import { AsyncMutex } from './mutex.js'
 import { isPng, parseHeader } from './png.js'
 import { parseVideoRecipe, RECIPE_SIDECAR_SUFFIX, serializeVideoRecipe } from './video-recipe.js'
 
 export const VIDEO_SUFFIX = '.webm'
+/** The file each container is stored as; WebM first, every local clip is one. */
+export const VIDEO_SUFFIXES: Readonly<Record<VideoOutputFormat, string>> = { webm: '.webm', mp4: '.mp4' }
+const FORMATS = Object.keys(VIDEO_SUFFIXES) as VideoOutputFormat[]
 export const POSTER_SUFFIX = '.thumb.png'
 /** The app's poster is a small PNG; anything larger is not one. */
 export const MAX_POSTER_BYTES = 16 * 1024 * 1024
@@ -63,8 +68,13 @@ export function isValidVideoId(id: string): boolean {
   return /^[a-f0-9]{32}$/.test(id)
 }
 
-export function videoPath(dir: string, id: string): string {
-  return join(dir, `${id}${VIDEO_SUFFIX}`)
+export function videoPath(dir: string, id: string, format: VideoOutputFormat = 'webm'): string {
+  return join(dir, `${id}${VIDEO_SUFFIXES[format]}`)
+}
+
+/** Whether `bytes` are in the container `format` names. */
+export function isVideoOf(format: VideoOutputFormat, bytes: Buffer): boolean {
+  return format === 'mp4' ? isMp4(bytes) : isWebm(bytes)
 }
 
 export function videoRecipePath(dir: string, id: string): string {
@@ -88,6 +98,20 @@ const isFile = (path: string): Promise<boolean> =>
     (s) => s.isFile(),
     () => false
   )
+
+/** The clip an id names, whichever container it is in; the WebM path when there is none. */
+async function locateVideo(dir: string, id: string): Promise<{ path: string; exists: boolean }> {
+  const webm = checkedVideoPath(dir, id)
+  for (const format of FORMATS) {
+    const path = format === 'webm' ? webm : videoPath(dir, id, format)
+    if (await isFile(path)) return { path, exists: true }
+  }
+  return { path: webm, exists: false }
+}
+
+/** A clip's length: what its recipe recorded, else its frames over its rate. */
+const clipSeconds = (recipe: VideoRecipe): number =>
+  recipe.durationSecs ?? (recipe.fps > 0 ? recipe.frameCount / recipe.fps : 0)
 
 async function readRecipe(dir: string, id: string): Promise<VideoRecipe | undefined> {
   const text = await readFile(videoRecipePath(dir, id), 'utf8').catch(() => undefined)
@@ -113,7 +137,7 @@ async function itemFromRecipe(
     height: recipe.height,
     fps: recipe.fps,
     frameCount: recipe.frameCount,
-    durationSecs: recipe.fps > 0 ? recipe.frameCount / recipe.fps : 0,
+    durationSecs: clipSeconds(recipe),
     sizeBytes: meta.size,
     createdAtMs: recipe.createdAtMs,
     pinned: flag?.pinned ?? false,
@@ -129,20 +153,28 @@ async function itemFromPath(
   flags: FlagMap
 ): Promise<GalleryVideoItem | undefined> {
   const recipe = await readRecipe(dir, id)
-  return recipe ? itemFromRecipe(dir, id, path, recipe, flags) : undefined
+  // The file must be the container the recipe says: a stray `.mp4` beside a WebM's sidecar is not ours.
+  if (!recipe || !path.endsWith(VIDEO_SUFFIXES[recipe.outputFormat])) return undefined
+  return itemFromRecipe(dir, id, path, recipe, flags)
 }
 
 /** Every owned clip, newest first. */
 async function scan(dir: string, flags: FlagMap): Promise<GalleryVideoItem[]> {
   const names = await readdir(dir).catch(() => [] as string[])
-  const ids = names
-    .filter((name) => name.endsWith(VIDEO_SUFFIX))
-    .map((name) => name.slice(0, -VIDEO_SUFFIX.length))
-    .filter(isValidVideoId)
+  const files = new Map<string, string>()
+  for (const format of FORMATS) {
+    const suffix = VIDEO_SUFFIXES[format]
+    for (const name of names) {
+      if (!name.endsWith(suffix)) continue
+      const id = name.slice(0, -suffix.length)
+      if (isValidVideoId(id) && !files.has(id)) files.set(id, join(dir, name))
+    }
+  }
+  const ids = [...files.keys()]
   const items: GalleryVideoItem[] = []
   for (let at = 0; at < ids.length; at += SCAN_CONCURRENCY) {
     const batch = ids.slice(at, at + SCAN_CONCURRENCY)
-    const found = await Promise.all(batch.map((id) => itemFromPath(dir, id, videoPath(dir, id), flags)))
+    const found = await Promise.all(batch.map((id) => itemFromPath(dir, id, files.get(id) as string, flags)))
     for (const item of found) if (item) items.push(item)
   }
   return items.sort((a, b) => b.createdAtMs - a.createdAtMs || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
@@ -157,7 +189,10 @@ export class VideoGallery {
 
   constructor(private readonly log: GalleryLogger = () => {}) {}
 
-  /** Write the sidecar, then the clip, and answer the item with the bytes (the facade streams them). */
+  /**
+   * Write the sidecar, then the clip in the container its recipe names, and answer the item with the
+   * bytes (the facade streams them).
+   */
   async save(
     dir: string,
     recipe: VideoRecipe,
@@ -167,9 +202,15 @@ export class VideoGallery {
       throw ioError('Could not create the videos folder.', error)
     })
     const id = recipe.jobId
-    const path = checkedVideoPath(dir, id)
-    if (!isWebm(webm))
-      throw diffusionError('INVALID_OUTPUT', 'The video engine returned something that is not a WebM.')
+    checkedVideoPath(dir, id)
+    const path = videoPath(dir, id, recipe.outputFormat)
+    if (!isVideoOf(recipe.outputFormat, webm))
+      throw diffusionError(
+        'INVALID_OUTPUT',
+        recipe.outputFormat === 'mp4'
+          ? 'The provider returned something that is not an MP4.'
+          : 'The video engine returned something that is not a WebM.'
+      )
     // The sidecar first: a clip without one is foreign, so a crash between the two leaves nothing listed.
     await writeAtomic(videoRecipePath(dir, id), serializeVideoRecipe(recipe), VIDEO_WRITE_MESSAGES)
     await writeAtomic(path, webm, VIDEO_WRITE_MESSAGES)
@@ -183,7 +224,7 @@ export class VideoGallery {
         height: recipe.height,
         fps: recipe.fps,
         frameCount: recipe.frameCount,
-        durationSecs: recipe.fps > 0 ? recipe.frameCount / recipe.fps : 0,
+        durationSecs: clipSeconds(recipe),
         sizeBytes: webm.length,
         createdAtMs: recipe.createdAtMs,
         pinned: flag?.pinned ?? false,
@@ -196,8 +237,8 @@ export class VideoGallery {
 
   /** The poster the app rendered from the first frame: a PNG with a readable header, kept as is. */
   async setPoster(dir: string, id: string, png: Buffer): Promise<GalleryVideoItem> {
-    const path = checkedVideoPath(dir, id)
-    if (!(await isFile(path)) || (await readRecipe(dir, id)) === undefined)
+    const { path, exists } = await locateVideo(dir, id)
+    if (!exists || (await readRecipe(dir, id)) === undefined)
       throw diffusionError('JOB_NOT_FOUND', 'That video is no longer in the gallery.')
     if (png.length > MAX_POSTER_BYTES)
       throw diffusionError('INVALID_REQUEST', 'The poster is too large.', `${png.length} bytes`)
@@ -212,8 +253,8 @@ export class VideoGallery {
   }
 
   async get(dir: string, id: string): Promise<GalleryVideoItem | null> {
-    const path = checkedVideoPath(dir, id)
-    if (!(await isFile(path))) return null
+    const { path, exists } = await locateVideo(dir, id)
+    if (!exists) return null
     const flags = await this.flagsLock.run(() => readFlags(dir))
     return (await itemFromPath(dir, id, path, flags)) ?? null
   }
@@ -231,8 +272,8 @@ export class VideoGallery {
       const flags = await readFlags(dir)
       let changed = false
       for (const id of ids) {
-        const path = checkedVideoPath(dir, id)
-        if (await isFile(path)) {
+        const { path, exists } = await locateVideo(dir, id)
+        if (exists) {
           if ((await readRecipe(dir, id)) === undefined) {
             this.log('warn', `refusing to delete foreign video ${id}`)
             continue
@@ -251,9 +292,8 @@ export class VideoGallery {
 
   setFlags(dir: string, id: string, update: GalleryFlags): Promise<GalleryVideoItem> {
     return this.flagsLock.run(async () => {
-      const path = checkedVideoPath(dir, id)
-      if (!(await isFile(path)))
-        throw diffusionError('JOB_NOT_FOUND', 'That video is no longer in the gallery.')
+      const { path, exists } = await locateVideo(dir, id)
+      if (!exists) throw diffusionError('JOB_NOT_FOUND', 'That video is no longer in the gallery.')
       const flags = await readFlags(dir)
       const entry = { ...(flags.get(id) ?? { pinned: false, archived: false }) }
       if (update.pinned !== undefined) entry.pinned = update.pinned
@@ -270,9 +310,8 @@ export class VideoGallery {
 
   /** Byte-for-byte copy of the clip; the recipe stays behind with the gallery. */
   async export(dir: string, id: string, target: string): Promise<void> {
-    const path = checkedVideoPath(dir, id)
-    if (!(await isFile(path)))
-      throw diffusionError('JOB_NOT_FOUND', 'That video is no longer in the gallery.')
+    const { path, exists } = await locateVideo(dir, id)
+    if (!exists) throw diffusionError('JOB_NOT_FOUND', 'That video is no longer in the gallery.')
     await mkdir(dirname(target), { recursive: true }).catch((error: unknown) => {
       throw ioError('Could not create the destination folder.', error)
     })

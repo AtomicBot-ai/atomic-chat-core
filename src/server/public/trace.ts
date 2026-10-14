@@ -47,6 +47,8 @@ export function endpointFromPath(path: string): string {
       return 'messages/count_tokens'
     case '/images/generations':
       return 'images/generations'
+    case '/images/edits':
+      return 'images/edits'
     case '/systemone':
       return 'systemone'
     case '/router/score':

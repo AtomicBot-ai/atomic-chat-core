@@ -27,10 +27,12 @@ export async function startBackendInstallFixture(
     /** Answer the first N requests for the archive with 503, to walk the retry ladder. */
     archiveFailures?: number
     /**
-     * More asset names for the manifest, without a mirror entry (the advisor lists them; an install
-     * would fall back to the ggml-org CDN, which the proxy does not reach).
+     * More asset names for the release list and the manifest, with no archive behind them (the
+     * advisor lists them; an install of one would fail).
      */
     extraAssets?: string[]
+    /** Answer the release list with 404, as conf did before it published one: the core reads the manifest. */
+    legacyOnly?: boolean
     /** The fork's `index.json`, served at `/releases/latest/download/index.json` on the same origin. */
     turboquantIndex?: unknown
   } = {}
@@ -63,6 +65,32 @@ export async function startBackendInstallFixture(
       ],
     })
   )
+  const releases = Buffer.from(
+    JSON.stringify({
+      schema_version: 1,
+      download_base: 'https://mirror.atomic.invalid/releases',
+      releases: [
+        {
+          tag,
+          min_core_version: '0.0.0',
+          assets: [
+            {
+              name: archiveName,
+              size: archive.length,
+              sha256: options.badChecksum ? '0'.repeat(64) : sha256,
+              validation: 'approved',
+            },
+            ...(options.extraAssets ?? []).map((name) => ({
+              name,
+              size: 1,
+              sha256: 'f'.repeat(64),
+              validation: 'approved',
+            })),
+          ],
+        },
+      ],
+    })
+  )
   const seen: string[] = []
   let archiveFailuresLeft = options.archiveFailures ?? 0
   let requested!: () => void
@@ -80,9 +108,10 @@ export async function startBackendInstallFixture(
         res.writeHead(200, { 'content-length': body.length, 'content-type': 'application/json' })
         return req.method === 'HEAD' ? res.end() : res.end(body)
       }
-      const isManifest = req.url?.endsWith('/backends/manifest.json')
+      const isReleases = !options.legacyOnly && req.url?.endsWith('/backends/llamacpp-upstream-releases.json')
+      const isManifest = isReleases || req.url?.endsWith('/backends/manifest.json')
       const isCompanion = options.cuda && req.url?.endsWith(`/${tag}/${companionName}`)
-      const content = isManifest ? manifest : isCompanion ? companion : archive
+      const content = isReleases ? releases : isManifest ? manifest : isCompanion ? companion : archive
       if (!isManifest && !isCompanion && !req.url?.endsWith(`/${tag}/${archiveName}`)) {
         res.writeHead(404).end()
         return

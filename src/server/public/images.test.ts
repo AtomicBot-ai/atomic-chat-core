@@ -369,3 +369,125 @@ async function fakeExchange(images: ImagesBackend) {
     },
   }
 }
+
+describe('remote image models', () => {
+  const remoteFake = () => {
+    const fake = fakeImages()
+    fake.present = false
+    fake.find = (model) => (model === 'gpt-image-2' ? { provider: 'openai', model } : undefined)
+    return fake
+  }
+
+  it('serves a model a connected provider has enabled, with the provider in atomic', async () => {
+    const fake = remoteFake()
+    const { started, events } = await server(fake)
+    const res = await postJson(started, '/images/generations', {
+      model: 'gpt-image-2',
+      prompt: 'a cat',
+      size: '1536x1024',
+      quality: 'high',
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: Array<{ b64_json: string }>; atomic: Record<string, unknown> }
+    expect(body.data[0]?.b64_json).toBe(PNG.toString('base64'))
+    expect(body.atomic).toMatchObject({ job_id: 'job-7', provider: 'openai' })
+    expect(fake.requests[0]).toMatchObject({
+      target: { provider: 'openai', model: 'gpt-image-2' },
+      width: 1536,
+      height: 1024,
+      remote: { size: '1536x1024', quality: 'high' },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const finished = events.find((e) => e.phase === 'finished')
+    expect(finished?.phase === 'finished' ? finished.observation : null).toMatchObject({
+      endpoint: 'images/generations',
+      backend: 'remote-media',
+      model_id: 'gpt-image-2',
+    })
+  })
+
+  it('maps a provider refusal to the OpenAI error a client expects', async () => {
+    const fake = remoteFake()
+    fake.next = () =>
+      Promise.resolve({ ok: false, error: { code: 'REMOTE_CONTENT_BLOCKED', message: 'rejected by safety' } })
+    const { started } = await server(fake)
+    const res = await postJson(started, '/images/generations', { model: 'gpt-image-2', prompt: 'x' })
+    expect(res.status).toBe(400)
+    expect(await errorOf(res)).toMatchObject({ code: 'content_policy_violation' })
+  })
+})
+
+describe('POST /v1/images/edits', () => {
+  it('edits with a remote model from a JSON body', async () => {
+    const fake = fakeImages()
+    fake.find = (model) => ({ provider: 'openai', model })
+    const { started } = await server(fake)
+    const res = await postJson(started, '/images/edits', {
+      model: 'gpt-image-2',
+      prompt: 'make it blue',
+      images: [{ image_url: `data:image/png;base64,${PNG.toString('base64')}` }],
+    })
+    expect(res.status).toBe(200)
+    expect(fake.requests[0]).toMatchObject({
+      workflow: 'edit',
+      initImage: { base64: PNG.toString('base64') },
+    })
+  })
+
+  it('refuses multipart, a model no provider serves, and a link instead of an image', async () => {
+    const fake = fakeImages()
+    fake.find = (model) => (model === 'gpt-image-2' ? { provider: 'openai', model } : undefined)
+    const { started } = await server(fake)
+    const multipart = await fetch(`http://127.0.0.1:${started.port}/v1/images/edits`, {
+      method: 'POST',
+      headers: { 'content-type': 'multipart/form-data; boundary=x' },
+      body: '--x--',
+    })
+    expect(multipart.status).toBe(415)
+    const unknown = await postJson(started, '/images/edits', {
+      model: 'local',
+      prompt: 'x',
+      images: ['eA=='],
+    })
+    expect(unknown.status).toBe(404)
+    const link = await postJson(started, '/images/edits', {
+      model: 'gpt-image-2',
+      prompt: 'x',
+      images: ['https://x.example/a.png'],
+    })
+    expect(link.status).toBe(400)
+    expect(await errorOf(link)).toMatchObject({ param: 'images[0]' })
+  })
+})
+
+describe('remote request refusals', () => {
+  const remote = () => {
+    const fake = fakeImages()
+    fake.find = (model) => ({ provider: 'openai', model })
+    return fake
+  }
+
+  it('answer a bad field, an unreadable mask and broken JSON with a 400', async () => {
+    const { started } = await server(remote())
+    const n = await postJson(started, '/images/generations', { model: 'gpt-image-2', prompt: 'x', n: 99 })
+    expect(n.status).toBe(400)
+    expect(await errorOf(n)).toMatchObject({ param: 'n' })
+    const mask = await postJson(started, '/images/edits', {
+      model: 'gpt-image-2',
+      prompt: 'x',
+      images: [PNG.toString('base64')],
+      mask: Buffer.from('not a png').toString('base64'),
+    })
+    expect(mask.status).toBe(400)
+    expect(await errorOf(mask)).toMatchObject({ param: 'mask' })
+    const broken = await fetch(`http://127.0.0.1:${started.port}/v1/images/edits`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{nope',
+    })
+    expect(broken.status).toBe(400)
+    // A body that is not an object names no model: it goes the local way, and is refused there.
+    const list = await postJson(started, '/images/generations', [])
+    expect(list.status).toBe(400)
+  })
+})

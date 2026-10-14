@@ -32,8 +32,8 @@ const ANY_HEADER = /^\[\d{4}-\d{2}-\d{2}\]\[\d{2}:\d{2}:\d{2}\]\[([^\]]+)\]\[(DE
 const APP_ENV = { TZ: 'Pacific/Kiritimati' }
 const MODEL = 'qwen3-8b'
 const ENGINE_STDOUT = 'fake llama-server: this line went to stdout'
-/** What the core warns when the backend manifest cannot be fetched (see {@link logAWarning}). */
-const MANIFEST_WARNING = '[fetchRemoteBackends] All manifest fetch transports failed'
+/** What the core warns when the upstream release list cannot be fetched (see {@link logAWarning}). */
+const MANIFEST_WARNING = '[upstream-releases] release list unavailable: All manifest fetch attempts failed'
 
 let dataFolder: string
 const daemons: ChildProcess[] = []

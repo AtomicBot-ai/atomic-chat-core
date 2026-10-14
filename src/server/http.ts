@@ -182,9 +182,24 @@ export function statusForCode(code: ErrorCode): number {
     case 'MODEL_SETUP_PLAN_STALE':
       return 409
     case 'QUEUE_FULL':
+    case 'REMOTE_RATE_LIMITED':
       return 429
     case 'DISK_FULL':
       return 507
+    // A provider's answer, not the caller's credentials: never a 401 the app would take for its own token.
+    case 'REMOTE_AUTH_FAILED':
+    case 'REMOTE_UNAVAILABLE':
+      return 502
+    case 'REMOTE_TIMEOUT':
+      return 504
+    case 'REMOTE_QUOTA':
+      return 402
+    case 'REMOTE_REJECTED':
+    case 'REMOTE_CONTENT_BLOCKED':
+    case 'REMOTE_UNSUPPORTED':
+      return 422
+    case 'REMOTE_NOT_CONFIGURED':
+      return 409
     case 'AUTH_FAILED':
     case 'UPSTREAM_ERROR':
       return 502

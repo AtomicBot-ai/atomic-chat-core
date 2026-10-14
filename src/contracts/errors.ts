@@ -132,6 +132,22 @@ export const DIFFUSION_ERROR_CODES = [
   'BACKEND_IN_USE',
   'NOT_CONFIGURED',
   'INTERNAL',
+  /** Remote media (cloud and self-hosted providers): the provider or the model is not set up here. */
+  'REMOTE_NOT_CONFIGURED',
+  /** The provider refused the key, or the account may not use the model. */
+  'REMOTE_AUTH_FAILED',
+  /** The provider refused the request as malformed or unsupported; `details` carries its words. */
+  'REMOTE_REJECTED',
+  /** The provider's safety filter refused the prompt, an input image or the result. */
+  'REMOTE_CONTENT_BLOCKED',
+  'REMOTE_RATE_LIMITED',
+  /** Out of credit, or over a spending limit. */
+  'REMOTE_QUOTA',
+  /** The provider could not be reached, or answered with a server error. */
+  'REMOTE_UNAVAILABLE',
+  'REMOTE_TIMEOUT',
+  /** The model cannot do what was asked (a workflow, an input it does not take). */
+  'REMOTE_UNSUPPORTED',
 ] as const
 export type DiffusionErrorCode = (typeof DIFFUSION_ERROR_CODES)[number]
 

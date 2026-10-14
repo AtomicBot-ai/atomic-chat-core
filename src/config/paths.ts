@@ -80,6 +80,8 @@ export interface CoreFiles {
   telemetry: string
   /** `<dir>/prism-setups`: one record per Bonsai setup operation (engine + model + projector). */
   prismSetupsDir: string
+  /** The last remote media catalog (conf `providers/media.json`) the core fetched. */
+  mediaCatalogCache: string
 }
 
 /** Image generation. Paths the app's diffusion plugin chose; the core adopted them as they are. */
@@ -95,6 +97,8 @@ export interface DiffusionPaths {
   defaultOutputDir: string
   /** `<data>/videos`: the video gallery, unless the user chose another folder. */
   defaultVideoOutputDir: string
+  /** Remote video jobs still running at a provider, so a restarted core keeps polling them. */
+  remoteJobsFile: string
 }
 
 /**
@@ -212,6 +216,7 @@ export function dataLayout(root: string): DataLayout {
       /** The core's own error-reporting state: the user's stored choice, the install id. */
       telemetry: join(coreDir, 'telemetry.json'),
       prismSetupsDir: join(coreDir, 'prism-setups'),
+      mediaCatalogCache: join(coreDir, 'media-catalog.cache.json'),
     },
     diffusion: {
       root: diffusionDir,
@@ -220,6 +225,7 @@ export function dataLayout(root: string): DataLayout {
       scratchDir: join(diffusionDir, 'scratch'),
       defaultOutputDir: join(root, 'images'),
       defaultVideoOutputDir: join(root, 'videos'),
+      remoteJobsFile: join(diffusionDir, 'remote-jobs.json'),
     },
     provider(id) {
       const providerRoot = join(root, id)

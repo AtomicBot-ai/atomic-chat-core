@@ -10,6 +10,7 @@ import {
   parseVideoPoster,
   requireString,
   requireStringList,
+  parseMediaTarget,
 } from './parse.js'
 
 /** The details of the `INVALID_REQUEST` a parser raises. */
@@ -365,5 +366,62 @@ describe('parseVideoPoster', () => {
     expect(refusal(() => parseVideoPoster({ png: 'not base64!' }))).toBe('png: expected a base64 PNG')
     expect(refusal(() => parseVideoPoster({ png: 7 }))).toBe('png: expected a string')
     expect(refusal(() => parseVideoPoster(null))).toBe('body: expected an object')
+  })
+})
+
+describe('remote targets', () => {
+  const image = { prompt: 'a cat', width: 0, height: 0, steps: 0, cfgScale: 0, batchSize: 1 }
+
+  it('reads a target and the remote options of an image request', () => {
+    expect(
+      parseImageGenerateRequest({
+        ...image,
+        target: { provider: ' openai ', model: 'gpt-image-2' },
+        remote: { size: '1024x1024', quality: 'high', unknown: 1 },
+      })
+    ).toEqual({
+      ...image,
+      target: { provider: 'openai', model: 'gpt-image-2' },
+      remote: { size: '1024x1024', quality: 'high' },
+    })
+  })
+
+  it('reads the remote options of a video request', () => {
+    expect(
+      parseVideoGenerateRequest({
+        prompt: 'waves',
+        width: 0,
+        height: 0,
+        steps: 0,
+        cfgScale: 0,
+        target: { provider: 'openrouter', model: 'google/veo-3.1-fast' },
+        remote: { durationSecs: 8, resolution: '720p', generateAudio: true },
+      }).remote
+    ).toEqual({ durationSecs: 8, resolution: '720p', generateAudio: true })
+  })
+
+  it.each([
+    [{ provider: '', model: 'm' }, 'target.provider'],
+    [{ provider: 'p' }, 'target.model'],
+    [{ provider: 'p', model: '  ' }, 'target.model'],
+    ['openai', 'target'],
+  ])('refuses the target %j', (target, field) => {
+    expect(() => parseImageGenerateRequest({ ...image, target })).toThrow(
+      expect.objectContaining({ code: 'INVALID_REQUEST', details: expect.stringContaining(field) })
+    )
+  })
+
+  it('refuses a clip length that is not above zero', () => {
+    expect(() =>
+      parseVideoGenerateRequest({
+        prompt: 'x',
+        width: 0,
+        height: 0,
+        steps: 0,
+        cfgScale: 0,
+        remote: { durationSecs: 0 },
+      })
+    ).toThrow(expect.objectContaining({ code: 'INVALID_REQUEST' }))
+    expect(parseMediaTarget({ provider: 'a', model: 'b' }, 'target')).toEqual({ provider: 'a', model: 'b' })
   })
 })

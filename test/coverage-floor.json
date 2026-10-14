@@ -17,12 +17,6 @@
     "functions": 100,
     "lines": 100
   },
-  "src/backend/catalog/bundled-manifest-baseline.ts": {
-    "statements": 100,
-    "branches": 100,
-    "functions": 100,
-    "lines": 100
-  },
   "src/backend/catalog/cuda-family.ts": {
     "statements": 100,
     "branches": 89,
@@ -52,6 +46,18 @@
     "branches": 91,
     "functions": 100,
     "lines": 99
+  },
+  "src/backend/catalog/upstream-releases-catalog.ts": {
+    "statements": 99,
+    "branches": 96,
+    "functions": 100,
+    "lines": 99
+  },
+  "src/backend/catalog/upstream-releases.ts": {
+    "statements": 100,
+    "branches": 97,
+    "functions": 100,
+    "lines": 100
   },
   "src/backend/installed/installed.ts": {
     "statements": 100,

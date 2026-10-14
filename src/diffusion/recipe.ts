@@ -5,12 +5,16 @@
  * `767ff6350`).
  */
 
+import { MEDIA_DIALECTS } from '../contracts/index.js'
 import type {
   DiffusionBackend,
   DiffusionEngineId,
   DiffusionOffloadPolicy,
+  DiffusionRecipeEngine,
   ImageRecipe,
   ImageWorkflowId,
+  MediaDialect,
+  RemoteImageOptions,
 } from '../contracts/index.js'
 import { expandExponent } from '../util/index.js'
 import { internalError } from './errors.js'
@@ -45,7 +49,8 @@ export function a1111Parameters(recipe: ImageRecipe): string {
   fields.push(
     `Seed: ${recipe.seed}`,
     `Size: ${recipe.width}x${recipe.height}`,
-    `Model: ${recipe.model.filename}`
+    // A remote model has no file: its id stands in.
+    `Model: ${recipe.model.filename || recipe.model.modelId}`
   )
   if (recipe.flowShift !== null) fields.push(`Flow shift: ${fmtFloat(recipe.flowShift)}`)
   if (recipe.strength !== null) fields.push(`Denoising strength: ${fmtFloat(recipe.strength)}`)
@@ -77,17 +82,40 @@ export function serializeRecipe(recipe: ImageRecipe): string {
       displayName: recipe.model.displayName,
       filename: recipe.model.filename,
     },
-    engine: {
-      kind: recipe.engine.kind,
-      backend: recipe.engine.backend,
-      tag: recipe.engine.tag,
-      offload: recipe.engine.offload,
-      cpuFallback: recipe.engine.cpuFallback,
-    },
+    engine: orderedEngine(recipe.engine),
+    // Only a remote recipe has it, so a local recipe keeps the plugin's exact shape.
+    ...(recipe.remote === undefined ? {} : { remote: orderedRemoteImage(recipe.remote) }),
     createdAtMs: recipe.createdAtMs,
     durationMs: recipe.durationMs,
   }
   return JSON.stringify(ordered)
+}
+
+/** A recipe's engine with its keys in a fixed order, whichever kind it is. */
+export function orderedEngine(engine: DiffusionRecipeEngine): DiffusionRecipeEngine {
+  if (engine.kind === 'remote') return { kind: 'remote', provider: engine.provider, api: engine.api }
+  return {
+    kind: engine.kind,
+    backend: engine.backend,
+    tag: engine.tag,
+    offload: engine.offload,
+    cpuFallback: engine.cpuFallback,
+  }
+}
+
+const REMOTE_IMAGE_KEYS = [
+  'size',
+  'aspectRatio',
+  'resolution',
+  'quality',
+  'background',
+  'outputFormat',
+] as const
+
+function orderedRemoteImage(options: RemoteImageOptions): RemoteImageOptions {
+  const out: RemoteImageOptions = {}
+  for (const key of REMOTE_IMAGE_KEYS) if (options[key] !== undefined) out[key] = options[key]
+  return out
 }
 
 /**
@@ -136,6 +164,46 @@ function optional<T>(value: unknown, check: (v: unknown) => v is T): T | null | 
 }
 
 /**
+ * A recipe's engine, or `undefined` when it is neither a local engine the plugin knew nor a remote
+ * provider through an adapter this core has.
+ */
+export function parseRecipeEngine(engine: Fields): DiffusionRecipeEngine | undefined {
+  if (engine['kind'] === 'remote') {
+    if (!isString(engine['provider']) || engine['provider'] === '') return undefined
+    if (!among<MediaDialect>(engine['api'], MEDIA_DIALECTS)) return undefined
+    return { kind: 'remote', provider: engine['provider'], api: engine['api'] }
+  }
+  const ok =
+    among(engine['kind'], ENGINES) &&
+    among(engine['backend'], BACKENDS) &&
+    isString(engine['tag']) &&
+    among(engine['offload'], OFFLOADS) &&
+    typeof engine['cpuFallback'] === 'boolean'
+  if (!ok) return undefined
+  return {
+    kind: engine['kind'] as DiffusionEngineId,
+    backend: engine['backend'] as DiffusionBackend,
+    tag: engine['tag'] as string,
+    offload: engine['offload'] as DiffusionOffloadPolicy,
+    cpuFallback: engine['cpuFallback'] as boolean,
+  }
+}
+
+/** A remote recipe's extra settings: strings only; `undefined` when the value is not such an object. */
+function parseRemoteImage(value: unknown): RemoteImageOptions | null | undefined {
+  if (value === undefined || value === null) return null
+  if (!isObject(value)) return undefined
+  const out: RemoteImageOptions = {}
+  for (const key of REMOTE_IMAGE_KEYS) {
+    const item = value[key]
+    if (item === undefined || item === null) continue
+    if (!isString(item)) return undefined
+    out[key] = item
+  }
+  return out
+}
+
+/**
  * The recipe out of an `atomic` chunk, or `undefined` when the text is not one. As strict as the
  * plugin's serde was, because this is what decides whether a PNG in the output folder is ours: an
  * image without a valid recipe is never listed and never deleted.
@@ -154,6 +222,8 @@ export function parseRecipe(text: string): ImageRecipe | undefined {
   const samplingMethod = optional(raw['samplingMethod'], isString)
   const flowShift = optional(raw['flowShift'], isNumber)
   const strength = optional(raw['strength'], isNumber)
+  const parsedEngine = parseRecipeEngine(engine)
+  const remote = parseRemoteImage(raw['remote'])
   const ok =
     isString(raw['jobId']) &&
     isWhole(raw['index']) &&
@@ -170,11 +240,8 @@ export function parseRecipe(text: string): ImageRecipe | undefined {
     isString(model['family']) &&
     isString(model['displayName']) &&
     isString(model['filename']) &&
-    among(engine['kind'], ENGINES) &&
-    among(engine['backend'], BACKENDS) &&
-    isString(engine['tag']) &&
-    among(engine['offload'], OFFLOADS) &&
-    typeof engine['cpuFallback'] === 'boolean' &&
+    parsedEngine !== undefined &&
+    remote !== undefined &&
     isWhole(raw['createdAtMs']) &&
     isWhole(raw['durationMs']) &&
     negativePrompt !== undefined &&
@@ -182,7 +249,7 @@ export function parseRecipe(text: string): ImageRecipe | undefined {
     samplingMethod !== undefined &&
     flowShift !== undefined &&
     strength !== undefined
-  if (!ok) return undefined
+  if (!ok || parsedEngine === undefined || remote === undefined) return undefined
   return {
     jobId: raw['jobId'] as string,
     index: raw['index'] as number,
@@ -206,13 +273,8 @@ export function parseRecipe(text: string): ImageRecipe | undefined {
       displayName: model['displayName'] as string,
       filename: model['filename'] as string,
     },
-    engine: {
-      kind: engine['kind'] as DiffusionEngineId,
-      backend: engine['backend'] as DiffusionBackend,
-      tag: engine['tag'] as string,
-      offload: engine['offload'] as DiffusionOffloadPolicy,
-      cpuFallback: engine['cpuFallback'] as boolean,
-    },
+    engine: parsedEngine,
+    ...(remote === null ? {} : { remote }),
     createdAtMs: raw['createdAtMs'] as number,
     durationMs: raw['durationMs'] as number,
   }

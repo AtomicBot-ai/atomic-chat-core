@@ -51,7 +51,7 @@ import { llamaServerExeName } from '../../config/index.js'
 import type { InstalledBackendPack, UpstreamManifest } from '../types.js'
 import type { OptimalBackendStore, OptimalState, OptimalUpdate } from '../optimal/index.js'
 import { ensureTurboquantCudart, readTurboquantIndexedAsset, turboquantArchiveUrl } from '../turboquant.js'
-import { parseBackendVersion, parseBinaryVersion } from '../version.js'
+import { parseBackendVersion, parseBinaryVersion, stripBom } from '../version.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -194,8 +194,11 @@ export interface BackendServiceDeps {
   layout: DataLayout
   provider: LocalProviderId
   downloader: Downloader
-  /** The live manifest for this platform, or `null` when it could not be fetched. */
-  readManifest: (proxy?: ProxyConfig | null) => Promise<UpstreamManifest | null>
+  /**
+   * Upstream: the release list's entry for this tag, in the legacy manifest's shape, or `null` when
+   * the tag is not listed (the archive then comes from the ggml-org CDN, unhashed).
+   */
+  readManifest: (tag: string, proxy?: ProxyConfig | null) => Promise<UpstreamManifest | null>
   optimalStore?: OptimalBackendStore
   /** Decides the executable name inside a pack (`llama-server` vs `llama-server.exe`). */
   platform?: NodeJS.Platform
@@ -453,8 +456,8 @@ export class BackendService {
   }
 
   /**
-   * An upstream pack: from the signed mirror when the manifest lists this exact asset, otherwise the
-   * ggml-org CDN without a checksum — the app's behaviour, and the reason a build the mirror has not
+   * An upstream pack: from the signed mirror when the release list lists this exact asset, otherwise
+   * the ggml-org CDN without a checksum — the app's behaviour, and the reason a build the mirror has not
    * caught up with still installs; a wrong tag then fails as a 404 during the download. Some Windows
    * CUDA backends ship without the CUDA runtime, which is fetched beside them under the same task,
    * because to the user this is one install with one progress bar.
@@ -465,7 +468,7 @@ export class BackendService {
     staging: string,
     options: InstallBackendOptions
   ): Promise<DownloadPlan> {
-    const manifest = await this.deps.readManifest(options.proxy)
+    const manifest = await this.deps.readManifest(stripBom(version), options.proxy)
     const source = resolveBackendArchiveSource(version, backend, manifest ?? undefined)
     const archivePath = join(staging, getBackendArchiveName(version, backend))
     const cudartName = getCudartArchiveName(backend, version)

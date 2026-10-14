@@ -41,11 +41,20 @@ async function createCore(): Promise<AtomicCore> {
   }
   const fakeFetch: typeof fetch = async (input) => {
     const url = String(input instanceof Request ? input.url : input)
-    if (url.endsWith('/backends/manifest.json'))
-      return new Response(JSON.stringify({ tag_name: 'b99999', assets: [{ name: archiveName }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
+    if (url.endsWith('/backends/llamacpp-upstream-releases.json'))
+      return new Response(
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              tag: 'b99999',
+              min_core_version: '0.0.0',
+              assets: [{ name: archiveName, sha256: 'a'.repeat(64), size: 1, validation: 'approved' }],
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
     return new Response('not here', { status: 404 })
   }
   const core = await AtomicCore.create({

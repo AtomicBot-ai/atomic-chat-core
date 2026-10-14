@@ -263,6 +263,13 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       }),
       remove: async () => {},
     },
+    media: {
+      catalog: async () => ({ catalog_version: 1, origin: 'baseline', dialects: {}, providers: {} }),
+      providerModels: async (provider, kind) => {
+        calls.push(`media models ${provider} ${kind}`)
+        return { provider, kind, api: null, models: [], live: false }
+      },
+    },
     chatgpt: {
       status: async () => ({ connected: false, email: null, plan_type: null, expires_at: null }),
       startLogin: async () => ({ authorize_url: 'https://auth.example/authorize' }),
