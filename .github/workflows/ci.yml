@@ -4,9 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # No schedule: the live suites run when someone dispatches this workflow, against the newest
+  # llama.cpp build (a nightly nobody watched stayed red for weeks).
   workflow_dispatch:
-  schedule:
-    - cron: '0 3 * * *'
   # `release.yml` runs these same gates before it publishes anything.
   workflow_call:
     inputs:
@@ -116,7 +116,7 @@ jobs:
   # A shell-script fake backend cannot be named llama-server.exe, so Windows proves the
   # spawn-a-backend path with a real llama-server and a small GGUF instead (PLAN.md §4 phase 1).
   live-backend:
-    if: ${{ !inputs.release && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
+    if: ${{ !inputs.release && github.event_name == 'workflow_dispatch' }}
     needs: [gate, unit, e2e]
     strategy:
       fail-fast: false
@@ -149,7 +149,7 @@ jobs:
           npx vitest run --project live
 
   live-cloud:
-    if: ${{ !inputs.release && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
+    if: ${{ !inputs.release && github.event_name == 'workflow_dispatch' }}
     needs: [gate, unit, e2e]
     runs-on: ubuntu-latest
     steps:

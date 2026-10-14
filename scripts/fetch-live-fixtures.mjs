@@ -3,6 +3,7 @@
 // Used by CI (and by hand) so the live suite has something to run against.
 //
 //   node scripts/fetch-live-fixtures.mjs --out /tmp/live [--tag b11617] [--repo ggml-org/llama.cpp]
+//     [--skip-model] [--capture]
 //
 // --tag picks a release (default: the newest one with this platform's CPU asset); --repo any GitHub
 // repo publishing ggml-org's asset names, e.g. AtomicBot-ai/atomic-chat-conf for the signed mirror.
@@ -12,6 +13,9 @@
 // Writes into <out>: bin-path.txt and model-path.txt (exported as ATOMIC_LIVE_UPSTREAM_BIN /
 // ATOMIC_LIVE_UPSTREAM_MODEL), tag.txt (ATOMIC_LIVE_UPSTREAM_TAG) and fixture.json, which records
 // what was tested: repo, tag, asset and model hashes, and the binary's `--version` output.
+// --capture also writes help.txt, version.txt and list-devices.txt: what `-h`, `--version` and
+// `--list-devices` print (stdout, a newline, stderr — the shape `runHelp` reads), for the fixtures
+// under test/fixtures/llamacpp/ and the surface diff. --skip-model leaves the GGUF out.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
@@ -42,6 +46,8 @@ const MODEL_URL = process.env.ATOMIC_LIVE_MODEL_URL ?? DEFAULT_MODEL_URL
 const MODEL_SHA256 =
   process.env.ATOMIC_LIVE_MODEL_SHA256 ?? (MODEL_URL === DEFAULT_MODEL_URL ? DEFAULT_MODEL_SHA256 : undefined)
 const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
+const SKIP_MODEL = process.argv.includes('--skip-model')
+const CAPTURE = process.argv.includes('--capture')
 
 mkdirSync(OUT, { recursive: true })
 
@@ -117,20 +123,33 @@ const extracted = join(OUT, `backend-${release.tag_name}`)
 extract(archive, extracted)
 const server = findServer(extracted)
 if (process.platform !== 'win32') chmodSync(server, 0o755)
-const version = spawnSync(server, ['--version'], { cwd: dirname(server), encoding: 'utf8', timeout: 60_000 })
-const versionOutput = `${version.stdout ?? ''}${version.stderr ?? ''}`.trim()
-
-const model = join(OUT, 'live-model.gguf')
-if (!existsSync(model) || (MODEL_SHA256 && sha256Of(model) !== MODEL_SHA256)) {
-  console.log(`downloading ${MODEL_URL}`)
-  await download(MODEL_URL, model)
+/** What `server <args>` prints: stdout, a newline, stderr. */
+const printed = (args) => {
+  const result = spawnSync(server, args, { cwd: dirname(server), encoding: 'utf8', timeout: 60_000 })
+  return `${result.stdout ?? ''}\n${result.stderr ?? ''}`
 }
-const modelSha256 = sha256Of(model)
-if (MODEL_SHA256 && modelSha256 !== MODEL_SHA256)
-  throw new Error(`${MODEL_URL}: sha256 ${modelSha256} does not match ${MODEL_SHA256}`)
+const versionOutput = printed(['--version']).trim()
+if (CAPTURE) {
+  writeFileSync(join(OUT, 'help.txt'), printed(['-h']))
+  writeFileSync(join(OUT, 'version.txt'), printed(['--version']))
+  writeFileSync(join(OUT, 'list-devices.txt'), printed(['--list-devices']))
+}
+
+let model
+let modelSha256
+if (!SKIP_MODEL) {
+  model = join(OUT, 'live-model.gguf')
+  if (!existsSync(model) || (MODEL_SHA256 && sha256Of(model) !== MODEL_SHA256)) {
+    console.log(`downloading ${MODEL_URL}`)
+    await download(MODEL_URL, model)
+  }
+  modelSha256 = sha256Of(model)
+  if (MODEL_SHA256 && modelSha256 !== MODEL_SHA256)
+    throw new Error(`${MODEL_URL}: sha256 ${modelSha256} does not match ${MODEL_SHA256}`)
+}
 
 writeFileSync(join(OUT, 'bin-path.txt'), server)
-writeFileSync(join(OUT, 'model-path.txt'), model)
+if (model) writeFileSync(join(OUT, 'model-path.txt'), model)
 writeFileSync(join(OUT, 'tag.txt'), release.tag_name)
 writeFileSync(
   join(OUT, 'fixture.json'),
@@ -142,7 +161,7 @@ writeFileSync(
       platform: process.platform,
       arch: process.arch,
       asset: { name: asset.name, size: asset.size, sha256: archiveSha256, digest_verified: verified ?? null },
-      model: { url: MODEL_URL, sha256: modelSha256, verified: MODEL_SHA256 !== undefined },
+      model: model ? { url: MODEL_URL, sha256: modelSha256, verified: MODEL_SHA256 !== undefined } : null,
       version_output: versionOutput,
     },
     null,
@@ -150,5 +169,5 @@ writeFileSync(
   ) + '\n'
 )
 console.log(`ATOMIC_LIVE_UPSTREAM_BIN=${server}`)
-console.log(`ATOMIC_LIVE_UPSTREAM_MODEL=${model}`)
+if (model) console.log(`ATOMIC_LIVE_UPSTREAM_MODEL=${model}`)
 console.log(`ATOMIC_LIVE_UPSTREAM_TAG=${release.tag_name}`)
