@@ -9,6 +9,7 @@ dist/
 coverage/
 test/fixtures/live-cloud/*.local.json
 test/tmp/
+.live-fixtures/
 
 # Env & secrets
 .env

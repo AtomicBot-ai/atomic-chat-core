@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
+import { hostUpstreamBackendId } from '../helpers/live-llamacpp.js'
 import { AtomicCore } from '../../src/core/index.js'
 import { llamaServerExeName } from '../../src/config/index.js'
 
@@ -22,13 +23,6 @@ const BIN = process.env['ATOMIC_LIVE_UPSTREAM_DECISION_BIN'] ?? ''
 const MODEL = process.env['ATOMIC_LIVE_UPSTREAM_DECISION_MODEL'] ?? ''
 const TAG = process.env['ATOMIC_LIVE_UPSTREAM_DECISION_TAG'] ?? 'b11436'
 const ENABLED = process.env['ATOMIC_LIVE'] === '1' && BIN !== '' && MODEL !== ''
-
-/** The backend id this host's upstream build is published under. */
-function hostBackend(): string {
-  if (process.platform === 'darwin') return process.arch === 'arm64' ? 'macos-arm64' : 'macos-x64'
-  if (process.platform === 'win32') return 'win-cpu-x64'
-  return 'ubuntu-x64'
-}
 
 let data: TmpDataFolder
 let core: AtomicCore
@@ -40,7 +34,7 @@ describe.skipIf(!ENABLED)('a real upstream llama.cpp decision model', () => {
     const packDir = join(
       data.layout.provider('llamacpp-upstream').backendsDir,
       TAG,
-      hostBackend(),
+      hostUpstreamBackendId(),
       'build',
       'bin'
     )
