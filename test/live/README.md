@@ -1,9 +1,26 @@
 # Live tests
 
 Run only with `ATOMIC_LIVE=1`. Real backend download for the pinned tag, real `llama-server` with a small
-GGUF (`ATOMIC_LIVE_UPSTREAM_BIN`, `ATOMIC_LIVE_UPSTREAM_MODEL`), cloud providers via
+GGUF (`ATOMIC_LIVE_UPSTREAM_BIN`, `ATOMIC_LIVE_UPSTREAM_MODEL`, optional `ATOMIC_LIVE_UPSTREAM_TAG`), cloud providers via
 `ATOMIC_CLOUD_PROVIDERS` + `ATOMIC_CLOUD_<NAME>_{BASE_URL,API_KEY,MODEL,_STYLE,_TOOLS}` (same contract as the
 app's `scripts/record-cloud-live.py`), recording sanitised cassettes into `test/fixtures/live-cloud/`.
+
+Upstream llama.cpp (`test/live/llamacpp.test.ts`): `node scripts/fetch-live-fixtures.mjs --out .live-fixtures [--tag bN]
+[--repo owner/name]` downloads the platform's CPU build (newest by default; `--repo AtomicBot-ai/atomic-chat-conf` for the
+signed mirror), checks it against the release digest and writes `bin-path.txt`, `model-path.txt`, `tag.txt` and
+`fixture.json`. The pack is installed under that tag (`ATOMIC_LIVE_UPSTREAM_TAG`, else `b<build>` from `--version`) and
+this host's real backend id (`test/helpers/live-llamacpp.ts`), so the build gates in `planLlamaArgs` run as they would
+for a user on that release; the suite checks `--version` against the tag and the gated flags in the argv core logs.
+
+```sh
+node scripts/fetch-live-fixtures.mjs --out .live-fixtures
+ATOMIC_LIVE=1 ATOMIC_LIVE_UPSTREAM_BIN="$(cat .live-fixtures/bin-path.txt)" \
+  ATOMIC_LIVE_UPSTREAM_MODEL="$(cat .live-fixtures/model-path.txt)" \
+  ATOMIC_LIVE_UPSTREAM_TAG="$(cat .live-fixtures/tag.txt)" npx vitest run --project live test/live/llamacpp.test.ts
+```
+
+On Windows set `ATOMIC_LIVE=1` in the environment and run `npx vitest run --project live`: `npm run test:live` sets it
+inline, which cmd.exe cannot parse.
 
 Stage 5 providers, each opt-in on its own:
 
