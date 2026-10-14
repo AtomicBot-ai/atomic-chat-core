@@ -15,18 +15,22 @@
  * On Windows this is the *only* coverage of the spawn-a-backend path, because a shell-script fake
  * cannot be named `llama-server.exe`; CI therefore runs it there with a small GGUF.
  */
+import { readFileSync } from 'node:fs'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
 import { installUpstreamPack, liveUpstreamTag, readVersion } from '../helpers/live-llamacpp.js'
+import { checkHelp, parseLlamaHelp } from '../../scripts/lib/llama-help.mjs'
+import type { ContractLike } from '../../scripts/lib/llama-help.mjs'
 import { AtomicCore } from '../../src/core/index.js'
 import { parseBuildNumber } from '../../src/backend/version.js'
 import {
   LOAD_MODE_ONLY_MIN_BUILD,
   REASONING_PRESERVE_DEFAULT_ON_MIN_BUILD,
 } from '../../src/runtime/llamacpp/args.js'
+import { runHelp } from '../../src/runtime/llamacpp/probe.js'
 
 const BIN = process.env['ATOMIC_LIVE_UPSTREAM_BIN'] ?? ''
 const MODEL = process.env['ATOMIC_LIVE_UPSTREAM_MODEL'] ?? ''
@@ -77,6 +81,18 @@ describe.skipIf(!ENABLED)('a real llama.cpp backend', () => {
     const { output, build: reported } = await readVersion(exe)
     expect(reported, `--version must report the build of ${tag}:\n${output}`).toBe(build)
   }, 60_000)
+
+  it('knows every flag and value core emits for its build (-h against the engine contract)', async () => {
+    const contract = JSON.parse(
+      readFileSync(new URL('../fixtures/llamacpp/engine-contract.json', import.meta.url), 'utf8')
+    ) as ContractLike
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined)
+    )
+    const { output } = await runHelp(exe, env, dirname(exe), { timeoutMs: 60_000 })
+    const findings = checkHelp(contract, build, parseLlamaHelp(output))
+    expect(findings.filter((f) => f.severity === 'break' || f.severity === 'error')).toEqual([])
+  }, 120_000)
 
   it('loads the model, answers a completion and unloads', async () => {
     const session = await core.load('llamacpp-upstream', 'live', { overrides: { ctx_size: 512 } })
