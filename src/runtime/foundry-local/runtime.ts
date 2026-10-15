@@ -133,6 +133,11 @@ export class FoundryLocalRuntime implements LocalRuntime {
   /** Loads past their GPU claim and not yet a session. */
   private readonly claimed = new Map<string, GpuOccupancy>()
 
+  /** The `foundry-local` model registry this runtime reads (`<data>/foundry-local/models`). */
+  get registry(): ModelRegistry {
+    return this.options.registry
+  }
+
   constructor(private readonly options: FoundryLocalRuntimeOptions) {
     this.emit = options.emit ?? (() => {})
     this.table = new SidecarTable<FoundrySessionExtra>({

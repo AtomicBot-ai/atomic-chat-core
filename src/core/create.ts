@@ -25,6 +25,7 @@ import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
 import { MlxRuntime } from '../runtime/mlx/index.js'
 import {
   FoundryLocalAcceleratorService,
+  FoundryLocalRuntime,
   foundryHostCommand,
   foundryLocalVerdict,
   parseFoundryLocalCheckRequest,
@@ -344,6 +345,50 @@ export async function createAtomicCore(
     // The public server's trusted hosts, kept in this one array for every session gateway to read.
     const managedTrustedHosts: string[] = []
 
+    // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
+    // from the process report, which Bun's compiled binaries fill in as Node does; musl has none. The
+    // report is a whole diagnostic snapshot, so it is built on Linux only, where glibc decides.
+    const foundryLocalHost = foundryLocalHostPlatform({
+      platform,
+      arch: process.arch,
+      osRelease: osRelease(),
+      glibcVersion:
+        platform === 'linux'
+          ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
+              ?.glibcVersionRuntime
+          : undefined,
+    })
+    const foundryLocalPaths = layout.provider('foundry-local')
+    const foundryHost = foundryHostCommand(env)
+    // The provider itself (task 6.6): one foundry-host per model, where the platform rule holds. The
+    // active build and the prepared accelerators are read per load, from services wired below.
+    const foundryLocalRuntime: FoundryLocalRuntime | undefined =
+      foundryLocalHost.platform === null
+        ? undefined
+        : new FoundryLocalRuntime({
+            layout,
+            registry: new ModelRegistry(layout, 'foundry-local'),
+            instanceId: lock.instanceId,
+            platform,
+            arch: process.arch,
+            hostCommand: foundryHost,
+            resolveBuild: (): Promise<string | undefined> => engineBuilds.activeDir('foundry-local'),
+            preparedAccelerators: async () =>
+              foundryLocalAccelerators ? foundryLocalAccelerators.prepared() : [],
+            trustedHosts: managedTrustedHosts,
+            readSettings: async () => settings.get('foundry-local'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+            claimGpu: gpuResidency.hook('foundry-local'),
+            baseEnv: env,
+            log: runtimeLog,
+            ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+          })
+    if (foundryLocalRuntime) {
+      registries.set('foundry-local', foundryLocalRuntime.registry)
+      runtimes.set('foundry-local', foundryLocalRuntime)
+    }
+
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
     })
@@ -516,22 +561,7 @@ export async function createAtomicCore(
     // their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
-    // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
-    // from the process report, which Bun's compiled binaries fill in as Node does; musl has none. The
-    // report is a whole diagnostic snapshot, so it is built on Linux only, where glibc decides.
-    const foundryLocalHost = foundryLocalHostPlatform({
-      platform,
-      arch: process.arch,
-      osRelease: osRelease(),
-      glibcVersion:
-        platform === 'linux'
-          ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
-              ?.glibcVersionRuntime
-          : undefined,
-    })
-    const foundryLocalPaths = layout.provider('foundry-local')
-    const foundryHost = foundryHostCommand(env)
-    const engineBuilds = new EngineBuildsService({
+    const engineBuilds: EngineBuildsService = new EngineBuildsService({
       dataFolder: layout.root,
       roots: {
         'sd-cpp': layout.diffusion.backendsDir,
@@ -568,8 +598,8 @@ export async function createAtomicCore(
         'sd-cpp': diffusion.engineHost(),
         // Off macOS there is no MLX runtime: nothing runs, so nothing to hold off or unload.
         'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
-        // Until the Foundry Local runtime (task 6.3) lends its own, no session runs from a build.
-        'foundry-local': IDLE_ENGINE_HOST,
+        // Where the provider is not registered nothing runs from a build.
+        'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
