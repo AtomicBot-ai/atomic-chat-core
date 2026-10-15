@@ -11,6 +11,7 @@ import {
   buildResults,
   CANDIDATE_ID_RE,
   coreCell,
+  mergeCoreShards,
   liveCell,
   renderResultsMarkdown,
   vitestOutcomes,
@@ -336,6 +337,49 @@ describe('cells', () => {
     })
     expect(cell.status).toBe('incomplete')
     expect(cell.steps).toEqual({ unit: 'success', build: 'success', build_bin: 'missing', e2e: 'missing' })
+  })
+})
+
+describe('core suites split over shards (Windows)', () => {
+  const shard = (k: string, steps: Record<string, string>, failed: string[] = []) => ({
+    ...coreCell({ platform: 'windows-arm64', steps, expected: config.core_suites, shard: k }),
+    ...(failed.length ? { failed_tests: failed } : {}),
+  })
+  const first = (unit = 'success') =>
+    shard('1/2', { unit, build: 'success', build_bin: 'success', e2e: 'success' })
+  const second = (unit = 'success', failed: string[] = []) =>
+    shard('2/2', { unit, build: 'skipped', build_bin: 'skipped', e2e: 'skipped' }, failed)
+
+  it('passes when both shards pass; the steps only the first runs count once', () => {
+    const [cell] = mergeCoreShards([first(), second()])
+    expect(cell).toMatchObject({
+      platform: 'windows-arm64',
+      status: 'pass',
+      shard: '2/2',
+      steps: { unit: 'success', build: 'success', build_bin: 'success', e2e: 'success' },
+    })
+  })
+
+  it('fails when either shard fails, with its failed tests', () => {
+    const [cell] = mergeCoreShards([first(), second('failure', ['src/core/x.test.ts: hangs'])])
+    expect(cell?.status).toBe('fail')
+    expect(cell?.failed_tests).toEqual(['src/core/x.test.ts: hangs'])
+  })
+
+  it('is incomplete when a shard left no cell', () => {
+    expect(mergeCoreShards([second()])[0]?.status).toBe('incomplete')
+    expect(mergeCoreShards([first()])[0]?.status).toBe('incomplete')
+  })
+
+  it('leaves an unsharded platform as it is, and the run passes on merged shards', () => {
+    const linux = coreCell({
+      platform: 'linux-x64',
+      steps: { unit: 'success', build: 'success', build_bin: 'success', e2e: 'success' },
+      expected: config.core_suites,
+    })
+    expect(mergeCoreShards([linux])).toEqual([linux])
+    const merged = mergeCoreShards([linux, first(), second()])
+    expect(merged.map((c) => `${c.platform}:${c.status}`)).toEqual(['linux-x64:pass', 'windows-arm64:pass'])
   })
 })
 

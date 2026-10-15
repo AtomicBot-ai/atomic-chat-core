@@ -134,8 +134,13 @@ jobs:
           - { platform: linux-x64, os: ubuntu-latest }
           - { platform: linux-arm64, os: ubuntu-24.04-arm }
           - { platform: macos-arm64, os: macos-14 }
-          - { platform: windows-x64, os: windows-2022 }
-          - { platform: windows-arm64, os: windows-11-arm }
+          # Windows spawns processes slowly: as in ci.yml its unit and contract files are split over
+          # two jobs (`--shard`), or the managed-engine tests time out; the first shard also builds
+          # and runs e2e, and results.json merges the two into one cell.
+          - { platform: windows-x64, os: windows-2022, shard: 1/2, part: '-1' }
+          - { platform: windows-x64, os: windows-2022, shard: 2/2, part: '-2' }
+          - { platform: windows-arm64, os: windows-11-arm, shard: 1/2, part: '-1' }
+          - { platform: windows-arm64, os: windows-11-arm, shard: 2/2, part: '-2' }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -157,8 +162,10 @@ jobs:
         shell: bash
         env:
           VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
-        run: npx vitest run --project unit --project contract --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/core/unit.json"
+          SHARD: ${{ matrix.shard }}
+        run: npx vitest run --project unit --project contract ${SHARD:+--shard=$SHARD} --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/core/unit.json"
       - id: build
+        if: ${{ !matrix.shard || startsWith(matrix.shard, '1/') }}
         continue-on-error: true
         run: npm run build
       - id: build_bin
@@ -179,6 +186,8 @@ jobs:
         env:
           PLATFORM: ${{ matrix.platform }}
           RUNNER: ${{ matrix.os }}
+          SHARD: ${{ matrix.shard }}
+          PART: ${{ matrix.part }}
           UNIT: ${{ steps.unit.outcome }}
           BUILD: ${{ steps.build.outcome }}
           BUILD_BIN: ${{ steps.build_bin.outcome }}
@@ -187,11 +196,11 @@ jobs:
           node scripts/engine-candidate.mjs cell --kind core --platform "$PLATFORM" --os "$RUNNER" \
             --step "unit=$UNIT" --step "build=$BUILD" --step "build_bin=$BUILD_BIN" --step "e2e=$E2E" \
             --vitest "$RUNNER_TEMP/core/unit.json" --vitest "$RUNNER_TEMP/core/e2e.json" \
-            --out "$RUNNER_TEMP/cell/core-$PLATFORM.json"
+            ${SHARD:+--shard "$SHARD"} --out "$RUNNER_TEMP/cell/core-$PLATFORM$PART.json"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cell-core-${{ matrix.platform }}
+          name: cell-core-${{ matrix.platform }}${{ matrix.part }}
           path: ${{ runner.temp }}/cell/
 
   # Real binaries on every platform, the pin beside the candidate: a test that fails on both is the
