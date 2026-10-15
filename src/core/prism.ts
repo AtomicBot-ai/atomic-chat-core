@@ -4,7 +4,15 @@
  * itself chooses), what that release declares it runs, and the `ModelCompatibilityService` that
  * the control routes and every llama.cpp runtime's load gate share.
  */
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { DataLayout } from '../config/index.js'
+import { AtomicCoreError } from '../contracts/index.js'
+import type {
+  LocalProviderId,
+  ModelCompatibilityRequest,
+  ModelCompatibilityResponse,
+} from '../contracts/index.js'
 import {
   findPrismRelease,
   prismTagBuild,
@@ -81,4 +89,52 @@ export function wirePrismCompatibility(deps: PrismWiringDeps): ModelCompatibilit
     ...(deps.remoteGgufTimeoutMs !== undefined ? { remoteTimeoutMs: deps.remoteGgufTimeoutMs } : {}),
     ...(deps.log ? { log: deps.log } : {}),
   })
+}
+
+export interface CompatibilityRouteDeps {
+  compatibility: Pick<ModelCompatibilityService, 'check'>
+  /** A registered model's file: absolute path and the sha256 its `model.yml` records. */
+  modelFile: (provider: LocalProviderId, modelId: string) => Promise<{ modelPath: string; sha256?: string }>
+}
+
+/**
+ * `POST /models/compatibility`: a registered model by id (its file on disk), or a Hub file before
+ * download (the conf rule, then — when asked — its header over HTTP ranges).
+ */
+export async function compatibilityFor(
+  deps: CompatibilityRouteDeps,
+  request: ModelCompatibilityRequest
+): Promise<ModelCompatibilityResponse> {
+  if (typeof request.model_id === 'string' && request.model_id !== '') {
+    const target = await deps.modelFile(request.provider ?? 'llamacpp-upstream', request.model_id)
+    return deps.compatibility.check({
+      modelPath: target.modelPath,
+      ...(target.sha256 ? { sha256: target.sha256 } : {}),
+    })
+  }
+  if (
+    typeof request.repo !== 'string' ||
+    request.repo === '' ||
+    typeof request.file !== 'string' ||
+    request.file === ''
+  ) {
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'A compatibility check needs model_id, or repo and file.')
+  }
+  return deps.compatibility.check({
+    repo: request.repo,
+    file: request.file,
+    ...(request.revision ? { revision: request.revision } : {}),
+    ...(request.sha256 ? { sha256: request.sha256 } : {}),
+    inspectRemote: request.inspect_remote === true,
+  })
+}
+
+/**
+ * Bonsai setup records a core before 0.17 kept in `<data>/atomic-core/prism-setups/`. Nothing reads
+ * them any more (ADR 2026-10-15-core-does-not-download-models), so startup removes the folder and
+ * resumes none of them. The partial `.tmp` and `.url` files those setups left next to the model are
+ * not touched: the client that downloads the model again picks them up.
+ */
+export async function removeLegacyPrismSetups(coreDir: string): Promise<void> {
+  await rm(join(coreDir, 'prism-setups'), { recursive: true, force: true })
 }

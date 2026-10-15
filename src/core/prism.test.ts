@@ -4,8 +4,8 @@ import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { PRISM_MANIFEST_BASELINE } from '../backend/index.js'
 import type { PrismManifest } from '../backend/index.js'
 import { ModelCompatibilityService } from '../models/index.js'
-import { currentPrismPack, installedPrism, wirePrismCompatibility } from './prism.js'
-import type { PrismWiringDeps } from './prism.js'
+import { compatibilityFor, currentPrismPack, installedPrism, wirePrismCompatibility } from './prism.js'
+import type { CompatibilityRouteDeps, PrismWiringDeps } from './prism.js'
 
 const TAG = PRISM_MANIFEST_BASELINE.releases[0]!.tag
 const LIVE: PrismManifest = {
@@ -101,5 +101,49 @@ describe('wirePrismCompatibility', () => {
     const service = wirePrismCompatibility(deps('', { fetch, rulesUrl: 'http://127.0.0.1:9/rules.json' }))
     await service.check({ repo: 'prism-ml/Ternary-Bonsai-8B-gguf', file: 'Ternary-Bonsai-8B-PQ2_0.gguf' })
     expect(seen).toEqual(['http://127.0.0.1:9/rules.json'])
+  })
+})
+
+describe('compatibilityFor', () => {
+  const REPO = 'prism-ml/Ternary-Bonsai-2-27B-gguf'
+  const FILE = 'Ternary-Bonsai-2-27B-PQ2_0.gguf'
+  const routeDeps = () =>
+    ({
+      compatibility: {
+        check: vi.fn(async () => ({
+          outcome: 'compatible' as const,
+          provider: 'atomic-prism' as const,
+          requires: [],
+          evidence: 'header' as const,
+          rules_version: 1,
+          reason: 'ok',
+        })),
+      },
+      modelFile: vi.fn(async () => ({ modelPath: '/m/model.gguf', sha256: 'b'.repeat(64) })),
+    }) satisfies CompatibilityRouteDeps
+
+  it('checks a registered model by its file on disk and sha256', async () => {
+    const d = routeDeps()
+    await compatibilityFor(d, { model_id: 'o/m', provider: 'atomic-prism' })
+    expect(d.modelFile).toHaveBeenCalledWith('atomic-prism', 'o/m')
+    expect(d.compatibility.check).toHaveBeenCalledWith({ modelPath: '/m/model.gguf', sha256: 'b'.repeat(64) })
+  })
+
+  it('checks a Hub file, reading the remote header only when asked', async () => {
+    const d = routeDeps()
+    await compatibilityFor(d, { repo: REPO, file: FILE, revision: 'abc', sha256: 'd'.repeat(64) })
+    expect(d.compatibility.check).toHaveBeenCalledWith({
+      repo: REPO,
+      file: FILE,
+      revision: 'abc',
+      sha256: 'd'.repeat(64),
+      inspectRemote: false,
+    })
+  })
+
+  it('needs a model id or a repo and file', async () => {
+    await expect(compatibilityFor(routeDeps(), { repo: REPO })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    })
   })
 })

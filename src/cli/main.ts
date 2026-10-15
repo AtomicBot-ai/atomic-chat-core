@@ -64,7 +64,6 @@ Serve compatibility options:
   -d, --detach           Compatibility flag; the persistent owner is already detached
   --log <path>           Append llama.cpp stdout/stderr to a file
   -v, --verbose          Relay llama.cpp output while the model loads
-  --select               Pick a GGUF when downloading owner/repository from Hugging Face
   --json                 Print the result as JSON
 
 Notes:

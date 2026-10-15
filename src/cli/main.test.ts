@@ -88,8 +88,10 @@ describe('runCli', () => {
       expect(await runCli(['serve', 'local', '--data-folder', data.root], structured)).toBe(1)
       expect(structured.err.join('')).toContain('[BINARY_NOT_FOUND]')
 
-      const thrown = recordingIo({ fetch: async () => Promise.reject('plain failure') })
-      expect(await runCli(['serve', 'owner/repo', '--data-folder', data.root], thrown)).toBe(1)
+      // Two models and no id: serve asks which, and the prompt rejects with a string.
+      await data.writeModel('other')
+      const thrown = recordingIo({ select: async () => Promise.reject('plain failure') })
+      expect(await runCli(['serve', '--data-folder', data.root], thrown)).toBe(1)
       expect(thrown.err.join('')).toContain('plain failure')
     } finally {
       await core.shutdown()

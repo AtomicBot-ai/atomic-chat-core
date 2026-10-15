@@ -9,11 +9,14 @@ it is in 0.12 or 0.13, so `atc` cannot move to a current core until it is ported
 ## Status
 
 Ported to `src/` on 2026-10-10 ([ADR](decisions/2026-10-10-the-terminal-patch-is-ported-and-what-it-changes-is-opt-in.md)).
-Left: a core release, then `eye-cli`. Two differences from the archive matter there: `atc` must pass
-`remoteGgufTimeoutMs: 20000` itself (the patch hard-coded 20 s for every caller, the app included),
-and the 250 ms progress cadence now comes only with `downloadStreams` > 1. The archive also recovers
-stalled ranges after 120 s of silence ("inactivity-based range recovery" in its `vendor/README.md`):
-that is part of feature 2.
+Feature 2 (parallel downloads) was removed again in 0.17.0: the core no longer downloads model files,
+and `atc` downloads them with its own module ([ADR](decisions/2026-10-15-core-does-not-download-models.md),
+change `remove-model-downloads-from-core`). Features 1, 3 and 4 stay.
+Left: a core release, then `eye-cli`. One difference from the archive matters there: `atc` must pass
+`remoteGgufTimeoutMs: 20000` itself (the patch hard-coded 20 s for every caller, the app included).
+The 250 ms progress cadence and the archive's recovery of stalled ranges after 120 s of silence
+("inactivity-based range recovery" in its `vendor/README.md`) were part of feature 2 and are now
+`atc`'s own downloader's business.
 
 ## What the patch adds
 

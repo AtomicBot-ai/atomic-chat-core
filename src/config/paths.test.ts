@@ -42,7 +42,6 @@ describe('dataLayout', () => {
     expect(prism.backendsDir).toBe(native('/data/atomic-prism/backends'))
     expect(prism.tmpDir).toBe(native('/data/atomic-prism/tmp'))
     expect(prism.libDir).toBeUndefined()
-    expect(layout.core.prismSetupsDir).toBe(native('/data/atomic-core/prism-setups'))
     expect(layout.core.mediaCatalogCache).toBe(native('/data/atomic-core/media-catalog.cache.json'))
   })
   it('puts every new file under <data>/atomic-core and keeps the legacy files at the root', () => {

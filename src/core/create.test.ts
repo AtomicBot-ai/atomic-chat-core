@@ -177,6 +177,52 @@ describe('taking ownership', () => {
     }
   }, 20_000)
 
+  it('checks a downloaded model by its id through the owner, and refuses an id under a provider it does not have', async () => {
+    const core = await createCore()
+    await data.writeModel('demo')
+    const check = (body: unknown) =>
+      fetch(`${core.control.url}/atomic/v1/models/compatibility`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const onDisk = await check({ model_id: 'demo', provider: 'llamacpp-upstream' })
+    expect(onDisk.status).toBe(200)
+    expect(await onDisk.json()).toHaveProperty('outcome')
+    const unknown = await check({ model_id: 'demo', provider: 'not-a-provider' })
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
+  it('removes the model setup records an older core left, resumes none and keeps the partial model files', async () => {
+    const setups = join(data.layout.core.dir, 'prism-setups')
+    await mkdir(setups, { recursive: true })
+    await writeFile(
+      join(setups, 's1.json'),
+      JSON.stringify({ setup_id: 's1', stage: 'interrupted', plan: { model_id: 'o/Bonsai' } })
+    )
+    const modelDir = join(data.layout.provider('atomic-prism').modelsDir, 'o', 'Bonsai')
+    await mkdir(modelDir, { recursive: true })
+    await writeFile(join(modelDir, 'Bonsai.gguf.tmp'), 'partial')
+    await writeFile(join(modelDir, 'Bonsai.gguf.url'), 'http://hub.test/o/Bonsai/resolve/main/Bonsai.gguf')
+    const fetchImpl = vi.fn(
+      async (_input: string | URL | Request) => new Response('not found', { status: 404 })
+    ) as unknown as typeof fetch
+
+    const core = await createCore({ fetch: fetchImpl })
+
+    await expect(readdir(setups)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(modelDir, 'Bonsai.gguf.tmp'), 'utf8')).toBe('partial')
+    expect(await readFile(join(modelDir, 'Bonsai.gguf.url'), 'utf8')).toContain('hub.test')
+    const asked = vi
+      .mocked(fetchImpl)
+      .mock.calls.map(([input]) => String(input instanceof Request ? input.url : input))
+    expect(asked.filter((url) => url.includes('hub.test') || url.includes('huggingface'))).toEqual([])
+    const records = core.events.replayAfter(0)
+    expect(records).toBeDefined()
+    expect(records!.map((record) => record.name).filter((name) => name.startsWith('download:'))).toEqual([])
+  })
+
   it('creates the settings file and reads models from the shared folder', async () => {
     const core = await createCore()
     await data.writeModel('demo')
@@ -1737,9 +1783,9 @@ const PRISM_HOST_BACKEND =
       : null
 
 describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
-  'PrismML model setup through the owner',
+  'PrismML Bonsai through the owner',
   () => {
-    it('wires the verdict, the plan, the setup, its engine install and registration, and PrismML updates', async () => {
+    it('answers the verdict, installs and activates the PrismML build, and checks the file a client downloaded, without fetching it', async () => {
       const tag = 'prism-b10754-2459f68'
       const repo = 'atomic-unit/Bonsai-gguf'
       const revision = 'c'.repeat(40)
@@ -1827,8 +1873,25 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
         [`http://packs.test/${tag}/${asset}`]: pack,
         [`http://hub.test/${repo}/resolve/${revision}/${file}`]: gguf,
       }
-      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-        const body = served[String(input instanceof Request ? input.url : input)]
+      // The pack is held back until released, so a snapshot can be read while the engine downloads.
+      let releasePack!: () => void
+      const packGate = new Promise<void>((resolve) => (releasePack = resolve))
+      const packUrl = `http://packs.test/${tag}/${asset}`
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input)
+        if (url === packUrl && (init?.method ?? 'GET') !== 'HEAD') {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              async start(controller) {
+                await packGate
+                controller.enqueue(new Uint8Array(pack))
+                controller.close()
+              },
+            }),
+            { status: 200, headers: { 'content-length': String(pack.length) } }
+          )
+        }
+        const body = served[url]
         return body
           ? new Response(new Uint8Array(body), {
               status: 200,
@@ -1843,7 +1906,6 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
           ...process.env,
           ATOMIC_PRISM_MANIFEST_URL: 'http://conf.test/manifest.json',
           ATOMIC_PRISM_MODEL_RULES_URL: 'http://conf.test/rules.json',
-          ATOMIC_HF_ENDPOINT: 'http://hub.test',
         },
       })
       const call = (path: string, body?: unknown) =>
@@ -1857,36 +1919,43 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
         outcome: string
       }
       expect(verdict.outcome).toBe('engine_required')
-      const plan = (await (await call('/models/setup-plan', { repo, file })).json()) as {
-        digest: string
-        blockers: unknown[]
-      }
-      expect(plan.blockers).toEqual([])
 
-      const started = await call('/model-setups', {
-        repo,
-        file,
-        request_id: 'unit-1',
-        plan_digest: plan.digest,
+      // The client's part (change remove-model-downloads-from-core): the engine through the core…
+      const installing = call('/backends/atomic-prism/install', {
+        version: tag,
+        backend: PRISM_HOST_BACKEND,
+        task_id: 'unit-engine',
       })
-      expect(started.status).toBe(202)
-      const { setup_id: setupId } = (await started.json()) as { setup_id: string }
-      let stage = ''
-      const deadline = Date.now() + 15_000
-      while (!['ready', 'failed', 'cancelled'].includes(stage) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 25))
-        stage = ((await (await call(`/model-setups/${setupId}`)).json()) as { stage: string }).stage
-      }
-      expect(stage).toBe('ready')
-      expect(((await (await call('/model-setups')).json()) as { setups: unknown[] }).setups).toHaveLength(1)
+      // While it downloads, the snapshot lists the engine download and has no model setups.
+      await vi.waitFor(
+        async () => {
+          const snapshot = (await (await call('/snapshot')).json()) as {
+            downloads: Array<{ taskId: string }>
+          }
+          expect(snapshot.downloads.map((d) => d.taskId)).toEqual(['unit-engine'])
+          expect(snapshot).not.toHaveProperty('model_setups')
+        },
+        { timeout: 10_000 }
+      )
+      releasePack()
+      const installed = await installing
+      expect(installed.status).toBe(200)
+      expect(((await (await call('/snapshot')).json()) as { downloads: unknown[] }).downloads).toEqual([])
+      const activated = await call(`/engines/atomic-prism/builds/${tag}/${PRISM_HOST_BACKEND}/activate`, {})
+      expect(activated.status).toBe(200)
       expect(core.settings.get('atomic-prism')['version_backend']).toBe(`${tag}/${PRISM_HOST_BACKEND}`)
 
-      // A finished setup is neither cancelled nor resumed; the answer is the record as it is.
-      for (const action of ['cancel', 'resume']) {
-        const answered = await call(`/model-setups/${setupId}/${action}`, {})
-        expect(answered.status).toBe(200)
-        expect(await answered.json()).toMatchObject({ setup_id: setupId, stage: 'ready' })
-      }
+      // …and the model file downloaded and registered by the client itself.
+      const modelDir = join(core.registry('atomic-prism').modelsDir, 'atomic-unit', 'Bonsai-PQ2_0')
+      await mkdir(modelDir, { recursive: true })
+      await writeFile(join(modelDir, file), gguf)
+      await core.registry('atomic-prism').write('atomic-unit/Bonsai-PQ2_0', {
+        model_path: join(modelDir, file),
+        name: 'Bonsai-PQ2_0',
+        size_bytes: gguf.length,
+        model_sha256: sha(gguf),
+        embedding: false,
+      })
 
       const onDisk = (await (
         await call('/models/compatibility', {
@@ -1896,9 +1965,29 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
       ).json()) as { outcome: string }
       expect(onDisk.outcome).toBe('compatible')
 
+      // A client that skipped that check is still covered: the stock engine refuses the file before
+      // anything starts, and the PrismML engine loads it.
+      const upstream = await call('/models/llamacpp-upstream/atomic-unit/Bonsai-PQ2_0/load', {})
+      expect(upstream.status).toBe(422)
+      expect(((await upstream.json()) as { error: { code: string } }).error.code).toBe(
+        'MODEL_ENGINE_INCOMPATIBLE'
+      )
+      expect(((await (await call('/sessions')).json()) as { sessions: unknown[] }).sessions).toEqual([])
+      const prism = await call('/models/atomic-prism/atomic-unit/Bonsai-PQ2_0/load', {})
+      expect(prism.status, await prism.clone().text()).toBe(200)
+      expect(
+        ((await (await call('/sessions')).json()) as { sessions: Array<{ provider: string }> }).sessions
+      ).toEqual([expect.objectContaining({ provider: 'atomic-prism' })])
+
       const updates = await call('/backends/atomic-prism/updates', {})
       expect(updates.status).toBe(200)
       expect(await updates.json()).toMatchObject({ provider: 'atomic-prism', update_needed: false })
+
+      // The core never asked for the model file, from the Hub or anywhere else.
+      const asked = vi
+        .mocked(fetchImpl)
+        .mock.calls.map(([input]) => String(input instanceof Request ? input.url : input))
+      expect(asked.filter((url) => url.includes(file))).toEqual([])
     })
   }
 )

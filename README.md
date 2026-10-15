@@ -16,7 +16,7 @@ npm run verify
 Phase-1 CLI examples:
 
 ```bash
-atomic-chat-core serve owner/repository --select
+atomic-chat-core serve owner/repository   # a model already on disk; the core does not download models
 atomic-chat-core serve --model-path ./model.gguf --bin ./llama-server --port 6767
 atomic-chat-core models list --json
 atomic-chat-core shutdown

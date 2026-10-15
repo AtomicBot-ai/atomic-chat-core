@@ -14,14 +14,7 @@ import type { CoreClient } from '../../client/index.js'
 import type { DataLayout } from '../../config/index.js'
 import { LOCAL_PROVIDER } from '../../core/index.js'
 import { versionBackendFromBinPath } from '../../backend/index.js'
-import {
-  chooseDefaultHfFile,
-  downloadHfModel,
-  fetchHfGgufFiles,
-  hfToken,
-  looksLikeHfRepo,
-  ModelRegistry,
-} from '../../models/index.js'
+import { looksLikeHfRepo, ModelRegistry } from '../../models/index.js'
 import type { ModelEntry } from '../../models/index.js'
 import { withAttachedOwner } from '../owner.js'
 import type { CliIo } from '../io.js'
@@ -55,6 +48,8 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
       'detach': { type: 'boolean', short: 'd' },
       'log': { type: 'string' },
       'verbose': { type: 'boolean', short: 'v' },
+      // Picked the quantization `serve owner/repo` downloaded. Accepted and ignored since 0.17.0 so an
+      // old script reaches the "download the model first" error instead of a parse error.
       'select': { type: 'boolean' },
       'provider': { type: 'string' },
       'resources-dir': { type: 'string' },
@@ -71,36 +66,16 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
   const modelPath = pathValue(values['model-path'], io.cwd)
   const mmprojPath = pathValue(values.mmproj, io.cwd)
   const exePath = pathValue(values.bin, io.cwd)
-  let modelId = await resolveServeModelId(positionals[0], modelPath, registry, io)
-  if (!modelPath && !(await registry.find(modelId)) && looksLikeHfRepo(modelId)) {
-    io.stderr(`Fetching GGUF files for ${modelId} from Hugging Face…\n`)
-    const token = hfToken(io.env)
-    const files = await fetchHfGgufFiles(modelId, {
-      fetch: io.fetch,
-      ...(token ? { token } : {}),
-    })
-    const chosen = values.select
-      ? files[
-          await io.select(
-            'Select a quantization to download',
-            files.map((file) => `${file.filename}  ${formatBytes(file.size)}`)
-          )
-        ]
-      : chooseDefaultHfFile(files)
-    if (!chosen) throw new Error('No Hugging Face file was selected.')
-    io.stderr(`Downloading ${chosen.filename} (${formatBytes(chosen.size)})…\n`)
-    modelId = await downloadHfModel({
-      layout,
-      registry,
-      repoId: modelId,
-      file: chosen,
-      fetch: io.fetch,
-      env: io.env,
-      emit: (name, payload) => {
-        if (name === 'download:progress' && (payload as { percent?: number }).percent === 100)
-          io.stderr(`Downloaded ${modelId}.\n`)
-      },
-    })
+  const modelId = await resolveServeModelId(positionals[0], modelPath, registry, io)
+  // The core does not download models (ADR 2026-10-15-core-does-not-download-models): a Hub id
+  // that is not on disk is refused here, before the owner starts and without a network request.
+  if (!modelPath && looksLikeHfRepo(modelId) && !(await registry.find(modelId))) {
+    throw new AtomicCoreError(
+      'MODEL_NOT_FOUND',
+      `${modelId} is not on disk. Download the model first (in the Atomic Chat app or with \`atc\`), ` +
+        'then serve it by its id or with --model-path.',
+      modelId
+    )
   }
 
   const port = integerOption(values.port, DEFAULT_SERVE_PORT, '--port', 0, 65_535)
@@ -284,7 +259,7 @@ async function resolveServeModelId(
   if (modelPath) return basename(modelPath, extname(modelPath)) || 'model'
   const models = await registry.listChatModels()
   if (models.length === 0) {
-    throw new Error('No chat models are installed. Pass --model-path or a Hugging Face owner/repository id.')
+    throw new Error('No chat models are installed. Download one first, or pass --model-path.')
   }
   if (models.length === 1) {
     io.stderr(`Using model ${models[0]?.id}.\n`)
