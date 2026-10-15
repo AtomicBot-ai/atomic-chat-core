@@ -2212,6 +2212,18 @@
         "why": "missing keys, tensor count, corrupt file"
       },
       {
+        "path": "src/llama-model-loader.h",
+        "why": "tensor data out of the file bounds: corrupted or incomplete"
+      },
+      {
+        "path": "src/llama.cpp",
+        "why": "error loading model hyperparameters"
+      },
+      {
+        "path": "src/llama-mmap.cpp",
+        "why": "unexpectedly reached end of file"
+      },
+      {
         "path": "src/llama-context.cpp",
         "why": "MTP warnings, compute and decode errors"
       },

@@ -404,6 +404,12 @@ export function deriveLlamaEngineContract(): EngineContract {
         { path: 'tools/mtmd/clip.cpp', why: 'unknown projector type' },
         { path: 'src/llama-model.cpp', why: 'architecture errors, offload and buffer-size log lines' },
         { path: 'src/llama-model-loader.cpp', why: 'missing keys, tensor count, corrupt file' },
+        {
+          path: 'src/llama-model-loader.h',
+          why: 'tensor data out of the file bounds: corrupted or incomplete',
+        },
+        { path: 'src/llama.cpp', why: 'error loading model hyperparameters' },
+        { path: 'src/llama-mmap.cpp', why: 'unexpectedly reached end of file' },
         { path: 'src/llama-context.cpp', why: 'MTP warnings, compute and decode errors' },
         { path: 'src/llama-arch.cpp', why: 'architecture names and GGUF keys core reads' },
         { path: 'ggml/src/ggml-backend-reg.cpp', why: 'load_backend log lines' },
