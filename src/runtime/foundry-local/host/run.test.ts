@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { FoundryLibraryError } from './library.js'
 import type { FoundryLibrary, FoundryManager, FoundryManagerConfig } from './library.js'
-import { libraryDir, runFoundryHost } from './run.js'
+import { failureReason, libraryDir, logTailReader, runFoundryHost } from './run.js'
 
 /** A stand-in for the `bun:ffi` layer: what the host asked of the library, and canned answers. */
 export function fakeLibrary(over: Partial<FoundryManager> = {}) {
@@ -106,5 +106,167 @@ describe('libraryDir', () => {
   it('opens <build>/lib when the build has one, else the folder itself', () => {
     expect(libraryDir('/b', (path) => path === '/b/lib')).toBe('/b/lib')
     expect(libraryDir('/b', () => false)).toBe('/b')
+  })
+})
+
+describe('runFoundryHost prepare', () => {
+  /** A library whose CUDA download fails half way, as on a host without CUDA 12 (rulings S1, finding 11). */
+  function partlyFailing() {
+    const registered = new Set<string>()
+    const asked: string[][] = []
+    const fake = fakeLibrary({
+      discoverableEps: () =>
+        ['WebGpuExecutionProvider', 'CUDAExecutionProvider', 'OpenVINOExecutionProvider'].map((name) => ({
+          name,
+          registered: registered.has(name),
+        })),
+      downloadAndRegisterEps: (names, onProgress) => {
+        asked.push(names)
+        const [name] = names
+        if (name === 'WebGpuExecutionProvider') {
+          onProgress?.('WebGPU EP', 50)
+          onProgress?.('WebGPU EP', 100)
+          registered.add(name)
+        }
+        if (name === 'CUDAExecutionProvider') onProgress?.('CUDA EP', 30)
+        // OpenVINO comes from Windows ML: registered, and no progress at all (rulings S2, finding 16).
+        if (name === 'OpenVINOExecutionProvider') registered.add(name)
+      },
+    })
+    return { ...fake, asked }
+  }
+
+  it('prepares one accelerator at a time, prints stage lines and a summary, and goes on after a failure', async () => {
+    const fake = partlyFailing()
+    const out = io()
+    const code = await runFoundryHost(['prepare', ...COMMON], {
+      ...out,
+      loadLibrary: async () => fake.library,
+      readLogTail: async () =>
+        "[warning] EP: failed to load '.../libonnxruntime-genai-cuda.so' (libcublasLt.so.12: cannot open shared object file)\n" +
+        '[warning] Failed to download or register EP(s) [CUDAExecutionProvider]; continuing',
+    })
+    expect(code).toBe(0)
+    expect(fake.asked).toEqual([
+      ['WebGpuExecutionProvider'],
+      ['CUDAExecutionProvider'],
+      ['OpenVINOExecutionProvider'],
+    ])
+    const lines = out.out.map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(lines.slice(0, 4)).toEqual([
+      { accelerator: 'WebGpuExecutionProvider', stage: 'started', fraction: 0 },
+      { accelerator: 'WebGpuExecutionProvider', stage: 'downloading', fraction: 0.5 },
+      { accelerator: 'WebGpuExecutionProvider', stage: 'downloading', fraction: 1 },
+      { accelerator: 'WebGpuExecutionProvider', stage: 'done', fraction: 1 },
+    ])
+    expect(lines).toContainEqual({
+      accelerator: 'CUDAExecutionProvider',
+      stage: 'failed',
+      fraction: null,
+      reason: expect.stringContaining('libcublasLt.so.12'),
+    })
+    expect(lines).toContainEqual({ accelerator: 'OpenVINOExecutionProvider', stage: 'done', fraction: 1 })
+    expect(lines.at(-1)).toEqual({
+      done: true,
+      accelerators: [
+        { name: 'WebGpuExecutionProvider', prepared: true },
+        {
+          name: 'CUDAExecutionProvider',
+          prepared: false,
+          reason: expect.stringContaining('libcublasLt.so.12'),
+        },
+        { name: 'OpenVINOExecutionProvider', prepared: true },
+      ],
+    })
+    expect(fake.calls).toEqual(['shutdown', 'release'])
+  })
+
+  it('prepares only the accelerators named, and refuses one this host does not offer without asking the library', async () => {
+    const fake = partlyFailing()
+    const out = io()
+    expect(
+      await runFoundryHost(['prepare', ...COMMON, 'QNNExecutionProvider', 'WebGpuExecutionProvider'], {
+        ...out,
+        loadLibrary: async () => fake.library,
+        readLogTail: async () => '',
+      })
+    ).toBe(0)
+    expect(fake.asked).toEqual([['WebGpuExecutionProvider']])
+    expect(JSON.parse(out.out.at(-1) as string)).toEqual({
+      done: true,
+      accelerators: [
+        {
+          name: 'QNNExecutionProvider',
+          prepared: false,
+          reason: 'This computer does not offer QNNExecutionProvider.',
+        },
+        { name: 'WebGpuExecutionProvider', prepared: true },
+      ],
+    })
+  })
+
+  it('says why in general terms when the log names no cause, and survives a call that throws', async () => {
+    const fake = fakeLibrary({
+      discoverableEps: () => [{ name: 'CUDAExecutionProvider', registered: false }],
+      downloadAndRegisterEps: () => {
+        throw new FoundryLibraryError('Manager_DownloadAndRegisterEps', 5, 'EP download cancelled by user')
+      },
+    })
+    const out = io()
+    expect(
+      await runFoundryHost(['prepare', ...COMMON], {
+        ...out,
+        loadLibrary: async () => fake.library,
+        readLogTail: async () => '',
+      })
+    ).toBe(0)
+    expect(JSON.parse(out.out.at(-1) as string)).toEqual({
+      done: true,
+      accelerators: [
+        {
+          name: 'CUDAExecutionProvider',
+          prepared: false,
+          reason: 'Manager_DownloadAndRegisterEps: EP download cancelled by user',
+        },
+      ],
+    })
+  })
+})
+
+describe('failureReason', () => {
+  it('finds the cause the library logged, by the accelerator or its family, past the generic summary', () => {
+    const linux = [
+      "[2026-10-15 16:32:51.303] [warning] EP: failed to load '/x/cuda-ep/bin/libonnxruntime-genai-cuda.so' (libcublasLt.so.12: cannot open shared object file: No such file or directory)",
+      '[2026-10-15 16:32:51.303] [warning] Failed to download or register EP(s) [CUDAExecutionProvider]; continuing',
+    ].join('\n')
+    expect(failureReason(linux, 'CUDAExecutionProvider')).toMatch(/^EP: failed to load .*libcublasLt\.so\.12/)
+    const windows =
+      '[2026-10-15 15:15:03.807] [warning] WinML EP OpenVINOExecutionProvider: EnsureReady failed (hr=0x80070005)'
+    expect(failureReason(windows, 'OpenVINOExecutionProvider')).toBe(
+      'WinML EP OpenVINOExecutionProvider: EnsureReady failed (hr=0x80070005)'
+    )
+    expect(failureReason(linux, 'WebGpuExecutionProvider')).toBeNull()
+  })
+})
+
+describe('logTailReader', () => {
+  it('returns only what the log gained since the previous read', async () => {
+    const { mkdtemp, appendFile, writeFile, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-foundry-log-'))
+    try {
+      const file = join(dir, 'foundry_local_2026-10-15.log')
+      await writeFile(file, 'old line\n')
+      const read = logTailReader()
+      expect(await read(dir)).toBe('')
+      await appendFile(file, 'new line\n')
+      expect(await read(dir)).toBe('new line\n')
+      expect(await read(dir)).toBe('')
+      await writeFile(join(dir, 'foundry_local_2026-10-16.log'), 'next day\n')
+      expect(await read(dir)).toBe('next day\n')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
