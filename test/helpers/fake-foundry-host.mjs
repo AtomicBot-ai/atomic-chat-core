@@ -25,6 +25,55 @@ if (process.env.FAKE_FOUNDRY_ARGV)
     })}\n`
   )
 const mode = process.env.FAKE_FOUNDRY_MODE ?? 'ready'
+
+// probe / prepare, as `host/run.ts` speaks them (task 5.2). FAKE_FOUNDRY_EPS: the accelerators the
+// "library" offers (comma list); FAKE_FOUNDRY_FAIL: the ones a prepare fails, with a reason.
+const offered = (process.env.FAKE_FOUNDRY_EPS ?? 'WebGpuExecutionProvider').split(',').filter(Boolean)
+const short = (name) => name.replace(/ExecutionProvider$/, '').toLowerCase()
+if (argv[0] === 'probe' || argv[0] === 'prepare') {
+  if (mode === 'exit-3') {
+    console.error('foundry_local does not load from /b: libatomic.so.1: cannot open shared object file')
+    process.exit(3)
+  }
+  const prepared = argv.flatMap((a, i) => (argv[i - 1] === '--prepared' ? [a] : []))
+  if (argv[0] === 'probe') {
+    console.log(
+      JSON.stringify({
+        c_api_version: 2,
+        version: '2.1.0',
+        accelerators: offered.map((name) => ({
+          name,
+          execution_provider: short(name),
+          device: 'gpu',
+          prepared: prepared.includes(name),
+        })),
+      })
+    )
+    process.exit(0)
+  }
+  const valued = new Set(['--lib', '--app-data', '--logs'])
+  const named = argv.slice(1).filter((a, i, rest) => !a.startsWith('--') && !valued.has(rest[i - 1]))
+  const failing = (process.env.FAKE_FOUNDRY_FAIL ?? '').split(',').filter(Boolean)
+  const summary = []
+  for (const name of named.length > 0 ? named : offered) {
+    if (!offered.includes(name)) {
+      summary.push({ name, prepared: false, reason: `This computer does not offer ${name}.` })
+      continue
+    }
+    console.log(JSON.stringify({ accelerator: name, stage: 'started', fraction: 0 }))
+    if (failing.includes(name)) {
+      const reason = `EP: failed to load (libcublasLt.so.12: cannot open shared object file)`
+      console.log(JSON.stringify({ accelerator: name, stage: 'failed', fraction: null, reason }))
+      summary.push({ name, prepared: false, reason })
+    } else {
+      console.log(JSON.stringify({ accelerator: name, stage: 'downloading', fraction: 0.5 }))
+      console.log(JSON.stringify({ accelerator: name, stage: 'done', fraction: 1 }))
+      summary.push({ name, prepared: true })
+    }
+  }
+  console.log(JSON.stringify({ done: true, accelerators: summary }))
+  process.exit(0)
+}
 if (mode === 'exit-5') {
   console.error(
     'WebGpuExecutionProvider is not prepared on this computer; prepare it before loading this model.'

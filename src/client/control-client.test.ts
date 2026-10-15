@@ -326,6 +326,25 @@ beforeEach(async () => {
     diffusion: fakeDiffusionControl(diffusionCalls),
     engineBuilds: fakeEngineBuildsControl(engineBuildCalls),
     engines: fakeEnginesControl(engineCalls),
+    foundryLocal: {
+      accelerators: async (force) => ({
+        installed: true,
+        build: 'v2.1.0/macos-arm64',
+        version: '2.1.0',
+        c_api_version: 2,
+        probed_at: force ? 2 : 1,
+        accelerators: [
+          { name: 'WebGpuExecutionProvider', execution_provider: 'webgpu', device: 'gpu', prepared: false },
+        ],
+        error: null,
+      }),
+      prepare: async (request) => ({
+        accelerators: (request.accelerators ?? ['WebGpuExecutionProvider']).map((name) => ({
+          name,
+          prepared: true,
+        })),
+      }),
+    },
     unloadModel: async (_provider, modelId) => {
       sessions = sessions.filter((s) => s.model_id !== modelId)
       return { success: true }
@@ -792,6 +811,22 @@ describe('engine builds', () => {
     await expect(client.installEngineBuild('mlx', { task_id: '' })).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
     })
+  })
+})
+
+describe('foundry local accelerators (task 6.4)', () => {
+  it('reads the last probe, probes again when forced, and prepares', async () => {
+    expect(await client.foundryLocalAccelerators()).toMatchObject({
+      probed_at: 1,
+      build: 'v2.1.0/macos-arm64',
+    })
+    expect(await client.foundryLocalAccelerators({ force: true })).toMatchObject({ probed_at: 2 })
+    expect(await client.prepareFoundryLocalAccelerators()).toEqual({
+      accelerators: [{ name: 'WebGpuExecutionProvider', prepared: true }],
+    })
+    expect(await client.prepareFoundryLocalAccelerators({ accelerators: ['CUDAExecutionProvider'] })).toEqual(
+      { accelerators: [{ name: 'CUDAExecutionProvider', prepared: true }] }
+    )
   })
 })
 

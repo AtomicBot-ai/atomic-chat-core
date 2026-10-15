@@ -409,6 +409,11 @@ export class EngineBuildsService {
 
   // --- what is on disk -------------------------------------------------------------------------
 
+  /** The directory of the build the next load of `engine` uses; nothing installed, `undefined`. */
+  async activeDir(engine: EngineBuildId): Promise<string | undefined> {
+    return this.activeOf(engine, await this.builds(engine))?.dir
+  }
+
   /** The build the next MLX load starts: the newest of bundled and downloaded, bundled on a tie. */
   async resolveMlxBinary(): Promise<string | undefined> {
     const active = this.activeOf('mlx', await this.builds('mlx'))

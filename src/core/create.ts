@@ -23,7 +23,11 @@ import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
 import { MlxRuntime } from '../runtime/mlx/index.js'
-import { foundryHostCommand, runFoundryHostProbe } from '../runtime/foundry-local/index.js'
+import {
+  FoundryLocalAcceleratorService,
+  foundryHostCommand,
+  runFoundryHostProbe,
+} from '../runtime/foundry-local/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
@@ -564,6 +568,20 @@ export async function createAtomicCore(
       log,
     })
 
+    // Foundry Local's accelerators (task 6.4, design D3): probed from the active build when a client
+    // asks, prepared only when one orders it. Only where the platform rule registers the provider.
+    const foundryLocalAccelerators =
+      foundryLocalHost.platform === null
+        ? undefined
+        : new FoundryLocalAcceleratorService({
+            hostCommand: foundryHost,
+            resolveBuild: () => engineBuilds.activeDir('foundry-local'),
+            runtimeDir: foundryLocalPaths.runtimeDir as string,
+            logsDir: foundryLocalPaths.logsDir as string,
+            emit: (name, payload) => emitter.emit(name, payload),
+            env,
+          })
+
     // The managed container environment and the one Docker executor of this core (task 2.6). The
     // `tensorrt-llm` provider (task 2.14) takes `managedContainers`, never a second executor, and the
     // environment's machine (`managedHost`: the e2e stand-in under `ATOMIC_MANAGED_TEST_HOST`, whose
@@ -801,6 +819,14 @@ export async function createAtomicCore(
         recreateSession: (provider: string, modelId: string) =>
           (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
         hardware,
+        ...(foundryLocalAccelerators
+          ? {
+              foundryLocal: {
+                accelerators: (force: boolean) => foundryLocalAccelerators.list({ force }),
+                prepare: (request) => foundryLocalAccelerators.prepare(request),
+              },
+            }
+          : {}),
         foundationModelsAvailability: (force: boolean) => {
           const runtime = runtimes.get('foundation-models')
           return runtime instanceof FoundationModelsRuntime

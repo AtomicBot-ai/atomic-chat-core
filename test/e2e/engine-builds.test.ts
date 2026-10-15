@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as core from '../helpers/compiled-core.js'
@@ -388,6 +388,160 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       })
       expect((await readdir(join(folder, 'foundry-local', 'backends', 'v2.1.0'))).sort()).toEqual([platform])
       expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+    }, 120_000)
+  }
+)
+
+const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
+
+describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
+  'Foundry Local accelerators through the core (task 6.4)',
+  () => {
+    it('probes the active build, prepares with progress and a partial failure, and probes again after an install', async () => {
+      const folder = ctx.dataFolder
+      const archive = await foundryArchive(folder)
+      const manifest = join(folder, 'foundry-local-manifest.json')
+      const publish = async (tag: string, publishedAt: string) => {
+        for (const platform of FOUNDRY_PLATFORMS)
+          mirror.serve(
+            `/microsoft/foundry-local/releases/download/${tag}/foundry-local-${platform}.tgz`,
+            archive.body
+          )
+        await writeFile(
+          manifest,
+          JSON.stringify({
+            schema_version: 1,
+            upstream_repo: 'microsoft/foundry-local',
+            releases: [
+              {
+                tag,
+                published_at: publishedAt,
+                min_core_version: '0.1.0',
+                c_api_version: 2,
+                assets: FOUNDRY_PLATFORMS.map((platform) => ({
+                  platform,
+                  name: `foundry-local-${platform}.tgz`,
+                  size: archive.size,
+                  sha256: archive.sha256,
+                })),
+              },
+            ],
+          })
+        )
+      }
+      // The host stand-in: the protocol of `foundry-host` (probe, prepare), CUDA failing to prepare.
+      const argvFile = join(folder, 'host-argv.jsonl')
+      const host = join(folder, 'fake-foundry-host')
+      await writeFile(
+        host,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_FOUNDRY_HOST)} "$@"\n`,
+        {
+          mode: 0o755,
+        }
+      )
+      await publish('v2.1.0', '2026-09-30T00:43:42Z')
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_FOUNDRY_LOCAL_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_FOUNDRY_HOST_TEST_COMMAND: host,
+        FAKE_FOUNDRY_ARGV: argvFile,
+        FAKE_FOUNDRY_EPS: 'WebGpuExecutionProvider,CUDAExecutionProvider',
+        FAKE_FOUNDRY_FAIL: 'CUDAExecutionProvider',
+      })
+      const proxy = mirror.proxy
+      const accelerators = async (force = false) =>
+        json<{
+          build: string | null
+          accelerators: Array<{ name: string; prepared: boolean; reason?: string }>
+        }>(await control(ctx, ready, `/runtimes/foundry-local/accelerators${force ? '?force=1' : ''}`))
+      const probes = async () =>
+        (await readFile(argvFile, 'utf8').catch(() => ''))
+          .split('\n')
+          .filter(Boolean)
+          .filter((line) => (JSON.parse(line) as { argv: string[] }).argv[0] === 'probe').length
+
+      // Nothing installed: nothing probed.
+      expect(await accelerators()).toMatchObject({ build: null, accelerators: [] })
+      expect(await probes()).toBe(0)
+
+      const installed = await json(
+        await post(ready, '/engine-builds/foundry-local/install', { task_id: 'fl-1', proxy })
+      )
+      expect(installed, JSON.stringify(installed)).toMatchObject({ installed: true })
+      const platform = (installed as { build: { backend_id: string } }).build.backend_id
+      const afterInstallCheck = await probes()
+      const first = await accelerators()
+      expect(first).toMatchObject({
+        build: `v2.1.0/${platform}`,
+        accelerators: [
+          { name: 'WebGpuExecutionProvider', prepared: false },
+          { name: 'CUDAExecutionProvider', prepared: false },
+        ],
+      })
+      await accelerators()
+      expect(await probes()).toBe(afterInstallCheck + 1)
+
+      const events = await sd.collectEvents(ctx, ready)
+      const prepared = await json(await post(ready, '/runtimes/foundry-local/accelerators/prepare', {}))
+      expect(prepared).toEqual({
+        accelerators: [
+          { name: 'WebGpuExecutionProvider', prepared: true },
+          {
+            name: 'CUDAExecutionProvider',
+            prepared: false,
+            reason: expect.stringContaining('libcublasLt.so.12'),
+          },
+        ],
+      })
+      await waitFor(
+        () => events.filter((e) => e.event === 'foundry-local:accelerators').length >= 5,
+        'five foundry-local:accelerators events'
+      )
+      expect(events.filter((e) => e.event === 'foundry-local:accelerators').map((e) => e.data)).toEqual([
+        { accelerator: 'WebGpuExecutionProvider', stage: 'started', fraction: 0 },
+        { accelerator: 'WebGpuExecutionProvider', stage: 'downloading', fraction: 0.5 },
+        { accelerator: 'WebGpuExecutionProvider', stage: 'done', fraction: 1 },
+        { accelerator: 'CUDAExecutionProvider', stage: 'started', fraction: 0 },
+        {
+          accelerator: 'CUDAExecutionProvider',
+          stage: 'failed',
+          fraction: null,
+          reason: expect.stringContaining('libcublasLt'),
+        },
+      ])
+      expect((await accelerators()).accelerators).toEqual([
+        expect.objectContaining({ name: 'WebGpuExecutionProvider', prepared: true }),
+        expect.objectContaining({
+          name: 'CUDAExecutionProvider',
+          prepared: false,
+          reason: expect.stringContaining('libcublasLt'),
+        }),
+      ])
+      const busyFree = await probes()
+
+      // conf publishes a newer release; installing it makes it active, and the next request probes it.
+      await publish('v2.2.0', '2026-10-30T00:00:00Z')
+      // As a client does: re-read the manifest (it is kept an hour), then install what it offers.
+      expect(
+        await json(await post(ready, '/engine-builds/foundry-local/catalog', { force: true }))
+      ).toMatchObject({
+        manifest: { tag: 'v2.2.0' },
+      })
+      expect(
+        await json(await post(ready, '/engine-builds/foundry-local/install', { task_id: 'fl-2', proxy }))
+      ).toMatchObject({
+        installed: true,
+        build: { tag: 'v2.2.0' },
+      })
+      const afterSecondCheck = await probes()
+      expect(afterSecondCheck).toBe(busyFree + 1)
+      expect(await accelerators()).toMatchObject({
+        build: `v2.2.0/${platform}`,
+        accelerators: [
+          expect.objectContaining({ name: 'WebGpuExecutionProvider', prepared: true }),
+          expect.anything(),
+        ],
+      })
+      expect(await probes()).toBe(afterSecondCheck + 1)
     }, 120_000)
   }
 )

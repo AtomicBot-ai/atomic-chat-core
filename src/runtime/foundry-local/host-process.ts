@@ -168,3 +168,102 @@ export function foundryHostCommand(
   const viaRuntime = script !== undefined && /\.(c|m)?[jt]s$/.test(script)
   return { exe: execPath, args: [...(viaRuntime ? [script] : []), 'foundry-host'] }
 }
+
+/** One accelerator's step, as `foundry-host prepare` prints it (task 5.2). */
+export interface FoundryHostPrepareStep {
+  accelerator: string
+  stage: 'started' | 'downloading' | 'done' | 'failed'
+  fraction: number | null
+  reason?: string
+}
+
+export interface FoundryHostPrepareSummary {
+  accelerators: Array<{ name: string; prepared: boolean; reason?: string }>
+}
+
+function parseStep(raw: Record<string, unknown>): FoundryHostPrepareStep | null {
+  const { accelerator, stage, fraction, reason } = raw
+  if (typeof accelerator !== 'string') return null
+  if (stage !== 'started' && stage !== 'downloading' && stage !== 'done' && stage !== 'failed') return null
+  if (fraction !== null && typeof fraction !== 'number') return null
+  return { accelerator, stage, fraction, ...(typeof reason === 'string' ? { reason } : {}) }
+}
+
+/**
+ * `foundry-host prepare --lib --app-data --logs [names…]`: each step to `onStep` as it happens, the
+ * summary as the result. No timeout: a CUDA plugin is 2 GB (rulings S2). A host that exits non-zero
+ * or prints no summary is `FOUNDRY_LOCAL_HOST_ERROR` with what it said.
+ */
+export function runFoundryHostPrepare(
+  command: FoundryHostCommand,
+  target: Omit<FoundryHostTarget, 'prepared'>,
+  names: readonly string[],
+  onStep: (step: FoundryHostPrepareStep) => void,
+  options: { env?: NodeJS.ProcessEnv } = {}
+): Promise<FoundryHostPrepareSummary> {
+  const args = [
+    ...command.args,
+    'prepare',
+    '--lib',
+    target.libDir,
+    '--app-data',
+    target.appDataDir,
+    '--logs',
+    target.logsDir,
+    ...names,
+  ]
+  return new Promise((resolve, reject) => {
+    const child = spawn(command.exe, args, {
+      env: options.env ?? process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let summary: FoundryHostPrepareSummary | null = null
+    let stderr = ''
+    child.stderr.on(
+      'data',
+      (chunk: Buffer) => (stderr = (stderr + chunk.toString('utf8')).slice(-OUTPUT_LIMIT))
+    )
+    let pending = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      pending += chunk.toString('utf8')
+      const lines = pending.split(/\r?\n/)
+      pending = lines.pop() ?? ''
+      for (const line of lines) {
+        let raw: unknown
+        try {
+          raw = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+        const record = raw as Record<string, unknown>
+        if (record['done'] === true && Array.isArray(record['accelerators'])) {
+          summary = { accelerators: record['accelerators'] as FoundryHostPrepareSummary['accelerators'] }
+          continue
+        }
+        const step = parseStep(record)
+        if (step) onStep(step)
+      }
+    })
+    child.on('error', (error) =>
+      reject(
+        new AtomicCoreError(
+          'FOUNDRY_LOCAL_HOST_ERROR',
+          'The Foundry Local host could not be started.',
+          String(error)
+        )
+      )
+    )
+    child.on('close', (code) => {
+      if (code === 0 && summary) return resolve(summary)
+      reject(
+        new AtomicCoreError(
+          'FOUNDRY_LOCAL_HOST_ERROR',
+          'The Foundry Local host could not prepare the accelerators.',
+          `exit code ${String(code)}\n${[...stderr].slice(-800).join('')}`.trim()
+        )
+      )
+    })
+  })
+}

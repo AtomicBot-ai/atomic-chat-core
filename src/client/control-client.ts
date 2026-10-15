@@ -12,6 +12,9 @@ import type { ChatGptStatus } from '../credentials/index.js'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import type {
+  FoundryLocalAccelerators,
+  FoundryLocalPrepareRequest,
+  FoundryLocalPrepareResult,
   EngineBuildCatalog,
   EngineBuildCatalogRequest,
   EngineBuildId,
@@ -247,6 +250,26 @@ export class CoreClient {
   removeEngineBuild(engine: EngineBuildId, tag: string, backendId: string): Promise<EngineBuildRemoveResult> {
     return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
       method: 'DELETE',
+    })
+  }
+
+  // --- Foundry Local's accelerators (change `add-foundry-local`, task 6.4) ------------------------
+
+  /** The last probe of the active Foundry Local build; `force` probes again. Never downloads. */
+  foundryLocalAccelerators(options: { force?: boolean } = {}): Promise<FoundryLocalAccelerators> {
+    return this.call(`/runtimes/foundry-local/accelerators${options.force ? '?force=1' : ''}`)
+  }
+
+  /**
+   * Download and register the accelerators named (none: every one offered); progress arrives as
+   * `foundry-local:accelerators` events. `ENGINE_INSTALL_IN_PROGRESS` while another prepare runs.
+   */
+  prepareFoundryLocalAccelerators(
+    request: FoundryLocalPrepareRequest = {}
+  ): Promise<FoundryLocalPrepareResult> {
+    return this.call('/runtimes/foundry-local/accelerators/prepare', {
+      method: 'POST',
+      body: JSON.stringify(request),
     })
   }
 

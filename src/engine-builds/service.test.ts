@@ -1092,6 +1092,9 @@ describe.skipIf(!POSIX)('Foundry Local builds (task 4.5)', () => {
       await h.service.install('foundry-local', { task_id: `t-${tag}` })
     }
     expect((await h.service.catalog('foundry-local')).active).toMatchObject({ tag: 'v2.1.0' })
+    // What the Foundry Local runtime and accelerators start their host from (task 6.4).
+    expect(await h.service.activeDir('foundry-local')).toBe(join(FOUNDRY_ROOT(), 'v2.1.0', 'linux-x64'))
+    expect(await harness().service.activeDir('mlx')).toBeUndefined()
 
     // A newer build whose record names a C API this core no longer binds is never the active one.
     const newer = join(FOUNDRY_ROOT(), 'v3.0.0', 'linux-x64')
