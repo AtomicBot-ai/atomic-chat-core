@@ -3,15 +3,33 @@
   "contract": "test/fixtures/llamacpp/engine-contract.json",
   "default_repo": "ggml-org/llama.cpp",
   "platforms": [
-    { "platform": "linux-x64", "runner": "ubuntu-latest" },
-    { "platform": "linux-arm64", "runner": "ubuntu-24.04-arm" },
-    { "platform": "macos-arm64", "runner": "macos-14" },
-    { "platform": "windows-x64", "runner": "windows-2022" },
-    { "platform": "windows-arm64", "runner": "windows-11-arm" }
+    {
+      "platform": "linux-x64",
+      "runner": "ubuntu-latest"
+    },
+    {
+      "platform": "linux-arm64",
+      "runner": "ubuntu-24.04-arm"
+    },
+    {
+      "platform": "macos-arm64",
+      "runner": "macos-14"
+    },
+    {
+      "platform": "windows-x64",
+      "runner": "windows-2022"
+    },
+    {
+      "platform": "windows-arm64",
+      "runner": "windows-11-arm"
+    }
   ],
-  "live_files": ["test/live/llamacpp.test.ts"],
+  "live_files": ["test/live/llamacpp.test.ts", "test/live/llamacpp-contract.test.ts"],
   "required_live_tests": [
-    { "file": "test/live/llamacpp.test.ts", "name": "a real llama.cpp backend runs the build its tag names" },
+    {
+      "file": "test/live/llamacpp.test.ts",
+      "name": "a real llama.cpp backend runs the build its tag names"
+    },
     {
       "file": "test/live/llamacpp.test.ts",
       "name": "a real llama.cpp backend knows every flag and value core emits for its build (-h against the engine contract)"
@@ -27,6 +45,42 @@
     {
       "file": "test/live/llamacpp.test.ts",
       "name": "a real llama.cpp backend reports the devices the real backend sees"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract serves the routes and fields core reads, behind the session key"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract refuses a prompt larger than the context in words isContextLimitError knows"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract serves /metrics only to a session started with expose_metrics"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract classifies a file that is not a GGUF as MODEL_FILE_CORRUPT"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract classifies a truncated GGUF as MODEL_FILE_CORRUPT"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract classifies an architecture the build does not know as MODEL_ARCH_NOT_SUPPORTED"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract records how a known architecture without its keys, an unknown flag and a bad value fail"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract lists devices in the shape parseDeviceOutput reads"
+    },
+    {
+      "file": "test/live/llamacpp-contract.test.ts",
+      "name": "a real llama.cpp backend against the engine contract prints every string the contract expects at break"
     }
   ],
   "core_suites": ["unit", "build", "build_bin", "e2e"],
@@ -45,6 +99,9 @@
     "test/fixtures/llamacpp/",
     "test/helpers/live-llamacpp.ts",
     "test/helpers/llamacpp-engine-contract.ts",
+    "test/helpers/llamacpp-engine-strings.ts",
+    "test/helpers/llamacpp-observed.ts",
+    "test/live/llamacpp-contract.test.ts",
     "test/live/llamacpp.test.ts",
     "vitest.config.ts"
   ],

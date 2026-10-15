@@ -292,7 +292,9 @@ describe('the verdict of a candidate run', () => {
     expect(md).toContain('— FAIL')
     expect(md).toContain('## Candidate regressions (the pin passes)')
     expect(md).toContain(`- linux-arm64: ${FIRST}`)
-    expect(md).toContain('| linux-x64 | pass (0/0) | pass b11463 (5/5) | pass b11617 (5/5) |')
+    expect(md).toContain(
+      `| linux-x64 | pass (0/0) | pass b11463 (${REQUIRED.length}/${REQUIRED.length}) | pass b11617 (${REQUIRED.length}/${REQUIRED.length}) |`
+    )
   })
 })
 
