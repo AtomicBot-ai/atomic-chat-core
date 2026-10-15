@@ -13,14 +13,17 @@
  */
 import type { ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { startBackendInstallFixture } from '../helpers/backend-install-e2e.js'
 import type { InstallFixture } from '../helpers/backend-install-e2e.js'
 import * as core from '../helpers/compiled-core.js'
+import { startReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import {
   DESCRIPTOR_ID,
@@ -435,4 +438,144 @@ describe.skipIf(!existsSync(BIN) || !POSIX)('a managed engine reinstalled throug
     const after = (await versions(ready, { app_version: '99.0.0' })).find((e) => e.engine === 'tensorrt-llm')
     expect(after).toMatchObject({ builds: [], active: null, latest: { version: NEWER } })
   })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Foundry Local (change add-foundry-local, task 4.6)
+// ---------------------------------------------------------------------------------------------
+
+const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
+const FOUNDRY_PLATFORM =
+  process.platform === 'darwin' && process.arch === 'arm64'
+    ? 'macos-arm64'
+    : process.platform === 'linux'
+      ? `linux-${process.arch}`
+      : null
+const ALL_FOUNDRY_PLATFORMS = ['win-x64', 'win-arm64', 'macos-arm64', 'linux-x64', 'linux-arm64']
+
+describe.skipIf(!existsSync(BIN) || FOUNDRY_PLATFORM === null)('Foundry Local through /engines', () => {
+  it('lists, installs and updates the build, and never removes the one a model runs from', async () => {
+    const mirror = await startReleaseMirror()
+    try {
+      const src = join(dataFolder, 'foundry-src')
+      await mkdir(join(src, 'lib'), { recursive: true })
+      await writeFile(join(src, 'lib', 'libfoundry_local.so'), 'so')
+      await writeFile(join(src, 'lib', 'libfoundry_local.dylib'), 'dylib')
+      await tarCreate({ gzip: true, cwd: src, file: join(dataFolder, 'fl.tgz') }, ['lib'])
+      const body = await readFile(join(dataFolder, 'fl.tgz'))
+      const sha256 = createHash('sha256').update(body).digest('hex')
+      const manifest = join(dataFolder, 'foundry-local-manifest.json')
+      const publish = async (tag: string, publishedAt: string) => {
+        for (const platform of ALL_FOUNDRY_PLATFORMS)
+          mirror.serve(
+            `/microsoft/foundry-local/releases/download/${tag}/foundry-local-${platform}.tgz`,
+            body
+          )
+        await writeFile(
+          manifest,
+          JSON.stringify({
+            schema_version: 1,
+            upstream_repo: 'microsoft/foundry-local',
+            releases: [
+              {
+                tag,
+                published_at: publishedAt,
+                min_core_version: '0.1.0',
+                c_api_version: 2,
+                assets: ALL_FOUNDRY_PLATFORMS.map((platform) => ({
+                  platform,
+                  name: `foundry-local-${platform}.tgz`,
+                  size: body.length,
+                  sha256,
+                })),
+              },
+            ],
+          })
+        )
+      }
+      const host = join(dataFolder, 'fake-foundry-host')
+      await writeFile(
+        host,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_FOUNDRY_HOST)} "$@"\n`,
+        {
+          mode: 0o755,
+        }
+      )
+      await publish('v2.1.0', '2026-09-30T00:43:42Z')
+      const { ready } = await core.startDaemon(dataFolder, daemons, [], {
+        ATOMIC_FOUNDRY_LOCAL_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_FOUNDRY_HOST_TEST_COMMAND: host,
+      })
+      const proxy = mirror.proxy
+      const entry = async (force = false) =>
+        (await versions(ready, { force, proxy })).find(
+          (candidate) => candidate.engine === 'foundry-local'
+        ) as Entry
+      const platform = FOUNDRY_PLATFORM as string
+
+      expect(await entry(true)).toMatchObject({
+        kind: 'engine-build',
+        active_choice: 'core',
+        builds: [],
+        active: null,
+        latest: { version: 'v2.1.0', variant: platform },
+      })
+      const installed = await send(ready, 'POST', '/engines/foundry-local/update', {
+        task_id: 'fl-engines-1',
+        proxy,
+      })
+      expect(await installed.json()).toMatchObject({
+        updated: true,
+        active: { version: 'v2.1.0', variant: platform },
+      })
+
+      // A model runs from the build.
+      const model = join(dataFolder, 'foundry-local', 'models', 'e2e-fl-cpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'genai_config.json'), '{}')
+      await writeFile(
+        join(model, 'model.yml'),
+        'model_path: foundry-local/models/e2e-fl-cpu\nname: e2e-fl-cpu\nsize_bytes: 1\nfoundry_local:\n  model_id: m\n  variant_id: e2e-fl-cpu\n  execution_provider: cpu\n  device: cpu\n'
+      )
+      const loaded = await send(ready, 'POST', '/models/foundry-local/e2e-fl-cpu/load', {})
+      expect(loaded.status, await loaded.clone().text()).toBe(200)
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: 'v2.1.0',
+          variant: platform,
+          active: true,
+          in_use: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
+      const viaEngines = await send(ready, 'DELETE', `/engines/foundry-local/builds/v2.1.0/${platform}`)
+      expect(viaEngines.status).toBe(400)
+      expect(((await viaEngines.json()) as { error: { details?: string } }).error.details).toBe('active')
+      const viaBuilds = await send(ready, 'DELETE', `/engine-builds/foundry-local/v2.1.0/${platform}`)
+      expect(viaBuilds.status).toBe(409)
+      expect(((await viaBuilds.json()) as { error: { code: string } }).error.code).toBe('BACKEND_IN_USE')
+      expect(existsSync(join(dataFolder, 'foundry-local', 'backends', 'v2.1.0', platform))).toBe(true)
+
+      // conf publishes v2.2.0: offered, installed; the model running from v2.1.0 is unloaded by it.
+      await publish('v2.2.0', '2026-10-30T00:00:00Z')
+      expect((await entry(true)).update).toMatchObject({
+        needed: true,
+        target: { version: 'v2.2.0', variant: platform },
+      })
+      const updated = await send(ready, 'POST', '/engines/foundry-local/update', {
+        task_id: 'fl-engines-2',
+        proxy,
+      })
+      expect(await updated.json()).toMatchObject({ updated: true, active: { version: 'v2.2.0' } })
+      expect(
+        ((await (await control(ready, '/sessions')).json()) as { sessions: unknown[] }).sessions
+      ).toEqual([])
+      const removed = await send(ready, 'DELETE', `/engines/foundry-local/builds/v2.1.0/${platform}`)
+      expect(await removed.json()).toEqual({ removed: true })
+      expect((await entry()).builds.map((build) => build.version)).toEqual(['v2.2.0'])
+    } finally {
+      await mirror.close()
+    }
+  }, 120_000)
 })
