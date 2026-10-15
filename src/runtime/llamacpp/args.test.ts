@@ -236,6 +236,17 @@ describe('planLlamaArgs', () => {
     })
   })
 
+  it('sends --defrag-thold only to builds that still defragment the KV cache', () => {
+    const defrag = (version_backend: string) =>
+      buildLlamaArgs({ ...base(), version_backend, defrag_thold: 0.5 }, input).join(' ')
+    expect(defrag('b6244/linux-cpu-x64')).toContain('--defrag-thold 0.5')
+    expect(defrag('b11344/ik-cuda')).toContain('--defrag-thold 0.5')
+    // ggml-org/llama.cpp#15473: from b6245 the flag only prints a deprecation warning.
+    expect(defrag('b6245/linux-cpu-x64')).not.toContain('--defrag-thold')
+    expect(defrag('b11617/macos-arm64')).not.toContain('--defrag-thold')
+    expect(defrag('b10269-1.7.0/macos-arm64')).not.toContain('--defrag-thold')
+  })
+
   it('drops the whole extra_args string on an unterminated quote and warns', () => {
     const plan = planLlamaArgs({ ...base(), extra_args: '--x "y' }, input)
     expect(plan.argv.at(-1)).toBe('off')
