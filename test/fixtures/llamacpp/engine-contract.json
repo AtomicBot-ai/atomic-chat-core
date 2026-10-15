@@ -1841,14 +1841,35 @@
       "note": "Without it `parseDeviceOutput` throws DEVICE_LIST_PARSE_FAILED and no device is offered."
     },
     {
+      "id": "http.context-overflow.upstream",
+      "text": "request \\(\\d+ tokens\\) exceeds the available context size",
+      "match": "regex",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "upstream_text": "exceeds the available context size",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "The 400 upstream, TurboQuant and Prism answer when a prompt does not fit: core reloads with a larger context."
+    },
+    {
+      "id": "http.context-overflow.type",
+      "text": "exceed_context_size_error",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "The `error.type` of that 400, also sent for `input (N tokens) is larger than the max context size`."
+    },
+    {
       "id": "http.context-overflow.literal",
       "text": "the request exceeds the available context size",
       "match": "substring-ci",
       "channel": "http",
       "source": "src/server/public/errors.ts",
-      "severity_if_lost": "warn",
+      "severity_if_lost": "info",
       "live_expectation": "not-observed",
-      "note": "Older and forked wording. Upstream answers 400 `request (N tokens) exceeds the available context size (M tokens), try increasing it` with `type: exceed_context_size_error`; isContextLimitError still catches it through its `context` + `size` fallback."
+      "note": "Older builds’ wording: neither upstream nor TurboQuant nor Prism prints it today. Kept for those builds."
     },
     {
       "id": "http.compute-error.compute-error",
@@ -2079,10 +2100,9 @@
         {
           "path": "error.type",
           "when": "context-overflow",
-          "source": null,
-          "severity_if_lost": "info",
-          "live_expectation": "observed",
-          "note": "`exceed_context_size_error` upstream; core matches the message instead."
+          "source": "src/server/public/errors.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
         },
         {
           "path": "error.n_prompt_tokens",
