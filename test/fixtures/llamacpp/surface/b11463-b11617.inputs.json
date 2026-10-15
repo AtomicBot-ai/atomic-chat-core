@@ -278,59 +278,130 @@
       {
         "sha": "14310190cd0a0c831fe949ac8cbedd8abdc90695",
         "subject": "vulkan: fix compile error (#30495)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+        ]
       },
       {
         "sha": "e7268bf6a99688f893abf58295f49454cb2b4eef",
         "subject": "llama : build the k-pool selection in the causal mask layout (#30480)",
-        "files": []
+        "files": [
+          "src/models/glm5-next.cpp",
+          "src/models/qwen4exp.cpp"
+        ]
       },
       {
         "sha": "cdce056a3e8811e5f7b2ee56ae24d8fb1c32df32",
         "subject": "vulkan: Add workaround for device free memory > total memory on Intel Windows (#29835)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+        ]
       },
       {
         "sha": "d524bb660be6d628c73f00b8ea8d4b8e7dfc043a",
         "subject": "vulkan: Define the shader count for Intel Arc Pro B65 + B70 (#30431)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+        ]
       },
       {
         "sha": "7ec420bc09e26c1c79ae453734c0e2bc7974c9b3",
         "subject": "vulkan: support mulmat bf16 activations (#29069)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan-types.h",
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp"
+        ]
       },
       {
         "sha": "10da8c463f735c7eaff904c6474e6cf38dccbe83",
         "subject": "unicode : add opt-in NFC normalization for Unigram tokenizers (#30390)",
         "files": [
-          "src/llama-arch.cpp"
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/gguf_writer.py",
+          "scripts/gen-unicode-data.py",
+          "src/llama-arch.cpp",
+          "src/llama-arch.h",
+          "src/llama-vocab.cpp",
+          "src/llama-vocab.h",
+          "src/unicode-data.cpp",
+          "src/unicode-data.h",
+          "src/unicode.cpp",
+          "src/unicode.h",
+          "tests/test-unicode.cpp"
         ]
       },
       {
         "sha": "eca5458ce0340eeac234619d425ba04cfd1c9cc2",
         "subject": "convert : export YaRN truncation config (#30288)",
-        "files": []
+        "files": [
+          "conversion/base.py",
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/gguf_writer.py"
+        ]
       },
       {
         "sha": "091b6a7fc561b78da90a0ed2d524ec995458c657",
         "subject": "Enable OpenSSL in FP32/FP16 SYCL builds to restore HF HTTPS downloads (#30330)",
-        "files": []
+        "files": [
+          "docs/backend/SYCL.md",
+          "examples/sycl/build.sh"
+        ]
       },
       {
         "sha": "fcac19079f3f2985fe74ed845f0880e7e9a8030a",
         "subject": "webgpu: (Fix CI) fix mul_mat_id with duplicate expert ids (#30451)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp",
+          "ggml/src/ggml-webgpu/ggml-webgpu.cpp",
+          "ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_id.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_id_gather.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/mul_mat_id_vec.wgsl"
+        ]
       },
       {
         "sha": "04f7226a2c12c7f382c545a6db5a034266aa53cb",
         "subject": "server : escape the special tokens without std::regex (#30243)",
-        "files": []
+        "files": [
+          "tests/test-server-component.cpp",
+          "tools/server/server-decision.cpp",
+          "tools/server/server-decision.h"
+        ]
       },
       {
         "sha": "ff026f8c0a97fe80649f34763432c9d40b418622",
         "subject": "chat: replace output string with parts (#30389)",
         "files": [
+          "common/chat-auto-parser-generator.cpp",
+          "common/chat-auto-parser-helpers.cpp",
+          "common/chat.cpp",
+          "common/chat.h",
+          "common/jinja/README.md",
+          "common/parsers/cohere2moe.cpp",
+          "common/parsers/deepseek.cpp",
+          "common/parsers/functionary-v3-2.cpp",
+          "common/parsers/gemma4.cpp",
+          "common/parsers/gigachat-v3.cpp",
+          "common/parsers/gpt-oss.cpp",
+          "common/parsers/k2-horizon.cpp",
+          "common/parsers/kimi-k2.cpp",
+          "common/parsers/kimi-k3.cpp",
+          "common/parsers/lfm2.cpp",
+          "common/parsers/ling3.cpp",
+          "common/parsers/llm-jp-harmony.cpp",
+          "common/parsers/minicpm5.cpp",
+          "common/parsers/minimax-m3.cpp",
+          "common/parsers/ministral3.cpp",
+          "common/parsers/muse-glimmer.cpp",
+          "common/parsers/parsers.h",
+          "common/parsers/qwen3-coder.cpp",
+          "common/parsers/translate-gemma.cpp",
+          "examples/diffusion/diffusion-cli.cpp",
+          "tests/test-chat-analysis.cpp",
+          "tests/test-chat-auto-parser.cpp",
+          "tests/test-chat-template.cpp",
+          "tests/test-chat.cpp",
+          "tools/completion/completion.cpp",
           "tools/server/server-common.cpp"
         ]
       },
@@ -344,60 +415,248 @@
       {
         "sha": "d71e324a44ce1238bdb066e58b88d629c5b49254",
         "subject": "docs : update zDNN supported ops (#30472)",
-        "files": []
+        "files": [
+          "docs/ops.md",
+          "docs/ops/zDNN.csv"
+        ]
       },
       {
         "sha": "45451c366d4256f94fbc8845645e31a6b9155054",
         "subject": "kleidiai: add SME2 Q4_K and Q6_K matmul support (#29219)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cpu/CMakeLists.txt",
+          "ggml/src/ggml-cpu/kleidiai/kernels.cpp",
+          "ggml/src/ggml-cpu/kleidiai/kernels.h",
+          "ggml/src/ggml-cpu/kleidiai/kleidiai.cpp"
+        ]
       },
       {
         "sha": "77c4540ce4667f4577753fe034a3a8042f510b8f",
         "subject": "vulkan: Optimize pool_2d when the pooling window is large (#30119)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan-types.h",
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/pool2d.comp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "ecdd29e8b2076bb85da9e9ca7ee3d84264375bd1",
         "subject": "meta: recreate all subgraphs when the arena is reallocated (#30453)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-backend-meta.cpp"
+        ]
       },
       {
         "sha": "ec0bfac1794ad722221dd68d84760f8980355fb2",
         "subject": "hexagon: add configurable HTP DCVS/HMX power mode (#30423)",
-        "files": []
+        "files": [
+          "docs/backend/snapdragon/README.md",
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "ggml/src/ggml-hexagon/htp/htp-ops.h",
+          "ggml/src/ggml-hexagon/htp/htp_iface.idl",
+          "ggml/src/ggml-hexagon/htp/main.c",
+          "scripts/snapdragon/run.py"
+        ]
       },
       {
         "sha": "ace20f679e30a39c09a7b17bec14199855469633",
         "subject": "graph: pad the KQ bias of the no-cache attention (#30446)",
-        "files": []
+        "files": [
+          "src/llama-graph.cpp"
+        ]
       },
       {
         "sha": "b9f3599fb1c429e89248f042699ea2e062a32e57",
         "subject": "llama : do not map foreign ranges into a backend buffer (#30405)",
         "files": [
+          "src/llama-mmap.cpp",
           "src/llama-model-loader.cpp",
+          "src/llama-model-loader.h",
           "src/llama-model.cpp"
         ]
       },
       {
         "sha": "f441d2d9db68410f78b9e937efe479049f458044",
         "subject": "model: load YaRN beta metadata for laguna models (#30331)",
-        "files": []
+        "files": [
+          "src/models/laguna.cpp"
+        ]
       },
       {
         "sha": "cb55ffe6e2147eb15f4bede1f60d11246715754f",
         "subject": "graph: skip the LM head for pooled embeddings (#30445)",
         "files": [
+          "include/llama.h",
           "src/llama-context.cpp",
-          "src/llama-model.cpp"
+          "src/llama-graph.cpp",
+          "src/llama-graph.h",
+          "src/llama-model.cpp",
+          "src/models/afmoe.cpp",
+          "src/models/apertus.cpp",
+          "src/models/arcee.cpp",
+          "src/models/arctic.cpp",
+          "src/models/arwkv7.cpp",
+          "src/models/baichuan.cpp",
+          "src/models/bailingmoe.cpp",
+          "src/models/bailingmoe2.cpp",
+          "src/models/bailingmoe3.cpp",
+          "src/models/bitnet.cpp",
+          "src/models/bloom.cpp",
+          "src/models/chameleon.cpp",
+          "src/models/chatglm.cpp",
+          "src/models/codeshell.cpp",
+          "src/models/cogvlm.cpp",
+          "src/models/cohere2.cpp",
+          "src/models/cohere2moe.cpp",
+          "src/models/command-r.cpp",
+          "src/models/dbrx.cpp",
+          "src/models/deci.cpp",
+          "src/models/deepseek.cpp",
+          "src/models/deepseek2.cpp",
+          "src/models/deepseek32.cpp",
+          "src/models/deepseek4.cpp",
+          "src/models/dflash.cpp",
+          "src/models/dots1.cpp",
+          "src/models/dots3note.cpp",
+          "src/models/dream.cpp",
+          "src/models/eagle3.cpp",
+          "src/models/ernie4-5-moe.cpp",
+          "src/models/ernie4-5.cpp",
+          "src/models/exaone-moe.cpp",
+          "src/models/exaone.cpp",
+          "src/models/exaone4.cpp",
+          "src/models/falcon-h1.cpp",
+          "src/models/falcon.cpp",
+          "src/models/gemma.cpp",
+          "src/models/gemma2.cpp",
+          "src/models/gemma3.cpp",
+          "src/models/gemma3n.cpp",
+          "src/models/gemma4-assistant.cpp",
+          "src/models/gemma4.cpp",
+          "src/models/glm-dsa.cpp",
+          "src/models/glm4-moe.cpp",
+          "src/models/glm4.cpp",
+          "src/models/glm5-next.cpp",
+          "src/models/gpt2.cpp",
+          "src/models/gptneox.cpp",
+          "src/models/granite-hybrid.cpp",
+          "src/models/granite-swa.cpp",
+          "src/models/granite-switch.cpp",
+          "src/models/granite.cpp",
+          "src/models/grok.cpp",
+          "src/models/grovemoe.cpp",
+          "src/models/hrm-text.cpp",
+          "src/models/hunyuan-moe.cpp",
+          "src/models/hunyuan-vl.cpp",
+          "src/models/hy-v3.cpp",
+          "src/models/hy-v4.cpp",
+          "src/models/internlm2.cpp",
+          "src/models/jais.cpp",
+          "src/models/jais2.cpp",
+          "src/models/jamba.cpp",
+          "src/models/k2-horizon.cpp",
+          "src/models/kimi-k3.cpp",
+          "src/models/kimi-linear.cpp",
+          "src/models/laguna.cpp",
+          "src/models/lfm2.cpp",
+          "src/models/llada-moe.cpp",
+          "src/models/llada.cpp",
+          "src/models/llama.cpp",
+          "src/models/llama4.cpp",
+          "src/models/maincoder.cpp",
+          "src/models/mamba.cpp",
+          "src/models/maple.cpp",
+          "src/models/mellum.cpp",
+          "src/models/mimo2.cpp",
+          "src/models/minicpm3.cpp",
+          "src/models/minimax-01.cpp",
+          "src/models/minimax-m2.cpp",
+          "src/models/minimax-m3.cpp",
+          "src/models/mistral3.cpp",
+          "src/models/mpt.cpp",
+          "src/models/muse-glimmer.cpp",
+          "src/models/nanbeige.cpp",
+          "src/models/nemotron-h-moe.cpp",
+          "src/models/nemotron-h.cpp",
+          "src/models/nemotron.cpp",
+          "src/models/olmo.cpp",
+          "src/models/olmo2.cpp",
+          "src/models/olmoe.cpp",
+          "src/models/openai-moe.cpp",
+          "src/models/openelm.cpp",
+          "src/models/orion.cpp",
+          "src/models/paddleocr.cpp",
+          "src/models/pangu-embed.cpp",
+          "src/models/phi2.cpp",
+          "src/models/phi3.cpp",
+          "src/models/plamo.cpp",
+          "src/models/plamo2.cpp",
+          "src/models/plamo3.cpp",
+          "src/models/plm.cpp",
+          "src/models/pockettts.cpp",
+          "src/models/qwen.cpp",
+          "src/models/qwen2.cpp",
+          "src/models/qwen2moe.cpp",
+          "src/models/qwen2vl.cpp",
+          "src/models/qwen3.cpp",
+          "src/models/qwen35.cpp",
+          "src/models/qwen35moe.cpp",
+          "src/models/qwen3moe.cpp",
+          "src/models/qwen3next.cpp",
+          "src/models/qwen3vl.cpp",
+          "src/models/qwen3vlmoe.cpp",
+          "src/models/qwen4exp.cpp",
+          "src/models/refact.cpp",
+          "src/models/rnd1.cpp",
+          "src/models/rwkv6.cpp",
+          "src/models/rwkv6qwen2.cpp",
+          "src/models/rwkv7.cpp",
+          "src/models/seed-oss.cpp",
+          "src/models/smallthinker.cpp",
+          "src/models/smollm3.cpp",
+          "src/models/spark2-5.cpp",
+          "src/models/stablelm.cpp",
+          "src/models/starcoder.cpp",
+          "src/models/starcoder2.cpp",
+          "src/models/step35.cpp",
+          "src/models/t5.cpp",
+          "src/models/talkie.cpp",
+          "src/models/xverse.cpp"
         ]
       },
       {
         "sha": "a17e94d229fc7fed1567a799baebd11b771fe5af",
         "subject": "tests : consolidate context state tests into test-llama-context (#30023)",
         "files": [
+          ".github/workflows/build-apple.yml",
+          ".github/workflows/build-openvino.yml",
+          "ci/run.sh",
           "common/log.cpp",
-          "src/llama-model.cpp"
+          "common/log.h",
+          "ggml/src/ggml.c",
+          "src/llama-ext.h",
+          "src/llama-kv-cache.cpp",
+          "src/llama-memory.cpp",
+          "src/llama-model.cpp",
+          "src/llama-model.h",
+          "tests/.gitignore",
+          "tests/CMakeLists.txt",
+          "tests/llama-context/cases-kv.cpp",
+          "tests/llama-context/cases-rs.cpp",
+          "tests/llama-context/test-case.cpp",
+          "tests/llama-context/test-case.h",
+          "tests/llama-context/test-log.cpp",
+          "tests/llama-context/test-log.h",
+          "tests/llama-context/test-runner.cpp",
+          "tests/llama-context/test-runner.h",
+          "tests/llama-context/test-util.cpp",
+          "tests/llama-context/test-util.h",
+          "tests/test-llama-context.cpp",
+          "tests/test-recurrent-state-rollback.cpp",
+          "tests/test-save-load-state.cpp",
+          "tests/test-state-restore-fragmented.cpp"
         ]
       },
       {
@@ -410,81 +669,148 @@
       {
         "sha": "e0bcaccbe50a773c8addec49bbfc8b7ba953c63b",
         "subject": "vulkan: allow multiple devices to access gpu-visible host memory (#29741)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan-buffers.cpp",
+          "ggml/src/ggml-vulkan/ggml-vulkan-common.h",
+          "ggml/src/ggml-vulkan/ggml-vulkan-types.h",
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+        ]
       },
       {
         "sha": "0a731cced9ed826349838333a767ccae63164c2c",
         "subject": "ggml-cpu : add AVX2 dot product for Q2_0 (#30447)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cpu/arch-fallback.h",
+          "ggml/src/ggml-cpu/arch/x86/quants.c"
+        ]
       },
       {
         "sha": "f851e244d0dc56074ab701c4467edb116840cb88",
         "subject": "cuda : add GGML_CUDA_GRAPH_DEBUG and read env vars once (#30327)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/ggml-cuda.cu"
+        ]
       },
       {
         "sha": "bfe65e1dfa8f1afed8a2158e83e5d2a3d6db5444",
         "subject": "cuda : fix compiler warnings in mmq-load-tiles.cuh (#30443)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/mmq-load-tiles.cuh"
+        ]
       },
       {
         "sha": "411d548515017ca75c2a12c39659b6e7e1551dd7",
         "subject": "vulkan : split matmul dispatch when it would exceed maxComputeWorkGroupCount (#29533)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan-common.h",
+          "ggml/src/ggml-vulkan/ggml-vulkan-debug.cpp",
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq.comp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "296538adea19ff397100bf8e7d71f302d2d2bb35",
         "subject": "spec : remove tokens assert from dsv4 graph_mtp (#30444)",
-        "files": []
+        "files": [
+          "src/models/deepseek4.cpp"
+        ]
       },
       {
         "sha": "7f51953d7d2f359939a763549e93d51f0347e569",
         "subject": "model : allow Qwen3.8 Flash Next to accept image embds for MTP (#30397)",
-        "files": []
+        "files": [
+          "src/models/qwen4exp.cpp"
+        ]
       },
       {
         "sha": "882d67166d237a7020c21c6e35fe05f00f92cb6d",
         "subject": "cuda : fix warnings from dead breaks (#30441)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/binbcast.cu",
+          "ggml/src/ggml-cuda/concat.cu",
+          "ggml/src/ggml-cuda/count-equal.cu",
+          "ggml/src/ggml-cuda/fattn-tile.cu",
+          "ggml/src/ggml-cuda/fattn.cu",
+          "ggml/src/ggml-cuda/gated_delta_net.cu",
+          "ggml/src/ggml-cuda/getrows.cu",
+          "ggml/src/ggml-cuda/ggml-cuda.cu",
+          "ggml/src/ggml-cuda/mmf.cuh",
+          "ggml/src/ggml-cuda/mmq.cu",
+          "ggml/src/ggml-cuda/mmq.cuh",
+          "ggml/src/ggml-cuda/mmvf.cu",
+          "ggml/src/ggml-cuda/mmvq.cu",
+          "ggml/src/ggml-cuda/quantize.cu",
+          "ggml/src/ggml-cuda/topk-moe.cu"
+        ]
       },
       {
         "sha": "30f7df1a831ba5bda37b737f46bdf2f11f6bcb88",
         "subject": "cuda : warnings cleanup (#30420)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/common.cuh"
+        ]
       },
       {
         "sha": "9d7d5049804be03fce6575cc9f49c058b3c48788",
         "subject": "convert : fix LoRA conversion with --outtype auto (#30433)",
-        "files": []
+        "files": [
+          "convert_lora_to_gguf.py"
+        ]
       },
       {
         "sha": "ed019cd8b94a8194881e3d2448075156939d32a1",
         "subject": "llama : skip logits buffer allocation when graph produces no logits (#30255)",
         "files": [
-          "src/llama-context.cpp"
+          "src/llama-context.cpp",
+          "src/llama-context.h"
         ]
       },
       {
         "sha": "98801578818b26d833a1fe244870d64b0c34bb46",
         "subject": "graph : avoid reallocations in the \"no cache\" path (#30439)",
         "files": [
-          "src/llama-context.cpp"
+          "src/llama-context.cpp",
+          "src/llama-context.h",
+          "src/llama-graph.cpp",
+          "src/models/bert.cpp"
         ]
       },
       {
         "sha": "af50f2f248b475d9760f8e67503d01c0f194f5f4",
         "subject": "ggml-zdnn : introduce Q8_0 mat mul (#29836)",
-        "files": []
+        "files": [
+          "docs/backend/zDNN.md",
+          "ggml/src/ggml-zdnn/common.hpp",
+          "ggml/src/ggml-zdnn/ggml-zdnn.cpp",
+          "ggml/src/ggml-zdnn/mmf.cpp",
+          "ggml/src/ggml-zdnn/mmq.cpp",
+          "ggml/src/ggml-zdnn/mmq.hpp",
+          "ggml/src/ggml-zdnn/quantize.cpp",
+          "ggml/src/ggml-zdnn/quantize.hpp",
+          "ggml/src/ggml-zdnn/utils.cpp",
+          "ggml/src/ggml-zdnn/utils.hpp"
+        ]
       },
       {
         "sha": "071b553fb1d3a1b76c0b12ab9a1546714cafe4e1",
         "subject": "models : remove redundant ggml_cont calls now supported by all unary kernels  (#30198)",
-        "files": []
+        "files": [
+          "src/models/delta-net-base.cpp",
+          "src/models/dflash.cpp",
+          "src/models/qwen3next.cpp"
+        ]
       },
       {
         "sha": "4413a192410fad1f054e9216114087a3e01527a0",
         "subject": "hexagon: extend scalar DMA broadcasting support for binary ops (#30245)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "ggml/src/ggml-hexagon/htp/binary-ops.c",
+          "ggml/src/ggml-hexagon/htp/binary-ops.h",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "8f574b0ad44c46d7b499ec028c29205aaa3fe80f",
@@ -497,6 +823,10 @@
         "sha": "a49f58dcc3af1aa869b2287bb71953d0ad0395e4",
         "subject": "ci: fix OpenVINO download links (#30401)",
         "files": [
+          ".github/workflows/build-cache.yml",
+          ".github/workflows/build-openvino.yml",
+          ".github/workflows/ci-self-hosted-openvino.yml",
+          ".github/workflows/release-publish.yml",
           ".github/workflows/release.yml"
         ]
       },
@@ -504,548 +834,1304 @@
         "sha": "cbe28bb3cb0758f0c566a9a3561766821aeb0748",
         "subject": "model: fix vllm d3 multi seq case (#30408)",
         "files": [
-          "src/llama-context.cpp"
+          "src/llama-batch.h",
+          "src/llama-context.cpp",
+          "src/llama-kv-cache-iswa.cpp",
+          "src/llama-kv-cache.cpp",
+          "src/llama-memory.h"
         ]
       },
       {
         "sha": "358a420ec4ed59b6b0be08b1d1f71dd478b99a99",
         "subject": "graph: pad the KV dimension of the no-cache attention to 256 (#30416)",
-        "files": []
+        "files": [
+          "src/llama-graph.cpp",
+          "src/llama-graph.h",
+          "src/models/clef.cpp"
+        ]
       },
       {
         "sha": "48e985756788b4a6c50933a88e0af1aa8412b68d",
         "subject": "metal: fix metal tensor kernel_mul_mm error for large tensor (#28748)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-metal/kernels/mul_mm.metal"
+        ]
       },
       {
         "sha": "8bb3cf0d216a5ae48360179f2931daf284be4d01",
-        "subject": "hexagon: optimize CPY/CONCAT — round 3, short-rows edition (#30341)",
-        "files": []
+        "subject": "hexagon: optimize CPY/CONCAT \u2014 round 3, short-rows edition (#30341)",
+        "files": [
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "ggml/src/ggml-hexagon/htp/CMakeLists.txt",
+          "ggml/src/ggml-hexagon/htp/concat-ops.c",
+          "ggml/src/ggml-hexagon/htp/concat-ops.h",
+          "ggml/src/ggml-hexagon/htp/cpy-ops.c",
+          "ggml/src/ggml-hexagon/htp/cpy-ops.h",
+          "ggml/src/ggml-hexagon/htp/gather-rows.c",
+          "ggml/src/ggml-hexagon/htp/gather-rows.h",
+          "ggml/src/ggml-hexagon/htp/main.c",
+          "scripts/snapdragon/build.py"
+        ]
       },
       {
         "sha": "0f701c88298606b41a13268a027e97c877ff63ca",
         "subject": "vulkan: pack FMA for f16 accumulation, no dot product op (#29877)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/vulkan-shaders/dot_product_funcs.glsl",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp"
+        ]
       },
       {
         "sha": "efe3626b119ff81033e309c3ba07a770bef2c546",
         "subject": "model: support vllm d3 models (#30383)",
         "files": [
+          "common/common.cpp",
+          "common/common.h",
+          "conversion/__init__.py",
+          "conversion/pplx_decider.py",
+          "conversion/vllm_d3.py",
+          "gguf-py/gguf/constants.py",
+          "tools/server/README.md",
           "tools/server/server-common.cpp",
-          "tools/server/server-context.cpp"
+          "tools/server/server-context.cpp",
+          "tools/server/server-decision.cpp",
+          "tools/server/server-decision.h"
         ]
       },
       {
         "sha": "097cf33d9499b1eade67d51e16d7c75427e7b267",
         "subject": "model: support vllm decision 2 model (#30378)",
         "files": [
+          "common/common.cpp",
+          "common/common.h",
+          "conversion/__init__.py",
+          "conversion/vllm_decision2.py",
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/gguf_writer.py",
+          "gguf-py/gguf/tensor_mapping.py",
           "src/llama-arch.cpp",
+          "src/llama-arch.h",
+          "src/llama-ext.h",
+          "src/llama-model-saver.cpp",
           "src/llama-model.cpp",
+          "src/llama-quant.cpp",
+          "src/models/models.h",
+          "src/models/qwen3.cpp",
+          "src/models/vllm-decision2.cpp",
+          "tests/test-llama-archs.cpp",
+          "tools/server/README.md",
           "tools/server/server-common.cpp",
-          "tools/server/server-context.cpp"
+          "tools/server/server-context.cpp",
+          "tools/server/server-decision.cpp",
+          "tools/server/server-decision.h",
+          "tools/server/server-task.h"
         ]
       },
       {
         "sha": "ccdbe290533f68154ede46e0618622eebcb6c070",
         "subject": "tests : link each test against only the libraries it uses (#30299)",
-        "files": []
+        "files": [
+          "tests/CMakeLists.txt",
+          "tests/testing.h"
+        ]
       },
       {
         "sha": "073b74034b8bfe652e410ec8bd1e0d95a7d46fea",
         "subject": "metal : fix mul_mat_id with duplicate ids (#30373)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-metal/ggml-metal-common.cpp",
+          "ggml/src/ggml-metal/ggml-metal-device.cpp",
+          "ggml/src/ggml-metal/ggml-metal-impl.h",
+          "ggml/src/ggml-metal/ggml-metal-ops.cpp",
+          "ggml/src/ggml-metal/kernels/mul_mm.metal"
+        ]
       },
       {
         "sha": "77757a34672a888845a09ab45728b8d34aa475ff",
         "subject": "examples : fix draft sampling and rejection handling (#30095)",
         "files": [
-          "common/arg.cpp"
+          "common/arg.cpp",
+          "examples/speculative/speculative.cpp"
         ]
       },
       {
         "sha": "972b5fcc19670e597f8de9bf5cacfb85752a5fff",
         "subject": "llama : report compute graph reallocations during inference (#30329)",
         "files": [
+          "common/sampling.cpp",
+          "ggml/include/ggml-backend.h",
+          "ggml/src/ggml-backend.cpp",
+          "include/llama.h",
           "src/llama-context.cpp",
+          "src/llama-context.h",
           "tools/server/server-context.cpp"
         ]
       },
       {
         "sha": "2f160ba59ae7a84e014d7c0e67690d110058aa03",
         "subject": "ui: fix text attachment preview overflow (#29898)",
-        "files": []
+        "files": [
+          "tools/ui/src/lib/components/app/chat/ChatAttachments/ChatAttachmentsPreview/ChatAttachmentsPreviewCurrentItem/ChatAttachmentsPreviewCurrentItemText.svelte"
+        ]
       },
       {
         "sha": "f9a95aeb2096d0c0218e0cd6e6d901cd37be798a",
         "subject": "sycl: guard DMMV reads at row tails (#29338)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-sycl/dmmv.cpp"
+        ]
       },
       {
         "sha": "08ffba21e5c2f1728b6b405c05ff3913f65706d4",
         "subject": "vulkan: use ternary expressions to avoid switch lowering for CM2 quant block size (#30164)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_cm2.comp"
+        ]
       },
       {
         "sha": "a05e58c981ea1ec863b2f5b11bbde66f7bb7aac6",
         "subject": "ggml: Change default visibility of symbols to hidden (#30014)",
-        "files": []
+        "files": [
+          "ggml/src/CMakeLists.txt"
+        ]
       },
       {
         "sha": "b2f036c0f138414dedc987446f1d9d802f920275",
         "subject": "vulkan: fix buffer logging on 32-bit platforms after source split (#30326)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan-common.h",
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+        ]
       },
       {
         "sha": "e937b17a2df081e9c7ae380f0dab4341c1585bce",
         "subject": "hexagon: optimize q2_k bpw and activation (#30035)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "ggml/src/ggml-hexagon/htp/hmx-mm-kernels-tiled.h",
+          "ggml/src/ggml-hexagon/htp/hvx-mm-kernels-tiled.h",
+          "ggml/src/ggml-hexagon/htp/matmul-ops.c",
+          "ggml/src/ggml-hexagon/htp/matmul-ops.h"
+        ]
       },
       {
         "sha": "b13a93a3d5fa44b57899d86467a4de463e7415a7",
         "subject": "hexagon: add IM2COL_3D (#30305)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "ggml/src/ggml-hexagon/htp/htp-ctx.h",
+          "ggml/src/ggml-hexagon/htp/htp-ops.h",
+          "ggml/src/ggml-hexagon/htp/im2col-ops.c",
+          "ggml/src/ggml-hexagon/htp/im2col-ops.h",
+          "ggml/src/ggml-hexagon/htp/main.c"
+        ]
       },
       {
         "sha": "f2cc7282ce0042641df55e0e563b75e824e2b647",
         "subject": "opencl: improve fa, allow dk512 for gemma-4, improve dk64 (#30266)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-opencl/ggml-opencl.cpp",
+          "ggml/src/ggml-opencl/kernels/flash_attn_f32_f16.cl"
+        ]
       },
       {
         "sha": "c83f3058b6f876f2f7e6ccbada858b2446860c85",
         "subject": "opencl: fix image limit for q4_k dense bin kernels, q4_0 bcast and rms_norm (#30310)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-opencl/ggml-opencl.cpp"
+        ]
       },
       {
         "sha": "5c8854fd88319125125dc4b836c98b1b215b0f23",
         "subject": "rpc : turn GGML_RPC_DEBUG into a verbosity level and add logs (#29544)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-rpc/ggml-rpc.cpp",
+          "ggml/src/ggml-rpc/log.h",
+          "ggml/src/ggml-rpc/transport-apple.cpp",
+          "ggml/src/ggml-rpc/transport.cpp",
+          "ggml/src/ggml-rpc/transport.h",
+          "tools/rpc/README.md"
+        ]
       },
       {
         "sha": "a9d27ac693ff0a1d3cba449c912c2b891904a4c7",
         "subject": "model :  support for Prism Bonsai 2 27B (#29600)",
         "files": [
+          "conversion/base.py",
+          "conversion/qwen.py",
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/gguf_writer.py",
+          "src/llama-adapter.cpp",
           "src/llama-arch.cpp",
+          "src/llama-arch.h",
           "src/llama-context.cpp",
-          "src/llama-model.cpp"
+          "src/llama-context.h",
+          "src/llama-graph.cpp",
+          "src/llama-graph.h",
+          "src/llama-model.cpp",
+          "src/llama-model.h",
+          "src/models/qwen35.cpp"
         ]
       },
       {
         "sha": "1cf7767765b872806e1bb74cfb55614f4334f02f",
         "subject": "cpu: fix AVX2 CPUs not using F16C when available (#30270)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cpu/simd-mappings.h"
+        ]
       },
       {
         "sha": "966baae76b578d5d3dd4c179a75a35c80ff75577",
         "subject": "vulkan: handle mul_mat_id duplicates in the prepass rather than looping (#29998)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan-push-constants.h",
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/count_experts.comp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_cm2.comp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_id_funcs.glsl",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq.comp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_cm1.comp",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "62a6f74bab748b1755f4cd8dfc0871caf865c6c8",
         "subject": "server: add component tests (#30312)",
-        "files": []
+        "files": [
+          "CODEOWNERS",
+          "skills/code-review/SKILL.md",
+          "tests/CMakeLists.txt",
+          "tests/test-server-component.cpp"
+        ]
       },
       {
         "sha": "23b0202a189c44a54625aadcb37a946dd1d6278d",
         "subject": "server: leave a busy slot untouched when a request pins it (#30295)",
         "files": [
-          "tools/server/server-context.cpp"
+          "tools/server/server-context.cpp",
+          "tools/server/tests/unit/test_completion.py"
         ]
       },
       {
         "sha": "69f201a2051ea9b9e9b50c3cc56afd9e2ae64414",
         "subject": "model : support MiniCPM-V 4.7 (#29416)",
         "files": [
+          "conversion/__init__.py",
+          "conversion/base.py",
+          "conversion/minicpm.py",
+          "docs/multimodal/minicpmv4.7.md",
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/gguf_writer.py",
+          "include/llama.h",
           "src/llama-arch.cpp",
+          "src/llama-arch.h",
+          "src/llama-graph.cpp",
+          "src/llama-graph.h",
+          "src/llama-hparams.h",
+          "src/llama-model-saver.cpp",
           "src/llama-model.cpp",
-          "tools/mtmd/clip.cpp"
+          "src/llama-model.h",
+          "tools/mtmd/clip-graph.h",
+          "tools/mtmd/clip-impl.h",
+          "tools/mtmd/clip-model.h",
+          "tools/mtmd/clip.cpp",
+          "tools/mtmd/models/minicpmv.cpp",
+          "tools/mtmd/mtmd-image.cpp",
+          "tools/mtmd/mtmd-image.h",
+          "tools/mtmd/mtmd.cpp"
         ]
       },
       {
         "sha": "abee0c8476b585b0d081d580b5ce21d0addc22c4",
         "subject": "cmake(s390x): disable z17 target for unsupported compilers (#30297)",
-        "files": []
+        "files": [
+          "ggml/src/CMakeLists.txt"
+        ]
       },
       {
         "sha": "aa94f2086147cd4bfbcff818ce998dffce5fcb39",
         "subject": "args: add LLAMA_ARG_SLOT_SAVE_PATH env for --slot-save-path (#30272)",
         "files": [
-          "common/arg.cpp"
+          "common/arg.cpp",
+          "tools/server/README.md"
         ]
       },
       {
         "sha": "781dbc5ac98921dbdb5e5b2ec5b7a50960e937d4",
         "subject": "spec: properly handle mtmd input for mtp (#30257)",
         "files": [
-          "common/speculative.cpp"
+          "common/common.cpp",
+          "common/common.h",
+          "common/speculative.cpp",
+          "include/llama.h",
+          "src/llama-batch.cpp",
+          "src/llama-batch.h",
+          "src/llama-graph.cpp",
+          "src/llama-graph.h",
+          "src/llama-kv-cache-dsv4.cpp",
+          "src/models/bailingmoe3.cpp",
+          "src/models/cohere2moe.cpp",
+          "src/models/deepseek2.cpp",
+          "src/models/deepseek32.cpp",
+          "src/models/deepseek4.cpp",
+          "src/models/gemma4-assistant.cpp",
+          "src/models/glm-dsa.cpp",
+          "src/models/glm4-moe.cpp",
+          "src/models/glm5-next.cpp",
+          "src/models/hy-v3.cpp",
+          "src/models/mimo2.cpp",
+          "src/models/nemotron-h-moe.cpp",
+          "src/models/qwen35.cpp",
+          "src/models/qwen35moe.cpp",
+          "src/models/qwen3next.cpp",
+          "src/models/qwen4exp.cpp",
+          "src/models/step35.cpp",
+          "tests/test-batch-alloc.cpp"
         ]
       },
       {
         "sha": "0fd868cbcadcbcd80373d1cb542ecbcfa115ca75",
         "subject": "mtmd: add build_inp_attn_mask (#30259)",
         "files": [
-          "tools/mtmd/clip.cpp"
+          "tools/mtmd/clip-graph.h",
+          "tools/mtmd/clip.cpp",
+          "tools/mtmd/models/deepseekocr2.cpp",
+          "tools/mtmd/models/exaone4_5.cpp",
+          "tools/mtmd/models/mimo-audio.cpp",
+          "tools/mtmd/models/mimovl.cpp",
+          "tools/mtmd/models/minicpmv.cpp",
+          "tools/mtmd/models/muse-glimmer.cpp",
+          "tools/mtmd/models/pockettts-gen.cpp",
+          "tools/mtmd/models/pockettts-spkenc.cpp",
+          "tools/mtmd/models/qwen2vl.cpp",
+          "tools/mtmd/models/qwen3tts-gen.cpp",
+          "tools/mtmd/models/youtuvl.cpp"
         ]
       },
       {
         "sha": "1623d8ce47bc0bee9757068780c23ca7abd45160",
         "subject": "cuda: always use MMVQ for MUL_MAT_ID on sm_60 (#27828)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/mmvq.cu"
+        ]
       },
       {
         "sha": "1bb2b9fcbe85c35c4e3b787e1c868ef05ca702f3",
         "subject": "CUDA/HIP: fix race in flash_attn_ext_f16_process_tile when nbatch_combine != DKQ/2 (#30103)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/fattn-mma-f16.cuh"
+        ]
       },
       {
         "sha": "2bbca8f202e76b25dac9116755bf1713a84e2753",
         "subject": "ggml-cpu: vectorize fp32 to fp16 conversion (#30157)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cpu/ggml-cpu-impl.h",
+          "ggml/src/ggml-cpu/ggml-cpu.c",
+          "ggml/src/ggml-cpu/simd-mappings.h"
+        ]
       },
       {
         "sha": "404f557b5b143a448a304521ee1d4719ee40debe",
         "subject": "vulkan: use 4 rows for NVIDIA MUL_MAT_ID MMVQ (#29274)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+        ]
       },
       {
         "sha": "b797c82c7dbb2c5bbba2db2efe8febc65bc77857",
         "subject": "ggml: fix s390x all cpu build (#30140)",
-        "files": []
+        "files": [
+          "ggml/src/CMakeLists.txt",
+          "ggml/src/ggml-cpu/CMakeLists.txt"
+        ]
       },
       {
         "sha": "f2918cabbffe8abf8e2a90c1c089085fa116c2cf",
         "subject": "opencl: add bin kernels kernel_gemm_moe_q4_k_q8_1_dp4a_bin, kernel_gemm_moe_q6_k_q8_1_dp4a_bin (#30187)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-opencl/ggml-opencl.cpp"
+        ]
       },
       {
         "sha": "1e6f04a75e91da4bb66b5248f3fd4bdeff169d41",
         "subject": "sycl : accelerate MXFP4 MoE with arithmetic decoding and weight reordering (#29809)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-sycl/convert.cpp",
+          "ggml/src/ggml-sycl/dequantize.hpp",
+          "ggml/src/ggml-sycl/ggml-sycl.cpp",
+          "ggml/src/ggml-sycl/mmvq.cpp",
+          "ggml/src/ggml-sycl/quants.hpp",
+          "ggml/src/ggml-sycl/vecdotq.hpp"
+        ]
       },
       {
         "sha": "10a60cf303566e10d6a7a2774c17d2085503d87b",
         "subject": "vendor: apply deep nested json patch from upstream (#30253)",
-        "files": []
+        "files": [
+          ".editorconfig",
+          "scripts/sync_vendor.py",
+          "vendor/nlohmann/json-deep-nesting.patch",
+          "vendor/nlohmann/json.hpp"
+        ]
       },
       {
         "sha": "79e2e74eb11022c1ba2e438df7f0ca2d4c10f8b6",
         "subject": "CUDA: fix round issue, under MSVC the CPU and GPU agree (#30229)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/unary.cu"
+        ]
       },
       {
         "sha": "8e2d31e0eb658d0382d3106a61369dff81f0c080",
         "subject": "graph : reorder get_rows for embeddings (#30160)",
-        "files": []
+        "files": [
+          "src/llama-graph.cpp",
+          "src/models/gemma4.cpp",
+          "src/models/qwen4exp.cpp"
+        ]
       },
       {
         "sha": "baef3ed9a1e81c4b620f6923857b1c080bffec5b",
         "subject": "ui: Models Manager Follow-up Improvements (#30228)",
-        "files": []
+        "files": [
+          "common/common.cpp",
+          "common/common.h",
+          "tools/server/server-models.cpp",
+          "tools/server/server-models.h",
+          "tools/ui/src/lib/components/app/models/ModelRowActions.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManager.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelRow.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelsTable.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/utils.ts",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelectorDropdown.svelte",
+          "tools/ui/src/lib/components/ui/dropdown-menu/dropdown-menu-content.svelte",
+          "tools/ui/src/lib/components/ui/dropdown-menu/dropdown-menu-item.svelte",
+          "tools/ui/src/lib/constants/settings.constants.ts",
+          "tools/ui/src/lib/enums/model.enums.ts",
+          "tools/ui/src/lib/stores/models/index.svelte.ts",
+          "tools/ui/src/lib/types/api.d.ts",
+          "tools/ui/tests/client/models-manager-sort-filter.svelte.test.ts"
+        ]
       },
       {
         "sha": "f39148a953e52d6d14e92b73187e9883544dce49",
         "subject": "llama-bench: respect -fitc if bigger than required benchmark size (#28331)",
-        "files": []
+        "files": [
+          "tools/llama-bench/README.md",
+          "tools/llama-bench/llama-bench.cpp"
+        ]
       },
       {
         "sha": "50e3e3e480c80b9ee0ea067e475602d540dc62c8",
         "subject": "CUDA: Remove redundant CUDA copies after SSM_SCAN (#29807)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/ggml-cuda.cu",
+          "ggml/src/ggml-cuda/ssm-scan.cu",
+          "ggml/src/ggml-cuda/ssm-scan.cuh",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "64df9183f5ca178c049a392f35e795d8e97c97b3",
         "subject": "opencl: fix kernel compilation for a6x GPUs (#30176)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-opencl/ggml-opencl.cpp",
+          "ggml/src/ggml-opencl/kernels/cpy.cl",
+          "ggml/src/ggml-opencl/kernels/gemv_noshuffle_q4_0_f32.cl",
+          "ggml/src/ggml-opencl/kernels/gemv_noshuffle_q4_k_f32.cl"
+        ]
       },
       {
         "sha": "6184e92c57dcd34de8a3e381d7641a5e75250d5f",
         "subject": "model : use exact GELU for ModernBERT encoders (#30108)",
         "files": [
-          "src/llama-model.cpp"
+          "src/llama-graph.cpp",
+          "src/llama-graph.h",
+          "src/llama-model.cpp",
+          "src/models/modern-bert.cpp"
         ]
       },
       {
         "sha": "8b543610254aafe121942eaf79a23c3847177270",
         "subject": "chat : refactor API (#30210)",
         "files": [
+          "common/chat-auto-parser-generator.cpp",
+          "common/chat.cpp",
+          "common/chat.h",
+          "common/parsers/cohere2moe.cpp",
+          "common/parsers/deepseek.cpp",
+          "common/parsers/functionary-v3-2.cpp",
+          "common/parsers/gemma4.cpp",
+          "common/parsers/gigachat-v3.cpp",
+          "common/parsers/gpt-oss.cpp",
+          "common/parsers/k2-horizon.cpp",
+          "common/parsers/kimi-k2.cpp",
+          "common/parsers/kimi-k3.cpp",
+          "common/parsers/lfm2.cpp",
+          "common/parsers/ling3.cpp",
+          "common/parsers/llm-jp-harmony.cpp",
+          "common/parsers/minicpm5.cpp",
+          "common/parsers/minimax-m3.cpp",
+          "common/parsers/ministral3.cpp",
+          "common/parsers/muse-glimmer.cpp",
+          "common/parsers/qwen3-coder.cpp",
+          "common/parsers/translate-gemma.cpp",
+          "common/peg-parser.cpp",
+          "common/peg-parser.h",
+          "common/sampling.cpp",
+          "common/sampling.h",
+          "tests/CMakeLists.txt",
+          "tests/peg-parser/test-json-serialization.cpp",
+          "tests/peg-parser/tests.h",
+          "tests/test-chat-auto-parser.cpp",
+          "tests/test-chat.cpp",
+          "tests/test-peg-parser.cpp",
+          "tools/server/README.md",
           "tools/server/server-common.cpp",
+          "tools/server/server-common.h",
           "tools/server/server-context.cpp",
-          "tools/server/server-task.cpp"
+          "tools/server/server-context.h",
+          "tools/server/server-queue.cpp",
+          "tools/server/server-queue.h",
+          "tools/server/server-schema.cpp",
+          "tools/server/server-task.cpp",
+          "tools/server/server-task.h"
         ]
       },
       {
         "sha": "a518119d30cade6260f7494120863428a3fe8ee5",
         "subject": "llama: keep the backend sampling graph static across ubatches (#30223)",
         "files": [
-          "src/llama-context.cpp"
+          "src/llama-context.cpp",
+          "src/llama-graph.cpp"
         ]
       },
       {
         "sha": "8ae386707bed05f02354dbfc6fa5ee0cf58e5f0f",
         "subject": "ggml: fix OOB write in ggml_acc with negative offset (#30135)",
-        "files": []
+        "files": [
+          "ggml/src/ggml.c"
+        ]
       },
       {
         "sha": "e60eff95fda7b6e46bf402a8e9f1e86d88ab29c8",
         "subject": "meta : handle host views (#30217)",
         "files": [
+          "ggml/src/ggml-backend-meta.cpp",
           "src/llama-arch.cpp"
         ]
       },
       {
         "sha": "ba6439a6b595224c480d71572c0e4ac91d3e6afd",
         "subject": "webgpu: use 2D workgroup dispatch for all the ops which use 1D dispatch (e.g., rms_norm) (#30219)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-webgpu/ggml-webgpu.cpp",
+          "ggml/src/ggml-webgpu/wgsl-shaders/concat.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/cumsum.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/glu.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/pad.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/repeat.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/rms_norm_mul.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/rope.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/row_norm.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/set.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/set_rows.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/soft_max.wgsl",
+          "ggml/src/ggml-webgpu/wgsl-shaders/sum_rows.wgsl"
+        ]
       },
       {
         "sha": "5e4878e9787fff9bcc5c12478c47618b73268610",
         "subject": "vulkan: fix rms_norm workgroup count overflow (#30145)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/rms_norm.comp"
+        ]
       },
       {
         "sha": "609290be6b15db02f9d73443435403cbff6e7802",
         "subject": "convert : support compressed-tensor mixed-precision NVFP4 checkpoint (#28636)",
-        "files": []
+        "files": [
+          "conversion/base.py"
+        ]
       },
       {
         "sha": "86a283532072722c5f3363d37d59a874d09fa99b",
         "subject": "musa: drop mp_21 from the default architectures (#30203)",
-        "files": []
+        "files": [
+          "docs/build.md",
+          "ggml/src/ggml-musa/CMakeLists.txt"
+        ]
       },
       {
         "sha": "e94acad853c0d11a3b47974e3167ec12f263d86a",
         "subject": "ci: fix Models Backend webgpu by supporting GGML_OP_DUP (#30216)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-webgpu/ggml-webgpu.cpp"
+        ]
       },
       {
         "sha": "5e1d74043eb84f5f82471a1c5d4c8171a4c0fcba",
         "subject": "ci : set run-name for publish release (#30214)",
-        "files": []
+        "files": [
+          ".github/workflows/release-publish.yml"
+        ]
       },
       {
         "sha": "b42b7e6d3059503dd4bed6ca5dcf342bb6379f67",
         "subject": "server: use port 9931 by default (#30159)",
         "files": [
+          ".devops/cann.Dockerfile",
+          ".devops/cpu.Dockerfile",
+          ".devops/cuda.Dockerfile",
+          ".devops/intel.Dockerfile",
+          ".devops/musa.Dockerfile",
+          ".devops/openvino.Dockerfile",
+          ".devops/rocm.Dockerfile",
+          ".devops/s390x.Dockerfile",
+          ".devops/vulkan.Dockerfile",
+          ".devops/zendnn.Dockerfile",
           "common/arg.cpp",
-          "tools/server/server.cpp"
+          "common/common.h",
+          "docs/backend/ZenDNN.md",
+          "docs/function-calling.md",
+          "examples/json_schema_pydantic_example.py",
+          "examples/model-conversion/scripts/causal/modelcard.template",
+          "examples/model-conversion/scripts/embedding/modelcard.template",
+          "examples/model-conversion/scripts/utils/curl-embedding-server.sh",
+          "examples/pydantic_models_to_grammar_examples.py",
+          "scripts/compare-logprobs.py",
+          "scripts/server-bench.py",
+          "scripts/server-test-function-call.py",
+          "scripts/server-test-model.py",
+          "scripts/server-test-parallel-tc.py",
+          "scripts/server-test-structured.py",
+          "tools/cli/README.md",
+          "tools/cli/cli-client.h",
+          "tools/fit-params/README.md",
+          "tools/server/README-dev.md",
+          "tools/server/README.md",
+          "tools/server/bench/README.md",
+          "tools/server/bench/bench.py",
+          "tools/server/bench/prometheus.yml",
+          "tools/server/bench/script.js",
+          "tools/server/bench/speed-bench/README.md",
+          "tools/server/bench/speed-bench/speed_bench.py",
+          "tools/server/server-http.h",
+          "tools/server/server.cpp",
+          "tools/ui/README.md",
+          "tools/ui/vite.config.ts"
         ]
       },
       {
         "sha": "b013e56a7147dbff5ec03175828442a94086507c",
         "subject": "ui : add the models manager (#29583)",
-        "files": []
+        "files": [
+          "tools/ui/.prettierignore",
+          "tools/ui/README.md",
+          "tools/ui/package-lock.json",
+          "tools/ui/package.json",
+          "tools/ui/src/app.css",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatForm.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddButton.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddDrawer.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddDropdown.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddReasoningSubmenu.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddSheet.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionAddToolsSubmenu.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionAdd/ChatFormActionsAdd.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionModels.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionReasoning.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActionRecord.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormActions/ChatFormActions.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormContextGauge/ChatFormContextGauge.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormContextGauge/ContextGaugeDetailRow.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormContextGauge/ContextGaugeDetails.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormContextGauge/ContextGaugeDial.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormContextGauge/ContextGaugePopup.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormContextGauge/gauge-popup.svelte.ts",
+          "tools/ui/src/lib/components/app/chat/ChatForm/ChatFormPickers/ChatFormPickerCommand.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatMessages/ChatMessage/ChatMessageAssistant/ChatMessageAssistantModel.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatMessages/ChatMessage/ChatMessageToolCall/ChatMessageToolCallBlockSearchResults.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatMessages/ChatMessageStatistics/ChatMessageStatistics.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatScreen/ChatScreenForm.svelte",
+          "tools/ui/src/lib/components/app/chat/ChatScreen/ChatScreenServerError.svelte",
+          "tools/ui/src/lib/components/app/chat/index.ts",
+          "tools/ui/src/lib/components/app/dialogs/DialogManageModels.svelte",
+          "tools/ui/src/lib/components/app/dialogs/DialogMcpResourcePreview.svelte",
+          "tools/ui/src/lib/components/app/dialogs/DialogMcpResourcesBrowser.svelte",
+          "tools/ui/src/lib/components/app/dialogs/DialogMcpServerAddNew.svelte",
+          "tools/ui/src/lib/components/app/dialogs/DialogMcpServers.svelte",
+          "tools/ui/src/lib/components/app/dialogs/DialogModelInformation.svelte",
+          "tools/ui/src/lib/components/app/dialogs/DialogSettingsChat.svelte",
+          "tools/ui/src/lib/components/app/dialogs/index.ts",
+          "tools/ui/src/lib/components/app/forms/SearchInput.svelte",
+          "tools/ui/src/lib/components/app/misc/CollapsibleRegion.svelte",
+          "tools/ui/src/lib/components/app/misc/CollapsibleSection.svelte",
+          "tools/ui/src/lib/components/app/misc/GroupedList.svelte",
+          "tools/ui/src/lib/components/app/misc/index.ts",
+          "tools/ui/src/lib/components/app/models/ModelAvatar.svelte",
+          "tools/ui/src/lib/components/app/models/ModelBadge.svelte",
+          "tools/ui/src/lib/components/app/models/ModelCapabilities.svelte",
+          "tools/ui/src/lib/components/app/models/ModelCapabilityIcons.svelte",
+          "tools/ui/src/lib/components/app/models/ModelContext.svelte",
+          "tools/ui/src/lib/components/app/models/ModelDownloadProgressBar.svelte",
+          "tools/ui/src/lib/components/app/models/ModelDraftSidecars.svelte",
+          "tools/ui/src/lib/components/app/models/ModelId.svelte",
+          "tools/ui/src/lib/components/app/models/ModelLoadControl.svelte",
+          "tools/ui/src/lib/components/app/models/ModelOrgAvatar.svelte",
+          "tools/ui/src/lib/components/app/models/ModelRowActions.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManager.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerDownloadControl.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerFilters.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelConfiguration/ModelsManagerModelConfiguration.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelConfiguration/ModelsManagerModelConfigurationActions.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelConfiguration/ModelsManagerModelConfigurationHeader.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelConfiguration/ModelsManagerModelConfigurationInformation.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelRow.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerModelsTable.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerQuantRow.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerRepoRow.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerStatusCell.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/ModelsManagerTableToolbar.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsManager/row-actions.ts",
+          "tools/ui/src/lib/components/app/models/ModelsManager/utils.ts",
+          "tools/ui/src/lib/components/app/models/ModelsSection.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelector.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelectorDownloadItem.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelectorDrawer.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelectorDropdown.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelectorList.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelectorOption.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/ModelsSelectorTriggerIcon.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelector/index.ts",
+          "tools/ui/src/lib/components/app/models/ModelsSelectorDropdown.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelectorList.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelectorOption.svelte",
+          "tools/ui/src/lib/components/app/models/ModelsSelectorSheet.svelte",
+          "tools/ui/src/lib/components/app/models/discover/ModelsDiscoverAvatar.svelte",
+          "tools/ui/src/lib/components/app/models/index.ts",
+          "tools/ui/src/lib/components/app/navigation/DropdownMenuActions.svelte",
+          "tools/ui/src/lib/components/app/navigation/DropdownMenuSearchable.svelte",
+          "tools/ui/src/lib/components/app/navigation/SidebarNavigation/SidebarNavigation.svelte",
+          "tools/ui/src/lib/components/app/navigation/SidebarNavigation/SidebarNavigationActions.svelte",
+          "tools/ui/src/lib/components/ui/button/button.svelte",
+          "tools/ui/src/lib/components/ui/dialog/dialog-content.svelte",
+          "tools/ui/src/lib/components/ui/dialog/dialog-header.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-close.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-content.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-description.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-footer.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-header.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-nested.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-overlay.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-portal.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-title.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer-trigger.svelte",
+          "tools/ui/src/lib/components/ui/drawer/drawer.svelte",
+          "tools/ui/src/lib/components/ui/drawer/index.ts",
+          "tools/ui/src/lib/components/ui/dropdown-menu/dropdown-menu-content.svelte",
+          "tools/ui/src/lib/components/ui/sheet/index.ts",
+          "tools/ui/src/lib/components/ui/sheet/sheet-close.svelte",
+          "tools/ui/src/lib/components/ui/sheet/sheet-content.svelte",
+          "tools/ui/src/lib/components/ui/sheet/sheet-description.svelte",
+          "tools/ui/src/lib/components/ui/sheet/sheet-overlay.svelte",
+          "tools/ui/src/lib/components/ui/sheet/sheet-title.svelte",
+          "tools/ui/src/lib/components/ui/sheet/sheet-trigger.svelte",
+          "tools/ui/src/lib/components/ui/toggle-group/index.ts",
+          "tools/ui/src/lib/components/ui/toggle-group/toggle-group-item.svelte",
+          "tools/ui/src/lib/components/ui/toggle-group/toggle-group.svelte",
+          "tools/ui/src/lib/components/ui/toggle/index.ts",
+          "tools/ui/src/lib/components/ui/toggle/toggle.svelte",
+          "tools/ui/src/lib/constants/attachment-menu.constants.ts",
+          "tools/ui/src/lib/constants/backend.constants.ts",
+          "tools/ui/src/lib/constants/css-classes.constants.ts",
+          "tools/ui/src/lib/constants/icons.constants.ts",
+          "tools/ui/src/lib/constants/index.ts",
+          "tools/ui/src/lib/constants/model-loading.constants.ts",
+          "tools/ui/src/lib/constants/models-manager.constants.ts",
+          "tools/ui/src/lib/constants/settings-keys.constants.ts",
+          "tools/ui/src/lib/constants/settings.constants.ts",
+          "tools/ui/src/lib/constants/storage.constants.ts",
+          "tools/ui/src/lib/constants/ui.constants.ts",
+          "tools/ui/src/lib/enums/index.ts",
+          "tools/ui/src/lib/enums/model.enums.ts",
+          "tools/ui/src/lib/enums/ui.enums.ts",
+          "tools/ui/src/lib/hooks/use-attachment-menu.svelte.ts",
+          "tools/ui/src/lib/hooks/use-chat-form-model.svelte.ts",
+          "tools/ui/src/lib/hooks/use-models-selector.svelte.ts",
+          "tools/ui/src/lib/hooks/use-reasoning-menu.svelte.ts",
+          "tools/ui/src/lib/hooks/use-tools-panel.svelte.ts",
+          "tools/ui/src/lib/services/huggingface.service.ts",
+          "tools/ui/src/lib/services/migration.service.ts",
+          "tools/ui/src/lib/stores/mcp/index.svelte.ts",
+          "tools/ui/src/lib/stores/models/index.svelte.ts",
+          "tools/ui/src/lib/stores/models/status.svelte.ts",
+          "tools/ui/src/lib/stores/settings/index.svelte.ts",
+          "tools/ui/src/lib/stores/ui.svelte.ts",
+          "tools/ui/src/lib/types/chat.d.ts",
+          "tools/ui/src/lib/types/huggingface.d.ts",
+          "tools/ui/src/lib/types/index.ts",
+          "tools/ui/src/lib/types/models.d.ts",
+          "tools/ui/src/lib/utils/cors-proxy.ts",
+          "tools/ui/src/lib/utils/formatters.ts",
+          "tools/ui/src/lib/utils/index.ts",
+          "tools/ui/src/lib/utils/model-families.ts",
+          "tools/ui/src/lib/utils/model-list.ts",
+          "tools/ui/src/lib/utils/model-names.ts",
+          "tools/ui/src/lib/utils/near-viewport.ts",
+          "tools/ui/tests/client/components/DialogPanelWrapper.svelte",
+          "tools/ui/tests/client/components/ModelsManagerRowWrapper.svelte",
+          "tools/ui/tests/client/components/ModelsManagerWrapper.svelte",
+          "tools/ui/tests/client/components/ModelsSelectorHookHarness.svelte",
+          "tools/ui/tests/client/context-panel-mobile.svelte.test.ts",
+          "tools/ui/tests/client/dialog-focus-mobile.svelte.test.ts",
+          "tools/ui/tests/client/mcp-icon-proxy-url.svelte.test.ts",
+          "tools/ui/tests/client/model-avatar-orgs.svelte.test.ts",
+          "tools/ui/tests/client/models-manager-rows.svelte.test.ts",
+          "tools/ui/tests/client/models-manager-utils.svelte.test.ts",
+          "tools/ui/tests/client/models-selector-hidden.svelte.test.ts",
+          "tools/ui/tests/client/models-selector-mobile.svelte.test.ts",
+          "tools/ui/tests/client/reasoning-control-mobile.svelte.test.ts",
+          "tools/ui/tests/client/settings-model-org-name-key-migration.svelte.test.ts",
+          "tools/ui/tests/stories/ModelsManager.stories.svelte",
+          "tools/ui/tests/stories/ModelsSelector.stories.svelte",
+          "tools/ui/tests/stories/a11y/ChatScreenForm.a11y.stories.svelte",
+          "tools/ui/tests/stories/a11y/ModelsManager.a11y.stories.svelte",
+          "tools/ui/tests/unit/formatters.test.ts",
+          "tools/ui/tests/unit/model-families.test.ts",
+          "tools/ui/tests/unit/model-list.test.ts"
+        ]
       },
       {
         "sha": "2c564f43dfdb0565745dc71cc7748d2a1305246a",
         "subject": "ci: fix HIP quality check by ignoring the 320/256 FA kernel spill (#30212)",
-        "files": []
+        "files": [
+          "scripts/hip/gcn-cdna-vgpr-check.py"
+        ]
       },
       {
         "sha": "1f8fa52318b594b373e7447a3c2bb36cdba9515f",
         "subject": "metal: add the 128/96 flash attention kernels, accept every compiled pair (#30209)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-metal/ggml-metal-device.m",
+          "ggml/src/ggml-metal/ggml-metal-ops.cpp",
+          "ggml/src/ggml-metal/ggml-metal-tuning.cpp",
+          "ggml/src/ggml-metal/kernels/fa_f16.metal",
+          "ggml/src/ggml-metal/kernels/fa_f32.metal",
+          "ggml/src/ggml-metal/kernels/fa_q4_0.metal",
+          "ggml/src/ggml-metal/kernels/fa_q4_1.metal",
+          "ggml/src/ggml-metal/kernels/fa_q5_0.metal",
+          "ggml/src/ggml-metal/kernels/fa_q5_1.metal",
+          "ggml/src/ggml-metal/kernels/fa_q8_0.metal",
+          "ggml/src/ggml-metal/kernels/fa_vec_f16.metal",
+          "ggml/src/ggml-metal/kernels/fa_vec_f32.metal",
+          "ggml/src/ggml-metal/kernels/fa_vec_q4_0.metal",
+          "ggml/src/ggml-metal/kernels/fa_vec_q4_1.metal",
+          "ggml/src/ggml-metal/kernels/fa_vec_q5_0.metal",
+          "ggml/src/ggml-metal/kernels/fa_vec_q5_1.metal",
+          "ggml/src/ggml-metal/kernels/fa_vec_q8_0.metal"
+        ]
       },
       {
         "sha": "8a1a9b5126126e5228b95fa909d4b08fac65e8b3",
         "subject": "CUDA: pass src1 precision to host MMQ config helpers (#30168)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/mmq-load-tiles.cuh",
+          "ggml/src/ggml-cuda/mmq-vec-dot.cuh",
+          "ggml/src/ggml-cuda/mmq.cu",
+          "ggml/src/ggml-cuda/mmq.cuh"
+        ]
       },
       {
         "sha": "d4d82d67f48bb8f51e9a3518063e49d9ee54f58b",
         "subject": "hexagon: fix IM2COL patch-embed DMA ring overflow (#30189)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/htp/im2col-ops.c",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "3d65c90d04d337e88f2b1f7f0061f40a5324e662",
         "subject": "sycl : Q5_K reorder-layout MMVQ and fused GLU (#29375)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-sycl/ggml-sycl.cpp",
+          "ggml/src/ggml-sycl/mmvq.cpp",
+          "ggml/src/ggml-sycl/mmvq.hpp",
+          "ggml/src/ggml-sycl/vecdotq.hpp"
+        ]
       },
       {
         "sha": "de7fa0a3c6a2e1b4cd9f22eb8d6bf5b12dbdb63b",
         "subject": "Musa FWHT fix (#30167)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/fwht.cu"
+        ]
       },
       {
         "sha": "71ad0590f4808b6202f9213d166913858c73b1bc",
         "subject": "CUDA: improve top-k algorithm selection (#28713)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/argsort.cu",
+          "ggml/src/ggml-cuda/argsort.cuh",
+          "ggml/src/ggml-cuda/ggml-cuda.cu",
+          "ggml/src/ggml-cuda/top-k.cu",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "a11f57ba93797579a5d1855ee216a31f10242676",
         "subject": "model : fix DFlash output head sharing (#30111)",
-        "files": []
+        "files": [
+          "conversion/gemma.py",
+          "src/models/dflash.cpp"
+        ]
       },
       {
         "sha": "fc9ce6b9d52a8504edcb262abc92737c2289f96c",
         "subject": "CUDA: fix MMQ out-of-bounds reads (#29953)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/mmq.cu",
+          "ggml/src/ggml-cuda/mmq.cuh"
+        ]
       },
       {
         "sha": "c35b66744f13cb0dcc476af063e112122eee9355",
         "subject": "CUDA : looped PAD kernel for more than 65535 rows or slices (#30147)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/pad.cu",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "1167d3f42c2b4dc5469bf4e696cb8c678ca79110",
         "subject": "CUDA: fix CCCL version guard breaking on major version rollover (#29453)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/argsort.cu"
+        ]
       },
       {
         "sha": "4f92965a7bfa9e8eb6519908ff962e23c2cb7b93",
         "subject": "ui: apply ui_settings on first visit in router mode (#29668)",
-        "files": []
+        "files": [
+          "tools/ui/src/lib/stores/settings/index.svelte.ts",
+          "tools/ui/tests/client/ui-settings-sync.svelte.test.ts"
+        ]
       },
       {
         "sha": "c811cb8f0ac91b8ac72a32f970bdd45037f20da7",
         "subject": "llama: support MoE cache over multiple GPUs (#30112)",
         "files": [
           "common/arg.cpp",
-          "src/llama-context.cpp"
+          "common/common.h",
+          "include/llama.h",
+          "src/llama-context.cpp",
+          "src/llama-graph.cpp",
+          "src/llama-moe-cache.cpp",
+          "src/llama-moe-cache.h",
+          "tests/test-llama-archs.cpp",
+          "tools/cli/README.md",
+          "tools/completion/README.md",
+          "tools/server/README.md"
         ]
       },
       {
         "sha": "033df86b69ec1a333eb241f0c16325a4d43dcff5",
         "subject": "server : preserve context checkpoints across slot save/restore (#26004)",
         "files": [
-          "tools/server/server-context.cpp"
+          "common/common.cpp",
+          "common/common.h",
+          "examples/speculative-simple/speculative-simple.cpp",
+          "tools/server/server-context.cpp",
+          "tools/server/tests/unit/test_slot_save.py",
+          "tools/server/tests/utils.py"
         ]
       },
       {
         "sha": "ff5888f999f24e2f9eaf6537b4eb6b85fd559188",
         "subject": "vulkan : fix TOP_K for +inf/NaN inputs and k = 1 on negative values (#30107)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/vulkan-shaders/topk_nary_search.comp",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "dac308739429d60ccf99c46ecc1fbb1dff20ca77",
         "subject": "vulkan: extend sparse FA support to coopmat2 (#30003)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+          "ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm2.comp",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "03aa006acb547549162a00dddeab3d3b38ebf7b2",
         "subject": "vendor : update cpp-httplib to 0.60.1 (#30134)",
-        "files": []
+        "files": [
+          "scripts/sync_vendor.py",
+          "vendor/cpp-httplib/httplib.cpp",
+          "vendor/cpp-httplib/httplib.h"
+        ]
       },
       {
         "sha": "08246a28f6000100433d297c4e037c02e9d2d464",
         "subject": "cuda : support arbitrary striding for unary ops on f16, f32, and bf16 (#29781)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/ggml-cuda.cu",
+          "ggml/src/ggml-cuda/unary.cu"
+        ]
       },
       {
         "sha": "46baf1f1fec5a06d1e52122a9207ca978b720f95",
         "subject": "sycl: FWHT optimizations (#29605)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-sycl/fwht.cpp",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "097f5b5332f46559f1ee11d9d64e48a5065b2989",
         "subject": "hex-mmadd: do not assume aligned read/write when bias-add is fused (#30133)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/htp/matmul-ops.c"
+        ]
       },
       {
         "sha": "d8880160413fc77f63d6a73a5b1ac21ac65e36e1",
         "subject": "cuda : Use byte strides for roll to allow non-contiguous ROLL operations (#29547)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/ggml-cuda.cu",
+          "ggml/src/ggml-cuda/roll.cu"
+        ]
       },
       {
         "sha": "fda186661304735bb9027abd472c1403a9902081",
         "subject": "CUDA: fix norm family kernels when ne[2]/ne[3] exceed grid dim limits (#28175)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/norm.cu",
+          "ggml/src/ggml-cuda/rope.cu",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "ff30363a0e3e2630828309ef5a37da5d1d40396c",
         "subject": "sycl: fuse the delta-net alpha gate (add + unary + mul) (#29687)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-sycl/element_wise.cpp",
+          "ggml/src/ggml-sycl/element_wise.hpp",
+          "ggml/src/ggml-sycl/fusion.cpp",
+          "ggml/src/ggml-sycl/ggml-sycl.cpp",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "000bee54a544070356b44d68af299b973d391d26",
         "subject": "sycl: stage bulk uploads (model loading) through a pinned ring buffer (#29608)",
-        "files": []
+        "files": [
+          "docs/backend/SYCL.md",
+          "ggml/src/ggml-sycl/ggml-sycl.cpp"
+        ]
       },
       {
         "sha": "37ac634566439e680959b90e1c960714ca6b8b92",
         "subject": "model : support classifier_activation for rerankers (#29692)",
         "files": [
+          "conversion/base.py",
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/gguf_writer.py",
           "src/llama-arch.cpp",
-          "src/llama-model.cpp"
+          "src/llama-arch.h",
+          "src/llama-graph.cpp",
+          "src/llama-hparams.h",
+          "src/llama-model.cpp",
+          "src/models/modern-bert.cpp"
         ]
       },
       {
         "sha": "24e41838e0c834f67db214e6d280af51f266056e",
         "subject": "ggml-cuda: assign four GDN state columns per warp (#30087)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/gated_delta_net.cu"
+        ]
       },
       {
         "sha": "847f447c310a3784d623a953e6f0bb07f04c0f27",
         "subject": "sycl: add grouped MoE XMX GEMM (#29245)",
-        "files": []
+        "files": [
+          "docs/backend/SYCL.md",
+          "ggml/src/ggml-sycl/CMakeLists.txt",
+          "ggml/src/ggml-sycl/common.hpp",
+          "ggml/src/ggml-sycl/fused-gemm.cpp",
+          "ggml/src/ggml-sycl/fused-gemm.hpp",
+          "ggml/src/ggml-sycl/ggml-sycl.cpp"
+        ]
       },
       {
         "sha": "75118a3a5925d85e1850db67e87e447fa5890a47",
         "subject": "convert : support Qwen3.5 embedding models (#27920)",
-        "files": []
+        "files": [
+          "conversion/__init__.py",
+          "conversion/base.py",
+          "conversion/qwen.py",
+          "gguf-py/gguf/tensor_mapping.py"
+        ]
       },
       {
         "sha": "9b4ed0ca572be213f4440a490f341f810f7aa2cf",
         "subject": "sycl: remove duplicate block-size defines from op headers (#29507)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-sycl/im2col.hpp",
+          "ggml/src/ggml-sycl/pad.hpp",
+          "ggml/src/ggml-sycl/rope.hpp",
+          "ggml/src/ggml-sycl/upscale.hpp"
+        ]
       },
       {
         "sha": "9c2e0e491a822adae1f0b1c831adb4160057d24f",
         "subject": "hexagon: enable alloc_buffer_n  (#30126)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "scripts/snapdragon/run.py"
+        ]
       },
       {
         "sha": "06cad0b9e77315bd2930bd4f70a6d7b37b2a01c1",
         "subject": "hexagon: Q6_K weight dequant speedup (#30121)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/htp/hmx-mm-kernels-tiled.h"
+        ]
       },
       {
         "sha": "a657f7e981ff8764d2ccce1e74ec3c7e9bf2cfa2",
         "subject": "model : add LiquidAI/d1-omni-600M decision model (#30114)",
         "files": [
+          "common/common.cpp",
+          "common/common.h",
+          "conversion/__init__.py",
+          "conversion/lfm2.py",
+          "gguf-py/gguf/constants.py",
           "src/llama-model.cpp",
+          "src/models/lfm2.cpp",
+          "src/models/models.h",
+          "tools/mtmd/clip-impl.h",
+          "tools/mtmd/clip-model.h",
           "tools/mtmd/clip.cpp",
+          "tools/mtmd/models/conformer.cpp",
+          "tools/mtmd/models/siglip.cpp",
+          "tools/mtmd/mtmd-audio.cpp",
+          "tools/mtmd/mtmd-audio.h",
+          "tools/mtmd/mtmd.cpp",
+          "tools/server/README.md",
           "tools/server/server-common.cpp",
-          "tools/server/server-context.cpp"
+          "tools/server/server-context.cpp",
+          "tools/server/server-decision.cpp",
+          "tools/server/server-decision.h"
         ]
       },
       {
         "sha": "aa5e0092fdb8980b9e89498dfb73049b4fe204c2",
         "subject": "hexagon: support tiled Q4_K and Q6_K GET_ROWS (#30115)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "ggml/src/ggml-hexagon/htp/get-rows-ops.c",
+          "ggml/src/ggml-hexagon/htp/get-rows-ops.h"
+        ]
       },
       {
         "sha": "70815103c8b251bdf5abba4eca12749eab1de686",
         "subject": "hexagon: improved GELU accuracy (#30104)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+          "ggml/src/ggml-hexagon/htp/htp-ops.h",
+          "ggml/src/ggml-hexagon/htp/hvx-erf.h",
+          "ggml/src/ggml-hexagon/htp/main.c",
+          "ggml/src/ggml-hexagon/htp/unary-ops.c",
+          "ggml/src/ggml-hexagon/htp/unary-ops.h"
+        ]
       },
       {
         "sha": "bd4eeaa047006cb1fe71999fbd11134b5836e167",
         "subject": "chat: fix jinja parser for TranslateGemma (#30096)",
-        "files": []
+        "files": [
+          "common/chat.cpp",
+          "common/parsers/parsers.h",
+          "common/parsers/sources.cmake",
+          "common/parsers/translate-gemma.cpp",
+          "models/templates/google-translategemma-4b-it.jinja",
+          "tests/test-chat.cpp"
+        ]
       },
       {
         "sha": "5de733437bc5f6d6b2714b39c4023fd3d3b16698",
         "subject": "chat : name tool and argument parser rules by index (#30088)",
-        "files": []
+        "files": [
+          "common/chat-auto-parser-generator.cpp",
+          "common/chat-peg-parser.cpp",
+          "common/parsers/deepseek.cpp",
+          "common/parsers/functionary-v3-2.cpp",
+          "common/parsers/gemma4.cpp",
+          "common/parsers/gigachat-v3.cpp",
+          "common/parsers/gpt-oss.cpp",
+          "common/parsers/k2-horizon.cpp",
+          "common/parsers/kimi-k2.cpp",
+          "common/parsers/kimi-k3.cpp",
+          "common/parsers/ling3.cpp",
+          "common/parsers/llm-jp-harmony.cpp",
+          "common/parsers/minicpm5.cpp",
+          "common/parsers/minimax-m3.cpp",
+          "common/parsers/ministral3.cpp",
+          "common/parsers/muse-glimmer.cpp",
+          "common/parsers/parsers.cpp",
+          "common/parsers/parsers.h",
+          "common/parsers/qwen3-coder.cpp",
+          "docs/development/parsing.md",
+          "tests/test-chat.cpp"
+        ]
       },
       {
         "sha": "88dcc460d628698bb8305b98c200c34f1edfdc04",
         "subject": "model : add LiquidAI/d1-3B decision model (#30110)",
         "files": [
+          "common/common.cpp",
+          "common/common.h",
+          "conversion/__init__.py",
+          "conversion/lfm2.py",
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/gguf_writer.py",
+          "tools/mtmd/clip-impl.h",
           "tools/mtmd/clip.cpp",
+          "tools/server/README.md",
           "tools/server/server-common.cpp",
-          "tools/server/server-context.cpp"
+          "tools/server/server-context.cpp",
+          "tools/server/server-decision.cpp",
+          "tools/server/server-decision.h",
+          "tools/server/server-task.h"
         ]
       },
       {
         "sha": "b86d2f07542b29ab099aed34fd6b6d1b2fd4b81c",
         "subject": "cuda: FWHT kernels for block widths above 512 (#29100)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/fwht.cu"
+        ]
       },
       {
         "sha": "50a6c5cf7c09ea5ea9c1937e4895ce88331c2869",
         "subject": "mtmd: add cohere2 vision support (#30062)",
         "files": [
-          "tools/mtmd/clip.cpp"
+          "conversion/__init__.py",
+          "conversion/command_r.py",
+          "gguf-py/gguf/constants.py",
+          "gguf-py/gguf/tensor_mapping.py",
+          "tools/mtmd/clip-impl.h",
+          "tools/mtmd/clip.cpp",
+          "tools/mtmd/models/siglip.cpp",
+          "tools/mtmd/mtmd-image.cpp",
+          "tools/mtmd/mtmd-image.h",
+          "tools/mtmd/mtmd.cpp"
         ]
       },
       {
@@ -1053,94 +2139,169 @@
         "subject": "llama : add a GPU cache for MoE experts kept in host memory (#29887)",
         "files": [
           "common/arg.cpp",
+          "common/common.cpp",
+          "common/common.h",
           "common/speculative.cpp",
-          "src/llama-context.cpp"
+          "include/llama.h",
+          "src/CMakeLists.txt",
+          "src/llama-context.cpp",
+          "src/llama-context.h",
+          "src/llama-cparams.h",
+          "src/llama-graph.cpp",
+          "src/llama-graph.h",
+          "src/llama-moe-cache.cpp",
+          "src/llama-moe-cache.h",
+          "tests/test-llama-archs.cpp"
         ]
       },
       {
         "sha": "42c787e8c191d49c01c757f4b7029d69ec0bf2c8",
         "subject": "cuda: update uncoalesced memory reads in pool2d (#29425)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/pool2d.cu",
+          "ggml/src/ggml-cuda/pool2d.cuh",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "18b5f8b1862ebfe0f1c33d2355b81a54d2fec867",
         "subject": "server : accumulate generated text and tokens as parse input (#29876)",
         "files": [
+          "common/chat.cpp",
+          "common/chat.h",
+          "common/peg-parser.h",
+          "tests/test-chat.cpp",
           "tools/server/server-context.cpp",
-          "tools/server/server-task.cpp"
+          "tools/server/server-schema.cpp",
+          "tools/server/server-task.cpp",
+          "tools/server/server-task.h"
         ]
       },
       {
         "sha": "448147d42a71d0147c6dc844f99f9ffe7419183a",
         "subject": "llama: share the nextn tensor flags between models (#30097)",
         "files": [
-          "src/llama-model.cpp"
+          "src/llama-model.cpp",
+          "src/llama-model.h",
+          "src/models/bailingmoe3.cpp",
+          "src/models/cohere2moe.cpp",
+          "src/models/deepseek2.cpp",
+          "src/models/deepseek32.cpp",
+          "src/models/deepseek4.cpp",
+          "src/models/glm-dsa.cpp",
+          "src/models/glm4-moe.cpp",
+          "src/models/glm5-next.cpp",
+          "src/models/hy-v3.cpp",
+          "src/models/mimo2.cpp",
+          "src/models/nemotron-h.cpp",
+          "src/models/qwen35.cpp",
+          "src/models/qwen35moe.cpp",
+          "src/models/qwen3next.cpp",
+          "src/models/qwen4exp.cpp",
+          "src/models/step35.cpp"
         ]
       },
       {
         "sha": "988190680d5a89fce97de3c20df2c2813731fd61",
         "subject": "metal : few-row MMA mat-mul for the remaining src0 types (#30065)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-metal/ggml-metal-common.cpp",
+          "ggml/src/ggml-metal/kernels/mul_mv_mma.metal",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "7e8324f5feba1d8be3f966e1791e84107e40cdd7",
         "subject": "metal : fix MUL_MAT+ADD fusion when the residual is itself a MUL_MAT (#30100)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-metal/ggml-metal-ops.cpp",
+          "tests/test-backend-ops.cpp"
+        ]
       },
       {
         "sha": "b9acf138a1e28ce1fc23b5a4fc4b12444b50f7ea",
         "subject": "feat: add GLM5Next MTP, optimize (#29928)",
-        "files": []
+        "files": [
+          "src/llama-memory-recurrent.cpp",
+          "src/models/glm5-next.cpp",
+          "src/models/models.h"
+        ]
       },
       {
         "sha": "48499d2e1c86c1d5fe7a05f8bf083156e7069cc0",
         "subject": "qwen3tts : guard speaker_encoder_config patch for CustomVoice variant (#29179)",
-        "files": []
+        "files": [
+          "conversion/qwen3tts.py"
+        ]
       },
       {
         "sha": "d0b490f25edec147b4dcd69cce31c7d1099dff1d",
         "subject": "sampling : use greedy selection for eligible temperature-zero chains (#29797)",
-        "files": []
+        "files": [
+          "common/sampling.cpp",
+          "src/llama-sampler.cpp",
+          "tests/test-backend-sampler.cpp"
+        ]
       },
       {
         "sha": "42b021b4dc42be573f1e1463528532fc8294c650",
         "subject": "vocab : add plamo fim tokens (#30090)",
-        "files": []
+        "files": [
+          "src/llama-vocab.cpp"
+        ]
       },
       {
         "sha": "7481354a174714a3447ea0f8723c1dd1b3cbf8e2",
         "subject": "convert : fix token configuration for PLaMo-3 (#29843)",
-        "files": []
+        "files": [
+          "conversion/base.py",
+          "conversion/plamo.py"
+        ]
       },
       {
         "sha": "ad2156533102a0d3c4e5fbdf422dc25fba4d03ba",
         "subject": "musa: use the tile lightning indexer kernel (#30080)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-cuda/lightning-indexer.cu"
+        ]
       },
       {
         "sha": "b7dafa01e5f375c3010fb24b61a67329f957426a",
         "subject": "vendor : update cpp-httplib to 0.60.0 (#30081)",
-        "files": []
+        "files": [
+          "scripts/sync_vendor.py",
+          "vendor/cpp-httplib/httplib.cpp",
+          "vendor/cpp-httplib/httplib.h"
+        ]
       },
       {
         "sha": "26908739bc8ab9c5ccacbde5dc9c0b3609079e8f",
         "subject": "imatrix : include clocale for std::setlocale (#30079)",
-        "files": []
+        "files": [
+          "tools/imatrix/imatrix.cpp"
+        ]
       },
       {
         "sha": "36a73916ee0cb3b457f356066afabd47cce68884",
         "subject": "ggml-webgpu: fix flash_attn supports_op check for overlapping KV (#28205)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-webgpu/ggml-webgpu.cpp"
+        ]
       },
       {
         "sha": "fa3c2fab361772f31116f2861a3c3583556a6fbe",
         "subject": "tests : retain the anchor when testing recurrent rollback (#29923)",
-        "files": []
+        "files": [
+          "tests/test-recurrent-state-rollback.cpp"
+        ]
       },
       {
         "sha": "005a1e127a84cc75bb66be11b43e4f0773564e53",
         "subject": "[SYCL] fix the issue in mixed different model GPUs in FA (#29071)",
-        "files": []
+        "files": [
+          "ggml/src/ggml-sycl/fattn-vec.hpp",
+          "ggml/src/ggml-sycl/ggml-sycl.cpp"
+        ]
       }
     ],
     "watched": [
@@ -1217,6 +2378,24 @@
         "deletions": 14
       },
       {
+        "path": "src/llama-model-loader.h",
+        "exists": true,
+        "additions": 11,
+        "deletions": 4
+      },
+      {
+        "path": "src/llama.cpp",
+        "exists": true,
+        "additions": 0,
+        "deletions": 0
+      },
+      {
+        "path": "src/llama-mmap.cpp",
+        "exists": true,
+        "additions": 2,
+        "deletions": 1
+      },
+      {
         "path": "src/llama-context.cpp",
         "exists": true,
         "additions": 183,
@@ -1246,6 +2425,168 @@
         "additions": 15,
         "deletions": 29
       }
-    ]
+    ],
+    "strings": {
+      "ready.listening-on": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "ready.all-slots-are-idle": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "ready.starting-the-main-loop": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "ready.http-server-listening": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.cuda": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.load-backend-failed": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "device.init-error.vulkan-no-devices": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.no-usable-gpu": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "device.loaded-backend": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "device.offloaded-layers": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "device.repeating-layers": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "device.model-buffer": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.oom.out-of-memory": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "error.oom.failed-to-allocate": {
+        "pin": 9,
+        "candidate": 9
+      },
+      "error.oom.insufficient-memory": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "error.arch.loading-architecture": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "error.arch.unknown-architecture": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.arch.loading-hyperparameters": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.arch.key-not-found": {
+        "pin": 6,
+        "candidate": 6
+      },
+      "error.projector.unknown-type": {
+        "pin": 4,
+        "candidate": 4
+      },
+      "error.corrupt.incomplete": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.corrupt.invalid-magic": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.corrupt.end-of-file": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "error.corrupt.read-tensor": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "error.corrupt.tensor-count": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.argument.unknown": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "error.argument.bad-value": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "mtp.create-context": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "mtp.context-type": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "mtp.no-layers": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "list-devices.header": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "http.context-overflow.upstream": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "http.context-overflow.type": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "http.context-overflow.literal": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "http.compute-error.compute-error": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "http.compute-error.failed-to-decode": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "http.compute-error.failed-to-compute-graph": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "http.compute-error.backend-is-in-error-state": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "http.compute-error.ggml_backend_sched_graph_compute": {
+        "pin": 4,
+        "candidate": 4
+      },
+      "http.sse.done": {
+        "pin": 1,
+        "candidate": 1
+      }
+    }
   }
 }

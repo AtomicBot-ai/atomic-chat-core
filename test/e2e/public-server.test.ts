@@ -382,7 +382,8 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
 
   it.skipIf(!POSIX)('serves embeddings, model listings and metrics from the sessions', async () => {
     await core.writeModel(dataFolder, 'embedder')
-    const { ready, port, post } = await servedModel()
+    // llama-server serves /metrics only when started with `--metrics`.
+    const { ready, port, post } = await servedModel({}, { expose_metrics: true })
     await load(ready, 'embedder', { isEmbedding: true })
 
     const embedded = await post('/embeddings', { model: 'embedder', input: ['abc'] })
@@ -405,6 +406,13 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
       data: Array<{ id: string }>
     }
     expect(catalog.data.map((m) => m.id).sort()).toEqual(['demo', 'embedder'])
+  })
+
+  it.skipIf(!POSIX)("passes on the engine's 501 for metrics of a session started without them", async () => {
+    const { port } = await servedModel()
+    const metrics = await fetch(`http://127.0.0.1:${port}/v1/metrics?model=demo`)
+    expect(metrics.status).toBe(501)
+    expect(await metrics.json()).toMatchObject({ error: { type: 'not_supported_error' } })
   })
 
   it.skipIf(!POSIX)('reports a backend that died as temporarily unavailable', async () => {

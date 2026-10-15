@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   isInconclusive,
+  parseDeviceInitError,
   parseLoadedBackend,
   parseModelBuffer,
   parseOffloadedLayers,
@@ -59,6 +60,22 @@ describe('line parsers', () => {
     ['kv_cache:        CUDA0 model buffer size =  4096.00 MiB', undefined],
     ['load_tensors: model buffer size = 1 MiB', undefined],
   ])('parseModelBuffer(%j) = %j', (l, e) => expect(parseModelBuffer(l)).toEqual(e))
+
+  // What llama.cpp builds print (upstream, TurboQuant and Prism alike); `no CUDA devices found` and
+  // `failed to load backend` were never among them.
+  it.each([
+    ['ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected', true],
+    [
+      'load_backend: failed to load /b/libggml-cuda.so: libcudart.so.12: cannot open shared object file',
+      true,
+    ],
+    ['warning: no usable GPU found, --gpu-layers option will be ignored', true],
+    ['ggml_vulkan: No devices found.', true],
+    ['ggml_cuda_init: no CUDA devices found', false],
+    ['srv    load_model: failed to load model', false],
+  ])('parseDeviceInitError(%j) reports it: %j', (line, reported) =>
+    expect(parseDeviceInitError(line)).toBe(reported ? line : undefined)
+  )
 })
 
 describe('RuntimeDeviceAccumulator', () => {

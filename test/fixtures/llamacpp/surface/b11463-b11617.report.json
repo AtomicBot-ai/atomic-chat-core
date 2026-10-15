@@ -104,11 +104,11 @@
     },
     "same_as_pin": false
   },
-  "status": "warn",
+  "status": "pass",
   "counts": {
     "break": 0,
-    "warn": 1,
-    "info": 17,
+    "warn": 0,
+    "info": 28,
     "error": 0
   },
   "checks": [
@@ -148,10 +148,10 @@
     {
       "id": "help.deprecated",
       "title": "none of them is deprecated",
-      "status": "warn",
+      "status": "pass",
       "counts": {
         "break": 0,
-        "warn": 1,
+        "warn": 0,
         "info": 0,
         "error": 0
       }
@@ -229,21 +229,20 @@
       "counts": {
         "break": 0,
         "warn": 0,
-        "info": 14,
+        "info": 16,
         "error": 0
       }
     },
     {
       "id": "upstream.contract_strings",
       "title": "the strings core matches are still printed",
-      "status": "skipped",
+      "status": "pass",
       "counts": {
         "break": 0,
         "warn": 0,
-        "info": 0,
+        "info": 9,
         "error": 0
-      },
-      "skipped": "the contract lists no strings yet"
+      }
     },
     {
       "id": "upstream.release_notes",
@@ -258,17 +257,6 @@
     }
   ],
   "findings": [
-    {
-      "id": "help.deprecated/--defrag-thold",
-      "check": "help.deprecated",
-      "severity": "warn",
-      "subject": "--defrag-thold",
-      "message": "b11617 marks --defrag-thold deprecated; core still emits it",
-      "evidence": {
-        "help": "KV cache defragmentation threshold (DEPRECATED)\n(env: LLAMA_ARG_DEFRAG_THOLD)"
-      },
-      "hint": "Plan the removal: gate the flag by build or drop it before upstream removes it."
-    },
     {
       "id": "assets.core_backends/unconsumed",
       "check": "assets.core_backends",
@@ -299,6 +287,96 @@
         "flags": [
           "--moe-cache-mib"
         ]
+      }
+    },
+    {
+      "id": "upstream.contract_strings/device.init-error.cuda",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "device.init-error.cuda",
+      "message": "\"failed to initialize \" GGML_CUDA_NAME\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/llamacpp/runtime-device.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/device.init-error.vulkan-no-devices",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "device.init-error.vulkan-no-devices",
+      "message": "\"ggml_vulkan: No devices found\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/llamacpp/runtime-device.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/error.arch.loading-architecture",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "error.arch.loading-architecture",
+      "message": "\"error loading model architecture\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/llamacpp/errors.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/error.oom.insufficient-memory",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "error.oom.insufficient-memory",
+      "message": "\"insufficient memory\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/llamacpp/errors.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/error.oom.out-of-memory",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "error.oom.out-of-memory",
+      "message": "\"out of memory\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/llamacpp/errors.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/http.compute-error.backend-is-in-error-state",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "http.compute-error.backend-is-in-error-state",
+      "message": "\"backend is in error state\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/server/public/errors.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/http.context-overflow.literal",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "http.context-overflow.literal",
+      "message": "\"the request exceeds the available context size\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/server/public/errors.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/ready.http-server-listening",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "ready.http-server-listening",
+      "message": "\"http server listening\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/shared/process.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/ready.starting-the-main-loop",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "ready.starting-the-main-loop",
+      "message": "\"starting the main loop\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/shared/process.ts"
       }
     },
     {
@@ -453,11 +531,35 @@
       }
     },
     {
+      "id": "upstream.watched_paths/src/llama-mmap.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "src/llama-mmap.cpp",
+      "message": "1 commit(s), +2 −1 (watched for: unexpectedly reached end of file)",
+      "evidence": {
+        "commits": [
+          "b9f3599fb1 llama : do not map foreign ranges into a backend buffer (#30405)"
+        ]
+      }
+    },
+    {
       "id": "upstream.watched_paths/src/llama-model-loader.cpp",
       "check": "upstream.watched_paths",
       "severity": "info",
       "subject": "src/llama-model-loader.cpp",
       "message": "1 commit(s), +80 −14 (watched for: missing keys, tensor count, corrupt file)",
+      "evidence": {
+        "commits": [
+          "b9f3599fb1 llama : do not map foreign ranges into a backend buffer (#30405)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/src/llama-model-loader.h",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "src/llama-model-loader.h",
+      "message": "1 commit(s), +11 −4 (watched for: tensor data out of the file bounds: corrupted or incomplete)",
       "evidence": {
         "commits": [
           "b9f3599fb1 llama : do not map foreign ranges into a backend buffer (#30405)"
