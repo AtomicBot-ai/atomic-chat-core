@@ -156,14 +156,14 @@ jobs:
           key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-${{ runner.arch }}-
       - run: bun install --frozen-lockfile
+      # The suites run in the runner's default shell, as in ci.yml: on windows-11-arm Git Bash runs
+      # emulated, and the processes the tests start (PowerShell probes among them) crawl under it.
       - id: unit
         name: Unit and contract suites
         continue-on-error: true
-        shell: bash
         env:
           VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
-          SHARD: ${{ matrix.shard }}
-        run: npx vitest run --project unit --project contract ${SHARD:+--shard=$SHARD} --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/core/unit.json"
+        run: npx vitest run --project unit --project contract ${{ matrix.shard && format('--shard={0}', matrix.shard) || '' }} --reporter=default --reporter=json --outputFile.json=${{ runner.temp }}/core/unit.json
       - id: build
         if: ${{ !matrix.shard || startsWith(matrix.shard, '1/') }}
         continue-on-error: true
@@ -176,10 +176,9 @@ jobs:
         name: E2E suites
         if: steps.build_bin.outcome == 'success'
         continue-on-error: true
-        shell: bash
         env:
           VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
-        run: npx vitest run --project e2e --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/core/e2e.json"
+        run: npx vitest run --project e2e --reporter=default --reporter=json --outputFile.json=${{ runner.temp }}/core/e2e.json
       - name: Core cell
         if: always()
         shell: bash
