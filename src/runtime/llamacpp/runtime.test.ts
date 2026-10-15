@@ -1033,7 +1033,9 @@ describe('shutdown', () => {
       },
     })
     const load = runtime.load('slow')
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    // Shut down once the child exists, not after a fixed sleep: on a busy Windows runner the load can
+    // take longer than that to reach `spawn`, and the shutdown then cancels it with nothing to kill.
+    await waitFor(() => spawned !== undefined)
     const shutdown = runtime.shutdown()
     await expect(load).rejects.toBeInstanceOf(AtomicCoreError)
     await shutdown
