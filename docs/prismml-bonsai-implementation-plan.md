@@ -4,6 +4,9 @@ Date: 2026-10-05
 Status: Development handoff; implementation and hardware acceptance have not started.  
 Repositories: `atomic-chat-core`, `Atomic-Chat`; release/catalog changes in `atomic-chat-conf`.  
 Related decision: [Use PrismML llama.cpp for desktop Bonsai](decisions/2026-10-05-use-prismml-llamacpp-for-desktop-bonsai.md).
+Superseded in part: the model setup operation this plan proposes (`/models/setup-plan`, `/model-setups/*`,
+`model-setup:changed`, `prism-setups/`) was built in 0.10.0 and removed in 0.17.0; clients download the
+model files ([The core does not download model files](decisions/2026-10-15-core-does-not-download-models.md)).
 
 Reading guide: product scope and model policy are in sections 1–3; architecture, contracts, and behavior in sections 4–9; implementation ownership and task checklists in sections 10–11; acceptance and release gates in sections 12–14. Start development with P0.1–P0.2 and the phase-1 contract work; do not treat proposed endpoints or paths as existing APIs.
 
