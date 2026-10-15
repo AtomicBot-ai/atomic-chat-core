@@ -43,23 +43,28 @@ describe('package exports', () => {
     expect(resolved['@atomic-chat/core/models']).toMatch(/\/dist\/models\/index\.js$/)
   })
 
-  it('keeps ModelRegistry and fetchHfGgufFiles in ./models, and no entry point hands out the downloader', async () => {
-    const entries = {
-      '.': await import('../../src/index.js'),
-      './client': await import('../../src/client/index.js'),
-      './contracts': await import('../../src/contracts/index.js'),
-      './host': await import('../../src/host/index.js'),
-      './models': await import('../../src/models/index.js'),
+  // It imports every entry point's whole module graph, cold: past the 5 s default on Windows runners.
+  it(
+    'keeps ModelRegistry and fetchHfGgufFiles in ./models, and no entry point hands out the downloader',
+    { timeout: 60_000 },
+    async () => {
+      const entries = {
+        '.': await import('../../src/index.js'),
+        './client': await import('../../src/client/index.js'),
+        './contracts': await import('../../src/contracts/index.js'),
+        './host': await import('../../src/host/index.js'),
+        './models': await import('../../src/models/index.js'),
+      }
+      const models = entries['./models'] as Record<string, unknown>
+      expect(typeof models['ModelRegistry']).toBe('function')
+      expect(typeof models['fetchHfGgufFiles']).toBe('function')
+      expect(models).not.toHaveProperty('downloadHfModel')
+      for (const [entry, module] of Object.entries(entries)) {
+        expect(module, entry).not.toHaveProperty('Downloader')
+        expect(module, entry).not.toHaveProperty('downloadSegments')
+      }
     }
-    const models = entries['./models'] as Record<string, unknown>
-    expect(typeof models['ModelRegistry']).toBe('function')
-    expect(typeof models['fetchHfGgufFiles']).toBe('function')
-    expect(models).not.toHaveProperty('downloadHfModel')
-    for (const [entry, module] of Object.entries(entries)) {
-      expect(module, entry).not.toHaveProperty('Downloader')
-      expect(module, entry).not.toHaveProperty('downloadSegments')
-    }
-  })
+  )
 
   it('re-exports nothing from the downloads module directly, types included', async () => {
     for (const entry of [
