@@ -84,6 +84,8 @@ export function bracketIfIpv6(host: string): string {
 export interface ManagedGatewayUpstream {
   host: string
   port: number
+  /** A prefix every forwarded path gets, for an engine that serves its models under a sub-path (Foundry Local's `/catalogs/local`). */
+  basePath?: string
 }
 
 export interface ManagedGatewayOptions {
@@ -324,7 +326,7 @@ async function sendBodyToUpstream(
   let upstreamResponse: UpstreamResponse
   try {
     const origin = `http://${bracketIfIpv6(upstream.host)}:${upstream.port}`
-    upstreamResponse = await sendUpstream(`${origin}${req.url ?? '/'}`, {
+    upstreamResponse = await sendUpstream(`${origin}${upstream.basePath ?? ''}${req.url ?? '/'}`, {
       method: req.method ?? 'GET',
       // The client's own auth headers are this gateway's secret, not the container's; they stop here.
       headers: forwardableHeaders(req, ['authorization', 'x-api-key']),

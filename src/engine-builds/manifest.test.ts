@@ -15,6 +15,9 @@ import {
   SDCPP_MANIFEST_URL,
   sdcppAssetUrl,
   mlxAssetUrl,
+  FOUNDRY_LOCAL_MANIFEST_URL,
+  foundryLocalAssetUrl,
+  parseFoundryLocalManifest,
 } from './manifest.js'
 import type { MlxManifest, SdcppManifest } from './manifest.js'
 
@@ -110,6 +113,125 @@ describe('parseMlxManifest', () => {
   })
 })
 
+const FL_ASSET = (platform: string, name: string) => ({ platform, name, size: 100, sha256: 'd'.repeat(64) })
+const FL_RELEASE = (tag: string, published_at: string, over: Record<string, unknown> = {}) => ({
+  tag,
+  published_at,
+  min_core_version: '0.18.0',
+  c_api_version: 2,
+  notes_url: `https://github.com/microsoft/foundry-local/releases/tag/${tag}`,
+  assets: [
+    FL_ASSET('win-x64', 'foundry-local-win-x64.zip'),
+    FL_ASSET('win-arm64', 'foundry-local-win-arm64.zip'),
+    FL_ASSET('macos-arm64', 'foundry-local-osx-arm64.tgz'),
+    FL_ASSET('linux-x64', 'foundry-local-linux-x64.tgz'),
+    FL_ASSET('linux-arm64', 'foundry-local-linux-arm64.tgz'),
+  ],
+  ...over,
+})
+const FOUNDRY = (releases: unknown[], over: Record<string, unknown> = {}) => ({
+  $schema: './foundry-local-schema.json',
+  schema_version: 1,
+  upstream_repo: 'microsoft/foundry-local',
+  releases,
+  ...over,
+})
+/** A core at 0.18.0 whose host speaks C API 2. */
+const FL_HOST = { coreVersion: '0.18.0', cApiVersions: [2] }
+
+describe('parseFoundryLocalManifest', () => {
+  it('reads the manifest conf publishes, .tgz archives included, newest release first', () => {
+    const parsed = parseFoundryLocalManifest(
+      FOUNDRY([FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z'), FL_RELEASE('v2.0.0', '2026-08-01T00:00:00Z')]),
+      FL_HOST
+    )
+    expect(parsed.upstream_repo).toBe('microsoft/foundry-local')
+    expect(parsed.releases.map((release) => release.tag)).toEqual(['v2.1.0', 'v2.0.0'])
+    expect(parsed.releases[0]?.assets.find((asset) => asset.platform === 'macos-arm64')).toEqual({
+      platform: 'macos-arm64',
+      name: 'foundry-local-osx-arm64.tgz',
+      size: 100,
+      sha256: 'd'.repeat(64),
+    })
+  })
+
+  it('drops a field it does not know at every level instead of refusing the document', () => {
+    const release = { ...FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z'), channel: 'stable' }
+    release.assets = release.assets.map((asset) => ({ ...asset, signature: 'x' }))
+    const parsed = parseFoundryLocalManifest(
+      FOUNDRY([release], { updated_at: '2026-10-01T00:00:00Z' }),
+      FL_HOST
+    )
+    expect(Object.keys(parsed)).toEqual(['upstream_repo', 'releases'])
+    expect(Object.keys(parsed.releases[0] ?? {})).toEqual([
+      'tag',
+      'published_at',
+      'min_core_version',
+      'c_api_version',
+      'notes_url',
+      'assets',
+    ])
+    expect(Object.keys(parsed.releases[0]?.assets[0] ?? {})).toEqual(['platform', 'name', 'size', 'sha256'])
+  })
+
+  it('keeps the first asset of a platform listed twice in a release', () => {
+    const release = FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z')
+    release.assets.push(FL_ASSET('linux-x64', 'foundry-local-linux-x64-other.tgz'))
+    const assets = parseFoundryLocalManifest(FOUNDRY([release]), FL_HOST).releases[0]?.assets ?? []
+    expect(assets.filter((asset) => asset.platform === 'linux-x64')).toEqual([
+      FL_ASSET('linux-x64', 'foundry-local-linux-x64.tgz'),
+    ])
+  })
+
+  it('skips a release for a newer core or a C API this host does not speak, and keeps the rest', () => {
+    const parsed = parseFoundryLocalManifest(
+      FOUNDRY([
+        FL_RELEASE('v3.0.0', '2026-12-01T00:00:00Z', { min_core_version: '0.19.0' }),
+        FL_RELEASE('v2.2.0', '2026-11-01T00:00:00Z', { c_api_version: 3 }),
+        FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z'),
+      ]),
+      FL_HOST
+    )
+    expect(parsed.releases.map((release) => release.tag)).toEqual(['v2.1.0'])
+  })
+
+  it('skips a malformed release or asset instead of refusing the document', () => {
+    const badAsset = FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z')
+    badAsset.assets[0] = { platform: 'win-x64', name: '../evil.zip', size: 1, sha256: 'd'.repeat(64) }
+    badAsset.assets[1] = {
+      platform: 'freebsd-x64',
+      name: 'foundry-local-freebsd-x64.tgz',
+      size: 1,
+      sha256: 'd'.repeat(64),
+    }
+    badAsset.assets[2] = { platform: 'macos-arm64', name: 'foundry-local-osx-arm64.tgz', size: 1 } as never
+    const parsed = parseFoundryLocalManifest(
+      FOUNDRY([
+        FL_RELEASE('2.3.0', '2026-12-01T00:00:00Z'),
+        FL_RELEASE('v2.2.0', 'yesterday'),
+        FL_RELEASE('v2.1.5', '2026-11-01T00:00:00Z', { assets: [] }),
+        badAsset,
+      ]),
+      FL_HOST
+    )
+    expect(parsed.releases.map((release) => release.tag)).toEqual(['v2.1.0'])
+    expect(parsed.releases[0]?.assets.map((asset) => asset.platform)).toEqual(['linux-x64', 'linux-arm64'])
+  })
+
+  it('refuses a document of another schema version or repository, or with no release this core can install', () => {
+    const release = FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z')
+    expect(() => parseFoundryLocalManifest(FOUNDRY([release], { schema_version: 2 }), FL_HOST)).toThrow(
+      /schema_version/
+    )
+    expect(() =>
+      parseFoundryLocalManifest(FOUNDRY([release], { upstream_repo: 'not a repo' }), FL_HOST)
+    ).toThrow(/upstream_repo/)
+    expect(() =>
+      parseFoundryLocalManifest(FOUNDRY([release]), { coreVersion: '0.17.0', cApiVersions: [2] })
+    ).toThrow(/no release this core can install/)
+  })
+})
+
 describe('asset URLs', () => {
   it('downloads sd.cpp from the mirror, or from the upstream release without the Atomic suffix', () => {
     const manifest = parseSdcppManifest(SDCPP)
@@ -119,6 +241,21 @@ describe('asset URLs', () => {
     const { download_base: _base, ...upstream } = manifest
     expect(sdcppAssetUrl(upstream, manifest.assets[0]!)).toBe(
       'https://github.com/AtomicBot-ai/stable-diffusion.cpp/releases/download/master-883-137f740/sd-mac.zip'
+    )
+  })
+
+  it('downloads Foundry Local from the GitHub release of upstream_repo', () => {
+    const manifest = parseFoundryLocalManifest(
+      FOUNDRY([FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z')]),
+      FL_HOST
+    )
+    const release = manifest.releases[0] as NonNullable<(typeof manifest.releases)[number]>
+    const asset = release.assets.find((candidate) => candidate.platform === 'linux-x64')
+    expect(foundryLocalAssetUrl(manifest, release, asset as NonNullable<typeof asset>)).toBe(
+      'https://github.com/microsoft/foundry-local/releases/download/v2.1.0/foundry-local-linux-x64.tgz'
+    )
+    expect(FOUNDRY_LOCAL_MANIFEST_URL).toBe(
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/foundry-local-manifest.json'
     )
   })
 

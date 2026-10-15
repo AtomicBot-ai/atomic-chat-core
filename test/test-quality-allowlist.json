@@ -1,6 +1,7 @@
 {
   "_comment": "Files exempt from the sibling-test rule. Key = repo-relative path, value = reason. Keep this short.",
   "files": {
-    "src/server/public/static-assets.generated.ts": "Generated string constants (scripts/import-app-static.mjs); the served bytes are pinned by sha256 in the proxy-http replay fixtures."
+    "src/server/public/static-assets.generated.ts": "Generated string constants (scripts/import-app-static.mjs); the served bytes are pinned by sha256 in the proxy-http replay fixtures.",
+    "src/runtime/foundry-local/host/ffi-bun.ts": "bun:ffi bindings; run only inside the compiled binaries, so covered by test/e2e/foundry-host.test.ts against a real library (FOUNDRY_LOCAL_TEST_LIB), not by vitest under Node."
   }
 }

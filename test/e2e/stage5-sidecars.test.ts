@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { APP_BIN, control, reapJournalledChildren, startDaemon } from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
+import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
 
 const fake = fileURLToPath(new URL('../helpers/fake-sidecar-server.mjs', import.meta.url))
 const daemons: ChildProcess[] = []
@@ -138,5 +139,125 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(APP_BIN))(
         expect(await again.json()).toEqual({ cancelled: false })
       })
     }
+  }
+)
+
+const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
+// The compiled core registers Foundry Local only where the platform rule holds; Windows needs a .cmd host.
+const FOUNDRY_PLATFORM = process.platform === 'win32' ? null : foundryLocalTestPlatform()
+
+/**
+ * A Foundry Local build and a CPU variant on disk, as the engine-builds install and the app's installer
+ * leave them, and the host stand-in core starts instead of `foundry-host` (task 6.6).
+ */
+async function foundryFixture() {
+  const folder = await mkdtemp(join(tmpdir(), 'atomic-stage5-foundry-'))
+  folders.push(folder)
+  const build = join(folder, 'foundry-local', 'backends', 'v2.1.0', FOUNDRY_PLATFORM as string)
+  await mkdir(join(build, 'lib'), { recursive: true })
+  await writeFile(
+    join(build, 'lib', process.platform === 'darwin' ? 'libfoundry_local.dylib' : 'libfoundry_local.so'),
+    'lib'
+  )
+  await writeFile(join(build, '.atomic-owned'), 'atomic-chat\n')
+  await writeFile(
+    join(build, 'install.json'),
+    JSON.stringify({
+      tag: 'v2.1.0',
+      backendId: FOUNDRY_PLATFORM,
+      sha256: null,
+      installedAtMs: 1,
+      publishedAt: '2026-09-30T00:43:42Z',
+      cApiVersion: 2,
+    })
+  )
+  const model = join(folder, 'foundry-local', 'models', 'e2e-fl-cpu')
+  await mkdir(model, { recursive: true })
+  await writeFile(join(model, 'genai_config.json'), '{}')
+  await writeFile(
+    join(model, 'model.yml'),
+    [
+      'model_path: foundry-local/models/e2e-fl-cpu',
+      'name: e2e-fl-cpu',
+      'size_bytes: 1',
+      'foundry_local:',
+      '  model_id: qwen2.5-0.5b-instruct',
+      '  variant_id: e2e-fl-cpu',
+      '  execution_provider: cpu',
+      '  device: cpu',
+      '',
+    ].join('\n')
+  )
+  const argvFile = join(folder, 'host.jsonl')
+  const host = join(folder, 'fake-foundry-host')
+  await writeFile(
+    host,
+    `#!/bin/sh\nexport FAKE_FOUNDRY_ARGV=${JSON.stringify(argvFile)}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_FOUNDRY_HOST)} "$@"\n`
+  )
+  await chmod(host, 0o755)
+  const { ready } = await startDaemon(
+    folder,
+    daemons,
+    [],
+    { ATOMIC_FOUNDRY_HOST_TEST_COMMAND: host },
+    APP_BIN
+  )
+  owners.push({ folder, ready })
+  return { folder, ready, argvFile }
+}
+
+describe.skipIf(FOUNDRY_PLATFORM === null || !existsSync(APP_BIN))(
+  'Foundry Local through the compiled core (task 6.6)',
+  () => {
+    it('loads a variant in its host, answers on :1337 by the model field, and unloads after the host exited', async () => {
+      const { folder, ready, argvFile } = await foundryFixture()
+      const loaded = await control(folder, ready, '/models/foundry-local/e2e-fl-cpu/load', {
+        method: 'POST',
+        body: '{}',
+      })
+      expect(loaded.status, await loaded.clone().text()).toBe(200)
+      const { session } = (await loaded.json()) as { session: { pid: number; port: number; api_key: string } }
+      const started = JSON.parse((await readFile(argvFile, 'utf8')).trim().split('\n')[0] as string) as {
+        argv: string[]
+        ort_telemetry_disabled: string | null
+      }
+      expect(started.argv[0]).toBe('serve')
+      expect(started.ort_telemetry_disabled).toBe('1')
+      const hostPort = Number(started.argv[started.argv.indexOf('--port') + 1])
+      expect(session.port).not.toBe(hostPort)
+
+      const server = await control(folder, ready, '/server/start', {
+        method: 'POST',
+        body: JSON.stringify({ port: 0 }),
+      })
+      const { port } = (await server.json()) as { port: number }
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'e2e-fl-cpu', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(answer.status, await answer.clone().text()).toBe(200)
+      expect(await answer.json()).toMatchObject({
+        model: 'e2e-fl-cpu',
+        choices: [{ message: { content: 'hi from fake foundry' } }],
+      })
+      const listed = (await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json()) as {
+        data: Array<{ id: string; owned_by: string }>
+      }
+      expect(listed.data).toContainEqual(
+        expect.objectContaining({ id: 'e2e-fl-cpu', owned_by: 'foundry-local' })
+      )
+      // The host's own port is not the way in: it is the gateway's job, and the gateway wants the key.
+      expect((await fetch(`http://127.0.0.1:${session.port}/v1/models`)).status).toBe(401)
+
+      const unloaded = await control(folder, ready, '/models/foundry-local/e2e-fl-cpu/unload', {
+        method: 'POST',
+      })
+      expect(await unloaded.json()).toMatchObject({ success: true })
+      expect(() => process.kill(session.pid, 0)).toThrow()
+      expect((await (await control(folder, ready, '/sessions')).json()) as object).toMatchObject({
+        sessions: [],
+      })
+    })
   }
 )

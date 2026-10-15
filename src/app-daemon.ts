@@ -10,6 +10,18 @@ import { nodeCliIo } from './cli/io.js'
 import { runAppDaemon } from './host/app-daemon.js'
 import { createCoreReporter } from './telemetry/index.js'
 
+// The Foundry Local host (change add-foundry-local, design D1): the app's core starts its own binary
+// in this hidden mode, one process per model; it never reaches the daemon.
+if (process.argv[2] === 'foundry-host') {
+  const host = await import('./runtime/foundry-local/index.js')
+  process.exit(
+    await host.runFoundryHost(process.argv.slice(3), {
+      ...host.lineIo(nodeCliIo()),
+      loadLibrary: host.loadLibraryWithBun,
+    })
+  )
+}
+
 await runAppDaemon({
   argv: process.argv.slice(2),
   io: nodeCliIo(),

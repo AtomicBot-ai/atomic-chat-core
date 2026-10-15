@@ -82,6 +82,11 @@ describe('error envelope', () => {
     expect(statusForCode('MODEL_LOAD_TIMED_OUT')).toBe(504)
     expect(statusForCode('SERVER_START_TIMED_OUT')).toBe(504)
     expect(statusForCode('FOUNDATION_MODELS_UNAVAILABLE')).toBe(503)
+    // Foundry Local (change add-foundry-local): prepare the accelerator first; the variant is not for this
+    // host; the host process failed.
+    expect(statusForCode('FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED')).toBe(409)
+    expect(statusForCode('FOUNDRY_LOCAL_VARIANT_UNSUPPORTED')).toBe(422)
+    expect(statusForCode('FOUNDRY_LOCAL_HOST_ERROR')).toBe(500)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
   })
 

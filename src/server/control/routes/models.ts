@@ -94,7 +94,9 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
     const provider = params['provider'] as string
     const check = Object.hasOwn(deps.managedModelChecks ?? {}, provider)
       ? deps.managedModelChecks?.[provider]
-      : undefined
+      : Object.hasOwn(deps.nativeModelChecks ?? {}, provider)
+        ? deps.nativeModelChecks?.[provider]
+        : undefined
     if (check === undefined) {
       return sendError(
         res,

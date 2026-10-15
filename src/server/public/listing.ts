@@ -32,6 +32,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'atomic-prism': 'prism-llama.cpp',
   'vllm': 'vllm',
   'sglang': 'sglang',
+  'foundry-local': 'foundry-local',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */

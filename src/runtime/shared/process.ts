@@ -38,6 +38,15 @@ export interface SpawnSpec {
   args: string[]
   env: Record<string, string>
   cwd?: string | undefined
+  /**
+   * `pipe`: the child's stdin stays open for its life (default: closed). For a child that takes the
+   * end of its stdin as the order to stop — on Windows, where there is no SIGTERM, `terminate` then
+   * closes it and waits for the child's own exit before killing it (the Foundry Local host, change
+   * `add-foundry-local`).
+   */
+  stdin?: 'pipe' | undefined
+  /** The platform the stop follows; `process.platform` unless a test says otherwise. */
+  platform?: NodeJS.Platform | undefined
 }
 
 export interface ReadyOptions {
@@ -73,7 +82,10 @@ export interface ManagedProcess {
   pid: number
   /** Resolves when the process exits (never rejects). */
   exited: Promise<ExitInfo>
-  /** SIGTERM → wait `graceMs` → SIGKILL on unix; `kill()` (TerminateProcess) on Windows. */
+  /**
+   * SIGTERM → wait `graceMs` → SIGKILL on unix; `kill()` (TerminateProcess) on Windows — or, for a
+   * child spawned with `stdin: 'pipe'`, close its stdin → wait `graceMs` → `kill()`.
+   */
   terminate: (graceMs?: number) => Promise<ExitInfo>
   /** Everything the process wrote so far (kept for later classification). */
   output: () => { stdout: string; stderr: string }
@@ -110,9 +122,11 @@ export function spawnManaged(
   const child = spawn(spec.exe, spec.args, {
     env: spec.env,
     cwd: spec.cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [spec.stdin === 'pipe' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
+  // A child that dies first makes writes to its stdin fail with EPIPE; that is its exit, not an error.
+  child.stdin?.on('error', () => {})
   const capture = hooks.captureOutput !== false
   let stdoutBuf = ''
   let stderrBuf = ''
@@ -147,28 +161,34 @@ export function spawnManaged(
       resolve(exitInfo(null, null))
     })
   })
+  const windows = (spec.platform ?? process.platform) === 'win32'
   const terminate = async (graceMs = DEFAULT_TERMINATE_GRACE_MS): Promise<ExitInfo> => {
     if (child.exitCode !== null || child.signalCode !== null) return exited
     // Never started (ENOENT, a missing cwd, …): there is nothing to signal, and `exited` settles with
     // the spawn error. Until that error is emitted Node still holds the handle, and `kill()` on it
     // throws EINVAL on Windows and signals pid 0, the caller's whole process group, on POSIX.
     if (child.pid === undefined) return exited
-    if (process.platform === 'win32') {
-      child.kill()
+    const kill = (signal?: NodeJS.Signals) => (windows ? child.kill() : child.kill(signal ?? 'SIGKILL'))
+    const graceful = async (ask: () => void): Promise<ExitInfo> => {
+      ask()
+      const timer = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), graceMs).unref())
+      const outcome = await Promise.race([exited, timer])
+      if (outcome === 'timeout') {
+        kill()
+        return exited
+      }
+      return outcome
+    }
+    if (windows) {
+      if (child.stdin && graceMs > 0) return graceful(() => child.stdin?.end())
+      kill()
       return exited
     }
     if (graceMs <= 0) {
-      child.kill('SIGKILL')
+      kill()
       return exited
     }
-    child.kill('SIGTERM')
-    const timer = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), graceMs).unref())
-    const outcome = await Promise.race([exited, timer])
-    if (outcome === 'timeout') {
-      child.kill('SIGKILL')
-      return exited
-    }
-    return outcome
+    return graceful(() => child.kill('SIGTERM'))
   }
   return {
     child,

@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
+import { homedir, release as osRelease } from 'node:os'
 import { join } from 'node:path'
 import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
 import type {
@@ -23,13 +23,27 @@ import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
 import { MlxRuntime } from '../runtime/mlx/index.js'
+import {
+  FoundryLocalAcceleratorService,
+  FoundryLocalRuntime,
+  foundryHostCommand,
+  foundryLocalVerdict,
+  parseFoundryLocalCheckRequest,
+  runFoundryHostProbe,
+} from '../runtime/foundry-local/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from '../cloud/index.js'
 import type { ChatGptBackend } from '../cloud/index.js'
-import { HardwareService, nodeProbeDeps, probeSystemInfo, probeUnifiedMemory } from '../hardware/index.js'
+import {
+  HardwareService,
+  nodeProbeDeps,
+  probeNpu,
+  probeSystemInfo,
+  probeUnifiedMemory,
+} from '../hardware/index.js'
 import {
   BackendAdvisor,
   BackendService,
@@ -63,6 +77,7 @@ import {
   EngineManifestSource,
   IDLE_ENGINE_HOST,
   manifestKinds,
+  foundryLocalHostPlatform,
 } from '../engine-builds/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
@@ -330,6 +345,52 @@ export async function createAtomicCore(
     // The public server's trusted hosts, kept in this one array for every session gateway to read.
     const managedTrustedHosts: string[] = []
 
+    // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
+    // from the process report, which Bun's compiled binaries fill in as Node does; musl has none. The
+    // report is a whole diagnostic snapshot, so it is built on Linux only, where glibc decides.
+    const foundryLocalArch = options.foundryLocalHost?.arch ?? process.arch
+    const foundryLocalHost = foundryLocalHostPlatform({
+      platform,
+      arch: foundryLocalArch,
+      osRelease: options.foundryLocalHost?.osRelease ?? osRelease(),
+      glibcVersion:
+        options.foundryLocalHost?.glibcVersion ??
+        (platform === 'linux'
+          ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
+              ?.glibcVersionRuntime
+          : undefined),
+    })
+    const foundryLocalPaths = layout.provider('foundry-local')
+    const foundryHost = foundryHostCommand(env)
+    // The provider itself (task 6.6): one foundry-host per model, where the platform rule holds. The
+    // active build and the prepared accelerators are read per load, from services wired below.
+    const foundryLocalRuntime: FoundryLocalRuntime | undefined =
+      foundryLocalHost.platform === null
+        ? undefined
+        : new FoundryLocalRuntime({
+            layout,
+            registry: new ModelRegistry(layout, 'foundry-local'),
+            instanceId: lock.instanceId,
+            platform,
+            arch: foundryLocalArch,
+            hostCommand: foundryHost,
+            resolveBuild: (): Promise<string | undefined> => engineBuilds.activeDir('foundry-local'),
+            preparedAccelerators: async () =>
+              foundryLocalAccelerators ? foundryLocalAccelerators.prepared() : [],
+            trustedHosts: managedTrustedHosts,
+            readSettings: async () => settings.get('foundry-local'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+            claimGpu: gpuResidency.hook('foundry-local'),
+            baseEnv: env,
+            log: runtimeLog,
+            ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+          })
+    if (foundryLocalRuntime) {
+      registries.set('foundry-local', foundryLocalRuntime.registry)
+      runtimes.set('foundry-local', foundryLocalRuntime)
+    }
+
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
     })
@@ -502,9 +563,13 @@ export async function createAtomicCore(
     // their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
-    const engineBuilds = new EngineBuildsService({
+    const engineBuilds: EngineBuildsService = new EngineBuildsService({
       dataFolder: layout.root,
-      roots: { 'sd-cpp': layout.diffusion.backendsDir, 'mlx': layout.provider('mlx').backendsDir },
+      roots: {
+        'sd-cpp': layout.diffusion.backendsDir,
+        'mlx': layout.provider('mlx').backendsDir,
+        'foundry-local': foundryLocalPaths.backendsDir,
+      },
       failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
       resourcesDir: options.resourcesDir,
       platform,
@@ -512,17 +577,57 @@ export async function createAtomicCore(
       manifests: {
         'sd-cpp': new EngineManifestSource(engineManifestKinds['sd-cpp'], { env, fetchFor, log }),
         'mlx': new EngineManifestSource(engineManifestKinds.mlx, { env, fetchFor, log }),
+        'foundry-local': new EngineManifestSource(engineManifestKinds['foundry-local'], {
+          env,
+          fetchFor,
+          log,
+        }),
+      },
+      foundryLocalHost,
+      foundryHostProbe: async (libDir) => {
+        await runFoundryHostProbe(
+          foundryHost,
+          {
+            libDir,
+            appDataDir: foundryLocalPaths.runtimeDir as string,
+            logsDir: foundryLocalPaths.logsDir as string,
+          },
+          { env }
+        )
       },
       hardware: () => hardware.facts(),
       hosts: {
         'sd-cpp': diffusion.engineHost(),
         // Off macOS there is no MLX runtime: nothing runs, so nothing to hold off or unload.
         'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
+        // Where the provider is not registered nothing runs from a build.
+        'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
       log,
     })
+
+    // Whether this machine has an NPU (task 6.5): asked once, on the first check that needs it.
+    let npuAnswer: ReturnType<typeof probeNpu> | undefined
+    const foundryLocalNpu = () =>
+      (npuAnswer ??= probeNpu(
+        nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+      ))
+
+    // Foundry Local's accelerators (task 6.4, design D3): probed from the active build when a client
+    // asks, prepared only when one orders it. Only where the platform rule registers the provider.
+    const foundryLocalAccelerators =
+      foundryLocalHost.platform === null
+        ? undefined
+        : new FoundryLocalAcceleratorService({
+            hostCommand: foundryHost,
+            resolveBuild: () => engineBuilds.activeDir('foundry-local'),
+            runtimeDir: foundryLocalPaths.runtimeDir as string,
+            logsDir: foundryLocalPaths.logsDir as string,
+            emit: (name, payload) => emitter.emit(name, payload),
+            env,
+          })
 
     // The managed container environment and the one Docker executor of this core (task 2.6). The
     // `tensorrt-llm` provider (task 2.14) takes `managedContainers`, never a second executor, and the
@@ -683,7 +788,9 @@ export async function createAtomicCore(
     // The `/engines` layer (change `unify-engine-lifecycle`): one handle per engine of this host, over
     // the system that installs it. Every part is read when a command arrives.
     const engineHandles: EngineHandle[] = []
-    for (const engine of hostEngines(platform, [...managedRuntimes.keys()])) {
+    for (const engine of hostEngines(platform, [...managedRuntimes.keys()], {
+      foundryLocal: foundryLocalHost.platform !== null,
+    })) {
       const kind = ENGINE_KINDS[engine]
       if (kind === 'llamacpp') {
         const provider = engine as LlamacppProviderId
@@ -759,6 +866,31 @@ export async function createAtomicCore(
         recreateSession: (provider: string, modelId: string) =>
           (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
         hardware,
+        ...(foundryLocalAccelerators
+          ? {
+              nativeModelChecks: {
+                // Task 6.5: the platform, the active build, the last probe, the NPU — no network.
+                'foundry-local': async (body: unknown) => {
+                  const request = parseFoundryLocalCheckRequest(body)
+                  const installed = (await engineBuilds.activeDir('foundry-local')) !== undefined
+                  return foundryLocalVerdict(
+                    {
+                      platform,
+                      arch: foundryLocalArch,
+                      installed,
+                      accelerators: installed ? (await foundryLocalAccelerators.list()).accelerators : [],
+                      npu: (await foundryLocalNpu()).present,
+                    },
+                    request
+                  )
+                },
+              },
+              foundryLocal: {
+                accelerators: (force: boolean) => foundryLocalAccelerators.list({ force }),
+                prepare: (request) => foundryLocalAccelerators.prepare(request),
+              },
+            }
+          : {}),
         foundationModelsAvailability: (force: boolean) => {
           const runtime = runtimes.get('foundation-models')
           return runtime instanceof FoundationModelsRuntime

@@ -7,6 +7,7 @@
  *     `diffusion/compat.ts` reads); at an equal number the Atomic rebuild (`-a<sha>`) is newer. Two
  *     rebuilds of one tag are equal: their shas carry no order.
  *   - MLX: `published_at` of the GitHub release. The tags are commit hashes.
+ *   - Foundry Local: `published_at` of the `microsoft/foundry-local` release, like MLX.
  *
  * A build whose order cannot be read (a dev stub, an installer without `mlx-server.json`) is older
  * than every build whose order can, so any verified build replaces it.
@@ -17,7 +18,7 @@ import { isDateTime } from './manifest.js'
 
 export interface OrderedBuild {
   tag: string
-  /** MLX only. */
+  /** MLX and Foundry Local. */
   published_at?: string | null
 }
 
@@ -28,7 +29,8 @@ export function sdcppBuildKey(tag: string): [number, number] | null {
   return [Number(match[1]), match[2] ? 1 : 0]
 }
 
-function mlxKey(build: OrderedBuild): [number] | null {
+/** MLX and Foundry Local: the release date. */
+function publishedKey(build: OrderedBuild): [number] | null {
   return isDateTime(build.published_at) ? [Date.parse(build.published_at)] : null
 }
 
@@ -41,11 +43,17 @@ function compareKeys(a: readonly number[] | null, b: readonly number[] | null): 
   return 0
 }
 
+/** Each engine's order key; `null` for a build whose order cannot be read. */
+const ORDER_KEYS: Record<EngineBuildId, (build: OrderedBuild) => readonly number[] | null> = {
+  'sd-cpp': (build) => sdcppBuildKey(build.tag),
+  'mlx': publishedKey,
+  'foundry-local': publishedKey,
+}
+
 /** Negative when `a` is older, positive when newer, zero when neither is. */
 export function compareBuilds(engine: EngineBuildId, a: OrderedBuild, b: OrderedBuild): number {
-  return engine === 'sd-cpp'
-    ? compareKeys(sdcppBuildKey(a.tag), sdcppBuildKey(b.tag))
-    : compareKeys(mlxKey(a), mlxKey(b))
+  const key = ORDER_KEYS[engine]
+  return compareKeys(key(a), key(b))
 }
 
 export function isNewerBuild(engine: EngineBuildId, candidate: OrderedBuild, than: OrderedBuild): boolean {

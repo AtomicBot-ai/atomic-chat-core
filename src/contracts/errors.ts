@@ -28,6 +28,12 @@ export type RuntimeErrorCode =
   | 'MLX_PROCESS_ERROR'
   /** Foundation Models plugin (`tauri-plugin-foundation-models/src/error.rs`). */
   | 'FOUNDATION_MODELS_UNAVAILABLE'
+  /** Foundry Local (change `add-foundry-local`): the variant's accelerator is not prepared yet. */
+  | 'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED'
+  /** Foundry Local: the variant's accelerator or device does not exist on this platform. */
+  | 'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED'
+  /** Foundry Local: the host process failed, or the library inside it did. */
+  | 'FOUNDRY_LOCAL_HOST_ERROR'
   | 'SERVER_START_FAILED'
   | 'SERVER_START_TIMED_OUT'
   | 'PROCESS_ERROR'

@@ -37,6 +37,11 @@ export interface AtomicCoreOptions {
   /** The platform runtimes are offered for (macOS-only engines are not registered elsewhere). Test seam. */
   platform?: NodeJS.Platform
   /**
+   * Test seam: the host facts Foundry Local's platform rule reads (change `add-foundry-local`, D7) —
+   * the CPU, the Darwin release, glibc. Omitted ones are probed; the rule then runs as on this host.
+   */
+  foundryLocalHost?: { arch?: string; osRelease?: string; glibcVersion?: string }
+  /**
    * Test seam: the docker CLI managed text runtimes run on Linux. Omitted, it is resolved from the
    * system directories (`/usr/bin`, `/usr/local/bin`, `/bin`), never `PATH`; `null` means none.
    */

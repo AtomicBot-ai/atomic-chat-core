@@ -239,3 +239,58 @@ describe('wireGpuResidency', () => {
     expect(w.calls).toEqual([])
   })
 })
+
+describe('foundry-local in GPU residency (task 6.6, spec gpu-residency)', () => {
+  function foundryWorld(foundry: GpuOccupancy[], others: Record<string, GpuOccupancy[]>) {
+    const calls: string[] = []
+    const tables: Record<string, GpuOccupancy[]> = { ...others, 'foundry-local': foundry }
+    const residency = wireGpuResidency({
+      runtimes: new Map<LocalProviderId, LocalRuntime>(
+        Object.entries(tables).map(([provider, list]) => [provider as LocalProviderId, runtime(list)])
+      ),
+      diffusion: () => ({ gpuOccupancy: () => [], unloadModel: async () => {} }),
+      leftovers: () => [],
+      sessions: () => ({
+        cancelLoad: () => false,
+        unload: async (provider, modelId): Promise<UnloadResult> => {
+          calls.push(`unload ${provider}/${modelId}`)
+          const list = tables[provider] ?? []
+          list.splice(
+            list.findIndex((o) => o.model_id === modelId),
+            1
+          )
+          return { success: true }
+        },
+      }),
+    })
+    return { residency, calls }
+  }
+
+  it('a WebGPU variant loading on a Mac stops the MLX model first', async () => {
+    const w = foundryWorld([], {
+      mlx: [{ model_id: 'qwen-mlx', cards: 'all', auxiliary: false, state: 'ready' }],
+    })
+    await w.residency.hook('foundry-local')({
+      model_id: 'qwen3-0.6b-generic-gpu',
+      cards: 'all',
+      auxiliary: false,
+    })
+    expect(w.calls).toEqual(['unload mlx/qwen-mlx'])
+  })
+
+  it('an NPU variant holds no card: a llama.cpp GPU load leaves it running', async () => {
+    const w = foundryWorld([{ model_id: 'qwen2.5-npu', cards: [], auxiliary: false, state: 'ready' }], {
+      'llamacpp-upstream': [],
+    })
+    await w.residency.hook('llamacpp-upstream')({ model_id: 'llama', cards: 'all', auxiliary: false })
+    expect(w.calls).toEqual([])
+  })
+
+  it('a CUDA or WebGPU variant is stopped like any GPU session when another engine needs the card', async () => {
+    const w = foundryWorld([{ model_id: 'phi-cuda', cards: 'all', auxiliary: false, state: 'ready' }], {
+      'llamacpp-upstream': [],
+    })
+    await w.residency.hook('llamacpp-upstream')({ model_id: 'llama', cards: 'all', auxiliary: false })
+    expect(w.calls).toEqual(['unload foundry-local/phi-cuda'])
+  })
+})

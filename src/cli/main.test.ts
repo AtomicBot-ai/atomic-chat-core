@@ -48,6 +48,27 @@ describe('runCli', () => {
     expect(USAGE, 'the detach difference from jan-cli must be stated').toContain('Ctrl+C detaches')
   })
 
+  it('runs the hidden foundry-host mode: a usage error is 2, and under Node the library cannot load (3)', async () => {
+    const usage = await run(['foundry-host', 'probe'])
+    expect(usage.exitCode).toBe(2)
+    expect(usage.stderr).toBe('--lib is required\n')
+    const node = await run([
+      'foundry-host',
+      'probe',
+      '--lib',
+      '/nowhere',
+      '--app-data',
+      '/nowhere/rt',
+      '--logs',
+      '/nowhere/l',
+    ])
+    expect(node.exitCode).toBe(3)
+    expect(node.stderr).toMatch(
+      /^foundry_local does not load from \/nowhere: .*compiled atomic-chat-core binaries only/
+    )
+    expect(USAGE).not.toContain('foundry-host')
+  })
+
   it('rejects an unknown command with usage on stderr', async () => {
     const result = await run(['nope'])
     expect(result.exitCode).toBe(2)

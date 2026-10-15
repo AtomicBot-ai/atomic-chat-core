@@ -6,6 +6,9 @@
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
+  FoundryLocalAccelerators,
+  FoundryLocalPrepareRequest,
+  FoundryLocalPrepareResult,
   EngineBuildCatalog,
   EngineBuildCatalogRequest,
   EngineBuildId,
@@ -487,6 +490,11 @@ export interface ControlServerDeps {
    */
   managedModelChecks?: Readonly<Record<string, (body: unknown) => Promise<ModelCompatibility>>>
   /**
+   * The same route for a native provider with its own answer (change `add-foundry-local`, task 6.5:
+   * `foundry-local` → `FoundryLocalCheckResult`). Asked when `managedModelChecks` has no entry.
+   */
+  nativeModelChecks?: Readonly<Record<string, (body: unknown) => Promise<object>>>
+  /**
    * `DELETE /managed-models/:id` (spec `managed-model-store`, "Модель хранилища удаляется через core"):
    * stop the model in whichever managed provider holds it, with Docker's confirmation, then remove every
    * engine cache of it and its folder. Absent where no managed provider is offered.
@@ -505,6 +513,11 @@ export interface ControlServerDeps {
    * Answers `unavailable` on a platform without the runtime.
    */
   foundationModelsAvailability?: (force: boolean) => Promise<string>
+  /**
+   * Foundry Local's accelerators (change `add-foundry-local`, task 6.4); absent where the provider is
+   * not registered, and its routes then answer `PROVIDER_NOT_FOUND`.
+   */
+  foundryLocal?: FoundryLocalControl
   cloud: CloudControl
   chatgpt: ChatGptControl
   externalSessions: ExternalSessionControl
@@ -552,4 +565,11 @@ export interface ControlRouteContext {
   snapshot: () => ControlSnapshot
   /** The server being constructed; `undefined` until `ControlServer.start` has built it. */
   self: () => ControlServer | undefined
+}
+
+export interface FoundryLocalControl {
+  /** The last probe of the active build; `force` probes again. */
+  accelerators(force: boolean): Promise<FoundryLocalAccelerators>
+  /** Downloads and registers the accelerators named (none: all offered); one at a time. */
+  prepare(request: FoundryLocalPrepareRequest): Promise<FoundryLocalPrepareResult>
 }

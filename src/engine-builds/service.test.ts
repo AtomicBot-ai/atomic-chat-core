@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readdir, readFile, readlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,8 +11,9 @@ import type { CoreEvents, EngineBuildId } from '../contracts/index.js'
 import { Downloader } from '../downloads/index.js'
 import type { DownloaderEventName } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
-import { parseMlxManifest, parseSdcppManifest } from './manifest.js'
-import type { ManifestRead, MlxManifest, SdcppManifest } from './manifest.js'
+import { parseFoundryLocalManifest, parseMlxManifest, parseSdcppManifest } from './manifest.js'
+import type { FoundryLocalManifest, ManifestRead, MlxManifest, SdcppManifest } from './manifest.js'
+import type { FoundryLocalHostPlatform } from './select.js'
 import { EngineBuildsService, IDLE_ENGINE_HOST, parseEngineBuildId } from './service.js'
 import type { EngineHost } from './service.js'
 
@@ -137,14 +138,23 @@ class FakeHost implements EngineHost {
 }
 
 function harness(
-  opts: { facts?: typeof LINUX_VULKAN | typeof MAC_ARM; space?: number; resourcesDir?: string } = {}
+  opts: {
+    facts?: typeof LINUX_VULKAN | typeof MAC_ARM
+    space?: number
+    resourcesDir?: string
+    platform?: NodeJS.Platform
+    foundryLocalHost?: FoundryLocalHostPlatform
+    foundryProbe?: (dir: string) => Promise<void>
+  } = {}
 ) {
   const manifests: {
     'sd-cpp': ManifestRead<SdcppManifest>
     'mlx': ManifestRead<MlxManifest>
+    'foundry-local': ManifestRead<FoundryLocalManifest>
   } = {
     'sd-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'mlx': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'foundry-local': { manifest: null, source: null, fetched_at: null, error: 'offline' },
   }
   const events: Array<{ name: string; payload: unknown }> = []
   const changed: Array<CoreEvents['engine-build:changed']> = []
@@ -153,6 +163,7 @@ function harness(
     const url = String(input)
       .replace(MIRROR, server.url('/releases'))
       .replace('https://github.com/AtomicBot-ai/mlx-vlm/releases/download', server.url('/releases'))
+      .replace('https://github.com/microsoft/foundry-local/releases/download', server.url('/releases'))
     return fetch(url, init)
   }
   const downloader = new Downloader({
@@ -163,19 +174,30 @@ function harness(
     sleep: async () => {},
     emit: <K extends DownloaderEventName>(name: K, payload: CoreEvents[K]) => events.push({ name, payload }),
   })
-  const hosts: Record<EngineBuildId, FakeHost> = { 'sd-cpp': new FakeHost(), 'mlx': new FakeHost() }
+  const hosts: Record<EngineBuildId, FakeHost> = {
+    'sd-cpp': new FakeHost(),
+    'mlx': new FakeHost(),
+    'foundry-local': new FakeHost(),
+  }
   let clock = 1_000
   const service = new EngineBuildsService({
     dataFolder: data.root,
-    roots: { 'sd-cpp': data.layout.diffusion.backendsDir, 'mlx': data.layout.provider('mlx').backendsDir },
+    roots: {
+      'sd-cpp': data.layout.diffusion.backendsDir,
+      'mlx': data.layout.provider('mlx').backendsDir,
+      'foundry-local': FOUNDRY_ROOT(),
+    },
     failedBackendsFile: join(data.layout.diffusion.root, 'failed-backends.json'),
     resourcesDir: opts.resourcesDir,
-    platform: 'linux',
+    platform: opts.platform ?? 'linux',
     downloader,
     manifests: {
       'sd-cpp': { read: async () => manifests['sd-cpp'] },
       'mlx': { read: async () => manifests.mlx },
+      'foundry-local': { read: async () => manifests['foundry-local'] },
     },
+    foundryLocalHost: opts.foundryLocalHost ?? { platform: 'linux-x64' },
+    ...(opts.foundryProbe ? { probe: { 'foundry-local': opts.foundryProbe } } : {}),
     hardware: async () => opts.facts ?? LINUX_VULKAN,
     hosts,
     availableSpace: async () => opts.space,
@@ -191,7 +213,58 @@ function harness(
   const setMlx = (manifest: MlxManifest) => {
     manifests.mlx = { manifest, source: 'remote', fetched_at: 1, error: null }
   }
-  return { service, downloader, events, changed, engineChanged, hosts, setSd, setMlx, manifests }
+  const setFoundry = (manifest: FoundryLocalManifest) => {
+    manifests['foundry-local'] = { manifest, source: 'remote', fetched_at: 1, error: null }
+  }
+  return { service, downloader, events, changed, engineChanged, hosts, setSd, setMlx, setFoundry, manifests }
+}
+
+const FOUNDRY_ROOT = () => join(data.root, 'foundry-local', 'backends')
+
+/** A Foundry Local archive: the libraries as plain files, plus the debug symbols Microsoft ships. */
+async function foundryArchive(name: string, files: Record<string, string>): Promise<Buffer> {
+  const dir = join(data.root, 'archive-src', name)
+  for (const [file, body] of Object.entries(files)) {
+    await mkdir(join(dir, file, '..'), { recursive: true })
+    await writeFile(join(dir, file), body)
+  }
+  const out = join(data.root, 'archive-src', `${name}.tgz`)
+  await tarCreate({ gzip: true, cwd: dir, file: out }, ['include', 'lib'])
+  return readFile(out)
+}
+
+const FOUNDRY_LINUX = {
+  'include/foundry_local/foundry_local_c.h': '#define FOUNDRY_LOCAL_API_VERSION 2',
+  'lib/libfoundry_local.so': 'so',
+  'lib/libfoundry_local.so.dbg': 'debug',
+  'lib/libonnxruntime.so': 'ort',
+  'lib/libonnxruntime-genai.so': 'genai',
+  'lib/foundry_local.pdb': 'pdb',
+  'lib/libfoundry_local.dylib.dSYM/Contents/Info.plist': 'plist',
+}
+
+function foundryManifest(
+  releases: Array<{
+    tag: string
+    published_at: string
+    c_api_version?: number
+    assets: ReturnType<typeof serve>
+  }>
+): FoundryLocalManifest {
+  return parseFoundryLocalManifest(
+    {
+      schema_version: 1,
+      upstream_repo: 'microsoft/foundry-local',
+      releases: releases.map((release) => ({
+        tag: release.tag,
+        published_at: release.published_at,
+        min_core_version: '0.1.0',
+        c_api_version: release.c_api_version ?? 2,
+        assets: release.assets.map(({ backend, ...asset }) => ({ platform: backend, ...asset })),
+      })),
+    },
+    { coreVersion: '9.9.9', cApiVersions: [2, 3] }
+  )
 }
 
 const ls = (dir: string) => readdir(dir).catch(() => [] as string[])
@@ -207,8 +280,9 @@ describe('IDLE_ENGINE_HOST', () => {
 })
 
 describe('parseEngineBuildId', () => {
-  it('knows sd-cpp and mlx only', () => {
+  it('knows sd-cpp, mlx and foundry-local only', () => {
     expect(parseEngineBuildId('mlx')).toBe('mlx')
+    expect(parseEngineBuildId('foundry-local')).toBe('foundry-local')
     expect(() => parseEngineBuildId('llamacpp')).toThrow(
       expect.objectContaining({ code: 'INVALID_ARGUMENT' })
     )
@@ -840,5 +914,234 @@ describe.skipIf(!POSIX)('EngineBuildsService.remove (task 3.4)', () => {
       removed: false,
     })
     expect(h.changed).toHaveLength(before)
+  })
+})
+
+describe.skipIf(!POSIX)('Foundry Local builds (task 4.5)', () => {
+  it('installs the host archive: debug symbols gone, the Linux soname added, probed in staging, then activated', async () => {
+    const probed: string[] = []
+    const h = harness({
+      foundryProbe: async (dir) => {
+        probed.push(dir)
+        // The probe runs against the fixed tree, before it takes the target's place.
+        expect(await readlink(join(dir, 'lib', 'libonnxruntime.so.1'))).toBe('libonnxruntime.so')
+      },
+    })
+    h.setFoundry(
+      foundryManifest([
+        {
+          tag: 'v2.1.0',
+          published_at: '2026-09-30T00:43:42Z',
+          assets: serve('v2.1.0', {
+            'linux-x64': {
+              name: 'foundry-local-linux-x64.tgz',
+              body: await foundryArchive('fl', FOUNDRY_LINUX),
+            },
+          }),
+        },
+      ])
+    )
+
+    const result = await h.service.install('foundry-local', { task_id: 'foundry-local-engine' })
+
+    const dir = join(FOUNDRY_ROOT(), 'v2.1.0', 'linux-x64')
+    expect(result).toMatchObject({ installed: true, build: { tag: 'v2.1.0', backend_id: 'linux-x64' } })
+    expect(probed).toEqual([expect.stringMatching(/linux-x64\.incoming-\d+$/)])
+    expect((await ls(join(dir, 'lib'))).sort()).toEqual([
+      'libfoundry_local.so',
+      'libonnxruntime-genai.so',
+      'libonnxruntime.so',
+      'libonnxruntime.so.1',
+    ])
+    expect((await lstat(join(dir, 'lib', 'libonnxruntime.so.1'))).isSymbolicLink()).toBe(true)
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({
+      tag: 'v2.1.0',
+      backendId: 'linux-x64',
+      publishedAt: '2026-09-30T00:43:42Z',
+      cApiVersion: 2,
+    })
+    expect(h.hosts['foundry-local'].calls).toEqual([`activate ${dir} false`])
+    const catalog = await h.service.catalog('foundry-local')
+    expect(catalog.manifest).toMatchObject({ tag: 'v2.1.0', published_at: '2026-09-30T00:43:42Z' })
+    expect(catalog.active).toMatchObject({ tag: 'v2.1.0', backend_id: 'linux-x64', removable: true })
+  })
+
+  it('adds no soname off Linux and keeps one the archive already has', async () => {
+    const mac = harness({
+      platform: 'darwin',
+      foundryLocalHost: { platform: 'macos-arm64' },
+      foundryProbe: async () => {},
+    })
+    mac.setFoundry(
+      foundryManifest([
+        {
+          tag: 'v2.1.0',
+          published_at: '2026-09-30T00:43:42Z',
+          assets: serve('v2.1.0', {
+            'macos-arm64': {
+              name: 'foundry-local-osx-arm64.tgz',
+              body: await foundryArchive('mac', FOUNDRY_LINUX),
+            },
+          }),
+        },
+      ])
+    )
+    await mac.service.install('foundry-local', { task_id: 't-mac' })
+    expect(await ls(join(FOUNDRY_ROOT(), 'v2.1.0', 'macos-arm64', 'lib'))).not.toContain(
+      'libonnxruntime.so.1'
+    )
+
+    const linux = harness({ foundryProbe: async () => {} })
+    linux.setFoundry(
+      foundryManifest([
+        {
+          tag: 'v2.2.0',
+          published_at: '2026-10-30T00:00:00Z',
+          assets: serve('v2.2.0', {
+            'linux-x64': {
+              name: 'foundry-local-linux-x64.tgz',
+              body: await foundryArchive('own-soname', {
+                ...FOUNDRY_LINUX,
+                'lib/libonnxruntime.so.1': 'real ort',
+              }),
+            },
+          }),
+        },
+      ])
+    )
+    await linux.service.install('foundry-local', { task_id: 't-linux' })
+    expect(
+      await readFile(join(FOUNDRY_ROOT(), 'v2.2.0', 'linux-x64', 'lib', 'libonnxruntime.so.1'), 'utf8')
+    ).toBe('real ort')
+  })
+
+  it('leaves nothing behind for a tampered archive or a failed probe', async () => {
+    const tampered = harness({ foundryProbe: async () => {} })
+    tampered.setFoundry(
+      foundryManifest([
+        {
+          tag: 'v2.1.0',
+          published_at: '2026-09-30T00:43:42Z',
+          assets: serve('v2.1.0', {
+            'linux-x64': {
+              name: 'foundry-local-linux-x64.tgz',
+              body: await foundryArchive('t', FOUNDRY_LINUX),
+              sha256: 'e'.repeat(64),
+            },
+          }),
+        },
+      ])
+    )
+    await expect(tampered.service.install('foundry-local', { task_id: 't1' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+    })
+    expect(await ls(join(FOUNDRY_ROOT(), 'v2.1.0'))).toEqual([])
+
+    const broken = harness({
+      foundryProbe: async () => {
+        throw new AtomicCoreError(
+          'ENGINE_INSTALL_FAILED',
+          'The Foundry Local library does not load on this computer.',
+          'libatomic.so.1: cannot open shared object file'
+        )
+      },
+    })
+    broken.setFoundry(
+      foundryManifest([
+        {
+          tag: 'v2.1.0',
+          published_at: '2026-09-30T00:43:42Z',
+          assets: serve('v2.1.0', {
+            'linux-x64': {
+              name: 'foundry-local-linux-x64.tgz',
+              body: await foundryArchive('b', FOUNDRY_LINUX),
+            },
+          }),
+        },
+      ])
+    )
+    await expect(broken.service.install('foundry-local', { task_id: 't2' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      details: expect.stringContaining('libatomic.so.1'),
+    })
+    expect(await ls(join(FOUNDRY_ROOT(), 'v2.1.0'))).toEqual([])
+    expect((await broken.service.catalog('foundry-local')).installed).toEqual([])
+  })
+
+  it('makes the newest build by release date active, skipping one this core does not speak', async () => {
+    const h = harness({ foundryProbe: async () => {} })
+    for (const [tag, published, cApi] of [
+      ['v2.0.0', '2026-08-01T00:00:00Z', 2],
+      ['v2.1.0', '2026-09-30T00:43:42Z', 2],
+    ] as const) {
+      h.setFoundry(
+        foundryManifest([
+          {
+            tag,
+            published_at: published,
+            c_api_version: cApi,
+            assets: serve(tag, {
+              'linux-x64': {
+                name: 'foundry-local-linux-x64.tgz',
+                body: await foundryArchive(tag, FOUNDRY_LINUX),
+              },
+            }),
+          },
+        ])
+      )
+      await h.service.install('foundry-local', { task_id: `t-${tag}` })
+    }
+    expect((await h.service.catalog('foundry-local')).active).toMatchObject({ tag: 'v2.1.0' })
+    // What the Foundry Local runtime and accelerators start their host from (task 6.4).
+    expect(await h.service.activeDir('foundry-local')).toBe(join(FOUNDRY_ROOT(), 'v2.1.0', 'linux-x64'))
+    expect(await harness().service.activeDir('mlx')).toBeUndefined()
+
+    // A newer build whose record names a C API this core no longer binds is never the active one.
+    const newer = join(FOUNDRY_ROOT(), 'v3.0.0', 'linux-x64')
+    await mkdir(newer, { recursive: true })
+    await writeFile(join(newer, '.atomic-owned'), 'atomic-chat\n')
+    await mkdir(join(newer, 'lib'), { recursive: true })
+    await writeFile(join(newer, 'lib', 'libfoundry_local.so'), 'so')
+    await writeFile(
+      join(newer, 'install.json'),
+      JSON.stringify({
+        tag: 'v3.0.0',
+        backendId: 'linux-x64',
+        sha256: null,
+        installedAtMs: 5,
+        publishedAt: '2026-12-01T00:00:00Z',
+        cApiVersion: 99,
+      })
+    )
+    const catalog = await h.service.catalog('foundry-local')
+    expect(catalog.installed.map((build) => build.tag).sort()).toEqual(['v2.0.0', 'v2.1.0', 'v3.0.0'])
+    expect(catalog.active).toMatchObject({ tag: 'v2.1.0' })
+  })
+
+  it('offers nothing on a host without a Foundry Local archive, saying why', async () => {
+    const h = harness({
+      foundryLocalHost: { platform: null, reason: 'Foundry Local needs macOS 15 or newer.' },
+    })
+    h.setFoundry(
+      foundryManifest([
+        {
+          tag: 'v2.1.0',
+          published_at: '2026-09-30T00:43:42Z',
+          assets: serve('v2.1.0', {
+            'linux-x64': {
+              name: 'foundry-local-linux-x64.tgz',
+              body: await foundryArchive('n', FOUNDRY_LINUX),
+            },
+          }),
+        },
+      ])
+    )
+    expect(await h.service.catalog('foundry-local')).toMatchObject({
+      host_backend_id: null,
+      host_reason: 'Foundry Local needs macOS 15 or newer.',
+    })
+    await expect(h.service.install('foundry-local', { task_id: 't' })).rejects.toMatchObject({
+      code: 'UNSUPPORTED_BACKEND',
+    })
   })
 })

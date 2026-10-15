@@ -217,6 +217,27 @@ describe('authentication', () => {
     expect(reached).toBe(false)
   })
 
+  it('prefixes the upstream base path, so a session served under a sub-path keeps the client paths', async () => {
+    const upstream = await startFakeUpstream((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end(`saw ${req.url}`)
+    })
+    upstreams.push(upstream)
+    const apiKey = generateGatewayKey()
+    const gw = await startManagedGateway({
+      upstream: { host: '127.0.0.1', port: upstream.port, basePath: '/catalogs/local' },
+      apiKey,
+      allowedHosts: [],
+      routes: DEFAULT_TEST_ROUTES,
+    })
+    gateways.push(gw)
+    const res = await send(gw.port, {
+      path: '/v1/models?limit=1',
+      headers: { host: '127.0.0.1', authorization: `Bearer ${apiKey}` },
+    })
+    expect(res.body).toBe('saw /catalogs/local/v1/models?limit=1')
+  })
+
   it('passes an authorized request from an allowed Host through to the container', async () => {
     let seenAuthHeaders: IncomingMessage['headers'] | undefined
     const { gw, apiKey } = await setup((req, res) => {

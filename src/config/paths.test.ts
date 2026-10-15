@@ -36,6 +36,17 @@ describe('dataLayout', () => {
     }
     expect(MANAGED_PROVIDER_IDS).toContain('sglang')
   })
+  it('gives foundry-local its builds, models, library data, host caches and logs under <data>/foundry-local', () => {
+    const foundry = layout.provider('foundry-local')
+    expect(foundry).toEqual({
+      root: native('/data/foundry-local'),
+      backendsDir: native('/data/foundry-local/backends'),
+      modelsDir: native('/data/foundry-local/models'),
+      runtimeDir: native('/data/foundry-local/runtime'),
+      tmpDir: native('/data/foundry-local/tmp'),
+      logsDir: native('/data/foundry-local/logs'),
+    })
+  })
   it('gives atomic-prism its own packs and the shared GGUF tree', () => {
     const prism = layout.provider('atomic-prism')
     expect(prism.modelsDir).toBe(native('/data/llamacpp/models'))

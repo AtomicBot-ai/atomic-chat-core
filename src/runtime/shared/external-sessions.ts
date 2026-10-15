@@ -51,6 +51,7 @@ const PROVIDERS: ReadonlySet<string> = new Set([
   'tensorrt-llm',
   'vllm',
   'sglang',
+  'foundry-local',
 ])
 
 export interface ExternalSessionsOptions {

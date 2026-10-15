@@ -39,6 +39,8 @@ export interface ModelYml {
    * llama.cpp provider; the load gate still reads the header either way.
    */
   atomic_runtime?: ModelYmlAtomicRuntime
+  /** A Foundry Local variant (`<data>/foundry-local/models/<variant_id>/`), written by the app's installer. */
+  foundry_local?: ModelYmlFoundryLocal
 }
 
 export interface ModelYmlAtomicRuntime {
@@ -49,6 +51,42 @@ export interface ModelYmlAtomicRuntime {
   min_build?: number
   /** Conf model-rules family id. */
   family?: string
+}
+
+/** The accelerators a Foundry Local variant may name, as conf's model list spells them. */
+export const FOUNDRY_LOCAL_EXECUTION_PROVIDERS = [
+  'cpu',
+  'cuda',
+  'webgpu',
+  'openvino',
+  'qnn',
+  'vitisai',
+] as const
+export type FoundryLocalExecutionProvider = (typeof FOUNDRY_LOCAL_EXECUTION_PROVIDERS)[number]
+
+export const FOUNDRY_LOCAL_DEVICES = ['cpu', 'gpu', 'npu'] as const
+export type FoundryLocalDevice = (typeof FOUNDRY_LOCAL_DEVICES)[number]
+
+/**
+ * The `foundry_local` block (openspec change `add-foundry-local`, design D4): which variant the folder
+ * holds and what the host registers it with. The accelerator is passed to the library explicitly.
+ */
+export interface ModelYmlFoundryLocal {
+  /** The model the variant belongs to (conf list id, or the catalog's parent model). */
+  model_id: string
+  variant_id: string
+  execution_provider: FoundryLocalExecutionProvider
+  device: FoundryLocalDevice
+  /** `azureml://registries/<r>/models/<name>/versions/<v>`. */
+  asset_id?: string
+  asset_version?: string
+  /** The variant's context, when it is smaller than the model's (NPU builds). */
+  context_length?: number
+  tools: boolean
+  reasoning: boolean
+  /** The markers the library splits reasoning on; without them `<think>` lands in the text (operator decision Q1). */
+  reasoning_start?: string
+  reasoning_end?: string
 }
 
 /** Key order the app's serde_yaml writer produces; `writeModelYml` must emit keys in this order. */
@@ -69,4 +107,5 @@ export const MODEL_YML_KEY_ORDER: readonly (keyof ModelYml)[] = [
   'source',
   'capabilities',
   'atomic_runtime',
+  'foundry_local',
 ]

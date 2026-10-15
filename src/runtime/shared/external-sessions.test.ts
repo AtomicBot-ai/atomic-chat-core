@@ -80,6 +80,10 @@ describe('ExternalSessions', () => {
       generation: 4,
       sessions: 1,
     })
+    expect(sessions.publish('app', 5, [{ provider: 'foundry-local', model_id: 'f', port: 5 }])).toEqual({
+      generation: 5,
+      sessions: 1,
+    })
   })
 
   it('asks the owner to grow a context and resolves with its answer, once', async () => {

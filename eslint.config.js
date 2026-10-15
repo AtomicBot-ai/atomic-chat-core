@@ -77,5 +77,25 @@ export default tseslint.config(
         },
       ],
     },
+  },
+  {
+    // The one exception to "no bun:*" (operator decision Q2 of change add-foundry-local): the Foundry
+    // Local host's bindings, imported dynamically by the hidden `foundry-host` mode alone. Every other
+    // restriction of the runtime-agnostic block stays.
+    files: ['src/runtime/foundry-local/host/ffi-bun.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: NODE_BUILTINS.map((name) => ({ name, message: `Import '${name}' as 'node:${name}'.` })),
+          patterns: [
+            {
+              group: ['../*/!(index)', '../*/!(index).js'],
+              message: 'Import sibling modules through their index.ts only.',
+            },
+          ],
+        },
+      ],
+    },
   }
 )

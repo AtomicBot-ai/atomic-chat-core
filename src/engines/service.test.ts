@@ -30,6 +30,21 @@ describe('hostEngines', () => {
       'sglang',
     ])
   })
+
+  it('lists foundry-local after the engine builds on a host that supports it, on every OS', () => {
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      const engines = hostEngines(platform, [], { foundryLocal: true })
+      expect(engines).toContain('foundry-local')
+      expect(engines.indexOf('foundry-local')).toBe(
+        engines.indexOf('sd-cpp') + (platform === 'darwin' ? 2 : 1)
+      )
+    }
+  })
+
+  it('has no foundry-local where the host does not support it, and none by default', () => {
+    expect(hostEngines('darwin', [], { foundryLocal: false })).not.toContain('foundry-local')
+    expect(hostEngines('linux', ['vllm'])).not.toContain('foundry-local')
+  })
 })
 
 function fakeHandle(engine: EngineId, kind: EngineKind, over: Partial<EngineHandle> = {}): EngineHandle {

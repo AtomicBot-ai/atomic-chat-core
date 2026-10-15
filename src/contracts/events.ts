@@ -14,6 +14,7 @@ import type {
 } from './diffusion.js'
 import type { EngineBuildChangedEvent } from './engine-builds.js'
 import type { EngineChangedEvent } from './engines.js'
+import type { FoundryLocalAcceleratorsEvent } from './foundry-local.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { EmbeddingErrorEvent, EmbeddingStateEvent } from './embedding.js'
@@ -200,6 +201,13 @@ export interface CoreEvents {
    * the desktop releases that listen to it.
    */
   'engine:changed': EngineChangedEvent
+
+  /**
+   * One accelerator's step of `POST /runtimes/foundry-local/accelerators/prepare` (change
+   * `add-foundry-local`, design D3): progress while the library downloads it, then `done` or
+   * `failed`. Re-read `GET /runtimes/foundry-local/accelerators` after the last one.
+   */
+  'foundry-local:accelerators': FoundryLocalAcceleratorsEvent
 
   /**
    * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). `state` on every

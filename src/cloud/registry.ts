@@ -28,6 +28,7 @@ const LOCAL_PROVIDERS = new Set([
   'tensorrt-llm',
   'vllm',
   'sglang',
+  'foundry-local',
 ])
 
 export interface CustomHeader {
