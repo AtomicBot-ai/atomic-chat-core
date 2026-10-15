@@ -10,12 +10,17 @@
 import type { RuntimeDeviceInfo } from '../../contracts/index.js'
 import { floatAsU64, parseRustF64, parseRustI32 } from '../../util/index.js'
 
-/** Lines that say a GPU backend failed to come up; the first one seen is reported as is. */
+/**
+ * Lines that say a GPU backend failed to come up; the first one seen is reported as is. Each is what
+ * a real build prints (engine-contract.json `strings`): `ggml_cuda_init: failed to initialize CUDA:
+ * <reason>`, the dynamic loader's own message, `load_backend: failed to load <path>: <error>` (only
+ * for a backend loaded by name — release builds load the rest silently), Vulkan without a device,
+ * and `-ngl` on a build that cannot offload.
+ */
 export const DEVICE_INIT_ERROR_MARKERS = [
   'failed to initialize CUDA',
-  'no CUDA devices found',
   'error while loading shared libraries',
-  'failed to load backend',
+  'load_backend: failed to load ',
   'ggml_vulkan: No devices found',
   'no usable GPU found',
 ]

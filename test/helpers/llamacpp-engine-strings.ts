@@ -137,12 +137,7 @@ export const CONTRACT_STRINGS: ContractString[] = [
     upstream_text: 'failed to initialize " GGML_CUDA_NAME',
     severity_if_lost: 'warn',
     live_expectation: 'conditional',
-    note: '`ggml_cuda_init: failed to initialize CUDA: <reason>` on a CUDA build without a usable device.',
-  }),
-  log('device.init-error.no-cuda-devices', 'no CUDA devices found', DEVICE, {
-    severity_if_lost: 'info',
-    live_expectation: 'unobservable',
-    note: 'Neither upstream nor the TurboQuant fork prints it; a CUDA build without a device says `failed to initialize CUDA`.',
+    note: '`ggml_cuda_init: failed to initialize CUDA: <reason>` on a CUDA build without a usable device (`no CUDA-capable device is detected`).',
   }),
   log('device.init-error.shared-libraries', 'error while loading shared libraries', DEVICE, {
     upstream_text: null,
@@ -150,10 +145,11 @@ export const CONTRACT_STRINGS: ContractString[] = [
     live_expectation: 'conditional',
     note: 'The Linux dynamic loader, when a backend library’s dependency (libcudart, libvulkan) is missing.',
   }),
-  log('device.init-error.failed-to-load-backend', 'failed to load backend', DEVICE, {
+  log('device.init-error.load-backend-failed', 'load_backend: failed to load ', DEVICE, {
+    upstream_text: '%s: failed to load %s: %s',
     severity_if_lost: 'info',
     live_expectation: 'unobservable',
-    note: 'Not upstream’s wording: ggml-backend-reg.cpp prints `load_backend: failed to load <path>: <error>`.',
+    note: 'ggml-backend-reg.cpp, for a backend library that does not load (libcudart missing). Release builds load their backends silently (NDEBUG), so only a debug build or GGML_BACKEND_PATH prints it; the CUDA path probe covers the missing runtime instead.',
   }),
   log('device.init-error.vulkan-no-devices', 'ggml_vulkan: No devices found', DEVICE, {
     severity_if_lost: 'warn',
