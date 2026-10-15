@@ -1097,6 +1097,8 @@ describe.skipIf(!POSIX)('Foundry Local builds (task 4.5)', () => {
     const newer = join(FOUNDRY_ROOT(), 'v3.0.0', 'linux-x64')
     await mkdir(newer, { recursive: true })
     await writeFile(join(newer, '.atomic-owned'), 'atomic-chat\n')
+    await mkdir(join(newer, 'lib'), { recursive: true })
+    await writeFile(join(newer, 'lib', 'libfoundry_local.so'), 'so')
     await writeFile(
       join(newer, 'install.json'),
       JSON.stringify({

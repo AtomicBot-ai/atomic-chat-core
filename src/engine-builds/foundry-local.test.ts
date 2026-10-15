@@ -43,6 +43,14 @@ describe.skipIf(!POSIX)('prepareFoundryLocalTree', () => {
     expect(await readdir(join(dir, 'include', 'foundry_local'))).toEqual(['foundry_local_c.h'])
   })
 
+  it('keeps a soname the archive ships as a dangling link instead of failing on it', async () => {
+    await tree(dir, ['lib/libonnxruntime.so'])
+    const { symlink } = await import('node:fs/promises')
+    await symlink('libonnxruntime.so.1.30.0', join(dir, 'lib', 'libonnxruntime.so.1'))
+    await prepareFoundryLocalTree(dir, 'linux')
+    expect(await readlink(join(dir, 'lib', 'libonnxruntime.so.1'))).toBe('libonnxruntime.so.1.30.0')
+  })
+
   it('adds no soname on macOS or Windows, and none when the library is absent', async () => {
     await tree(dir, ['lib/libonnxruntime.so', 'lib/libonnxruntime.1.dylib'])
     await prepareFoundryLocalTree(dir, 'darwin')
@@ -67,9 +75,12 @@ describe('listFoundryLocalBuilds', () => {
     for (const [tag, at] of [
       ['v2.0.0', 10],
       ['v2.1.0', 20],
+      ['v2.2.0', 25],
     ] as const) {
       await mkdir(join(dir, tag, 'linux-x64'), { recursive: true })
       await writeFoundryLocalInstallRecord(join(dir, tag, 'linux-x64'), record(tag, at))
+      // v2.2.0 lost its library (an antivirus quarantine, a hand-deleted lib/): not a build.
+      if (tag !== 'v2.2.0') await tree(join(dir, tag, 'linux-x64'), ['lib/libfoundry_local.so'])
     }
     await mkdir(join(dir, 'v9.0.0', 'linux-x64'), { recursive: true })
     await writeFile(join(dir, 'v9.0.0', 'linux-x64', 'install.json'), JSON.stringify(record('v9.0.0', 30)))

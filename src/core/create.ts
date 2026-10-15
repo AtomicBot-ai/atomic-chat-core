@@ -505,13 +505,17 @@ export async function createAtomicCore(
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
     // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
-    // from the process report, which Bun's compiled binaries fill in as Node does; musl has none.
+    // from the process report, which Bun's compiled binaries fill in as Node does; musl has none. The
+    // report is a whole diagnostic snapshot, so it is built on Linux only, where glibc decides.
     const foundryLocalHost = foundryLocalHostPlatform({
       platform,
       arch: process.arch,
       osRelease: osRelease(),
-      glibcVersion: (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)
-        ?.header?.glibcVersionRuntime,
+      glibcVersion:
+        platform === 'linux'
+          ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
+              ?.glibcVersionRuntime
+          : undefined,
     })
     const foundryLocalPaths = layout.provider('foundry-local')
     const foundryHost = foundryHostCommand(env)

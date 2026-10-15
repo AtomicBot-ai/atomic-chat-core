@@ -6,7 +6,7 @@
  * build records the C API version it was published with, which decides whether this core can run it.
  */
 
-import { readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { lstat, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/install.js'
 import { isDateTime } from './manifest.js'
@@ -19,6 +19,12 @@ const ORT_LIBRARY = 'libonnxruntime.so'
 
 const exists = (path: string): Promise<boolean> =>
   stat(path).then(
+    () => true,
+    () => false
+  )
+/** The name itself, a dangling symlink included. */
+const named = (path: string): Promise<boolean> =>
+  lstat(path).then(
     () => true,
     () => false
   )
@@ -37,7 +43,7 @@ export async function prepareFoundryLocalTree(staging: string, platform: NodeJS.
   await removeDebugSymbols(staging)
   if (platform !== 'linux') return
   const lib = join(staging, 'lib')
-  if ((await exists(join(lib, ORT_LIBRARY))) && !(await exists(join(lib, ORT_SONAME))))
+  if ((await exists(join(lib, ORT_LIBRARY))) && !(await named(join(lib, ORT_SONAME))))
     await symlink(ORT_LIBRARY, join(lib, ORT_SONAME))
 }
 
@@ -95,7 +101,15 @@ async function readFoundryLocalInstallRecord(dir: string): Promise<FoundryLocalI
   }
 }
 
-/** Every marked `<root>/<tag>/<platform>/` with a record, newest install first. */
+/** The Foundry Local library under `lib/`, by each system's name for it. */
+const LIBRARY_NAMES = ['libfoundry_local.dylib', 'libfoundry_local.so', 'foundry_local.dll']
+
+async function hasLibrary(dir: string): Promise<boolean> {
+  for (const name of LIBRARY_NAMES) if (await exists(join(dir, 'lib', name))) return true
+  return false
+}
+
+/** Every marked `<root>/<tag>/<platform>/` with a record and its library, newest install first. */
 export async function listFoundryLocalBuilds(root: string): Promise<FoundryLocalInstallRecord[]> {
   const out: FoundryLocalInstallRecord[] = []
   for (const tag of await readdir(root).catch(() => [] as string[]))
@@ -103,7 +117,7 @@ export async function listFoundryLocalBuilds(root: string): Promise<FoundryLocal
       const dir = join(root, tag, backend)
       if (!(await exists(join(dir, OWNER_MARKER)))) continue
       const record = await readFoundryLocalInstallRecord(dir)
-      if (record) out.push(record)
+      if (record && (await hasLibrary(dir))) out.push(record)
     }
   return out.sort((a, b) => b.installedAtMs - a.installedAtMs)
 }
