@@ -11,14 +11,17 @@
 import { constants, cpus } from 'node:os'
 import { mkdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { AtomicCoreError, DiffusionModality } from '../contracts/index.js'
+import { AtomicCoreError } from '../contracts/index.js'
+import type { DiffusionModality } from '../contracts/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import {
   backendOutputReporter,
   buildProcessEnv,
   discoverCudaPaths,
   nodeCudaProbeEnv,
+  exitedOnTakenPort,
   randomFreePort,
+  retryOnTakenPort,
   spawnManaged,
 } from '../runtime/shared/index.js'
 import type { BackendOutputSink, ManagedProcess } from '../runtime/shared/index.js'
@@ -147,9 +150,26 @@ export function modeMismatchError(
 
 /**
  * Spawn `sd-server` for `spec`, wait until it serves the model, and probe its capabilities. On any
- * failure the child is dead when this rejects.
+ * failure the child is dead when this rejects. A start that died because its port was taken before
+ * the engine could bind it (`randomFreePort`'s probe is racy) goes again on another port, as the
+ * llama.cpp, embedding and decision engines do.
  */
 export async function spawnServer(
+  spec: ServerSpec,
+  scratchDir: string,
+  deps: SpawnServerDeps
+): Promise<ServerHandle> {
+  return retryOnTakenPort(
+    () => spawnServerOnce(spec, scratchDir, deps),
+    (error) =>
+      error instanceof AtomicCoreError &&
+      error.code === 'MODEL_LOAD_FAILED' &&
+      exitedOnTakenPort(error.details),
+    (attempt) => deps.log?.('warn', `sd-server's port was taken while it started; retrying (${attempt})`)
+  )
+}
+
+async function spawnServerOnce(
   spec: ServerSpec,
   scratchDir: string,
   deps: SpawnServerDeps

@@ -4,6 +4,7 @@
  */
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
@@ -323,6 +324,36 @@ describe.skipIf(!posix)('spawnServer', () => {
     ).rejects.toThrow('journal unwritable')
     const [pid] = await startedPids()
     expect(isProcessAlive(pid as number)).toBe(false)
+  })
+
+  it('starts again on another port when the one it picked was taken before sd-server bound it', async () => {
+    const spec = await engine()
+    // Another process takes the port between the probe and the engine's own bind.
+    const holder = createServer((socket) => socket.destroy())
+    await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve))
+    const taken = (holder.address() as { port: number }).port
+    const picked: number[] = []
+    const log: string[] = []
+    try {
+      const handle = await spawnServer(spec, join(dir, 'scratch'), {
+        http,
+        log: (level, msg) => log.push(`${level}: ${msg}`),
+        freePort: async () => {
+          const free = createServer()
+          await new Promise<void>((resolve) => free.listen(0, '127.0.0.1', resolve))
+          const port = picked.length === 0 ? taken : (free.address() as { port: number }).port
+          await new Promise((resolve) => free.close(resolve))
+          picked.push(port)
+          return port
+        },
+      })
+      handles.push(handle)
+      expect(picked).toHaveLength(2)
+      expect(handle.port).toBe(picked[1])
+      expect(log).toContain("warn: sd-server's port was taken while it started; retrying (1)")
+    } finally {
+      await new Promise((resolve) => holder.close(resolve))
+    }
   })
 
   it('reports a scratch directory it cannot create, and a port it cannot find', async () => {
