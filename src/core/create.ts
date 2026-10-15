@@ -40,7 +40,6 @@ import {
   ensureBackend,
   ensureTurboquantCudart,
   ensureUpstreamCudart,
-  probeLinuxRocmHost,
   OptimalBackendStore,
   readRuntimeSettings,
   resolveBackendExe,
@@ -80,9 +79,7 @@ import {
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
-import { compatibilityFor, wireModelSetups } from './model-setup/index.js'
-import type { ModelSetupWiringDeps } from './model-setup/index.js'
-import { currentPrismPack, wirePrismCompatibility } from './prism.js'
+import { compatibilityFor, removeLegacyPrismSetups, wirePrismCompatibility } from './prism.js'
 import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
@@ -361,11 +358,10 @@ export async function createAtomicCore(
       log: (level, message) => log(level, message),
     })
     // Test hooks (docs/contracts.md "Test hooks"): where the upstream release list, the PrismML
-    // manifest, the model rules and model files are read from. Unset in production.
+    // manifest and the model rules are read from. Unset in production.
     const upstreamReleasesUrl = env['ATOMIC_LLAMACPP_UPSTREAM_RELEASES_URL']
     const prismManifestUrl = env['ATOMIC_PRISM_MANIFEST_URL']
     const prismRulesUrl = env['ATOMIC_PRISM_MODEL_RULES_URL']
-    const hfEndpoint = env['ATOMIC_HF_ENDPOINT']
     // One release list for the advisor and the installs, so a catalog and the download it leads to
     // read the same hashes.
     const upstreamCatalog = new UpstreamReleasesCatalogService({
@@ -395,7 +391,6 @@ export async function createAtomicCore(
       env,
       log,
     })
-    const allowPrismCandidates = () => settings.get('atomic-prism')['allow_candidate_builds'] === true
     const advisors = new Map<LlamacppProviderId, BackendAdvisor>()
     const backendAdvisor = (provider: LlamacppProviderId): BackendAdvisor => {
       const existing = advisors.get(provider)
@@ -460,8 +455,7 @@ export async function createAtomicCore(
       backendServices.set(provider, created)
       return created
     }
-    // One model-setup runner per core: it owns the in-memory table of runs and the shared engine
-    // installs that a cancel works from. The records survive a restart as `interrupted`.
+    // `POST /models/compatibility` by `model_id`: the verdict is read from the registered file on disk.
     const modelFile = async (provider: LocalProviderId, modelId: string) => {
       const registry = registries.get(provider)
       if (!(registry instanceof ModelRegistry)) throw unknownProvider(provider, registries.keys())
@@ -471,32 +465,6 @@ export async function createAtomicCore(
         ...(yml.model_sha256 ? { sha256: yml.model_sha256 } : {}),
       }
     }
-    const modelSetupDeps: ModelSetupWiringDeps = {
-      layout,
-      compatibility: prismCompatibility,
-      prismCatalog,
-      hardware: () => hardware.facts(),
-      offer: () => ({ coreVersion: CORE_VERSION, allowCandidates: allowPrismCandidates() }),
-      currentPack: () => currentPrismPack({ layout, settings, hardware }),
-      installEngine: (version, backend, opts) =>
-        backendService('atomic-prism').install(version, backend, opts),
-      selectEngine: (versionBackend) => settings.update('atomic-prism', { version_backend: versionBackend }),
-      downloader,
-      register: async (provider, modelId, yml) => {
-        await (registries.get(provider) as ModelRegistry).write(modelId, yml)
-      },
-      modelFile,
-      emit: (name, payload) => emitter.emit(name, payload),
-      freeBytes: () => availableDiskSpace(layout.root, undefined),
-      fetchFor,
-      newId: () => randomUUID(),
-      ...(hfEndpoint ? { hfEndpoint } : {}),
-      env,
-      platform,
-      ...(platform === 'linux' ? { rocmProbe: () => probeLinuxRocmHost() } : {}),
-      log,
-    }
-    const modelSetups = wireModelSetups(modelSetupDeps)
 
     // Cloud and self-hosted providers' image and video models (ADR
     // 2026-10-13-remote-media-shares-the-diffusion-job-table). `ATOMIC_MEDIA_CATALOG_URL` is a test hook
@@ -828,16 +796,10 @@ export async function createAtomicCore(
           embed: (provider, modelId, input, ubatchSize) =>
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),
         },
-        modelSetups: {
-          compatibility: (request) => compatibilityFor(modelSetupDeps, request),
-          plan: (request) => modelSetups.plan(request),
+        modelCompatibility: {
+          compatibility: (request) =>
+            compatibilityFor({ compatibility: prismCompatibility, modelFile }, request),
           families: () => prismCompatibility.families(),
-          start: (request) => modelSetups.start(request),
-          list: () => modelSetups.list(),
-          get: (setupId) => modelSetups.get(setupId),
-          cancel: (setupId) => modelSetups.cancel(setupId),
-          resume: (setupId, opts) => modelSetups.resume(setupId, opts),
-          snapshot: () => modelSetups.snapshot(),
         },
         managedModelChecks,
         ...(managedModelDelete !== null ? { managedModelDelete } : {}),
@@ -1023,8 +985,10 @@ export async function createAtomicCore(
     // Before the first load (design D5): downloaded engine builds no newer than the installer's, the
     // ones a session kept on the last install, the leftovers of an interrupted install.
     await engineBuilds.startupCleanup()
-    // A model setup a stopped core left mid-way becomes `interrupted`, resumable from its files.
-    await modelSetups.recover().catch((e: unknown) => warn(`model setup recovery: ${String(e)}`))
+    // Bonsai setup records an older core left; the core no longer downloads models, so none resumes.
+    await removeLegacyPrismSetups(layout.core.dir).catch((e: unknown) =>
+      warn(`removing the old model setup records: ${String(e)}`)
+    )
     // A tunnel is worse to orphan than a backend: it keeps a public URL pointed at a local port.
     await reapTunnelOrphan(layout.core.remoteAccessTunnel, { log: warn })
     // Atomic Chat 2.0.40 journalled its tunnel at the data root and reaped it at its own startup; the

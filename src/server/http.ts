@@ -144,7 +144,6 @@ export function statusForCode(code: ErrorCode): number {
     case 'MODEL_MISSING':
     case 'SIDE_FILE_MISSING':
     case 'MANAGED_OPERATION_NOT_FOUND':
-    case 'MODEL_SETUP_NOT_FOUND':
       return 404
     case 'CORE_ALREADY_RUNNING':
     case 'AUTH_CANCELLED':
@@ -179,7 +178,6 @@ export function statusForCode(code: ErrorCode): number {
     case 'EMBEDDING_NOT_CONFIGURED':
     case 'EMBEDDING_ENGINE_UNSUPPORTED':
     case 'EMBEDDING_MODEL_NOT_EMBEDDING':
-    case 'MODEL_SETUP_PLAN_STALE':
       return 409
     case 'QUEUE_FULL':
     case 'REMOTE_RATE_LIMITED':

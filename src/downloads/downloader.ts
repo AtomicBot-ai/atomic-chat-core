@@ -24,7 +24,7 @@
 import { createWriteStream } from 'node:fs'
 import { mkdir, readFile, realpath, rename, rm, rmdir, stat, statfs, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import type { CoreEvents, DownloadStage } from '../contracts/index.js'
+import type { CoreEvents, DownloadProgress, DownloadStage } from '../contracts/index.js'
 import { checkFreeSpace, checkPathWithinLimit, diskErrToString, remainingBytes } from './disk.js'
 import type { ProxyConfig } from './protocol.js'
 import {
@@ -96,14 +96,6 @@ interface Task {
   superseded: boolean
   /** The last combined progress this task reported, for `snapshot()`. */
   progress?: DownloadProgress
-}
-
-/** One running task's combined progress, as its last `download:progress` event said. */
-export interface DownloadProgress {
-  taskId: string
-  transferred: number
-  total: number
-  percent: number
 }
 
 /** With `streams` > 1, progress is also reported this often while bytes flow. */

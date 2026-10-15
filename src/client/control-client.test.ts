@@ -9,7 +9,7 @@ import type {
   BackendCatalogRequest,
   BackendRecommendationRequest,
   BackendUpdateCheckRequest,
-  ModelSetup,
+  DownloadProgress,
 } from '../contracts/index.js'
 import { fakeCatalog } from '../../test/helpers/control-harness.js'
 import { fakeEngineBuildsControl } from '../../test/helpers/fake-engine-builds-control.js'
@@ -48,19 +48,9 @@ const diffusionCalls: string[] = []
 const engineBuildCalls: string[] = []
 const engineCalls: string[] = []
 const environmentCalls: string[] = []
-const setupCalls: string[] = []
+const compatibilityCalls: string[] = []
 
-const SETUP = {
-  setup_id: 's1',
-  request_id: 'r1',
-  revision: 0,
-  stage: 'queued',
-  request: { repo: 'o/r', file: 'f.gguf' },
-  plan: { digest: 'd', model_id: 'o/f' },
-  task_ids: { model: 'model-setup-s1-model' },
-  created_at: 1,
-  updated_at: 1,
-} as unknown as ModelSetup
+const ENGINE_DOWNLOAD: DownloadProgress = { taskId: 'engine-1', transferred: 1, total: 2, percent: 50 }
 
 const OPERATION: EnvironmentOperation = {
   schema_version: 1,
@@ -206,9 +196,9 @@ beforeEach(async () => {
     },
     environmentsSnapshot: () => [{ environment_id: 'default' } as EnvironmentSnapshot],
     environmentOperations: () => [OPERATION],
-    modelSetups: {
+    modelCompatibility: {
       compatibility: async (request) => {
-        setupCalls.push(`compatibility:${request.repo}`)
+        compatibilityCalls.push(`compatibility:${request.repo ?? request.model_id}`)
         return {
           outcome: 'engine_required',
           provider: 'atomic-prism',
@@ -218,33 +208,12 @@ beforeEach(async () => {
           reason: 'r',
         }
       },
-      plan: async (request) => {
-        setupCalls.push(`plan:${request.file}`)
-        return SETUP.plan
-      },
       families: async () => {
-        setupCalls.push('families')
+        compatibilityCalls.push('families')
         return { rules_version: 2, families: [] }
       },
-      start: async (request) => {
-        setupCalls.push(`start:${request.request_id}:${request.plan_digest}`)
-        return SETUP
-      },
-      list: async () => [SETUP],
-      get: async (id) => {
-        setupCalls.push(`get:${id}`)
-        return SETUP
-      },
-      cancel: async (id) => {
-        setupCalls.push(`cancel:${id}`)
-        return { ...SETUP, stage: 'cancelled' }
-      },
-      resume: async (id, options) => {
-        setupCalls.push(`resume:${id}:${JSON.stringify(options.proxy)}`)
-        return SETUP
-      },
-      snapshot: () => [SETUP],
     },
+    downloads: () => [ENGINE_DOWNLOAD],
     backends: {
       list: async () => [],
       install: async (_p: string, version: string, backend: string) => ({
@@ -870,30 +839,30 @@ describe('request', () => {
   })
 })
 
-describe('model compatibility and setup', () => {
-  it('drives compatibility, plan, start, list, get, cancel and resume, and reads the snapshot field', async () => {
-    setupCalls.length = 0
+describe('model compatibility', () => {
+  it('drives compatibility before and after download and the families', async () => {
+    compatibilityCalls.length = 0
     expect((await client.modelCompatibility({ repo: 'o/r', file: 'f.gguf' })).outcome).toBe('engine_required')
-    expect((await client.modelSetupPlan({ repo: 'o/r', file: 'f.gguf' })).digest).toBe('d')
+    await client.modelCompatibility({ model_id: 'o/m', provider: 'atomic-prism' })
     expect(await client.prismFamilies()).toEqual({ rules_version: 2, families: [] })
-    expect(
-      (await client.startModelSetup({ repo: 'o/r', file: 'f.gguf', request_id: 'r1', plan_digest: 'd' }))
-        .setup_id
-    ).toBe('s1')
-    expect(await client.modelSetups()).toEqual([SETUP])
-    expect((await client.modelSetup('s1')).stage).toBe('queued')
-    expect((await client.cancelModelSetup('s1')).stage).toBe('cancelled')
-    await client.resumeModelSetup('s1')
-    expect((await client.snapshot()).model_setups).toEqual([SETUP])
-    expect(setupCalls).toEqual([
-      'compatibility:o/r',
-      'plan:f.gguf',
-      'families',
-      'start:r1:d',
-      'get:s1',
-      'cancel:s1',
-      'resume:s1:null',
-    ])
+    expect(compatibilityCalls).toEqual(['compatibility:o/r', 'compatibility:o/m', 'families'])
+  })
+
+  it('has no model setup methods, and the snapshot has typed engine downloads and no model_setups', async () => {
+    for (const method of [
+      'modelSetupPlan',
+      'startModelSetup',
+      'modelSetups',
+      'modelSetup',
+      'cancelModelSetup',
+      'resumeModelSetup',
+    ]) {
+      expect(method in client).toBe(false)
+    }
+    const snapshot = await client.snapshot()
+    expect(snapshot).not.toHaveProperty('model_setups')
+    const downloads: DownloadProgress[] = snapshot.downloads
+    expect(downloads).toEqual([ENGINE_DOWNLOAD])
   })
 })
 

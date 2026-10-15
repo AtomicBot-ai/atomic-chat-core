@@ -95,9 +95,6 @@ export type CoreErrorCode =
   | 'MODEL_ENGINE_INCOMPATIBLE'
   /** A legacy layout no current engine runs (Bonsai Q2_0 group-128); `details` names the replacement. */
   | 'MODEL_FORMAT_LEGACY'
-  /** A model setup was started from a plan whose inputs changed since it was computed; plan again. */
-  | 'MODEL_SETUP_PLAN_STALE'
-  | 'MODEL_SETUP_NOT_FOUND'
   /** Another install of the same engine build (sd.cpp, MLX) is running; wait for it. */
   | 'ENGINE_INSTALL_IN_PROGRESS'
 

@@ -8,7 +8,6 @@
  *   <data>/llamacpp-upstream/tmp/
  *   <data>/atomic-prism/backends/<version>/<backend>/build/bin/llama-server  (PrismML llama.cpp, Bonsai)
  *   <data>/atomic-prism/tmp/
- *   <data>/atomic-core/prism-setups/<operation id>.json  (Bonsai setup operations)
  *   <data>/mlx/models/<id>/{model.yml, config.json, *.safetensors}
  *   <data>/diffusion/{backends/<tag>/<backend>/, models/, scratch/}, <data>/images/  (image generation; the app's paths since v2.0.38)
  *   <data>/videos/  (video generation; the folder the app's ADR of 2026-09-10 reserved)
@@ -78,8 +77,6 @@ export interface CoreFiles {
   cloudflaredEmptyConfig: string
   /** The core's own error-reporting state: the user's stored choice, the install id. */
   telemetry: string
-  /** `<dir>/prism-setups`: one record per Bonsai setup operation (engine + model + projector). */
-  prismSetupsDir: string
   /** The last remote media catalog (conf `providers/media.json`) the core fetched. */
   mediaCatalogCache: string
 }
@@ -215,7 +212,6 @@ export function dataLayout(root: string): DataLayout {
       cloudflaredEmptyConfig: join(coreDir, 'cloudflared-empty.yml'),
       /** The core's own error-reporting state: the user's stored choice, the install id. */
       telemetry: join(coreDir, 'telemetry.json'),
-      prismSetupsDir: join(coreDir, 'prism-setups'),
       mediaCatalogCache: join(coreDir, 'media-catalog.cache.json'),
     },
     diffusion: {

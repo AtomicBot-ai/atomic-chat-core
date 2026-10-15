@@ -17,7 +17,6 @@ import type { EngineChangedEvent } from './engines.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { EmbeddingErrorEvent, EmbeddingStateEvent } from './embedding.js'
-import type { ModelSetup } from './model-setup.js'
 import type { RemoteAccessStatus } from './remote-access.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo, SessionLoadStage } from './session.js'
 
@@ -33,6 +32,18 @@ export interface DownloadStage {
   kind: 'connecting' | 'retrying'
   attempt: number
   maxAttempts: number
+}
+
+/**
+ * One running download's combined progress, as its last `download:progress` event said: what
+ * `GET /atomic/v1/snapshot` lists under `downloads`. The core downloads engine builds only; model
+ * files are the clients' (ADR 2026-10-15-core-does-not-download-models).
+ */
+export interface DownloadProgress {
+  taskId: string
+  transferred: number
+  total: number
+  percent: number
 }
 
 export interface CoreEvents {
@@ -205,12 +216,6 @@ export interface CoreEvents {
    */
   'embedding:state': EmbeddingStateEvent
   'embedding:error': EmbeddingErrorEvent
-
-  /**
-   * Every write of a model setup (`src/contracts/model-setup.ts`), the whole record: keep the one
-   * with the highest `revision` per `setup_id`.
-   */
-  'model-setup:changed': ModelSetup
 
   /**
    * One request to the Local API Server, for the app's analytics window and its API screen

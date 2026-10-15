@@ -3,7 +3,6 @@
  * snapshot shape it answers with. Types and shared constants only.
  */
 
-import type { DownloadProgress } from '../../downloads/downloader.js'
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
@@ -40,6 +39,7 @@ import type {
   SystemoneResponse,
   DeviceInfo,
   DiffusionCancelResult,
+  DownloadProgress,
   DiffusionConfig,
   DiffusionModelFile,
   DiffusionStatus,
@@ -50,10 +50,6 @@ import type {
   ModelCompatibilityRequest,
   ModelCompatibilityResponse,
   PrismFamiliesResponse,
-  ModelSetup,
-  ModelSetupPlan,
-  ModelSetupPlanRequest,
-  ModelSetupStartRequest,
   GalleryFlags,
   GalleryImageItem,
   GalleryListOptions,
@@ -412,19 +408,11 @@ export interface ChatGptControl {
   models: () => Promise<SubscriptionModel[]>
 }
 
-/** Model compatibility and the model setup (PrismML Bonsai and every other Hub GGUF). */
-export interface ModelSetupControl {
+/** Model compatibility: what a GGUF file needs, before download and after it, and the Bonsai families. */
+export interface ModelCompatibilityControl {
   compatibility: (request: ModelCompatibilityRequest) => Promise<ModelCompatibilityResponse>
-  plan: (request: ModelSetupPlanRequest) => Promise<ModelSetupPlan>
-  /** The Bonsai families the conf model rules name, for the Hub's PrismML list. */
+  /** The Bonsai families the conf model rules name, for a client to plan its own download. */
   families: () => Promise<PrismFamiliesResponse>
-  start: (request: ModelSetupStartRequest) => Promise<ModelSetup>
-  list: () => Promise<ModelSetup[]>
-  get: (setupId: string) => Promise<ModelSetup>
-  cancel: (setupId: string) => Promise<ModelSetup>
-  resume: (setupId: string, options: { proxy?: ProxyConfig | null }) => Promise<ModelSetup>
-  /** In memory, for the control snapshot. */
-  snapshot: () => ModelSetup[]
 }
 
 export interface ControlServerDeps {
@@ -488,8 +476,8 @@ export interface ControlServerDeps {
   media?: MediaControl
   /** What a model is and can do, without loading it (PLAN.md §4, stage 3d). */
   models: ModelControl
-  /** Absent in a core without the setup wired; its routes then answer `INVALID_ARGUMENT`. */
-  modelSetups?: ModelSetupControl
+  /** Absent in a core without it wired; its routes then answer `INVALID_ARGUMENT`. */
+  modelCompatibility?: ModelCompatibilityControl
   /**
    * `POST /models/:provider/check` (spec `managed-model-store`, "Проверка совместимости одинакова по
    * форме для всех managed-движков"): for each managed provider this core offers, whether a Hugging
@@ -550,8 +538,6 @@ export interface ControlSnapshot {
   /** The managed container runtimes this user has, and the changes in flight on them. */
   environments: EnvironmentSnapshot[]
   environment_operations: EnvironmentOperation[]
-  /** Model setups, the running ones and those left to resume or read. */
-  model_setups: ModelSetup[]
 }
 
 /**

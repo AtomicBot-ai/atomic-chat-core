@@ -86,11 +86,9 @@ describe('error envelope', () => {
   })
 
   it.each([
-    ['MODEL_SETUP_NOT_FOUND', 404],
-    ['MODEL_SETUP_PLAN_STALE', 409],
     ['MODEL_ENGINE_INCOMPATIBLE', 422],
     ['MODEL_FORMAT_LEGACY', 422],
-  ] satisfies Array<[ErrorCode, number]>)('maps the model-setup code %s to %i', (code, status) => {
+  ] satisfies Array<[ErrorCode, number]>)('maps the model compatibility code %s to %i', (code, status) => {
     expect(statusForCode(code)).toBe(status)
   })
 
