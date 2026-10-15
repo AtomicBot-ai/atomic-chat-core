@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { FoundryLibraryError } from './library.js'
 import type { FoundryLibrary, FoundryManager, FoundryManagerConfig } from './library.js'
-import { failureReason, libraryDir, logTailReader, runFoundryHost } from './run.js'
+import { failureReason, libraryDir, lineIo, logTailReader, runFoundryHost } from './run.js'
 
 /** A stand-in for the `bun:ffi` layer: what the host asked of the library, and canned answers. */
 export function fakeLibrary(over: Partial<FoundryManager> = {}) {
@@ -432,5 +432,17 @@ describe('runFoundryHost serve', () => {
     expect(out.out).toEqual([])
     expect(fake.calls).toEqual(['shutdown', 'release'])
     expect(removed).toEqual(['/d/tmp/s1'])
+  })
+})
+
+describe('lineIo', () => {
+  it('ends every line it is given, on the stream it belongs to', () => {
+    const out: string[] = []
+    const err: string[] = []
+    const lines = lineIo({ stdout: (t) => void out.push(t), stderr: (t) => void err.push(t) })
+    lines.stdout('{"ready":true}')
+    lines.stderr('boom')
+    expect(out).toEqual(['{"ready":true}\n'])
+    expect(err).toEqual(['boom\n'])
   })
 })

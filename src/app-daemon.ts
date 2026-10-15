@@ -13,13 +13,11 @@ import { createCoreReporter } from './telemetry/index.js'
 // The Foundry Local host (change add-foundry-local, design D1): the app's core starts its own binary
 // in this hidden mode, one process per model; it never reaches the daemon.
 if (process.argv[2] === 'foundry-host') {
-  const { runFoundryHost, loadLibraryWithBun } = await import('./runtime/foundry-local/index.js')
-  const io = nodeCliIo()
+  const host = await import('./runtime/foundry-local/index.js')
   process.exit(
-    await runFoundryHost(process.argv.slice(3), {
-      stdout: (line) => io.stdout(`${line}\n`),
-      stderr: (line) => io.stderr(`${line}\n`),
-      loadLibrary: loadLibraryWithBun,
+    await host.runFoundryHost(process.argv.slice(3), {
+      ...host.lineIo(nodeCliIo()),
+      loadLibrary: host.loadLibraryWithBun,
     })
   )
 }

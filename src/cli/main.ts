@@ -114,12 +114,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await hostStepCommand(rest, io)
       // Hidden from USAGE: the per-model host core starts for Foundry Local (change add-foundry-local, D1).
       case 'foundry-host': {
-        const { runFoundryHost, loadLibraryWithBun } = await import('../runtime/foundry-local/index.js')
-        return await runFoundryHost(rest, {
-          stdout: (line) => io.stdout(`${line}\n`),
-          stderr: (line) => io.stderr(`${line}\n`),
-          loadLibrary: loadLibraryWithBun,
-        })
+        const host = await import('../runtime/foundry-local/index.js')
+        return await host.runFoundryHost(rest, { ...host.lineIo(io), loadLibrary: host.loadLibraryWithBun })
       }
       default:
         io.stderr(`Unknown command: ${command}\n\n${USAGE}`)

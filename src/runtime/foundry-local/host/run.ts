@@ -114,6 +114,14 @@ export function failureReason(log: string, name: string): string | null {
   return last ? last.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim() : null
 }
 
+/** Line-oriented output over a stream-oriented CLI io: one JSON or error line per call. */
+export function lineIo(io: {
+  stdout: (text: string) => void
+  stderr: (text: string) => void
+}): Pick<FoundryHostDeps, 'stdout' | 'stderr'> {
+  return { stdout: (line) => io.stdout(`${line}\n`), stderr: (line) => io.stderr(`${line}\n`) }
+}
+
 /** The name the library reports itself under (telemetry, logs). */
 export const FOUNDRY_HOST_APP_NAME = 'atomic-chat'
 
