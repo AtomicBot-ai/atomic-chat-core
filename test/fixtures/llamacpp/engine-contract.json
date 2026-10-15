@@ -27,6 +27,11 @@
   ],
   "build_gates": [
     {
+      "name": "DEFRAG_THOLD_NO_OP_MIN_BUILD",
+      "build": 6245,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
       "name": "FLASH_ATTN_STRING_ARG_MIN_BUILD",
       "build": 6325,
       "source": "src/runtime/llamacpp/args.ts"
@@ -393,13 +398,13 @@
         "chat": [
           {
             "from": null,
-            "until": null
+            "until": 6245
           }
         ],
         "chat-dflash": [
           {
             "from": null,
-            "until": null
+            "until": 6245
           }
         ]
       }

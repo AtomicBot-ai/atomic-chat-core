@@ -114,10 +114,8 @@ describe('checkHelp against real builds', () => {
     expect(severities(findings, 'error')).toEqual([])
   })
 
-  it('warns that core still emits --defrag-thold, which upstream marks deprecated', () => {
-    expect(severities(checkHelp(contract, 11617, help('b11617')), 'warn')).toContain(
-      'help.deprecated/--defrag-thold'
-    )
+  it('has nothing deprecated to warn about: --defrag-thold is not sent to builds where it is a no-op', () => {
+    expect(severities(checkHelp(contract, 11617, help('b11617')), 'warn')).toEqual([])
   })
 
   it('fails closed on output that is not a help screen', () => {

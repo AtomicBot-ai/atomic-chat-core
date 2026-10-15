@@ -34,6 +34,11 @@ export const REASONING_PRESERVE_DEFAULT_ON_MIN_BUILD = 10762
  * `--load-mode` (since b10105) is the only spelling left, and the removed flags fail the launch.
  */
 export const LOAD_MODE_ONLY_MIN_BUILD = 10875
+/**
+ * First upstream release without KV cache defragmentation (ggml-org/llama.cpp#15473): `--defrag-thold`
+ * is a no-op there that only prints a deprecation warning, so it is not sent.
+ */
+export const DEFRAG_THOLD_NO_OP_MIN_BUILD = 6245
 
 /** Cache types supported by stock ggml-org builds. */
 export const STANDARD_CACHE_TYPES: readonly string[] = [
@@ -398,7 +403,9 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
       const safeV = sanitizeCacheType(cfg.cache_type_v)
       if (safeV !== 'f16' && safeV !== 'f32') push('--cache-type-v', safeV)
     }
-    if (f32Differs(cfg.defrag_thold, 0.1)) push('--defrag-thold', formatRustF32(cfg.defrag_thold))
+    const defragIsNoOp = !ik && build !== undefined && build >= DEFRAG_THOLD_NO_OP_MIN_BUILD
+    if (f32Differs(cfg.defrag_thold, 0.1) && !defragIsNoOp)
+      push('--defrag-thold', formatRustF32(cfg.defrag_thold))
     if (cfg.rope_scaling !== '' && cfg.rope_scaling !== 'none') push('--rope-scaling', cfg.rope_scaling)
     if (f32Differs(cfg.rope_scale, 1.0)) push('--rope-scale', formatRustF32(cfg.rope_scale))
     if (Math.fround(cfg.rope_freq_base) !== 0) push('--rope-freq-base', formatRustF32(cfg.rope_freq_base))
