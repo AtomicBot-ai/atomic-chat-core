@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { CoreEvents } from '../contracts/index.js'
 import { FixtureHttpServer } from '../../test/helpers/fixture-http-server.js'
 import { PROGRESS_EMIT_INTERVAL_BYTES } from './protocol.js'
@@ -354,5 +354,50 @@ describe('the progress cadence the app draws its bar from', () => {
         .map((e) => (e.payload as { taskId: string }).taskId)
     )
     expect([...tasks]).toEqual(['llamacpp-backend-b6325/macos-arm64'])
+  })
+
+  it('lists a running task in snapshot() with its last progress, on the 10 MiB cadence, and forgets it once done', async () => {
+    const dataFolder = await mkdtemp(join(tmpdir(), 'atomic-dl-snapshot-'))
+    const step = PROGRESS_EMIT_INTERVAL_BYTES
+    const payload = Buffer.alloc(step * 2, 7)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const gated = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            // The first 10 MiB, then a short read below the step, then the rest once released.
+            controller.enqueue(new Uint8Array(payload.subarray(0, step)))
+            controller.enqueue(new Uint8Array(payload.subarray(step, step + 1024)))
+            await gate
+            controller.enqueue(new Uint8Array(payload.subarray(step + 1024)))
+            controller.close()
+          },
+        }),
+        { status: 200, headers: { 'content-length': String(payload.length) } }
+      )) as unknown as typeof fetch
+    const dl = new Downloader({
+      dataFolder,
+      platform: 'linux',
+      fetch: gated,
+      availableSpace: async () => undefined,
+      sleep: async () => {},
+      emit: () => {},
+    })
+    expect(dl.snapshot()).toEqual([])
+
+    const running = dl.download('engine-1', [
+      { url: 'http://engine.test/pack.tar.gz', save_path: 'x/pack.tar.gz', size: payload.length },
+    ])
+    // One stream, reported every 10 MiB only: the 1 KiB after the step is not reported yet.
+    await vi.waitFor(() =>
+      expect(dl.snapshot()).toEqual([
+        { taskId: 'engine-1', transferred: step, total: payload.length, percent: 50 },
+      ])
+    )
+    release()
+    await running
+    expect(dl.snapshot()).toEqual([])
+    expect((await stat(join(dataFolder, 'x', 'pack.tar.gz'))).size).toBe(payload.length)
   })
 })

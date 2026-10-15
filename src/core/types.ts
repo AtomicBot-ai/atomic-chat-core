@@ -48,11 +48,6 @@ export interface AtomicCoreOptions {
    */
   publicApiKeys?: () => readonly string[] | undefined
   /**
-   * Parallel byte-range streams for a hash-pinned file of at least 32 MiB (at most 4); one when
-   * unset. A server without ranges falls back to one stream.
-   */
-  downloadStreams?: number
-  /**
    * How long reading a remote GGUF header for a model check may take in all (a terminal that must not
    * hang on a slow or broken mirror); past it the check goes on without the header. Unset waits.
    */

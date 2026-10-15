@@ -1852,8 +1852,25 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
         [`http://packs.test/${tag}/${asset}`]: pack,
         [`http://hub.test/${repo}/resolve/${revision}/${file}`]: gguf,
       }
-      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
-        const body = served[String(input instanceof Request ? input.url : input)]
+      // The pack is held back until released, so a snapshot can be read while the engine downloads.
+      let releasePack!: () => void
+      const packGate = new Promise<void>((resolve) => (releasePack = resolve))
+      const packUrl = `http://packs.test/${tag}/${asset}`
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input)
+        if (url === packUrl && (init?.method ?? 'GET') !== 'HEAD') {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              async start(controller) {
+                await packGate
+                controller.enqueue(new Uint8Array(pack))
+                controller.close()
+              },
+            }),
+            { status: 200, headers: { 'content-length': String(pack.length) } }
+          )
+        }
+        const body = served[url]
         return body
           ? new Response(new Uint8Array(body), {
               status: 200,
@@ -1883,12 +1900,23 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND || PRISM_HOST_BACKEND === null)(
       expect(verdict.outcome).toBe('engine_required')
 
       // The client's part (change remove-model-downloads-from-core): the engine through the core…
-      const installed = await call('/backends/atomic-prism/install', {
+      const installing = call('/backends/atomic-prism/install', {
         version: tag,
         backend: PRISM_HOST_BACKEND,
         task_id: 'unit-engine',
       })
+      // While it downloads, the snapshot lists the engine download and has no model setups.
+      await vi.waitFor(async () => {
+        const snapshot = (await (await call('/snapshot')).json()) as {
+          downloads: Array<{ taskId: string }>
+        }
+        expect(snapshot.downloads.map((d) => d.taskId)).toEqual(['unit-engine'])
+        expect(snapshot).not.toHaveProperty('model_setups')
+      })
+      releasePack()
+      const installed = await installing
       expect(installed.status).toBe(200)
+      expect(((await (await call('/snapshot')).json()) as { downloads: unknown[] }).downloads).toEqual([])
       const activated = await call(`/engines/atomic-prism/builds/${tag}/${PRISM_HOST_BACKEND}/activate`, {})
       expect(activated.status).toBe(200)
       expect(core.settings.get('atomic-prism')['version_backend']).toBe(`${tag}/${PRISM_HOST_BACKEND}`)

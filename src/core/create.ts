@@ -207,7 +207,6 @@ export async function createAtomicCore(
     // One downloader per core process: it owns the active-task table that `cancel` works from, so
     // two of them would each know only half of what is running.
     const downloader = new Downloader({
-      ...(options.downloadStreams !== undefined ? { streams: options.downloadStreams } : {}),
       dataFolder: layout.root,
       platform: process.platform,
       fetch: options.fetch ?? fetch,
