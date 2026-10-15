@@ -1,0 +1,299 @@
+name: engine-candidate
+run-name: engine-candidate ${{ inputs.engine }} ${{ inputs.tag || 'newest' }} [cid:${{ inputs.candidate_id }}] core@${{ inputs.core_ref }}
+
+# Is an upstream llama.cpp build compatible with a core? Started only by hand or by the update
+# orchestrator through the API: no schedule, no push or pull_request trigger, never called from
+# ci.yml (ADR 2026-10-15-check-an-engine-candidate-only-when-asked). The same check on one machine is
+# `npm run engine:check`; docs/live-tests.md, "Checking a llama.cpp build", has both.
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: Engine to check
+        type: choice
+        options: [llamacpp-upstream]
+        default: llamacpp-upstream
+      tag:
+        description: Candidate b-tag; empty takes the newest one with every archive up
+        type: string
+        default: ''
+      repo:
+        description: Repo with ggml-org's asset names (AtomicBot-ai/atomic-chat-conf for the signed mirror)
+        type: string
+        default: ggml-org/llama.cpp
+      candidate_id:
+        description: Id the orchestrator finds this run by in its title ([A-Za-z0-9._:-], up to 80)
+        type: string
+        default: manual
+      core_ref:
+        description: Core branch, tag or commit to check against
+        type: string
+        default: main
+      pin:
+        description: Pin override (bN); empty takes what conf's release list gives this core
+        type: string
+        default: ''
+      conf_ref:
+        description: atomic-chat-conf ref for the release list and the mirror whitelist
+        type: string
+        default: main
+      suites:
+        description: all = core suites on 5 OS and the live matrix; live = the live matrix only
+        type: choice
+        options: [all, live]
+        default: all
+
+# Read-only and no secrets beyond the read-only token, so a core_ref from an agent's branch is safe
+# to run. Every input reaches a script through env, never through `${{ }}` inside `run:`.
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      repo: ${{ steps.resolve.outputs.repo }}
+      pin: ${{ steps.resolve.outputs.pin }}
+      pin_repo: ${{ steps.resolve.outputs.pin_repo }}
+      conf_sha: ${{ steps.resolve.outputs.conf_sha }}
+      core_sha: ${{ steps.resolve.outputs.core_sha }}
+      complete: ${{ steps.resolve.outputs.complete }}
+      live_matrix: ${{ steps.resolve.outputs.live_matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.core_ref }}
+          # origin/main too: the files under protected paths this ref changes are reported.
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - id: resolve
+        name: Fix core, conf, the candidate and the pins
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ENGINE: ${{ inputs.engine }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ inputs.repo }}
+          CANDIDATE_ID: ${{ inputs.candidate_id }}
+          CORE_REF: ${{ inputs.core_ref }}
+          PIN: ${{ inputs.pin }}
+          CONF_REF: ${{ inputs.conf_ref }}
+          SUITES: ${{ inputs.suites }}
+        run: node scripts/engine-candidate.mjs resolve --out "$RUNNER_TEMP/resolve"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolve
+          path: ${{ runner.temp }}/resolve/
+
+  surface:
+    needs: resolve
+    if: needs.resolve.outputs.complete == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.core_sha }}
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - name: Surface diff (help, version, archives, upstream history)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          REPO: ${{ needs.resolve.outputs.repo }}
+          PIN: ${{ needs.resolve.outputs.pin }}
+          PIN_REPO: ${{ needs.resolve.outputs.pin_repo }}
+          CONF_SHA: ${{ needs.resolve.outputs.conf_sha }}
+        run: |
+          args=(--candidate "$TAG" --repo "$REPO" --pin "${PIN:-none}" --conf-ref "$CONF_SHA")
+          if [ -n "$PIN_REPO" ]; then args+=(--pin-repo "$PIN_REPO"); fi
+          node scripts/engine-surface-diff.mjs "${args[@]}" --out "$RUNNER_TEMP/surface" --cache "$RUNNER_TEMP/cache"
+          cat "$RUNNER_TEMP/surface/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surface
+          path: |
+            ${{ runner.temp }}/surface/report.json
+            ${{ runner.temp }}/surface/report.md
+            ${{ runner.temp }}/surface/inputs.json
+            ${{ runner.temp }}/surface/watched.patch
+          if-no-files-found: ignore
+
+  # The core at core_ref on its own: the same suites ci.yml runs, as results rather than gates.
+  core:
+    needs: resolve
+    if: inputs.suites == 'all' && needs.resolve.outputs.complete == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64, os: ubuntu-latest }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm }
+          - { platform: macos-arm64, os: macos-14 }
+          - { platform: windows-x64, os: windows-2022 }
+          - { platform: windows-arm64, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.core_sha }}
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-${{ runner.arch }}-
+      - run: bun install --frozen-lockfile
+      - id: unit
+        name: Unit and contract suites
+        continue-on-error: true
+        shell: bash
+        env:
+          VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
+        run: npx vitest run --project unit --project contract --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/core/unit.json"
+      - id: build
+        continue-on-error: true
+        run: npm run build
+      - id: build_bin
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: npm run build:bin
+      - id: e2e
+        name: E2E suites
+        if: steps.build_bin.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        env:
+          VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
+        run: npx vitest run --project e2e --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/core/e2e.json"
+      - name: Core cell
+        if: always()
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          RUNNER: ${{ matrix.os }}
+          UNIT: ${{ steps.unit.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          BUILD_BIN: ${{ steps.build_bin.outcome }}
+          E2E: ${{ steps.e2e.outcome }}
+        run: |
+          node scripts/engine-candidate.mjs cell --kind core --platform "$PLATFORM" --os "$RUNNER" \
+            --step "unit=$UNIT" --step "build=$BUILD" --step "build_bin=$BUILD_BIN" --step "e2e=$E2E" \
+            --vitest "$RUNNER_TEMP/core/unit.json" --vitest "$RUNNER_TEMP/core/e2e.json" \
+            --out "$RUNNER_TEMP/cell/core-$PLATFORM.json"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cell-core-${{ matrix.platform }}
+          path: ${{ runner.temp }}/cell/
+
+  # Real binaries on every platform, the pin beside the candidate: a test that fails on both is the
+  # core's, one that fails only on the candidate is the candidate's.
+  live:
+    needs: resolve
+    if: needs.resolve.outputs.complete == 'true'
+    name: live ${{ matrix.platform }} ${{ matrix.role }} ${{ matrix.tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.live_matrix || '[]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.core_sha }}
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-${{ runner.arch }}-
+      - run: bun install --frozen-lockfile
+      # The archive and the GGUF; fetch-live-fixtures reuses either only while its sha256 matches.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/live
+          key: live-${{ matrix.platform }}-${{ matrix.repo }}-${{ matrix.tag }}
+          restore-keys: live-${{ matrix.platform }}-
+      - id: fetch
+        name: Fetch the build and a small GGUF
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ matrix.tag }}
+          REPO: ${{ matrix.repo }}
+          PLATFORM: ${{ matrix.platform }}
+          ROLE: ${{ matrix.role }}
+        run: |
+          node scripts/fetch-live-fixtures.mjs --out "$RUNNER_TEMP/live" --tag "$TAG" --repo "$REPO"
+          echo "llama.cpp \`$TAG\` from $REPO, $ROLE on $PLATFORM" >> "$GITHUB_STEP_SUMMARY"
+      - name: Live tests
+        if: steps.fetch.outcome == 'success'
+        shell: bash
+        run: node scripts/engine-candidate.mjs live --fixtures "$RUNNER_TEMP/live" --report "$RUNNER_TEMP/live-report.json"
+      - name: Live cell
+        if: always()
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          RUNNER: ${{ matrix.os }}
+          ROLE: ${{ matrix.role }}
+          TAG: ${{ matrix.tag }}
+          REPO: ${{ matrix.repo }}
+        run: |
+          node scripts/engine-candidate.mjs cell --kind live --platform "$PLATFORM" --os "$RUNNER" \
+            --role "$ROLE" --tag "$TAG" --repo "$REPO" --fixtures "$RUNNER_TEMP/live" \
+            --vitest "$RUNNER_TEMP/live-report.json" --out "$RUNNER_TEMP/cell/live-$PLATFORM-$ROLE.json"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cell-live-${{ matrix.platform }}-${{ matrix.role }}
+          # The cell, and what the live contract probe observed (live-report.observed/observed.json).
+          path: |
+            ${{ runner.temp }}/cell/
+            ${{ runner.temp }}/live-report.observed/
+          if-no-files-found: warn
+
+  report:
+    needs: [resolve, surface, core, live]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.core_sha || inputs.core_ref }}
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+      - id: results
+        name: results.json
+        shell: bash
+        env:
+          ENGINE: ${{ inputs.engine }}
+          CANDIDATE_ID: ${{ inputs.candidate_id }}
+          SUITES: ${{ inputs.suites }}
+        run: node scripts/engine-candidate.mjs results --artifacts "$RUNNER_TEMP/artifacts" --out "$RUNNER_TEMP/results"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-candidate-results
+          path: ${{ runner.temp }}/results/
+      - name: Verdict
+        shell: bash
+        env:
+          STATUS: ${{ steps.results.outputs.status }}
+        run: |
+          echo "engine candidate: ${STATUS:-no result}"
+          test "$STATUS" = pass

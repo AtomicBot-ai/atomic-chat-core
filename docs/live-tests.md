@@ -8,6 +8,9 @@ Two live tests cover the managed TensorRT-LLM engine on real Linux machines with
   engine on every NVIDIA card of a host and measures the values the design left open. It changes nothing
   on the host.
 
+Whether a new upstream llama.cpp build is compatible with a core is its own check, run by hand on five OS
+or on one machine: [Checking a llama.cpp build](#checking-a-llamacpp-build-engine-candidate).
+
 Windows has no automated live test yet: the [Windows acceptance](#windows-acceptance-change-add-tensorrt-llm-windows)
 below is a manual run on a real PC, and the condition for publishing `runtimes/environments/windows.json`
 in conf main.
@@ -638,3 +641,86 @@ ATOMIC_LIVE=1 npx vitest run --project live test/live/sglang.test.ts
   8.9, and whether `qwen3`'s reasoning-into-content rewrite is needed: into `rulings/` of the change, and
   the descriptor in conf's branch.
 
+
+## Checking a llama.cpp build (engine candidate)
+
+Is an upstream llama.cpp build compatible with a core? One check answers it, started only by hand or by
+the update orchestrator through the API — never on a schedule, a push or a pull request
+([ADR 2026-10-15](decisions/2026-10-15-check-an-engine-candidate-only-when-asked.md)). It runs:
+
+- **resolve** — fixes core and conf to one commit each; takes the candidate (a b-tag, by default the newest
+  one whose archives are all up) and checks that every archive conf's mirror requires and every CPU archive
+  core installs is there (if not, the run is `incomplete`: upstream is still uploading); computes the pin
+  per platform — the release this core version takes today from conf's `llamacpp-upstream-releases.json`
+  — and the live matrix.
+- **surface** — `scripts/engine-surface-diff.mjs`, no model: `-h` against the engine contract
+  (`test/fixtures/llamacpp/engine-contract.json`) and against the pin's `-h`, the invocations core makes
+  (`-h`, `--version`, `--list-devices`), the build `--version` names, the release's archives against what
+  core installs and what the mirror requires, and the upstream history between the two commits (watched
+  paths, commits announcing a removal or a deprecation). `report.json` / `report.md`; severities `break`
+  (a launch fails or a feature is lost), `warn`, `info`, `error` (a check could not run).
+- **core** (`suites=all`) — unit, contract and e2e suites and both builds on five OS, at `core_ref`.
+- **live** — `test/live/llamacpp.test.ts` on five OS, for the candidate and for the pin, each with a real
+  `llama-server` installed under its real tag.
+- **report** — `results.json` / `results.md`: `pass`, `fail` or `incomplete`, and why.
+
+A test that fails only on the candidate is a `candidate_regression`; one that fails on the pin as well is a
+`core_failure` (the core's problem, not the candidate's). Only CPU builds run: CUDA, Vulkan, ROCm and
+OpenCL archives are listed under `unverified_assets`. When the candidate is the pin, the pin cells are
+`same-as-pin`.
+
+### On this machine
+
+```bash
+npm run engine:check -- --tag b11617                                       # a ggml-org build
+npm run engine:check -- --repo AtomicBot-ai/atomic-chat-conf --tag b11463   # the signed mirror
+npm run engine:check -- --bin ~/src/llama.cpp/build/bin/llama-server       # any local build
+npm run engine:check -- --tag b10875 --pin b10874 --suites live            # a backtest
+```
+
+Without `--tag` or `--bin` it takes the newest complete b-tag of `--repo` (default `ggml-org/llama.cpp`).
+`--pin auto` (default) reads conf `main`'s release list (`--conf-ref <ref>`, or `--conf <checkout>`);
+`--pin bN` overrides it, `--pin none` skips it. A local build is tagged `b<build>` from its `--version`; when
+its commit is not in ggml-org/llama.cpp the upstream checks say "diff unavailable" and the rest still run.
+`--suites all` also runs the core suites and both builds here; the default is `live`. `--skip-upstream`
+leaves the git history out (offline). Set `GITHUB_TOKEN` (or `GH_TOKEN`) against the API rate limit.
+
+Everything lands in `.engine-check/` (`--out`): `results.json`, `results.md`, `report.json`, `report.md`,
+`resolve.json`, `surface/` (with `inputs.json`, `watched.patch` and both help screens), `cells/` and
+`cache/` (archives, the GGUF and the blobless llama.cpp clone, reused while their hashes match). The exit
+code is 0 only on `pass`.
+
+The surface diff runs on its own as well:
+
+```bash
+node scripts/engine-surface-diff.mjs --candidate b11617 [--pin auto|none|bN] [--repo …] [--fail-on break]
+node scripts/engine-surface-diff.mjs --candidate-bin <llama-server> [--pin-bin <llama-server>]
+node scripts/engine-surface-diff.mjs --inputs .engine-check/surface/inputs.json   # rebuild the report offline
+```
+
+### In GitHub Actions
+
+The workflow exists to be dispatched; GitHub can dispatch only workflows on the default branch.
+
+```bash
+gh workflow run engine-candidate.yml -f tag=b11617 -f candidate_id=phase0-smoke -f core_ref=main
+gh run list --workflow engine-candidate.yml --limit 5
+gh run download <run-id> -n engine-candidate-results
+```
+
+| input | default | |
+|---|---|---|
+| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths |
+| `tag` | newest complete | the candidate b-tag |
+| `repo` | `ggml-org/llama.cpp` | any repo with ggml-org's asset names; `AtomicBot-ai/atomic-chat-conf` tests the signed mirror |
+| `candidate_id` | `manual` | `[A-Za-z0-9._:-]{1,80}`, shown as `[cid:<id>]` in the run title so a caller can find its run |
+| `core_ref` | `main` | the core to check, e.g. an agent's fix branch |
+| `pin` | conf's list | `bN` overrides the pin on every platform |
+| `conf_ref` | `main` | where the release list and the mirror whitelist come from |
+| `suites` | `all` | `live` skips the core suites (`not-requested` in the results) |
+
+The run title is `engine-candidate <engine> <tag> [cid:<id>] core@<ref>`. The `engine-candidate-results`
+artifact holds `results.json`, `results.md`, `report.json`, `report.md` and `resolve.json`; the surface
+report and the results are in the run summary too. The last job fails unless the result is `pass`.
+`results.json.core.protected_changes` lists the files under the check's own paths that `core_ref` changes
+against `main` — the check, its contract or its fixtures loosened by the change under test.

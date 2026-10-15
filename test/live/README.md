@@ -19,6 +19,9 @@ ATOMIC_LIVE=1 ATOMIC_LIVE_UPSTREAM_BIN="$(cat .live-fixtures/bin-path.txt)" \
   ATOMIC_LIVE_UPSTREAM_TAG="$(cat .live-fixtures/tag.txt)" npx vitest run --project live test/live/llamacpp.test.ts
 ```
 
+To check a whole llama.cpp build against this core — the surface diff plus these tests on the build and on the pin — run
+`npm run engine:check -- --tag bN` (or `--repo …`, `--bin …`); see `docs/live-tests.md`, "Checking a llama.cpp build".
+
 On Windows set `ATOMIC_LIVE=1` in the environment and run `npx vitest run --project live`: `npm run test:live` sets it
 inline, which cmd.exe cannot parse.
 
