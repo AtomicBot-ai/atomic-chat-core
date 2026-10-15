@@ -1,0 +1,1568 @@
+{
+  "schema": "atomic-engine-contract",
+  "schema_version": 1,
+  "engine": "llamacpp-upstream",
+  "generated_by": "npx vitest run --project contract -u test/contract/llamacpp-engine-contract.test.ts",
+  "emitters": [
+    {
+      "name": "chat",
+      "source": "src/runtime/llamacpp/args.ts",
+      "probe_gated": false
+    },
+    {
+      "name": "chat-dflash",
+      "source": "src/runtime/llamacpp/args.ts",
+      "probe_gated": true
+    },
+    {
+      "name": "embedding",
+      "source": "src/embedding/args.ts",
+      "probe_gated": false
+    },
+    {
+      "name": "decision-upstream",
+      "source": "src/decision/args.ts",
+      "probe_gated": false
+    }
+  ],
+  "build_gates": [
+    {
+      "name": "FLASH_ATTN_STRING_ARG_MIN_BUILD",
+      "build": 6325,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
+      "name": "MTP_MIN_BUILD",
+      "build": 9180,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
+      "name": "GEMMA_MTP_MIN_BUILD",
+      "build": 9553,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
+      "name": "REASONING_PRESERVE_MIN_BUILD",
+      "build": 9837,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
+      "name": "REASONING_PRESERVE_DEFAULT_ON_MIN_BUILD",
+      "build": 10762,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
+      "name": "LOAD_MODE_ONLY_MIN_BUILD",
+      "build": 10875,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
+      "name": "EMBEDDING_CONTENT_PARTS_MIN_BUILD",
+      "build": 11240,
+      "source": "src/embedding/model-facts.ts"
+    },
+    {
+      "name": "UPSTREAM_DECISION_MIN_BUILD",
+      "build": 11370,
+      "source": "src/decision/upstream-version.ts"
+    }
+  ],
+  "invocations": [
+    {
+      "argv": [
+        "-h"
+      ],
+      "source": "src/runtime/llamacpp/probe.ts",
+      "expect": "exit-0"
+    },
+    {
+      "argv": [
+        "--version"
+      ],
+      "source": "src/backend/install/service.ts",
+      "expect": "exit-0"
+    },
+    {
+      "argv": [
+        "--list-devices"
+      ],
+      "source": "src/runtime/llamacpp/runtime.ts",
+      "expect": "exit-0"
+    }
+  ],
+  "env": [
+    {
+      "name": "LLAMA_API_KEY",
+      "severity": "break",
+      "source": "src/runtime/llamacpp/load-plan.ts"
+    },
+    {
+      "name": "LLAMA_ARG_TIMEOUT",
+      "severity": "warn",
+      "source": "src/runtime/llamacpp/load-plan.ts"
+    }
+  ],
+  "flags": [
+    {
+      "flag": "--batch-size",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--cache-type-k",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "bf16",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "f32",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "iq4_nl",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q4_0",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q4_1",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q5_0",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q5_1",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q8_0",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--cache-type-v",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "bf16",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "iq4_nl",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q4_0",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q4_1",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q5_0",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q5_1",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "q8_0",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--chat-template",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--cont-batching",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--context-shift",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--cpu-moe",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--ctx-size",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--defrag-thold",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--device",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--embedding",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--fit",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "off",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "on",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--fit-ctx",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--fit-target",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--flash-attn",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "auto",
+          "builds": [
+            {
+              "from": 6325,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "off",
+          "builds": [
+            {
+              "from": 6325,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "on",
+          "builds": [
+            {
+              "from": 6325,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--host",
+      "severity": "break",
+      "emitters": {
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--image-max-tokens",
+      "severity": "break",
+      "emitters": {
+        "embedding": [
+          {
+            "from": 11240,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--jinja",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--load-mode",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 10875,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": 10875,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "mlock",
+          "builds": [
+            {
+              "from": 10875,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "mmap+mlock",
+          "builds": [
+            {
+              "from": 10875,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "none",
+          "builds": [
+            {
+              "from": 10875,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--main-gpu",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--metrics",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--mlock",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": 10875
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": 10875
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--mmproj",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "embedding": [
+          {
+            "from": 11240,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--model-draft",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 9553,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--n-cpu-moe",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--n-predict",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--no-kv-offload",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--no-mmap",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": 10875
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": 10875
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--no-mmproj-offload",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--no-reasoning-preserve",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 10762,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": 10762,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--no-webui",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--override-tensor",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--parallel",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--pooling",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "cls",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "last",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "mean",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "none",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "rank",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--port",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--reasoning-preserve",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 9837,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": 9837,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--rope-freq-base",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--rope-freq-scale",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--rope-scale",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--rope-scaling",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "linear",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "yarn",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--spec-draft-n-max",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 9180,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--spec-type",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 9180,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "draft-dflash",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ],
+          "probe_gated": true
+        },
+        {
+          "value": "draft-mtp",
+          "builds": [
+            {
+              "from": 9180,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--split-mode",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      },
+      "values": [
+        {
+          "value": "none",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "row",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        },
+        {
+          "value": "tensor",
+          "builds": [
+            {
+              "from": null,
+              "until": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "flag": "--threads",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--threads-batch",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--ubatch-size",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-a",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-b",
+      "severity": "break",
+      "emitters": {
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-c",
+      "severity": "break",
+      "emitters": {
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-kvu",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-m",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-ngl",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-t",
+      "severity": "break",
+      "emitters": {
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "-ub",
+      "severity": "break",
+      "emitters": {
+        "embedding": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "decision-upstream": [
+          {
+            "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    }
+  ],
+  "upstream": {
+    "repo": "ggml-org/llama.cpp",
+    "watched_paths": [
+      {
+        "path": "common/arg.cpp",
+        "why": "every flag, -h, --version and --list-devices"
+      },
+      {
+        "path": "common/speculative.cpp",
+        "why": "--spec-type names, MTP context errors"
+      },
+      {
+        "path": "common/log.cpp",
+        "why": "log level and line prefixes the markers assume"
+      },
+      {
+        "path": "tools/server/server.cpp",
+        "why": "routes, `model loaded` / `listening on`"
+      },
+      {
+        "path": "tools/server/server-http.cpp",
+        "why": "bind error, 503 Loading model, 401"
+      },
+      {
+        "path": "tools/server/server-context.cpp",
+        "why": "/props, /v1/models, /health, context overflow, compute errors"
+      },
+      {
+        "path": "tools/server/server-common.cpp",
+        "why": "error types → HTTP codes, media errors"
+      },
+      {
+        "path": "tools/server/server-task.cpp",
+        "why": "timings, usage, n_prompt_tokens / n_ctx"
+      },
+      {
+        "path": "tools/server/server-chat.cpp",
+        "why": "reasoning_content"
+      },
+      {
+        "path": "tools/mtmd/clip.cpp",
+        "why": "unknown projector type"
+      },
+      {
+        "path": "src/llama-model.cpp",
+        "why": "architecture errors, offload and buffer-size log lines"
+      },
+      {
+        "path": "src/llama-model-loader.cpp",
+        "why": "missing keys, tensor count, corrupt file"
+      },
+      {
+        "path": "src/llama-context.cpp",
+        "why": "MTP warnings, compute and decode errors"
+      },
+      {
+        "path": "src/llama-arch.cpp",
+        "why": "architecture names and GGUF keys core reads"
+      },
+      {
+        "path": "ggml/src/ggml-backend-reg.cpp",
+        "why": "load_backend log lines"
+      },
+      {
+        "path": "ggml/src/gguf.cpp",
+        "why": "invalid magic, failed to read tensor"
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "why": "asset names and archive layout"
+      }
+    ],
+    "release_note_keywords": [
+      {
+        "pattern": "deprecat",
+        "severity": "warn"
+      },
+      {
+        "pattern": "remove",
+        "severity": "warn"
+      },
+      {
+        "pattern": "rename",
+        "severity": "warn"
+      },
+      {
+        "pattern": "breaking",
+        "severity": "warn"
+      },
+      {
+        "pattern": "^(args|server|common)[:(]",
+        "severity": "info"
+      }
+    ]
+  }
+}

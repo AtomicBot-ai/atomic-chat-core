@@ -6,3 +6,8 @@ test/fixtures/**/*.log text eol=lf
 # regex whose `.` stops at a CR, so a CRLF checkout (core.autocrlf=true on Windows) left `#!` in the
 # module and every test importing fake-wsl.mjs / fake-linux-host.mjs failed with a SyntaxError.
 test/helpers/*.mjs text eol=lf
+
+# llama-server -h / --version captures and the engine contract are parsed by column and compared
+# exactly; the shared scripts/lib helpers are imported by tests. LF everywhere.
+test/fixtures/llamacpp/** text eol=lf
+scripts/lib/*.mjs text eol=lf
