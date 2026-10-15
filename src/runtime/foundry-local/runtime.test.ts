@@ -133,8 +133,9 @@ describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
         '--context-length',
         '40960',
       ])
-      // Design D8: the optional telemetry off through the environment; nothing that fakes CI.
-      expect(start).toMatchObject({ ort_telemetry_disabled: '1', ci: null })
+      // Design D8: the optional telemetry off through the environment; nothing that fakes CI (on a CI
+      // runner the host inherits the runner's own CI, and only that).
+      expect(start).toMatchObject({ ort_telemetry_disabled: '1', ci: process.env.CI ?? null })
       expect(Number(start?.argv[start.argv.indexOf('--port') + 1])).not.toBe(session.port)
 
       const answer = await chat(session.port, session.api_key, {

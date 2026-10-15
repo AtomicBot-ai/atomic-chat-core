@@ -348,15 +348,17 @@ export async function createAtomicCore(
     // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
     // from the process report, which Bun's compiled binaries fill in as Node does; musl has none. The
     // report is a whole diagnostic snapshot, so it is built on Linux only, where glibc decides.
+    const foundryLocalArch = options.foundryLocalHost?.arch ?? process.arch
     const foundryLocalHost = foundryLocalHostPlatform({
       platform,
-      arch: process.arch,
-      osRelease: osRelease(),
+      arch: foundryLocalArch,
+      osRelease: options.foundryLocalHost?.osRelease ?? osRelease(),
       glibcVersion:
-        platform === 'linux'
+        options.foundryLocalHost?.glibcVersion ??
+        (platform === 'linux'
           ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
               ?.glibcVersionRuntime
-          : undefined,
+          : undefined),
     })
     const foundryLocalPaths = layout.provider('foundry-local')
     const foundryHost = foundryHostCommand(env)
@@ -370,7 +372,7 @@ export async function createAtomicCore(
             registry: new ModelRegistry(layout, 'foundry-local'),
             instanceId: lock.instanceId,
             platform,
-            arch: process.arch,
+            arch: foundryLocalArch,
             hostCommand: foundryHost,
             resolveBuild: (): Promise<string | undefined> => engineBuilds.activeDir('foundry-local'),
             preparedAccelerators: async () =>
@@ -874,7 +876,7 @@ export async function createAtomicCore(
                   return foundryLocalVerdict(
                     {
                       platform,
-                      arch: process.arch,
+                      arch: foundryLocalArch,
                       installed,
                       accelerators: installed ? (await foundryLocalAccelerators.list()).accelerators : [],
                       npu: (await foundryLocalNpu()).present,

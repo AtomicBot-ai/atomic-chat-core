@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { join } from 'node:path'
 import { FoundryLibraryError } from './library.js'
 import type { FoundryLibrary, FoundryManager, FoundryManagerConfig } from './library.js'
 import { failureReason, libraryDir, lineIo, logTailReader, runFoundryHost } from './run.js'
@@ -104,7 +105,7 @@ describe('runFoundryHost', () => {
 
 describe('libraryDir', () => {
   it('opens <build>/lib when the build has one, else the folder itself', () => {
-    expect(libraryDir('/b', (path) => path === '/b/lib')).toBe('/b/lib')
+    expect(libraryDir('/b', (path) => path === join('/b', 'lib'))).toBe(join('/b', 'lib'))
     expect(libraryDir('/b', () => false)).toBe('/b')
   })
 })

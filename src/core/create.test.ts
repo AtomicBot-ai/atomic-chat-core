@@ -236,14 +236,21 @@ describe('taking ownership', () => {
   })
 
   it('rejects an unknown provider by name', async () => {
-    const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, platform: 'linux' })
+    // A glibc 2.39 x64 host, wherever the test runs, so Foundry Local's platform rule holds.
+    const core = await AtomicCore.create({
+      dataFolder: data.root,
+      controlPort: 0,
+      platform: 'linux',
+      foundryLocalHost: { arch: 'x64', osRelease: '6.8.0', glibcVersion: '2.39' },
+    })
     cores.push(core)
     expect(() => core.runtime('mlx')).toThrow(/Unknown provider/)
     expect(() => core.registry('mlx')).toThrow(/Unknown provider/)
     expect(core.llamacpp('llamacpp')).toBe(core.runtime('llamacpp'))
     expect(() => core.runtime('ollama' as never)).toThrow(
       expect.objectContaining({
-        details: 'available: llamacpp-upstream, llamacpp, atomic-prism, tensorrt-llm, vllm, sglang',
+        details:
+          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, tensorrt-llm, vllm, sglang',
       })
     )
   })
@@ -2052,7 +2059,9 @@ describe('engine builds through the owner', () => {
   })
 })
 
-describe.skipIf(process.platform === 'win32' || (process.platform === 'darwin' && process.arch !== 'arm64'))(
+// A macOS 15 Apple Silicon host by the seam, on every runner but Windows (the launcher is a shell script):
+// the coverage runner is macOS 14, where the real rule leaves the provider out.
+describe.skipIf(process.platform === 'win32')(
   'foundry-local on the owner (change add-foundry-local, task 6.6)',
   () => {
     it('wires the runtime, the accelerators, the check and the engine host where the platform rule holds', async () => {
@@ -2063,12 +2072,13 @@ describe.skipIf(process.platform === 'win32' || (process.platform === 'darwin' &
         `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeHost)} "$@"\n`
       )
       await chmod(launcher, 0o755)
-      const gpuEp = process.platform === 'darwin' ? 'webgpu' : 'cuda'
-      const gpuName = process.platform === 'darwin' ? 'WebGpuExecutionProvider' : 'CUDAExecutionProvider'
+      const gpuEp = 'webgpu'
+      const gpuName = 'WebGpuExecutionProvider'
       const core = await AtomicCore.create({
         dataFolder: data.root,
         controlPort: 0,
-        platform: process.platform,
+        platform: 'darwin',
+        foundryLocalHost: { arch: 'arm64', osRelease: '24.0.0' },
         env: {
           ...process.env,
           ATOMIC_FOUNDRY_HOST_TEST_COMMAND: launcher,
@@ -2091,10 +2101,9 @@ describe.skipIf(process.platform === 'win32' || (process.platform === 'darwin' &
       ).toMatchObject({ verdict: 'engine-not-installed' })
 
       // A build as the engine-builds install leaves it, and a GPU variant as the app's installer does.
-      const platformId = process.platform === 'darwin' ? 'macos-arm64' : `linux-${process.arch}`
+      const platformId = 'macos-arm64'
       const build = join(data.root, 'foundry-local', 'backends', 'v2.1.0', platformId)
       await mkdir(join(build, 'lib'), { recursive: true })
-      await writeFile(join(build, 'lib', 'libfoundry_local.so'), 'so')
       await writeFile(join(build, 'lib', 'libfoundry_local.dylib'), 'dylib')
       await writeFile(join(build, '.atomic-owned'), 'atomic-chat\n')
       await writeFile(

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { APP_BIN, control, reapJournalledChildren, startDaemon } from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
+import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
 
 const fake = fileURLToPath(new URL('../helpers/fake-sidecar-server.mjs', import.meta.url))
 const daemons: ChildProcess[] = []
@@ -142,12 +143,8 @@ describe.skipIf(process.platform !== 'darwin' || !existsSync(APP_BIN))(
 )
 
 const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
-const FOUNDRY_PLATFORM =
-  process.platform === 'darwin'
-    ? 'macos-arm64'
-    : process.platform === 'linux'
-      ? `linux-${process.arch}`
-      : null
+// The compiled core registers Foundry Local only where the platform rule holds; Windows needs a .cmd host.
+const FOUNDRY_PLATFORM = process.platform === 'win32' ? null : foundryLocalTestPlatform()
 
 /**
  * A Foundry Local build and a CPU variant on disk, as the engine-builds install and the app's installer

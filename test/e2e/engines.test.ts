@@ -25,6 +25,7 @@ import type { InstallFixture } from '../helpers/backend-install-e2e.js'
 import * as core from '../helpers/compiled-core.js'
 import { startReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
+import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
 import {
   DESCRIPTOR_ID,
   DESCRIPTOR_URL,
@@ -445,12 +446,8 @@ describe.skipIf(!existsSync(BIN) || !POSIX)('a managed engine reinstalled throug
 // ---------------------------------------------------------------------------------------------
 
 const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
-const FOUNDRY_PLATFORM =
-  process.platform === 'darwin' && process.arch === 'arm64'
-    ? 'macos-arm64'
-    : process.platform === 'linux'
-      ? `linux-${process.arch}`
-      : null
+// The compiled core registers Foundry Local only where the platform rule holds; Windows needs a .cmd host.
+const FOUNDRY_PLATFORM = process.platform === 'win32' ? null : foundryLocalTestPlatform()
 const ALL_FOUNDRY_PLATFORMS = ['win-x64', 'win-arm64', 'macos-arm64', 'linux-x64', 'linux-arm64']
 
 describe.skipIf(!existsSync(BIN) || FOUNDRY_PLATFORM === null)('Foundry Local through /engines', () => {
