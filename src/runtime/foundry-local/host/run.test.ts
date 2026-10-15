@@ -270,3 +270,167 @@ describe('logTailReader', () => {
     }
   })
 })
+
+describe('runFoundryHost serve', () => {
+  const SERVE = [
+    'serve',
+    ...COMMON,
+    '--model',
+    '/d/models/qwen3-0.6b-generic-gpu',
+    '--ep',
+    'webgpu',
+    '--port',
+    '41987',
+    '--cache',
+    '/d/tmp/s1',
+    '--id',
+    'atomic-qwen3-0.6b-generic-gpu:1',
+  ]
+
+  function serveLibrary(opts: { registers?: boolean; loadFails?: boolean } = {}) {
+    const log: string[] = []
+    const registered = new Set<string>()
+    const fake = fakeLibrary({
+      discoverableEps: () => [
+        { name: 'WebGpuExecutionProvider', registered: registered.has('WebGpuExecutionProvider') },
+      ],
+      downloadAndRegisterEps: (names, onProgress) => {
+        log.push(`register ${names.join(',')} progress=${String(onProgress !== undefined)}`)
+        if (opts.registers !== false) for (const name of names) registered.add(name)
+      },
+      registerLocalModel: (path, id, metadata) => {
+        log.push(`RegisterModel ${path} ${id} ${JSON.stringify(metadata)}`)
+        return {
+          load: () => {
+            log.push('load')
+            if (opts.loadFails) throw new FoundryLibraryError('Model_Load', 2, 'out of memory')
+          },
+          unload: () => void log.push('unload'),
+          executionProvider: () => 'WebGPUExecutionProvider',
+        }
+      },
+      webServiceStart: () => {
+        log.push('WebServiceStart')
+        return ['http://127.0.0.1:41987']
+      },
+    })
+    return { ...fake, log }
+  }
+
+  it('registers the prepared accelerator, the model with explicit metadata, loads, serves on loopback and says so', async () => {
+    const fake = serveLibrary()
+    const out = io()
+    const removed: string[] = []
+    const disposed: string[] = []
+    let stop: () => void = () => {}
+    const running = runFoundryHost(
+      [
+        ...SERVE,
+        '--tools',
+        '--reasoning-start',
+        '<think>',
+        '--reasoning-end',
+        '</think>',
+        '--context-length',
+        '40960',
+      ],
+      {
+        ...out,
+        loadLibrary: async () => fake.library,
+        watchStop: () => ({
+          stopped: new Promise<void>((resolve) => (stop = resolve)),
+          dispose: () => void disposed.push('dispose'),
+        }),
+        removeDir: async (path) => void removed.push(path),
+      }
+    )
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(fake.configs[0]).toMatchObject({
+      modelCacheDir: '/d/tmp/s1',
+      webServiceEndpoints: ['http://127.0.0.1:41987'],
+      additionalOptions: { DisableNonessentialTelemetry: 'true' },
+    })
+    expect(fake.log).toEqual([
+      'register WebGpuExecutionProvider progress=false',
+      `RegisterModel /d/models/qwen3-0.6b-generic-gpu atomic-qwen3-0.6b-generic-gpu:1 ${JSON.stringify({
+        strings: {
+          task: 'chat-completion',
+          execution_provider: 'WebGPUExecutionProvider',
+          reasoning_start: '<think>',
+          reasoning_end: '</think>',
+        },
+        ints: { supports_tool_calling: 1, supports_reasoning: 1, context_length: 40960 },
+      })}`,
+      'load',
+      'WebServiceStart',
+    ])
+    expect(JSON.parse(out.out[0] as string)).toEqual({
+      ready: true,
+      url: 'http://127.0.0.1:41987',
+      base_path: '/catalogs/local',
+      model_id: 'atomic-qwen3-0.6b-generic-gpu:1',
+      execution_provider: 'WebGPUExecutionProvider',
+    })
+    expect(removed).toEqual([])
+    stop()
+    expect(await running).toBe(0)
+    expect(fake.calls).toEqual(['shutdown', 'release'])
+    expect(removed).toEqual(['/d/tmp/s1'])
+    expect(disposed).toEqual(['dispose'])
+  })
+
+  it('registers no accelerator for a CPU variant and tells the library it has no tools or reasoning', async () => {
+    const fake = serveLibrary()
+    const out = io()
+    expect(
+      await runFoundryHost(
+        SERVE.map((a) => (a === 'webgpu' ? 'cpu' : a)),
+        {
+          ...out,
+          loadLibrary: async () => fake.library,
+          watchStop: () => ({ stopped: Promise.resolve(), dispose: () => {} }),
+          removeDir: async () => {},
+        }
+      )
+    ).toBe(0)
+    expect(fake.log[0]).toMatch(
+      /"execution_provider":"CPUExecutionProvider".*"supports_tool_calling":0,"supports_reasoning":0/
+    )
+  })
+
+  it('refuses to serve on an accelerator the library would not register, and cleans up', async () => {
+    const fake = serveLibrary({ registers: false })
+    const out = io()
+    const removed: string[] = []
+    expect(
+      await runFoundryHost(SERVE, {
+        ...out,
+        loadLibrary: async () => fake.library,
+        watchStop: () => ({ stopped: Promise.resolve(), dispose: () => {} }),
+        removeDir: async (path) => void removed.push(path),
+      })
+    ).toBe(5)
+    expect(out.err[0]).toMatch(/WebGpuExecutionProvider is not prepared/)
+    expect(fake.log.some((line) => line.startsWith('RegisterModel'))).toBe(false)
+    expect(fake.calls).toEqual(['shutdown', 'release'])
+    expect(removed).toEqual(['/d/tmp/s1'])
+  })
+
+  it('exits 4 with the library error when the load fails, after shutting down and removing the cache', async () => {
+    const fake = serveLibrary({ loadFails: true })
+    const out = io()
+    const removed: string[] = []
+    expect(
+      await runFoundryHost(SERVE, {
+        ...out,
+        loadLibrary: async () => fake.library,
+        watchStop: () => ({ stopped: Promise.resolve(), dispose: () => {} }),
+        removeDir: async (path) => void removed.push(path),
+      })
+    ).toBe(4)
+    expect(out.err[0]).toBe('Model_Load: out of memory')
+    expect(out.out).toEqual([])
+    expect(fake.calls).toEqual(['shutdown', 'release'])
+    expect(removed).toEqual(['/d/tmp/s1'])
+  })
+})

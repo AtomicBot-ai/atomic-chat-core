@@ -8,11 +8,11 @@
  */
 
 import { existsSync } from 'node:fs'
-import { open, readdir, stat } from 'node:fs/promises'
+import { open, readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { FoundryHostUsageError, parseFoundryHostArgs } from './args.js'
 import type { FoundryHostArgs } from './args.js'
-import { describeDiscoverable } from './execution-providers.js'
+import { describeDiscoverable, executionProvider } from './execution-providers.js'
 import { FoundryLibraryError } from './library.js'
 import type { FoundryLibrary, FoundryManager, LoadFoundryLibrary } from './library.js'
 
@@ -25,7 +25,46 @@ export interface FoundryHostDeps {
    * The C API reports no per-accelerator failure (spike finding 11); its log does.
    */
   readLogTail?: (logsDir: string) => Promise<string>
+  /**
+   * Starts watching for core's stop: SIGTERM, SIGINT or stdin closed (Windows has no SIGTERM). Made
+   * before the model loads, so a stop sent right after the readiness line is never missed.
+   */
+  watchStop?: () => StopWatch
+  /** Deletes the host's catalog cache at exit. */
+  removeDir?: (path: string) => Promise<void>
 }
+
+export interface StopWatch {
+  stopped: Promise<void>
+  /** Let go of the signals and of stdin, so nothing keeps the process alive after the host is done. */
+  dispose(): void
+}
+
+/** SIGTERM, SIGINT or the end of stdin, whichever comes first. */
+export function watchStopSignals(): StopWatch {
+  let resolve: () => void = () => {}
+  const stopped = new Promise<void>((done) => (resolve = done))
+  const stop = () => resolve()
+  process.on('SIGTERM', stop)
+  process.on('SIGINT', stop)
+  process.stdin.on('end', stop)
+  process.stdin.on('close', stop)
+  process.stdin.resume()
+  return {
+    stopped,
+    dispose() {
+      process.off('SIGTERM', stop)
+      process.off('SIGINT', stop)
+      process.stdin.off('end', stop)
+      process.stdin.off('close', stop)
+      process.stdin.pause()
+      process.stdin.destroy()
+    },
+  }
+}
+
+/** Where the built-in server serves models registered in the local catalog (spike finding 7). */
+export const LOCAL_CATALOG_BASE_PATH = '/catalogs/local'
 
 /** Reads what `foundry_local_<date>.log` files under `logsDir` gained since the reader was made. */
 export function logTailReader(): (logsDir: string) => Promise<string> {
@@ -197,6 +236,70 @@ async function prepare(
   }
 }
 
+/**
+ * Task 5.3: register the variant's accelerator (prepared only — nothing is downloaded here), register
+ * the folder in this host's own catalog with the accelerator named explicitly, load, start the
+ * built-in server on the loopback port core chose, print the readiness line, and on stop shut the
+ * library down and delete the catalog cache. Exit 5: the accelerator is not prepared.
+ */
+async function serve(
+  library: FoundryLibrary,
+  args: Extract<FoundryHostArgs, { mode: 'serve' }>,
+  deps: FoundryHostDeps
+): Promise<number> {
+  const ep = executionProvider(args.ep)
+  const removeDir = deps.removeDir ?? ((path: string) => rm(path, { recursive: true, force: true }))
+  const watch = (deps.watchStop ?? watchStopSignals)()
+  const manager = openManager(library, args, {
+    cache: args.cache,
+    endpoints: [`http://127.0.0.1:${args.port}`],
+  })
+  try {
+    if (ep.register) {
+      manager.downloadAndRegisterEps([ep.register])
+      if (!manager.discoverableEps().some((found) => found.name === ep.register && found.registered)) {
+        deps.stderr(`${ep.register} is not prepared on this computer; prepare it before loading this model.`)
+        return 5
+      }
+    }
+    const reasoning = args.reasoningStart !== undefined && args.reasoningEnd !== undefined
+    const model = manager.registerLocalModel(args.model, args.id, {
+      strings: {
+        task: 'chat-completion',
+        execution_provider: ep.metadata,
+        ...(reasoning
+          ? { reasoning_start: args.reasoningStart as string, reasoning_end: args.reasoningEnd as string }
+          : {}),
+      },
+      ints: {
+        supports_tool_calling: args.tools ? 1 : 0,
+        supports_reasoning: reasoning ? 1 : 0,
+        ...(args.contextLength !== undefined ? { context_length: args.contextLength } : {}),
+      },
+    })
+    model.load()
+    const [url] = manager.webServiceStart()
+    deps.stdout(
+      json({
+        ready: true,
+        url: url ?? `http://127.0.0.1:${args.port}`,
+        base_path: LOCAL_CATALOG_BASE_PATH,
+        model_id: args.id,
+        execution_provider: model.executionProvider(),
+      })
+    )
+    await watch.stopped
+    return 0
+  } finally {
+    try {
+      close(manager)
+    } finally {
+      watch.dispose()
+      await removeDir(args.cache).catch(() => {})
+    }
+  }
+}
+
 export async function runFoundryHost(argv: readonly string[], deps: FoundryHostDeps): Promise<number> {
   let args: FoundryHostArgs
   try {
@@ -217,10 +320,7 @@ export async function runFoundryHost(argv: readonly string[], deps: FoundryHostD
   try {
     if (args.mode === 'probe') await probe(library, args, deps)
     else if (args.mode === 'prepare') await prepare(library, args, deps)
-    else {
-      deps.stderr(`foundry-host ${args.mode} is not implemented yet`)
-      return 2
-    }
+    else return await serve(library, args, deps)
     return 0
   } catch (error) {
     deps.stderr(error instanceof Error ? error.message : String(error))
