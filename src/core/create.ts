@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
+import { homedir, release as osRelease } from 'node:os'
 import { join } from 'node:path'
 import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
 import type {
@@ -23,6 +23,7 @@ import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
 import { MlxRuntime } from '../runtime/mlx/index.js'
+import { foundryHostCommand, runFoundryHostProbe } from '../runtime/foundry-local/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
@@ -63,6 +64,7 @@ import {
   EngineManifestSource,
   IDLE_ENGINE_HOST,
   manifestKinds,
+  foundryLocalHostPlatform,
 } from '../engine-builds/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
@@ -502,9 +504,24 @@ export async function createAtomicCore(
     // their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
+    // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
+    // from the process report, which Bun's compiled binaries fill in as Node does; musl has none.
+    const foundryLocalHost = foundryLocalHostPlatform({
+      platform,
+      arch: process.arch,
+      osRelease: osRelease(),
+      glibcVersion: (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)
+        ?.header?.glibcVersionRuntime,
+    })
+    const foundryLocalRoot = join(layout.root, 'foundry-local')
+    const foundryHost = foundryHostCommand(env)
     const engineBuilds = new EngineBuildsService({
       dataFolder: layout.root,
-      roots: { 'sd-cpp': layout.diffusion.backendsDir, 'mlx': layout.provider('mlx').backendsDir },
+      roots: {
+        'sd-cpp': layout.diffusion.backendsDir,
+        'mlx': layout.provider('mlx').backendsDir,
+        'foundry-local': join(foundryLocalRoot, 'backends'),
+      },
       failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
       resourcesDir: options.resourcesDir,
       platform,
@@ -512,12 +529,27 @@ export async function createAtomicCore(
       manifests: {
         'sd-cpp': new EngineManifestSource(engineManifestKinds['sd-cpp'], { env, fetchFor, log }),
         'mlx': new EngineManifestSource(engineManifestKinds.mlx, { env, fetchFor, log }),
+        'foundry-local': new EngineManifestSource(engineManifestKinds['foundry-local'], {
+          env,
+          fetchFor,
+          log,
+        }),
+      },
+      foundryLocalHost,
+      foundryHostProbe: async (libDir) => {
+        await runFoundryHostProbe(
+          foundryHost,
+          { libDir, appDataDir: join(foundryLocalRoot, 'runtime') },
+          { env }
+        )
       },
       hardware: () => hardware.facts(),
       hosts: {
         'sd-cpp': diffusion.engineHost(),
         // Off macOS there is no MLX runtime: nothing runs, so nothing to hold off or unload.
         'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
+        // Until the Foundry Local runtime (task 6.3) lends its own, no session runs from a build.
+        'foundry-local': IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
@@ -683,7 +715,9 @@ export async function createAtomicCore(
     // The `/engines` layer (change `unify-engine-lifecycle`): one handle per engine of this host, over
     // the system that installs it. Every part is read when a command arrives.
     const engineHandles: EngineHandle[] = []
-    for (const engine of hostEngines(platform, [...managedRuntimes.keys()])) {
+    for (const engine of hostEngines(platform, [...managedRuntimes.keys()], {
+      foundryLocal: foundryLocalHost.platform !== null,
+    })) {
       const kind = ENGINE_KINDS[engine]
       if (kind === 'llamacpp') {
         const provider = engine as LlamacppProviderId

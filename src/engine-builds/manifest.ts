@@ -1,7 +1,9 @@
 /**
- * The two conf manifests the engine-builds module installs from: `backends/sdcpp-manifest.json`
+ * The conf manifests the engine-builds module installs from: `backends/sdcpp-manifest.json`
  * (stable-diffusion.cpp, which the desktop used to read itself) and `backends/mlx-manifest.json`
- * (the mlx-vlm fork's `mlx-server`). Openspec change `move-sdcpp-mlx-install-to-core`, design D6.
+ * (the mlx-vlm fork's `mlx-server`), openspec change `move-sdcpp-mlx-install-to-core` design D6;
+ * `backends/foundry-local-manifest.json` (Microsoft Foundry Local releases), change
+ * `add-foundry-local` design D2.
  *
  * The source follows the house pattern of `PrismCatalogService` and `cached-document.ts`: conf main
  * over `fetch` with an 8 s budget and the request's proxy, an `ATOMIC_*_MANIFEST_URL` override that
@@ -20,12 +22,21 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { DataLayout } from '../config/index.js'
 import type { EngineBuildId, ProxyConfig } from '../contracts/index.js'
-import { withHardTimeout } from '../backend/index.js'
+import { compareVersions, withHardTimeout } from '../backend/index.js'
+import { CORE_VERSION } from '../version.js'
+
+/**
+ * The `FOUNDRY_LOCAL_API_VERSION`s this core's `foundry-host` binds (design D1). A release built
+ * against another one is not offered.
+ */
+export const FOUNDRY_LOCAL_C_API_VERSIONS: readonly number[] = [2]
 
 export const SDCPP_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/sdcpp-manifest.json'
 export const MLX_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/mlx-manifest.json'
+export const FOUNDRY_LOCAL_MANIFEST_URL =
+  'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/foundry-local-manifest.json'
 export const ENGINE_MANIFEST_TIMEOUT_MS = 8_000
 /** A fetched manifest is reused for this long unless the caller forces a re-read. */
 export const ENGINE_MANIFEST_TTL_MS = 60 * 60 * 1000
@@ -65,11 +76,55 @@ export interface MlxManifest {
   assets: MlxAsset[]
 }
 
+export const FOUNDRY_LOCAL_PLATFORMS = [
+  'win-x64',
+  'win-arm64',
+  'macos-arm64',
+  'linux-x64',
+  'linux-arm64',
+] as const
+export type FoundryLocalPlatform = (typeof FOUNDRY_LOCAL_PLATFORMS)[number]
+
+export interface FoundryLocalAsset {
+  platform: FoundryLocalPlatform
+  name: string
+  size: number
+  sha256: string
+}
+
+export interface FoundryLocalRelease {
+  /** The `microsoft/foundry-local` release tag, `v<major>.<minor>.<patch>`. */
+  tag: string
+  /** The order builds of this engine have. */
+  published_at: string
+  min_core_version: string
+  /** `FOUNDRY_LOCAL_API_VERSION` of the release's `foundry_local_c.h`. */
+  c_api_version: number
+  notes_url?: string
+  assets: FoundryLocalAsset[]
+}
+
+/** The releases this core can install, newest first; never empty. */
+export interface FoundryLocalManifest {
+  upstream_repo: string
+  releases: FoundryLocalRelease[]
+}
+
+/** What decides which releases a core accepts. */
+export interface FoundryLocalAcceptance {
+  coreVersion: string
+  /** The C API versions this core's `foundry-host` speaks. */
+  cApiVersions: readonly number[]
+}
+
 const SDCPP_TAG_RE = /^master-[0-9]+-[0-9a-f]{7}(-a[0-9a-f]{7})?$/
 const MLX_TAG_RE = /^mlxvlm-macos-arm64-[0-9a-f]{7,40}$/
 const BACKEND_ID_RE = /^[a-z0-9.-]+$/
 /** A bare file name: it lands in a download path and a URL. */
-const ASSET_NAME_RE = /^[A-Za-z0-9._-]+\.(zip|tar\.gz)$/
+const ASSET_NAME_RE = /^[A-Za-z0-9._-]+\.(zip|tar\.gz|tgz)$/
+const FOUNDRY_LOCAL_TAG_RE = /^v\d+\.\d+\.\d+$/
+const FOUNDRY_LOCAL_ASSET_NAME_RE = /^foundry-local-[a-z0-9-]+\.(zip|tgz)$/
+const SEMVER_RE = /^\d+\.\d+\.\d+$/
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const SHA256_RE = /^[0-9a-f]{64}$/
 /** RFC 3339 with a zone; `Date.parse` alone accepts far more. */
@@ -158,6 +213,78 @@ export function parseMlxManifest(data: unknown): MlxManifest {
   return { upstream_repo: repo, tag_name: tag, published_at: published, assets }
 }
 
+function parseFoundryLocalAsset(raw: unknown): FoundryLocalAsset | null {
+  if (!isRecord(raw)) return null
+  const { platform, name, size, sha256 } = raw
+  if (!FOUNDRY_LOCAL_PLATFORMS.some((known) => known === platform)) return null
+  if (typeof name !== 'string' || !FOUNDRY_LOCAL_ASSET_NAME_RE.test(name)) return null
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
+  if (typeof sha256 !== 'string' || !SHA256_RE.test(sha256)) return null
+  return { platform: platform as FoundryLocalPlatform, name, size, sha256 }
+}
+
+/** One release, or `null` when a field is not what the conf schema says. */
+function parseFoundryLocalRelease(raw: unknown): FoundryLocalRelease | null {
+  if (!isRecord(raw)) return null
+  const { tag, published_at, min_core_version, c_api_version, notes_url } = raw
+  if (typeof tag !== 'string' || !FOUNDRY_LOCAL_TAG_RE.test(tag)) return null
+  if (!isDateTime(published_at)) return null
+  if (typeof min_core_version !== 'string' || !SEMVER_RE.test(min_core_version)) return null
+  if (typeof c_api_version !== 'number' || !Number.isSafeInteger(c_api_version) || c_api_version < 1)
+    return null
+  if (!Array.isArray(raw['assets'])) return null
+  const assets: FoundryLocalAsset[] = []
+  for (const item of raw['assets']) {
+    const asset = parseFoundryLocalAsset(item)
+    // conf's CI refuses a platform listed twice; here the first one wins, as for the other engines.
+    if (asset && !assets.some((known) => known.platform === asset.platform)) assets.push(asset)
+  }
+  if (assets.length === 0) return null
+  return {
+    tag,
+    published_at,
+    min_core_version,
+    c_api_version,
+    ...(typeof notes_url === 'string' && /^https:\/\/\S+$/.test(notes_url) ? { notes_url } : {}),
+    assets,
+  }
+}
+
+/**
+ * `backends/foundry-local-manifest.json`: strict per field, lenient per record — a release or asset
+ * that does not parse is skipped, as is a release for a newer core or a C API `accept` does not
+ * speak (spec `foundry-local-runtime`, "Релизы рантайма публикуются в conf"). Throws for another
+ * schema version, a document without a valid repository, or no release left to install.
+ */
+export function parseFoundryLocalManifest(
+  data: unknown,
+  accept: FoundryLocalAcceptance
+): FoundryLocalManifest {
+  if (!isRecord(data)) throw new Error('the Foundry Local manifest is not an object')
+  if (data['schema_version'] !== 1)
+    throw new Error(
+      `the Foundry Local manifest has schema_version ${JSON.stringify(data['schema_version'])}, not 1`
+    )
+  const repo = data['upstream_repo']
+  if (typeof repo !== 'string' || !REPO_RE.test(repo))
+    throw new Error(`the Foundry Local manifest has no valid upstream_repo (${JSON.stringify(repo)})`)
+  if (!Array.isArray(data['releases'])) throw new Error('the Foundry Local manifest has no releases array')
+  const releases = data['releases']
+    .map(parseFoundryLocalRelease)
+    .filter((release): release is FoundryLocalRelease => release !== null)
+    .filter(
+      (release) =>
+        compareVersions(release.min_core_version, accept.coreVersion) <= 0 &&
+        accept.cApiVersions.includes(release.c_api_version)
+    )
+    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))
+  if (releases.length === 0)
+    throw new Error(
+      `the Foundry Local manifest lists no release this core can install (core ${accept.coreVersion}, C API ${accept.cApiVersions.join('/')})`
+    )
+  return { upstream_repo: repo, releases }
+}
+
 /** An asset core may download and run: pinned by both `sha256` and `size`. */
 export function assetInstallable(asset: { sha256?: string; size?: number }): boolean {
   return typeof asset.sha256 === 'string' && typeof asset.size === 'number'
@@ -174,7 +301,15 @@ export function mlxAssetUrl(manifest: MlxManifest, asset: MlxAsset): string {
   return `https://github.com/${manifest.upstream_repo}/releases/download/${manifest.tag_name}/${asset.name}`
 }
 
-/** Which manifest: everything that differs between the two engines. */
+export function foundryLocalAssetUrl(
+  manifest: FoundryLocalManifest,
+  release: FoundryLocalRelease,
+  asset: FoundryLocalAsset
+): string {
+  return `https://github.com/${manifest.upstream_repo}/releases/download/${release.tag}/${asset.name}`
+}
+
+/** Which manifest: everything that differs between the engines. */
 export interface ManifestKind<T> {
   label: string
   url: string
@@ -187,6 +322,7 @@ export interface ManifestKind<T> {
 export interface ManifestOf {
   'sd-cpp': SdcppManifest
   'mlx': MlxManifest
+  'foundry-local': FoundryLocalManifest
 }
 
 export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: ManifestKind<ManifestOf[K]> } {
@@ -204,6 +340,17 @@ export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: Manif
       urlEnv: 'ATOMIC_MLX_MANIFEST_URL',
       parse: parseMlxManifest,
       cacheFile: join(layout.provider('mlx').root, 'mlx-manifest.cache.json'),
+    },
+    'foundry-local': {
+      label: 'Foundry Local manifest',
+      url: FOUNDRY_LOCAL_MANIFEST_URL,
+      urlEnv: 'ATOMIC_FOUNDRY_LOCAL_MANIFEST_URL',
+      parse: (data) =>
+        parseFoundryLocalManifest(data, {
+          coreVersion: CORE_VERSION,
+          cApiVersions: FOUNDRY_LOCAL_C_API_VERSIONS,
+        }),
+      cacheFile: join(layout.root, 'foundry-local', 'foundry-local-manifest.cache.json'),
     },
   }
 }

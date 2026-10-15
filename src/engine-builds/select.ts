@@ -38,6 +38,7 @@ import { dirname } from 'node:path'
 import type { DiffusionBackend } from '../contracts/index.js'
 import { getSupportedFeatures } from '../backend/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
+import type { FoundryLocalPlatform } from './manifest.js'
 
 /**
  * Smallest Vulkan device worth moving a Linux host off the CPU build for.
@@ -268,4 +269,65 @@ export function mlxHostChoice(
   if (manifest && !manifest.assets.some((asset) => asset.backend === MACOS_ARM64))
     return { backend_id: null, reason: 'The MLX manifest lists no build for Apple Silicon.' }
   return { backend_id: MACOS_ARM64, reason: null }
+}
+
+// --- Foundry Local: one archive per platform (change `add-foundry-local`, design D7) ---------------
+
+/** Darwin 24 is macOS 15: `libfoundry_local.dylib` is built with `minos 15.0`. */
+const FOUNDRY_LOCAL_MIN_DARWIN = 24
+/** The oldest glibc Microsoft's Linux archives run on. */
+const FOUNDRY_LOCAL_MIN_GLIBC: readonly [number, number] = [2, 28]
+
+export interface FoundryLocalHostFacts {
+  platform: NodeJS.Platform
+  arch: string
+  /** `os.release()`; on macOS the Darwin version. */
+  osRelease: string
+  /** `process.report.getReport().header.glibcVersionRuntime`; absent off glibc (musl, Windows, macOS). */
+  glibcVersion: string | undefined
+}
+
+export type FoundryLocalHostPlatform = { platform: FoundryLocalPlatform } | { platform: null; reason: string }
+
+const leadingNumbers = (version: string): number[] =>
+  version.split('.').map((part) => Number.parseInt(part, 10))
+
+/** Which archive of a Foundry Local release this host runs, or why none (spec "Провайдер регистрируется только на поддерживаемых платформах"). */
+export function foundryLocalHostPlatform(host: FoundryLocalHostFacts): FoundryLocalHostPlatform {
+  const arch = host.arch === 'arm64' || host.arch === 'x64' ? host.arch : null
+  if (host.platform === 'win32' && arch) return { platform: `win-${arch}` }
+  if (host.platform === 'darwin') {
+    if (arch !== 'arm64') return { platform: null, reason: 'Foundry Local runs on Apple Silicon Macs only.' }
+    const [darwin = 0] = leadingNumbers(host.osRelease)
+    return darwin >= FOUNDRY_LOCAL_MIN_DARWIN
+      ? { platform: 'macos-arm64' }
+      : { platform: null, reason: 'Foundry Local needs macOS 15 or newer.' }
+  }
+  if (host.platform === 'linux' && arch) {
+    const [major = 0, minor = 0] = host.glibcVersion ? leadingNumbers(host.glibcVersion) : []
+    const [needMajor, needMinor] = FOUNDRY_LOCAL_MIN_GLIBC
+    if (!host.glibcVersion || major < needMajor || (major === needMajor && minor < needMinor))
+      return {
+        platform: null,
+        reason: `Foundry Local needs glibc ${needMajor}.${needMinor} or newer${host.glibcVersion ? `; this system has ${host.glibcVersion}` : '; this system has none'}.`,
+      }
+    return { platform: `linux-${arch}` }
+  }
+  return { platform: null, reason: `Foundry Local does not run on ${host.platform} ${host.arch}.` }
+}
+
+/** The host's archive in the newest installable release, as a one-rung ladder. */
+export function foundryLocalHostChoice(
+  host: FoundryLocalHostPlatform,
+  release: { assets: readonly { platform: FoundryLocalPlatform }[] } | null
+): { ladder: string[]; backend_id: string | null; reason: string | null } {
+  if (host.platform === null) return { ladder: [], backend_id: null, reason: host.reason }
+  if (!release) return { ladder: [], backend_id: null, reason: 'The Foundry Local manifest is unavailable.' }
+  if (!release.assets.some((asset) => asset.platform === host.platform))
+    return {
+      ladder: [],
+      backend_id: null,
+      reason: `The Foundry Local manifest lists no archive for ${host.platform}.`,
+    }
+  return { ladder: [host.platform], backend_id: host.platform, reason: null }
 }

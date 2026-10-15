@@ -93,6 +93,17 @@ describe('extractArchive', () => {
       UNSUPPORTED_ARCHIVE_MESSAGE
     )
   })
+
+  it('extracts .tgz, the name Microsoft gives its gzipped tarballs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-tgz-'))
+    await mkdir(join(dir, 'src', 'lib'), { recursive: true })
+    await writeFile(join(dir, 'src', 'lib', 'libfoundry_local.so'), 'so')
+    await tarCreate({ gzip: true, file: join(dir, 'foundry-local-linux-x64.tgz'), cwd: join(dir, 'src') }, [
+      'lib',
+    ])
+    await extractArchive(join(dir, 'foundry-local-linux-x64.tgz'), join(dir, 'out'))
+    expect(await readFile(join(dir, 'out/lib/libfoundry_local.so'), 'utf8')).toBe('so')
+  })
 })
 
 describe('normalizeBackendLayout', () => {

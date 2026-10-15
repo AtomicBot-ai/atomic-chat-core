@@ -50,6 +50,7 @@ import type { BuildArchive } from './install.js'
 import { assetInstallable } from './manifest.js'
 import type { ManifestOf, ManifestRead } from './manifest.js'
 import { compareBuilds } from './order.js'
+import type { FoundryLocalHostPlatform } from './select.js'
 
 /** Any engine's manifest, where the service handles them alike. */
 type AnyManifest = ManifestOf[EngineBuildId]
@@ -102,7 +103,11 @@ export interface EngineBuildsDeps {
   emit: <K extends 'engine-build:changed' | 'engine:changed'>(name: K, payload: CoreEvents[K]) => void
   now?: () => number
   log?: (level: 'info' | 'warn', message: string) => void
-  /** Test seams for the two probes. */
+  /** Which Foundry Local archive this host runs; absent, none (`foundryLocalHostPlatform`). */
+  foundryLocalHost?: FoundryLocalHostPlatform
+  /** `foundry-host probe` of this core against an unpacked build. */
+  foundryHostProbe?: (libDir: string) => Promise<void>
+  /** Test seams for the probes. */
   probe?: Partial<Record<EngineBuildId, (dir: string) => Promise<void>>>
 }
 
@@ -285,7 +290,7 @@ export class EngineBuildsService {
     onProbeFailure: (error: unknown) => never
   ): Promise<Omit<EngineBuildInstallResult, 'failed_backend_ids'>> {
     const descriptor = this.engine(engine)
-    const { tag, published_at: publishedAt } = descriptor.release(manifest)
+    const { tag, published_at: publishedAt, c_api_version: cApiVersion } = descriptor.release(manifest)
     const archives = descriptor.archives(manifest, backendId)
     const unpinned = archives.find((archive) => !assetInstallable(archive))
     if (unpinned)
@@ -307,9 +312,19 @@ export class EngineBuildsService {
       downloader: this.deps.downloader,
       availableSpace: this.deps.availableSpace,
       now: this.now,
-      verify: (staging) => probe(staging).catch(onProbeFailure),
+      verify: async (staging) => {
+        await descriptor.prepare?.(staging, context)
+        await probe(staging).catch(onProbeFailure)
+      },
       record: (staging) =>
-        descriptor.record(staging, { tag, backendId, sha256, installedAtMs: this.now(), publishedAt }),
+        descriptor.record(staging, {
+          tag,
+          backendId,
+          sha256,
+          installedAtMs: this.now(),
+          publishedAt,
+          cApiVersion: cApiVersion ?? null,
+        }),
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
     const host = this.deps.hosts[engine]
@@ -421,6 +436,11 @@ export class EngineBuildsService {
       platform: this.deps.platform,
       hardware: this.deps.hardware,
       log: this.deps.log,
+      foundryLocalHost: this.deps.foundryLocalHost ?? {
+        platform: null,
+        reason: 'Foundry Local does not run on this computer.',
+      },
+      foundryHostProbe: this.deps.foundryHostProbe,
     }
   }
 

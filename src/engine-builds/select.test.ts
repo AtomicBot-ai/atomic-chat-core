@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
+  foundryLocalHostChoice,
+  foundryLocalHostPlatform,
   backendKindOf,
   companionFor,
   diffusionBackendLadder,
@@ -445,5 +447,85 @@ describe('mlxHostChoice', () => {
       reason: null,
     })
     expect(mlxHostChoice({ os: 'linux', arch: 'x64' }, null).backend_id).toBeNull()
+  })
+})
+
+describe('foundryLocalHostPlatform', () => {
+  const host = (over: Partial<Parameters<typeof foundryLocalHostPlatform>[0]>) =>
+    foundryLocalHostPlatform({
+      platform: 'linux',
+      arch: 'x64',
+      osRelease: '6.8.0',
+      glibcVersion: '2.36',
+      ...over,
+    })
+
+  it('maps Windows x64 and arm64 to their archives', () => {
+    expect(host({ platform: 'win32', arch: 'x64', glibcVersion: undefined })).toEqual({ platform: 'win-x64' })
+    expect(host({ platform: 'win32', arch: 'arm64', glibcVersion: undefined })).toEqual({
+      platform: 'win-arm64',
+    })
+  })
+
+  it('takes macOS 15 and newer on Apple Silicon, by the Darwin release', () => {
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '24.0.0' })).toEqual({
+      platform: 'macos-arm64',
+    })
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '25.6.0' })).toEqual({
+      platform: 'macos-arm64',
+    })
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '23.6.0' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/macOS 15/),
+    })
+    expect(host({ platform: 'darwin', arch: 'x64', osRelease: '24.0.0' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/Apple Silicon/),
+    })
+  })
+
+  it('takes Linux x64 and arm64 with glibc 2.28 or newer, and nothing without glibc', () => {
+    expect(host({ arch: 'x64', glibcVersion: '2.28' })).toEqual({ platform: 'linux-x64' })
+    expect(host({ arch: 'arm64', glibcVersion: '2.43' })).toEqual({ platform: 'linux-arm64' })
+    expect(host({ glibcVersion: '2.27' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/glibc 2\.28/),
+    })
+    expect(host({ glibcVersion: '2.9' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/glibc 2\.28/),
+    })
+    expect(host({ glibcVersion: undefined })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/glibc/),
+    })
+  })
+
+  it('has no archive for any other system or architecture', () => {
+    expect(host({ platform: 'win32', arch: 'ia32' }).platform).toBeNull()
+    expect(host({ arch: 'riscv64' }).platform).toBeNull()
+    expect(host({ platform: 'freebsd' }).platform).toBeNull()
+  })
+})
+
+describe('foundryLocalHostChoice', () => {
+  const release = { assets: [{ platform: 'macos-arm64' as const }, { platform: 'linux-x64' as const }] }
+
+  it('offers the archive of the host platform when the newest release lists it', () => {
+    expect(foundryLocalHostChoice({ platform: 'linux-x64' }, release)).toEqual({
+      ladder: ['linux-x64'],
+      backend_id: 'linux-x64',
+      reason: null,
+    })
+  })
+
+  it('says why when the host has no platform, or the release lists none for it', () => {
+    expect(foundryLocalHostChoice({ platform: null, reason: 'needs macOS 15' }, release)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'needs macOS 15',
+    })
+    expect(foundryLocalHostChoice({ platform: 'win-arm64' }, release).reason).toMatch(/win-arm64/)
+    expect(foundryLocalHostChoice({ platform: 'linux-x64' }, null).reason).toMatch(/manifest/)
   })
 })

@@ -2,7 +2,7 @@
  * Archive extraction and backend-pack layout normalisation. Port of `decompress` and
  * `normalize_backend_layout` in `src-tauri/src/core/filesystem/commands.rs`.
  *
- * Only `.tar.gz` and `.zip` are supported (same error text as the app). Zip entries are guarded
+ * Only `.tar.gz` (also named `.tgz`) and `.zip` are supported (same error text as the app). Zip entries are guarded
  * against zip-slip, directory entries are created, and the unix mode bits are applied.
  */
 
@@ -17,7 +17,7 @@ export const UNSUPPORTED_ARCHIVE_MESSAGE = 'Unsupported file format. Only .tar.g
 
 export async function extractArchive(archivePath: string, outputDir: string): Promise<void> {
   await mkdir(outputDir, { recursive: true })
-  if (archivePath.endsWith('.tar.gz')) {
+  if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
     await tarExtract({ file: archivePath, cwd: outputDir })
     return
   }

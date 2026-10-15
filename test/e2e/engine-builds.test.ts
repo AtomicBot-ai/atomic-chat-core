@@ -10,10 +10,12 @@
  *
  * No imports from `src/`. POSIX only: the fake engines are shell launchers.
  */
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
@@ -274,6 +276,118 @@ describe.skipIf(!existsSync(BIN) || process.platform !== 'darwin' || process.arc
       ).toMatchObject({
         origin: 'bundled',
       })
+    }, 120_000)
+  }
+)
+
+/** The Foundry Local archive of every platform: the libraries as plain files, debug symbols included. */
+async function foundryArchive(workDir: string) {
+  const src = join(workDir, 'foundry-src')
+  for (const file of [
+    'lib/libfoundry_local.so',
+    'lib/libonnxruntime.so',
+    'lib/libfoundry_local.so.dbg',
+    'lib/foundry_local.pdb',
+  ]) {
+    await mkdir(join(src, 'lib'), { recursive: true })
+    await writeFile(join(src, file), file)
+  }
+  const out = join(workDir, 'foundry.tgz')
+  await tarCreate({ gzip: true, cwd: src, file: out }, ['lib'])
+  const body = await readFile(out)
+  return { body, sha256: createHash('sha256').update(body).digest('hex'), size: body.length }
+}
+
+const FOUNDRY_PLATFORMS = ['win-x64', 'win-arm64', 'macos-arm64', 'linux-x64', 'linux-arm64']
+
+describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
+  'Foundry Local builds through the core',
+  () => {
+    it('installs the host archive from a file:// manifest, checked by the host, and leaves nothing when the host refuses it', async () => {
+      const folder = ctx.dataFolder
+      const archive = await foundryArchive(folder)
+      for (const platform of FOUNDRY_PLATFORMS)
+        mirror.serve(
+          `/microsoft/foundry-local/releases/download/v2.1.0/foundry-local-${platform}.tgz`,
+          archive.body
+        )
+      const manifest = join(folder, 'foundry-local-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          upstream_repo: 'microsoft/foundry-local',
+          releases: [
+            {
+              tag: 'v2.1.0',
+              published_at: '2026-09-30T00:43:42Z',
+              min_core_version: '0.1.0',
+              c_api_version: 2,
+              assets: FOUNDRY_PLATFORMS.map((platform) => ({
+                platform,
+                name: `foundry-local-${platform}.tgz`,
+                size: archive.size,
+                sha256: archive.sha256,
+              })),
+            },
+          ],
+        })
+      )
+      // The host stand-in: records its argv, answers like `foundry-host probe` unless told to fail.
+      const argvFile = join(folder, 'host.argv')
+      const failFlag = join(folder, 'host.fail')
+      const host = join(folder, 'fake-foundry-host')
+      await writeFile(
+        host,
+        [
+          '#!/bin/sh',
+          `echo "$@" >> ${JSON.stringify(argvFile)}`,
+          `if [ -f ${JSON.stringify(failFlag)} ]; then echo "libatomic.so.1: cannot open shared object file" >&2; exit 3; fi`,
+          `echo '{"c_api_version":2,"accelerators":[]}'`,
+        ].join('\n'),
+        { mode: 0o755 }
+      )
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_FOUNDRY_LOCAL_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_FOUNDRY_HOST_TEST_COMMAND: host,
+      })
+      const proxy = mirror.proxy
+
+      const catalog = await json<Catalog>(
+        await post(ready, '/engine-builds/foundry-local/catalog', { force: true })
+      )
+      expect(catalog.manifest).toMatchObject({ tag: 'v2.1.0', source: 'remote' })
+      expect(FOUNDRY_PLATFORMS).toContain(catalog.host_backend_id)
+      const platform = catalog.host_backend_id as string
+
+      const installed = await json(
+        await post(ready, '/engine-builds/foundry-local/install', { task_id: 'fl-1', proxy })
+      )
+      expect(installed).toMatchObject({ installed: true, build: { tag: 'v2.1.0', backend_id: platform } })
+      const dir = join(folder, 'foundry-local', 'backends', 'v2.1.0', platform)
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+      expect(existsSync(join(dir, 'lib', 'foundry_local.pdb'))).toBe(false)
+      expect(existsSync(join(dir, 'lib', 'libfoundry_local.so.dbg'))).toBe(false)
+      expect(existsSync(join(dir, 'lib', 'libonnxruntime.so.1'))).toBe(process.platform === 'linux')
+      const argv = (await readFile(argvFile, 'utf8')).trim()
+      expect(argv).toMatch(
+        new RegExp(
+          `^probe --lib .*v2\\.1\\.0/${platform}\\.incoming-\\d+ --app-data .*foundry-local/runtime$`
+        )
+      )
+
+      // The host refuses a forced reinstall: the install fails with what it printed, the build stays.
+      await writeFile(failFlag, '')
+      const refused = await post(ready, '/engine-builds/foundry-local/install', {
+        task_id: 'fl-2',
+        proxy,
+        force: true,
+      })
+      expect(await refused.json()).toMatchObject({
+        error: { code: 'ENGINE_INSTALL_FAILED', details: expect.stringContaining('libatomic.so.1') },
+      })
+      expect((await readdir(join(folder, 'foundry-local', 'backends', 'v2.1.0'))).sort()).toEqual([platform])
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
     }, 120_000)
   }
 )

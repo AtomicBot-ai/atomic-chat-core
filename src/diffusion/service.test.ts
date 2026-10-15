@@ -26,7 +26,7 @@ import type { FakeSdOptions } from '../../test/helpers/fake-sd-server.js'
 import { isProcessAlive, loadCancelledError } from '../runtime/shared/index.js'
 import type { GpuClaim, GpuClaimHook } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
-import { EngineBuildsService } from '../engine-builds/service.js'
+import { EngineBuildsService, IDLE_ENGINE_HOST } from '../engine-builds/service.js'
 import { parseSdcppManifest } from '../engine-builds/manifest.js'
 import type { DownloadItem } from '../downloads/index.js'
 import { c as tarCreate } from 'tar'
@@ -137,7 +137,11 @@ async function engineBuilds(h: Harness, tag: string) {
   })
   return new EngineBuildsService({
     dataFolder,
-    roots: { 'sd-cpp': layout.diffusion.backendsDir, 'mlx': layout.provider('mlx').backendsDir },
+    roots: {
+      'sd-cpp': layout.diffusion.backendsDir,
+      'mlx': layout.provider('mlx').backendsDir,
+      'foundry-local': join(dataFolder, 'foundry-local', 'backends'),
+    },
     failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
     platform: process.platform,
     downloader: {
@@ -148,9 +152,16 @@ async function engineBuilds(h: Harness, tag: string) {
     manifests: {
       'sd-cpp': { read: async () => ({ manifest, source: 'remote', fetched_at: 1, error: null }) },
       'mlx': { read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }) },
+      'foundry-local': {
+        read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
+      },
     },
     hardware: async () => ({ osType: 'macos', arch: 'arm64', cpuExtensions: [], gpus: [] }),
-    hosts: { 'sd-cpp': h.service.engineHost(), 'mlx': h.service.engineHost() },
+    hosts: {
+      'sd-cpp': h.service.engineHost(),
+      'mlx': h.service.engineHost(),
+      'foundry-local': IDLE_ENGINE_HOST,
+    },
     availableSpace: async () => undefined,
     emit: () => {},
   })
