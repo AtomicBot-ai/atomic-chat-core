@@ -7,6 +7,12 @@ import { join, relative } from 'node:path'
 const ROOT = new URL('..', import.meta.url).pathname
 const SRC = join(ROOT, 'src')
 const BROWSER_SAFE = ['src/contracts', 'src/client']
+// The one exception to "no bun:*" (operator decision Q2 of change add-foundry-local, ADR in docs/decisions):
+// the Foundry Local host's bindings, imported dynamically by the hidden `foundry-host` mode alone.
+const BUN_FFI_ALLOWED = new Set([
+  'src/runtime/foundry-local/host/ffi-bun.ts',
+  'src/runtime/foundry-local/host/bun-ffi.d.ts',
+])
 const BUILTINS = [
   'assert',
   'buffer',
@@ -65,7 +71,10 @@ for (const file of walk(SRC)) {
   const lines = text.split('\n')
   lines.forEach((line, i) => {
     if (/^\s*(\/\/|\*)/.test(line)) return // comments may mention forbidden things
-    for (const { re, msg } of checks) if (re.test(line)) failures.push(`${rel}:${i + 1}: ${msg}`)
+    for (const { re, msg } of checks) {
+      if (BUN_FFI_ALLOWED.has(rel) && msg === 'bun / bun:* import' && /['"]bun:ffi['"]/.test(line)) continue
+      if (re.test(line)) failures.push(`${rel}:${i + 1}: ${msg}`)
+    }
     if (BROWSER_SAFE.some((d) => rel.startsWith(d)) && /from\s+['"]node:/.test(line))
       failures.push(`${rel}:${i + 1}: node:* import in a browser-safe folder`)
   })
