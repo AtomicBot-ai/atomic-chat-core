@@ -3,7 +3,7 @@
   "schema_version": 1,
   "core": {
     "version": "0.17.0",
-    "sha": "8a3852146568f666a5d8fc4ab6b53361ed8c8576"
+    "sha": "5262d2724b35b8df641b070d01e35fab214fd67c"
   },
   "conf": {
     "ref": "main",
@@ -375,7 +375,9 @@
         "sha": "b9f3599fb1c429e89248f042699ea2e062a32e57",
         "subject": "llama : do not map foreign ranges into a backend buffer (#30405)",
         "files": [
+          "src/llama-mmap.cpp",
           "src/llama-model-loader.cpp",
+          "src/llama-model-loader.h",
           "src/llama-model.cpp"
         ]
       },
@@ -1217,6 +1219,24 @@
         "deletions": 14
       },
       {
+        "path": "src/llama-model-loader.h",
+        "exists": true,
+        "additions": 11,
+        "deletions": 4
+      },
+      {
+        "path": "src/llama.cpp",
+        "exists": true,
+        "additions": 0,
+        "deletions": 0
+      },
+      {
+        "path": "src/llama-mmap.cpp",
+        "exists": true,
+        "additions": 2,
+        "deletions": 1
+      },
+      {
         "path": "src/llama-context.cpp",
         "exists": true,
         "additions": 183,
@@ -1246,6 +1266,156 @@
         "additions": 15,
         "deletions": 29
       }
-    ]
+    ],
+    "strings": {
+      "ready.listening-on": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "ready.all-slots-are-idle": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "ready.starting-the-main-loop": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "ready.http-server-listening": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.cuda": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.no-cuda-devices": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.failed-to-load-backend": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.vulkan-no-devices": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "device.init-error.no-usable-gpu": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "device.loaded-backend": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "device.offloaded-layers": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "device.repeating-layers": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "device.model-buffer": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.oom.out-of-memory": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "error.oom.failed-to-allocate": {
+        "pin": 9,
+        "candidate": 9
+      },
+      "error.oom.insufficient-memory": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "error.arch.loading-architecture": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "error.arch.unknown-architecture": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.arch.loading-hyperparameters": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.arch.key-not-found": {
+        "pin": 6,
+        "candidate": 6
+      },
+      "error.projector.unknown-type": {
+        "pin": 4,
+        "candidate": 4
+      },
+      "error.corrupt.incomplete": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.corrupt.invalid-magic": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "error.corrupt.end-of-file": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "error.corrupt.read-tensor": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "error.corrupt.tensor-count": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "mtp.create-context": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "mtp.context-type": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "mtp.no-layers": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "list-devices.header": {
+        "pin": 2,
+        "candidate": 2
+      },
+      "http.context-overflow.literal": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "http.compute-error.compute-error": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "http.compute-error.failed-to-decode": {
+        "pin": 3,
+        "candidate": 3
+      },
+      "http.compute-error.failed-to-compute-graph": {
+        "pin": 1,
+        "candidate": 1
+      },
+      "http.compute-error.backend-is-in-error-state": {
+        "pin": 0,
+        "candidate": 0
+      },
+      "http.compute-error.ggml_backend_sched_graph_compute": {
+        "pin": 4,
+        "candidate": 4
+      },
+      "http.sse.done": {
+        "pin": 1,
+        "candidate": 1
+      }
+    }
   }
 }

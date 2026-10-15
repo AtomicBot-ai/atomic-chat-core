@@ -7,13 +7,17 @@ What real ggml-org `llama-server` builds print, for the engine contract checks
   upstream llama.cpp and from which build to which (`test/helpers/llamacpp-engine-contract.ts`).
   Regenerate with `npx vitest run --project contract -u test/contract/llamacpp-engine-contract.test.ts`
   and review the diff: it is the list of things a new llama.cpp release must keep accepting.
+  Besides the flags it holds `strings` (log lines and bodies core matches) and `routes` (what core
+  calls on a session, and the fields it reads), curated in `test/helpers/llamacpp-engine-strings.ts`:
+  each names the core file that holds it, how much losing it costs (`severity_if_lost`) and what the
+  live probe (`test/live/llamacpp-contract.test.ts`) sees on a stock build (`live_expectation`).
 - `help/<tag>.txt` — `llama-server -h`; `version/<tag>.txt` — `llama-server --version`. Each file is
   stdout, a newline, stderr: the shape `runHelp` (`src/runtime/llamacpp/probe.ts`) reads.
 - `releases/<tag>.json` — the archive names of a ggml-org release (GitHub API, 2026-10-15), for the
   asset checks of the surface diff and the `assets.core_backends` check of the contract.
 - `surface/b11463-b11617.inputs.json` — what `node scripts/engine-surface-diff.mjs --candidate b11617
-  --conf <conf checkout>` gathered on macOS arm64 on 2026-10-15 (conf 159ed3a, pin b11463 from its
-  release list), with the `-h`/`--version` text left out (it is `help/` and `version/` here) and each
+  --conf <conf checkout>` gathered on macOS arm64 on 2026-10-15 with the contract's strings (conf 159ed3a, pin b11463 from
+  its release list), with the `-h`/`--version` text left out (it is `help/` and `version/` here) and each
   commit's files cut down to the watched paths. `surface/b11463-b11617.report.{json,md}` are the golden
   report built from it (`test/contract/engine-surface.test.ts`; regenerate with `-u` and review the
   diff when the contract or the checks change).

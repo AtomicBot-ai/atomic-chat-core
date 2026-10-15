@@ -301,8 +301,9 @@ describe('H5: the strings core matches, counted in both trees', () => {
   })
 
   it('a contract without strings skips the check instead of failing it', () => {
-    expect(checkStrings(contract, upstream())).toBeUndefined()
-    const report = buildReport(contract, goldenInputs(), { now: 'x' })
+    const { strings: _strings, ...withoutStrings } = contract
+    expect(checkStrings(withoutStrings, upstream())).toBeUndefined()
+    const report = buildReport(withoutStrings, goldenInputs(), { now: 'x' })
     expect(report.checks.find((c) => c.id === 'upstream.contract_strings')).toMatchObject({
       status: 'skipped',
     })
@@ -428,8 +429,11 @@ describe('golden: b11463 → b11617', () => {
         'assets.core_backends/unconsumed',
         'help.diff/added',
         'upstream.watched_paths/common/arg.cpp',
+        // Core's context-overflow literal is not upstream's: known drift, information until PR7.
+        'upstream.contract_strings/http.context-overflow.literal',
       ])
     )
+    expect(report.checks.find((c) => c.id === 'upstream.contract_strings')?.status).toBe('pass')
   })
 
   it('matches report.json and report.md', async () => {
