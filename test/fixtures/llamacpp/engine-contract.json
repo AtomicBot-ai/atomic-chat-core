@@ -1796,6 +1796,27 @@
       "note": "MODEL_FILE_CORRUPT upstream; MODEL_ARCH_NOT_SUPPORTED on the TurboQuant fork, whose tensor layout can differ."
     },
     {
+      "id": "error.argument.unknown",
+      "text": "error: invalid argument: ",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": "error: invalid argument: %s",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "A flag the build does not know (common/arg.cpp): the process error, with words that say so."
+    },
+    {
+      "id": "error.argument.bad-value",
+      "text": "error while handling argument",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "A value the build refuses, e.g. `--flash-attn bogus` (common/arg.cpp)."
+    },
+    {
       "id": "mtp.create-context",
       "text": "failed to create MTP context",
       "match": "regex",

@@ -73,6 +73,9 @@ const includesAny = (lower: string, needles: string[]) => needles.some((n) => lo
 const TENSOR_COUNT_MISMATCH = 'wrong number of tensors'
 const tensorLayoutIsArchitecture = (provider: LocalProviderId) => provider === 'llamacpp'
 
+export const ARGUMENT_REJECTED_MESSAGE =
+  'This llama.cpp backend does not accept one of the arguments it was started with. If you added custom arguments to this model, remove them; otherwise switch to another backend version or update Atomic Chat.'
+
 const CASCADE: Rule[] = [
   {
     code: 'OS_VERSION_UNSUPPORTED',
@@ -123,6 +126,15 @@ const CASCADE: Rule[] = [
         'failed to read tensor',
       ]) ||
       (!tensorLayoutIsArchitecture(provider) && l.includes(TENSOR_COUNT_MISMATCH)),
+  },
+  {
+    // `common_params_parse` (upstream, TurboQuant and Prism alike): a flag the build does not know,
+    // or a value it refuses. Core's own flags are gated per build (engine-contract.json), so this is
+    // a build that drifted from what core expects, or a custom argument in the model's settings. The
+    // code stays the process error: it is worth a report, not the user's mistake alone.
+    code: 'LLAMA_CPP_PROCESS_ERROR',
+    message: ARGUMENT_REJECTED_MESSAGE,
+    match: (l) => includesAny(l, ['error: invalid argument: ', 'error while handling argument']),
   },
 ]
 

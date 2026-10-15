@@ -267,6 +267,18 @@ export const CONTRACT_STRINGS: ContractString[] = [
     note: 'MODEL_FILE_CORRUPT upstream; MODEL_ARCH_NOT_SUPPORTED on the TurboQuant fork, whose tensor layout can differ.',
   }),
 
+  log('error.argument.unknown', 'error: invalid argument: ', CASCADE, {
+    upstream_text: 'error: invalid argument: %s',
+    severity_if_lost: 'warn',
+    live_expectation: 'observed',
+    note: 'A flag the build does not know (common/arg.cpp): the process error, with words that say so.',
+  }),
+  log('error.argument.bad-value', 'error while handling argument', CASCADE, {
+    severity_if_lost: 'warn',
+    live_expectation: 'observed',
+    note: 'A value the build refuses, e.g. `--flash-attn bogus` (common/arg.cpp).',
+  }),
+
   // MTP rejections (classify.ts): llama.cpp has no code for them, so the text is the contract.
   ...(
     [
