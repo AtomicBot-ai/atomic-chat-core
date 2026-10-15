@@ -1,0 +1,567 @@
+{
+  "schema": "atomic-engine-surface-report",
+  "schema_version": 1,
+  "generated_at": "2026-10-15T00:00:00.000Z",
+  "engine": "llamacpp-upstream",
+  "inputs": {
+    "contract": {
+      "schema": "atomic-engine-contract",
+      "schema_version": 1,
+      "sha256": null
+    },
+    "core": {
+      "version": "0.17.0",
+      "sha": "8a3852146568f666a5d8fc4ab6b53361ed8c8576"
+    },
+    "conf": {
+      "ref": "main",
+      "sha": "159ed3ac0f0a9e63506a8269fe3736658d3d1d70"
+    },
+    "candidate": {
+      "tag": "b11617",
+      "build": 11617,
+      "commit": "14310190c",
+      "repo": "ggml-org/llama.cpp",
+      "source": "release",
+      "platform": "macos-arm64",
+      "binary": {
+        "name": "llama-b11617-bin-macos-arm64.tar.gz",
+        "sha256": "051bb0b55b3e5e72081aa819131ba30c74d910acc915b28bab298757472e39d9",
+        "digest_verified": true
+      },
+      "release": {
+        "published_at": "2026-10-14T12:53:33Z",
+        "commit": "14310190cd0a0c831fe949ac8cbedd8abdc90695"
+      }
+    },
+    "pin": {
+      "tag": "b11463",
+      "build": 11463,
+      "commit": "d2a79e604",
+      "repo": "ggml-org/llama.cpp",
+      "source": "release",
+      "platform": "macos-arm64",
+      "binary": {
+        "name": "llama-b11463-bin-macos-arm64.tar.gz",
+        "sha256": "bef66fc5f7993c2ce814c6b619df6eb8ca3a5213cf3eb828918674c22324b252",
+        "digest_verified": true
+      },
+      "release": {
+        "published_at": "2026-10-07T10:40:25Z",
+        "commit": "d2a79e60464903f9832fbecdba48bd4cc6c47e75"
+      }
+    },
+    "pin_resolution": {
+      "source": "list",
+      "core_version": "0.17.0",
+      "per_platform": {
+        "linux-x64": {
+          "backend": "linux-cpu-x64",
+          "tag": "b11463"
+        },
+        "linux-arm64": {
+          "backend": "linux-cpu-arm64",
+          "tag": "b11463"
+        },
+        "macos-arm64": {
+          "backend": "macos-arm64",
+          "tag": "b11463"
+        },
+        "windows-x64": {
+          "backend": "win-cpu-x64",
+          "tag": "b11463"
+        },
+        "windows-arm64": {
+          "backend": "win-cpu-arm64",
+          "tag": "b11463"
+        }
+      },
+      "list": {
+        "readable": true,
+        "per_platform": {
+          "linux-x64": "b11463",
+          "linux-arm64": "b11463",
+          "macos-arm64": "b11463",
+          "windows-x64": "b11463",
+          "windows-arm64": "b11463"
+        }
+      },
+      "legacy": {
+        "tag": "b11463"
+      },
+      "tag": "b11463"
+    },
+    "mirror_whitelist": {
+      "source": "conf"
+    },
+    "upstream": {
+      "available": true,
+      "method": "git",
+      "base": "d2a79e60464903f9832fbecdba48bd4cc6c47e75",
+      "head": "14310190cd0a0c831fe949ac8cbedd8abdc90695",
+      "commits": 154,
+      "truncated": false
+    },
+    "same_as_pin": false
+  },
+  "status": "warn",
+  "counts": {
+    "break": 0,
+    "warn": 1,
+    "info": 17,
+    "error": 0
+  },
+  "checks": [
+    {
+      "id": "help.parse",
+      "title": "`-h` reads as a help screen",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "help.required_flags",
+      "title": "the build knows every flag core emits for it",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "help.flag_values",
+      "title": "and every closed value",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "help.deprecated",
+      "title": "none of them is deprecated",
+      "status": "warn",
+      "counts": {
+        "break": 0,
+        "warn": 1,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "help.env",
+      "title": "the build reads the variables core sets",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "help.diff",
+      "title": "`-h` changes since the pin",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 1,
+        "error": 0
+      }
+    },
+    {
+      "id": "invocations.exit",
+      "title": "the invocations core makes exit 0",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "version.output",
+      "title": "`--version` names the build",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "assets.core_backends",
+      "title": "an archive for every backend core installs",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 1,
+        "error": 0
+      }
+    },
+    {
+      "id": "assets.mirror",
+      "title": "every archive conf's mirror requires",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      }
+    },
+    {
+      "id": "upstream.watched_paths",
+      "title": "changes to the sources core depends on",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 14,
+        "error": 0
+      }
+    },
+    {
+      "id": "upstream.contract_strings",
+      "title": "the strings core matches are still printed",
+      "status": "skipped",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 0,
+        "error": 0
+      },
+      "skipped": "the contract lists no strings yet"
+    },
+    {
+      "id": "upstream.release_notes",
+      "title": "commits announcing a removal or rename",
+      "status": "pass",
+      "counts": {
+        "break": 0,
+        "warn": 0,
+        "info": 1,
+        "error": 0
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "help.deprecated/--defrag-thold",
+      "check": "help.deprecated",
+      "severity": "warn",
+      "subject": "--defrag-thold",
+      "message": "b11617 marks --defrag-thold deprecated; core still emits it",
+      "evidence": {
+        "help": "KV cache defragmentation threshold (DEPRECATED)\n(env: LLAMA_ARG_DEFRAG_THOLD)"
+      },
+      "hint": "Plan the removal: gate the flag by build or drop it before upstream removes it."
+    },
+    {
+      "id": "assets.core_backends/unconsumed",
+      "check": "assets.core_backends",
+      "severity": "info",
+      "subject": "unconsumed",
+      "message": "9 archive(s) for the platforms core ships that no backend it installs takes",
+      "evidence": {
+        "archives": [
+          "ubuntu-cuda-12.8-x64.tar.gz",
+          "ubuntu-cuda-13.4-x64.tar.gz",
+          "ubuntu-openvino-2026.4.1-x64.tar.gz",
+          "ubuntu-rocm-10.0-x64.tar.gz",
+          "ubuntu-sycl-fp16-x64.tar.gz",
+          "ubuntu-sycl-fp32-x64.tar.gz",
+          "win-openvino-2026.4.1-x64.zip",
+          "win-sycl-x64.zip",
+          "win-vulkan-arm64.zip"
+        ]
+      }
+    },
+    {
+      "id": "help.diff/added",
+      "check": "help.diff",
+      "severity": "info",
+      "subject": "added",
+      "message": "1 new flag(s)",
+      "evidence": {
+        "flags": [
+          "--moe-cache-mib"
+        ]
+      }
+    },
+    {
+      "id": "upstream.release_notes/others",
+      "check": "upstream.release_notes",
+      "severity": "info",
+      "subject": "others",
+      "message": "9 more commit(s) match a keyword outside the watched paths, or name args/server/common",
+      "evidence": {
+        "commits": [
+          {
+            "sha": "296538adea",
+            "subject": "spec : remove tokens assert from dsv4 graph_mtp (#30444)"
+          },
+          {
+            "sha": "071b553fb1",
+            "subject": "models : remove redundant ggml_cont calls now supported by all unary kernels  (#30198)"
+          },
+          {
+            "sha": "62a6f74bab",
+            "subject": "server: add component tests (#30312)"
+          },
+          {
+            "sha": "23b0202a18",
+            "subject": "server: leave a busy slot untouched when a request pins it (#30295)"
+          },
+          {
+            "sha": "aa94f20861",
+            "subject": "args: add LLAMA_ARG_SLOT_SAVE_PATH env for --slot-save-path (#30272)"
+          },
+          {
+            "sha": "50e3e3e480",
+            "subject": "CUDA: Remove redundant CUDA copies after SSM_SCAN (#29807)"
+          },
+          {
+            "sha": "b42b7e6d30",
+            "subject": "server: use port 9931 by default (#30159)"
+          },
+          {
+            "sha": "1167d3f42c",
+            "subject": "CUDA: fix CCCL version guard breaking on major version rollover (#29453)"
+          },
+          {
+            "sha": "9b4ed0ca57",
+            "subject": "sycl: remove duplicate block-size defines from op headers (#29507)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/.github/workflows/release.yml",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": ".github/workflows/release.yml",
+      "message": "2 commit(s), +15 −29 (watched for: asset names and archive layout)",
+      "evidence": {
+        "commits": [
+          "8f574b0ad4 ci : build OpenVINO releases with GGML_NATIVE=OFF and CPU backend variants (#30324)",
+          "a49f58dcc3 ci: fix OpenVINO download links (#30401)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/common/arg.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "common/arg.cpp",
+      "message": "5 commit(s), +13 −3 (watched for: every flag, -h, --version and --list-devices)",
+      "evidence": {
+        "commits": [
+          "77757a3467 examples : fix draft sampling and rejection handling (#30095)",
+          "aa94f20861 args: add LLAMA_ARG_SLOT_SAVE_PATH env for --slot-save-path (#30272)",
+          "b42b7e6d30 server: use port 9931 by default (#30159)",
+          "c811cb8f0a llama: support MoE cache over multiple GPUs (#30112)",
+          "d6cf9acb25 llama : add a GPU cache for MoE experts kept in host memory (#29887)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/common/log.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "common/log.cpp",
+      "message": "1 commit(s), +17 −1 (watched for: log level and line prefixes the markers assume)",
+      "evidence": {
+        "commits": [
+          "a17e94d229 tests : consolidate context state tests into test-llama-context (#30023)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/common/speculative.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "common/speculative.cpp",
+      "message": "2 commit(s), +16 −9 (watched for: --spec-type names, MTP context errors)",
+      "evidence": {
+        "commits": [
+          "781dbc5ac9 spec: properly handle mtmd input for mtp (#30257)",
+          "d6cf9acb25 llama : add a GPU cache for MoE experts kept in host memory (#29887)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/ggml/src/ggml-backend-reg.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "ggml/src/ggml-backend-reg.cpp",
+      "message": "1 commit(s), +7 −14 (watched for: load_backend log lines)",
+      "evidence": {
+        "commits": [
+          "1b70350c92 ggml : simplify backend search path error handling (#28367)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/src/llama-arch.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "src/llama-arch.cpp",
+      "message": "6 commit(s), +26 −1 (watched for: architecture names and GGUF keys core reads)",
+      "evidence": {
+        "commits": [
+          "10da8c463f unicode : add opt-in NFC normalization for Unigram tokenizers (#30390)",
+          "097cf33d94 model: support vllm decision 2 model (#30378)",
+          "a9d27ac693 model :  support for Prism Bonsai 2 27B (#29600)",
+          "69f201a205 model : support MiniCPM-V 4.7 (#29416)",
+          "e60eff95fd meta : handle host views (#30217)",
+          "37ac634566 model : support classifier_activation for rerankers (#29692)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/src/llama-context.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "src/llama-context.cpp",
+      "message": "10 commit(s), +183 −31 (watched for: MTP warnings, compute and decode errors)",
+      "evidence": {
+        "commits": [
+          "cb55ffe6e2 graph: skip the LM head for pooled embeddings (#30445)",
+          "b476d9a762 llama : fix log message (#30452)",
+          "ed019cd8b9 llama : skip logits buffer allocation when graph produces no logits (#30255)",
+          "9880157881 graph : avoid reallocations in the \"no cache\" path (#30439)",
+          "cbe28bb3cb model: fix vllm d3 multi seq case (#30408)",
+          "972b5fcc19 llama : report compute graph reallocations during inference (#30329)",
+          "a9d27ac693 model :  support for Prism Bonsai 2 27B (#29600)",
+          "a518119d30 llama: keep the backend sampling graph static across ubatches (#30223)",
+          "c811cb8f0a llama: support MoE cache over multiple GPUs (#30112)",
+          "d6cf9acb25 llama : add a GPU cache for MoE experts kept in host memory (#29887)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/src/llama-model-loader.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "src/llama-model-loader.cpp",
+      "message": "1 commit(s), +80 −14 (watched for: missing keys, tensor count, corrupt file)",
+      "evidence": {
+        "commits": [
+          "b9f3599fb1 llama : do not map foreign ranges into a backend buffer (#30405)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/src/llama-model.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "src/llama-model.cpp",
+      "message": "10 commit(s), +464 −44 (watched for: architecture errors, offload and buffer-size log lines)",
+      "evidence": {
+        "commits": [
+          "b9f3599fb1 llama : do not map foreign ranges into a backend buffer (#30405)",
+          "cb55ffe6e2 graph: skip the LM head for pooled embeddings (#30445)",
+          "a17e94d229 tests : consolidate context state tests into test-llama-context (#30023)",
+          "097cf33d94 model: support vllm decision 2 model (#30378)",
+          "a9d27ac693 model :  support for Prism Bonsai 2 27B (#29600)",
+          "69f201a205 model : support MiniCPM-V 4.7 (#29416)",
+          "6184e92c57 model : use exact GELU for ModernBERT encoders (#30108)",
+          "37ac634566 model : support classifier_activation for rerankers (#29692)",
+          "a657f7e981 model : add LiquidAI/d1-omni-600M decision model (#30114)",
+          "448147d42a llama: share the nextn tensor flags between models (#30097)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/tools/mtmd/clip.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "tools/mtmd/clip.cpp",
+      "message": "5 commit(s), +128 −16 (watched for: unknown projector type)",
+      "evidence": {
+        "commits": [
+          "69f201a205 model : support MiniCPM-V 4.7 (#29416)",
+          "0fd868cbca mtmd: add build_inp_attn_mask (#30259)",
+          "a657f7e981 model : add LiquidAI/d1-omni-600M decision model (#30114)",
+          "88dcc460d6 model : add LiquidAI/d1-3B decision model (#30110)",
+          "50a6c5cf7c mtmd: add cohere2 vision support (#30062)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/tools/server/server-common.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "tools/server/server-common.cpp",
+      "message": "6 commit(s), +23 −29 (watched for: error types → HTTP codes, media errors)",
+      "evidence": {
+        "commits": [
+          "ff026f8c0a chat: replace output string with parts (#30389)",
+          "efe3626b11 model: support vllm d3 models (#30383)",
+          "097cf33d94 model: support vllm decision 2 model (#30378)",
+          "8b54361025 chat : refactor API (#30210)",
+          "a657f7e981 model : add LiquidAI/d1-omni-600M decision model (#30114)",
+          "88dcc460d6 model : add LiquidAI/d1-3B decision model (#30110)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/tools/server/server-context.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "tools/server/server-context.cpp",
+      "message": "9 commit(s), +240 −47 (watched for: /props, /v1/models, /health, context overflow, compute errors)",
+      "evidence": {
+        "commits": [
+          "efe3626b11 model: support vllm d3 models (#30383)",
+          "097cf33d94 model: support vllm decision 2 model (#30378)",
+          "972b5fcc19 llama : report compute graph reallocations during inference (#30329)",
+          "23b0202a18 server: leave a busy slot untouched when a request pins it (#30295)",
+          "8b54361025 chat : refactor API (#30210)",
+          "033df86b69 server : preserve context checkpoints across slot save/restore (#26004)",
+          "a657f7e981 model : add LiquidAI/d1-omni-600M decision model (#30114)",
+          "88dcc460d6 model : add LiquidAI/d1-3B decision model (#30110)",
+          "18b5f8b186 server : accumulate generated text and tokens as parse input (#29876)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/tools/server/server-task.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "tools/server/server-task.cpp",
+      "message": "2 commit(s), +21 −29 (watched for: timings, usage, n_prompt_tokens / n_ctx)",
+      "evidence": {
+        "commits": [
+          "8b54361025 chat : refactor API (#30210)",
+          "18b5f8b186 server : accumulate generated text and tokens as parse input (#29876)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/tools/server/server.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "tools/server/server.cpp",
+      "message": "1 commit(s), +0 −8 (watched for: routes, `model loaded` / `listening on`)",
+      "evidence": {
+        "commits": [
+          "b42b7e6d30 server: use port 9931 by default (#30159)"
+        ]
+      }
+    }
+  ]
+}

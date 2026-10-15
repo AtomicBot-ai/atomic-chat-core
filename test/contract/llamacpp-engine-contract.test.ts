@@ -6,8 +6,10 @@
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { getBackendArchiveName, parseManifestForPlatform } from '../../src/backend/index.js'
 import {
   argsBuildGates,
+  backendAssetPattern,
   deriveLlamaEngineContract,
   sampledBuilds,
   toRanges,
@@ -66,6 +68,66 @@ describe('the upstream llama.cpp engine contract', () => {
   it('reads `-ngl -1` as a flag and its value, never `-1` as a flag', () => {
     expect(contract.flags.map((f) => f.flag)).toContain('-ngl')
     expect(contract.flags.every((f) => /^--?[A-Za-z]/.test(f.flag))).toBe(true)
+  })
+})
+
+describe('the archives core installs (assets.core_backends)', () => {
+  const release = (tag: string) =>
+    JSON.parse(
+      readFileSync(new URL(`../fixtures/llamacpp/releases/${tag}.json`, import.meta.url), 'utf8')
+    ) as {
+      tag: string
+      assets: string[]
+    }
+  const matching = (tag: string, platform: string, assets: readonly string[]) =>
+    contract.assets.core_backends
+      .filter((b) => b.platform === platform)
+      .flatMap((b) => assets.filter((n) => new RegExp(`^${b.asset.replace('{tag}', tag)}$`).test(n)))
+      .sort()
+
+  it.each(['b10874', 'b11463', 'b11617'])(
+    '%s: the patterns pick exactly what the manifest parser offers each platform',
+    (tag) => {
+      const { assets } = release(tag)
+      for (const [platform, os, arch] of [
+        ['linux-x64', 'linux', 'x64'],
+        ['linux-arm64', 'linux', 'arm64'],
+        ['macos-x64', 'macos', 'x64'],
+        ['macos-arm64', 'macos', 'arm64'],
+        ['windows-x64', 'windows', 'x64'],
+        ['windows-arm64', 'windows', 'arm64'],
+      ] as const) {
+        const offered = parseManifestForPlatform(
+          { tag_name: tag, assets: assets.map((name) => ({ name })) },
+          os,
+          arch
+        )
+          .map((b) => getBackendArchiveName(tag, b.backend))
+          .sort()
+        expect(matching(tag, platform, assets), platform).toEqual(offered)
+      }
+    }
+  )
+
+  it('marks the one backend of each platform every host runs', () => {
+    const cpu = contract.assets.core_backends.filter((b) => b.cpu).map((b) => b.backend)
+    expect(cpu).toEqual([
+      'linux-cpu-x64',
+      'linux-cpu-arm64',
+      'macos-x64',
+      'macos-arm64',
+      'win-cpu-x64',
+      'win-cpu-arm64',
+    ])
+  })
+
+  it('frees the toolkit minor of a GPU family, and only that', () => {
+    expect(backendAssetPattern('win-cuda-13-x64')).toBe('llama-{tag}-bin-win-cuda-13\\.\\d+-x64\\.zip')
+    expect(backendAssetPattern('win-rocm-x64')).toBe('llama-{tag}-bin-win-rocm-\\d+\\.\\d+-x64\\.zip')
+    expect(backendAssetPattern('linux-cuda-13-arm64')).toBe(
+      'llama-{tag}-bin-ubuntu-cuda-13\\.\\d+-arm64\\.tar\\.gz'
+    )
+    expect(backendAssetPattern('win-cuda-12.4-x64')).toBe('llama-{tag}-bin-win-cuda-12\\.4-x64\\.zip')
   })
 })
 

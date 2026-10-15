@@ -15,6 +15,8 @@ import { buildEmbeddingArgs } from '../../src/embedding/args.js'
 import { EMBEDDING_CONTENT_PARTS_MIN_BUILD } from '../../src/embedding/model-facts.js'
 import { buildUpstreamDecisionArgs } from '../../src/decision/args.js'
 import { UPSTREAM_DECISION_MIN_BUILD } from '../../src/decision/upstream-version.js'
+import { getBackendArchiveName, gpuFamilyConcreteRe } from '../../src/backend/catalog/index.js'
+import { determineSupportedBackends, normalizeFeatures } from '../../src/backend/select/index.js'
 import type { LlamacppConfig } from '../../src/contracts/index.js'
 
 export interface BuildRange {
@@ -52,6 +54,16 @@ export interface ContractFlag {
   values?: ContractValue[]
 }
 
+/** A release archive core installs: one backend id of one platform. */
+export interface ContractAsset {
+  platform: string
+  backend: string
+  /** The platform's first backend, the one every host of it runs (`determineSupportedBackends`). */
+  cpu: boolean
+  /** Regex source of the archive name, `{tag}` standing for the release tag. */
+  asset: string
+}
+
 export interface EngineContract {
   schema: 'atomic-engine-contract'
   schema_version: 1
@@ -62,6 +74,7 @@ export interface EngineContract {
   invocations: Array<{ argv: string[]; source: string; expect: 'exit-0' }>
   env: Array<{ name: string; severity: 'break' | 'warn'; source: string }>
   flags: ContractFlag[]
+  assets: { core_backends: ContractAsset[] }
   upstream: {
     repo: string
     watched_paths: Array<{ path: string; why: string }>
@@ -304,6 +317,50 @@ function decisionPresence(builds: readonly number[]): Presence {
   return presence
 }
 
+/** The platforms core ships for, as `determineSupportedBackends` spells them. */
+const ASSET_PLATFORMS: ReadonlyArray<{ platform: string; os: string; arch: string }> = [
+  { platform: 'linux-x64', os: 'linux', arch: 'x86_64' },
+  { platform: 'linux-arm64', os: 'linux', arch: 'aarch64' },
+  { platform: 'macos-x64', os: 'macos', arch: 'x86_64' },
+  { platform: 'macos-arm64', os: 'macos', arch: 'aarch64' },
+  { platform: 'windows-x64', os: 'windows', arch: 'x86_64' },
+  { platform: 'windows-arm64', os: 'windows', arch: 'aarch64' },
+]
+
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * The archive-name pattern of a backend id. A minor-less GPU family (`win-cuda-13-x64`,
+ * `win-rocm-x64`) takes whichever toolkit minor the release carries, so its concrete-id regex is
+ * turned into a sample id (`9999` for each free number), named, and the sample freed again.
+ */
+export function backendAssetPattern(backend: string): string {
+  const family = gpuFamilyConcreteRe(backend)
+  const id = family
+    ? family.source
+        .replace(/^\^|\$$/g, '')
+        .replace(/\(\\d\+\)/g, '9999')
+        .replace(/\((\d+)\)/g, '$1')
+        .replace(/\\\./g, '.')
+    : backend
+  return escapeRegExp(getBackendArchiveName('{tag}', id))
+    .replace(/9999/g, '\\d+')
+    .replace('\\{tag\\}', '{tag}')
+}
+
+/** Every backend core installs, per platform, with every hardware feature on. */
+export function coreBackendAssets(): ContractAsset[] {
+  const all = normalizeFeatures({ cuda12: true, cuda13: true, vulkan: true, rocm: true, opencl: true })
+  return ASSET_PLATFORMS.flatMap(({ platform, os, arch }) =>
+    determineSupportedBackends(os, arch, all).map((backend, i) => ({
+      platform,
+      backend,
+      cpu: i === 0,
+      asset: backendAssetPattern(backend),
+    }))
+  )
+}
+
 export function deriveLlamaEngineContract(): EngineContract {
   const builds = [
     ...new Set([
@@ -378,6 +435,7 @@ export function deriveLlamaEngineContract(): EngineContract {
       { name: 'LLAMA_ARG_TIMEOUT', severity: 'warn', source: 'src/runtime/llamacpp/load-plan.ts' },
     ],
     flags,
+    assets: { core_backends: coreBackendAssets() },
     upstream: {
       repo: 'ggml-org/llama.cpp',
       watched_paths: [

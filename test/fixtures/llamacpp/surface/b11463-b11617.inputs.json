@@ -1,0 +1,1251 @@
+{
+  "schema": "atomic-engine-surface-inputs",
+  "schema_version": 1,
+  "core": {
+    "version": "0.17.0",
+    "sha": "8a3852146568f666a5d8fc4ab6b53361ed8c8576"
+  },
+  "conf": {
+    "ref": "main",
+    "sha": "159ed3ac0f0a9e63506a8269fe3736658d3d1d70"
+  },
+  "candidate": {
+    "tag": "b11617",
+    "repo": "ggml-org/llama.cpp",
+    "source": "release",
+    "platform": "macos-arm64",
+    "assets": [
+      "cudart-llama-b11617-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "cudart-llama-b11617-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+      "cudart-llama-b11617-bin-ubuntu-cuda-13.4-x64.tar.gz",
+      "cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "cudart-llama-bin-win-cuda-13.4-arm64.zip",
+      "cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "llama-b11617-bin-android-arm64-snapdragon.tar.gz",
+      "llama-b11617-bin-android-arm64.tar.gz",
+      "llama-b11617-bin-linux-arm64-snapdragon.tar.gz",
+      "llama-b11617-bin-macos-arm64.tar.gz",
+      "llama-b11617-bin-macos-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-arm64.tar.gz",
+      "llama-b11617-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+      "llama-b11617-bin-ubuntu-cuda-13.4-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-openvino-2026.4.1-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-rocm-10.0-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-s390x.tar.gz",
+      "llama-b11617-bin-ubuntu-sycl-fp16-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-sycl-fp32-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-vulkan-arm64.tar.gz",
+      "llama-b11617-bin-ubuntu-vulkan-x64.tar.gz",
+      "llama-b11617-bin-ubuntu-x64.tar.gz",
+      "llama-b11617-bin-win-cpu-arm64.zip",
+      "llama-b11617-bin-win-cpu-x64.zip",
+      "llama-b11617-bin-win-cuda-12.4-x64.zip",
+      "llama-b11617-bin-win-cuda-13.4-arm64.zip",
+      "llama-b11617-bin-win-cuda-13.4-x64.zip",
+      "llama-b11617-bin-win-opencl-adreno-arm64.zip",
+      "llama-b11617-bin-win-openvino-2026.4.1-x64.zip",
+      "llama-b11617-bin-win-rocm-10.0-x64.zip",
+      "llama-b11617-bin-win-sycl-x64.zip",
+      "llama-b11617-bin-win-vulkan-arm64.zip",
+      "llama-b11617-bin-win-vulkan-x64.zip",
+      "llama-b11617-ui.tar.gz",
+      "llama-b11617-xcframework.zip"
+    ],
+    "release": {
+      "published_at": "2026-10-14T12:53:33Z",
+      "commit": "14310190cd0a0c831fe949ac8cbedd8abdc90695"
+    },
+    "binary": {
+      "name": "llama-b11617-bin-macos-arm64.tar.gz",
+      "sha256": "051bb0b55b3e5e72081aa819131ba30c74d910acc915b28bab298757472e39d9",
+      "digest_verified": true
+    },
+    "invocations": [
+      {
+        "argv": [
+          "-h"
+        ],
+        "status": 0
+      },
+      {
+        "argv": [
+          "--version"
+        ],
+        "status": 0
+      },
+      {
+        "argv": [
+          "--list-devices"
+        ],
+        "status": 0
+      }
+    ],
+    "build": 11617,
+    "commit": "14310190c"
+  },
+  "pin": {
+    "tag": "b11463",
+    "repo": "ggml-org/llama.cpp",
+    "source": "release",
+    "platform": "macos-arm64",
+    "assets": [
+      "cudart-llama-b11463-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "cudart-llama-b11463-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+      "cudart-llama-b11463-bin-ubuntu-cuda-13.4-x64.tar.gz",
+      "cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "cudart-llama-bin-win-cuda-13.4-arm64.zip",
+      "cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "llama-b11463-bin-android-arm64-snapdragon.tar.gz",
+      "llama-b11463-bin-android-arm64.tar.gz",
+      "llama-b11463-bin-linux-arm64-snapdragon.tar.gz",
+      "llama-b11463-bin-macos-arm64.tar.gz",
+      "llama-b11463-bin-macos-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-arm64.tar.gz",
+      "llama-b11463-bin-ubuntu-cuda-12.8-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+      "llama-b11463-bin-ubuntu-cuda-13.4-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-openvino-2026.4.1-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-rocm-10.0-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-s390x.tar.gz",
+      "llama-b11463-bin-ubuntu-sycl-fp16-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-sycl-fp32-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-vulkan-arm64.tar.gz",
+      "llama-b11463-bin-ubuntu-vulkan-x64.tar.gz",
+      "llama-b11463-bin-ubuntu-x64.tar.gz",
+      "llama-b11463-bin-win-cpu-arm64.zip",
+      "llama-b11463-bin-win-cpu-x64.zip",
+      "llama-b11463-bin-win-cuda-12.4-x64.zip",
+      "llama-b11463-bin-win-cuda-13.4-arm64.zip",
+      "llama-b11463-bin-win-cuda-13.4-x64.zip",
+      "llama-b11463-bin-win-opencl-adreno-arm64.zip",
+      "llama-b11463-bin-win-openvino-2026.4.1-x64.zip",
+      "llama-b11463-bin-win-rocm-10.0-x64.zip",
+      "llama-b11463-bin-win-sycl-x64.zip",
+      "llama-b11463-bin-win-vulkan-arm64.zip",
+      "llama-b11463-bin-win-vulkan-x64.zip",
+      "llama-b11463-ui.tar.gz",
+      "llama-b11463-xcframework.zip"
+    ],
+    "release": {
+      "published_at": "2026-10-07T10:40:25Z",
+      "commit": "d2a79e60464903f9832fbecdba48bd4cc6c47e75"
+    },
+    "binary": {
+      "name": "llama-b11463-bin-macos-arm64.tar.gz",
+      "sha256": "bef66fc5f7993c2ce814c6b619df6eb8ca3a5213cf3eb828918674c22324b252",
+      "digest_verified": true
+    },
+    "invocations": [
+      {
+        "argv": [
+          "-h"
+        ],
+        "status": 0
+      },
+      {
+        "argv": [
+          "--version"
+        ],
+        "status": 0
+      },
+      {
+        "argv": [
+          "--list-devices"
+        ],
+        "status": 0
+      }
+    ],
+    "build": 11463,
+    "commit": "d2a79e604"
+  },
+  "pin_resolution": {
+    "source": "list",
+    "core_version": "0.17.0",
+    "per_platform": {
+      "linux-x64": {
+        "backend": "linux-cpu-x64",
+        "tag": "b11463"
+      },
+      "linux-arm64": {
+        "backend": "linux-cpu-arm64",
+        "tag": "b11463"
+      },
+      "macos-arm64": {
+        "backend": "macos-arm64",
+        "tag": "b11463"
+      },
+      "windows-x64": {
+        "backend": "win-cpu-x64",
+        "tag": "b11463"
+      },
+      "windows-arm64": {
+        "backend": "win-cpu-arm64",
+        "tag": "b11463"
+      }
+    },
+    "list": {
+      "readable": true,
+      "per_platform": {
+        "linux-x64": "b11463",
+        "linux-arm64": "b11463",
+        "macos-arm64": "b11463",
+        "windows-x64": "b11463",
+        "windows-arm64": "b11463"
+      }
+    },
+    "legacy": {
+      "tag": "b11463"
+    },
+    "tag": "b11463"
+  },
+  "whitelist": {
+    "source": "conf",
+    "entries": [
+      {
+        "platform": "windows",
+        "pattern": "win-cpu-x64\\.zip",
+        "required": true
+      },
+      {
+        "platform": "windows",
+        "pattern": "win-cuda-\\d+\\.\\d+-x64\\.zip",
+        "required": true
+      },
+      {
+        "platform": "windows",
+        "pattern": "win-vulkan-x64\\.zip",
+        "required": true
+      },
+      {
+        "platform": "windows",
+        "pattern": "win-rocm-[\\d.]+-x64\\.zip",
+        "required": false
+      },
+      {
+        "platform": "windows",
+        "pattern": "win-cpu-arm64\\.zip",
+        "required": true
+      },
+      {
+        "platform": "windows",
+        "pattern": "win-opencl-adreno-arm64\\.zip",
+        "required": false
+      },
+      {
+        "platform": "windows",
+        "pattern": "win-cuda-\\d+\\.\\d+-arm64\\.zip",
+        "required": false
+      },
+      {
+        "platform": "linux",
+        "pattern": "ubuntu-x64\\.tar\\.gz",
+        "required": true
+      },
+      {
+        "platform": "linux",
+        "pattern": "ubuntu-vulkan-x64\\.tar\\.gz",
+        "required": true
+      },
+      {
+        "platform": "linux",
+        "pattern": "ubuntu-arm64\\.tar\\.gz",
+        "required": true
+      },
+      {
+        "platform": "linux",
+        "pattern": "ubuntu-vulkan-arm64\\.tar\\.gz",
+        "required": false
+      },
+      {
+        "platform": "linux",
+        "pattern": "ubuntu-cuda-\\d+\\.\\d+-arm64\\.tar\\.gz",
+        "required": false
+      },
+      {
+        "platform": "macos",
+        "pattern": "macos-arm64\\.tar\\.gz",
+        "required": true
+      }
+    ]
+  },
+  "upstream": {
+    "available": true,
+    "method": "git",
+    "base": "d2a79e60464903f9832fbecdba48bd4cc6c47e75",
+    "head": "14310190cd0a0c831fe949ac8cbedd8abdc90695",
+    "commits": [
+      {
+        "sha": "14310190cd0a0c831fe949ac8cbedd8abdc90695",
+        "subject": "vulkan: fix compile error (#30495)",
+        "files": []
+      },
+      {
+        "sha": "e7268bf6a99688f893abf58295f49454cb2b4eef",
+        "subject": "llama : build the k-pool selection in the causal mask layout (#30480)",
+        "files": []
+      },
+      {
+        "sha": "cdce056a3e8811e5f7b2ee56ae24d8fb1c32df32",
+        "subject": "vulkan: Add workaround for device free memory > total memory on Intel Windows (#29835)",
+        "files": []
+      },
+      {
+        "sha": "d524bb660be6d628c73f00b8ea8d4b8e7dfc043a",
+        "subject": "vulkan: Define the shader count for Intel Arc Pro B65 + B70 (#30431)",
+        "files": []
+      },
+      {
+        "sha": "7ec420bc09e26c1c79ae453734c0e2bc7974c9b3",
+        "subject": "vulkan: support mulmat bf16 activations (#29069)",
+        "files": []
+      },
+      {
+        "sha": "10da8c463f735c7eaff904c6474e6cf38dccbe83",
+        "subject": "unicode : add opt-in NFC normalization for Unigram tokenizers (#30390)",
+        "files": [
+          "src/llama-arch.cpp"
+        ]
+      },
+      {
+        "sha": "eca5458ce0340eeac234619d425ba04cfd1c9cc2",
+        "subject": "convert : export YaRN truncation config (#30288)",
+        "files": []
+      },
+      {
+        "sha": "091b6a7fc561b78da90a0ed2d524ec995458c657",
+        "subject": "Enable OpenSSL in FP32/FP16 SYCL builds to restore HF HTTPS downloads (#30330)",
+        "files": []
+      },
+      {
+        "sha": "fcac19079f3f2985fe74ed845f0880e7e9a8030a",
+        "subject": "webgpu: (Fix CI) fix mul_mat_id with duplicate expert ids (#30451)",
+        "files": []
+      },
+      {
+        "sha": "04f7226a2c12c7f382c545a6db5a034266aa53cb",
+        "subject": "server : escape the special tokens without std::regex (#30243)",
+        "files": []
+      },
+      {
+        "sha": "ff026f8c0a97fe80649f34763432c9d40b418622",
+        "subject": "chat: replace output string with parts (#30389)",
+        "files": [
+          "tools/server/server-common.cpp"
+        ]
+      },
+      {
+        "sha": "1b70350c92563449576bcbbf552994b1d1ed847d",
+        "subject": "ggml : simplify backend search path error handling (#28367)",
+        "files": [
+          "ggml/src/ggml-backend-reg.cpp"
+        ]
+      },
+      {
+        "sha": "d71e324a44ce1238bdb066e58b88d629c5b49254",
+        "subject": "docs : update zDNN supported ops (#30472)",
+        "files": []
+      },
+      {
+        "sha": "45451c366d4256f94fbc8845645e31a6b9155054",
+        "subject": "kleidiai: add SME2 Q4_K and Q6_K matmul support (#29219)",
+        "files": []
+      },
+      {
+        "sha": "77c4540ce4667f4577753fe034a3a8042f510b8f",
+        "subject": "vulkan: Optimize pool_2d when the pooling window is large (#30119)",
+        "files": []
+      },
+      {
+        "sha": "ecdd29e8b2076bb85da9e9ca7ee3d84264375bd1",
+        "subject": "meta: recreate all subgraphs when the arena is reallocated (#30453)",
+        "files": []
+      },
+      {
+        "sha": "ec0bfac1794ad722221dd68d84760f8980355fb2",
+        "subject": "hexagon: add configurable HTP DCVS/HMX power mode (#30423)",
+        "files": []
+      },
+      {
+        "sha": "ace20f679e30a39c09a7b17bec14199855469633",
+        "subject": "graph: pad the KQ bias of the no-cache attention (#30446)",
+        "files": []
+      },
+      {
+        "sha": "b9f3599fb1c429e89248f042699ea2e062a32e57",
+        "subject": "llama : do not map foreign ranges into a backend buffer (#30405)",
+        "files": [
+          "src/llama-model-loader.cpp",
+          "src/llama-model.cpp"
+        ]
+      },
+      {
+        "sha": "f441d2d9db68410f78b9e937efe479049f458044",
+        "subject": "model: load YaRN beta metadata for laguna models (#30331)",
+        "files": []
+      },
+      {
+        "sha": "cb55ffe6e2147eb15f4bede1f60d11246715754f",
+        "subject": "graph: skip the LM head for pooled embeddings (#30445)",
+        "files": [
+          "src/llama-context.cpp",
+          "src/llama-model.cpp"
+        ]
+      },
+      {
+        "sha": "a17e94d229fc7fed1567a799baebd11b771fe5af",
+        "subject": "tests : consolidate context state tests into test-llama-context (#30023)",
+        "files": [
+          "common/log.cpp",
+          "src/llama-model.cpp"
+        ]
+      },
+      {
+        "sha": "b476d9a762d64a9ef8e82ee59419eca495a24b51",
+        "subject": "llama : fix log message (#30452)",
+        "files": [
+          "src/llama-context.cpp"
+        ]
+      },
+      {
+        "sha": "e0bcaccbe50a773c8addec49bbfc8b7ba953c63b",
+        "subject": "vulkan: allow multiple devices to access gpu-visible host memory (#29741)",
+        "files": []
+      },
+      {
+        "sha": "0a731cced9ed826349838333a767ccae63164c2c",
+        "subject": "ggml-cpu : add AVX2 dot product for Q2_0 (#30447)",
+        "files": []
+      },
+      {
+        "sha": "f851e244d0dc56074ab701c4467edb116840cb88",
+        "subject": "cuda : add GGML_CUDA_GRAPH_DEBUG and read env vars once (#30327)",
+        "files": []
+      },
+      {
+        "sha": "bfe65e1dfa8f1afed8a2158e83e5d2a3d6db5444",
+        "subject": "cuda : fix compiler warnings in mmq-load-tiles.cuh (#30443)",
+        "files": []
+      },
+      {
+        "sha": "411d548515017ca75c2a12c39659b6e7e1551dd7",
+        "subject": "vulkan : split matmul dispatch when it would exceed maxComputeWorkGroupCount (#29533)",
+        "files": []
+      },
+      {
+        "sha": "296538adea19ff397100bf8e7d71f302d2d2bb35",
+        "subject": "spec : remove tokens assert from dsv4 graph_mtp (#30444)",
+        "files": []
+      },
+      {
+        "sha": "7f51953d7d2f359939a763549e93d51f0347e569",
+        "subject": "model : allow Qwen3.8 Flash Next to accept image embds for MTP (#30397)",
+        "files": []
+      },
+      {
+        "sha": "882d67166d237a7020c21c6e35fe05f00f92cb6d",
+        "subject": "cuda : fix warnings from dead breaks (#30441)",
+        "files": []
+      },
+      {
+        "sha": "30f7df1a831ba5bda37b737f46bdf2f11f6bcb88",
+        "subject": "cuda : warnings cleanup (#30420)",
+        "files": []
+      },
+      {
+        "sha": "9d7d5049804be03fce6575cc9f49c058b3c48788",
+        "subject": "convert : fix LoRA conversion with --outtype auto (#30433)",
+        "files": []
+      },
+      {
+        "sha": "ed019cd8b94a8194881e3d2448075156939d32a1",
+        "subject": "llama : skip logits buffer allocation when graph produces no logits (#30255)",
+        "files": [
+          "src/llama-context.cpp"
+        ]
+      },
+      {
+        "sha": "98801578818b26d833a1fe244870d64b0c34bb46",
+        "subject": "graph : avoid reallocations in the \"no cache\" path (#30439)",
+        "files": [
+          "src/llama-context.cpp"
+        ]
+      },
+      {
+        "sha": "af50f2f248b475d9760f8e67503d01c0f194f5f4",
+        "subject": "ggml-zdnn : introduce Q8_0 mat mul (#29836)",
+        "files": []
+      },
+      {
+        "sha": "071b553fb1d3a1b76c0b12ab9a1546714cafe4e1",
+        "subject": "models : remove redundant ggml_cont calls now supported by all unary kernels  (#30198)",
+        "files": []
+      },
+      {
+        "sha": "4413a192410fad1f054e9216114087a3e01527a0",
+        "subject": "hexagon: extend scalar DMA broadcasting support for binary ops (#30245)",
+        "files": []
+      },
+      {
+        "sha": "8f574b0ad44c46d7b499ec028c29205aaa3fe80f",
+        "subject": "ci : build OpenVINO releases with GGML_NATIVE=OFF and CPU backend variants (#30324)",
+        "files": [
+          ".github/workflows/release.yml"
+        ]
+      },
+      {
+        "sha": "a49f58dcc3af1aa869b2287bb71953d0ad0395e4",
+        "subject": "ci: fix OpenVINO download links (#30401)",
+        "files": [
+          ".github/workflows/release.yml"
+        ]
+      },
+      {
+        "sha": "cbe28bb3cb0758f0c566a9a3561766821aeb0748",
+        "subject": "model: fix vllm d3 multi seq case (#30408)",
+        "files": [
+          "src/llama-context.cpp"
+        ]
+      },
+      {
+        "sha": "358a420ec4ed59b6b0be08b1d1f71dd478b99a99",
+        "subject": "graph: pad the KV dimension of the no-cache attention to 256 (#30416)",
+        "files": []
+      },
+      {
+        "sha": "48e985756788b4a6c50933a88e0af1aa8412b68d",
+        "subject": "metal: fix metal tensor kernel_mul_mm error for large tensor (#28748)",
+        "files": []
+      },
+      {
+        "sha": "8bb3cf0d216a5ae48360179f2931daf284be4d01",
+        "subject": "hexagon: optimize CPY/CONCAT — round 3, short-rows edition (#30341)",
+        "files": []
+      },
+      {
+        "sha": "0f701c88298606b41a13268a027e97c877ff63ca",
+        "subject": "vulkan: pack FMA for f16 accumulation, no dot product op (#29877)",
+        "files": []
+      },
+      {
+        "sha": "efe3626b119ff81033e309c3ba07a770bef2c546",
+        "subject": "model: support vllm d3 models (#30383)",
+        "files": [
+          "tools/server/server-common.cpp",
+          "tools/server/server-context.cpp"
+        ]
+      },
+      {
+        "sha": "097cf33d9499b1eade67d51e16d7c75427e7b267",
+        "subject": "model: support vllm decision 2 model (#30378)",
+        "files": [
+          "src/llama-arch.cpp",
+          "src/llama-model.cpp",
+          "tools/server/server-common.cpp",
+          "tools/server/server-context.cpp"
+        ]
+      },
+      {
+        "sha": "ccdbe290533f68154ede46e0618622eebcb6c070",
+        "subject": "tests : link each test against only the libraries it uses (#30299)",
+        "files": []
+      },
+      {
+        "sha": "073b74034b8bfe652e410ec8bd1e0d95a7d46fea",
+        "subject": "metal : fix mul_mat_id with duplicate ids (#30373)",
+        "files": []
+      },
+      {
+        "sha": "77757a34672a888845a09ab45728b8d34aa475ff",
+        "subject": "examples : fix draft sampling and rejection handling (#30095)",
+        "files": [
+          "common/arg.cpp"
+        ]
+      },
+      {
+        "sha": "972b5fcc19670e597f8de9bf5cacfb85752a5fff",
+        "subject": "llama : report compute graph reallocations during inference (#30329)",
+        "files": [
+          "src/llama-context.cpp",
+          "tools/server/server-context.cpp"
+        ]
+      },
+      {
+        "sha": "2f160ba59ae7a84e014d7c0e67690d110058aa03",
+        "subject": "ui: fix text attachment preview overflow (#29898)",
+        "files": []
+      },
+      {
+        "sha": "f9a95aeb2096d0c0218e0cd6e6d901cd37be798a",
+        "subject": "sycl: guard DMMV reads at row tails (#29338)",
+        "files": []
+      },
+      {
+        "sha": "08ffba21e5c2f1728b6b405c05ff3913f65706d4",
+        "subject": "vulkan: use ternary expressions to avoid switch lowering for CM2 quant block size (#30164)",
+        "files": []
+      },
+      {
+        "sha": "a05e58c981ea1ec863b2f5b11bbde66f7bb7aac6",
+        "subject": "ggml: Change default visibility of symbols to hidden (#30014)",
+        "files": []
+      },
+      {
+        "sha": "b2f036c0f138414dedc987446f1d9d802f920275",
+        "subject": "vulkan: fix buffer logging on 32-bit platforms after source split (#30326)",
+        "files": []
+      },
+      {
+        "sha": "e937b17a2df081e9c7ae380f0dab4341c1585bce",
+        "subject": "hexagon: optimize q2_k bpw and activation (#30035)",
+        "files": []
+      },
+      {
+        "sha": "b13a93a3d5fa44b57899d86467a4de463e7415a7",
+        "subject": "hexagon: add IM2COL_3D (#30305)",
+        "files": []
+      },
+      {
+        "sha": "f2cc7282ce0042641df55e0e563b75e824e2b647",
+        "subject": "opencl: improve fa, allow dk512 for gemma-4, improve dk64 (#30266)",
+        "files": []
+      },
+      {
+        "sha": "c83f3058b6f876f2f7e6ccbada858b2446860c85",
+        "subject": "opencl: fix image limit for q4_k dense bin kernels, q4_0 bcast and rms_norm (#30310)",
+        "files": []
+      },
+      {
+        "sha": "5c8854fd88319125125dc4b836c98b1b215b0f23",
+        "subject": "rpc : turn GGML_RPC_DEBUG into a verbosity level and add logs (#29544)",
+        "files": []
+      },
+      {
+        "sha": "a9d27ac693ff0a1d3cba449c912c2b891904a4c7",
+        "subject": "model :  support for Prism Bonsai 2 27B (#29600)",
+        "files": [
+          "src/llama-arch.cpp",
+          "src/llama-context.cpp",
+          "src/llama-model.cpp"
+        ]
+      },
+      {
+        "sha": "1cf7767765b872806e1bb74cfb55614f4334f02f",
+        "subject": "cpu: fix AVX2 CPUs not using F16C when available (#30270)",
+        "files": []
+      },
+      {
+        "sha": "966baae76b578d5d3dd4c179a75a35c80ff75577",
+        "subject": "vulkan: handle mul_mat_id duplicates in the prepass rather than looping (#29998)",
+        "files": []
+      },
+      {
+        "sha": "62a6f74bab748b1755f4cd8dfc0871caf865c6c8",
+        "subject": "server: add component tests (#30312)",
+        "files": []
+      },
+      {
+        "sha": "23b0202a189c44a54625aadcb37a946dd1d6278d",
+        "subject": "server: leave a busy slot untouched when a request pins it (#30295)",
+        "files": [
+          "tools/server/server-context.cpp"
+        ]
+      },
+      {
+        "sha": "69f201a2051ea9b9e9b50c3cc56afd9e2ae64414",
+        "subject": "model : support MiniCPM-V 4.7 (#29416)",
+        "files": [
+          "src/llama-arch.cpp",
+          "src/llama-model.cpp",
+          "tools/mtmd/clip.cpp"
+        ]
+      },
+      {
+        "sha": "abee0c8476b585b0d081d580b5ce21d0addc22c4",
+        "subject": "cmake(s390x): disable z17 target for unsupported compilers (#30297)",
+        "files": []
+      },
+      {
+        "sha": "aa94f2086147cd4bfbcff818ce998dffce5fcb39",
+        "subject": "args: add LLAMA_ARG_SLOT_SAVE_PATH env for --slot-save-path (#30272)",
+        "files": [
+          "common/arg.cpp"
+        ]
+      },
+      {
+        "sha": "781dbc5ac98921dbdb5e5b2ec5b7a50960e937d4",
+        "subject": "spec: properly handle mtmd input for mtp (#30257)",
+        "files": [
+          "common/speculative.cpp"
+        ]
+      },
+      {
+        "sha": "0fd868cbcadcbcd80373d1cb542ecbcfa115ca75",
+        "subject": "mtmd: add build_inp_attn_mask (#30259)",
+        "files": [
+          "tools/mtmd/clip.cpp"
+        ]
+      },
+      {
+        "sha": "1623d8ce47bc0bee9757068780c23ca7abd45160",
+        "subject": "cuda: always use MMVQ for MUL_MAT_ID on sm_60 (#27828)",
+        "files": []
+      },
+      {
+        "sha": "1bb2b9fcbe85c35c4e3b787e1c868ef05ca702f3",
+        "subject": "CUDA/HIP: fix race in flash_attn_ext_f16_process_tile when nbatch_combine != DKQ/2 (#30103)",
+        "files": []
+      },
+      {
+        "sha": "2bbca8f202e76b25dac9116755bf1713a84e2753",
+        "subject": "ggml-cpu: vectorize fp32 to fp16 conversion (#30157)",
+        "files": []
+      },
+      {
+        "sha": "404f557b5b143a448a304521ee1d4719ee40debe",
+        "subject": "vulkan: use 4 rows for NVIDIA MUL_MAT_ID MMVQ (#29274)",
+        "files": []
+      },
+      {
+        "sha": "b797c82c7dbb2c5bbba2db2efe8febc65bc77857",
+        "subject": "ggml: fix s390x all cpu build (#30140)",
+        "files": []
+      },
+      {
+        "sha": "f2918cabbffe8abf8e2a90c1c089085fa116c2cf",
+        "subject": "opencl: add bin kernels kernel_gemm_moe_q4_k_q8_1_dp4a_bin, kernel_gemm_moe_q6_k_q8_1_dp4a_bin (#30187)",
+        "files": []
+      },
+      {
+        "sha": "1e6f04a75e91da4bb66b5248f3fd4bdeff169d41",
+        "subject": "sycl : accelerate MXFP4 MoE with arithmetic decoding and weight reordering (#29809)",
+        "files": []
+      },
+      {
+        "sha": "10a60cf303566e10d6a7a2774c17d2085503d87b",
+        "subject": "vendor: apply deep nested json patch from upstream (#30253)",
+        "files": []
+      },
+      {
+        "sha": "79e2e74eb11022c1ba2e438df7f0ca2d4c10f8b6",
+        "subject": "CUDA: fix round issue, under MSVC the CPU and GPU agree (#30229)",
+        "files": []
+      },
+      {
+        "sha": "8e2d31e0eb658d0382d3106a61369dff81f0c080",
+        "subject": "graph : reorder get_rows for embeddings (#30160)",
+        "files": []
+      },
+      {
+        "sha": "baef3ed9a1e81c4b620f6923857b1c080bffec5b",
+        "subject": "ui: Models Manager Follow-up Improvements (#30228)",
+        "files": []
+      },
+      {
+        "sha": "f39148a953e52d6d14e92b73187e9883544dce49",
+        "subject": "llama-bench: respect -fitc if bigger than required benchmark size (#28331)",
+        "files": []
+      },
+      {
+        "sha": "50e3e3e480c80b9ee0ea067e475602d540dc62c8",
+        "subject": "CUDA: Remove redundant CUDA copies after SSM_SCAN (#29807)",
+        "files": []
+      },
+      {
+        "sha": "64df9183f5ca178c049a392f35e795d8e97c97b3",
+        "subject": "opencl: fix kernel compilation for a6x GPUs (#30176)",
+        "files": []
+      },
+      {
+        "sha": "6184e92c57dcd34de8a3e381d7641a5e75250d5f",
+        "subject": "model : use exact GELU for ModernBERT encoders (#30108)",
+        "files": [
+          "src/llama-model.cpp"
+        ]
+      },
+      {
+        "sha": "8b543610254aafe121942eaf79a23c3847177270",
+        "subject": "chat : refactor API (#30210)",
+        "files": [
+          "tools/server/server-common.cpp",
+          "tools/server/server-context.cpp",
+          "tools/server/server-task.cpp"
+        ]
+      },
+      {
+        "sha": "a518119d30cade6260f7494120863428a3fe8ee5",
+        "subject": "llama: keep the backend sampling graph static across ubatches (#30223)",
+        "files": [
+          "src/llama-context.cpp"
+        ]
+      },
+      {
+        "sha": "8ae386707bed05f02354dbfc6fa5ee0cf58e5f0f",
+        "subject": "ggml: fix OOB write in ggml_acc with negative offset (#30135)",
+        "files": []
+      },
+      {
+        "sha": "e60eff95fda7b6e46bf402a8e9f1e86d88ab29c8",
+        "subject": "meta : handle host views (#30217)",
+        "files": [
+          "src/llama-arch.cpp"
+        ]
+      },
+      {
+        "sha": "ba6439a6b595224c480d71572c0e4ac91d3e6afd",
+        "subject": "webgpu: use 2D workgroup dispatch for all the ops which use 1D dispatch (e.g., rms_norm) (#30219)",
+        "files": []
+      },
+      {
+        "sha": "5e4878e9787fff9bcc5c12478c47618b73268610",
+        "subject": "vulkan: fix rms_norm workgroup count overflow (#30145)",
+        "files": []
+      },
+      {
+        "sha": "609290be6b15db02f9d73443435403cbff6e7802",
+        "subject": "convert : support compressed-tensor mixed-precision NVFP4 checkpoint (#28636)",
+        "files": []
+      },
+      {
+        "sha": "86a283532072722c5f3363d37d59a874d09fa99b",
+        "subject": "musa: drop mp_21 from the default architectures (#30203)",
+        "files": []
+      },
+      {
+        "sha": "e94acad853c0d11a3b47974e3167ec12f263d86a",
+        "subject": "ci: fix Models Backend webgpu by supporting GGML_OP_DUP (#30216)",
+        "files": []
+      },
+      {
+        "sha": "5e1d74043eb84f5f82471a1c5d4c8171a4c0fcba",
+        "subject": "ci : set run-name for publish release (#30214)",
+        "files": []
+      },
+      {
+        "sha": "b42b7e6d3059503dd4bed6ca5dcf342bb6379f67",
+        "subject": "server: use port 9931 by default (#30159)",
+        "files": [
+          "common/arg.cpp",
+          "tools/server/server.cpp"
+        ]
+      },
+      {
+        "sha": "b013e56a7147dbff5ec03175828442a94086507c",
+        "subject": "ui : add the models manager (#29583)",
+        "files": []
+      },
+      {
+        "sha": "2c564f43dfdb0565745dc71cc7748d2a1305246a",
+        "subject": "ci: fix HIP quality check by ignoring the 320/256 FA kernel spill (#30212)",
+        "files": []
+      },
+      {
+        "sha": "1f8fa52318b594b373e7447a3c2bb36cdba9515f",
+        "subject": "metal: add the 128/96 flash attention kernels, accept every compiled pair (#30209)",
+        "files": []
+      },
+      {
+        "sha": "8a1a9b5126126e5228b95fa909d4b08fac65e8b3",
+        "subject": "CUDA: pass src1 precision to host MMQ config helpers (#30168)",
+        "files": []
+      },
+      {
+        "sha": "d4d82d67f48bb8f51e9a3518063e49d9ee54f58b",
+        "subject": "hexagon: fix IM2COL patch-embed DMA ring overflow (#30189)",
+        "files": []
+      },
+      {
+        "sha": "3d65c90d04d337e88f2b1f7f0061f40a5324e662",
+        "subject": "sycl : Q5_K reorder-layout MMVQ and fused GLU (#29375)",
+        "files": []
+      },
+      {
+        "sha": "de7fa0a3c6a2e1b4cd9f22eb8d6bf5b12dbdb63b",
+        "subject": "Musa FWHT fix (#30167)",
+        "files": []
+      },
+      {
+        "sha": "71ad0590f4808b6202f9213d166913858c73b1bc",
+        "subject": "CUDA: improve top-k algorithm selection (#28713)",
+        "files": []
+      },
+      {
+        "sha": "a11f57ba93797579a5d1855ee216a31f10242676",
+        "subject": "model : fix DFlash output head sharing (#30111)",
+        "files": []
+      },
+      {
+        "sha": "fc9ce6b9d52a8504edcb262abc92737c2289f96c",
+        "subject": "CUDA: fix MMQ out-of-bounds reads (#29953)",
+        "files": []
+      },
+      {
+        "sha": "c35b66744f13cb0dcc476af063e112122eee9355",
+        "subject": "CUDA : looped PAD kernel for more than 65535 rows or slices (#30147)",
+        "files": []
+      },
+      {
+        "sha": "1167d3f42c2b4dc5469bf4e696cb8c678ca79110",
+        "subject": "CUDA: fix CCCL version guard breaking on major version rollover (#29453)",
+        "files": []
+      },
+      {
+        "sha": "4f92965a7bfa9e8eb6519908ff962e23c2cb7b93",
+        "subject": "ui: apply ui_settings on first visit in router mode (#29668)",
+        "files": []
+      },
+      {
+        "sha": "c811cb8f0ac91b8ac72a32f970bdd45037f20da7",
+        "subject": "llama: support MoE cache over multiple GPUs (#30112)",
+        "files": [
+          "common/arg.cpp",
+          "src/llama-context.cpp"
+        ]
+      },
+      {
+        "sha": "033df86b69ec1a333eb241f0c16325a4d43dcff5",
+        "subject": "server : preserve context checkpoints across slot save/restore (#26004)",
+        "files": [
+          "tools/server/server-context.cpp"
+        ]
+      },
+      {
+        "sha": "ff5888f999f24e2f9eaf6537b4eb6b85fd559188",
+        "subject": "vulkan : fix TOP_K for +inf/NaN inputs and k = 1 on negative values (#30107)",
+        "files": []
+      },
+      {
+        "sha": "dac308739429d60ccf99c46ecc1fbb1dff20ca77",
+        "subject": "vulkan: extend sparse FA support to coopmat2 (#30003)",
+        "files": []
+      },
+      {
+        "sha": "03aa006acb547549162a00dddeab3d3b38ebf7b2",
+        "subject": "vendor : update cpp-httplib to 0.60.1 (#30134)",
+        "files": []
+      },
+      {
+        "sha": "08246a28f6000100433d297c4e037c02e9d2d464",
+        "subject": "cuda : support arbitrary striding for unary ops on f16, f32, and bf16 (#29781)",
+        "files": []
+      },
+      {
+        "sha": "46baf1f1fec5a06d1e52122a9207ca978b720f95",
+        "subject": "sycl: FWHT optimizations (#29605)",
+        "files": []
+      },
+      {
+        "sha": "097f5b5332f46559f1ee11d9d64e48a5065b2989",
+        "subject": "hex-mmadd: do not assume aligned read/write when bias-add is fused (#30133)",
+        "files": []
+      },
+      {
+        "sha": "d8880160413fc77f63d6a73a5b1ac21ac65e36e1",
+        "subject": "cuda : Use byte strides for roll to allow non-contiguous ROLL operations (#29547)",
+        "files": []
+      },
+      {
+        "sha": "fda186661304735bb9027abd472c1403a9902081",
+        "subject": "CUDA: fix norm family kernels when ne[2]/ne[3] exceed grid dim limits (#28175)",
+        "files": []
+      },
+      {
+        "sha": "ff30363a0e3e2630828309ef5a37da5d1d40396c",
+        "subject": "sycl: fuse the delta-net alpha gate (add + unary + mul) (#29687)",
+        "files": []
+      },
+      {
+        "sha": "000bee54a544070356b44d68af299b973d391d26",
+        "subject": "sycl: stage bulk uploads (model loading) through a pinned ring buffer (#29608)",
+        "files": []
+      },
+      {
+        "sha": "37ac634566439e680959b90e1c960714ca6b8b92",
+        "subject": "model : support classifier_activation for rerankers (#29692)",
+        "files": [
+          "src/llama-arch.cpp",
+          "src/llama-model.cpp"
+        ]
+      },
+      {
+        "sha": "24e41838e0c834f67db214e6d280af51f266056e",
+        "subject": "ggml-cuda: assign four GDN state columns per warp (#30087)",
+        "files": []
+      },
+      {
+        "sha": "847f447c310a3784d623a953e6f0bb07f04c0f27",
+        "subject": "sycl: add grouped MoE XMX GEMM (#29245)",
+        "files": []
+      },
+      {
+        "sha": "75118a3a5925d85e1850db67e87e447fa5890a47",
+        "subject": "convert : support Qwen3.5 embedding models (#27920)",
+        "files": []
+      },
+      {
+        "sha": "9b4ed0ca572be213f4440a490f341f810f7aa2cf",
+        "subject": "sycl: remove duplicate block-size defines from op headers (#29507)",
+        "files": []
+      },
+      {
+        "sha": "9c2e0e491a822adae1f0b1c831adb4160057d24f",
+        "subject": "hexagon: enable alloc_buffer_n  (#30126)",
+        "files": []
+      },
+      {
+        "sha": "06cad0b9e77315bd2930bd4f70a6d7b37b2a01c1",
+        "subject": "hexagon: Q6_K weight dequant speedup (#30121)",
+        "files": []
+      },
+      {
+        "sha": "a657f7e981ff8764d2ccce1e74ec3c7e9bf2cfa2",
+        "subject": "model : add LiquidAI/d1-omni-600M decision model (#30114)",
+        "files": [
+          "src/llama-model.cpp",
+          "tools/mtmd/clip.cpp",
+          "tools/server/server-common.cpp",
+          "tools/server/server-context.cpp"
+        ]
+      },
+      {
+        "sha": "aa5e0092fdb8980b9e89498dfb73049b4fe204c2",
+        "subject": "hexagon: support tiled Q4_K and Q6_K GET_ROWS (#30115)",
+        "files": []
+      },
+      {
+        "sha": "70815103c8b251bdf5abba4eca12749eab1de686",
+        "subject": "hexagon: improved GELU accuracy (#30104)",
+        "files": []
+      },
+      {
+        "sha": "bd4eeaa047006cb1fe71999fbd11134b5836e167",
+        "subject": "chat: fix jinja parser for TranslateGemma (#30096)",
+        "files": []
+      },
+      {
+        "sha": "5de733437bc5f6d6b2714b39c4023fd3d3b16698",
+        "subject": "chat : name tool and argument parser rules by index (#30088)",
+        "files": []
+      },
+      {
+        "sha": "88dcc460d628698bb8305b98c200c34f1edfdc04",
+        "subject": "model : add LiquidAI/d1-3B decision model (#30110)",
+        "files": [
+          "tools/mtmd/clip.cpp",
+          "tools/server/server-common.cpp",
+          "tools/server/server-context.cpp"
+        ]
+      },
+      {
+        "sha": "b86d2f07542b29ab099aed34fd6b6d1b2fd4b81c",
+        "subject": "cuda: FWHT kernels for block widths above 512 (#29100)",
+        "files": []
+      },
+      {
+        "sha": "50a6c5cf7c09ea5ea9c1937e4895ce88331c2869",
+        "subject": "mtmd: add cohere2 vision support (#30062)",
+        "files": [
+          "tools/mtmd/clip.cpp"
+        ]
+      },
+      {
+        "sha": "d6cf9acb25e6c657d6c6a4645ab7b69fce119995",
+        "subject": "llama : add a GPU cache for MoE experts kept in host memory (#29887)",
+        "files": [
+          "common/arg.cpp",
+          "common/speculative.cpp",
+          "src/llama-context.cpp"
+        ]
+      },
+      {
+        "sha": "42c787e8c191d49c01c757f4b7029d69ec0bf2c8",
+        "subject": "cuda: update uncoalesced memory reads in pool2d (#29425)",
+        "files": []
+      },
+      {
+        "sha": "18b5f8b1862ebfe0f1c33d2355b81a54d2fec867",
+        "subject": "server : accumulate generated text and tokens as parse input (#29876)",
+        "files": [
+          "tools/server/server-context.cpp",
+          "tools/server/server-task.cpp"
+        ]
+      },
+      {
+        "sha": "448147d42a71d0147c6dc844f99f9ffe7419183a",
+        "subject": "llama: share the nextn tensor flags between models (#30097)",
+        "files": [
+          "src/llama-model.cpp"
+        ]
+      },
+      {
+        "sha": "988190680d5a89fce97de3c20df2c2813731fd61",
+        "subject": "metal : few-row MMA mat-mul for the remaining src0 types (#30065)",
+        "files": []
+      },
+      {
+        "sha": "7e8324f5feba1d8be3f966e1791e84107e40cdd7",
+        "subject": "metal : fix MUL_MAT+ADD fusion when the residual is itself a MUL_MAT (#30100)",
+        "files": []
+      },
+      {
+        "sha": "b9acf138a1e28ce1fc23b5a4fc4b12444b50f7ea",
+        "subject": "feat: add GLM5Next MTP, optimize (#29928)",
+        "files": []
+      },
+      {
+        "sha": "48499d2e1c86c1d5fe7a05f8bf083156e7069cc0",
+        "subject": "qwen3tts : guard speaker_encoder_config patch for CustomVoice variant (#29179)",
+        "files": []
+      },
+      {
+        "sha": "d0b490f25edec147b4dcd69cce31c7d1099dff1d",
+        "subject": "sampling : use greedy selection for eligible temperature-zero chains (#29797)",
+        "files": []
+      },
+      {
+        "sha": "42b021b4dc42be573f1e1463528532fc8294c650",
+        "subject": "vocab : add plamo fim tokens (#30090)",
+        "files": []
+      },
+      {
+        "sha": "7481354a174714a3447ea0f8723c1dd1b3cbf8e2",
+        "subject": "convert : fix token configuration for PLaMo-3 (#29843)",
+        "files": []
+      },
+      {
+        "sha": "ad2156533102a0d3c4e5fbdf422dc25fba4d03ba",
+        "subject": "musa: use the tile lightning indexer kernel (#30080)",
+        "files": []
+      },
+      {
+        "sha": "b7dafa01e5f375c3010fb24b61a67329f957426a",
+        "subject": "vendor : update cpp-httplib to 0.60.0 (#30081)",
+        "files": []
+      },
+      {
+        "sha": "26908739bc8ab9c5ccacbde5dc9c0b3609079e8f",
+        "subject": "imatrix : include clocale for std::setlocale (#30079)",
+        "files": []
+      },
+      {
+        "sha": "36a73916ee0cb3b457f356066afabd47cce68884",
+        "subject": "ggml-webgpu: fix flash_attn supports_op check for overlapping KV (#28205)",
+        "files": []
+      },
+      {
+        "sha": "fa3c2fab361772f31116f2861a3c3583556a6fbe",
+        "subject": "tests : retain the anchor when testing recurrent rollback (#29923)",
+        "files": []
+      },
+      {
+        "sha": "005a1e127a84cc75bb66be11b43e4f0773564e53",
+        "subject": "[SYCL] fix the issue in mixed different model GPUs in FA (#29071)",
+        "files": []
+      }
+    ],
+    "watched": [
+      {
+        "path": "common/arg.cpp",
+        "exists": true,
+        "additions": 13,
+        "deletions": 3
+      },
+      {
+        "path": "common/speculative.cpp",
+        "exists": true,
+        "additions": 16,
+        "deletions": 9
+      },
+      {
+        "path": "common/log.cpp",
+        "exists": true,
+        "additions": 17,
+        "deletions": 1
+      },
+      {
+        "path": "tools/server/server.cpp",
+        "exists": true,
+        "additions": 0,
+        "deletions": 8
+      },
+      {
+        "path": "tools/server/server-http.cpp",
+        "exists": true,
+        "additions": 0,
+        "deletions": 0
+      },
+      {
+        "path": "tools/server/server-context.cpp",
+        "exists": true,
+        "additions": 240,
+        "deletions": 47
+      },
+      {
+        "path": "tools/server/server-common.cpp",
+        "exists": true,
+        "additions": 23,
+        "deletions": 29
+      },
+      {
+        "path": "tools/server/server-task.cpp",
+        "exists": true,
+        "additions": 21,
+        "deletions": 29
+      },
+      {
+        "path": "tools/server/server-chat.cpp",
+        "exists": true,
+        "additions": 0,
+        "deletions": 0
+      },
+      {
+        "path": "tools/mtmd/clip.cpp",
+        "exists": true,
+        "additions": 128,
+        "deletions": 16
+      },
+      {
+        "path": "src/llama-model.cpp",
+        "exists": true,
+        "additions": 464,
+        "deletions": 44
+      },
+      {
+        "path": "src/llama-model-loader.cpp",
+        "exists": true,
+        "additions": 80,
+        "deletions": 14
+      },
+      {
+        "path": "src/llama-context.cpp",
+        "exists": true,
+        "additions": 183,
+        "deletions": 31
+      },
+      {
+        "path": "src/llama-arch.cpp",
+        "exists": true,
+        "additions": 26,
+        "deletions": 1
+      },
+      {
+        "path": "ggml/src/ggml-backend-reg.cpp",
+        "exists": true,
+        "additions": 7,
+        "deletions": 14
+      },
+      {
+        "path": "ggml/src/gguf.cpp",
+        "exists": true,
+        "additions": 0,
+        "deletions": 0
+      },
+      {
+        "path": ".github/workflows/release.yml",
+        "exists": true,
+        "additions": 15,
+        "deletions": 29
+      }
+    ]
+  }
+}
