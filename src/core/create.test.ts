@@ -817,7 +817,7 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('engine output', () => {
       provider: 'llamacpp-upstream',
       model: 'demo',
       stream: 'stderr',
-      line: expect.stringMatching(/^build: /),
+      line: expect.stringContaining('llama_server: initializing'),
     })
   })
 
@@ -868,10 +868,10 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('engine output', () => {
     await core.load('llamacpp-upstream', 'demo', { verbose: true })
 
     // The engine did print them, and `verbose` still relays them as events...
-    expect(verbose.some((line) => line.includes('build:'))).toBe(true)
+    expect(verbose.some((line) => line.includes('llama_server: initializing'))).toBe(true)
     // ...but the host's logger never sees one.
     expect(logs.some((line) => line.includes('listening on'))).toBe(false)
-    expect(logs.some((line) => line.includes('build:'))).toBe(false)
+    expect(logs.some((line) => line.includes('llama_server: initializing'))).toBe(false)
   })
 })
 

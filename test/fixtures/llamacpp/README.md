@@ -11,6 +11,12 @@ What real ggml-org `llama-server` builds print, for the engine contract checks
   calls on a session, and the fields it reads), curated in `test/helpers/llamacpp-engine-strings.ts`:
   each names the core file that holds it, how much losing it costs (`severity_if_lost`) and what the
   live probe (`test/live/llamacpp-contract.test.ts`) sees on a stock build (`live_expectation`).
+- `observed/<tag>-<backend>.json` — what a real build said to the live contract probe, without
+  timestamps, paths or ports: its startup and ready lines, the 401, the 501s of a route it was not
+  started for, the context-overflow envelope, `--version`. `test/contract/fake-llama-server-vs-real.test.ts`
+  holds the fake llama-server to each file. A new one is the `golden` section of a probe's
+  `observed.json` (CI's `llamacpp-observed-<os>` artifact):
+  `jq '{schema: "atomic-engine-observed-golden", schema_version: 1, engine, tag, build, host, golden}'`.
 - `help/<tag>.txt` — `llama-server -h`; `version/<tag>.txt` — `llama-server --version`. Each file is
   stdout, a newline, stderr: the shape `runHelp` (`src/runtime/llamacpp/probe.ts`) reads.
 

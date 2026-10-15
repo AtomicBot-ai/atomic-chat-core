@@ -2,7 +2,8 @@
 /**
  * A stand-in for `llama-server`, close enough that the core cannot tell the difference: it prints
  * the real readiness and device log lines, answers the routes the runtime and the proxy use, and
- * can fail the way a real backend fails (out of memory, SIGSEGV, silence).
+ * can fail the way a real backend fails (out of memory, SIGSEGV, silence). What it says is held to
+ * what a real build said (test/fixtures/llamacpp/observed/, test/contract/fake-llama-server-vs-real.test.ts).
  *
  * Driven by argv (the same flags `args.ts` emits) plus env:
  *   FAKE_LLAMA_MODE   ready | no-ready | hang | oom | segv | exit-<code> | projector-fail | mtp-fail |
@@ -31,8 +32,10 @@
  *   FAKE_LLAMA_LABEL  free-form name of the pack that launched this fake; recorded verbatim
  *   FAKE_LLAMA_STDOUT text; printed as one stdout line among the startup log, which llama.cpp itself
  *                     writes to stderr, so a test can follow both of the engine's streams
- *   LLAMA_API_KEY     when set, every route but `/health`, `/v1/health`, `/models` and `/v1/models`
- *                     demands `Authorization: Bearer <key>` (the real server's public endpoints)
+ *   LLAMA_API_KEY     when set, every route but `/health` and `/v1/health` demands
+ *                     `Authorization: Bearer <key>` (or `X-Api-Key`), as upstream does; a TurboQuant decision
+ *                     server keeps its model list public, as the fork does
+ *   FAKE_LLAMA_BUILD  the build `--version` reports (default 6325)
  *   FAKE_LLAMA_DECISION  1 → a TurboQuant build with the decision role (1.7.0+): `-h` lists `--decision`,
  *                     and started with `--decision` the fake is a decision server (DECISION.md): no
  *                     chat routes; `/health`, `/v1/models` (capabilities), `/props.decision`,
@@ -82,6 +85,15 @@ const modelPath = flag('-m', flag('--model', ''))
 const modelAlias = flag('-a', flag('--alias', 'fake-model'))
 const apiKey = process.env.LLAMA_API_KEY ?? ''
 const err = (line) => process.stderr.write(`${line}\n`)
+const started = Date.now()
+/** A line as llama.cpp's logger prints it: `<min>.<s>.<ms>.<µs> <level> <text>`. */
+const logged = (level, text) => {
+  const ms = Date.now() - started
+  const pad = (n, w) => String(n).padStart(w, '0')
+  err(
+    `${Math.floor(ms / 60_000)}.${pad(Math.floor(ms / 1000) % 60, 2)}.${pad(ms % 1000, 3)}.000 ${level} ${text}`
+  )
+}
 
 if (argv.includes('--list-devices')) {
   process.stdout.write('Available devices:\n')
@@ -91,6 +103,12 @@ if (argv.includes('--list-devices')) {
     process.stdout.write('  CUDA0: NVIDIA GeForce RTX 4090 (24564 MiB, 23875 MiB free)\n')
     process.stdout.write('  Vulkan0: NVIDIA GeForce RTX 4090 (24564 MiB, 23875 MiB free)\n')
   }
+  process.exit(0)
+}
+if (argv.includes('--version')) {
+  // b11642's shape, on stderr; core reads the build number out of it (parseBinaryVersion).
+  err(`version: 0.6.0-dev (build ${process.env.FAKE_LLAMA_BUILD ?? '6325'}, commit 0000000)`)
+  err('built with fake for fake')
   process.exit(0)
 }
 const decisionBuild = process.env.FAKE_LLAMA_DECISION === '1'
@@ -139,14 +157,18 @@ if (process.env.FAKE_LLAMA_ARGV_FILE) {
   )
 }
 
-// ── startup log, as llama.cpp prints it ───────────────────────────────────────
-err(`build: 6325 (fake) with cc (GCC) 13.2.0 for x86_64-linux-gnu`)
+// ── startup log, as llama.cpp prints it at its default verbosity (b11642; the live contract probe
+// keeps the real lines in test/fixtures/llamacpp/observed/) ──────────────────────────────────────
+logged('I', 'srv  llama_server: initializing ...')
+logged('I', 'cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)')
 if (process.env.FAKE_LLAMA_STDOUT) process.stdout.write(`${process.env.FAKE_LLAMA_STDOUT}\n`)
+// The device lines are llama library INFO lines a real build prints only with `-lv 4`; the fake
+// prints them on request so the device report can be tested at all.
 if (process.env.FAKE_LLAMA_GPU === '1') {
   err('load_backend: loaded CUDA backend from /backends/libggml-cuda.so')
   err('load_backend: loaded CPU backend from /backends/libggml-cpu.so')
 }
-err(`llama_model_loader: loaded meta data with 30 key-value pairs from ${modelPath}`)
+logged('I', `srv    load_model: loading model '${modelPath}'`)
 if (process.env.FAKE_LLAMA_GPU === '1') {
   err('load_tensors: offloaded 33/33 layers to GPU')
   err('load_tensors:        CUDA0 model buffer size =  3820.93 MiB')
@@ -183,26 +205,33 @@ if (mode === 'hang') {
   startServer()
 }
 
+/** Upstream's check: `Authorization: Bearer <key>`, or Anthropic's `X-Api-Key`. */
 function unauthorized(req) {
   if (!apiKey) return false
-  const header = req.headers.authorization ?? ''
-  return header !== `Bearer ${apiKey}`
+  const bearer = (req.headers.authorization ?? '').replace(/^Bearer /, '')
+  return bearer !== apiKey && req.headers['x-api-key'] !== apiKey
 }
+
+/** The 401 upstream answers, word for word. */
+const UNAUTHORIZED = { error: { message: 'Invalid API Key', type: 'authentication_error', code: 401 } }
+
+/** Upstream's 501 for a route the server was not started for. */
+const notSupported = (message) => ({ error: { code: 501, message, type: 'not_supported_error' } })
 
 function startServer() {
   let ready = mode !== 'no-ready'
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const json = (status, body) => {
-      res.writeHead(status, { 'content-type': 'application/json' })
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify(body))
     }
+    // Only the health routes are public upstream (and in Prism); the model list is behind the key.
     if (url.pathname === '/health' || url.pathname === '/v1/health')
       return json(ready ? 200 : 503, { status: ready ? 'ok' : 'loading' })
+    if (unauthorized(req)) return json(401, UNAUTHORIZED)
     if (url.pathname === '/v1/models' || url.pathname === '/models')
       return json(200, { object: 'list', data: [{ id: modelAlias, object: 'model', owned_by: 'llamacpp' }] })
-    if (unauthorized(req))
-      return json(401, { error: { message: 'Invalid API key', type: 'authentication_error' } })
     if (url.pathname === '/props') {
       const embeddingProjector = argv.includes('--embedding') && argv.includes('--mmproj')
       return json(200, {
@@ -218,6 +247,11 @@ function startServer() {
     }
     // Real llama-server serves Prometheus metrics at its root (with `--metrics`), behind the key.
     if (url.pathname === '/metrics') {
+      if (!argv.includes('--metrics'))
+        return json(
+          501,
+          notSupported('This server does not support metrics endpoint. Start it with `--metrics`')
+        )
       res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' })
       return res.end(`llamacpp:prompt_tokens_total 3\nllamacpp:requests_processing 0\n`)
     }
@@ -229,12 +263,15 @@ function startServer() {
         // The bytes it received, so a test can prove a passthrough left them alone.
         res.setHeader('x-fake-body-sha256', createHash('sha256').update(raw).digest('hex'))
         if (!argv.includes('--embedding'))
-          return json(501, { error: { message: 'embedding mode is disabled' } })
+          return json(
+            501,
+            notSupported('This server does not support embeddings. Start it with `--embeddings`')
+          )
         if (process.env.FAKE_EMBEDDING_REFUSE === '1')
           return json(400, {
             error: {
               code: 400,
-              message: "Pooling type 'none' is not OAI compatible",
+              message: "Pooling type 'none' is not OAI compatible. Please use a different pooling type",
               type: 'invalid_request_error',
             },
           })
@@ -264,8 +301,8 @@ function startServer() {
     const delay = Number(process.env.FAKE_LLAMA_DELAY ?? '0')
     const announce = () => {
       if (mode === 'no-ready') return
-      err(`main: server is listening on http://127.0.0.1:${bound} - starting the main loop`)
-      err('srv  update_slots: all slots are idle')
+      logged('I', 'srv  llama_server: model loaded')
+      logged('I', `srv  llama_server: listening on http://127.0.0.1:${bound}`)
       ready = true
     }
     if (delay > 0) setTimeout(announce, delay).unref?.()
@@ -612,6 +649,8 @@ function startDecisionServer() {
         return loaded()
           ? send(200, { status: 'ok', ok: true, model: alias, layout: 'laya' })
           : send(503, { error: { code: 503, message: 'Loading model', type: 'unavailable_error' } })
+      // Stock llama.cpp keeps its model list behind the key; the TurboQuant fork (b10269) does not.
+      if (upstreamDecision && unauthorized(req)) return send(401, UNAUTHORIZED)
       if (upstreamDecision && (url.pathname === '/v1/models' || url.pathname === '/models'))
         return send(200, {
           object: 'list',
@@ -643,8 +682,7 @@ function startDecisionServer() {
         })
       if (!loaded())
         return send(503, { error: { code: 503, message: 'Loading model', type: 'unavailable_error' } })
-      if (unauthorized(req))
-        return send(401, { error: { code: 401, message: 'Invalid API Key', type: 'authentication_error' } })
+      if (unauthorized(req)) return send(401, UNAUTHORIZED)
       if (upstreamDecision && url.pathname === '/props' && req.method === 'GET')
         return send(200, { model_alias: alias, model_path: modelPath, build_info: 'b11436-fake' })
       if (url.pathname === '/props' && req.method === 'GET')
@@ -812,7 +850,7 @@ function startDecisionServer() {
     })
   })
   server.listen(port, '127.0.0.1', () => {
-    err(`main: server is listening on http://127.0.0.1:${server.address().port} - decision mode`)
+    logged('I', `srv  llama_server: listening on http://127.0.0.1:${server.address().port}`)
   })
   process.on('SIGTERM', () => {
     server.close()
