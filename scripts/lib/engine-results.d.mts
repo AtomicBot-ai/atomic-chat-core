@@ -76,6 +76,8 @@ export interface CoreCell {
   steps?: Record<string, string>
   tests?: Counts
   failed_tests?: string[]
+  /** `k/n` of a platform whose suites run split over n jobs; after merging, `<shards seen>/n`. */
+  shard?: string
 }
 
 export type Cell = LiveCell | CoreCell
@@ -174,7 +176,9 @@ export declare function coreCell(input: {
   steps: Record<string, string>
   vitest?: VitestReport[]
   expected: readonly string[]
+  shard?: string
 }): CoreCell
+export declare function mergeCoreShards(cells: readonly CoreCell[]): CoreCell[]
 export declare function buildResults(input: {
   run?: Record<string, unknown> | null
   config?: Pick<EngineCandidateConfig, 'engine' | 'not_verified'> | null

@@ -357,6 +357,7 @@ function cmdCell(argv) {
       fixtures: { type: 'string' },
       vitest: { type: 'string', multiple: true, default: [] },
       step: { type: 'string', multiple: true, default: [] },
+      shard: { type: 'string' },
       out: { type: 'string' },
     },
   })
@@ -388,6 +389,7 @@ function cmdCell(argv) {
       steps,
       vitest: o.vitest.map(readJsonIf).filter(Boolean),
       expected: config.core_suites,
+      ...(o.shard ? { shard: o.shard } : {}),
     })
   } else throw new Error('--kind is live or core')
   writeJson(o.out, cell)

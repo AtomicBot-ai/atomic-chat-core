@@ -96,7 +96,7 @@ export function liveCell({ platform, os, role, tag, repo, fixture, vitest, requi
  * A core cell: one platform, the outcome of each suite step (`success`, `failure`, `cancelled`,
  * `skipped`, as GitHub reports them) and the Vitest reports of the suites that have one.
  */
-export function coreCell({ platform, os, steps, vitest = [], expected }) {
+export function coreCell({ platform, os, steps, vitest = [], expected, shard }) {
   const tests = vitest.flatMap((r) => vitestOutcomes(r))
   const outcome = Object.fromEntries(expected.map((name) => [name, steps[name] ?? 'missing']))
   const values = Object.values(outcome)
@@ -114,7 +114,54 @@ export function coreCell({ platform, os, steps, vitest = [], expected }) {
     steps: outcome,
     tests: count(tests),
     failed_tests: tests.filter((t) => t.status === 'failed').map((t) => `${t.file}: ${t.name}`),
+    ...(shard ? { shard } : {}),
   }
+}
+
+/** How bad a step outcome is, to merge shards: the worst real outcome wins over a skipped step. */
+const STEP_RANK = { failure: 5, cancelled: 4, missing: 3, success: 2, skipped: 1 }
+
+/**
+ * One core cell per platform from the shard cells of a platform whose suites run split over
+ * several jobs (Windows, `--shard=k/n`): steps take the worst outcome a shard ran (a step only the
+ * first shard runs is `skipped` in the others), tests add up, and a shard that left no cell makes
+ * the platform `incomplete`.
+ */
+export function mergeCoreShards(cells) {
+  const byPlatform = new Map()
+  for (const cell of cells) byPlatform.set(cell.platform, [...(byPlatform.get(cell.platform) ?? []), cell])
+  return [...byPlatform.values()].map((group) => {
+    if (group.length === 1 && !group[0].shard) return group[0]
+    const [first] = group
+    const steps = {}
+    for (const name of Object.keys(first.steps ?? {})) {
+      const outcomes = group.map((c) => c.steps?.[name] ?? 'missing')
+      steps[name] = outcomes.reduce((a, b) => ((STEP_RANK[b] ?? 3) > (STEP_RANK[a] ?? 3) ? b : a))
+    }
+    const total = Number(first.shard?.split('/')[1] ?? group.length)
+    const parts = new Set(group.map((c) => c.shard))
+    const values = Object.values(steps)
+    const status =
+      values.includes('failure') || group.some((c) => c.status === 'fail')
+        ? 'fail'
+        : parts.size < total ||
+            values.some((v) => v !== 'success' && v !== 'skipped') ||
+            values.every((v) => v === 'skipped')
+          ? 'incomplete'
+          : 'pass'
+    return {
+      ...first,
+      status,
+      steps,
+      tests: {
+        passed: group.reduce((n, c) => n + (c.tests?.passed ?? 0), 0),
+        failed: group.reduce((n, c) => n + (c.tests?.failed ?? 0), 0),
+        skipped: group.reduce((n, c) => n + (c.tests?.skipped ?? 0), 0),
+      },
+      failed_tests: group.flatMap((c) => c.failed_tests ?? []),
+      shard: `${parts.size}/${total}`,
+    }
+  })
 }
 
 const reason = (status, code, message, detail) => ({ status, code, message, ...(detail ? { detail } : {}) })
@@ -162,7 +209,7 @@ export function buildResults({ run, config, resolve, surface, cells, platforms, 
     )
 
   const live = cells.filter((c) => c.kind === 'live')
-  const core = cells.filter((c) => c.kind === 'core')
+  const core = mergeCoreShards(cells.filter((c) => c.kind === 'core'))
   const matrix = resolve?.live_matrix ?? []
   const outCells = []
   const verdict = {
