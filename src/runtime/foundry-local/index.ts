@@ -3,3 +3,4 @@
  * `foundry-host` protocol for now; the runtime, the host mode and the accelerators follow.
  */
 export * from './host-process.js'
+export * from './model-yml.js'
