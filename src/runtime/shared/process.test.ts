@@ -364,3 +364,40 @@ describe('hostPid', () => {
     }
   })
 })
+
+describe('spawnManaged with stdin kept open', () => {
+  /** Exits 0 once its stdin ends; says so on stdout. */
+  const STDIN_WATCHER =
+    "process.stdin.on('end', () => { console.log('stdin ended'); process.exit(0) }); process.stdin.resume(); console.log('up')"
+
+  it('keeps the child stdin open: a child that stops on stdin end keeps running', async () => {
+    const proc = spawnManaged({ ...node(STDIN_WATCHER), stdin: 'pipe' })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(proc.child.exitCode).toBeNull()
+    await proc.terminate(0)
+  })
+
+  it('on Windows stops it by closing stdin and waits for its own exit before killing', async () => {
+    const proc = spawnManaged({ ...node(STDIN_WATCHER), stdin: 'pipe', platform: 'win32' })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(proc.child.exitCode).toBeNull()
+    const exit = await proc.terminate(5000)
+    expect(exit).toEqual({ code: 0, signal: null })
+    expect(proc.output().stdout).toContain('stdin ended')
+  })
+
+  it('on Windows still kills a child that ignores its stdin, once the grace is over', async () => {
+    const proc = spawnManaged({ ...node('setInterval(() => {}, 1000)'), stdin: 'pipe', platform: 'win32' })
+    const started = Date.now()
+    const exit = await proc.terminate(300)
+    expect(exit.code === 0).toBe(false)
+    expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  it('leaves stdin closed by default, as every other engine has it', async () => {
+    const proc = spawnManaged(node(STDIN_WATCHER))
+    const exit = await proc.exited
+    expect(exit.code).toBe(0)
+    expect(proc.output().stdout).toContain('stdin ended')
+  })
+})
