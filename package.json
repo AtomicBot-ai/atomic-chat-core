@@ -52,6 +52,7 @@
     "test:app-e2e": "vitest run --project app-e2e",
     "test:runtime-compat": "vitest run --project runtime-compat",
     "test:live": "ATOMIC_LIVE=1 vitest run --project live",
+    "engine:check": "node scripts/engine-candidate.mjs local",
     "test:coverage": "vitest run --project unit --project contract --coverage && node scripts/check-coverage-floor.mjs",
     "fixtures:import": "node scripts/import-app-fixtures.mjs",
     "release": "node scripts/release.mjs",
