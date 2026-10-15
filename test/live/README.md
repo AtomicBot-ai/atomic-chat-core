@@ -19,8 +19,19 @@ ATOMIC_LIVE=1 ATOMIC_LIVE_UPSTREAM_BIN="$(cat .live-fixtures/bin-path.txt)" \
   ATOMIC_LIVE_UPSTREAM_TAG="$(cat .live-fixtures/tag.txt)" npx vitest run --project live test/live/llamacpp.test.ts
 ```
 
+To check a whole llama.cpp build against this core — the surface diff plus these tests on the build and on the pin — run
+`npm run engine:check -- --tag bN` (or `--repo …`, `--bin …`); see `docs/live-tests.md`, "Checking a llama.cpp build".
+
 On Windows set `ATOMIC_LIVE=1` in the environment and run `npx vitest run --project live`: `npm run test:live` sets it
 inline, which cmd.exe cannot parse.
+
+The same variables drive the contract probe (`test/live/llamacpp-contract.test.ts`): it checks the `strings` and `routes`
+of `test/fixtures/llamacpp/engine-contract.json` against the real build — readiness and device lines through
+`backendOutput`, the session key (401 without it), every route core calls and the fields it reads, a context overflow,
+`/metrics` with and without `expose_metrics`, the failures core classifies (a file that is not a GGUF, a truncated one, an
+unknown architecture, a known one without its keys, an unknown flag) and `--list-devices`. Only a `break` the contract
+expected and did not see fails it; with `ATOMIC_LIVE_REPORT_DIR=<dir>` it writes everything it saw, drift included, to
+`<dir>/observed.json` (CI keeps it as the `llamacpp-observed-<os>` artifact of `live-backend`).
 
 Stage 5 providers, each opt-in on its own:
 

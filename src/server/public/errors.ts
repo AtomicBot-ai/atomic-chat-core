@@ -13,10 +13,21 @@
 import { isJsonObject, serdeToString } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
 
+/**
+ * How llama.cpp says a prompt does not fit (upstream, TurboQuant and Prism alike): a 400 with
+ * `request (N tokens) exceeds the available context size (M tokens), try increasing it` and this
+ * error type, which it also sends for `input (N tokens) is larger than the max context size`.
+ * Pinned by the engine contract (test/fixtures/llamacpp/engine-contract.json).
+ */
+const LLAMA_CONTEXT_OVERFLOW = /request \(\d+ tokens\) exceeds the available context size/i
+export const LLAMA_CONTEXT_OVERFLOW_TYPE = 'exceed_context_size_error'
+
 /** A request that no longer fits the loaded context window, as llama.cpp and MLX word it. */
 export function isContextLimitError(status: number, body: string): boolean {
   if (![400, 413, 500, 503].includes(status)) return false
   const b = body.toLowerCase()
+  if (LLAMA_CONTEXT_OVERFLOW.test(body) || errorTypeOf(body) === LLAMA_CONTEXT_OVERFLOW_TYPE) return true
+  // Older builds' wording.
   if (b.includes('the request exceeds the available context size')) return true
   if (b.includes('max_kv_size') || b.includes('max-kv-size') || b.includes('max kv size')) return true
   if (b.includes('kv cache') && (b.includes('exceed') || b.includes('overflow') || b.includes('too')))
@@ -75,6 +86,14 @@ function parseJson(text: string): JsonValue | undefined {
   } catch {
     return undefined
   }
+}
+
+/** `error.type` of an OpenAI-style error envelope, if the body is one. */
+function errorTypeOf(body: string): string | undefined {
+  const parsed = parseJson(body)
+  const error = isJsonObject(parsed) ? parsed['error'] : undefined
+  const type = isJsonObject(error) ? error['type'] : undefined
+  return typeof type === 'string' ? type : undefined
 }
 
 function isStructuredErrorBody(body: string): boolean {

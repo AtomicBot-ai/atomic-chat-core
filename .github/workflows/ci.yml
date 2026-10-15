@@ -146,7 +146,15 @@ jobs:
           export ATOMIC_LIVE_UPSTREAM_BIN="$(cat "$RUNNER_TEMP/live/bin-path.txt")"
           export ATOMIC_LIVE_UPSTREAM_MODEL="$(cat "$RUNNER_TEMP/live/model-path.txt")"
           export ATOMIC_LIVE_UPSTREAM_TAG="$(cat "$RUNNER_TEMP/live/tag.txt")"
+          export ATOMIC_LIVE_REPORT_DIR="$RUNNER_TEMP/live-report"
           npx vitest run --project live
+      # What the contract probe (test/live/llamacpp-contract.test.ts) saw on this OS, drift included.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: llamacpp-observed-${{ matrix.os }}
+          path: ${{ runner.temp }}/live-report/observed.json
+          if-no-files-found: ignore
 
   live-cloud:
     if: ${{ !inputs.release && github.event_name == 'workflow_dispatch' }}

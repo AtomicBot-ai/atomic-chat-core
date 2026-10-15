@@ -27,6 +27,11 @@
   ],
   "build_gates": [
     {
+      "name": "DEFRAG_THOLD_NO_OP_MIN_BUILD",
+      "build": 6245,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
       "name": "FLASH_ATTN_STRING_ARG_MIN_BUILD",
       "build": 6325,
       "source": "src/runtime/llamacpp/args.ts"
@@ -393,13 +398,13 @@
         "chat": [
           {
             "from": null,
-            "until": null
+            "until": 6245
           }
         ],
         "chat-dflash": [
           {
             "from": null,
-            "until": null
+            "until": 6245
           }
         ]
       }
@@ -1470,6 +1475,822 @@
       }
     }
   ],
+  "assets": {
+    "core_backends": [
+      {
+        "platform": "linux-x64",
+        "backend": "linux-cpu-x64",
+        "cpu": true,
+        "asset": "llama-{tag}-bin-ubuntu-x64\\.tar\\.gz"
+      },
+      {
+        "platform": "linux-x64",
+        "backend": "linux-vulkan-x64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-ubuntu-vulkan-x64\\.tar\\.gz"
+      },
+      {
+        "platform": "linux-arm64",
+        "backend": "linux-cpu-arm64",
+        "cpu": true,
+        "asset": "llama-{tag}-bin-ubuntu-arm64\\.tar\\.gz"
+      },
+      {
+        "platform": "linux-arm64",
+        "backend": "linux-vulkan-arm64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-ubuntu-vulkan-arm64\\.tar\\.gz"
+      },
+      {
+        "platform": "linux-arm64",
+        "backend": "linux-cuda-13-arm64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-ubuntu-cuda-13\\.\\d+-arm64\\.tar\\.gz"
+      },
+      {
+        "platform": "macos-x64",
+        "backend": "macos-x64",
+        "cpu": true,
+        "asset": "llama-{tag}-bin-macos-x64\\.tar\\.gz"
+      },
+      {
+        "platform": "macos-arm64",
+        "backend": "macos-arm64",
+        "cpu": true,
+        "asset": "llama-{tag}-bin-macos-arm64\\.tar\\.gz"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cpu-x64",
+        "cpu": true,
+        "asset": "llama-{tag}-bin-win-cpu-x64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cuda-12.4-x64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-win-cuda-12\\.4-x64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cuda-13-x64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-win-cuda-13\\.\\d+-x64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-rocm-x64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-win-rocm-\\d+\\.\\d+-x64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-vulkan-x64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-win-vulkan-x64\\.zip"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-cpu-arm64",
+        "cpu": true,
+        "asset": "llama-{tag}-bin-win-cpu-arm64\\.zip"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-opencl-adreno-arm64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-win-opencl-adreno-arm64\\.zip"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-cuda-13-arm64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-win-cuda-13\\.\\d+-arm64\\.zip"
+      }
+    ]
+  },
+  "strings": [
+    {
+      "id": "ready.listening-on",
+      "text": "listening on",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/shared/process.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "`llama_server: listening on http://…` (tools/server/server.cpp). Readiness also polls /health every 200 ms, so losing it only delays the ready signal."
+    },
+    {
+      "id": "ready.all-slots-are-idle",
+      "text": "all slots are idle",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/shared/process.ts",
+      "severity_if_lost": "info",
+      "live_expectation": "not-observed",
+      "note": "Trace level upstream (SRV_TRC in server-context.cpp): printed only with `-lv 4` or more. Kept for older builds and forks."
+    },
+    {
+      "id": "ready.starting-the-main-loop",
+      "text": "starting the main loop",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/shared/process.ts",
+      "severity_if_lost": "info",
+      "live_expectation": "not-observed",
+      "note": "No upstream source prints it any more (only tools/server/tests/README.md mentions it). Kept for older builds."
+    },
+    {
+      "id": "ready.http-server-listening",
+      "text": "http server listening",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/shared/process.ts",
+      "severity_if_lost": "info",
+      "live_expectation": "not-observed",
+      "note": "Neither upstream nor the TurboQuant fork prints it."
+    },
+    {
+      "id": "device.init-error.cuda",
+      "text": "failed to initialize CUDA",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "upstream_text": "failed to initialize \" GGML_CUDA_NAME",
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "`ggml_cuda_init: failed to initialize CUDA: <reason>` on a CUDA build without a usable device (`no CUDA-capable device is detected`)."
+    },
+    {
+      "id": "device.init-error.shared-libraries",
+      "text": "error while loading shared libraries",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "upstream_text": null,
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "The Linux dynamic loader, when a backend library’s dependency (libcudart, libvulkan) is missing."
+    },
+    {
+      "id": "device.init-error.load-backend-failed",
+      "text": "load_backend: failed to load ",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "upstream_text": "%s: failed to load %s: %s",
+      "severity_if_lost": "info",
+      "live_expectation": "unobservable",
+      "note": "ggml-backend-reg.cpp, for a backend library that does not load (libcudart missing). Release builds load their backends silently (NDEBUG), so only a debug build or GGML_BACKEND_PATH prints it; the CUDA path probe covers the missing runtime instead."
+    },
+    {
+      "id": "device.init-error.vulkan-no-devices",
+      "text": "ggml_vulkan: No devices found",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "A Vulkan build on a host without a Vulkan device."
+    },
+    {
+      "id": "device.init-error.no-usable-gpu",
+      "text": "no usable GPU found",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "common/arg.cpp, when `-ngl` is given to a build without GPU offload (the Linux and Windows CPU builds)."
+    },
+    {
+      "id": "device.loaded-backend",
+      "text": "load_backend: loaded ",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "upstream_text": "%s: loaded %s backend from %s",
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "Only builds that load their backends as libraries (Linux, Windows); macOS links Metal in."
+    },
+    {
+      "id": "device.offloaded-layers",
+      "text": "layers to GPU",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "upstream_text": "offloaded %d/%d layers to GPU",
+      "severity_if_lost": "warn",
+      "live_expectation": "not-observed",
+      "note": "A llama library INFO line, hidden at llama-server’s default verbosity (3) on b11642: printed only with `-lv 4`. Until core asks for it, the runtime device report is inconclusive."
+    },
+    {
+      "id": "device.repeating-layers",
+      "text": "repeating layers to GPU",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "severity_if_lost": "info",
+      "live_expectation": "not-observed",
+      "note": "A fallback for builds without the `offloaded N/M` line. A llama library INFO line, hidden at llama-server’s default verbosity (3) on b11642: printed only with `-lv 4`. Until core asks for it, the runtime device report is inconclusive."
+    },
+    {
+      "id": "device.model-buffer",
+      "text": " model buffer size =",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/runtime-device.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "not-observed",
+      "note": "A llama library INFO line, hidden at llama-server’s default verbosity (3) on b11642: printed only with `-lv 4`. Until core asks for it, the runtime device report is inconclusive."
+    },
+    {
+      "id": "error.os-version.dyld",
+      "text": "dyld",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": null,
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "macOS’s loader; with `symbol not found` it means OS_VERSION_UNSUPPORTED."
+    },
+    {
+      "id": "error.os-version.symbol-not-found",
+      "text": "symbol not found",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": null,
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable"
+    },
+    {
+      "id": "error.oom.out-of-memory",
+      "text": "out of memory",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "OUT_OF_MEMORY."
+    },
+    {
+      "id": "error.oom.failed-to-allocate",
+      "text": "failed to allocate",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "OUT_OF_MEMORY."
+    },
+    {
+      "id": "error.oom.insufficient-memory",
+      "text": "insufficient memory",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "OUT_OF_MEMORY."
+    },
+    {
+      "id": "error.oom.erroroutofdevicememory",
+      "text": "erroroutofdevicememory",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": null,
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "The GPU API’s own error name (Vulkan, Metal, CUDA), not a llama.cpp string. OUT_OF_MEMORY."
+    },
+    {
+      "id": "error.oom.kiogpucommandbuffercallbackerroroutofmemory",
+      "text": "kiogpucommandbuffercallbackerroroutofmemory",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": null,
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "The GPU API’s own error name (Vulkan, Metal, CUDA), not a llama.cpp string. OUT_OF_MEMORY."
+    },
+    {
+      "id": "error.oom.cuda_error_out_of_memory",
+      "text": "cuda_error_out_of_memory",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": null,
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "The GPU API’s own error name (Vulkan, Metal, CUDA), not a llama.cpp string. OUT_OF_MEMORY."
+    },
+    {
+      "id": "error.arch.loading-architecture",
+      "text": "error loading model architecture",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "info",
+      "live_expectation": "not-observed",
+      "note": "Gone upstream: an unknown architecture now says only `unknown model architecture: '<name>'`. MODEL_ARCH_NOT_SUPPORTED."
+    },
+    {
+      "id": "error.arch.unknown-architecture",
+      "text": "unknown model architecture",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "MODEL_ARCH_NOT_SUPPORTED: a GGUF whose architecture this build does not know (a newer model)."
+    },
+    {
+      "id": "error.arch.loading-hyperparameters",
+      "text": "error loading model hyperparameters",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "MODEL_ARCH_NOT_SUPPORTED: a known architecture missing a key this build requires."
+    },
+    {
+      "id": "error.arch.key-not-found",
+      "text": "key not found in model",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "MODEL_ARCH_NOT_SUPPORTED."
+    },
+    {
+      "id": "error.projector.unknown-type",
+      "text": "unknown projector type",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "MULTIMODAL_PROJECTOR_LOAD_FAILED: a projector this build does not know (tools/mtmd/clip.cpp)."
+    },
+    {
+      "id": "error.corrupt.incomplete",
+      "text": "corrupted or incomplete",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "MODEL_FILE_CORRUPT: `tensor … data is not within the file bounds, model is corrupted or incomplete` (an interrupted download)."
+    },
+    {
+      "id": "error.corrupt.invalid-magic",
+      "text": "invalid magic",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "MODEL_FILE_CORRUPT: `gguf_init_from_file_impl: invalid magic characters` (not a GGUF at all)."
+    },
+    {
+      "id": "error.corrupt.end-of-file",
+      "text": "unexpectedly reached end of file",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "MODEL_FILE_CORRUPT: a short read without mmap (src/llama-mmap.cpp); with mmap the bounds check fires first."
+    },
+    {
+      "id": "error.corrupt.read-tensor",
+      "text": "failed to read tensor",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "MODEL_FILE_CORRUPT: a file cut inside the tensor table (ggml/src/gguf.cpp)."
+    },
+    {
+      "id": "error.corrupt.tensor-count",
+      "text": "wrong number of tensors",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "conditional",
+      "note": "MODEL_FILE_CORRUPT upstream; MODEL_ARCH_NOT_SUPPORTED on the TurboQuant fork, whose tensor layout can differ."
+    },
+    {
+      "id": "error.argument.unknown",
+      "text": "error: invalid argument: ",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": "error: invalid argument: %s",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "A flag the build does not know (common/arg.cpp): the process error, with words that say so."
+    },
+    {
+      "id": "error.argument.bad-value",
+      "text": "error while handling argument",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "A value the build refuses, e.g. `--flash-attn bogus` (common/arg.cpp)."
+    },
+    {
+      "id": "mtp.create-context",
+      "text": "failed to create MTP context",
+      "match": "regex",
+      "channel": "log",
+      "source": "src/models/gguf/classify.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "Needs a model with an MTP head and a draft; the load is retried without MTP."
+    },
+    {
+      "id": "mtp.context-type",
+      "text": "context type MTP requested",
+      "match": "regex",
+      "channel": "log",
+      "source": "src/models/gguf/classify.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "Needs a model with an MTP head and a draft; the load is retried without MTP."
+    },
+    {
+      "id": "mtp.no-layers",
+      "text": "doesn'?t contain MTP layers",
+      "match": "regex",
+      "channel": "log",
+      "source": "src/models/gguf/classify.ts",
+      "upstream_text": "contain MTP layers",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "Needs a model with an MTP head and a draft; the load is retried without MTP."
+    },
+    {
+      "id": "list-devices.header",
+      "text": "Available devices:",
+      "match": "substring-ci",
+      "channel": "list-devices",
+      "source": "src/runtime/llamacpp/devices.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "Without it `parseDeviceOutput` throws DEVICE_LIST_PARSE_FAILED and no device is offered."
+    },
+    {
+      "id": "http.context-overflow.upstream",
+      "text": "request \\(\\d+ tokens\\) exceeds the available context size",
+      "match": "regex",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "upstream_text": "exceeds the available context size",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "The 400 upstream, TurboQuant and Prism answer when a prompt does not fit: core reloads with a larger context."
+    },
+    {
+      "id": "http.context-overflow.type",
+      "text": "exceed_context_size_error",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "The `error.type` of that 400, also sent for `input (N tokens) is larger than the max context size`."
+    },
+    {
+      "id": "http.context-overflow.literal",
+      "text": "the request exceeds the available context size",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "info",
+      "live_expectation": "not-observed",
+      "note": "Older builds’ wording: neither upstream nor TurboQuant nor Prism prints it today. Kept for those builds."
+    },
+    {
+      "id": "http.compute-error.compute-error",
+      "text": "compute error",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "A 500 after which the ggml backend is unusable: core restarts the session."
+    },
+    {
+      "id": "http.compute-error.failed-to-decode",
+      "text": "failed to decode",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "A 500 after which the ggml backend is unusable: core restarts the session."
+    },
+    {
+      "id": "http.compute-error.failed-to-compute-graph",
+      "text": "failed to compute graph",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "A 500 after which the ggml backend is unusable: core restarts the session."
+    },
+    {
+      "id": "http.compute-error.backend-is-in-error-state",
+      "text": "backend is in error state",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "A 500 after which the ggml backend is unusable: core restarts the session."
+    },
+    {
+      "id": "http.compute-error.ggml_backend_sched_graph_compute",
+      "text": "ggml_backend_sched_graph_compute",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "A 500 after which the ggml backend is unusable: core restarts the session."
+    },
+    {
+      "id": "http.sse.done",
+      "text": "[DONE]",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/sse.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "The last event of a streamed chat; without it core closes the answer when the upstream body ends."
+    }
+  ],
+  "routes": [
+    {
+      "id": "health",
+      "method": "GET",
+      "path": "/health",
+      "source": "src/runtime/llamacpp/runtime.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "The readiness poll; 503 while the model loads."
+    },
+    {
+      "id": "props",
+      "method": "GET",
+      "path": "/props",
+      "source": "src/embedding/readiness.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "fields": [
+        {
+          "path": "modalities",
+          "source": "src/embedding/readiness.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed",
+          "note": "What an embedding input may hold (`vision`, `audio`, `video`)."
+        },
+        {
+          "path": "default_generation_settings.n_ctx",
+          "source": null,
+          "severity_if_lost": "info",
+          "live_expectation": "observed",
+          "note": "The context window the server actually runs with; core reads the configured one instead."
+        }
+      ]
+    },
+    {
+      "id": "models",
+      "method": "GET",
+      "path": "/v1/models",
+      "source": "src/decision/readiness.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "Behind the API key like every route but /health.",
+      "fields": [
+        {
+          "path": "data[].id",
+          "source": "src/decision/readiness.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "data[].architecture.output_modalities",
+          "min_build": 11370,
+          "source": "src/decision/readiness.ts",
+          "severity_if_lost": "break",
+          "live_expectation": "observed",
+          "note": "`[\"decisions\"]` is how an upstream decision process says it is ready (b11370 on)."
+        },
+        {
+          "path": "data[].architecture.input_modalities",
+          "min_build": 11370,
+          "source": "src/decision/readiness.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "models[].capabilities",
+          "source": "src/decision/readiness.ts",
+          "severity_if_lost": "info",
+          "live_expectation": "observed",
+          "note": "Read for the TurboQuant `decision` capability; upstream lists `completion`."
+        },
+        {
+          "path": "data[].meta.n_ctx",
+          "source": null,
+          "severity_if_lost": "info",
+          "live_expectation": "observed"
+        }
+      ]
+    },
+    {
+      "id": "chat-completions",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "source": "src/server/public/index.ts",
+      "source_text": "/chat/completions",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "fields": [
+        {
+          "path": "choices[].message.content",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "break",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "choices[].finish_reason",
+          "source": "src/server/public/errors.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed",
+          "note": "`length` without a client cap is read as a context overflow."
+        },
+        {
+          "path": "usage.prompt_tokens",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "usage.completion_tokens",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "timings.prompt_n",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "timings.predicted_n",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "timings.prompt_per_second",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "info",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "timings.predicted_per_second",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "info",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "choices[].message.reasoning_content",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "conditional",
+          "note": "Only a reasoning model with a reasoning format fills it."
+        },
+        {
+          "path": "choices[].delta.content",
+          "when": "stream",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "break",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "timings.predicted_n",
+          "when": "stream",
+          "source": "src/server/public/telemetry.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "error.message",
+          "when": "context-overflow",
+          "source": "src/server/public/errors.ts",
+          "severity_if_lost": "break",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "error.type",
+          "when": "context-overflow",
+          "source": "src/server/public/errors.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "error.n_prompt_tokens",
+          "when": "context-overflow",
+          "source": null,
+          "severity_if_lost": "info",
+          "live_expectation": "observed"
+        },
+        {
+          "path": "error.n_ctx",
+          "when": "context-overflow",
+          "source": null,
+          "severity_if_lost": "info",
+          "live_expectation": "observed"
+        }
+      ]
+    },
+    {
+      "id": "completions",
+      "method": "POST",
+      "path": "/v1/completions",
+      "source": "src/server/public/index.ts",
+      "source_text": "/completions",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed"
+    },
+    {
+      "id": "embeddings",
+      "method": "POST",
+      "path": "/v1/embeddings",
+      "source": "src/embedding/readiness.ts",
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "Answers 501 on a server started without `--embedding`; test/live/embedding-upstream.test.ts covers the vectors."
+    },
+    {
+      "id": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "source": "src/server/public/index.ts",
+      "source_text": "/messages",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "Without it core translates Anthropic messages to chat completions itself."
+    },
+    {
+      "id": "messages-count-tokens",
+      "method": "POST",
+      "path": "/v1/messages/count_tokens",
+      "source": "src/server/public/index.ts",
+      "source_text": "/messages/count_tokens",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed"
+    },
+    {
+      "id": "metrics",
+      "method": "GET",
+      "path": "/metrics",
+      "source": "src/server/public/listing.ts",
+      "requires": [
+        "--metrics"
+      ],
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "Prometheus text at the root, behind the key; 501 `not_supported_error` without `--metrics`."
+    },
+    {
+      "id": "systemone",
+      "method": "POST",
+      "path": "/v1/systemone",
+      "source": "src/decision/service.ts",
+      "min_build": 11370,
+      "severity_if_lost": "break",
+      "live_expectation": "observed",
+      "note": "Answers 501 for a model that is not a decision model; test/live/decision-upstream.test.ts covers the answers."
+    }
+  ],
   "upstream": {
     "repo": "ggml-org/llama.cpp",
     "watched_paths": [
@@ -1520,6 +2341,18 @@
       {
         "path": "src/llama-model-loader.cpp",
         "why": "missing keys, tensor count, corrupt file"
+      },
+      {
+        "path": "src/llama-model-loader.h",
+        "why": "tensor data out of the file bounds: corrupted or incomplete"
+      },
+      {
+        "path": "src/llama.cpp",
+        "why": "error loading model hyperparameters"
+      },
+      {
+        "path": "src/llama-mmap.cpp",
+        "why": "unexpectedly reached end of file"
       },
       {
         "path": "src/llama-context.cpp",

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ModelYmlDocument } from '../../models/index.js'
+import { generateApiKey } from '../shared/index.js'
 import { withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
 import {
@@ -8,6 +9,7 @@ import {
   nextRetry,
   planLlamaLoad,
   resolveModelMaxCtxTrain,
+  withPort,
 } from './load-plan.js'
 import type { LoadPlan, LoadPlanDeps } from './load-plan.js'
 
@@ -93,6 +95,19 @@ const input = (config: Partial<LlamacppConfigInput> = {}, engine = {}) => ({
   engine: { timeout: 600, llamacpp_env: '', ...engine },
   isEmbedding: false,
   dataFolder: '/data',
+})
+
+describe('withPort', () => {
+  it('moves the plan, its key and the key the engine reads to another port, and nothing else', async () => {
+    const plan = await planLlamaLoad(input({}, { llamacpp_env: 'GGML_X=1' }), deps())
+    const moved = withPort(plan, 3999)
+    expect(moved.port).toBe(3999)
+    expect(moved.apiKey).toBe(generateApiKey('m', 3999))
+    expect(moved.apiKey).not.toBe(plan.apiKey)
+    expect(moved.env).toEqual({ ...plan.env, LLAMA_API_KEY: moved.apiKey })
+    expect({ ...moved, port: plan.port, apiKey: plan.apiKey, env: plan.env }).toEqual(plan)
+    expect(plan.port).toBe(3456)
+  })
 })
 
 describe('planLlamaLoad', () => {

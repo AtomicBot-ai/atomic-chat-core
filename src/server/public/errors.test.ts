@@ -15,6 +15,34 @@ describe('isContextLimitError', () => {
     expect(isContextLimitError(502, 'context length exceeded')).toBe(false)
     expect(isContextLimitError(400, 'bad request')).toBe(false)
   })
+
+  it("knows llama.cpp's own overflow by its wording and by its error type, not only by the words it shares", () => {
+    // What b11642 answers (test/live/llamacpp-contract.test.ts).
+    const upstream = JSON.stringify({
+      error: {
+        code: 400,
+        message: 'request (828 tokens) exceeds the available context size (128 tokens), try increasing it',
+        type: 'exceed_context_size_error',
+        n_prompt_tokens: 828,
+        n_ctx: 128,
+      },
+    })
+    expect(isContextLimitError(400, upstream)).toBe(true)
+    expect(isContextLimitError(400, 'request (9 tokens) exceeds the available context size')).toBe(true)
+    // The type alone is enough, whatever the message says.
+    expect(
+      isContextLimitError(
+        400,
+        JSON.stringify({ error: { message: 'too big', type: 'exceed_context_size_error' } })
+      )
+    ).toBe(true)
+    expect(
+      isContextLimitError(400, 'the request exceeds the available context size, try increasing it')
+    ).toBe(true)
+    expect(
+      isContextLimitError(400, JSON.stringify({ error: { message: 'bad', type: 'invalid_request_error' } }))
+    ).toBe(false)
+  })
 })
 
 describe('compute failures', () => {

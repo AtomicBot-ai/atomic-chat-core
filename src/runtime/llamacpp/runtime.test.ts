@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
+import type { Server } from 'node:net'
 import { join } from 'node:path'
 import {
   fakeLlamaSpawn,
@@ -14,7 +16,7 @@ import type { CoreEvents } from '../../contracts/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { ProcessJournal } from '../../lock/index.js'
 import { ModelRegistry } from '../../models/index.js'
-import { hostPid, spawnManaged } from '../shared/index.js'
+import { generateApiKey, hostPid, spawnManaged } from '../shared/index.js'
 import type { GpuClaim, ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
@@ -109,6 +111,63 @@ const PRINTS_BEFORE_AND_AFTER_READY = [
   "setTimeout(() => console.log('after-ready: still running'), 30)",
   'setInterval(() => {}, 1000)',
 ].join('; ')
+
+/**
+ * A listener holding `port` on 127.0.0.1, as another process would between the probe and the bind.
+ * It drops every connection at once: core may poll `/health` on the taken port before the engine has
+ * said it could not bind, and a connection left open would keep `close()` waiting.
+ */
+function holdPort(port: number): Promise<Server> {
+  return new Promise((resolve, reject) => {
+    const server = createServer((socket) => socket.destroy())
+    server.once('error', reject)
+    server.listen(port, '127.0.0.1', () => resolve(server))
+  })
+}
+
+const portOf = (args: readonly string[]) => Number(args[args.indexOf('--port') + 1])
+
+describe('a port taken before llama-server binds it', () => {
+  const held: Server[] = []
+  afterEach(async () => {
+    await Promise.all(held.splice(0).map((s) => new Promise((resolve) => s.close(resolve))))
+  })
+
+  it('starts again on another port, with the key of that port', async () => {
+    await data.writeModel('demo')
+    const spawn = fakeLlamaSpawn()
+    const ports: number[] = []
+    const runtime = await makeRuntime({
+      spawn: async (spec, opts) => {
+        ports.push(portOf(spec.args))
+        if (ports.length === 1) held.push(await holdPort(portOf(spec.args)))
+        return spawn(spec, opts)
+      },
+    })
+    const info = await runtime.load('demo')
+
+    expect(ports).toHaveLength(2)
+    expect(info.port).toBe(ports[1])
+    expect(info.port).not.toBe(ports[0])
+    expect(info.api_key).toBe(generateApiKey('demo', info.port))
+    const models = await fetch(`http://127.0.0.1:${info.port}/props`, {
+      headers: { Authorization: `Bearer ${info.api_key}` },
+    })
+    expect(models.status).toBe(200)
+  })
+
+  it('keeps a port the caller chose and reports why it could not start', async () => {
+    await data.writeModel('demo')
+    const blocker = await holdPort(0)
+    held.push(blocker)
+    const port = (blocker.address() as { port: number }).port
+    const runtime = await makeRuntime()
+
+    const error = await runtime.load('demo', { port }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    expect((error as AtomicCoreError).details).toMatch(/couldn't bind HTTP server socket/)
+  })
+})
 
 describe('load', () => {
   it('uses a no-op event sink when the embedding owner did not supply one', async () => {
@@ -216,13 +275,13 @@ describe('load', () => {
     await waitFor(() => events.some((event) => event.name === 'core:log'))
     await waitFor(() => {
       try {
-        return /server is listening|HTTP server listening/i.test(readFileSync(logPath, 'utf8'))
+        return /listening on/i.test(readFileSync(logPath, 'utf8'))
       } catch {
         return false
       }
     })
     const text = readFileSync(logPath, 'utf8')
-    expect(text).toMatch(/server is listening|HTTP server listening/i)
+    expect(text).toMatch(/llama_server: listening on/)
     expect(payloads('core:log')).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ level: 'debug', msg: expect.stringContaining('logged') }),
@@ -431,8 +490,9 @@ describe('failure paths', () => {
 
     const tagged = { provider: 'llamacpp', model: 'oom-output', stream: 'stderr' }
     expect(received).toEqual([
-      { ...tagged, line: expect.stringMatching(/^build: /) },
-      { ...tagged, line: expect.stringMatching(/^llama_model_loader: loaded meta data/) },
+      { ...tagged, line: expect.stringMatching(/ I srv {2}llama_server: initializing \.\.\.$/) },
+      { ...tagged, line: expect.stringContaining('common_params_print_info: verbosity = 3') },
+      { ...tagged, line: expect.stringContaining("load_model: loading model '") },
       { ...tagged, line: expect.stringContaining('failed to allocate 4096.00 MiB') },
       { ...tagged, line: expect.stringContaining('error loading model') },
     ])

@@ -41,6 +41,8 @@ import {
   nodeCudaProbeEnv,
   textMentionsCudaRuntime,
   randomFreePort,
+  exitedOnTakenPort,
+  PORT_TAKEN_ATTEMPTS,
   backendOutputReporter,
   spawnAndAwaitReady,
   spawnManaged,
@@ -68,7 +70,7 @@ import type { LlamacppConfigInput } from './args.js'
 import { parseDeviceOutput } from './devices.js'
 import { classifyProcessOutput } from './errors.js'
 import type { ExitInfo } from './errors.js'
-import { autoUnloadTargets, llamaGpuFootprint, nextRetry, planLlamaLoad } from './load-plan.js'
+import { autoUnloadTargets, llamaGpuFootprint, nextRetry, planLlamaLoad, withPort } from './load-plan.js'
 import type { LlamacppEngineSettings, LoadPlan, LoadPlanDeps } from './load-plan.js'
 import { classifyBackendMismatch, formatLoadError, isConcreteVersionBackend, packDirOfExe } from './policy.js'
 import { checkSpecTypeSupport, DFLASH_SPEC_TYPE } from './probe.js'
@@ -367,10 +369,16 @@ export class LlamacppRuntime implements LocalRuntime {
     }
   }
 
-  /** The spawn, and the two post-failure retries of `performLoad` (drop mmproj, drop MTP), once each. */
+  /**
+   * The spawn, and the two post-failure retries of `performLoad` (drop mmproj, drop MTP), once each.
+   * A start that failed only because its port was taken before llama-server could bind it (the
+   * probe in `randomFreePort` is racy by nature) goes again on a fresh port, as the embedding and
+   * decision engines do; that does not use up a fallback. A port the caller chose is kept.
+   */
   private async spawnWithRetries(initial: LoadPlan, opts: LoadOptions): Promise<SessionInfo> {
     let plan = initial
     const { modelId } = plan
+    let portRetries = 0
     for (let attempt = 0; attempt < 3; attempt++) {
       this.assertRunning()
       throwIfLoadCancelled(opts.signal)
@@ -379,6 +387,21 @@ export class LlamacppRuntime implements LocalRuntime {
       } catch (error) {
         // A cancelled load is a user stop, never a reason to try again without the projector or MTP.
         if (this.closing || isLoadCancelled(opts.signal)) throw error
+        if (
+          opts.port === undefined &&
+          portRetries < PORT_TAKEN_ATTEMPTS - 1 &&
+          error instanceof AtomicCoreError &&
+          exitedOnTakenPort(error.details)
+        ) {
+          portRetries++
+          this.options.log?.(
+            'warn',
+            `the port of ${plan.provider}/${modelId} was taken while it started; retrying on another (${portRetries})`
+          )
+          plan = withPort(plan, await randomFreePort([...this.usedPorts(), plan.port]))
+          attempt--
+          continue
+        }
         const retry = nextRetry(error, plan, this.options.transcriptionModelId)
         if (!retry) throw error
         if (retry.kind === 'text-only') {

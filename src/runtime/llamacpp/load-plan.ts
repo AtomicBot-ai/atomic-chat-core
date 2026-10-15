@@ -168,6 +168,15 @@ export function llamaGpuFootprint(
   }
 }
 
+/**
+ * The same plan on another port. The session key is derived from the port, so it moves with it.
+ * For a start whose port was taken between `randomFreePort`'s probe and the engine's own bind.
+ */
+export function withPort(plan: LoadPlan, port: number, apiSecret?: string): LoadPlan {
+  const apiKey = generateApiKey(plan.modelId, port, apiSecret)
+  return { ...plan, port, apiKey, env: { ...plan.env, LLAMA_API_KEY: apiKey } }
+}
+
 export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): Promise<LoadPlan> {
   const warnings: string[] = []
   const warn = (m: string) => {

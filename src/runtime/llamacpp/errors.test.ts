@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ARGUMENT_REJECTED_MESSAGE,
   classifyExit,
   classifyProcessOutput,
   classifyStderr,
@@ -22,6 +23,18 @@ describe('classifyStderr', () => {
     const err = classifyStderr(stderr)
     expect(err.code).toBe(code)
     expect(err.details).toBe(stderr)
+  })
+
+  // What b11642 prints for `--atomic-probe-unknown-flag` and for `--flash-attn bogus`
+  // (test/live/llamacpp-contract.test.ts); TurboQuant and Prism share the parser.
+  it.each([
+    'error: invalid argument: --no-mmap',
+    'error while handling argument "--flash-attn": error: unknown value for --flash-attn: \'bogus\'\n\nusage:\n…',
+  ])('says the build refused its arguments: %j', (stderr) => {
+    const err = classifyProcessOutput({ code: 1, signal: null }, `${stderr}\n`, '', 'linux')
+    expect(err.code).toBe('LLAMA_CPP_PROCESS_ERROR')
+    expect(err.message).toBe(ARGUMENT_REJECTED_MESSAGE)
+    expect(err.details).toBe(`${stderr}\n`)
   })
 
   it('applies the cascade in order (OOM before arch, dyld before OOM)', () => {
