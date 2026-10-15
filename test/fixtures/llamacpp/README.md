@@ -17,6 +17,8 @@ What real ggml-org `llama-server` builds print, for the engine contract checks
   holds the fake llama-server to each file. A new one is the `golden` section of a probe's
   `observed.json` (CI's `llamacpp-observed-<os>` artifact):
   `jq '{schema: "atomic-engine-observed-golden", schema_version: 1, engine, tag, build, host, golden}'`.
+  Captured: b11642 on macOS arm64 (local run) and on linux-cpu-x64 (ubuntu-latest, `ci.yml` run
+  38713949703); they differ only in the compiler line of `--version`.
 - `help/<tag>.txt` — `llama-server -h`; `version/<tag>.txt` — `llama-server --version`. Each file is
   stdout, a newline, stderr: the shape `runHelp` (`src/runtime/llamacpp/probe.ts`) reads.
 
