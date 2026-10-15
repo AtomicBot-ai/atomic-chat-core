@@ -318,14 +318,18 @@ const tokenize = (body) => {
 function completions(body, res) {
   const content = process.env.FAKE_LLAMA_REPLY ?? 'hello from the fake backend'
   const minCtx = Number(process.env.FAKE_LLAMA_MIN_CTX ?? '0')
-  if (minCtx > 0 && Number(flag('--ctx-size', flag('-c', '0'))) < minCtx) {
-    res.writeHead(400, { 'content-type': 'application/json' })
+  const nCtx = Number(flag('--ctx-size', flag('-c', '0')))
+  if (minCtx > 0 && nCtx < minCtx) {
+    // The request "needs" FAKE_LLAMA_MIN_CTX tokens; the envelope is the one b11642 answers.
+    res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
     return res.end(
       JSON.stringify({
         error: {
           code: 400,
-          message: 'the request exceeds the available context size, try increasing it',
+          message: `request (${minCtx} tokens) exceeds the available context size (${nCtx} tokens), try increasing it`,
           type: 'exceed_context_size_error',
+          n_prompt_tokens: minCtx,
+          n_ctx: nCtx,
         },
       })
     )
