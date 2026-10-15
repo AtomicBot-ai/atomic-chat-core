@@ -301,9 +301,11 @@ describe('H5: the strings core matches, counted in both trees', () => {
   })
 
   it('a contract without strings skips the check instead of failing it', () => {
-    const { strings: _strings, ...withoutStrings } = contract
-    expect(checkStrings(withoutStrings, upstream())).toBeUndefined()
-    const report = buildReport(withoutStrings, goldenInputs(), { now: 'x' })
+    const noStrings = Object.fromEntries(
+      Object.entries(contract).filter(([key]) => key !== 'strings')
+    ) as SurfaceContract
+    expect(checkStrings(noStrings, upstream())).toBeUndefined()
+    const report = buildReport(noStrings, goldenInputs(), { now: 'x' })
     expect(report.checks.find((c) => c.id === 'upstream.contract_strings')).toMatchObject({
       status: 'skipped',
     })
@@ -317,11 +319,11 @@ describe('the upstream history of a build that is not upstream', () => {
       upstream: { available: false, reason: 'the candidate commit 0123abc is not in ggml-org/llama.cpp' },
     }
     const report = buildReport(contract, inputs, { now: 'x' })
-    expect(report.status).toBe('warn')
+    expect(report.status).toBe('pass')
     expect(ids(report.findings, 'info')).toEqual(
       expect.arrayContaining(['upstream.watched_paths/unavailable', 'upstream.release_notes/unavailable'])
     )
-    expect(report.checks.find((c) => c.id === 'help.deprecated')?.status).toBe('warn')
+    expect(report.checks.find((c) => c.id === 'help.required_flags')?.status).toBe('pass')
   })
 
   it('a local binary has no release: the archive checks are skipped', () => {
@@ -420,20 +422,17 @@ function goldenInputs(): SurfaceInputs {
 describe('golden: b11463 → b11617', () => {
   const report = buildReport(contract, goldenInputs(), { now: '2026-10-15T00:00:00.000Z' })
 
-  it('warns on --defrag-thold only; the rest is information', () => {
-    expect(report.status).toBe('warn')
-    expect(ids(report.findings, 'warn')).toEqual(['help.deprecated/--defrag-thold'])
+  it('passes with information only, now that core no longer sends --defrag-thold', () => {
+    expect(report.status).toBe('pass')
+    expect(ids(report.findings, 'warn')).toEqual([])
     expect(report.counts).toMatchObject({ break: 0, error: 0 })
     expect(ids(report.findings, 'info')).toEqual(
       expect.arrayContaining([
         'assets.core_backends/unconsumed',
         'help.diff/added',
         'upstream.watched_paths/common/arg.cpp',
-        // Core's context-overflow literal is not upstream's: known drift, information until PR7.
-        'upstream.contract_strings/http.context-overflow.literal',
       ])
     )
-    expect(report.checks.find((c) => c.id === 'upstream.contract_strings')?.status).toBe('pass')
   })
 
   it('matches report.json and report.md', async () => {

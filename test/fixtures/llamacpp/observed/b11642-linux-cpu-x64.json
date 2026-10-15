@@ -1,0 +1,78 @@
+{
+  "schema": "atomic-engine-observed-golden",
+  "schema_version": 1,
+  "engine": "llamacpp-upstream",
+  "tag": "b11642",
+  "build": 11642,
+  "host": {
+    "platform": "linux",
+    "arch": "x64",
+    "backend": "linux-cpu-x64"
+  },
+  "golden": {
+    "version": "version: 0.6.0-dev (build 11642, commit 2639a3b4e)\nbuilt with GNU 11.4.0 for Linux x86_64",
+    "startup_head": [
+      "I srv  llama_server: initializing ...",
+      "I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)"
+    ],
+    "ready_line": "I srv  llama_server: listening on http://127.0.0.1:<port>",
+    "unauthorized": {
+      "status": 401,
+      "body": {
+        "error": {
+          "message": "Invalid API Key",
+          "type": "authentication_error",
+          "code": 401
+        }
+      }
+    },
+    "refused.embeddings": {
+      "status": 501,
+      "body": {
+        "error": {
+          "code": 501,
+          "message": "This server does not support embeddings. Start it with `--embeddings`",
+          "type": "not_supported_error"
+        }
+      }
+    },
+    "refused.metrics": {
+      "status": 501,
+      "body": {
+        "error": {
+          "code": 501,
+          "message": "This server does not support metrics endpoint. Start it with `--metrics`",
+          "type": "not_supported_error"
+        }
+      }
+    },
+    "refused.systemone": {
+      "status": 501,
+      "body": {
+        "error": {
+          "code": 501,
+          "message": "This model is not a decision model",
+          "type": "not_supported_error"
+        }
+      }
+    },
+    "context_overflow": {
+      "status": 400,
+      "body": {
+        "error": {
+          "code": 400,
+          "message": "request (828 tokens) exceeds the available context size (128 tokens), try increasing it",
+          "type": "exceed_context_size_error",
+          "n_prompt_tokens": 828,
+          "n_ctx": 128
+        }
+      }
+    },
+    "metrics_with_flag": {
+      "status": 200,
+      "content_type": "text/plain; version=0.0.4"
+    },
+    "unknown_flag_line": "error: invalid argument: --atomic-probe-unknown-flag",
+    "list_devices_header": "Available devices:"
+  }
+}

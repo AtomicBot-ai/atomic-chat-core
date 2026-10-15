@@ -352,7 +352,7 @@ describe.skipIf(!ENABLED)('a real llama.cpp backend against the engine contract'
     expect((await failedLoad('probe-unknown-arch')).code).toBe('MODEL_ARCH_NOT_SUPPORTED')
   }, 120_000)
 
-  it('records how a known architecture without its keys and an unknown flag fail', async () => {
+  it('records how a known architecture without its keys, an unknown flag and a bad value fail', async () => {
     // Recorded, not asserted: warn-level strings, judged with the rest at the end.
     await failedLoad('probe-no-hparams')
     const flag = '--atomic-probe-unknown-flag'
@@ -364,6 +364,10 @@ describe.skipIf(!ENABLED)('a real llama.cpp backend against the engine contract'
     }
     const line = linesOf('live').find((l) => l.includes(flag))
     golden['unknown_flag_line'] = line === undefined ? null : stableLine(line)
+    const value = await failedLoad('live', { ...BASE, extra_args: '--flash-attn bogus' })
+    const refusal = linesOf('live').find((l) => l.includes('error while handling argument'))
+    scenarios['bad_value'] = { code: value.code, message: value.message, upstream_line: refusal ?? null }
+    golden['bad_value_line'] = refusal === undefined ? null : stableLine(refusal)
   }, 120_000)
 
   it('lists devices in the shape parseDeviceOutput reads', async () => {

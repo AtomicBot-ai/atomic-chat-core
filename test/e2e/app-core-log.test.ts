@@ -317,8 +317,8 @@ describe.skipIf(!existsSync(APP_BIN))('the app core log', () => {
       expect(ofEngine.map((entry) => entry.body)).toEqual(
         expect.arrayContaining([
           `[stdout] ${ENGINE_STDOUT}`,
-          '[stderr] build: 6325 (fake) with cc (GCC) 13.2.0 for x86_64-linux-gnu',
-          expect.stringMatching(/^\[stderr\] main: server is listening on /),
+          expect.stringMatching(/^\[stderr\] [\d.]+ I srv {2}llama_server: initializing \.\.\.$/),
+          expect.stringMatching(/^\[stderr\] [\d.]+ I srv {2}llama_server: listening on /),
         ])
       )
       // The start line comes before anything the engine printed.

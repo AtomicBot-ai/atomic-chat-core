@@ -137,12 +137,7 @@ export const CONTRACT_STRINGS: ContractString[] = [
     upstream_text: 'failed to initialize " GGML_CUDA_NAME',
     severity_if_lost: 'warn',
     live_expectation: 'conditional',
-    note: '`ggml_cuda_init: failed to initialize CUDA: <reason>` on a CUDA build without a usable device.',
-  }),
-  log('device.init-error.no-cuda-devices', 'no CUDA devices found', DEVICE, {
-    severity_if_lost: 'info',
-    live_expectation: 'unobservable',
-    note: 'Neither upstream nor the TurboQuant fork prints it; a CUDA build without a device says `failed to initialize CUDA`.',
+    note: '`ggml_cuda_init: failed to initialize CUDA: <reason>` on a CUDA build without a usable device (`no CUDA-capable device is detected`).',
   }),
   log('device.init-error.shared-libraries', 'error while loading shared libraries', DEVICE, {
     upstream_text: null,
@@ -150,10 +145,11 @@ export const CONTRACT_STRINGS: ContractString[] = [
     live_expectation: 'conditional',
     note: 'The Linux dynamic loader, when a backend library’s dependency (libcudart, libvulkan) is missing.',
   }),
-  log('device.init-error.failed-to-load-backend', 'failed to load backend', DEVICE, {
+  log('device.init-error.load-backend-failed', 'load_backend: failed to load ', DEVICE, {
+    upstream_text: '%s: failed to load %s: %s',
     severity_if_lost: 'info',
     live_expectation: 'unobservable',
-    note: 'Not upstream’s wording: ggml-backend-reg.cpp prints `load_backend: failed to load <path>: <error>`.',
+    note: 'ggml-backend-reg.cpp, for a backend library that does not load (libcudart missing). Release builds load their backends silently (NDEBUG), so only a debug build or GGML_BACKEND_PATH prints it; the CUDA path probe covers the missing runtime instead.',
   }),
   log('device.init-error.vulkan-no-devices', 'ggml_vulkan: No devices found', DEVICE, {
     severity_if_lost: 'warn',
@@ -271,6 +267,18 @@ export const CONTRACT_STRINGS: ContractString[] = [
     note: 'MODEL_FILE_CORRUPT upstream; MODEL_ARCH_NOT_SUPPORTED on the TurboQuant fork, whose tensor layout can differ.',
   }),
 
+  log('error.argument.unknown', 'error: invalid argument: ', CASCADE, {
+    upstream_text: 'error: invalid argument: %s',
+    severity_if_lost: 'warn',
+    live_expectation: 'observed',
+    note: 'A flag the build does not know (common/arg.cpp): the process error, with words that say so.',
+  }),
+  log('error.argument.bad-value', 'error while handling argument', CASCADE, {
+    severity_if_lost: 'warn',
+    live_expectation: 'observed',
+    note: 'A value the build refuses, e.g. `--flash-attn bogus` (common/arg.cpp).',
+  }),
+
   // MTP rejections (classify.ts): llama.cpp has no code for them, so the text is the contract.
   ...(
     [
@@ -303,14 +311,35 @@ export const CONTRACT_STRINGS: ContractString[] = [
 
   // Bodies the public server reads before it answers the client.
   {
+    id: 'http.context-overflow.upstream',
+    text: 'request \\(\\d+ tokens\\) exceeds the available context size',
+    match: 'regex',
+    channel: 'http',
+    source: PUBLIC_ERRORS,
+    upstream_text: 'exceeds the available context size',
+    severity_if_lost: 'warn',
+    live_expectation: 'observed',
+    note: 'The 400 upstream, TurboQuant and Prism answer when a prompt does not fit: core reloads with a larger context.',
+  },
+  {
+    id: 'http.context-overflow.type',
+    text: 'exceed_context_size_error',
+    match: 'substring-ci',
+    channel: 'http',
+    source: PUBLIC_ERRORS,
+    severity_if_lost: 'warn',
+    live_expectation: 'observed',
+    note: 'The `error.type` of that 400, also sent for `input (N tokens) is larger than the max context size`.',
+  },
+  {
     id: 'http.context-overflow.literal',
     text: 'the request exceeds the available context size',
     match: 'substring-ci',
     channel: 'http',
     source: PUBLIC_ERRORS,
-    severity_if_lost: 'warn',
+    severity_if_lost: 'info',
     live_expectation: 'not-observed',
-    note: 'Older and forked wording. Upstream answers 400 `request (N tokens) exceeds the available context size (M tokens), try increasing it` with `type: exceed_context_size_error`; isContextLimitError still catches it through its `context` + `size` fallback.',
+    note: 'Older builds’ wording: neither upstream nor TurboQuant nor Prism prints it today. Kept for those builds.',
   },
   ...[
     'compute error',
@@ -430,10 +459,7 @@ export const CONTRACT_ROUTES: ContractRoute[] = [
       field('choices[].delta.content', TELEMETRY, 'break', 'observed', { when: 'stream' }),
       field('timings.predicted_n', TELEMETRY, 'warn', 'observed', { when: 'stream' }),
       field('error.message', PUBLIC_ERRORS, 'break', 'observed', { when: 'context-overflow' }),
-      field('error.type', null, 'info', 'observed', {
-        when: 'context-overflow',
-        note: '`exceed_context_size_error` upstream; core matches the message instead.',
-      }),
+      field('error.type', PUBLIC_ERRORS, 'warn', 'observed', { when: 'context-overflow' }),
       field('error.n_prompt_tokens', null, 'info', 'observed', { when: 'context-overflow' }),
       field('error.n_ctx', null, 'info', 'observed', { when: 'context-overflow' }),
     ],

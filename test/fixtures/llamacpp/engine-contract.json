@@ -27,6 +27,11 @@
   ],
   "build_gates": [
     {
+      "name": "DEFRAG_THOLD_NO_OP_MIN_BUILD",
+      "build": 6245,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
       "name": "FLASH_ATTN_STRING_ARG_MIN_BUILD",
       "build": 6325,
       "source": "src/runtime/llamacpp/args.ts"
@@ -393,13 +398,13 @@
         "chat": [
           {
             "from": null,
-            "until": null
+            "until": 6245
           }
         ],
         "chat-dflash": [
           {
             "from": null,
-            "until": null
+            "until": 6245
           }
         ]
       }
@@ -1614,17 +1619,7 @@
       "upstream_text": "failed to initialize \" GGML_CUDA_NAME",
       "severity_if_lost": "warn",
       "live_expectation": "conditional",
-      "note": "`ggml_cuda_init: failed to initialize CUDA: <reason>` on a CUDA build without a usable device."
-    },
-    {
-      "id": "device.init-error.no-cuda-devices",
-      "text": "no CUDA devices found",
-      "match": "substring-ci",
-      "channel": "log",
-      "source": "src/runtime/llamacpp/runtime-device.ts",
-      "severity_if_lost": "info",
-      "live_expectation": "unobservable",
-      "note": "Neither upstream nor the TurboQuant fork prints it; a CUDA build without a device says `failed to initialize CUDA`."
+      "note": "`ggml_cuda_init: failed to initialize CUDA: <reason>` on a CUDA build without a usable device (`no CUDA-capable device is detected`)."
     },
     {
       "id": "device.init-error.shared-libraries",
@@ -1638,14 +1633,15 @@
       "note": "The Linux dynamic loader, when a backend library’s dependency (libcudart, libvulkan) is missing."
     },
     {
-      "id": "device.init-error.failed-to-load-backend",
-      "text": "failed to load backend",
+      "id": "device.init-error.load-backend-failed",
+      "text": "load_backend: failed to load ",
       "match": "substring-ci",
       "channel": "log",
       "source": "src/runtime/llamacpp/runtime-device.ts",
+      "upstream_text": "%s: failed to load %s: %s",
       "severity_if_lost": "info",
       "live_expectation": "unobservable",
-      "note": "Not upstream’s wording: ggml-backend-reg.cpp prints `load_backend: failed to load <path>: <error>`."
+      "note": "ggml-backend-reg.cpp, for a backend library that does not load (libcudart missing). Release builds load their backends silently (NDEBUG), so only a debug build or GGML_BACKEND_PATH prints it; the CUDA path probe covers the missing runtime instead."
     },
     {
       "id": "device.init-error.vulkan-no-devices",
@@ -1894,6 +1890,27 @@
       "note": "MODEL_FILE_CORRUPT upstream; MODEL_ARCH_NOT_SUPPORTED on the TurboQuant fork, whose tensor layout can differ."
     },
     {
+      "id": "error.argument.unknown",
+      "text": "error: invalid argument: ",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": "error: invalid argument: %s",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "A flag the build does not know (common/arg.cpp): the process error, with words that say so."
+    },
+    {
+      "id": "error.argument.bad-value",
+      "text": "error while handling argument",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "A value the build refuses, e.g. `--flash-attn bogus` (common/arg.cpp)."
+    },
+    {
       "id": "mtp.create-context",
       "text": "failed to create MTP context",
       "match": "regex",
@@ -1935,14 +1952,35 @@
       "note": "Without it `parseDeviceOutput` throws DEVICE_LIST_PARSE_FAILED and no device is offered."
     },
     {
+      "id": "http.context-overflow.upstream",
+      "text": "request \\(\\d+ tokens\\) exceeds the available context size",
+      "match": "regex",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "upstream_text": "exceeds the available context size",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "The 400 upstream, TurboQuant and Prism answer when a prompt does not fit: core reloads with a larger context."
+    },
+    {
+      "id": "http.context-overflow.type",
+      "text": "exceed_context_size_error",
+      "match": "substring-ci",
+      "channel": "http",
+      "source": "src/server/public/errors.ts",
+      "severity_if_lost": "warn",
+      "live_expectation": "observed",
+      "note": "The `error.type` of that 400, also sent for `input (N tokens) is larger than the max context size`."
+    },
+    {
       "id": "http.context-overflow.literal",
       "text": "the request exceeds the available context size",
       "match": "substring-ci",
       "channel": "http",
       "source": "src/server/public/errors.ts",
-      "severity_if_lost": "warn",
+      "severity_if_lost": "info",
       "live_expectation": "not-observed",
-      "note": "Older and forked wording. Upstream answers 400 `request (N tokens) exceeds the available context size (M tokens), try increasing it` with `type: exceed_context_size_error`; isContextLimitError still catches it through its `context` + `size` fallback."
+      "note": "Older builds’ wording: neither upstream nor TurboQuant nor Prism prints it today. Kept for those builds."
     },
     {
       "id": "http.compute-error.compute-error",
@@ -2173,10 +2211,9 @@
         {
           "path": "error.type",
           "when": "context-overflow",
-          "source": null,
-          "severity_if_lost": "info",
-          "live_expectation": "observed",
-          "note": "`exceed_context_size_error` upstream; core matches the message instead."
+          "source": "src/server/public/errors.ts",
+          "severity_if_lost": "warn",
+          "live_expectation": "observed"
         },
         {
           "path": "error.n_prompt_tokens",

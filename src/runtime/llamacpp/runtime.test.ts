@@ -216,13 +216,13 @@ describe('load', () => {
     await waitFor(() => events.some((event) => event.name === 'core:log'))
     await waitFor(() => {
       try {
-        return /server is listening|HTTP server listening/i.test(readFileSync(logPath, 'utf8'))
+        return /listening on/i.test(readFileSync(logPath, 'utf8'))
       } catch {
         return false
       }
     })
     const text = readFileSync(logPath, 'utf8')
-    expect(text).toMatch(/server is listening|HTTP server listening/i)
+    expect(text).toMatch(/llama_server: listening on/)
     expect(payloads('core:log')).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ level: 'debug', msg: expect.stringContaining('logged') }),
@@ -431,8 +431,9 @@ describe('failure paths', () => {
 
     const tagged = { provider: 'llamacpp', model: 'oom-output', stream: 'stderr' }
     expect(received).toEqual([
-      { ...tagged, line: expect.stringMatching(/^build: /) },
-      { ...tagged, line: expect.stringMatching(/^llama_model_loader: loaded meta data/) },
+      { ...tagged, line: expect.stringMatching(/ I srv {2}llama_server: initializing \.\.\.$/) },
+      { ...tagged, line: expect.stringContaining('common_params_print_info: verbosity = 3') },
+      { ...tagged, line: expect.stringContaining("load_model: loading model '") },
       { ...tagged, line: expect.stringContaining('failed to allocate 4096.00 MiB') },
       { ...tagged, line: expect.stringContaining('error loading model') },
     ])
