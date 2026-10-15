@@ -10,6 +10,7 @@ coverage/
 test/fixtures/live-cloud/*.local.json
 test/tmp/
 .live-fixtures/
+.engine-check/
 
 # Env & secrets
 .env
