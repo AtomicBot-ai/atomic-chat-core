@@ -26,7 +26,12 @@ describe.skipIf(!POSIX)('runFoundryHostProbe', () => {
     )
     const result = await runFoundryHostProbe(
       { exe, args: [] },
-      { libDir: '/builds/v2.1.0/macos-arm64', appDataDir: '/data/rt' }
+      {
+        libDir: '/builds/v2.1.0/macos-arm64',
+        appDataDir: '/data/rt',
+        logsDir: '/data/logs',
+        prepared: ['WebGpuExecutionProvider'],
+      }
     )
     expect(result).toEqual({
       c_api_version: 2,
@@ -34,7 +39,8 @@ describe.skipIf(!POSIX)('runFoundryHostProbe', () => {
     })
     const { readFile } = await import('node:fs/promises')
     expect((await readFile(join(dir, 'argv'), 'utf8')).trim()).toBe(
-      'probe --lib /builds/v2.1.0/macos-arm64 --app-data /data/rt'
+      // The real host refuses a probe without --logs (exit 2): the install-time check must pass it.
+      'probe --lib /builds/v2.1.0/macos-arm64 --app-data /data/rt --logs /data/logs --prepared WebGpuExecutionProvider'
     )
   })
 
@@ -43,7 +49,7 @@ describe.skipIf(!POSIX)('runFoundryHostProbe', () => {
       `echo 'Failed to open library: libatomic.so.1: cannot open shared object file' >&2; exit 3`
     )
     await expect(
-      runFoundryHostProbe({ exe, args: [] }, { libDir: '/l', appDataDir: '/a' })
+      runFoundryHostProbe({ exe, args: [] }, { libDir: '/l', appDataDir: '/a', logsDir: '/g' })
     ).rejects.toMatchObject({
       code: 'ENGINE_INSTALL_FAILED',
       details: expect.stringContaining('libatomic.so.1'),
@@ -53,7 +59,7 @@ describe.skipIf(!POSIX)('runFoundryHostProbe', () => {
   it('fails when the host prints no probe answer', async () => {
     const exe = await fakeHost(`echo 'not json'`)
     await expect(
-      runFoundryHostProbe({ exe, args: [] }, { libDir: '/l', appDataDir: '/a' })
+      runFoundryHostProbe({ exe, args: [] }, { libDir: '/l', appDataDir: '/a', logsDir: '/g' })
     ).rejects.toMatchObject({
       code: 'ENGINE_INSTALL_FAILED',
     })
@@ -62,7 +68,11 @@ describe.skipIf(!POSIX)('runFoundryHostProbe', () => {
   it('stops a host that does not answer in time', async () => {
     const exe = await fakeHost('sleep 5')
     await expect(
-      runFoundryHostProbe({ exe, args: [] }, { libDir: '/l', appDataDir: '/a' }, { timeoutMs: 200 })
+      runFoundryHostProbe(
+        { exe, args: [] },
+        { libDir: '/l', appDataDir: '/a', logsDir: '/g' },
+        { timeoutMs: 200 }
+      )
     ).rejects.toMatchObject({
       code: 'ENGINE_INSTALL_FAILED',
       message: expect.stringMatching(/did not answer/),

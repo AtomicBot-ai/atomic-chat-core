@@ -543,7 +543,11 @@ export async function createAtomicCore(
       foundryHostProbe: async (libDir) => {
         await runFoundryHostProbe(
           foundryHost,
-          { libDir, appDataDir: foundryLocalPaths.runtimeDir as string },
+          {
+            libDir,
+            appDataDir: foundryLocalPaths.runtimeDir as string,
+            logsDir: foundryLocalPaths.logsDir as string,
+          },
           { env }
         )
       },

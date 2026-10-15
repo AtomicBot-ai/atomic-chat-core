@@ -16,13 +16,29 @@ export interface FoundryHostCommand {
 
 export interface FoundryHostAccelerator {
   name: string
+  /** The conf spelling (`cuda`, `openvino`…); `null` for one this core runs no variant on. */
+  execution_provider?: string | null
   device: string
   prepared: boolean
 }
 
 export interface FoundryHostProbeResult {
   c_api_version: number
+  /** The library's own version string. */
+  version?: string
   accelerators: FoundryHostAccelerator[]
+}
+
+/** What `probe` and `prepare` run against. */
+export interface FoundryHostTarget {
+  /** The build directory. */
+  libDir: string
+  /** The library's data, shared by every build (`<data>/foundry-local/runtime`). */
+  appDataDir: string
+  /** The library's logs (`<data>/foundry-local/logs`); the host refuses to run without them. */
+  logsDir: string
+  /** The accelerators core recorded as prepared (the library cannot tell, rulings R6). */
+  prepared?: readonly string[]
 }
 
 /** The first run of a freshly unpacked library is scanned by Gatekeeper / Defender. */
@@ -37,16 +53,23 @@ function parseProbeLine(line: string): FoundryHostProbeResult | null {
     return null
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
-  const { c_api_version, accelerators } = raw as Record<string, unknown>
+  const { c_api_version, version, accelerators } = raw as Record<string, unknown>
   if (typeof c_api_version !== 'number' || !Array.isArray(accelerators)) return null
   const out: FoundryHostAccelerator[] = []
   for (const item of accelerators) {
     if (item === null || typeof item !== 'object') return null
-    const { name, device, prepared } = item as Record<string, unknown>
+    const { name, device, prepared, execution_provider } = item as Record<string, unknown>
     if (typeof name !== 'string' || typeof device !== 'string' || typeof prepared !== 'boolean') return null
-    out.push({ name, device, prepared })
+    out.push({
+      name,
+      ...(typeof execution_provider === 'string' || execution_provider === null
+        ? { execution_provider }
+        : {}),
+      device,
+      prepared,
+    })
   }
-  return { c_api_version, accelerators: out }
+  return { c_api_version, ...(typeof version === 'string' ? { version } : {}), accelerators: out }
 }
 
 /**
@@ -55,10 +78,20 @@ function parseProbeLine(line: string): FoundryHostProbeResult | null {
  */
 export function runFoundryHostProbe(
   command: FoundryHostCommand,
-  target: { libDir: string; appDataDir: string },
+  target: FoundryHostTarget,
   options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}
 ): Promise<FoundryHostProbeResult> {
-  const args = [...command.args, 'probe', '--lib', target.libDir, '--app-data', target.appDataDir]
+  const args = [
+    ...command.args,
+    'probe',
+    '--lib',
+    target.libDir,
+    '--app-data',
+    target.appDataDir,
+    '--logs',
+    target.logsDir,
+    ...(target.prepared ?? []).flatMap((name) => ['--prepared', name]),
+  ]
   return new Promise((resolve, reject) => {
     const child = spawn(command.exe, args, {
       env: options.env ?? process.env,

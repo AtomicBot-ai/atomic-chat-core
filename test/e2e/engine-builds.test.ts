@@ -372,7 +372,7 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       const argv = (await readFile(argvFile, 'utf8')).trim()
       expect(argv).toMatch(
         new RegExp(
-          `^probe --lib .*v2\\.1\\.0/${platform}\\.incoming-\\d+ --app-data .*foundry-local/runtime$`
+          `^probe --lib .*v2\\.1\\.0/${platform}\\.incoming-\\d+ --app-data .*foundry-local/runtime --logs .*foundry-local/logs$`
         )
       )
 
