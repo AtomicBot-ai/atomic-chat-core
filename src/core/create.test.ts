@@ -2051,3 +2051,100 @@ describe('engine builds through the owner', () => {
     ])
   })
 })
+
+describe.skipIf(process.platform === 'win32' || (process.platform === 'darwin' && process.arch !== 'arm64'))(
+  'foundry-local on the owner (change add-foundry-local, task 6.6)',
+  () => {
+    it('wires the runtime, the accelerators, the check and the engine host where the platform rule holds', async () => {
+      const fakeHost = new URL('../../test/helpers/fake-foundry-host.mjs', import.meta.url).pathname
+      const launcher = join(data.root, 'fake-foundry-host')
+      await writeFile(
+        launcher,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeHost)} "$@"\n`
+      )
+      await chmod(launcher, 0o755)
+      const gpuEp = process.platform === 'darwin' ? 'webgpu' : 'cuda'
+      const gpuName = process.platform === 'darwin' ? 'WebGpuExecutionProvider' : 'CUDAExecutionProvider'
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        platform: process.platform,
+        env: {
+          ...process.env,
+          ATOMIC_FOUNDRY_HOST_TEST_COMMAND: launcher,
+          FAKE_FOUNDRY_EPS: gpuName,
+        },
+      })
+      cores.push(core)
+      const call = (path: string, init: RequestInit = {}) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          ...init,
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        }).then((r) => r.json() as Promise<Record<string, unknown>>)
+
+      expect(await call('/runtimes/foundry-local/accelerators')).toMatchObject({ installed: false })
+      expect(
+        await call('/models/foundry-local/check', {
+          method: 'POST',
+          body: JSON.stringify({ execution_provider: gpuEp, device: 'gpu' }),
+        })
+      ).toMatchObject({ verdict: 'engine-not-installed' })
+
+      // A build as the engine-builds install leaves it, and a GPU variant as the app's installer does.
+      const platformId = process.platform === 'darwin' ? 'macos-arm64' : `linux-${process.arch}`
+      const build = join(data.root, 'foundry-local', 'backends', 'v2.1.0', platformId)
+      await mkdir(join(build, 'lib'), { recursive: true })
+      await writeFile(join(build, 'lib', 'libfoundry_local.so'), 'so')
+      await writeFile(join(build, 'lib', 'libfoundry_local.dylib'), 'dylib')
+      await writeFile(join(build, '.atomic-owned'), 'atomic-chat\n')
+      await writeFile(
+        join(build, 'install.json'),
+        JSON.stringify({
+          tag: 'v2.1.0',
+          backendId: platformId,
+          installedAtMs: 1,
+          publishedAt: '2026-09-30T00:43:42Z',
+          cApiVersion: 2,
+        })
+      )
+      const model = join(data.root, 'foundry-local', 'models', 'fl-gpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'genai_config.json'), '{}')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: foundry-local/models/fl-gpu\nname: fl-gpu\nsize_bytes: 1\nfoundry_local:\n  model_id: m\n  variant_id: fl-gpu\n  execution_provider: ${gpuEp}\n  device: gpu\n`
+      )
+
+      expect(await call('/runtimes/foundry-local/accelerators')).toMatchObject({
+        installed: true,
+        accelerators: [{ name: gpuName, prepared: false }],
+      })
+      await expect(core.load('foundry-local', 'fl-gpu')).rejects.toMatchObject({
+        code: 'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED',
+      })
+      expect(
+        await call('/runtimes/foundry-local/accelerators/prepare', { method: 'POST', body: '{}' })
+      ).toEqual({
+        accelerators: [{ name: gpuName, prepared: true }],
+      })
+      expect(
+        await call('/models/foundry-local/check', {
+          method: 'POST',
+          body: JSON.stringify({ execution_provider: gpuEp, device: 'gpu' }),
+        })
+      ).toMatchObject({ verdict: 'ok', accelerator: gpuName })
+
+      const session = await core.load('foundry-local', 'fl-gpu')
+      expect(session.api_key.length).toBeGreaterThan(20)
+      expect(core.registry('foundry-local').modelsDir).toBe(join(data.root, 'foundry-local', 'models'))
+      const versions = (await call('/engines/versions', {
+        method: 'POST',
+        body: '{}',
+      })) as unknown as EngineVersionsResponse
+      expect(versions.engines.find((entry) => entry.engine === 'foundry-local')?.builds).toEqual([
+        expect.objectContaining({ version: 'v2.1.0', in_use: true }),
+      ])
+      expect(await core.unload('foundry-local', 'fl-gpu')).toMatchObject({ success: true })
+    })
+  }
+)
