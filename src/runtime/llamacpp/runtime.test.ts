@@ -112,10 +112,14 @@ const PRINTS_BEFORE_AND_AFTER_READY = [
   'setInterval(() => {}, 1000)',
 ].join('; ')
 
-/** A listener holding `port` on 127.0.0.1, as another process would between the probe and the bind. */
+/**
+ * A listener holding `port` on 127.0.0.1, as another process would between the probe and the bind.
+ * It drops every connection at once: core may poll `/health` on the taken port before the engine has
+ * said it could not bind, and a connection left open would keep `close()` waiting.
+ */
 function holdPort(port: number): Promise<Server> {
   return new Promise((resolve, reject) => {
-    const server = createServer()
+    const server = createServer((socket) => socket.destroy())
     server.once('error', reject)
     server.listen(port, '127.0.0.1', () => resolve(server))
   })
