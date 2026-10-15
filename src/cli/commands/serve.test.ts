@@ -30,7 +30,8 @@ describe('daemon and serve compatibility', () => {
     const globalFetch = vi.spyOn(globalThis, 'fetch')
     try {
       const out = recordingIo({ env: { HF_TOKEN: 'token' }, fetch: ioFetch as unknown as typeof fetch })
-      expect(await runCli(['serve', 'owner/repo', '--port', '0', ...folder()], out)).not.toBe(0)
+      // `--select` chose what to download; an old script that still passes it gets the same answer.
+      expect(await runCli(['serve', 'owner/repo', '--select', '--port', '0', ...folder()], out)).not.toBe(0)
       const stderr = out.err.join('')
       expect(stderr).toContain('owner/repo is not on disk')
       expect(stderr).toContain('Download the model first')

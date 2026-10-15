@@ -198,8 +198,8 @@ CLI surface kept compatible with the Rust `jan-cli`: `serve` accepts `--model-pa
 Its defaults are port 6767, timeout 120 seconds, GPU layers -1, context 32768, fit off and threads 0;
 fit forces context 0. `owner/repository` serves that model only when it is already on disk: the core
 does not download models (ADR 2026-10-15-core-does-not-download-models), so a Hub id with no such model
-exits 1 with `MODEL_NOT_FOUND`, before an owner starts and without a network request; `--select` is
-gone with the download it chose for. `models list`
+exits 1 with `MODEL_NOT_FOUND`, before an owner starts and without a network request; `--select`, which
+chose what to download, is still accepted and ignored so an old script gets that answer. `models list`
 hides embedding models and prints `{id,name,model_path,size_bytes,capabilities,mmproj_path}` under
 `--json`, `server status` exits 1 when nothing answers and reads `ATOMIC_API_KEY`. The deliberate
 difference is ownership — `serve` attaches to a core that outlives it, so Ctrl+C detaches instead of

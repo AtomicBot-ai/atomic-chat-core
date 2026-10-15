@@ -61,7 +61,7 @@ describe('package exports', () => {
     }
   })
 
-  it('re-exports nothing from the downloads module, types included', async () => {
+  it('re-exports nothing from the downloads module directly, types included', async () => {
     for (const entry of [
       'index.ts',
       'client/index.ts',
@@ -70,7 +70,8 @@ describe('package exports', () => {
       'models/index.ts',
     ]) {
       const text = await readFile(new URL(`src/${entry}`, ROOT), 'utf8')
-      expect(text, entry).not.toMatch(/from ['"][./]*downloads(\/[^'"]*)?['"]/)
+      // Any specifier into src/downloads: `./downloads`, `../downloads/index.js`, `./downloads.js`.
+      expect(text, entry).not.toMatch(/from ['"][^'"]*\bdownloads(\.js|\/[^'"]*)?['"]/)
     }
   })
 })

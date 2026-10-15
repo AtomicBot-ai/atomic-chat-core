@@ -48,6 +48,9 @@ export async function serveCommand(argv: string[], io: CliIo): Promise<number> {
       'detach': { type: 'boolean', short: 'd' },
       'log': { type: 'string' },
       'verbose': { type: 'boolean', short: 'v' },
+      // Picked the quantization `serve owner/repo` downloaded. Accepted and ignored since 0.17.0 so an
+      // old script reaches the "download the model first" error instead of a parse error.
+      'select': { type: 'boolean' },
       'provider': { type: 'string' },
       'resources-dir': { type: 'string' },
     },
