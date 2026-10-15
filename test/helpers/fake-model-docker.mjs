@@ -32,9 +32,12 @@ const SGLANG_ENGINE = fileURLToPath(new URL('./fake-sglang-engine.mjs', import.m
 const db = existsSync(statePath)
   ? JSON.parse(readFileSync(statePath, 'utf8'))
   : { n: 0, containers: {}, calls: [] }
+// A temporary file of this process's own: two fake `docker` calls at once (a probe beside a load)
+// writing one shared `.tmp` interleave, and the rename then publishes JSON with garbage after it.
 const save = () => {
-  writeFileSync(`${statePath}.tmp`, JSON.stringify(db))
-  renameSync(`${statePath}.tmp`, statePath)
+  const tmp = `${statePath}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(db))
+  renameSync(tmp, statePath)
 }
 // Every command the executor builds starts with `--host unix:///var/run/docker.sock`.
 const args = process.argv.slice(2)
