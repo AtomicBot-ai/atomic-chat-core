@@ -53,6 +53,10 @@ export interface ProviderPaths {
   libDir?: string
   /** `<data>/llamacpp/models` for both llama.cpp providers; `<data>/mlx/models` for MLX. */
   modelsDir: string
+  /** `foundry-local`: `<root>/runtime`, the library's own data (accelerators, `accelerators.json`). */
+  runtimeDir?: string
+  /** `foundry-local`: `<root>/logs`, the library's logs. */
+  logsDir?: string
 }
 
 export interface CoreFiles {
@@ -253,6 +257,17 @@ export function dataLayout(root: string): DataLayout {
             backendsDir: join(providerRoot, 'backends'),
             tmpDir: join(providerRoot, 'tmp'),
             modelsDir: join(root, MODELS_ROOT, 'models'),
+          }
+        case 'foundry-local':
+          // Change `add-foundry-local`: builds, models the app downloads, the library's data shared by
+          // every build, each host's temporary catalog (`tmp/<session>`) and the library's logs.
+          return {
+            root: providerRoot,
+            backendsDir: join(providerRoot, 'backends'),
+            modelsDir: join(providerRoot, 'models'),
+            runtimeDir: join(providerRoot, 'runtime'),
+            tmpDir: join(providerRoot, 'tmp'),
+            logsDir: join(providerRoot, 'logs'),
           }
         case 'mlx':
         case 'foundation-models':

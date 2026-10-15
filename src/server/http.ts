@@ -151,6 +151,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'REMOTE_ACCESS_SERVER_STOPPED':
     case 'REMOTE_ACCESS_OPERATION_IN_PROGRESS':
     case 'ENGINE_INSTALL_IN_PROGRESS':
+    case 'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED':
     case 'REMOTE_ACCESS_STOP_FAILED':
     case 'JOB_BUSY':
     case 'BACKEND_IN_USE':
@@ -195,6 +196,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'REMOTE_REJECTED':
     case 'REMOTE_CONTENT_BLOCKED':
     case 'REMOTE_UNSUPPORTED':
+    case 'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED':
       return 422
     case 'REMOTE_NOT_CONFIGURED':
       return 409

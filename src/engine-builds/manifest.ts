@@ -350,7 +350,7 @@ export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: Manif
           coreVersion: CORE_VERSION,
           cApiVersions: FOUNDRY_LOCAL_C_API_VERSIONS,
         }),
-      cacheFile: join(layout.root, 'foundry-local', 'foundry-local-manifest.cache.json'),
+      cacheFile: join(layout.provider('foundry-local').root, 'foundry-local-manifest.cache.json'),
     },
   }
 }

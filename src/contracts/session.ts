@@ -11,9 +11,19 @@
  * `atomic-prism` is PrismML's llama.cpp fork, the only engine that runs Bonsai's Prism packings
  * (`PQ2_0`, `PTQ1_0`, the Hadamard transform). It shares the GGUF model tree with the two other
  * llama.cpp providers and never becomes the default for an ordinary model.
+ *
+ * `foundry-local` is Microsoft Foundry Local (ONNX Runtime GenAI: NPU, CUDA, WebGPU, CPU), run by a
+ * host process of this binary per model (openspec change `add-foundry-local`); registered only on
+ * the platforms its archives support.
  */
 export type LocalProviderId =
-  'llamacpp-upstream' | 'llamacpp' | 'atomic-prism' | 'mlx' | 'foundation-models' | ManagedProviderId
+  | 'llamacpp-upstream'
+  | 'llamacpp'
+  | 'atomic-prism'
+  | 'mlx'
+  | 'foundation-models'
+  | 'foundry-local'
+  | ManagedProviderId
 
 /**
  * The managed engines — each one a container core runs from a model of the managed model store — in

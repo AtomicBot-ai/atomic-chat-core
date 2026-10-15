@@ -83,6 +83,7 @@ describe('/models', () => {
         localSession(1, { provider: 'tensorrt-llm', modelId: 'trt-model' }),
         localSession(2, { provider: 'vllm', modelId: 'vllm-model' }),
         localSession(3, { provider: 'sglang', modelId: 'sglang-model' }),
+        localSession(4, { provider: 'foundry-local', modelId: 'qwen2.5-1.5b-instruct-openvino-npu' }),
       ],
     })
     const res = await fetch(`http://127.0.0.1:${server.port}/v1/models`)
@@ -92,6 +93,7 @@ describe('/models', () => {
         { id: 'trt-model', object: 'model', created: 1, owned_by: 'tensorrt-llm' },
         { id: 'vllm-model', object: 'model', created: 1, owned_by: 'vllm' },
         { id: 'sglang-model', object: 'model', created: 1, owned_by: 'sglang' },
+        { id: 'qwen2.5-1.5b-instruct-openvino-npu', object: 'model', created: 1, owned_by: 'foundry-local' },
       ],
     })
   })

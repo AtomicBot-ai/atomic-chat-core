@@ -188,6 +188,9 @@ describe('CloudRegistry', () => {
     await expect(registry.upsert({ provider: 'sglang' })).rejects.toMatchObject({
       message: '"sglang" is a local engine, not a cloud provider',
     })
+    await expect(registry.upsert({ provider: 'foundry-local' })).rejects.toMatchObject({
+      message: '"foundry-local" is a local engine, not a cloud provider',
+    })
     for (const bad of [
       { models: 'gpt' },
       { models: [1] },

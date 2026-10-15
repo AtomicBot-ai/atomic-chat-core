@@ -513,14 +513,14 @@ export async function createAtomicCore(
       glibcVersion: (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)
         ?.header?.glibcVersionRuntime,
     })
-    const foundryLocalRoot = join(layout.root, 'foundry-local')
+    const foundryLocalPaths = layout.provider('foundry-local')
     const foundryHost = foundryHostCommand(env)
     const engineBuilds = new EngineBuildsService({
       dataFolder: layout.root,
       roots: {
         'sd-cpp': layout.diffusion.backendsDir,
         'mlx': layout.provider('mlx').backendsDir,
-        'foundry-local': join(foundryLocalRoot, 'backends'),
+        'foundry-local': foundryLocalPaths.backendsDir,
       },
       failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
       resourcesDir: options.resourcesDir,
@@ -539,7 +539,7 @@ export async function createAtomicCore(
       foundryHostProbe: async (libDir) => {
         await runFoundryHostProbe(
           foundryHost,
-          { libDir, appDataDir: join(foundryLocalRoot, 'runtime') },
+          { libDir, appDataDir: foundryLocalPaths.runtimeDir as string },
           { env }
         )
       },
