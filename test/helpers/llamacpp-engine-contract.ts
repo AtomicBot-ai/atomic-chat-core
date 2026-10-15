@@ -16,6 +16,8 @@ import { EMBEDDING_CONTENT_PARTS_MIN_BUILD } from '../../src/embedding/model-fac
 import { buildUpstreamDecisionArgs } from '../../src/decision/args.js'
 import { UPSTREAM_DECISION_MIN_BUILD } from '../../src/decision/upstream-version.js'
 import type { LlamacppConfig } from '../../src/contracts/index.js'
+import { CONTRACT_ROUTES, CONTRACT_STRINGS } from './llamacpp-engine-strings.js'
+import type { ContractRoute, ContractString } from './llamacpp-engine-strings.js'
 
 export interface BuildRange {
   /** First build that has it; `null` = every build. */
@@ -62,6 +64,10 @@ export interface EngineContract {
   invocations: Array<{ argv: string[]; source: string; expect: 'exit-0' }>
   env: Array<{ name: string; severity: 'break' | 'warn'; source: string }>
   flags: ContractFlag[]
+  /** Log lines and bodies core matches (llamacpp-engine-strings.ts). */
+  strings: ContractString[]
+  /** Routes core calls on a session, and the fields it reads from their answers. */
+  routes: ContractRoute[]
   upstream: {
     repo: string
     watched_paths: Array<{ path: string; why: string }>
@@ -378,6 +384,8 @@ export function deriveLlamaEngineContract(): EngineContract {
       { name: 'LLAMA_ARG_TIMEOUT', severity: 'warn', source: 'src/runtime/llamacpp/load-plan.ts' },
     ],
     flags,
+    strings: CONTRACT_STRINGS,
+    routes: CONTRACT_ROUTES,
     upstream: {
       repo: 'ggml-org/llama.cpp',
       watched_paths: [

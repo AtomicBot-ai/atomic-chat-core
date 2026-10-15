@@ -7,6 +7,10 @@ What real ggml-org `llama-server` builds print, for the engine contract checks
   upstream llama.cpp and from which build to which (`test/helpers/llamacpp-engine-contract.ts`).
   Regenerate with `npx vitest run --project contract -u test/contract/llamacpp-engine-contract.test.ts`
   and review the diff: it is the list of things a new llama.cpp release must keep accepting.
+  Besides the flags it holds `strings` (log lines and bodies core matches) and `routes` (what core
+  calls on a session, and the fields it reads), curated in `test/helpers/llamacpp-engine-strings.ts`:
+  each names the core file that holds it, how much losing it costs (`severity_if_lost`) and what the
+  live probe (`test/live/llamacpp-contract.test.ts`) sees on a stock build (`live_expectation`).
 - `help/<tag>.txt` — `llama-server -h`; `version/<tag>.txt` — `llama-server --version`. Each file is
   stdout, a newline, stderr: the shape `runHelp` (`src/runtime/llamacpp/probe.ts`) reads.
 

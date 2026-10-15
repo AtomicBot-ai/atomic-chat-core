@@ -10,7 +10,8 @@
 import type { RuntimeDeviceInfo } from '../../contracts/index.js'
 import { floatAsU64, parseRustF64, parseRustI32 } from '../../util/index.js'
 
-const DEVICE_INIT_ERROR_MARKERS = [
+/** Lines that say a GPU backend failed to come up; the first one seen is reported as is. */
+export const DEVICE_INIT_ERROR_MARKERS = [
   'failed to initialize CUDA',
   'no CUDA devices found',
   'error while loading shared libraries',
