@@ -19,7 +19,7 @@ import { mkdir, readFile as nodeReadFile, rename, rm, writeFile } from 'node:fs/
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { DataLayout } from '../config/index.js'
-import type { ProxyConfig } from '../contracts/index.js'
+import type { EngineBuildId, ProxyConfig } from '../contracts/index.js'
 import { withHardTimeout } from '../backend/index.js'
 
 export const SDCPP_MANIFEST_URL =
@@ -183,10 +183,13 @@ export interface ManifestKind<T> {
   cacheFile: string
 }
 
-export function manifestKinds(layout: DataLayout): {
-  'sd-cpp': ManifestKind<SdcppManifest>
-  'mlx': ManifestKind<MlxManifest>
-} {
+/** The manifest document of each engine. */
+export interface ManifestOf {
+  'sd-cpp': SdcppManifest
+  'mlx': MlxManifest
+}
+
+export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: ManifestKind<ManifestOf[K]> } {
   return {
     'sd-cpp': {
       label: 'sd.cpp manifest',

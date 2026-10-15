@@ -24,7 +24,7 @@
 
 import { readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { AtomicCoreError } from '../contracts/index.js'
+import { AtomicCoreError, ENGINE_BUILD_IDS } from '../contracts/index.js'
 import type {
   CoreEvents,
   EngineBuildCatalog,
@@ -40,32 +40,19 @@ import type {
   ProxyConfig,
 } from '../contracts/index.js'
 import { samePath } from '../diffusion/containment.js'
-import { listInstalledBackends, prepareSdcppTree, writeInstallRecord } from '../diffusion/install.js'
 import type { Downloader } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
-import {
-  listDownloadedMlx,
-  MLX_SERVER_BINARY,
-  probeMlxServer,
-  readBundledMlx,
-  removeOwnedBuild,
-  writeMlxInstallRecord,
-} from './builds.js'
-import type { BundledMlx } from './builds.js'
+import { MLX_SERVER_BINARY, removeOwnedBuild } from './builds.js'
+import { ENGINE_DESCRIPTORS } from './engines.js'
+import type { Build, EngineContext, EngineDescriptor, HostChoice } from './engines.js'
 import { installStaged } from './install.js'
 import type { BuildArchive } from './install.js'
-import { assetInstallable, mlxAssetUrl, sdcppAssetUrl } from './manifest.js'
-import type { ManifestRead, MlxManifest, SdcppManifest } from './manifest.js'
+import { assetInstallable } from './manifest.js'
+import type { ManifestOf, ManifestRead } from './manifest.js'
 import { compareBuilds } from './order.js'
-import {
-  backendKindOf,
-  companionFor,
-  mlxHostChoice,
-  readFailedBackends,
-  rememberFailedBackend,
-  sdcppHostChoice,
-  sdcppHostOf,
-} from './select.js'
+
+/** Any engine's manifest, where the service handles them alike. */
+type AnyManifest = ManifestOf[EngineBuildId]
 
 /** What an engine's runtime lends this module. */
 export interface EngineHost {
@@ -90,14 +77,6 @@ export const IDLE_ENGINE_HOST: EngineHost = {
   activate: async () => {},
 }
 
-/** One build on disk as this module sees it. */
-interface Build extends EngineBuildRef {
-  /** For a bundled MLX build, `resources-dir`; otherwise the build's own directory. */
-  dir: string
-  installed_at_ms: number | null
-  published_at: string | null
-}
-
 export interface EngineBuildsDeps {
   dataFolder: string
   /** `<data>/diffusion/backends` and `<data>/mlx/backends`. */
@@ -109,11 +88,8 @@ export interface EngineBuildsDeps {
   platform: NodeJS.Platform
   downloader: Pick<Downloader, 'download'>
   manifests: {
-    'sd-cpp': {
-      read(options?: { force?: boolean; proxy?: ProxyConfig | null }): Promise<ManifestRead<SdcppManifest>>
-    }
-    'mlx': {
-      read(options?: { force?: boolean; proxy?: ProxyConfig | null }): Promise<ManifestRead<MlxManifest>>
+    [K in EngineBuildId]: {
+      read(options?: { force?: boolean; proxy?: ProxyConfig | null }): Promise<ManifestRead<ManifestOf[K]>>
     }
   }
   hardware: () => Promise<Pick<HardwareFacts, 'osType' | 'arch' | 'cpuExtensions' | 'gpus'>>
@@ -140,8 +116,10 @@ const ref = (build: Build): EngineBuildRef => ({
 })
 
 export function parseEngineBuildId(raw: string): EngineBuildId {
-  if (raw === 'sd-cpp' || raw === 'mlx') return raw
-  throw new AtomicCoreError('INVALID_ARGUMENT', `Engine builds exist for sd-cpp and mlx, not ${raw}.`)
+  const known = ENGINE_BUILD_IDS.find((id) => id === raw)
+  if (known) return known
+  const names = `${ENGINE_BUILD_IDS.slice(0, -1).join(', ')} and ${ENGINE_BUILD_IDS.at(-1)}`
+  throw new AtomicCoreError('INVALID_ARGUMENT', `Engine builds exist for ${names}, not ${raw}.`)
 }
 
 export class EngineBuildsService {
@@ -162,12 +140,12 @@ export class EngineBuildsService {
     const inUse = await this.deps.hosts[engine].inUse()
     const installed: InstalledEngineBuild[] = []
     for (const build of builds) installed.push(await this.describe(build, active, inUse))
-    const manifestTag = read.manifest?.tag_name
+    const release = read.manifest ? this.engine(engine).release(read.manifest) : null
     const manifest: EngineBuildManifestInfo | null =
-      read.manifest && manifestTag !== undefined && read.source && read.fetched_at !== null
+      release && read.source && read.fetched_at !== null
         ? {
-            tag: manifestTag,
-            ...('published_at' in read.manifest ? { published_at: read.manifest.published_at } : {}),
+            tag: release.tag,
+            ...(release.published_at !== null ? { published_at: release.published_at } : {}),
             source: read.source,
             fetched_at: read.fetched_at,
             error: read.error,
@@ -194,14 +172,14 @@ export class EngineBuildsService {
     const choice = await this.hostChoice(engine, read.manifest)
     if (!active || !read.manifest || !choice.backend_id)
       return { update_needed: false, current, target: null }
-    const candidate = { tag: read.manifest.tag_name, published_at: publishedAt(read.manifest) }
+    const candidate = this.engine(engine).release(read.manifest)
     if (compareBuilds(engine, candidate, active) <= 0) return { update_needed: false, current, target: null }
-    const archives = this.archivesFor(engine, read.manifest, choice.backend_id)
+    const archives = this.engine(engine).archives(read.manifest, choice.backend_id)
     return {
       update_needed: true,
       current,
       target: {
-        tag: read.manifest.tag_name,
+        tag: candidate.tag,
         backend_id: choice.backend_id,
         ...(candidate.published_at ? { published_at: candidate.published_at } : {}),
         download_bytes: archives.reduce((sum, archive) => sum + (archive.size ?? 0), 0),
@@ -246,8 +224,8 @@ export class EngineBuildsService {
         'UNSUPPORTED_BACKEND',
         choice.reason ?? 'No build of this engine fits this computer.'
       )
-    const tag = manifest.tag_name
-    const target = { tag, published_at: publishedAt(manifest) }
+    const target = this.engine(engine).release(manifest)
+    const tag = target.tag
     const top: EngineBuildRef = { tag, backend_id: choice.backend_id, origin: 'downloaded' }
 
     const builds = await this.builds(engine)
@@ -274,6 +252,7 @@ export class EngineBuildsService {
         kept_in_use: [],
       }
 
+    const rememberFailedRung = this.engine(engine).rememberFailedRung
     const failed: string[] = []
     for (const [index, backendId] of choice.ladder.entries()) {
       const last = index === choice.ladder.length - 1
@@ -285,8 +264,8 @@ export class EngineBuildsService {
         })
         return { ...outcome, ...(failed.length > 0 ? { failed_backend_ids: failed } : {}) }
       } catch (error) {
-        if (engine !== 'sd-cpp' || last || !probeFailed) throw error
-        await rememberFailedBackend(this.deps.failedBackendsFile, tag, backendId)
+        if (!rememberFailedRung || last || !probeFailed) throw error
+        await rememberFailedRung(this.context(engine), tag, backendId)
         failed.push(backendId)
         this.deps.log?.(
           'warn',
@@ -300,13 +279,14 @@ export class EngineBuildsService {
 
   private async installOne(
     engine: EngineBuildId,
-    manifest: SdcppManifest | MlxManifest,
+    manifest: AnyManifest,
     backendId: string,
     request: EngineBuildInstallRequest,
     onProbeFailure: (error: unknown) => never
   ): Promise<Omit<EngineBuildInstallResult, 'failed_backend_ids'>> {
-    const tag = manifest.tag_name
-    const archives = this.archivesFor(engine, manifest, backendId)
+    const descriptor = this.engine(engine)
+    const { tag, published_at: publishedAt } = descriptor.release(manifest)
+    const archives = descriptor.archives(manifest, backendId)
     const unpinned = archives.find((archive) => !assetInstallable(archive))
     if (unpinned)
       throw new AtomicCoreError(
@@ -316,15 +296,8 @@ export class EngineBuildsService {
       )
     const dir = join(this.deps.roots[engine], tag, backendId)
     const sha256 = archives[0]?.sha256 ?? null
-    const probe =
-      this.deps.probe?.[engine] ??
-      (engine === 'sd-cpp'
-        ? (staging: string) =>
-            prepareSdcppTree(staging, {
-              platform: this.deps.platform,
-              ...(this.deps.log ? { log: this.deps.log } : {}),
-            })
-        : (staging: string) => probeMlxServer(staging, { platform: this.deps.platform }))
+    const context = this.context(engine)
+    const probe = this.deps.probe?.[engine] ?? ((staging: string) => descriptor.probe(staging, context))
     const { replaced } = await installStaged({
       dataFolder: this.deps.dataFolder,
       target: dir,
@@ -336,23 +309,7 @@ export class EngineBuildsService {
       now: this.now,
       verify: (staging) => probe(staging).catch(onProbeFailure),
       record: (staging) =>
-        engine === 'sd-cpp'
-          ? writeInstallRecord(staging, {
-              tag,
-              backendId,
-              backend: backendKindOf(backendId),
-              engine: 'sd-cpp',
-              sha256,
-              installedAtMs: this.now(),
-              dir: staging,
-            })
-          : writeMlxInstallRecord(staging, {
-              tag,
-              backendId,
-              sha256,
-              installedAtMs: this.now(),
-              publishedAt: publishedAt(manifest),
-            }),
+        descriptor.record(staging, { tag, backendId, sha256, installedAtMs: this.now(), publishedAt }),
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
     const host = this.deps.hosts[engine]
@@ -418,7 +375,7 @@ export class EngineBuildsService {
    * disk, active or not, always stays. Under each engine's load lock.
    */
   async startupCleanup(): Promise<void> {
-    for (const engine of ['sd-cpp', 'mlx'] as const)
+    for (const engine of ENGINE_BUILD_IDS)
       await this.deps.hosts[engine]
         .exclusive(() => this.removeLeftovers(engine))
         .catch((error: unknown) => {
@@ -443,40 +400,28 @@ export class EngineBuildsService {
     return active ? join(active.dir, MLX_SERVER_BINARY) : undefined
   }
 
-  private async builds(engine: EngineBuildId): Promise<Build[]> {
-    if (engine === 'sd-cpp')
-      return (await listInstalledBackends(this.deps.roots['sd-cpp'], this.deps.platform))
-        .filter((record) => record.engine === 'sd-cpp')
-        .map((record) => ({
-          tag: record.tag,
-          backend_id: record.backendId,
-          origin: 'downloaded',
-          dir: record.dir,
-          installed_at_ms: record.installedAtMs,
-          published_at: null,
-        }))
-    const out: Build[] = (await listDownloadedMlx(this.deps.roots.mlx)).map((record) => ({
-      tag: record.tag,
-      backend_id: record.backendId,
-      origin: 'downloaded',
-      dir: record.dir,
-      installed_at_ms: record.installedAtMs,
-      published_at: record.publishedAt,
-    }))
-    const bundled = await readBundledMlx(this.deps.resourcesDir)
-    if (bundled) out.unshift(bundledBuild(bundled, this.deps.resourcesDir as string))
-    return out
+  private builds(engine: EngineBuildId): Promise<Build[]> {
+    return this.engine(engine).builds(this.context(engine))
   }
 
-  /**
-   * sd.cpp: the newest install, which `selectModelInstall` hands the next load. MLX: the newest
-   * build by `published_at`, the bundled one on a tie (spec "Две точки происхождения mlx-server").
-   */
   private activeOf(engine: EngineBuildId, builds: Build[]): Build | undefined {
-    if (engine === 'sd-cpp') return builds[0]
-    let best: Build | undefined
-    for (const build of builds) if (!best || compareBuilds('mlx', build, best) > 0) best = build
-    return best
+    return this.engine(engine).active(builds)
+  }
+
+  /** The table row of `engine`; one cast, since TypeScript cannot correlate a key with its row. */
+  private engine(engine: EngineBuildId): EngineDescriptor<AnyManifest> {
+    return ENGINE_DESCRIPTORS[engine] as EngineDescriptor<AnyManifest>
+  }
+
+  private context(engine: EngineBuildId): EngineContext {
+    return {
+      root: this.deps.roots[engine],
+      failedBackendsFile: this.deps.failedBackendsFile,
+      resourcesDir: this.deps.resourcesDir,
+      platform: this.deps.platform,
+      hardware: this.deps.hardware,
+      log: this.deps.log,
+    }
   }
 
   private async isUsed(build: Build, inUse: string[]): Promise<boolean> {
@@ -506,66 +451,15 @@ export class EngineBuildsService {
   private readManifest(
     engine: EngineBuildId,
     request: EngineBuildCatalogRequest
-  ): Promise<ManifestRead<SdcppManifest> | ManifestRead<MlxManifest>> {
+  ): Promise<ManifestRead<AnyManifest>> {
     const options = {
       ...(request.force ? { force: true } : {}),
       ...(request.proxy ? { proxy: request.proxy } : {}),
     }
-    return engine === 'sd-cpp'
-      ? this.deps.manifests['sd-cpp'].read(options)
-      : this.deps.manifests.mlx.read(options)
+    return this.deps.manifests[engine].read(options)
   }
 
-  private async hostChoice(
-    engine: EngineBuildId,
-    manifest: SdcppManifest | MlxManifest | null
-  ): Promise<{ ladder: string[]; backend_id: string | null; reason: string | null }> {
-    const facts = await this.deps.hardware()
-    const host = sdcppHostOf(facts)
-    if (engine === 'mlx') {
-      const choice = mlxHostChoice(host, manifest)
-      return { ...choice, ladder: choice.backend_id ? [choice.backend_id] : [] }
-    }
-    if (!manifest) return { ladder: [], backend_id: null, reason: 'The sd.cpp manifest is unavailable.' }
-    return sdcppHostChoice(host, manifest, await readFailedBackends(this.deps.failedBackendsFile))
-  }
-
-  private archivesFor(
-    engine: EngineBuildId,
-    manifest: SdcppManifest | MlxManifest,
-    backendId: string
-  ): Array<Omit<BuildArchive, 'sha256' | 'size'> & { sha256?: string; size?: number }> {
-    if (engine === 'mlx') {
-      const mlx = manifest as MlxManifest
-      return mlx.assets
-        .filter((asset) => asset.backend === backendId)
-        .map((asset) => ({ ...pin(asset), url: mlxAssetUrl(mlx, asset), name: asset.name }))
-    }
-    const sd = manifest as SdcppManifest
-    const ids = [backendId, companionFor(backendId)]
-    return ids.flatMap((id) => {
-      const asset = sd.assets.find((candidate) => candidate.backend === id)
-      return asset ? [{ ...pin(asset), url: sdcppAssetUrl(sd, asset), name: asset.name }] : []
-    })
-  }
-}
-
-const pin = (asset: { sha256?: string; size?: number }) => ({
-  ...(asset.sha256 !== undefined ? { sha256: asset.sha256 } : {}),
-  ...(asset.size !== undefined ? { size: asset.size } : {}),
-})
-
-function publishedAt(manifest: SdcppManifest | MlxManifest): string | null {
-  return 'published_at' in manifest ? manifest.published_at : null
-}
-
-function bundledBuild(bundled: BundledMlx, resourcesDir: string): Build {
-  return {
-    tag: bundled.tag ?? 'bundled',
-    backend_id: 'macos-arm64',
-    origin: 'bundled',
-    dir: resourcesDir,
-    installed_at_ms: null,
-    published_at: bundled.published_at,
+  private hostChoice(engine: EngineBuildId, manifest: AnyManifest | null): Promise<HostChoice> {
+    return this.engine(engine).hostChoice(this.context(engine), manifest)
   }
 }

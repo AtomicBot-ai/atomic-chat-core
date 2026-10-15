@@ -41,11 +41,16 @@ function compareKeys(a: readonly number[] | null, b: readonly number[] | null): 
   return 0
 }
 
+/** Each engine's order key; `null` for a build whose order cannot be read. */
+const ORDER_KEYS: Record<EngineBuildId, (build: OrderedBuild) => readonly number[] | null> = {
+  'sd-cpp': (build) => sdcppBuildKey(build.tag),
+  'mlx': mlxKey,
+}
+
 /** Negative when `a` is older, positive when newer, zero when neither is. */
 export function compareBuilds(engine: EngineBuildId, a: OrderedBuild, b: OrderedBuild): number {
-  return engine === 'sd-cpp'
-    ? compareKeys(sdcppBuildKey(a.tag), sdcppBuildKey(b.tag))
-    : compareKeys(mlxKey(a), mlxKey(b))
+  const key = ORDER_KEYS[engine]
+  return compareKeys(key(a), key(b))
 }
 
 export function isNewerBuild(engine: EngineBuildId, candidate: OrderedBuild, than: OrderedBuild): boolean {
