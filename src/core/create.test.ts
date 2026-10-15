@@ -177,6 +177,23 @@ describe('taking ownership', () => {
     }
   }, 20_000)
 
+  it('checks a downloaded model by its id through the owner, and refuses an id under a provider it does not have', async () => {
+    const core = await createCore()
+    await data.writeModel('demo')
+    const check = (body: unknown) =>
+      fetch(`${core.control.url}/atomic/v1/models/compatibility`, {
+        method: 'POST',
+        headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const onDisk = await check({ model_id: 'demo', provider: 'llamacpp-upstream' })
+    expect(onDisk.status).toBe(200)
+    expect(await onDisk.json()).toHaveProperty('outcome')
+    const unknown = await check({ model_id: 'demo', provider: 'not-a-provider' })
+    expect(unknown.status).toBe(404)
+    expect(await unknown.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+
   it('removes the model setup records an older core left, resumes none and keeps the partial model files', async () => {
     const setups = join(data.layout.core.dir, 'prism-setups')
     await mkdir(setups, { recursive: true })
