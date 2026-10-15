@@ -1,11 +1,13 @@
-import { createHash } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { writeFakeSidecarBinary } from '../../../test/helpers/fake-sidecar-server.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { AtomicCore } from '../../core/index.js'
+import { inspectLock } from '../../lock/index.js'
+import { ModelRegistry } from '../../models/index.js'
 import { recordingIo } from '../io.js'
+import { runCli } from '../main.js'
 import { serveAttachOptions, serveCommand } from './serve.js'
 
 let data: TmpDataFolder
@@ -23,37 +25,24 @@ const io = () => recordingIo()
 const folder = () => ['--data-folder', data.root]
 
 describe('daemon and serve compatibility', () => {
-  it('downloads an HF GGUF before asking the owner to load it', async () => {
-    const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0 })
-    cores.push(core)
-    const bytes = Buffer.from('downloaded gguf')
-    const sha256 = createHash('sha256').update(bytes).digest('hex')
-    const out = recordingIo({
-      env: { HF_TOKEN: 'token' },
-      select: async () => 1,
-      fetch: async (input, init) => {
-        const request = new Request(input, init)
-        if (request.url.includes('/api/models/')) {
-          expect(request.headers.get('authorization')).toBe('Bearer token')
-          return Response.json({
-            siblings: [
-              { rfilename: 'tiny.Q2.gguf', lfs: { size: bytes.length - 1 } },
-              { rfilename: 'chosen.Q4_K_XL.gguf', lfs: { size: bytes.length, sha256 } },
-            ],
-          })
-        }
-        return new Response(bytes, { headers: { 'content-length': String(bytes.length) } })
-      },
-    })
-    await expect(
-      serveCommand(['owner/repo', '--select', '--port', '0', ...folder()], out)
-    ).rejects.toMatchObject({
-      code: 'BINARY_NOT_FOUND',
-    })
-    expect(await core.registry().find('owner/repo')).toMatchObject({
-      yml: { model_path: 'llamacpp/models/owner/repo/chosen.Q4_K_XL.gguf' },
-    })
-    expect(out.err.join('')).toContain('Downloaded owner/repo')
+  it('refuses a Hub repository that is not on disk, without a network request or an owner', async () => {
+    const ioFetch = vi.fn(async () => new Response('unexpected', { status: 500 }))
+    const globalFetch = vi.spyOn(globalThis, 'fetch')
+    try {
+      const out = recordingIo({ env: { HF_TOKEN: 'token' }, fetch: ioFetch as unknown as typeof fetch })
+      expect(await runCli(['serve', 'owner/repo', '--port', '0', ...folder()], out)).not.toBe(0)
+      const stderr = out.err.join('')
+      expect(stderr).toContain('owner/repo is not on disk')
+      expect(stderr).toContain('Download the model first')
+      expect(stderr).toContain('[MODEL_NOT_FOUND]')
+      expect(ioFetch).not.toHaveBeenCalled()
+      expect(globalFetch).not.toHaveBeenCalled()
+      // Refused before an owner was started for it.
+      expect(await inspectLock(data.layout)).toEqual({ kind: 'free' })
+      expect(await new ModelRegistry(data.layout, 'llamacpp-upstream').find('owner/repo')).toBeUndefined()
+    } finally {
+      globalFetch.mockRestore()
+    }
   })
 
   it('selects an installed model and validates numeric serve flags before owner mutation', async () => {

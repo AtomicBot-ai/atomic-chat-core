@@ -1,17 +1,5 @@
-import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
-import { ModelRegistry } from './registry.js'
-import { chooseDefaultHfFile, downloadHfModel, fetchHfGgufFiles, hfToken, looksLikeHfRepo } from './hf.js'
-
-let data: TmpDataFolder
-
-beforeEach(async () => {
-  data = await makeTmpDataFolder('atomic-core-hf-')
-})
-afterEach(() => data.cleanup())
+import { describe, expect, it } from 'vitest'
+import { chooseDefaultHfFile, fetchHfGgufFiles, hfToken, looksLikeHfRepo } from './hf.js'
 
 describe('Hugging Face discovery', () => {
   it('recognises only safe owner/repository ids and applies token precedence', () => {
@@ -54,65 +42,5 @@ describe('Hugging Face discovery', () => {
     await expect(
       fetchHfGgufFiles('owner/empty', { fetch: async () => Response.json({ siblings: [] }) })
     ).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
-  })
-})
-
-describe('Hugging Face download', () => {
-  it('validates the file before publishing model.yml in the shared app tree', async () => {
-    const bytes = Buffer.from('a complete pretend gguf')
-    const sha256 = createHash('sha256').update(bytes).digest('hex')
-    let authorization: string | null = null
-    const fetchImpl: typeof fetch = async (input, init) => {
-      const request = new Request(input, init)
-      authorization = request.headers.get('authorization')
-      return new Response(bytes, {
-        status: 200,
-        headers: { 'content-length': String(bytes.length) },
-      })
-    }
-    const registry = new ModelRegistry(data.layout)
-    await downloadHfModel({
-      layout: data.layout,
-      registry,
-      repoId: 'owner/repo',
-      file: {
-        filename: 'model.Q4_K_XL.gguf',
-        size: bytes.length,
-        sha256,
-        downloadUrl: 'https://huggingface.co/owner/repo/resolve/main/model.Q4_K_XL.gguf',
-      },
-      fetch: fetchImpl,
-      env: { HF_TOKEN: 'secret' },
-    })
-
-    const model = await registry.get('owner/repo')
-    expect(model.yml).toMatchObject({
-      model_path: 'llamacpp/models/owner/repo/model.Q4_K_XL.gguf',
-      model_size_bytes: bytes.length,
-      model_sha256: sha256,
-      embedding: false,
-    })
-    expect(authorization).toBe('Bearer secret')
-    expect(await readFile(registry.resolvePaths(model.yml).modelPath)).toEqual(bytes)
-  })
-
-  it('does not publish model.yml when integrity validation fails', async () => {
-    const bytes = Buffer.from('wrong')
-    const registry = new ModelRegistry(data.layout)
-    await expect(
-      downloadHfModel({
-        layout: data.layout,
-        registry,
-        repoId: 'owner/repo',
-        file: {
-          filename: 'model.gguf',
-          size: bytes.length,
-          sha256: '0'.repeat(64),
-          downloadUrl: 'https://huggingface.co/file',
-        },
-        fetch: async () => new Response(bytes, { headers: { 'content-length': String(bytes.length) } }),
-      })
-    ).rejects.toThrow(/Hash verification/i)
-    expect(await registry.find('owner/repo')).toBeUndefined()
   })
 })

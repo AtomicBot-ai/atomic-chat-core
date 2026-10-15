@@ -1,32 +1,17 @@
 /**
- * Hugging Face GGUF discovery and import used by `serve owner/repo`. The HTTP metadata call is
- * separate from the downloader so selection is pure and tests never need the public service.
+ * Hugging Face GGUF discovery: the repository id check, the token, and the GGUF files a repository
+ * offers. The core reads this catalog but does not download model files; clients do (ADR
+ * 2026-10-15-core-does-not-download-models).
  */
 
-import { stat } from 'node:fs/promises'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { isAbsolute } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { DataLayout } from '../config/index.js'
-import { modelDirFromId } from '../config/index.js'
-import { Downloader } from '../downloads/index.js'
-import type { DownloaderEmit } from '../downloads/index.js'
-import type { ModelRegistry } from './registry.js'
 
 export interface HfFileInfo {
   filename: string
   size: number
   sha256?: string
   downloadUrl: string
-}
-
-export interface HfDownloadOptions {
-  layout: DataLayout
-  registry: ModelRegistry
-  repoId: string
-  file: HfFileInfo
-  fetch?: typeof fetch
-  env?: NodeJS.ProcessEnv
-  emit?: DownloaderEmit
 }
 
 /** Exactly `owner/repo`, with the same conservative character set as the legacy Rust CLI. */
@@ -95,47 +80,6 @@ export function chooseDefaultHfFile(files: HfFileInfo[]): HfFileInfo {
     }, undefined)
   if (!chosen) throw new AtomicCoreError('MODEL_NOT_FOUND', 'No GGUF file is available to download.')
   return chosen
-}
-
-/** Download into the app's shared model tree, validate, then atomically publish via `model.yml`. */
-export async function downloadHfModel(options: HfDownloadOptions): Promise<string> {
-  const { layout, registry, repoId, file } = options
-  if (!looksLikeHfRepo(repoId)) {
-    throw new AtomicCoreError('INVALID_ARGUMENT', `Invalid Hugging Face repository id "${repoId}".`)
-  }
-  assertSafeRepoFile(file.filename)
-  const destination = join(modelDirFromId(registry.modelsDir, repoId), ...file.filename.split('/'))
-  const savePath = relative(layout.root, destination).split(sep).join('/')
-  const token = hfToken(options.env)
-  const downloader = new Downloader({
-    dataFolder: layout.root,
-    platform: process.platform,
-    fetch: options.fetch ?? fetch,
-    emit: options.emit ?? (() => {}),
-  })
-  await downloader.download(
-    `hf:${repoId}`,
-    [
-      {
-        url: file.downloadUrl,
-        save_path: savePath,
-        size: file.size || null,
-        sha256: file.sha256 ?? null,
-        model_id: repoId,
-      },
-    ],
-    { headers: token ? { authorization: `Bearer ${token}` } : {}, resume: true }
-  )
-  const actualSize = (await stat(destination)).size
-  await registry.write(repoId, {
-    model_path: savePath,
-    name: repoId.split('/')[1] as string,
-    size_bytes: actualSize,
-    model_size_bytes: actualSize,
-    ...(file.sha256 ? { model_sha256: file.sha256 } : {}),
-    embedding: false,
-  })
-  return repoId
 }
 
 function parseSibling(repoId: string): (value: unknown) => HfFileInfo | undefined {
