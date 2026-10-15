@@ -16,6 +16,8 @@ import { EMBEDDING_CONTENT_PARTS_MIN_BUILD } from '../../src/embedding/model-fac
 import { buildUpstreamDecisionArgs } from '../../src/decision/args.js'
 import { UPSTREAM_DECISION_MIN_BUILD } from '../../src/decision/upstream-version.js'
 import type { LlamacppConfig } from '../../src/contracts/index.js'
+import { CONTRACT_ROUTES, CONTRACT_STRINGS } from './llamacpp-engine-strings.js'
+import type { ContractRoute, ContractString } from './llamacpp-engine-strings.js'
 
 export interface BuildRange {
   /** First build that has it; `null` = every build. */
@@ -62,6 +64,10 @@ export interface EngineContract {
   invocations: Array<{ argv: string[]; source: string; expect: 'exit-0' }>
   env: Array<{ name: string; severity: 'break' | 'warn'; source: string }>
   flags: ContractFlag[]
+  /** Log lines and bodies core matches (llamacpp-engine-strings.ts). */
+  strings: ContractString[]
+  /** Routes core calls on a session, and the fields it reads from their answers. */
+  routes: ContractRoute[]
   upstream: {
     repo: string
     watched_paths: Array<{ path: string; why: string }>
@@ -378,6 +384,8 @@ export function deriveLlamaEngineContract(): EngineContract {
       { name: 'LLAMA_ARG_TIMEOUT', severity: 'warn', source: 'src/runtime/llamacpp/load-plan.ts' },
     ],
     flags,
+    strings: CONTRACT_STRINGS,
+    routes: CONTRACT_ROUTES,
     upstream: {
       repo: 'ggml-org/llama.cpp',
       watched_paths: [
@@ -396,6 +404,12 @@ export function deriveLlamaEngineContract(): EngineContract {
         { path: 'tools/mtmd/clip.cpp', why: 'unknown projector type' },
         { path: 'src/llama-model.cpp', why: 'architecture errors, offload and buffer-size log lines' },
         { path: 'src/llama-model-loader.cpp', why: 'missing keys, tensor count, corrupt file' },
+        {
+          path: 'src/llama-model-loader.h',
+          why: 'tensor data out of the file bounds: corrupted or incomplete',
+        },
+        { path: 'src/llama.cpp', why: 'error loading model hyperparameters' },
+        { path: 'src/llama-mmap.cpp', why: 'unexpectedly reached end of file' },
         { path: 'src/llama-context.cpp', why: 'MTP warnings, compute and decode errors' },
         { path: 'src/llama-arch.cpp', why: 'architecture names and GGUF keys core reads' },
         { path: 'ggml/src/ggml-backend-reg.cpp', why: 'load_backend log lines' },
