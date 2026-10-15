@@ -60,3 +60,30 @@ export interface FoundryLocalAcceleratorsEvent {
   fraction: number | null
   reason?: string
 }
+
+/** `POST /models/foundry-local/check`: the variant's accelerator and device, as conf and `model.yml` spell them. */
+export interface FoundryLocalCheckRequest {
+  execution_provider: string
+  device: string
+}
+
+export const FOUNDRY_LOCAL_CHECK_VERDICTS = [
+  'ok',
+  'accelerator-not-prepared',
+  'accelerator-unavailable',
+  'platform-unsupported',
+  'engine-not-installed',
+] as const
+export type FoundryLocalCheckVerdict = (typeof FOUNDRY_LOCAL_CHECK_VERDICTS)[number]
+
+/**
+ * Whether a Foundry Local variant would run here, from the platform, the installed build and the
+ * last accelerators probe — never the network (spec "Совместимость варианта проверяется в core").
+ */
+export interface FoundryLocalCheckResult {
+  verdict: FoundryLocalCheckVerdict
+  /** Why, in words a card can show; `null` for `ok`. */
+  reason: string | null
+  /** The library name of the accelerator the variant needs; `null` for the CPU. */
+  accelerator: string | null
+}

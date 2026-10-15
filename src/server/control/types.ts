@@ -490,6 +490,11 @@ export interface ControlServerDeps {
    */
   managedModelChecks?: Readonly<Record<string, (body: unknown) => Promise<ModelCompatibility>>>
   /**
+   * The same route for a native provider with its own answer (change `add-foundry-local`, task 6.5:
+   * `foundry-local` → `FoundryLocalCheckResult`). Asked when `managedModelChecks` has no entry.
+   */
+  nativeModelChecks?: Readonly<Record<string, (body: unknown) => Promise<object>>>
+  /**
    * `DELETE /managed-models/:id` (spec `managed-model-store`, "Модель хранилища удаляется через core"):
    * stop the model in whichever managed provider holds it, with Docker's confirmation, then remove every
    * engine cache of it and its folder. Absent where no managed provider is offered.

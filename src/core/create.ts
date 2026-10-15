@@ -26,6 +26,8 @@ import { MlxRuntime } from '../runtime/mlx/index.js'
 import {
   FoundryLocalAcceleratorService,
   foundryHostCommand,
+  foundryLocalVerdict,
+  parseFoundryLocalCheckRequest,
   runFoundryHostProbe,
 } from '../runtime/foundry-local/index.js'
 import { SettingsStore } from '../settings/index.js'
@@ -34,7 +36,13 @@ import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import { CloudRegistry, listSubscriptionModels } from '../cloud/index.js'
 import type { ChatGptBackend } from '../cloud/index.js'
-import { HardwareService, nodeProbeDeps, probeSystemInfo, probeUnifiedMemory } from '../hardware/index.js'
+import {
+  HardwareService,
+  nodeProbeDeps,
+  probeNpu,
+  probeSystemInfo,
+  probeUnifiedMemory,
+} from '../hardware/index.js'
 import {
   BackendAdvisor,
   BackendService,
@@ -568,6 +576,13 @@ export async function createAtomicCore(
       log,
     })
 
+    // Whether this machine has an NPU (task 6.5): asked once, on the first check that needs it.
+    let npuAnswer: ReturnType<typeof probeNpu> | undefined
+    const foundryLocalNpu = () =>
+      (npuAnswer ??= probeNpu(
+        nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+      ))
+
     // Foundry Local's accelerators (task 6.4, design D3): probed from the active build when a client
     // asks, prepared only when one orders it. Only where the platform rule registers the provider.
     const foundryLocalAccelerators =
@@ -821,6 +836,23 @@ export async function createAtomicCore(
         hardware,
         ...(foundryLocalAccelerators
           ? {
+              nativeModelChecks: {
+                // Task 6.5: the platform, the active build, the last probe, the NPU — no network.
+                'foundry-local': async (body: unknown) => {
+                  const request = parseFoundryLocalCheckRequest(body)
+                  const installed = (await engineBuilds.activeDir('foundry-local')) !== undefined
+                  return foundryLocalVerdict(
+                    {
+                      platform,
+                      arch: process.arch,
+                      installed,
+                      accelerators: installed ? (await foundryLocalAccelerators.list()).accelerators : [],
+                      npu: (await foundryLocalNpu()).present,
+                    },
+                    request
+                  )
+                },
+              },
               foundryLocal: {
                 accelerators: (force: boolean) => foundryLocalAccelerators.list({ force }),
                 prepare: (request) => foundryLocalAccelerators.prepare(request),

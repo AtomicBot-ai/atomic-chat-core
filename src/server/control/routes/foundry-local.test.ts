@@ -92,3 +92,39 @@ describe('foundry-local routes (task 6.4)', () => {
     expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
   })
 })
+
+describe('POST /models/foundry-local/check (task 6.5)', () => {
+  it('answers from the native check table, after the managed one has no entry for the provider', async () => {
+    const seen: unknown[] = []
+    h = await start({
+      nativeModelChecks: {
+        'foundry-local': async (body) => {
+          seen.push(body)
+          return {
+            verdict: 'accelerator-unavailable',
+            reason: 'This computer has no NPU.',
+            accelerator: 'OpenVINOExecutionProvider',
+          }
+        },
+      },
+    })
+    const res = await h.get('/atomic/v1/models/foundry-local/check', {
+      method: 'POST',
+      body: JSON.stringify({ execution_provider: 'openvino', device: 'npu' }),
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      verdict: 'accelerator-unavailable',
+      reason: 'This computer has no NPU.',
+      accelerator: 'OpenVINOExecutionProvider',
+    })
+    expect(seen).toEqual([{ execution_provider: 'openvino', device: 'npu' }])
+  })
+
+  it('is not found where the provider is not registered', async () => {
+    h = await start()
+    const res = await h.get('/atomic/v1/models/foundry-local/check', { method: 'POST', body: '{}' })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+})
