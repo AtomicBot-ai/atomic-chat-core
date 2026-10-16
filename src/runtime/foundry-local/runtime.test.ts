@@ -136,6 +136,9 @@ describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
       // Design D8: the optional telemetry off through the environment; nothing that fakes CI (on a CI
       // runner the host inherits the runner's own CI, and only that).
       expect(start).toMatchObject({ ort_telemetry_disabled: '1', ci: process.env.CI ?? null })
+      // cuDNN flash attention off: on Blackwell (sm_120) cuDNN 9.20 cannot build its graph and every
+      // completion fails (microsoft/foundry-local#1179).
+      expect(start).toMatchObject({ ort_enable_cudnn_flash_attention: '0' })
       expect(Number(start?.argv[start.argv.indexOf('--port') + 1])).not.toBe(session.port)
 
       const answer = await chat(session.port, session.api_key, {
@@ -150,6 +153,24 @@ describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
       expect(events.map((e) => e.name)).toContain('session:started')
     } finally {
       await rt.unload('qwen3-0.6b-generic-gpu')
+    }
+  })
+
+  it('keeps cuDNN flash attention as the person set it in the environment', async () => {
+    await variant('phi-4-cuda-gpu', { execution_provider: 'webgpu', device: 'gpu' })
+    const { rt } = runtime({
+      baseEnv: {
+        ...process.env,
+        FAKE_FOUNDRY_ARGV: argvFile,
+        ORT_ENABLE_CUDNN_FLASH_ATTENTION: '1',
+      } as NodeJS.ProcessEnv,
+    })
+    await rt.load('phi-4-cuda-gpu')
+    try {
+      const [start] = await starts()
+      expect(start).toMatchObject({ ort_enable_cudnn_flash_attention: '1' })
+    } finally {
+      await rt.unload('phi-4-cuda-gpu')
     }
   })
 
