@@ -48,12 +48,19 @@ describe('detectAgent', () => {
     expect(detection).toEqual({ installed: false, path: undefined, program: 'droid' })
   })
 
-  it('probes the real PATH by default: this machine has a shell but no such agent', async () => {
-    const fake = { ...agent('codex'), detectBin: 'definitely-not-an-installed-binary-xyz' }
-    expect((await detectAgent(fake)).installed).toBe(false)
-    const shell = { ...agent('codex'), detectBin: process.platform === 'win32' ? 'cmd' : 'sh' }
-    expect((await detectAgent(shell)).installed).toBe(true)
-  })
+  // Two real `where`/`which` runs. On a busy windows-2022 runner starting one can take longer than the
+  // production 5 s budget, and a probe that runs out reads as "not on PATH": the shell would be missed.
+  it(
+    'probes the real PATH by default: this machine has a shell but no such agent',
+    { timeout: 60_000 },
+    async () => {
+      const deps = { pathProbeTimeoutMs: 25_000 }
+      const fake = { ...agent('codex'), detectBin: 'definitely-not-an-installed-binary-xyz' }
+      expect((await detectAgent(fake, deps)).installed).toBe(false)
+      const shell = { ...agent('codex'), detectBin: process.platform === 'win32' ? 'cmd' : 'sh' }
+      expect((await detectAgent(shell, deps)).installed).toBe(true)
+    }
+  )
 })
 
 describe('detectAgents', () => {

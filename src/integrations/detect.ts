@@ -21,6 +21,8 @@ export interface DetectDeps {
   home?: string
   /** Run the PATH probe; resolves true when the command exists. */
   onPath?: (bin: string) => Promise<boolean>
+  /** Budget of the default PATH probe; one that runs out reads as not on PATH. Default `PATH_PROBE_TIMEOUT_MS`. */
+  pathProbeTimeoutMs?: number
   /** Does this absolute path exist as a file? */
   isFile?: (path: string) => Promise<boolean>
 }
@@ -39,16 +41,17 @@ const defaultIsFile = (path: string): Promise<boolean> =>
     () => false
   )
 
-function defaultOnPath(bin: string, platform: NodeJS.Platform): Promise<boolean> {
+function defaultOnPath(bin: string, platform: NodeJS.Platform, timeoutMs: number): Promise<boolean> {
   const probe = platform === 'win32' ? 'where' : 'which'
   return new Promise((resolve) => {
-    execFile(probe, [bin], { timeout: PATH_PROBE_TIMEOUT_MS, windowsHide: true }, (err) => resolve(!err))
+    execFile(probe, [bin], { timeout: timeoutMs, windowsHide: true }, (err) => resolve(!err))
   })
 }
 
 export async function detectAgent(agent: Agent, deps: DetectDeps = {}): Promise<AgentDetection> {
   const platform = deps.platform ?? process.platform
-  const onPath = deps.onPath ?? ((bin: string) => defaultOnPath(bin, platform))
+  const timeoutMs = deps.pathProbeTimeoutMs ?? PATH_PROBE_TIMEOUT_MS
+  const onPath = deps.onPath ?? ((bin: string) => defaultOnPath(bin, platform, timeoutMs))
   const isFile = deps.isFile ?? defaultIsFile
   if (await onPath(agent.detectBin)) {
     return { installed: true, path: undefined, program: agent.detectBin }

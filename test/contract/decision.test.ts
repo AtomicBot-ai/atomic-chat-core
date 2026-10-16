@@ -310,41 +310,48 @@ describe('contract: an upstream decision GGUF runs on stock llama.cpp at its flo
     expect(await router.json()).toMatchObject({ error: { reason: 'UNSUPPORTED_ENDPOINT' } })
   })
 
-  it('is unsupported with the build to update to when no upstream build reaches the floor', async () => {
-    const older = await makeTmpDataFolder('atomic-core-decision-upstream-old-')
-    try {
-      await older.writeBackend('llamacpp-upstream', 'b11344', 'macos-arm64')
-      await mkdir(join(older.root, 'm'), { recursive: true })
-      await writeFile(
-        join(older.root, 'm', 'lev.gguf'),
-        buildGguf({
-          metadata: { 'general.architecture': 'qwen35', 'qwen35.decision.type': 'lev' },
-          tensors: [],
-        })
-      )
-      const settings = await SettingsStore.open(older.layout.core.settings)
-      const stale = wireDecision({
-        layout: older.layout,
-        settings,
-        journal: { add: async () => {}, remove: async () => {} },
-        instanceId: 'contract',
-        emit: () => {},
-        log: () => {},
-        overrides: { spawn: fakeDecisionSpawn({ decision: { upstream: true } }) },
-      })
+  // A second data folder of its own, with a pack written and deleted again: plain file I/O that takes
+  // well under a second, except when the windows-2022 runner stalls for several seconds, as it did for
+  // three workers at once in ci run 38808175962. The contract project's 5 s default is too tight.
+  it(
+    'is unsupported with the build to update to when no upstream build reaches the floor',
+    { timeout: 30_000 },
+    async () => {
+      const older = await makeTmpDataFolder('atomic-core-decision-upstream-old-')
       try {
-        await stale.configure({ enabled: true, model_path: 'm/lev.gguf' })
-        await expect(stale.load()).rejects.toMatchObject({
-          code: 'DECISION_ENGINE_UNSUPPORTED',
-          message:
-            'No installed llama.cpp build can run the decision model. Update llama.cpp to b11370 or newer.',
+        await older.writeBackend('llamacpp-upstream', 'b11344', 'macos-arm64')
+        await mkdir(join(older.root, 'm'), { recursive: true })
+        await writeFile(
+          join(older.root, 'm', 'lev.gguf'),
+          buildGguf({
+            metadata: { 'general.architecture': 'qwen35', 'qwen35.decision.type': 'lev' },
+            tensors: [],
+          })
+        )
+        const settings = await SettingsStore.open(older.layout.core.settings)
+        const stale = wireDecision({
+          layout: older.layout,
+          settings,
+          journal: { add: async () => {}, remove: async () => {} },
+          instanceId: 'contract',
+          emit: () => {},
+          log: () => {},
+          overrides: { spawn: fakeDecisionSpawn({ decision: { upstream: true } }) },
         })
-        expect(stale.getStatus().state).toBe('unsupported')
+        try {
+          await stale.configure({ enabled: true, model_path: 'm/lev.gguf' })
+          await expect(stale.load()).rejects.toMatchObject({
+            code: 'DECISION_ENGINE_UNSUPPORTED',
+            message:
+              'No installed llama.cpp build can run the decision model. Update llama.cpp to b11370 or newer.',
+          })
+          expect(stale.getStatus().state).toBe('unsupported')
+        } finally {
+          await stale.shutdown()
+        }
       } finally {
-        await stale.shutdown()
+        await older.cleanup()
       }
-    } finally {
-      await older.cleanup()
     }
-  })
+  )
 })
