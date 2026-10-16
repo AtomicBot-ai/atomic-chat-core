@@ -111,7 +111,36 @@ export function failureReason(log: string, name: string): string | null {
     .filter((line) => !/Failed to download or register EP/i.test(line))
     .filter((line) => line.includes(name) || line.toLowerCase().includes(family))
   const last = lines.at(-1)
-  return last ? last.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim() : null
+  if (!last) return null
+  const blocked = /failed to load '([^']+)' \(4551\)/.exec(last)
+  if (blocked) return appControlBlocked(blocked[1] ?? '', family)
+  return last.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim()
+}
+
+/**
+ * Windows' 4551 (`ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION`): Smart App Control or an organization's
+ * app control policy refused a library without a signature. Microsoft's CUDA bundle ships
+ * `onnxruntime-genai-cuda.dll` unsigned, so on a laptop with Smart App Control on the whole bundle
+ * downloads and then cannot load. The person can act on this, not on the path and the code.
+ */
+const ACCELERATOR_LABELS: Record<string, string> = {
+  cuda: 'CUDA',
+  webgpu: 'WebGPU',
+  openvino: 'OpenVINO',
+  nvtensorrtrtx: 'TensorRT-RTX',
+  qnn: 'QNN',
+}
+
+function appControlBlocked(path: string, family: string): string {
+  const file = path.split(/[\\/]/).at(-1) || 'a library'
+  const accelerator = ACCELERATOR_LABELS[family] ?? family
+  return (
+    `Windows blocked ${file}, a library of Microsoft's ${accelerator} accelerator that has no digital signature: ` +
+    "Smart App Control or your organization's app control policy does not let unsigned libraries load. " +
+    `To use ${accelerator}, turn Smart App Control off in Windows Security → App & browser control → ` +
+    'Smart App Control settings (Windows cannot turn it back on without a reset), or on a managed PC ask your ' +
+    'administrator to allow it; then press Retry. Models on WebGPU and CPU run without it.'
+  )
 }
 
 /** Line-oriented output over a stream-oriented CLI io: one JSON or error line per call. */
@@ -196,6 +225,18 @@ interface PrepareSummary {
 }
 
 /**
+ * The accelerators the library downloads from Microsoft's CDN and reports on the calling thread,
+ * synchronously (spike findings 2, 15). Every other one comes through Windows ML, which reported
+ * nothing on a machine that already had it (finding 16) and, on a first install on a Core Ultra
+ * laptop, called back from a thread of its own; it gets no callback and reports a start and an end.
+ */
+const CDN_ACCELERATORS = new Set([
+  'CUDAExecutionProvider',
+  'WebGpuExecutionProvider',
+  'WebGPUExecutionProvider',
+])
+
+/**
  * Task 5.2: each accelerator on its own `Manager_DownloadAndRegisterEps` call, so one failure never
  * cancels the others and each gets its own reason. Lines: `{accelerator, stage, fraction}` with
  * `stage` started → downloading* → done | failed; Windows ML accelerators report no downloading lines
@@ -221,8 +262,16 @@ async function prepare(
       deps.stdout(json({ accelerator: name, stage: 'started', fraction: 0 }))
       let thrown: string | null = null
       try {
-        manager.downloadAndRegisterEps([name], (_label, percent) =>
-          deps.stdout(json({ accelerator: name, stage: 'downloading', fraction: Math.min(1, percent / 100) }))
+        // The callback goes only where the library calls it on this thread: Windows ML reported a first
+        // install from a thread of its own, and Bun's plain callback called there failed the prepare.
+        manager.downloadAndRegisterEps(
+          [name],
+          CDN_ACCELERATORS.has(name)
+            ? (_label, percent) =>
+                deps.stdout(
+                  json({ accelerator: name, stage: 'downloading', fraction: Math.min(1, percent / 100) })
+                )
+            : undefined
         )
       } catch (error) {
         thrown = error instanceof Error ? error.message : String(error)
