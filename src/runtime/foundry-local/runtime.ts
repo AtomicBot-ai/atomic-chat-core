@@ -321,6 +321,11 @@ export class FoundryLocalRuntime implements LocalRuntime {
       if (value !== undefined) env[key] = value
     // Design D8: Microsoft's optional telemetry off; `ProcessInfo` still goes and is disclosed.
     env['ORT_TELEMETRY_DISABLED'] = '1'
+    // ONNX Runtime's GroupQueryAttention picks cuDNN flash attention on compute capability >= 9, and
+    // the cuDNN 9.20 of Microsoft's CUDA plugin cannot build that graph on Blackwell (sm_120): every
+    // completion fails, the model loaded. Off unless the person set it; only the CUDA plugin reads it.
+    // Drop once the plugin ships a cuDNN that builds it (microsoft/foundry-local#1179).
+    env['ORT_ENABLE_CUDNN_FLASH_ATTENTION'] ??= '0'
     const exe = this.options.hostCommand.exe
     const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
     this.options.log?.(
