@@ -49,8 +49,9 @@ export interface FoundryManager {
   discoverableEps(): DiscoverableEp[]
   /**
    * `Manager_DownloadAndRegisterEps`, blocking. `onProgress` is called on the calling thread for
-   * CDN accelerators and never for Windows ML ones (spike findings 2, 15, 16); a per-EP failure is
-   * not an error — read `discoverableEps()` afterwards.
+   * CDN accelerators (spike findings 2, 15). Windows ML ones may call it from a thread of their own
+   * on a first install, where the plain callback cannot run: pass it only for CDN accelerators. A
+   * per-EP failure is not an error — read `discoverableEps()` afterwards.
    */
   downloadAndRegisterEps(names: string[], onProgress?: (ep: string, percent: number) => void): void
   /** `RegisterModel` in the local catalog; files are not copied. */

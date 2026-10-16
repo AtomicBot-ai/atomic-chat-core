@@ -196,6 +196,18 @@ interface PrepareSummary {
 }
 
 /**
+ * The accelerators the library downloads from Microsoft's CDN and reports on the calling thread,
+ * synchronously (spike findings 2, 15). Every other one comes through Windows ML, which reported
+ * nothing on a machine that already had it (finding 16) and, on a first install on a Core Ultra
+ * laptop, called back from a thread of its own; it gets no callback and reports a start and an end.
+ */
+const CDN_ACCELERATORS = new Set([
+  'CUDAExecutionProvider',
+  'WebGpuExecutionProvider',
+  'WebGPUExecutionProvider',
+])
+
+/**
  * Task 5.2: each accelerator on its own `Manager_DownloadAndRegisterEps` call, so one failure never
  * cancels the others and each gets its own reason. Lines: `{accelerator, stage, fraction}` with
  * `stage` started → downloading* → done | failed; Windows ML accelerators report no downloading lines
@@ -221,8 +233,16 @@ async function prepare(
       deps.stdout(json({ accelerator: name, stage: 'started', fraction: 0 }))
       let thrown: string | null = null
       try {
-        manager.downloadAndRegisterEps([name], (_label, percent) =>
-          deps.stdout(json({ accelerator: name, stage: 'downloading', fraction: Math.min(1, percent / 100) }))
+        // The callback goes only where the library calls it on this thread: Windows ML reported a first
+        // install from a thread of its own, and Bun's plain callback called there failed the prepare.
+        manager.downloadAndRegisterEps(
+          [name],
+          CDN_ACCELERATORS.has(name)
+            ? (_label, percent) =>
+                deps.stdout(
+                  json({ accelerator: name, stage: 'downloading', fraction: Math.min(1, percent / 100) })
+                )
+            : undefined
         )
       } catch (error) {
         thrown = error instanceof Error ? error.message : String(error)

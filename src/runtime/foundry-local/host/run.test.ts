@@ -137,6 +137,47 @@ describe('runFoundryHost prepare', () => {
     return { ...fake, asked }
   }
 
+  it('hands the progress callback only to CDN accelerators: Windows ML may call it from its own thread', async () => {
+    // A Core Ultra laptop with an RTX: on a first install Windows ML reported OpenVINO's download from a
+    // thread of its own, and Bun's plain callback, called off the JS thread, failed the prepare with
+    // "onProgress is not defined". CUDA and WebGPU call back on the calling thread (rulings S2, finding 15).
+    const offered = [
+      'WebGpuExecutionProvider',
+      'CUDAExecutionProvider',
+      'OpenVINOExecutionProvider',
+      'NvTensorRTRTXExecutionProvider',
+      'QNNExecutionProvider',
+    ]
+    const given: Record<string, boolean> = {}
+    const registered = new Set<string>()
+    const fake = fakeLibrary({
+      discoverableEps: () => offered.map((name) => ({ name, registered: registered.has(name) })),
+      downloadAndRegisterEps: (names, onProgress) => {
+        const name = names[0] ?? ''
+        given[name] = onProgress !== undefined
+        registered.add(name)
+      },
+    })
+    const out = io()
+    const code = await runFoundryHost(['prepare', ...COMMON], {
+      ...out,
+      loadLibrary: async () => fake.library,
+      readLogTail: async () => '',
+    })
+    expect(code).toBe(0)
+    expect(given).toEqual({
+      WebGpuExecutionProvider: true,
+      CUDAExecutionProvider: true,
+      OpenVINOExecutionProvider: false,
+      NvTensorRTRTXExecutionProvider: false,
+      QNNExecutionProvider: false,
+    })
+    // Without a fraction a Windows ML accelerator still reports its start and its end.
+    const lines = out.out.map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(lines).toContainEqual({ accelerator: 'OpenVINOExecutionProvider', stage: 'started', fraction: 0 })
+    expect(lines).toContainEqual({ accelerator: 'OpenVINOExecutionProvider', stage: 'done', fraction: 1 })
+  })
+
   it('prepares one accelerator at a time, prints stage lines and a summary, and goes on after a failure', async () => {
     const fake = partlyFailing()
     const out = io()
