@@ -289,6 +289,23 @@ describe('failureReason', () => {
     )
     expect(failureReason(linux, 'WebGpuExecutionProvider')).toBeNull()
   })
+
+  it('says what Windows blocked and what to do when app control refuses an unsigned library (4551)', () => {
+    // A Core Ultra laptop with Smart App Control on: the whole CUDA bundle downloads, then Windows
+    // refuses Microsoft's unsigned onnxruntime-genai-cuda.dll (ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION).
+    const log = [
+      "[2026-10-15 23:33:04.732] [warning] EP: failed to load 'C:\\Users\\msi_m\\AppData\\Roaming\\Atomic Chat\\data\\foundry-local\\runtime\\ep\\cuda-ep\\bundles\\cuda-ep-win-x64-cuda-12.8.4\\bin\\onnxruntime-genai-cuda.dll' (4551)",
+      '[2026-10-15 23:33:04.732] [warning] Failed to download or register EP(s) [CUDAExecutionProvider]; continuing',
+    ].join('\n')
+    const reason = failureReason(log, 'CUDAExecutionProvider')
+    expect(reason).toMatch(/^Windows blocked onnxruntime-genai-cuda\.dll/)
+    expect(reason).toContain('Smart App Control')
+    expect(reason).toContain('App & browser control')
+    expect(reason).toContain('administrator')
+    expect(reason).toContain('WebGPU')
+    // Not the raw path and code the person cannot act on.
+    expect(reason).not.toContain('(4551)')
+  })
 })
 
 describe('logTailReader', () => {

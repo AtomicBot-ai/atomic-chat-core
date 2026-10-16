@@ -111,7 +111,36 @@ export function failureReason(log: string, name: string): string | null {
     .filter((line) => !/Failed to download or register EP/i.test(line))
     .filter((line) => line.includes(name) || line.toLowerCase().includes(family))
   const last = lines.at(-1)
-  return last ? last.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim() : null
+  if (!last) return null
+  const blocked = /failed to load '([^']+)' \(4551\)/.exec(last)
+  if (blocked) return appControlBlocked(blocked[1] ?? '', family)
+  return last.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim()
+}
+
+/**
+ * Windows' 4551 (`ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION`): Smart App Control or an organization's
+ * app control policy refused a library without a signature. Microsoft's CUDA bundle ships
+ * `onnxruntime-genai-cuda.dll` unsigned, so on a laptop with Smart App Control on the whole bundle
+ * downloads and then cannot load. The person can act on this, not on the path and the code.
+ */
+const ACCELERATOR_LABELS: Record<string, string> = {
+  cuda: 'CUDA',
+  webgpu: 'WebGPU',
+  openvino: 'OpenVINO',
+  nvtensorrtrtx: 'TensorRT-RTX',
+  qnn: 'QNN',
+}
+
+function appControlBlocked(path: string, family: string): string {
+  const file = path.split(/[\\/]/).at(-1) || 'a library'
+  const accelerator = ACCELERATOR_LABELS[family] ?? family
+  return (
+    `Windows blocked ${file}, a library of Microsoft's ${accelerator} accelerator that has no digital signature: ` +
+    "Smart App Control or your organization's app control policy does not let unsigned libraries load. " +
+    `To use ${accelerator}, turn Smart App Control off in Windows Security → App & browser control → ` +
+    'Smart App Control settings (Windows cannot turn it back on without a reset), or on a managed PC ask your ' +
+    'administrator to allow it; then press Retry. Models on WebGPU and CPU run without it.'
+  )
 }
 
 /** Line-oriented output over a stream-oriented CLI io: one JSON or error line per call. */
