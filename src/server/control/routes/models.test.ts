@@ -147,6 +147,18 @@ describe('model capability routes', () => {
     expect(await res.json()).toMatchObject({ modelId: 'vendor/model-7b', isEmbedding: false })
   })
 
+  // Change close-cli-core-gaps, design D4: an id with a space, as fetch encodes it, reaches the registry
+  // decoded; a broken percent sequence is the caller's 400, not a 500.
+  it('decodes a rest-parameter id and refuses a broken percent sequence with 400', async () => {
+    const res = await h.get('/atomic/v1/models/llamacpp-upstream/imported/My%20Model-1/capabilities')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ modelId: 'imported/My Model-1' })
+
+    const bad = await h.get('/atomic/v1/models/llamacpp-upstream/imported/bad%E0%A4/capabilities')
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
+  })
+
   it('answers "not a model" with 200, because that is the answer to the question asked', async () => {
     // The user pointed at a file. Rendering "not a model" is the caller's job; a 4xx would make it
     // look like the request was malformed.
@@ -304,7 +316,7 @@ describe('managed model store deletion route (change add-vllm-runtime, spec mana
     expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
   })
 
-  it('passes the id exactly as sent — a nested id whole, a percent-encoded slash not decoded — and answers the deletion', async () => {
+  it('passes the id whole and percent-decoded — a nested id, an encoded slash as a slash — and answers the deletion', async () => {
     const seen: string[] = []
     const withDelete = await start({
       managedModelDelete: async (modelId) => {
@@ -321,7 +333,10 @@ describe('managed model store deletion route (change add-vllm-runtime, spec mana
       engine_caches_removed: 2,
     })
     await withDelete.get('/atomic/v1/managed-models/acme%2Fm', { method: 'DELETE' })
-    expect(seen).toEqual(['acme/m', 'acme%2Fm'])
+    await withDelete.get('/atomic/v1/managed-models/acme%252Fm', { method: 'DELETE' })
+    // Change close-cli-core-gaps, design D4: `%2F` decodes to `/` inside the segment; a literal `%`
+    // is reached as `%25`.
+    expect(seen).toEqual(['acme/m', 'acme/m', 'acme%2Fm'])
     await withDelete.server.close()
   })
 

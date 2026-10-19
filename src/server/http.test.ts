@@ -48,6 +48,58 @@ describe('Router', () => {
       match: { params: { id: 'a/b' } },
     })
   })
+
+  // Change close-cli-core-gaps, design D4: every segment of a rest parameter is decoded on its own, so
+  // `%2F` inside one never moves the boundary with the fixed tail; a broken sequence is the caller's 400.
+  describe('percent-decoding path parameters', () => {
+    const models = new Router()
+      .get('/atomic/v1/models/:provider/*modelId/capabilities', () => {})
+      .post('/atomic/v1/clients/:id/heartbeat', () => {})
+    const refusal = (method: string, path: string) => {
+      try {
+        models.find(method, path)
+      } catch (error) {
+        return error
+      }
+      return undefined
+    }
+
+    it('decodes each rest segment before joining them', () => {
+      expect(
+        models.find('GET', '/atomic/v1/models/llamacpp-upstream/imported/My%20Model-1/capabilities')
+      ).toMatchObject({
+        match: { params: { provider: 'llamacpp-upstream', modelId: 'imported/My Model-1' } },
+      })
+      expect(models.find('GET', '/atomic/v1/models/p/a%2Fb/c%25d/capabilities')).toMatchObject({
+        match: { params: { modelId: 'a/b/c%d' } },
+      })
+    })
+
+    it('leaves values without % as they are', () => {
+      expect(models.find('GET', '/atomic/v1/models/p/Owner/Repo-GGUF:Q4_K_M/capabilities')).toMatchObject({
+        match: { params: { provider: 'p', modelId: 'Owner/Repo-GGUF:Q4_K_M' } },
+      })
+    })
+
+    it('refuses a broken sequence in a rest or a named parameter as INVALID_ARGUMENT (400)', () => {
+      for (const [method, path] of [
+        ['GET', '/atomic/v1/models/llamacpp-upstream/imported/bad%E0%A4/capabilities'],
+        ['GET', '/atomic/v1/models/bad%ZZ/x/capabilities'],
+        ['POST', '/atomic/v1/clients/%E0%A4/heartbeat'],
+      ] as const) {
+        const error = refusal(method, path)
+        expect(error, path).toBeInstanceOf(AtomicCoreError)
+        expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+        expect(statusForCode((error as AtomicCoreError).code)).toBe(400)
+      }
+    })
+
+    it('decodes only the route that matched: a broken value on a wrong method is still a 405', () => {
+      expect(models.find('POST', '/atomic/v1/models/p/bad%E0%A4/capabilities')).toEqual({
+        methodMismatch: true,
+      })
+    })
+  })
 })
 
 describe('loopback checks', () => {

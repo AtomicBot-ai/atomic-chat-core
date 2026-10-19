@@ -66,13 +66,13 @@ export class Router {
     const segments = splitPath(path)
     let methodMismatch = false
     for (const route of this.routes) {
-      const params = matchSegments(route.segments, segments)
-      if (!params) continue
+      const raw = matchSegments(route.segments, segments)
+      if (!raw) continue
       if (route.method !== method) {
         methodMismatch = true
         continue
       }
-      return { route, match: { params } }
+      return { route, match: { params: decodeParams(raw) } }
     }
     return methodMismatch ? { methodMismatch: true } : undefined
   }
@@ -82,8 +82,13 @@ function splitPath(path: string): string[] {
   return path.split('/').filter((s) => s.length > 0)
 }
 
-function matchSegments(pattern: string[], actual: string[]): Record<string, string> | undefined {
-  const params: Record<string, string> = {}
+/**
+ * The raw (still percent-encoded) segments of each parameter: one for `:param`, every segment it took
+ * for `*rest`. Matching runs on raw segments, so a `%2F` inside one never shifts the boundary with the
+ * fixed segments after a rest parameter.
+ */
+function matchSegments(pattern: string[], actual: string[]): Record<string, string[]> | undefined {
+  const params: Record<string, string[]> = {}
   let p = 0
   let a = 0
   while (p < pattern.length) {
@@ -93,19 +98,40 @@ function matchSegments(pattern: string[], actual: string[]): Record<string, stri
       const remainingFixed = pattern.length - p - 1
       const take = actual.length - a - remainingFixed
       if (take < 1) return undefined
-      params[seg.slice(1)] = actual.slice(a, a + take).join('/')
+      params[seg.slice(1)] = actual.slice(a, a + take)
       a += take
       p++
       continue
     }
     if (a >= actual.length) return undefined
     const value = actual[a] as string
-    if (seg.startsWith(':')) params[seg.slice(1)] = decodeURIComponent(value)
+    if (seg.startsWith(':')) params[seg.slice(1)] = [value]
     else if (seg !== value) return undefined
     p++
     a++
   }
   return a === actual.length ? params : undefined
+}
+
+/**
+ * Each segment decoded on its own, then a rest parameter's joined with `/` (change close-cli-core-gaps,
+ * design D4). A broken percent sequence is the caller's mistake: `INVALID_ARGUMENT` (400), not a 500.
+ */
+function decodeParams(raw: Record<string, string[]>): Record<string, string> {
+  const params: Record<string, string> = {}
+  for (const [name, segments] of Object.entries(raw)) {
+    try {
+      params[name] = segments.map((segment) => decodeURIComponent(segment)).join('/')
+    } catch (error) {
+      if (!(error instanceof URIError)) throw error
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `The path parameter ${name} is not valid percent-encoding.`,
+        segments.join('/')
+      )
+    }
+  }
+  return params
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
