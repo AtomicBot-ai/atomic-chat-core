@@ -36,6 +36,8 @@ const TOKEN = 'client-test-token'
 
 let server: ControlServer
 let client: CoreClient
+/** The bodies the core's backend catalog received, as it parsed them. */
+const catalogBodies: Array<[string, BackendCatalogRequest]> = []
 let emitter: CoreEmitter
 let clients: ClientRegistry
 let sessions: Array<SessionInfo & { provider: 'llamacpp-upstream' }>
@@ -227,10 +229,12 @@ beforeEach(async () => {
       getOptimal: async () => ({ revision: 0, optimal: null }),
       setOptimal: async () => ({ status: 'updated', current: { revision: 1, optimal: null } }),
       optimalSnapshot: () => ({}),
-      catalog: async (provider: string, request: BackendCatalogRequest) => ({
-        ...fakeCatalog(provider),
-        recommended: request.force ? 'b99999/win-cpu-x64' : null,
-      }),
+      catalog: async (provider: string, request: BackendCatalogRequest) => {
+        catalogBodies.push([provider, request])
+        if ((request.min_build ?? 0) > 20_000)
+          throw new AtomicCoreError('BACKEND_BUILD_UNAVAILABLE', 'No engine build meets the model file')
+        return { ...fakeCatalog(provider), recommended: request.force ? 'b99999/win-cpu-x64' : null }
+      },
       recommend: async (provider: string, request: BackendRecommendationRequest) => ({
         provider: provider as 'llamacpp-upstream' | 'llamacpp',
         mode: request.mode,
@@ -782,6 +786,19 @@ describe('backend advisor', () => {
     await expect(client.backendCatalog('mlx' as 'llamacpp', {})).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
     })
+  })
+
+  // Change close-cli-core-gaps, task 2.3: the file's requirements travel in the body as given.
+  it('sends requires and min_build in the PrismML catalog body and surfaces BACKEND_BUILD_UNAVAILABLE', async () => {
+    catalogBodies.length = 0
+    await client.backendCatalog('atomic-prism', { requires: ['pq2_0'] })
+    await expect(
+      client.backendCatalog('atomic-prism', { requires: ['pq2_0'], min_build: 99_999 })
+    ).rejects.toMatchObject({ code: 'BACKEND_BUILD_UNAVAILABLE' })
+    expect(catalogBodies).toEqual([
+      ['atomic-prism', { requires: ['pq2_0'] }],
+      ['atomic-prism', { requires: ['pq2_0'], min_build: 99_999 }],
+    ])
   })
 })
 
