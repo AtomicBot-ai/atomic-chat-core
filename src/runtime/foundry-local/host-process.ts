@@ -156,6 +156,9 @@ export const FOUNDRY_HOST_TEST_COMMAND_ENV = 'ATOMIC_FOUNDRY_HOST_TEST_COMMAND'
 /**
  * This binary in its `foundry-host` mode: `process.execPath` (inside a compiled Bun binary that is
  * the binary; under a runtime, the runtime plus the entry script, as `selfCommand` in the CLI does).
+ * That binary may be a program embedding the core as a library (`atc`): it must hand an `argv` of
+ * `foundry-host …` to `runFoundryHostMain` (`@atomic-chat/core/foundry-host`) before its own commands,
+ * as the core binaries do (change close-cli-core-gaps, design D1).
  */
 export function foundryHostCommand(
   env: Record<string, string | undefined>,
