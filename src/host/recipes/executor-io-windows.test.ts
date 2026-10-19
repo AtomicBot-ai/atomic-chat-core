@@ -3,6 +3,7 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import {
   judgeWindowsAcl,
   parseWindowsAcl,
+  readWindowsAcl,
   windowsHostStepDeps,
   type WindowsAcl,
   type WindowsHostStepIo,
@@ -86,6 +87,44 @@ describe('parseWindowsAcl', () => {
   })
 })
 
+// Change close-cli-core-gaps, design D5: the one ACL query, exported for `atc` and used by the executor.
+describe('readWindowsAcl', () => {
+  const recording = (answer: { code: number | null; stdout: string; stderr: string }) => {
+    const calls: { command: string; args: string[]; env?: Record<string, string> }[] = []
+    const exec: WindowsHostStepIo['exec'] = async (command, args, options) => {
+      calls.push({ command, args, ...(options?.env === undefined ? {} : { env: options.env }) })
+      return answer
+    }
+    return { exec, calls }
+  }
+
+  it('runs PowerShell by its full path under SystemRoot, the path in the environment, and parses the answer', async () => {
+    const { exec, calls } = recording({ code: 0, stdout: JSON.stringify(appFolder()), stderr: '' })
+    expect(await readWindowsAcl(FOLDER, { exec, systemRoot: 'D:\\Win\\' })).toEqual(appFolder())
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.command).toBe('D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(calls[0]?.env).toEqual({ ATOMIC_HOST_STEP_PATH: FOLDER })
+    expect(calls[0]?.args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-Command'])
+    expect(calls[0]?.args.join(' ')).not.toContain(FOLDER)
+    expect(calls[0]?.args.join(' ')).toContain('Get-Acl -LiteralPath $p')
+  })
+
+  it('throws when PowerShell exits non-zero', async () => {
+    const { exec } = recording({ code: 1, stdout: '', stderr: 'access denied' })
+    await expect(readWindowsAcl(FOLDER, { exec, systemRoot: 'C:\\Windows' })).rejects.toThrow(
+      /Get-Acl failed \(1\): access denied/
+    )
+  })
+
+  it('throws when the answer has no owner', async () => {
+    const { owner: _owner, ...noOwner } = appFolder()
+    const { exec } = recording({ code: 0, stdout: JSON.stringify(noOwner), stderr: '' })
+    await expect(readWindowsAcl(FOLDER, { exec, systemRoot: 'C:\\Windows' })).rejects.toThrow(
+      /without an owner/
+    )
+  })
+})
+
 /** An in-memory Windows for the executor's I/O: ACLs by path, files, every command. */
 const fakeIo = (acls: Record<string, WindowsAcl>, files: Record<string, string> = {}) => {
   const calls: { command: string; args: string[]; env?: Record<string, string> }[] = []
@@ -153,8 +192,9 @@ describe('windowsHostStepDeps', () => {
 
   it('passes the path to PowerShell in the environment, never in the script', async () => {
     const { io, calls } = fakeIo({ [FOLDER]: appFolder(), [REQUEST]: fileAcl }, { [REQUEST]: '{}' })
-    await windowsHostStepDeps({}, io).readRequest(REQUEST)
+    await windowsHostStepDeps({ SystemRoot: 'E:\\Windows' }, io).readRequest(REQUEST)
     const query = calls.find((call) => call.command.endsWith('powershell.exe'))
+    expect(query?.command).toBe('E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
     expect(query?.env).toEqual({ ATOMIC_HOST_STEP_PATH: FOLDER })
     expect(query?.args.join(' ')).not.toContain(FOLDER)
   })

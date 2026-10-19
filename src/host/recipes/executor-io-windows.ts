@@ -143,6 +143,31 @@ export interface WindowsHostStepIo {
 }
 
 /**
+ * `path`'s owner, ACL (by SID, inherited rules included), whether it is a folder and whether it is a
+ * reparse point: one `Get-Acl` through PowerShell by its full path under `systemRoot` (default
+ * `%SystemRoot%`), the path in the environment, never in the script. Throws when PowerShell fails or
+ * answers without an owner. The host-step executor reads every ACL through it; `atc` checks its data
+ * folder with it (change close-cli-core-gaps, design D5).
+ */
+export async function readWindowsAcl(
+  path: string,
+  options: { exec: WindowsHostStepIo['exec']; systemRoot?: string }
+): Promise<WindowsAcl> {
+  const systemRoot = (
+    options.systemRoot ??
+    process.env['SystemRoot'] ??
+    process.env['SYSTEMROOT'] ??
+    'C:\\Windows'
+  ).replace(/[\\/]+$/, '')
+  const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+  return parseWindowsAcl(
+    await options.exec(powershell, ['-NoProfile', '-NonInteractive', '-Command', ACL_QUERY], {
+      env: { ATOMIC_HOST_STEP_PATH: path },
+    })
+  )
+}
+
+/**
  * Runs `command` with this process's own console (stdio inherited, window hidden), no shell, and
  * resolves with the exit code only. The elevated executor is started by the app with `SW_HIDE`, so the
  * console it shares is invisible. Used for the inbox `wsl.exe --install`, which refuses to install
@@ -239,17 +264,16 @@ export function windowsHostStepDeps(
   env: NodeJS.ProcessEnv,
   io: WindowsHostStepIo = nodeIo()
 ): HostStepExecutorDeps {
-  const system32 = `${(env['SystemRoot'] ?? env['SYSTEMROOT'] ?? 'C:\\Windows').replace(/[\\/]+$/, '')}\\System32`
-  const powershell = `${system32}\\WindowsPowerShell\\v1.0\\powershell.exe`
+  const systemRoot = (env['SystemRoot'] ?? env['SYSTEMROOT'] ?? 'C:\\Windows').replace(/[\\/]+$/, '')
+  const system32 = `${systemRoot}\\System32`
 
   const trust = async (path: string, what: string, expect: 'directory' | 'file'): Promise<void> => {
     let acl: WindowsAcl
     try {
-      acl = parseWindowsAcl(
-        await io.exec(powershell, ['-NoProfile', '-NonInteractive', '-Command', ACL_QUERY], {
-          env: { ATOMIC_HOST_STEP_PATH: path },
-        })
-      )
+      acl = await readWindowsAcl(path, {
+        exec: (command, args, options) => io.exec(command, args, options),
+        systemRoot,
+      })
     } catch (error) {
       return refuse(`could not read the owner and permissions of ${what}: ${(error as Error).message}`)
     }

@@ -127,4 +127,11 @@ describe('package exports', () => {
     const pkg = JSON.parse(await readFile(new URL('package.json', ROOT), 'utf8')) as { files: string[] }
     expect(pkg.files.filter((f) => f.startsWith('src'))).toEqual([])
   })
+
+  // `atc` reads its data folder's ACL with the executor's own query and judge (change close-cli-core-gaps, D5).
+  it('hands out readWindowsAcl and judgeWindowsAcl from ./host', { timeout: 60_000 }, async () => {
+    const host = (await import('../../src/host/index.js')) as Record<string, unknown>
+    expect(typeof host['readWindowsAcl']).toBe('function')
+    expect(typeof host['judgeWindowsAcl']).toBe('function')
+  })
 })
