@@ -12,6 +12,7 @@ import {
   waitForPublishedOwner,
 } from './instance-lock.js'
 import type { LockRecord } from './instance-lock.js'
+import { processStartEpoch } from './process-identity.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -99,6 +100,26 @@ describe('InstanceLock.acquire', () => {
     const lock = await InstanceLock.acquire(data.layout)
     expect(lock.record.instance_id).not.toBe('other-instance')
     await lock.release()
+  })
+
+  // `owner_started_at` (seconds since the epoch) means the same to every reader, unlike an older
+  // `process_start_id` printed in its writer's locale: it decides, as the desktop app's reader does.
+  it('keeps an owner whose start time matches, whatever locale its start identity was written in', async () => {
+    await write({
+      pid: process.pid,
+      process_start_id: 'darwin:понедельник, 19 октября 2026 г. 13:33:52',
+      owner_started_at: (await processStartEpoch(process.pid)) ?? null,
+    })
+    expect(await inspectLock(data.layout)).toMatchObject({ kind: 'owned', verdict: 'match' })
+  })
+
+  it('frees a lock whose start time names another process behind the same pid', async () => {
+    await write({
+      pid: process.pid,
+      process_start_id: 'darwin:понедельник, 19 октября 2026 г. 13:33:52',
+      owner_started_at: 'epoch:1',
+    })
+    expect(await inspectLock(data.layout)).toMatchObject({ kind: 'stale', verdict: 'mismatch' })
   })
 
   it('gives exactly one owner when several starters race for a stale lock', async () => {

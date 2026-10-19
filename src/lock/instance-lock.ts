@@ -23,6 +23,7 @@ import {
   processStartEpoch,
   processStartId,
   verifyProcessIdentity,
+  verifyStartEpoch,
 } from './process-identity.js'
 import type { IdentityDeps, IdentityVerdict } from './process-identity.js'
 
@@ -128,7 +129,11 @@ export async function inspectLock(layout: DataLayout, deps: LockDeps = {}): Prom
   const record = await readLockRecord(layout.core.instanceLock, deps)
   if (record === undefined) return { kind: 'free' }
   if (record === 'corrupt') return { kind: 'corrupt' }
-  const verdict = await verifyProcessIdentity(record.pid, record.process_start_id, deps)
+  // The start time decides when there is one: it reads the same for every reader (the desktop app
+  // decides the same way); the older start identity is the fallback.
+  const byEpoch = await verifyStartEpoch(record.pid, record.owner_started_at, deps)
+  const verdict =
+    byEpoch === 'unknown' ? await verifyProcessIdentity(record.pid, record.process_start_id, deps) : byEpoch
   return identityPermitsTakeover(verdict)
     ? { kind: 'stale', record, verdict: verdict as 'dead' | 'mismatch' }
     : { kind: 'owned', record, verdict: verdict as 'match' | 'unknown' }
