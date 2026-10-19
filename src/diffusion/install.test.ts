@@ -169,6 +169,10 @@ describe('model files', () => {
     await writeFile(join(family, 'half.part'), '1')
     await writeFile(join(family, 'half.download'), '1')
     await writeFile(join(family, '.hidden'), '1')
+    // A download in progress beside its file: the app's downloader writes `.url` and `.parts`, atc's
+    // `.url`, `.ranges` and `.ranges.next`. None of them is a model.
+    for (const sidecar of ['.url', '.parts', '.ranges', '.ranges.next'])
+      await writeFile(join(family, `next.gguf${sidecar}`), '1')
     const shared = join(root, 'shared', 'Qwen3-4B')
     await mkdir(shared, { recursive: true })
     await writeFile(join(shared, 'te.gguf'), '12')
