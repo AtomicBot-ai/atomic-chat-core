@@ -131,8 +131,8 @@ interface BuildRequirements {
 
 /**
  * The catalog request's `requires`/`min_build`, checked: `null` when the caller sent neither (the
- * catalog answers as it always did). They describe a PrismML build, so another provider refuses them
- * unless `requires` is empty and `min_build` absent.
+ * catalog answers as it always did, as it does for another provider given an empty `requires`). They
+ * describe a PrismML build, so another provider refuses a non-empty `requires` or a `min_build`.
  */
 function buildRequirements(
   provider: LlamacppProviderId,
@@ -156,11 +156,15 @@ function buildRequirements(
     throw new AtomicCoreError('INVALID_ARGUMENT', 'min_build must be a non-negative integer build number')
   const requires = (rawRequires ?? []) as EngineCapability[]
   const minBuild = rawMinBuild as number | undefined
-  if (provider !== 'atomic-prism' && (requires.length > 0 || minBuild !== undefined))
-    throw new AtomicCoreError(
-      'INVALID_ARGUMENT',
-      `requires and min_build choose a PrismML build (atomic-prism), not a ${provider} one`
-    )
+  if (provider !== 'atomic-prism') {
+    if (requires.length > 0 || minBuild !== undefined)
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `requires and min_build choose a PrismML build (atomic-prism), not a ${provider} one`
+      )
+    // An empty `requires` asks nothing of a llama.cpp build: the answer stays what it always was.
+    return null
+  }
   return { requires, minBuild }
 }
 

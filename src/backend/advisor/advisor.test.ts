@@ -1364,6 +1364,13 @@ describe('BackendAdvisor — atomic-prism catalog for a file (requires, min_buil
       )
     }
   )
+
+  it('answers an empty fork catalog with requires: [] as before, recommended null, not 422', async () => {
+    const h = await harness('llamacpp', host('windows', [rtx4090]), { routes: OFFLINE })
+    const plain = await h.advisor.catalog()
+    expect(plain.available).toEqual([])
+    expect(await h.advisor.catalog({ requires: [] })).toMatchObject({ recommended: null, available: [] })
+  })
 })
 
 describe('prismCatalogReleases / prismUpdateResponse', () => {
