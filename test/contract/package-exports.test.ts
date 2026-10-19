@@ -41,6 +41,7 @@ describe('package exports', () => {
       './host',
       './models',
       './foundry-host',
+      './settings',
     ])
   })
 
@@ -110,5 +111,20 @@ describe('package exports', () => {
       stderr.mockRestore()
       stdout.mockRestore()
     }
+  })
+
+  // Provider setting schemas for a program that embeds the core (change close-cli-core-gaps, design D3):
+  // `settingsSchema` and `LOCAL_PROVIDER_IDS` only, not the store behind `src/settings/index.ts`, and
+  // no deep path into the package's sources.
+  it('resolves ./settings to the schemas alone and publishes no source schema files', async () => {
+    const resolved = await resolveFromPackage(['@atomic-chat/core/settings'])
+    expect(resolved['@atomic-chat/core/settings']).toMatch(/\/dist\/settings\/public\.js$/)
+    const entry = (await import('../../src/settings/public.js')) as Record<string, unknown>
+    expect(Object.keys(entry).sort()).toEqual(['LOCAL_PROVIDER_IDS', 'settingsSchema'])
+    const settingsSchema = entry['settingsSchema'] as (provider: string) => unknown[]
+    expect(entry['LOCAL_PROVIDER_IDS']).toContain('atomic-prism')
+    expect(settingsSchema('atomic-prism').length).toBeGreaterThan(0)
+    const pkg = JSON.parse(await readFile(new URL('package.json', ROOT), 'utf8')) as { files: string[] }
+    expect(pkg.files.filter((f) => f.startsWith('src'))).toEqual([])
   })
 })

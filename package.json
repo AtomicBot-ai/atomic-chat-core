@@ -34,12 +34,15 @@
     "./foundry-host": {
       "types": "./dist/runtime/foundry-local/foundry-host.d.ts",
       "import": "./dist/runtime/foundry-local/foundry-host.js"
+    },
+    "./settings": {
+      "types": "./dist/settings/public.d.ts",
+      "import": "./dist/settings/public.js"
     }
   },
   "files": [
     "dist",
-    "!dist/bin",
-    "src/settings/schema"
+    "!dist/bin"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
