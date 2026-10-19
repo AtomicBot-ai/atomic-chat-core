@@ -103,6 +103,11 @@ export type CoreErrorCode =
   | 'MODEL_FORMAT_LEGACY'
   /** Another install of the same engine build (sd.cpp, MLX) is running; wait for it. */
   | 'ENGINE_INSTALL_IN_PROGRESS'
+  /**
+   * `POST /backends/atomic-prism/catalog` with `requires`/`min_build`: no build this machine can run
+   * meets them; `details` is `{requires, min_build}` as asked (change close-cli-core-gaps, D2).
+   */
+  | 'BACKEND_BUILD_UNAVAILABLE'
 
 /**
  * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the

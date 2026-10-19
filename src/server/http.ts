@@ -219,11 +219,13 @@ export function statusForCode(code: ErrorCode): number {
     case 'MANAGED_HOST_STEP_INVALID':
     case 'MANAGED_METADATA_INVALID':
       return 400
-    // Understood, well-formed, and asking for an engine this build has no adapter for, or asking a
-    // provider to run a file it cannot (or a file nothing runs any more).
+    // Understood, well-formed, and asking for an engine this build has no adapter for, asking a
+    // provider to run a file it cannot (or a file nothing runs any more), or for an engine build that
+    // meets a file's requirements when none on offer does.
     case 'MANAGED_ADAPTER_UNAVAILABLE':
     case 'MODEL_ENGINE_INCOMPATIBLE':
     case 'MODEL_FORMAT_LEGACY':
+    case 'BACKEND_BUILD_UNAVAILABLE':
       return 422
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':

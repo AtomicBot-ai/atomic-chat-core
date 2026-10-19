@@ -97,6 +97,12 @@ describe('error envelope', () => {
     expect(statusForCode(code)).toBe(status)
   })
 
+  // Change close-cli-core-gaps, design D2: the catalog understood the file's requirements, and no
+  // build on offer meets them.
+  it('maps BACKEND_BUILD_UNAVAILABLE to 422', () => {
+    expect(statusForCode('BACKEND_BUILD_UNAVAILABLE')).toBe(422)
+  })
+
   it('maps the image-generation codes: the caller can fix 4xx, and nothing acts on the status', () => {
     const table: Array<[ErrorCode, number]> = [
       ['INVALID_REQUEST', 400],
