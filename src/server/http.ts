@@ -116,22 +116,40 @@ function matchSegments(pattern: string[], actual: string[]): Record<string, stri
 /**
  * Each segment decoded on its own, then a rest parameter's joined with `/` (change close-cli-core-gaps,
  * design D4). A broken percent sequence is the caller's mistake: `INVALID_ARGUMENT` (400), not a 500.
+ * So is a segment whose decoding produced a path step — `.`, `..` or an empty piece between `/` or
+ * `\` (`%2E%2E`, `a%2F..%2Fb`, `%2Fx`): ids reach `join` (`modelDirFromId`), and an encoding must not
+ * walk one out of its folder. A segment without `%` is passed on as it came.
  */
 function decodeParams(raw: Record<string, string[]>): Record<string, string> {
   const params: Record<string, string> = {}
   for (const [name, segments] of Object.entries(raw)) {
-    try {
-      params[name] = segments.map((segment) => decodeURIComponent(segment)).join('/')
-    } catch (error) {
-      if (!(error instanceof URIError)) throw error
-      throw new AtomicCoreError(
-        'INVALID_ARGUMENT',
-        `The path parameter ${name} is not valid percent-encoding.`,
-        segments.join('/')
-      )
-    }
+    params[name] = segments.map((segment) => decodeSegment(name, segment)).join('/')
   }
   return params
+}
+
+function decodeSegment(name: string, segment: string): string {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch (error) {
+    if (!(error instanceof URIError)) throw error
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `The path parameter ${name} is not valid percent-encoding.`,
+      segment
+    )
+  }
+  if (
+    decoded !== segment &&
+    decoded.split(/[\\/]/).some((piece) => piece === '' || piece === '.' || piece === '..')
+  )
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `The path parameter ${name} encodes a path step (".", ".." or an empty segment).`,
+      segment
+    )
+  return decoded
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {

@@ -14,6 +14,13 @@ describe('runFoundryHostMain', () => {
     expect(stdout).not.toHaveBeenCalled()
   })
 
+  it('goes quiet instead of crashing when its stream is gone (EPIPE)', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
+    })
+    expect(await runFoundryHostMain(['nope'])).toBe(2)
+  })
+
   it('takes injected streams, and under Node the library cannot load: 3, naming the folder and why', async () => {
     const lines: string[] = []
     const code = await runFoundryHostMain(

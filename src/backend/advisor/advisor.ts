@@ -43,6 +43,7 @@ import {
   findPrismRelease,
   prismArchiveSources,
   prismAssetOffered,
+  PRISM_CAPABILITIES,
   PrismCatalogService,
   prismCatalogToBackends,
   prismTagBuild,
@@ -128,15 +129,6 @@ interface BuildRequirements {
   minBuild: number | undefined
 }
 
-const ENGINE_CAPABILITIES: ReadonlySet<string> = new Set<EngineCapability>([
-  'q1_0',
-  'q2_0_g64',
-  'pq2_0',
-  'ptq1_0',
-  'hadamard',
-  'vision',
-])
-
 /**
  * The catalog request's `requires`/`min_build`, checked: `null` when the caller sent neither (the
  * catalog answers as it always did). They describe a PrismML build, so another provider refuses them
@@ -153,12 +145,12 @@ function buildRequirements(
     rawRequires !== undefined &&
     !(
       Array.isArray(rawRequires) &&
-      rawRequires.every((c) => typeof c === 'string' && ENGINE_CAPABILITIES.has(c))
+      rawRequires.every((c) => typeof c === 'string' && PRISM_CAPABILITIES.has(c))
     )
   )
     throw new AtomicCoreError(
       'INVALID_ARGUMENT',
-      `requires must be a list of engine capabilities (${[...ENGINE_CAPABILITIES].join(', ')})`
+      `requires must be a list of engine capabilities (${[...PRISM_CAPABILITIES].join(', ')})`
     )
   if (rawMinBuild !== undefined && !(Number.isInteger(rawMinBuild) && (rawMinBuild as number) >= 0))
     throw new AtomicCoreError('INVALID_ARGUMENT', 'min_build must be a non-negative integer build number')

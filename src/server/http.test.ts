@@ -94,6 +94,25 @@ describe('Router', () => {
       }
     })
 
+    it('refuses an encoding that decodes into a path step, and leaves a raw segment as it came', () => {
+      for (const path of [
+        '/atomic/v1/models/p/a%2F..%2F..%2Fx/capabilities',
+        '/atomic/v1/models/p/%2E%2E/x/capabilities',
+        '/atomic/v1/models/p/a%5C..%5Cx/capabilities',
+        '/atomic/v1/models/p/%2Fetc/capabilities',
+        '/atomic/v1/models/p/a%2F%2Fb/capabilities',
+        '/atomic/v1/clients/%2E/heartbeat',
+      ]) {
+        const method = path.includes('/clients/') ? 'POST' : 'GET'
+        const error = refusal(method, path)
+        expect(error, path).toBeInstanceOf(AtomicCoreError)
+        expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+      }
+      expect(models.find('GET', '/atomic/v1/models/p/v1.2/model.Q4/capabilities')).toMatchObject({
+        match: { params: { modelId: 'v1.2/model.Q4' } },
+      })
+    })
+
     it('decodes only the route that matched: a broken value on a wrong method is still a 405', () => {
       expect(models.find('POST', '/atomic/v1/models/p/bad%E0%A4/capabilities')).toEqual({
         methodMismatch: true,

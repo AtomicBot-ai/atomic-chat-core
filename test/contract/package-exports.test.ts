@@ -9,7 +9,7 @@
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 const ROOT = new URL('../../', import.meta.url)
 const run = promisify(execFile)
@@ -91,26 +91,14 @@ describe('package exports', () => {
   // The entry a program that embeds the core (`atc`) hands `foundry-host …` to (change
   // close-cli-core-gaps, design D1). Importing it under Node must not touch `bun:ffi`: this test runs
   // under Node, where a static `bun:ffi` anywhere in its graph fails the import itself.
-  it('resolves ./foundry-host to its own entry, which imports under Node and runs the host mode', async () => {
+  it('resolves ./foundry-host to its own entry, which imports under Node', async () => {
     const resolved = await resolveFromPackage(['@atomic-chat/core/foundry-host'])
     expect(resolved['@atomic-chat/core/foundry-host']).toMatch(
       /\/dist\/runtime\/foundry-local\/foundry-host\.js$/
     )
+    // What the entry does is `src/runtime/foundry-local/foundry-host.test.ts`; here, that it is the one export.
     const entry = (await import('../../src/runtime/foundry-local/foundry-host.js')) as Record<string, unknown>
     expect(Object.keys(entry)).toEqual(['runFoundryHostMain'])
-    const runFoundryHostMain = entry['runFoundryHostMain'] as (argv: readonly string[]) => Promise<number>
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
-    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
-    try {
-      expect(await runFoundryHostMain(['nope'])).toBe(2)
-      expect(stderr.mock.calls.map(([chunk]) => String(chunk))).toEqual([
-        'foundry-host: unknown mode "nope" (probe, prepare, serve)\n',
-      ])
-      expect(stdout).not.toHaveBeenCalled()
-    } finally {
-      stderr.mockRestore()
-      stdout.mockRestore()
-    }
   })
 
   // Provider setting schemas for a program that embeds the core (change close-cli-core-gaps, design D3):
