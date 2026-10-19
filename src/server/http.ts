@@ -66,13 +66,13 @@ export class Router {
     const segments = splitPath(path)
     let methodMismatch = false
     for (const route of this.routes) {
-      const params = matchSegments(route.segments, segments)
-      if (!params) continue
+      const raw = matchSegments(route.segments, segments)
+      if (!raw) continue
       if (route.method !== method) {
         methodMismatch = true
         continue
       }
-      return { route, match: { params } }
+      return { route, match: { params: decodeParams(raw) } }
     }
     return methodMismatch ? { methodMismatch: true } : undefined
   }
@@ -82,8 +82,13 @@ function splitPath(path: string): string[] {
   return path.split('/').filter((s) => s.length > 0)
 }
 
-function matchSegments(pattern: string[], actual: string[]): Record<string, string> | undefined {
-  const params: Record<string, string> = {}
+/**
+ * The raw (still percent-encoded) segments of each parameter: one for `:param`, every segment it took
+ * for `*rest`. Matching runs on raw segments, so a `%2F` inside one never shifts the boundary with the
+ * fixed segments after a rest parameter.
+ */
+function matchSegments(pattern: string[], actual: string[]): Record<string, string[]> | undefined {
+  const params: Record<string, string[]> = {}
   let p = 0
   let a = 0
   while (p < pattern.length) {
@@ -93,19 +98,58 @@ function matchSegments(pattern: string[], actual: string[]): Record<string, stri
       const remainingFixed = pattern.length - p - 1
       const take = actual.length - a - remainingFixed
       if (take < 1) return undefined
-      params[seg.slice(1)] = actual.slice(a, a + take).join('/')
+      params[seg.slice(1)] = actual.slice(a, a + take)
       a += take
       p++
       continue
     }
     if (a >= actual.length) return undefined
     const value = actual[a] as string
-    if (seg.startsWith(':')) params[seg.slice(1)] = decodeURIComponent(value)
+    if (seg.startsWith(':')) params[seg.slice(1)] = [value]
     else if (seg !== value) return undefined
     p++
     a++
   }
   return a === actual.length ? params : undefined
+}
+
+/**
+ * Each segment decoded on its own, then a rest parameter's joined with `/` (change close-cli-core-gaps,
+ * design D4). A broken percent sequence is the caller's mistake: `INVALID_ARGUMENT` (400), not a 500.
+ * So is a segment whose decoding produced a path step — `.`, `..` or an empty piece between `/` or
+ * `\` (`%2E%2E`, `a%2F..%2Fb`, `%2Fx`): ids reach `join` (`modelDirFromId`), and an encoding must not
+ * walk one out of its folder. A segment without `%` is passed on as it came.
+ */
+function decodeParams(raw: Record<string, string[]>): Record<string, string> {
+  const params: Record<string, string> = {}
+  for (const [name, segments] of Object.entries(raw)) {
+    params[name] = segments.map((segment) => decodeSegment(name, segment)).join('/')
+  }
+  return params
+}
+
+function decodeSegment(name: string, segment: string): string {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch (error) {
+    if (!(error instanceof URIError)) throw error
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `The path parameter ${name} is not valid percent-encoding.`,
+      segment
+    )
+  }
+  if (
+    decoded !== segment &&
+    decoded.split(/[\\/]/).some((piece) => piece === '' || piece === '.' || piece === '..')
+  )
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `The path parameter ${name} encodes a path step (".", ".." or an empty segment).`,
+      segment
+    )
+  return decoded
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -219,11 +263,13 @@ export function statusForCode(code: ErrorCode): number {
     case 'MANAGED_HOST_STEP_INVALID':
     case 'MANAGED_METADATA_INVALID':
       return 400
-    // Understood, well-formed, and asking for an engine this build has no adapter for, or asking a
-    // provider to run a file it cannot (or a file nothing runs any more).
+    // Understood, well-formed, and asking for an engine this build has no adapter for, asking a
+    // provider to run a file it cannot (or a file nothing runs any more), or for an engine build that
+    // meets a file's requirements when none on offer does.
     case 'MANAGED_ADAPTER_UNAVAILABLE':
     case 'MODEL_ENGINE_INCOMPATIBLE':
     case 'MODEL_FORMAT_LEGACY':
+    case 'BACKEND_BUILD_UNAVAILABLE':
       return 422
     case 'CORE_NOT_RUNNING':
     case 'FOUNDATION_MODELS_UNAVAILABLE':

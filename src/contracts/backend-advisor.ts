@@ -11,6 +11,8 @@
  * Browser-safe: types only.
  */
 
+import type { EngineCapability } from './model-compatibility.js'
+
 /** The llama.cpp providers the advisor answers for. */
 export type LlamacppProviderId = 'llamacpp-upstream' | 'llamacpp' | 'atomic-prism'
 
@@ -111,6 +113,15 @@ export interface BackendCatalogRequest {
   /** The provider's `version_backend`; only the macOS static variants depend on it. */
   current_backend?: string
   proxy?: ProxyConfig | null
+  /**
+   * `atomic-prism` only: the engine capabilities a model file needs (its compatibility verdict's
+   * `requires`). With this or `min_build`, `recommended` and `recommended_installed` come only from
+   * builds whose manifest release has them all; none → `BACKEND_BUILD_UNAVAILABLE` (422). The other
+   * fields of the answer do not depend on it. Non-empty for another provider → `INVALID_ARGUMENT`.
+   */
+  requires?: EngineCapability[]
+  /** `atomic-prism` only: the lowest build number the file runs on (the verdict's `min_prism_build`). */
+  min_build?: number
 }
 
 /** One release of the TurboQuant fork or of PrismML, for the dropdown's release notes. */
@@ -124,6 +135,8 @@ export interface BackendCatalogRelease {
   notes?: string
   /** PrismML: present when the release was pulled; its packs are never offered. */
   withdrawn?: { reason: string }
+  /** PrismML: the engine capabilities the manifest lists for this release. */
+  capabilities?: EngineCapability[]
   variants: Array<{ id: string; asset?: string; size?: number; validation?: 'candidate' | 'approved' }>
 }
 

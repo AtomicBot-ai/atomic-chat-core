@@ -87,6 +87,32 @@ describe.skipIf(!LIB || !existsSync(BIN))('foundry-host against a real Foundry L
   })
 })
 
+// Both binaries run the mode through the package's public entry (change close-cli-core-gaps, task 1.2),
+// so the FFI module must be inside each of them: without it the load fails with "only inside a
+// compiled binary" instead of reaching the folder. No real library needed.
+describe.skipIf(!existsSync(BIN) || !existsSync(APP_BIN))('foundry-host through the public entry', () => {
+  it.each([
+    ['atomic-chat-core', BIN],
+    ['atomic-chat-app-core', APP_BIN],
+  ])(
+    '%s reaches the folder through its bundled FFI module, and answers a wrong mode with usage',
+    (_name, bin) => {
+      const empty = spawnSync(
+        bin,
+        ['foundry-host', 'probe', '--lib', dir, '--app-data', join(dir, 'r'), '--logs', join(dir, 'l')],
+        { encoding: 'utf8', timeout: 60_000 }
+      )
+      expect(empty.status, empty.stderr).toBe(3)
+      expect(empty.stderr).toMatch(/^foundry_local does not load from /)
+      expect(empty.stderr).not.toMatch(/only inside a compiled binary/)
+      expect(empty.stdout).toBe('')
+      const usage = spawnSync(bin, ['foundry-host', 'nope'], { encoding: 'utf8', timeout: 60_000 })
+      expect(usage.status).toBe(2)
+      expect(usage.stderr).toBe('foundry-host: unknown mode "nope" (probe, prepare, serve)\n')
+    }
+  )
+})
+
 const freePort = () =>
   new Promise<number>((resolve) => {
     const server = createServer()

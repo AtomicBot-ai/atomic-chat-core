@@ -25,7 +25,8 @@ export const PRISM_TAG_RE = /^prism-b(\d+)-([0-9a-f]{7})$/
 export type PrismValidation = 'candidate' | 'approved'
 export type PrismCapability = 'q1_0' | 'q2_0_g64' | 'pq2_0' | 'ptq1_0' | 'hadamard' | 'vision'
 
-const CAPABILITIES: ReadonlySet<string> = new Set([
+/** Every capability a PrismML release may list; the advisor checks a catalog request's `requires` against it. */
+export const PRISM_CAPABILITIES: ReadonlySet<string> = new Set<PrismCapability>([
   'q1_0',
   'q2_0_g64',
   'pq2_0',
@@ -110,7 +111,9 @@ function parseRelease(raw: unknown): PrismRelease | null {
   if (!isString(published_at) || !isString(min_core_version) || !isString(notes_url)) return null
   const assets = Array.isArray(raw['assets']) ? raw['assets'].map(parseAsset) : []
   const capabilities = Array.isArray(raw['capabilities'])
-    ? raw['capabilities'].filter((c): c is PrismCapability => typeof c === 'string' && CAPABILITIES.has(c))
+    ? raw['capabilities'].filter(
+        (c): c is PrismCapability => typeof c === 'string' && PRISM_CAPABILITIES.has(c)
+      )
     : []
   const release: PrismRelease = {
     tag,

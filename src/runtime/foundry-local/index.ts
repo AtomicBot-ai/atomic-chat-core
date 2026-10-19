@@ -4,7 +4,6 @@
  */
 export * from './host-process.js'
 export * from './model-yml.js'
-export { lineIo, loadLibraryWithBun, runFoundryHost } from './host/run.js'
 export type { FoundryHostDeps } from './host/run.js'
 export * from './runtime.js'
 export * from './accelerators.js'

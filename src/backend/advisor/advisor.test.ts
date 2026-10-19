@@ -1190,6 +1190,189 @@ describe('BackendAdvisor — atomic-prism', () => {
   })
 })
 
+// Change close-cli-core-gaps, design D2: the build for one model file. The best build for the hardware
+// (CUDA) comes from a release without `pq2_0`; an older release has it, in a CPU build only.
+const P3 = 'prism-b10900-ccccccc'
+const SPLIT_DOC = prismManifest([
+  prismRelease(
+    P2,
+    [
+      prismAsset('win-cuda-13.3-x64', 'approved', { companion_backend: 'win-cudart-13.3-x64' }),
+      prismAsset('win-cudart-13.3-x64', 'approved', { companion: true, size: 50 }),
+      prismAsset('win-cpu-x64'),
+    ],
+    { capabilities: ['q1_0'] }
+  ),
+  prismRelease(P1, [prismAsset('win-cpu-x64')], { capabilities: ['q1_0', 'pq2_0'] }),
+])
+
+describe('BackendAdvisor — atomic-prism catalog for a file (requires, min_build)', () => {
+  const prismHarness = (doc: PrismManifest, installed: BackendVersion[] = []) =>
+    harness('atomic-prism', host('windows', [rtx4090]), {
+      routes: { [PRISM_MANIFEST_URL]: () => json(doc) },
+      current: `${P2}/win-cuda-13.3-x64`,
+      installed,
+      deps: { coreVersion: '0.10.0' },
+    })
+  const unavailable = async (promise: Promise<unknown>) => {
+    const error = await promise.then(
+      () => null,
+      (e: unknown) => e
+    )
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    return error as AtomicCoreError
+  }
+
+  it('recommends the build that has the capability over the best one for the hardware, and changes nothing else', async () => {
+    const installed = [
+      { version: P2, backend: 'win-cuda-13.3-x64', order: 7 },
+      { version: P1, backend: 'win-cpu-x64', order: 5 },
+    ]
+    const plain = await (await prismHarness(SPLIT_DOC, installed)).advisor.catalog()
+    const forFile = await (await prismHarness(SPLIT_DOC, installed)).advisor.catalog({ requires: ['pq2_0'] })
+    expect(plain.recommended).toBe(`${P2}/win-cuda-13.3-x64`)
+    expect(plain.recommended_installed).toBe(`${P2}/win-cuda-13.3-x64`)
+    expect(forFile.recommended).toBe(`${P1}/win-cpu-x64`)
+    expect(forFile.recommended_installed).toBe(`${P1}/win-cpu-x64`)
+    const { recommended: _a, recommended_installed: _b, ...plainRest } = plain
+    const { recommended: _c, recommended_installed: _d, ...forFileRest } = forFile
+    expect(forFileRest).toEqual(plainRest)
+    expect(forFile.releases?.map((r) => [r.tag, r.capabilities])).toEqual([
+      [P2, ['q1_0']],
+      [P1, ['q1_0', 'pq2_0']],
+    ])
+  })
+
+  it('leaves recommended_installed null when nothing installed meets the file, without failing', async () => {
+    const h = await prismHarness(SPLIT_DOC, [{ version: P2, backend: 'win-cuda-13.3-x64', order: 7 }])
+    const catalog = await h.advisor.catalog({ requires: ['pq2_0'] })
+    expect(catalog.recommended).toBe(`${P1}/win-cpu-x64`)
+    expect(catalog.recommended_installed).toBeNull()
+  })
+
+  it('filters by build number, keeping the category priority among what is left', async () => {
+    const h = await prismHarness(SPLIT_DOC)
+    expect((await h.advisor.catalog({ min_build: 10754 })).recommended).toBe(`${P2}/win-cuda-13.3-x64`)
+    expect((await h.advisor.catalog({ requires: ['q1_0'], min_build: 10800 })).recommended).toBe(
+      `${P2}/win-cuda-13.3-x64`
+    )
+  })
+
+  it('never lets a build without a manifest release cover non-empty requires, but lets it meet min_build', async () => {
+    const h = await prismHarness(SPLIT_DOC, [{ version: P3, backend: 'win-cpu-x64', order: 9 }])
+    expect((await h.advisor.catalog({ min_build: 10850 })).recommended).toBe(`${P3}/win-cpu-x64`)
+    expect((await h.advisor.catalog({ requires: ['pq2_0'] })).recommended).toBe(`${P1}/win-cpu-x64`)
+    const error = await unavailable(h.advisor.catalog({ requires: ['pq2_0'], min_build: 10850 }))
+    expect(error.code).toBe('BACKEND_BUILD_UNAVAILABLE')
+  })
+
+  it('answers BACKEND_BUILD_UNAVAILABLE with the requirements when no build meets them', async () => {
+    const h = await prismHarness(SPLIT_DOC)
+    const error = await unavailable(h.advisor.catalog({ requires: ['hadamard'], min_build: 99_999 }))
+    expect(error.code).toBe('BACKEND_BUILD_UNAVAILABLE')
+    expect(JSON.parse(error.details as string)).toEqual({ requires: ['hadamard'], min_build: 99_999 })
+    const onlyBuild = await unavailable(h.advisor.catalog({ min_build: 99_999 }))
+    expect(JSON.parse(onlyBuild.details as string)).toEqual({ requires: [], min_build: 99_999 })
+  })
+
+  it('answers exactly as before without the new fields, the releases gaining only capabilities', async () => {
+    const h = await prismHarness(PRISM_DOC, [{ version: P1, backend: 'win-cpu-x64', order: 5 }])
+    // The answer of core 0.18.3 to this request, recorded before the change, plus `capabilities`.
+    expect(await h.advisor.catalog()).toEqual({
+      provider: 'atomic-prism',
+      os_type: 'windows',
+      arch_suffix: 'x64',
+      hardware_source: 'probe',
+      features: {
+        avx: true,
+        avx2: true,
+        avx512: false,
+        cuda11: true,
+        cuda12: true,
+        cuda13: true,
+        vulkan: true,
+        rocm: false,
+      },
+      supported_backends: ['win-cpu-x64', 'win-cuda-12.4-x64', 'win-cuda-13.3-x64', 'win-vulkan-x64'],
+      remote: [
+        { version: P2, backend: 'win-cuda-13.3-x64' },
+        { version: P1, backend: 'win-cuda-13.3-x64' },
+        { version: P1, backend: 'win-cpu-x64' },
+      ],
+      installed: [{ version: P1, backend: 'win-cpu-x64', order: 5 }],
+      available: [
+        { version: P2, backend: 'win-cuda-13.3-x64' },
+        { version: P1, backend: 'win-cuda-13.3-x64' },
+        { version: P1, backend: 'win-cpu-x64', order: 5 },
+      ],
+      recommended: `${P2}/win-cuda-13.3-x64`,
+      recommended_installed: `${P1}/win-cpu-x64`,
+      latest_by_type: {
+        'win-cuda-13.3-x64': `${P2}/win-cuda-13.3-x64`,
+        'win-cpu-x64': `${P1}/win-cpu-x64`,
+      },
+      static_variants: [],
+      source: 'live',
+      releases: [
+        {
+          tag: P2,
+          notes_url: `https://example.test/${P2}`,
+          notes: 'Faster PQ2_0',
+          capabilities: ['pq2_0'],
+          variants: [
+            { id: 'win-cuda-13.3-x64', asset: 'win-cuda-13.3-x64.zip', size: 100, validation: 'approved' },
+          ],
+        },
+        {
+          tag: P1,
+          notes_url: `https://example.test/${P1}`,
+          capabilities: ['pq2_0'],
+          variants: [
+            { id: 'win-cuda-13.3-x64', asset: 'win-cuda-13.3-x64.zip', size: 100, validation: 'approved' },
+            { id: 'win-cpu-x64', asset: 'win-cpu-x64.zip', size: 100, validation: 'approved' },
+          ],
+        },
+      ],
+    })
+  })
+
+  it('refuses requirements it cannot read', async () => {
+    const h = await prismHarness(SPLIT_DOC)
+    for (const request of [
+      { requires: ['nope'] },
+      { requires: 'pq2_0' },
+      { min_build: -1 },
+      { min_build: 1.5 },
+      { min_build: '10800' },
+    ]) {
+      const error = await unavailable(h.advisor.catalog(request as never))
+      expect(error.code, JSON.stringify(request)).toBe('INVALID_ARGUMENT')
+    }
+  })
+
+  it.each(['llamacpp-upstream', 'llamacpp'] as const)(
+    'refuses non-empty requires or a min_build for %s, and serves an empty requires as before',
+    async (provider) => {
+      const h = await harness(provider, host('windows', [rtx4090]))
+      for (const request of [{ requires: ['pq2_0' as const] }, { min_build: 1 }]) {
+        const error = await unavailable(h.advisor.catalog(request))
+        expect(error.code).toBe('INVALID_ARGUMENT')
+        expect(error.message).toContain(provider)
+      }
+      expect((await h.advisor.catalog({ requires: [] })).recommended).toBe(
+        (await h.advisor.catalog()).recommended
+      )
+    }
+  )
+
+  it('answers an empty fork catalog with requires: [] as before, recommended null, not 422', async () => {
+    const h = await harness('llamacpp', host('windows', [rtx4090]), { routes: OFFLINE })
+    const plain = await h.advisor.catalog()
+    expect(plain.available).toEqual([])
+    expect(await h.advisor.catalog({ requires: [] })).toMatchObject({ recommended: null, available: [] })
+  })
+})
+
 describe('prismCatalogReleases / prismUpdateResponse', () => {
   const offer = { coreVersion: '0.10.0', allowCandidates: false }
   it('lists runnable releases newest first with only offered variants', () => {

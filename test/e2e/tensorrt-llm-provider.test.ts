@@ -626,7 +626,9 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
   it('answers MODEL_NOT_FOUND for an unknown, a percent-encoded or an owner-less id, deleting nothing; an unload of such an id is was_loaded: false', async () => {
     await installModel('acme/nested', 'LlamaForCausalLM')
     const { ready } = await start()
-    for (const id of ['no-such-model', 'acme%2Fnested', 'nested']) {
+    // `acme%252Fnested` is the literal id `acme%2Fnested`: path parameters are percent-decoded (change
+    // close-cli-core-gaps, design D4), and that id is not one the store lists.
+    for (const id of ['no-such-model', 'acme%252Fnested', 'nested']) {
       const res = await control(ready, `/managed-models/${id}`, { method: 'DELETE' })
       expect(res.status, id).toBe(404)
       expect(await res.json()).toMatchObject({ error: { code: 'MODEL_NOT_FOUND' } })
@@ -635,7 +637,8 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the tens
     }
     expect(existsSync(join(dataFolder, 'managed-models', 'acme', 'nested', 'model.yml'))).toBe(true)
 
-    const nested = await control(ready, '/managed-models/acme/nested', { method: 'DELETE' })
+    // An encoded slash decodes to the slash it stands for: this is the store's `acme/nested`.
+    const nested = await control(ready, '/managed-models/acme%2Fnested', { method: 'DELETE' })
     expect(nested.status, await nested.clone().text()).toBe(200)
     expect(await nested.json()).toMatchObject({ model_id: 'acme/nested', was_loaded: false })
     expect(existsSync(join(dataFolder, 'managed-models', 'acme', 'nested'))).toBe(false)

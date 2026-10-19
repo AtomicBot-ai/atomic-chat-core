@@ -64,7 +64,7 @@ describe('runCli', () => {
     ])
     expect(node.exitCode).toBe(3)
     expect(node.stderr).toMatch(
-      /^foundry_local does not load from \/nowhere: .*compiled atomic-chat-core binaries only/
+      /^foundry_local does not load from \/nowhere: .*only inside a compiled binary/
     )
     expect(USAGE).not.toContain('foundry-host')
   })

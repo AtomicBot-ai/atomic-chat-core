@@ -34,7 +34,15 @@ describe('package exports', () => {
     const pkg = JSON.parse(await readFile(new URL('package.json', ROOT), 'utf8')) as {
       exports: Record<string, unknown>
     }
-    expect(Object.keys(pkg.exports)).toEqual(['.', './client', './contracts', './host', './models'])
+    expect(Object.keys(pkg.exports)).toEqual([
+      '.',
+      './client',
+      './contracts',
+      './host',
+      './models',
+      './foundry-host',
+      './settings',
+    ])
   })
 
   it('refuses to resolve @atomic-chat/core/downloads and resolves ./models', async () => {
@@ -78,5 +86,40 @@ describe('package exports', () => {
       // Any specifier into src/downloads: `./downloads`, `../downloads/index.js`, `./downloads.js`.
       expect(text, entry).not.toMatch(/from ['"][^'"]*\bdownloads(\.js|\/[^'"]*)?['"]/)
     }
+  })
+
+  // The entry a program that embeds the core (`atc`) hands `foundry-host …` to (change
+  // close-cli-core-gaps, design D1). Importing it under Node must not touch `bun:ffi`: this test runs
+  // under Node, where a static `bun:ffi` anywhere in its graph fails the import itself.
+  it('resolves ./foundry-host to its own entry, which imports under Node', async () => {
+    const resolved = await resolveFromPackage(['@atomic-chat/core/foundry-host'])
+    expect(resolved['@atomic-chat/core/foundry-host']).toMatch(
+      /\/dist\/runtime\/foundry-local\/foundry-host\.js$/
+    )
+    // What the entry does is `src/runtime/foundry-local/foundry-host.test.ts`; here, that it is the one export.
+    const entry = (await import('../../src/runtime/foundry-local/foundry-host.js')) as Record<string, unknown>
+    expect(Object.keys(entry)).toEqual(['runFoundryHostMain'])
+  })
+
+  // Provider setting schemas for a program that embeds the core (change close-cli-core-gaps, design D3):
+  // `settingsSchema` and `LOCAL_PROVIDER_IDS` only, not the store behind `src/settings/index.ts`, and
+  // no deep path into the package's sources.
+  it('resolves ./settings to the schemas alone and publishes no source schema files', async () => {
+    const resolved = await resolveFromPackage(['@atomic-chat/core/settings'])
+    expect(resolved['@atomic-chat/core/settings']).toMatch(/\/dist\/settings\/public\.js$/)
+    const entry = (await import('../../src/settings/public.js')) as Record<string, unknown>
+    expect(Object.keys(entry).sort()).toEqual(['LOCAL_PROVIDER_IDS', 'settingsSchema'])
+    const settingsSchema = entry['settingsSchema'] as (provider: string) => unknown[]
+    expect(entry['LOCAL_PROVIDER_IDS']).toContain('atomic-prism')
+    expect(settingsSchema('atomic-prism').length).toBeGreaterThan(0)
+    const pkg = JSON.parse(await readFile(new URL('package.json', ROOT), 'utf8')) as { files: string[] }
+    expect(pkg.files.filter((f) => f.startsWith('src'))).toEqual([])
+  })
+
+  // `atc` reads its data folder's ACL with the executor's own query and judge (change close-cli-core-gaps, D5).
+  it('hands out readWindowsAcl and judgeWindowsAcl from ./host', { timeout: 60_000 }, async () => {
+    const host = (await import('../../src/host/index.js')) as Record<string, unknown>
+    expect(typeof host['readWindowsAcl']).toBe('function')
+    expect(typeof host['judgeWindowsAcl']).toBe('function')
   })
 })
