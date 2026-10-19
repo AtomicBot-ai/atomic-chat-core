@@ -341,11 +341,16 @@ const isEmptyDir = (dir: string): Promise<boolean> =>
  * Regular files under the models root, recursively, with `/`-separated relative paths. Hidden files
  * and in-flight downloads are skipped.
  */
+const PARTIAL_SUFFIXES = ['.tmp', '.part', '.download', '.url', '.parts', '.ranges', '.ranges.next']
+
 export async function listModelFiles(modelsRoot: string): Promise<DiffusionModelFile[]> {
   const out: DiffusionModelFile[] = []
   const walk = async (dir: string): Promise<void> => {
     for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
       if (entry.name.startsWith('.')) continue
+      // A download in progress: its partial and the clients' sidecars beside it (the app's `.url` and
+      // `.parts`, atc's `.url` and `.ranges`), files or folders, are not models.
+      if (PARTIAL_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))) continue
       const path = join(dir, entry.name)
       const meta = await stat(path).catch(() => undefined)
       if (!meta) continue
@@ -355,7 +360,6 @@ export async function listModelFiles(modelsRoot: string): Promise<DiffusionModel
       }
       // A link to a file is not a model file of ours (the plugin read the entry itself, not its target).
       if (entry.isSymbolicLink() || !meta.isFile()) continue
-      if (['.tmp', '.part', '.download'].some((suffix) => entry.name.endsWith(suffix))) continue
       out.push({ path, relativePath: relative(modelsRoot, path).split(sep).join('/'), bytes: meta.size })
     }
   }
