@@ -30,6 +30,10 @@
     "./models": {
       "types": "./dist/models/index.d.ts",
       "import": "./dist/models/index.js"
+    },
+    "./foundry-host": {
+      "types": "./dist/runtime/foundry-local/foundry-host.d.ts",
+      "import": "./dist/runtime/foundry-local/foundry-host.js"
     }
   },
   "files": [
