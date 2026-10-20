@@ -119,7 +119,10 @@ export function parseWindowsAcl(output: HostCommandOutput): WindowsAcl {
 
 /** The calls this module makes, injectable so a test fakes owners and ACLs it cannot create. */
 export interface WindowsHostStepIo {
-  /** Runs one command, no shell; `env` is added to the inherited environment. */
+  /**
+   * Runs one command, no shell; `env` is added to the inherited environment, and a name in it
+   * replaces the inherited one in any case.
+   */
   exec(
     command: string,
     args: string[],
@@ -148,6 +151,12 @@ export interface WindowsHostStepIo {
  * `%SystemRoot%`), the path in the environment, never in the script. Throws when PowerShell fails or
  * answers without an owner. The host-step executor reads every ACL through it; `atc` checks its data
  * folder with it (change close-cli-core-gaps, design D5).
+ *
+ * `PSModulePath` names Windows PowerShell's own modules folder alone, where `Get-Acl`'s module lives.
+ * Started from pwsh, a process inherits PowerShell 7's module path, whose copy of that module Windows
+ * PowerShell finds first and cannot load (`CouldNotAutoloadMatchingModule`); its default path holds
+ * every module installed for it, which a cold command lookup on a slow machine searches for tens of
+ * seconds.
  */
 export async function readWindowsAcl(
   path: string,
@@ -159,10 +168,10 @@ export async function readWindowsAcl(
     process.env['SYSTEMROOT'] ??
     'C:\\Windows'
   ).replace(/[\\/]+$/, '')
-  const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+  const home = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0`
   return parseWindowsAcl(
-    await options.exec(powershell, ['-NoProfile', '-NonInteractive', '-Command', ACL_QUERY], {
-      env: { ATOMIC_HOST_STEP_PATH: path },
+    await options.exec(`${home}\\powershell.exe`, ['-NoProfile', '-NonInteractive', '-Command', ACL_QUERY], {
+      env: { PSModulePath: `${home}\\Modules`, ATOMIC_HOST_STEP_PATH: path },
     })
   )
 }

@@ -103,7 +103,12 @@ describe('readWindowsAcl', () => {
     expect(await readWindowsAcl(FOLDER, { exec, systemRoot: 'D:\\Win\\' })).toEqual(appFolder())
     expect(calls).toHaveLength(1)
     expect(calls[0]?.command).toBe('D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-    expect(calls[0]?.env).toEqual({ ATOMIC_HOST_STEP_PATH: FOLDER })
+    // Only Windows PowerShell's own modules: started from pwsh, the inherited PowerShell 7 path holds
+    // a copy of Get-Acl's module that Windows PowerShell cannot load.
+    expect(calls[0]?.env).toEqual({
+      PSModulePath: 'D:\\Win\\System32\\WindowsPowerShell\\v1.0\\Modules',
+      ATOMIC_HOST_STEP_PATH: FOLDER,
+    })
     expect(calls[0]?.args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-Command'])
     expect(calls[0]?.args.join(' ')).not.toContain(FOLDER)
     expect(calls[0]?.args.join(' ')).toContain('Get-Acl -LiteralPath $p')
@@ -195,7 +200,10 @@ describe('windowsHostStepDeps', () => {
     await windowsHostStepDeps({ SystemRoot: 'E:\\Windows' }, io).readRequest(REQUEST)
     const query = calls.find((call) => call.command.endsWith('powershell.exe'))
     expect(query?.command).toBe('E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-    expect(query?.env).toEqual({ ATOMIC_HOST_STEP_PATH: FOLDER })
+    expect(query?.env).toEqual({
+      PSModulePath: 'E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules',
+      ATOMIC_HOST_STEP_PATH: FOLDER,
+    })
     expect(query?.args.join(' ')).not.toContain(FOLDER)
   })
 
