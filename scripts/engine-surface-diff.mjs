@@ -5,17 +5,19 @@
 // atomic-engine-surface-report v1), report.md, inputs.json (everything gathered, to rebuild the
 // report with --inputs), watched.patch and both help screens into --out.
 //
-//   node scripts/engine-surface-diff.mjs --candidate b11617 [--repo ggml-org/llama.cpp]
-//     [--pin auto|none|bN] [--pin-repo <repo>] [--conf <dir> | --conf-ref main]
+//   node scripts/engine-surface-diff.mjs --candidate b11617 [--engine llamacpp-upstream]
+//     [--repo ggml-org/llama.cpp] [--pin auto|none|<tag>] [--pin-repo <repo>] [--conf <dir> | --conf-ref main]
 //     [--contract <path>] [--out .engine-check/surface] [--cache .engine-check/cache]
 //     [--fail-on break|error|warn] [--skip-upstream]
 //   node scripts/engine-surface-diff.mjs --candidate-bin <llama-server> [--pin-bin <llama-server>] …
 //   node scripts/engine-surface-diff.mjs --inputs <inputs.json> [--out …]
 //
-// --repo: any repo publishing ggml-org's asset names (AtomicBot-ai/atomic-chat-conf for the signed
-// mirror). --pin auto takes conf's release list (the newest approved release this core version
-// runs, on linux-x64); the pin's binary comes from --pin-repo, by default the candidate's repo when
-// it has the tag, else ggml-org. A local --candidate-bin is tagged b<build> from its --version;
+// --engine picks .github/engine-candidate/<engine>.json: its contract, tag shape, default repo and
+// pin source (`atomic-prism`: PrismML-Eng/llama.cpp, its `prism` branch for the history, conf's
+// PrismML manifest for the pin, and no mirror). --repo: any repo publishing ggml-org's asset names
+// (AtomicBot-ai/atomic-chat-conf for the signed mirror). --pin auto takes conf's list for the engine
+// (the newest approved release this core version runs, on linux-x64); the pin's binary comes from
+// --pin-repo, by default the candidate's repo when it has the tag, else the engine's. A local --candidate-bin is tagged b<build> from its --version;
 // when its commit is not in ggml-org/llama.cpp (a fork, a local branch) the upstream checks say
 // "diff unavailable" and the rest still run. Exit 0 unless the tool itself fails (2) or the
 // report reaches --fail-on (1). GITHUB_TOKEN / GH_TOKEN lift the API rate limit.
@@ -24,8 +26,6 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
-import { DEFAULT_RELEASE_REPO } from './lib/live-fixtures.mjs'
-import { resolvePins, PIN_PLATFORMS } from './lib/engine-pin.mjs'
 import {
   buildReport,
   countStrings,
@@ -40,6 +40,10 @@ import {
 } from './lib/engine-surface.mjs'
 import {
   coreIdentity,
+  engineConfig,
+  engineContract,
+  enginePins,
+  engineTagRe,
   fetchBuild,
   git,
   githubJson,
@@ -53,7 +57,6 @@ import {
 } from './lib/engine-io.mjs'
 
 const SEVERITY_ORDER = ['warn', 'error', 'break']
-const isTag = (v) => /^b\d+$/.test(v)
 
 export async function main(argv = process.argv.slice(2)) {
   const { values: opts } = parseArgs({
@@ -62,13 +65,14 @@ export async function main(argv = process.argv.slice(2)) {
     options: {
       'candidate': { type: 'string' },
       'candidate-bin': { type: 'string' },
-      'repo': { type: 'string', default: DEFAULT_RELEASE_REPO },
+      'engine': { type: 'string', default: 'llamacpp-upstream' },
+      'repo': { type: 'string' },
       'pin': { type: 'string', default: 'auto' },
       'pin-bin': { type: 'string' },
       'pin-repo': { type: 'string' },
       'conf': { type: 'string' },
       'conf-ref': { type: 'string', default: 'main' },
-      'contract': { type: 'string', default: join(ROOT, 'test/fixtures/llamacpp/engine-contract.json') },
+      'contract': { type: 'string' },
       'out': { type: 'string', default: '.engine-check/surface' },
       'cache': { type: 'string', default: '.engine-check/cache' },
       'fail-on': { type: 'string' },
@@ -76,22 +80,27 @@ export async function main(argv = process.argv.slice(2)) {
       'inputs': { type: 'string' },
     },
   })
+  const config = engineConfig(opts.engine)
+  const tagRe = engineTagRe(config)
+  const isTag = (v) => tagRe.test(v)
+  opts.repo ??= config.default_repo
   if (!opts.inputs && !opts.candidate === !opts['candidate-bin'])
-    throw new Error('give one of --candidate bN or --candidate-bin <llama-server> (or --inputs)')
-  if (opts.candidate && !isTag(opts.candidate)) throw new Error(`--candidate must look like b11617`)
-  if (!['auto', 'none'].includes(opts.pin) && !isTag(opts.pin)) throw new Error('--pin is auto, none or bN')
+    throw new Error('give one of --candidate <tag> or --candidate-bin <llama-server> (or --inputs)')
+  if (opts.candidate && !isTag(opts.candidate)) throw new Error(`--candidate must match ${tagRe}`)
+  if (!['auto', 'none'].includes(opts.pin) && !isTag(opts.pin))
+    throw new Error(`--pin is auto, none or a tag matching ${tagRe}`)
   if (opts['fail-on'] && !SEVERITY_ORDER.includes(opts['fail-on']))
     throw new Error('--fail-on is break, error or warn')
 
-  const contractText = readFileSync(opts.contract, 'utf8')
-  const contract = JSON.parse(contractText)
+  const contractText = readFileSync(opts.contract ?? join(ROOT, config.contract), 'utf8')
+  const contract = opts.contract ? JSON.parse(contractText) : engineContract(config)
   const out = resolve(opts.out)
   mkdirSync(out, { recursive: true })
 
   let inputs
   if (opts.inputs) inputs = JSON.parse(readFileSync(opts.inputs, 'utf8'))
   else {
-    const gathered = await gather(contract, opts)
+    const gathered = await gather(contract, opts, config)
     inputs = gathered.inputs
     if (gathered.patch !== undefined) writeFileSync(join(out, 'watched.patch'), gathered.patch)
   }
@@ -118,16 +127,20 @@ export async function main(argv = process.argv.slice(2)) {
   return 0
 }
 
-async function gather(contract, opts) {
+async function gather(contract, opts, config) {
   const cache = resolve(opts.cache)
   const platform = hostPlatform()
   const core = coreIdentity()
   const conf = await loadConf(opts.conf ? { dir: resolve(opts.conf) } : { ref: opts['conf-ref'] })
   for (const error of conf.errors) console.warn(`conf: ${error}`)
   const fromConf = conf.mirrorSource === undefined ? undefined : parseMirrorWhitelist(conf.mirrorSource)
-  const whitelist = fromConf
-    ? { source: 'conf', entries: fromConf }
-    : { source: 'core-copy', entries: MIRROR_WHITELIST }
+  // conf mirrors upstream builds only: a fork that core downloads from its own releases has no whitelist.
+  const whitelist =
+    config.mirror === false
+      ? { source: 'none', entries: null }
+      : fromConf
+        ? { source: 'conf', entries: fromConf }
+        : { source: 'core-copy', entries: MIRROR_WHITELIST }
 
   const capture = (side, bin) => {
     const invocations = runInvocations(bin, contract.invocations ?? [])
@@ -199,29 +212,27 @@ async function gather(contract, opts) {
   else {
     let tag = opts.pin
     if (opts.pin === 'auto') {
-      const pins = resolvePins({
-        releases: conf.releases,
-        manifest: conf.manifest,
-        coreVersion: core.version,
-      })
+      const pins = enginePins(config, conf, core.version)
       tag =
         pins.per_platform['linux-x64']?.tag ??
-        PIN_PLATFORMS.map((p) => pins.per_platform[p.platform]?.tag).find((t) => t) ??
+        Object.values(pins.per_platform)
+          .map((p) => p.tag)
+          .find((t) => t) ??
         null
       resolution = { ...pins, tag }
     } else resolution = { source: 'override', tag }
     if (tag) {
-      const candidateRepo = candidate.repo ?? DEFAULT_RELEASE_REPO
+      const candidateRepo = candidate.repo ?? config.default_repo
       const repo =
         opts['pin-repo'] ??
-        (candidateRepo !== DEFAULT_RELEASE_REPO && (await githubRelease(candidateRepo, tag).catch(() => null))
+        (candidateRepo !== config.default_repo && (await githubRelease(candidateRepo, tag).catch(() => null))
           ? candidateRepo
-          : DEFAULT_RELEASE_REPO)
+          : config.default_repo)
       pin = await releaseSide(tag, repo)
     }
   }
 
-  const upstreamRepo = contract.upstream?.repo ?? DEFAULT_RELEASE_REPO
+  const upstreamRepo = contract.upstream?.repo ?? config.default_repo
   const { upstream, patch } = opts['skip-upstream']
     ? { upstream: { available: false, reason: 'skipped (--skip-upstream)' } }
     : await upstreamDiff(contract, candidate, pin, upstreamRepo, join(cache, 'llama.cpp.git'))
@@ -277,7 +288,9 @@ function gitDiff(contract, { base, head, candidate, pin, upstreamRepo, gitDir })
   const dates = [pin, candidate].map((s) => Date.parse(s.release?.published_at ?? '')).filter((d) => d > 0)
   const since = new Date(dates.length > 0 ? Math.min(...dates) : Date.now() - 90 * 86_400_000)
   since.setUTCDate(since.getUTCDate() - 2)
-  const refs = ['+refs/heads/master:refs/remotes/origin/master']
+  // The branch builds are cut from: `master` upstream, `prism` on PrismML's fork.
+  const branch = contract.upstream?.branch ?? 'master'
+  const refs = [`+refs/heads/${branch}:refs/remotes/origin/${branch}`]
   for (const side of [pin, candidate])
     if (side.repo === upstreamRepo && side.tag) refs.push(`+refs/tags/${side.tag}:refs/tags/${side.tag}`)
   const fetch = () =>

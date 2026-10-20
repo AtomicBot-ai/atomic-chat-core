@@ -2,24 +2,34 @@
  * `scripts/lib/engine-pin.mjs` decides which llama.cpp release the candidate check compares against:
  * the one this core takes today. It re-implements the TypeScript catalog in plain JS for the
  * scripts, so it is held here to the same answers as `upstreamRemoteBackends` — on the bundled
- * baseline and on lists with a withdrawn release, a release for newer cores, and candidates only.
+ * baseline and on lists with a withdrawn release, a release for newer cores, and candidates only —
+ * and, for PrismML, as `prismCatalogToBackends`.
  */
 import { describe, expect, it } from 'vitest'
 import {
+  engineTagBuild,
   PIN_PLATFORMS,
+  PRISM_PIN_PLATFORMS,
+  parsePrismManifest as parsePrismMjs,
   parseUpstreamReleases as parseMjs,
+  prismCatalogToBackends as prismBackendsMjs,
   resolvePins,
+  resolvePrismPins,
   upstreamCatalogFromLegacyManifest as legacyMjs,
   upstreamRemoteBackends as remoteMjs,
 } from '../../scripts/lib/engine-pin.mjs'
 import {
+  determinePrismSupportedBackends,
   determineSupportedBackends,
   normalizeFeatures,
+  parsePrismManifest,
   parseUpstreamReleases,
+  prismCatalogToBackends,
   upstreamCatalogFromLegacyManifest,
   upstreamRemoteBackends,
 } from '../../src/backend/index.js'
 import baseline from '../../src/backend/catalog/upstream-releases-baseline.json' with { type: 'json' }
+import prismBaseline from '../../src/backend/catalog/prism-manifest-baseline.json' with { type: 'json' }
 
 const sha = (n: number) => n.toString(16).padStart(64, '0')
 const asset = (tag: string, infix: string, validation: 'approved' | 'candidate' = 'approved') => ({
@@ -164,5 +174,111 @@ describe('resolvePins', () => {
     expect(pins.list.readable).toBe(false)
     expect(pins.per_platform['windows-x64']?.tag).toBe('b11400')
     expect(pins.per_platform['linux-x64']?.tag).toBeNull()
+  })
+})
+
+const prismTag = (build: number) => `prism-b${build}-${(build % 0xfffffff).toString(16).padStart(7, '0')}`
+const prismAsset = (
+  tag: string,
+  backend: string,
+  validation: 'approved' | 'candidate' = 'approved',
+  extra: object = {}
+) => ({
+  backend,
+  name: `llama-${tag}-bin-${backend}.tar.gz`,
+  size: 1000,
+  sha256: sha(backend.length),
+  validation,
+  ...extra,
+})
+const prismRelease = (
+  build: number,
+  extra: object = {},
+  validation: 'approved' | 'candidate' = 'approved'
+) => {
+  const tag = prismTag(build)
+  return {
+    tag,
+    commit: `${tag.slice(-7)}${'0'.repeat(33)}`,
+    published_at: '2026-10-19T00:00:00Z',
+    min_core_version: '0.10.0',
+    notes_url: `https://example.invalid/${tag}`,
+    capabilities: ['pq2_0'],
+    assets: [
+      ...PRISM_PIN_PLATFORMS.map((p) => prismAsset(tag, p.backend, validation)),
+      prismAsset(tag, 'win-cuda-12.4-x64', validation, { companion_backend: 'win-cudart-12.4-x64' }),
+      prismAsset(tag, 'win-cudart-12.4-x64', 'candidate', { companion: true }),
+    ],
+    ...extra,
+  }
+}
+const prismManifests: Record<string, unknown> = {
+  'baseline': prismBaseline,
+  'a withdrawn newest release': {
+    schema_version: 1,
+    releases: [prismRelease(10787, { withdrawn: { reason: 'crashes' } }), prismRelease(10754)],
+  },
+  'the newest release needs a newer core': {
+    schema_version: 1,
+    releases: [prismRelease(10787, { min_core_version: '99.0.0' }), prismRelease(10754)],
+  },
+  'the newest release only a candidate': {
+    schema_version: 1,
+    releases: [prismRelease(10787, {}, 'candidate'), prismRelease(10754)],
+  },
+  'a newer schema': { schema_version: 2, releases: [prismRelease(10787)] },
+  'malformed entries': {
+    schema_version: 1,
+    releases: [{ tag: 'b11617', assets: [] }, prismRelease(10754), 7],
+  },
+}
+
+describe('engine-pin.mjs reads the PrismML manifest as the core does', () => {
+  for (const [name, raw] of Object.entries(prismManifests)) {
+    it(`${name}: same offered packs`, () => {
+      const ts = parsePrismManifest(raw)
+      const mjs = parsePrismMjs(raw)
+      expect(mjs === null).toBe(ts === null)
+      if (!ts || !mjs) return
+      for (const coreVersion of ['0.17.0', '99.0.0'])
+        for (const allowCandidates of [false, true])
+          expect(prismBackendsMjs(mjs, { coreVersion, allowCandidates })).toEqual(
+            prismCatalogToBackends(ts, { coreVersion, allowCandidates })
+          )
+    })
+  }
+
+  it('names the CPU pack core installs on each platform PrismML builds for', () => {
+    for (const p of PRISM_PIN_PLATFORMS) {
+      const arch = p.arch === 'x64' ? 'x86_64' : 'aarch64'
+      expect(determinePrismSupportedBackends(p.os, arch, normalizeFeatures(null))[0]).toBe(p.backend)
+    }
+  })
+
+  it('pins each platform to the newest release whose CPU pack is approved', () => {
+    const pins = resolvePrismPins({
+      manifest: {
+        schema_version: 1,
+        releases: [
+          { ...prismRelease(10787), assets: [prismAsset(prismTag(10787), 'macos-arm64')] },
+          prismRelease(10754),
+        ],
+      },
+      coreVersion: '0.18.5',
+    })
+    expect(pins.source).toBe('prism-manifest')
+    expect(pins.per_platform['macos-arm64']?.tag).toBe(prismTag(10787))
+    expect(pins.per_platform['linux-x64']?.tag).toBe(prismTag(10754))
+    expect(pins.legacy.tag).toBeNull()
+    const none = resolvePrismPins({ manifest: undefined, coreVersion: '0.18.5' })
+    expect(none.source).toBe('none')
+    expect(Object.values(none.per_platform).every((p) => p.tag === null)).toBe(true)
+  })
+
+  it("reads the build of either engine's tags", () => {
+    expect(engineTagBuild('b11617')).toBe(11617)
+    expect(engineTagBuild('prism-b10787-73bfe6c')).toBe(10787)
+    expect(engineTagBuild('b10018-1.3.0')).toBeNull()
+    expect(engineTagBuild('prism-b10787')).toBeNull()
   })
 })

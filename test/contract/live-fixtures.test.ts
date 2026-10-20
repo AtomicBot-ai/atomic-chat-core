@@ -32,6 +32,16 @@ describe('assetPatternFor', () => {
     expect(names('b11617').filter((n) => pattern.test(n))).toEqual([expected])
   })
 
+  it('names the tag when given one, so a fork with its own tags is fetched', () => {
+    const tag = 'prism-b10787-73bfe6c'
+    const prism = names(tag)
+    expect(prism.filter((n) => assetPatternFor('linux', 'x64', undefined, tag).test(n))).toEqual([
+      `llama-${tag}-bin-ubuntu-x64.tar.gz`,
+    ])
+    expect(prism.filter((n) => assetPatternFor('linux', 'x64').test(n))).toEqual([])
+    expect(names('b11617').filter((n) => assetPatternFor('win32', 'x64', undefined, tag).test(n))).toEqual([])
+  })
+
   it('takes an exact asset name literally', () => {
     const pattern = assetPatternFor('linux', 'x64', 'llama-b1-bin-ubuntu-x64.tar.gz')
     expect(pattern.test('llama-b1-bin-ubuntu-x64.tar.gz')).toBe(true)

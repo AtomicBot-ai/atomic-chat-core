@@ -676,6 +676,7 @@ npm run engine:check -- --tag b11617                                       # a g
 npm run engine:check -- --repo AtomicBot-ai/atomic-chat-conf --tag b11463   # the signed mirror
 npm run engine:check -- --bin ~/src/llama.cpp/build/bin/llama-server       # any local build
 npm run engine:check -- --tag b10875 --pin b10874 --suites live            # a backtest
+npm run engine:check -- --engine atomic-prism --tag prism-b10787-73bfe6c   # a PrismML build
 ```
 
 Without `--tag` or `--bin` it takes the newest complete b-tag of `--repo` (default `ggml-org/llama.cpp`).
@@ -710,12 +711,12 @@ gh run download <run-id> -n engine-candidate-results
 
 | input | default | |
 |---|---|---|
-| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths |
-| `tag` | newest complete | the candidate b-tag |
-| `repo` | `ggml-org/llama.cpp` | any repo with ggml-org's asset names; `AtomicBot-ai/atomic-chat-conf` tests the signed mirror |
+| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths; `atomic-prism` checks PrismML's fork (below) |
+| `tag` | newest complete | the candidate tag: `b11617`, or `prism-b10787-73bfe6c` for `atomic-prism` |
+| `repo` | the engine's | any repo with ggml-org's asset names; `AtomicBot-ai/atomic-chat-conf` tests the signed mirror |
 | `candidate_id` | `manual` | `[A-Za-z0-9._:-]{1,80}`, shown as `[cid:<id>]` in the run title so a caller can find its run |
 | `core_ref` | `main` | the core to check, e.g. an agent's fix branch |
-| `pin` | conf's list | `bN` overrides the pin on every platform |
+| `pin` | conf's list | a tag overrides the pin on every platform |
 | `conf_ref` | `main` | where the release list and the mirror whitelist come from |
 | `suites` | `all` | `live` skips the core suites (`not-requested` in the results) |
 
@@ -724,3 +725,32 @@ artifact holds `results.json`, `results.md`, `report.json`, `report.md` and `res
 report and the results are in the run summary too. The last job fails unless the result is `pass`.
 `results.json.core.protected_changes` lists the files under the check's own paths that `core_ref` changes
 against `main` — the check, its contract or its fixtures loosened by the change under test.
+
+### PrismML builds (`atomic-prism`)
+
+The same check covers PrismML's fork (`PrismML-Eng/llama.cpp`, the `atomic-prism` provider Bonsai models
+run on). `.github/engine-candidate/atomic-prism.json` says how it differs from upstream:
+
+- **Tags** are `prism-b<N>-<sha7>`. `<N>` is the upstream build the fork is cut from: what `--version`
+  prints and what the build gates in `planLlamaArgs` see.
+- **The pin** comes from conf's `backends/atomic-prism-manifest.json`, read as `prismCatalogToBackends`
+  reads it (`resolvePrismPins` in `scripts/lib/engine-pin.mjs`, held to the TypeScript by
+  `test/contract/engine-pin.test.ts`).
+- **No mirror**: core downloads PrismML's archives from the fork itself, so there is no whitelist to
+  check, and the release is complete once the CPU archive of every platform the check runs on is up.
+- **The contract** is upstream's: the fork runs the same `llama-server` surface. Its history is read from
+  the fork's `prism` branch.
+- **Live** is `test/live/prism.test.ts` on linux-x64, macos-arm64 and windows-x64, candidate and pin, with
+  `Ternary-Bonsai-1.7B-PQ2_0.gguf` (463 MB, pinned by revision and sha256, `live_model`): the install gate
+  (`--version` names the tag's build), `-h` against the contract, and a load through `atomic-prism` that
+  answers. macOS x64 and the GPU packs are not run (`not_verified`).
+
+```bash
+gh workflow run engine-candidate.yml -f engine=atomic-prism -f tag=prism-b10787-73bfe6c \
+  -f candidate_id=prism-smoke -f core_ref=main
+```
+
+The engine update pipeline (atomic-hatchet-pipeline) dispatches it with `repo=PrismML-Eng/llama.cpp`, then
+again with `core_ref` set to the latest core release before conf's `prism-approve.yml` approves the
+build. A core release older than the PrismML check has no `.github/engine-candidate/atomic-prism.json`:
+the pipeline then stops before approving and waits for the next release.

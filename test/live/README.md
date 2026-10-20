@@ -33,6 +33,14 @@ unknown architecture, a known one without its keys, an unknown flag) and `--list
 expected and did not see fails it; with `ATOMIC_LIVE_REPORT_DIR=<dir>` it writes everything it saw, drift included, to
 `<dir>/observed.json` (CI keeps it as the `llamacpp-observed-<os>` artifact of `live-backend`).
 
+PrismML (`test/live/prism.test.ts`): `ATOMIC_LIVE_PRISM_BIN` (a `llama-server` from a PrismML-Eng/llama.cpp
+`llama-prism-<tag>-bin-<platform>` archive), `ATOMIC_LIVE_PRISM_MODEL` (a Bonsai GGUF with PrismML tensor types),
+`ATOMIC_LIVE_PRISM_TAG` (the `prism-b<N>-<sha7>` tag; required, the build alone does not name it). The pack is installed
+under that tag and this host's PrismML CPU pack id; the suite runs the install gate (`--version` names the tag's build),
+`-h` against the engine contract, and a load on `atomic-prism` that answers. `node scripts/fetch-live-fixtures.mjs --out
+.live-prism --repo PrismML-Eng/llama.cpp --tag <tag> --engine atomic-prism` fetches the build and
+`Ternary-Bonsai-1.7B-PQ2_0.gguf`; `npm run engine:check -- --engine atomic-prism --tag <tag>` runs the whole check.
+
 Stage 5 providers, each opt-in on its own:
 
 - TurboQuant (`test/live/turboquant.test.ts`): `ATOMIC_LIVE_TURBOQUANT_BIN` (a fork `llama-server`, its whole

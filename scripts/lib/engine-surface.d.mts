@@ -98,7 +98,8 @@ export interface SurfaceInputs {
   candidate: SurfaceSide
   pin?: SurfaceSide | null
   pin_resolution?: unknown
-  whitelist?: { source: string; entries: MirrorWhitelistEntry[] } | null
+  /** `entries: null`: conf does not mirror this engine (PrismML), so no mirror check runs. */
+  whitelist?: { source: string; entries: MirrorWhitelistEntry[] | null } | null
   upstream?: SurfaceUpstream
 }
 
@@ -144,12 +145,12 @@ export declare function checkAssets(
   input: {
     candidate: { tag: string; assets: readonly string[] }
     pin: { tag: string; assets: readonly string[] } | null
-    whitelist: readonly MirrorWhitelistEntry[] | undefined
+    whitelist: readonly MirrorWhitelistEntry[] | null | undefined
   }
 ): Finding[]
 export declare function candidateCompleteness(
   contract: SurfaceContract,
-  whitelist: readonly MirrorWhitelistEntry[],
+  whitelist: readonly MirrorWhitelistEntry[] | null,
   tag: string,
   assets: readonly string[],
   platforms?: readonly string[]

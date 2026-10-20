@@ -140,6 +140,29 @@ describe('H4: the release archives', () => {
     ])
     expect(candidateCompleteness(contract, MIRROR_WHITELIST, 'b11463', mirrored, ci).complete).toBe(true)
   })
+
+  it('checks no mirror for an engine conf does not mirror (PrismML), and its tags read as they are', () => {
+    const tag = 'prism-b10787-73bfe6c'
+    const prism = (t: string) => release('b11617').assets.map((n) => n.replace('b11617', t))
+    const findings = checkAssets(contract, {
+      candidate: { tag, assets: prism(tag) },
+      pin: { tag: 'prism-b10754-2459f68', assets: prism('prism-b10754-2459f68') },
+      whitelist: null,
+    })
+    expect(findings.filter((f) => f.check === 'assets.mirror')).toEqual([])
+    expect(findings.filter((f) => f.severity !== 'info')).toEqual([])
+    const ci = ['linux-x64', 'macos-arm64', 'windows-x64']
+    expect(candidateCompleteness(contract, null, tag, prism(tag), ci)).toEqual({
+      complete: true,
+      missing: [],
+    })
+    expect(
+      candidateCompleteness(contract, null, tag, [`llama-${tag}-bin-macos-arm64.tar.gz`], ci).missing
+    ).toEqual([
+      { kind: 'core', platform: 'linux-x64', backend: 'linux-cpu-x64' },
+      { kind: 'core', platform: 'windows-x64', backend: 'win-cpu-x64' },
+    ])
+  })
 })
 
 describe("conf's mirror whitelist", () => {
@@ -181,6 +204,12 @@ describe('--version and the invocations', () => {
     expect(versionCommit(fixture('version/b11617.txt'))).toBe('14310190c')
     expect(versionCommit('version: 10344 (a1b2c3d)\nbuilt with cc\n')).toBe('a1b2c3d')
     expect(versionCommit('version: 1.2.3\n')).toBeUndefined()
+  })
+
+  it('reads the build of a PrismML tag: the upstream build the fork is cut from', () => {
+    const output = 'version: 10787 (73bfe6c)\nbuilt with Apple clang for arm64-apple-darwin\n'
+    expect(checkVersion({ tag: 'prism-b10787-73bfe6c', output })).toEqual([])
+    expect(ids(checkVersion({ tag: 'prism-b10788-73bfe6c', output }), 'break')).toEqual(['version.output'])
   })
 
   it('breaks on a build it cannot read, or one that is not the tag’s', () => {

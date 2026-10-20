@@ -5,7 +5,7 @@
 // gathers the inputs, `buildReport` turns them into `report.json`, `renderMarkdown` into `report.md`.
 // Findings carry stable ids (`check/subject`) so runs can be compared; `now` is a parameter.
 import { checkHelp, diffHelp, MIN_HELP_OPTIONS, parseLlamaHelp } from './llama-help.mjs'
-import { upstreamTagBuild } from './engine-pin.mjs'
+import { engineTagBuild } from './engine-pin.mjs'
 
 export const SURFACE_REPORT_SCHEMA = 'atomic-engine-surface-report'
 export const SURFACE_INPUTS_SCHEMA = 'atomic-engine-surface-inputs'
@@ -137,7 +137,8 @@ const CORE_PLATFORM = /^(win|ubuntu|macos)-.*-(x64|arm64)\.(zip|tar\.gz)$/
 /**
  * The release's archives against what core installs (`assets.core_backends` of the contract) and
  * what conf's mirror requires (its whitelist). `pin` is the pin's archive list from the same repo:
- * an archive the pin had and the candidate lacks is a loss; one neither had is not.
+ * an archive the pin had and the candidate lacks is a loss; one neither had is not. A `null`
+ * whitelist is an engine conf does not mirror (PrismML: core downloads from the fork itself).
  */
 export function checkAssets(contract, { candidate, pin, whitelist }) {
   const findings = []
@@ -210,6 +211,7 @@ export function checkAssets(contract, { candidate, pin, whitelist }) {
       )
     )
 
+  if (whitelist === null) return findings
   if (!whitelist || whitelist.length === 0)
     findings.push(finding('assets.mirror', undefined, 'error', "conf's mirror whitelist is unknown"))
   for (const entry of whitelist ?? []) {
@@ -240,13 +242,13 @@ export function checkAssets(contract, { candidate, pin, whitelist }) {
 
 /**
  * Whether a release can be tested yet: ggml-org publishes a tag before all of its archives are up.
- * Complete = every archive the mirror requires and the CPU archive of each of `platforms` (default:
- * every platform core ships for; the mirror carries no macos-x64, so a check of the mirror names the
- * platforms it runs on).
+ * Complete = every archive the mirror requires (none for a `null` whitelist: an engine conf does not
+ * mirror) and the CPU archive of each of `platforms` (default: every platform core ships for; the
+ * mirror carries no macos-x64, so a check of the mirror names the platforms it runs on).
  */
 export function candidateCompleteness(contract, whitelist, tag, assets, platforms) {
   const missing = []
-  for (const entry of whitelist)
+  for (const entry of whitelist ?? [])
     if (entry.required && !assets.some((n) => mirrorRe(entry.pattern, tag).test(n)))
       missing.push({ kind: 'mirror', pattern: entry.pattern })
   for (const b of contract.assets?.core_backends ?? [])
@@ -272,7 +274,7 @@ export function checkVersion({ tag, output }) {
         { output: output.trim().slice(0, 400) }
       ),
     ]
-  const expected = tag ? upstreamTagBuild(tag) : null
+  const expected = tag ? engineTagBuild(tag) : null
   if (expected !== null && build !== expected)
     return [
       finding(
@@ -521,7 +523,7 @@ export function buildReport(contract, inputs, { now, contractSha256 } = {}) {
   const skipped = {}
   const candidate = inputs.candidate
   const pin = inputs.pin ?? null
-  const build = candidate.build ?? (candidate.tag ? upstreamTagBuild(candidate.tag) : null)
+  const build = candidate.build ?? (candidate.tag ? engineTagBuild(candidate.tag) : null)
 
   if (candidate.capture_error) {
     for (const check of ['help.parse', 'invocations.exit', 'version.output'])
@@ -553,6 +555,7 @@ export function buildReport(contract, inputs, { now, contractSha256 } = {}) {
         findings.push(finding(check, undefined, 'error', `no archive list: ${why}`))
     else skipped['assets.core_backends'] = skipped['assets.mirror'] = why
   } else {
+    if (inputs.whitelist?.entries === null) skipped['assets.mirror'] = 'conf does not mirror this engine'
     findings.push(
       ...checkAssets(contract, {
         candidate: { tag: candidate.tag, assets: candidate.assets },

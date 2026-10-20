@@ -14,7 +14,12 @@ export interface Release {
   assets?: ReleaseAsset[]
 }
 
-export declare function assetPatternFor(platform: string, arch: string, exactName?: string): RegExp
+export declare function assetPatternFor(
+  platform: string,
+  arch: string,
+  exactName?: string,
+  tag?: string
+): RegExp
 
 export declare function pickRelease<R extends Release>(
   releases: readonly R[],
