@@ -56,8 +56,11 @@ export declare function upstreamRemoteBackends(
 ): PinBackendVersion[]
 
 export interface Pins {
-  /** Which conf file decided: the release list when this core reads it, else the legacy manifest. */
-  source: 'list' | 'legacy' | 'none'
+  /**
+   * Which conf file decided: the release list when this core reads it, else the legacy manifest;
+   * the PrismML manifest for `atomic-prism`.
+   */
+  source: 'list' | 'legacy' | 'prism-manifest' | 'none'
   core_version: string
   per_platform: Record<string, { backend: string; tag: string | null }>
   list: { readable: boolean; per_platform: Record<string, string | null> | null }
@@ -69,3 +72,38 @@ export declare function resolvePins(input: {
   manifest: unknown
   coreVersion: string
 }): Pins
+
+export declare const PRISM_MANIFEST_SCHEMA_VERSION: number
+export declare const PRISM_PIN_PLATFORMS: readonly PinPlatform[]
+export declare function prismTagBuild(tag: string): number | null
+export declare function engineTagBuild(tag: string): number | null
+
+export interface PrismPinAsset {
+  backend: string
+  name: string
+  size: number
+  sha256: string
+  validation: 'candidate' | 'approved'
+  companion?: true
+  companion_backend?: string
+}
+
+export interface PrismPinRelease {
+  tag: string
+  commit: string
+  min_core_version: string
+  withdrawn?: { reason: string }
+  assets: PrismPinAsset[]
+}
+
+export interface PrismPinManifest {
+  schema_version: 1
+  releases: PrismPinRelease[]
+}
+
+export declare function parsePrismManifest(value: unknown): PrismPinManifest | null
+export declare function prismCatalogToBackends(
+  manifest: PrismPinManifest,
+  options: { coreVersion: string; allowCandidates: boolean }
+): Array<{ version: string; backend: string }>
+export declare function resolvePrismPins(input: { manifest: unknown; coreVersion: string }): Pins

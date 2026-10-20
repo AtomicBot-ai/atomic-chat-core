@@ -10,14 +10,17 @@ const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /**
  * Release asset for a host, in the naming llama.cpp publishes (macOS and Linux ship `.tar.gz`,
  * Windows `.zip`) — the CPU build of the same mapping `src/backend/catalog/archive.ts` encodes.
- * `exactName` (ATOMIC_LIVE_ASSET) replaces the pattern with that one asset name.
+ * `exactName` (ATOMIC_LIVE_ASSET) replaces the pattern with that one asset name. With `tag` the
+ * pattern names that tag, which is how a fork with its own tags (PrismML's `prism-b<N>-<sha7>`,
+ * `llama-prism-b10787-73bfe6c-bin-ubuntu-x64.tar.gz`) is fetched; without it, any `b<N>` build.
  */
-export function assetPatternFor(platform, arch, exactName) {
+export function assetPatternFor(platform, arch, exactName, tag) {
   if (exactName) return new RegExp(`^${escape(exactName)}$`)
   const a = arch === 'arm64' ? 'arm64' : 'x64'
-  if (platform === 'win32') return new RegExp(`^llama-b\\d+-bin-win-cpu-${a}\\.zip$`)
-  if (platform === 'darwin') return new RegExp(`^llama-b\\d+-bin-macos-${a}\\.tar\\.gz$`)
-  return new RegExp(`^llama-b\\d+-bin-ubuntu-${a}\\.tar\\.gz$`)
+  const prefix = tag ? `llama-${escape(tag)}-bin-` : 'llama-b\\d+-bin-'
+  if (platform === 'win32') return new RegExp(`^${prefix}win-cpu-${a}\\.zip$`)
+  if (platform === 'darwin') return new RegExp(`^${prefix}macos-${a}\\.tar\\.gz$`)
+  return new RegExp(`^${prefix}ubuntu-${a}\\.tar\\.gz$`)
 }
 
 /**

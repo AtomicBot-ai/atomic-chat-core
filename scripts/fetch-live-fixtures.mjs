@@ -3,15 +3,19 @@
 // Used by CI (and by hand) so the live suite has something to run against.
 //
 //   node scripts/fetch-live-fixtures.mjs --out /tmp/live [--tag b11617] [--repo ggml-org/llama.cpp]
-//     [--skip-model] [--capture]
+//     [--engine llamacpp-upstream] [--skip-model] [--capture]
 //
 // --tag picks a release (default: the newest one with this platform's CPU asset); --repo any GitHub
-// repo publishing ggml-org's asset names, e.g. AtomicBot-ai/atomic-chat-conf for the signed mirror.
+// repo publishing ggml-org's asset names, e.g. AtomicBot-ai/atomic-chat-conf for the signed mirror,
+// or PrismML-Eng/llama.cpp with a `prism-b<N>-<sha7>` tag. --engine takes the model that engine's
+// live tests need (`live_model` in .github/engine-candidate/<engine>.json; PrismML needs a Bonsai
+// GGUF); without it, or when the engine names none, a tiny stock GGUF.
 // Env: ATOMIC_LIVE_RELEASE_TAG, ATOMIC_LIVE_RELEASE_REPO, ATOMIC_LIVE_ASSET (exact asset name),
 // ATOMIC_LIVE_MODEL_URL (+ ATOMIC_LIVE_MODEL_SHA256), GITHUB_TOKEN / GH_TOKEN for the API.
 //
 // Writes into <out>: bin-path.txt and model-path.txt (exported as ATOMIC_LIVE_UPSTREAM_BIN /
-// ATOMIC_LIVE_UPSTREAM_MODEL), tag.txt (ATOMIC_LIVE_UPSTREAM_TAG) and fixture.json, which records
+// ATOMIC_LIVE_UPSTREAM_MODEL, or the engine's own prefix such as ATOMIC_LIVE_PRISM_*), tag.txt
+// (ATOMIC_LIVE_UPSTREAM_TAG) and fixture.json, which records
 // what was tested: repo, tag, asset and model hashes, and the binary's `--version` output.
 // --capture also writes help.txt, version.txt and list-devices.txt: what `-h`, `--version` and
 // `--list-devices` print (stdout, a newline, stderr — the shape `runHelp` reads), for the fixtures
@@ -29,6 +33,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { assetPatternFor, DEFAULT_RELEASE_REPO, digestMatches, pickRelease } from './lib/live-fixtures.mjs'
 
 const arg = (name) => {
@@ -39,12 +44,24 @@ const arg = (name) => {
 const OUT = resolve(arg('--out') ?? '.live-fixtures')
 const TAG = arg('--tag') ?? process.env.ATOMIC_LIVE_RELEASE_TAG
 const REPO = arg('--repo') ?? process.env.ATOMIC_LIVE_RELEASE_REPO ?? DEFAULT_RELEASE_REPO
+const ENGINE = arg('--engine')
+const engineConfig = ENGINE
+  ? JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL(`../.github/engine-candidate/${ENGINE}.json`, import.meta.url)),
+        'utf8'
+      )
+    )
+  : undefined
 const DEFAULT_MODEL_URL =
+  engineConfig?.live_model?.url ??
   'https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories15M-q4_0.gguf'
-const DEFAULT_MODEL_SHA256 = '66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739'
+const DEFAULT_MODEL_SHA256 =
+  engineConfig?.live_model?.sha256 ?? '66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739'
 const MODEL_URL = process.env.ATOMIC_LIVE_MODEL_URL ?? DEFAULT_MODEL_URL
 const MODEL_SHA256 =
   process.env.ATOMIC_LIVE_MODEL_SHA256 ?? (MODEL_URL === DEFAULT_MODEL_URL ? DEFAULT_MODEL_SHA256 : undefined)
+const ENV_PREFIX = engineConfig?.live_env_prefix ?? 'ATOMIC_LIVE_UPSTREAM'
 const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
 const SKIP_MODEL = process.argv.includes('--skip-model')
 const CAPTURE = process.argv.includes('--capture')
@@ -100,7 +117,7 @@ function findServer(dir) {
   throw new Error(`no ${wanted} inside ${dir}`)
 }
 
-const pattern = assetPatternFor(process.platform, process.arch, process.env.ATOMIC_LIVE_ASSET)
+const pattern = assetPatternFor(process.platform, process.arch, process.env.ATOMIC_LIVE_ASSET, TAG)
 const api = `https://api.github.com/repos/${REPO}/releases`
 const releases = TAG ? [await json(`${api}/tags/${TAG}`)] : await json(`${api}?per_page=30`)
 const picked = pickRelease(releases, pattern)
@@ -168,6 +185,6 @@ writeFileSync(
     2
   ) + '\n'
 )
-console.log(`ATOMIC_LIVE_UPSTREAM_BIN=${server}`)
-if (model) console.log(`ATOMIC_LIVE_UPSTREAM_MODEL=${model}`)
-console.log(`ATOMIC_LIVE_UPSTREAM_TAG=${release.tag_name}`)
+console.log(`${ENV_PREFIX}_BIN=${server}`)
+if (model) console.log(`${ENV_PREFIX}_MODEL=${model}`)
+console.log(`${ENV_PREFIX}_TAG=${release.tag_name}`)

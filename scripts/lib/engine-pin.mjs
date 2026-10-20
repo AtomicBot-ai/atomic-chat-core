@@ -1,7 +1,8 @@
-// Which upstream llama.cpp release a core version runs today: its "pin". A plain-JS mirror of
-// src/backend/catalog/upstream-releases.ts (`parseUpstreamReleases`, `upstreamRemoteBackends`) and
-// manifest.ts (`parseManifestForPlatform`), for the scripts that cannot import TypeScript;
-// test/contract/engine-pin.test.ts holds the two to the same answers.
+// Which llama.cpp release a core version runs today: its "pin". A plain-JS mirror of
+// src/backend/catalog/upstream-releases.ts (`parseUpstreamReleases`, `upstreamRemoteBackends`),
+// manifest.ts (`parseManifestForPlatform`) and, for the PrismML fork (`atomic-prism`),
+// prism-manifest.ts (`parsePrismManifest`, `prismCatalogToBackends`), for the scripts that cannot
+// import TypeScript; test/contract/engine-pin.test.ts holds the two to the same answers.
 //
 // The pin of a platform is the release its CPU backend comes from: the newest release conf's
 // `backends/llamacpp-upstream-releases.json` lists that is not withdrawn, that this core version
@@ -206,5 +207,114 @@ export function resolvePins({ releases, manifest, coreVersion }) {
     ),
     list: { readable: list !== null, per_platform: listPins },
     legacy: { tag: legacy?.releases[0]?.tag ?? null },
+  }
+}
+
+// --- PrismML (atomic-prism) -------------------------------------------------------------------------
+//
+// conf's `backends/atomic-prism-manifest.json` lists PrismML-Eng/llama.cpp builds with a backend id on
+// every asset; core downloads them from PrismML itself. The pin of a platform is the newest offered
+// release whose CPU pack for it is approved, as `prismCatalogToBackends` offers them.
+
+export const PRISM_MANIFEST_SCHEMA_VERSION = 1
+
+/** Where PrismML publishes a build core installs (src/backend/select/prism.ts), with its CPU pack. */
+export const PRISM_PIN_PLATFORMS = [
+  { platform: 'linux-x64', os: 'linux', arch: 'x64', backend: 'linux-cpu-x64' },
+  { platform: 'macos-arm64', os: 'macos', arch: 'arm64', backend: 'macos-arm64' },
+  { platform: 'macos-x64', os: 'macos', arch: 'x64', backend: 'macos-x64' },
+  { platform: 'windows-x64', os: 'windows', arch: 'x64', backend: 'win-cpu-x64' },
+]
+
+const PRISM_TAG_RE = /^prism-b(\d+)-[0-9a-f]{7}$/
+
+/** Build number of a PrismML tag (`prism-b10787-73bfe6c` → 10787), `null` for any other shape. */
+export function prismTagBuild(tag) {
+  const match = PRISM_TAG_RE.exec(tag)
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * Build number of a tag of any engine the check knows: `b11617` or `prism-b10787-73bfe6c`. PrismML's
+ * number is the upstream build the fork is cut from, which is what `--version` prints.
+ */
+export function engineTagBuild(tag) {
+  return upstreamTagBuild(tag) ?? prismTagBuild(tag)
+}
+
+function parsePrismAsset(raw) {
+  if (!isRecord(raw)) return null
+  const { backend, name, size, sha256, validation } = raw
+  if (!isString(backend) || !isString(name)) return null
+  if (typeof size !== 'number' || !Number.isInteger(size) || size <= 0) return null
+  if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) return null
+  if (validation !== 'candidate' && validation !== 'approved') return null
+  const asset = { backend, name, size, sha256, validation }
+  if (raw.companion === true) asset.companion = true
+  if (isString(raw.companion_backend)) asset.companion_backend = raw.companion_backend
+  return asset
+}
+
+function parsePrismRelease(raw) {
+  if (!isRecord(raw)) return null
+  const { tag, commit, published_at, min_core_version, notes_url } = raw
+  if (!isString(tag) || prismTagBuild(tag) === null) return null
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/.test(commit)) return null
+  if (!isString(published_at) || !isString(min_core_version) || !isString(notes_url)) return null
+  const assets = Array.isArray(raw.assets) ? raw.assets.map(parsePrismAsset) : []
+  const release = { tag, commit, min_core_version, assets: assets.filter((a) => a !== null) }
+  if (isRecord(raw.withdrawn) && isString(raw.withdrawn.reason))
+    release.withdrawn = { reason: raw.withdrawn.reason }
+  return release
+}
+
+/** A parsed PrismML manifest, or `null` for anything that is not one this core reads. */
+export function parsePrismManifest(value) {
+  if (!isRecord(value)) return null
+  if (value.schema_version !== PRISM_MANIFEST_SCHEMA_VERSION) return null
+  if (!Array.isArray(value.releases)) return null
+  return { schema_version: 1, releases: value.releases.map(parsePrismRelease).filter((r) => r !== null) }
+}
+
+/** Offered assets of offered releases, newest build first, as `{ version, backend }` (`prismCatalogToBackends`). */
+export function prismCatalogToBackends(manifest, options) {
+  const validated = (a) => a.validation === 'approved' || options.allowCandidates
+  const offered = (release, asset) => {
+    if (asset.companion || !validated(asset)) return false
+    if (!asset.companion_backend) return true
+    const companion = release.assets.find((a) => a.backend === asset.companion_backend)
+    return !!companion && validated(companion)
+  }
+  const out = []
+  const newestFirst = [...manifest.releases].sort((a, b) => prismTagBuild(b.tag) - prismTagBuild(a.tag))
+  for (const release of newestFirst) {
+    if (!upstreamReleaseOffered(release, options)) continue
+    for (const asset of release.assets)
+      if (offered(release, asset)) out.push({ version: release.tag, backend: asset.backend })
+  }
+  return out
+}
+
+/**
+ * The PrismML pin of `coreVersion` on every platform PrismML builds for, from conf's manifest (raw
+ * JSON, may be `undefined`). The same shape as `resolvePins`; there is no legacy file.
+ */
+export function resolvePrismPins({ manifest, coreVersion }) {
+  const parsed = manifest === undefined ? null : parsePrismManifest(manifest)
+  const offered = parsed ? prismCatalogToBackends(parsed, { coreVersion, allowCandidates: false }) : []
+  const pins = Object.fromEntries(
+    PRISM_PIN_PLATFORMS.map((p) => [
+      p.platform,
+      offered.find((e) => e.backend === p.backend)?.version ?? null,
+    ])
+  )
+  return {
+    source: parsed ? 'prism-manifest' : 'none',
+    core_version: coreVersion,
+    per_platform: Object.fromEntries(
+      PRISM_PIN_PLATFORMS.map((p) => [p.platform, { backend: p.backend, tag: pins[p.platform] }])
+    ),
+    list: { readable: parsed !== null, per_platform: parsed ? pins : null },
+    legacy: { tag: null },
   }
 }

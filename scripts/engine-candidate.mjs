@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// Is an upstream llama.cpp build compatible with this core? The steps of
-// .github/workflows/engine-candidate.yml, and the same check on this machine alone.
+// Is a llama.cpp build compatible with this core? The steps of
+// .github/workflows/engine-candidate.yml, and the same check on this machine alone. --engine picks
+// .github/engine-candidate/<engine>.json: upstream llama.cpp (`llamacpp-upstream`, b-tags from
+// ggml-org, pinned by conf's release list) or PrismML's fork (`atomic-prism`, prism-b<N>-<sha7> tags
+// from PrismML-Eng/llama.cpp, pinned by conf's PrismML manifest, live tests on a Bonsai GGUF).
 //
-//   resolve  fix core and conf to one commit each, pick the candidate (the newest complete b-tag of
+//   resolve  fix core and conf to one commit each, pick the candidate (the newest complete tag of
 //            --repo unless --tag), check its archives are all up, compute the pin per platform and
 //            the live matrix; writes resolve.json (and $GITHUB_OUTPUT in CI).
 //   live     run the live files on a fetched build (--fixtures, the dir fetch-live-fixtures wrote)
@@ -13,11 +16,13 @@
 //            writes `status` to $GITHUB_OUTPUT.
 //   local    all of it here, for this host only: `npm run engine:check -- --tag b11617`,
 //            `-- --repo AtomicBot-ai/atomic-chat-conf --tag b11463`, `-- --bin <llama-server>`,
-//            `-- --tag b10875 --pin b10874 --suites live`. Writes results.json, results.md,
+//            `-- --tag b10875 --pin b10874 --suites live`,
+//            `-- --engine atomic-prism --tag prism-b10787-73bfe6c`. Writes results.json, results.md,
 //            report.json and report.md into --out (default .engine-check/); exit 0 only on pass.
 //
 // CI passes its inputs as env (ENGINE, TAG, REPO, CANDIDATE_ID, CORE_REF, PIN, CONF_REF, SUITES);
-// flags win over env. GITHUB_TOKEN / GH_TOKEN lift the API rate limit.
+// flags win over env; an empty REPO is the engine's own (`default_repo`). GITHUB_TOKEN / GH_TOKEN
+// lift the API rate limit.
 import { spawnSync } from 'node:child_process'
 import {
   appendFileSync,
@@ -32,8 +37,6 @@ import {
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
-import { DEFAULT_RELEASE_REPO } from './lib/live-fixtures.mjs'
-import { resolvePins } from './lib/engine-pin.mjs'
 import {
   candidateCompleteness,
   MIRROR_WHITELIST,
@@ -51,6 +54,10 @@ import {
 } from './lib/engine-results.mjs'
 import {
   coreIdentity,
+  engineConfig,
+  engineContract,
+  enginePins,
+  engineTagRe,
   fetchBuild,
   githubRelease,
   githubReleases,
@@ -67,8 +74,8 @@ const writeJson = (path, value) => {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
 }
-const configFor = (engine) => readJson(join(ROOT, '.github/engine-candidate', `${engine}.json`))
-const isTag = (v) => /^b\d+$/.test(v ?? '')
+/** The prefix of the env the engine's live files read: `<prefix>_BIN`, `_MODEL`, `_TAG`. */
+const liveEnvPrefix = (config) => config.live_env_prefix ?? 'ATOMIC_LIVE_UPSTREAM'
 
 /** `key=value` lines for later steps; multi-line values never occur (JSON is one line). */
 function githubOutput(values) {
@@ -111,18 +118,26 @@ async function resolveRun({
   bin,
   platforms,
 }) {
-  const config = configFor(engine)
-  const contract = readJson(join(ROOT, config.contract))
+  const config = engineConfig(engine)
+  const contract = engineContract(config)
+  const tagRe = engineTagRe(config)
+  const isTag = (v) => tagRe.test(v ?? '')
+  const defaultRepo = config.default_repo
   const errors = []
   if (!CANDIDATE_ID_RE.test(candidateId)) throw new Error(`candidate_id must match ${CANDIDATE_ID_RE}`)
   if (!['all', 'live'].includes(suites)) throw new Error('suites is all or live')
-  if (tag && !isTag(tag)) throw new Error('tag must look like b11617')
-  if (pin && !['auto', 'none'].includes(pin) && !isTag(pin)) throw new Error('pin is auto, none or bN')
+  if (tag && !isTag(tag)) throw new Error(`tag must match ${tagRe} for ${engine}`)
+  if (pin && !['auto', 'none'].includes(pin) && !isTag(pin))
+    throw new Error(`pin is auto, none or a tag matching ${tagRe}`)
 
   const core = coreIdentity()
   const conf = await loadConf(confDir ? { dir: confDir } : { ref: confRef })
   errors.push(...conf.errors)
-  const whitelist = (conf.mirrorSource && parseMirrorWhitelist(conf.mirrorSource)) || MIRROR_WHITELIST
+  // conf mirrors upstream builds only: a fork that core downloads from its own releases has no whitelist.
+  const whitelist =
+    config.mirror === false
+      ? null
+      : (conf.mirrorSource && parseMirrorWhitelist(conf.mirrorSource)) || MIRROR_WHITELIST
   const keys = platforms.map((p) => p.platform)
 
   let candidate
@@ -158,8 +173,7 @@ async function resolveRun({
             keys
           ).complete
       )
-      if (!release)
-        throw new Error(`no complete b-tag among the ${releases.length} newest releases of ${repo}`)
+      if (!release) throw new Error(`no complete tag among the ${releases.length} newest releases of ${repo}`)
     }
     const names = (release.assets ?? []).map((a) => a.name).sort()
     const completeness = candidateCompleteness(contract, whitelist, release.tag_name, names, keys)
@@ -173,7 +187,7 @@ async function resolveRun({
       tag: release.tag_name,
       source: 'release',
       commit:
-        repo === DEFAULT_RELEASE_REPO && /^[0-9a-f]{40}$/.test(release.target_commitish ?? '')
+        repo === defaultRepo && /^[0-9a-f]{40}$/.test(release.target_commitish ?? '')
           ? release.target_commitish
           : null,
       published_at: release.published_at ?? null,
@@ -190,19 +204,19 @@ async function resolveRun({
     }
   else if (pin === 'none')
     pins = { source: 'none', per_platform: Object.fromEntries(keys.map((k) => [k, { tag: null }])) }
-  else pins = resolvePins({ releases: conf.releases, manifest: conf.manifest, coreVersion: core.version })
+  else pins = enginePins(config, conf, core.version)
   const pinTag =
     pins.per_platform['linux-x64']?.tag ?? keys.map((k) => pins.per_platform[k]?.tag).find(Boolean) ?? null
   // The pin's archives from the candidate's repo when it has them (the mirror's signed bytes against
-  // the mirror's), else from ggml-org.
+  // the mirror's), else from the engine's own repo.
   let pinRepo = null
   if (pinTag)
     pinRepo =
       candidate.repo &&
-      candidate.repo !== DEFAULT_RELEASE_REPO &&
+      candidate.repo !== defaultRepo &&
       (await githubRelease(candidate.repo, pinTag).catch(() => null))
         ? candidate.repo
-        : DEFAULT_RELEASE_REPO
+        : defaultRepo
 
   const liveMatrix = []
   for (const { platform, runner } of platforms) {
@@ -249,7 +263,7 @@ async function cmdResolve(argv) {
     options: {
       'engine': { type: 'string', default: env('ENGINE', 'llamacpp-upstream') },
       'tag': { type: 'string', default: env('TAG', '') },
-      'repo': { type: 'string', default: env('REPO', DEFAULT_RELEASE_REPO) },
+      'repo': { type: 'string', default: env('REPO', '') },
       'candidate-id': { type: 'string', default: env('CANDIDATE_ID', 'manual') },
       'core-ref': { type: 'string', default: env('CORE_REF', '') },
       'pin': { type: 'string', default: env('PIN', 'auto') },
@@ -258,11 +272,11 @@ async function cmdResolve(argv) {
       'out': { type: 'string', default: '.engine-check/resolve' },
     },
   })
-  const config = configFor(o.engine)
+  const config = engineConfig(o.engine)
   const resolved = await resolveRun({
     engine: o.engine,
     tag: o.tag || undefined,
-    repo: o.repo,
+    repo: o.repo || config.default_repo,
     candidateId: o['candidate-id'],
     coreRef: o['core-ref'] || null,
     pin: o.pin,
@@ -294,6 +308,7 @@ const observedDir = (report) => join(dirname(report), `${basename(report, '.json
 /** Run the engine's live files against a fetched build; the report lands at `report`. */
 function runLive({ config, fixtures, report, tag, bin, model }) {
   const read = (name) => readFileSync(join(fixtures, name), 'utf8').trim()
+  const prefix = liveEnvPrefix(config)
   const vitest = join(ROOT, 'node_modules/vitest/vitest.mjs')
   mkdirSync(dirname(report), { recursive: true })
   const r = spawnSync(
@@ -315,9 +330,9 @@ function runLive({ config, fixtures, report, tag, bin, model }) {
       env: {
         ...process.env,
         ATOMIC_LIVE: '1',
-        ATOMIC_LIVE_UPSTREAM_BIN: bin ?? read('bin-path.txt'),
-        ATOMIC_LIVE_UPSTREAM_MODEL: model ?? read('model-path.txt'),
-        ATOMIC_LIVE_UPSTREAM_TAG: tag ?? read('tag.txt'),
+        [`${prefix}_BIN`]: bin ?? read('bin-path.txt'),
+        [`${prefix}_MODEL`]: model ?? read('model-path.txt'),
+        [`${prefix}_TAG`]: tag ?? read('tag.txt'),
         // The live contract probe writes observed.json here; the cell reads it.
         ATOMIC_LIVE_REPORT_DIR: observedDir(report),
       },
@@ -337,7 +352,7 @@ function cmdLive(argv) {
     },
   })
   if (!o.fixtures || !o.report) throw new Error('live needs --fixtures <dir> and --report <file>')
-  runLive({ config: configFor(o.engine), fixtures: o.fixtures, report: o.report })
+  runLive({ config: engineConfig(o.engine), fixtures: o.fixtures, report: o.report })
   // The verdict is the cell's to give, from the report: a red test is not a tool failure.
   return 0
 }
@@ -362,7 +377,7 @@ function cmdCell(argv) {
     },
   })
   if (!o.out || !o.platform) throw new Error('cell needs --platform and --out')
-  const config = configFor(o.engine)
+  const config = engineConfig(o.engine)
   let cell
   if (o.kind === 'live') {
     cell = liveCell({
@@ -444,7 +459,7 @@ function cmdResults(argv) {
     },
   })
   if (!o.artifacts) throw new Error('results needs --artifacts <dir>')
-  const config = configFor(o.engine)
+  const config = engineConfig(o.engine)
   const find = (name) => {
     const hits = []
     const walk = (d) => {
@@ -498,7 +513,7 @@ async function cmdLocal(argv) {
       'engine': { type: 'string', default: 'llamacpp-upstream' },
       'tag': { type: 'string' },
       'bin': { type: 'string' },
-      'repo': { type: 'string', default: DEFAULT_RELEASE_REPO },
+      'repo': { type: 'string' },
       'pin': { type: 'string', default: 'auto' },
       'conf': { type: 'string' },
       'conf-ref': { type: 'string', default: 'main' },
@@ -511,7 +526,7 @@ async function cmdLocal(argv) {
   if (o.tag && o.bin) throw new Error('give --tag or --bin, not both')
   const out = resolve(o.out)
   const cache = join(out, 'cache')
-  const config = configFor(o.engine)
+  const config = engineConfig(o.engine)
   const platform = hostPlatform()
   const platforms = config.platforms.filter((p) => p.platform === platform)
   if (platforms.length === 0) platforms.push({ platform, runner: 'local' })
@@ -519,7 +534,7 @@ async function cmdLocal(argv) {
   const resolved = await resolveRun({
     engine: o.engine,
     tag: o.tag,
-    repo: o.repo,
+    repo: o.repo ?? config.default_repo,
     candidateId: o['candidate-id'],
     coreRef: null,
     pin: o.pin,
@@ -540,6 +555,8 @@ async function cmdLocal(argv) {
   console.log('\n== surface')
   const surfaceArgs = [
     join(ROOT, 'scripts/engine-surface-diff.mjs'),
+    '--engine',
+    o.engine,
     ...(o.bin ? ['--candidate-bin', resolve(o.bin)] : ['--candidate', cand.tag, '--repo', cand.repo]),
     '--pin',
     resolved.pin.tag ?? 'none',
@@ -557,11 +574,16 @@ async function cmdLocal(argv) {
 
   // Live: the pin first (its fetch brings the model a local --bin needs), then the candidate.
   const cells = []
-  let model = process.env.ATOMIC_LIVE_UPSTREAM_MODEL || undefined
+  let model = process.env[`${liveEnvPrefix(config)}_MODEL`] || undefined
   const ordered = [...resolved.live_matrix].sort((a, b) => (a.role === 'pin' ? -1 : b.role === 'pin' ? 1 : 0))
   if (o.bin && !model && !ordered.some((m) => m.role === 'pin')) {
-    // No pin to bring the model: fetch the candidate's own tag from ggml-org for it.
-    model = fetchBuild({ tag: cand.tag, repo: DEFAULT_RELEASE_REPO, out: join(cache, 'model') }).model
+    // No pin to bring the model: fetch the candidate's own tag from the engine's repo for it.
+    model = fetchBuild({
+      tag: cand.tag,
+      repo: config.default_repo,
+      out: join(cache, 'model'),
+      engine: o.engine,
+    }).model
   }
   for (const m of ordered) {
     console.log(`\n== live ${m.platform} ${m.role} ${m.tag}`)
@@ -585,6 +607,7 @@ async function cmdLocal(argv) {
           repo: m.repo,
           out: join(cache, m.repo.replace('/', '__'), m.tag, m.platform),
           model: model === undefined,
+          engine: o.engine,
         })
         fixtures = build.dir
         model ??= build.model

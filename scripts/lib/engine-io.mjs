@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolvePins, resolvePrismPins } from './engine-pin.mjs'
 
 export const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 export const CONF_REPO = 'AtomicBot-ai/atomic-chat-conf'
@@ -14,9 +15,42 @@ export const CONF_FILES = {
   releases: 'backends/llamacpp-upstream-releases.json',
   manifest: 'backends/manifest.json',
   mirror: '.github/scripts/mirror.mjs',
+  prism: 'backends/atomic-prism-manifest.json',
 }
 
 const TOKEN = () => process.env.GITHUB_TOKEN || process.env.GH_TOKEN
+
+/**
+ * `.github/engine-candidate/<engine>.json`: where the engine's builds live, the platforms and live
+ * tests of its check, and how it differs from upstream llama.cpp. A core without the file does not
+ * check that engine: the orchestrator looks for it on a core release before it asks for a check.
+ */
+export function engineConfig(engine) {
+  const path = join(ROOT, '.github/engine-candidate', `${engine}.json`)
+  if (!/^[a-z0-9-]+$/.test(engine) || !existsSync(path))
+    throw new Error(`this core does not check ${engine} (no .github/engine-candidate/${engine}.json)`)
+  return JSON.parse(readFileSync(path, 'utf8'))
+}
+
+/**
+ * The contract a build of the engine is held to: the config's `contract` file, named after the
+ * engine and with the config's `upstream` (a fork's repo and branch) over the file's. PrismML runs
+ * the same `llama-server` surface core drives for upstream, so it shares that contract.
+ */
+export function engineContract(config) {
+  const contract = JSON.parse(readFileSync(join(ROOT, config.contract), 'utf8'))
+  return { ...contract, engine: config.engine, upstream: { ...contract.upstream, ...config.upstream } }
+}
+
+/** The engine's release tags: `b11617` unless the config names its own (`tag_pattern`). */
+export const engineTagRe = (config) => new RegExp(config.tag_pattern ?? '^b\\d+$')
+
+/** The engine's pin per platform, from the conf file core reads it from (`pins` in the config). */
+export function enginePins(config, conf, coreVersion) {
+  return config.pins === 'prism-manifest'
+    ? resolvePrismPins({ manifest: conf.prism, coreVersion })
+    : resolvePins({ releases: conf.releases, manifest: conf.manifest, coreVersion })
+}
 
 /** `GET https://api.github.com<path>` as JSON; `null` on a 404 when `allow404`. */
 export async function githubJson(path, { allow404 = false } = {}) {
@@ -62,7 +96,8 @@ export function git(cwd, args, options = {}) {
 }
 
 /**
- * conf's release list, legacy manifest and mirror script at one commit: a local checkout (`dir`),
+ * conf's release list, legacy manifest, mirror script and PrismML manifest at one commit: a local
+ * checkout (`dir`),
  * or a ref of AtomicBot-ai/atomic-chat-conf resolved to its sha first, so one run reads one version.
  * A file that cannot be read is `undefined` and named in `errors`.
  */
@@ -101,6 +136,7 @@ export async function loadConf({ dir, ref }) {
   conf.releases = await json(CONF_FILES.releases)
   conf.manifest = await json(CONF_FILES.manifest)
   conf.mirrorSource = await read(CONF_FILES.mirror)
+  conf.prism = await json(CONF_FILES.prism)
   return conf
 }
 
@@ -121,11 +157,12 @@ export const sha256File = (path) => createHash('sha256').update(readFileSync(pat
 
 /**
  * This host's archive of `repo`@`tag`, unpacked under `out` by scripts/fetch-live-fixtures.mjs
- * (which checks it against the release digest and reuses what is already there), with the small
- * GGUF unless `model` is false.
+ * (which checks it against the release digest and reuses what is already there), with the GGUF
+ * `engine`'s live tests take unless `model` is false.
  */
-export function fetchBuild({ tag, repo, out, model = true }) {
+export function fetchBuild({ tag, repo, out, model = true, engine }) {
   const args = [join(ROOT, 'scripts/fetch-live-fixtures.mjs'), '--out', out, '--tag', tag, '--repo', repo]
+  if (engine) args.push('--engine', engine)
   if (!model) args.push('--skip-model')
   const r = spawnSync(process.execPath, args, { stdio: ['ignore', 'inherit', 'inherit'] })
   if (r.status !== 0) throw new Error(`fetch-live-fixtures ${repo}@${tag} exited ${r.status ?? r.signal}`)
