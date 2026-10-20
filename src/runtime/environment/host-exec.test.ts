@@ -146,6 +146,40 @@ describe('running a probe command', () => {
     expect((await readEnv('PATH')).stdout).not.toBe('<unset>')
   })
 
+  /** The environment `spawn` was handed, by a fake that then fails to start (an unanswered command). */
+  const spawnedEnv = async (options: HostExecOptions, overlay: Record<string, string | undefined>) => {
+    let env: NodeJS.ProcessEnv | undefined
+    const spawnProcess = ((_command: string, _args: string[], o: { env?: NodeJS.ProcessEnv }) => {
+      env = o.env
+      throw new Error('not started')
+    }) as unknown as NonNullable<HostExecOptions['spawnProcess']>
+    expect((await hostExec({ ...options, spawnProcess })('powershell.exe', [], overlay)).code).toBeNull()
+    return env
+  }
+
+  it('on Windows, an overlaid name replaces or strips the base one in any case and keeps the rest', async () => {
+    // Started from pwsh, the core inherits PowerShell 7's module path; readWindowsAcl's own must win.
+    const base = {
+      Path: 'C:\\Windows',
+      TEMP: 'C:\\Temp',
+      PSMODULEPATH: 'C:\\pwsh7',
+      psmodulepath: 'C:\\x',
+      Mark: '1',
+    }
+    expect(
+      await spawnedEnv({ platform: 'win32', env: base }, { PSModulePath: 'C:\\ps51', MARK: undefined })
+    ).toEqual({ Path: 'C:\\Windows', TEMP: 'C:\\Temp', PSModulePath: 'C:\\ps51' })
+  })
+
+  it('elsewhere, names that differ in case are different variables', async () => {
+    expect(
+      await spawnedEnv({ platform: 'linux', env: { Mark: '1', MARK: '2' } }, { mark: '3', MARK: undefined })
+    ).toEqual({
+      Mark: '1',
+      mark: '3',
+    })
+  })
+
   it('sets a key the overlay maps to a string, on top of the ambient environment', async () => {
     const answer = await hostExec()(
       node,
