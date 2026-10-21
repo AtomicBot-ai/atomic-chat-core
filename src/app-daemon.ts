@@ -17,6 +17,11 @@ if (process.argv[2] === 'foundry-host') {
   const { runFoundryHostMain } = await import('./runtime/foundry-local/foundry-host.js')
   process.exit(await runFoundryHostMain(process.argv.slice(3)))
 }
+// The LiteRT-LM host (change add-litert-lm-runtime, design D1), the same way.
+if (process.argv[2] === 'litert-host') {
+  const { runLiteRtHostMain } = await import('./runtime/litert-lm/litert-host.js')
+  process.exit(await runLiteRtHostMain(process.argv.slice(3)))
+}
 
 await runAppDaemon({
   argv: process.argv.slice(2),

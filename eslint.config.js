@@ -79,10 +79,10 @@ export default tseslint.config(
     },
   },
   {
-    // The one exception to "no bun:*" (operator decision Q2 of change add-foundry-local): the Foundry
-    // Local host's bindings, imported dynamically by the hidden `foundry-host` mode alone. Every other
-    // restriction of the runtime-agnostic block stays.
-    files: ['src/runtime/foundry-local/host/ffi-bun.ts'],
+    // The two exceptions to "no bun:*" (operator decision Q2 of change add-foundry-local; change
+    // add-litert-lm-runtime, design D1): the Foundry Local and LiteRT-LM hosts' bindings, each imported
+    // dynamically by its hidden host mode alone. Every other restriction of the runtime-agnostic block stays.
+    files: ['src/runtime/foundry-local/host/ffi-bun.ts', 'src/runtime/litert-lm/host/ffi-bun.ts'],
     rules: {
       'no-restricted-imports': [
         'error',

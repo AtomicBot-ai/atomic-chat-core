@@ -7,11 +7,13 @@ import { join, relative } from 'node:path'
 const ROOT = new URL('..', import.meta.url).pathname
 const SRC = join(ROOT, 'src')
 const BROWSER_SAFE = ['src/contracts', 'src/client']
-// The one exception to "no bun:*" (operator decision Q2 of change add-foundry-local, ADR in docs/decisions):
-// the Foundry Local host's bindings, imported dynamically by the hidden `foundry-host` mode alone.
+// The two exceptions to "no bun:*" (operator decision Q2 of change add-foundry-local, ADR in docs/decisions;
+// change add-litert-lm-runtime, design D1): the Foundry Local and LiteRT-LM hosts' bindings, each imported
+// dynamically by its hidden host mode alone.
 const BUN_FFI_ALLOWED = new Set([
   'src/runtime/foundry-local/host/ffi-bun.ts',
   'src/runtime/foundry-local/host/bun-ffi.d.ts',
+  'src/runtime/litert-lm/host/ffi-bun.ts',
 ])
 const BUILTINS = [
   'assert',

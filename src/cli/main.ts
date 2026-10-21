@@ -117,6 +117,11 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         const { runFoundryHostMain } = await import('../runtime/foundry-local/foundry-host.js')
         return await runFoundryHostMain(rest, io)
       }
+      // Hidden from USAGE: the per-model host core starts for LiteRT-LM (change add-litert-lm-runtime, D1).
+      case 'litert-host': {
+        const { runLiteRtHostMain } = await import('../runtime/litert-lm/litert-host.js')
+        return await runLiteRtHostMain(rest, io)
+      }
       default:
         io.stderr(`Unknown command: ${command}\n\n${USAGE}`)
         return 2
