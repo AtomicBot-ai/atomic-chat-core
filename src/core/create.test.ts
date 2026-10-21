@@ -250,7 +250,7 @@ describe('taking ownership', () => {
     expect(() => core.runtime('ollama' as never)).toThrow(
       expect.objectContaining({
         details:
-          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, tensorrt-llm, vllm, sglang',
+          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, litert-lm, tensorrt-llm, vllm, sglang',
       })
     )
   })

@@ -5,3 +5,6 @@
 export * from './host-process.js'
 export * from './model-yml.js'
 export * from './runtime.js'
+export * from './npu.js'
+export * from './accelerators.js'
+export * from './check.js'

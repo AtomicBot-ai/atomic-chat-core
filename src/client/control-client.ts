@@ -15,6 +15,11 @@ import type {
   FoundryLocalAccelerators,
   FoundryLocalPrepareRequest,
   FoundryLocalPrepareResult,
+  LiteRtLmAccelerators,
+  LiteRtLmCheckRequest,
+  LiteRtLmCheckResult,
+  LiteRtLmPrepareRequest,
+  LiteRtLmPrepareResult,
   EngineBuildCatalog,
   EngineBuildCatalogRequest,
   EngineBuildId,
@@ -251,6 +256,29 @@ export class CoreClient {
     return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
       method: 'DELETE',
     })
+  }
+
+  // --- LiteRT-LM's accelerator and check (change `add-litert-lm-runtime`, tasks 6.4–6.5) ---------
+
+  /** What this machine is offered (OpenVINO on an Intel NPU LiteRT-LM targets), with what is prepared. */
+  liteRtLmAccelerators(): Promise<LiteRtLmAccelerators> {
+    return this.call('/runtimes/litert-lm/accelerators')
+  }
+
+  /**
+   * Download and unpack the accelerators named (none: every one offered); progress arrives as
+   * `litert-lm:accelerators` events. `ENGINE_INSTALL_IN_PROGRESS` while another prepare runs.
+   */
+  prepareLiteRtLmAccelerators(request: LiteRtLmPrepareRequest = {}): Promise<LiteRtLmPrepareResult> {
+    return this.call('/runtimes/litert-lm/accelerators/prepare', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  /** Whether a variant, a downloaded file or an installed model would run here; files come with their facts. */
+  checkLiteRtLmModel(request: LiteRtLmCheckRequest): Promise<LiteRtLmCheckResult> {
+    return this.call('/models/litert-lm/check', { method: 'POST', body: JSON.stringify(request) })
   }
 
   // --- Foundry Local's accelerators (change `add-foundry-local`, task 6.4) ------------------------

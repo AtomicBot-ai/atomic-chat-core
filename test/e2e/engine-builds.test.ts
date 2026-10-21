@@ -495,6 +495,120 @@ describe.skipIf(!existsSync(BIN) || LITERT_HOST === null)(
   }
 )
 
+describe.skipIf(!existsSync(BIN) || LITERT_HOST === null)(
+  'LiteRT-LM OpenVINO through the core (task 6.4)',
+  () => {
+    it('offers OpenVINO on an Intel NPU, prepares it with progress, unpacks only its libs, and does not download twice', async () => {
+      const folder = ctx.dataFolder
+      const platform = LITERT_HOST as string
+      const libName = `litert_lm_api-0.18.1-py3-none-${platform}.whl`
+      const lib = makeZip([{ name: `litert_lm/${LITERT_LIBRARY[platform]}`, data: Buffer.from('lib') }])
+      mirror.serve(`/packages/lr/${libName}`, lib)
+      const ovName = 'openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl'
+      const ov = makeZip([
+        { name: 'openvino/__init__.py', data: Buffer.from('py') },
+        { name: 'openvino/libs/openvino.dll', data: Buffer.from('ov'.repeat(50_000)) },
+        { name: 'openvino/libs/openvino_intel_npu_plugin.dll', data: Buffer.from('npu') },
+      ])
+      mirror.serve(`/packages/ov/${ovName}`, ov)
+      const pin = (body: Buffer) => ({
+        size: body.length,
+        sha256: createHash('sha256').update(body).digest('hex'),
+      })
+      const manifest = join(folder, 'litert-lm-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.18.1',
+              published_at: '2026-10-19T22:44:33Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              assets: [
+                {
+                  platform,
+                  url: `https://files.pythonhosted.org/packages/lr/${libName}`,
+                  name: libName,
+                  ...pin(lib),
+                },
+              ],
+              accelerators: [
+                {
+                  id: 'openvino',
+                  platform: 'win-x64',
+                  version: '2026.4.1',
+                  url: `https://files.pythonhosted.org/packages/ov/${ovName}`,
+                  name: ovName,
+                  ...pin(ov),
+                },
+              ],
+            },
+          ],
+        })
+      )
+      const host = join(folder, 'fake-litert-host')
+      await writeFile(host, `#!/bin/sh\necho '{"version":"0.18.1","abi":1,"backends":["cpu","gpu"]}'\n`, {
+        mode: 0o755,
+      })
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_LITERT_HOST_TEST_COMMAND: host,
+        ATOMIC_LITERT_LM_TEST_NPU: 'intel-lnl',
+      })
+      const proxy = mirror.proxy
+      const accelerators = async () =>
+        json<{
+          npu: string | null
+          accelerators: Array<{ name: string; prepared: boolean; reason?: string }>
+        }>(await control(ctx, ready, '/runtimes/litert-lm/accelerators'))
+      expect(await accelerators()).toMatchObject({ npu: null, accelerators: [] })
+      expect(
+        await json(await post(ready, '/engine-builds/litert-lm/install', { task_id: 'lr-1', proxy }))
+      ).toMatchObject({
+        installed: true,
+      })
+      expect(await accelerators()).toMatchObject({
+        npu: 'intel-lnl',
+        accelerators: [
+          { name: 'openvino', device: 'npu', version: '2026.4.1', size_bytes: ov.length, prepared: false },
+        ],
+      })
+
+      const events = await sd.collectEvents(ctx, ready)
+      expect(await json(await post(ready, '/runtimes/litert-lm/accelerators/prepare', { proxy }))).toEqual({
+        accelerators: [{ name: 'openvino', prepared: true }],
+      })
+      await waitFor(
+        () =>
+          events.some(
+            (e) => e.event === 'litert-lm:accelerators' && (e.data as { stage: string }).stage === 'done'
+          ),
+        'done'
+      )
+      const steps = events
+        .filter((e) => e.event === 'litert-lm:accelerators')
+        .map((e) => e.data as { stage: string })
+      expect(steps[0]).toEqual({ accelerator: 'openvino', stage: 'started', fraction: 0 })
+      expect(steps.some((step) => step.stage === 'downloading')).toBe(true)
+      expect(steps.at(-1)).toEqual({ accelerator: 'openvino', stage: 'done', fraction: 1 })
+      const dir = join(folder, 'litert-lm', 'accelerators', 'openvino', '2026.4.1')
+      expect((await readdir(dir)).sort()).toEqual([
+        '.atomic-owned',
+        'openvino.dll',
+        'openvino_intel_npu_plugin.dll',
+      ])
+      expect((await accelerators()).accelerators[0]?.prepared).toBe(true)
+
+      const downloads = () => mirror.seen.filter((path) => path.startsWith('/packages/ov/')).length
+      expect(downloads()).toBe(1)
+      await post(ready, '/runtimes/litert-lm/accelerators/prepare', { proxy })
+      expect(downloads()).toBe(1)
+    }, 120_000)
+  }
+)
+
 const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
 
 describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)(

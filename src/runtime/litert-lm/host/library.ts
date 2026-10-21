@@ -4,6 +4,8 @@
  * against a fake one. Calls are synchronous except `send`, whose chunks arrive later on the JS thread.
  */
 
+import type { LiteRtLmFileMetadata } from '../../../contracts/index.js'
+
 /** A library call returned an error (the library's own message) or a null handle. */
 export class LiteRtLibraryError extends Error {
   constructor(
@@ -19,26 +21,13 @@ export type LiteRtBackendName = 'cpu' | 'gpu' | 'npu'
 export type LiteRtModality = 'text' | 'vision' | 'audio' | 'video'
 export type LiteRtNpuBrand = 'unknown' | 'qualcomm' | 'google-tensor' | 'mediatek' | 'intel' | 'samsung'
 
-/** What `litert_lm_loaded_file_*` tells about a `.litertlm` file without creating an engine. */
-export interface LiteRtFileInfo {
-  model_type: 'llm' | 'embedding' | 'unknown'
-  /** `null` when the file does not declare it (the library answers 0). */
-  max_context_tokens: number | null
-  dynamic_context: boolean
-  /** As the file declares it; Gemma 4 files say `false` and call tools anyway (spike S1). */
-  function_calling: boolean
-  thinking: boolean
-  modalities: LiteRtModality[]
-  /** Backends of the text modality, the default first. */
-  backends: LiteRtBackendName[]
-  /** Backends of the vision encoder; empty without one. */
-  vision_backends: LiteRtBackendName[]
-  /** The NPU the file was compiled for; `null` when it targets none. */
-  npu: { brand: LiteRtNpuBrand; soc: string | null } | null
-  speculative_decoding: boolean
-  /** `X.Y` or `X.Y.Z`; `null` when the file does not require one. */
-  min_runtime_version: string | null
-}
+/**
+ * What `litert_lm_loaded_file_*` tells about a `.litertlm` file without creating an engine: the wire
+ * shape core returns from `/models/litert-lm/check`. `max_context_tokens` is `null` when the library
+ * answers 0 (not declared); `function_calling` and `thinking` are what the file declares, and Gemma 4
+ * files declare neither while doing both (spike S1).
+ */
+export type LiteRtFileInfo = LiteRtLmFileMetadata
 
 export interface LiteRtEngineSettings {
   model: string

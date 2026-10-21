@@ -9,6 +9,9 @@ import type {
   FoundryLocalAccelerators,
   FoundryLocalPrepareRequest,
   FoundryLocalPrepareResult,
+  LiteRtLmAccelerators,
+  LiteRtLmPrepareRequest,
+  LiteRtLmPrepareResult,
   EngineBuildCatalog,
   EngineBuildCatalogRequest,
   EngineBuildId,
@@ -518,6 +521,11 @@ export interface ControlServerDeps {
    * not registered, and its routes then answer `PROVIDER_NOT_FOUND`.
    */
   foundryLocal?: FoundryLocalControl
+  /**
+   * LiteRT-LM's accelerator (change `add-litert-lm-runtime`, task 6.4); absent where the provider is
+   * not registered.
+   */
+  liteRtLm?: LiteRtLmControl
   cloud: CloudControl
   chatgpt: ChatGptControl
   externalSessions: ExternalSessionControl
@@ -565,6 +573,13 @@ export interface ControlRouteContext {
   snapshot: () => ControlSnapshot
   /** The server being constructed; `undefined` until `ControlServer.start` has built it. */
   self: () => ControlServer | undefined
+}
+
+export interface LiteRtLmControl {
+  /** What this machine is offered, with what is prepared. */
+  accelerators(): Promise<LiteRtLmAccelerators>
+  /** Downloads and unpacks the accelerators named (none: all offered); one at a time. */
+  prepare(request: LiteRtLmPrepareRequest): Promise<LiteRtLmPrepareResult>
 }
 
 export interface FoundryLocalControl {

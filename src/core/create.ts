@@ -6,10 +6,11 @@
 
 import { randomUUID } from 'node:crypto'
 import { homedir, release as osRelease } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
 import type {
   EngineBuildId,
+  LiteRtLmNpu,
   LlamacppProviderId,
   LocalProviderId,
   ModelCompatibility,
@@ -31,7 +32,15 @@ import {
   parseFoundryLocalCheckRequest,
   runFoundryHostProbe,
 } from '../runtime/foundry-local/index.js'
-import { liteRtHostCommand, runLiteRtHostProbe } from '../runtime/litert-lm/index.js'
+import {
+  LiteRtLmAcceleratorService,
+  LiteRtLmCheckService,
+  LiteRtLmRuntime,
+  liteRtHostCommand,
+  liteRtNpuGeneration,
+  parseLiteRtLmCheckRequest,
+  runLiteRtHostProbe,
+} from '../runtime/litert-lm/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
@@ -398,6 +407,40 @@ export async function createAtomicCore(
       runtimes.set('foundry-local', foundryLocalRuntime)
     }
 
+    // LiteRT-LM (change `add-litert-lm-runtime`, task 6.6): one litert-host per model, where the
+    // platform rule of design D7 holds. The active build, OpenVINO and the NPU generation are read per
+    // load, from services wired below.
+    const liteRtLmPaths = layout.provider('litert-lm')
+    const liteRtActiveBuild = async (): Promise<{ dir: string; version: string } | undefined> => {
+      const dir = await engineBuilds.activeDir('litert-lm')
+      return dir ? { dir, version: basename(dirname(dir)) } : undefined
+    }
+    const liteRtLmRuntime: LiteRtLmRuntime | undefined =
+      liteRtLmHost.platform === null
+        ? undefined
+        : new LiteRtLmRuntime({
+            layout,
+            registry: new ModelRegistry(layout, 'litert-lm'),
+            instanceId: lock.instanceId,
+            hostPlatform: liteRtLmHost.platform,
+            hostCommand: liteRtHost,
+            resolveBuild: liteRtActiveBuild,
+            openVinoLibs: async () => (liteRtLmAccelerators ? liteRtLmAccelerators.libsDir() : undefined),
+            npuGeneration: () => liteRtNpu(),
+            trustedHosts: managedTrustedHosts,
+            readSettings: async () => settings.get('litert-lm'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+            claimGpu: gpuResidency.hook('litert-lm'),
+            baseEnv: env,
+            log: runtimeLog,
+            ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+          })
+    if (liteRtLmRuntime) {
+      registries.set('litert-lm', liteRtLmRuntime.registry)
+      runtimes.set('litert-lm', liteRtLmRuntime)
+    }
+
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
     })
@@ -569,6 +612,7 @@ export async function createAtomicCore(
     // manifests, installs, activates and removes them; image generation and the MLX runtime lend it
     // their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
+    const liteRtManifest = new EngineManifestSource(engineManifestKinds['litert-lm'], { env, fetchFor, log })
     const mlxRuntime = runtimes.get('mlx')
     const engineBuilds: EngineBuildsService = new EngineBuildsService({
       dataFolder: layout.root,
@@ -590,7 +634,7 @@ export async function createAtomicCore(
           fetchFor,
           log,
         }),
-        'litert-lm': new EngineManifestSource(engineManifestKinds['litert-lm'], { env, fetchFor, log }),
+        'litert-lm': liteRtManifest,
       },
       hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost },
       hostProbes: {
@@ -616,7 +660,7 @@ export async function createAtomicCore(
         'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
         // Where the provider is not registered nothing runs from a build.
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
-        'litert-lm': IDLE_ENGINE_HOST,
+        'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
@@ -629,6 +673,59 @@ export async function createAtomicCore(
       (npuAnswer ??= probeNpu(
         nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
       ))
+
+    // LiteRT-LM's NPU generation (change `add-litert-lm-runtime`, design D3): an NPU device on Windows,
+    // then the CPU model string; asked once. `ATOMIC_LITERT_LM_TEST_NPU` stands in for the machine in
+    // the e2e tests, where no Intel NPU is.
+    let liteRtNpuAnswer: Promise<LiteRtLmNpu | null> | undefined
+    const liteRtNpu = (): Promise<LiteRtLmNpu | null> =>
+      (liteRtNpuAnswer ??= (async () => {
+        const standIn = env['ATOMIC_LITERT_LM_TEST_NPU']
+        if (standIn === 'intel-lnl' || standIn === 'intel-ptl') return standIn
+        if (liteRtLmHost.platform !== 'win-x64' || (await foundryLocalNpu()).present === false) return null
+        return liteRtNpuGeneration((await hardware.info()).info.cpu.name)
+      })())
+
+    // LiteRT-LM's OpenVINO (task 6.4): offered on an Intel NPU LiteRT-LM targets, prepared on order.
+    const liteRtLmAccelerators =
+      liteRtLmHost.platform === null
+        ? undefined
+        : new LiteRtLmAcceleratorService({
+            acceleratorsDir: liteRtLmPaths.acceleratorsDir as string,
+            tmpDir: liteRtLmPaths.tmpDir,
+            resolveBuild: liteRtActiveBuild,
+            release: async (version) =>
+              (await liteRtManifest.read()).manifest?.releases.find(
+                (release) => release.version === version
+              ) ??
+              (await liteRtManifest.cached())?.releases.find((release) => release.version === version) ??
+              null,
+            npuGeneration: liteRtNpu,
+            download: async (taskId, item, onFraction) => {
+              const off = emitter.on('download:progress', (progress) => {
+                if (progress.taskId === taskId && progress.total > 0)
+                  onFraction(Math.min(1, progress.transferred / progress.total))
+              })
+              try {
+                await downloader.download(taskId, [{ ...item, model_id: taskId }])
+              } finally {
+                off()
+              }
+            },
+            emit: (name, payload) => emitter.emit(name, payload),
+          })
+    const liteRtLmCheck =
+      liteRtLmRuntime && liteRtLmHost.platform !== null
+        ? new LiteRtLmCheckService({
+            platform: liteRtLmHost.platform,
+            modelsDir: liteRtLmPaths.modelsDir,
+            registry: liteRtLmRuntime.registry,
+            resolveBuild: liteRtActiveBuild,
+            npuGeneration: liteRtNpu,
+            openVinoLibs: async () => (liteRtLmAccelerators ? liteRtLmAccelerators.libsDir() : undefined),
+            inspect: (buildDir, file) => liteRtLmRuntime.inspect(buildDir, file),
+          })
+        : undefined
 
     // Foundry Local's accelerators (task 6.4, design D3): probed from the active build when a client
     // asks, prepared only when one orders it. Only where the platform rule registers the provider.
@@ -882,9 +979,9 @@ export async function createAtomicCore(
         recreateSession: (provider: string, modelId: string) =>
           (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
         hardware,
-        ...(foundryLocalAccelerators
-          ? {
-              nativeModelChecks: {
+        nativeModelChecks: {
+          ...(foundryLocalAccelerators
+            ? {
                 // Task 6.5: the platform, the active build, the last probe, the NPU — no network.
                 'foundry-local': async (body: unknown) => {
                   const request = parseFoundryLocalCheckRequest(body)
@@ -900,10 +997,26 @@ export async function createAtomicCore(
                     request
                   )
                 },
-              },
+              }
+            : {}),
+          // LiteRT-LM (task 6.5): the variant without the network, a file with its own facts.
+          ...(liteRtLmCheck
+            ? { 'litert-lm': async (body: unknown) => liteRtLmCheck.check(parseLiteRtLmCheckRequest(body)) }
+            : {}),
+        },
+        ...(foundryLocalAccelerators
+          ? {
               foundryLocal: {
                 accelerators: (force: boolean) => foundryLocalAccelerators.list({ force }),
                 prepare: (request) => foundryLocalAccelerators.prepare(request),
+              },
+            }
+          : {}),
+        ...(liteRtLmAccelerators
+          ? {
+              liteRtLm: {
+                accelerators: () => liteRtLmAccelerators.list(),
+                prepare: (request) => liteRtLmAccelerators.prepare(request),
               },
             }
           : {}),
