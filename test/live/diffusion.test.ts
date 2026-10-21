@@ -35,6 +35,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { cp, mkdir, readFile, stat } from 'node:fs/promises'
+import { request } from 'node:http'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { prepareSdcppTree, writeInstallRecord } from '../../src/diffusion/install.js'
@@ -47,6 +48,35 @@ import { decodePng, isWebm, parseVideoRecipe, readPngHeader } from '../../src/di
 import { isProcessAlive } from '../../src/runtime/shared/index.js'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
+
+/**
+ * POST a JSON body and wait for the whole answer, however long the engine takes. The images facade
+ * answers once the picture exists, and on a CI runner's CPU that is longer than global `fetch` waits
+ * for a response's headers (undici's `headersTimeout`, 300 s; seen on macOS: `UND_ERR_HEADERS_TIMEOUT`).
+ * `node:http` sets no such limit; the facade's own 30-minute timeout still applies.
+ */
+function postJson(url: string, body: unknown): Promise<{ status: number; text: string }> {
+  const data = JSON.stringify(body)
+  return new Promise((resolve, reject) => {
+    const req = request(
+      url,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })
+        )
+        res.on('error', reject)
+      }
+    )
+    req.on('error', reject)
+    req.end(data)
+  })
+}
 
 /** Probe a copied engine tree for real, then mark it installed the way the engine-builds install does. */
 async function ownLiveEngine(dir: string): Promise<void> {
@@ -237,13 +267,14 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
 
       // The OpenAI facade runs the same job.
       const served = await core.startPublicServer({ port: 0 })
-      const answer = await fetch(`http://127.0.0.1:${served.port}/v1/images/generations`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt: 'a small blue sphere', size: '256x256', n: 1, seed: 8 }),
+      const answer = await postJson(`http://127.0.0.1:${served.port}/v1/images/generations`, {
+        prompt: 'a small blue sphere',
+        size: '256x256',
+        n: 1,
+        seed: 8,
       })
-      expect(answer.status, await answer.clone().text()).toBe(200)
-      const body = (await answer.json()) as { data: Array<{ b64_json: string }>; atomic: { seed: number } }
+      expect(answer.status, answer.text).toBe(200)
+      const body = JSON.parse(answer.text) as { data: Array<{ b64_json: string }>; atomic: { seed: number } }
       expect(body.atomic.seed).toBe(8)
       const served2 = await decodePng(Buffer.from(body.data[0]?.b64_json ?? '', 'base64'))
       expect([served2.width, served2.height]).toEqual([256, 256])
