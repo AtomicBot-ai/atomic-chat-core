@@ -3,3 +3,5 @@
  * `litert-host` protocol; the host mode, the runtime and the accelerator follow.
  */
 export * from './host-process.js'
+export * from './model-yml.js'
+export * from './runtime.js'

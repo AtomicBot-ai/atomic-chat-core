@@ -8,6 +8,7 @@
 import { spawn } from 'node:child_process'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ErrorCode } from '../../contracts/index.js'
+import type { LiteRtFileInfo } from './host/library.js'
 
 /** How to start `litert-host`: `[execPath, script?]` + `litert-host`, or a test stand-in. */
 export interface LiteRtHostCommand {
@@ -141,6 +142,27 @@ export function runLiteRtHostProbe(
     ['probe', '--lib', buildDir],
     parseProbe,
     { code: 'ENGINE_INSTALL_FAILED', what: 'The LiteRT-LM build does not load' },
+    options
+  )
+}
+
+function parseInspect(raw: unknown): LiteRtFileInfo | null {
+  if (!isRecord(raw) || typeof raw['model_type'] !== 'string' || !Array.isArray(raw['backends'])) return null
+  return raw as unknown as LiteRtFileInfo
+}
+
+/** `litert-host inspect --lib <buildDir> <file>`: the file's metadata, read without an engine. */
+export function runLiteRtHostInspect(
+  command: LiteRtHostCommand,
+  buildDir: string,
+  file: string,
+  options: HostRunOptions = {}
+): Promise<LiteRtFileInfo> {
+  return runLiteRtHostJson(
+    command,
+    ['inspect', '--lib', buildDir, file],
+    parseInspect,
+    { code: 'LITERT_LM_HOST_ERROR', what: 'The LiteRT-LM model file cannot be read' },
     options
   )
 }
