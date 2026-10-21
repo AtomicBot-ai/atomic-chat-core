@@ -22,9 +22,11 @@ import {
   videoModeFlags,
   commandSummaryForLog,
   cpuBackendExtraArgs,
+  DIFFUSION_BACKEND_ENV,
   hostEnv,
   isGgmlUnsupportedOpAbort,
   isM5Brand,
+  loadExtraArgs,
   METAL_TE_GPU_ENV,
   metalTextEncoderFlags,
   offloadFlags,
@@ -222,6 +224,14 @@ describe('the CPU-backend recovery', () => {
     expect(cpuBackendExtraArgs(flags)).toEqual(['--diffusion-fa', '--backend', 'cpu'])
     // A trailing `--backend` with no value is dropped too.
     expect(withoutDeviceBackendFlags(['-x', '--backend'])).toEqual(['-x'])
+  })
+
+  it('starts a load on the CPU only under ATOMIC_DIFFUSION_BACKEND=cpu', () => {
+    expect(DIFFUSION_BACKEND_ENV).toBe('ATOMIC_DIFFUSION_BACKEND')
+    for (const value of ['cpu', 'CPU', ' cpu '])
+      expect(loadExtraArgs(value), value).toEqual(['--backend', 'cpu'])
+    for (const value of [undefined, '', 'metal', 'cuda0', 'cpu,metal'])
+      expect(loadExtraArgs(value), String(value)).toEqual([])
   })
 
   it('needs both markers of the ggml abort signature', () => {
