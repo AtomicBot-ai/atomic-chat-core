@@ -7,6 +7,7 @@
  * (`.github/engine-candidate/sd-cpp.json`) the workflow and `npm run engine:check` read.
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildSdcppReport,
@@ -345,7 +346,8 @@ describe('the sd-cpp configuration', () => {
     const env = expandLiveEnv(config.live_env, { engine_dir: '/e', tag: 't', manifest: '/m.json', models })
     expect(env).toMatchObject({
       ATOMIC_LIVE_SD_ENGINE: '/e',
-      ATOMIC_LIVE_SD_MODEL: '/models/0b25d143c8469b34/flux-2-klein-4b-Q4_K_M.gguf',
+      // The host's separators: the fetch writes these paths for the host it runs on.
+      ATOMIC_LIVE_SD_MODEL: join('/models', '0b25d143c8469b34', 'flux-2-klein-4b-Q4_K_M.gguf'),
       ATOMIC_LIVE_SD_VAE_FORMAT: 'flux2',
       ATOMIC_LIVE_SD_BACKEND: 'cpu',
     })
