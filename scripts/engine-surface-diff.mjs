@@ -14,8 +14,11 @@
 //
 // --engine picks .github/engine-candidate/<engine>.json: its contract, tag shape, default repo and
 // pin source (`atomic-prism`: PrismML-Eng/llama.cpp, its `prism` branch for the history, conf's
-// PrismML manifest for the pin, and no mirror). --repo: any repo publishing ggml-org's asset names
-// (AtomicBot-ai/atomic-chat-conf for the signed mirror). --pin auto takes conf's list for the engine
+// PrismML manifest for the pin, and no mirror; `sd-cpp`: stable-diffusion.cpp's own checks in
+// scripts/lib/sdcpp-surface.mjs — `sd-server --help` and `--version`, the install probe's
+// `sd-cli --help`, the archives by backend — with the pin from conf's sd.cpp manifest and leejet's
+// history between the two tags the builds are cut from). --repo: any repo publishing the engine's
+// asset names (AtomicBot-ai/atomic-chat-conf for the signed mirror). --pin auto takes conf's list for the engine
 // (the newest approved release this core version runs, on linux-x64); the pin's binary comes from
 // --pin-repo, by default the candidate's repo when it has the tag, else the engine's. A local --candidate-bin is tagged b<build> from its --version;
 // when its commit is not in ggml-org/llama.cpp (a fork, a local branch) the upstream checks say
@@ -29,6 +32,7 @@ import { parseArgs } from 'node:util'
 import {
   buildReport,
   countStrings,
+  invocationKey,
   MIRROR_WHITELIST,
   parseBinaryVersion,
   parseGitLog,
@@ -54,7 +58,10 @@ import {
   run,
   runInvocations,
   sha256File,
+  upstreamTagCommit,
 } from './lib/engine-io.mjs'
+import { sdcppTagBuild, sdcppTagParts } from './lib/engine-pin.mjs'
+import { buildSdcppReport, notInArchive, parseSdVersion } from './lib/sdcpp-surface.mjs'
 
 const SEVERITY_ORDER = ['warn', 'error', 'break']
 
@@ -87,6 +94,8 @@ export async function main(argv = process.argv.slice(2)) {
   if (!opts.inputs && !opts.candidate === !opts['candidate-bin'])
     throw new Error('give one of --candidate <tag> or --candidate-bin <llama-server> (or --inputs)')
   if (opts.candidate && !isTag(opts.candidate)) throw new Error(`--candidate must match ${tagRe}`)
+  if (config.kind === 'sdcpp' && (opts['candidate-bin'] || opts['pin-bin']))
+    throw new Error(`${opts.engine} is compared from releases (--candidate, --pin), not local binaries`)
   if (!['auto', 'none'].includes(opts.pin) && !isTag(opts.pin))
     throw new Error(`--pin is auto, none or a tag matching ${tagRe}`)
   if (opts['fail-on'] && !SEVERITY_ORDER.includes(opts['fail-on']))
@@ -108,7 +117,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (inputs.candidate?.help_text) writeFileSync(join(out, 'help-candidate.txt'), inputs.candidate.help_text)
   if (inputs.pin?.help_text) writeFileSync(join(out, 'help-pin.txt'), inputs.pin.help_text)
 
-  const report = buildReport(contract, inputs, {
+  const report = (config.kind === 'sdcpp' ? buildSdcppReport : buildReport)(contract, inputs, {
     now: new Date().toISOString(),
     contractSha256: createHash('sha256').update(contractText).digest('hex'),
   })
@@ -144,12 +153,22 @@ async function gather(contract, opts, config) {
 
   const capture = (side, bin) => {
     const invocations = runInvocations(bin, contract.invocations ?? [])
-    const output = (flag) => invocations.find((i) => i.argv.join(' ') === flag)?.output
-    side.help_text = output('-h')
-    side.version_output = output('--version')
+    const ran = (key) => invocations.find((i) => invocationKey(i) === key)
+    const output = (key) => ran(key)?.output
     side.invocations = invocations.map(({ output: text, ...rest }) =>
       rest.status === 0 ? rest : { ...rest, output: text.slice(-2000) }
     )
+    if (config.kind === 'sdcpp') {
+      side.help_text = output('sd-server --help')
+      const cli = ran('sd-cli --help')
+      if (cli && !notInArchive(cli)) side.cli_help_text = cli.output
+      side.version_output = output('sd-server --version')
+      side.build = sdcppTagBuild(side.tag ?? '')
+      side.commit = parseSdVersion(contract, side.version_output ?? '')?.commit ?? null
+      return
+    }
+    side.help_text = output('-h')
+    side.version_output = output('--version')
     side.build = side.version_output === undefined ? null : (parseBinaryVersion(side.version_output) ?? null)
     side.commit = side.version_output === undefined ? null : (versionCommit(side.version_output) ?? null)
   }
@@ -168,8 +187,19 @@ async function gather(contract, opts, config) {
     return side
   }
 
+  const upstreamRepo = contract.upstream?.repo ?? config.default_repo
   const releaseSide = async (tag, repo) => {
     const side = { tag, repo, source: 'release', platform }
+    // sd.cpp's builds are cut from a leejet tag: its commit and date place them in leejet's history.
+    const parts = config.kind === 'sdcpp' ? sdcppTagParts(tag) : null
+    if (parts) {
+      const upstreamRelease = await githubRelease(upstreamRepo, parts.upstream_tag).catch(() => null)
+      side.upstream = {
+        tag: parts.upstream_tag,
+        commit: upstreamTagCommit(upstreamRepo, parts.upstream_tag),
+        published_at: upstreamRelease?.published_at ?? null,
+      }
+    }
     try {
       const release = await githubRelease(repo, tag)
       if (!release) side.assets_error = `${repo} has no release ${tag}`
@@ -189,6 +219,7 @@ async function gather(contract, opts, config) {
         repo,
         out: join(cache, repo.replace('/', '__'), tag, platform),
         model: false,
+        ...(config.kind === 'sdcpp' ? { engine: config.engine } : {}),
       })
       const asset = build.fixture.asset
       side.binary = { name: asset.name, sha256: asset.sha256, digest_verified: asset.digest_verified }
@@ -225,6 +256,7 @@ async function gather(contract, opts, config) {
       const candidateRepo = candidate.repo ?? config.default_repo
       const repo =
         opts['pin-repo'] ??
+        config.pin_repo ??
         (candidateRepo !== config.default_repo && (await githubRelease(candidateRepo, tag).catch(() => null))
           ? candidateRepo
           : config.default_repo)
@@ -232,10 +264,15 @@ async function gather(contract, opts, config) {
     }
   }
 
-  const upstreamRepo = contract.upstream?.repo ?? config.default_repo
   const { upstream, patch } = opts['skip-upstream']
     ? { upstream: { available: false, reason: 'skipped (--skip-upstream)' } }
-    : await upstreamDiff(contract, candidate, pin, upstreamRepo, join(cache, 'llama.cpp.git'))
+    : await upstreamDiff(
+        contract,
+        candidate,
+        pin,
+        upstreamRepo,
+        join(cache, `${upstreamRepo.replace('/', '__')}.git`)
+      )
 
   return {
     inputs: {
@@ -253,9 +290,12 @@ async function gather(contract, opts, config) {
   }
 }
 
-/** A side's upstream commit: the release's own when it is an upstream release, else what --version names. */
+/**
+ * A side's upstream commit: the leejet tag's for sd.cpp, the release's own when it is an upstream
+ * release, else what --version names.
+ */
 const commitOf = (side, upstreamRepo) =>
-  (side.repo === upstreamRepo ? side.release?.commit : null) ?? side.commit ?? null
+  side.upstream?.commit ?? (side.repo === upstreamRepo ? side.release?.commit : null) ?? side.commit ?? null
 
 async function upstreamDiff(contract, candidate, pin, upstreamRepo, gitDir) {
   if (!pin) return { upstream: { available: false, reason: 'no pin to compare with' } }
@@ -284,15 +324,20 @@ async function upstreamDiff(contract, candidate, pin, upstreamRepo, gitDir) {
  */
 function gitDiff(contract, { base, head, candidate, pin, upstreamRepo, gitDir }) {
   const watched = (contract.upstream?.watched_paths ?? []).map((w) => w.path)
-  // History from two days before the older release: enough for `log base..head` either way round.
-  const dates = [pin, candidate].map((s) => Date.parse(s.release?.published_at ?? '')).filter((d) => d > 0)
+  // History from two days before the older release (leejet's, for a build cut from one): enough for
+  // `log base..head` either way round.
+  const dates = [pin, candidate]
+    .map((s) => Date.parse(s.upstream?.published_at ?? s.release?.published_at ?? ''))
+    .filter((d) => d > 0)
   const since = new Date(dates.length > 0 ? Math.min(...dates) : Date.now() - 90 * 86_400_000)
   since.setUTCDate(since.getUTCDate() - 2)
   // The branch builds are cut from: `master` upstream, `prism` on PrismML's fork.
   const branch = contract.upstream?.branch ?? 'master'
   const refs = [`+refs/heads/${branch}:refs/remotes/origin/${branch}`]
-  for (const side of [pin, candidate])
-    if (side.repo === upstreamRepo && side.tag) refs.push(`+refs/tags/${side.tag}:refs/tags/${side.tag}`)
+  for (const side of [pin, candidate]) {
+    const tag = side.upstream?.tag ?? (side.repo === upstreamRepo ? side.tag : null)
+    if (tag) refs.push(`+refs/tags/${tag}:refs/tags/${tag}`)
+  }
   const fetch = () =>
     git(gitDir, [
       'fetch',

@@ -1,22 +1,23 @@
 name: engine-candidate
 run-name: engine-candidate ${{ inputs.engine }} ${{ inputs.tag || 'newest' }} [cid:${{ inputs.candidate_id }}] core@${{ inputs.core_ref }}
 
-# Is a llama.cpp build compatible with a core: upstream (`llamacpp-upstream`) or PrismML's fork
-# (`atomic-prism`)? Started only by hand or by the update orchestrator through the API: no schedule,
-# no push or pull_request trigger, never called from ci.yml (ADR
-# 2026-10-15-check-an-engine-candidate-only-when-asked). Each engine's tags, repo, pin source,
-# platforms and live tests are in .github/engine-candidate/<engine>.json. The same check on one
-# machine is `npm run engine:check`; docs/live-tests.md, "Checking a llama.cpp build", has both.
+# Is an engine build compatible with a core: upstream llama.cpp (`llamacpp-upstream`), PrismML's fork
+# (`atomic-prism`) or stable-diffusion.cpp (`sd-cpp`)? Started only by hand or by the update
+# orchestrator through the API: no schedule, no push or pull_request trigger, never called from
+# ci.yml (ADR 2026-10-15-check-an-engine-candidate-only-when-asked). Each engine's tags, repo, pin
+# source, platforms and live tests are in .github/engine-candidate/<engine>.json, and the core
+# suites run on that engine's platforms only. The same check on one machine is `npm run
+# engine:check`; docs/live-tests.md, "Checking a llama.cpp build", has both.
 on:
   workflow_dispatch:
     inputs:
       engine:
         description: Engine to check
         type: choice
-        options: [llamacpp-upstream, atomic-prism]
+        options: [llamacpp-upstream, atomic-prism, sd-cpp]
         default: llamacpp-upstream
       tag:
-        description: Candidate tag (b11617, prism-b10787-73bfe6c); empty takes the newest one with every archive up
+        description: Candidate tag (b11617, prism-b10787-73bfe6c, master-975-95b3090); empty takes the newest one with every archive up
         type: string
         default: ''
       repo:
@@ -36,11 +37,11 @@ on:
         type: string
         default: ''
       conf_ref:
-        description: atomic-chat-conf ref for the release lists and the mirror whitelist
+        description: atomic-chat-conf ref for the release lists, manifests and the mirror whitelist
         type: string
         default: main
       suites:
-        description: all = core suites on 5 OS and the live matrix; live = the live matrix only
+        description: all = core suites on the engine's platforms and the live matrix; live = the live matrix only
         type: choice
         options: [all, live]
         default: all
@@ -62,6 +63,9 @@ jobs:
       core_sha: ${{ steps.resolve.outputs.core_sha }}
       complete: ${{ steps.resolve.outputs.complete }}
       live_matrix: ${{ steps.resolve.outputs.live_matrix }}
+      core_matrix: ${{ steps.resolve.outputs.core_matrix }}
+      live_timeout_minutes: ${{ steps.resolve.outputs.live_timeout_minutes }}
+      live_models_key: ${{ steps.resolve.outputs.live_models_key }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -126,24 +130,18 @@ jobs:
             ${{ runner.temp }}/surface/watched.patch
           if-no-files-found: ignore
 
-  # The core at core_ref on its own: the same suites ci.yml runs, as results rather than gates.
+  # The core at core_ref on its own: the same suites ci.yml runs, as results rather than gates, on
+  # the platforms of the engine's config (resolve's core_matrix: all five for llama.cpp). Windows
+  # spawns processes slowly: as in ci.yml its unit and contract files are split over two jobs
+  # (`--shard`), or the managed-engine tests time out; the first shard also builds and runs e2e, and
+  # results.json merges the two into one cell.
   core:
     needs: resolve
     if: inputs.suites == 'all' && needs.resolve.outputs.complete == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { platform: linux-x64, os: ubuntu-latest }
-          - { platform: linux-arm64, os: ubuntu-24.04-arm }
-          - { platform: macos-arm64, os: macos-14 }
-          # Windows spawns processes slowly: as in ci.yml its unit and contract files are split over
-          # two jobs (`--shard`), or the managed-engine tests time out; the first shard also builds
-          # and runs e2e, and results.json merges the two into one cell.
-          - { platform: windows-x64, os: windows-2022, shard: 1/2, part: '-1' }
-          - { platform: windows-x64, os: windows-2022, shard: 2/2, part: '-2' }
-          - { platform: windows-arm64, os: windows-11-arm, shard: 1/2, part: '-1' }
-          - { platform: windows-arm64, os: windows-11-arm, shard: 2/2, part: '-2' }
+        include: ${{ fromJSON(needs.resolve.outputs.core_matrix || '[]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -212,6 +210,8 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.complete == 'true'
     name: live ${{ matrix.platform }} ${{ matrix.role }} ${{ matrix.tag }}
+    # GitHub's 6 hours unless the engine sets its own (sd.cpp: an image model on a CPU runner).
+    timeout-minutes: ${{ fromJSON(needs.resolve.outputs.live_timeout_minutes || '360') }}
     strategy:
       fail-fast: false
       matrix:
@@ -238,8 +238,16 @@ jobs:
           path: ${{ runner.temp }}/live
           key: live-${{ inputs.engine }}-${{ matrix.platform }}-${{ matrix.repo }}-${{ matrix.tag }}
           restore-keys: live-${{ inputs.engine }}-${{ matrix.platform }}-
+      # An engine's several model files (`live_models`: sd.cpp's 5.4 GB), apart from its builds: one
+      # entry keyed by their sha256, on a path Linux and macOS spell alike, so every platform shares it
+      # within the 10 GB the repository may cache.
+      - if: needs.resolve.outputs.live_models_key != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/atomic-live-models
+          key: live-models-${{ needs.resolve.outputs.live_models_key }}
       - id: fetch
-        name: Fetch the build and the engine's GGUF
+        name: Fetch the build and the engine's models
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -249,8 +257,9 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
           ROLE: ${{ matrix.role }}
         run: |
-          node scripts/fetch-live-fixtures.mjs --out "$RUNNER_TEMP/live" --tag "$TAG" --repo "$REPO" --engine "$ENGINE"
-          echo "llama.cpp \`$TAG\` from $REPO, $ROLE on $PLATFORM" >> "$GITHUB_STEP_SUMMARY"
+          node scripts/fetch-live-fixtures.mjs --out "$RUNNER_TEMP/live" --tag "$TAG" --repo "$REPO" --engine "$ENGINE" \
+            --models "$HOME/.cache/atomic-live-models"
+          echo "$ENGINE \`$TAG\` from $REPO, $ROLE on $PLATFORM" >> "$GITHUB_STEP_SUMMARY"
       - name: Live tests
         if: steps.fetch.outcome == 'success'
         shell: bash

@@ -1,10 +1,17 @@
 /**
  * The release-picking rules of `scripts/fetch-live-fixtures.mjs`, which decide what llama.cpp build
  * the live suites run: the platform's CPU asset, the newest release that has it (ggml-org's builds
- * are prereleases and its `latest` carries no binaries), and a digest check on the bytes.
+ * are prereleases and its `latest` carries no binaries), and a digest check on the bytes; and for an
+ * engine with several model files (sd.cpp), the live env its config describes and the models' cache key.
  */
 import { describe, expect, it } from 'vitest'
-import { assetPatternFor, digestMatches, pickRelease } from '../../scripts/lib/live-fixtures.mjs'
+import {
+  assetPatternFor,
+  digestMatches,
+  expandLiveEnv,
+  liveModelsKey,
+  pickRelease,
+} from '../../scripts/lib/live-fixtures.mjs'
 
 const names = (tag: string) => [
   `llama-${tag}-bin-macos-arm64.tar.gz`,
@@ -97,5 +104,30 @@ describe('digestMatches', () => {
     expect(digestMatches(null, hex)).toBeUndefined()
     expect(digestMatches(undefined, hex)).toBeUndefined()
     expect(digestMatches(`md5:${hex}`, hex)).toBeUndefined()
+  })
+})
+
+describe('the live env of an engine with several files', () => {
+  const values = { engine_dir: '/live/engine', tag: 'master-883-137f740', models: { llm: '/m/llm.gguf' } }
+
+  it('fills the placeholders from what the fetch left, and keeps literal text', () => {
+    expect(
+      expandLiveEnv({ E: '{engine_dir}', T: 'tag={tag}', L: '{model:llm}', F: 'flux2', B: 'cpu' }, values)
+    ).toEqual({ E: '/live/engine', T: 'tag=master-883-137f740', L: '/m/llm.gguf', F: 'flux2', B: 'cpu' })
+  })
+
+  it('throws on a placeholder the fetch did not fill rather than start a half-set-up run', () => {
+    expect(() => expandLiveEnv({ M: '{model:vae}' }, values)).toThrow('{model:vae}')
+    expect(() => expandLiveEnv({ M: '{manifest}' }, values)).toThrow('{manifest}')
+  })
+
+  it('keys the model cache by the models, whatever their order, and has no key without models', () => {
+    const a = { sha256: 'a'.repeat(64) }
+    const b = { sha256: 'b'.repeat(64) }
+    expect(liveModelsKey([a, b])).toBe(liveModelsKey([b, a]))
+    expect(liveModelsKey([a, b])).not.toBe(liveModelsKey([a]))
+    expect(liveModelsKey([a])).toMatch(/^[0-9a-f]{16}$/)
+    expect(liveModelsKey(undefined)).toBe('')
+    expect(liveModelsKey([])).toBe('')
   })
 })

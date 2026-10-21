@@ -5,11 +5,15 @@ export declare const CANDIDATE_ID_RE: RegExp
 
 export interface EngineCandidateConfig {
   engine: string
+  /** `sdcpp`: stable-diffusion.cpp's resolve, surface and fetch; absent: llama.cpp's. */
+  kind?: string
   contract: string
   default_repo: string
-  platforms: Array<{ platform: string; runner: string }>
+  /** `core_runner`: where the core suites run when the live runner is another. */
+  platforms: Array<{ platform: string; runner: string; core_runner?: string }>
   live_files: string[]
-  required_live_tests: Array<{ file: string; name: string }>
+  /** `platforms`: the platforms the test runs on; absent, every one. */
+  required_live_tests: Array<{ file: string; name: string; platforms?: string[] }>
   core_suites: string[]
   protected_paths: string[]
   not_verified: string[]
@@ -153,6 +157,13 @@ export interface Results {
 }
 
 export declare function vitestOutcomes(report: VitestReport | undefined): TestOutcome[]
+export declare function coreMatrix(
+  platforms: EngineCandidateConfig['platforms']
+): Array<{ platform: string; os: string; shard?: string; part?: string }>
+export declare function requiredLiveTests(
+  required: EngineCandidateConfig['required_live_tests'] | undefined,
+  platform: string
+): EngineCandidateConfig['required_live_tests']
 export declare function liveCell(input: {
   platform: string
   os?: string

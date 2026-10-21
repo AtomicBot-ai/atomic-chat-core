@@ -1,13 +1,13 @@
 // The I/O half of the engine candidate scripts (scripts/engine-surface-diff.mjs,
-// scripts/engine-candidate.mjs): the GitHub API, conf at one commit, this core's identity, and a
-// llama.cpp build fetched and run. The decisions live in engine-pin.mjs, engine-surface.mjs and
+// scripts/engine-candidate.mjs): the GitHub API, conf at one commit, this core's identity, upstream
+// tags, and an engine build fetched and run. The decisions live in engine-pin.mjs, engine-surface.mjs and
 // engine-results.mjs, which take what this returns as data.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolvePins, resolvePrismPins } from './engine-pin.mjs'
+import { resolvePins, resolvePrismPins, resolveSdcppPins } from './engine-pin.mjs'
 
 export const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 export const CONF_REPO = 'AtomicBot-ai/atomic-chat-conf'
@@ -16,6 +16,8 @@ export const CONF_FILES = {
   manifest: 'backends/manifest.json',
   mirror: '.github/scripts/mirror.mjs',
   prism: 'backends/atomic-prism-manifest.json',
+  sdcpp: 'backends/sdcpp-manifest.json',
+  sdcppStaging: 'backends/sdcpp-manifest.staging.json',
 }
 
 const TOKEN = () => process.env.GITHUB_TOKEN || process.env.GH_TOKEN
@@ -47,9 +49,9 @@ export const engineTagRe = (config) => new RegExp(config.tag_pattern ?? '^b\\d+$
 
 /** The engine's pin per platform, from the conf file core reads it from (`pins` in the config). */
 export function enginePins(config, conf, coreVersion) {
-  return config.pins === 'prism-manifest'
-    ? resolvePrismPins({ manifest: conf.prism, coreVersion })
-    : resolvePins({ releases: conf.releases, manifest: conf.manifest, coreVersion })
+  if (config.pins === 'prism-manifest') return resolvePrismPins({ manifest: conf.prism, coreVersion })
+  if (config.pins === 'sdcpp-manifest') return resolveSdcppPins({ manifest: conf.sdcpp, coreVersion })
+  return resolvePins({ releases: conf.releases, manifest: conf.manifest, coreVersion })
 }
 
 /** `GET https://api.github.com<path>` as JSON; `null` on a 404 when `allow404`. */
@@ -96,10 +98,11 @@ export function git(cwd, args, options = {}) {
 }
 
 /**
- * conf's release list, legacy manifest, mirror script and PrismML manifest at one commit: a local
- * checkout (`dir`),
+ * conf's release list, legacy manifest, mirror script, PrismML manifest and both sd.cpp manifests
+ * (the live one and the staging one a candidate waits in) at one commit: a local checkout (`dir`),
  * or a ref of AtomicBot-ai/atomic-chat-conf resolved to its sha first, so one run reads one version.
- * A file that cannot be read is `undefined` and named in `errors`.
+ * A file that cannot be read is `undefined` and named in `errors`; `docs` holds each JSON file by
+ * path.
  */
 export async function loadConf({ dir, ref }) {
   const conf = { ref: dir ? null : ref, sha: null, errors: [] }
@@ -137,7 +140,33 @@ export async function loadConf({ dir, ref }) {
   conf.manifest = await json(CONF_FILES.manifest)
   conf.mirrorSource = await read(CONF_FILES.mirror)
   conf.prism = await json(CONF_FILES.prism)
+  conf.sdcpp = await json(CONF_FILES.sdcpp)
+  conf.sdcppStaging = await json(CONF_FILES.sdcppStaging)
+  conf.docs = {
+    [CONF_FILES.releases]: conf.releases,
+    [CONF_FILES.manifest]: conf.manifest,
+    [CONF_FILES.prism]: conf.prism,
+    [CONF_FILES.sdcpp]: conf.sdcpp,
+    [CONF_FILES.sdcppStaging]: conf.sdcppStaging,
+  }
   return conf
+}
+
+/**
+ * The commit `tag` points to in `repo` (`git ls-remote`, the peeled commit of an annotated tag);
+ * `null` when the repo has no such tag or cannot be reached.
+ */
+export function upstreamTagCommit(repo, tag) {
+  const url = `https://github.com/${repo}.git`
+  const r = run('git', ['ls-remote', '--tags', url, `refs/tags/${tag}`, `refs/tags/${tag}^{}`], {
+    timeout: 60_000,
+  })
+  if (r.status !== 0) return null
+  const lines = r.stdout
+    .split('\n')
+    .map((l) => l.split('\t'))
+    .filter(([sha]) => /^[0-9a-f]{40}$/.test(sha ?? ''))
+  return (lines.find(([, ref]) => ref?.endsWith('^{}')) ?? lines[0])?.[0] ?? null
 }
 
 /** This checkout: package version and commit (`null` outside git). */
@@ -158,12 +187,14 @@ export const sha256File = (path) => createHash('sha256').update(readFileSync(pat
 /**
  * This host's archive of `repo`@`tag`, unpacked under `out` by scripts/fetch-live-fixtures.mjs
  * (which checks it against the release digest and reuses what is already there), with the GGUF
- * `engine`'s live tests take unless `model` is false.
+ * `engine`'s live tests take unless `model` is false. `models`: where an engine with several model
+ * files (`live_models`) keeps them, shared between builds.
  */
-export function fetchBuild({ tag, repo, out, model = true, engine }) {
+export function fetchBuild({ tag, repo, out, model = true, engine, models }) {
   const args = [join(ROOT, 'scripts/fetch-live-fixtures.mjs'), '--out', out, '--tag', tag, '--repo', repo]
   if (engine) args.push('--engine', engine)
   if (!model) args.push('--skip-model')
+  if (models) args.push('--models', models)
   const r = spawnSync(process.execPath, args, { stdio: ['ignore', 'inherit', 'inherit'] })
   if (r.status !== 0) throw new Error(`fetch-live-fixtures ${repo}@${tag} exited ${r.status ?? r.signal}`)
   const read = (name) => readFileSync(join(out, name), 'utf8').trim()
@@ -177,12 +208,15 @@ export function fetchBuild({ tag, repo, out, model = true, engine }) {
 
 /**
  * Run each of `invocations` (the contract's `-h`, `--version`, `--list-devices`) beside the binary's
- * libraries, as core does; the output is stdout, a newline, stderr — the shape `runHelp` reads.
+ * libraries, as core does; the output is stdout, a newline, stderr — the shape `runHelp` reads. An
+ * invocation naming a `bin` (sd.cpp's `sd-cli`) runs that executable from `bin`'s folder.
  */
 export function runInvocations(bin, invocations, timeoutMs = 60_000) {
-  return invocations.map(({ argv }) => {
-    const r = run(bin, argv, { cwd: dirname(bin), timeout: timeoutMs })
+  return invocations.map(({ argv, bin: name }) => {
+    const exe = name ? join(dirname(bin), process.platform === 'win32' ? `${name}.exe` : name) : bin
+    const r = run(exe, argv, { cwd: dirname(bin), timeout: timeoutMs })
     return {
+      ...(name ? { bin: name } : {}),
       argv,
       status: r.status,
       ...(r.signal ? { signal: r.signal } : {}),

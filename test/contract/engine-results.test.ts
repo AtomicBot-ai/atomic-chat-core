@@ -11,9 +11,11 @@ import {
   buildResults,
   CANDIDATE_ID_RE,
   coreCell,
+  coreMatrix,
   mergeCoreShards,
   liveCell,
   renderResultsMarkdown,
+  requiredLiveTests,
   vitestOutcomes,
 } from '../../scripts/lib/engine-results.mjs'
 import type {
@@ -399,6 +401,27 @@ describe('the llamacpp-upstream configuration', () => {
     expect(PLATFORMS).toEqual(PIN_PLATFORMS.map((p) => p.platform))
     for (const path of [...config.protected_paths, ...config.live_files, config.contract])
       expect(existsSync(new URL(path, root)), path).toBe(true)
+  })
+
+  it('runs the core suites on the five platforms, Windows in two shards, as the workflow always did', () => {
+    expect(coreMatrix(config.platforms)).toEqual([
+      { platform: 'linux-x64', os: 'ubuntu-latest' },
+      { platform: 'linux-arm64', os: 'ubuntu-24.04-arm' },
+      { platform: 'macos-arm64', os: 'macos-14' },
+      { platform: 'windows-x64', os: 'windows-2022', shard: '1/2', part: '-1' },
+      { platform: 'windows-x64', os: 'windows-2022', shard: '2/2', part: '-2' },
+      { platform: 'windows-arm64', os: 'windows-11-arm', shard: '1/2', part: '-1' },
+      { platform: 'windows-arm64', os: 'windows-11-arm', shard: '2/2', part: '-2' },
+    ])
+    // Every required test applies on every platform unless it names its own.
+    for (const platform of PLATFORMS)
+      expect(requiredLiveTests(config.required_live_tests, platform)).toEqual(config.required_live_tests)
+    const only = [
+      { file: 'a', name: 'everywhere' },
+      { file: 'a', name: 'macOS only', platforms: ['macos-arm64'] },
+    ]
+    expect(requiredLiveTests(only, 'linux-x64').map((t) => t.name)).toEqual(['everywhere'])
+    expect(requiredLiveTests(only, 'macos-arm64').map((t) => t.name)).toEqual(['everywhere', 'macOS only'])
   })
 
   it('takes candidate ids an orchestrator can find in run-name', () => {

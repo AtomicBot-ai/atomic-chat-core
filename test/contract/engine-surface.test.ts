@@ -17,6 +17,7 @@ import {
   checkStrings,
   checkVersion,
   countStrings,
+  invocationKey,
   MIRROR_WHITELIST,
   parseBinaryVersion,
   parseGitLog,
@@ -229,6 +230,15 @@ describe('--version and the invocations', () => {
     ])
     expect(ids(findings, 'break')).toEqual(['invocations.exit/--version'])
     expect(ids(findings, 'error')).toEqual(['invocations.exit/--list-devices'])
+  })
+
+  it('names an invocation by its executable only when it runs another than the server', () => {
+    expect(invocationKey({ argv: ['-h'] })).toBe('-h')
+    expect(invocationKey({ bin: 'sd-cli', argv: ['--help'] })).toBe('sd-cli --help')
+    // An sd-cli run never stands in for the server's own -h.
+    expect(ids(checkInvocations(contract, [{ bin: 'sd-cli', argv: ['-h'], status: 0 }]), 'error')).toContain(
+      'invocations.exit/-h'
+    )
   })
 })
 

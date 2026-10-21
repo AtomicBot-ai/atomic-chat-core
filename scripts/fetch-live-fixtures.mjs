@@ -13,6 +13,11 @@
 // Env: ATOMIC_LIVE_RELEASE_TAG, ATOMIC_LIVE_RELEASE_REPO, ATOMIC_LIVE_ASSET (exact asset name),
 // ATOMIC_LIVE_MODEL_URL (+ ATOMIC_LIVE_MODEL_SHA256), GITHUB_TOKEN / GH_TOKEN for the API.
 //
+// --engine sd-cpp (a config of `kind: sdcpp`) fetches stable-diffusion.cpp instead: this host's CPU
+// archive of the release, unpacked alone, the config's `live_models` into --models (default
+// <out>/models; shared between builds), and manifest.json and live.json for the live env
+// (scripts/lib/sdcpp-fixtures.mjs).
+//
 // Writes into <out>: bin-path.txt and model-path.txt (exported as ATOMIC_LIVE_UPSTREAM_BIN /
 // ATOMIC_LIVE_UPSTREAM_MODEL, or the engine's own prefix such as ATOMIC_LIVE_PRISM_*), tag.txt
 // (ATOMIC_LIVE_UPSTREAM_TAG) and fixture.json, which records
@@ -35,6 +40,8 @@ import {
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assetPatternFor, DEFAULT_RELEASE_REPO, digestMatches, pickRelease } from './lib/live-fixtures.mjs'
+import { engineContract, hostPlatform } from './lib/engine-io.mjs'
+import { fetchSdcppFixtures } from './lib/sdcpp-fixtures.mjs'
 
 const arg = (name) => {
   const index = process.argv.indexOf(name)
@@ -67,6 +74,22 @@ const SKIP_MODEL = process.argv.includes('--skip-model')
 const CAPTURE = process.argv.includes('--capture')
 
 mkdirSync(OUT, { recursive: true })
+
+if (engineConfig?.kind === 'sdcpp') {
+  if (!TAG) throw new Error('--engine sd-cpp needs --tag')
+  await fetchSdcppFixtures({
+    out: OUT,
+    tag: TAG,
+    repo: arg('--repo') ?? engineConfig.default_repo,
+    config: engineConfig,
+    contract: engineContract(engineConfig),
+    modelsDir: resolve(arg('--models') ?? join(OUT, 'models')),
+    skipModel: SKIP_MODEL,
+    token: TOKEN,
+    platform: hostPlatform(),
+  })
+  process.exit(0)
+}
 
 async function json(url) {
   const headers = { 'user-agent': 'atomic-chat-core-live-fixtures', 'accept': 'application/vnd.github+json' }
