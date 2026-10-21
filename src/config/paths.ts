@@ -57,6 +57,10 @@ export interface ProviderPaths {
   runtimeDir?: string
   /** `foundry-local`: `<root>/logs`, the library's logs. */
   logsDir?: string
+  /** `litert-lm`: `<root>/accelerators`, prepared OpenVINO libraries (`openvino/<version>/`). */
+  acceleratorsDir?: string
+  /** `litert-lm`: `<root>/cache`, the library's `cache_dir` (XNNPACK caches, compiled shaders). */
+  cacheDir?: string
 }
 
 export interface CoreFiles {
@@ -265,6 +269,19 @@ export function dataLayout(root: string): DataLayout {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),
             modelsDir: join(providerRoot, 'models'),
+            runtimeDir: join(providerRoot, 'runtime'),
+            tmpDir: join(providerRoot, 'tmp'),
+            logsDir: join(providerRoot, 'logs'),
+          }
+        case 'litert-lm':
+          // Change `add-litert-lm-runtime`: builds, prepared accelerators, models the clients download,
+          // the library's cache, each host's runtime files, staging and logs.
+          return {
+            root: providerRoot,
+            backendsDir: join(providerRoot, 'backends'),
+            acceleratorsDir: join(providerRoot, 'accelerators'),
+            modelsDir: join(providerRoot, 'models'),
+            cacheDir: join(providerRoot, 'cache'),
             runtimeDir: join(providerRoot, 'runtime'),
             tmpDir: join(providerRoot, 'tmp'),
             logsDir: join(providerRoot, 'logs'),

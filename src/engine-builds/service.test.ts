@@ -11,9 +11,23 @@ import type { CoreEvents, EngineBuildId } from '../contracts/index.js'
 import { Downloader } from '../downloads/index.js'
 import type { DownloaderEventName } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
-import { parseFoundryLocalManifest, parseMlxManifest, parseSdcppManifest } from './manifest.js'
-import type { FoundryLocalManifest, ManifestRead, MlxManifest, SdcppManifest } from './manifest.js'
-import type { FoundryLocalHostPlatform } from './select.js'
+import { makeZip } from '../../test/helpers/make-zip.js'
+import { OWNER_MARKER } from '../diffusion/install.js'
+import { writeLiteRtLmInstallRecord } from './litert-lm.js'
+import {
+  parseFoundryLocalManifest,
+  parseLiteRtLmManifest,
+  parseMlxManifest,
+  parseSdcppManifest,
+} from './manifest.js'
+import type {
+  FoundryLocalManifest,
+  LiteRtLmManifest,
+  ManifestRead,
+  MlxManifest,
+  SdcppManifest,
+} from './manifest.js'
+import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
 import { EngineBuildsService, IDLE_ENGINE_HOST, parseEngineBuildId } from './service.js'
 import type { EngineHost } from './service.js'
 
@@ -145,16 +159,20 @@ function harness(
     platform?: NodeJS.Platform
     foundryLocalHost?: FoundryLocalHostPlatform
     foundryProbe?: (dir: string) => Promise<void>
+    liteRtLmHost?: LiteRtLmHostPlatform
+    liteRtLmProbe?: (dir: string) => Promise<void>
   } = {}
 ) {
   const manifests: {
     'sd-cpp': ManifestRead<SdcppManifest>
     'mlx': ManifestRead<MlxManifest>
     'foundry-local': ManifestRead<FoundryLocalManifest>
+    'litert-lm': ManifestRead<LiteRtLmManifest>
   } = {
     'sd-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'mlx': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'foundry-local': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'litert-lm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
   }
   const events: Array<{ name: string; payload: unknown }> = []
   const changed: Array<CoreEvents['engine-build:changed']> = []
@@ -164,6 +182,7 @@ function harness(
       .replace(MIRROR, server.url('/releases'))
       .replace('https://github.com/AtomicBot-ai/mlx-vlm/releases/download', server.url('/releases'))
       .replace('https://github.com/microsoft/foundry-local/releases/download', server.url('/releases'))
+      .replace('https://files.pythonhosted.org/packages', server.url('/releases'))
     return fetch(url, init)
   }
   const downloader = new Downloader({
@@ -178,6 +197,7 @@ function harness(
     'sd-cpp': new FakeHost(),
     'mlx': new FakeHost(),
     'foundry-local': new FakeHost(),
+    'litert-lm': new FakeHost(),
   }
   let clock = 1_000
   const service = new EngineBuildsService({
@@ -186,6 +206,7 @@ function harness(
       'sd-cpp': data.layout.diffusion.backendsDir,
       'mlx': data.layout.provider('mlx').backendsDir,
       'foundry-local': FOUNDRY_ROOT(),
+      'litert-lm': LITERT_ROOT(),
     },
     failedBackendsFile: join(data.layout.diffusion.root, 'failed-backends.json'),
     resourcesDir: opts.resourcesDir,
@@ -195,9 +216,16 @@ function harness(
       'sd-cpp': { read: async () => manifests['sd-cpp'] },
       'mlx': { read: async () => manifests.mlx },
       'foundry-local': { read: async () => manifests['foundry-local'] },
+      'litert-lm': { read: async () => manifests['litert-lm'] },
     },
-    foundryLocalHost: opts.foundryLocalHost ?? { platform: 'linux-x64' },
-    ...(opts.foundryProbe ? { probe: { 'foundry-local': opts.foundryProbe } } : {}),
+    hostPlatforms: {
+      'foundry-local': opts.foundryLocalHost ?? { platform: 'linux-x64' },
+      'litert-lm': opts.liteRtLmHost ?? { platform: 'linux-x64' },
+    },
+    probe: {
+      ...(opts.foundryProbe ? { 'foundry-local': opts.foundryProbe } : {}),
+      ...(opts.liteRtLmProbe ? { 'litert-lm': opts.liteRtLmProbe } : {}),
+    },
     hardware: async () => opts.facts ?? LINUX_VULKAN,
     hosts,
     availableSpace: async () => opts.space,
@@ -216,10 +244,26 @@ function harness(
   const setFoundry = (manifest: FoundryLocalManifest) => {
     manifests['foundry-local'] = { manifest, source: 'remote', fetched_at: 1, error: null }
   }
-  return { service, downloader, events, changed, engineChanged, hosts, setSd, setMlx, setFoundry, manifests }
+  const setLiteRtLm = (manifest: LiteRtLmManifest) => {
+    manifests['litert-lm'] = { manifest, source: 'remote', fetched_at: 1, error: null }
+  }
+  return {
+    service,
+    downloader,
+    events,
+    changed,
+    engineChanged,
+    hosts,
+    setSd,
+    setMlx,
+    setFoundry,
+    setLiteRtLm,
+    manifests,
+  }
 }
 
 const FOUNDRY_ROOT = () => join(data.root, 'foundry-local', 'backends')
+const LITERT_ROOT = () => join(data.root, 'litert-lm', 'backends')
 
 /** A Foundry Local archive: the libraries as plain files, plus the debug symbols Microsoft ships. */
 async function foundryArchive(name: string, files: Record<string, string>): Promise<Buffer> {
@@ -280,9 +324,10 @@ describe('IDLE_ENGINE_HOST', () => {
 })
 
 describe('parseEngineBuildId', () => {
-  it('knows sd-cpp, mlx and foundry-local only', () => {
+  it('knows sd-cpp, mlx, foundry-local and litert-lm only', () => {
     expect(parseEngineBuildId('mlx')).toBe('mlx')
     expect(parseEngineBuildId('foundry-local')).toBe('foundry-local')
+    expect(parseEngineBuildId('litert-lm')).toBe('litert-lm')
     expect(() => parseEngineBuildId('llamacpp')).toThrow(
       expect.objectContaining({ code: 'INVALID_ARGUMENT' })
     )
@@ -1142,6 +1187,148 @@ describe.skipIf(!POSIX)('Foundry Local builds (task 4.5)', () => {
     })
     await expect(h.service.install('foundry-local', { task_id: 't' })).rejects.toMatchObject({
       code: 'UNSUPPORTED_BACKEND',
+    })
+  })
+})
+
+const LITERT_WHEEL = 'litert_lm_api-0.18.1-py3-none-manylinux_2_27_x86_64.whl'
+const litertWheel = (): Buffer =>
+  makeZip([
+    { name: 'litert_lm/__init__.py', data: Buffer.from('py') },
+    { name: 'litert_lm/liblitert-lm.so', data: Buffer.from('so'), mode: 0o777 },
+    { name: 'litert_lm_api-0.18.1.dist-info/RECORD', data: Buffer.from('record') },
+  ])
+
+/** Serve one wheel per release under `/releases/<version>/` and describe the releases as conf does. */
+function litertManifest(
+  releases: Array<{ version: string; published_at: string; body: Buffer; sha256?: string }>
+): LiteRtLmManifest {
+  return parseLiteRtLmManifest(
+    {
+      schema_version: 1,
+      releases: releases.map((release) => {
+        server.files.set(`/releases/${release.version}/${LITERT_WHEEL}`, { body: release.body })
+        return {
+          version: release.version,
+          published_at: release.published_at,
+          min_core_version: '0.1.0',
+          abi: 1,
+          assets: [
+            {
+              platform: 'linux-x64',
+              url: `https://files.pythonhosted.org/packages/${release.version}/${LITERT_WHEEL}`,
+              name: LITERT_WHEEL,
+              size: release.body.length,
+              sha256: release.sha256 ?? sha(release.body),
+            },
+          ],
+        }
+      }),
+    },
+    { coreVersion: '9.9.9', abis: [1] }
+  )
+}
+
+describe('LiteRT-LM builds (task 4.4)', () => {
+  it('installs the host wheel: native files under lib/, probed in staging, recorded with its ABI, activated', async () => {
+    const probed: string[] = []
+    const h = harness({ liteRtLmProbe: async (dir) => void probed.push(dir) })
+    h.setLiteRtLm(
+      litertManifest([{ version: '0.18.1', published_at: '2026-10-19T22:44:33Z', body: litertWheel() }])
+    )
+
+    const result = await h.service.install('litert-lm', { task_id: 'litert-lm-engine' })
+
+    const dir = join(LITERT_ROOT(), '0.18.1', 'linux-x64')
+    expect(result).toMatchObject({ installed: true, build: { tag: '0.18.1', backend_id: 'linux-x64' } })
+    expect(probed).toEqual([expect.stringMatching(/linux-x64\.incoming-\d+$/)])
+    expect((await ls(dir)).sort()).toEqual([OWNER_MARKER, 'install.json', 'lib'].sort())
+    expect(await ls(join(dir, 'lib'))).toEqual(['liblitert-lm.so'])
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({
+      tag: '0.18.1',
+      backendId: 'linux-x64',
+      publishedAt: '2026-10-19T22:44:33Z',
+      abi: 1,
+    })
+    expect(h.hosts['litert-lm'].calls).toEqual([`activate ${dir} false`])
+    const catalog = await h.service.catalog('litert-lm')
+    expect(catalog.manifest).toMatchObject({ tag: '0.18.1', published_at: '2026-10-19T22:44:33Z' })
+    expect(catalog.active).toMatchObject({ tag: '0.18.1', backend_id: 'linux-x64', removable: true })
+  })
+
+  it('refuses a wheel whose sha256 differs from conf and leaves nothing behind, unprobed', async () => {
+    const probed: string[] = []
+    const h = harness({ liteRtLmProbe: async (dir) => void probed.push(dir) })
+    h.setLiteRtLm(
+      litertManifest([
+        {
+          version: '0.18.1',
+          published_at: '2026-10-19T22:44:33Z',
+          body: litertWheel(),
+          sha256: 'a'.repeat(64),
+        },
+      ])
+    )
+    await expect(h.service.install('litert-lm', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+    })
+    expect(probed).toEqual([])
+    expect(await ls(join(LITERT_ROOT(), '0.18.1'))).toEqual([])
+  })
+
+  it('deletes the staging tree when the probe fails, the error carrying what the host printed', async () => {
+    const h = harness({
+      liteRtLmProbe: async () => {
+        throw new AtomicCoreError(
+          'ENGINE_INSTALL_FAILED',
+          'litert-host probe failed.',
+          'dlopen: no such file'
+        )
+      },
+    })
+    h.setLiteRtLm(
+      litertManifest([{ version: '0.18.1', published_at: '2026-10-19T22:44:33Z', body: litertWheel() }])
+    )
+    await expect(h.service.install('litert-lm', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      details: 'dlopen: no such file',
+    })
+    expect(await ls(join(LITERT_ROOT(), '0.18.1'))).toEqual([])
+    expect(h.hosts['litert-lm'].calls).toEqual([])
+  })
+
+  it('activates the newest build by published_at among those whose ABI this core binds', async () => {
+    const h = harness()
+    const make = async (version: string, publishedAt: string, abi: number) => {
+      const dir = join(LITERT_ROOT(), version, 'linux-x64')
+      await mkdir(join(dir, 'lib'), { recursive: true })
+      await writeFile(join(dir, 'lib', 'liblitert-lm.so'), 'so')
+      await writeLiteRtLmInstallRecord(dir, {
+        tag: version,
+        backendId: 'linux-x64',
+        sha256: null,
+        installedAtMs: 1,
+        publishedAt,
+        abi,
+      })
+    }
+    await make('0.17.0', '2026-08-01T00:00:00Z', 1)
+    await make('0.18.1', '2026-10-19T22:44:33Z', 1)
+    await make('0.19.0', '2026-12-01T00:00:00Z', 2)
+    const catalog = await h.service.catalog('litert-lm')
+    expect(catalog.installed.map((build) => build.tag).sort()).toEqual(['0.17.0', '0.18.1', '0.19.0'])
+    expect(catalog.active).toMatchObject({ tag: '0.18.1' })
+  })
+
+  it('offers nothing on a host without a LiteRT-LM wheel, saying why', async () => {
+    const h = harness({ liteRtLmHost: { platform: null, reason: 'LiteRT-LM runs on Windows x64 only.' } })
+    h.setLiteRtLm(
+      litertManifest([{ version: '0.18.1', published_at: '2026-10-19T22:44:33Z', body: litertWheel() }])
+    )
+    const catalog = await h.service.catalog('litert-lm')
+    expect(catalog).toMatchObject({
+      host_backend_id: null,
+      host_reason: 'LiteRT-LM runs on Windows x64 only.',
     })
   })
 })

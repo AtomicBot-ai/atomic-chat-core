@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { ENGINE_KINDS } from '../contracts/index.js'
 import type { EngineId, EngineKind, EngineVersions } from '../contracts/index.js'
 import { EnginesService, hostEngines } from './service.js'
 import type { EngineHandle } from './service.js'
@@ -39,6 +40,24 @@ describe('hostEngines', () => {
         engines.indexOf('sd-cpp') + (platform === 'darwin' ? 2 : 1)
       )
     }
+  })
+
+  it('lists litert-lm after foundry-local only where its platform rule holds', () => {
+    expect(hostEngines('darwin', [], { foundryLocal: true, liteRtLm: true }).slice(-2)).toEqual([
+      'foundry-local',
+      'litert-lm',
+    ])
+    expect(hostEngines('linux', ['vllm'], { liteRtLm: true })).toEqual([
+      'llamacpp-upstream',
+      'llamacpp',
+      'atomic-prism',
+      'sd-cpp',
+      'litert-lm',
+      'vllm',
+    ])
+    expect(hostEngines('win32', [], { liteRtLm: false })).not.toContain('litert-lm')
+    expect(hostEngines('darwin', [])).not.toContain('litert-lm')
+    expect(ENGINE_KINDS['litert-lm']).toBe('engine-build')
   })
 
   it('has no foundry-local where the host does not support it, and none by default', () => {

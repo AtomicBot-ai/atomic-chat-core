@@ -104,6 +104,16 @@ export interface FoundryLocalConfig {
   timeout: number
 }
 
+/** `litert-lm` (change `add-litert-lm-runtime`, design D6). */
+export interface LiteRtLmConfig {
+  /** Tokens; `0` takes `model.yml`'s length. Always cut to the file's maximum. */
+  ctx_len: number
+  /** On when the file carries a draft model. */
+  speculative_decoding: boolean
+  /** Seconds a model may take to load in its host. */
+  timeout: number
+}
+
 /**
  * `tensorrt-llm` as the settings store holds it (`src/settings/schema/tensorrt-llm.json`). `gpu_id: ''`
  * lets a load pick the card with the most free memory and `load_timeout_seconds: 0` keeps the engine's own
@@ -197,7 +207,9 @@ export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
           ? SglangProviderConfig
           : P extends 'foundry-local'
             ? FoundryLocalConfig
-            : LlamacppConfig
+            : P extends 'litert-lm'
+              ? LiteRtLmConfig
+              : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

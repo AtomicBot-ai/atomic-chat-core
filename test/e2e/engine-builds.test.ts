@@ -25,6 +25,8 @@ import { launcherArchive, nodeLauncher, startReleaseMirror } from '../helpers/en
 import type { ReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import { FAKE_SIDECAR_SCRIPT } from '../helpers/fake-sidecar-server.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
+import { liteRtLmTestPlatform } from '../helpers/litert-lm-host.js'
+import { makeZip } from '../helpers/make-zip.js'
 
 const { BIN } = core
 const { control, json, waitFor } = sd
@@ -391,6 +393,107 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)('Foundry Local builds
     expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
   }, 120_000)
 })
+
+const LITERT_PLATFORMS = ['macos-arm64', 'linux-x64', 'linux-arm64', 'win-x64']
+const LITERT_HOST = process.platform === 'win32' ? null : liteRtLmTestPlatform()
+const LITERT_LIBRARY: Record<string, string> = {
+  'macos-arm64': 'liblitert-lm.dylib',
+  'linux-x64': 'liblitert-lm.so',
+  'linux-arm64': 'liblitert-lm.so',
+  'win-x64': 'litert-lm.dll',
+}
+
+describe.skipIf(!existsSync(BIN) || LITERT_HOST === null)(
+  'LiteRT-LM builds through the core (task 4.4)',
+  () => {
+    it('installs the host wheel from a file:// manifest, checked by litert-host probe, and leaves nothing when the host refuses it', async () => {
+      const folder = ctx.dataFolder
+      const assets = LITERT_PLATFORMS.map((platform) => {
+        const name = `litert_lm_api-0.18.1-py3-none-${platform}.whl`
+        const body = makeZip([
+          { name: 'litert_lm/__init__.py', data: Buffer.from('py') },
+          { name: `litert_lm/${LITERT_LIBRARY[platform]}`, data: Buffer.from('lib'), mode: 0o777 },
+          { name: 'litert_lm_api-0.18.1.dist-info/RECORD', data: Buffer.from('record') },
+        ])
+        mirror.serve(`/packages/aa/${name}`, body)
+        return {
+          platform,
+          url: `https://files.pythonhosted.org/packages/aa/${name}`,
+          name,
+          size: body.length,
+          sha256: createHash('sha256').update(body).digest('hex'),
+        }
+      })
+      const manifest = join(folder, 'litert-lm-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.18.1',
+              published_at: '2026-10-19T22:44:33Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              assets,
+            },
+          ],
+        })
+      )
+      // The host stand-in: records its argv, answers like `litert-host probe` unless told to fail.
+      const argvFile = join(folder, 'host.argv')
+      const failFlag = join(folder, 'host.fail')
+      const host = join(folder, 'fake-litert-host')
+      await writeFile(
+        host,
+        [
+          '#!/bin/sh',
+          `echo "$@" >> ${JSON.stringify(argvFile)}`,
+          `if [ -f ${JSON.stringify(failFlag)} ]; then echo "dlopen: liblitert-lm.so: wrong ELF class" >&2; exit 3; fi`,
+          `echo '{"version":"0.18.1","abi":1,"backends":["cpu","gpu"]}'`,
+        ].join('\n'),
+        { mode: 0o755 }
+      )
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_LITERT_HOST_TEST_COMMAND: host,
+      })
+      const proxy = mirror.proxy
+
+      const catalog = await json<Catalog>(
+        await post(ready, '/engine-builds/litert-lm/catalog', { force: true })
+      )
+      expect(catalog.manifest).toMatchObject({ tag: '0.18.1', source: 'remote' })
+      expect(catalog.host_backend_id).toBe(LITERT_HOST)
+      const platform = catalog.host_backend_id as string
+
+      const installed = await json(
+        await post(ready, '/engine-builds/litert-lm/install', { task_id: 'lr-1', proxy })
+      )
+      expect(installed).toMatchObject({ installed: true, build: { tag: '0.18.1', backend_id: platform } })
+      const dir = join(folder, 'litert-lm', 'backends', '0.18.1', platform)
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+      expect(await readdir(join(dir, 'lib'))).toEqual([LITERT_LIBRARY[platform]])
+      expect(existsSync(join(dir, 'litert_lm'))).toBe(false)
+      expect((await readFile(argvFile, 'utf8')).trim()).toMatch(
+        new RegExp(`^probe --lib .*0\\.18\\.1/${platform}\\.incoming-\\d+$`)
+      )
+
+      // The host refuses a forced reinstall: the install fails with what it printed, the build stays.
+      await writeFile(failFlag, '')
+      const refused = await post(ready, '/engine-builds/litert-lm/install', {
+        task_id: 'lr-2',
+        proxy,
+        force: true,
+      })
+      expect(await refused.json()).toMatchObject({
+        error: { code: 'ENGINE_INSTALL_FAILED', details: expect.stringContaining('wrong ELF class') },
+      })
+      expect((await readdir(join(folder, 'litert-lm', 'backends', '0.18.1'))).sort()).toEqual([platform])
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+    }, 120_000)
+  }
+)
 
 const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
 

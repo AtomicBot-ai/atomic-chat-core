@@ -15,6 +15,10 @@
  * `foundry-local` is Microsoft Foundry Local (ONNX Runtime GenAI: NPU, CUDA, WebGPU, CPU), run by a
  * host process of this binary per model (openspec change `add-foundry-local`); registered only on
  * the platforms its archives support.
+ *
+ * `litert-lm` is Google's LiteRT-LM (`.litertlm` models on CPU, GPU and an Intel NPU), run by a host
+ * process of this binary per model with its own OpenAI server (openspec change
+ * `add-litert-lm-runtime`); registered only on macOS arm64, Linux x64/arm64 and Windows x64.
  */
 export type LocalProviderId =
   | 'llamacpp-upstream'
@@ -23,6 +27,7 @@ export type LocalProviderId =
   | 'mlx'
   | 'foundation-models'
   | 'foundry-local'
+  | 'litert-lm'
   | ManagedProviderId
 
 /**

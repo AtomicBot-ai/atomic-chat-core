@@ -31,6 +31,7 @@ import {
   parseFoundryLocalCheckRequest,
   runFoundryHostProbe,
 } from '../runtime/foundry-local/index.js'
+import { liteRtHostCommand, runLiteRtHostProbe } from '../runtime/litert-lm/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
@@ -78,6 +79,7 @@ import {
   IDLE_ENGINE_HOST,
   manifestKinds,
   foundryLocalHostPlatform,
+  liteRtLmHostPlatform,
 } from '../engine-builds/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
@@ -348,8 +350,10 @@ export async function createAtomicCore(
     // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
     // from the process report, which Bun's compiled binaries fill in as Node does; musl has none. The
     // report is a whole diagnostic snapshot, so it is built on Linux only, where glibc decides.
+    // LiteRT-LM (change `add-litert-lm-runtime`, design D7) decides on the same facts with its own
+    // thresholds: macOS 12, glibc 2.27, no Windows arm64.
     const foundryLocalArch = options.foundryLocalHost?.arch ?? process.arch
-    const foundryLocalHost = foundryLocalHostPlatform({
+    const nativeHostFacts = {
       platform,
       arch: foundryLocalArch,
       osRelease: options.foundryLocalHost?.osRelease ?? osRelease(),
@@ -359,7 +363,10 @@ export async function createAtomicCore(
           ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
               ?.glibcVersionRuntime
           : undefined),
-    })
+    }
+    const foundryLocalHost = foundryLocalHostPlatform(nativeHostFacts)
+    const liteRtLmHost = liteRtLmHostPlatform(nativeHostFacts)
+    const liteRtHost = liteRtHostCommand(env)
     const foundryLocalPaths = layout.provider('foundry-local')
     const foundryHost = foundryHostCommand(env)
     // The provider itself (task 6.6): one foundry-host per model, where the platform rule holds. The
@@ -569,6 +576,7 @@ export async function createAtomicCore(
         'sd-cpp': layout.diffusion.backendsDir,
         'mlx': layout.provider('mlx').backendsDir,
         'foundry-local': foundryLocalPaths.backendsDir,
+        'litert-lm': layout.provider('litert-lm').backendsDir,
       },
       failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
       resourcesDir: options.resourcesDir,
@@ -582,18 +590,24 @@ export async function createAtomicCore(
           fetchFor,
           log,
         }),
+        'litert-lm': new EngineManifestSource(engineManifestKinds['litert-lm'], { env, fetchFor, log }),
       },
-      foundryLocalHost,
-      foundryHostProbe: async (libDir) => {
-        await runFoundryHostProbe(
-          foundryHost,
-          {
-            libDir,
-            appDataDir: foundryLocalPaths.runtimeDir as string,
-            logsDir: foundryLocalPaths.logsDir as string,
-          },
-          { env }
-        )
+      hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost },
+      hostProbes: {
+        'foundry-local': async (libDir) => {
+          await runFoundryHostProbe(
+            foundryHost,
+            {
+              libDir,
+              appDataDir: foundryLocalPaths.runtimeDir as string,
+              logsDir: foundryLocalPaths.logsDir as string,
+            },
+            { env }
+          )
+        },
+        'litert-lm': async (buildDir) => {
+          await runLiteRtHostProbe(liteRtHost, buildDir, { env })
+        },
       },
       hardware: () => hardware.facts(),
       hosts: {
@@ -602,6 +616,7 @@ export async function createAtomicCore(
         'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
         // Where the provider is not registered nothing runs from a build.
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
+        'litert-lm': IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
@@ -790,6 +805,7 @@ export async function createAtomicCore(
     const engineHandles: EngineHandle[] = []
     for (const engine of hostEngines(platform, [...managedRuntimes.keys()], {
       foundryLocal: foundryLocalHost.platform !== null,
+      liteRtLm: liteRtLmHost.platform !== null,
     })) {
       const kind = ENGINE_KINDS[engine]
       if (kind === 'llamacpp') {

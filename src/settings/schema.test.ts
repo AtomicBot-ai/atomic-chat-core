@@ -57,6 +57,7 @@ describe('settingsSchema', () => {
     ['vllm', 20],
     ['sglang', 18],
     ['foundry-local', 1],
+    ['litert-lm', 3],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -131,6 +132,12 @@ describe('defaultSettingValues', () => {
     expect(defaultSettingValues('foundation-models')).toEqual({})
     // The host's load timeout: registration, the ORT session and the first EP load (change add-foundry-local).
     expect(defaultSettingValues('foundry-local')).toEqual({ timeout: 600 })
+    // `ctx_len: 0` is "the model's own" from model.yml, cut to the file's maximum (change add-litert-lm-runtime).
+    expect(defaultSettingValues('litert-lm')).toEqual({
+      ctx_len: 0,
+      speculative_decoding: true,
+      timeout: 600,
+    })
     // `gpu_id: ''` picks the card with the most free memory; `load_timeout_seconds: 0` keeps the adapter's
     // own weight-based estimate. Both mean "not set", which is what the adapter's `null` means.
     expect(defaultSettingValues('tensorrt-llm')).toEqual({
@@ -345,6 +352,13 @@ describe('canonicalizeSettingValues', () => {
       load_timeout_seconds: 600,
     })
     expect(canonicalizeSettingValues('foundry-local', { timeout: '120' })).toEqual({ timeout: 120 })
+    expect(
+      canonicalizeSettingValues('litert-lm', {
+        ctx_len: '8192',
+        speculative_decoding: 'false',
+        timeout: '30',
+      })
+    ).toEqual({ ctx_len: 8192, speculative_decoding: false, timeout: 30 })
     expect(canonicalizeSettingValues('foundation-models', { timeout: '300', other: 'x' })).toEqual({
       timeout: 300,
       other: 'x',

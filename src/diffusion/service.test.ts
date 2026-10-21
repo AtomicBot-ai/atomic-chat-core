@@ -147,6 +147,7 @@ async function engineBuilds(h: Harness, tag: string) {
       'sd-cpp': layout.diffusion.backendsDir,
       'mlx': layout.provider('mlx').backendsDir,
       'foundry-local': join(dataFolder, 'foundry-local', 'backends'),
+      'litert-lm': join(dataFolder, 'litert-lm', 'backends'),
     },
     failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
     platform: process.platform,
@@ -161,12 +162,16 @@ async function engineBuilds(h: Harness, tag: string) {
       'foundry-local': {
         read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
       },
+      'litert-lm': {
+        read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
+      },
     },
     hardware: async () => ({ osType: 'macos', arch: 'arm64', cpuExtensions: [], gpus: [] }),
     hosts: {
       'sd-cpp': h.service.engineHost(),
       'mlx': h.service.engineHost(),
       'foundry-local': IDLE_ENGINE_HOST,
+      'litert-lm': IDLE_ENGINE_HOST,
     },
     availableSpace: async () => undefined,
     emit: () => {},

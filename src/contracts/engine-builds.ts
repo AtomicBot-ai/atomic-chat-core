@@ -10,7 +10,7 @@
 
 import type { ProxyConfig } from './backend-advisor.js'
 
-export const ENGINE_BUILD_IDS = ['sd-cpp', 'mlx', 'foundry-local'] as const
+export const ENGINE_BUILD_IDS = ['sd-cpp', 'mlx', 'foundry-local', 'litert-lm'] as const
 export type EngineBuildId = (typeof ENGINE_BUILD_IDS)[number]
 
 /**

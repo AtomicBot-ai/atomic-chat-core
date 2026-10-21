@@ -20,6 +20,7 @@ describe('engine lifecycle contracts', () => {
       'sd-cpp',
       'mlx',
       'foundry-local',
+      'litert-lm',
       'tensorrt-llm',
       'vllm',
       'sglang',
@@ -37,6 +38,7 @@ describe('engine lifecycle contracts', () => {
       'sd-cpp',
       'mlx',
       'foundry-local',
+      'litert-lm',
     ])
   })
 

@@ -47,6 +47,18 @@ describe('dataLayout', () => {
       logsDir: native('/data/foundry-local/logs'),
     })
   })
+  it('gives litert-lm its builds, accelerators, models, library cache, host data and logs under <data>/litert-lm', () => {
+    expect(layout.provider('litert-lm')).toEqual({
+      root: native('/data/litert-lm'),
+      backendsDir: native('/data/litert-lm/backends'),
+      acceleratorsDir: native('/data/litert-lm/accelerators'),
+      modelsDir: native('/data/litert-lm/models'),
+      cacheDir: native('/data/litert-lm/cache'),
+      runtimeDir: native('/data/litert-lm/runtime'),
+      tmpDir: native('/data/litert-lm/tmp'),
+      logsDir: native('/data/litert-lm/logs'),
+    })
+  })
   it('gives atomic-prism its own packs and the shared GGUF tree', () => {
     const prism = layout.provider('atomic-prism')
     expect(prism.modelsDir).toBe(native('/data/llamacpp/models'))
