@@ -60,7 +60,7 @@ export interface Pins {
    * Which conf file decided: the release list when this core reads it, else the legacy manifest;
    * the PrismML manifest for `atomic-prism`.
    */
-  source: 'list' | 'legacy' | 'prism-manifest' | 'none'
+  source: 'list' | 'legacy' | 'prism-manifest' | 'sdcpp-manifest' | 'none'
   core_version: string
   per_platform: Record<string, { backend: string; tag: string | null }>
   list: { readable: boolean; per_platform: Record<string, string | null> | null }
@@ -107,3 +107,29 @@ export declare function prismCatalogToBackends(
   options: { coreVersion: string; allowCandidates: boolean }
 ): Array<{ version: string; backend: string }>
 export declare function resolvePrismPins(input: { manifest: unknown; coreVersion: string }): Pins
+
+export declare const SDCPP_PIN_PLATFORMS: readonly PinPlatform[]
+
+export interface SdcppTagParts {
+  build: number
+  /** The upstream commit the tag names. */
+  sha7: string
+  /** `master-<build>-<sha7>`: the tag without the fork's `-a<rev>`. */
+  upstream_tag: string
+  /** The Atomic fork's rev of a conf mirror tag; `null` on a bare upstream tag. */
+  atomic_rev: string | null
+}
+
+export declare function sdcppTagParts(tag: string): SdcppTagParts | null
+export declare function sdcppTagBuild(tag: string): number | null
+
+export interface SdcppPinManifest {
+  updated_at?: string
+  tag_name: string
+  upstream_repo?: string
+  download_base?: string
+  assets: Array<{ backend: string; name: string; sha256?: string; size?: number; companion?: true }>
+}
+
+export declare function parseSdcppPinManifest(value: unknown): SdcppPinManifest | null
+export declare function resolveSdcppPins(input: { manifest: unknown; coreVersion: string }): Pins

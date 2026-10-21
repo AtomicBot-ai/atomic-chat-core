@@ -69,7 +69,12 @@ const MAC_16: SystemInfo = {
 }
 
 function harness(
-  options: { idleTickMs?: number; claimGpu?: GpuClaimHook; systemInfo?: SystemInfo } = {}
+  options: {
+    idleTickMs?: number
+    claimGpu?: GpuClaimHook
+    systemInfo?: SystemInfo
+    env?: NodeJS.ProcessEnv
+  } = {}
 ): Harness {
   const events: Harness['events'] = []
   const journal: Harness['journal'] = []
@@ -91,6 +96,7 @@ function harness(
     idleTickMs: options.idleTickMs ?? 50,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
     ...(options.systemInfo ? { systemInfo: async () => options.systemInfo as SystemInfo } : {}),
+    ...(options.env ? { env: options.env } : {}),
   })
   service.start()
   services.push(service)
@@ -388,6 +394,22 @@ describe.skipIf(!posix)('the engine and the model', () => {
     await h.service.loadModel({ ...request, files: { ...request.files, llmVision: projector } })
     await expect(h.service.deleteModelFile(projector)).rejects.toMatchObject({ code: 'BACKEND_IN_USE' })
     await h.service.unloadModel()
+  })
+
+  it('starts every load on the CPU backend under ATOMIC_DIFFUSION_BACKEND=cpu, and only then', async () => {
+    for (const [env, extraArgs] of [
+      [{ ...process.env, ATOMIC_DIFFUSION_BACKEND: 'cpu' }, ['--backend', 'cpu']],
+      [{ ...process.env, ATOMIC_DIFFUSION_BACKEND: '' }, []],
+    ] as const) {
+      const h = harness({ env })
+      await h.service.configure({ dataFolder })
+      await installFakeSdEngine(layout, { tag: 'master-883-137f740', backendId: 'fake-cpu' })
+      const loaded = await h.service.loadModel(await loadRequest())
+      expect(h.service.state.spec?.extraArgs).toEqual(extraArgs)
+      // A chosen backend is not a recovery: the job record says nothing fell back.
+      expect(loaded.cpuFallback).toBe(false)
+      await h.service.unloadModel()
+    }
   })
 
   it('reports a load that fails, and stops one that is abandoned', async () => {

@@ -116,7 +116,8 @@ export function versionCommit(output) {
   )
 }
 
-const finding = (check, subject, severity, message, evidence) => ({
+/** One finding: `id` is `check/subject`, stable between runs. */
+export const finding = (check, subject, severity, message, evidence) => ({
   id: subject === undefined ? check : `${check}/${subject}`,
   check,
   severity,
@@ -288,12 +289,15 @@ export function checkVersion({ tag, output }) {
   return []
 }
 
+/** What names an invocation in findings: its argv, after the executable when it names one (`sd-cli --help`). */
+export const invocationKey = ({ bin, argv }) => [...(bin ? [bin] : []), ...argv].join(' ')
+
 /** Every invocation the contract lists (`-h`, `--version`, `--list-devices`) has to exit 0. */
 export function checkInvocations(contract, invocations) {
   const findings = []
-  for (const { argv, source } of contract.invocations ?? []) {
-    const key = argv.join(' ')
-    const ran = invocations.find((i) => i.argv.join(' ') === key)
+  for (const { bin, argv, source } of contract.invocations ?? []) {
+    const key = invocationKey({ bin, argv })
+    const ran = invocations.find((i) => invocationKey(i) === key)
     if (!ran) findings.push(finding('invocations.exit', key, 'error', `${key} was not run`))
     else if (ran.status !== 0)
       findings.push(
@@ -485,21 +489,21 @@ export function checkStrings(contract, upstream) {
 const RANK = { break: 0, error: 1, warn: 2, info: 3 }
 
 /** The worst severity decides: break, then error (incomplete), then warn; info alone is a pass. */
-function statusOf(findings) {
+export function statusOf(findings) {
   if (findings.some((f) => f.severity === 'break')) return 'break'
   if (findings.some((f) => f.severity === 'error')) return 'error'
   if (findings.some((f) => f.severity === 'warn')) return 'warn'
   return 'pass'
 }
 
-const countsOf = (findings) => ({
+export const countsOf = (findings) => ({
   break: findings.filter((f) => f.severity === 'break').length,
   warn: findings.filter((f) => f.severity === 'warn').length,
   info: findings.filter((f) => f.severity === 'info').length,
   error: findings.filter((f) => f.severity === 'error').length,
 })
 
-function sideSummary(side) {
+export function sideSummary(side) {
   if (!side) return null
   return {
     tag: side.tag ?? null,
@@ -638,12 +642,15 @@ export function buildReport(contract, inputs, { now, contractSha256 } = {}) {
 const cell = (v) => (v === null || v === undefined || v === '' ? '—' : String(v).replace(/\|/g, '\\|'))
 const code = (v) => (v === null || v === undefined || v === '' ? '—' : `\`${v}\``)
 
+/** The engine as report.md names it: upstream llama.cpp and PrismML's fork both run llama.cpp. */
+const ENGINE_TITLES = { 'sd-cpp': 'stable-diffusion.cpp' }
+
 /** `report.md`: the same report for a human, rendered from the JSON alone. */
 export function renderMarkdown(report) {
   const { candidate, pin, pin_resolution: res, upstream, core, conf } = report.inputs
   const lines = []
   lines.push(
-    `# llama.cpp surface: ${candidate?.tag ?? 'local build'} against ${pin?.tag ?? 'no pin'} — ${report.status.toUpperCase()}`,
+    `# ${ENGINE_TITLES[report.engine] ?? 'llama.cpp'} surface: ${candidate?.tag ?? 'local build'} against ${pin?.tag ?? 'no pin'} — ${report.status.toUpperCase()}`,
     ''
   )
   const c = report.counts
@@ -659,7 +666,7 @@ export function renderMarkdown(report) {
   const facts = []
   if (res)
     facts.push(
-      `Pin: ${res.source === 'override' ? 'given' : `${res.source === 'list' ? 'the release list' : res.source === 'legacy' ? 'the legacy manifest' : res.source}`}` +
+      `Pin: ${res.source === 'override' ? 'given' : `${res.source === 'list' ? 'the release list' : res.source === 'legacy' ? 'the legacy manifest' : res.source === 'sdcpp-manifest' ? "conf's sd.cpp manifest" : res.source}`}` +
         (res.legacy?.tag ? `; legacy manifest names \`${res.legacy.tag}\`` : '') +
         (conf?.sha ? ` (conf \`${conf.sha.slice(0, 10)}\`)` : '')
     )

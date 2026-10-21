@@ -67,7 +67,8 @@ Stage 5 providers, each opt-in on its own:
   `ATOMIC_LIVE_SD_LLM_VISION` (Qwen Image 2.1's Qwen3-VL projector; with it and `ATOMIC_LIVE_SD_FAMILY=qwen-image-2.1` or
   `qwen-image-2.1-turbo` a `reference` generation from the first output runs as well),
   `ATOMIC_LIVE_SD_FAMILY` (default `flux.2-klein`; `qwen-image-2.1-turbo` runs its 8-step schedule as `custom_sigmas`), `ATOMIC_LIVE_SD_TAG` (the engine's release tag, default
-  `master-883-137f740`, the build app v2.0.42 ships). Holds `sd-server --help` to `test/fixtures/sdcpp/required-flags.txt`,
+  `master-883-137f740`, the build app v2.0.42 ships), `ATOMIC_LIVE_SD_BACKEND=cpu` (every load on the CPU backend, as on
+  CI runners). Holds `sd-server --help` to the `break` flags of `test/fixtures/sdcpp/engine-contract.json`, alias by alias,
   then finalize → load → a 256² generation with parsed step progress, PNG, thumbnail and recipe → the OpenAI facade → a hard
   cancel of a long job → respawn → unload. About five minutes with FLUX.2 Klein Q4_K_M on an M-series Mac.
   The video block of the same file runs when `ATOMIC_LIVE_SD_VIDEO_MODEL` names a video model (LTX-2.3 distilled by
@@ -76,6 +77,11 @@ Stage 5 providers, each opt-in on its own:
   Wan; `ATOMIC_LIVE_SD_VIDEO_MODE_FLAG=1` also passes `-M vid_gen`): load → a nine-frame clip with parsed step progress,
   the WebM and its sidecar → `/v1/videos` queue, poll and content → a hard cancel → respawn → unload. It prints the
   engine's capabilities and the clip's numbers, which is the evidence the ADR of 2026-09-23 leaves open.
+  `test/live/diffusion-install.test.ts` takes `ATOMIC_LIVE_SD_MANIFEST` (a conf-shaped sd.cpp manifest, a path or an
+  `https://` URL) and installs its build the way a user gets it: picked for the host, downloaded, checked, unpacked and
+  probed; a tampered sha256 refused; `--version` naming the tag's commit. `node scripts/fetch-live-fixtures.mjs --engine
+  sd-cpp --tag <tag> --out .live-sd` fetches a release, its manifest and FLUX.2 Klein for both files, and
+  `npm run engine:check -- --engine sd-cpp --tag <tag>` runs the whole check.
 
 Managed TensorRT-LLM install on Linux (`test/live/managed-install.test.ts`, task 2.18): `ATOMIC_LIVE=1` **and**
 `ATOMIC_LIVE_MANAGED=1`, on a throwaway Linux VM with an NVIDIA GPU, driver ≥ the descriptor's minimum and passwordless

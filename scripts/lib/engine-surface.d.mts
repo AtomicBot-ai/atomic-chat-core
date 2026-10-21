@@ -18,7 +18,8 @@ export interface SurfaceContract extends ContractLike {
   schema?: string
   schema_version?: number
   engine?: string
-  invocations?: Array<{ argv: string[]; source: string; expect?: string }>
+  /** `bin`: the executable beside the server that runs it (sd.cpp's `sd-cli`); absent, the server. */
+  invocations?: Array<{ bin?: string; argv: string[]; source: string; expect?: string }>
   assets?: { core_backends: Array<{ platform: string; backend: string; cpu: boolean; asset: string }> }
   upstream?: {
     repo?: string
@@ -41,6 +42,7 @@ export interface SurfaceContract extends ContractLike {
 }
 
 export interface Invocation {
+  bin?: string
   argv: string[]
   /** Exit code, `null` when the process died or did not start. */
   status: number | null
@@ -61,7 +63,11 @@ export interface SurfaceSide {
   binary?: { name?: string; path?: string; sha256?: string; digest_verified?: boolean | null } | null
   release?: { published_at?: string | null; commit?: string | null } | null
   help_text?: string
+  /** sd.cpp: what `sd-cli --help` printed, the install probe's output. */
+  cli_help_text?: string
   version_output?: string
+  /** sd.cpp: the leejet tag the build is cut from, its commit and when leejet published it. */
+  upstream?: { tag: string; commit: string | null; published_at: string | null } | null
   invocations?: Invocation[]
   /** The release's archive names; absent for a local binary. */
   assets?: string[] | null
@@ -159,6 +165,17 @@ export declare function candidateCompleteness(
   missing: Array<{ kind: 'mirror'; pattern: string } | { kind: 'core'; platform: string; backend: string }>
 }
 export declare function checkVersion(input: { tag?: string | null; output: string }): Finding[]
+export declare function finding(
+  check: string,
+  subject: string | undefined,
+  severity: Severity,
+  message: string,
+  evidence?: unknown
+): Finding
+export declare function invocationKey(invocation: { bin?: string; argv: readonly string[] }): string
+export declare function statusOf(findings: readonly Finding[]): 'pass' | 'warn' | 'break' | 'error'
+export declare function countsOf(findings: readonly Finding[]): Record<Severity, number>
+export declare function sideSummary(side: SurfaceSide | null | undefined): Record<string, unknown> | null
 export declare function checkInvocations(
   contract: SurfaceContract,
   invocations: readonly Invocation[]

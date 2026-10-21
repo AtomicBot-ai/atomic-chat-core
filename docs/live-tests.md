@@ -659,7 +659,8 @@ the update orchestrator through the API — never on a schedule, a push or a pul
   core installs and what the mirror requires, and the upstream history between the two commits (watched
   paths, commits announcing a removal or a deprecation). `report.json` / `report.md`; severities `break`
   (a launch fails or a feature is lost), `warn`, `info`, `error` (a check could not run).
-- **core** (`suites=all`) — unit, contract and e2e suites and both builds on five OS, at `core_ref`.
+- **core** (`suites=all`) — unit, contract and e2e suites and both builds at `core_ref`, on the platforms
+  of the engine's config (five OS for llama.cpp).
 - **live** — `test/live/llamacpp.test.ts` on five OS, for the candidate and for the pin, each with a real
   `llama-server` installed under its real tag.
 - **report** — `results.json` / `results.md`: `pass`, `fail` or `incomplete`, and why.
@@ -677,6 +678,7 @@ npm run engine:check -- --repo AtomicBot-ai/atomic-chat-conf --tag b11463   # th
 npm run engine:check -- --bin ~/src/llama.cpp/build/bin/llama-server       # any local build
 npm run engine:check -- --tag b10875 --pin b10874 --suites live            # a backtest
 npm run engine:check -- --engine atomic-prism --tag prism-b10787-73bfe6c   # a PrismML build
+npm run engine:check -- --engine sd-cpp --tag master-883-137f740           # a stable-diffusion.cpp build
 ```
 
 Without `--tag` or `--bin` it takes the newest complete b-tag of `--repo` (default `ggml-org/llama.cpp`).
@@ -711,8 +713,8 @@ gh run download <run-id> -n engine-candidate-results
 
 | input | default | |
 |---|---|---|
-| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths; `atomic-prism` checks PrismML's fork (below) |
-| `tag` | newest complete | the candidate tag: `b11617`, or `prism-b10787-73bfe6c` for `atomic-prism` |
+| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths; `atomic-prism` checks PrismML's fork, `sd-cpp` stable-diffusion.cpp (below) |
+| `tag` | newest complete | the candidate tag: `b11617`, `prism-b10787-73bfe6c` for `atomic-prism`, `master-975-95b3090` or `master-975-95b3090-a<rev>` for `sd-cpp` |
 | `repo` | the engine's | any repo with ggml-org's asset names; `AtomicBot-ai/atomic-chat-conf` tests the signed mirror |
 | `candidate_id` | `manual` | `[A-Za-z0-9._:-]{1,80}`, shown as `[cid:<id>]` in the run title so a caller can find its run |
 | `core_ref` | `main` | the core to check, e.g. an agent's fix branch |
@@ -754,3 +756,47 @@ The engine update pipeline (atomic-hatchet-pipeline) dispatches it with `repo=Pr
 again with `core_ref` set to the latest core release before conf's `prism-approve.yml` approves the
 build. A core release older than the PrismML check has no `.github/engine-candidate/atomic-prism.json`:
 the pipeline then stops before approving and waits for the next release.
+
+### stable-diffusion.cpp builds (`sd-cpp`)
+
+The check covers the image engine too ([ADR 2026-10-21](decisions/2026-10-21-check-sdcpp-builds-with-the-engine-candidate.md)).
+`.github/engine-candidate/sd-cpp.json` (`kind: sdcpp`) and `scripts/lib/sdcpp-{surface,fixtures}.mjs` hold what
+differs:
+
+- **Two kinds of candidate.** The Atomic fork's build of a leejet tag (`master-<N>-<sha7>`, from
+  `AtomicBot-ai/stable-diffusion.cpp`, the default `repo`) and conf's signed mirror of it
+  (`master-<N>-<sha7>-a<rev>`, `repo=AtomicBot-ai/atomic-chat-conf`). The fork's is complete once every
+  archive conf's mirror requires and the CPU archive of each live platform is up once with its digest;
+  conf's also needs `backends/sdcpp-manifest.staging.json` at the run's conf commit (or the live manifest,
+  when that is the one naming the tag) to name the tag and pin exactly the release's sizes and sha256,
+  downloading from conf.
+- **The pin** is the live manifest's `tag_name` (`backends/sdcpp-manifest.json`, the build every core
+  installs), fetched from conf's releases.
+- **The surface** reads `sd-server --help` (flags matched as whole aliases), `sd-server --version` (the
+  commit has to be the tag's), the install probe's `sd-cli --help` (one of `stable-diffusion.cpp`,
+  `--cfg-scale`), the archives by backend, and leejet's history between the two tags: the watched
+  sources, the routes and log text core reads, and commits announcing a removal. The contract is
+  `test/fixtures/sdcpp/engine-contract.json`.
+- **Live** is `test/live/diffusion.test.ts` and `test/live/diffusion-install.test.ts` on linux-x64,
+  linux-arm64 and macos-arm64 (`macos-26`: the archive needs macOS 26), CPU archives only, with FLUX.2
+  Klein 4B Q4_K_M, Qwen3-4B-Instruct-2507 Q4_K_M and the FLUX.2 VAE (`live_models`, 5.4 GB, pinned by
+  revision and sha256, cached under `~/.cache/atomic-live-models` by their hashes). Every load runs on
+  the CPU backend (`ATOMIC_LIVE_SD_BACKEND=cpu` → `ATOMIC_DIFFUSION_BACKEND=cpu`). The install test
+  installs the release through a manifest `fetch-live-fixtures` writes from it
+  (`ATOMIC_SDCPP_MANIFEST_URL`), and refuses a tampered sha256.
+
+```bash
+gh workflow run engine-candidate.yml -f engine=sd-cpp -f tag=master-883-137f740 \
+  -f candidate_id=sdcpp-smoke -f core_ref=main
+# conf's signed mirror on a core release, as the pipeline checks it before approval:
+gh workflow run engine-candidate.yml --ref v0.18.7 -f engine=sd-cpp -f tag=master-883-137f740-a36f1b1a \
+  -f repo=AtomicBot-ai/atomic-chat-conf -f candidate_id=sdcpp-verify -f core_ref=v0.18.7
+```
+
+`node scripts/fetch-live-fixtures.mjs --engine sd-cpp --tag <tag> [--repo …] --out .live-sd [--models <dir>]`
+fetches the archive into `.live-sd/engine-<tag>/` and the models into `<dir>` (default `.live-sd/models`),
+and writes `manifest.json` and `live.json` (the values the config's `live_env` fills in). The engine update
+pipeline dispatches the fork's build with `core_ref=main`, then conf's mirror from the ref of a core
+release; a core release without `.github/engine-candidate/sd-cpp.json` cannot check sd.cpp, and the
+pipeline holds the rollout until one does.
+

@@ -235,11 +235,12 @@ export function prismTagBuild(tag) {
 }
 
 /**
- * Build number of a tag of any engine the check knows: `b11617` or `prism-b10787-73bfe6c`. PrismML's
- * number is the upstream build the fork is cut from, which is what `--version` prints.
+ * Build number of a tag of any engine the check knows: `b11617`, `prism-b10787-73bfe6c` or
+ * `master-883-137f740`. PrismML's number is the upstream build the fork is cut from, which is what
+ * `--version` prints; sd.cpp's is the commit count of upstream's master.
  */
 export function engineTagBuild(tag) {
-  return upstreamTagBuild(tag) ?? prismTagBuild(tag)
+  return upstreamTagBuild(tag) ?? prismTagBuild(tag) ?? sdcppTagBuild(tag)
 }
 
 function parsePrismAsset(raw) {
@@ -313,6 +314,104 @@ export function resolvePrismPins({ manifest, coreVersion }) {
     core_version: coreVersion,
     per_platform: Object.fromEntries(
       PRISM_PIN_PLATFORMS.map((p) => [p.platform, { backend: p.backend, tag: pins[p.platform] }])
+    ),
+    list: { readable: parsed !== null, per_platform: parsed ? pins : null },
+    legacy: { tag: null },
+  }
+}
+
+// --- stable-diffusion.cpp (sd-cpp) ------------------------------------------------------------------
+//
+// conf's `backends/sdcpp-manifest.json` names one build, `tag_name`, for every core (no
+// `min_core_version`). The pin of a platform is that tag when the manifest pins the platform's CPU
+// archive with a sha256 and a size (`assetInstallable`); `parseSdcppPinManifest` mirrors
+// `parseSdcppManifest` in src/engine-builds/manifest.ts.
+
+/** Where sd.cpp ships a build core installs (src/engine-builds/select.ts), with its CPU archive. */
+export const SDCPP_PIN_PLATFORMS = [
+  { platform: 'linux-x64', os: 'linux', arch: 'x64', backend: 'linux-cpu-x64' },
+  { platform: 'linux-arm64', os: 'linux', arch: 'arm64', backend: 'linux-cpu-arm64' },
+  { platform: 'macos-arm64', os: 'macos', arch: 'arm64', backend: 'macos-arm64' },
+  { platform: 'windows-x64', os: 'windows', arch: 'x64', backend: 'win-cpu-x64' },
+  { platform: 'windows-arm64', os: 'windows', arch: 'arm64', backend: 'win-cpu-arm64' },
+]
+
+const SDCPP_TAG_RE = /^master-(\d+)-([0-9a-f]{7})(?:-a([0-9a-f]{7}))?$/
+
+/**
+ * `master-883-137f740-a36f1b1a` → its build (883), upstream commit (`137f740`), the upstream tag
+ * (`master-883-137f740`) and the Atomic fork's rev (`36f1b1a`, `null` on a bare upstream tag).
+ * `null` for any other shape.
+ */
+export function sdcppTagParts(tag) {
+  const match = SDCPP_TAG_RE.exec(tag)
+  if (!match) return null
+  const [, build, sha7, rev] = match
+  return { build: Number(build), sha7, upstream_tag: `master-${build}-${sha7}`, atomic_rev: rev ?? null }
+}
+
+/** Build number of an sd.cpp tag (`master-883-137f740` → 883), `null` for any other shape. */
+export function sdcppTagBuild(tag) {
+  return sdcppTagParts(tag)?.build ?? null
+}
+
+const SDCPP_BACKEND_RE = /^[a-z0-9.-]+$/
+const SDCPP_ASSET_NAME_RE = /^[A-Za-z0-9._-]+\.(zip|tar\.gz|tgz)$/
+
+/** conf's sd.cpp manifest as the core reads it, or `null` for anything it would refuse. */
+export function parseSdcppPinManifest(value) {
+  if (!isRecord(value)) return null
+  const tag = value.tag_name
+  if (typeof tag !== 'string' || !SDCPP_TAG_RE.test(tag)) return null
+  if (!Array.isArray(value.assets)) return null
+  const assets = []
+  const seen = new Set()
+  for (const raw of value.assets) {
+    if (!isRecord(raw)) continue
+    const { backend, name, sha256, size } = raw
+    if (typeof backend !== 'string' || !SDCPP_BACKEND_RE.test(backend)) continue
+    if (typeof name !== 'string' || !SDCPP_ASSET_NAME_RE.test(name)) continue
+    if (seen.has(backend)) continue
+    seen.add(backend)
+    assets.push({
+      backend,
+      name,
+      ...(typeof sha256 === 'string' && /^[0-9a-f]{64}$/.test(sha256) ? { sha256 } : {}),
+      ...(typeof size === 'number' && Number.isSafeInteger(size) && size > 0 ? { size } : {}),
+      ...(raw.companion === true ? { companion: true } : {}),
+    })
+  }
+  if (assets.length === 0) return null
+  const manifest = { tag_name: tag, assets }
+  if (typeof value.updated_at === 'string') manifest.updated_at = value.updated_at
+  if (
+    typeof value.upstream_repo === 'string' &&
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.upstream_repo)
+  )
+    manifest.upstream_repo = value.upstream_repo
+  if (typeof value.download_base === 'string' && /^https:\/\/\S+$/.test(value.download_base))
+    manifest.download_base = value.download_base.replace(/\/+$/, '')
+  return manifest
+}
+
+/**
+ * The sd.cpp pin on every platform core ships it for, from conf's manifest (raw JSON, may be
+ * `undefined`). The same shape as `resolvePins`; there is no release list and no legacy file, and
+ * `coreVersion` decides nothing: every core gets the manifest's build.
+ */
+export function resolveSdcppPins({ manifest, coreVersion }) {
+  const parsed = manifest === undefined ? null : parseSdcppPinManifest(manifest)
+  const pins = Object.fromEntries(
+    SDCPP_PIN_PLATFORMS.map((p) => {
+      const asset = parsed?.assets.find((a) => a.backend === p.backend)
+      return [p.platform, asset?.sha256 && asset.size ? parsed.tag_name : null]
+    })
+  )
+  return {
+    source: parsed ? 'sdcpp-manifest' : 'none',
+    core_version: coreVersion,
+    per_platform: Object.fromEntries(
+      SDCPP_PIN_PLATFORMS.map((p) => [p.platform, { backend: p.backend, tag: pins[p.platform] }])
     ),
     list: { readable: parsed !== null, per_platform: parsed ? pins : null },
     legacy: { tag: null },
