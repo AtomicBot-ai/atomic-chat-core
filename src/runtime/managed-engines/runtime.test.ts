@@ -685,13 +685,19 @@ describe('ManagedTextRuntime (tensorrt-llm): sessions', () => {
 
   it('a second model that arrives while the first is still loading cancels that load', async () => {
     build()
+    // Only the second model's stop may end the first: it never answers ready (`readyAt` is shared,
+    // so it opens only once the first has gone) and, with a timeout no poll of the fake clock can
+    // reach, never times out either — however long either load's file I/O takes on a busy runner.
     readyAt = null
-    const first = runtime.load('qwen3')
-    for (let i = 0; i < 200 && !runtime.isLoading('qwen3'); i++) await new Promise((r) => setImmediate(r))
-    readyAt = Number.MAX_SAFE_INTEGER
+    const first = runtime.load('qwen3', { timeoutSecs: Number.MAX_SAFE_INTEGER })
+    // Bounded by time, not by a count of turns: until the lifecycle has registered the first load,
+    // the second would find nothing to stop.
+    await vi.waitFor(() => expect(runtime.isLoading('qwen3'), 'qwen3 never started loading').toBe(true), {
+      timeout: 4_000,
+    })
     const second = runtime.load('llama')
-    readyAt = 0
     expect((await rejection(first)).code).toBe('MODEL_LOAD_CANCELLED')
+    readyAt = 0
     await second
     expect(runtime.getLoadedModels()).toEqual(['llama'])
   })
