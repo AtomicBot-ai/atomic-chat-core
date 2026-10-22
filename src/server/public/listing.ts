@@ -12,6 +12,7 @@ import { answer, connectTimeoutMs, header } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { readBody, sendUpstream } from './wire.js'
 import { EMBEDDING_OWNED_BY } from './embedding.js'
+import { findLocalSession, findSelectedLocalSession, routedRemote, selectedRoute } from './forward.js'
 import type { LocalProvider } from '../../router/index.js'
 
 /**
@@ -43,20 +44,41 @@ interface MuseFacts {
   output?: number
 }
 
+/**
+ * Every model a request can reach, each named once by the backend a request for it goes to: a local
+ * session is left out when its id is routed elsewhere (a selected remote provider, a remote provider
+ * that owns an unselected id, the selected or an earlier local engine), and so is a remote provider's
+ * model routed to another provider.
+ */
 export function servedModels(ex: Exchange): Array<{ id: string; ownedBy: string; muse: MuseFacts }> {
-  const models = ex.deps.listLocal().map((s) => ({
-    id: s.modelId,
-    ownedBy: OWNED_BY[s.provider],
-    muse: s.policy
-      ? {
-          toolCall: s.policy.tools,
-          ...(s.policy.contextLength === undefined ? {} : { context: s.policy.contextLength }),
-          ...(s.policy.maxOutputTokens === undefined ? {} : { output: s.policy.maxOutputTokens }),
-        }
-      : {},
-  }))
+  const routedLocally = (s: { provider: LocalProvider; modelId: string }): boolean => {
+    const selected = selectedRoute(ex, s.modelId)
+    if (routedRemote(ex, s.modelId, selected)) return false
+    const owner =
+      selected?.kind === 'local'
+        ? findSelectedLocalSession(ex, s.modelId, selected.provider)?.provider
+        : findLocalSession(ex, s.modelId)?.provider
+    return owner === s.provider
+  }
+  const models = ex.deps
+    .listLocal()
+    .filter(routedLocally)
+    .map((s) => ({
+      id: s.modelId,
+      ownedBy: OWNED_BY[s.provider],
+      muse: s.policy
+        ? {
+            toolCall: s.policy.tools,
+            ...(s.policy.contextLength === undefined ? {} : { context: s.policy.contextLength }),
+            ...(s.policy.maxOutputTokens === undefined ? {} : { output: s.policy.maxOutputTokens }),
+          }
+        : {},
+    }))
   for (const provider of ex.deps.providers().values()) {
-    for (const id of provider.models) models.push({ id, ownedBy: 'remote', muse: {} })
+    for (const id of provider.models) {
+      if (routedRemote(ex, id, selectedRoute(ex, id))?.provider === provider.provider)
+        models.push({ id, ownedBy: 'remote', muse: {} })
+    }
   }
   return models
 }

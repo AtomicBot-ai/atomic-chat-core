@@ -82,6 +82,7 @@ import type {
   HardwareOverrideInput,
   LoadedDiffusionModel,
   LocalApiServerState,
+  ServedModelSelection,
   RemoteAccessStatus,
   SessionInfo,
   UnloadResult,
@@ -692,6 +693,16 @@ export class CoreClient {
     fallback_port?: boolean
   }): Promise<LocalApiServerState> {
     return this.call('/server/start', { method: 'POST', body: JSON.stringify(options) })
+  }
+
+  /** The provider the app selected to serve each model id on the public server. */
+  serverSelection(): Promise<{ models: ServedModelSelection[] }> {
+    return this.call('/server/selection')
+  }
+
+  /** Replace the whole selection: those ids go to their selected provider only. */
+  setServerSelection(models: ServedModelSelection[]): Promise<{ models: ServedModelSelection[] }> {
+    return this.call('/server/selection', { method: 'PUT', body: JSON.stringify({ models }) })
   }
 
   /** Tell the core whether the app's API screen is watching, which gates prompt previews. */

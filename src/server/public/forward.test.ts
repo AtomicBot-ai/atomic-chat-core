@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ErrorReport } from '../../telemetry/index.js'
 import { sseEvent } from './forward.js'
+import type { LocalTarget } from './types.js'
 import {
   closeAll,
   closedPort,
@@ -60,6 +61,56 @@ describe('compute failures', () => {
     expect((await postJson(server, '/chat/completions', { model: 'demo' })).status).toBe(400)
     expect((await postJson(server, '/chat/completions', { model: 'turbo' })).status).toBe(400)
     expect(triggers).toEqual(['compute_error_recovery'])
+  })
+})
+
+describe('refusals before the engine', () => {
+  it("answers a model nothing serves with OpenAI's model_not_found envelope on every model route", async () => {
+    const server = await startPublic({ sessions: [localSession(await closedPort())] })
+
+    for (const path of ['/chat/completions', '/messages', '/completions', '/embeddings']) {
+      const res = await postJson(server, path, {
+        model: 'ghost',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+      expect(res.status, path).toBe(404)
+      expect(res.headers.get('content-type'), path).toBe('application/json')
+      expect(await res.json(), path).toEqual({
+        error: {
+          message: "No running session found for model 'ghost'",
+          type: 'invalid_request_error',
+          param: 'model',
+          code: 'model_not_found',
+        },
+      })
+    }
+  })
+
+  it('refuses an empty conversation with a 400 and never asks the local engine', async () => {
+    let calls = 0
+    const { port } = await startUpstream((_req, _body, res) => {
+      calls++
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"choices":[{"message":{"content":"unsolicited"}}]}')
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    for (const path of ['/chat/completions', '/messages']) {
+      const res = await postJson(server, path, { model: 'demo', max_tokens: 8, messages: [] })
+      expect(res.status, path).toBe(400)
+      expect(res.headers.get('content-type'), path).toBe('application/json')
+      expect(await res.json(), path).toMatchObject({
+        error: { type: 'invalid_request_error', param: 'messages', code: 'empty_array' },
+      })
+    }
+    expect(calls).toBe(0)
+
+    const ok = await postJson(server, '/chat/completions', {
+      model: 'demo',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    expect(ok.status).toBe(200)
+    expect(calls).toBe(1)
   })
 })
 
@@ -362,4 +413,109 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
       })
     }
   )
+})
+
+describe('the provider the app selected for a model id', () => {
+  /** A local engine and a remote provider that both serve `demo`, each counting its calls. */
+  async function collision(
+    selection: Array<[string, string]> | undefined,
+    {
+      localLoaded = true,
+      localProvider = 'llamacpp-upstream',
+    }: { localLoaded?: boolean; localProvider?: LocalTarget['provider'] } = {}
+  ) {
+    const calls = { local: 0, remote: 0 }
+    const local = await startUpstream((_req, _body, res) => {
+      calls.local++
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"from":"local"}')
+    })
+    const remote = await startUpstream((_req, _body, res) => {
+      calls.remote++
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"from":"remote"}')
+    })
+    const server = await startPublic({
+      sessions: [
+        localSession(local.port, { provider: localProvider, ...(localLoaded ? {} : { modelId: 'other' }) }),
+      ],
+      remote: [
+        remoteProvider({
+          provider: 'custom',
+          baseUrl: `http://127.0.0.1:${remote.port}/v1`,
+          models: ['demo'],
+        }),
+      ],
+      ...(selection ? { selection: () => new Map(selection) } : {}),
+    })
+    return { server, calls }
+  }
+  const chat = { model: 'demo', messages: [{ role: 'user', content: 'hi' }] }
+
+  it('sends the id to the remote provider without a selection, as before', async () => {
+    const { server, calls } = await collision(undefined)
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'remote' })
+    expect(calls).toEqual({ local: 0, remote: 1 })
+  })
+
+  it('sends the id to the selected local engine although a remote provider lists it', async () => {
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']])
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'local' })
+    expect(calls).toEqual({ local: 1, remote: 0 })
+  })
+
+  it('keeps a model selected on one local engine local when another engine holds it', async () => {
+    // The app named llama.cpp upstream; TurboQuant (`llamacpp`) has the session.
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']], { localProvider: 'llamacpp' })
+
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'local' })
+    expect((await postJson(server, '/responses', { model: 'demo', input: 'hi' })).status).toBe(200)
+    expect(calls).toEqual({ local: 2, remote: 0 })
+    const { data } = (await (await fetch(`http://127.0.0.1:${server.port}/v1/models`)).json()) as {
+      data: Array<{ id: string; owned_by: string }>
+    }
+    expect(data.filter((m) => m.id === 'demo').map((m) => m.owned_by)).toEqual(['llama.cpp'])
+  })
+
+  it('sends /responses for the id to the selected local engine too', async () => {
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']])
+    expect((await postJson(server, '/responses', { model: 'demo', input: 'hi' })).status).toBe(200)
+    expect(calls).toEqual({ local: 1, remote: 0 })
+  })
+
+  it('sends the id to the selected remote provider while the local engine has it loaded', async () => {
+    const { server, calls } = await collision([['demo', 'custom']])
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'remote' })
+    expect(calls).toEqual({ local: 0, remote: 1 })
+  })
+
+  it('answers 503 naming the model and the selected engine when it has no session, and asks nobody', async () => {
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']], { localLoaded: false })
+
+    for (const path of ['/chat/completions', '/messages', '/responses']) {
+      const res = await postJson(server, path, { ...chat, input: 'hi' })
+      expect(res.status, path).toBe(503)
+      expect(res.headers.get('content-type'), path).toBe('application/json')
+      const body = (await res.json()) as { error: { message: string; code: string; type: string } }
+      expect(body.error, path).toMatchObject({ code: 'selected_provider_unavailable', type: 'server_error' })
+      expect(body.error.message, path).toContain("model 'demo'")
+      expect(body.error.message, path).toContain('llamacpp-upstream')
+    }
+    expect(calls).toEqual({ local: 0, remote: 0 })
+  })
+
+  it('lists the id once in /v1/models, owned by the backend its requests go to', async () => {
+    const owners = async (selection: Array<[string, string]> | undefined, loaded = true) => {
+      const { server } = await collision(selection, { localLoaded: loaded })
+      const res = await fetch(`http://127.0.0.1:${server.port}/v1/models`)
+      const { data } = (await res.json()) as { data: Array<{ id: string; owned_by: string }> }
+      return data.filter((m) => m.id === 'demo').map((m) => m.owned_by)
+    }
+
+    expect(await owners(undefined)).toEqual(['remote'])
+    expect(await owners([['demo', 'llamacpp-upstream']])).toEqual(['llama.cpp-upstream'])
+    expect(await owners([['demo', 'custom']])).toEqual(['remote'])
+    // Selected but not loaded: nothing serves it, so nothing lists it.
+    expect(await owners([['demo', 'llamacpp-upstream']], false)).toEqual([])
+  })
 })

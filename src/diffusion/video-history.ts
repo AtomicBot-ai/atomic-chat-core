@@ -27,8 +27,9 @@ export function recipeInput(input: VideoEstimateInput, recipe: VideoRecipe): Vid
     width: recipe.width,
     height: recipe.height,
     frames: recipe.frames,
-    steps: recipe.steps,
-    cfgScale: recipe.cfgScale,
+    // A local clip always has both; the request's stand in for one that does not.
+    steps: recipe.steps ?? input.steps,
+    cfgScale: recipe.cfgScale ?? input.cfgScale,
   }
   if (!input.decodeTiling) return base
   const decodeTiling = planDecodeTiling(base)

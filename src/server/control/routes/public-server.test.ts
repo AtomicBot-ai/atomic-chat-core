@@ -52,3 +52,48 @@ describe('inspector route', () => {
     expect(bad.status).toBe(400)
   })
 })
+
+describe('selection route', () => {
+  it('replaces the whole selection and reads it back', async () => {
+    const put = (body: unknown) =>
+      h.get('/atomic/v1/server/selection', { method: 'PUT', body: JSON.stringify(body) })
+
+    const first = await put({ models: [{ model: 'qwen', provider: 'llamacpp-upstream' }] })
+    expect(await first.json()).toEqual({ models: [{ model: 'qwen', provider: 'llamacpp-upstream' }] })
+    const replaced = await put({ models: [{ model: 'gpt-5', provider: 'openai' }] })
+    expect(await replaced.json()).toEqual({ models: [{ model: 'gpt-5', provider: 'openai' }] })
+    expect(await (await h.get('/atomic/v1/server/selection')).json()).toEqual({
+      models: [{ model: 'gpt-5', provider: 'openai' }],
+    })
+    expect((await put({ models: [] })).status).toBe(200)
+    expect(h.selection).toEqual([])
+  })
+
+  it('refuses a body that is not a list of non-empty model and provider strings, and keeps the selection', async () => {
+    await h.get('/atomic/v1/server/selection', {
+      method: 'PUT',
+      body: JSON.stringify({ models: [{ model: 'qwen', provider: 'mlx' }] }),
+    })
+    for (const body of [
+      null,
+      {},
+      { models: 'qwen' },
+      { models: [null] },
+      { models: ['qwen'] },
+      { models: [{ model: 'qwen' }] },
+      { models: [{ model: 1, provider: 'mlx' }] },
+      { models: [{ model: '', provider: 'mlx' }] },
+      { models: [{ model: 'qwen', provider: '' }] },
+      {
+        models: [
+          { model: 'gemma', provider: 'mlx' },
+          { model: 'qwen', provider: 7 },
+        ],
+      },
+    ]) {
+      const res = await h.get('/atomic/v1/server/selection', { method: 'PUT', body: JSON.stringify(body) })
+      expect(res.status, JSON.stringify(body)).toBe(400)
+    }
+    expect(h.selection).toEqual([{ model: 'qwen', provider: 'mlx' }])
+  })
+})

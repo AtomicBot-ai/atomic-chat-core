@@ -29,8 +29,8 @@ import {
   serdeToString,
 } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
-import { LOCAL_SEARCH_ORDER, resolveRemoteProvider } from '../../router/index.js'
-import type { LocalProvider, RemoteProvider } from '../../router/index.js'
+import { LOCAL_SEARCH_ORDER, resolveRemoteProvider, resolveSelectedRoute } from '../../router/index.js'
+import type { LocalProvider, RemoteProvider, SelectedRoute } from '../../router/index.js'
 import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
 import { autoIncreaseCtx } from './ctx.js'
 import { SseLineReader } from './sse.js'
@@ -39,9 +39,12 @@ import { endpointFromPath } from './trace.js'
 import {
   bodyIndicatesOom,
   computeErrorEnvelope,
+  emptyMessagesRefusal,
   isComputeBackendError,
   isContextLimitError,
   isContextOverflowFinishLength,
+  modelNotFoundJson,
+  selectedProviderUnavailableJson,
   structureBackendErrorBody,
   structuredErrorJson,
 } from './errors.js'
@@ -61,6 +64,49 @@ import {
 import type { HeaderPairs, UpstreamResponse } from './wire.js'
 
 export type Backend = { kind: 'remote'; provider: RemoteProvider } | { kind: 'local'; session: LocalTarget }
+
+const NO_SELECTION: ReadonlyMap<string, string> = new Map()
+
+/**
+ * The provider the app selected to serve `modelId`, when the core can route to it; `undefined`
+ * leaves the id to the rules without a selection (remote first, then the local search order).
+ */
+export function selectedRoute(ex: Exchange, modelId: string): SelectedRoute | undefined {
+  return resolveSelectedRoute(modelId, ex.deps.selection?.() ?? NO_SELECTION, ex.deps.providers())
+}
+
+/**
+ * The remote provider a request for `modelId` goes to: the selected one, or with no selection the
+ * one that owns the id. A selected local engine means no remote provider at all.
+ */
+export function routedRemote(
+  ex: Exchange,
+  modelId: string,
+  selected: SelectedRoute | undefined
+): RemoteProvider | undefined {
+  if (selected) return selected.kind === 'remote' ? selected.provider : undefined
+  return resolveRemoteProvider(modelId, ex.deps.providers())
+}
+
+/**
+ * The session a request for a model selected on a local engine goes to: that engine's, or else any
+ * other local engine's in search order — the app and the core may name the engine differently (both
+ * llama.cpp providers list one models folder). `undefined` only when no local engine has it; it never
+ * goes to a remote provider.
+ */
+export function findSelectedLocalSession(
+  ex: Exchange,
+  modelId: string,
+  provider: LocalProvider
+): LocalTarget | undefined {
+  return ex.deps.findLocal(provider, modelId) ?? findLocalSession(ex, modelId)
+}
+
+/** The 503 for a model selected on a local engine that no local engine has a session of. */
+export function answerSelectedUnavailable(ex: Exchange, modelId: string, provider: LocalProvider): void {
+  ex.trace.errorKind = 'not_found'
+  answer(ex, 503, selectedProviderUnavailableJson(modelId, provider), [['Content-Type', 'application/json']])
+}
 
 /** The first local session serving `modelId`, in the proxy's provider order. */
 export function findLocalSession(ex: Exchange, modelId: string): LocalTarget | undefined {
@@ -153,7 +199,8 @@ export async function serveForward(ex: Exchange): Promise<void> {
   let backend: Backend
   let url: string | undefined
   let key: string | undefined
-  const remote = resolveRemoteProvider(modelId, ex.deps.providers())
+  const selected = selectedRoute(ex, modelId)
+  const remote = routedRemote(ex, modelId, selected)
   const trace = ex.trace
   if (remote) {
     backend = { kind: 'remote', provider: remote }
@@ -164,18 +211,27 @@ export async function serveForward(ex: Exchange): Promise<void> {
       url = isMessages ? `${remote.baseUrl.replace(/\/+$/, '')}/messages` : `${remote.baseUrl}${ex.path}`
     }
   } else {
-    // "Nothing is loaded" (503) and "that model is not loaded" (404) are told apart so a client can
-    // tell a cold server from a typo. `/messages` has always answered 404 for both.
-    if (!isMessages && ex.deps.listLocal().length === 0) {
-      trace.errorKind = 'not_found'
-      answer(ex, 503, 'No models are available')
-      return
-    }
-    const session = findLocalSession(ex, modelId)
-    if (!session) {
-      trace.errorKind = 'not_found'
-      answer(ex, 404, `No running session found for model '${modelId}'`)
-      return
+    let session: LocalTarget | undefined
+    if (selected?.kind === 'local') {
+      session = findSelectedLocalSession(ex, modelId, selected.provider)
+      if (!session) {
+        answerSelectedUnavailable(ex, modelId, selected.provider)
+        return
+      }
+    } else {
+      // "Nothing is loaded" (503) and "that model is not loaded" (404) are told apart so a client can
+      // tell a cold server from a typo. `/messages` has always answered 404 for both.
+      if (!isMessages && ex.deps.listLocal().length === 0) {
+        trace.errorKind = 'not_found'
+        answer(ex, 503, 'No models are available')
+        return
+      }
+      session = findLocalSession(ex, modelId)
+      if (!session) {
+        trace.errorKind = 'not_found'
+        answer(ex, 404, modelNotFoundJson(modelId), [['Content-Type', 'application/json']])
+        return
+      }
     }
     backend = { kind: 'local', session }
     trace.backend = session.provider
@@ -183,6 +239,14 @@ export async function serveForward(ex: Exchange): Promise<void> {
     if (refused) {
       trace.errorKind = 'bad_request'
       answer(ex, refused.status, refused.body, [['Content-Type', 'application/json']])
+      return
+    }
+    // A local engine answers an empty conversation with a completion nobody asked for; a remote
+    // provider validates its own requests.
+    const empty = ex.path === '/chat/completions' || isMessages ? emptyMessagesRefusal(json) : undefined
+    if (empty !== undefined) {
+      trace.errorKind = 'bad_request'
+      answer(ex, 400, empty, [['Content-Type', 'application/json']])
       return
     }
     key = session.apiKey

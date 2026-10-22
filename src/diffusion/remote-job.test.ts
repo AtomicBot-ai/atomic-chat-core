@@ -77,6 +77,9 @@ const videoModel = (overrides: Partial<VideoModelDescriptor> = {}): VideoModelDe
 interface Fakes {
   image: ImageAdapter
   video: VideoAdapter
+  /** The descriptors the gateway resolves to; `imageModel()` / `videoModel()` when unset. */
+  imageModel?: ImageModelDescriptor
+  videoModel?: VideoModelDescriptor
   submits: number
   polls: VideoPoll[]
   signals: AbortSignal[]
@@ -124,8 +127,14 @@ function gateway(f: Fakes): RemoteMediaGateway {
     if (target.provider !== 'acme') throw diffusionError('REMOTE_NOT_CONFIGURED', 'not connected')
   }
   return {
-    image: async (target) => (check(target), { target, descriptor: imageModel(), adapter: f.image, context }),
-    video: async (target) => (check(target), { target, descriptor: videoModel(), adapter: f.video, context }),
+    image: async (target) => (
+      check(target),
+      { target, descriptor: f.imageModel ?? imageModel(), adapter: f.image, context }
+    ),
+    video: async (target) => (
+      check(target),
+      { target, descriptor: f.videoModel ?? videoModel(), adapter: f.video, context }
+    ),
     find: (model, kind) =>
       model === 'named' ? { provider: 'acme', model: kind === 'image' ? 'img-1' : 'vid-1' } : undefined,
   }
@@ -255,6 +264,34 @@ describe('remote image jobs', () => {
     expect((await s.listGallery({ offset: 0, limit: 10 }).catch(() => ({ total: -1 }))).total).toBe(-1)
   })
 
+  it('record only the knobs the model was sent', async () => {
+    const f = fakes()
+    f.imageModel = imageModel({ params: { n: { max: 2 }, output_format: { values: ['png'] } } })
+    const { s } = service(f)
+    const { jobId } = await s.generate(imageRequest({ steps: 20, cfgScale: 5, seed: 3 }))
+    const recipe = (await settled(s, jobId)).outputs[0]?.recipe
+    expect(recipe).toMatchObject({ engine: { kind: 'remote' }, guidance: null })
+    for (const key of ['steps', 'cfgScale', 'seed', 'batchSeed']) expect(recipe).not.toHaveProperty(key)
+  })
+
+  it('record the steps, CFG and seed a model was sent', async () => {
+    const f = fakes()
+    f.imageModel = imageModel({
+      params: {
+        n: { max: 2 },
+        seed: true,
+        steps: { min: 1, max: 50 },
+        cfg: { min: 0, max: 20 },
+        output_format: { values: ['png'] },
+      },
+    })
+    const { s } = service(f)
+    const { jobId } = await s.generate(imageRequest({ steps: 20, cfgScale: 5, seed: 0, batchSize: 2 }))
+    const outputs = (await settled(s, jobId)).outputs
+    expect(outputs[0]?.recipe).toMatchObject({ steps: 20, cfgScale: 5, seed: 0, batchSeed: 0 })
+    expect(outputs[1]?.recipe).toMatchObject({ seed: 1, batchSeed: 0 })
+  })
+
   it('keep a JPEG as it came', async () => {
     const f = fakes()
     f.image = { ...f.image, generate: async () => [{ bytes: JPEG_STUB, mime: 'image/jpeg' }] }
@@ -322,6 +359,27 @@ describe('remote video jobs', () => {
     expect(job.outputs[0]).toMatchObject({ durationSecs: 4 })
     expect(job.outputs[0]?.path.endsWith('.mp4')).toBe(true)
     expect(await new RemoteJobStore(layout.diffusion.remoteJobsFile).list()).toEqual([])
+  })
+
+  it('record no steps or CFG, and no seed when the model takes none', async () => {
+    const { s } = service(fakes())
+    const { jobId } = await s.generateVideo(videoRequest({ steps: 8, cfgScale: 1, seed: 5 }))
+    const recipe = (await settled(s, jobId, 'video')).outputs[0]?.recipe
+    expect(recipe).toMatchObject({ engine: { kind: 'remote' }, durationSecs: 4 })
+    for (const key of ['steps', 'cfgScale', 'seed']) expect(recipe).not.toHaveProperty(key)
+  })
+
+  it("record the seed a clip's model was sent", async () => {
+    const f = fakes()
+    f.videoModel = videoModel({
+      params: { durations: { values: [4, 8], default: 8 }, resolutions: { values: ['720p'] }, seed: true },
+    })
+    const { s } = service(f)
+    const { jobId } = await s.generateVideo(videoRequest({ steps: 8, cfgScale: 1, seed: 0 }))
+    const recipe = (await settled(s, jobId, 'video')).outputs[0]?.recipe
+    expect(recipe).toMatchObject({ seed: 0 })
+    expect(recipe).not.toHaveProperty('steps')
+    expect(recipe).not.toHaveProperty('cfgScale')
   })
 
   it('retry a poll that failed in transit, and fail the job on a provider failure', async () => {

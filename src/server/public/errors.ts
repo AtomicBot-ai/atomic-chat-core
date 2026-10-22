@@ -73,6 +73,51 @@ export function structuredErrorJson(message: string, type: string, code: string,
   })
 }
 
+/**
+ * A model nothing serves: OpenAI's `model_not_found` envelope. The message keeps the proxy's wording,
+ * which the app's agent client matches (in `error.message`) to tell a missing session from other failures.
+ */
+export function modelNotFoundJson(modelId: string): string {
+  return structuredErrorJson(
+    `No running session found for model '${modelId}'`,
+    'invalid_request_error',
+    'model_not_found',
+    'model'
+  )
+}
+
+/**
+ * The 503 for a model id the app selected a local engine to serve while no local engine has a session
+ * of it. It names the model and the selected engine; the request never goes to a remote provider that
+ * lists the same id. The message opens with the not-found wording the app's agent client matches.
+ */
+export function selectedProviderUnavailableJson(modelId: string, provider: string): string {
+  return structuredErrorJson(
+    `No running session found for model '${modelId}' in any local engine. It is selected to be served ` +
+      `by ${provider} in Atomic Chat, so it is not sent to a remote provider. Load the model, or select ` +
+      'another provider for it on the Local API Server page.',
+    'server_error',
+    'selected_provider_unavailable',
+    'model'
+  )
+}
+
+/**
+ * The 400 for a chat request whose `messages` is an empty array, in OpenAI's own wording; `undefined`
+ * for any other body. A local engine would otherwise answer an empty conversation with a completion
+ * of its own.
+ */
+export function emptyMessagesRefusal(json: JsonValue): string | undefined {
+  const messages = isJsonObject(json) ? json['messages'] : undefined
+  if (!Array.isArray(messages) || messages.length > 0) return undefined
+  return structuredErrorJson(
+    "Invalid 'messages': empty array. Expected an array with minimum length 1, but got an empty array instead.",
+    'invalid_request_error',
+    'empty_array',
+    'messages'
+  )
+}
+
 export function computeErrorEnvelope(oom: boolean): string {
   const message = oom
     ? 'The model ran out of memory while processing this request. Try a smaller or lighter model, reduce the context size, or remove attached images. On Apple Silicon, memory is shared with the system, so closing other memory-heavy apps can free up headroom.'

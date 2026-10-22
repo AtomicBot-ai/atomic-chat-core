@@ -10,6 +10,7 @@ import type {
   BackendUpdateCheckRequest,
   LocalApiServerState,
   RemoteAccessStatus,
+  ServedModelSelection,
   SessionInfo,
   SystemInfo,
   UnloadResult,
@@ -85,6 +86,8 @@ export interface ControlHarness {
   /** Set to make `POST /remote-access/start` refuse. */
   remoteAccessRefusal: Error | undefined
   diffusion: FakeDiffusionControl
+  /** What `PUT /server/selection` stored. */
+  selection: ServedModelSelection[]
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
 
@@ -203,6 +206,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     },
     remoteAccessRefusal: undefined,
     diffusion: fakeDiffusionControl(calls),
+    selection: [],
   } as unknown as ControlHarness
   const server = await ControlServer.start({
     token: CONTROL_TOKEN,
@@ -300,6 +304,11 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     publicServer: {
       setInspecting: (enabled: boolean) => {
         calls.push(`inspector ${enabled}`)
+      },
+      selection: () => [...harness.selection],
+      setSelection: (models) => {
+        calls.push(`selection ${JSON.stringify(models)}`)
+        harness.selection = [...models]
       },
       status: () => ({ ...serverState }),
       start: async (options) => {

@@ -170,7 +170,7 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', (
     const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'turbo_q4', messages: [] }),
+      body: JSON.stringify({ model: 'turbo_q4', messages: [{ role: 'user', content: 'hi' }] }),
     })
     await answering
 

@@ -249,13 +249,18 @@ export interface ImageRecipe {
   negativePrompt: string | null
   width: number
   height: number
-  steps: number
-  cfgScale: number
+  /**
+   * `steps`, `cfgScale`, `seed` and `batchSeed`: a local recipe always has them. A provider's model
+   * is sent only the knobs it takes, and its recipe leaves out the ones it was not sent (one written
+   * before 0.18.9 holds 0, 0, -1 and -1 for them instead).
+   */
+  steps?: number
+  cfgScale?: number
   guidance: number | null
   /** The seed this image was sampled with (`batchSeed + index`). */
-  seed: number
+  seed?: number
   /** The seed the batch was requested with. */
-  batchSeed: number
+  batchSeed?: number
   batchSize: number
   samplingMethod: string | null
   flowShift: number | null
@@ -517,10 +522,15 @@ export interface VideoRecipe {
   /** The frame count the engine reported for the file it wrote, after its own normalisation. */
   frameCount: number
   fps: number
-  steps: number
-  cfgScale: number
+  /**
+   * `steps`, `cfgScale` and `seed`: a local clip always has them. A provider's clip is never sent
+   * steps or CFG and leaves them out, and leaves out the seed when its model takes none (one written
+   * before 0.18.9 holds the form's steps and CFG and seed -1 instead).
+   */
+  steps?: number
+  cfgScale?: number
   guidance: number | null
-  seed: number
+  seed?: number
   samplingMethod: string | null
   flowShift: number | null
   workflow: VideoWorkflowId

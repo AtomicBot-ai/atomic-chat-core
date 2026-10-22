@@ -1172,6 +1172,11 @@ export async function createAtomicCore(
           setInspecting: (enabled) => {
             ;(core as AtomicCore).inspecting = enabled
           },
+          selection: () =>
+            [...(core as AtomicCore).servedSelection].map(([model, provider]) => ({ model, provider })),
+          setSelection: (models) => {
+            ;(core as AtomicCore).servedSelection = new Map(models.map((m) => [m.model, m.provider]))
+          },
           status: () => (core as AtomicCore).publicState(),
           start: (opts) => (core as AtomicCore).startPublicServer(opts),
           stop: () => (core as AtomicCore).stopPublicServer(),

@@ -45,6 +45,7 @@ let serverState: LocalApiServerState
 let shutdowns: number
 let loadFailure: Error | undefined
 let inspecting = false
+let selection: Array<{ model: string; provider: string }> = []
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
 const engineBuildCalls: string[] = []
@@ -374,6 +375,10 @@ beforeEach(async () => {
       setInspecting: (enabled: boolean) => {
         inspecting = enabled
       },
+      selection: () => [...selection],
+      setSelection: (models) => {
+        selection = [...models]
+      },
       status: () => ({ ...serverState }),
       start: async (options) => {
         Object.assign(serverState, { running: true, ...options, pid: process.pid })
@@ -475,6 +480,12 @@ describe('sessions and public server', () => {
       port: 8081,
     })
     expect(await client.stopServer()).toMatchObject({ running: false })
+  })
+
+  it('replaces and reads the provider selected for each model id', async () => {
+    const models = [{ model: 'qwen', provider: 'llamacpp-upstream' }]
+    expect(await client.setServerSelection(models)).toEqual({ models })
+    expect(await client.serverSelection()).toEqual({ models })
   })
 
   it('asks the core to shut down', async () => {
