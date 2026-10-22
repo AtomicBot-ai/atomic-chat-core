@@ -178,6 +178,36 @@ describe('LiteRtLmCheckService', () => {
     })
   })
 
+  it('checks an installed model by id even when its file is a link, as the runtime loads it', async () => {
+    const { svc, inspected } = service()
+    const dir = join(data.layout.provider('litert-lm').modelsDir, 'linked')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(data.root, 'elsewhere.litertlm'), 'x')
+    await symlink(join(data.root, 'elsewhere.litertlm'), join(dir, 'f.litertlm'))
+    await writeFile(
+      join(dir, 'model.yml'),
+      serializeModelYml({
+        model_path: 'litert-lm/models/linked/f.litertlm',
+        name: 'linked',
+        size_bytes: 1,
+        litert_lm: {
+          model_id: 'm',
+          variant_id: 'linked',
+          backend: 'cpu',
+          repo: 'o/r',
+          revision: 'a'.repeat(40),
+          file: 'f.litertlm',
+          tools: false,
+          reasoning: false,
+          vision: false,
+          source: 'huggingface',
+        },
+      })
+    )
+    expect(await svc.check({ model_id: 'linked' })).toMatchObject({ verdict: 'ok' })
+    expect(inspected).toEqual([join(dir, 'f.litertlm')])
+  })
+
   it('refuses a link inside the models root that leads outside it', async () => {
     const { svc } = service()
     const root = data.layout.provider('litert-lm').modelsDir

@@ -162,7 +162,8 @@ export class LiteRtLmCheckService {
       const yml = await this.deps.registry.read(request.model_id)
       const block = readLiteRtLmBlock(yml)
       variant = { backend: block.backend, ...(block.npu ? { npu: block.npu } : {}) }
-      file = await this.inRoot(this.deps.registry.resolvePaths(yml).modelPath)
+      // The registry's own path: an installed model may be a link, which the runtime loads as it is.
+      file = this.deps.registry.resolvePaths(yml).modelPath
     }
     const build = (await this.deps.resolveBuild()) ?? null
     const facts: LiteRtLmCheckFacts = {
