@@ -263,6 +263,21 @@ function prepareWindowsSearch(libDir: string, ovLibsDir: string | undefined): vo
     k32.SetEnvironmentVariableW(ptr(wide('PATH')), ptr(wide(`${ovLibsDir};${process.env['PATH'] ?? ''}`)))
 }
 
+/**
+ * Windows: out of EcoQoS. A process with no window counts as background work, and Windows runs it on
+ * efficiency cores at low clocks; on an i7-14700HX that held CPU decode of Gemma 4 E2B at 9 tok/s
+ * against 29 without it (`ProcessPowerThrottling`, execution speed off). A failure only costs speed.
+ */
+function leaveEcoQos(): void {
+  const k32 = dlopen('kernel32.dll', {
+    SetProcessInformation: { args: [T.i64, T.i32, T.ptr, T.u32], returns: T.i32 },
+  }).symbols
+  const PROCESS_POWER_THROTTLING = 4
+  // Version 1, control execution speed, state off.
+  const state = new Uint32Array([1, 1, 0])
+  k32.SetProcessInformation(-1n, PROCESS_POWER_THROTTLING, ptr(state), state.byteLength)
+}
+
 function readVersion(lookup: SymbolLookup, handle: Pointer): string | null {
   const at = lookup.find(handle, VERSION_SYMBOL)
   if (!at) return null
@@ -280,7 +295,10 @@ export const loadBunLiteRtLibrary: LoadLiteRtLibrary = async (libDir, options = 
   if (!file) throw new LiteRtLibraryError('load', `LiteRT-LM has no library for ${process.platform}`)
   const path = join(libDir, file)
   if (!existsSync(path)) throw new LiteRtLibraryError('load', `${path} not found: no ${file} in this build`)
-  if (process.platform === 'win32') prepareWindowsSearch(libDir, options.ovLibsDir)
+  if (process.platform === 'win32') {
+    prepareWindowsSearch(libDir, options.ovLibsDir)
+    leaveEcoQos()
+  }
   let L: Record<keyof typeof SYMBOLS, Fn>
   try {
     L = dlopen(path, SYMBOLS).symbols as Record<keyof typeof SYMBOLS, Fn>
