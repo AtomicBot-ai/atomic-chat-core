@@ -8,7 +8,7 @@
  */
 
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { resolve } from 'node:path'
 import { LiteRtHostUsageError, parseLiteRtHostArgs } from './args.js'
 import type { LiteRtHostArgs } from './args.js'
 import { LiteRtLibraryError } from './library.js'
@@ -87,9 +87,12 @@ export const loadLibraryWithBun: LoadLiteRtLibrary = async (libDir, options) => 
   return module.loadBunLiteRtLibrary(libDir, options)
 }
 
-/** Where a build keeps the library: `<build>/lib` (task 4.2). */
+/**
+ * Where a build keeps the library: `<build>/lib` (task 4.2), absolute. Windows searches DLLs in the
+ * folder `SetDllDirectoryW` names instead of the working one, so a relative path would not load.
+ */
 export function libraryDir(build: string): string {
-  return join(build, 'lib')
+  return resolve(build, 'lib')
 }
 
 const json = (value: unknown): string => JSON.stringify(value)
@@ -107,7 +110,7 @@ export async function runLiteRtHost(argv: readonly string[], deps: LiteRtHostDep
   try {
     library = await deps.loadLibrary(
       libraryDir(args.lib),
-      args.mode === 'serve' && args.ovLibs ? { ovLibsDir: args.ovLibs } : undefined
+      args.mode === 'serve' && args.ovLibs ? { ovLibsDir: resolve(args.ovLibs) } : undefined
     )
   } catch (error) {
     deps.stderr(
@@ -170,7 +173,7 @@ async function serve(
       visionBackend,
       maxNumTokens,
       cacheDir: args.cache,
-      ...(args.dispatch ? { dispatchLibDir: args.dispatch } : {}),
+      ...(args.dispatch ? { dispatchLibDir: resolve(args.dispatch) } : {}),
       speculative,
     })
     const server = createLiteRtServer({

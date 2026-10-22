@@ -1,6 +1,6 @@
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { FakeLiteRtLibrary, GEMMA_INFO } from '../../../../test/helpers/fake-litert-library.js'
 import { LiteRtLibraryError } from './library.js'
@@ -56,7 +56,13 @@ describe('runLiteRtHost probe and inspect (task 5.2)', () => {
     expect(h.out.map((line) => JSON.parse(line) as unknown)).toEqual([
       { version: '0.18.1', abi: 1, backends: ['cpu', 'gpu'] },
     ])
-    expect(h.loads).toEqual([{ libDir: join('/b', 'lib') }])
+    expect(h.loads).toEqual([{ libDir: resolve('/b', 'lib') }])
+  })
+
+  it('loads from absolute folders even when given relative ones: Windows drops the working folder from its DLL search', async () => {
+    const h = harness()
+    expect(await runLiteRtHost(['probe', '--lib', 'build'], h.deps)).toBe(EXIT.ok)
+    expect(h.loads).toEqual([{ libDir: resolve('build', 'lib') }])
   })
 
   it('inspect prints the file metadata as JSON', async () => {
@@ -172,7 +178,7 @@ describe('runLiteRtHost serve (task 5.3)', () => {
       await runLiteRtHost(serveArgs({ 'backend': 'npu', 'dispatch': '/d', 'ov-libs': '/ov' }), h.deps)
     ).toBe(EXIT.variantUnsupported)
     expect(JSON.parse(h.err.at(-1) ?? '{}')).toMatchObject({ code: 'LITERT_LM_VARIANT_UNSUPPORTED' })
-    expect(h.loads.at(-1)).toEqual({ libDir: join(dir, 'build', 'lib'), ovLibsDir: '/ov' })
+    expect(h.loads.at(-1)).toEqual({ libDir: resolve(dir, 'build', 'lib'), ovLibsDir: resolve('/ov') })
 
     h.library.failEngine = 'INTERNAL: Failed to create Metal device'
     expect(await runLiteRtHost(serveArgs(), h.deps)).toBe(EXIT.libraryCall)
@@ -191,7 +197,7 @@ describe('runLiteRtHost serve (task 5.3)', () => {
       h.deps
     )
     await until(() => h.out.length > 0)
-    expect(h.library.engines[0]?.settings).toMatchObject({ backend: 'npu', dispatchLibDir: '/d' })
+    expect(h.library.engines[0]?.settings).toMatchObject({ backend: 'npu', dispatchLibDir: resolve('/d') })
     h.stop()
     expect(await exit).toBe(EXIT.ok)
   })
