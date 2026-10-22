@@ -25,11 +25,23 @@ describe('samplerSettings', () => {
       temperature: 0.2,
       seed: 1073741823,
     })
-    expect(samplerSettings({ topK: 1, topP: 0.5, temperature: 0, seed: 7 })).toEqual({
-      topK: 1,
+    expect(samplerSettings({ topK: 8, topP: 0.5, temperature: 0.3, seed: 7 })).toEqual({
+      topK: 8,
       topP: 0.5,
-      temperature: 0,
+      temperature: 0.3,
       seed: 7,
     })
   })
+
+  it.each([0, 0.0001, 0.009])(
+    'takes temperature %s as greedy, one candidate at temperature 1: the GPU sampler divides by it',
+    (temperature) => {
+      expect(samplerSettings({ topK: 40, topP: 0.5, temperature, seed: 7 })).toEqual({
+        topK: 1,
+        topP: 0.5,
+        temperature: 1,
+        seed: 7,
+      })
+    }
+  )
 })
