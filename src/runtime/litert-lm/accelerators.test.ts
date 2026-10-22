@@ -148,14 +148,19 @@ describe('LiteRtLmAcceleratorService (task 6.4)', () => {
       ],
     })
     let release!: () => void
+    let downloading!: () => void
+    // The first prepare is inside its download, not merely started: a slow disk took longer than a sleep.
+    const inDownload = new Promise<void>((resolve) => (downloading = resolve))
     const slow = service({
       download: async (_task, item) => {
-        await new Promise<void>((resolve) => (release = resolve))
+        const held = new Promise<void>((resolve) => (release = resolve))
+        downloading()
+        await held
         await writeFile(item.save_path, WHEEL)
       },
     }).svc
     const first = slow.prepare({})
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await inDownload
     await expect(slow.prepare({})).rejects.toMatchObject({ code: 'ENGINE_INSTALL_IN_PROGRESS' })
     release()
     expect((await first).accelerators[0]?.prepared).toBe(true)

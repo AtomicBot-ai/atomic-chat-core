@@ -687,7 +687,8 @@ describe('ManagedTextRuntime (tensorrt-llm): sessions', () => {
     build()
     readyAt = null
     const first = runtime.load('qwen3')
-    for (let i = 0; i < 200 && !runtime.isLoading('qwen3'); i++) await new Promise((r) => setImmediate(r))
+    // Until the first load is under way, however long its disk reads take: a count of turns ran out on CI.
+    await vi.waitFor(() => expect(runtime.isLoading('qwen3')).toBe(true), { timeout: 10_000, interval: 1 })
     readyAt = Number.MAX_SAFE_INTEGER
     const second = runtime.load('llama')
     readyAt = 0
