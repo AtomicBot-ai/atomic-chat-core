@@ -20,7 +20,8 @@ import { BIN, control, startDaemon } from '../helpers/compiled-core.js'
 
 const MODEL = process.env['LITERT_LM_TEST_MODEL']
 const MANIFEST =
-  process.env['LITERT_LM_TEST_MANIFEST'] ?? resolve('..', 'atomic-chat-conf', 'backends', 'litert-lm-manifest.json')
+  process.env['LITERT_LM_TEST_MANIFEST'] ??
+  resolve('..', 'atomic-chat-conf', 'backends', 'litert-lm-manifest.json')
 const ENABLED = Boolean(process.env['LITERT_LM_TEST_LIB'] && MODEL && existsSync(MANIFEST) && existsSync(BIN))
 
 const daemons: ChildProcess[] = []
@@ -46,9 +47,14 @@ describe.skipIf(!ENABLED)('LiteRT-LM through the core on the real library (task 
     // conf's release asks for the core version that ships this change; this checkout is older.
     await writeFile(
       manifest,
-      JSON.stringify({ schema_version: 1, releases: conf.releases.map((release) => ({ ...release, min_core_version: '0.1.0' })) })
+      JSON.stringify({
+        schema_version: 1,
+        releases: conf.releases.map((release) => ({ ...release, min_core_version: '0.1.0' })),
+      })
     )
-    const { ready } = await startDaemon(folder, daemons, [], { ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href })
+    const { ready } = await startDaemon(folder, daemons, [], {
+      ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+    })
     const call = (path: string, body?: unknown) =>
       control(folder, ready, path, body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) })
 
@@ -95,7 +101,10 @@ describe.skipIf(!ENABLED)('LiteRT-LM through the core on the real library (task 
       })
 
     const streamed = await (
-      await post({ messages: [{ role: 'user', content: 'Say the word "banana" and nothing else.' }], stream: true })
+      await post({
+        messages: [{ role: 'user', content: 'Say the word "banana" and nothing else.' }],
+        stream: true,
+      })
     ).text()
     const frames = streamed.split('\n\n').filter(Boolean)
     expect(frames.at(-1)).toBe('data: [DONE]')
@@ -120,7 +129,12 @@ describe.skipIf(!ENABLED)('LiteRT-LM through the core on the real library (task 
           },
         ],
       })
-    )) as { choices: Array<{ finish_reason: string; message: { tool_calls?: Array<{ function: { name: string } }> } }> }
+    )) as {
+      choices: Array<{
+        finish_reason: string
+        message: { tool_calls?: Array<{ function: { name: string } }> }
+      }>
+    }
     expect(tool.choices[0]?.finish_reason).toBe('tool_calls')
     expect(tool.choices[0]?.message.tool_calls?.[0]?.function.name).toBe('get_weather')
 

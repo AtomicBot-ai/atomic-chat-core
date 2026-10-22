@@ -322,7 +322,9 @@ describe('litert-lm in GPU residency (change add-litert-lm-runtime, task 6.6)', 
   }
 
   it('a GPU variant loading on a Mac stops the MLX model first', async () => {
-    const w = liteRtWorld([], { mlx: [{ model_id: 'qwen-mlx', cards: 'all', auxiliary: false, state: 'ready' }] })
+    const w = liteRtWorld([], {
+      mlx: [{ model_id: 'qwen-mlx', cards: 'all', auxiliary: false, state: 'ready' }],
+    })
     await w.residency.hook('litert-lm')({ model_id: 'gemma-4-e4b-gpu', cards: 'all', auxiliary: false })
     expect(w.calls).toEqual(['unload mlx/qwen-mlx'])
   })
