@@ -381,7 +381,7 @@ describe('sessions the app still owns', () => {
       const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'Qwen3_5-MLX', messages: [] }),
+        body: JSON.stringify({ model: 'Qwen3_5-MLX', messages: [{ role: 'user', content: 'hi' }] }),
       })
 
       expect(await answer.json()).toEqual({ choices: [{ message: { content: 'from the app engine' } }] })

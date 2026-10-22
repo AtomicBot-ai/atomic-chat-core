@@ -179,6 +179,11 @@ export interface PublicServerDeps {
   /** Registered cloud providers, keyed by provider id. */
   providers: () => ReadonlyMap<string, RemoteProvider>
   /**
+   * The provider the app selected to serve each model id (`PUT /atomic/v1/server/selection`), read
+   * for every request. Absent or empty: every id follows the rules without a selection.
+   */
+  selection?: () => ReadonlyMap<string, string>
+  /**
    * Reload a local model with a larger context because a request overflowed it. In the app this was
    * a round trip to the llama.cpp extension; in the core it is the runtime's own `increaseCtx`.
    */

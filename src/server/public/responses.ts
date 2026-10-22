@@ -17,18 +17,29 @@ import {
 } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
 import { MANAGED_PROVIDER_IDS } from '../../contracts/index.js'
-import { resolveRemoteProvider } from '../../router/index.js'
+import type { LocalProvider } from '../../router/index.js'
 import { answer, clientGone, connectTimeoutMs } from './exchange.js'
 import type { Exchange } from './exchange.js'
-import { outboundHeaders, readModelRequest, sseEvent } from './forward.js'
+import {
+  answerSelectedUnavailable,
+  findSelectedLocalSession,
+  outboundHeaders,
+  readModelRequest,
+  routedRemote,
+  selectedRoute,
+  sseEvent,
+} from './forward.js'
 import { policyRefusal } from './policy.js'
 import type { Backend } from './forward.js'
 import type { LocalTarget } from './types.js'
 import { SseLineReader } from './sse.js'
-import { bodyIndicatesOom, isContextLimitError } from './errors.js'
+import { bodyIndicatesOom, isContextLimitError, modelNotFoundJson } from './errors.js'
 import type { RequestTrace } from './trace.js'
 import { pipeBody, readBody, readUpstreamText, relay, sendUpstream } from './wire.js'
 import type { UpstreamResponse } from './wire.js'
+
+/** The engines `/responses` serves, in the order they are asked. */
+const RESPONSES_PROVIDERS: readonly LocalProvider[] = ['llamacpp', 'llamacpp-upstream', 'atomic-prism', 'mlx']
 
 export async function serveResponses(ex: Exchange): Promise<void> {
   const parsed = await readModelRequest(ex)
@@ -36,7 +47,8 @@ export async function serveResponses(ex: Exchange): Promise<void> {
   const { raw, json, modelId, stream } = parsed
 
   const trace = ex.trace
-  const remote = resolveRemoteProvider(modelId, ex.deps.providers())
+  const selected = selectedRoute(ex, modelId)
+  const remote = routedRemote(ex, modelId, selected)
   if (remote) {
     trace.backend = 'remote'
     trace.provider = remote.provider
@@ -50,16 +62,28 @@ export async function serveResponses(ex: Exchange): Promise<void> {
     return
   }
 
+  // A model selected on a local engine stays local: that engine is asked first, then the others;
+  // with no local session at all the answer is a 503, never a remote provider.
+  if (selected?.kind === 'local' && !findSelectedLocalSession(ex, modelId, selected.provider)) {
+    answerSelectedUnavailable(ex, modelId, selected.provider)
+    return
+  }
+  const order = <P extends LocalProvider>(providers: readonly P[]): P[] =>
+    selected?.kind === 'local'
+      ? [
+          ...providers.filter((p) => p === selected.provider),
+          ...providers.filter((p) => p !== selected.provider),
+        ]
+      : [...providers]
   // Unlike the chat routes, MLX is the passthrough here and llama.cpp is translated.
-  const session =
-    ex.deps.findLocal('llamacpp', modelId) ??
-    ex.deps.findLocal('llamacpp-upstream', modelId) ??
-    ex.deps.findLocal('atomic-prism', modelId) ??
-    ex.deps.findLocal('mlx', modelId)
+  const session = order(RESPONSES_PROVIDERS).reduce<LocalTarget | undefined>(
+    (found, provider) => found ?? ex.deps.findLocal(provider, modelId),
+    undefined
+  )
   if (!session) {
     // A session that declares its routes and has no Responses API says so, rather than "not found":
     // every managed provider's, whichever loaded the model (change add-sglang-runtime, D1).
-    const declared = MANAGED_PROVIDER_IDS.reduce<LocalTarget | undefined>(
+    const declared = order(MANAGED_PROVIDER_IDS).reduce<LocalTarget | undefined>(
       (found, provider) => found ?? ex.deps.findLocal(provider, modelId),
       undefined
     )
@@ -70,7 +94,7 @@ export async function serveResponses(ex: Exchange): Promise<void> {
       return
     }
     trace.errorKind = 'not_found'
-    answer(ex, 404, `No running session found for model '${modelId}'`)
+    answer(ex, 404, modelNotFoundJson(modelId), [['Content-Type', 'application/json']])
     return
   }
   trace.backend = session.provider

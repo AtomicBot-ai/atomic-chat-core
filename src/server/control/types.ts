@@ -27,6 +27,7 @@ import type {
   MediaCatalogView,
   MediaKind,
   MediaProviderModels,
+  ServedModelSelection,
 } from '../../contracts/index.js'
 import type {
   BeginOperation,
@@ -160,6 +161,10 @@ export interface PublicServerControl {
    * collected only while it is (ATO-113). Survives a server restart, like the app's own inspector.
    */
   setInspecting: (enabled: boolean) => void
+  /** The provider the app selected for each model id; kept until replaced, across server restarts. */
+  selection: () => ServedModelSelection[]
+  /** Replace the whole selection; an empty list routes every id by the rules without one. */
+  setSelection: (models: ServedModelSelection[]) => void
 }
 
 /**

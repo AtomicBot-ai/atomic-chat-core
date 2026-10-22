@@ -42,6 +42,23 @@ describe('/responses', () => {
     expect(await local.text()).toMatch(/^Proxy request to model failed: /)
   })
 
+  it("answers a model nothing serves with OpenAI's model_not_found envelope", async () => {
+    const server = await startPublic({ sessions: [localSession(await closedPort())] })
+
+    const res = await postJson(server, '/responses', { model: 'ghost', input: 'hi' })
+
+    expect(res.status).toBe(404)
+    expect(res.headers.get('content-type')).toBe('application/json')
+    expect(await res.json()).toEqual({
+      error: {
+        message: "No running session found for model 'ghost'",
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'model_not_found',
+      },
+    })
+  })
+
   it('passes an engine error through with its status', async () => {
     const { port } = await startUpstream((_req, _body, res) => {
       res.writeHead(503, { 'content-type': 'text/plain' })

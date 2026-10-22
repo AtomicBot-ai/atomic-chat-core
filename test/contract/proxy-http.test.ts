@@ -17,6 +17,7 @@ import { PublicServer } from '../../src/server/public/index.js'
 import type { CtxIncreaseOutcome, LocalTarget, PublicServerDeps } from '../../src/server/public/index.js'
 import { modelIdsMatch } from '../../src/router/index.js'
 import type { RemoteProvider } from '../../src/router/index.js'
+import { isJsonObject } from '../../src/server/shims/index.js'
 import type { JsonValue } from '../../src/server/shims/index.js'
 
 interface Reply {
@@ -82,10 +83,27 @@ const REMOTE_BEARER = 'Bearer sk-remote'
  * `index.json` → `comparator_notes.known_divergence`. The expectation is corrected, never skipped.
  * The Rust proxy stored a provider's custom headers but never sent them; the port sends them on
  * every call to that provider.
+ *
+ * Recorded later, so not in `index.json`: the proxy answered a model nothing serves with a plain-text
+ * 404; the port answers OpenAI's `model_not_found` JSON envelope with the same text as its message
+ * (ADR 2026-10-21-answer-an-unknown-model-and-an-empty-conversation-with-openai-errors).
  */
+const UNKNOWN_MODEL_TEXT = /^No running session found for model '(.*)'$/
+
 function applyKnownDivergence(expected: Expected): void {
   for (const call of expected.upstream_calls) {
     if (call.headers['authorization'] === REMOTE_BEARER) call.headers['x-custom'] = 'from-provider'
+  }
+  const { response } = expected
+  const text = isJsonObject(response.body) ? response.body['text'] : undefined
+  const unknown = response.status === 404 && typeof text === 'string' ? UNKNOWN_MODEL_TEXT.exec(text) : null
+  if (unknown) {
+    response.headers['content-type'] = 'application/json'
+    response.body = {
+      json: {
+        error: { message: text, type: 'invalid_request_error', param: 'model', code: 'model_not_found' },
+      },
+    } as JsonValue
   }
 }
 

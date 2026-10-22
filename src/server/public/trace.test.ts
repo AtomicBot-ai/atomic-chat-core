@@ -202,7 +202,12 @@ describe('api:request inspector', () => {
     })
     const { server, finished } = await observed(true, { sessions: [localSession(port)] })
 
-    await (await postJson(server, '/chat/completions', { model: 'demo', messages: [] })).text()
+    await (
+      await postJson(server, '/chat/completions', {
+        model: 'demo',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+    ).text()
 
     const [done] = await finished()
     expect(done?.finish).toMatchObject({ reply_preview: 'whole', ttft_ms: null, total_tokens: 2 })
@@ -223,7 +228,7 @@ describe('api:request inspector', () => {
     const answer = await postJson(
       server,
       '/chat/completions',
-      { model: 'demo', stream: true, messages: [] },
+      { model: 'demo', stream: true, messages: [{ role: 'user', content: 'hi' }] },
       { signal: controller.signal }
     )
     const reader = answer.body!.getReader()
@@ -336,7 +341,11 @@ describe('api:request edges', () => {
       remote: [remoteProvider({ provider: 'gone', baseUrl: 'http://127.0.0.1:9', models: ['gone-model'] })],
     })
 
-    const plain = await postJson(server, '/messages', { model: 'demo', max_tokens: 4, messages: [] })
+    const plain = await postJson(server, '/messages', {
+      model: 'demo',
+      max_tokens: 4,
+      messages: [{ role: 'user', content: 'hi' }],
+    })
     expect(await plain.text()).toBe('plain fallback')
 
     const unreachable = await postJson(server, '/messages', {
@@ -361,7 +370,10 @@ describe('api:request edges', () => {
       increaseCtx: () => Promise.resolve({ ok: true, new_ctx_len: 8192 }),
     })
 
-    const answer = await postJson(server, '/chat/completions', { model: 'demo', messages: [] })
+    const answer = await postJson(server, '/chat/completions', {
+      model: 'demo',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
     expect(answer.status).toBe(400)
     const [done] = await finished()
     expect(done?.observation).toMatchObject({ error_kind: 'local_model_error', ctx_overflow_detected: true })

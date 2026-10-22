@@ -259,6 +259,34 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
     expect(untrusted.headers['access-control-allow-origin']).toBeUndefined()
   })
 
+  it.skipIf(!POSIX)('sends a model id the app selected a local engine for to that engine only', async () => {
+    const { ready, post } = await servedModel()
+    const registered = await control(ready, '/cloud/providers/custom', {
+      method: 'PUT',
+      body: JSON.stringify({ base_url: 'http://127.0.0.1:9/v1', custom_headers: [], models: ['demo'] }),
+    })
+    expect(registered.status, await registered.clone().text()).toBe(200)
+    const chat = { model: 'demo', messages: [{ role: 'user', content: 'hi' }] }
+
+    // Without a selection the remote provider that lists the id wins, as before.
+    expect((await post('/chat/completions', chat)).status).toBe(502)
+
+    const selected = await control(ready, '/server/selection', {
+      method: 'PUT',
+      body: JSON.stringify({ models: [{ model: 'demo', provider: 'llamacpp-upstream' }] }),
+    })
+    expect(selected.status, await selected.clone().text()).toBe(200)
+    expect((await post('/chat/completions', chat)).status).toBe(200)
+
+    const unloaded = await control(ready, '/models/llamacpp-upstream/demo/unload', { method: 'POST' })
+    expect(unloaded.status, await unloaded.clone().text()).toBe(200)
+    const refused = await post('/chat/completions', chat)
+    expect(refused.status).toBe(503)
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe(
+      'selected_provider_unavailable'
+    )
+  })
+
   it.skipIf(!POSIX)('tells a cold server from an unknown model and a malformed request', async () => {
     await core.writeModel(dataFolder, 'demo')
     await core.writeFakeBackend(dataFolder)
@@ -276,9 +304,17 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
 
     await load(ready, 'demo')
     const unknown = await post(JSON.stringify({ model: 'ghost' }))
-    expect([unknown.status, await unknown.text()]).toEqual([
+    expect([unknown.status, unknown.headers.get('content-type'), await unknown.json()]).toEqual([
       404,
-      "No running session found for model 'ghost'",
+      'application/json',
+      {
+        error: {
+          message: "No running session found for model 'ghost'",
+          type: 'invalid_request_error',
+          param: 'model',
+          code: 'model_not_found',
+        },
+      },
     ])
     const noModel = await post('{}')
     expect([noModel.status, await noModel.text()]).toEqual([400, "Request body must contain a 'model' field"])
@@ -309,7 +345,10 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
     async () => {
       const { ready, session, post } = await servedModel({ FAKE_LLAMA_MIN_CTX: '8192' })
 
-      const answer = await post('/chat/completions', { model: 'demo', messages: [] })
+      const answer = await post('/chat/completions', {
+        model: 'demo',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
 
       expect(answer.status).toBe(400)
       expect(await answer.json()).toMatchObject({ error: { type: 'exceed_context_size_error' } })
@@ -321,14 +360,19 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
     const marker = join(dataFolder, 'compute-error-once')
     const { ready, session, post } = await servedModel({ FAKE_LLAMA_COMPUTE_ERROR_MARKER: marker })
 
-    const failed = await post('/chat/completions', { model: 'demo', messages: [] })
+    const failed = await post('/chat/completions', {
+      model: 'demo',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
 
     expect(failed.status).toBe(400)
     expect(await failed.json()).toMatchObject({
       error: { code: 'insufficient_memory', type: 'server_error' },
     })
     expect(await sessionPid(ready), 'a fresh engine replaced the poisoned one').not.toBe(session.pid)
-    expect((await post('/chat/completions', { model: 'demo', messages: [] })).status).toBe(200)
+    expect(
+      (await post('/chat/completions', { model: 'demo', messages: [{ role: 'user', content: 'hi' }] })).status
+    ).toBe(200)
   })
 
   it.skipIf(!POSIX)('answers Anthropic /messages through the chat fallback, whole and streamed', async () => {
@@ -419,7 +463,10 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
     const { session, post } = await servedModel()
 
     process.kill(session.pid, 'SIGKILL')
-    const answer = await post('/chat/completions', { model: 'demo', messages: [] })
+    const answer = await post('/chat/completions', {
+      model: 'demo',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
 
     // Either the request reaches the dead port first, or the core has already noticed the exit and
     // dropped the session; both are a 503 a client may retry.

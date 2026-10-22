@@ -104,6 +104,11 @@ export class AtomicCore {
   private shutdownPromise: Promise<void> | undefined
   /** Whether the app's API screen is watching; previews are collected only then. */
   inspecting = false
+  /**
+   * The provider the app selected to serve each model id on the public server, read per request;
+   * kept across server restarts, not across core restarts (the app hands it over again).
+   */
+  servedSelection: ReadonlyMap<string, string> = new Map()
   private resolveStopped: (() => void) | undefined
   /** Resolves once this core has stopped, however that was triggered (API, signal, or in-process). */
   readonly stopped: Promise<void> = new Promise<void>((resolve) => {
@@ -208,6 +213,7 @@ export class AtomicCore {
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
         providers: () => this.cloud.routing(),
+        selection: () => this.servedSelection,
         chatgpt: parts.chatgptBackend,
         increaseCtx: (provider, modelId, trigger) =>
           this.localSessions.serverCtxRequest(provider, modelId, trigger),

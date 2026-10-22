@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { LOCAL_SEARCH_ORDER, modelIdsMatch, resolveRemoteMedia, resolveRemoteProvider } from './resolve.js'
+import {
+  LOCAL_SEARCH_ORDER,
+  modelIdsMatch,
+  resolveRemoteMedia,
+  resolveRemoteProvider,
+  resolveSelectedRoute,
+} from './resolve.js'
 import type { RemoteProvider } from './resolve.js'
 
 const provider = (name: string, models: string[] = []): RemoteProvider => ({
@@ -40,6 +46,37 @@ describe('resolveRemoteProvider', () => {
   it('leaves a model no provider claims to the local sessions', () => {
     expect(resolveRemoteProvider('local.model', providers)).toBeUndefined()
     expect(resolveRemoteProvider('unknown/model', providers)).toBeUndefined()
+  })
+})
+
+describe('resolveSelectedRoute', () => {
+  const providers = new Map([['custom', provider('custom', ['qwen'])]])
+
+  it('sends a selected id to the selected local engine, even though a remote provider lists it', () => {
+    const selection = new Map([['qwen', 'llamacpp-upstream']])
+    expect(resolveSelectedRoute('qwen', selection, providers)).toEqual({
+      kind: 'local',
+      provider: 'llamacpp-upstream',
+    })
+    // The proxy's `.`/`_` rule applies to the selection too.
+    expect(resolveSelectedRoute('qwen3_5', new Map([['qwen3.5', 'mlx']]), providers)).toEqual({
+      kind: 'local',
+      provider: 'mlx',
+    })
+  })
+
+  it('sends a selected id to the selected remote provider', () => {
+    expect(resolveSelectedRoute('qwen', new Map([['qwen', 'custom']]), providers)).toEqual({
+      kind: 'remote',
+      provider: providers.get('custom'),
+    })
+  })
+
+  it('leaves an id without a selection, or with a provider it cannot route to, to the other rules', () => {
+    expect(resolveSelectedRoute('qwen', new Map(), providers)).toBeUndefined()
+    expect(resolveSelectedRoute('qwen', new Map([['other', 'llamacpp']]), providers)).toBeUndefined()
+    expect(resolveSelectedRoute('qwen', new Map([['qwen', 'removed-cloud']]), providers)).toBeUndefined()
+    expect(resolveSelectedRoute('qwen', new Map([['qwen', 'foundation-models']]), providers)).toBeUndefined()
   })
 })
 

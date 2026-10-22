@@ -2,11 +2,55 @@ import { describe, expect, it } from 'vitest'
 import {
   bodyIndicatesOom,
   computeErrorEnvelope,
+  emptyMessagesRefusal,
   isComputeBackendError,
   isContextLimitError,
   isContextOverflowFinishLength,
+  modelNotFoundJson,
+  selectedProviderUnavailableJson,
   structureBackendErrorBody,
 } from './errors.js'
+
+describe('modelNotFoundJson', () => {
+  it("is OpenAI's model_not_found envelope that keeps the proxy's wording as the message", () => {
+    expect(JSON.parse(modelNotFoundJson('ghost'))).toEqual({
+      error: {
+        message: "No running session found for model 'ghost'",
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'model_not_found',
+      },
+    })
+  })
+})
+
+describe('selectedProviderUnavailableJson', () => {
+  it('names the model and the selected provider in a server_error envelope', () => {
+    const body = JSON.parse(selectedProviderUnavailableJson('qwen', 'llamacpp-upstream')) as {
+      error: Record<string, string>
+    }
+    expect(body.error).toMatchObject({
+      type: 'server_error',
+      code: 'selected_provider_unavailable',
+      param: 'model',
+    })
+    expect(body.error['message']).toMatch(/^No running session found for model 'qwen' in any local engine\./)
+    expect(body.error['message']).toContain('served by llamacpp-upstream')
+  })
+})
+
+describe('emptyMessagesRefusal', () => {
+  it('refuses an empty messages array and nothing else', () => {
+    expect(JSON.parse(emptyMessagesRefusal({ model: 'm', messages: [] }) ?? 'null')).toMatchObject({
+      error: { type: 'invalid_request_error', param: 'messages', code: 'empty_array' },
+    })
+    expect(emptyMessagesRefusal({ model: 'm', messages: [{ role: 'user', content: 'hi' }] })).toBeUndefined()
+    // A body without `messages` (a legacy prompt, a malformed request) is the engine's to judge.
+    expect(emptyMessagesRefusal({ model: 'm' })).toBeUndefined()
+    expect(emptyMessagesRefusal({ model: 'm', messages: 'hi' })).toBeUndefined()
+    expect(emptyMessagesRefusal([])).toBeUndefined()
+  })
+})
 
 describe('isContextLimitError', () => {
   it('classifies overflows only on the statuses engines use for them', () => {

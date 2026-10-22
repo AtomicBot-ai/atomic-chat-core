@@ -1344,6 +1344,48 @@ describe('remote media through the owner', () => {
   })
 })
 
+describe('the served model selection through the owner', () => {
+  it('keeps what the app selected and routes the public server by it', async () => {
+    const core = await createCore()
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    // A cloud provider that lists `demo` at an address nothing answers.
+    await client.setCloudProvider('custom', {
+      base_url: 'http://127.0.0.1:9/v1',
+      custom_headers: [],
+      models: ['demo'],
+    })
+    const { port } = await client.startServer({ port: 0 })
+    const chat = () =>
+      fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+
+    // Unselected: the cloud provider that lists the id gets it, and cannot be reached.
+    expect((await chat()).status).toBe(502)
+
+    const selected = [{ model: 'demo', provider: 'llamacpp-upstream' }]
+    expect(await client.setServerSelection(selected)).toEqual({ models: selected })
+    expect(await client.serverSelection()).toEqual({ models: selected })
+    // Selected on a local engine and loaded nowhere: refused, never sent to the cloud provider.
+    const refused = await chat()
+    expect(refused.status).toBe(503)
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe(
+      'selected_provider_unavailable'
+    )
+
+    // The selection outlives a restart of the public server.
+    await client.stopServer()
+    const restarted = await client.startServer({ port })
+    expect(restarted.port).toBe(port)
+    expect((await chat()).status).toBe(503)
+
+    expect(await client.setServerSelection([])).toEqual({ models: [] })
+    expect((await chat()).status).toBe(502)
+  })
+})
+
 describe('error reporting', () => {
   it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
     const captured: ErrorReport[] = []
