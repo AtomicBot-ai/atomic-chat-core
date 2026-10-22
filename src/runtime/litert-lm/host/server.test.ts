@@ -1,11 +1,12 @@
-import { request } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { request, ServerResponse } from 'node:http'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FakeLiteRtLibrary, GEMMA_INFO, text } from '../../../../test/helpers/fake-litert-library.js'
 import type { FakeEngine } from '../../../../test/helpers/fake-litert-library.js'
 import { createLiteRtServer } from './server.js'
 
 let close: (() => Promise<void>) | null = null
 afterEach(async () => {
+  vi.restoreAllMocks()
   await close?.()
   close = null
 })
@@ -178,44 +179,60 @@ describe('litert-host server', () => {
     expect(library.conversationsCreated).toBe(2)
   })
 
-  it('cancels the generation when the client hangs up, and serves the next request at once', async () => {
-    const { url, library } = await start()
-    library.chunkDelayMs = 20
-    library.script = () => Array.from({ length: 200 }, (_, i) => text(`t${i} `))
-    const port = Number(new URL(url).port)
-    await new Promise<void>((resolve) => {
-      const req = request(
-        {
-          host: '127.0.0.1',
-          port,
-          path: '/v1/chat/completions',
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-        },
-        (res) => {
-          let seen = 0
-          res.on('data', () => {
-            if (++seen === 3) {
-              req.destroy()
-              resolve()
-            }
-          })
-        }
-      )
-      req.end(JSON.stringify(ask('long', { stream: true })))
-    })
-    library.chunkDelayMs = 1
-    library.script = () => [text('next')]
-    const started = Date.now()
-    const body = (await (await post(url, ask('next'))).json()) as {
-      choices: Array<{ message: { content: string } }>
+  it.each([
+    ['', false],
+    [', even when the response never says it closed (as under Bun)', true],
+  ])(
+    'cancels the generation when the client hangs up%s, and serves the next request at once',
+    async (_, bun) => {
+      if (bun) {
+        const emit = ServerResponse.prototype.emit
+        vi.spyOn(ServerResponse.prototype, 'emit').mockImplementation(function (
+          this: ServerResponse,
+          event: string | symbol,
+          ...args: unknown[]
+        ) {
+          return event === 'close' ? false : emit.call(this, event, ...args)
+        })
+      }
+      const { url, library } = await start()
+      library.chunkDelayMs = 20
+      library.script = () => Array.from({ length: 200 }, (_, i) => text(`t${i} `))
+      const port = Number(new URL(url).port)
+      await new Promise<void>((resolve) => {
+        const req = request(
+          {
+            host: '127.0.0.1',
+            port,
+            path: '/v1/chat/completions',
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+          },
+          (res) => {
+            let seen = 0
+            res.on('data', () => {
+              if (++seen === 3) {
+                req.destroy()
+                resolve()
+              }
+            })
+          }
+        )
+        req.end(JSON.stringify(ask('long', { stream: true })))
+      })
+      library.chunkDelayMs = 1
+      library.script = () => [text('next')]
+      const started = Date.now()
+      const body = (await (await post(url, ask('next'))).json()) as {
+        choices: Array<{ message: { content: string } }>
+      }
+      expect(body.choices[0]?.message.content).toBe('next')
+      expect(Date.now() - started).toBeLessThan(2_000)
+      const first = library.engines[0]?.conversations[0]
+      expect(first?.poisoned).toBe(true)
+      expect(first?.closed).toBe(true)
     }
-    expect(body.choices[0]?.message.content).toBe('next')
-    expect(Date.now() - started).toBeLessThan(2_000)
-    const first = library.engines[0]?.conversations[0]
-    expect(first?.poisoned).toBe(true)
-    expect(first?.closed).toBe(true)
-  })
+  )
 
   it('runs three simultaneous requests one after another, all complete, none refused', async () => {
     const { url, library } = await start()

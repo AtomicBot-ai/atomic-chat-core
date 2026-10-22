@@ -12,6 +12,7 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { requestAborted } from '../../../server/public/exchange.js'
 import { OpenAiRequestError, parseChatRequest, ReplyBuilder } from './openai.js'
 import type { Delta, FinishReason, ModelCaps, ParsedChat } from './openai.js'
 import type { LiteRtChunk, LiteRtConversation, LiteRtEngine } from './library.js'
@@ -107,13 +108,16 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
           : new OpenAiRequestError(400, 'The request body is not valid JSON.')
       }
       const chat = parseChatRequest(raw, options.caps)
-      let gone = false
+      let closed = false
       res.on('close', () => {
-        if (!res.writableFinished) gone = true
+        if (!res.writableFinished) closed = true
       })
+      // Bun never says the response closed once the body is read; only its native handle knows (ADR
+      // 2026-09-22-detect-a-client-that-hangs-up-before-the-answer-under-bun), polled by `watchGone`.
+      const gone = () => closed || requestAborted(req, res)
       return lock.run(async () => {
-        if (gone) return
-        await generate(chat, res, () => gone)
+        if (gone()) return
+        await generate(chat, res, gone)
       })
     }
     sendError(
