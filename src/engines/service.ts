@@ -45,17 +45,19 @@ export interface EngineRemoveOptions {
 /**
  * The engines registered on this host, in catalog order: the three llama.cpp providers and sd.cpp
  * everywhere, MLX on macOS, Foundry Local where its platform rule holds (`foundryLocal`, change
- * `add-foundry-local` design D7), a managed engine where this core offers it (Linux, Windows with
+ * `add-foundry-local` design D7), LiteRT-LM likewise (`liteRtLm`, change `add-litert-lm-runtime`
+ * design D7), a managed engine where this core offers it (Linux, Windows with
  * Atomic Chat's WSL distribution).
  */
 export function hostEngines(
   platform: NodeJS.Platform,
   managed: readonly string[],
-  host: { foundryLocal?: boolean } = {}
+  host: { foundryLocal?: boolean; liteRtLm?: boolean } = {}
 ): EngineId[] {
   return ENGINE_IDS.filter((engine) => {
     if (engine === 'mlx') return platform === 'darwin'
     if (engine === 'foundry-local') return host.foundryLocal === true
+    if (engine === 'litert-lm') return host.liteRtLm === true
     if (ENGINE_KINDS[engine] === 'managed') return managed.includes(engine)
     return true
   })

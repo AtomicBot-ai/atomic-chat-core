@@ -26,6 +26,8 @@ import * as core from '../helpers/compiled-core.js'
 import { startReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
+import { liteRtLmTestPlatform } from '../helpers/litert-lm-host.js'
+import { makeZip } from '../helpers/make-zip.js'
 import {
   DESCRIPTOR_ID,
   DESCRIPTOR_URL,
@@ -571,6 +573,131 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_PLATFORM === null)('Foundry Local th
       const removed = await send(ready, 'DELETE', `/engines/foundry-local/builds/v2.1.0/${platform}`)
       expect(await removed.json()).toEqual({ removed: true })
       expect((await entry()).builds.map((build) => build.version)).toEqual(['v2.2.0'])
+    } finally {
+      await mirror.close()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------------------------
+// LiteRT-LM (change add-litert-lm-runtime, task 4.5)
+// ---------------------------------------------------------------------------------------------
+
+const FAKE_LITERT_HOST = fileURLToPath(new URL('../helpers/fake-litert-host.mjs', import.meta.url))
+const LITERT_PLATFORM = process.platform === 'win32' ? null : liteRtLmTestPlatform()
+const ALL_LITERT_PLATFORMS = ['macos-arm64', 'linux-x64', 'linux-arm64', 'win-x64']
+const LITERT_LIBRARY: Record<string, string> = {
+  'macos-arm64': 'liblitert-lm.dylib',
+  'linux-x64': 'liblitert-lm.so',
+  'linux-arm64': 'liblitert-lm.so',
+  'win-x64': 'litert-lm.dll',
+}
+
+describe.skipIf(!existsSync(BIN) || LITERT_PLATFORM === null)('LiteRT-LM through /engines', () => {
+  it('lists, installs and updates the build, and never removes the one a model runs from', async () => {
+    const mirror = await startReleaseMirror()
+    try {
+      const manifest = join(dataFolder, 'litert-lm-manifest.json')
+      const releases: unknown[] = []
+      const publish = async (version: string, publishedAt: string) => {
+        const assets = ALL_LITERT_PLATFORMS.map((platform) => {
+          const name = `litert_lm_api-${version}-py3-none-${platform}.whl`
+          const body = makeZip([
+            { name: `litert_lm/${LITERT_LIBRARY[platform]}`, data: Buffer.from(version) },
+          ])
+          mirror.serve(`/packages/${version}/${name}`, body)
+          return {
+            platform,
+            url: `https://files.pythonhosted.org/packages/${version}/${name}`,
+            name,
+            size: body.length,
+            sha256: createHash('sha256').update(body).digest('hex'),
+          }
+        })
+        releases.unshift({ version, published_at: publishedAt, min_core_version: '0.1.0', abi: 1, assets })
+        await writeFile(manifest, JSON.stringify({ schema_version: 1, releases }))
+      }
+      const host = join(dataFolder, 'fake-litert-host')
+      await writeFile(
+        host,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_LITERT_HOST)} "$@"\n`,
+        {
+          mode: 0o755,
+        }
+      )
+      await publish('0.18.1', '2026-10-19T22:44:33Z')
+      const { ready } = await core.startDaemon(dataFolder, daemons, [], {
+        ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_LITERT_HOST_TEST_COMMAND: host,
+      })
+      const proxy = mirror.proxy
+      const entry = async (force = false) =>
+        (await versions(ready, { force, proxy })).find(
+          (candidate) => candidate.engine === 'litert-lm'
+        ) as Entry
+      const platform = LITERT_PLATFORM as string
+
+      expect(await entry(true)).toMatchObject({
+        kind: 'engine-build',
+        active_choice: 'core',
+        builds: [],
+        active: null,
+        latest: { version: '0.18.1', variant: platform },
+      })
+      const installed = await send(ready, 'POST', '/engines/litert-lm/update', {
+        task_id: 'lr-engines-1',
+        proxy,
+      })
+      expect(await installed.json()).toMatchObject({
+        updated: true,
+        active: { version: '0.18.1', variant: platform },
+      })
+
+      // A model runs from the build.
+      const model = join(dataFolder, 'litert-lm', 'models', 'e2e-lr-cpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'm.litertlm'), 'litertlm')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: litert-lm/models/e2e-lr-cpu/m.litertlm\nname: e2e-lr-cpu\nsize_bytes: 8\nlitert_lm:\n  model_id: m\n  variant_id: e2e-lr-cpu\n  backend: cpu\n  repo: o/r\n  revision: ${'a'.repeat(40)}\n  file: m.litertlm\n  tools: false\n  reasoning: false\n  vision: false\n  source: huggingface\n`
+      )
+      const loaded = await send(ready, 'POST', '/models/litert-lm/e2e-lr-cpu/load', {})
+      expect(loaded.status, await loaded.clone().text()).toBe(200)
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: '0.18.1',
+          variant: platform,
+          active: true,
+          in_use: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
+      const viaEngines = await send(ready, 'DELETE', `/engines/litert-lm/builds/0.18.1/${platform}`)
+      expect(viaEngines.status).toBe(400)
+      expect(((await viaEngines.json()) as { error: { details?: string } }).error.details).toBe('active')
+      const viaBuilds = await send(ready, 'DELETE', `/engine-builds/litert-lm/0.18.1/${platform}`)
+      expect(viaBuilds.status).toBe(409)
+      expect(((await viaBuilds.json()) as { error: { code: string } }).error.code).toBe('BACKEND_IN_USE')
+      expect(existsSync(join(dataFolder, 'litert-lm', 'backends', '0.18.1', platform))).toBe(true)
+
+      // conf publishes 0.18.2: offered, installed; the model running from 0.18.1 is unloaded by it.
+      await publish('0.18.2', '2026-11-01T00:00:00Z')
+      expect((await entry(true)).update).toMatchObject({
+        needed: true,
+        target: { version: '0.18.2', variant: platform },
+      })
+      const updated = await send(ready, 'POST', '/engines/litert-lm/update', {
+        task_id: 'lr-engines-2',
+        proxy,
+      })
+      expect(await updated.json()).toMatchObject({ updated: true, active: { version: '0.18.2' } })
+      expect(
+        ((await (await control(ready, '/sessions')).json()) as { sessions: unknown[] }).sessions
+      ).toEqual([])
+      const removed = await send(ready, 'DELETE', `/engines/litert-lm/builds/0.18.1/${platform}`)
+      expect(await removed.json()).toEqual({ removed: true })
+      expect((await entry()).builds.map((build) => build.version)).toEqual(['0.18.2'])
     } finally {
       await mirror.close()
     }

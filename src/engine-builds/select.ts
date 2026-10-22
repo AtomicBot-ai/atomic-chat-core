@@ -38,7 +38,7 @@ import { dirname } from 'node:path'
 import type { DiffusionBackend } from '../contracts/index.js'
 import { getSupportedFeatures } from '../backend/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
-import type { FoundryLocalPlatform } from './manifest.js'
+import type { FoundryLocalPlatform, LiteRtLmPlatform } from './manifest.js'
 
 /**
  * Smallest Vulkan device worth moving a Linux host off the CPU build for.
@@ -328,6 +328,57 @@ export function foundryLocalHostChoice(
       ladder: [],
       backend_id: null,
       reason: `The Foundry Local manifest lists no archive for ${host.platform}.`,
+    }
+  return { ladder: [host.platform], backend_id: host.platform, reason: null }
+}
+
+// --- LiteRT-LM: one wheel per platform (change `add-litert-lm-runtime`, design D7) -----------------
+
+/** Darwin 21 is macOS 12: the wheel is tagged `macosx_12_0_arm64`. */
+const LITERT_LM_MIN_DARWIN = 21
+/** The wheels are `manylinux_2_27`. */
+const LITERT_LM_MIN_GLIBC: readonly [number, number] = [2, 27]
+
+export type LiteRtLmHostPlatform = { platform: LiteRtLmPlatform } | { platform: null; reason: string }
+
+/** Which wheel of a LiteRT-LM release this host runs, or why none; `null` means no provider here. */
+export function liteRtLmHostPlatform(host: FoundryLocalHostFacts): LiteRtLmHostPlatform {
+  if (host.platform === 'win32')
+    return host.arch === 'x64'
+      ? { platform: 'win-x64' }
+      : { platform: null, reason: 'LiteRT-LM runs on Windows x64 only.' }
+  if (host.platform === 'darwin') {
+    if (host.arch !== 'arm64') return { platform: null, reason: 'LiteRT-LM runs on Apple Silicon Macs only.' }
+    const [darwin = 0] = leadingNumbers(host.osRelease)
+    return darwin >= LITERT_LM_MIN_DARWIN
+      ? { platform: 'macos-arm64' }
+      : { platform: null, reason: 'LiteRT-LM needs macOS 12 or newer.' }
+  }
+  if (host.platform === 'linux' && (host.arch === 'x64' || host.arch === 'arm64')) {
+    const [major = 0, minor = 0] = host.glibcVersion ? leadingNumbers(host.glibcVersion) : []
+    const [needMajor, needMinor] = LITERT_LM_MIN_GLIBC
+    if (!host.glibcVersion || major < needMajor || (major === needMajor && minor < needMinor))
+      return {
+        platform: null,
+        reason: `LiteRT-LM needs glibc ${needMajor}.${needMinor} or newer${host.glibcVersion ? `; this system has ${host.glibcVersion}` : '; this system has none'}.`,
+      }
+    return { platform: `linux-${host.arch}` }
+  }
+  return { platform: null, reason: `LiteRT-LM does not run on ${host.platform} ${host.arch}.` }
+}
+
+/** The host's wheel in the newest installable release, as a one-rung ladder. */
+export function liteRtLmHostChoice(
+  host: LiteRtLmHostPlatform,
+  release: { assets: readonly { platform: LiteRtLmPlatform }[] } | null
+): { ladder: string[]; backend_id: string | null; reason: string | null } {
+  if (host.platform === null) return { ladder: [], backend_id: null, reason: host.reason }
+  if (!release) return { ladder: [], backend_id: null, reason: 'The LiteRT-LM manifest is unavailable.' }
+  if (!release.assets.some((asset) => asset.platform === host.platform))
+    return {
+      ladder: [],
+      backend_id: null,
+      reason: `The LiteRT-LM manifest lists no wheel for ${host.platform}.`,
     }
   return { ladder: [host.platform], backend_id: host.platform, reason: null }
 }

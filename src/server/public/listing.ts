@@ -34,6 +34,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'vllm': 'vllm',
   'sglang': 'sglang',
   'foundry-local': 'foundry-local',
+  'litert-lm': 'litert-lm',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */

@@ -41,6 +41,7 @@ describe('package exports', () => {
       './host',
       './models',
       './foundry-host',
+      './litert-host',
       './settings',
     ])
   })
@@ -99,6 +100,14 @@ describe('package exports', () => {
     // What the entry does is `src/runtime/foundry-local/foundry-host.test.ts`; here, that it is the one export.
     const entry = (await import('../../src/runtime/foundry-local/foundry-host.js')) as Record<string, unknown>
     expect(Object.keys(entry)).toEqual(['runFoundryHostMain'])
+  })
+
+  // The same for `litert-host …` (change add-litert-lm-runtime, design D1).
+  it('resolves ./litert-host to its own entry, which imports under Node', async () => {
+    const resolved = await resolveFromPackage(['@atomic-chat/core/litert-host'])
+    expect(resolved['@atomic-chat/core/litert-host']).toMatch(/\/dist\/runtime\/litert-lm\/litert-host\.js$/)
+    const entry = (await import('../../src/runtime/litert-lm/litert-host.js')) as Record<string, unknown>
+    expect(Object.keys(entry)).toEqual(['runLiteRtHostMain'])
   })
 
   // Provider setting schemas for a program that embeds the core (change close-cli-core-gaps, design D3):

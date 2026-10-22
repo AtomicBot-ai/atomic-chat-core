@@ -86,10 +86,11 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
    mapping in the app repo, in the same pair of PRs.
 6. **Runtime-agnostic.** Only `node:*` builtins and global `fetch`. No `Bun.*`, no `bun:*`, no native
    addons, no `worker_threads`, no `import.meta.url`-relative file loading (breaks under `--compile`).
-   Embed JSON with `import … with { type: 'json' }`. `npm run lint` fails otherwise. One exception:
-   `src/runtime/foundry-local/host/ffi-bun.ts` imports `bun:ffi` (ADR
-   2026-10-15-foundry-local-runs-in-a-host-mode-of-the-core-binary) — allow-listed in both gates and
-   imported only dynamically by the hidden `foundry-host` mode; no other file may follow it.
+   Embed JSON with `import … with { type: 'json' }`. `npm run lint` fails otherwise. Two exceptions:
+   `src/runtime/foundry-local/host/ffi-bun.ts` and `src/runtime/litert-lm/host/ffi-bun.ts` import
+   `bun:ffi` (ADRs 2026-10-15-foundry-local-runs-in-a-host-mode-of-the-core-binary,
+   2026-10-21-litert-lm-runs-in-a-host-mode-with-its-own-openai-server) — allow-listed in both gates and
+   imported only dynamically by their hidden host modes; no other file may follow them.
 7. **Naming.** New identifiers are `atomic-*`, never `jan*`. Files `kebab-case.ts`, classes `PascalCase`,
    functions `camelCase`. Data paths: only those listed in `docs/contracts.md`; never invent a new one.
 8. **Dependencies.** `yaml`, `tar`, `yauzl`, `ai`, `@ai-sdk/openai-compatible`. Adding one needs an

@@ -2,7 +2,8 @@
  * Archive extraction and backend-pack layout normalisation. Port of `decompress` and
  * `normalize_backend_layout` in `src-tauri/src/core/filesystem/commands.rs`.
  *
- * Only `.tar.gz` (also named `.tgz`) and `.zip` are supported (same error text as the app). Zip entries are guarded
+ * Only `.tar.gz` (also named `.tgz`) and `.zip` are supported (same error text as the app); a Python
+ * wheel (`.whl`) is a zip and unpacks as one (change `add-litert-lm-runtime`, task 4.2). Zip entries are guarded
  * against zip-slip, directory entries are created, and the unix mode bits are applied.
  */
 
@@ -21,7 +22,7 @@ export async function extractArchive(archivePath: string, outputDir: string): Pr
     await tarExtract({ file: archivePath, cwd: outputDir })
     return
   }
-  if (archivePath.endsWith('.zip')) {
+  if (archivePath.endsWith('.zip') || archivePath.endsWith('.whl')) {
     await extractZip(archivePath, outputDir)
     return
   }

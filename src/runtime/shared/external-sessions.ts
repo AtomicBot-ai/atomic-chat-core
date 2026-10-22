@@ -52,6 +52,7 @@ const PROVIDERS: ReadonlySet<string> = new Set([
   'vllm',
   'sglang',
   'foundry-local',
+  'litert-lm',
 ])
 
 export interface ExternalSessionsOptions {

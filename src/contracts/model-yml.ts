@@ -41,6 +41,8 @@ export interface ModelYml {
   atomic_runtime?: ModelYmlAtomicRuntime
   /** A Foundry Local variant (`<data>/foundry-local/models/<variant_id>/`), written by the app's installer. */
   foundry_local?: ModelYmlFoundryLocal
+  /** A LiteRT-LM variant (`<data>/litert-lm/models/<variant_id>/`), written by the app or `atc`. */
+  litert_lm?: ModelYmlLiteRtLm
 }
 
 export interface ModelYmlAtomicRuntime {
@@ -89,6 +91,38 @@ export interface ModelYmlFoundryLocal {
   reasoning_end?: string
 }
 
+/** The backends a LiteRT-LM variant runs on (change `add-litert-lm-runtime`). */
+export const LITERT_LM_BACKENDS = ['cpu', 'gpu', 'npu'] as const
+export type LiteRtLmBackendId = (typeof LITERT_LM_BACKENDS)[number]
+
+/** The Intel NPU generations LiteRT-LM files are compiled for: Lunar Lake and Panther Lake (design D3). */
+export const LITERT_LM_NPUS = ['intel-lnl', 'intel-ptl'] as const
+export type LiteRtLmNpu = (typeof LITERT_LM_NPUS)[number]
+
+/**
+ * The `litert_lm` block (spec `litert-lm-models`, task 6.2): which variant the folder holds and what it
+ * can do. `tools`, `reasoning` and `vision` come from conf's list, or for a Hugging Face model from
+ * core's check of the downloaded file.
+ */
+export interface ModelYmlLiteRtLm {
+  model_id: string
+  variant_id: string
+  backend: LiteRtLmBackendId
+  /** Present exactly when `backend` is `npu`. */
+  npu?: LiteRtLmNpu
+  /** `<org>/<name>` on Hugging Face. */
+  repo: string
+  revision: string
+  /** The file's path in the repository; its name in the variant folder. */
+  file: string
+  /** Absent when neither conf nor the file declares one. */
+  context_length?: number
+  tools: boolean
+  reasoning: boolean
+  vision: boolean
+  source: 'curated' | 'huggingface'
+}
+
 /** Key order the app's serde_yaml writer produces; `writeModelYml` must emit keys in this order. */
 export const MODEL_YML_KEY_ORDER: readonly (keyof ModelYml)[] = [
   'model_path',
@@ -108,4 +142,5 @@ export const MODEL_YML_KEY_ORDER: readonly (keyof ModelYml)[] = [
   'capabilities',
   'atomic_runtime',
   'foundry_local',
+  'litert_lm',
 ]

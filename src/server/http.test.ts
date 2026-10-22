@@ -158,6 +158,12 @@ describe('error envelope', () => {
     expect(statusForCode('FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED')).toBe(409)
     expect(statusForCode('FOUNDRY_LOCAL_VARIANT_UNSUPPORTED')).toBe(422)
     expect(statusForCode('FOUNDRY_LOCAL_HOST_ERROR')).toBe(500)
+    // LiteRT-LM (change add-litert-lm-runtime, task 6.1): the same three, and a file for a newer engine
+    // (update the engine first, like ENGINE_UPDATE_REQUIRED).
+    expect(statusForCode('LITERT_LM_ACCELERATOR_NOT_PREPARED')).toBe(409)
+    expect(statusForCode('LITERT_LM_VARIANT_UNSUPPORTED')).toBe(422)
+    expect(statusForCode('LITERT_LM_HOST_ERROR')).toBe(500)
+    expect(statusForCode('LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE')).toBe(409)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
   })
 

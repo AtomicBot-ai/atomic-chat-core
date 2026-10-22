@@ -17,6 +17,7 @@ import { registerDiffusionVideoRoutes } from './routes/diffusion-video.js'
 import { registerDiskRoutes } from './routes/disk.js'
 import { registerEngineBuildRoutes } from './routes/engine-builds.js'
 import { registerFoundryLocalRoutes } from './routes/foundry-local.js'
+import { registerLiteRtLmRoutes } from './routes/litert-lm.js'
 import { registerEngineRoutes } from './routes/engines.js'
 import { registerEnvironmentRoutes } from './routes/environments.js'
 import { registerExternalSessionRoutes } from './routes/external-sessions.js'
@@ -64,6 +65,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerBackendRoutes(router, deps, ctx)
   registerEngineBuildRoutes(router, deps, ctx)
   registerFoundryLocalRoutes(router, deps, ctx)
+  registerLiteRtLmRoutes(router, deps, ctx)
   registerEngineRoutes(router, deps, ctx)
   registerHardwareRoutes(router, deps, ctx)
   registerDiskRoutes(router, deps, ctx)

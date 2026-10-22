@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { APP_BIN, control, reapJournalledChildren, startDaemon } from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
+import { liteRtLmTestPlatform } from '../helpers/litert-lm-host.js'
 
 const fake = fileURLToPath(new URL('../helpers/fake-sidecar-server.mjs', import.meta.url))
 const daemons: ChildProcess[] = []
@@ -253,6 +254,129 @@ describe.skipIf(FOUNDRY_PLATFORM === null || !existsSync(APP_BIN))(
       const unloaded = await control(folder, ready, '/models/foundry-local/e2e-fl-cpu/unload', {
         method: 'POST',
       })
+      expect(await unloaded.json()).toMatchObject({ success: true })
+      expect(() => process.kill(session.pid, 0)).toThrow()
+      expect((await (await control(folder, ready, '/sessions')).json()) as object).toMatchObject({
+        sessions: [],
+      })
+    })
+  }
+)
+
+const FAKE_LITERT_HOST = fileURLToPath(new URL('../helpers/fake-litert-host.mjs', import.meta.url))
+// The compiled core registers LiteRT-LM only where the platform rule holds; Windows needs a .cmd host.
+const LITERT_PLATFORM = process.platform === 'win32' ? null : liteRtLmTestPlatform()
+
+/**
+ * A LiteRT-LM build and a CPU variant on disk, as the engine-builds install and the clients leave them,
+ * and the host stand-in core starts instead of `litert-host` (change add-litert-lm-runtime, task 6.6).
+ */
+async function liteRtFixture() {
+  const folder = await mkdtemp(join(tmpdir(), 'atomic-stage5-litert-'))
+  folders.push(folder)
+  const build = join(folder, 'litert-lm', 'backends', '0.18.1', LITERT_PLATFORM as string)
+  await mkdir(join(build, 'lib'), { recursive: true })
+  await writeFile(
+    join(build, 'lib', process.platform === 'darwin' ? 'liblitert-lm.dylib' : 'liblitert-lm.so'),
+    'lib'
+  )
+  await writeFile(join(build, '.atomic-owned'), 'atomic-chat\n')
+  await writeFile(
+    join(build, 'install.json'),
+    JSON.stringify({
+      tag: '0.18.1',
+      backendId: LITERT_PLATFORM,
+      sha256: null,
+      installedAtMs: 1,
+      publishedAt: '2026-10-19T22:44:33Z',
+      abi: 1,
+    })
+  )
+  const model = join(folder, 'litert-lm', 'models', 'e2e-lr-cpu')
+  await mkdir(model, { recursive: true })
+  await writeFile(join(model, 'gemma.litertlm'), 'litertlm')
+  await writeFile(
+    join(model, 'model.yml'),
+    [
+      'model_path: litert-lm/models/e2e-lr-cpu/gemma.litertlm',
+      'name: e2e-lr-cpu',
+      'size_bytes: 8',
+      'litert_lm:',
+      '  model_id: gemma-4-e2b',
+      '  variant_id: e2e-lr-cpu',
+      '  backend: cpu',
+      '  repo: litert-community/gemma-4-E2B-it-litert-lm',
+      `  revision: ${'a'.repeat(40)}`,
+      '  file: gemma.litertlm',
+      '  context_length: 4096',
+      '  tools: true',
+      '  reasoning: false',
+      '  vision: false',
+      '  source: curated',
+      '',
+    ].join('\n')
+  )
+  const argvFile = join(folder, 'host.jsonl')
+  const host = join(folder, 'fake-litert-host')
+  await writeFile(
+    host,
+    `#!/bin/sh\nexport FAKE_LITERT_ARGV=${JSON.stringify(argvFile)}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_LITERT_HOST)} "$@"\n`
+  )
+  await chmod(host, 0o755)
+  const { ready } = await startDaemon(folder, daemons, [], { ATOMIC_LITERT_HOST_TEST_COMMAND: host }, APP_BIN)
+  owners.push({ folder, ready })
+  return { folder, ready, argvFile }
+}
+
+describe.skipIf(LITERT_PLATFORM === null || !existsSync(APP_BIN))(
+  'LiteRT-LM through the compiled core (task 6.6)',
+  () => {
+    it('loads a variant in its host, answers on :1337 by the model field, and unloads after the host exited', async () => {
+      const { folder, ready, argvFile } = await liteRtFixture()
+      const loaded = await control(folder, ready, '/models/litert-lm/e2e-lr-cpu/load', {
+        method: 'POST',
+        body: '{}',
+      })
+      expect(loaded.status, await loaded.clone().text()).toBe(200)
+      const { session } = (await loaded.json()) as { session: { pid: number; port: number; api_key: string } }
+      const starts = (await readFile(argvFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => (JSON.parse(line) as { argv: string[] }).argv)
+      expect(starts.map((argv) => argv[0])).toEqual(['inspect', 'serve'])
+      const serve = starts[1] as string[]
+      expect(serve.slice(0, 5)).toEqual([
+        'serve',
+        '--lib',
+        join(folder, 'litert-lm', 'backends', '0.18.1', LITERT_PLATFORM as string),
+        '--engine-version',
+        '0.18.1',
+      ])
+      const hostPort = Number(serve[serve.indexOf('--port') + 1])
+      expect(session.port).not.toBe(hostPort)
+
+      const server = await control(folder, ready, '/server/start', {
+        method: 'POST',
+        body: JSON.stringify({ port: 0 }),
+      })
+      const { port } = (await server.json()) as { port: number }
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'e2e-lr-cpu', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(answer.status, await answer.clone().text()).toBe(200)
+      expect(await answer.json()).toMatchObject({
+        model: 'e2e-lr-cpu',
+        choices: [{ message: { content: 'fake reply to hi' } }],
+      })
+      const listed = (await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json()) as {
+        data: Array<{ id: string; owned_by: string }>
+      }
+      expect(listed.data).toContainEqual(expect.objectContaining({ id: 'e2e-lr-cpu', owned_by: 'litert-lm' }))
+      expect((await fetch(`http://127.0.0.1:${session.port}/v1/models`)).status).toBe(401)
+
+      const unloaded = await control(folder, ready, '/models/litert-lm/e2e-lr-cpu/unload', { method: 'POST' })
       expect(await unloaded.json()).toMatchObject({ success: true })
       expect(() => process.kill(session.pid, 0)).toThrow()
       expect((await (await control(folder, ready, '/sessions')).json()) as object).toMatchObject({

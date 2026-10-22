@@ -23,6 +23,7 @@ import llamacppSchema from './schema/llamacpp.json' with { type: 'json' }
 import mlxSchema from './schema/mlx.json' with { type: 'json' }
 import sglangSchema from './schema/sglang.json' with { type: 'json' }
 import foundryLocalSchema from './schema/foundry-local.json' with { type: 'json' }
+import liteRtLmSchema from './schema/litert-lm.json' with { type: 'json' }
 import tensorrtLlmSchema from './schema/tensorrt-llm.json' with { type: 'json' }
 import vllmSchema from './schema/vllm.json' with { type: 'json' }
 
@@ -36,6 +37,7 @@ export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'vllm',
   'sglang',
   'foundry-local',
+  'litert-lm',
 ]
 
 const CONTROLLER_TYPES = new Set(['checkbox', 'input', 'dropdown', 'slider'])
@@ -70,6 +72,7 @@ const SCHEMAS: Record<LocalProviderId, readonly SettingDescriptor[]> = {
   'vllm': toDescriptors('vllm', vllmSchema),
   'sglang': toDescriptors('sglang', sglangSchema),
   'foundry-local': toDescriptors('foundry-local', foundryLocalSchema),
+  'litert-lm': toDescriptors('litert-lm', liteRtLmSchema),
 }
 
 /** The descriptor array as the app registers it (deep copy — callers may mutate `options`/`value`). */
@@ -167,6 +170,12 @@ const FOUNDRY_LOCAL_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = 
   timeout: 'number',
 }
 
+const LITERT_LM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
+  ctx_len: 'number',
+  speculative_decoding: 'boolean',
+  timeout: 'number',
+}
+
 /** `TensorrtLlmProviderConfig`: the card's UUID as text, every other key a number. */
 const TENSORRT_LLM_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
   gpu_id: 'string',
@@ -248,6 +257,7 @@ export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<stri
   'vllm': VLLM_VALUE_TYPES,
   'sglang': SGLANG_VALUE_TYPES,
   'foundry-local': FOUNDRY_LOCAL_VALUE_TYPES,
+  'litert-lm': LITERT_LM_VALUE_TYPES,
 }
 
 /**

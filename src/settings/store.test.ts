@@ -100,6 +100,7 @@ describe('SettingsStore.open', () => {
           'vllm': EMPTY_PROVIDER_STATE,
           'sglang': EMPTY_PROVIDER_STATE,
           'foundry-local': EMPTY_PROVIDER_STATE,
+          'litert-lm': EMPTY_PROVIDER_STATE,
         },
         migrations: {},
       },
@@ -114,6 +115,7 @@ describe('SettingsStore.open', () => {
       'vllm': canonicalProviderDefaults('vllm'),
       'sglang': canonicalProviderDefaults('sglang'),
       'foundry-local': canonicalProviderDefaults('foundry-local'),
+      'litert-lm': canonicalProviderDefaults('litert-lm'),
     })
     // canonical, not raw: the schema ships timeout "1800" and fit_ctx 4096
     expect(store.get('llamacpp-upstream')).toMatchObject({

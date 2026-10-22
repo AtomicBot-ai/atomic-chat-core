@@ -17,20 +17,34 @@ import {
   prepareFoundryLocalTree,
   writeFoundryLocalInstallRecord,
 } from './foundry-local.js'
-import { FOUNDRY_LOCAL_C_API_VERSIONS, foundryLocalAssetUrl, mlxAssetUrl, sdcppAssetUrl } from './manifest.js'
-import type { FoundryLocalManifest, ManifestOf, MlxManifest, SdcppManifest } from './manifest.js'
+import { listLiteRtLmBuilds, prepareLiteRtLmTree, writeLiteRtLmInstallRecord } from './litert-lm.js'
+import {
+  FOUNDRY_LOCAL_C_API_VERSIONS,
+  foundryLocalAssetUrl,
+  mlxAssetUrl,
+  sdcppAssetUrl,
+  SUPPORTED_LITERT_LM_ABI,
+} from './manifest.js'
+import type {
+  FoundryLocalManifest,
+  LiteRtLmManifest,
+  ManifestOf,
+  MlxManifest,
+  SdcppManifest,
+} from './manifest.js'
 import { compareBuilds } from './order.js'
 import {
   backendKindOf,
   companionFor,
   foundryLocalHostChoice,
+  liteRtLmHostChoice,
   mlxHostChoice,
   readFailedBackends,
   rememberFailedBackend,
   sdcppHostChoice,
   sdcppHostOf,
 } from './select.js'
-import type { FoundryLocalHostPlatform } from './select.js'
+import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
 
 /** One build on disk as the service sees it. */
 export interface Build extends EngineBuildRef {
@@ -40,7 +54,15 @@ export interface Build extends EngineBuildRef {
   published_at: string | null
   /** Foundry Local: the C API version recorded at install; `null` when unknown. */
   c_api_version?: number | null
+  /** LiteRT-LM: the binding number recorded at install; `null` when unknown. */
+  abi?: number | null
 }
+
+/**
+ * Which build of an engine with one archive per platform this host runs, or why none
+ * (`foundryLocalHostPlatform`, `liteRtLmHostPlatform`).
+ */
+export type EngineHostPlatform = { platform: string } | { platform: null; reason: string }
 
 /** What a row may read from the service's dependencies. */
 export interface EngineContext {
@@ -51,10 +73,13 @@ export interface EngineContext {
   platform: NodeJS.Platform
   hardware: () => Promise<Pick<HardwareFacts, 'osType' | 'arch' | 'cpuExtensions' | 'gpus'>>
   log?: ((level: 'info' | 'warn', message: string) => void) | undefined
-  /** Which Foundry Local archive this host runs (`foundryLocalHostPlatform`), or why none. */
-  foundryLocalHost: FoundryLocalHostPlatform
-  /** `foundry-host probe --lib <dir>` of this core; throws `ENGINE_INSTALL_FAILED` with what it printed. */
-  foundryHostProbe?: ((libDir: string) => Promise<void>) | undefined
+  /** Which build of this engine the host runs, for the engines that are one archive per platform. */
+  hostPlatform: EngineHostPlatform
+  /**
+   * This core's own host mode run against an unpacked build (`foundry-host probe`, `litert-host
+   * probe`); throws `ENGINE_INSTALL_FAILED` with what it printed. Absent where this core has none.
+   */
+  hostProbe?: ((buildDir: string) => Promise<void>) | undefined
 }
 
 export interface HostChoice {
@@ -76,11 +101,13 @@ export interface BuildRecordInfo {
   publishedAt: string | null
   /** Foundry Local: the release's C API version. */
   cApiVersion: number | null
+  /** LiteRT-LM: the release's binding number. */
+  abi: number | null
 }
 
 export interface EngineDescriptor<M> {
   /** The release an install takes from the manifest, and the order key it carries. */
-  release(manifest: M): { tag: string; published_at: string | null; c_api_version?: number }
+  release(manifest: M): { tag: string; published_at: string | null; c_api_version?: number; abi?: number }
   hostChoice(ctx: EngineContext, manifest: M | null): Promise<HostChoice>
   /** The build's archive first, companions after; all unpack into one directory. */
   archives(manifest: M, backendId: string): ArchiveRef[]
@@ -166,7 +193,8 @@ const mlx: EngineDescriptor<MlxManifest> = {
       .filter((asset) => asset.backend === backendId)
       .map((asset) => ({ ...pin(asset), url: mlxAssetUrl(manifest, asset), name: asset.name })),
   probe: (staging, ctx) => probeMlxServer(staging, { platform: ctx.platform }),
-  record: (staging, { cApiVersion: _cApiVersion, ...info }) => writeMlxInstallRecord(staging, info),
+  record: (staging, { cApiVersion: _cApiVersion, abi: _abi, ...info }) =>
+    writeMlxInstallRecord(staging, info),
   async builds(ctx) {
     const out: Build[] = (await listDownloadedMlx(ctx.root)).map((record) => ({
       tag: record.tag,
@@ -201,7 +229,7 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
     return { tag: newest.tag, published_at: newest.published_at, c_api_version: newest.c_api_version }
   },
   hostChoice: async (ctx, manifest) =>
-    foundryLocalHostChoice(ctx.foundryLocalHost, manifest?.releases[0] ?? null),
+    foundryLocalHostChoice(ctx.hostPlatform as FoundryLocalHostPlatform, manifest?.releases[0] ?? null),
   archives(manifest, backendId) {
     const release = manifest.releases[0]
     const asset = release?.assets.find((candidate) => candidate.platform === backendId)
@@ -211,14 +239,14 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
   },
   prepare: (staging, ctx) => prepareFoundryLocalTree(staging, ctx.platform),
   async probe(staging, ctx) {
-    if (!ctx.foundryHostProbe)
+    if (!ctx.hostProbe)
       throw new AtomicCoreError(
         'ENGINE_INSTALL_FAILED',
         'This core has no Foundry Local host to check the build with.'
       )
-    await ctx.foundryHostProbe(staging)
+    await ctx.hostProbe(staging)
   },
-  record: (staging, info) => writeFoundryLocalInstallRecord(staging, info),
+  record: (staging, { abi: _abi, ...info }) => writeFoundryLocalInstallRecord(staging, info),
   async builds(ctx) {
     return (await listFoundryLocalBuilds(ctx.root)).map((record) => ({
       tag: record.tag,
@@ -240,8 +268,53 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
     ),
 }
 
+/**
+ * LiteRT-LM (change `add-litert-lm-runtime`, task 4.4): the host's wheel of the newest release; the
+ * native part of it goes to `lib/`, `litert-host probe --lib <staging>` of this core proves it loads.
+ */
+const liteRtLm: EngineDescriptor<LiteRtLmManifest> = {
+  release: (manifest) => {
+    const newest = manifest.releases[0] as LiteRtLmManifest['releases'][number]
+    return { tag: newest.version, published_at: newest.published_at, abi: newest.abi }
+  },
+  hostChoice: async (ctx, manifest) =>
+    liteRtLmHostChoice(ctx.hostPlatform as LiteRtLmHostPlatform, manifest?.releases[0] ?? null),
+  archives(manifest, backendId) {
+    const asset = manifest.releases[0]?.assets.find((candidate) => candidate.platform === backendId)
+    return asset ? [{ url: asset.url, name: asset.name, sha256: asset.sha256, size: asset.size }] : []
+  },
+  prepare: (staging) => prepareLiteRtLmTree(staging),
+  async probe(staging, ctx) {
+    if (!ctx.hostProbe)
+      throw new AtomicCoreError(
+        'ENGINE_INSTALL_FAILED',
+        'This core has no LiteRT-LM host to check the build with.'
+      )
+    await ctx.hostProbe(staging)
+  },
+  record: (staging, { cApiVersion: _cApiVersion, ...info }) => writeLiteRtLmInstallRecord(staging, info),
+  async builds(ctx) {
+    return (await listLiteRtLmBuilds(ctx.root)).map((record) => ({
+      tag: record.tag,
+      backend_id: record.backendId,
+      origin: 'downloaded',
+      dir: record.dir,
+      installed_at_ms: record.installedAtMs,
+      published_at: record.publishedAt,
+      abi: record.abi,
+    }))
+  },
+  /** The newest by `published_at` among the builds whose ABI this core's host binds (design D2). */
+  active: (builds) =>
+    newest(
+      'litert-lm',
+      builds.filter((build) => build.abi != null && SUPPORTED_LITERT_LM_ABI.includes(build.abi))
+    ),
+}
+
 export const ENGINE_DESCRIPTORS: { [K in EngineBuildId]: EngineDescriptor<ManifestOf[K]> } = {
   'sd-cpp': sdcpp,
   'mlx': mlx,
   'foundry-local': foundryLocal,
+  'litert-lm': liteRtLm,
 }

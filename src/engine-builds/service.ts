@@ -44,13 +44,12 @@ import type { Downloader } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { MLX_SERVER_BINARY, removeOwnedBuild } from './builds.js'
 import { ENGINE_DESCRIPTORS } from './engines.js'
-import type { Build, EngineContext, EngineDescriptor, HostChoice } from './engines.js'
+import type { Build, EngineContext, EngineDescriptor, EngineHostPlatform, HostChoice } from './engines.js'
 import { installStaged } from './install.js'
 import type { BuildArchive } from './install.js'
 import { assetInstallable } from './manifest.js'
 import type { ManifestOf, ManifestRead } from './manifest.js'
 import { compareBuilds } from './order.js'
-import type { FoundryLocalHostPlatform } from './select.js'
 
 /** Any engine's manifest, where the service handles them alike. */
 type AnyManifest = ManifestOf[EngineBuildId]
@@ -103,10 +102,13 @@ export interface EngineBuildsDeps {
   emit: <K extends 'engine-build:changed' | 'engine:changed'>(name: K, payload: CoreEvents[K]) => void
   now?: () => number
   log?: (level: 'info' | 'warn', message: string) => void
-  /** Which Foundry Local archive this host runs; absent, none (`foundryLocalHostPlatform`). */
-  foundryLocalHost?: FoundryLocalHostPlatform
-  /** `foundry-host probe` of this core against an unpacked build. */
-  foundryHostProbe?: (libDir: string) => Promise<void>
+  /**
+   * Which build each one-archive-per-platform engine runs here (`foundryLocalHostPlatform`,
+   * `liteRtLmHostPlatform`); an engine absent from the table runs nowhere.
+   */
+  hostPlatforms?: Partial<Record<EngineBuildId, EngineHostPlatform>>
+  /** This core's host mode probing an unpacked build, per engine (`foundry-host`, `litert-host`). */
+  hostProbes?: Partial<Record<EngineBuildId, (buildDir: string) => Promise<void>>>
   /** Test seams for the probes. */
   probe?: Partial<Record<EngineBuildId, (dir: string) => Promise<void>>>
 }
@@ -119,6 +121,13 @@ const ref = (build: Build): EngineBuildRef => ({
   backend_id: build.backend_id,
   origin: build.origin,
 })
+
+const ENGINE_LABELS: Record<EngineBuildId, string> = {
+  'sd-cpp': 'sd.cpp',
+  'mlx': 'MLX',
+  'foundry-local': 'Foundry Local',
+  'litert-lm': 'LiteRT-LM',
+}
 
 export function parseEngineBuildId(raw: string): EngineBuildId {
   const known = ENGINE_BUILD_IDS.find((id) => id === raw)
@@ -290,7 +299,7 @@ export class EngineBuildsService {
     onProbeFailure: (error: unknown) => never
   ): Promise<Omit<EngineBuildInstallResult, 'failed_backend_ids'>> {
     const descriptor = this.engine(engine)
-    const { tag, published_at: publishedAt, c_api_version: cApiVersion } = descriptor.release(manifest)
+    const { tag, published_at: publishedAt, c_api_version: cApiVersion, abi } = descriptor.release(manifest)
     const archives = descriptor.archives(manifest, backendId)
     const unpinned = archives.find((archive) => !assetInstallable(archive))
     if (unpinned)
@@ -324,6 +333,7 @@ export class EngineBuildsService {
           installedAtMs: this.now(),
           publishedAt,
           cApiVersion: cApiVersion ?? null,
+          abi: abi ?? null,
         }),
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
@@ -441,11 +451,11 @@ export class EngineBuildsService {
       platform: this.deps.platform,
       hardware: this.deps.hardware,
       log: this.deps.log,
-      foundryLocalHost: this.deps.foundryLocalHost ?? {
+      hostPlatform: this.deps.hostPlatforms?.[engine] ?? {
         platform: null,
-        reason: 'Foundry Local does not run on this computer.',
+        reason: `${ENGINE_LABELS[engine]} does not run on this computer.`,
       },
-      foundryHostProbe: this.deps.foundryHostProbe,
+      hostProbe: this.deps.hostProbes?.[engine],
     }
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "@atomic-chat/core",
-  "version": "0.18.9",
+  "version": "0.19.0",
   "description": "Inference core of Atomic Chat: local llama.cpp/MLX/Foundation Models runtime, cloud providers, model router and the OpenAI-compatible server on :1337.",
   "license": "MIT",
   "type": "module",
@@ -35,6 +35,10 @@
       "types": "./dist/runtime/foundry-local/foundry-host.d.ts",
       "import": "./dist/runtime/foundry-local/foundry-host.js"
     },
+    "./litert-host": {
+      "types": "./dist/runtime/litert-lm/litert-host.d.ts",
+      "import": "./dist/runtime/litert-lm/litert-host.js"
+    },
     "./settings": {
       "types": "./dist/settings/public.d.ts",
       "import": "./dist/settings/public.js"
@@ -59,6 +63,7 @@
     "test:app-e2e": "vitest run --project app-e2e",
     "test:runtime-compat": "vitest run --project runtime-compat",
     "test:live": "ATOMIC_LIVE=1 vitest run --project live",
+    "test:integration": "vitest run --project integration",
     "engine:check": "node scripts/engine-candidate.mjs local",
     "test:coverage": "vitest run --project unit --project contract --coverage && node scripts/check-coverage-floor.mjs",
     "fixtures:import": "node scripts/import-app-fixtures.mjs",

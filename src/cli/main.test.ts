@@ -69,6 +69,16 @@ describe('runCli', () => {
     expect(USAGE).not.toContain('foundry-host')
   })
 
+  it('runs the hidden litert-host mode: a usage error is 2, and under Node the library cannot load (3)', async () => {
+    const usage = await run(['litert-host', 'probe'])
+    expect(usage.exitCode).toBe(2)
+    expect(usage.stderr).toBe('--lib is required\n')
+    const node = await run(['litert-host', 'probe', '--lib', '/nowhere'])
+    expect(node.exitCode).toBe(3)
+    expect(node.stderr).toMatch(/^LiteRT-LM does not load from \/nowhere: .*only inside a compiled binary/)
+    expect(USAGE).not.toContain('litert-host')
+  })
+
   it('rejects an unknown command with usage on stderr', async () => {
     const result = await run(['nope'])
     expect(result.exitCode).toBe(2)

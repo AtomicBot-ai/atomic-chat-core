@@ -8,6 +8,7 @@
  *     rebuilds of one tag are equal: their shas carry no order.
  *   - MLX: `published_at` of the GitHub release. The tags are commit hashes.
  *   - Foundry Local: `published_at` of the `microsoft/foundry-local` release, like MLX.
+ *   - LiteRT-LM: `published_at` of the PyPI release (change `add-litert-lm-runtime`, task 4.4).
  *
  * A build whose order cannot be read (a dev stub, an installer without `mlx-server.json`) is older
  * than every build whose order can, so any verified build replaces it.
@@ -18,7 +19,7 @@ import { isDateTime } from './manifest.js'
 
 export interface OrderedBuild {
   tag: string
-  /** MLX and Foundry Local. */
+  /** MLX, Foundry Local and LiteRT-LM. */
   published_at?: string | null
 }
 
@@ -29,7 +30,7 @@ export function sdcppBuildKey(tag: string): [number, number] | null {
   return [Number(match[1]), match[2] ? 1 : 0]
 }
 
-/** MLX and Foundry Local: the release date. */
+/** MLX, Foundry Local and LiteRT-LM: the release date. */
 function publishedKey(build: OrderedBuild): [number] | null {
   return isDateTime(build.published_at) ? [Date.parse(build.published_at)] : null
 }
@@ -48,6 +49,7 @@ const ORDER_KEYS: Record<EngineBuildId, (build: OrderedBuild) => readonly number
   'sd-cpp': (build) => sdcppBuildKey(build.tag),
   'mlx': publishedKey,
   'foundry-local': publishedKey,
+  'litert-lm': publishedKey,
 }
 
 /** Negative when `a` is older, positive when newer, zero when neither is. */

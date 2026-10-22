@@ -6,6 +6,8 @@ import { describe, expect, it } from 'vitest'
 import {
   foundryLocalHostChoice,
   foundryLocalHostPlatform,
+  liteRtLmHostChoice,
+  liteRtLmHostPlatform,
   backendKindOf,
   companionFor,
   diffusionBackendLadder,
@@ -527,5 +529,75 @@ describe('foundryLocalHostChoice', () => {
     })
     expect(foundryLocalHostChoice({ platform: 'win-arm64' }, release).reason).toMatch(/win-arm64/)
     expect(foundryLocalHostChoice({ platform: 'linux-x64' }, null).reason).toMatch(/manifest/)
+  })
+})
+
+describe('liteRtLmHostPlatform', () => {
+  const host = (over: Partial<Parameters<typeof liteRtLmHostPlatform>[0]>) =>
+    liteRtLmHostPlatform({
+      platform: 'linux',
+      arch: 'x64',
+      osRelease: '6.8.0',
+      glibcVersion: '2.39',
+      ...over,
+    })
+
+  it('takes Windows x64 only: Google publishes no Windows arm64 wheel', () => {
+    expect(host({ platform: 'win32', arch: 'x64', glibcVersion: undefined })).toEqual({ platform: 'win-x64' })
+    expect(host({ platform: 'win32', arch: 'arm64', glibcVersion: undefined })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/Windows x64/),
+    })
+  })
+
+  it('takes macOS 12 and newer on Apple Silicon, by the Darwin release', () => {
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '21.0.0' })).toEqual({
+      platform: 'macos-arm64',
+    })
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '25.6.0' })).toEqual({
+      platform: 'macos-arm64',
+    })
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '20.6.0' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/macOS 12/),
+    })
+    expect(host({ platform: 'darwin', arch: 'x64', osRelease: '24.0.0' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/Apple Silicon/),
+    })
+  })
+
+  it('takes Linux x64 and arm64 with glibc 2.27 or newer, and nothing without glibc', () => {
+    expect(host({ arch: 'x64', glibcVersion: '2.27' })).toEqual({ platform: 'linux-x64' })
+    expect(host({ arch: 'arm64', glibcVersion: '2.39' })).toEqual({ platform: 'linux-arm64' })
+    expect(host({ glibcVersion: '2.26' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/glibc 2\.27/),
+    })
+    expect(host({ glibcVersion: undefined })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/glibc 2\.27/),
+    })
+    expect(host({ arch: 'ia32' })).toEqual({ platform: null, reason: expect.stringMatching(/does not run/) })
+  })
+
+  it('offers the host wheel of the newest release, or says why not', () => {
+    const release = { assets: [{ platform: 'macos-arm64' as const }, { platform: 'win-x64' as const }] }
+    expect(liteRtLmHostChoice({ platform: 'win-x64' }, release)).toEqual({
+      ladder: ['win-x64'],
+      backend_id: 'win-x64',
+      reason: null,
+    })
+    expect(liteRtLmHostChoice({ platform: 'linux-x64' }, release)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'The LiteRT-LM manifest lists no wheel for linux-x64.',
+    })
+    expect(liteRtLmHostChoice({ platform: 'linux-x64' }, null).reason).toMatch(/unavailable/)
+    expect(liteRtLmHostChoice({ platform: null, reason: 'no' }, release)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'no',
+    })
   })
 })

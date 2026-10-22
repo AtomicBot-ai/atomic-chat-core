@@ -84,6 +84,7 @@ describe('/models', () => {
         localSession(2, { provider: 'vllm', modelId: 'vllm-model' }),
         localSession(3, { provider: 'sglang', modelId: 'sglang-model' }),
         localSession(4, { provider: 'foundry-local', modelId: 'qwen2.5-1.5b-instruct-openvino-npu' }),
+        localSession(5, { provider: 'litert-lm', modelId: 'gemma-4-e2b-gpu' }),
       ],
     })
     const res = await fetch(`http://127.0.0.1:${server.port}/v1/models`)
@@ -94,6 +95,7 @@ describe('/models', () => {
         { id: 'vllm-model', object: 'model', created: 1, owned_by: 'vllm' },
         { id: 'sglang-model', object: 'model', created: 1, owned_by: 'sglang' },
         { id: 'qwen2.5-1.5b-instruct-openvino-npu', object: 'model', created: 1, owned_by: 'foundry-local' },
+        { id: 'gemma-4-e2b-gpu', object: 'model', created: 1, owned_by: 'litert-lm' },
       ],
     })
   })

@@ -34,6 +34,14 @@ export type RuntimeErrorCode =
   | 'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED'
   /** Foundry Local: the host process failed, or the library inside it did. */
   | 'FOUNDRY_LOCAL_HOST_ERROR'
+  /** LiteRT-LM (change `add-litert-lm-runtime`): the host process failed, or the library inside it did. */
+  | 'LITERT_LM_HOST_ERROR'
+  /** LiteRT-LM: the variant's backend or target NPU does not run on this platform or in this file. */
+  | 'LITERT_LM_VARIANT_UNSUPPORTED'
+  /** LiteRT-LM: an NPU variant needs the OpenVINO accelerator prepared first. */
+  | 'LITERT_LM_ACCELERATOR_NOT_PREPARED'
+  /** LiteRT-LM: the file needs a newer LiteRT-LM than the active build; `details` names the version. */
+  | 'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE'
   | 'SERVER_START_FAILED'
   | 'SERVER_START_TIMED_OUT'
   | 'PROCESS_ERROR'
