@@ -330,6 +330,23 @@ beforeEach(async () => {
     diffusion: fakeDiffusionControl(diffusionCalls),
     engineBuilds: fakeEngineBuildsControl(engineBuildCalls),
     engines: fakeEnginesControl(engineCalls),
+    liteRtLm: {
+      accelerators: async () => ({
+        installed: true,
+        build: '0.18.1/win-x64',
+        npu: 'intel-lnl',
+        accelerators: [
+          { name: 'openvino', device: 'npu', version: '2026.4.1', size_bytes: 1, prepared: false },
+        ],
+        error: null,
+      }),
+      prepare: async (request) => ({
+        accelerators: (request.accelerators ?? ['openvino']).map((name) => ({ name, prepared: true })),
+      }),
+    },
+    nativeModelChecks: {
+      'litert-lm': async (body) => ({ verdict: 'ok', reason: null, echo: body }),
+    },
     foundryLocal: {
       accelerators: async (force) => ({
         installed: true,
@@ -844,6 +861,26 @@ describe('foundry local accelerators (task 6.4)', () => {
     expect(await client.prepareFoundryLocalAccelerators({ accelerators: ['CUDAExecutionProvider'] })).toEqual(
       { accelerators: [{ name: 'CUDAExecutionProvider', prepared: true }] }
     )
+  })
+})
+
+describe('litert-lm accelerator and check (tasks 6.4–6.5)', () => {
+  it('reads what is offered, prepares through a proxy, and checks a variant', async () => {
+    expect(await client.liteRtLmAccelerators()).toMatchObject({ npu: 'intel-lnl', build: '0.18.1/win-x64' })
+    expect(await client.prepareLiteRtLmAccelerators()).toEqual({
+      accelerators: [{ name: 'openvino', prepared: true }],
+    })
+    expect(
+      await client.prepareLiteRtLmAccelerators({
+        accelerators: ['openvino'],
+        proxy: { url: 'http://p:3128' },
+      })
+    ).toEqual({ accelerators: [{ name: 'openvino', prepared: true }] })
+    expect(await client.checkLiteRtLmModel({ backend: 'npu', npu: 'intel-lnl' })).toEqual({
+      verdict: 'ok',
+      reason: null,
+      echo: { backend: 'npu', npu: 'intel-lnl' },
+    })
   })
 })
 

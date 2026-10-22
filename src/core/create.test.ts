@@ -2157,3 +2157,136 @@ describe.skipIf(process.platform === 'win32')(
     })
   }
 )
+
+// The same macOS 15 Apple Silicon seam for LiteRT-LM (macOS 12+), with an Intel NPU by its test seam
+// so the accelerator's wiring runs too.
+describe.skipIf(process.platform === 'win32')(
+  'litert-lm on the owner (change add-litert-lm-runtime, task 6.6)',
+  () => {
+    it('wires the runtime, the accelerator, the check and the engine host where the platform rule holds', async () => {
+      const fakeHost = new URL('../../test/helpers/fake-litert-host.mjs', import.meta.url).pathname
+      const launcher = join(data.root, 'fake-litert-host')
+      await writeFile(
+        launcher,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeHost)} "$@"\n`
+      )
+      await chmod(launcher, 0o755)
+      const manifest = join(data.root, 'litert-lm-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.18.1',
+              published_at: '2026-10-19T22:44:33Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              assets: [
+                {
+                  platform: 'macos-arm64',
+                  url: 'https://files.pythonhosted.org/packages/a/litert_lm_api-0.18.1-py3-none-macosx_12_0_arm64.whl',
+                  name: 'litert_lm_api-0.18.1-py3-none-macosx_12_0_arm64.whl',
+                  size: 1,
+                  sha256: 'e'.repeat(64),
+                },
+              ],
+              accelerators: [
+                {
+                  id: 'openvino',
+                  platform: 'win-x64',
+                  version: '2026.4.1',
+                  url: 'https://files.pythonhosted.org/packages/o/openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl',
+                  name: 'openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl',
+                  size: 1,
+                  sha256: 'f'.repeat(64),
+                },
+              ],
+            },
+          ],
+        })
+      )
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        platform: 'darwin',
+        foundryLocalHost: { arch: 'arm64', osRelease: '24.0.0' },
+        env: {
+          ...process.env,
+          ATOMIC_LITERT_HOST_TEST_COMMAND: launcher,
+          ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+          ATOMIC_LITERT_LM_TEST_NPU: 'intel-lnl',
+        },
+      })
+      cores.push(core)
+      const call = (path: string, init: RequestInit = {}) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          ...init,
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        }).then((r) => r.json() as Promise<Record<string, unknown>>)
+
+      expect(await call('/runtimes/litert-lm/accelerators')).toMatchObject({
+        installed: false,
+        accelerators: [],
+      })
+      expect(
+        await call('/models/litert-lm/check', { method: 'POST', body: JSON.stringify({ backend: 'cpu' }) })
+      ).toMatchObject({ verdict: 'engine-not-installed' })
+
+      // A build as the engine-builds install leaves it, and a CPU variant as a client does.
+      const build = join(data.root, 'litert-lm', 'backends', '0.18.1', 'macos-arm64')
+      await mkdir(join(build, 'lib'), { recursive: true })
+      await writeFile(join(build, 'lib', 'liblitert-lm.dylib'), 'dylib')
+      await writeFile(join(build, '.atomic-owned'), 'atomic-chat\n')
+      await writeFile(
+        join(build, 'install.json'),
+        JSON.stringify({
+          tag: '0.18.1',
+          backendId: 'macos-arm64',
+          installedAtMs: 1,
+          publishedAt: '2026-10-19T22:44:33Z',
+          abi: 1,
+        })
+      )
+      const model = join(data.root, 'litert-lm', 'models', 'lr-cpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'm.litertlm'), 'litertlm')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: litert-lm/models/lr-cpu/m.litertlm\nname: lr-cpu\nsize_bytes: 8\nlitert_lm:\n  model_id: m\n  variant_id: lr-cpu\n  backend: cpu\n  repo: o/r\n  revision: ${'a'.repeat(40)}\n  file: m.litertlm\n  tools: true\n  reasoning: false\n  vision: false\n  source: curated\n`
+      )
+
+      expect(await call('/runtimes/litert-lm/accelerators')).toMatchObject({
+        installed: true,
+        npu: 'intel-lnl',
+        accelerators: [{ name: 'openvino', version: '2026.4.1', prepared: false }],
+      })
+      // A proxy the downloader refuses before any network: the prepare fails, and says why.
+      const prepared = await call('/runtimes/litert-lm/accelerators/prepare', {
+        method: 'POST',
+        body: JSON.stringify({ proxy: { url: 'ftp://127.0.0.1:9' } }),
+      })
+      expect(prepared).toMatchObject({
+        accelerators: [{ name: 'openvino', prepared: false, reason: expect.any(String) }],
+      })
+      expect(
+        await call('/models/litert-lm/check', {
+          method: 'POST',
+          body: JSON.stringify({ model_id: 'lr-cpu' }),
+        })
+      ).toMatchObject({ verdict: 'ok', metadata: { backends: ['cpu', 'gpu'] } })
+
+      const session = await core.load('litert-lm', 'lr-cpu')
+      expect(session.api_key.length).toBeGreaterThan(20)
+      expect(core.registry('litert-lm').modelsDir).toBe(join(data.root, 'litert-lm', 'models'))
+      const versions = (await call('/engines/versions', {
+        method: 'POST',
+        body: '{}',
+      })) as unknown as EngineVersionsResponse
+      expect(versions.engines.find((entry) => entry.engine === 'litert-lm')?.builds).toEqual([
+        expect.objectContaining({ version: '0.18.1', in_use: true }),
+      ])
+      expect(await core.unload('litert-lm', 'lr-cpu')).toMatchObject({ success: true })
+    })
+  }
+)
