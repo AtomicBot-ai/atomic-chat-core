@@ -47,7 +47,10 @@ export const GEMMA_INFO: LiteRtFileInfo = {
 export class FakeConversation implements LiteRtConversation {
   readonly sent: Array<{ message: LiteRtMessage | LiteRtMessage[]; options: LiteRtSendOptions }> = []
   closed = false
+  /** `close` came while a generation of this conversation was still running in the library. */
+  closedWhileRunning = false
   poisoned = false
+  private running = false
   private cancelRequested = false
   private tokens: number
 
@@ -66,6 +69,7 @@ export class FakeConversation implements LiteRtConversation {
     if (this.closed)
       throw new LiteRtLibraryError('conversation_send_message_stream', 'the conversation is closed')
     this.sent.push({ message, options })
+    this.running = true
     this.library.active++
     this.library.maxActive = Math.max(this.library.maxActive, this.library.active)
     this.tokens += Array.isArray(message) ? message.length * 10 : 10
@@ -74,21 +78,25 @@ export class FakeConversation implements LiteRtConversation {
     const tick = () => {
       if (this.poisoned) {
         this.library.active--
+        this.running = false
         return onChunk({ text: null, error: 'CANCELLED: Task cancelled', final: true })
       }
       if (this.cancelRequested) {
         this.cancelRequested = false
         this.poisoned = true
         this.library.active--
+        this.running = false
         return onChunk({ text: null, error: 'CANCELLED: Task cancelled', final: true })
       }
       const item = items[at++]
       if (item === undefined) {
         this.library.active--
+        this.running = false
         return onChunk({ text: null, error: null, final: true })
       }
       if ('error' in item && typeof item.error === 'string') {
         this.library.active--
+        this.running = false
         return onChunk({ text: null, error: item.error, final: true })
       }
       this.tokens++
@@ -107,6 +115,7 @@ export class FakeConversation implements LiteRtConversation {
   }
 
   close(): void {
+    if (this.running) this.closedWhileRunning = true
     this.closed = true
   }
 }

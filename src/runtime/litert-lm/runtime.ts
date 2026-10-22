@@ -42,7 +42,7 @@ import {
   throwIfLoadCancelled,
 } from '../shared/index.js'
 import type { BackendOutputSink } from '../shared/index.js'
-import { compareRuntimeVersions } from './host/run.js'
+import { compareVersions } from '../../backend/index.js'
 import type { LiteRtFileInfo } from './host/library.js'
 import { runLiteRtHostInspect } from './host-process.js'
 import type { LiteRtHostCommand } from './host-process.js'
@@ -294,7 +294,7 @@ export class LiteRtLmRuntime implements LocalRuntime {
       )
     const { modelPath } = registry.resolvePaths(yml)
     const info = await this.inspect(build.dir, modelPath)
-    if (info.min_runtime_version && compareRuntimeVersions(info.min_runtime_version, build.version) > 0)
+    if (info.min_runtime_version && compareVersions(info.min_runtime_version, build.version) > 0)
       throw new AtomicCoreError(
         'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE',
         `This model needs LiteRT-LM ${info.min_runtime_version}; the active build is ${build.version}. Update LiteRT-LM first.`,

@@ -53,6 +53,25 @@ export interface LiteRtSampler {
 /** One message in the library's conversation JSON (`{role, content: [...], tool_calls?}`). */
 export type LiteRtMessage = Record<string, unknown>
 
+/**
+ * What a conversation's `TOP_P` sampler is set to: `null` when the request names nothing, so the
+ * engine keeps the sampling the file declares (as the Python binding does without a SamplerConfig);
+ * otherwise the request's values, the rest filled in, and a fresh seed unless one is given — a fixed
+ * seed would answer a regenerate with the same text.
+ */
+export function samplerSettings(
+  sampler: LiteRtSampler,
+  random: () => number = Math.random
+): { topK: number; topP: number; temperature: number; seed: number } | null {
+  if (Object.values(sampler).every((value) => value === undefined)) return null
+  return {
+    topK: sampler.topK ?? 64,
+    topP: sampler.topP ?? 0.95,
+    temperature: sampler.temperature ?? 1,
+    seed: sampler.seed ?? Math.floor(random() * 0x7fffffff),
+  }
+}
+
 export interface LiteRtConversationConfig {
   /** History the conversation starts from; the next `send` continues it. */
   messages: LiteRtMessage[]

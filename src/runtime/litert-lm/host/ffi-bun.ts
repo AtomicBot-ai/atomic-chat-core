@@ -18,7 +18,7 @@ import type { NativeArgument, Pointer } from 'bun:ffi'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { BOUND_LITERT_LM_ABI, LiteRtLibraryError } from './library.js'
+import { BOUND_LITERT_LM_ABI, LiteRtLibraryError, samplerSettings } from './library.js'
 import type {
   LiteRtBackendName,
   LiteRtChunk,
@@ -395,13 +395,16 @@ function bindLibrary(L: Record<keyof typeof SYMBOLS, Fn>, context: BindContext):
 
   function createConversation(engine: Pointer, config: LiteRtConversationConfig): LiteRtConversation {
     const session = L.litert_lm_session_config_create() as Pointer
-    const sampler = L.litert_lm_sampler_params_create(SAMPLER_TOP_P) as Pointer
-    L.litert_lm_sampler_params_set_top_k(sampler, config.sampler.topK ?? 64)
-    L.litert_lm_sampler_params_set_top_p(sampler, config.sampler.topP ?? 0.95)
-    L.litert_lm_sampler_params_set_temperature(sampler, config.sampler.temperature ?? 1)
-    L.litert_lm_sampler_params_set_seed(sampler, config.sampler.seed ?? 0)
-    L.litert_lm_session_config_set_sampler_params(session, sampler)
-    L.litert_lm_sampler_params_delete(sampler)
+    const settings = samplerSettings(config.sampler)
+    if (settings) {
+      const sampler = L.litert_lm_sampler_params_create(SAMPLER_TOP_P) as Pointer
+      L.litert_lm_sampler_params_set_top_k(sampler, settings.topK)
+      L.litert_lm_sampler_params_set_top_p(sampler, settings.topP)
+      L.litert_lm_sampler_params_set_temperature(sampler, settings.temperature)
+      L.litert_lm_sampler_params_set_seed(sampler, settings.seed)
+      L.litert_lm_session_config_set_sampler_params(session, sampler)
+      L.litert_lm_sampler_params_delete(sampler)
+    }
     const conversationConfig = L.litert_lm_conversation_config_create() as Pointer
     let conversation: Pointer | null
     try {

@@ -274,3 +274,25 @@ describe('litert-host server', () => {
     expect(GEMMA_INFO.thinking).toBe(false)
   })
 })
+
+describe('litert-host server shutdown', () => {
+  it('closes a conversation only after the library ended its cancelled generation', async () => {
+    const { url, library, engine } = await start()
+    library.chunkDelayMs = 20
+    library.script = () => Array.from({ length: 200 }, (_, i) => text(`t${i} `))
+    const pending = fetch(`${url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ask('long', { stream: true })),
+    }).catch(() => null)
+    for (let i = 0; i < 100 && library.active === 0; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(library.active).toBe(1)
+    await close?.()
+    close = null
+    const conversation = engine.conversations[0]
+    expect(conversation?.closed).toBe(true)
+    expect(conversation?.closedWhileRunning).toBe(false)
+    expect(library.active).toBe(0)
+    await pending
+  })
+})

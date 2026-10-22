@@ -451,11 +451,13 @@ export async function createAtomicCore(
             acceleratorsDir: liteRtLmPaths.acceleratorsDir as string,
             tmpDir: liteRtLmPaths.tmpDir,
             resolveBuild: liteRtActiveBuild,
+            // The cached manifest first: a published release never changes (conf's rule), and a load
+            // must not wait on the network for it.
             release: async (version) =>
+              (await liteRtManifest.cached())?.releases.find((release) => release.version === version) ??
               (await liteRtManifest.read()).manifest?.releases.find(
                 (release) => release.version === version
               ) ??
-              (await liteRtManifest.cached())?.releases.find((release) => release.version === version) ??
               null,
             npuGeneration: liteRtNpu,
             download: async (taskId, item, onFraction) => {

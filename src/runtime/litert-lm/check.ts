@@ -6,6 +6,7 @@
  * answer for the client to write into `model.yml`.
  */
 
+import { realpath } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { AtomicCoreError, LITERT_LM_BACKENDS, LITERT_LM_NPUS } from '../../contracts/index.js'
 import type {
@@ -16,7 +17,7 @@ import type {
 } from '../../contracts/index.js'
 import type { LiteRtLmPlatform } from '../../engine-builds/manifest.js'
 import type { ModelRegistry } from '../../models/index.js'
-import { compareRuntimeVersions } from './host/run.js'
+import { compareVersions } from '../../backend/index.js'
 import { readLiteRtLmBlock } from './model-yml.js'
 import { backendRunsOn } from './runtime.js'
 
@@ -81,7 +82,7 @@ export function liteRtLmVerdict(
       file
     )
   const needs = file?.min_runtime_version ?? request.min_runtime_version ?? null
-  if (needs && compareRuntimeVersions(needs, facts.build.version) > 0)
+  if (needs && compareVersions(needs, facts.build.version) > 0)
     return verdict(
       'requires-newer-engine',
       `This model needs LiteRT-LM ${needs}; the installed one is ${facts.build.version}.`,
@@ -141,24 +142,27 @@ export interface LiteRtLmCheckDeps {
 export class LiteRtLmCheckService {
   constructor(private readonly deps: LiteRtLmCheckDeps) {}
 
-  /** A path inside the models root, or `INVALID_ARGUMENT`. */
-  private inRoot(path: string): string {
+  /** A path inside the models root, links resolved, or `INVALID_ARGUMENT`. */
+  private async inRoot(path: string): Promise<string> {
+    const refuse = () =>
+      new AtomicCoreError('INVALID_ARGUMENT', 'path must be a file inside the LiteRT-LM models folder.')
     if (!isAbsolute(path)) throw new AtomicCoreError('INVALID_ARGUMENT', 'path must be absolute.')
-    const full = resolve(path)
-    const rel = relative(resolve(this.deps.modelsDir), full)
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel))
-      throw new AtomicCoreError('INVALID_ARGUMENT', 'path must be a file inside the LiteRT-LM models folder.')
-    return full
+    const root = await realpath(this.deps.modelsDir).catch(() => resolve(this.deps.modelsDir))
+    // A file that is not there yet is judged by its spelling; one that is, by where its links lead.
+    const full = await realpath(path).catch(() => resolve(path))
+    const rel = relative(root, full)
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) throw refuse()
+    return resolve(path)
   }
 
   async check(request: LiteRtLmCheckRequest): Promise<LiteRtLmCheckResult> {
     let variant: Pick<LiteRtLmCheckRequest, 'backend' | 'npu' | 'min_runtime_version'> = request
-    let file: string | null = request.path !== undefined ? this.inRoot(request.path) : null
+    let file: string | null = request.path !== undefined ? await this.inRoot(request.path) : null
     if (request.model_id !== undefined) {
       const yml = await this.deps.registry.read(request.model_id)
       const block = readLiteRtLmBlock(yml)
       variant = { backend: block.backend, ...(block.npu ? { npu: block.npu } : {}) }
-      file = this.inRoot(this.deps.registry.resolvePaths(yml).modelPath)
+      file = await this.inRoot(this.deps.registry.resolvePaths(yml).modelPath)
     }
     const build = (await this.deps.resolveBuild()) ?? null
     const facts: LiteRtLmCheckFacts = {

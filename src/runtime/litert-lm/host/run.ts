@@ -13,6 +13,7 @@ import { LiteRtHostUsageError, parseLiteRtHostArgs } from './args.js'
 import type { LiteRtHostArgs } from './args.js'
 import { LiteRtLibraryError } from './library.js'
 import type { LiteRtLibrary, LoadLiteRtLibrary } from './library.js'
+import { compareVersions } from '../../../backend/index.js'
 import { createLiteRtServer } from './server.js'
 
 /** The host's exit codes; core reads 6 and 7 as its `LITERT_LM_*` codes. */
@@ -91,17 +92,6 @@ export function libraryDir(build: string): string {
   return join(build, 'lib')
 }
 
-/** `X.Y[.Z]` against `X.Y.Z`: negative when `a` is older. A missing part counts as 0. */
-export function compareRuntimeVersions(a: string, b: string): number {
-  const pa = a.split('.').map(Number)
-  const pb = b.split('.').map(Number)
-  for (let i = 0; i < 3; i++) {
-    const diff = (pa[i] ?? 0) - (pb[i] ?? 0)
-    if (diff !== 0) return diff
-  }
-  return 0
-}
-
 const json = (value: unknown): string => JSON.stringify(value)
 
 /** Runs `litert-host <argv…>` and returns its exit code. */
@@ -149,10 +139,7 @@ async function serve(
   const watch = (deps.watchStop ?? watchStopSignals)()
   try {
     const info = library.inspect(args.model)
-    if (
-      info.min_runtime_version &&
-      compareRuntimeVersions(info.min_runtime_version, args.engineVersion) > 0
-    ) {
+    if (info.min_runtime_version && compareVersions(info.min_runtime_version, args.engineVersion) > 0) {
       deps.stderr(
         json({
           code: 'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE',

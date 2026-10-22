@@ -34,6 +34,9 @@ export interface LiteRtServer {
   close(): Promise<void>
 }
 
+/** How long a stop waits for cancelled generations to end in the library. */
+const CLOSE_WAIT_MS = 10_000
+
 /** Images arrive inline as base64. */
 const BODY_LIMIT = 64 * 1024 * 1024
 
@@ -69,7 +72,8 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
   const now = options.now ?? Date.now
   const lock = new FifoLock()
   const pool = new ConversationPool<LiteRtConversation>((config) => options.engine.conversation(config))
-  const running = new Set<LiteRtConversation>()
+  /** Generations under way, each resolved when the library's last chunk has been handled. */
+  const running = new Map<LiteRtConversation, Promise<void>>()
   let counter = 0
 
   const server = createServer((req, res) => {
@@ -163,6 +167,7 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
       const done = (chunk: LiteRtChunk) => {
         clearInterval(watchGone)
         running.delete(conversation)
+        settle()
         write(reply.flush())
         let finish: FinishReason | null = null
         let failure: OpenAiRequestError | null = null
@@ -207,8 +212,9 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
           usage,
         })
       }
+      let settle: () => void = () => {}
+      running.set(conversation, new Promise<void>((done) => (settle = done)))
       try {
-        running.add(conversation)
         conversation.send(
           chat.next,
           {
@@ -227,6 +233,7 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
       } catch (error) {
         clearInterval(watchGone)
         running.delete(conversation)
+        settle()
         pool.drop(entry)
         const failure = new OpenAiRequestError(500, error instanceof Error ? error.message : String(error))
         options.log?.(`generation failed to start: ${failure.message}`)
@@ -248,14 +255,18 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
           resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)
         })
       }),
-    close: () =>
-      new Promise((resolve) => {
-        for (const conversation of running) conversation.cancel()
-        server.closeAllConnections()
-        server.close(() => {
-          pool.closeAll()
-          resolve()
-        })
-      }),
+    close: async () => {
+      // A conversation or engine deleted while the library still runs its generation is a
+      // use-after-free on the library's thread: cancel, then wait for each last chunk (bounded).
+      const pending = [...running.entries()]
+      for (const [conversation] of pending) conversation.cancel()
+      await Promise.race([
+        Promise.all(pending.map(([, ended]) => ended)),
+        new Promise((resolve) => setTimeout(resolve, CLOSE_WAIT_MS).unref()),
+      ])
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      pool.closeAll()
+    },
   }
 }

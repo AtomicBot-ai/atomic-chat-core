@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
@@ -176,6 +176,19 @@ describe('LiteRtLmCheckService', () => {
     await expect(svc.check({ path: 'relative.litertlm', backend: 'cpu' })).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
     })
+  })
+
+  it('refuses a link inside the models root that leads outside it', async () => {
+    const { svc } = service()
+    const root = data.layout.provider('litert-lm').modelsDir
+    await writeFile(join(data.root, 'outside.litertlm'), 'x')
+    await mkdir(join(root, 'v'), { recursive: true })
+    await symlink(join(data.root, 'outside.litertlm'), join(root, 'v', 'link.litertlm'))
+    await expect(svc.check({ path: join(root, 'v', 'link.litertlm'), backend: 'cpu' })).rejects.toMatchObject(
+      {
+        code: 'INVALID_ARGUMENT',
+      }
+    )
   })
 
   it('checks an installed model by id, its backend from model.yml', async () => {
