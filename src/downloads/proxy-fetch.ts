@@ -8,7 +8,8 @@
  * Scope: what the downloader needs. GET/HEAD, status + headers, `Content-Length`/chunked/
  * close-delimited bodies as a `ReadableStream` with backpressure, `AbortSignal`, fetch-shaped
  * redirects (each hop re-evaluates `no_proxy` and opens a fresh tunnel). One connection per request,
- * no content encoding. Downloads without a proxy never come here; the remote-access probe does, for
+ * no content encoding. Loopback inference also reuses this client for buffered POST bodies.
+ * Downloads without a proxy never come here; the remote-access probe does, for
  * `connectTo` and because it must behave the same under Node, Bun and the compiled binary.
  */
 
@@ -20,6 +21,8 @@ import { shouldBypassProxy } from './protocol.js'
 import type { ProxyConfig } from './protocol.js'
 
 export interface ProxyPolicy {
+  /** Direct TCP dial deadline; response headers and a live body have no total timeout. */
+  connectTimeoutMs?: number | undefined
   proxy?: ProxyConfig | null
   /** Accept any server certificate (the app's `ignore_ssl`); falls back to `proxy.ignore_ssl`. */
   ignore_ssl?: boolean | null | undefined
@@ -79,7 +82,12 @@ export function createPolicyFetch(policy: ProxyPolicy): typeof fetch {
     } else {
       socket = useProxy
         ? await tunnel(proxy, url.hostname, port, policy, signal)
-        : await connectTcp(policy.connectTo?.host ?? url.hostname, policy.connectTo?.port ?? port, signal)
+        : await connectTcp(
+            policy.connectTo?.host ?? url.hostname,
+            policy.connectTo?.port ?? port,
+            signal,
+            policy.connectTimeoutMs
+          )
       if (isHttps) socket = await upgradeTls(socket, url.hostname, policy, signal)
     }
 
@@ -148,7 +156,12 @@ export function proxyAuthorization(proxy: ProxyConfig): string | undefined {
   return user ? `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}` : undefined
 }
 
-function connectTcp(host: string, port: number, signal: AbortSignal | null = null): Promise<Socket> {
+function connectTcp(
+  host: string,
+  port: number,
+  signal: AbortSignal | null = null,
+  timeoutMs = PROXY_CONNECT_TIMEOUT_MS
+): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = netConnect(port, host)
     let settled = false
@@ -166,7 +179,7 @@ function connectTcp(host: string, port: number, signal: AbortSignal | null = nul
     }
     const timer = setTimeout(
       () => socket.destroy(new ProxyTunnelError(`connect ${host}:${port} timed out`)),
-      PROXY_CONNECT_TIMEOUT_MS
+      timeoutMs
     )
     if (signal?.aborted) return onAbort()
     signal?.addEventListener('abort', onAbort, { once: true })

@@ -72,6 +72,16 @@ ignored. Scenarios 6 and 12 below describe the flag round-trip as it was planned
 
 These are target scenarios, not claims of implemented coverage. Record evidence/grade before each phase exit.
 
+18. **Loopback image response under GC** — attach a large image to a chat using a local OpenAI-compatible
+    endpoint, exchange several messages, and verify text, persisted completion and an enabled composer
+    after every turn. Exercise two cached follow-ups; then Stop a long reply and send a new message.
+    Clock metadata and assistant instructions must stay unchanged. The model-free core regressions are
+    `test/runtime-compat/http-stream-gc.test.ts` (Bun with `--expose-gc`) and
+    `test/e2e/loopback-stream.test.ts` (compiled core). Manual evidence on 2026-10-23: Atomic Chat 2.2.23,
+    macOS arm64, Qwen3.8 Flash Next IQ3_XXS at 64K, original image/search history of 22,294 tokens;
+    the first completed response and two cached follow-ups were visible and saved. Desktop Stop/retry
+    under forced GC remains an automation target; core abort and idle-reader destruction are tested.
+
 ## Stage 3 evidence (2026-09-16)
 
 - `npm run verify` builds and drives the core binary on an isolated data folder. `test/e2e/owner.test.ts`
