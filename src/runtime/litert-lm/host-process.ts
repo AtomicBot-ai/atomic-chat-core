@@ -166,3 +166,13 @@ export function runLiteRtHostInspect(
     options
   )
 }
+
+/** The engine-builds probe of a LiteRT-LM build: `litert-host probe`, its answer dropped. */
+export function liteRtHostProber(
+  command: LiteRtHostCommand,
+  env: NodeJS.ProcessEnv
+): (buildDir: string) => Promise<void> {
+  return async (buildDir) => {
+    await runLiteRtHostProbe(command, buildDir, { env })
+  }
+}

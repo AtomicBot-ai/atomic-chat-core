@@ -39,7 +39,7 @@ import {
   liteRtHostCommand,
   liteRtNpuGeneration,
   parseLiteRtLmCheckRequest,
-  runLiteRtHostProbe,
+  liteRtHostProber,
 } from '../runtime/litert-lm/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
@@ -415,8 +415,65 @@ export async function createAtomicCore(
       const dir = await engineBuilds.activeDir('litert-lm')
       return dir ? { dir, version: basename(dirname(dir)) } : undefined
     }
-    const liteRtLmRuntime: LiteRtLmRuntime | undefined =
+    // The proxy policy of one request decides that request's fetch; nothing about it is kept.
+    const fetchFor = (proxy?: ProxyConfig | null): typeof fetch =>
+      policyFetchFor({ proxy: proxy ?? null }, options.fetch ?? fetch)
+    const liteRtManifest = new EngineManifestSource(manifestKinds(layout)['litert-lm'], {
+      env,
+      fetchFor,
+      log,
+    })
+
+    // Whether this machine has an NPU (task 6.5): asked once, on the first check that needs it.
+    let npuAnswer: ReturnType<typeof probeNpu> | undefined
+    const foundryLocalNpu = () =>
+      (npuAnswer ??= probeNpu(
+        nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+      ))
+
+    // LiteRT-LM's NPU generation (change `add-litert-lm-runtime`, design D3): an NPU device on Windows,
+    // then the CPU model string; asked once. `ATOMIC_LITERT_LM_TEST_NPU` stands in for the machine in
+    // the e2e tests, where no Intel NPU is.
+    let liteRtNpuAnswer: Promise<LiteRtLmNpu | null> | undefined
+    const liteRtNpu = (): Promise<LiteRtLmNpu | null> =>
+      (liteRtNpuAnswer ??= (async () => {
+        const standIn = env['ATOMIC_LITERT_LM_TEST_NPU']
+        if (standIn === 'intel-lnl' || standIn === 'intel-ptl') return standIn
+        if (liteRtLmHost.platform !== 'win-x64' || (await foundryLocalNpu()).present === false) return null
+        return liteRtNpuGeneration((await hardware.info()).info.cpu.name)
+      })())
+
+    // LiteRT-LM's OpenVINO (task 6.4): offered on an Intel NPU LiteRT-LM targets, prepared on order.
+    const liteRtLmAccelerators =
       liteRtLmHost.platform === null
+        ? undefined
+        : new LiteRtLmAcceleratorService({
+            acceleratorsDir: liteRtLmPaths.acceleratorsDir as string,
+            tmpDir: liteRtLmPaths.tmpDir,
+            resolveBuild: liteRtActiveBuild,
+            release: async (version) =>
+              (await liteRtManifest.read()).manifest?.releases.find(
+                (release) => release.version === version
+              ) ??
+              (await liteRtManifest.cached())?.releases.find((release) => release.version === version) ??
+              null,
+            npuGeneration: liteRtNpu,
+            download: async (taskId, item, onFraction) => {
+              const off = emitter.on('download:progress', (progress) => {
+                if (progress.taskId === taskId && progress.total > 0)
+                  onFraction(Math.min(1, progress.transferred / progress.total))
+              })
+              try {
+                await downloader.download(taskId, [{ ...item, model_id: taskId }])
+              } finally {
+                off()
+              }
+            },
+            emit: (name, payload) => emitter.emit(name, payload),
+          })
+
+    const liteRtLmRuntime: LiteRtLmRuntime | undefined =
+      liteRtLmHost.platform === null || !liteRtLmAccelerators
         ? undefined
         : new LiteRtLmRuntime({
             layout,
@@ -425,8 +482,8 @@ export async function createAtomicCore(
             hostPlatform: liteRtLmHost.platform,
             hostCommand: liteRtHost,
             resolveBuild: liteRtActiveBuild,
-            openVinoLibs: async () => (liteRtLmAccelerators ? liteRtLmAccelerators.libsDir() : undefined),
-            npuGeneration: () => liteRtNpu(),
+            openVinoLibs: liteRtLmAccelerators.libsDir.bind(liteRtLmAccelerators),
+            npuGeneration: liteRtNpu,
             trustedHosts: managedTrustedHosts,
             readSettings: async () => settings.get('litert-lm'),
             journal,
@@ -456,9 +513,6 @@ export async function createAtomicCore(
       unload: (provider, modelId) => (core as AtomicCore).unload(provider, modelId),
       fetch: options.fetch ?? fetch,
     })
-    // The proxy policy of one request decides that request's fetch; nothing about it is kept.
-    const fetchFor = (proxy?: ProxyConfig | null): typeof fetch =>
-      policyFetchFor({ proxy: proxy ?? null }, options.fetch ?? fetch)
     // One release-index service for the fork: its memory TTL and in-flight coalescing only help
     // when every caller shares them.
     const turboquantCatalog = new TurboquantCatalogService({
@@ -612,7 +666,6 @@ export async function createAtomicCore(
     // manifests, installs, activates and removes them; image generation and the MLX runtime lend it
     // their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
-    const liteRtManifest = new EngineManifestSource(engineManifestKinds['litert-lm'], { env, fetchFor, log })
     const mlxRuntime = runtimes.get('mlx')
     const engineBuilds: EngineBuildsService = new EngineBuildsService({
       dataFolder: layout.root,
@@ -649,9 +702,7 @@ export async function createAtomicCore(
             { env }
           )
         },
-        'litert-lm': async (buildDir) => {
-          await runLiteRtHostProbe(liteRtHost, buildDir, { env })
-        },
+        'litert-lm': liteRtHostProber(liteRtHost, env),
       },
       hardware: () => hardware.facts(),
       hosts: {
@@ -667,62 +718,15 @@ export async function createAtomicCore(
       log,
     })
 
-    // Whether this machine has an NPU (task 6.5): asked once, on the first check that needs it.
-    let npuAnswer: ReturnType<typeof probeNpu> | undefined
-    const foundryLocalNpu = () =>
-      (npuAnswer ??= probeNpu(
-        nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
-      ))
-
-    // LiteRT-LM's NPU generation (change `add-litert-lm-runtime`, design D3): an NPU device on Windows,
-    // then the CPU model string; asked once. `ATOMIC_LITERT_LM_TEST_NPU` stands in for the machine in
-    // the e2e tests, where no Intel NPU is.
-    let liteRtNpuAnswer: Promise<LiteRtLmNpu | null> | undefined
-    const liteRtNpu = (): Promise<LiteRtLmNpu | null> =>
-      (liteRtNpuAnswer ??= (async () => {
-        const standIn = env['ATOMIC_LITERT_LM_TEST_NPU']
-        if (standIn === 'intel-lnl' || standIn === 'intel-ptl') return standIn
-        if (liteRtLmHost.platform !== 'win-x64' || (await foundryLocalNpu()).present === false) return null
-        return liteRtNpuGeneration((await hardware.info()).info.cpu.name)
-      })())
-
-    // LiteRT-LM's OpenVINO (task 6.4): offered on an Intel NPU LiteRT-LM targets, prepared on order.
-    const liteRtLmAccelerators =
-      liteRtLmHost.platform === null
-        ? undefined
-        : new LiteRtLmAcceleratorService({
-            acceleratorsDir: liteRtLmPaths.acceleratorsDir as string,
-            tmpDir: liteRtLmPaths.tmpDir,
-            resolveBuild: liteRtActiveBuild,
-            release: async (version) =>
-              (await liteRtManifest.read()).manifest?.releases.find(
-                (release) => release.version === version
-              ) ??
-              (await liteRtManifest.cached())?.releases.find((release) => release.version === version) ??
-              null,
-            npuGeneration: liteRtNpu,
-            download: async (taskId, item, onFraction) => {
-              const off = emitter.on('download:progress', (progress) => {
-                if (progress.taskId === taskId && progress.total > 0)
-                  onFraction(Math.min(1, progress.transferred / progress.total))
-              })
-              try {
-                await downloader.download(taskId, [{ ...item, model_id: taskId }])
-              } finally {
-                off()
-              }
-            },
-            emit: (name, payload) => emitter.emit(name, payload),
-          })
     const liteRtLmCheck =
-      liteRtLmRuntime && liteRtLmHost.platform !== null
+      liteRtLmRuntime && liteRtLmAccelerators && liteRtLmHost.platform !== null
         ? new LiteRtLmCheckService({
             platform: liteRtLmHost.platform,
             modelsDir: liteRtLmPaths.modelsDir,
             registry: liteRtLmRuntime.registry,
             resolveBuild: liteRtActiveBuild,
             npuGeneration: liteRtNpu,
-            openVinoLibs: async () => (liteRtLmAccelerators ? liteRtLmAccelerators.libsDir() : undefined),
+            openVinoLibs: liteRtLmAccelerators.libsDir.bind(liteRtLmAccelerators),
             inspect: (buildDir, file) => liteRtLmRuntime.inspect(buildDir, file),
           })
         : undefined

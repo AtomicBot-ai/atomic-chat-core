@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   LITERT_HOST_TEST_COMMAND_ENV,
   liteRtHostCommand,
+  liteRtHostProber,
   runLiteRtHostInspect,
   runLiteRtHostProbe,
 } from './host-process.js'
@@ -86,6 +87,24 @@ describe.skipIf(!POSIX)('runLiteRtHostInspect', () => {
     await expect(runLiteRtHostInspect({ exe, args: [] }, '/b', '/m/cut.litertlm')).rejects.toMatchObject({
       code: 'LITERT_LM_HOST_ERROR',
       details: expect.stringContaining('not a LiteRT-LM file'),
+    })
+  })
+})
+
+describe.skipIf(!POSIX)('liteRtHostProber', () => {
+  it('is the engine-builds probe: resolves on a probe answer, rejects with what the host printed', async () => {
+    const ok = liteRtHostProber(
+      { exe: await fakeHost(`echo '{"version":"0.18.1","abi":1,"backends":["cpu"]}'`), args: [] },
+      process.env
+    )
+    await expect(ok('/b')).resolves.toBeUndefined()
+    const broken = liteRtHostProber(
+      { exe: await fakeHost(`echo 'wrong ELF class' >&2; exit 3`), args: [] },
+      process.env
+    )
+    await expect(broken('/b')).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      details: expect.stringContaining('ELF'),
     })
   })
 })
