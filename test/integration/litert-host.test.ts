@@ -78,6 +78,8 @@ describe.skipIf(!LIB || !MODEL || !existsSync(BIN))('litert-host serve on the re
         join(dir, 'cache'),
         '--id',
         'it-model',
+        // As core starts it by default (`speculative_decoding: true`).
+        '--speculative',
       ],
       { stdio: ['pipe', 'pipe', 'inherit'] }
     )
@@ -149,5 +151,31 @@ describe.skipIf(!LIB || !MODEL || !existsSync(BIN))('litert-host serve on the re
     expect(JSON.parse(body.choices[0]?.message.tool_calls?.[0]?.function.arguments ?? '{}')).toMatchObject({
       city: expect.stringMatching(/paris/i),
     })
+  })
+
+  it('answers by a JSON schema with speculative decoding on: its drafts would skip the grammar', async () => {
+    const body = (await (
+      await post({
+        messages: [{ role: 'user', content: 'Give the largest city of Japan and its population.' }],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'city',
+            schema: {
+              type: 'object',
+              properties: { city: { type: 'string' }, population: { type: 'integer' } },
+              required: ['city', 'population'],
+              additionalProperties: false,
+            },
+          },
+        },
+      })
+    ).json()) as { choices?: Array<{ message: { content: string } }> }
+    const answer = JSON.parse(body.choices?.[0]?.message.content ?? JSON.stringify(body)) as Record<
+      string,
+      unknown
+    >
+    expect(Object.keys(answer).sort()).toEqual(['city', 'population'])
+    expect(Number.isInteger(answer['population'])).toBe(true)
   })
 })

@@ -80,6 +80,7 @@ const SYMBOLS = {
   litert_lm_session_config_create: { args: [], returns: T.ptr },
   litert_lm_session_config_delete: { args: [T.ptr], returns: T.void },
   litert_lm_session_config_set_sampler_params: { args: [T.ptr, T.ptr], returns: T.void },
+  litert_lm_session_config_set_enable_speculative_decoding: { args: [T.ptr, T.bool], returns: T.void },
   litert_lm_sampler_params_create: { args: [T.i32], returns: T.ptr },
   litert_lm_sampler_params_delete: { args: [T.ptr], returns: T.void },
   litert_lm_sampler_params_set_top_k: { args: [T.ptr, T.i32], returns: T.void },
@@ -423,6 +424,9 @@ function bindLibrary(L: Record<keyof typeof SYMBOLS, Fn>, context: BindContext):
       L.litert_lm_session_config_set_sampler_params(session, sampler)
       L.litert_lm_sampler_params_delete(sampler)
     }
+    // Drafted tokens skip the grammar: with speculative decoding a constrained answer comes back
+    // malformed (GPU) or fails with "compute_mask() called after stop" (CPU), on 0.18.1.
+    if (config.constrained) L.litert_lm_session_config_set_enable_speculative_decoding(session, false)
     const conversationConfig = L.litert_lm_conversation_config_create() as Pointer
     let conversation: Pointer | null
     try {
