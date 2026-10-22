@@ -83,6 +83,15 @@ describe('recipeInput', () => {
     const unplanned = recipeInput(input({ offload: 'model', decodeTiling: { tilesX: 2, tilesY: 2 } }), recipe)
     expect(unplanned).not.toHaveProperty('decodeTiling')
   })
+
+  it('takes the request’s steps and CFG for a clip that recorded none', () => {
+    const { steps: _steps, cfgScale: _cfg, ...bare } = sampleVideoRecipe({ frames: 49 })
+    expect(recipeInput(input({ steps: 12, cfgScale: 3 }), bare)).toMatchObject({
+      frames: 49,
+      steps: 12,
+      cfgScale: 3,
+    })
+  })
 })
 
 describe('historyMultiplier', () => {
