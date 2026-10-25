@@ -447,31 +447,39 @@ describe('install on the PrismML provider', () => {
       verifyPrismBackend: options.verify ?? (async () => {}),
     })
 
-  it('installs a Windows CUDA pack and its runtime into one build/bin, with hashes, under one task', async () => {
-    const items: Array<{ url: string; save_path: string; sha256?: string; size?: number }> = []
-    const downloader = {
-      download: vi.fn(async (task: string, given: typeof items) => {
-        expect(task).toBe('prism-task')
-        items.push(...given)
-        await writeFile(given[0]!.save_path, storedZip(`llama-${TAG}/llama-server.exe`, Buffer.from('exe')))
-        await writeFile(given[1]!.save_path, storedZip('cudart64_12.dll', Buffer.from('dll')))
-      }),
+  it.each([
+    ['a flat archive (exe at zip root)', 'llama-server.exe'],
+    ['a nested top-directory archive', `llama-${TAG}/llama-server.exe`],
+  ])(
+    'installs %s Windows CUDA pack and its runtime into one build/bin, with hashes, under one task',
+    async (_layout, exeEntry) => {
+      const items: Array<{ url: string; save_path: string; sha256?: string; size?: number }> = []
+      const downloader = {
+        download: vi.fn(async (task: string, given: typeof items) => {
+          expect(task).toBe('prism-task')
+          items.push(...given)
+          await writeFile(given[0]!.save_path, storedZip(exeEntry, Buffer.from('exe')))
+          await writeFile(given[1]!.save_path, storedZip('cudart64_12.dll', Buffer.from('dll')))
+        }),
+      }
+      const result = await prism(downloader as never).install(TAG, 'win-cuda-12.4-x64', {
+        taskId: 'prism-task',
+      })
+      expect(items.map((i) => i.url)).toEqual([
+        `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-win-cuda-12.4-x64.zip`,
+        `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/cudart-llama-bin-win-cuda-12.4-x64.zip`,
+      ])
+      expect(items.every((i) => i.sha256?.length === 64 && i.size === 3)).toBe(true)
+      expect(result.path).toBe(
+        join(data.layout.provider('atomic-prism').backendsDir, TAG, 'win-cuda-12.4-x64')
+      )
+      expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
+        'cudart64_12.dll',
+        'llama-server.exe',
+      ])
+      expect(await readdir(result.path)).toEqual(['build'])
     }
-    const result = await prism(downloader as never).install(TAG, 'win-cuda-12.4-x64', {
-      taskId: 'prism-task',
-    })
-    expect(items.map((i) => i.url)).toEqual([
-      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/llama-${TAG}-bin-win-cuda-12.4-x64.zip`,
-      `https://github.com/PrismML-Eng/llama.cpp/releases/download/${TAG}/cudart-llama-bin-win-cuda-12.4-x64.zip`,
-    ])
-    expect(items.every((i) => i.sha256?.length === 64 && i.size === 3)).toBe(true)
-    expect(result.path).toBe(join(data.layout.provider('atomic-prism').backendsDir, TAG, 'win-cuda-12.4-x64'))
-    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
-      'cudart64_12.dll',
-      'llama-server.exe',
-    ])
-    expect(await readdir(result.path)).toEqual(['build'])
-  })
+  )
 
   it.each([
     ['an asset the manifest does not list', TAG, 'win-vulkan-x64', false, /not in the Atomic Chat manifest/],
