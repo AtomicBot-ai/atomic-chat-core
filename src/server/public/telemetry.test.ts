@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { StreamTelemetry, extractReasoning, promptPreview } from './telemetry.js'
+import { PREVIEW_MAX_CHARS, StreamTelemetry, extractReasoning, promptPreview } from './telemetry.js'
 
 // Parity with the Rust inspector is test/contract/inspector-telemetry.test.ts; these pin what the
 // fixtures do not reach.
@@ -41,6 +41,23 @@ describe('telemetry edges', () => {
       finish_reason: 'stop',
       reply_preview: null,
       reply_chars: 14,
+    })
+  })
+
+  it('keeps what an Anthropic stream already said when a later event leaves it out, and caps the preview', () => {
+    const telemetry = new StreamTelemetry()
+    telemetry.onJson({ type: 'message_start', message: { usage: { input_tokens: 7 } } }, 1)
+    telemetry.onJson({ type: 'message_start', message: {} }, 2)
+    telemetry.onJson({ type: 'content_block_delta', delta: { thinking: '' } }, 3)
+    expect(telemetry.ttftMs(0)).toBeNull()
+    telemetry.onJson({ type: 'content_block_delta', delta: { text: 'a'.repeat(PREVIEW_MAX_CHARS) } }, 4)
+    telemetry.onJson({ type: 'content_block_delta', delta: { text: 'past the cap' } }, 5)
+
+    expect(telemetry.finishFields(0)).toMatchObject({
+      ttft_ms: 4,
+      prompt_tokens: 7,
+      reply_preview: 'a'.repeat(PREVIEW_MAX_CHARS),
+      reply_chars: PREVIEW_MAX_CHARS + 'past the cap'.length,
     })
   })
 })
