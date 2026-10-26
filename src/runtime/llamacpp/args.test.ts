@@ -262,6 +262,64 @@ describe('planLlamaArgs', () => {
   })
 })
 
+/**
+ * The context arguments of a chat load, for every provider that offers "Fit context to device
+ * memory". llama.cpp's `--fit` adjusts only arguments left unset (`llama-server -h`: "whether to
+ * adjust unset arguments to fit in device memory"), and `common_params_fit_impl` skips its context
+ * step once `n_ctx` is set. So `--ctx-size N --fit on` would pin the window at N, not cap it: under
+ * fit no `--ctx-size` goes out, llama.cpp picks the window from the trained context down, and the
+ * app shows the one the server reports (QA 2.2.25: 16K on screen, `n_ctx_slot = 128000` running).
+ */
+describe('context size and fit', () => {
+  const CONTEXT_FLAGS = new Set(['--ctx-size', '--fit', '--fit-ctx', '--fit-target'])
+  /** Each context flag with its value, in emission order. */
+  const contextArgs = (argv: string[]) =>
+    argv.flatMap((arg, i) => (CONTEXT_FLAGS.has(arg) ? [arg, argv[i + 1] ?? ''] : []))
+
+  const PROVIDERS = [
+    ['llamacpp-upstream', 'b11463/macos-arm64'],
+    ['llamacpp', 'b10269-1.7.0/macos-arm64'],
+    ['atomic-prism', 'prism-b10754-2459f68/macos-arm64'],
+  ] as const
+
+  const CASES: Array<[string, Partial<LlamacppConfig>, boolean, string[]]> = [
+    ['fit on: no window, not even the 16K default', { fit: true, ctx_size: 16384 }, false, ['--fit', 'on']],
+    [
+      'fit on with a widened unified-memory margin',
+      { fit: true, ctx_size: 16384, fit_target: '1364' },
+      false,
+      ['--fit', 'on', '--fit-target', '1364'],
+    ],
+    [
+      'fit on with a raised floor',
+      { fit: true, ctx_size: 16384, fit_ctx: '8192' },
+      false,
+      ['--fit', 'on', '--fit-ctx', '8192'],
+    ],
+    [
+      "fit on with llama.cpp's own floor and margin",
+      { fit: true, ctx_size: 16384, fit_ctx: '4096', fit_target: '1024' },
+      false,
+      ['--fit', 'on'],
+    ],
+    [
+      'fit off: the chosen window is sent',
+      { fit: false, ctx_size: 4096 },
+      false,
+      ['--ctx-size', '4096', '--fit', 'off'],
+    ],
+    ['fit off with no window: the model default', { fit: false, ctx_size: 0 }, false, ['--fit', 'off']],
+    ['an embedding load never sends a window', { fit: false, ctx_size: 4096 }, true, ['--fit', 'off']],
+  ]
+
+  describe.each(PROVIDERS)('%s', (provider, version_backend) => {
+    it.each(CASES)('%s', (_name, cfg, isEmbedding, expected) => {
+      const argv = buildLlamaArgs({ ...base(), version_backend, ...cfg }, { ...input, provider, isEmbedding })
+      expect(contextArgs(argv)).toEqual(expected)
+    })
+  })
+})
+
 describe('TurboQuant provider', () => {
   const input = (provider: 'llamacpp' | 'llamacpp-upstream') => ({
     provider,

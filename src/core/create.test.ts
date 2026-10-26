@@ -109,6 +109,54 @@ describe('taking ownership', () => {
       vi.useRealTimers()
     }
   })
+  it('keeps an app owner whose app went quiet while an image job runs, and retires it after', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    try {
+      const app = await AtomicCore.create({ dataFolder: data.root, ownerScope: 'app' })
+      cores.push(app)
+      const client = new CoreClient({ baseUrl: app.control.url, token: app.controlToken })
+      await client.register()
+      await vi.advanceTimersByTimeAsync(5_000)
+      // The app stops heartbeating (it is swapping, or it crashed) while the image renders.
+      const job = {
+        model_id: 'z-image:q3_k_m',
+        cards: 'all' as const,
+        auxiliary: false,
+        state: 'ready' as const,
+      }
+      const occupancy = vi
+        .spyOn(app.diffusion, 'gpuOccupancy')
+        .mockReturnValue([{ ...job, busy: 'Z-Image is generating an image' }])
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect((await inspectLock(data.layout)).kind).toBe('owned')
+      expect((await client.health()).instance_id).toBe(app.instanceId)
+
+      // The image is done and still nobody is attached: now it retires.
+      occupancy.mockReturnValue([job])
+      await vi.advanceTimersByTimeAsync(5_000)
+      await app.stopped
+      expect((await inspectLock(data.layout)).kind).toBe('free')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('does not count time the app owner was not running against its app', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    try {
+      const app = await AtomicCore.create({ dataFolder: data.root, ownerScope: 'app' })
+      cores.push(app)
+      const client = new CoreClient({ baseUrl: app.control.url, token: app.controlToken })
+      const registration = await client.register()
+      await vi.advanceTimersByTimeAsync(5_000)
+      // The whole process stops for two minutes (swap, sleep): no check runs, no heartbeat lands.
+      vi.setSystemTime(Date.now() + 120_000)
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(await client.heartbeat(registration.client.id)).toEqual({ ok: true })
+      expect((await inspectLock(data.layout)).kind).toBe('owned')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('disposes a CLI owner explicitly without an application lease', async () => {
     const core = await createCore()
     await core.dispose()

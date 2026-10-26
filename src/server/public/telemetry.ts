@@ -7,7 +7,8 @@
  * Contract: test/fixtures/app/inspector-telemetry.
  *
  * PRIVACY (ATO-113): previews are user content. They leave the core only in `api:request` events,
- * and only while the app's API screen is open; they are never logged or written to disk.
+ * and only while the app's API screen is open; they are never logged or written to disk. The numbers
+ * (timings, token counts, rates, finish reason) carry no content and are reported for every request.
  */
 
 import { isJsonObject, serdeToString } from '../shims/index.js'
@@ -150,6 +151,12 @@ export class StreamTelemetry {
   private reply = ''
   /** Apart from `reply`, so a model that answered previews the answer, not its thinking. */
   private reasoning = ''
+  /** Without previews no reply text is kept at all, not even in memory: only the numbers. */
+  private readonly previews: boolean
+
+  constructor(options: { previews?: boolean } = {}) {
+    this.previews = options.previews ?? true
+  }
 
   onJson(v: JsonValue, now: number): void {
     switch (asStr(get(v, 'type'))) {
@@ -214,14 +221,14 @@ export class StreamTelemetry {
     if (text === '') return
     this.markToken(now)
     this.replyChars += charCount(text)
-    this.reply = appendCapped(this.reply, text)
+    if (this.previews) this.reply = appendCapped(this.reply, text)
   }
 
   private onReasoning(text: string, now: number): void {
     if (text === '') return
     this.markToken(now)
     this.replyChars += charCount(text)
-    this.reasoning = appendCapped(this.reasoning, text)
+    if (this.previews) this.reasoning = appendCapped(this.reasoning, text)
   }
 
   private markToken(now: number): void {
