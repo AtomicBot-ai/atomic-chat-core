@@ -78,6 +78,16 @@ export class ClientRegistry {
     return this.list().filter((c) => c.id !== exceptId)
   }
 
+  /**
+   * Give every lease `ms` back: time this process was not running (swapping, asleep), in which no
+   * heartbeat could have been heard. Without it the first check after a stall finds every client
+   * expired, though their heartbeats are waiting in the socket.
+   */
+  extendLeases(ms: number): void {
+    if (!(ms > 0)) return
+    for (const record of this.clients.values()) record.last_seen += ms
+  }
+
   /** Check leases and close admission in one synchronous step. */
   acceptShutdown(exceptId: string | undefined, force: boolean): ClientRecord[] {
     const others = this.others(exceptId)

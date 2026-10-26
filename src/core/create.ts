@@ -106,6 +106,7 @@ import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
 import { compatibilityFor, removeLegacyPrismSetups, wirePrismCompatibility } from './prism.js'
+import { APP_LEASE_CHECK_MS, appLeaseDecision, stalledMs, workInProgress } from './app-lease.js'
 import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
@@ -1196,12 +1197,44 @@ export async function createAtomicCore(
     if (scope === 'app') {
       const startupDeadline = Date.now() + CLIENT_EXPIRY_MS
       let appEverRegistered = false
+      let lastCheckAt = Date.now()
+      let waitingFor: string | undefined
+      // What a retirement would throw away, as every engine reports it (`app-lease.ts`).
+      const work = (): string[] =>
+        workInProgress([
+          ...[...runtimes].flatMap(([provider, runtime]) =>
+            (runtime.gpuOccupancy?.() ?? []).map((occupant) => ({ ...occupant, provider }))
+          ),
+          ...diffusion.gpuOccupancy().map((occupant) => ({ ...occupant, provider: DIFFUSION_GPU_PROVIDER })),
+        ])
       // An app that crashes cannot detach. Its registration expires after missed heartbeats;
-      // unlike the CLI daemon, this owner then unloads models and releases its lock.
+      // unlike the CLI daemon, this owner then unloads models and releases its lock — but not for
+      // time it was not running itself, and not in the middle of work (`app-lease.ts`).
       appLeaseTimer = setInterval(() => {
-        if (clients.count() > 0) appEverRegistered = true
-        else if (appEverRegistered || Date.now() > startupDeadline) void core!.shutdown()
-      }, 5_000)
+        const now = Date.now()
+        clients.extendLeases(stalledMs(lastCheckAt, now, APP_LEASE_CHECK_MS))
+        lastCheckAt = now
+        const count = clients.count()
+        if (count > 0) appEverRegistered = true
+        const decision = appLeaseDecision({
+          clients: count,
+          everRegistered: appEverRegistered,
+          now,
+          startupDeadline,
+          work: count > 0 ? [] : work(),
+        })
+        if (decision.action === 'wait') {
+          const said = decision.work.join('; ')
+          if (said !== waitingFor) log('info', `no app is attached; staying up while ${said}`)
+          waitingFor = said
+          return
+        }
+        waitingFor = undefined
+        // Closing admission in the same step: an app that registers right now is refused and starts
+        // over, rather than attaching to a core that is already on its way out.
+        if (decision.action === 'retire' && clients.acceptShutdown(undefined, false).length === 0)
+          void core!.shutdown()
+      }, APP_LEASE_CHECK_MS)
       appLeaseTimer.unref()
     }
     core = construct({
