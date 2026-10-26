@@ -692,7 +692,10 @@ export class LlamacppRuntime implements LocalRuntime {
     return this.unloadSession(modelId)
   }
 
-  /** The context window a loaded session is actually running with. */
+  /**
+   * The context window a loaded session was asked for. Under fit that is not the one it runs with:
+   * no `--ctx-size` is sent and llama.cpp picks the window, which only the server's `/props` knows.
+   */
   getCtxSize(modelId: string): number | undefined {
     const configured = this.sessions.get(modelId)?.plan.config.ctx_size
     return typeof configured === 'number' && configured > 0 ? configured : undefined
