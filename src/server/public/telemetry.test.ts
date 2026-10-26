@@ -23,4 +23,24 @@ describe('telemetry edges', () => {
       chars: 3,
     })
   })
+
+  it('counts and times a reply without keeping its text when previews are off', () => {
+    const telemetry = new StreamTelemetry({ previews: false })
+    telemetry.onJson({ choices: [{ delta: { reasoning_content: 'thinking' } }] }, 3)
+    telemetry.onJson({ choices: [{ delta: { content: 'answer' }, finish_reason: 'stop' }] }, 4)
+    telemetry.onJson({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 2 } }, 5)
+
+    expect(telemetry.finishFields(0)).toEqual({
+      ttft_ms: 3,
+      prompt_tokens: 5,
+      completion_tokens: 2,
+      total_tokens: 7,
+      tokens_estimated: false,
+      prompt_per_second: null,
+      predicted_per_second: null,
+      finish_reason: 'stop',
+      reply_preview: null,
+      reply_chars: 14,
+    })
+  })
 })

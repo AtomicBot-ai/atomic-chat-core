@@ -65,9 +65,94 @@ describe('api:request analytics', () => {
       oom_detected: true,
       ctx_overflow_detected: false,
     })
-    expect(done?.finish).toBeNull()
+    expect(done?.seq).toBe(-1)
+    expect(done?.finish).toMatchObject({
+      status: 500,
+      error_kind: 'local_model_error',
+      aborted: false,
+      reply_preview: null,
+    })
+    expect(done?.finish?.duration_ms).toEqual(expect.any(Number))
     expect(events.map((e) => e.phase)).toEqual(['finished'])
     expect(JSON.stringify(events)).not.toContain('secret prompt')
+  })
+
+  it('times and counts a whole local reply nobody watched, without its text', async () => {
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: 'secret reply' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+          timings: { prompt_n: 10, predicted_n: 4, prompt_per_second: 16.6, predicted_per_second: 44.4 },
+        })
+      )
+    })
+    const { server, events, finished } = await observed(false, { sessions: [localSession(port)] })
+
+    const answer = await postJson(server, '/chat/completions', {
+      model: 'demo',
+      max_tokens: 16,
+      messages: [{ role: 'user', content: 'secret prompt' }],
+    })
+    expect(await answer.text()).toContain('secret reply')
+
+    const [done] = await finished()
+    expect(done?.seq).toBe(-1)
+    expect(done?.finish).toMatchObject({
+      status: 200,
+      ttft_ms: null,
+      prompt_tokens: 10,
+      completion_tokens: 4,
+      total_tokens: 14,
+      tokens_estimated: false,
+      prompt_per_second: 16.6,
+      predicted_per_second: 44.4,
+      finish_reason: 'stop',
+      reply_preview: null,
+      reply_chars: 12,
+    })
+    expect(done?.finish?.duration_ms).toEqual(expect.any(Number))
+    expect(events.map((e) => e.phase)).toEqual(['finished'])
+    expect(JSON.stringify(events)).not.toContain('secret')
+  })
+
+  it('times and counts a stream nobody watched from its final timings, and relays it untouched', async () => {
+    let sentBody = ''
+    const stream = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'secret ' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'reply' }, finish_reason: 'stop' }], timings: { prompt_n: 7, predicted_n: 2, predicted_per_second: 40 } })}\n\n`,
+      'data: [DONE]\n\n',
+    ].join('')
+    const { port } = await startUpstream((_req, body, res) => {
+      sentBody = body
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(stream)
+    })
+    const { server, events, finished } = await observed(false, { sessions: [localSession(port)] })
+
+    const answer = await postJson(server, '/chat/completions', {
+      model: 'demo',
+      stream: true,
+      messages: [{ role: 'user', content: 'secret prompt' }],
+    })
+
+    expect(await answer.text()).toBe(stream)
+    // Nobody watches: the engine is asked exactly what the client asked.
+    expect(JSON.parse(sentBody)).not.toHaveProperty('stream_options')
+    const [done] = await finished()
+    expect(done?.finish).toMatchObject({
+      status: 200,
+      prompt_tokens: 7,
+      completion_tokens: 2,
+      tokens_estimated: false,
+      predicted_per_second: 40,
+      finish_reason: 'stop',
+      reply_preview: null,
+    })
+    expect(done?.finish?.ttft_ms).toEqual(expect.any(Number))
+    expect(events.map((e) => e.phase)).toEqual(['finished'])
+    expect(JSON.stringify(events)).not.toContain('secret')
   })
 
   it('keeps model polling, docs, preflight, scanners and hidden paths out of analytics', async () => {

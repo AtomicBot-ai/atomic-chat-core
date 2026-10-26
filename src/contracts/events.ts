@@ -232,7 +232,9 @@ export interface CoreEvents {
    * One request to the Local API Server, for the app's analytics window and its API screen
    * (PLAN.md §2 decision 15). `started` and `progress` are sent only while the app's inspector is
    * watching, because they carry the prompt preview; `finished` carries the analytics observation
-   * for every request that is product traffic, and the inspector's finish fields when it announced.
+   * for every request that is product traffic, and the finish fields for every request it reports.
+   * A request nobody watched (`seq` -1) has its timings and token counts there, never a
+   * `reply_preview`.
    */
   'api:request': ApiRequestEvent
 

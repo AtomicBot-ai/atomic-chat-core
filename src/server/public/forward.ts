@@ -310,9 +310,11 @@ export async function serveForward(ex: Exchange): Promise<void> {
 const NON_SSE_CAPTURE_LIMIT = 256 * 1024
 
 /**
- * Relay the upstream answer; while the inspector watches, fold what streams past into telemetry and
- * drop the usage-only trailer this proxy asked for itself — the client never opted into an extra chunk
- * with empty `choices`, and some clients throw on one. The bytes otherwise pass unchanged.
+ * Relay the upstream answer, folding what streams past into telemetry whenever the request is
+ * reported (time to first token, token counts from `usage` or llama.cpp's final `timings`; the reply
+ * text only while the inspector watches), and drop the usage-only trailer this proxy asked for
+ * itself — the client never opted into an extra chunk with empty `choices`, and some clients throw on
+ * one. The bytes otherwise pass unchanged.
  */
 async function relayObserved(
   ex: Exchange,
@@ -540,8 +542,9 @@ async function inspectFinish(
   } catch {
     parsed = undefined
   }
-  if (parsed !== undefined && ex.trace.inspecting) {
-    const telemetry = new StreamTelemetry()
+  if (parsed !== undefined) {
+    // Already parsed for the cut-off check: its usage and timings cost nothing more to report.
+    const telemetry = new StreamTelemetry({ previews: ex.trace.inspecting })
     telemetry.onJson(parsed, performance.now())
     ex.trace.stash(telemetry.finishFields(0))
   }

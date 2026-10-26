@@ -1,7 +1,8 @@
 /**
  * The record of one request as it goes through the Local API Server, and the `api:request` events
- * made from it: the analytics observation the app aggregates, and — only while the app's API screen
- * is open — the inspector's started / progress / finished view.
+ * made from it: the analytics observation the app aggregates, the finish fields its Activity log
+ * shows (timings, token counts — no content), and — only while the app's API screen is open — the
+ * inspector's started / progress events and the prompt and reply previews.
  *
  * Ported from: src-tauri/src/core/server/proxy.rs (`EmitState`, `proxy_request`),
  * src-tauri/src/core/server/request_inspector.rs (`RequestInspector::begin`, `InspectorHandle`).
@@ -106,7 +107,7 @@ export class RequestTrace {
     }
   }
 
-  /** Whether the inspector is watching this request (previews and telemetry are collected). */
+  /** Whether the inspector is watching this request: it is announced and its previews are collected. */
   get inspecting(): boolean {
     return this.seq !== undefined
   }
@@ -148,10 +149,13 @@ export class RequestTrace {
     })
   }
 
-  /** A telemetry collector, when the inspector is watching. */
+  /**
+   * A telemetry collector, whenever the request is reported at all. Its numbers go out for every
+   * request; it keeps reply text only while the inspector watches.
+   */
   startTelemetry(): StreamTelemetry | undefined {
-    if (!this.inspecting) return undefined
-    this.telemetry ??= new StreamTelemetry()
+    if (!this.deps.emit) return undefined
+    this.telemetry ??= new StreamTelemetry({ previews: this.inspecting })
     return this.telemetry
   }
 
@@ -207,8 +211,10 @@ export class RequestTrace {
           ctx_overflow_detected: this.ctxOverflowDetected,
         }
 
+    // Finish fields for every request the app hears about, announced or not: the Activity log lists
+    // an unwatched request with its timings and token counts. Only its previews wait for a watcher.
     let finish: ApiRequestFinishFields | null = null
-    if (this.announced) {
+    if (this.announced || observation) {
       const telemetry = this.telemetry?.finishFields(this.startedAt) ?? this.stashed
       finish = {
         ttft_ms: null,
@@ -222,6 +228,8 @@ export class RequestTrace {
         reply_preview: null,
         reply_chars: null,
         ...telemetry,
+        // PRIVACY (ATO-113): whatever collected it, no reply text leaves for a request nobody watched.
+        ...(this.inspecting ? {} : { reply_preview: null }),
         status: status || null,
         error_kind: this.errorKind,
         aborted: !res.writableFinished,
