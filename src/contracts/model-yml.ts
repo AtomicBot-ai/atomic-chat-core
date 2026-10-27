@@ -123,6 +123,18 @@ export interface ModelYmlLiteRtLm {
   source: 'curated' | 'huggingface'
 }
 
+/** The devices a GenieX model runs on: GenieX's own aliases (`geniex_resolve_device`), change `add-geniex-runtime`. */
+export const GENIEX_DEVICES = ['npu', 'gpu', 'cpu', 'hybrid'] as const
+export type GeniexDevice = (typeof GENIEX_DEVICES)[number]
+
+/** The GenieX plugins: `llama_cpp` runs a GGUF file, `qairt` an AI Hub bundle (design D4). */
+export const GENIEX_PLUGINS = ['llama_cpp', 'qairt'] as const
+export type GeniexPlugin = (typeof GENIEX_PLUGINS)[number]
+
+/** The Snapdragon chips AI Hub bundles are compiled for, as conf's model list spells them (design D3). */
+export const GENIEX_CHIPS = ['x-elite', 'x2-elite'] as const
+export type GeniexChip = (typeof GENIEX_CHIPS)[number]
+
 /** Key order the app's serde_yaml writer produces; `writeModelYml` must emit keys in this order. */
 export const MODEL_YML_KEY_ORDER: readonly (keyof ModelYml)[] = [
   'model_path',
