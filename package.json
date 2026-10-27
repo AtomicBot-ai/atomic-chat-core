@@ -74,6 +74,7 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "^1.0.28",
     "ai": "^5.0.121",
+    "smol-toml": "^1.9.1",
     "tar": "^7.4.3",
     "yaml": "^2.8.1",
     "yauzl": "^3.2.0"

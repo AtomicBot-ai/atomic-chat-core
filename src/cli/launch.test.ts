@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { readFile } from 'node:fs/promises'
+import { chmod, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../test/helpers/fake-backend-pack.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -107,6 +107,7 @@ describe('agentEnvironment', () => {
 
     const codexEnv = agentEnvironment(base, findAgent('codex') as never, 'http://h/v1', 'm', 'k')
     expect(codexEnv['OPENAI_API_KEY']).toBeUndefined()
+    expect(codexEnv['ATOMIC_CHAT_API_KEY'], 'the variable Codex’s profile names').toBe('k')
     expect(codexEnv['HOME']).toBe('/home/u')
   })
 })
@@ -145,10 +146,17 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('launching an agent', () => {
     expect(configured).toHaveLength(1)
     expect(configured[0]).toMatchObject({ agent: 'codex', model: 'demo', apiKey: 'atomic' })
     expect(configured[0]?.apiUrl, 'Codex wants the /v1 prefix').toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/)
-    expect(ran[0]).toMatchObject({ program: 'codex', args: [], detached: false })
+    expect(ran[0]).toMatchObject({ program: 'codex', args: ['--profile', 'atomic-chat'], detached: false })
+    expect(ran[0]?.env['ATOMIC_CHAT_API_KEY'], 'the key the profile names, set on the child').toBe('atomic')
     expect(core.sessions(), 'the model is unloaded when the agent exits').toEqual([])
     expect(io.err.join('')).toContain('Agent     Codex CLI')
   })
+
+  /** Detection that hands `launch` this program for Codex — never the real `codex` on the test machine. */
+  const codexAt =
+    (program: string): LaunchDeps['detect'] =>
+    async (agents) =>
+      new Map(agents.map((a) => [a.id, { installed: true, path: program, program }]))
 
   it('uses the production agent config writer when none is injected', async () => {
     await runningCore()
@@ -157,14 +165,45 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('launching an agent', () => {
     const io = recordingIo({ env: { HOME: data.root } })
     expect(
       await launchCommand(['codex', '--model', 'demo', '--port', '0', '--data-folder', data.root], io, {
-        detect: detecting(),
+        // A launcher that does not exist: its version is unknown, which is let through.
+        detect: codexAt(join(data.root, 'no-such-codex')),
         run: async () => 0,
       })
     ).toBe(0)
-    expect(await readFile(join(data.root, '.codex/config.toml'), 'utf8')).toContain(
-      '[model_providers.atomic]'
-    )
+    const profile = await readFile(join(data.root, '.codex/atomic-chat.config.toml'), 'utf8')
+    expect(profile).toContain('[model_providers.atomic-chat]')
+    expect(profile).toContain('env_key = "ATOMIC_CHAT_API_KEY"')
+    expect(await readdir(join(data.root, '.codex')), 'the shared config.toml is not ours').toEqual([
+      'atomic-chat.config.toml',
+    ])
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a Codex too old for profiles, asking the detected launcher',
+    async () => {
+      const core = await runningCore()
+      await data.writeModel('demo')
+      await installFakeBackend(data.layout)
+      const codex = join(data.root, 'old-codex')
+      await writeFile(codex, '#!/bin/sh\necho "codex-cli 0.133.0"\n')
+      await chmod(codex, 0o755)
+      const ran: RunSpec[] = []
+      await expect(
+        launchCommand(
+          ['codex', '--model', 'demo', '--port', '0', '--data-folder', data.root],
+          recordingIo({ env: { HOME: data.root } }),
+          { detect: codexAt(codex), run: async (s) => (ran.push(s), 0) }
+        )
+      ).rejects.toMatchObject({
+        code: 'IO_ERROR',
+        details:
+          'Codex CLI 0.133.0 is too old for Atomic Chat. Update it to 0.134 or newer and connect again.',
+      })
+      expect(ran, 'Codex is not run').toEqual([])
+      await expect(readdir(join(data.root, '.codex'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(core.sessions(), 'the model is unloaded again').toEqual([])
+    }
+  )
 
   it('runs standalone as a foreground owner and shuts it down with its session', async () => {
     await data.writeModel('demo')

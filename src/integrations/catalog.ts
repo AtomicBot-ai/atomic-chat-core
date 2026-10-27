@@ -80,7 +80,9 @@ export const AGENTS: readonly Agent[] = [
     requiresModel: true,
     endpointWithPrefix: true,
     docsUrl: 'https://github.com/openai/codex',
-    runArgs: [],
+    // The model and provider live in our own profile file (`configure/codex.ts`), which Codex reads
+    // only when asked to; the shared `config.toml` is the user's.
+    runArgs: ['--profile', 'atomic-chat'],
     runMode: 'terminal',
   },
   {
@@ -304,7 +306,9 @@ export const CONFLICTING_PROVIDER_ENV: readonly string[] = [
 /**
  * Environment the spawned agent needs on top of its config file. Five agents are configured purely
  * through environment variables that `configure_*` persists to the user's shell rc — that file is
- * not live in a process we are about to spawn, so the same variables are set on the child.
+ * not live in a process we are about to spawn, so the same variables are set on the child. Codex's
+ * profile names the variable its key is read from (`env_key`) but never holds the key, so the key
+ * goes on the child — only when there is one, as the profile names the variable only then.
  */
 export function childEnv(
   agent: Agent,
@@ -342,6 +346,8 @@ export function childEnv(
       }
     case 'muse':
       return { META_API_KEY: key }
+    case 'codex':
+      return apiKey ? { ATOMIC_CHAT_API_KEY: apiKey } : {}
     default:
       return {}
   }

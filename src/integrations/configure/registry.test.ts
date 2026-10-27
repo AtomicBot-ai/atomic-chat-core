@@ -3,6 +3,7 @@ import type { Agent } from '../catalog.js'
 import { findAgent } from '../catalog.js'
 import type { ConfigFs } from '../config-io.js'
 import { configureAgent, registeredAgents, registerWriter, writerFor } from './registry.js'
+import type { ConfigureInput } from './registry.js'
 
 /** A catalog entry that is not in the real catalog, so a test writer cannot shadow a real agent. */
 const testAgent = (id: string): Agent => ({ ...(findAgent('codex') as Agent), id })
@@ -13,9 +14,16 @@ const memoryFs = (): ConfigFs => {
     home: '/home/test',
     absolute: (relative) => `/home/test/${relative}`,
     read: async (relative) => files.get(relative),
+    readStrict: async (relative) => files.get(relative),
     write: async (relative, contents) => {
       files.set(relative, contents)
     },
+    createNew: async (relative, contents) => {
+      if (files.has(relative)) return false
+      files.set(relative, contents)
+      return true
+    },
+    permissions: async (relative) => (files.has(relative) ? 0o644 : undefined),
     mkdirp: async () => {},
     exists: async (relative) => files.has(relative),
     remove: async (relative) => {
@@ -41,6 +49,18 @@ describe('the writer registry', () => {
       env: {},
     })
     expect(seen).toEqual(['http://127.0.0.1:1337/v1|demo|k|/bin/zsh|linux'])
+  })
+
+  it('hands on the process runner and the launcher detection found, only when given', async () => {
+    const inputs: Array<Pick<ConfigureInput, 'spawn' | 'program'>> = []
+    registerWriter('__launcher-probe', async ({ spawn, program }) => {
+      inputs.push({ ...(spawn ? { spawn } : {}), ...(program ? { program } : {}) })
+    })
+    const agent = testAgent('__launcher-probe')
+    const spawn: NonNullable<ConfigureInput['spawn']> = async () => ({ code: 0, stdout: '', stderr: '' })
+    await configureAgent(agent, 'u', 'm', 'k', { fs: memoryFs(), spawn, program: '/opt/codex/bin/codex' })
+    await configureAgent(agent, 'u', 'm', 'k', { fs: memoryFs() })
+    expect(inputs).toEqual([{ spawn, program: '/opt/codex/bin/codex' }, {}])
   })
 
   it('refuses an unknown agent and an agent with no writer', async () => {

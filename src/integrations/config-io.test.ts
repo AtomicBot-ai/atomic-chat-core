@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -172,6 +172,72 @@ describe('nodeConfigFs', () => {
     expect(await fs.exists('.config/nested/deep')).toBe(true)
   })
 
+  it('applies a requested mode exactly, whatever the umask or a stale temp file left behind', async () => {
+    const root = await home()
+    const fs = nodeConfigFs(root)
+    // A temp file from a crashed run keeps its own mode when `writeFile` reuses it.
+    await writeFile(join(root, 'shared.toml.atomic-tmp'), 'stale', { mode: 0o644 })
+    await fs.write('shared.toml', 'x = 1\n', { mode: 0o660 })
+    expect(await readFile(join(root, 'shared.toml'), 'utf8')).toBe('x = 1\n')
+    await expect(stat(join(root, 'shared.toml.atomic-tmp'))).rejects.toMatchObject({ code: 'ENOENT' })
+    if (process.platform !== 'win32') expect((await stat(join(root, 'shared.toml'))).mode & 0o777).toBe(0o660)
+  })
+
+  it('reads strictly: only a missing file is absent, and the bytes come back exactly', async () => {
+    const root = await home()
+    const fs = nodeConfigFs(root)
+    expect(await fs.readStrict('missing.toml')).toBeUndefined()
+
+    // A byte-order mark is content: dropping it would change the bytes a backup is made of.
+    await writeFile(join(root, 'bom.toml'), Buffer.from([0xef, 0xbb, 0xbf, 0x61, 0x0d, 0x0a]))
+    expect(await fs.readStrict('bom.toml')).toBe('\ufeffa\r\n')
+
+    await writeFile(join(root, 'latin1.toml'), Buffer.from([0x61, 0xe9, 0x0a]))
+    expect(await fs.read('latin1.toml'), 'the lenient read decodes lossily').toBe('a\ufffd\n')
+    await expect(fs.readStrict('latin1.toml'), 'not UTF-8 is an error, not text').rejects.toThrow()
+
+    await mkdir(join(root, 'a-directory'))
+    expect(await fs.read('a-directory'), 'the lenient read calls any failure absent').toBeUndefined()
+    await expect(fs.readStrict('a-directory')).rejects.toMatchObject({ code: 'EISDIR' })
+  })
+
+  it('creates a file only when nothing is there, and never overwrites', async () => {
+    const root = await home()
+    const fs = nodeConfigFs(root)
+    expect(await fs.createNew('nested/backup', 'first\n', { mode: 0o600 })).toBe(true)
+    expect(await fs.createNew('nested/backup', 'second\n')).toBe(false)
+    expect(await readFile(join(root, 'nested/backup'), 'utf8')).toBe('first\n')
+    if (process.platform !== 'win32')
+      expect((await stat(join(root, 'nested/backup'))).mode & 0o777).toBe(0o600)
+    expect(await fs.createNew('plain', 'x')).toBe(true)
+  })
+
+  // Root writes into a read-only directory anyway; Windows has no such directory mode.
+  const canLockDirs = process.platform !== 'win32' && process.getuid?.() !== 0
+  it.skipIf(!canLockDirs)('throws when a file cannot be created at all', async () => {
+    const root = await home()
+    const fs = nodeConfigFs(root)
+    await mkdir(join(root, 'locked'))
+    await chmod(join(root, 'locked'), 0o500)
+    try {
+      await expect(fs.createNew('locked/backup', 'x')).rejects.toMatchObject({ code: 'EACCES' })
+    } finally {
+      await chmod(join(root, 'locked'), 0o700)
+    }
+    expect(await fs.exists('locked/backup')).toBe(false)
+  })
+
+  it('reports permission bits, absent for a missing file and an error for an unreachable one', async () => {
+    const root = await home()
+    const fs = nodeConfigFs(root)
+    await writeFile(join(root, 'config.toml'), '')
+    await chmod(join(root, 'config.toml'), 0o640)
+    expect(await fs.permissions('missing.toml')).toBeUndefined()
+    if (process.platform === 'win32') return
+    expect(await fs.permissions('config.toml')).toBe(0o640)
+    await expect(fs.permissions('config.toml/inside')).rejects.toMatchObject({ code: 'ENOTDIR' })
+  })
+
   it('writes the env block into the rc file the shell implies', async () => {
     const root = await home()
     const fs = nodeConfigFs(root)
@@ -187,9 +253,15 @@ describe('nodeConfigFs', () => {
 })
 
 describe('small helpers', () => {
-  it('escapes only backslash and quote for TOML, and falls back for an empty key', () => {
+  it('escapes everything a TOML basic string forbids raw, and falls back for an empty key', () => {
     expect(tomlBasicStringEscape('a"b\\c')).toBe('a\\"b\\\\c')
     expect(tomlBasicStringEscape("it's fine")).toBe("it's fine")
+    expect(tomlBasicStringEscape('\b\t\n\f\r')).toBe('\\b\\t\\n\\f\\r')
+    // The other control characters and DEL have no short form: four upper-case hex digits.
+    expect(tomlBasicStringEscape('\u0000\u0001\u001b\u001f\u007f')).toBe(
+      '\\u0000\\u0001\\u001B\\u001F\\u007F'
+    )
+    expect(tomlBasicStringEscape(' ~é€😀')).toBe(' ~é€😀')
     expect(keyOr('', 'atomic')).toBe('atomic')
     expect(keyOr('k', 'atomic')).toBe('k')
   })
