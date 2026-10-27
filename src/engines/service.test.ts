@@ -60,6 +60,23 @@ describe('hostEngines', () => {
     expect(ENGINE_KINDS['litert-lm']).toBe('engine-build')
   })
 
+  it('lists geniex after litert-lm only on a Snapdragon X host (change add-geniex-runtime, task 4.5)', () => {
+    expect(hostEngines('win32', [], { liteRtLm: true, geniex: true }).slice(-2)).toEqual([
+      'litert-lm',
+      'geniex',
+    ])
+    expect(hostEngines('win32', [], { geniex: true })).toEqual([
+      'llamacpp-upstream',
+      'llamacpp',
+      'atomic-prism',
+      'sd-cpp',
+      'geniex',
+    ])
+    expect(hostEngines('win32', [], { geniex: false })).not.toContain('geniex')
+    expect(hostEngines('win32', [])).not.toContain('geniex')
+    expect(ENGINE_KINDS['geniex']).toBe('engine-build')
+  })
+
   it('has no foundry-local where the host does not support it, and none by default', () => {
     expect(hostEngines('darwin', [], { foundryLocal: false })).not.toContain('foundry-local')
     expect(hostEngines('linux', ['vllm'])).not.toContain('foundry-local')

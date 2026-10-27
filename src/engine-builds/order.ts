@@ -9,6 +9,7 @@
  *   - MLX: `published_at` of the GitHub release. The tags are commit hashes.
  *   - Foundry Local: `published_at` of the `microsoft/foundry-local` release, like MLX.
  *   - LiteRT-LM: `published_at` of the PyPI release (change `add-litert-lm-runtime`, task 4.4).
+ *   - GenieX: `published_at` of the SDK release on Qualcomm's mirror (change `add-geniex-runtime`, task 4.4).
  *
  * A build whose order cannot be read (a dev stub, an installer without `mlx-server.json`) is older
  * than every build whose order can, so any verified build replaces it.
@@ -19,7 +20,7 @@ import { isDateTime } from './manifest.js'
 
 export interface OrderedBuild {
   tag: string
-  /** MLX, Foundry Local and LiteRT-LM. */
+  /** MLX, Foundry Local, LiteRT-LM and GenieX. */
   published_at?: string | null
 }
 
@@ -50,6 +51,7 @@ const ORDER_KEYS: Record<EngineBuildId, (build: OrderedBuild) => readonly number
   'mlx': publishedKey,
   'foundry-local': publishedKey,
   'litert-lm': publishedKey,
+  'geniex': publishedKey,
 }
 
 /** Negative when `a` is older, positive when newer, zero when neither is. */

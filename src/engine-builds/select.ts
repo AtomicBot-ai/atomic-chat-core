@@ -39,6 +39,7 @@ import type { DiffusionBackend } from '../contracts/index.js'
 import { getSupportedFeatures } from '../backend/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import type { FoundryLocalPlatform, LiteRtLmPlatform } from './manifest.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 
 /**
  * Smallest Vulkan device worth moving a Linux host off the CPU build for.
@@ -380,5 +381,21 @@ export function liteRtLmHostChoice(
       backend_id: null,
       reason: `The LiteRT-LM manifest lists no wheel for ${host.platform}.`,
     }
+  return { ladder: [host.platform], backend_id: host.platform, reason: null }
+}
+
+/**
+ * GenieX (change `add-geniex-runtime`, task 4.4): the host runs the one SDK zip of its platform, when
+ * the newest release has it. Which platform, and whether at all, `geniexHostPlatform` decided from
+ * the processor string (`runtime/geniex/chip.ts`).
+ */
+export function geniexHostChoice(
+  host: GeniexHostPlatform,
+  release: { assets: readonly { platform: string }[] } | null
+): { ladder: string[]; backend_id: string | null; reason: string | null } {
+  if (host.platform === null) return { ladder: [], backend_id: null, reason: host.reason }
+  if (!release) return { ladder: [], backend_id: null, reason: 'The GenieX manifest is unavailable.' }
+  if (!release.assets.some((asset) => asset.platform === host.platform))
+    return { ladder: [], backend_id: null, reason: `The GenieX manifest lists no SDK for ${host.platform}.` }
   return { ladder: [host.platform], backend_id: host.platform, reason: null }
 }

@@ -21,8 +21,11 @@ import {
   LITERT_LM_MANIFEST_URL,
   parseLiteRtLmManifest,
   SUPPORTED_LITERT_LM_ABI,
+  GENIEX_MANIFEST_URL,
+  parseGeniexManifest,
+  SUPPORTED_GENIEX_ABI,
 } from './manifest.js'
-import type { LiteRtLmManifest, MlxManifest, SdcppManifest } from './manifest.js'
+import type { GeniexManifest, LiteRtLmManifest, MlxManifest, SdcppManifest } from './manifest.js'
 
 const SDCPP = {
   $schema: './sdcpp-schema.json',
@@ -381,6 +384,130 @@ describe('parseLiteRtLmManifest', () => {
   })
 })
 
+// ---------------------------------------------------------------------------------------------
+// GenieX (change add-geniex-runtime, task 4.1)
+// ---------------------------------------------------------------------------------------------
+
+const GX_MIRROR = 'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex'
+const GX_ASSET = (version = '0.9.3', over: Record<string, unknown> = {}) => ({
+  platform: 'win-arm64',
+  url: `${GX_MIRROR}/geniex-sdk-windows-arm64-v${version}.zip`,
+  name: `geniex-sdk-windows-arm64-v${version}.zip`,
+  size: 91519631,
+  sha256: '3edffa6e64878dfb68ea45116c37550a286e01d0c5066c28e8673cdfd4840446',
+  ...over,
+})
+const GX_RELEASE = (version: string, published_at: string, over: Record<string, unknown> = {}) => ({
+  version,
+  published_at,
+  min_core_version: '0.20.0',
+  abi: 1,
+  notes_url: `https://github.com/qualcomm/GenieX/releases/tag/v${version}`,
+  assets: [GX_ASSET(version)],
+  ...over,
+})
+const GENIEX = (releases: unknown[], over: Record<string, unknown> = {}) => ({
+  $schema: './geniex-schema.json',
+  schema_version: 1,
+  releases,
+  ...over,
+})
+const GX_HOST = { coreVersion: '0.20.0', abis: SUPPORTED_GENIEX_ABI }
+
+describe('parseGeniexManifest', () => {
+  it('reads the manifest conf publishes, newest release first, with the zip of each platform', () => {
+    const parsed = parseGeniexManifest(
+      GENIEX([GX_RELEASE('0.9.2', '2026-09-01T00:00:00Z'), GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z')]),
+      GX_HOST
+    )
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.9.3', '0.9.2'])
+    expect(parsed.releases[0]).toEqual({
+      version: '0.9.3',
+      published_at: '2026-10-19T23:09:06Z',
+      min_core_version: '0.20.0',
+      abi: 1,
+      notes_url: 'https://github.com/qualcomm/GenieX/releases/tag/v0.9.3',
+      assets: [GX_ASSET('0.9.3')],
+    })
+    expect(SUPPORTED_GENIEX_ABI).toEqual([1])
+  })
+
+  it('drops a field it does not know at every level instead of refusing the document', () => {
+    const release = { ...GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z'), htp_signed: true }
+    release.assets = release.assets.map((asset) => ({ ...asset, signature: 'x' }))
+    const parsed = parseGeniexManifest(GENIEX([release], { updated_at: 'x' }), GX_HOST)
+    expect(Object.keys(parsed)).toEqual(['releases'])
+    expect(Object.keys(parsed.releases[0] ?? {})).toEqual([
+      'version',
+      'published_at',
+      'min_core_version',
+      'abi',
+      'notes_url',
+      'assets',
+    ])
+    expect(Object.keys(parsed.releases[0]?.assets[0] ?? {})).toEqual([
+      'platform',
+      'url',
+      'name',
+      'size',
+      'sha256',
+    ])
+  })
+
+  it('skips a release for a newer core, one with an ABI this core does not bind, and keeps the rest', () => {
+    const parsed = parseGeniexManifest(
+      GENIEX([
+        GX_RELEASE('0.10.0', '2026-12-01T00:00:00Z', { min_core_version: '0.21.0' }),
+        GX_RELEASE('0.9.5', '2026-11-15T00:00:00Z', { abi: 2 }),
+        GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z'),
+      ]),
+      GX_HOST
+    )
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.9.3'])
+  })
+
+  it('takes a zip from the S3 mirror or a qualcomm/GenieX GitHub release only, and never one unpinned', () => {
+    const github = GX_ASSET('0.9.3', {
+      url: 'https://github.com/qualcomm/GenieX/releases/download/v0.9.3/geniex-sdk-windows-arm64-v0.9.3.zip',
+    })
+    expect(
+      parseGeniexManifest(
+        GENIEX([GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z', { assets: [github] })]),
+        GX_HOST
+      ).releases[0]?.assets
+    ).toEqual([github])
+    const foreign = GX_RELEASE('0.9.4', '2026-11-01T00:00:00Z', {
+      assets: [GX_ASSET('0.9.4', { url: 'https://example.com/geniex-sdk-windows-arm64-v0.9.4.zip' })],
+    })
+    const unpinned = GX_RELEASE('0.9.5', '2026-11-02T00:00:00Z', {
+      assets: [GX_ASSET('0.9.5', { sha256: undefined })],
+    })
+    const unknownPlatform = GX_RELEASE('0.9.6', '2026-11-03T00:00:00Z', {
+      assets: [GX_ASSET('0.9.6', { platform: 'linux-arm64' })],
+    })
+    const badName = GX_RELEASE('0.9.7', '2026-11-04T00:00:00Z', {
+      assets: [GX_ASSET('0.9.7', { name: 'geniex.zip' })],
+    })
+    const parsed = parseGeniexManifest(
+      GENIEX([foreign, unpinned, unknownPlatform, badName, GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z')]),
+      GX_HOST
+    )
+    // A release whose only asset is unusable lists nothing to install and is skipped whole.
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.9.3'])
+  })
+
+  it('refuses another schema version, no releases, and a document with nothing left to install', () => {
+    expect(() => parseGeniexManifest(GENIEX([], { schema_version: 2 }), GX_HOST)).toThrow(/schema_version/)
+    expect(() => parseGeniexManifest(GENIEX('x' as never), GX_HOST)).toThrow(/releases/)
+    expect(() =>
+      parseGeniexManifest(GENIEX([GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z', { abi: 9 })]), GX_HOST)
+    ).toThrow(/no release this core can install/)
+    expect(() => parseGeniexManifest(GENIEX([GX_RELEASE('0.9.3', 'not a date')]), GX_HOST)).toThrow(
+      /no release this core can install/
+    )
+  })
+})
+
 describe('asset URLs', () => {
   it('downloads sd.cpp from the mirror, or from the upstream release without the Atomic suffix', () => {
     const manifest = parseSdcppManifest(SDCPP)
@@ -425,7 +552,7 @@ afterEach(() => data.cleanup())
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
 function source<T>(
-  kind: 'sd-cpp' | 'mlx' | 'litert-lm',
+  kind: 'sd-cpp' | 'mlx' | 'litert-lm' | 'geniex',
   respond: (url: string) => Response | Promise<Response>,
   opts: { env?: Record<string, string>; clock?: { now: number } } = {}
 ) {
@@ -558,6 +685,32 @@ describe('EngineManifestSource', () => {
       env: { ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(file).href },
     })
     expect((await local.src.read()).manifest?.releases[0]?.version).toBe('0.18.2')
+    expect(local.urls).toEqual([])
+  })
+
+  it('reads the GenieX manifest from conf main or ATOMIC_GENIEX_MANIFEST_URL and caches it under <data>/geniex', async () => {
+    // `min_core_version` below this core's own: the manifest's 0.20.0 would skip the release until 6.9.
+    const doc = GENIEX([GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z', { min_core_version: '0.1.0' })])
+    const remote = source<GeniexManifest>('geniex', () => json(doc))
+    expect((await remote.src.read()).manifest?.releases[0]?.version).toBe('0.9.3')
+    expect(remote.urls).toEqual([GENIEX_MANIFEST_URL])
+    expect(GENIEX_MANIFEST_URL).toBe(
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/geniex-manifest.json'
+    )
+    const cached = JSON.parse(
+      await readFile(join(data.layout.provider('geniex').root, 'geniex-manifest.cache.json'), 'utf8')
+    )
+    expect(cached.manifest.releases[0].version).toBe('0.9.3')
+
+    const file = join(data.root, 'geniex-manifest.json')
+    await writeFile(
+      file,
+      JSON.stringify(GENIEX([GX_RELEASE('0.9.4', '2026-11-01T00:00:00Z', { min_core_version: '0.1.0' })]))
+    )
+    const local = source<GeniexManifest>('geniex', () => json(doc), {
+      env: { ATOMIC_GENIEX_MANIFEST_URL: pathToFileURL(file).href },
+    })
+    expect((await local.src.read()).manifest?.releases[0]?.version).toBe('0.9.4')
     expect(local.urls).toEqual([])
   })
 

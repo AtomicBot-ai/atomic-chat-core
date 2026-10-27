@@ -14,20 +14,25 @@ import type { HardwareFacts } from '../hardware/index.js'
 import { makeZip } from '../../test/helpers/make-zip.js'
 import { OWNER_MARKER } from '../diffusion/install.js'
 import { writeLiteRtLmInstallRecord } from './litert-lm.js'
+import { writeGeniexInstallRecord } from './geniex.js'
+import type { EngineProbeFacts } from './engines.js'
 import {
   parseFoundryLocalManifest,
+  parseGeniexManifest,
   parseLiteRtLmManifest,
   parseMlxManifest,
   parseSdcppManifest,
 } from './manifest.js'
 import type {
   FoundryLocalManifest,
+  GeniexManifest,
   LiteRtLmManifest,
   ManifestRead,
   MlxManifest,
   SdcppManifest,
 } from './manifest.js'
 import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 import { EngineBuildsService, IDLE_ENGINE_HOST, parseEngineBuildId } from './service.js'
 import type { EngineHost } from './service.js'
 
@@ -161,6 +166,9 @@ function harness(
     foundryProbe?: (dir: string) => Promise<void>
     liteRtLmHost?: LiteRtLmHostPlatform
     liteRtLmProbe?: (dir: string) => Promise<void>
+    geniexHost?: GeniexHostPlatform
+    /** The `geniex-host probe` stand-in: what the core's prober returns, as `hostProbes.geniex` does. */
+    geniexProbe?: (dir: string) => Promise<EngineProbeFacts | void>
   } = {}
 ) {
   const manifests: {
@@ -168,11 +176,13 @@ function harness(
     'mlx': ManifestRead<MlxManifest>
     'foundry-local': ManifestRead<FoundryLocalManifest>
     'litert-lm': ManifestRead<LiteRtLmManifest>
+    'geniex': ManifestRead<GeniexManifest>
   } = {
     'sd-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'mlx': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'foundry-local': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'litert-lm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'geniex': { manifest: null, source: null, fetched_at: null, error: 'offline' },
   }
   const events: Array<{ name: string; payload: unknown }> = []
   const changed: Array<CoreEvents['engine-build:changed']> = []
@@ -183,6 +193,10 @@ function harness(
       .replace('https://github.com/AtomicBot-ai/mlx-vlm/releases/download', server.url('/releases'))
       .replace('https://github.com/microsoft/foundry-local/releases/download', server.url('/releases'))
       .replace('https://files.pythonhosted.org/packages', server.url('/releases'))
+      .replace(
+        'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex',
+        server.url('/releases')
+      )
     return fetch(url, init)
   }
   const downloader = new Downloader({
@@ -198,6 +212,7 @@ function harness(
     'mlx': new FakeHost(),
     'foundry-local': new FakeHost(),
     'litert-lm': new FakeHost(),
+    'geniex': new FakeHost(),
   }
   let clock = 1_000
   const service = new EngineBuildsService({
@@ -207,6 +222,7 @@ function harness(
       'mlx': data.layout.provider('mlx').backendsDir,
       'foundry-local': FOUNDRY_ROOT(),
       'litert-lm': LITERT_ROOT(),
+      'geniex': GENIEX_ROOT(),
     },
     failedBackendsFile: join(data.layout.diffusion.root, 'failed-backends.json'),
     resourcesDir: opts.resourcesDir,
@@ -217,10 +233,15 @@ function harness(
       'mlx': { read: async () => manifests.mlx },
       'foundry-local': { read: async () => manifests['foundry-local'] },
       'litert-lm': { read: async () => manifests['litert-lm'] },
+      'geniex': { read: async () => manifests.geniex },
     },
     hostPlatforms: {
       'foundry-local': opts.foundryLocalHost ?? { platform: 'linux-x64' },
       'litert-lm': opts.liteRtLmHost ?? { platform: 'linux-x64' },
+      'geniex': opts.geniexHost ?? { platform: 'win-arm64', chip: 'x-elite' },
+    },
+    hostProbes: {
+      ...(opts.geniexProbe ? { geniex: opts.geniexProbe } : {}),
     },
     probe: {
       ...(opts.foundryProbe ? { 'foundry-local': opts.foundryProbe } : {}),
@@ -247,6 +268,9 @@ function harness(
   const setLiteRtLm = (manifest: LiteRtLmManifest) => {
     manifests['litert-lm'] = { manifest, source: 'remote', fetched_at: 1, error: null }
   }
+  const setGeniex = (manifest: GeniexManifest) => {
+    manifests.geniex = { manifest, source: 'remote', fetched_at: 1, error: null }
+  }
   return {
     service,
     downloader,
@@ -258,12 +282,14 @@ function harness(
     setMlx,
     setFoundry,
     setLiteRtLm,
+    setGeniex,
     manifests,
   }
 }
 
 const FOUNDRY_ROOT = () => join(data.root, 'foundry-local', 'backends')
 const LITERT_ROOT = () => join(data.root, 'litert-lm', 'backends')
+const GENIEX_ROOT = () => join(data.root, 'geniex', 'backends')
 
 /** A Foundry Local archive: the libraries as plain files, plus the debug symbols Microsoft ships. */
 async function foundryArchive(name: string, files: Record<string, string>): Promise<Buffer> {
@@ -1330,5 +1356,170 @@ describe('LiteRT-LM builds (task 4.4)', () => {
       host_backend_id: null,
       host_reason: 'LiteRT-LM runs on Windows x64 only.',
     })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// GenieX (change add-geniex-runtime, task 4.4)
+// ---------------------------------------------------------------------------------------------
+
+const GENIEX_ZIP = (version: string) => `geniex-sdk-windows-arm64-v${version}.zip`
+const geniexSdk = (): Buffer =>
+  makeZip([
+    { name: 'sdk-windows-arm64/lib/geniex.dll', data: Buffer.from('core') },
+    { name: 'sdk-windows-arm64/lib/llama_cpp/geniex_plugin.dll', data: Buffer.from('plugin') },
+    { name: 'sdk-windows-arm64/lib/llama_cpp/libggml-htp-v73.so', data: Buffer.from('htp') },
+    { name: 'sdk-windows-arm64/bin/geniex-bench.exe', data: Buffer.from('bench') },
+    { name: 'sdk-windows-arm64/include/geniex.h', data: Buffer.from('h') },
+  ])
+
+/** Serve one zip per release under `/releases/<version>/` and describe the releases as conf does. */
+function geniexManifest(
+  releases: Array<{ version: string; published_at: string; body: Buffer; sha256?: string; abi?: number }>
+): GeniexManifest {
+  return parseGeniexManifest(
+    {
+      schema_version: 1,
+      releases: releases.map((release) => {
+        server.files.set(`/releases/${release.version}/${GENIEX_ZIP(release.version)}`, {
+          body: release.body,
+        })
+        return {
+          version: release.version,
+          published_at: release.published_at,
+          min_core_version: '0.1.0',
+          abi: release.abi ?? 1,
+          assets: [
+            {
+              platform: 'win-arm64',
+              url: `https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex/${release.version}/${GENIEX_ZIP(release.version)}`,
+              name: GENIEX_ZIP(release.version),
+              size: release.body.length,
+              sha256: release.sha256 ?? sha(release.body),
+            },
+          ],
+        }
+      }),
+    },
+    { coreVersion: '9.9.9', abis: [1] }
+  )
+}
+
+describe('GenieX builds (task 4.4)', () => {
+  it('installs the SDK: lib/** under the build, probed in staging, recorded with its ABI and the devices the probe found, activated', async () => {
+    const probed: string[] = []
+    const h = harness({
+      geniexProbe: async (dir) => {
+        probed.push(dir)
+        return { libraryVersion: '0.9.3', devices: ['HTP0', 'GPUOpenCL', 'CPU'] }
+      },
+    })
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+
+    const result = await h.service.install('geniex', { task_id: 'geniex-engine' })
+
+    const dir = join(GENIEX_ROOT(), '0.9.3', 'win-arm64')
+    expect(result).toMatchObject({ installed: true, build: { tag: '0.9.3', backend_id: 'win-arm64' } })
+    expect(probed).toEqual([expect.stringMatching(/win-arm64\.incoming-\d+$/)])
+    expect((await ls(dir)).sort()).toEqual([OWNER_MARKER, 'install.json', 'lib'].sort())
+    expect((await ls(join(dir, 'lib'))).sort()).toEqual(['geniex.dll', 'llama_cpp'])
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({
+      tag: '0.9.3',
+      backendId: 'win-arm64',
+      publishedAt: '2026-10-19T23:09:06Z',
+      abi: 1,
+      libraryVersion: '0.9.3',
+      devices: ['HTP0', 'GPUOpenCL', 'CPU'],
+    })
+    expect(h.hosts.geniex.calls).toEqual([`activate ${dir} false`])
+    const catalog = await h.service.catalog('geniex')
+    expect(catalog.manifest).toMatchObject({ tag: '0.9.3', published_at: '2026-10-19T23:09:06Z' })
+    expect(catalog.active).toMatchObject({ tag: '0.9.3', backend_id: 'win-arm64', removable: true })
+  })
+
+  it('refuses a zip whose sha256 differs from conf and leaves nothing behind, unprobed', async () => {
+    const probed: string[] = []
+    const h = harness({ geniexProbe: async (dir) => void probed.push(dir) })
+    h.setGeniex(
+      geniexManifest([
+        { version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk(), sha256: 'a'.repeat(64) },
+      ])
+    )
+    await expect(h.service.install('geniex', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+    })
+    expect(probed).toEqual([])
+    expect(await ls(join(GENIEX_ROOT(), '0.9.3'))).toEqual([])
+  })
+
+  it('deletes the staging tree when the probe fails, the error carrying what the host printed', async () => {
+    const h = harness({
+      geniexProbe: async () => {
+        throw new AtomicCoreError('ENGINE_INSTALL_FAILED', 'geniex-host probe failed.', 'LoadLibraryW: 126')
+      },
+    })
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+    await expect(h.service.install('geniex', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      details: 'LoadLibraryW: 126',
+    })
+    expect(await ls(join(GENIEX_ROOT(), '0.9.3'))).toEqual([])
+    expect(h.hosts.geniex.calls).toEqual([])
+  })
+
+  it('refuses to install without a host of its own to probe with', async () => {
+    const h = harness()
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+    await expect(h.service.install('geniex', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: expect.stringMatching(/no GenieX host/),
+    })
+    expect(await ls(join(GENIEX_ROOT(), '0.9.3'))).toEqual([])
+  })
+
+  it('activates the newest build by published_at among those whose ABI this core binds', async () => {
+    const h = harness()
+    const make = async (version: string, publishedAt: string, abi: number) => {
+      const dir = join(GENIEX_ROOT(), version, 'win-arm64')
+      await mkdir(join(dir, 'lib'), { recursive: true })
+      await writeFile(join(dir, 'lib', 'geniex.dll'), 'dll')
+      await writeGeniexInstallRecord(dir, {
+        tag: version,
+        backendId: 'win-arm64',
+        sha256: null,
+        installedAtMs: 1,
+        publishedAt,
+        abi,
+        libraryVersion: version,
+        devices: ['CPU'],
+      })
+    }
+    await make('0.9.2', '2026-09-01T00:00:00Z', 1)
+    await make('0.9.3', '2026-10-19T23:09:06Z', 1)
+    await make('0.10.0', '2026-12-01T00:00:00Z', 2)
+    const catalog = await h.service.catalog('geniex')
+    expect(catalog.installed.map((build) => build.tag).sort()).toEqual(['0.10.0', '0.9.2', '0.9.3'])
+    expect(catalog.active).toMatchObject({ tag: '0.9.3' })
+    expect(await h.service.activeDir('geniex')).toBe(join(GENIEX_ROOT(), '0.9.3', 'win-arm64'))
+  })
+
+  it('offers nothing on a host without a Snapdragon X, saying why', async () => {
+    const h = harness({
+      geniexHost: { platform: null, reason: 'GenieX runs on Windows arm64 only, not darwin arm64.' },
+    })
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+    expect(await h.service.catalog('geniex')).toMatchObject({
+      host_backend_id: null,
+      host_reason: 'GenieX runs on Windows arm64 only, not darwin arm64.',
+    })
+    expect(parseEngineBuildId('geniex')).toBe('geniex')
   })
 })

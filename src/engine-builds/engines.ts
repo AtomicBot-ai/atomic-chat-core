@@ -18,15 +18,18 @@ import {
   writeFoundryLocalInstallRecord,
 } from './foundry-local.js'
 import { listLiteRtLmBuilds, prepareLiteRtLmTree, writeLiteRtLmInstallRecord } from './litert-lm.js'
+import { listGeniexBuilds, prepareGeniexTree, writeGeniexInstallRecord } from './geniex.js'
 import {
   FOUNDRY_LOCAL_C_API_VERSIONS,
   foundryLocalAssetUrl,
   mlxAssetUrl,
   sdcppAssetUrl,
+  SUPPORTED_GENIEX_ABI,
   SUPPORTED_LITERT_LM_ABI,
 } from './manifest.js'
 import type {
   FoundryLocalManifest,
+  GeniexManifest,
   LiteRtLmManifest,
   ManifestOf,
   MlxManifest,
@@ -37,6 +40,7 @@ import {
   backendKindOf,
   companionFor,
   foundryLocalHostChoice,
+  geniexHostChoice,
   liteRtLmHostChoice,
   mlxHostChoice,
   readFailedBackends,
@@ -45,6 +49,7 @@ import {
   sdcppHostOf,
 } from './select.js'
 import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 
 /** One build on disk as the service sees it. */
 export interface Build extends EngineBuildRef {
@@ -54,15 +59,31 @@ export interface Build extends EngineBuildRef {
   published_at: string | null
   /** Foundry Local: the C API version recorded at install; `null` when unknown. */
   c_api_version?: number | null
-  /** LiteRT-LM: the binding number recorded at install; `null` when unknown. */
+  /** LiteRT-LM and GenieX: the binding number recorded at install; `null` when unknown. */
   abi?: number | null
+  /** GenieX: the device ids the install's probe found (`HTP0`, `GPUOpenCL`, `CPU`). */
+  devices?: string[]
+  /** GenieX: `geniex_version()` as the install's probe read it. */
+  library_version?: string | null
+}
+
+/**
+ * What a host's probe learns about an unpacked build beyond "it loads", kept in its install record
+ * (GenieX, task 4.4): the devices the library found and its own version. Hosts whose probe learns
+ * nothing to keep answer `void`.
+ */
+export interface EngineProbeFacts {
+  libraryVersion: string | null
+  devices: string[]
 }
 
 /**
  * Which build of an engine with one archive per platform this host runs, or why none
- * (`foundryLocalHostPlatform`, `liteRtLmHostPlatform`).
+ * (`foundryLocalHostPlatform`, `liteRtLmHostPlatform`, `geniexHostPlatform`); an engine may carry
+ * more beside the platform (GenieX: the chip), which only its own row reads.
  */
-export type EngineHostPlatform = { platform: string } | { platform: null; reason: string }
+export type EngineHostPlatform =
+  { platform: string; [fact: string]: unknown } | { platform: null; reason: string }
 
 /** What a row may read from the service's dependencies. */
 export interface EngineContext {
@@ -77,9 +98,10 @@ export interface EngineContext {
   hostPlatform: EngineHostPlatform
   /**
    * This core's own host mode run against an unpacked build (`foundry-host probe`, `litert-host
-   * probe`); throws `ENGINE_INSTALL_FAILED` with what it printed. Absent where this core has none.
+   * probe`, `geniex-host probe`); throws `ENGINE_INSTALL_FAILED` with what it printed, and answers
+   * the facts the record keeps, when the host has any. Absent where this core has none.
    */
-  hostProbe?: ((buildDir: string) => Promise<void>) | undefined
+  hostProbe?: ((buildDir: string) => Promise<EngineProbeFacts | void>) | undefined
 }
 
 export interface HostChoice {
@@ -101,8 +123,10 @@ export interface BuildRecordInfo {
   publishedAt: string | null
   /** Foundry Local: the release's C API version. */
   cApiVersion: number | null
-  /** LiteRT-LM: the release's binding number. */
+  /** LiteRT-LM and GenieX: the release's binding number. */
   abi: number | null
+  /** What the probe learned (`EngineProbeFacts`), for the hosts whose record keeps it. */
+  probe: EngineProbeFacts | null
 }
 
 export interface EngineDescriptor<M> {
@@ -113,8 +137,11 @@ export interface EngineDescriptor<M> {
   archives(manifest: M, backendId: string): ArchiveRef[]
   /** Fix the unpacked tree up before the probe; runs even when a test replaces the probe. */
   prepare?(staging: string, ctx: EngineContext): Promise<void>
-  /** Make the unpacked tree runnable and prove it runs here; throws `ENGINE_INSTALL_FAILED`. */
-  probe(staging: string, ctx: EngineContext): Promise<void>
+  /**
+   * Make the unpacked tree runnable and prove it runs here; throws `ENGINE_INSTALL_FAILED`. What it
+   * answers (if anything) reaches `record` as `info.probe`.
+   */
+  probe(staging: string, ctx: EngineContext): Promise<EngineProbeFacts | void>
   /** The ownership marker and `install.json`. */
   record(staging: string, info: BuildRecordInfo): Promise<void>
   builds(ctx: EngineContext): Promise<Build[]>
@@ -193,7 +220,7 @@ const mlx: EngineDescriptor<MlxManifest> = {
       .filter((asset) => asset.backend === backendId)
       .map((asset) => ({ ...pin(asset), url: mlxAssetUrl(manifest, asset), name: asset.name })),
   probe: (staging, ctx) => probeMlxServer(staging, { platform: ctx.platform }),
-  record: (staging, { cApiVersion: _cApiVersion, abi: _abi, ...info }) =>
+  record: (staging, { cApiVersion: _cApiVersion, abi: _abi, probe: _probe, ...info }) =>
     writeMlxInstallRecord(staging, info),
   async builds(ctx) {
     const out: Build[] = (await listDownloadedMlx(ctx.root)).map((record) => ({
@@ -246,7 +273,7 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
       )
     await ctx.hostProbe(staging)
   },
-  record: (staging, { abi: _abi, ...info }) => writeFoundryLocalInstallRecord(staging, info),
+  record: (staging, { abi: _abi, probe: _probe, ...info }) => writeFoundryLocalInstallRecord(staging, info),
   async builds(ctx) {
     return (await listFoundryLocalBuilds(ctx.root)).map((record) => ({
       tag: record.tag,
@@ -292,7 +319,8 @@ const liteRtLm: EngineDescriptor<LiteRtLmManifest> = {
       )
     await ctx.hostProbe(staging)
   },
-  record: (staging, { cApiVersion: _cApiVersion, ...info }) => writeLiteRtLmInstallRecord(staging, info),
+  record: (staging, { cApiVersion: _cApiVersion, probe: _probe, ...info }) =>
+    writeLiteRtLmInstallRecord(staging, info),
   async builds(ctx) {
     return (await listLiteRtLmBuilds(ctx.root)).map((record) => ({
       tag: record.tag,
@@ -312,9 +340,62 @@ const liteRtLm: EngineDescriptor<LiteRtLmManifest> = {
     ),
 }
 
+/**
+ * GenieX (change `add-geniex-runtime`, task 4.4): the SDK zip of the newest release; `lib/**` of it
+ * goes to the build, `geniex-host probe --lib <staging>` of this core proves the library loads and
+ * names the devices it sees, which the record keeps for `GET /runtimes/geniex/accelerators`.
+ */
+const geniex: EngineDescriptor<GeniexManifest> = {
+  release: (manifest) => {
+    const newest = manifest.releases[0] as GeniexManifest['releases'][number]
+    return { tag: newest.version, published_at: newest.published_at, abi: newest.abi }
+  },
+  hostChoice: async (ctx, manifest) =>
+    geniexHostChoice(ctx.hostPlatform as GeniexHostPlatform, manifest?.releases[0] ?? null),
+  archives(manifest, backendId) {
+    const asset = manifest.releases[0]?.assets.find((candidate) => candidate.platform === backendId)
+    return asset ? [{ url: asset.url, name: asset.name, sha256: asset.sha256, size: asset.size }] : []
+  },
+  prepare: (staging) => prepareGeniexTree(staging),
+  async probe(staging, ctx) {
+    if (!ctx.hostProbe)
+      throw new AtomicCoreError(
+        'ENGINE_INSTALL_FAILED',
+        'This core has no GenieX host to check the build with.'
+      )
+    return ctx.hostProbe(staging)
+  },
+  record: (staging, { cApiVersion: _cApiVersion, probe, ...info }) =>
+    writeGeniexInstallRecord(staging, {
+      ...info,
+      libraryVersion: probe?.libraryVersion ?? null,
+      devices: probe?.devices ?? [],
+    }),
+  async builds(ctx) {
+    return (await listGeniexBuilds(ctx.root)).map((record) => ({
+      tag: record.tag,
+      backend_id: record.backendId,
+      origin: 'downloaded',
+      dir: record.dir,
+      installed_at_ms: record.installedAtMs,
+      published_at: record.publishedAt,
+      abi: record.abi,
+      devices: record.devices,
+      library_version: record.libraryVersion,
+    }))
+  },
+  /** The newest by `published_at` among the builds whose ABI this core's host binds (design D2). */
+  active: (builds) =>
+    newest(
+      'geniex',
+      builds.filter((build) => build.abi != null && SUPPORTED_GENIEX_ABI.includes(build.abi))
+    ),
+}
+
 export const ENGINE_DESCRIPTORS: { [K in EngineBuildId]: EngineDescriptor<ManifestOf[K]> } = {
   'sd-cpp': sdcpp,
   'mlx': mlx,
   'foundry-local': foundryLocal,
   'litert-lm': liteRtLm,
+  'geniex': geniex,
 }

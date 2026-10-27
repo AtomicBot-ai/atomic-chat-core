@@ -8,6 +8,7 @@ import {
   foundryLocalHostPlatform,
   liteRtLmHostChoice,
   liteRtLmHostPlatform,
+  geniexHostChoice,
   backendKindOf,
   companionFor,
   diffusionBackendLadder,
@@ -595,6 +596,28 @@ describe('liteRtLmHostPlatform', () => {
     })
     expect(liteRtLmHostChoice({ platform: 'linux-x64' }, null).reason).toMatch(/unavailable/)
     expect(liteRtLmHostChoice({ platform: null, reason: 'no' }, release)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'no',
+    })
+  })
+})
+
+describe('geniexHostChoice (change add-geniex-runtime, task 4.4)', () => {
+  it('offers the host zip of the newest release, or says why not', () => {
+    const release = { assets: [{ platform: 'win-arm64' as const }] }
+    expect(geniexHostChoice({ platform: 'win-arm64', chip: 'x-elite' }, release)).toEqual({
+      ladder: ['win-arm64'],
+      backend_id: 'win-arm64',
+      reason: null,
+    })
+    expect(geniexHostChoice({ platform: 'win-arm64', chip: 'x-elite' }, { assets: [] })).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'The GenieX manifest lists no SDK for win-arm64.',
+    })
+    expect(geniexHostChoice({ platform: 'win-arm64', chip: 'x2-elite' }, null).reason).toMatch(/unavailable/)
+    expect(geniexHostChoice({ platform: null, reason: 'no' }, release)).toEqual({
       ladder: [],
       backend_id: null,
       reason: 'no',
