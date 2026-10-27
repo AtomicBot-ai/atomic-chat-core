@@ -41,8 +41,16 @@ import {
   parseLiteRtLmCheckRequest,
   liteRtHostProber,
 } from '../runtime/litert-lm/index.js'
-import { geniexHostCommand, geniexHostPlatform, geniexHostProber } from '../runtime/geniex/index.js'
-import type { GeniexHostPlatform } from '../runtime/geniex/index.js'
+import {
+  GeniexAcceleratorService,
+  GeniexCheckService,
+  geniexHostCommand,
+  geniexHostPlatform,
+  geniexHostProber,
+  GeniexRuntime,
+  parseGeniexCheckRequest,
+} from '../runtime/geniex/index.js'
+import type { GeniexBuild, GeniexHostPlatform } from '../runtime/geniex/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
@@ -515,6 +523,52 @@ export async function createAtomicCore(
       runtimes.set('litert-lm', liteRtLmRuntime)
     }
 
+    // GenieX (change `add-geniex-runtime`, task 6.6): one geniex-host per model, on a Snapdragon X only
+    // (design D3). The active build — its folder, version and the devices its probe found — is read
+    // per load from the engine-builds service wired below.
+    const geniexPaths = layout.provider('geniex')
+    const geniexActiveBuild = async (): Promise<GeniexBuild | undefined> => {
+      const build = await engineBuilds.activeBuild('geniex')
+      return build ? { dir: build.dir, version: build.tag, devices: build.devices ?? [] } : undefined
+    }
+    const geniexRuntime: GeniexRuntime | undefined =
+      geniexHost.platform === null
+        ? undefined
+        : new GeniexRuntime({
+            layout,
+            registry: new ModelRegistry(layout, 'geniex'),
+            instanceId: lock.instanceId,
+            chip: geniexHost.chip,
+            hostCommand: geniexHostCmd,
+            resolveBuild: geniexActiveBuild,
+            trustedHosts: managedTrustedHosts,
+            readSettings: async () => settings.get('geniex'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+            claimGpu: gpuResidency.hook('geniex'),
+            baseEnv: env,
+            log: runtimeLog,
+            ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+          })
+    if (geniexRuntime) {
+      registries.set('geniex', geniexRuntime.registry)
+      runtimes.set('geniex', geniexRuntime)
+    }
+    const geniexAccelerators =
+      geniexHost.platform === null
+        ? undefined
+        : new GeniexAcceleratorService({ resolveBuild: geniexActiveBuild, chip: geniexHost.chip })
+    const geniexCheck =
+      geniexRuntime && geniexHost.platform !== null
+        ? new GeniexCheckService({
+            chip: geniexHost.chip,
+            modelsDir: geniexPaths.modelsDir,
+            registry: geniexRuntime.registry,
+            resolveBuild: geniexActiveBuild,
+            inspect: (path) => geniexRuntime.inspect(path),
+          })
+        : undefined
+
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
     })
@@ -732,8 +786,7 @@ export async function createAtomicCore(
         // Where the provider is not registered nothing runs from a build.
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
         'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
-        // The GenieX runtime (task 6.6) lends its load lock and sessions here; until then nothing runs.
-        'geniex': IDLE_ENGINE_HOST,
+        'geniex': geniexRuntime ? geniexRuntime.engineHost() : IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
@@ -1030,6 +1083,10 @@ export async function createAtomicCore(
           ...(liteRtLmCheck
             ? { 'litert-lm': async (body: unknown) => liteRtLmCheck.check(parseLiteRtLmCheckRequest(body)) }
             : {}),
+          // GenieX (change `add-geniex-runtime`, task 6.5): the same, a bundle judged by this machine's chip.
+          ...(geniexCheck
+            ? { geniex: async (body: unknown) => geniexCheck.check(parseGeniexCheckRequest(body)) }
+            : {}),
         },
         ...(foundryLocalAccelerators
           ? {
@@ -1044,6 +1101,14 @@ export async function createAtomicCore(
               liteRtLm: {
                 accelerators: () => liteRtLmAccelerators.list(),
                 prepare: (request) => liteRtLmAccelerators.prepare(request),
+              },
+            }
+          : {}),
+        ...(geniexAccelerators
+          ? {
+              geniex: {
+                accelerators: () => geniexAccelerators.list(),
+                prepare: (request) => geniexAccelerators.prepare(request),
               },
             }
           : {}),

@@ -432,7 +432,12 @@ export class EngineBuildsService {
 
   /** The directory of the build the next load of `engine` uses; nothing installed, `undefined`. */
   async activeDir(engine: EngineBuildId): Promise<string | undefined> {
-    return this.activeOf(engine, await this.builds(engine))?.dir
+    return (await this.activeBuild(engine))?.dir
+  }
+
+  /** The build the next load of `engine` uses, with what its record keeps (GenieX: the probe's devices). */
+  async activeBuild(engine: EngineBuildId): Promise<Build | undefined> {
+    return this.activeOf(engine, await this.builds(engine))
   }
 
   /** The build the next MLX load starts: the newest of bundled and downloaded, bundled on a tie. */

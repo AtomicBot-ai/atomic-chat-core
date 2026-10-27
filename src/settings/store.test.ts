@@ -101,6 +101,7 @@ describe('SettingsStore.open', () => {
           'sglang': EMPTY_PROVIDER_STATE,
           'foundry-local': EMPTY_PROVIDER_STATE,
           'litert-lm': EMPTY_PROVIDER_STATE,
+          'geniex': EMPTY_PROVIDER_STATE,
         },
         migrations: {},
       },
@@ -116,6 +117,7 @@ describe('SettingsStore.open', () => {
       'sglang': canonicalProviderDefaults('sglang'),
       'foundry-local': canonicalProviderDefaults('foundry-local'),
       'litert-lm': canonicalProviderDefaults('litert-lm'),
+      'geniex': canonicalProviderDefaults('geniex'),
     })
     // canonical, not raw: the schema ships timeout "1800" and fit_ctx 4096
     expect(store.get('llamacpp-upstream')).toMatchObject({

@@ -773,12 +773,35 @@ describe.skipIf(!existsSync(BIN) || !POSIX)('GenieX through /engines', () => {
           not_removable_reason: 'active',
         }),
       ])
+      // A model runs from the build: in use, and refused on both routes.
+      const model = join(dataFolder, 'geniex', 'models', 'e2e-gx-cpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'm.gguf'), 'gguf')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: geniex/models/e2e-gx-cpu/m.gguf\nname: e2e-gx-cpu\nsize_bytes: 4\ngeniex:\n  model_id: m\n  variant_id: e2e-gx-cpu\n  plugin: llama_cpp\n  backend: cpu\n  repo: o/r\n  revision: ${'a'.repeat(40)}\n  file: m.gguf\n  context_length: 4096\n  tools: false\n  reasoning: false\n  vision: false\n  source: huggingface\n`
+      )
+      const loaded = await send(ready, 'POST', '/models/geniex/e2e-gx-cpu/load', {})
+      expect(loaded.status, await loaded.clone().text()).toBe(200)
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: '0.9.3',
+          variant: 'win-arm64',
+          active: true,
+          in_use: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
       const viaEngines = await send(ready, 'DELETE', '/engines/geniex/builds/0.9.3/win-arm64')
       expect(viaEngines.status).toBe(400)
       expect(((await viaEngines.json()) as { error: { details?: string } }).error.details).toBe('active')
+      const viaBuilds = await send(ready, 'DELETE', '/engine-builds/geniex/0.9.3/win-arm64')
+      expect(viaBuilds.status).toBe(409)
+      expect(((await viaBuilds.json()) as { error: { code: string } }).error.code).toBe('BACKEND_IN_USE')
       expect(existsSync(join(dataFolder, 'geniex', 'backends', '0.9.3', 'win-arm64'))).toBe(true)
 
-      // conf publishes 0.9.4: offered, installed; 0.9.3 is then removable.
+      // conf publishes 0.9.4: offered, installed; the model running from 0.9.3 is unloaded by it, and 0.9.3 is then removable.
       await publish('0.9.4', '2026-11-01T00:00:00Z')
       expect((await entry(true)).update).toMatchObject({
         needed: true,
@@ -786,6 +809,9 @@ describe.skipIf(!existsSync(BIN) || !POSIX)('GenieX through /engines', () => {
       })
       const updated = await send(ready, 'POST', '/engines/geniex/update', { task_id: 'gx-engines-2', proxy })
       expect(await updated.json()).toMatchObject({ updated: true, active: { version: '0.9.4' } })
+      expect(
+        ((await (await control(ready, '/sessions')).json()) as { sessions: unknown[] }).sessions
+      ).toEqual([])
       const removed = await send(ready, 'DELETE', '/engines/geniex/builds/0.9.3/win-arm64')
       expect(await removed.json()).toEqual({ removed: true })
       expect((await entry()).builds.map((build) => build.version)).toEqual(['0.9.4'])

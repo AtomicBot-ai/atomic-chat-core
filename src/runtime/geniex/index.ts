@@ -4,3 +4,8 @@
  */
 export * from './chip.js'
 export * from './host-process.js'
+export * from './model-yml.js'
+export * from './devices.js'
+export * from './runtime.js'
+export * from './accelerators.js'
+export * from './check.js'

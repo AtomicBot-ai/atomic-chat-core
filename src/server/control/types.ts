@@ -9,6 +9,9 @@ import type {
   FoundryLocalAccelerators,
   FoundryLocalPrepareRequest,
   FoundryLocalPrepareResult,
+  GeniexAccelerators,
+  GeniexPrepareRequest,
+  GeniexPrepareResult,
   LiteRtLmAccelerators,
   LiteRtLmPrepareRequest,
   LiteRtLmPrepareResult,
@@ -531,6 +534,11 @@ export interface ControlServerDeps {
    * not registered.
    */
   liteRtLm?: LiteRtLmControl
+  /**
+   * GenieX's devices (change `add-geniex-runtime`, task 6.4); absent where the provider is not
+   * registered (off a Snapdragon X), and its routes then answer `PROVIDER_NOT_FOUND`.
+   */
+  geniex?: GeniexControl
   cloud: CloudControl
   chatgpt: ChatGptControl
   externalSessions: ExternalSessionControl
@@ -585,6 +593,12 @@ export interface LiteRtLmControl {
   accelerators(): Promise<LiteRtLmAccelerators>
   /** Downloads and unpacks the accelerators named (none: all offered); one at a time. */
   prepare(request: LiteRtLmPrepareRequest): Promise<LiteRtLmPrepareResult>
+}
+
+/** GenieX's devices and its no-op prepare (change `add-geniex-runtime`, task 6.4). */
+export interface GeniexControl {
+  accelerators(): Promise<GeniexAccelerators>
+  prepare(request: GeniexPrepareRequest): Promise<GeniexPrepareResult>
 }
 
 export interface FoundryLocalControl {
