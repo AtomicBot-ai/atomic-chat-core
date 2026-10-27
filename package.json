@@ -39,6 +39,10 @@
       "types": "./dist/runtime/litert-lm/litert-host.d.ts",
       "import": "./dist/runtime/litert-lm/litert-host.js"
     },
+    "./geniex-host": {
+      "types": "./dist/runtime/geniex/geniex-host.d.ts",
+      "import": "./dist/runtime/geniex/geniex-host.js"
+    },
     "./settings": {
       "types": "./dist/settings/public.d.ts",
       "import": "./dist/settings/public.js"

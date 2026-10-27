@@ -22,6 +22,11 @@ if (process.argv[2] === 'litert-host') {
   const { runLiteRtHostMain } = await import('./runtime/litert-lm/litert-host.js')
   process.exit(await runLiteRtHostMain(process.argv.slice(3)))
 }
+// The GenieX host (change add-geniex-runtime, design D1), the same way.
+if (process.argv[2] === 'geniex-host') {
+  const { runGeniexHostMain } = await import('./runtime/geniex/geniex-host.js')
+  process.exit(await runGeniexHostMain(process.argv.slice(3)))
+}
 
 await runAppDaemon({
   argv: process.argv.slice(2),

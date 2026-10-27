@@ -42,6 +42,7 @@ describe('package exports', () => {
       './models',
       './foundry-host',
       './litert-host',
+      './geniex-host',
       './settings',
     ])
   })
@@ -108,6 +109,14 @@ describe('package exports', () => {
     expect(resolved['@atomic-chat/core/litert-host']).toMatch(/\/dist\/runtime\/litert-lm\/litert-host\.js$/)
     const entry = (await import('../../src/runtime/litert-lm/litert-host.js')) as Record<string, unknown>
     expect(Object.keys(entry)).toEqual(['runLiteRtHostMain'])
+  })
+
+  // The same for `geniex-host …` (change add-geniex-runtime, design D1).
+  it('resolves ./geniex-host to its own entry, which imports under Node', async () => {
+    const resolved = await resolveFromPackage(['@atomic-chat/core/geniex-host'])
+    expect(resolved['@atomic-chat/core/geniex-host']).toMatch(/\/dist\/runtime\/geniex\/geniex-host\.js$/)
+    const entry = (await import('../../src/runtime/geniex/geniex-host.js')) as Record<string, unknown>
+    expect(Object.keys(entry)).toEqual(['runGeniexHostMain'])
   })
 
   // Provider setting schemas for a program that embeds the core (change close-cli-core-gaps, design D3):

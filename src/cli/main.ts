@@ -122,6 +122,11 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         const { runLiteRtHostMain } = await import('../runtime/litert-lm/litert-host.js')
         return await runLiteRtHostMain(rest, io)
       }
+      // Hidden from USAGE: the per-model host core starts for GenieX (change add-geniex-runtime, D1).
+      case 'geniex-host': {
+        const { runGeniexHostMain } = await import('../runtime/geniex/geniex-host.js')
+        return await runGeniexHostMain(rest, io)
+      }
       default:
         io.stderr(`Unknown command: ${command}\n\n${USAGE}`)
         return 2

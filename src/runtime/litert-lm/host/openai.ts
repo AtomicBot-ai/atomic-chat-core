@@ -10,34 +10,18 @@
 
 import type { LiteRtMessage, LiteRtSampler } from './library.js'
 
-export interface OpenAiErrorBody {
-  error: { message: string; type: string; param: string | null; code: string | null }
-}
+import {
+  DATA_URL_RE,
+  invalidRequest as invalid,
+  isRecord,
+  OpenAiRequestError,
+  parseCommonChatRequest,
+  textOf,
+} from '../../shared/index.js'
+import type { Delta, FinishReason, ModelCaps } from '../../shared/index.js'
 
-/** A request this server answers with an OpenAI-shaped error instead of a completion. */
-export class OpenAiRequestError extends Error {
-  readonly body: OpenAiErrorBody
-  constructor(
-    readonly status: number,
-    message: string,
-    param: string | null = null,
-    type = status >= 500 ? 'server_error' : 'invalid_request_error',
-    code: string | null = null
-  ) {
-    super(message)
-    this.name = 'OpenAiRequestError'
-    this.body = { error: { message, type, param, code } }
-  }
-}
-
-const invalid = (message: string, param: string | null = null) => new OpenAiRequestError(400, message, param)
-
-export interface ModelCaps {
-  /** The file declares image input. */
-  vision: boolean
-  /** Think unless the request says not to (`model.yml` `reasoning`). */
-  reasoning: boolean
-}
+export { OpenAiRequestError }
+export type { Delta, FinishReason, ModelCaps, OpenAiErrorBody } from '../../shared/index.js'
 
 export interface ParsedChat {
   /** Every message but the trailing user message or run of tool results. */
@@ -54,9 +38,6 @@ export interface ParsedChat {
   responseFormat: { kind: 'json_schema' | 'regex'; value: string } | null
   thinking: boolean
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const text = (value: string) => ({ type: 'text', text: value })
 
@@ -78,20 +59,6 @@ function parseToolResponse(content: unknown): unknown {
     return raw
   }
 }
-
-function textOf(content: unknown, param: string): string {
-  if (content == null) return ''
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) throw invalid(`${param} must be a string or an array of parts`, param)
-  return content
-    .map((part) => {
-      if (isRecord(part) && part['type'] === 'text' && typeof part['text'] === 'string') return part['text']
-      throw invalid(`${param} may hold text parts only`, param)
-    })
-    .join('')
-}
-
-const DATA_URL_RE = /^data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/i
 
 function userContent(content: unknown, caps: ModelCaps, param: string): Record<string, unknown>[] {
   if (typeof content === 'string') return [text(content)]
@@ -151,43 +118,11 @@ function convertMessages(raw: unknown[], caps: ModelCaps): LiteRtMessage[] {
   })
 }
 
-function optionalNumber(body: Record<string, unknown>, key: string): number | undefined {
-  const value = body[key]
-  if (value === undefined || value === null) return undefined
-  if (typeof value !== 'number' || !Number.isFinite(value)) throw invalid(`${key} must be a number`, key)
-  return value
-}
-
-function parseResponseFormat(raw: unknown): ParsedChat['responseFormat'] {
-  if (raw === undefined || raw === null) return null
-  if (!isRecord(raw)) throw invalid('response_format must be an object', 'response_format')
-  if (raw['type'] === 'text') return null
-  if (raw['type'] === 'json_object') return { kind: 'json_schema', value: '{"type":"object"}' }
-  if (raw['type'] === 'json_schema') {
-    const schema = isRecord(raw['json_schema']) ? raw['json_schema']['schema'] : undefined
-    if (!isRecord(schema))
-      throw invalid('response_format.json_schema.schema must be a JSON schema', 'response_format')
-    return { kind: 'json_schema', value: JSON.stringify(schema) }
-  }
-  throw invalid(`response_format type ${JSON.stringify(raw['type'])} is not supported`, 'response_format')
-}
-
-function parseThinking(body: Record<string, unknown>, caps: ModelCaps): boolean {
-  const kwargs = body['chat_template_kwargs']
-  if (isRecord(kwargs) && typeof kwargs['enable_thinking'] === 'boolean') return kwargs['enable_thinking']
-  const effort = body['reasoning_effort']
-  if (typeof effort === 'string') return effort !== 'none'
-  return caps.reasoning
-}
-
 /** A chat completions body, or `OpenAiRequestError` (400) naming the field it cannot serve. */
 export function parseChatRequest(raw: unknown, caps: ModelCaps): ParsedChat {
   if (!isRecord(raw)) throw invalid('The request body must be a JSON object.')
-  const n = raw['n']
-  if (n !== undefined && n !== null && n !== 1) throw invalid('Only n: 1 is supported.', 'n')
-  if (!Array.isArray(raw['messages']) || raw['messages'].length === 0)
-    throw invalid('messages must be a non-empty array', 'messages')
-  const messages = convertMessages(raw['messages'], caps)
+  const common = parseCommonChatRequest(raw, caps)
+  const messages = convertMessages(raw['messages'] as unknown[], caps)
   let split = messages.length
   while (split > 0 && messages[split - 1]?.['role'] === 'tool') split--
   if (split === messages.length) {
@@ -195,56 +130,19 @@ export function parseChatRequest(raw: unknown, caps: ModelCaps): ParsedChat {
       throw invalid('The last message must be from the user or a tool.', 'messages')
     split--
   }
-  const toolChoice = raw['tool_choice']
-  if (toolChoice !== undefined && toolChoice !== null && toolChoice !== 'auto' && toolChoice !== 'none')
-    throw invalid('Only tool_choice "auto" and "none" are supported.', 'tool_choice')
-  const tools =
-    Array.isArray(raw['tools']) && raw['tools'].length > 0 && toolChoice !== 'none' ? raw['tools'] : null
-  const streamOptions = raw['stream_options']
-  const stop = raw['stop']
-  const maxTokens = optionalNumber(raw, 'max_completion_tokens') ?? optionalNumber(raw, 'max_tokens')
-  const temperature = optionalNumber(raw, 'temperature')
-  const topP = optionalNumber(raw, 'top_p')
-  const topK = optionalNumber(raw, 'top_k')
-  const seed = optionalNumber(raw, 'seed')
   return {
     history: messages.slice(0, split),
     next: messages.slice(split),
-    tools,
-    stream: raw['stream'] === true,
-    includeUsage: isRecord(streamOptions) && streamOptions['include_usage'] === true,
-    sampler: {
-      ...(temperature !== undefined ? { temperature } : {}),
-      ...(topP !== undefined ? { topP } : {}),
-      ...(topK !== undefined ? { topK: Math.round(topK) } : {}),
-      ...(seed !== undefined ? { seed: Math.round(seed) } : {}),
-    },
-    ...(maxTokens !== undefined ? { maxTokens: Math.max(1, Math.round(maxTokens)) } : {}),
-    stop:
-      typeof stop === 'string'
-        ? [stop]
-        : Array.isArray(stop)
-          ? stop.filter((s) => typeof s === 'string' && s)
-          : [],
-    responseFormat: parseResponseFormat(raw['response_format']),
-    thinking: parseThinking(raw, caps),
+    tools: common.tools,
+    stream: common.stream,
+    includeUsage: common.includeUsage,
+    sampler: common.sampler,
+    ...(common.maxTokens !== undefined ? { maxTokens: common.maxTokens } : {}),
+    stop: common.stop,
+    responseFormat: common.responseFormat,
+    thinking: common.thinking,
   }
 }
-
-/** One OpenAI delta (`choices[0].delta`) without the role. */
-export type Delta =
-  | { content: string }
-  | { reasoning_content: string }
-  | {
-      tool_calls: Array<{
-        index: number
-        id: string
-        type: 'function'
-        function: { name: string; arguments: string }
-      }>
-    }
-
-export type FinishReason = 'stop' | 'length' | 'tool_calls'
 
 interface ToolCall {
   id: string

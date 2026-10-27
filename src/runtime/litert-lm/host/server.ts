@@ -13,10 +13,21 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { requestAborted } from '../../../server/public/exchange.js'
+import {
+  completionBody,
+  notServed,
+  readJsonBody,
+  sendJson,
+  sendOpenAiError,
+  SSE_DONE,
+  sseFramer,
+} from '../../shared/index.js'
 import { OpenAiRequestError, parseChatRequest, ReplyBuilder } from './openai.js'
 import type { Delta, FinishReason, ModelCaps, ParsedChat } from './openai.js'
 import type { LiteRtChunk, LiteRtConversation, LiteRtEngine } from './library.js'
 import { ConversationPool, FifoLock } from './pool.js'
+
+const sendError = sendOpenAiError
 
 export interface LiteRtServerOptions {
   engine: LiteRtEngine
@@ -37,37 +48,6 @@ export interface LiteRtServer {
 
 /** How long a stop waits for cancelled generations to end in the library. */
 const CLOSE_WAIT_MS = 10_000
-
-/** Images arrive inline as base64. */
-const BODY_LIMIT = 64 * 1024 * 1024
-
-class BodyTooLarge extends Error {}
-
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    let size = 0
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > BODY_LIMIT) {
-        reject(new BodyTooLarge())
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
-  })
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body)
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) })
-  res.end(text)
-}
-
-const sendError = (res: ServerResponse, error: OpenAiRequestError) => sendJson(res, error.status, error.body)
 
 export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
   const now = options.now ?? Date.now
@@ -90,7 +70,7 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
   })
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const path = (req.url ?? '/').split('?')[0]
+    const path = (req.url ?? '/').split('?')[0] ?? '/'
     if (req.method === 'GET' && path === '/v1/models')
       return sendJson(res, 200, {
         object: 'list',
@@ -99,15 +79,7 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
         ],
       })
     if (req.method === 'POST' && path === '/v1/chat/completions') {
-      let raw: unknown
-      try {
-        raw = JSON.parse(await readBody(req)) as unknown
-      } catch (error) {
-        throw error instanceof BodyTooLarge
-          ? new OpenAiRequestError(413, 'The request body is too large.')
-          : new OpenAiRequestError(400, 'The request body is not valid JSON.')
-      }
-      const chat = parseChatRequest(raw, options.caps)
+      const chat = parseChatRequest(await readJsonBody(req), options.caps)
       let closed = false
       res.on('close', () => {
         if (!res.writableFinished) closed = true
@@ -120,16 +92,7 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
         await generate(chat, res, gone)
       })
     }
-    sendError(
-      res,
-      new OpenAiRequestError(
-        404,
-        `${req.method ?? 'GET'} ${path} is not served by LiteRT-LM.`,
-        null,
-        'invalid_request_error',
-        'not_found'
-      )
-    )
+    sendError(res, notServed(req.method ?? 'GET', path, 'LiteRT-LM'))
   }
 
   /** One generation, resolved when the library's last chunk has been handled. */
@@ -140,12 +103,14 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
       constrained: chat.responseFormat !== null,
     })
     const reply = new ReplyBuilder(chat.stop)
-    const id = `chatcmpl-${now().toString(36)}${(counter++).toString(36)}`
-    const created = Math.floor(now() / 1000)
-    const frame = (body: Record<string, unknown>) =>
-      `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: options.modelId, ...body })}\n\n`
+    const framer = sseFramer(
+      `chatcmpl-${now().toString(36)}${(counter++).toString(36)}`,
+      Math.floor(now() / 1000),
+      options.modelId
+    )
+    const frame = framer.frame
     const deltaFrame = (delta: Record<string, unknown>, finish: FinishReason | null = null) =>
-      frame({ choices: [{ index: 0, delta, finish_reason: finish }] })
+      framer.delta(delta, finish)
     if (chat.stream) {
       res.writeHead(200, {
         'content-type': 'text/event-stream',
@@ -203,18 +168,11 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
             res.write(deltaFrame({}, finish))
             if (chat.includeUsage) res.write(frame({ choices: [], usage }))
           }
-          res.end('data: [DONE]\n\n')
+          res.end(SSE_DONE)
           return
         }
         if (failure) return sendError(res, failure)
-        sendJson(res, 200, {
-          id,
-          object: 'chat.completion',
-          created,
-          model: options.modelId,
-          choices: [{ index: 0, message: reply.message(), finish_reason: finish }],
-          usage,
-        })
+        sendJson(res, 200, completionBody(framer, options.modelId, reply.message(), finish, usage as never))
       }
       let settle: () => void = () => {}
       running.set(conversation, new Promise<void>((done) => (settle = done)))
@@ -243,7 +201,7 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
         options.log?.(`generation failed to start: ${failure.message}`)
         if (chat.stream) {
           res.write(`data: ${JSON.stringify(failure.body)}\n\n`)
-          res.end('data: [DONE]\n\n')
+          res.end(SSE_DONE)
         } else sendError(res, failure)
         resolve()
       }

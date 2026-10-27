@@ -13,6 +13,10 @@ import { fileURLToPath } from 'node:url'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const ENTRY = join(ROOT, 'src/cli/bin.ts')
 const APP_ENTRY = join(ROOT, 'src/app-daemon.ts')
+// The GenieX host's Worker (change add-geniex-runtime, design D1): its own entry of every binary,
+// reached from `engine.ts` as `new URL('./worker.js', import.meta.url)`, which inside the compiled
+// binary is `/$bunfs/root/worker.js` — hence the flat entry naming.
+const GENIEX_WORKER_ENTRY = join(ROOT, 'src/runtime/geniex/host/worker.ts')
 const OUT_DIR = join(ROOT, 'dist/bin')
 
 // Bun target → Tauri externalBin triple used by the app (scripts/download-bin.mjs).
@@ -79,8 +83,11 @@ for (const target of targets) {
       '--minify-syntax',
       '--minify-whitespace',
       '--sourcemap',
+      '--entry-naming',
+      '[name].[ext]',
       ...telemetryDefines(),
       entry,
+      GENIEX_WORKER_ENTRY,
       '--outfile',
       outfile,
     ]
