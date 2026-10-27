@@ -51,6 +51,7 @@ const post = (ready: ReadyLine, path: string, body: unknown = {}) =>
 interface Catalog {
   manifest: { tag: string; source: string } | null
   host_backend_id: string | null
+  host_download_bytes: number | null
   installed: Array<{ tag: string; backend_id: string; origin: string; active: boolean; removable: boolean }>
   active: { tag: string; origin: string } | null
 }
@@ -224,6 +225,7 @@ describe.skipIf(!existsSync(BIN) || process.platform !== 'darwin' || process.arc
       const ready = first.ready
       const catalog = await json<Catalog>(await post(ready, '/engine-builds/mlx/catalog', { force: true }))
       expect(catalog.host_backend_id).toBe('macos-arm64')
+      expect(catalog.host_download_bytes).toBe(archive.size)
       expect(catalog.installed).toEqual([
         expect.objectContaining({
           origin: 'bundled',

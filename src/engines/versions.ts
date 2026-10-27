@@ -253,6 +253,8 @@ export async function engineBuildVersions(
         }
       : null
   const manifest = catalog.manifest
+  // With no update to offer (nothing active yet, or the active build is the manifest's), the size is
+  // the catalog's: what an install of the host build downloads.
   const latest: EngineAvailableBuild | null =
     target ??
     (manifest && catalog.host_backend_id
@@ -260,6 +262,7 @@ export async function engineBuildVersions(
           version: manifest.tag,
           variant: catalog.host_backend_id,
           ...(manifest.published_at !== undefined ? { published_at: manifest.published_at } : {}),
+          ...(catalog.host_download_bytes !== null ? { download_bytes: catalog.host_download_bytes } : {}),
         }
       : null)
   const source = manifest?.source ?? null
