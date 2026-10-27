@@ -22,5 +22,5 @@ const handle = createGeniexWorkerHandler({
 let tail: Promise<void> = Promise.resolve()
 self.onmessage = (event) => {
   const request = event.data as GeniexWorkerRequest
-  tail = tail.then(() => handle(request))
+  tail = tail.then(() => handle(request)).catch(() => {})
 }

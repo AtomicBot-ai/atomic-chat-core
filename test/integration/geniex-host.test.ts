@@ -192,7 +192,6 @@ describe.skipIf(!LIB || !MODEL || !existsSync(BIN))(
     }, 300_000)
 
     it('stops generating when the client hangs up, and the next request starts at once', async () => {
-      const controller = new AbortController()
       const started = post({
         messages: [{ role: 'user', content: 'Count from 1 to 10000, one number per line.' }],
         stream: true,
@@ -201,7 +200,6 @@ describe.skipIf(!LIB || !MODEL || !existsSync(BIN))(
       const reader = response.body?.getReader()
       await reader?.read()
       await reader?.read()
-      controller.abort()
       await reader?.cancel()
       const begun = Date.now()
       const next = await post({

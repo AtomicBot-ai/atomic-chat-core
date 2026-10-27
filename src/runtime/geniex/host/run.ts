@@ -187,7 +187,6 @@ async function serve(
       return EXIT.requiresNewerEngine
     }
     const nCtx = Math.min(args.nCtx, info.max_context_tokens ?? args.nCtx)
-    await mkdir(args.tmp, { recursive: true })
     let created: { vision: boolean }
     try {
       created = await engine.create(libraryDir(args.lib), {
@@ -202,6 +201,8 @@ async function serve(
       deps.stderr(`GenieX could not create the model from ${args.model}: ${said(error)}`)
       return failureExit(error)
     }
+    // Only once there is a model to serve: a failed create leaves no folder behind.
+    await mkdir(args.tmp, { recursive: true })
     const server = createGeniexServer({
       engine,
       modelId: args.id,

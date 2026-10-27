@@ -75,7 +75,9 @@ export interface GeniexPrepareResult {
 /**
  * `POST /models/geniex/check`: a variant before it is downloaded (`plugin`, `device`, `chip` for a
  * bundle, `min_runtime_version` when conf knows it), a downloaded file or bundle folder by `path`
- * inside `<data>/geniex/models` with its `plugin` and `device`, or an installed model by `model_id`.
+ * inside `<data>/geniex/models` with its `plugin` and `device` — and, for a bundle, the `chip` conf
+ * named, which stands in when the bundle's `geniex.json` does not say — or an installed model by
+ * `model_id`.
  */
 export interface GeniexCheckRequest {
   plugin?: string

@@ -178,8 +178,6 @@ export class GeniexReplyParser {
   /** Text not yet classified: may begin a marker or a stop string. */
   private held = ''
   private state: 'text' | 'think' | 'call' | 'fence' = 'text'
-  /** The body of the block being read in `think`, `call` or `fence`. */
-  private block = ''
   /** The fence's opening line (` ```json `), kept to replay a block that was not a tool call. */
   private fenceHead = ''
   /** A stop string was met: everything after it is dropped and the library should be cancelled. */
@@ -237,7 +235,6 @@ export class GeniexReplyParser {
           const opener = kind === 'think' ? THINK_OPEN : kind === 'call' ? CALL_OPEN : FENCE
           this.held = this.held.slice(at + opener.length)
           this.state = kind
-          this.block = ''
           this.fenceHead = ''
           progress = true
           continue

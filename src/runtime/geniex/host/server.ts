@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { requestAborted } from '../../../server/public/exchange.js'
 import {
   completionBody,
+  FifoLock,
   notServed,
   OpenAiRequestError,
   readJsonBody,
@@ -28,7 +29,6 @@ import {
   sseFramer,
 } from '../../shared/index.js'
 import type { Delta, FinishReason, ModelCaps } from '../../shared/index.js'
-import { FifoLock } from '../../litert-lm/host/pool.js'
 import type { GeniexEngine } from './engine.js'
 import { jsonSchemaToGrammar } from './grammar.js'
 import { GeniexLibraryError } from './library.js'
@@ -154,6 +154,7 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
       if (stream && !gone()) for (const delta of deltas) res.write(framer.delta(delta))
     }
     let promptTokens = 0
+    let generatedTokens = 0
     let stopReason: GeniexStopReason = 'unknown'
     let failure: OpenAiRequestError | null = null
     const watch = setInterval(() => {
@@ -198,6 +199,7 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
         cancel
       )
       promptTokens = result.promptTokens
+      generatedTokens = result.generatedTokens
       stopReason = parser.stopped ? 'user' : result.stopReason
     } catch (error) {
       failure =
@@ -217,10 +219,12 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
     if (gone()) return
     write(parser.flush())
     const finish: FinishReason | null = failure ? null : parser.finish(stopReason)
+    // The library's own count where it gave one (a cancelled or failed generation gives none).
+    const completion = generatedTokens > 0 ? generatedTokens : parser.tokens
     const usage = {
       prompt_tokens: promptTokens,
-      completion_tokens: parser.tokens,
-      total_tokens: promptTokens + parser.tokens,
+      completion_tokens: completion,
+      total_tokens: promptTokens + completion,
     }
     if (stream) {
       if (!res.headersSent) {

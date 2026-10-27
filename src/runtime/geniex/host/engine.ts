@@ -83,12 +83,17 @@ export class WorkerEngine implements GeniexEngine {
     pending?.resolve(answer)
   }
 
-  /** One request, answered by the next non-token message; requests queue behind each other. */
-  private ask(request: GeniexWorkerRequest): Promise<GeniexWorkerAnswer> {
+  /**
+   * One request, answered by the next non-token message; requests queue behind each other. `before`
+   * runs when the request's turn comes, not when it is queued: a generate's token handler must not
+   * replace the one of a generation still streaming.
+   */
+  private ask(request: GeniexWorkerRequest, before?: () => void): Promise<GeniexWorkerAnswer> {
     const run = this.tail.then(
       () =>
         new Promise<GeniexWorkerAnswer>((resolve, reject) => {
           if (this.gone) return reject(this.gone)
+          before?.()
           this.pending = { resolve, reject }
           this.worker.postMessage(request)
         })
@@ -134,13 +139,17 @@ export class WorkerEngine implements GeniexEngine {
     const buffer = cancel.buffer
     if (!(buffer instanceof SharedArrayBuffer))
       throw new GeniexLibraryError('generate', 'the cancel flag must live in a SharedArrayBuffer')
-    this.onToken = onToken
     try {
-      const answer = await this.ask({ type: 'generate', id: this.nextId++, prompt, config, cancel: buffer })
+      const answer = await this.ask(
+        { type: 'generate', id: this.nextId++, prompt, config, cancel: buffer },
+        () => {
+          this.onToken = onToken
+        }
+      )
       if (answer.type !== 'done') WorkerEngine.refused(answer, 'generate')
       return answer.result
     } finally {
-      this.onToken = null
+      if (this.onToken === onToken) this.onToken = null
     }
   }
 

@@ -14,7 +14,7 @@
  */
 
 import { stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { AtomicCoreError, GENIEX_DEVICES } from '../../contracts/index.js'
 import type {
   GeniexChip,
@@ -302,7 +302,9 @@ export class GeniexRuntime implements LocalRuntime {
         deviceMissingReason(device),
         build.devices.join(', ') || 'no devices'
       )
-    const { modelPath, mmprojPath } = registry.resolvePaths(yml)
+    const { modelPath, mmprojPath: declared } = registry.resolvePaths(yml)
+    // The projector: `mmproj_path` of model.yml, else the block's file name beside the model.
+    const mmprojPath = declared ?? (block.mmproj ? join(dirname(modelPath), block.mmproj) : undefined)
     const info = await this.inspect(modelPath)
     if (
       info.kind === 'qairt' &&
