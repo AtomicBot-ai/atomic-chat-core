@@ -60,6 +60,10 @@ describe('the catalog', () => {
     expect(agent('goose').runArgs).toEqual(['session'])
     expect(agent('openhands').runArgs).toEqual(['--override-with-envs'])
     expect(agent('openclaw').runArgs).toEqual(['chat'])
+    expect(agent('codex').runArgs, 'Codex runs on our profile, not its shared config').toEqual([
+      '--profile',
+      'atomic-chat',
+    ])
     expect(agent('zed').runMode).toBe('gui')
     expect(agent('zcode').runMode).toBe('gui')
     expect(agent('codex').runMode).toBe('terminal')
@@ -117,7 +121,12 @@ describe('childEnv', () => {
       POOLSIDE_STANDALONE_MODEL: 'm',
     })
     expect(childEnv(agent('muse'), 'http://h/v1', 'm', 'k')).toEqual({ META_API_KEY: 'k' })
-    expect(childEnv(agent('codex'), 'http://h/v1', 'm', 'k')).toEqual({})
+    expect(childEnv(agent('codex'), 'http://h/v1', 'm', 'k')).toEqual({ ATOMIC_CHAT_API_KEY: 'k' })
+    expect(childEnv(agent('kilo'), 'http://h/v1', 'm', 'k')).toEqual({})
+  })
+
+  it('gives Codex no key variable for a keyless server, whose profile names none', () => {
+    expect(childEnv(agent('codex'), 'http://h/v1', 'm', '')).toEqual({})
   })
 
   it('omits the Copilot key when there is none, instead of sending the word "atomic"', () => {

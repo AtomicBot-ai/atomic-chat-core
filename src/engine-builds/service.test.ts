@@ -717,6 +717,93 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
   }
 }
 
+describe('EngineBuildsService.catalog host_download_bytes', () => {
+  const PIN = '0'.repeat(64)
+  const WIN_CUDA: typeof LINUX_VULKAN = {
+    osType: 'windows',
+    arch: 'x86_64',
+    cpuExtensions: [],
+    gpus: [
+      {
+        name: 'GeForce',
+        vendor: 'NVIDIA',
+        total_memory: 8192,
+        uuid: 'gpu-0',
+        driver_version: '560.94',
+        nvidia_info: { index: 0, compute_capability: '8.9' },
+        vulkan_info: null,
+      } as never,
+    ],
+  }
+
+  it('sizes the MLX build this host would install with nothing installed, which the update check does not', async () => {
+    const h = harness({ facts: MAC_ARM })
+    h.setMlx(
+      mlxManifest('mlxvlm-macos-arm64-1234567', '2026-10-02T00:00:00Z', [
+        { backend: 'macos-arm64', name: 'mlx.tar.gz', sha256: PIN, size: 210_000_000 },
+      ])
+    )
+    expect(await h.service.catalog('mlx')).toMatchObject({
+      host_backend_id: 'macos-arm64',
+      host_download_bytes: 210_000_000,
+      installed: [],
+      active: null,
+    })
+    expect(await h.service.checkUpdates('mlx')).toEqual({ update_needed: false, current: null, target: null })
+  })
+
+  it('counts the cudart companion with the Windows CUDA build of sd.cpp', async () => {
+    const h = harness({ facts: WIN_CUDA })
+    h.setSd(
+      parseSdcppManifest({
+        tag_name: 'master-900-aaaaaaa',
+        download_base: MIRROR,
+        assets: [
+          { backend: 'win-cuda12-x64', name: 'sd-cuda.zip', sha256: PIN, size: 300 },
+          { backend: 'win-cudart-cu12', name: 'cudart.zip', sha256: PIN, size: 200, companion: true },
+          { backend: 'win-cpu-x64', name: 'sd-cpu.zip', sha256: PIN, size: 50 },
+        ],
+      })
+    )
+    expect(await h.service.catalog('sd-cpp')).toMatchObject({
+      host_backend_id: 'win-cuda12-x64',
+      host_download_bytes: 500,
+    })
+  })
+
+  it('is null without a manifest, without a host build, or when the manifest leaves a size out', async () => {
+    expect(await harness().service.catalog('mlx')).toMatchObject({
+      manifest: null,
+      host_backend_id: null,
+      host_download_bytes: null,
+    })
+
+    const intel = harness({ facts: { osType: 'macos', arch: 'x86_64', cpuExtensions: [], gpus: [] } })
+    intel.setMlx(
+      mlxManifest('mlxvlm-macos-arm64-1234567', '2026-10-02T00:00:00Z', [
+        { backend: 'macos-arm64', name: 'mlx.tar.gz', sha256: PIN, size: 210_000_000 },
+      ])
+    )
+    expect(await intel.service.catalog('mlx')).toMatchObject({
+      host_backend_id: null,
+      host_download_bytes: null,
+    })
+
+    const unsized = harness()
+    unsized.setSd(
+      parseSdcppManifest({
+        tag_name: 'master-900-aaaaaaa',
+        download_base: MIRROR,
+        assets: [{ backend: 'linux-vulkan-x64', name: 'sd.tar.gz', sha256: PIN }],
+      })
+    )
+    expect(await unsized.service.catalog('sd-cpp')).toMatchObject({
+      host_backend_id: 'linux-vulkan-x64',
+      host_download_bytes: null,
+    })
+  })
+})
+
 describe('MLX from two origins (task 3.3)', () => {
   const resources = () => join(data.root, 'resources')
   async function bundle(meta?: { tag: string; published_at: string }): Promise<void> {

@@ -45,6 +45,7 @@ import type { HardwareFacts } from '../hardware/index.js'
 import { MLX_SERVER_BINARY, removeOwnedBuild } from './builds.js'
 import { ENGINE_DESCRIPTORS } from './engines.js'
 import type {
+  ArchiveRef,
   Build,
   EngineContext,
   EngineDescriptor,
@@ -129,6 +130,16 @@ const ref = (build: Build): EngineBuildRef => ({
   origin: build.origin,
 })
 
+/** What `archives` download in all; `null` when there are none or the manifest leaves a size out. */
+function downloadBytes(archives: ArchiveRef[]): number | null {
+  let total = 0
+  for (const archive of archives) {
+    if (archive.size === undefined) return null
+    total += archive.size
+  }
+  return archives.length > 0 ? total : null
+}
+
 const ENGINE_LABELS: Record<EngineBuildId, string> = {
   'sd-cpp': 'sd.cpp',
   'mlx': 'MLX',
@@ -163,6 +174,8 @@ export class EngineBuildsService {
     const installed: InstalledEngineBuild[] = []
     for (const build of builds) installed.push(await this.describe(build, active, inUse))
     const release = read.manifest ? this.engine(engine).release(read.manifest) : null
+    const archives =
+      read.manifest && choice.backend_id ? this.engine(engine).archives(read.manifest, choice.backend_id) : []
     const manifest: EngineBuildManifestInfo | null =
       release && read.source && read.fetched_at !== null
         ? {
@@ -179,6 +192,7 @@ export class EngineBuildsService {
       manifest_error: manifest ? null : read.error,
       host_backend_id: choice.backend_id,
       host_reason: choice.reason,
+      host_download_bytes: downloadBytes(archives),
       installed,
       active: installed.find((build) => build.active) ?? null,
     }

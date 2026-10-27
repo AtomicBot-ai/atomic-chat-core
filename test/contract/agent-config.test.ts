@@ -36,10 +36,13 @@ interface AgentConfigExpectation {
 const { index, cases } = loadFixtureSet<AgentConfigInput, AgentConfigExpectation>('agent-config')
 
 /**
- * Writers ported after the app's fixture emitter (`cli/fixture_dump.rs`) was removed with its Rust
- * CLI, so no golden files exist for them; their own tests pin them (`configure/zcode.test.ts`).
+ * Writers with no golden files; their own tests pin them. ZCode was ported after the app's fixture
+ * emitter (`cli/fixture_dump.rs`) was removed with its Rust CLI (`configure/zcode.test.ts`). Codex's
+ * cases were retired on 2026-10-27: they pinned the managed regions in the user's shared
+ * `config.toml` that stopped Codex from starting, and Codex now gets a profile file of its own
+ * (`configure/codex.test.ts`, `configure/codex-repair.test.ts`; index note in the fixture set).
  */
-const PORTED_WITHOUT_FIXTURES = new Set(['zcode'])
+const PORTED_WITHOUT_FIXTURES = new Set(['zcode', 'codex'])
 
 /** Agents whose writer has not landed yet. Shrinks to empty as the port proceeds. */
 const PENDING_AGENTS = new Set(

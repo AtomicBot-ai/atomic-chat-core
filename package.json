@@ -1,6 +1,6 @@
 {
   "name": "@atomic-chat/core",
-  "version": "0.19.1",
+  "version": "0.19.3",
   "description": "Inference core of Atomic Chat: local llama.cpp/MLX/Foundation Models runtime, cloud providers, model router and the OpenAI-compatible server on :1337.",
   "license": "MIT",
   "type": "module",
@@ -78,6 +78,7 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "^1.0.28",
     "ai": "^5.0.121",
+    "smol-toml": "^1.9.1",
     "tar": "^7.4.3",
     "yaml": "^2.8.1",
     "yauzl": "^3.2.0"
