@@ -14,6 +14,7 @@ export function fakeEngineCatalog(engine: EngineBuildId): EngineBuildCatalog {
     manifest_error: null,
     host_backend_id: 'macos-arm64',
     host_reason: null,
+    host_download_bytes: 1024,
     installed: [],
     active: null,
   }

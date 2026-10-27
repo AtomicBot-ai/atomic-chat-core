@@ -58,6 +58,11 @@ export interface EngineBuildCatalog {
   /** The build this host would install from the manifest; `null` with `host_reason` when none fits. */
   host_backend_id: string | null
   host_reason: string | null
+  /**
+   * Every archive an install of `host_backend_id` would download (the cudart companion included),
+   * whether or not a build is active; `null` without a host build or when the manifest leaves a size out.
+   */
+  host_download_bytes: number | null
   installed: InstalledEngineBuild[]
   active: InstalledEngineBuild | null
 }
