@@ -1,7 +1,7 @@
 /**
  * Talking to upstreams and writing answers back: the plumbing every public route shares.
  *
- * Upstream requests go through `node:http` rather than `fetch`. The proxy forwards the client's own
+ * Cloud/TLS upstream requests go through `node:http` rather than `fetch`. The proxy forwards the client's own
  * headers, and `fetch` refuses or rewrites several of them; it also cannot report a transport error
  * apart from a timeout without guessing. A plain request keeps the forwarded header set, the body
  * and the error under this module's control.
@@ -12,6 +12,9 @@
 
 import { request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { Readable } from 'node:stream'
+import { createPolicyFetch } from '../../downloads/index.js'
+import { hostHeaderIsLoopback } from '../http.js'
 import { request as httpsRequest } from 'node:https'
 
 /** A stream that delivers nothing for this long is abandoned (the proxy's `STREAM_IDLE_TIMEOUT`). */
@@ -52,7 +55,7 @@ export function forwardableHeaders(req: IncomingMessage, exclude: readonly strin
   })
 }
 
-export async function readBody(stream: IncomingMessage): Promise<Buffer> {
+export async function readBody(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of stream) chunks.push(chunk as Buffer)
   return Buffer.concat(chunks)
@@ -62,7 +65,7 @@ export interface UpstreamResponse {
   status: number
   headers: HeaderPairs
   contentType: string | undefined
-  body: IncomingMessage
+  body: Readable
 }
 
 export interface UpstreamInit {
@@ -95,6 +98,14 @@ export function sendUpstream(url: string, init: UpstreamInit): Promise<UpstreamR
     ]
     if (body !== undefined) headers.push(['Content-Length', String(body.length)])
 
+    // Bun 1.3.10's node:http response can stop after the first SSE chunk when
+    // GC runs during a large image POST. The existing raw-socket HTTP client
+    // avoids that compatibility layer. Keep cloud/TLS routing unchanged.
+    if (target.protocol === 'http:' && hostHeaderIsLoopback(target.host)) {
+      void sendLoopbackUpstream(target, init, headers, body).then(resolve, reject)
+      return
+    }
+
     const send = target.protocol === 'https:' ? httpsRequest : httpRequest
     const req = send(target, { method: init.method, headers: headers.flat(), signal: init.signal })
     const fail = (e: Error) =>
@@ -122,6 +133,94 @@ export function sendUpstream(url: string, init: UpstreamInit): Promise<UpstreamR
     })
     req.end(body)
   })
+}
+
+/** Loopback model traffic uses the same bounded, abortable HTTP parser as downloads. */
+async function sendLoopbackUpstream(
+  target: URL,
+  init: UpstreamInit,
+  headers: HeaderPairs,
+  body: Buffer | undefined
+): Promise<UpstreamResponse> {
+  try {
+    const fetch = createPolicyFetch({
+      connectTo: { host: target.hostname.replace(/^\[|\]$/g, ''), port: Number(target.port) || 80 },
+      connectTimeoutMs: init.connectTimeoutMs,
+    })
+    const response = await fetch(target, {
+      method: init.method,
+      headers: Object.fromEntries(headers),
+      ...(body === undefined ? {} : { body: Uint8Array.from(body) }),
+      ...(init.signal === undefined ? {} : { signal: init.signal }),
+      redirect: 'manual',
+    })
+    const stream = response.body ? readableBody(response.body) : Readable.from([])
+    // An abort can arrive after headers but before a consumer installs its
+    // iterator. Keep that error handled; the iterator still rejects with it.
+    stream.on('error', () => {})
+    return {
+      status: response.status,
+      headers: [...response.headers.entries()],
+      contentType: response.headers.get('content-type') ?? undefined,
+      body: stream,
+    }
+  } catch (e) {
+    throw new UpstreamUnreachable(`error sending request for url (${target}): ${(e as Error).message}`)
+  }
+}
+
+/** A destroy must cancel a pending web read, rather than wait for another token. */
+function readableBody(body: ReadableStream<Uint8Array>): Readable {
+  const reader = body.getReader()
+  // The reader can error before the Node consumer has requested its first chunk.
+  void reader.closed.catch(() => {})
+  let pulling = false
+  let stopped = false
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    reader.releaseLock()
+  }
+  const stream = new Readable({
+    read() {
+      if (pulling || stopped) return
+      pulling = true
+      void reader.read().then(
+        ({ value, done }) => {
+          pulling = false
+          if (stopped) return
+          if (done) {
+            stopped = true
+            release()
+            stream.push(null)
+          } else stream.push(Buffer.from(value))
+        },
+        (error: Error) => {
+          pulling = false
+          stream.destroy(error)
+        }
+      )
+    },
+    destroy(error, callback) {
+      stopped = true
+      if (released) {
+        callback(error)
+        return
+      }
+      void reader.cancel(error ?? undefined).then(
+        () => {
+          release()
+          callback(error)
+        },
+        (cancelError: Error) => {
+          release()
+          callback(error ?? cancelError)
+        }
+      )
+    },
+  })
+  return stream
 }
 
 export async function readUpstreamText(response: UpstreamResponse): Promise<string> {
