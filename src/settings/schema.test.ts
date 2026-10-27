@@ -58,6 +58,7 @@ describe('settingsSchema', () => {
     ['sglang', 18],
     ['foundry-local', 1],
     ['litert-lm', 3],
+    ['geniex', 4],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })
@@ -138,6 +139,9 @@ describe('defaultSettingValues', () => {
       speculative_decoding: true,
       timeout: 600,
     })
+    // `device: ''` is model.yml's default device; `power_mode: burst` is Qualcomm's own default (change
+    // add-geniex-runtime, design D7).
+    expect(defaultSettingValues('geniex')).toEqual({ device: '', ctx_len: 0, power_mode: 'burst', timeout: 600 })
     // `gpu_id: ''` picks the card with the most free memory; `load_timeout_seconds: 0` keeps the adapter's
     // own weight-based estimate. Both mean "not set", which is what the adapter's `null` means.
     expect(defaultSettingValues('tensorrt-llm')).toEqual({
@@ -359,6 +363,9 @@ describe('canonicalizeSettingValues', () => {
         timeout: '30',
       })
     ).toEqual({ ctx_len: 8192, speculative_decoding: false, timeout: 30 })
+    expect(
+      canonicalizeSettingValues('geniex', { device: 'npu', ctx_len: '4096', power_mode: 'balanced', timeout: '30' })
+    ).toEqual({ device: 'npu', ctx_len: 4096, power_mode: 'balanced', timeout: 30 })
     expect(canonicalizeSettingValues('foundation-models', { timeout: '300', other: 'x' })).toEqual({
       timeout: 300,
       other: 'x',

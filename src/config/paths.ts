@@ -59,7 +59,7 @@ export interface ProviderPaths {
   logsDir?: string
   /** `litert-lm`: `<root>/accelerators`, prepared OpenVINO libraries (`openvino/<version>/`). */
   acceleratorsDir?: string
-  /** `litert-lm`: `<root>/cache`, the library's `cache_dir` (XNNPACK caches, compiled shaders). */
+  /** `litert-lm`: `<root>/cache`, the library's `cache_dir`; `geniex`: `<root>/cache`, `inspect` answers and the like. */
   cacheDir?: string
 }
 
@@ -280,6 +280,18 @@ export function dataLayout(root: string): DataLayout {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),
             acceleratorsDir: join(providerRoot, 'accelerators'),
+            modelsDir: join(providerRoot, 'models'),
+            cacheDir: join(providerRoot, 'cache'),
+            runtimeDir: join(providerRoot, 'runtime'),
+            tmpDir: join(providerRoot, 'tmp'),
+            logsDir: join(providerRoot, 'logs'),
+          }
+        case 'geniex':
+          // Change `add-geniex-runtime` (task 6.1): builds (the SDK's lib/**), models the clients download,
+          // the host's cache, each host's runtime files, temporary images of requests and logs.
+          return {
+            root: providerRoot,
+            backendsDir: join(providerRoot, 'backends'),
             modelsDir: join(providerRoot, 'models'),
             cacheDir: join(providerRoot, 'cache'),
             runtimeDir: join(providerRoot, 'runtime'),

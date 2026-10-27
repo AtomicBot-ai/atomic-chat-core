@@ -198,6 +198,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED':
     case 'LITERT_LM_ACCELERATOR_NOT_PREPARED':
     case 'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE':
+    case 'GENIEX_MODEL_REQUIRES_NEWER_ENGINE':
     case 'REMOTE_ACCESS_STOP_FAILED':
     case 'JOB_BUSY':
     case 'BACKEND_IN_USE':
@@ -244,6 +245,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'REMOTE_UNSUPPORTED':
     case 'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED':
     case 'LITERT_LM_VARIANT_UNSUPPORTED':
+    case 'GENIEX_VARIANT_UNSUPPORTED':
       return 422
     case 'REMOTE_NOT_CONFIGURED':
       return 409

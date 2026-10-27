@@ -53,6 +53,7 @@ const PROVIDERS: ReadonlySet<string> = new Set([
   'sglang',
   'foundry-local',
   'litert-lm',
+  'geniex',
 ])
 
 export interface ExternalSessionsOptions {

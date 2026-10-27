@@ -31,6 +31,7 @@ export type LocalProvider =
   | 'sglang'
   | 'foundry-local'
   | 'litert-lm'
+  | 'geniex'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
@@ -39,7 +40,8 @@ export type LocalProvider =
  * exactly that reason: adding a provider moves nothing that already resolved (`vllm` after
  * `atomic-prism`, which core 0.10.0 already shipped; change `add-vllm-runtime`, D11; `sglang` after
  * `vllm`, change `add-sglang-runtime`, D8; `foundry-local` after `sglang`, change `add-foundry-local`, D5;
- * `litert-lm` after `foundry-local`, change `add-litert-lm-runtime`, task 6.1). A Prism-only file never loads
+ * `litert-lm` after `foundry-local`, change `add-litert-lm-runtime`, task 6.1; `geniex` after `litert-lm`,
+ * change `add-geniex-runtime`, task 6.1). A Prism-only file never loads
  * under another engine (the compatibility gate), so its sessions are found here even near the end of
  * the list; one store model is never loaded in two managed providers at once, so their order never
  * decides between two live sessions of one id.
@@ -54,6 +56,7 @@ export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
   'sglang',
   'foundry-local',
   'litert-lm',
+  'geniex',
 ]
 
 /**
