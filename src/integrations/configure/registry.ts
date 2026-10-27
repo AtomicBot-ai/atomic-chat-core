@@ -19,8 +19,10 @@ export interface ConfigureInput {
   /** `$SHELL`; decides which rc file the env-var agents write to. */
   shell: string | undefined
   env: NodeJS.ProcessEnv
-  /** Run a command (only Cline needs one). Resolves with its exit status and output. */
+  /** Run a command (Cline's `cline auth`, Codex's `--version`). Resolves with its exit status and output. */
   spawn?: (program: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>
+  /** The agent's launcher as detection found it (bare name or absolute path); Codex asks it its version. */
+  program?: string
 }
 
 export type ConfigureWriter = (input: ConfigureInput) => Promise<void>
@@ -47,6 +49,7 @@ export interface ConfigureOptions {
   shell?: string | undefined
   env?: NodeJS.ProcessEnv
   spawn?: ConfigureInput['spawn']
+  program?: string
 }
 
 /**
@@ -87,5 +90,6 @@ export async function configureAgent(
     shell: options.shell ?? env['SHELL'],
     env,
     ...(options.spawn ? { spawn: options.spawn } : {}),
+    ...(options.program ? { program: options.program } : {}),
   })
 }

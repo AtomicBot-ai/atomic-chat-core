@@ -93,8 +93,8 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
    imported only dynamically by their hidden host modes; no other file may follow them.
 7. **Naming.** New identifiers are `atomic-*`, never `jan*`. Files `kebab-case.ts`, classes `PascalCase`,
    functions `camelCase`. Data paths: only those listed in `docs/contracts.md`; never invent a new one.
-8. **Dependencies.** `yaml`, `tar`, `yauzl`, `ai`, `@ai-sdk/openai-compatible`. Adding one needs an
-   explicit "ok" from the owner and an ADR.
+8. **Dependencies.** `yaml`, `tar`, `yauzl`, `ai`, `@ai-sdk/openai-compatible`, `smol-toml`. Adding one
+   needs an explicit "ok" from the owner and an ADR.
 9. **Do only what was asked.** No drive-by refactors or cleanups; propose them instead.
 10. **Never commit unless explicitly asked.**
 11. **Record non-trivial decisions** as a new file in `docs/decisions/` (template `_TEMPLATE.md`), in the

@@ -171,6 +171,8 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
           configureAgent(a, u, m, k, {
             env: io.env,
             spawn: runCommand,
+            // Codex asks the launcher we are about to run for its version.
+            program: detection.program,
           }))
       try {
         await configure(agent, apiUrl, modelId, apiKey)
