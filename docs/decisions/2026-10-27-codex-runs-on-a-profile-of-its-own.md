@@ -36,12 +36,16 @@ title: "Codex runs on a profile of its own; the shared config.toml is only repai
   `configure/codex.test.ts` + `codex-repair.test.ts` pin the new behaviour.
 - **Consequences:** A user's Codex config is no longer ours to break; the first configure after this
   release repairs the incident shape and keeps a backup. Codex older than 0.134 cannot be launched
-  from `launch codex` until updated (0.131–0.133 named the flag `--profile-v2`). A config.toml that
-  is a symlink is replaced by a regular file on repair (the backup and the link's target keep the old
-  text). The app's copy of the agent-config fixtures still has the codex cases; it drops them with
-  the desktop half of this change. Startup migration, disconnect (delete our profile, repair) and the
-  "configured" detection are the desktop's alone.
+  from `launch codex` until updated (0.131–0.133 named the flag `--profile-v2`). A `config.toml` or
+  profile that is a symbolic link (dotfile managers link them) is written through: the temp file and
+  the rename happen beside the real file, which gets the new text and keeps its permission bits, while
+  the link stays a link; the backup still goes next to the link. A profile link to nothing is refused,
+  not replaced (a `config.toml` link to nothing reads as absent, so there is nothing to repair). The
+  desktop does the same (`symlink_metadata` + `canonicalize`). The app's copy of the agent-config
+  fixtures still has the codex cases; it drops them with the desktop half of this change. Startup
+  migration, disconnect (delete our profile, repair) and the "configured" detection are the
+  desktop's alone.
 - **Owner:** team
 - **Links:** `src/integrations/configure/{codex,codex-repair}.ts`, `src/integrations/config-io.ts`
-  (`readStrict`, `createNew`, `permissions`, `tomlBasicStringEscape`), `src/integrations/catalog.ts`,
+  (`readStrict`, `createNew`, `permissions`, `linkTarget`, `tomlBasicStringEscape`), `src/integrations/catalog.ts`,
   `src/cli/launch.ts`, `test/contract/agent-config.test.ts`, `test/fixtures/app/agent-config/index.json`.

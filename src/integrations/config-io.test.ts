@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -237,6 +237,37 @@ describe('nodeConfigFs', () => {
     expect(await fs.permissions('config.toml')).toBe(0o640)
     await expect(fs.permissions('config.toml/inside')).rejects.toMatchObject({ code: 'ENOTDIR' })
   })
+
+  it('writes to a path as it is when it is not a symbolic link', async () => {
+    const root = await home()
+    const fs = nodeConfigFs(root)
+    expect(await fs.linkTarget('missing.toml'), 'a file yet to be created').toBe(join(root, 'missing.toml'))
+    await writeFile(join(root, 'plain.toml'), '')
+    expect(await fs.linkTarget('plain.toml')).toBe(join(root, 'plain.toml'))
+    // Windows reports a path through a file as not found, which is just a file yet to be created.
+    if (process.platform === 'win32') return
+    await writeFile(join(root, 'file'), '')
+    await expect(fs.linkTarget('file/inside'), 'any other failure').rejects.toMatchObject({ code: 'ENOTDIR' })
+  })
+
+  // Creating a symbolic link on Windows needs a privilege CI runners do not have.
+  it.skipIf(process.platform === 'win32')(
+    'resolves a symbolic link, through every hop, to its real file',
+    async () => {
+      const root = await home()
+      const dotfiles = await home()
+      const fs = nodeConfigFs(root)
+      await writeFile(join(dotfiles, 'config.toml'), '')
+      await symlink(join(dotfiles, 'config.toml'), join(root, 'hop.toml'))
+      await symlink(join(root, 'hop.toml'), join(root, 'config.toml'))
+      expect(await fs.linkTarget('config.toml')).toBe(await realpath(join(dotfiles, 'config.toml')))
+
+      await symlink(join(dotfiles, 'gone.toml'), join(root, 'dangling.toml'))
+      await expect(fs.linkTarget('dangling.toml'), 'a link to nothing').rejects.toMatchObject({
+        code: 'ENOENT',
+      })
+    }
+  )
 
   it('writes the env block into the rc file the shell implies', async () => {
     const root = await home()

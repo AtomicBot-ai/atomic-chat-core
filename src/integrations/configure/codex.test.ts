@@ -1,3 +1,4 @@
+import { lstat, readlink, symlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { parse as parseToml } from 'smol-toml'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -39,9 +40,22 @@ const LEGACY_V2 =
   `${BEGIN}\n[model_providers.atomic]\nname = "Atomic Chat"\nbase_url = "http://127.0.0.1:1337/v1"\n${END}\n`
 
 let home: AgentHome
+/** A second throwaway directory, standing in for a dotfile manager's repository. */
+let dotfiles: AgentHome | undefined
 afterEach(async () => {
   await home?.cleanup()
+  await dotfiles?.cleanup()
+  dotfiles = undefined
 })
+
+/** `.codex/atomic-chat.config.toml` as a symbolic link to `name` in the dotfiles directory. */
+async function linkProfileTo(name: string): Promise<string> {
+  dotfiles = await makeAgentHome('atomic-codex-dotfiles-')
+  await home.fs.mkdirp('.codex')
+  const real = join(dotfiles.path, name)
+  await symlink(real, join(home.path, PROFILE))
+  return real
+}
 
 type Spawn = NonNullable<ConfigureInput['spawn']>
 const answering =
@@ -103,6 +117,44 @@ describe('configureCodex', () => {
     })
     expect(await home.tree()).toEqual({ [PROFILE]: 'model = "theirs"\n' })
   })
+
+  // Creating a symbolic link on Windows needs a privilege CI runners do not have.
+  it.skipIf(process.platform === 'win32')('rewrites a symbolic-linked profile through the link', async () => {
+    home = await makeAgentHome()
+    const real = await linkProfileTo('atomic-chat.config.toml')
+    await dotfiles?.seed('atomic-chat.config.toml', GOLDEN)
+    await configureCodex(agentInput(home.fs, { apiKey: '', model: 'other' }))
+    expect((await lstat(join(home.path, PROFILE))).isSymbolicLink()).toBe(true)
+    expect(await readlink(join(home.path, PROFILE))).toBe(real)
+    expect(await dotfiles?.tree()).toEqual({
+      'atomic-chat.config.toml': GOLDEN_KEYLESS.replace('AtomicChat/Qwen3.5-9B-GGUF', 'other'),
+    })
+  })
+
+  it.skipIf(process.platform === 'win32')('judges a linked profile by the file it points to', async () => {
+    home = await makeAgentHome()
+    await linkProfileTo('mine.toml')
+    await dotfiles?.seed('mine.toml', 'model = "theirs"\n')
+    await expect(configureCodex(agentInput(home.fs))).rejects.toMatchObject({
+      message: expect.stringContaining('was not written by Atomic Chat') as unknown as string,
+    })
+    expect(await dotfiles?.tree()).toEqual({ 'mine.toml': 'model = "theirs"\n' })
+  })
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a profile link to nothing instead of replacing it',
+    async () => {
+      home = await makeAgentHome()
+      await linkProfileTo('gone.toml')
+      const path = join(home.path, '.codex', 'atomic-chat.config.toml')
+      await expect(configureCodex(agentInput(home.fs))).rejects.toMatchObject({
+        code: 'IO_ERROR',
+        message: `${path} is a symbolic link to a file that does not exist. Remove the link or create the file it points to, then connect Codex again.`,
+      })
+      expect((await lstat(path)).isSymbolicLink()).toBe(true)
+      expect(await dotfiles?.tree()).toEqual({})
+    }
+  )
 
   it('does not take an unreadable profile for a missing one', async () => {
     home = await makeAgentHome()

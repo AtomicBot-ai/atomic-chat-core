@@ -24,6 +24,7 @@ const memoryFs = (): ConfigFs => {
       return true
     },
     permissions: async (relative) => (files.has(relative) ? 0o644 : undefined),
+    linkTarget: async (relative) => relative,
     mkdirp: async () => {},
     exists: async (relative) => files.has(relative),
     remove: async (relative) => {

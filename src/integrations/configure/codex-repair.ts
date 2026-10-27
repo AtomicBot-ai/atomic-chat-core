@@ -14,7 +14,9 @@
  * the file without them must still parse; and it must not have changed since it was read. Anything
  * else is a conflict: the file stays byte for byte as it was, and the message names it and says which
  * lines to remove by hand. A repair keeps a backup of the original (never over an earlier one) and
- * writes atomically with the file's own permission bits.
+ * writes atomically with the file's own permission bits. A `config.toml` that is a symbolic link (a
+ * dotfile manager's) is written through: the temp file and the rename happen beside the real file,
+ * which gets the new text while the link stays a link; the backup still goes next to the link.
  *
  * The algorithm is shared with the desktop app, which runs it at startup and on disconnect; both
  * sides must reach the same decision on the same bytes
@@ -260,9 +262,11 @@ export async function repairLegacyCodexConfig(
   const plan = planCodexConfigRepair(original, path)
   if (plan.kind !== 'repair') return plan
 
+  let target: string
   let mode: number | undefined
   try {
-    mode = platform === 'win32' ? undefined : await fs.permissions(path)
+    target = await fs.linkTarget(path)
+    mode = platform === 'win32' ? undefined : await fs.permissions(target)
   } catch (e) {
     throw readFailure(path, e)
   }
@@ -287,9 +291,9 @@ export async function repairLegacyCodexConfig(
   }
 
   try {
-    await fs.write(path, plan.text, options)
+    await fs.write(target, plan.text, options)
   } catch (e) {
-    throw new AtomicCoreError('IO_ERROR', `Failed to write ${path}`, (e as Error).message)
+    throw new AtomicCoreError('IO_ERROR', `Failed to write ${target}`, (e as Error).message)
   }
   return { kind: 'repaired', backupPath, legacy: plan.legacy }
 }

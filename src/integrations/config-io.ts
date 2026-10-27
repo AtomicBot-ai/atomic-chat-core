@@ -15,10 +15,12 @@
  * ever *repairs* the shared `config.toml` (`configure/codex-repair.ts`). A repair must never turn an
  * unreadable file into an empty one, so it reads through `readStrict` ("not found" is the only
  * absence), backs up through `createNew` (never over an earlier backup) and writes back with the
- * file's own `permissions` — three operations the lenient writers above do not need.
+ * file's own `permissions` — operations the lenient writers above do not need. Its writes also go
+ * through a symbolic link (`linkTarget`) rather than over it: dotfile managers link
+ * `~/.codex/config.toml` into their repository, and replacing the link would detach it.
  */
 
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml'
 import { AtomicCoreError } from '../contracts/index.js'
@@ -54,6 +56,12 @@ export interface ConfigFs {
   createNew: (relative: string, contents: string, options?: { mode?: number }) => Promise<boolean>
   /** Permission bits (`mode & 0o777`) of an existing file, `undefined` when there is none. */
   permissions: (relative: string) => Promise<number | undefined>
+  /**
+   * Where a write to this path should land so a symbolic link stays a link: the fully resolved real
+   * path when the path itself is a link, else the path unchanged (whether or not it exists). A link
+   * to nothing rejects with `ENOENT`.
+   */
+  linkTarget: (relative: string) => Promise<string>
   mkdirp: (relative: string) => Promise<void>
   exists: (relative: string) => Promise<boolean>
   remove: (relative: string) => Promise<void>
@@ -120,6 +128,17 @@ export function nodeConfigFs(home: string): ConfigFs {
           throw e
         }
       ),
+    linkTarget: async (relative) => {
+      const path = abs(relative)
+      let link: boolean
+      try {
+        link = (await lstat(path)).isSymbolicLink()
+      } catch (e) {
+        if (isNotFound(e)) return path
+        throw e
+      }
+      return link ? realpath(path) : path
+    },
     mkdirp: (relative) => mkdir(abs(relative), { recursive: true }).then(() => undefined),
     exists: (relative) =>
       stat(abs(relative)).then(

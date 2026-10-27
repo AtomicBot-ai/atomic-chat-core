@@ -15,8 +15,10 @@
  * Order: version gate, repair, profile. Below 0.134 `--profile` meant the old `[profiles.x]` tables,
  * so an old Codex is refused before anything is touched; a version that cannot be read is let through.
  * The profile is rewritten only while its first line says Atomic Chat wrote it: a file of the same
- * name that someone else made is refused, never replaced. The bytes are a contract with the desktop
- * writer (ADR 2026-10-27-codex-runs-on-a-profile-of-its-own), so either side can rewrite the other's.
+ * name that someone else made is refused, never replaced. A profile that is a symbolic link is
+ * written through, so the link survives; one that points at nothing is refused rather than replaced.
+ * The bytes are a contract with the desktop writer (ADR 2026-10-27-codex-runs-on-a-profile-of-its-own),
+ * so either side can rewrite the other's.
  */
 
 import { join, resolve } from 'node:path'
@@ -87,7 +89,7 @@ export function isCodexTooOld([major, minor, patch]: CodexVersion): boolean {
 
 /**
  * Write the profile, refusing to replace a file of that name Atomic Chat did not write. Returns its
- * path. A profile that cannot be read is an error, never "absent".
+ * path. A profile that cannot be read is an error, never "absent"; a symbolic link is written through.
  */
 export async function writeCodexProfile(
   fs: ConfigFs,
@@ -102,11 +104,21 @@ export async function writeCodexProfile(
   // Codex would reject.
   parseToml(contents)
 
+  let target: string
   let existing: string | undefined
   try {
-    existing = await fs.readStrict(path)
+    target = await fs.linkTarget(path)
+    existing = await fs.readStrict(target)
   } catch (e) {
-    throw new AtomicCoreError('IO_ERROR', `Failed to read ${path}`, (e as Error).message)
+    // Only a link to nothing makes `linkTarget` report "not found"; writing would replace the link.
+    const dangling = (e as NodeJS.ErrnoException).code === 'ENOENT'
+    throw new AtomicCoreError(
+      'IO_ERROR',
+      dangling
+        ? `${path} is a symbolic link to a file that does not exist. Remove the link or create the file it points to, then connect Codex again.`
+        : `Failed to read ${path}`,
+      (e as Error).message
+    )
   }
   if (existing !== undefined && !existing.startsWith(CODEX_PROFILE_OWNER_PREFIX)) {
     throw new AtomicCoreError(
@@ -114,7 +126,7 @@ export async function writeCodexProfile(
       `${path} already exists and was not written by Atomic Chat. Rename or remove it, then connect Codex again.`
     )
   }
-  await fs.write(path, contents)
+  await fs.write(target, contents)
   return path
 }
 

@@ -1,4 +1,4 @@
-import { chmod, stat } from 'node:fs/promises'
+import { chmod, lstat, readlink, stat, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse as parseToml } from 'smol-toml'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -36,8 +36,12 @@ const INCIDENT = `${HEAD}\n${USER.trim()}\n${TAIL}`
 const PATH = '/home/u/.codex/config.toml'
 
 let home: AgentHome
+/** A second throwaway directory, standing in for a dotfile manager's repository. */
+let dotfiles: AgentHome | undefined
 afterEach(async () => {
   await home?.cleanup()
+  await dotfiles?.cleanup()
+  dotfiles = undefined
 })
 
 const dirOf = (h: AgentHome) => join(h.path, '.codex')
@@ -314,6 +318,40 @@ describe('repairLegacyCodexConfig', () => {
       'the backup is no more open than the file'
     ).toBe(0)
   })
+
+  // Creating a symbolic link on Windows needs a privilege CI runners do not have.
+  it.skipIf(process.platform === 'win32')(
+    'writes through a symbolic link: the link stays, its real file is repaired, the backup sits beside the link',
+    async () => {
+      home = await makeAgentHome()
+      dotfiles = await makeAgentHome('atomic-codex-dotfiles-')
+      const real = join(dotfiles.path, 'codex', 'config.toml')
+      await dotfiles.seed('codex/config.toml', INCIDENT)
+      await chmod(real, 0o660)
+      await home.fs.mkdirp('.codex')
+      await symlink(real, join(home.path, CONFIG))
+
+      expect(await repair(home)).toMatchObject({ kind: 'repaired', backupPath: join(home.path, BACKUP) })
+      expect((await lstat(join(home.path, CONFIG))).isSymbolicLink()).toBe(true)
+      expect(await readlink(join(home.path, CONFIG))).toBe(real)
+      expect(await dotfiles.tree(), 'the temp file was renamed beside the real file').toEqual({
+        'codex/config.toml': USER,
+      })
+      expect((await stat(real)).mode & 0o777, "the real file's permission bits").toBe(0o660)
+      expect(await home.tree()).toEqual({ [CONFIG]: USER, [BACKUP]: INCIDENT })
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'is clean for a link to nothing, which it leaves alone',
+    async () => {
+      home = await makeAgentHome()
+      await home.fs.mkdirp('.codex')
+      await symlink(join(home.path, 'gone.toml'), join(home.path, CONFIG))
+      expect(await repair(home)).toEqual({ kind: 'clean' })
+      expect((await lstat(join(home.path, CONFIG))).isSymbolicLink()).toBe(true)
+    }
+  )
 
   it('does not ask for permission bits on Windows, where there are none to keep', async () => {
     home = await makeAgentHome()
