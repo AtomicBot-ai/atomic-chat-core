@@ -1,23 +1,28 @@
 /**
  * Where the `geniex` provider registers, and which Snapdragon chip the machine has (openspec change
  * `add-geniex-runtime`, task 4.3, design D3): Windows arm64 whose processor string names a Snapdragon
- * X Elite (`X1E…`) or X2 Elite (`X2E…`). Other arm64 Windows machines (virtual machines, Snapdragon X
- * Plus, 8cx) have no HTP GenieX's signed bundle targets, so the provider stays off there. The chip
- * matters for AI Hub bundles, which are compiled per SoC.
+ * X of either generation. The AI Hub bundles are compiled per Hexagon generation, not per SKU, and
+ * conf spells the generations `x-elite` (Hexagon v73: X Elite `X1E…`, X Plus `X1P…`, X `X1-…`) and
+ * `x2-elite` (v81: X2 Elite `X2E…`, X2 Plus `X2P…`) — AI Hub itself points the X Plus at the X Elite
+ * zip. Other arm64 Windows machines (virtual machines, 8cx: Hexagon v69, which the SDK has no HTP
+ * library for) keep the provider off.
  *
- * The same table shape as LiteRT-LM's Intel NPU generations (`litert-lm/npu.ts`); unverified on real
- * hardware until the spike (rulings/core.md), and fixed by a core release when wrong.
+ * The same table shape as LiteRT-LM's Intel NPU generations (`litert-lm/npu.ts`). Verified on an X2
+ * Elite (rulings/core.md, spike S1); the first generation is read off the part numbers only.
  */
 
 import type { GeniexChip } from '../../contracts/index.js'
 
-/** The part numbers: `X1E80100`, `X1E78100` (X Elite); `X2E…` (X2 Elite). A bare word, not a suffix. */
-const PART_RE = /(?:^|[^A-Za-z0-9])(X1E|X2E)\d*(?![A-Za-z])/
+/**
+ * The part numbers as a bare word, not a suffix: `X1E80100`, `X1E78100` (X Elite), `X1P64100` (X Plus),
+ * `X1-26-100` (X), `X2E88100` (X2 Elite), `X2P…` (X2 Plus).
+ */
+const PART_RE = /(?:^|[^A-Za-z0-9])(X1E|X1P|X1(?=-\d)|X2E|X2P)\d*(?![A-Za-z])/
 
 export function geniexChip(cpuName: string): GeniexChip | null {
-  const match = PART_RE.exec(cpuName)
-  if (!match) return null
-  return match[1] === 'X1E' ? 'x-elite' : 'x2-elite'
+  const part = PART_RE.exec(cpuName)?.[1]
+  if (!part) return null
+  return part.startsWith('X1') ? 'x-elite' : 'x2-elite'
 }
 
 export interface GeniexHostFacts {
@@ -38,7 +43,7 @@ export function geniexHostPlatform(host: GeniexHostFacts): GeniexHostPlatform {
   if (!chip)
     return {
       platform: null,
-      reason: `GenieX runs on Snapdragon X Elite and X2 Elite only; this processor is "${host.cpuName}".`,
+      reason: `GenieX runs on Snapdragon X (X Elite, X Plus, X, X2 Elite, X2 Plus) only; this processor is "${host.cpuName}".`,
     }
   return { platform: 'win-arm64', chip }
 }
