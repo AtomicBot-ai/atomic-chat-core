@@ -201,6 +201,26 @@ export function parseExtraArgs(value: string): string[] {
   return args
 }
 
+/**
+ * Extra arguments without a tensor split (`-sm tensor`, `--split-mode tensor`, `=tensor` spellings).
+ * llama.cpp's tensor split cannot run an embedding model: the meta backend aborts the server with
+ * `unsupported mul_mat split states` on the first attention layer (ATO-556). The settings dropdown
+ * offers no tensor split, so extra arguments are its only way in.
+ */
+function withoutTensorSplit(args: string[]): string[] {
+  const kept: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if ((arg === '-sm' || arg === '--split-mode') && args[i + 1] === 'tensor') {
+      i++
+      continue
+    }
+    if (arg === '-sm=tensor' || arg === '--split-mode=tensor') continue
+    kept.push(arg)
+  }
+  return kept
+}
+
 /** Build the plan (argv + warnings). Throws `INVALID_ARGUMENT` for a malformed `version_backend`. */
 export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): LlamaArgsPlan {
   const { version, backend } = parseVersionBackend(config.version_backend)
@@ -421,7 +441,16 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   }
 
   try {
-    push(...parseExtraArgs(cfg.extra_args))
+    const extra = parseExtraArgs(cfg.extra_args)
+    if (input.isEmbedding) {
+      const kept = withoutTensorSplit(extra)
+      if (kept.length !== extra.length) {
+        warnings.push(
+          'Embedding model: ignoring the tensor split from the extra llama-server arguments (ATO-556)'
+        )
+      }
+      push(...kept)
+    } else push(...extra)
   } catch (error) {
     warnings.push(`Ignoring invalid extra llama-server arguments: ${(error as Error).message}`)
   }

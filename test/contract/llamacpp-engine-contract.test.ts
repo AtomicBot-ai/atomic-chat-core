@@ -59,6 +59,7 @@ describe('the upstream llama.cpp engine contract', () => {
       '--decision-convert-cache': 'TurboQuant fork only',
       '--decision-convert-type': 'TurboQuant fork only',
       '--decision-allow-uncalibrated': 'TurboQuant fork only',
+      '-sm': 'never emitted: matched in the extra arguments to drop a tensor split from embedding loads',
     }
     for (const source of ['src/runtime/llamacpp/args.ts', 'src/embedding/args.ts', 'src/decision/args.ts']) {
       const text = readFileSync(source, 'utf8')
