@@ -8,7 +8,14 @@ import {
   GENERIC_PROCESS_ERROR_MESSAGE,
   isCrashExit,
   signalNumber,
+  TENSOR_SPLIT_FAILED_MESSAGE,
 } from './errors.js'
+
+// What a Windows user with two CUDA GPUs and `-sm tensor` got from the embedding model (ATO-556).
+const META_ABORT =
+  'W init: embeddings required but some input tokens were not marked as outputs -> overriding\n' +
+  'D:/a/llama.cpp/llama.cpp/ggml/src/ggml-backend-meta.cpp:610: unsupported mul_mat split states: ' +
+  'node=node_30 src0=blk.0.attn_output.weight axis=0 src1=Meta(CUDA0,CUDA1)#kqv_out-0#0 axis=10\n'
 
 describe('classifyStderr', () => {
   it.each([
@@ -35,6 +42,15 @@ describe('classifyStderr', () => {
     expect(err.code).toBe('LLAMA_CPP_PROCESS_ERROR')
     expect(err.message).toBe(ARGUMENT_REJECTED_MESSAGE)
     expect(err.details).toBe(`${stderr}\n`)
+  })
+
+  it('names the tensor split when the meta backend aborts', () => {
+    const err = classifyStderr(META_ABORT)
+    expect(err.code).toBe('LLAMA_CPP_PROCESS_ERROR')
+    expect(err.message).toBe(TENSOR_SPLIT_FAILED_MESSAGE)
+    expect(err.details).toBe(META_ABORT)
+    // An out-of-memory under a tensor split is still out of memory.
+    expect(classifyStderr(`${META_ABORT}cudaMalloc failed: out of memory`).code).toBe('OUT_OF_MEMORY')
   })
 
   it('applies the cascade in order (OOM before arch, dyld before OOM)', () => {
@@ -71,6 +87,18 @@ describe('classifyExit / classifyProcessOutput', () => {
     expect(classifyExit({ code: null, signal: 11 }, '', 'linux').message).toBe(CRASH_MESSAGE)
     expect(classifyExit({ code: null, signal: 11 }, 'out of memory', 'linux').code).toBe('OUT_OF_MEMORY')
     expect(classifyExit({ code: 1, signal: null }, '', 'linux').message).toBe(GENERIC_PROCESS_ERROR_MESSAGE)
+  })
+  it('keeps the tensor-split message when GGML_ABORT ends the process', () => {
+    expect(classifyExit({ code: null, signal: 'SIGABRT' }, META_ABORT, 'linux').message).toBe(
+      TENSOR_SPLIT_FAILED_MESSAGE
+    )
+    // MSVC's abort() exits with 3; an NTSTATUS crash code must not override it either.
+    expect(classifyProcessOutput({ code: 3, signal: null }, META_ABORT, '', 'win32').message).toBe(
+      TENSOR_SPLIT_FAILED_MESSAGE
+    )
+    expect(classifyExit({ code: 0xc0000409, signal: null }, META_ABORT, 'win32').message).toBe(
+      TENSOR_SPLIT_FAILED_MESSAGE
+    )
   })
   it('falls back to stdout and uses it as details only when stderr is blank', () => {
     const exit = { code: 1, signal: null }

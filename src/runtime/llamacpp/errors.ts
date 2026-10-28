@@ -76,6 +76,9 @@ const tensorLayoutIsArchitecture = (provider: LocalProviderId) => provider === '
 export const ARGUMENT_REJECTED_MESSAGE =
   'This llama.cpp backend does not accept one of the arguments it was started with. If you added custom arguments to this model, remove them; otherwise switch to another backend version or update Atomic Chat.'
 
+export const TENSOR_SPLIT_FAILED_MESSAGE =
+  "This model can't run with llama.cpp's experimental tensor split (-sm tensor). Remove it from Additional llama-server Arguments, or use the Layer split mode."
+
 const CASCADE: Rule[] = [
   {
     code: 'OS_VERSION_UNSUPPORTED',
@@ -136,6 +139,14 @@ const CASCADE: Rule[] = [
     message: ARGUMENT_REJECTED_MESSAGE,
     match: (l) => includesAny(l, ['error: invalid argument: ', 'error while handling argument']),
   },
+  {
+    // llama.cpp builds its "meta" device only for `--split-mode tensor`, so an abort from
+    // `ggml-backend-meta.cpp` is that split failing, e.g. `unsupported mul_mat split states` on an
+    // embedding model (ATO-556). Settings offer no tensor split: it came from custom arguments.
+    code: 'LLAMA_CPP_PROCESS_ERROR',
+    message: TENSOR_SPLIT_FAILED_MESSAGE,
+    match: (l) => l.includes('ggml-backend-meta.cpp'),
+  },
 ]
 
 export const GENERIC_PROCESS_ERROR_MESSAGE = 'The model process encountered an unexpected error.'
@@ -162,7 +173,8 @@ export function classifyExit(
   provider: LocalProviderId = 'llamacpp-upstream'
 ): AtomicCoreError {
   const base = classifyStderr(stderr, provider)
-  if (base.code !== 'LLAMA_CPP_PROCESS_ERROR' || !isCrashExit(exit, platform)) return base
+  // Only the generic message: a GGML_ABORT exits on SIGABRT, and the tensor-split one says more.
+  if (base.message !== GENERIC_PROCESS_ERROR_MESSAGE || !isCrashExit(exit, platform)) return base
   return new AtomicCoreError('LLAMA_CPP_PROCESS_ERROR', CRASH_MESSAGE, stderr)
 }
 

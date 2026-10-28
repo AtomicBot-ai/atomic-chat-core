@@ -278,6 +278,12 @@ export const CONTRACT_STRINGS: ContractString[] = [
     live_expectation: 'observed',
     note: 'A value the build refuses, e.g. `--flash-attn bogus` (common/arg.cpp).',
   }),
+  log('error.tensor-split.meta-abort', 'ggml-backend-meta.cpp', CASCADE, {
+    upstream_text: 'unsupported mul_mat split states',
+    severity_if_lost: 'warn',
+    live_expectation: 'unobservable',
+    note: 'GGML_ABORT prints its file name; llama.cpp builds the meta device only for `--split-mode tensor`, which needs two GPUs. The process error, with words that say so (ATO-556).',
+  }),
 
   // MTP rejections (classify.ts): llama.cpp has no code for them, so the text is the contract.
   ...(
