@@ -53,7 +53,7 @@
     "!dist/bin"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/build-geniex-worker.mjs && tsc -p tsconfig.build.json",
     "build:bin": "node scripts/build-binaries.mjs --host",
     "build:bin:all": "node scripts/build-binaries.mjs --all",
     "typecheck": "tsc -p tsconfig.json --noEmit",

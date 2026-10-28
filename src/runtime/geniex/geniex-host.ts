@@ -23,5 +23,8 @@ export async function runGeniexHostMain(
     stderr: detachableWriter(process.stderr),
   }
 ): Promise<number> {
-  return runGeniexHost(argv, { ...lineIo(io), startEngine: () => new WorkerEngine(spawnGeniexWorker()) })
+  return runGeniexHost(argv, {
+    ...lineIo(io),
+    startEngine: async () => new WorkerEngine(await spawnGeniexWorker()),
+  })
 }

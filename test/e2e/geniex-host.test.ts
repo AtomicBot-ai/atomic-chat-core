@@ -36,7 +36,7 @@ describe.skipIf(!existsSync(BIN) || !existsSync(APP_BIN))('geniex-host through t
       expect(empty.stderr).toMatch(
         /^GenieX does not load from .*: load: .*geniex\.dll not found: no geniex\.dll in this build/
       )
-      expect(empty.stderr).not.toMatch(/only inside a compiled binary|no Worker|ModuleNotFound/)
+      expect(empty.stderr).not.toMatch(/only inside a compiled binary|no Worker|ModuleNotFound|ENOENT/)
       expect(empty.stdout).toBe('')
       const usage = spawnSync(bin, ['geniex-host', 'nope'], { encoding: 'utf8', timeout: 60_000 })
       expect(usage.status).toBe(2)

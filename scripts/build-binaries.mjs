@@ -8,15 +8,12 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildGeniexWorkerSource } from './build-geniex-worker.mjs'
 
 // Not `.pathname`: on Windows that is `/D:/…`, which neither `mkdirSync` nor `cwd` accepts.
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const ENTRY = join(ROOT, 'src/cli/bin.ts')
 const APP_ENTRY = join(ROOT, 'src/app-daemon.ts')
-// The GenieX host's Worker (change add-geniex-runtime, design D1): its own entry of every binary,
-// reached from `engine.ts` as `new URL('./worker.js', import.meta.url)`, which inside the compiled
-// binary is `/$bunfs/root/worker.js` — hence the flat entry naming.
-const GENIEX_WORKER_ENTRY = join(ROOT, 'src/runtime/geniex/host/worker.ts')
 const OUT_DIR = join(ROOT, 'dist/bin')
 
 // Bun target → Tauri externalBin triple used by the app (scripts/download-bin.mjs).
@@ -66,6 +63,9 @@ function assertDsnBaked(outfile) {
 const all = process.argv.includes('--all')
 const targets = all ? Object.keys(TARGETS) : [hostTarget()]
 mkdirSync(OUT_DIR, { recursive: true })
+// The GenieX host's Worker (change add-geniex-runtime, design D1) rides inside each binary as a string:
+// `scripts/build-geniex-worker.mjs` says why not as a second entrypoint.
+buildGeniexWorkerSource()
 
 for (const target of targets) {
   const triple = TARGETS[target]
@@ -83,11 +83,8 @@ for (const target of targets) {
       '--minify-syntax',
       '--minify-whitespace',
       '--sourcemap',
-      '--entry-naming',
-      '[name].[ext]',
       ...telemetryDefines(),
       entry,
-      GENIEX_WORKER_ENTRY,
       '--outfile',
       outfile,
     ]

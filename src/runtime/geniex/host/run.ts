@@ -40,7 +40,7 @@ export interface GeniexHostDeps {
   stdout: (line: string) => void
   stderr: (line: string) => void
   /** The Worker with the library in it; made once per run, destroyed at the end. */
-  startEngine: () => GeniexEngine
+  startEngine: () => GeniexEngine | Promise<GeniexEngine>
   /** SIGTERM, SIGINT or stdin closed; made before the model, so an early stop is never missed. */
   watchStop?: () => StopWatch
 }
@@ -111,7 +111,7 @@ export async function runGeniexHost(argv: readonly string[], deps: GeniexHostDep
   }
   let engine: GeniexEngine
   try {
-    engine = deps.startEngine()
+    engine = await deps.startEngine()
   } catch (error) {
     deps.stderr(`GenieX does not load from ${args.lib}: ${said(error)}`)
     return EXIT.load

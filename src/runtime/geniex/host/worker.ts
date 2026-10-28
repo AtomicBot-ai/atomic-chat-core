@@ -1,7 +1,8 @@
 /**
  * The Worker of `geniex-host` (openspec change `add-geniex-runtime`, design D1): the one thread that
- * calls Qualcomm's library. Bundled as its own entry of the compiled binaries; allow-listed with
- * `ffi-bun.ts` in the runtime-agnostic gates, since the Worker globals and `bun:ffi` are Bun's.
+ * calls Qualcomm's library. Bundled by `scripts/build-geniex-worker.mjs` into the script `engine.ts`
+ * starts as a `blob:` Worker; allow-listed with `ffi-bun.ts` in the runtime-agnostic gates, since the
+ * Worker globals and `bun:ffi` are Bun's.
  */
 
 import { loadBunGeniexLibrary } from './ffi-bun.js'

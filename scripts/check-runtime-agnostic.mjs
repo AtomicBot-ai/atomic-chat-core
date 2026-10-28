@@ -18,6 +18,8 @@ const BUN_FFI_ALLOWED = new Set([
   'src/runtime/geniex/host/ffi-bun.ts',
   'src/runtime/geniex/host/worker.ts',
 ])
+// The Worker's bundle as a string (scripts/build-geniex-worker.mjs): generated, Bun-only by nature.
+const GENERATED_BUN_ONLY = new Set(['src/runtime/geniex/host/worker-source.generated.ts'])
 const BUILTINS = [
   'assert',
   'buffer',
@@ -72,6 +74,7 @@ function* walk(dir) {
 const failures = []
 for (const file of walk(SRC)) {
   const rel = relative(ROOT, file)
+  if (GENERATED_BUN_ONLY.has(rel)) continue
   const text = readFileSync(file, 'utf8')
   const lines = text.split('\n')
   lines.forEach((line, i) => {

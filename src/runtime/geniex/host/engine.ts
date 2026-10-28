@@ -163,13 +163,18 @@ export class WorkerEngine implements GeniexEngine {
 }
 
 /**
- * The Worker of the compiled binaries: `worker.ts`, bundled as its own entry (`scripts/build-binaries.mjs`,
- * `--entry-naming [name].[ext]`) and reached by the name the bundle gives it; under `bun src/…` the
- * same URL resolves to the source. Under Node there is no `Worker` global, and no host either.
+ * The Worker of the compiled binaries, started from a `blob:` URL over the script that
+ * `scripts/build-geniex-worker.mjs` bundles out of `worker.ts` into `worker-source.generated.ts`.
+ * Not from a path: inside a compiled Windows binary the Bun that CI pins (1.3.10) reads a Worker's
+ * `B:\~BUN\root\worker.js` from the real disk (ENOENT; oven-sh/bun#16869, #29124, fixed in 1.4.1),
+ * and a bare `./worker.js` is resolved against the working directory. The generated module is imported
+ * here and only here, so a checkout without a build still loads this file; under Node there is no
+ * `Worker` global, and no host either.
  */
-export function spawnGeniexWorker(): WorkerLike {
-  const ctor = (globalThis as { Worker?: new (url: URL) => WorkerLike }).Worker
+export async function spawnGeniexWorker(): Promise<WorkerLike> {
+  const ctor = (globalThis as { Worker?: new (url: string) => WorkerLike }).Worker
   if (!ctor)
     throw new GeniexLibraryError('load', 'geniex-host runs only inside a compiled binary (no Worker)')
-  return new ctor(new URL('./worker.js', import.meta.url))
+  const { GENIEX_WORKER_SOURCE } = await import(/* @vite-ignore */ './worker-source.generated.js')
+  return new ctor(URL.createObjectURL(new Blob([GENIEX_WORKER_SOURCE], { type: 'application/javascript' })))
 }
