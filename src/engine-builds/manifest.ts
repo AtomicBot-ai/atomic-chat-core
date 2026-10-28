@@ -38,6 +38,13 @@ export const FOUNDRY_LOCAL_C_API_VERSIONS: readonly number[] = [2]
  */
 export const SUPPORTED_LITERT_LM_ABI: readonly number[] = [1]
 
+/**
+ * The `abi` numbers this core's `geniex-host` binds (change `add-geniex-runtime`, design D2). Ours, not
+ * Qualcomm's: GenieX is pre-1.0 and changes `geniex.h` with minor versions; the number moves when the
+ * C functions and structs `geniex/host/ffi-bun.ts` reads change.
+ */
+export const SUPPORTED_GENIEX_ABI: readonly number[] = [1]
+
 export const SDCPP_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/sdcpp-manifest.json'
 export const MLX_MANIFEST_URL =
@@ -46,6 +53,8 @@ export const FOUNDRY_LOCAL_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/foundry-local-manifest.json'
 export const LITERT_LM_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/litert-lm-manifest.json'
+export const GENIEX_MANIFEST_URL =
+  'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/geniex-manifest.json'
 export const ENGINE_MANIFEST_TIMEOUT_MS = 8_000
 /** A fetched manifest is reused for this long unless the caller forces a re-read. */
 export const ENGINE_MANIFEST_TTL_MS = 60 * 60 * 1000
@@ -172,6 +181,38 @@ export interface LiteRtLmAcceptance {
   abis: readonly number[]
 }
 
+/** The platforms GenieX SDK zips exist for; only Windows on Snapdragon X in the first iteration. */
+export const GENIEX_PLATFORMS = ['win-arm64'] as const
+export type GeniexPlatform = (typeof GENIEX_PLATFORMS)[number]
+
+/** One SDK zip. The URL is explicit, on Qualcomm's S3 mirror or a `qualcomm/GenieX` GitHub release (design D2). */
+export interface GeniexAsset {
+  platform: GeniexPlatform
+  url: string
+  name: string
+  size: number
+  sha256: string
+}
+
+export interface GeniexRelease {
+  /** Qualcomm's GenieX version, `X.Y.Z` (the tag without its `v`). */
+  version: string
+  /** The order builds of this engine have. */
+  published_at: string
+  min_core_version: string
+  /** Our binding number; see `SUPPORTED_GENIEX_ABI`. */
+  abi: number
+  notes_url?: string
+  assets: GeniexAsset[]
+}
+
+/** The releases this core can install, newest first; never empty. */
+export interface GeniexManifest {
+  releases: GeniexRelease[]
+}
+
+export type GeniexAcceptance = LiteRtLmAcceptance
+
 const SDCPP_TAG_RE = /^master-[0-9]+-[0-9a-f]{7}(-a[0-9a-f]{7})?$/
 const MLX_TAG_RE = /^mlxvlm-macos-arm64-[0-9a-f]{7,40}$/
 const BACKEND_ID_RE = /^[a-z0-9.-]+$/
@@ -183,6 +224,10 @@ const SEMVER_RE = /^\d+\.\d+\.\d+$/
 const PYPI_URL_RE = /^https:\/\/files\.pythonhosted\.org\/\S+$/
 const LITERT_LM_WHEEL_RE = /^litert_lm_api-[0-9.]+-[A-Za-z0-9._-]+\.whl$/
 const OPENVINO_WHEEL_RE = /^openvino-[A-Za-z0-9._-]+\.whl$/
+/** conf's `sdk_url`: the S3 mirror's `qai-hub-geniex/` folder or a `qualcomm/GenieX` release download. */
+const GENIEX_SDK_URL_RE =
+  /^https:\/\/(qaihub-public-assets\.s3\.us-west-2\.amazonaws\.com\/qai-hub-geniex\/|github\.com\/qualcomm\/GenieX\/releases\/download\/)\S+$/
+const GENIEX_ASSET_NAME_RE = /^geniex-sdk-[a-z0-9-]+-v[0-9.]+\.zip$/
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const SHA256_RE = /^[0-9a-f]{64}$/
 /** RFC 3339 with a zone; `Date.parse` alone accepts far more. */
@@ -431,6 +476,71 @@ export function parseLiteRtLmManifest(data: unknown, accept: LiteRtLmAcceptance)
   return { releases }
 }
 
+function parseGeniexAsset(raw: unknown): GeniexAsset | null {
+  if (!isRecord(raw)) return null
+  const { platform, url, name, size, sha256 } = raw
+  if (!GENIEX_PLATFORMS.some((known) => known === platform)) return null
+  if (typeof name !== 'string' || !GENIEX_ASSET_NAME_RE.test(name)) return null
+  if (typeof url !== 'string' || !GENIEX_SDK_URL_RE.test(url)) return null
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
+  if (typeof sha256 !== 'string' || !SHA256_RE.test(sha256)) return null
+  return { platform: platform as GeniexPlatform, url, name, size, sha256 }
+}
+
+/** One release, or `null` when a field is not what the conf schema says. */
+function parseGeniexRelease(raw: unknown): GeniexRelease | null {
+  if (!isRecord(raw)) return null
+  const { version, published_at, min_core_version, abi, notes_url } = raw
+  if (typeof version !== 'string' || !SEMVER_RE.test(version)) return null
+  if (!isDateTime(published_at)) return null
+  if (typeof min_core_version !== 'string' || !SEMVER_RE.test(min_core_version)) return null
+  if (typeof abi !== 'number' || !Number.isSafeInteger(abi) || abi < 1) return null
+  if (!Array.isArray(raw['assets'])) return null
+  const assets: GeniexAsset[] = []
+  for (const item of raw['assets']) {
+    const asset = parseGeniexAsset(item)
+    // conf's check refuses a platform listed twice; here the first one wins, as for the other engines.
+    if (asset && !assets.some((known) => known.platform === asset.platform)) assets.push(asset)
+  }
+  if (assets.length === 0) return null
+  return {
+    version,
+    published_at,
+    min_core_version,
+    abi,
+    ...(typeof notes_url === 'string' && /^https:\/\/\S+$/.test(notes_url) ? { notes_url } : {}),
+    assets,
+  }
+}
+
+/**
+ * `backends/geniex-manifest.json` (change `add-geniex-runtime`, task 4.1): strict per field, lenient
+ * per record — a release or zip that does not parse is skipped, as is a release for a newer core or an
+ * `abi` this core does not bind (spec `geniex-runtime`, "Релизы SDK публикуются в conf"); a zip on any
+ * host but the two of conf's schema is never installed. Throws for another schema version or no
+ * release left.
+ */
+export function parseGeniexManifest(data: unknown, accept: GeniexAcceptance): GeniexManifest {
+  if (!isRecord(data)) throw new Error('the GenieX manifest is not an object')
+  if (data['schema_version'] !== 1)
+    throw new Error(`the GenieX manifest has schema_version ${JSON.stringify(data['schema_version'])}, not 1`)
+  if (!Array.isArray(data['releases'])) throw new Error('the GenieX manifest has no releases array')
+  const releases = data['releases']
+    .map(parseGeniexRelease)
+    .filter((release): release is GeniexRelease => release !== null)
+    .filter(
+      (release) =>
+        compareVersions(release.min_core_version, accept.coreVersion) <= 0 &&
+        accept.abis.includes(release.abi)
+    )
+    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))
+  if (releases.length === 0)
+    throw new Error(
+      `the GenieX manifest lists no release this core can install (core ${accept.coreVersion}, ABI ${accept.abis.join('/')})`
+    )
+  return { releases }
+}
+
 /** An asset core may download and run: pinned by both `sha256` and `size`. */
 export function assetInstallable(asset: { sha256?: string; size?: number }): boolean {
   return typeof asset.sha256 === 'string' && typeof asset.size === 'number'
@@ -470,6 +580,7 @@ export interface ManifestOf {
   'mlx': MlxManifest
   'foundry-local': FoundryLocalManifest
   'litert-lm': LiteRtLmManifest
+  'geniex': GeniexManifest
 }
 
 export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: ManifestKind<ManifestOf[K]> } {
@@ -506,6 +617,13 @@ export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: Manif
       parse: (data) =>
         parseLiteRtLmManifest(data, { coreVersion: CORE_VERSION, abis: SUPPORTED_LITERT_LM_ABI }),
       cacheFile: join(layout.provider('litert-lm').root, 'litert-lm-manifest.cache.json'),
+    },
+    'geniex': {
+      label: 'GenieX manifest',
+      url: GENIEX_MANIFEST_URL,
+      urlEnv: 'ATOMIC_GENIEX_MANIFEST_URL',
+      parse: (data) => parseGeniexManifest(data, { coreVersion: CORE_VERSION, abis: SUPPORTED_GENIEX_ABI }),
+      cacheFile: join(layout.provider('geniex').root, 'geniex-manifest.cache.json'),
     },
   }
 }

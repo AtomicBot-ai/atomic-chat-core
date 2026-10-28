@@ -3,6 +3,7 @@
   "files": {
     "src/server/public/static-assets.generated.ts": "Generated string constants (scripts/import-app-static.mjs); the served bytes are pinned by sha256 in the proxy-http replay fixtures.",
     "src/runtime/litert-lm/host/ffi-bun.ts": "bun:ffi bindings and the TinyCC stream shim; run only inside the compiled binaries, so covered by test/integration/litert-host.test.ts against a real library (LITERT_LM_TEST_LIB), not by vitest under Node.",
-    "src/runtime/foundry-local/host/ffi-bun.ts": "bun:ffi bindings; run only inside the compiled binaries, so covered by test/e2e/foundry-host.test.ts against a real library (FOUNDRY_LOCAL_TEST_LIB), not by vitest under Node."
+    "src/runtime/foundry-local/host/ffi-bun.ts": "bun:ffi bindings; run only inside the compiled binaries, so covered by test/e2e/foundry-host.test.ts against a real library (FOUNDRY_LOCAL_TEST_LIB), not by vitest under Node.",
+    "src/runtime/geniex/host/ffi-bun.ts": "bun:ffi bindings to geniex.dll; run only inside the compiled binaries' Worker, so covered by test/integration/geniex-host.test.ts against the real SDK (GENIEX_TEST_LIB), not by vitest under Node."
   }
 }

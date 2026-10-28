@@ -50,6 +50,7 @@ import type {
   EngineContext,
   EngineDescriptor,
   EngineHostPlatform,
+  EngineProbeFacts,
   HostChoice,
 } from './engines.js'
 import { installStaged } from './install.js'
@@ -114,8 +115,8 @@ export interface EngineBuildsDeps {
    * `liteRtLmHostPlatform`); an engine absent from the table runs nowhere.
    */
   hostPlatforms?: Partial<Record<EngineBuildId, EngineHostPlatform>>
-  /** This core's host mode probing an unpacked build, per engine (`foundry-host`, `litert-host`). */
-  hostProbes?: Partial<Record<EngineBuildId, (buildDir: string) => Promise<void>>>
+  /** This core's host mode probing an unpacked build, per engine (`foundry-host`, `litert-host`, `geniex-host`). */
+  hostProbes?: Partial<Record<EngineBuildId, (buildDir: string) => Promise<EngineProbeFacts | void>>>
   /** Test seams for the probes. */
   probe?: Partial<Record<EngineBuildId, (dir: string) => Promise<void>>>
 }
@@ -144,6 +145,7 @@ const ENGINE_LABELS: Record<EngineBuildId, string> = {
   'mlx': 'MLX',
   'foundry-local': 'Foundry Local',
   'litert-lm': 'LiteRT-LM',
+  'geniex': 'GenieX',
 }
 
 export function parseEngineBuildId(raw: string): EngineBuildId {
@@ -331,7 +333,9 @@ export class EngineBuildsService {
     const dir = join(this.deps.roots[engine], tag, backendId)
     const sha256 = archives[0]?.sha256 ?? null
     const context = this.context(engine)
-    const probe = this.deps.probe?.[engine] ?? ((staging: string) => descriptor.probe(staging, context))
+    const probe: (staging: string) => Promise<EngineProbeFacts | void> =
+      this.deps.probe?.[engine] ?? ((staging) => descriptor.probe(staging, context))
+    let facts: EngineProbeFacts | null = null
     const { replaced } = await installStaged({
       dataFolder: this.deps.dataFolder,
       target: dir,
@@ -343,7 +347,7 @@ export class EngineBuildsService {
       now: this.now,
       verify: async (staging) => {
         await descriptor.prepare?.(staging, context)
-        await probe(staging).catch(onProbeFailure)
+        facts = (await probe(staging).catch(onProbeFailure)) ?? null
       },
       record: (staging) =>
         descriptor.record(staging, {
@@ -354,6 +358,7 @@ export class EngineBuildsService {
           publishedAt,
           cApiVersion: cApiVersion ?? null,
           abi: abi ?? null,
+          probe: facts,
         }),
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
@@ -441,7 +446,12 @@ export class EngineBuildsService {
 
   /** The directory of the build the next load of `engine` uses; nothing installed, `undefined`. */
   async activeDir(engine: EngineBuildId): Promise<string | undefined> {
-    return this.activeOf(engine, await this.builds(engine))?.dir
+    return (await this.activeBuild(engine))?.dir
+  }
+
+  /** The build the next load of `engine` uses, with what its record keeps (GenieX: the probe's devices). */
+  async activeBuild(engine: EngineBuildId): Promise<Build | undefined> {
+    return this.activeOf(engine, await this.builds(engine))
   }
 
   /** The build the next MLX load starts: the newest of bundled and downloaded, bundled on a tie. */

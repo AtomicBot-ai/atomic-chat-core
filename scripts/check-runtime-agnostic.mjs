@@ -7,14 +7,19 @@ import { join, relative } from 'node:path'
 const ROOT = new URL('..', import.meta.url).pathname
 const SRC = join(ROOT, 'src')
 const BROWSER_SAFE = ['src/contracts', 'src/client']
-// The two exceptions to "no bun:*" (operator decision Q2 of change add-foundry-local, ADR in docs/decisions;
-// change add-litert-lm-runtime, design D1): the Foundry Local and LiteRT-LM hosts' bindings, each imported
-// dynamically by its hidden host mode alone.
+// The exceptions to "no bun:*" (operator decision Q2 of change add-foundry-local, ADR in docs/decisions;
+// change add-litert-lm-runtime, design D1; change add-geniex-runtime, design D1): the Foundry Local,
+// LiteRT-LM and GenieX hosts' bindings, each imported by its hidden host mode alone — GenieX's inside
+// the Worker (`worker.ts`) that the mode starts.
 const BUN_FFI_ALLOWED = new Set([
   'src/runtime/foundry-local/host/ffi-bun.ts',
   'src/runtime/foundry-local/host/bun-ffi.d.ts',
   'src/runtime/litert-lm/host/ffi-bun.ts',
+  'src/runtime/geniex/host/ffi-bun.ts',
+  'src/runtime/geniex/host/worker.ts',
 ])
+// The Worker's bundle as a string (scripts/build-geniex-worker.mjs): generated, Bun-only by nature.
+const GENERATED_BUN_ONLY = new Set(['src/runtime/geniex/host/worker-source.generated.ts'])
 const BUILTINS = [
   'assert',
   'buffer',
@@ -69,6 +74,7 @@ function* walk(dir) {
 const failures = []
 for (const file of walk(SRC)) {
   const rel = relative(ROOT, file)
+  if (GENERATED_BUN_ONLY.has(rel)) continue
   const text = readFileSync(file, 'utf8')
   const lines = text.split('\n')
   lines.forEach((line, i) => {

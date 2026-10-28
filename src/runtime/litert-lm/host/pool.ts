@@ -11,27 +11,7 @@
 import { createHash } from 'node:crypto'
 import type { LiteRtConversationConfig, LiteRtMessage } from './library.js'
 
-/** Waits its turn, in arrival order; a failure does not block the next one. */
-export class FifoLock {
-  private tail: Promise<unknown> = Promise.resolve()
-  /** Work queued behind the one running, that one included. */
-  waiting = 0
-
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    this.waiting++
-    const run = this.tail.then(fn)
-    const settled = run.then(
-      () => {
-        this.waiting--
-      },
-      () => {
-        this.waiting--
-      }
-    )
-    this.tail = settled
-    return run
-  }
-}
+export { FifoLock } from '../../shared/index.js'
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)

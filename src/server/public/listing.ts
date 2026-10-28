@@ -35,6 +35,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'sglang': 'sglang',
   'foundry-local': 'foundry-local',
   'litert-lm': 'litert-lm',
+  'geniex': 'geniex',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */

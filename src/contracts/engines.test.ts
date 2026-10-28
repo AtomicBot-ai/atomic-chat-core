@@ -21,6 +21,7 @@ describe('engine lifecycle contracts', () => {
       'mlx',
       'foundry-local',
       'litert-lm',
+      'geniex',
       'tensorrt-llm',
       'vllm',
       'sglang',
@@ -39,6 +40,7 @@ describe('engine lifecycle contracts', () => {
       'mlx',
       'foundry-local',
       'litert-lm',
+      'geniex',
     ])
   })
 

@@ -164,6 +164,11 @@ describe('error envelope', () => {
     expect(statusForCode('LITERT_LM_VARIANT_UNSUPPORTED')).toBe(422)
     expect(statusForCode('LITERT_LM_HOST_ERROR')).toBe(500)
     expect(statusForCode('LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE')).toBe(409)
+    // GenieX (change add-geniex-runtime, task 6.1): the host failed; the variant is not for this host or
+    // device; a bundle for a newer GenieX (update the engine first).
+    expect(statusForCode('GENIEX_HOST_ERROR')).toBe(500)
+    expect(statusForCode('GENIEX_VARIANT_UNSUPPORTED')).toBe(422)
+    expect(statusForCode('GENIEX_MODEL_REQUIRES_NEWER_ENGINE')).toBe(409)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
   })
 

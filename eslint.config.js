@@ -79,10 +79,16 @@ export default tseslint.config(
     },
   },
   {
-    // The two exceptions to "no bun:*" (operator decision Q2 of change add-foundry-local; change
-    // add-litert-lm-runtime, design D1): the Foundry Local and LiteRT-LM hosts' bindings, each imported
-    // dynamically by its hidden host mode alone. Every other restriction of the runtime-agnostic block stays.
-    files: ['src/runtime/foundry-local/host/ffi-bun.ts', 'src/runtime/litert-lm/host/ffi-bun.ts'],
+    // The exceptions to "no bun:*" (operator decision Q2 of change add-foundry-local; change
+    // add-litert-lm-runtime, design D1; change add-geniex-runtime, design D1): the Foundry Local, LiteRT-LM
+    // and GenieX hosts' bindings, each imported by its hidden host mode alone — GenieX's inside the Worker
+    // the mode starts. Every other restriction of the runtime-agnostic block stays.
+    files: [
+      'src/runtime/foundry-local/host/ffi-bun.ts',
+      'src/runtime/litert-lm/host/ffi-bun.ts',
+      'src/runtime/geniex/host/ffi-bun.ts',
+      'src/runtime/geniex/host/worker.ts',
+    ],
     rules: {
       'no-restricted-imports': [
         'error',

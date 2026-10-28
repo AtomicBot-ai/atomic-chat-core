@@ -41,6 +41,16 @@ import {
   parseLiteRtLmCheckRequest,
   liteRtHostProber,
 } from '../runtime/litert-lm/index.js'
+import {
+  GeniexAcceleratorService,
+  GeniexCheckService,
+  geniexHostCommand,
+  geniexHostPlatform,
+  geniexHostProber,
+  GeniexRuntime,
+  parseGeniexCheckRequest,
+} from '../runtime/geniex/index.js'
+import type { GeniexBuild, GeniexHostPlatform } from '../runtime/geniex/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
@@ -377,6 +387,18 @@ export async function createAtomicCore(
     const foundryLocalHost = foundryLocalHostPlatform(nativeHostFacts)
     const liteRtLmHost = liteRtLmHostPlatform(nativeHostFacts)
     const liteRtHost = liteRtHostCommand(env)
+    // GenieX (change `add-geniex-runtime`, design D3): Windows arm64 whose processor is a Snapdragon X
+    // Elite or X2 Elite, by the CPU model string — read from the hardware probe only where the first
+    // two hold, so no other host waits for it. `ATOMIC_GENIEX_TEST_CHIP` stands in for the machine in
+    // the e2e tests, where no Snapdragon is.
+    const geniexHost: GeniexHostPlatform = await (async () => {
+      const standIn = env['ATOMIC_GENIEX_TEST_CHIP']
+      if (standIn === 'x-elite' || standIn === 'x2-elite') return { platform: 'win-arm64', chip: standIn }
+      const facts = { platform, arch: foundryLocalArch, cpuName: '' }
+      if (platform !== 'win32' || foundryLocalArch !== 'arm64') return geniexHostPlatform(facts)
+      return geniexHostPlatform({ ...facts, cpuName: (await hardware.info()).info.cpu.name })
+    })()
+    const geniexHostCmd = geniexHostCommand(env)
     const foundryLocalPaths = layout.provider('foundry-local')
     const foundryHost = foundryHostCommand(env)
     // The provider itself (task 6.6): one foundry-host per model, where the platform rule holds. The
@@ -500,6 +522,52 @@ export async function createAtomicCore(
       registries.set('litert-lm', liteRtLmRuntime.registry)
       runtimes.set('litert-lm', liteRtLmRuntime)
     }
+
+    // GenieX (change `add-geniex-runtime`, task 6.6): one geniex-host per model, on a Snapdragon X only
+    // (design D3). The active build — its folder, version and the devices its probe found — is read
+    // per load from the engine-builds service wired below.
+    const geniexPaths = layout.provider('geniex')
+    const geniexActiveBuild = async (): Promise<GeniexBuild | undefined> => {
+      const build = await engineBuilds.activeBuild('geniex')
+      return build ? { dir: build.dir, version: build.tag, devices: build.devices ?? [] } : undefined
+    }
+    const geniexRuntime: GeniexRuntime | undefined =
+      geniexHost.platform === null
+        ? undefined
+        : new GeniexRuntime({
+            layout,
+            registry: new ModelRegistry(layout, 'geniex'),
+            instanceId: lock.instanceId,
+            chip: geniexHost.chip,
+            hostCommand: geniexHostCmd,
+            resolveBuild: geniexActiveBuild,
+            trustedHosts: managedTrustedHosts,
+            readSettings: async () => settings.get('geniex'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+            claimGpu: gpuResidency.hook('geniex'),
+            baseEnv: env,
+            log: runtimeLog,
+            ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+          })
+    if (geniexRuntime) {
+      registries.set('geniex', geniexRuntime.registry)
+      runtimes.set('geniex', geniexRuntime)
+    }
+    const geniexAccelerators =
+      geniexHost.platform === null
+        ? undefined
+        : new GeniexAcceleratorService({ resolveBuild: geniexActiveBuild, chip: geniexHost.chip })
+    const geniexCheck =
+      geniexRuntime && geniexHost.platform !== null
+        ? new GeniexCheckService({
+            chip: geniexHost.chip,
+            modelsDir: geniexPaths.modelsDir,
+            registry: geniexRuntime.registry,
+            resolveBuild: geniexActiveBuild,
+            inspect: (path) => geniexRuntime.inspect(path),
+          })
+        : undefined
 
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
@@ -677,6 +745,7 @@ export async function createAtomicCore(
         'mlx': layout.provider('mlx').backendsDir,
         'foundry-local': foundryLocalPaths.backendsDir,
         'litert-lm': layout.provider('litert-lm').backendsDir,
+        'geniex': layout.provider('geniex').backendsDir,
       },
       failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
       resourcesDir: options.resourcesDir,
@@ -691,8 +760,9 @@ export async function createAtomicCore(
           log,
         }),
         'litert-lm': liteRtManifest,
+        'geniex': new EngineManifestSource(engineManifestKinds.geniex, { env, fetchFor, log }),
       },
-      hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost },
+      hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost, 'geniex': geniexHost },
       hostProbes: {
         'foundry-local': async (libDir) => {
           await runFoundryHostProbe(
@@ -706,6 +776,7 @@ export async function createAtomicCore(
           )
         },
         'litert-lm': liteRtHostProber(liteRtHost, env),
+        'geniex': geniexHostProber(geniexHostCmd, env),
       },
       hardware: () => hardware.facts(),
       hosts: {
@@ -715,6 +786,7 @@ export async function createAtomicCore(
         // Where the provider is not registered nothing runs from a build.
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
         'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
+        'geniex': geniexRuntime ? geniexRuntime.engineHost() : IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
@@ -910,6 +982,7 @@ export async function createAtomicCore(
     for (const engine of hostEngines(platform, [...managedRuntimes.keys()], {
       foundryLocal: foundryLocalHost.platform !== null,
       liteRtLm: liteRtLmHost.platform !== null,
+      geniex: geniexHost.platform !== null,
     })) {
       const kind = ENGINE_KINDS[engine]
       if (kind === 'llamacpp') {
@@ -1010,6 +1083,10 @@ export async function createAtomicCore(
           ...(liteRtLmCheck
             ? { 'litert-lm': async (body: unknown) => liteRtLmCheck.check(parseLiteRtLmCheckRequest(body)) }
             : {}),
+          // GenieX (change `add-geniex-runtime`, task 6.5): the same, a bundle judged by this machine's chip.
+          ...(geniexCheck
+            ? { geniex: async (body: unknown) => geniexCheck.check(parseGeniexCheckRequest(body)) }
+            : {}),
         },
         ...(foundryLocalAccelerators
           ? {
@@ -1024,6 +1101,14 @@ export async function createAtomicCore(
               liteRtLm: {
                 accelerators: () => liteRtLmAccelerators.list(),
                 prepare: (request) => liteRtLmAccelerators.prepare(request),
+              },
+            }
+          : {}),
+        ...(geniexAccelerators
+          ? {
+              geniex: {
+                accelerators: () => geniexAccelerators.list(),
+                prepare: (request) => geniexAccelerators.prepare(request),
               },
             }
           : {}),

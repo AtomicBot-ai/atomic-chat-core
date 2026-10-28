@@ -79,6 +79,18 @@ describe('runCli', () => {
     expect(USAGE).not.toContain('litert-host')
   })
 
+  it('runs the hidden geniex-host mode: a usage error is 2, and under Node there is no Worker to load the library in (3)', async () => {
+    const usage = await run(['geniex-host', 'probe'])
+    expect(usage.exitCode).toBe(2)
+    expect(usage.stderr).toBe('--lib is required\n')
+    const node = await run(['geniex-host', 'probe', '--lib', '/nowhere'])
+    expect(node.exitCode).toBe(3)
+    expect(node.stderr).toMatch(
+      /^GenieX does not load from \/nowhere: .*only inside a compiled binary \(no Worker\)/
+    )
+    expect(USAGE).not.toContain('geniex-host')
+  })
+
   it('rejects an unknown command with usage on stderr', async () => {
     const result = await run(['nope'])
     expect(result.exitCode).toBe(2)

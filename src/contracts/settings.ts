@@ -114,6 +114,18 @@ export interface LiteRtLmConfig {
   timeout: number
 }
 
+/** `geniex` (change `add-geniex-runtime`, design D7). */
+export interface GeniexConfig {
+  /** `npu`, `gpu`, `cpu` or `hybrid`; `''` takes `model.yml`'s default device. A `qairt` bundle runs on `npu` only. */
+  device: string
+  /** Tokens; `0` takes `model.yml`'s length. Always cut to the model's maximum. */
+  ctx_len: number
+  /** The NPU power mode (`geniex_PowerMode`); `burst` is Qualcomm's default. Ignored off the NPU. */
+  power_mode: string
+  /** Seconds a model may take to load in its host. */
+  timeout: number
+}
+
 /**
  * `tensorrt-llm` as the settings store holds it (`src/settings/schema/tensorrt-llm.json`). `gpu_id: ''`
  * lets a load pick the card with the most free memory and `load_timeout_seconds: 0` keeps the engine's own
@@ -209,7 +221,9 @@ export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
             ? FoundryLocalConfig
             : P extends 'litert-lm'
               ? LiteRtLmConfig
-              : LlamacppConfig
+              : P extends 'geniex'
+                ? GeniexConfig
+                : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

@@ -28,7 +28,8 @@ describe('readLiteRtLmBlock', () => {
     })
     const { context_length: _context, ...withoutContext } = BLOCK
     expect(readLiteRtLmBlock({ litert_lm: withoutContext })).toEqual(withoutContext)
-    expect(MODEL_YML_KEY_ORDER.at(-1)).toBe('litert_lm')
+    // `geniex` follows it since change add-geniex-runtime (task 6.2).
+    expect(MODEL_YML_KEY_ORDER.slice(-2)).toEqual(['litert_lm', 'geniex'])
   })
 
   it('calls a backend or NPU this core does not know a variant it cannot run', () => {

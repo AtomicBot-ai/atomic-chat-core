@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { compareBuilds, isNewerBuild, sdcppBuildKey } from './order.js'
 
+describe('compareBuilds for GenieX (change add-geniex-runtime, task 4.4)', () => {
+  it('orders by published_at, an unreadable date oldest of all', () => {
+    const a = { tag: '0.9.3', published_at: '2026-10-19T23:09:06Z' }
+    const b = { tag: '0.9.4', published_at: '2026-11-01T00:00:00Z' }
+    expect(compareBuilds('geniex', b, a)).toBeGreaterThan(0)
+    expect(isNewerBuild('geniex', a, b)).toBe(false)
+    expect(compareBuilds('geniex', { tag: '0.9.9', published_at: null }, a)).toBeLessThan(0)
+  })
+})
+
 describe('sdcppBuildKey', () => {
   it.each([
     ['master-883-137f740', [883, 0]],

@@ -42,6 +42,12 @@ export type RuntimeErrorCode =
   | 'LITERT_LM_ACCELERATOR_NOT_PREPARED'
   /** LiteRT-LM: the file needs a newer LiteRT-LM than the active build; `details` names the version. */
   | 'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE'
+  /** GenieX (change `add-geniex-runtime`): the host process failed, or the library inside it did; the message is the library's. */
+  | 'GENIEX_HOST_ERROR'
+  /** GenieX: the bundle is for another chip, the device is not for this plugin, or the library found no such device. */
+  | 'GENIEX_VARIANT_UNSUPPORTED'
+  /** GenieX: the bundle needs a newer GenieX than the active build; `details` names the version. */
+  | 'GENIEX_MODEL_REQUIRES_NEWER_ENGINE'
   | 'SERVER_START_FAILED'
   | 'SERVER_START_TIMED_OUT'
   | 'PROCESS_ERROR'

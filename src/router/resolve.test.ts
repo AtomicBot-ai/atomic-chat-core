@@ -92,7 +92,7 @@ describe('LOCAL_SEARCH_ORDER', () => {
   it('searches TurboQuant, upstream, MLX, TensorRT-LLM, PrismML, vLLM, SGLang, Foundry Local, then LiteRT-LM last so no existing route moves', () => {
     // vllm after atomic-prism, which core 0.10.0 shipped (change add-vllm-runtime, D11); sglang after
     // vllm by the same rule (change add-sglang-runtime, D8); foundry-local after sglang (add-foundry-local, D5);
-    // litert-lm after foundry-local (add-litert-lm-runtime, task 6.1).
+    // litert-lm after foundry-local (add-litert-lm-runtime, task 6.1); geniex last (add-geniex-runtime, task 6.1).
     expect(LOCAL_SEARCH_ORDER).toEqual([
       'llamacpp',
       'llamacpp-upstream',
@@ -103,6 +103,7 @@ describe('LOCAL_SEARCH_ORDER', () => {
       'sglang',
       'foundry-local',
       'litert-lm',
+      'geniex',
     ])
   })
 })

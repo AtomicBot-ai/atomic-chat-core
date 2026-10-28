@@ -148,7 +148,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.core_sha }}
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+        with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - uses: actions/cache@v4
@@ -222,7 +222,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.core_sha }}
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+        with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - uses: actions/cache@v4

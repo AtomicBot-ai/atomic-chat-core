@@ -26,6 +26,7 @@ import type { ReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import { FAKE_SIDECAR_SCRIPT } from '../helpers/fake-sidecar-server.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
 import { liteRtLmTestPlatform } from '../helpers/litert-lm-host.js'
+import { geniexTestEnv, writeFakeGeniexHost } from '../helpers/geniex-host.js'
 import { makeZip } from '../helpers/make-zip.js'
 
 const { BIN } = core
@@ -762,5 +763,128 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)(
       })
       expect(await probes()).toBe(afterSecondCheck + 1)
     }, 120_000)
+  }
+)
+
+// ---------------------------------------------------------------------------------------------
+// GenieX (change add-geniex-runtime, task 4.4)
+// ---------------------------------------------------------------------------------------------
+
+const GENIEX_MIRROR = 'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex'
+
+describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
+  'GenieX builds through the core (task 4.4)',
+  () => {
+    it('installs lib/** of the SDK zip from a file:// manifest, checked by geniex-host probe whose devices it records, and leaves nothing when the host refuses it', async () => {
+      const folder = ctx.dataFolder
+      const name = 'geniex-sdk-windows-arm64-v0.9.3.zip'
+      const body = makeZip([
+        { name: 'sdk-windows-arm64/lib/geniex.dll', data: Buffer.from('core') },
+        { name: 'sdk-windows-arm64/lib/llama_cpp/geniex_plugin.dll', data: Buffer.from('plugin') },
+        { name: 'sdk-windows-arm64/lib/llama_cpp/libggml-htp-v73.so', data: Buffer.from('htp') },
+        { name: 'sdk-windows-arm64/lib/qairt/htp-files/libQnnHtpV73Skel.so', data: Buffer.from('skel') },
+        { name: 'sdk-windows-arm64/bin/geniex-bench.exe', data: Buffer.from('bench') },
+        { name: 'sdk-windows-arm64/include/geniex.h', data: Buffer.from('h') },
+      ])
+      mirror.serve(`/qai-hub-geniex/${name}`, body)
+      const manifest = join(folder, 'geniex-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.9.3',
+              published_at: '2026-10-19T23:09:06Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              notes_url: 'https://github.com/qualcomm/GenieX/releases/tag/v0.9.3',
+              assets: [
+                {
+                  platform: 'win-arm64',
+                  url: `${GENIEX_MIRROR}/${name}`,
+                  name,
+                  size: body.length,
+                  sha256: createHash('sha256').update(body).digest('hex'),
+                },
+              ],
+            },
+          ],
+        })
+      )
+      // The host stand-in: records its argv, answers like `geniex-host probe` unless told to fail.
+      const argvFile = join(folder, 'host.argv')
+      const failFlag = join(folder, 'host.fail')
+      const host = join(folder, 'fake-geniex-host')
+      await writeFile(
+        host,
+        [
+          '#!/bin/sh',
+          `echo "$@" >> ${JSON.stringify(argvFile)}`,
+          `if [ -f ${JSON.stringify(failFlag)} ]; then echo "LoadLibraryW geniex.dll: error 126" >&2; exit 3; fi`,
+          `echo '{"version":"0.9.3","abi":1,"plugins":["llama_cpp","qairt"],"devices":["HTP0","GPUOpenCL","CPU"]}'`,
+        ].join('\n'),
+        { mode: 0o755 }
+      )
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_GENIEX_MANIFEST_URL: pathToFileURL(manifest).href,
+        ...geniexTestEnv(host),
+      })
+      const proxy = mirror.proxy
+
+      const catalog = await json<Catalog>(await post(ready, '/engine-builds/geniex/catalog', { force: true }))
+      expect(catalog.manifest).toMatchObject({ tag: '0.9.3', source: 'remote' })
+      expect(catalog.host_backend_id).toBe('win-arm64')
+
+      const installed = await json(
+        await post(ready, '/engine-builds/geniex/install', { task_id: 'gx-1', proxy })
+      )
+      expect(installed).toMatchObject({ installed: true, build: { tag: '0.9.3', backend_id: 'win-arm64' } })
+      const dir = join(folder, 'geniex', 'backends', '0.9.3', 'win-arm64')
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+      expect((await readdir(dir)).sort()).toEqual(['.atomic-owned', 'install.json', 'lib'])
+      expect((await readdir(join(dir, 'lib'))).sort()).toEqual(['geniex.dll', 'llama_cpp', 'qairt'])
+      expect(existsSync(join(dir, 'lib', 'qairt', 'htp-files', 'libQnnHtpV73Skel.so'))).toBe(true)
+      expect(existsSync(join(dir, 'sdk-windows-arm64'))).toBe(false)
+      expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({
+        tag: '0.9.3',
+        abi: 1,
+        libraryVersion: '0.9.3',
+        devices: ['HTP0', 'GPUOpenCL', 'CPU'],
+      })
+      expect((await readFile(argvFile, 'utf8')).trim()).toMatch(
+        /^probe --lib .*0\.9\.3\/win-arm64\.incoming-\d+$/
+      )
+
+      // The host refuses a forced reinstall: the install fails with what it printed, the build stays.
+      await writeFile(failFlag, '')
+      const refused = await post(ready, '/engine-builds/geniex/install', {
+        task_id: 'gx-2',
+        proxy,
+        force: true,
+      })
+      expect(await refused.json()).toMatchObject({
+        error: { code: 'ENGINE_INSTALL_FAILED', details: expect.stringContaining('error 126') },
+      })
+      expect((await readdir(join(folder, 'geniex', 'backends', '0.9.3'))).sort()).toEqual(['win-arm64'])
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+    }, 120_000)
+
+    it('registers the provider only with the chip stand-in, and never on this machine by itself', async () => {
+      const folder = ctx.dataFolder
+      const host = await writeFakeGeniexHost(join(folder, 'fake-geniex-host'))
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_GENIEX_HOST_TEST_COMMAND: host,
+      })
+      const versions = await json<{ engines: Array<{ engine: string }> }>(
+        await post(ready, '/engines/versions', {})
+      )
+      expect(versions.engines.map((entry) => entry.engine)).not.toContain('geniex')
+      const catalog = await post(ready, '/engine-builds/geniex/catalog', {})
+      expect(await json<Catalog>(catalog)).toMatchObject({
+        host_backend_id: null,
+        host_reason: expect.stringMatching(/Windows arm64 only/),
+      })
+    }, 60_000)
   }
 )
