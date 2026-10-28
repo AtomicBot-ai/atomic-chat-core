@@ -19,7 +19,9 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true })
 })
 
-async function start(over: { vision?: boolean; reasoning?: boolean; library?: FakeGeniexLibrary } = {}) {
+async function start(
+  over: { vision?: boolean; reasoning?: boolean; grammar?: boolean; library?: FakeGeniexLibrary } = {}
+) {
   const library = over.library ?? new FakeGeniexLibrary()
   const engine = new WorkerEngine(new FakeGeniexWorker(library))
   await engine.create('/b/lib', {
@@ -28,6 +30,7 @@ async function start(over: { vision?: boolean; reasoning?: boolean; library?: Fa
     model: '/m/qwen3.gguf',
     mmproj: over.vision ? '/m/mmproj.gguf' : null,
     nCtx: 4096,
+    threads: 0,
     powerMode: 'burst',
   })
   const server = createGeniexServer({
@@ -35,6 +38,7 @@ async function start(over: { vision?: boolean; reasoning?: boolean; library?: Fa
     modelId: 'qwen3-4b',
     caps: { vision: over.vision ?? false, reasoning: over.reasoning ?? false },
     defaultMaxTokens: 256,
+    ...(over.grammar === undefined ? {} : { grammar: over.grammar }),
     tmpDir: join(tmp, 'images'),
     now: () => 1_700_000_000_000,
   })
@@ -264,14 +268,34 @@ describe('geniex-host server (tasks 5.4–5.5)', () => {
     expect(library.maxActive).toBe(1)
   })
 
-  it('turns a library error into a 500 with the library message', async () => {
+  it('turns a library error into a 500 with the library message, and a prompt past the context into a 400', async () => {
     const { url, library } = await start()
-    library.script = () => ({ error: 'Input prompt too long', code: -200103 })
+    library.script = () => ({ error: 'Failed to decode', code: -200104 })
     const response = await post(url, ask('x'))
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({
-      error: { message: expect.stringMatching(/Input prompt too long/) },
+      error: { message: expect.stringMatching(/Failed to decode/), type: 'server_error' },
     })
+    library.script = () => ({ error: 'Input prompt too long', code: -200103 })
+    const long = await post(url, ask('x'.repeat(100)))
+    expect(long.status).toBe(400)
+    expect(await long.json()).toMatchObject({
+      error: {
+        message: expect.stringMatching(/Input prompt too long/),
+        code: 'context_length_exceeded',
+        param: 'messages',
+      },
+    })
+  })
+
+  it('refuses response_format with a 400 when the plugin has no grammar sampler (qairt)', async () => {
+    const { url, model } = await start({ grammar: false })
+    const response = await post(url, ask('JSON', { response_format: { type: 'json_object' } }))
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      error: { param: 'response_format', message: expect.stringMatching(/qairt/) },
+    })
+    expect(model().generations).toHaveLength(0)
   })
 
   it('turns thinking on by the model default and off when the request says so', async () => {

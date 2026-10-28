@@ -95,6 +95,8 @@ export interface GeniexModelSettings {
   /** `llama_cpp` only: creates a VLM instead of an LLM. */
   mmproj: string | null
   nCtx: number
+  /** Generation and batch threads for `llama_cpp` (spike S3: the plugin's default halves CPU decode). */
+  threads: number
   powerMode: GeniexPowerMode
 }
 

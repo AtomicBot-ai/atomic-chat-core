@@ -3,8 +3,10 @@
  * about itself, read without the library — GenieX has no metadata call short of creating the model.
  * A GGUF file is read by its header (`general.architecture`, `<arch>.context_length`,
  * `general.file_type`, `tokenizer.chat_template`), and an `mmproj*.gguf` beside it means vision; an
- * AI Hub bundle folder is read by its `geniex.json`, whose field names the spike (S4) fixes — the
- * reader takes the likely spellings and leaves `null` for what it cannot find.
+ * AI Hub bundle folder is read by the files AI Hub v0.65.0 puts in it (spike S4, 2026-10-28):
+ * `genie_config.json` (the dialog config with the context size; what makes a folder a bundle),
+ * `metadata.json` (`runtime`, `precision`, tool versions) and `htp_backend_ext_config.json` (the
+ * Hexagon generation, which names the chip). The reader leaves `null` for what it cannot find.
  */
 
 import { readdir, readFile, stat } from 'node:fs/promises'
@@ -55,9 +57,19 @@ const FILE_TYPES: Record<number, string> = {
   38: 'MXFP4_MOE',
 }
 
-/** The bundle's description file (design "Бандлы AI Hub"). */
-export const BUNDLE_MANIFEST = 'geniex.json'
-const MMPROJ_RE = /^mmproj.*\.gguf$/i
+/** The bundle's dialog config (design "Бандлы AI Hub", as S4 found it): without it, no bundle. */
+export const BUNDLE_MANIFEST = 'genie_config.json'
+const BUNDLE_METADATA = 'metadata.json'
+const BUNDLE_HTP_CONFIG = 'htp_backend_ext_config.json'
+/** The `runtime` of `metadata.json` of a bundle the `qairt` plugin runs; `genie` bundles are not. */
+const BUNDLE_RUNTIME = 'geniex_qairt'
+/**
+ * Hexagon generation (`devices[].dsp_arch` of `htp_backend_ext_config.json`) → the Snapdragon X it
+ * ships in. S4: the x2-elite bundle says `v81`; `v73` is X Elite's Hexagon.
+ */
+const DSP_ARCH_CHIP: Record<string, GeniexChip> = { v73: 'x-elite', v81: 'x2-elite' }
+/** `mmproj-F16.gguf` (llama.cpp's spelling) and `gemma-4-E2B-it-mmproj.gguf` (Google's). */
+const MMPROJ_RE = /mmproj.*\.gguf$/i
 
 /** The model cannot be read: not a GGUF file, not a bundle folder, or a broken one. */
 export class GeniexInspectError extends Error {
@@ -125,36 +137,46 @@ export function bundleChip(value: unknown): GeniexChip | null {
   return null
 }
 
-/** An AI Hub bundle folder's facts from its `geniex.json`. */
-export async function inspectBundle(dir: string): Promise<GeniexBundleMetadata> {
-  const file = join(dir, BUNDLE_MANIFEST)
+/** A JSON object from a bundle file; `null` when the file is absent. */
+async function bundleJson(dir: string, name: string): Promise<Record<string, unknown> | null> {
+  const file = join(dir, name)
   let raw: unknown
   try {
     raw = JSON.parse(await readFile(file, 'utf8'))
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw new GeniexInspectError(
-      `${dir} is not an AI Hub bundle: ${BUNDLE_MANIFEST} ${error instanceof Error ? error.message : String(error)}`
+      `${file} cannot be read: ${error instanceof Error ? error.message : String(error)}`
     )
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
     throw new GeniexInspectError(`${file} is not a JSON object`)
-  const record = raw as Record<string, unknown>
-  const version = pick(record, [
-    'min_runtime_version',
-    'min_geniex_version',
-    'geniex_version',
-    'runtime.min_version',
-  ])
+  return raw as Record<string, unknown>
+}
+
+/** An AI Hub bundle folder's facts from `genie_config.json`, `metadata.json` and the HTP config. */
+export async function inspectBundle(dir: string): Promise<GeniexBundleMetadata> {
+  const genie = await bundleJson(dir, BUNDLE_MANIFEST)
+  if (!genie) throw new GeniexInspectError(`${dir} is not an AI Hub bundle: no ${BUNDLE_MANIFEST} in it`)
+  const metadata = (await bundleJson(dir, BUNDLE_METADATA)) ?? {}
+  const runtime = pick(metadata, ['runtime'])
+  if (typeof runtime === 'string' && runtime !== BUNDLE_RUNTIME)
+    throw new GeniexInspectError(`${dir} is a ${runtime} bundle, not ${BUNDLE_RUNTIME}`)
+  const htp = (await bundleJson(dir, BUNDLE_HTP_CONFIG)) ?? {}
+  const devices = pick(htp, ['devices'])
+  const dspArch = Array.isArray(devices)
+    ? pick((devices[0] ?? {}) as Record<string, unknown>, ['dsp_arch'])
+    : undefined
+  const version = pick(metadata, ['min_runtime_version', 'min_geniex_version', 'tool_versions.geniex'])
+  const precision = pick(metadata, ['precision'])
   return {
     kind: 'qairt',
-    chip: bundleChip(pick(record, ['chip', 'chipset', 'device', 'target', 'soc', 'hardware.chipset'])),
-    max_context_tokens: whole(
-      pick(record, ['context_length', 'max_context_length', 'n_ctx', 'model.context_length'])
-    ),
-    precision: (() => {
-      const value = pick(record, ['precision', 'quantization', 'model.precision'])
-      return typeof value === 'string' && value !== '' ? value : null
-    })(),
+    chip:
+      (typeof dspArch === 'string' ? DSP_ARCH_CHIP[dspArch.toLowerCase()] : undefined) ??
+      bundleChip(pick(metadata, ['chipset', 'chip'])) ??
+      bundleChip(basename(dir)),
+    max_context_tokens: whole(pick(genie, ['dialog.context.size', 'context_length'])),
+    precision: typeof precision === 'string' && precision !== '' ? precision : null,
     min_runtime_version:
       typeof version === 'string' && /^\d+\.\d+(\.\d+)?/.test(version)
         ? (/^\d+\.\d+(\.\d+)?/.exec(version) as RegExpExecArray)[0]

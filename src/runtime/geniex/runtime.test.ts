@@ -77,7 +77,11 @@ async function gguf(
 async function bundle(id: string, chip = 'x-elite'): Promise<void> {
   const dir = join(data.layout.provider('geniex').modelsDir, id)
   await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, 'geniex.json'), JSON.stringify({ chipset: chip }))
+  await writeFile(join(dir, 'genie_config.json'), JSON.stringify({ dialog: { context: { size: 4096 } } }))
+  await writeFile(
+    join(dir, 'htp_backend_ext_config.json'),
+    JSON.stringify({ devices: [{ dsp_arch: chip === 'x2-elite' ? 'v81' : 'v73' }] })
+  )
   await writeFile(
     join(dir, 'model.yml'),
     serializeModelYml({

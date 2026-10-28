@@ -195,6 +195,7 @@ async function serve(
         model: args.model,
         mmproj: args.mmproj ?? null,
         nCtx,
+        threads: args.threads,
         powerMode: args.powerMode,
       })
     } catch (error) {
@@ -208,6 +209,7 @@ async function serve(
       modelId: args.id,
       caps: { vision: created.vision, reasoning: args.reasoning },
       defaultMaxTokens: Math.min(args.maxTokens, nCtx),
+      grammar: args.plugin !== 'qairt',
       tmpDir: args.tmp,
       log: (line) => deps.stderr(line),
     })

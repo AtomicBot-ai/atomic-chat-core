@@ -23,7 +23,11 @@ export interface GeniexGgufMetadata {
   vision: boolean
 }
 
-/** What `geniex-host inspect` reads from an AI Hub bundle's `geniex.json` (spike S4 fills the fields). */
+/**
+ * What `geniex-host inspect` reads from an AI Hub bundle folder (spike S4, AI Hub v0.65.0): the context
+ * from `genie_config.json`, `precision` from `metadata.json`, the chip from the Hexagon generation in
+ * `htp_backend_ext_config.json` (`v73` x-elite, `v81` x2-elite). No bundle names a minimal GenieX.
+ */
 export interface GeniexBundleMetadata {
   kind: 'qairt'
   /** The chip the bundle is compiled for, as conf spells it; `null` when the bundle does not say. */
@@ -76,7 +80,7 @@ export interface GeniexPrepareResult {
  * `POST /models/geniex/check`: a variant before it is downloaded (`plugin`, `device`, `chip` for a
  * bundle, `min_runtime_version` when conf knows it), a downloaded file or bundle folder by `path`
  * inside `<data>/geniex/models` with its `plugin` and `device` — and, for a bundle, the `chip` conf
- * named, which stands in when the bundle's `geniex.json` does not say — or an installed model by
+ * named, which stands in when the bundle's files do not say — or an installed model by
  * `model_id`.
  */
 export interface GeniexCheckRequest {

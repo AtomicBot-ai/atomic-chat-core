@@ -11,6 +11,7 @@ const SETTINGS: GeniexModelSettings = {
   model: '/m/qwen3.gguf',
   mmproj: null,
   nCtx: 4096,
+  threads: 0,
   powerMode: 'burst',
 }
 const CONFIG = { maxTokens: 64, stop: [], sampler: { grammar: null }, imagePaths: [] }

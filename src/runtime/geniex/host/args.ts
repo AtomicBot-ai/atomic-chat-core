@@ -6,10 +6,11 @@
  *   geniex-host inspect <file | bundle folder>
  *   geniex-host serve   --lib <build> --engine-version <v> --model <file | bundle folder>
  *                       --plugin llama_cpp|qairt --device npu|gpu|cpu|hybrid [--mmproj <file>]
- *                       --nctx <n> --max-tokens <n> --power-mode <mode> --port <p, 0 for any>
+ *                       --nctx <n> [--threads <n>] --max-tokens <n> --power-mode <mode> --port <p, 0 for any>
  *                       --tmp <dir> --id <model id> [--reasoning]
  */
 
+import { availableParallelism } from 'node:os'
 import { parseArgs } from 'node:util'
 import { GENIEX_DEVICES, GENIEX_PLUGINS } from '../../../contracts/index.js'
 import type { GeniexDevice, GeniexPlugin } from '../../../contracts/index.js'
@@ -33,6 +34,7 @@ export type GeniexHostArgs =
       mmproj?: string
       /** `n_ctx`, already cut to what the model allows. */
       nCtx: number
+      threads: number
       /** The default `max_tokens` of a request that names none. */
       maxTokens: number
       /** The NPU power mode; ignored off the NPU. */
@@ -81,6 +83,15 @@ function oneOf<T extends string>(
   return value as T
 }
 
+/**
+ * Threads for the `llama_cpp` plugin when `--threads` is not given. Spike S3 on an 18-core X2 Elite
+ * (Qwen3 4B Q4_0, cpu): the plugin's own default decoded at 17.7 tok/s, 12 threads at 40.7 (conf's
+ * llama.cpp with `-t 12`: 39.5), 18 threads at 21.1 — the efficiency cores drag the pool down.
+ */
+export function defaultGeniexThreads(): number {
+  return Math.max(1, Math.min(12, availableParallelism()))
+}
+
 export function parseGeniexHostArgs(argv: readonly string[]): GeniexHostArgs {
   const [mode, ...rest] = argv
   try {
@@ -105,6 +116,7 @@ export function parseGeniexHostArgs(argv: readonly string[]): GeniexHostArgs {
           'device': { type: 'string' },
           'mmproj': { type: 'string' },
           'nctx': { type: 'string' },
+          'threads': { type: 'string' },
           'max-tokens': { type: 'string' },
           'power-mode': { type: 'string' },
           'port': { type: 'string' },
@@ -128,6 +140,8 @@ export function parseGeniexHostArgs(argv: readonly string[]): GeniexHostArgs {
         device: oneOf(values, 'device', GENIEX_DEVICES, 'npu, gpu, cpu or hybrid'),
         ...(mmproj ? { mmproj } : {}),
         nCtx: wholeNumber(values, 'nctx', 1, 16_777_216),
+        threads:
+          values['threads'] === undefined ? defaultGeniexThreads() : wholeNumber(values, 'threads', 1, 1024),
         maxTokens: wholeNumber(values, 'max-tokens', 1, 16_777_216),
         powerMode: oneOf(values, 'power-mode', GENIEX_POWER_MODES, `one of ${GENIEX_POWER_MODES.join(', ')}`),
         port: wholeNumber(values, 'port', 0, 65535),

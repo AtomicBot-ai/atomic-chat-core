@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { GeniexHostUsageError, parseGeniexHostArgs } from './args.js'
+import { GeniexHostUsageError, defaultGeniexThreads, parseGeniexHostArgs } from './args.js'
 
 const SERVE = [
   'serve',
@@ -43,6 +43,7 @@ describe('parseGeniexHostArgs (task 5.1)', () => {
       plugin: 'llama_cpp',
       device: 'npu',
       nCtx: 8192,
+      threads: defaultGeniexThreads(),
       maxTokens: 4096,
       powerMode: 'burst',
       port: 41234,

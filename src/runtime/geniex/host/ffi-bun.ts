@@ -55,6 +55,7 @@ const SYMBOLS = {
   geniex_vlm_destroy: { args: [T.ptr], returns: T.i32 },
   geniex_vlm_apply_chat_template: { args: [T.ptr, T.ptr, T.ptr], returns: T.i32 },
   geniex_vlm_generate: { args: [T.ptr, T.ptr, T.ptr], returns: T.i32 },
+  geniex_vlm_reset: { args: [T.ptr], returns: T.i32 },
 } as const
 
 type Fn = (...args: NativeArgument[]) => unknown
@@ -140,13 +141,18 @@ export const loadBunGeniexLibrary: LoadGeniexLibrary = async (libDir) => {
       value
     )
   }
-  const qairt = join(libDir, QAIRT_DIR)
-  if (existsSync(qairt)) {
+  // The QAIRT runtime the plugin needs (QnnHtp.dll, QnnSystem.dll, the HTP stubs and skels) ships in
+  // the SDK under `lib/qairt/htp-files` (spike S4); pinning it there keeps a `GENIEX_QAIRT_LIB` in the
+  // user's environment from swapping it. `lib/qairt` itself holds only the plugin's DLLs.
+  const qairt = join(libDir, QAIRT_DIR, 'htp-files')
+  if (existsSync(join(qairt, 'QnnHtp.dll'))) {
     const keep = cstr(qairt)
     check('set_qairt_runtime_path', L.geniex_set_qairt_runtime_path(ptr(keep)))
   }
-  check('init', L.geniex_init())
+  // Before `geniex_init`, as the header says: the default is TRACE, and the plugin scan at init logs
+  // at that level to stderr (spike S1). The level also sets QNN's in the qairt plugin.
   L.geniex_set_log_level(LOG_LEVEL_ERROR)
+  check('init', L.geniex_init())
   return bindLibrary(L, check)
 }
 
@@ -163,7 +169,8 @@ function takeStrings(L: L, table: Pointer | null, count: number): string[] {
 }
 
 function bindLibrary(L: L, check: (operation: string, code: unknown) => void): GeniexLibrary {
-  const version = /^\d+\.\d+\.\d+/.exec(text(L.geniex_version()) ?? '')?.[0] ?? null
+  // The library says `v0.9.3` (spike S1, 2026-10-28): the `v` is not part of the version.
+  const version = /^\d+\.\d+\.\d+/.exec((text(L.geniex_version()) ?? '').replace(/^v/i, ''))?.[0] ?? null
 
   function plugins(): string[] {
     // geniex_GetPluginListOutput { const char** plugin_ids @0; int32 plugin_count @8 } = 16
@@ -213,9 +220,11 @@ function bindLibrary(L: L, check: (operation: string, code: unknown) => void): G
     settings: GeniexModelSettings,
     ngl: number
   ): void {
-    buffer.writeInt32LE(settings.nCtx, at + 0) // n_ctx
-    buffer.writeInt32LE(0, at + 4) // n_threads: plugin default
-    buffer.writeInt32LE(0, at + 8) // n_threads_batch
+    // The qairt plugin refuses any n_ctx (S4: `--nctx (n_ctx) is not supported by the qairt plugin`);
+    // the bundle fixes its context, and 0 means "from the model".
+    buffer.writeInt32LE(settings.plugin === 'qairt' ? 0 : settings.nCtx, at + 0) // n_ctx
+    buffer.writeInt32LE(settings.threads, at + 4) // n_threads
+    buffer.writeInt32LE(settings.threads, at + 8) // n_threads_batch
     buffer.writeInt32LE(0, at + 12) // n_batch
     buffer.writeInt32LE(0, at + 16) // n_ubatch
     buffer.writeInt32LE(0, at + 20) // n_seq_max
@@ -233,12 +242,15 @@ function bindLibrary(L: L, check: (operation: string, code: unknown) => void): G
   function createModel(settings: GeniexModelSettings): GeniexModel {
     const { deviceId, ngl } = resolveDevice(settings.plugin, settings.device)
     const vision = settings.mmproj !== null
+    // The qairt plugin resolves a bundle from the folder of the FILE it is given (spike S4: handed the
+    // folder, it looked for tokenizer.json in the parent); `genie_config.json` is the file every bundle has.
+    const modelPath = settings.plugin === 'qairt' ? join(settings.model, 'genie_config.json') : settings.model
     const arena = new Arena()
     const handleOut = arena.struct(8)
     if (vision) {
       // geniex_VlmCreateInput { model_path @0; mmproj_path @8; config @16 (80); plugin_id @96; device_id @104; vit_device_id @112; tokenizer_path @120 } = 128
       const input = arena.struct(128)
-      writePtr(input, 0, arena.str(settings.model))
+      writePtr(input, 0, arena.str(modelPath))
       writePtr(input, 8, arena.str(settings.mmproj))
       writeModelConfig(input, 16, arena, settings, ngl)
       writePtr(input, 96, arena.str(settings.plugin))
@@ -249,7 +261,7 @@ function bindLibrary(L: L, check: (operation: string, code: unknown) => void): G
     } else {
       // geniex_LlmCreateInput { model_path @0; tokenizer_path @8; config @16 (80); plugin_id @96; device_id @104 } = 112
       const input = arena.struct(112)
-      writePtr(input, 0, arena.str(settings.model))
+      writePtr(input, 0, arena.str(modelPath))
       writePtr(input, 8, null)
       writeModelConfig(input, 16, arena, settings, ngl)
       writePtr(input, 96, arena.str(settings.plugin))
@@ -409,6 +421,10 @@ function bindModel(
       // Output { char* full_text @0; geniex_ProfileData @8: i64 ttft @8, media_time @16, prompt_time @24, decode_time @32,
       //   prompt_tokens @40, generated_tokens @48, f64 prefill_speed @56, decoding_speed @64, i64 draft_n_total @72, draft_n_accepted @80, stop_reason @88 } = 96
       const out = arena.struct(96)
+      // The llama_cpp VLM keeps the last generation's prefix and refuses a prompt that diverges from it
+      // (S2 on Gemma 4: `VLM prefix reuse failed: prompt[12:18] does not match last generation`);
+      // every request here is a full prompt, so the state is cleared first.
+      if (vision) check('vlm_reset', L.geniex_vlm_reset(handle))
       const code = Number(
         vision
           ? L.geniex_vlm_generate(handle, ptr(input), ptr(out))

@@ -43,6 +43,11 @@ export interface GeniexServerOptions {
   caps: ModelCaps
   /** The `max_tokens` of a request that names none. */
   defaultMaxTokens: number
+  /**
+   * Whether the plugin takes a GBNF grammar (`response_format`). The qairt plugin does not (spike S4:
+   * `Unexpected empty grammar stack after accepting piece: <|im_start|>`), so a request asking for one is a 400.
+   */
+  grammar?: boolean
   /** Where request images are written for the library. */
   tmpDir: string
   now?: () => number
@@ -99,6 +104,12 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
       })
     if (req.method === 'POST' && path === '/v1/chat/completions') {
       const chat = parseGeniexChatRequest(await readJsonBody(req), options.caps)
+      if (chat.responseFormat && options.grammar === false)
+        throw new OpenAiRequestError(
+          400,
+          'response_format: this model runs on the qairt plugin, which has no grammar sampler',
+          'response_format'
+        )
       let hungUp = false
       res.on('close', () => {
         if (!res.writableFinished) hungUp = true
@@ -202,13 +213,17 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
       generatedTokens = result.generatedTokens
       stopReason = parser.stopped ? 'user' : result.stopReason
     } catch (error) {
+      const text = error instanceof Error ? error.message : String(error)
       failure =
         error instanceof OpenAiRequestError
           ? error
-          : new OpenAiRequestError(
-              500,
-              `GenieX: ${error instanceof GeniexLibraryError ? error.message : error instanceof Error ? error.message : String(error)}`
-            )
+          : /prompt too long/i.test(text)
+            ? // The library's own words for a prompt past the context window (spike S4, qairt).
+              new OpenAiRequestError(400, `GenieX: ${text}`, 'messages', undefined, 'context_length_exceeded')
+            : new OpenAiRequestError(
+                500,
+                `GenieX: ${error instanceof GeniexLibraryError ? error.message : text}`
+              )
       options.log?.(`generation failed: ${failure.message}`)
     } finally {
       clearInterval(watch)

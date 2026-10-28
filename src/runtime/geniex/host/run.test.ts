@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { FakeGeniexLibrary } from '../../../../test/helpers/fake-geniex-library.js'
 import { FakeGeniexWorker } from '../../../../test/helpers/fake-geniex-worker.js'
 import { buildGguf } from '../../../../test/helpers/gguf-builder.js'
+import { defaultGeniexThreads } from './args.js'
 import { WorkerEngine } from './engine.js'
 import { GeniexLibraryError } from './library.js'
 import { EXIT, runGeniexHost } from './run.js'
@@ -149,6 +150,7 @@ describe('runGeniexHost serve (task 5.3)', () => {
       model: join(dir, 'qwen3.gguf'),
       mmproj: null,
       nCtx: 8192,
+      threads: defaultGeniexThreads(),
       powerMode: 'burst',
     })
     expect(h.worker.loads).toEqual([join(dir, 'build', 'lib')])
@@ -179,8 +181,12 @@ describe('runGeniexHost serve (task 5.3)', () => {
     const bundle = join(dir, 'bundle')
     await mkdir(bundle)
     await writeFile(
-      join(bundle, 'geniex.json'),
-      JSON.stringify({ chipset: 'qualcomm-snapdragon-x-elite', context_length: 4096 })
+      join(bundle, 'genie_config.json'),
+      JSON.stringify({ dialog: { context: { size: 4096 } } })
+    )
+    await writeFile(
+      join(bundle, 'htp_backend_ext_config.json'),
+      JSON.stringify({ devices: [{ soc_model: 60, dsp_arch: 'v73' }] })
     )
     expect(await runGeniexHost(serveArgs({ model: bundle, plugin: 'qairt', device: 'gpu' }), h.deps)).toBe(
       EXIT.variantUnsupported
@@ -205,8 +211,12 @@ describe('runGeniexHost serve (task 5.3)', () => {
     const bundle = join(dir, 'bundle')
     await mkdir(bundle)
     await writeFile(
-      join(bundle, 'geniex.json'),
-      JSON.stringify({ chipset: 'x-elite', min_runtime_version: '0.10.0' })
+      join(bundle, 'genie_config.json'),
+      JSON.stringify({ dialog: { context: { size: 4096 } } })
+    )
+    await writeFile(
+      join(bundle, 'metadata.json'),
+      JSON.stringify({ runtime: 'geniex_qairt', min_runtime_version: '0.10.0' })
     )
     expect(await runGeniexHost(serveArgs({ model: bundle, plugin: 'qairt', device: 'npu' }), h.deps)).toBe(
       EXIT.requiresNewerEngine
