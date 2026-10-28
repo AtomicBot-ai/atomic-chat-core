@@ -472,6 +472,7 @@ export function deriveLlamaEngineContract(): EngineContract {
         { path: 'src/llama-arch.cpp', why: 'architecture names and GGUF keys core reads' },
         { path: 'ggml/src/ggml-backend-reg.cpp', why: 'load_backend log lines' },
         { path: 'ggml/src/gguf.cpp', why: 'invalid magic, failed to read tensor' },
+        { path: 'ggml/src/ggml-backend-meta.cpp', why: 'tensor split aborts (GGML_ABORT names this file)' },
         { path: '.github/workflows/release.yml', why: 'asset names and archive layout' },
       ],
       release_note_keywords: [

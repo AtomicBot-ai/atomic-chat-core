@@ -1911,6 +1911,17 @@
       "note": "A value the build refuses, e.g. `--flash-attn bogus` (common/arg.cpp)."
     },
     {
+      "id": "error.tensor-split.meta-abort",
+      "text": "ggml-backend-meta.cpp",
+      "match": "substring-ci",
+      "channel": "log",
+      "source": "src/runtime/llamacpp/errors.ts",
+      "upstream_text": "unsupported mul_mat split states",
+      "severity_if_lost": "warn",
+      "live_expectation": "unobservable",
+      "note": "GGML_ABORT prints its file name; llama.cpp builds the meta device only for `--split-mode tensor`, which needs two GPUs. The process error, with words that say so (ATO-556)."
+    },
+    {
       "id": "mtp.create-context",
       "text": "failed to create MTP context",
       "match": "regex",
@@ -2369,6 +2380,10 @@
       {
         "path": "ggml/src/gguf.cpp",
         "why": "invalid magic, failed to read tensor"
+      },
+      {
+        "path": "ggml/src/ggml-backend-meta.cpp",
+        "why": "tensor split aborts (GGML_ABORT names this file)"
       },
       {
         "path": ".github/workflows/release.yml",

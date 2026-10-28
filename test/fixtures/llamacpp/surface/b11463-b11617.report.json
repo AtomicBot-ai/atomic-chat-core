@@ -108,7 +108,7 @@
   "counts": {
     "break": 0,
     "warn": 0,
-    "info": 28,
+    "info": 29,
     "error": 0
   },
   "checks": [
@@ -229,7 +229,7 @@
       "counts": {
         "break": 0,
         "warn": 0,
-        "info": 16,
+        "info": 17,
         "error": 0
       }
     },
@@ -477,6 +477,19 @@
         "commits": [
           "781dbc5ac9 spec: properly handle mtmd input for mtp (#30257)",
           "d6cf9acb25 llama : add a GPU cache for MoE experts kept in host memory (#29887)"
+        ]
+      }
+    },
+    {
+      "id": "upstream.watched_paths/ggml/src/ggml-backend-meta.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "info",
+      "subject": "ggml/src/ggml-backend-meta.cpp",
+      "message": "2 commit(s), +22 −5 (watched for: tensor split aborts (GGML_ABORT names this file))",
+      "evidence": {
+        "commits": [
+          "ecdd29e8b2 meta: recreate all subgraphs when the arena is reallocated (#30453)",
+          "e60eff95fd meta : handle host views (#30217)"
         ]
       }
     },
