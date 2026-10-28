@@ -126,6 +126,24 @@ describe('POST /v1/embeddings for the embedding module', () => {
     expect(log).toEqual([])
   })
 
+  it.each([false, true])(
+    'returns a JSON model error with an embedding model available (chat loaded: %s)',
+    async (chatLoaded) => {
+      const { fake, log } = backend(() => ready(1))
+      const { server } = await publicWith({
+        embedding: fake,
+        sessions: chatLoaded ? [localSession(1, { modelId: 'chat-model' })] : [],
+      })
+      const res = await post(server.port, JSON.stringify({ model: 'qa-missing', input: 'test' }))
+      expect(res.status).toBe(404)
+      expect(res.headers.get('content-type')).toContain('application/json')
+      expect(await res.json()).toMatchObject({
+        error: { code: 'model_not_found', message: expect.stringContaining('qa-missing') },
+      })
+      expect(log).toEqual([])
+    }
+  )
+
   it.each([
     [
       { input: [{ content: [{ type: 'image_url', image_url: { url: 'http://192.168.1.2/cat.png' } }] }] },

@@ -129,6 +129,17 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('the embedding
       expect.objectContaining({ id: 'embeddinggemma-2', owned_by: 'atomic-embedding' }),
     ])
 
+    const missing = await fetch(`${base}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qa-missing', input: 'test' }),
+    })
+    expect(missing.status).toBe(404)
+    expect(missing.headers.get('content-type')).toContain('application/json')
+    expect(await missing.json()).toMatchObject({
+      error: { code: 'model_not_found', message: expect.stringContaining('qa-missing') },
+    })
+
     const unloaded = await control(ready, '/embedding/unload', { method: 'POST' })
     expect(((await unloaded.json()) as { state: string }).state).toBe('idle')
   })

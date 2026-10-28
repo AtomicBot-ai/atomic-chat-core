@@ -221,7 +221,8 @@ export async function serveForward(ex: Exchange): Promise<void> {
     } else {
       // "Nothing is loaded" (503) and "that model is not loaded" (404) are told apart so a client can
       // tell a cold server from a typo. `/messages` has always answered 404 for both.
-      if (!isMessages && ex.deps.listLocal().length === 0) {
+      const hasEmbeddingModel = ex.path === '/embeddings' && ex.deps.embedding?.modelId() != null
+      if (!isMessages && !hasEmbeddingModel && ex.deps.listLocal().length === 0) {
         trace.errorKind = 'not_found'
         answer(ex, 503, 'No models are available')
         return

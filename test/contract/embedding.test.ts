@@ -141,7 +141,7 @@ describe('contract: /v1/embeddings to the embedding module', () => {
     expect((await post('{"model":"embeddinggemma-2","input":"x","dimensions":256}')).status).toBe(400)
   })
 
-  it('lists the model and leaves another name to the sessions', async () => {
+  it('lists the model and returns a JSON error for an unknown name without chat sessions', async () => {
     const models = (await (
       await fetch(`http://127.0.0.1:${server.port}/v1/models`, {
         headers: { authorization: 'Bearer public-key' },
@@ -151,7 +151,11 @@ describe('contract: /v1/embeddings to the embedding module', () => {
       expect.objectContaining({ id: 'embeddinggemma-2', owned_by: 'atomic-embedding' }),
     ])
     const other = await post('{"model":"sentence-transformer-mini","input":"x"}')
-    expect(other.status).toBe(503)
+    expect(other.status).toBe(404)
+    expect(other.headers.get('content-type')).toContain('application/json')
+    expect(await other.json()).toMatchObject({
+      error: { code: 'model_not_found', message: expect.stringContaining('sentence-transformer-mini') },
+    })
     expect(other.headers.get('x-fake-body-sha256')).toBeNull()
   })
 })

@@ -203,3 +203,7 @@ real external agents (Codex, Claude Code, OpenCode), tray behaviour — is still
 level. With `fit` on, which is how the app ships, there is no `--ctx-size` and no ladder: the app tells
 the user the context is fitted to the device — and then, a defect in the app's thread route recorded
 there as an expected failure, leaves the thread stuck in "Growing the Mind..." with sending disabled. `test/app-e2e/` in this repo stays empty: the runner lives with the app it launches.
+
+## Regression B02: embedding-only model lookup
+
+With only Nomic or another embedding model configured, start the public server from the app. Confirm `/v1/models` lists the embedding model and a valid embedding request returns 200. Request `qa-missing` at `/v1/embeddings`: require JSON 404 with `error.code = model_not_found`, naming the unknown model. Repeat with a chat model loaded; the error must be identical. Automated binary coverage is in `test/e2e/embedding.test.ts`; the desktop scenario still requires an app built with this core revision.
