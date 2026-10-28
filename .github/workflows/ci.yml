@@ -108,7 +108,12 @@ jobs:
       # the first test of each file failed, every later start took 3 s). One start here absorbs it.
       - name: Start each binary once so the e2e suites meet warm executables
         shell: bash
-        run: for bin in dist/bin/atomic-chat-*; do "$bin" --version; done
+        # `build:bin` leaves a `.map` beside each binary; only the binaries start.
+        run: |
+          for bin in dist/bin/atomic-chat-*; do
+            case "$bin" in *.map) continue ;; esac
+            "$bin" --version
+          done
       - run: npm run test:e2e
         env:
           # As in `unit`: all three of macos-14's vCPUs. The e2e suites mostly wait on the compiled
