@@ -103,6 +103,12 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: npm run build
       - run: npm run build:bin
+      # The first start of a freshly built binary on a Windows runner waits for Defender's scan of a
+      # 100 MB exe, past the 20 s the e2e helpers give a ready line (v0.20.0's gates, windows-11-arm:
+      # the first test of each file failed, every later start took 3 s). One start here absorbs it.
+      - name: Start each binary once so the e2e suites meet warm executables
+        shell: bash
+        run: for bin in dist/bin/atomic-chat-*; do "$bin" --version; done
       - run: npm run test:e2e
         env:
           # As in `unit`: all three of macos-14's vCPUs. The e2e suites mostly wait on the compiled
