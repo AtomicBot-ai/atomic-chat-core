@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
+import { AtomicCoreError } from '../../contracts/index.js'
 import type { CoreEvents, GeniexModelMetadata } from '../../contracts/index.js'
 import { ModelRegistry, serializeModelYml } from '../../models/index.js'
+import { spawnAndAwaitReady } from '../shared/index.js'
 import type { GpuClaimHook } from '../shared/index.js'
 import { engineContext, GeniexRuntime, launchDevice } from './runtime.js'
 import type { GeniexRuntimeOptions } from './runtime.js'
@@ -312,6 +314,31 @@ describe.skipIf(!POSIX)('GeniexRuntime (task 6.3)', () => {
       code: 'GENIEX_HOST_ERROR',
       details: expect.stringMatching(/error 126/),
     })
+  })
+
+  it('starts the host again on another port when the first one was taken (the free-port probe is racy)', async () => {
+    await gguf('m')
+    const ports: string[] = []
+    const logs: string[] = []
+    const { rt } = runtime({
+      log: (_level, message) => void logs.push(message),
+      spawn: async (spec, options) => {
+        ports.push(spec.args[spec.args.indexOf('--port') + 1] as string)
+        if (ports.length === 1)
+          throw new AtomicCoreError(
+            'GENIEX_HOST_ERROR',
+            'The GenieX host stopped before the model was ready.',
+            `Error: listen EADDRINUSE: address already in use 127.0.0.1:${ports[0]}\n    at Server.setupListenHandle\n  code: 'EADDRINUSE'`
+          )
+        return spawnAndAwaitReady(spec, options)
+      },
+    })
+    const session = await rt.load('m')
+    expect(session.model_id).toBe('m')
+    expect(ports).toHaveLength(2)
+    expect(ports[0]).not.toBe(ports[1])
+    expect(logs.some((line) => /port taken \(attempt 1\)/.test(line))).toBe(true)
+    await rt.unload('m')
   })
 
   it('reports session:died when the host exits on its own', async () => {

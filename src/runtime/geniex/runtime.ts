@@ -42,7 +42,9 @@ import type {
 } from '../shared/index.js'
 import {
   backendOutputReporter,
+  exitedOnTakenPort,
   randomFreePort,
+  retryOnTakenPort,
   SidecarTable,
   spawnAndAwaitReady,
   throwIfLoadCancelled,
@@ -124,7 +126,10 @@ export interface GeniexRuntimeOptions {
 
 /** The host's exit codes (`host/run.ts` `EXIT`) as the core's errors. */
 function hostError(exitCode: number | null, stderr: string): AtomicCoreError {
-  const said = stderr.trim().split('\n').slice(-5).join('\n')
+  const lines = stderr.trim().split('\n')
+  // A bind failure sits above Node's stack, outside the last five lines: kept first, the retry reads it.
+  const taken = lines.find((line) => exitedOnTakenPort(line))
+  const said = [...(taken ? [taken] : []), ...lines.slice(-5).filter((line) => line !== taken)].join('\n')
   const last = stderr.trim().split('\n').at(-1) ?? ''
   let line: Record<string, unknown> = {}
   try {
@@ -377,36 +382,6 @@ export class GeniexRuntime implements LocalRuntime {
   ): Promise<SessionInfo> {
     const { block, device, build, modelPath, mmprojPath, context, timeoutSecs, mode } = launch
     const paths = this.options.layout.provider('geniex')
-    const hostPort = await randomFreePort(this.table.usedPorts())
-    const tmp = join(paths.tmpDir, `${modelId.replace(/[^A-Za-z0-9._-]+/g, '_')}-${hostPort}`)
-    const args = [
-      ...this.options.hostCommand.args,
-      'serve',
-      '--lib',
-      build.dir,
-      '--engine-version',
-      build.version,
-      '--model',
-      modelPath,
-      '--plugin',
-      block.plugin,
-      '--device',
-      device,
-      ...(mmprojPath ? ['--mmproj', mmprojPath] : []),
-      '--nctx',
-      String(context),
-      '--max-tokens',
-      String(context),
-      '--power-mode',
-      mode,
-      '--port',
-      String(hostPort),
-      '--tmp',
-      tmp,
-      '--id',
-      modelId,
-      ...(block.reasoning ? ['--reasoning'] : []),
-    ]
     const env: Record<string, string> = {}
     for (const [key, value] of Object.entries(this.options.baseEnv ?? process.env))
       if (value !== undefined) env[key] = value
@@ -416,26 +391,69 @@ export class GeniexRuntime implements LocalRuntime {
       'info',
       `starting the GenieX host for ${modelId} (${block.plugin} on ${device}) from ${build.dir}`
     )
-    const started = await (this.options.spawn ?? spawnAndAwaitReady)(
-      { exe, args, env, stdin: 'pipe', platform: process.platform },
-      {
-        timeoutMs: timeoutSecs * 1000,
-        signal: this.table.signal,
-        ...(opts.signal ? { cancelSignal: opts.signal } : {}),
-        streamReadyMarkers: { stdout: ['"ready":true'], stderr: [] },
-        timeoutError: (stderr) =>
-          new AtomicCoreError(
-            'MODEL_LOAD_TIMED_OUT',
-            `The GenieX model did not load within ${timeoutSecs} seconds.`,
-            stderr.trim().split('\n').slice(-5).join('\n')
-          ),
-        classifyExit: (exit, stderr) => hostError(exit.code, stderr),
-        onLine: (stream, line) => {
-          if (opts.verbose)
-            this.emit('core:log', { level: 'debug', msg: `[geniex/${modelId}][${stream}] ${line}` })
-          reportOutput({ provider: 'geniex', model: modelId, stream, line })
-        },
-      }
+    // The free-port probe is racy: another process may bind the port before the host does. The host
+    // then exits on EADDRINUSE, and is started again on a port picked anew (as llama-server is).
+    const { started, hostPort } = await retryOnTakenPort(
+      async () => {
+        const hostPort = await randomFreePort(this.table.usedPorts())
+        const tmp = join(paths.tmpDir, `${modelId.replace(/[^A-Za-z0-9._-]+/g, '_')}-${hostPort}`)
+        const args = [
+          ...this.options.hostCommand.args,
+          'serve',
+          '--lib',
+          build.dir,
+          '--engine-version',
+          build.version,
+          '--model',
+          modelPath,
+          '--plugin',
+          block.plugin,
+          '--device',
+          device,
+          ...(mmprojPath ? ['--mmproj', mmprojPath] : []),
+          '--nctx',
+          String(context),
+          '--max-tokens',
+          String(context),
+          '--power-mode',
+          mode,
+          '--port',
+          String(hostPort),
+          '--tmp',
+          tmp,
+          '--id',
+          modelId,
+          ...(block.reasoning ? ['--reasoning'] : []),
+        ]
+        const started = await (this.options.spawn ?? spawnAndAwaitReady)(
+          { exe, args, env, stdin: 'pipe', platform: process.platform },
+          {
+            timeoutMs: timeoutSecs * 1000,
+            signal: this.table.signal,
+            ...(opts.signal ? { cancelSignal: opts.signal } : {}),
+            streamReadyMarkers: { stdout: ['"ready":true'], stderr: [] },
+            timeoutError: (stderr) =>
+              new AtomicCoreError(
+                'MODEL_LOAD_TIMED_OUT',
+                `The GenieX model did not load within ${timeoutSecs} seconds.`,
+                stderr.trim().split('\n').slice(-5).join('\n')
+              ),
+            classifyExit: (exit, stderr) => hostError(exit.code, stderr),
+            onLine: (stream, line) => {
+              if (opts.verbose)
+                this.emit('core:log', { level: 'debug', msg: `[geniex/${modelId}][${stream}] ${line}` })
+              reportOutput({ provider: 'geniex', model: modelId, stream, line })
+            },
+          }
+        )
+        return { started, hostPort }
+      },
+      (error) => error instanceof AtomicCoreError && exitedOnTakenPort(error.details),
+      (attempt) =>
+        this.options.log?.(
+          'warn',
+          `the GenieX host for ${modelId} found its port taken (attempt ${attempt}); starting it on another`
+        )
     )
     let gateway: ManagedGateway
     const apiKey = generateGatewayKey()
