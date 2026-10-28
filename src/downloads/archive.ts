@@ -94,10 +94,15 @@ async function moveEntry(src: string, dstDir: string): Promise<void> {
 
 /**
  * Ensure `<outputDir>/build/bin/<exe>` exists after extraction: a flat archive (exe at the root) is
- * moved into `build/bin/` (except `build`, `version.txt`, `backend.txt`); a single nested `llama-*`
- * directory holding the exe is unpacked into `build/bin/` and removed.
+ * moved into `build/bin/` (except `build`, `version.txt`, `backend.txt` and any caller-held root
+ * entries in `keep`); a single nested `llama-*` directory holding the exe is unpacked into
+ * `build/bin/` and removed.
  */
-export async function normalizeBackendLayout(outputDir: string, exeName: string): Promise<void> {
+export async function normalizeBackendLayout(
+  outputDir: string,
+  exeName: string,
+  keep?: ReadonlySet<string>
+): Promise<void> {
   if (outputDir === '' || exeName === '') throw new Error('normalize_backend_layout error: Invalid argument')
   const buildBin = join(outputDir, 'build', 'bin')
   const expected = join(buildBin, exeName)
@@ -106,7 +111,7 @@ export async function normalizeBackendLayout(outputDir: string, exeName: string)
   if (await exists(join(outputDir, exeName))) {
     await mkdir(buildBin, { recursive: true })
     for (const name of await readdir(outputDir)) {
-      if (name === 'build' || name === 'version.txt' || name === 'backend.txt') continue
+      if (name === 'build' || name === 'version.txt' || name === 'backend.txt' || keep?.has(name)) continue
       await moveEntry(join(outputDir, name), buildBin)
     }
     return
