@@ -132,9 +132,9 @@ that gid, but the core reaches the daemon with it and rightly goes on without a 
     key. If the step fails on it anyway, the operation's error names this cause (when the app forwards
     the step's log tail with its receipt), and a retry after the fix starts Docker again: the recipe
     clears systemd's `start-limit-hit` with `systemctl reset-failed` first.
-- **Node.js 22+** (vitest runs on it) and **Bun 1.3.10**, the version CI pins (the repository's lockfile
+- **Node.js 22+** (vitest runs on it) and **Bun 1.4.4**, the version CI pins (the repository's lockfile
   is `bun.lock`, and there is no `package-lock.json`, so `npm ci` cannot work):
-  `curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.10"`, then open a new shell.
+  `curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"`, then open a new shell.
 - **Ubuntu/Debian: no background upgrades during the run.** `unattended-upgrades` can hold the dpkg lock
   past the recipe's timeout, or change the installed-package set that `probe-plan` and
   `recipe-rerun-noop` compare. Before the run, wait for it to finish and stop it:
