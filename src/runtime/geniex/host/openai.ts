@@ -132,6 +132,14 @@ const THINK_CLOSE = '</think>'
 const CALL_OPEN = '<tool_call>'
 const CALL_CLOSE = '</tool_call>'
 const FENCE = '```'
+// Gemma 4's own syntax (spike S2, 2026-10-28; the format vLLM's `gemma4` parser reads):
+// `<|channel>thought …<channel|>` is thinking, `<|tool_call>call:name{key:<|"|>text<|"|>,n:42,…}<tool_call|>`
+// (or `<turn|>`) a call — bare keys, strings in `<|"|>` with no escapes, nested `{}` and `[]`.
+const GEMMA_THINK_OPEN = '<|channel>thought'
+const GEMMA_THINK_CLOSE = '<channel|>'
+const GEMMA_CALL_OPEN = '<|tool_call>'
+const GEMMA_CALL_CLOSES = ['<tool_call|>', '<turn|>'] as const
+const GEMMA_QUOTE = '<|"|>'
 
 /** A JSON object with `name` and `arguments` (or `parameters`), or a list of them. */
 function callsOf(json: string): Array<{ name: string; arguments: string }> | null {
@@ -155,6 +163,99 @@ function callsOf(json: string): Array<{ name: string; arguments: string }> | nul
 }
 
 /** The longest prefix of a marker that `text` ends with; 0 when none. */
+/** `call:name{…}` blocks of a Gemma 4 tool-call body, their arguments as JSON; `null` when there is none. */
+function gemmaCallsOf(body: string): Array<{ name: string; arguments: string }> | null {
+  const calls: Array<{ name: string; arguments: string }> = []
+  const re = /call:(\w+)\{/g
+  let match: RegExpExecArray | null
+  while ((match = re.exec(body))) {
+    const open = match.index + match[0].length - 1
+    const close = gemmaMatching(body, open)
+    if (close < 0) return null
+    calls.push({
+      name: match[1] as string,
+      arguments: JSON.stringify(gemmaObject(body.slice(open + 1, close))),
+    })
+    re.lastIndex = close + 1
+  }
+  return calls.length > 0 ? calls : null
+}
+
+/** The index of the bracket closing the one at `open`, skipping quoted strings; -1 when unbalanced. */
+function gemmaMatching(text: string, open: number): number {
+  const pairs: Record<string, string> = { '{': '}', '[': ']' }
+  const stack: string[] = [pairs[text[open] as string] as string]
+  for (let i = open + 1; i < text.length; i++) {
+    if (text.startsWith(GEMMA_QUOTE, i)) {
+      const end = text.indexOf(GEMMA_QUOTE, i + GEMMA_QUOTE.length)
+      if (end < 0) return -1
+      i = end + GEMMA_QUOTE.length - 1
+      continue
+    }
+    const c = text[i] as string
+    if (c === '{' || c === '[') stack.push(pairs[c] as string)
+    else if (c === '}' || c === ']') {
+      if (stack.pop() !== c) return -1
+      if (stack.length === 0) return i
+    }
+  }
+  return -1
+}
+
+/** Splits `text` at the commas outside strings and brackets. */
+function gemmaItems(text: string): string[] {
+  const items: string[] = []
+  let depth = 0
+  let from = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text.startsWith(GEMMA_QUOTE, i)) {
+      const end = text.indexOf(GEMMA_QUOTE, i + GEMMA_QUOTE.length)
+      i = end < 0 ? text.length : end + GEMMA_QUOTE.length - 1
+      continue
+    }
+    const c = text[i] as string
+    if (c === '{' || c === '[') depth++
+    else if (c === '}' || c === ']') depth--
+    else if (c === ',' && depth === 0) {
+      items.push(text.slice(from, i))
+      from = i + 1
+    }
+  }
+  items.push(text.slice(from))
+  return items.map((item) => item.trim()).filter((item) => item !== '')
+}
+
+function gemmaValue(raw: string): unknown {
+  const text = raw.trim()
+  if (text.startsWith(GEMMA_QUOTE)) {
+    const end = text.indexOf(GEMMA_QUOTE, GEMMA_QUOTE.length)
+    return end < 0 ? text.slice(GEMMA_QUOTE.length) : text.slice(GEMMA_QUOTE.length, end)
+  }
+  if (text.startsWith('{') && text.endsWith('}')) return gemmaObject(text.slice(1, -1))
+  if (text.startsWith('[') && text.endsWith(']')) return gemmaItems(text.slice(1, -1)).map(gemmaValue)
+  if (text === 'true') return true
+  if (text === 'false') return false
+  if (text === 'null' || text === 'None') return null
+  if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(text)) return Number(text)
+  return text
+}
+
+/** `key:value,…` of a Gemma 4 call (keys bare or in `<|"|>`), as an object. */
+function gemmaObject(text: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const item of gemmaItems(text)) {
+    const colon = item.startsWith(GEMMA_QUOTE)
+      ? item.indexOf(':', item.indexOf(GEMMA_QUOTE, GEMMA_QUOTE.length) + GEMMA_QUOTE.length)
+      : item.indexOf(':')
+    if (colon < 0) continue
+    let key = item.slice(0, colon).trim()
+    if (key.startsWith(GEMMA_QUOTE) && key.endsWith(GEMMA_QUOTE))
+      key = key.slice(GEMMA_QUOTE.length, -GEMMA_QUOTE.length)
+    out[key] = gemmaValue(item.slice(colon + 1))
+  }
+  return out
+}
+
 function partialSuffix(text: string, markers: readonly string[]): number {
   let keep = 0
   for (const marker of markers)
@@ -168,8 +269,9 @@ function partialSuffix(text: string, markers: readonly string[]): number {
 
 /**
  * Builds one reply from the library's tokens: deltas as they come, the whole message at the end. A
- * `<think>` block becomes `reasoning_content`; a `<tool_call>` block, and with tools requested a
- * fenced JSON block, become `tool_calls`; a stop string ends the text and asks to cancel the library.
+ * `<think>` block (Gemma 4: `<|channel>thought…<channel|>`) becomes `reasoning_content`; a `<tool_call>`
+ * block (Gemma 4: `<|tool_call>call:…<tool_call|>`), and with tools requested a fenced JSON block,
+ * become `tool_calls`; a stop string ends the text and asks to cancel the library.
  */
 export class GeniexReplyParser {
   private content = ''
@@ -177,7 +279,7 @@ export class GeniexReplyParser {
   private readonly calls: ToolCall[] = []
   /** Text not yet classified: may begin a marker or a stop string. */
   private held = ''
-  private state: 'text' | 'think' | 'call' | 'fence' = 'text'
+  private state: 'text' | 'think' | 'call' | 'fence' | 'gthink' | 'gcall' = 'text'
   /** The fence's opening line (` ```json `), kept to replay a block that was not a tool call. */
   private fenceHead = ''
   /** A stop string was met: everything after it is dropped and the library should be cancelled. */
@@ -213,15 +315,21 @@ export class GeniexReplyParser {
           .map((stop) => [this.held.indexOf(stop), stop] as const)
           .filter(([at]) => at >= 0)
           .sort((a, b) => a[0] - b[0])[0]
-        const think = this.held.indexOf(THINK_OPEN)
-        const call = this.held.indexOf(CALL_OPEN)
-        const fence = this.toolsRequested ? this.held.indexOf(FENCE) : -1
-        const marks = [
-          [think, 'think'],
-          [call, 'call'],
-          [fence, 'fence'],
-        ].filter(([at]) => (at as number) >= 0) as Array<[number, 'think' | 'call' | 'fence']>
-        marks.sort((a, b) => a[0] - b[0])
+        const openers = {
+          think: THINK_OPEN,
+          call: CALL_OPEN,
+          fence: this.toolsRequested ? FENCE : null,
+          gthink: GEMMA_THINK_OPEN,
+          gcall: GEMMA_CALL_OPEN,
+        } as const
+        type Kind = keyof typeof openers
+        const marks = (Object.keys(openers) as Kind[])
+          .map(
+            (kind) =>
+              [openers[kind] === null ? -1 : this.held.indexOf(openers[kind] as string), kind] as const
+          )
+          .filter(([at]) => at >= 0)
+          .sort((a, b) => a[0] - b[0])
         const first = marks[0]
         if (stopAt && (!first || stopAt[0] <= first[0])) {
           this.emitText(this.held.slice(0, stopAt[0]), deltas)
@@ -232,8 +340,7 @@ export class GeniexReplyParser {
         if (first) {
           const [at, kind] = first
           this.emitText(this.held.slice(0, at), deltas)
-          const opener = kind === 'think' ? THINK_OPEN : kind === 'call' ? CALL_OPEN : FENCE
-          this.held = this.held.slice(at + opener.length)
+          this.held = this.held.slice(at + (openers[kind] as string).length)
           this.state = kind
           this.fenceHead = ''
           progress = true
@@ -244,6 +351,8 @@ export class GeniexReplyParser {
           : partialSuffix(this.held, [
               THINK_OPEN,
               CALL_OPEN,
+              GEMMA_THINK_OPEN,
+              GEMMA_CALL_OPEN,
               ...(this.toolsRequested ? [FENCE] : []),
               ...this.stops,
             ])
@@ -252,30 +361,36 @@ export class GeniexReplyParser {
         this.emitText(out, deltas)
         continue
       }
-      if (this.state === 'think') {
-        const close = this.held.indexOf(THINK_CLOSE)
+      if (this.state === 'think' || this.state === 'gthink') {
+        const closer = this.state === 'think' ? THINK_CLOSE : GEMMA_THINK_CLOSE
+        const close = this.held.indexOf(closer)
         if (close >= 0) {
           this.emitReasoning(this.held.slice(0, close), deltas)
-          this.held = this.held.slice(close + THINK_CLOSE.length)
+          this.held = this.held.slice(close + closer.length)
           this.state = 'text'
           progress = true
           continue
         }
-        const keep = final ? 0 : partialSuffix(this.held, [THINK_CLOSE])
+        const keep = final ? 0 : partialSuffix(this.held, [closer])
         this.emitReasoning(this.held.slice(0, this.held.length - keep), deltas)
         this.held = this.held.slice(this.held.length - keep)
         continue
       }
-      if (this.state === 'call') {
-        const close = this.held.indexOf(CALL_CLOSE)
-        if (close >= 0 || final) {
-          const body = close >= 0 ? this.held.slice(0, close) : this.held
-          this.held = close >= 0 ? this.held.slice(close + CALL_CLOSE.length) : ''
+      if (this.state === 'call' || this.state === 'gcall') {
+        const gemma = this.state === 'gcall'
+        const closers: readonly string[] = gemma ? GEMMA_CALL_CLOSES : [CALL_CLOSE]
+        const found = closers
+          .map((closer) => [this.held.indexOf(closer), closer] as const)
+          .filter(([at]) => at >= 0)
+          .sort((a, b) => a[0] - b[0])[0]
+        if (found || final) {
+          const body = found ? this.held.slice(0, found[0]) : this.held
+          this.held = found ? this.held.slice(found[0] + found[1].length) : ''
           this.state = 'text'
-          const calls = callsOf(body)
+          const calls = gemma ? gemmaCallsOf(body) : callsOf(body)
           if (calls) deltas.push(this.record(calls))
-          else this.emitText(`${CALL_OPEN}${body}${close >= 0 ? CALL_CLOSE : ''}`, deltas)
-          progress = close >= 0
+          else this.emitText(`${gemma ? GEMMA_CALL_OPEN : CALL_OPEN}${body}${found ? found[1] : ''}`, deltas)
+          progress = found !== undefined
           continue
         }
         return deltas

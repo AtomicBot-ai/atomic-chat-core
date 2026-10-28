@@ -231,6 +231,61 @@ describe('GeniexReplyParser', () => {
     ).toBe('```python\nprint(1)\n```')
   })
 
+  it("reads Gemma 4's own syntax: <|channel>thought as reasoning, <|tool_call>call:… as tool_calls with typed arguments", () => {
+    const parser = new GeniexReplyParser([], true, () => 'call_m')
+    const deltas = feed(parser, [
+      '<|chan',
+      'nel>thought\n',
+      'The tool answers this.',
+      '<channel|>',
+      '<|tool_call>call:get_wea',
+      'ther{city:<|"|>Paris, {FR}<|"|>,days:3,units:{metric:true,none:null},tags:[<|"|>a<|"|>,<|"|>b<|"|>,2.5]}',
+      '<tool_call|>',
+      '<|tool_call>call:second{<|"|>quoted key<|"|>:<|"|>x<|"|>}<turn|>',
+    ])
+    expect(deltas).toEqual([
+      { reasoning_content: '\n' },
+      { reasoning_content: 'The tool answers this.' },
+      {
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_m',
+            type: 'function',
+            function: {
+              name: 'get_weather',
+              arguments:
+                '{"city":"Paris, {FR}","days":3,"units":{"metric":true,"none":null},"tags":["a","b",2.5]}',
+            },
+          },
+        ],
+      },
+      {
+        tool_calls: [
+          {
+            index: 1,
+            id: 'call_m',
+            type: 'function',
+            function: { name: 'second', arguments: '{"quoted key":"x"}' },
+          },
+        ],
+      },
+    ])
+    expect(parser.finish('eos')).toBe('tool_calls')
+    expect(parser.message()).toMatchObject({ content: null, reasoning_content: 'The tool answers this.' })
+  })
+
+  it('keeps a Gemma 4 call block that names no call as text, and an unfinished one at the end', () => {
+    const parser = new GeniexReplyParser([], true)
+    expect(feed(parser, ['<|tool_call>', 'nothing here', '<tool_call|>', ' after'])).toEqual([
+      { content: '<|tool_call>nothing here<tool_call|>' },
+      { content: ' after' },
+    ])
+    const cut = new GeniexReplyParser([], true)
+    expect(cut.add('<|tool_call>call:x{a:')).toEqual([])
+    expect(cut.flush()).toEqual([{ content: '<|tool_call>call:x{a:' }])
+  })
+
   it('cuts the reply at a stop string, even across tokens, and says when to stop the library', () => {
     const parser = new GeniexReplyParser(['END'], false)
     expect(parser.add('abc E')).toEqual([{ content: 'abc ' }])
