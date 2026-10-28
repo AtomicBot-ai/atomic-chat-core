@@ -253,6 +253,33 @@ describe('planLlamaArgs', () => {
     expect(plan.warnings.at(-1)).toContain('unterminated')
   })
 
+  describe('tensor split in the extra arguments', () => {
+    // The argv a Windows user with two CUDA GPUs sent to sentence-transformer-mini (ATO-556).
+    const cfg = (extra_args: string) => ({ ...base(), split_mode: 'none' as const, extra_args })
+    const embedding = { ...input, isEmbedding: true }
+
+    it.each([
+      ['-sm tensor', ''],
+      ['--split-mode tensor', ''],
+      ['-sm=tensor', ''],
+      ['--split-mode=tensor', ''],
+      ['--no-warmup -sm tensor -t 8', '--no-warmup -t 8'],
+    ])('drops "%s" from an embedding load', (extra, kept) => {
+      const plan = planLlamaArgs(cfg(extra), embedding)
+      const tail = plan.argv.slice(plan.argv.lastIndexOf('off') + 1).join(' ')
+      expect(tail).toBe(kept)
+      expect(plan.argv).toEqual(expect.arrayContaining(['--split-mode', 'none']))
+      expect(plan.warnings.at(-1)).toContain('ignoring the tensor split')
+    })
+
+    it('keeps other split modes and every argument of a text load', () => {
+      const row = planLlamaArgs(cfg('-sm row'), embedding)
+      expect(row.argv.slice(-2)).toEqual(['-sm', 'row'])
+      expect(row.warnings.join('\n')).not.toContain('tensor split')
+      expect(buildLlamaArgs(cfg('-sm tensor'), input).slice(-2)).toEqual(['-sm', 'tensor'])
+    })
+  })
+
   it('withLlamacppDefaults fills only the serde-default fields', () => {
     const cfg = base()
     expect(cfg.parallel).toBe(1)
