@@ -196,6 +196,43 @@ describe('jobs through the service', () => {
   })
 })
 
+describe('speechBackend', () => {
+  it('names the loaded model and its mode, runs speech jobs as the studio does, and cancels one', async () => {
+    const w = await world()
+    const backend = w.service.speechBackend()
+    expect(backend.loaded()).toBeUndefined()
+    await expect(backend.start({ text: 'Hello' })).rejects.toMatchObject({ code: 'MODEL_NOT_LOADED' })
+    await w.service.loadModel(speechLoad())
+    expect(backend.loaded()).toEqual({
+      modelId: 'kokoro-82m:q8_0',
+      displayName: 'Kokoro 82M',
+      mode: 'speech',
+    })
+
+    const started = await backend.start({ text: 'Hello', seed: 5 })
+    expect(w.service.getJob(started.id)?.mode).toBe('speech')
+    const result = await started.done
+    if (!result.ok) throw new Error(result.error.message)
+    expect(result.outcome.job).toMatchObject({ id: started.id, state: 'completed' })
+    expect(result.outcome.item.recipe).toMatchObject({ text: 'Hello', seed: 5 })
+    expect(result.outcome.wav.toString('latin1', 0, 4)).toBe('RIFF')
+    expect((await w.service.gallery({ offset: 0, limit: 10 })).items.map((i) => i.id)).toEqual([started.id])
+    expect(
+      w.events.filter((e) => e.name === 'audio:job').map((e) => (e.payload['job'] as AudioJob).state)
+    ).toContain('completed')
+
+    w.http.reply.current = hangUntilAborted
+    const long = await backend.start({ text: 'long' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await backend.cancel(long.id)
+    expect(await long.done).toMatchObject({ ok: false, error: { code: 'CANCELLED' } })
+
+    await w.service.loadModel(speechLoad({ modelId: 'ace', mode: 'music', task: 'gen', family: 'ace_step' }))
+    expect(backend.loaded()?.mode).toBe('music')
+    await expect(backend.start({ text: 'Hello' })).rejects.toMatchObject({ code: 'UNSUPPORTED_MODE' })
+  })
+})
+
 describe('configuration', () => {
   it('moves the gallery folder and back, sets the idle unload, and reports each change', async () => {
     const w = await world()

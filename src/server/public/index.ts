@@ -20,6 +20,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { LocalApiServerState } from '../../contracts/index.js'
 import { captureReport, internalErrorReport } from '../../telemetry/index.js'
+import { serveAudioSpeech } from './audio-speech.js'
 import { DECISION_ROUTES, serveDecision } from './decision.js'
 import { serveEmbeddingIfOwned } from './embedding.js'
 import { answer, newExchange } from './exchange.js'
@@ -37,6 +38,7 @@ import type { PublicServerConfig, PublicServerDeps } from './types.js'
 import { sendWhole } from './wire.js'
 
 export type {
+  AudioSpeechBackend,
   CtxIncreaseOutcome,
   DecisionBackend,
   DecisionTarget,
@@ -102,6 +104,7 @@ const ALLOWED_METHODS: Record<string, string> = {
   '/messages/count_tokens': 'POST',
   '/images/generations': 'POST',
   '/images/edits': 'POST',
+  '/audio/speech': 'POST',
   '/systemone': 'POST',
   '/router/score': 'POST',
 }
@@ -192,6 +195,11 @@ export async function handlePublicRequest(
     if (path === '/images/edits') {
       trace.endpoint = endpointFromPath(path)
       return serveImagesEdits(ex)
+    }
+    // Served here, never forwarded: the audio model is the core's own, and it is not in `/models`.
+    if (path === '/audio/speech') {
+      trace.endpoint = endpointFromPath(path)
+      return serveAudioSpeech(ex)
     }
     // Served by the decision module's own process, byte for byte; never a chat session.
     if (Object.hasOwn(DECISION_ROUTES, path)) {

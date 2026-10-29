@@ -22,6 +22,7 @@ import type {
 } from '../contracts/index.js'
 import { AsyncMutex, samePath } from '../diffusion/index.js'
 import type { EngineHost } from '../engine-builds/service.js'
+import type { AudioSpeechBackend } from '../server/index.js'
 import type { BackendOutputSink, GpuClaimHook, GpuOccupancy } from '../runtime/shared/index.js'
 import { resolveAudioBackend } from './args.js'
 import { resolveModelPath, taskForMode } from './config.js'
@@ -441,6 +442,25 @@ export class AudioService {
   /** Run one job to completion and answer the clip. */
   runJob(mode: AudioMode, request: AudioGenerateRequest): Promise<AudioJobOutcome> {
     return runAudioJob(this.deps, mode, request)
+  }
+
+  /**
+   * What `POST /v1/audio/speech` needs: the loaded model and what it makes, and a speech job started
+   * the way `runJob` starts one — same validation, events, gallery and idle timer — but answered with
+   * its id at once, so a client that hangs up can have it cancelled.
+   */
+  speechBackend(): AudioSpeechBackend {
+    return {
+      loaded: () => {
+        const spec = this.state.spec
+        return spec ? { modelId: spec.modelId, displayName: spec.displayName, mode: spec.mode } : undefined
+      },
+      start: async (request) => {
+        const { job, done } = await startAudioJob(this.deps, 'speech', request)
+        return { id: job.id, done }
+      },
+      cancel: (jobId) => cancelAudioJob(this.deps, jobId),
+    }
   }
 
   getJob(id: string): AudioJob | null {

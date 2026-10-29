@@ -228,6 +228,7 @@ export class AtomicCore {
         dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
         images: this.diffusion.imagesBackend(),
         videos: this.diffusion.videosBackend(),
+        speech: this.audio.speechBackend(),
         decision: this.decision.publicBackend(),
         embedding: this.embedding.publicBackend(),
         errors: parts.errors,

@@ -7,6 +7,11 @@
  */
 
 import type {
+  AudioErrorBody,
+  AudioGalleryItem,
+  AudioGenerateRequest,
+  AudioJob,
+  AudioMode,
   CoreEvents,
   DiffusionErrorBody,
   DiffusionFamilyDefaults,
@@ -76,6 +81,22 @@ export interface ImagesBackend {
   cancel: (jobId: string) => Promise<unknown>
   /** The provider and model a `model` names among the enabled remote image models. */
   find?: (model: string) => MediaTarget | undefined
+}
+
+/** The resident audio model as `POST /audio/speech` needs it: who it is, what it makes, and how a job runs. */
+export interface AudioSpeechBackend {
+  /** The loaded audio model, whatever it makes, or `undefined` when there is none. */
+  loaded: () => { modelId: string; displayName: string; mode: AudioMode } | undefined
+  /** Start a speech job on it; `done` settles with the outcome and never rejects. */
+  start: (request: AudioGenerateRequest) => Promise<{
+    id: string
+    done: Promise<
+      | { ok: true; outcome: { job: AudioJob; item: AudioGalleryItem; wav: Buffer } }
+      | { ok: false; error: AudioErrorBody }
+    >
+  }>
+  /** Give up on a job the client no longer waits for. */
+  cancel: (jobId: string) => Promise<unknown>
 }
 
 /** The resident video model as `/videos` needs it, plus the two places a video lives: the runner and the gallery. */
@@ -207,6 +228,8 @@ export interface PublicServerDeps {
   images?: ImagesBackend
   /** The video counterpart, for `/videos`. */
   videos?: VideosBackend
+  /** Speech on the resident audio model, for `/audio/speech`; without it the route answers 503. */
+  speech?: AudioSpeechBackend
   /** The decision model, for `/systemone` and `/router/score`; without it those routes answer 503. */
   decision?: DecisionBackend
   /**
