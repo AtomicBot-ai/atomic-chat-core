@@ -14,6 +14,8 @@ export type ReportSource =
   | 'model_load'
   | 'diffusion_load'
   | 'diffusion_job'
+  | 'audio_load'
+  | 'audio_job'
   | 'inference'
 
 /** One failure worth an issue, before scrubbing: what the rest of the core hands the reporter. */

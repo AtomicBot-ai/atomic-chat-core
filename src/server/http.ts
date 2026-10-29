@@ -218,6 +218,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'MANAGED_RELOGIN_REQUIRED':
     case 'MANAGED_REBOOT_REQUIRED':
     case 'GPU_BUSY':
+    case 'UNSUPPORTED_MODE':
     case 'SESSION_GENERATION_STALE':
     case 'DECISION_NOT_CONFIGURED':
     case 'DECISION_ENGINE_UNSUPPORTED':
@@ -241,6 +242,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'REMOTE_QUOTA':
       return 402
     case 'REMOTE_REJECTED':
+    case 'REQUEST_REJECTED':
     case 'REMOTE_CONTENT_BLOCKED':
     case 'REMOTE_UNSUPPORTED':
     case 'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED':

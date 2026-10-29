@@ -89,6 +89,41 @@ describe('wireGpuResidency', () => {
     )
   })
 
+  it('stops an idle audio model through its service, and refuses a chat load while it generates', async () => {
+    const calls: string[] = []
+    const audio: GpuOccupancy[] = [{ model_id: 'kokoro', cards: 'all', auxiliary: false, state: 'ready' }]
+    const residency = wireGpuResidency({
+      runtimes: new Map<LocalProviderId, LocalRuntime>(),
+      diffusion: () => undefined,
+      audio: () => ({
+        gpuOccupancy: () => audio,
+        unloadModel: async () => {
+          calls.push('audio.unloadModel')
+          audio.splice(0)
+        },
+      }),
+      leftovers: () => [],
+      sessions: () => ({ cancelLoad: () => false, unload: async () => ({ success: true }) }),
+    })
+    await residency.hook('llamacpp')({ model_id: 'chat', cards: 'all', auxiliary: false })
+    expect(calls).toEqual(['audio.unloadModel'])
+
+    audio.push({
+      model_id: 'ace-step',
+      cards: 'all',
+      auxiliary: false,
+      state: 'ready',
+      busy: 'ACE-Step is generating music',
+      remedy: 'Wait for the clip to finish, or stop it, then try again.',
+    })
+    const error = (await residency
+      .hook('llamacpp')({ model_id: 'chat', cards: 'all', auxiliary: false })
+      .catch((e: unknown) => e)) as AtomicCoreError
+    expect(error.code).toBe('GPU_BUSY')
+    expect(error.details).toContain('holder=audio/ace-step')
+    expect(calls).toEqual(['audio.unloadModel'])
+  })
+
   it('names a failed unload by its model when the session gives no reason', async () => {
     const residency = wireGpuResidency({
       runtimes: new Map<LocalProviderId, LocalRuntime>([

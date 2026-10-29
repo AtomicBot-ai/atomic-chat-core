@@ -11,6 +11,7 @@
 export { ControlServer } from './server.js'
 export { SSE_HEARTBEAT_MS } from './types.js'
 export type {
+  AudioControl,
   BackendControl,
   ChatGptControl,
   CloudControl,

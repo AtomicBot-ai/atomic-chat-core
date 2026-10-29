@@ -27,6 +27,8 @@ import type {
   SessionSummary,
 } from '../../src/server/control/index.js'
 import { fakeDiffusionControl } from './fake-diffusion-control.js'
+import { fakeAudioControl } from './fake-audio-control.js'
+import type { FakeAudioControl } from './fake-audio-control.js'
 import { fakeEngineBuildsControl } from './fake-engine-builds-control.js'
 import { fakeEnginesControl } from './fake-engines-control.js'
 import type { FakeDiffusionControl } from './fake-diffusion-control.js'
@@ -86,6 +88,7 @@ export interface ControlHarness {
   /** Set to make `POST /remote-access/start` refuse. */
   remoteAccessRefusal: Error | undefined
   diffusion: FakeDiffusionControl
+  audio: FakeAudioControl
   /** What `PUT /server/selection` stored. */
   selection: ServedModelSelection[]
   get: (path: string, init?: RequestInit) => Promise<Response>
@@ -206,6 +209,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     },
     remoteAccessRefusal: undefined,
     diffusion: fakeDiffusionControl(calls),
+    audio: fakeAudioControl(calls),
     selection: [],
   } as unknown as ControlHarness
   const server = await ControlServer.start({
@@ -247,6 +251,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       },
     },
     diffusion: harness.diffusion,
+    audio: harness.audio,
     engineBuilds: fakeEngineBuildsControl(calls),
     engines: fakeEnginesControl(calls),
     externalSessions: {

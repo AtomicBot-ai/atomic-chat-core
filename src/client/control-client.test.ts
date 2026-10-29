@@ -27,6 +27,7 @@ import { ClientRegistry } from '../server/clients.js'
 import { ControlServer } from '../server/control/index.js'
 import { CoreClient } from './control-client.js'
 import { fakeDiffusionControl } from '../../test/helpers/fake-diffusion-control.js'
+import { fakeAudioControl } from '../../test/helpers/fake-audio-control.js'
 import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
 import { HardwareService } from '../hardware/index.js'
 import { HARNESS_SYSTEM_INFO } from '../../test/helpers/control-harness.js'
@@ -48,6 +49,7 @@ let inspecting = false
 let selection: Array<{ model: string; provider: string }> = []
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
+const audioCalls: string[] = []
 const engineBuildCalls: string[] = []
 const engineCalls: string[] = []
 const environmentCalls: string[] = []
@@ -329,6 +331,7 @@ beforeEach(async () => {
       },
     },
     diffusion: fakeDiffusionControl(diffusionCalls),
+    audio: fakeAudioControl(audioCalls),
     engineBuilds: fakeEngineBuildsControl(engineBuildCalls),
     engines: fakeEnginesControl(engineCalls),
     liteRtLm: {
@@ -640,6 +643,59 @@ describe('recreate', () => {
       ok: false,
       reason: 'not-loaded',
     })
+  })
+})
+
+describe('audio generation', () => {
+  it('drives the operations, unwrapping the lists and the lookups', async () => {
+    audioCalls.length = 0
+    expect((await client.audioStatus()).outputDir).toBe('/tmp/data/audios')
+    expect((await client.configureAudio({ idleUnloadSecs: 0 })).idleUnloadSecs).toBe(0)
+    expect((await client.setAudioOutputDir('/sounds')).outputDir).toBe('/sounds')
+    expect((await client.listAudioModelFiles()).map((f) => f.relativePath)).toEqual(['kokoro/k.gguf'])
+    await client.deleteAudioModelFile('kokoro/k.gguf')
+    const loaded = await client.loadAudioModel({
+      modelId: 'kokoro-82m:q8_0',
+      displayName: 'Kokoro 82M',
+      mode: 'speech',
+      file: 'kokoro/k.gguf',
+      family: 'kokoro_tts',
+      task: 'tts',
+    })
+    expect(loaded.pid).toBe(778)
+    expect((await client.audioCapabilities()).voices).toEqual(['af_heart'])
+    await client.touchAudioIdle()
+    const job = await client.generateAudio('speech', { text: 'hello', voice: 'af_heart' })
+    expect(job).toMatchObject({ id: 'ajob-1', mode: 'speech', request: { text: 'hello', voice: 'af_heart' } })
+    expect((await client.audioJob(job.id))?.state).toBe('queued')
+    expect(await client.audioJob('gone/with/slashes')).toBeNull()
+    expect(await client.cancelAudioJob(job.id)).toEqual({ cancelled: true, serverStopped: true })
+    const page = await client.audioGallery({ offset: 0, limit: 20 })
+    expect(page.items[0]?.recipe.engine.kind).toBe('audio-cpp')
+    await client.deleteAudioGalleryItem(page.items[0]?.id as string)
+    await client.unloadAudioModel()
+    expect(audioCalls).toEqual([
+      'audio config {"idleUnloadSecs":0}',
+      'audio setOutputDir /sounds',
+      'audio deleteModelFile kokoro/k.gguf',
+      'audio loadModel kokoro-82m:q8_0 speech',
+      'audio touchIdle',
+      'audio generate speech hello',
+      'audio cancelJob ajob-1',
+      'audio gallery {"offset":0,"limit":20}',
+      `audio deleteGalleryItem ${page.items[0]?.id}`,
+      'audio unloadModel',
+    ])
+  })
+
+  it('surfaces a refusal with the audio code', async () => {
+    await expect(
+      client.generateAudio('lullabies' as unknown as 'speech', { text: 'hello' })
+    ).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      details: 'mode: expected one of speech, music, effects',
+    })
+    await expect(client.loadAudioModel({} as never)).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 })
 

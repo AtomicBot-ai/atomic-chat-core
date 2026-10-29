@@ -211,6 +211,48 @@ export function diffusionFailureReport(input: {
   }
 }
 
+/**
+ * Audio-generation codes that name something the user or the client can fix — a missing engine or
+ * file, the wrong mode, a request audio.cpp refused, a busy engine, a full disk — rather than an
+ * engine or core defect.
+ */
+export const RECOVERABLE_AUDIO_CODES: ReadonlySet<string> = new Set([
+  'ENGINE_MISSING',
+  'MODEL_MISSING',
+  'MODEL_INCOMPATIBLE',
+  'MODEL_NOT_LOADED',
+  'UNSUPPORTED_BACKEND',
+  'UNSUPPORTED_MODE',
+  'INVALID_REQUEST',
+  'REQUEST_REJECTED',
+  'JOB_BUSY',
+  'JOB_NOT_FOUND',
+  'CANCELLED',
+  'DISK_FULL',
+  'BACKEND_IN_USE',
+])
+
+/** audio.cpp failing to load a model (`load`) or to finish a clip (`job`). */
+export function audioFailureReport(input: {
+  phase: 'load' | 'job'
+  error: unknown
+  family?: string | undefined
+}): ErrorReport | null {
+  if (isCancellation(input.error)) return null
+  const code = errorCodeOf(input.error) ?? 'INTERNAL'
+  if (RECOVERABLE_AUDIO_CODES.has(code)) return null
+  const engineErrors = markerLines(detailsOf(input.error))
+  return {
+    source: input.phase === 'load' ? 'audio_load' : 'audio_job',
+    level: code === 'OUT_OF_MEMORY' || code === 'INVALID_OUTPUT' ? 'warning' : 'error',
+    error: input.error,
+    fingerprint: [input.phase === 'load' ? 'audio-load-failure' : 'audio-failure', code],
+    tags: { provider: 'audio', error_code: code, audio_family: input.family },
+    ...(engineErrors ? { extra: { engine_errors: engineErrors } } : {}),
+    throttle: { key: `audio:${input.phase}:${input.family ?? ''}:${code}`, windowMs: ENGINE_THROTTLE_MS },
+  }
+}
+
 function upstreamMessage(body: string): string {
   try {
     const parsed = JSON.parse(body) as { error?: { message?: unknown } | string; message?: unknown }

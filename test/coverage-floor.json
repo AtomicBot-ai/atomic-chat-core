@@ -1,4 +1,130 @@
 {
+  "src/audio/args.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/capabilities.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/config.ts": {
+    "statements": 100,
+    "branches": 95,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/errors.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/gallery.ts": {
+    "statements": 97,
+    "branches": 92,
+    "functions": 93,
+    "lines": 97
+  },
+  "src/audio/http.ts": {
+    "statements": 100,
+    "branches": 88,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/idle.ts": {
+    "statements": 100,
+    "branches": 80,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/install.ts": {
+    "statements": 98,
+    "branches": 94,
+    "functions": 100,
+    "lines": 98
+  },
+  "src/audio/jobs.ts": {
+    "statements": 97,
+    "branches": 91,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/audio/model-files.ts": {
+    "statements": 97,
+    "branches": 100,
+    "functions": 100,
+    "lines": 97
+  },
+  "src/audio/output.ts": {
+    "statements": 96,
+    "branches": 95,
+    "functions": 100,
+    "lines": 96
+  },
+  "src/audio/parse.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/recipe.ts": {
+    "statements": 100,
+    "branches": 98,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/request.ts": {
+    "statements": 100,
+    "branches": 96,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/server-process.ts": {
+    "statements": 91,
+    "branches": 88,
+    "functions": 100,
+    "lines": 91
+  },
+  "src/audio/service.ts": {
+    "statements": 94,
+    "branches": 91,
+    "functions": 89,
+    "lines": 94
+  },
+  "src/audio/session.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/state.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/types.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/wav.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/audio/wiring.ts": {
+    "statements": 100,
+    "branches": 44,
+    "functions": 100,
+    "lines": 100
+  },
   "src/backend/advisor/advisor.ts": {
     "statements": 98,
     "branches": 83,
@@ -1518,6 +1644,12 @@
     "lines": 100
   },
   "src/server/control/router.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/control/routes/audio.ts": {
     "statements": 100,
     "branches": 100,
     "functions": 100,
