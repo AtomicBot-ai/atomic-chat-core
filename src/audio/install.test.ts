@@ -48,7 +48,7 @@ const record = (
   dir: string,
   overrides: Partial<AudioBackendInstallRecord> = {}
 ): AudioBackendInstallRecord => ({
-  tag: 'v0.9.3-a1b2c3d',
+  tag: 'v0.9.3-a1b2c3d4',
   backendId: 'macos-arm64',
   backend: 'metal',
   engine: 'audio-cpp',
@@ -75,7 +75,7 @@ describe('the install record', () => {
   it('round-trips, camelCase on disk, with the ownership marker beside it', async () => {
     await writeAudioInstallRecord(root, record(root))
     expect(JSON.parse(await readFile(join(root, INSTALL_RECORD), 'utf8'))).toEqual({
-      tag: 'v0.9.3-a1b2c3d',
+      tag: 'v0.9.3-a1b2c3d4',
       backendId: 'macos-arm64',
       backend: 'metal',
       engine: 'audio-cpp',
@@ -116,7 +116,7 @@ describe('listInstalledAudioBuilds', () => {
   it('lists owned builds with their server, newest install first', async () => {
     await build('v0.9.2', 'macos-arm64', 10)
     await build('v0.9.3', 'macos-arm64', 30)
-    await build('v0.9.3-a1b2c3d', 'macos-arm64', 20, false)
+    await build('v0.9.3-a1b2c3d4', 'macos-arm64', 20, false)
     await mkdir(join(root, 'v0.9.1', 'stray'), { recursive: true })
     await writeFile(join(root, 'not-a-dir'), '')
     const builds = await listInstalledAudioBuilds(root)
