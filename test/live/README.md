@@ -82,6 +82,20 @@ Stage 5 providers, each opt-in on its own:
   probed; a tampered sha256 refused; `--version` naming the tag's commit. `node scripts/fetch-live-fixtures.mjs --engine
   sd-cpp --tag <tag> --out .live-sd` fetches a release, its manifest and FLUX.2 Klein for both files, and
   `npm run engine:check -- --engine sd-cpp --tag <tag>` runs the whole check.
+- audio.cpp (`test/live/audio-install.test.ts`): installs a real build the way a user gets it, from a manifest of conf's
+  shape (`ATOMIC_AUDIOCPP_MANIFEST_URL`): picked for the host, downloaded, size and sha256 checked, unpacked and probed
+  (`--version`, and `--list-devices` for a GPU build); a tampered sha256 refused; `--version` naming the tag's `X.Y.Z`.
+  `ATOMIC_LIVE_AUDIO_MANIFEST` (a path or an `https://` URL, such as conf's `backends/audiocpp-manifest.json` on
+  raw.githubusercontent.com) picks the manifest; without it the test installs from conf's bootstrap staging manifest
+  (`test/fixtures/audiocpp/conf/audiocpp-manifest.staging.json`: upstream `0xShug0/audio.cpp` v0.9.3, which has no
+  Linux or Windows arm64 build). It downloads this host's archive twice: 35 MB on an Apple Silicon Mac.
+  `node scripts/fetch-live-fixtures.mjs --engine audio-cpp --tag <tag> [--repo …] --out .live-audio` fetches a release,
+  its manifest, Kokoro-82M q8 (189 MB, pinned by revision and sha256) and the build's `--help`, `--version` and
+  `--list-devices` (`help.txt`, `version.txt`, `list-devices.txt`), and writes `live.json` for the config's `live_env`:
+  `ATOMIC_LIVE_AUDIO_ENGINE` (the unpacked build), `ATOMIC_LIVE_AUDIO_TAG`, `ATOMIC_LIVE_AUDIO_MANIFEST`,
+  `ATOMIC_LIVE_AUDIO_MODEL` (Kokoro), `ATOMIC_LIVE_AUDIO_FAMILY=kokoro_tts`, `ATOMIC_LIVE_AUDIO_TASK=tts`,
+  `ATOMIC_LIVE_AUDIO_MODE=offline` and `ATOMIC_LIVE_AUDIO_BACKEND=cpu`, which the audio runtime's live tests read.
+  `npm run engine:check -- --engine audio-cpp --tag <tag>` runs the whole check.
 
 Managed TensorRT-LLM install on Linux (`test/live/managed-install.test.ts`, task 2.18): `ATOMIC_LIVE=1` **and**
 `ATOMIC_LIVE_MANAGED=1`, on a throwaway Linux VM with an NVIDIA GPU, driver ≥ the descriptor's minimum and passwordless

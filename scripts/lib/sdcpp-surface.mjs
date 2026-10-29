@@ -5,6 +5,9 @@
 // v1, engine-surface.mjs) with sd.cpp's own checks. Also what `resolve` asks of a release before it is
 // tested: every archive up, and on conf's signed mirror a staging manifest naming exactly those
 // bytes. Pure; scripts/engine-surface-diff.mjs and scripts/engine-candidate.mjs do the I/O.
+//
+// The archive, completeness and report parts take a release spec (`SDCPP_RELEASE`): audio.cpp's
+// builds are the same kind of release (scripts/lib/audiocpp-surface.mjs, `AUDIOCPP_RELEASE`).
 import {
   checkReleaseNotes,
   checkStrings,
@@ -285,7 +288,7 @@ export function checkSdVersion(contract, { tag, output }) {
   return findings
 }
 
-const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+export const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** A contract archive pattern for the build of `sha7`. */
 export const sdAssetRe = (pattern, sha7) => new RegExp(`^${pattern.replace('{sha7}', escapeRegExp(sha7))}$`)
 /** `sd-master-<sha7>-bin-<rest>` → `<rest>`; any other name as it is. */
@@ -293,39 +296,61 @@ const binRest = (name, sha7) =>
   new RegExp(`^sd-master-${escapeRegExp(sha7)}-bin-(.+)$`).exec(name)?.[1] ?? name
 const ARCHIVE = /\.(zip|tar\.gz|tgz)$/
 
+/**
+ * What differs between the engines whose builds are a ggml project's release, one archive per backend
+ * id cut from an upstream tag: the project's name in messages, how its tags read (`tagParts`), the
+ * archive a contract pattern names for a tag (`assetRe`), the part of an archive's name that says
+ * which build it is (`archiveKind`, for "moved" findings) and conf's manifest of the engine
+ * (`parseManifest`).
+ */
+export const SDCPP_RELEASE = {
+  project: 'sd.cpp',
+  tagParts: sdcppTagParts,
+  assetRe: (pattern, tag) => sdAssetRe(pattern, sdcppTagParts(tag)?.sha7 ?? '\0'),
+  archiveKind: (name, tag) => binRest(name, sdcppTagParts(tag)?.sha7 ?? ''),
+  parseManifest: parseSdcppPinManifest,
+}
+
 /** The archives of `assets` (names) each contract backend takes, for the build `tag` names. */
-export function sdcppBackendArchives(contract, tag, assets) {
-  const sha7 = sdcppTagParts(tag)?.sha7 ?? '\0'
+export function releaseBackendArchives(contract, tag, assets, release) {
   return Object.fromEntries(
     (contract.assets?.core_backends ?? []).map((b) => [
       b.backend,
-      assets.filter((n) => sdAssetRe(b.asset, sha7).test(n)).sort(),
+      assets.filter((n) => release.assetRe(b.asset, tag).test(n)).sort(),
     ])
   )
 }
 
+/** The archives of `assets` (names) each contract backend takes, for the build `tag` names. */
+export function sdcppBackendArchives(contract, tag, assets) {
+  return releaseBackendArchives(contract, tag, assets, SDCPP_RELEASE)
+}
+
 /** The archives of a release core installs: what a passing live run does not cover is listed as unverified. */
-export function sdcppCoreAssets(contract, tag, assets) {
-  return Object.values(sdcppBackendArchives(contract, tag, assets))
+export function releaseCoreAssets(contract, tag, assets, release) {
+  return Object.values(releaseBackendArchives(contract, tag, assets, release))
     .flat()
     .sort()
 }
 
+/** The archives of a release core installs: what a passing live run does not cover is listed as unverified. */
+export function sdcppCoreAssets(contract, tag, assets) {
+  return releaseCoreAssets(contract, tag, assets, SDCPP_RELEASE)
+}
+
 /**
  * The release's archives against the backends core installs (`assets.core_backends`). A missing CPU
- * archive leaves its platform without sd.cpp, a missing `required` one stops conf's mirror (both
+ * archive leaves its platform without the engine, a missing `required` one stops conf's mirror (both
  * `break`); two archives for one backend stop the mirror too. `pin` is the pin's archive list: a
  * backend the pin had and the candidate lacks is a loss (`warn`).
  */
-export function checkSdAssets(contract, { candidate, pin }) {
+export function checkReleaseAssets(contract, { candidate, pin }, release) {
   const backends = contract.assets?.core_backends ?? []
   if (backends.length === 0)
     return [finding('assets.core_backends', undefined, 'error', 'the contract lists no core backends')]
   const findings = []
-  const now = sdcppBackendArchives(contract, candidate.tag, candidate.assets)
-  const before = pin ? sdcppBackendArchives(contract, pin.tag, pin.assets) : null
-  const sha7 = sdcppTagParts(candidate.tag)?.sha7 ?? ''
-  const pinSha7 = pin ? (sdcppTagParts(pin.tag)?.sha7 ?? '') : ''
+  const now = releaseBackendArchives(contract, candidate.tag, candidate.assets, release)
+  const before = pin ? releaseBackendArchives(contract, pin.tag, pin.assets, release) : null
   for (const b of backends) {
     const names = now[b.backend]
     const had = before?.[b.backend] ?? null
@@ -333,7 +358,7 @@ export function checkSdAssets(contract, { candidate, pin }) {
     if (names.length === 0) {
       const missing = `no ${b.backend} archive in ${candidate.tag}`
       const [severity, message] = b.cpu
-        ? ['break', `${missing}: ${b.platform} gets no sd.cpp`]
+        ? ['break', `${missing}: ${b.platform} gets no ${release.project}`]
         : b.required
           ? ['break', `${missing}, which conf's mirror requires: conf cannot mirror the tag`]
           : had && had.length > 0
@@ -352,13 +377,16 @@ export function checkSdAssets(contract, { candidate, pin }) {
           { archives: names }
         )
       )
-    else if (had?.length === 1 && binRest(had[0], pinSha7) !== binRest(names[0], sha7))
+    else if (
+      had?.length === 1 &&
+      release.archiveKind(had[0], pin.tag) !== release.archiveKind(names[0], candidate.tag)
+    )
       findings.push(
         finding(
           'assets.core_backends',
           subject,
           'info',
-          `${b.backend} moved: ${binRest(had[0], pinSha7)} → ${binRest(names[0], sha7)}`
+          `${b.backend} moved: ${release.archiveKind(had[0], pin.tag)} → ${release.archiveKind(names[0], candidate.tag)}`
         )
       )
   }
@@ -377,6 +405,11 @@ export function checkSdAssets(contract, { candidate, pin }) {
   return findings
 }
 
+/** sd.cpp's archives against the backends core installs (`checkReleaseAssets`). */
+export function checkSdAssets(contract, input) {
+  return checkReleaseAssets(contract, input, SDCPP_RELEASE)
+}
+
 /**
  * Whether a release can be tested: every archive conf's mirror requires and the CPU archive of each
  * of `platforms` is up exactly once, with the digest GitHub computes once an upload finishes. On
@@ -384,16 +417,17 @@ export function checkSdAssets(contract, { candidate, pin }) {
  * to name this tag, point its downloads at `downloadBase`, and pin every archive it lists with the
  * size and sha256 the release has. `assets` are the release's (`{name, size, digest}`).
  */
-export function sdcppCompleteness({ contract, tag, assets, platforms, manifest, downloadBase }) {
+export function releaseCompleteness({ contract, tag, assets, platforms, manifest, downloadBase }, release) {
   const missing = []
-  if (!sdcppTagParts(tag)) return { complete: false, missing: [{ kind: 'tag', tag }] }
+  if (!release.tagParts(tag)) return { complete: false, missing: [{ kind: 'tag', tag }] }
   const wanted = (contract.assets?.core_backends ?? []).filter(
     (b) => b.required || (b.cpu && (platforms ?? []).includes(b.platform))
   )
-  const archives = sdcppBackendArchives(
+  const archives = releaseBackendArchives(
     contract,
     tag,
-    assets.map((a) => a.name)
+    assets.map((a) => a.name),
+    release
   )
   for (const b of wanted) {
     const names = archives[b.backend]
@@ -403,7 +437,7 @@ export function sdcppCompleteness({ contract, tag, assets, platforms, manifest, 
       missing.push({ kind: 'digest', backend: b.backend, name: names[0] })
   }
   if (manifest !== undefined) {
-    const parsed = manifest === null ? null : parseSdcppPinManifest(manifest)
+    const parsed = manifest === null ? null : release.parseManifest(manifest)
     if (!parsed) missing.push({ kind: 'manifest', reason: 'conf has no staging manifest core reads' })
     else if (parsed.tag_name !== tag)
       missing.push({ kind: 'manifest', reason: `the staging manifest names ${parsed.tag_name}` })
@@ -432,6 +466,11 @@ export function sdcppCompleteness({ contract, tag, assets, platforms, manifest, 
   return { complete: missing.length === 0, missing }
 }
 
+/** Whether an sd.cpp release can be tested (`releaseCompleteness`). */
+export function sdcppCompleteness(input) {
+  return releaseCompleteness(input, SDCPP_RELEASE)
+}
+
 const RANK = { break: 0, error: 1, warn: 2, info: 3 }
 
 /** A side as the report shows it, with the leejet tag it is cut from. */
@@ -442,7 +481,7 @@ const summary = (side) => side && { ...sideSummary(side), upstream: side.upstrea
  * sides' `--help` (`help_text`, and `cli_help_text` for `sd-cli`), `--version`, the invocations and
  * the archive lists, the pin's resolution, and the upstream history between the two commits.
  */
-export function buildSdcppReport(contract, inputs, { now, contractSha256 } = {}) {
+export function buildSdcppReport(contract, inputs, options = {}) {
   const findings = []
   const skipped = {}
   const candidate = inputs.candidate
@@ -488,6 +527,18 @@ export function buildSdcppReport(contract, inputs, { now, contractSha256 } = {})
       })
     )
 
+  return releaseReport(contract, inputs, { findings, skipped, checks: SDCPP_CHECKS, hints: HINTS }, options)
+}
+
+/**
+ * A release engine's report (`atomic-engine-surface-report` v1) from its own findings about the build
+ * and its archives (`findings`, `skipped`: check id → why it did not run): adds the upstream history's
+ * findings, the hints, the order and each of `checks` with its status.
+ */
+export function releaseReport(contract, inputs, { findings, skipped, checks, hints }, options = {}) {
+  const { now, contractSha256 } = options
+  const candidate = inputs.candidate
+  const pin = inputs.pin ?? null
   const upstream = inputs.upstream ?? { available: false, reason: 'not compared' }
   if (upstream.available) {
     findings.push(...checkWatched(contract, upstream))
@@ -498,12 +549,12 @@ export function buildSdcppReport(contract, inputs, { now, contractSha256 } = {})
       findings.push(finding(check, 'unavailable', 'info', `upstream diff unavailable: ${upstream.reason}`))
 
   for (const f of findings) {
-    const hint = HINTS[f.check]
+    const hint = hints[f.check]
     if (hint && f.severity !== 'info') f.hint = hint
   }
   findings.sort((a, b) => RANK[a.severity] - RANK[b.severity] || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 
-  const checks = SDCPP_CHECKS.map(({ id, title }) => {
+  const reported = checks.map(({ id, title }) => {
     const own = findings.filter((f) => f.check === id)
     const reason = skipped[id]
     return {
@@ -546,7 +597,7 @@ export function buildSdcppReport(contract, inputs, { now, contractSha256 } = {})
     },
     status: statusOf(findings),
     counts: countsOf(findings),
-    checks,
+    checks: reported,
     findings,
   }
 }

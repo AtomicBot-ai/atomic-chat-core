@@ -2,11 +2,11 @@ name: engine-candidate
 run-name: engine-candidate ${{ inputs.engine }} ${{ inputs.tag || 'newest' }} [cid:${{ inputs.candidate_id }}] core@${{ inputs.core_ref }}
 
 # Is an engine build compatible with a core: upstream llama.cpp (`llamacpp-upstream`), PrismML's fork
-# (`atomic-prism`) or stable-diffusion.cpp (`sd-cpp`)? Started only by hand or by the update
-# orchestrator through the API: no schedule, no push or pull_request trigger, never called from
-# ci.yml (ADR 2026-10-15-check-an-engine-candidate-only-when-asked). Each engine's tags, repo, pin
-# source, platforms and live tests are in .github/engine-candidate/<engine>.json, and the core
-# suites run on that engine's platforms only. The same check on one machine is `npm run
+# (`atomic-prism`), stable-diffusion.cpp (`sd-cpp`) or audio.cpp (`audio-cpp`)? Started only by hand
+# or by the update orchestrator through the API: no schedule, no push or pull_request trigger, never
+# called from ci.yml (ADR 2026-10-15-check-an-engine-candidate-only-when-asked). Each engine's tags,
+# repo, pin source, platforms and live tests are in .github/engine-candidate/<engine>.json, and the
+# core suites run on that engine's platforms only. The same check on one machine is `npm run
 # engine:check`; docs/live-tests.md, "Checking a llama.cpp build", has both.
 on:
   workflow_dispatch:
@@ -14,10 +14,10 @@ on:
       engine:
         description: Engine to check
         type: choice
-        options: [llamacpp-upstream, atomic-prism, sd-cpp]
+        options: [llamacpp-upstream, atomic-prism, sd-cpp, audio-cpp]
         default: llamacpp-upstream
       tag:
-        description: Candidate tag (b11617, prism-b10787-73bfe6c, master-975-95b3090); empty takes the newest one with every archive up
+        description: Candidate tag (b11617, prism-b10787-73bfe6c, master-975-95b3090, v0.9.3-a1b2c3d4); empty takes the newest one with every archive up
         type: string
         default: ''
       repo:

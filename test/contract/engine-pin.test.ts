@@ -4,17 +4,21 @@
  * scripts, so it is held here to the same answers as `upstreamRemoteBackends` — on the bundled
  * baseline and on lists with a withdrawn release, a release for newer cores, and candidates only —
  * and, for PrismML, as `prismCatalogToBackends`; for sd.cpp, as `parseSdcppManifest` and the host
- * ladder of `sdcppHostChoice`.
+ * ladder of `sdcppHostChoice`; for audio.cpp, as `parseAudiocppManifest` and `audiocppHostChoice`.
  */
 import { describe, expect, it } from 'vitest'
 import {
+  AUDIOCPP_PIN_PLATFORMS,
+  audiocppTagParts,
   engineTagBuild,
+  parseAudiocppPinManifest,
   PIN_PLATFORMS,
   PRISM_PIN_PLATFORMS,
   parsePrismManifest as parsePrismMjs,
   parseSdcppPinManifest,
   parseUpstreamReleases as parseMjs,
   prismCatalogToBackends as prismBackendsMjs,
+  resolveAudiocppPins,
   resolvePins,
   resolvePrismPins,
   resolveSdcppPins,
@@ -34,11 +38,20 @@ import {
   upstreamCatalogFromLegacyManifest,
   upstreamRemoteBackends,
 } from '../../src/backend/index.js'
-import { assetInstallable, parseSdcppManifest, sdcppHostChoice } from '../../src/engine-builds/index.js'
+import {
+  assetInstallable,
+  audiocppBuildKey,
+  audiocppHostChoice,
+  parseAudiocppManifest,
+  parseSdcppManifest,
+  sdcppHostChoice,
+} from '../../src/engine-builds/index.js'
 import baseline from '../../src/backend/catalog/upstream-releases-baseline.json' with { type: 'json' }
 import sdcppLive from '../fixtures/sdcpp/conf/sdcpp-manifest.json' with { type: 'json' }
 import sdcppStaging from '../fixtures/sdcpp/conf/sdcpp-manifest.staging.json' with { type: 'json' }
 import prismBaseline from '../../src/backend/catalog/prism-manifest-baseline.json' with { type: 'json' }
+import audiocppMirror from '../fixtures/audiocpp/conf/audiocpp-manifest.json' with { type: 'json' }
+import audiocppBootstrap from '../fixtures/audiocpp/conf/audiocpp-manifest.staging.json' with { type: 'json' }
 
 const sha = (n: number) => n.toString(16).padStart(64, '0')
 const asset = (tag: string, infix: string, validation: 'approved' | 'candidate' = 'approved') => ({
@@ -358,5 +371,96 @@ describe('engine-pin.mjs reads the sd.cpp manifest as the core does', () => {
       expect(sdcppTagParts(tag), tag).toBeNull()
     expect(sdcppTagBuild('master-883-137f740-a36f1b1a')).toBe(883)
     expect(engineTagBuild('master-975-95b3090')).toBe(975)
+  })
+})
+
+describe('engine-pin.mjs reads the audio.cpp manifest as the core does', () => {
+  const manifests: Record<string, unknown> = {
+    'conf bootstrap staging (upstream v0.9.3)': audiocppBootstrap,
+    'a fork build on conf’s mirror (v0.9.3-a1b2c3d4)': audiocppMirror,
+    'a later rebuild': { ...audiocppMirror, tag_name: 'v0.10.0-a0123456' },
+    'no sha256 on the CPU archives': {
+      ...audiocppMirror,
+      assets: audiocppMirror.assets.map(({ sha256: _sha256, ...a }) => a),
+    },
+    'an asset name with a path in it, and a backend listed twice': {
+      tag_name: 'v0.9.3',
+      assets: [
+        { backend: 'linux-cpu-x64', name: '../x.zip', sha256: sha(1), size: 1 },
+        { backend: 'linux-cpu-x64', name: 'a.zip', sha256: sha(2), size: 2 },
+        { backend: 'linux-cpu-x64', name: 'b.zip', sha256: sha(3), size: 3 },
+      ],
+    },
+    'an upstream side tag': { ...audiocppBootstrap, tag_name: 'v0.9.2-drama3-base-small' },
+    'a rev of six characters': { ...audiocppMirror, tag_name: 'v0.9.3-a1b2c3' },
+    'an sd.cpp tag': { ...audiocppMirror, tag_name: 'master-883-137f740' },
+    'no assets': { tag_name: 'v0.9.3', assets: [] },
+    'not an object': 'v0.9.3',
+  }
+  const ts = (raw: unknown) => {
+    try {
+      return parseAudiocppManifest(raw)
+    } catch {
+      return null
+    }
+  }
+
+  for (const [name, raw] of Object.entries(manifests))
+    it(`${name}: the same document, the pin the core would install on each platform`, () => {
+      const core = ts(raw)
+      const mjs = parseAudiocppPinManifest(raw)
+      expect(mjs).toEqual(core)
+      const pins = resolveAudiocppPins({ manifest: raw, coreVersion: '0.21.0' })
+      expect(pins.source).toBe(core ? 'audiocpp-manifest' : 'none')
+      for (const p of AUDIOCPP_PIN_PLATFORMS) {
+        // A CPU-only host: the bottom rung of the ladder, which is the archive the check runs.
+        const choice = core
+          ? audiocppHostChoice({ os: p.os, arch: p.arch, features: {}, gpus: [] }, core, new Set())
+          : null
+        const archive = core?.assets.find((a) => a.backend === choice?.backend_id)
+        expect(pins.per_platform[p.platform], p.platform).toEqual({
+          backend: p.backend,
+          tag: archive && assetInstallable(archive) ? core?.tag_name : null,
+        })
+        if (archive) expect(choice?.backend_id).toBe(p.backend)
+      }
+    })
+
+  it('has no pin anywhere until conf approves a first build, and none on arm64 for the upstream bootstrap', () => {
+    expect(resolveAudiocppPins({ manifest: undefined, coreVersion: '0.21.0' }).source).toBe('none')
+    const bootstrap = resolveAudiocppPins({ manifest: audiocppBootstrap, coreVersion: '0.21.0' })
+    expect(Object.fromEntries(Object.entries(bootstrap.per_platform).map(([k, v]) => [k, v.tag]))).toEqual({
+      'linux-x64': 'v0.9.3',
+      'linux-arm64': null,
+      'macos-arm64': 'v0.9.3',
+      'windows-x64': 'v0.9.3',
+      'windows-arm64': null,
+    })
+  })
+
+  it('splits a tag into its version, the upstream tag and the fork rev, as the core orders them', () => {
+    expect(audiocppTagParts('v0.9.3-a1b2c3d4')).toEqual({
+      version: '0.9.3',
+      upstream_tag: 'v0.9.3',
+      atomic_rev: '1b2c3d4',
+    })
+    expect(audiocppTagParts('v0.10.0')).toEqual({
+      version: '0.10.0',
+      upstream_tag: 'v0.10.0',
+      atomic_rev: null,
+    })
+    for (const tag of ['v0.9.2-drama3-base-small', 'v0.8.2-audio8-perf-hotfix', '0.9.3', 'v0.9', 'b11617'])
+      expect(audiocppTagParts(tag), tag).toBeNull()
+    for (const tag of ['v0.9.3', 'v0.9.3-a1b2c3d4', 'v12.0.1-a0000000', 'v0.9.2-drama3-base-small']) {
+      const key = audiocppBuildKey(tag)
+      const parts = audiocppTagParts(tag)
+      expect(parts === null, tag).toBe(key === null)
+      if (key && parts) {
+        expect(parts.version, tag).toBe(key.slice(0, 3).join('.'))
+        expect(parts.atomic_rev !== null, tag).toBe(key[3] === 1)
+      }
+    }
+    // audio.cpp has no build number: llama.cpp's build gates never apply to it.
+    expect(engineTagBuild('v0.9.3')).toBeNull()
   })
 })

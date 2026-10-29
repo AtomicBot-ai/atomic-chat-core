@@ -679,6 +679,7 @@ npm run engine:check -- --bin ~/src/llama.cpp/build/bin/llama-server       # any
 npm run engine:check -- --tag b10875 --pin b10874 --suites live            # a backtest
 npm run engine:check -- --engine atomic-prism --tag prism-b10787-73bfe6c   # a PrismML build
 npm run engine:check -- --engine sd-cpp --tag master-883-137f740           # a stable-diffusion.cpp build
+npm run engine:check -- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3   # an audio.cpp build
 ```
 
 Without `--tag` or `--bin` it takes the newest complete b-tag of `--repo` (default `ggml-org/llama.cpp`).
@@ -713,8 +714,8 @@ gh run download <run-id> -n engine-candidate-results
 
 | input | default | |
 |---|---|---|
-| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths; `atomic-prism` checks PrismML's fork, `sd-cpp` stable-diffusion.cpp (below) |
-| `tag` | newest complete | the candidate tag: `b11617`, `prism-b10787-73bfe6c` for `atomic-prism`, `master-975-95b3090` or `master-975-95b3090-a<rev>` for `sd-cpp` |
+| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths; `atomic-prism` checks PrismML's fork, `sd-cpp` stable-diffusion.cpp, `audio-cpp` audio.cpp (below) |
+| `tag` | newest complete | the candidate tag: `b11617`, `prism-b10787-73bfe6c` for `atomic-prism`, `master-975-95b3090` or `master-975-95b3090-a<rev>` for `sd-cpp`, `v0.9.3` or `v0.9.3-a<rev>` for `audio-cpp` |
 | `repo` | the engine's | any repo with ggml-org's asset names; `AtomicBot-ai/atomic-chat-conf` tests the signed mirror |
 | `candidate_id` | `manual` | `[A-Za-z0-9._:-]{1,80}`, shown as `[cid:<id>]` in the run title so a caller can find its run |
 | `core_ref` | `main` | the core to check, e.g. an agent's fix branch |
@@ -800,3 +801,48 @@ pipeline dispatches the fork's build with `core_ref=main`, then conf's mirror fr
 release; a core release without `.github/engine-candidate/sd-cpp.json` cannot check sd.cpp, and the
 pipeline holds the rollout until one does.
 
+### audio.cpp builds (`audio-cpp`)
+
+The check covers the audio engine as it covers sd.cpp's
+([ADR 2026-10-29](decisions/2026-10-29-check-audiocpp-builds-with-the-engine-candidate.md)).
+`.github/engine-candidate/audio-cpp.json` (`kind: audiocpp`) and `scripts/lib/audiocpp-{surface,fixtures}.mjs` hold what
+differs; the archive, completeness, manifest and fetch logic is sd.cpp's, with audio.cpp's release spec:
+
+- **Three kinds of candidate.** The Atomic fork's build of a 0xShug0 tag (`vX.Y.Z`, from `AtomicBot-ai/audio.cpp`, the
+  default `repo`), conf's signed mirror of it (`vX.Y.Z-a<rev>`, `repo=AtomicBot-ai/atomic-chat-conf`), and upstream's
+  own release (`repo=0xShug0/audio.cpp`, the bootstrap path). Archives are named by the bare tag on all three
+  (`audio-v0.9.3-bin-macos-arm64.zip` from the fork, `audio-v0.9.3-bin-macos-arm64-metal.tar.gz` from upstream); the
+  contract's patterns take both names, as conf's `mirror-audiocpp.yml` does. Completeness is sd.cpp's: every archive
+  conf's mirror requires and the CPU archive of each live platform, up once with its digest; on conf,
+  `backends/audiocpp-manifest.staging.json` naming the tag and exactly the release's bytes. The candidate's `commit` is
+  0xShug0's tag's (`git ls-remote`).
+- **The pin** is the live manifest's `tag_name` (`backends/audiocpp-manifest.json`), fetched from conf's releases. Until
+  conf approves a first build there is none: the pin cells are `no-pin` and the help diff is skipped.
+- **The surface** reads `audiocpp_server --help` (every flag core passes, as a whole token of the usage block or an
+  option line, and every route core calls with its method in the `Endpoints:` list), `--version` (the install probe's
+  `audio.cpp ` line; the version has to be the tag's `X.Y.Z`, the `git:` commit the upstream tag's), `--list-devices`,
+  the archives by backend, and 0xShug0's history between the two tags: the watched server sources, the routes as the
+  quoted paths the dispatcher compares, and commits announcing a removal. The contract is
+  `test/fixtures/audiocpp/engine-contract.json`.
+- **Live** is `test/live/audio-install.test.ts` on linux-x64, linux-arm64 and macos-arm64 (`macos-15`), CPU archives
+  only: the build installed through a manifest `fetch-live-fixtures` writes from the release
+  (`ATOMIC_AUDIOCPP_MANIFEST_URL`), a tampered sha256 refused, `--version` naming the tag's version. The fetch also
+  brings Kokoro-82M q8 (`live_models`, 189 MB) and fills `ATOMIC_LIVE_AUDIO_*` for the runtime's live tests, which join
+  `live_files` and `required_live_tests` when they land.
+- **Upstream's builds cannot pass in CI**: 0xShug0 publishes no Linux or Windows arm64 build, so the surface breaks on
+  both CPU archives and the linux-arm64 cell has nothing to fetch. On one Mac
+  (`npm run engine:check -- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3`) the live cell runs; the result
+  still fails on the surface. The fork's builds are the ones the pipeline approves.
+
+```bash
+gh workflow run engine-candidate.yml -f engine=audio-cpp -f tag=v0.9.3 -f candidate_id=audiocpp-smoke -f core_ref=main
+# conf's signed mirror on a core release, as the pipeline checks it before approval:
+gh workflow run engine-candidate.yml --ref <core release> -f engine=audio-cpp -f tag=v0.9.3-a<rev> \
+  -f repo=AtomicBot-ai/atomic-chat-conf -f candidate_id=audiocpp-verify -f core_ref=<core release>
+```
+
+`node scripts/fetch-live-fixtures.mjs --engine audio-cpp --tag <tag> [--repo …] --out .live-audio [--models <dir>]`
+fetches the archive into `.live-audio/engine-<tag>/` and Kokoro into `<dir>` (default `.live-audio/models`), and writes
+`manifest.json`, `live.json`, and `help.txt`, `version.txt` and `list-devices.txt` (the shape of
+`test/fixtures/audiocpp/v<version>/`). A core release without `.github/engine-candidate/audio-cpp.json` cannot check
+audio.cpp.

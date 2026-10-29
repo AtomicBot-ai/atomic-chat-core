@@ -17,7 +17,10 @@
 // PrismML manifest for the pin, and no mirror; `sd-cpp`: stable-diffusion.cpp's own checks in
 // scripts/lib/sdcpp-surface.mjs — `sd-server --help` and `--version`, the install probe's
 // `sd-cli --help`, the archives by backend — with the pin from conf's sd.cpp manifest and leejet's
-// history between the two tags the builds are cut from). --repo: any repo publishing the engine's
+// history between the two tags the builds are cut from; `audio-cpp`: audio.cpp's in
+// scripts/lib/audiocpp-surface.mjs — the flags and routes of `audiocpp_server --help`, `--version`
+// naming the tag's version, the archives by backend — with the pin from conf's audio.cpp manifest and
+// 0xShug0's history between the two tags). --repo: any repo publishing the engine's
 // asset names (AtomicBot-ai/atomic-chat-conf for the signed mirror). --pin auto takes conf's list for the engine
 // (the newest approved release this core version runs, on linux-x64); the pin's binary comes from
 // --pin-repo, by default the candidate's repo when it has the tag, else the engine's. A local --candidate-bin is tagged b<build> from its --version;
@@ -60,10 +63,20 @@ import {
   sha256File,
   upstreamTagCommit,
 } from './lib/engine-io.mjs'
-import { sdcppTagBuild, sdcppTagParts } from './lib/engine-pin.mjs'
+import { audiocppTagParts, sdcppTagBuild, sdcppTagParts } from './lib/engine-pin.mjs'
 import { buildSdcppReport, notInArchive, parseSdVersion } from './lib/sdcpp-surface.mjs'
+import { buildAudiocppReport, parseAudioVersionOutput } from './lib/audiocpp-surface.mjs'
 
 const SEVERITY_ORDER = ['warn', 'error', 'break']
+
+/**
+ * The engines whose builds are a ggml project's release cut from an upstream tag (`kind` in the
+ * config): their own report, and how a tag names the upstream tag it is cut from.
+ */
+const RELEASE_KINDS = {
+  sdcpp: { report: buildSdcppReport, tagParts: sdcppTagParts },
+  audiocpp: { report: buildAudiocppReport, tagParts: audiocppTagParts },
+}
 
 export async function main(argv = process.argv.slice(2)) {
   const { values: opts } = parseArgs({
@@ -94,7 +107,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (!opts.inputs && !opts.candidate === !opts['candidate-bin'])
     throw new Error('give one of --candidate <tag> or --candidate-bin <llama-server> (or --inputs)')
   if (opts.candidate && !isTag(opts.candidate)) throw new Error(`--candidate must match ${tagRe}`)
-  if (config.kind === 'sdcpp' && (opts['candidate-bin'] || opts['pin-bin']))
+  if (RELEASE_KINDS[config.kind] && (opts['candidate-bin'] || opts['pin-bin']))
     throw new Error(`${opts.engine} is compared from releases (--candidate, --pin), not local binaries`)
   if (!['auto', 'none'].includes(opts.pin) && !isTag(opts.pin))
     throw new Error(`--pin is auto, none or a tag matching ${tagRe}`)
@@ -117,7 +130,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (inputs.candidate?.help_text) writeFileSync(join(out, 'help-candidate.txt'), inputs.candidate.help_text)
   if (inputs.pin?.help_text) writeFileSync(join(out, 'help-pin.txt'), inputs.pin.help_text)
 
-  const report = (config.kind === 'sdcpp' ? buildSdcppReport : buildReport)(contract, inputs, {
+  const report = (RELEASE_KINDS[config.kind]?.report ?? buildReport)(contract, inputs, {
     now: new Date().toISOString(),
     contractSha256: createHash('sha256').update(contractText).digest('hex'),
   })
@@ -167,6 +180,14 @@ async function gather(contract, opts, config) {
       side.commit = parseSdVersion(contract, side.version_output ?? '')?.commit ?? null
       return
     }
+    if (config.kind === 'audiocpp') {
+      side.help_text = output('audiocpp_server --help')
+      side.version_output = output('audiocpp_server --version')
+      // audio.cpp versions are X.Y.Z, not build numbers.
+      side.build = null
+      side.commit = parseAudioVersionOutput(contract, side.version_output ?? '')?.commit ?? null
+      return
+    }
     side.help_text = output('-h')
     side.version_output = output('--version')
     side.build = side.version_output === undefined ? null : (parseBinaryVersion(side.version_output) ?? null)
@@ -190,8 +211,9 @@ async function gather(contract, opts, config) {
   const upstreamRepo = contract.upstream?.repo ?? config.default_repo
   const releaseSide = async (tag, repo) => {
     const side = { tag, repo, source: 'release', platform }
-    // sd.cpp's builds are cut from a leejet tag: its commit and date place them in leejet's history.
-    const parts = config.kind === 'sdcpp' ? sdcppTagParts(tag) : null
+    // sd.cpp's and audio.cpp's builds are cut from an upstream tag: its commit and date place them in
+    // upstream's history.
+    const parts = RELEASE_KINDS[config.kind]?.tagParts(tag) ?? null
     if (parts) {
       const upstreamRelease = await githubRelease(upstreamRepo, parts.upstream_tag).catch(() => null)
       side.upstream = {
@@ -219,7 +241,7 @@ async function gather(contract, opts, config) {
         repo,
         out: join(cache, repo.replace('/', '__'), tag, platform),
         model: false,
-        ...(config.kind === 'sdcpp' ? { engine: config.engine } : {}),
+        ...(RELEASE_KINDS[config.kind] ? { engine: config.engine } : {}),
       })
       const asset = build.fixture.asset
       side.binary = { name: asset.name, sha256: asset.sha256, digest_verified: asset.digest_verified }
@@ -291,8 +313,8 @@ async function gather(contract, opts, config) {
 }
 
 /**
- * A side's upstream commit: the leejet tag's for sd.cpp, the release's own when it is an upstream
- * release, else what --version names.
+ * A side's upstream commit: the upstream tag's for sd.cpp and audio.cpp, the release's own when it is
+ * an upstream release, else what --version names.
  */
 const commitOf = (side, upstreamRepo) =>
   side.upstream?.commit ?? (side.repo === upstreamRepo ? side.release?.commit : null) ?? side.commit ?? null

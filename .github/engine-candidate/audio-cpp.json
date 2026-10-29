@@ -1,0 +1,84 @@
+{
+  "engine": "audio-cpp",
+  "kind": "audiocpp",
+  "contract": "test/fixtures/audiocpp/engine-contract.json",
+  "default_repo": "AtomicBot-ai/audio.cpp",
+  "tag_pattern": "^v\\d+\\.\\d+\\.\\d+(-a[0-9a-f]{7})?$",
+  "pins": "audiocpp-manifest",
+  "pin_repo": "AtomicBot-ai/atomic-chat-conf",
+  "mirror": false,
+  "candidate_manifests": {
+    "conf": "backends/audiocpp-manifest.staging.json"
+  },
+  "upstream": {
+    "repo": "0xShug0/audio.cpp",
+    "branch": "main"
+  },
+  "live_models": [
+    {
+      "id": "kokoro",
+      "url": "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/874fcb41ececda20bcbc0782d6b4ea7f7d069ea8/Kokoro-82M-GGUF/kokoro-82m-q8_0.gguf",
+      "sha256": "9a4ca6176460cdc8c7845b804c0bbe85a4791ee3ffff568a3fdadbb708c63f47",
+      "bytes": 189550976
+    }
+  ],
+  "live_env": {
+    "ATOMIC_LIVE_AUDIO_ENGINE": "{engine_dir}",
+    "ATOMIC_LIVE_AUDIO_TAG": "{tag}",
+    "ATOMIC_LIVE_AUDIO_MANIFEST": "{manifest}",
+    "ATOMIC_LIVE_AUDIO_MODEL": "{model:kokoro}",
+    "ATOMIC_LIVE_AUDIO_FAMILY": "kokoro_tts",
+    "ATOMIC_LIVE_AUDIO_TASK": "tts",
+    "ATOMIC_LIVE_AUDIO_MODE": "offline",
+    "ATOMIC_LIVE_AUDIO_BACKEND": "cpu"
+  },
+  "platforms": [
+    {
+      "platform": "linux-x64",
+      "runner": "ubuntu-latest"
+    },
+    {
+      "platform": "linux-arm64",
+      "runner": "ubuntu-24.04-arm"
+    },
+    {
+      "platform": "macos-arm64",
+      "runner": "macos-15",
+      "core_runner": "macos-14"
+    }
+  ],
+  "live_timeout_minutes": 30,
+  "live_files": ["test/live/audio-install.test.ts"],
+  "required_live_tests": [
+    {
+      "file": "test/live/audio-install.test.ts",
+      "name": "a real audio.cpp build installed from its manifest is picked for this host, downloaded, checked, unpacked and probed"
+    },
+    {
+      "file": "test/live/audio-install.test.ts",
+      "name": "a real audio.cpp build installed from its manifest names the version of its tag"
+    },
+    {
+      "file": "test/live/audio-install.test.ts",
+      "name": "a real audio.cpp build installed from its manifest is refused when its sha256 does not match the manifest"
+    }
+  ],
+  "core_suites": ["unit", "build", "build_bin", "e2e"],
+  "protected_paths": [
+    ".github/engine-candidate/",
+    ".github/workflows/engine-candidate.yml",
+    "scripts/engine-candidate.mjs",
+    "scripts/engine-surface-diff.mjs",
+    "scripts/fetch-live-fixtures.mjs",
+    "scripts/lib/",
+    "src/audio/install.test.ts",
+    "test/contract/engine-pin.test.ts",
+    "test/contract/engine-results.test.ts",
+    "test/contract/engine-surface.test.ts",
+    "test/contract/audiocpp-*",
+    "test/fixtures/audiocpp/",
+    "test/live/audio*",
+    "vitest.config.ts"
+  ],
+  "not_verified": ["metal", "cuda", "vulkan", "windows"]
+}

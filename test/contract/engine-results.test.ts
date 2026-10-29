@@ -3,9 +3,11 @@
  * fail or stay incomplete, and whose fault a red test is — the candidate's (the pin passes it) or
  * core's (the pin fails it too). Plus the configuration the workflow and `npm run engine:check`
  * read: every required live test it names has to exist, or a renamed test would silently stop
- * counting (`.github/engine-candidate/llamacpp-upstream.json`).
+ * counting (`.github/engine-candidate/llamacpp-upstream.json`, `audio-cpp.json`), and an audio.cpp
+ * run's results.json carries what conf's approval gate reads.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildResults,
@@ -24,7 +26,10 @@ import type {
   ResolveResult,
   VitestReport,
 } from '../../scripts/lib/engine-results.mjs'
-import { PIN_PLATFORMS } from '../../scripts/lib/engine-pin.mjs'
+import { AUDIOCPP_PIN_PLATFORMS, PIN_PLATFORMS } from '../../scripts/lib/engine-pin.mjs'
+import { liveModelPath } from '../../scripts/lib/sdcpp-fixtures.mjs'
+import { expandLiveEnv, liveModelsKey } from '../../scripts/lib/live-fixtures.mjs'
+import { parseAudiocppManifest } from '../../src/engine-builds/index.js'
 
 const root = new URL('../../', import.meta.url)
 const config = JSON.parse(
@@ -430,5 +435,159 @@ describe('the llamacpp-upstream configuration', () => {
     expect(CANDIDATE_ID_RE.test('x y')).toBe(false)
     expect(CANDIDATE_ID_RE.test('a]b')).toBe(false)
     expect(CANDIDATE_ID_RE.test('x'.repeat(81))).toBe(false)
+  })
+})
+
+describe('the audio-cpp configuration', () => {
+  const audio = JSON.parse(
+    readFileSync(new URL('.github/engine-candidate/audio-cpp.json', root), 'utf8')
+  ) as EngineCandidateConfig & {
+    tag_pattern: string
+    pins: string
+    pin_repo: string
+    candidate_manifests: { conf: string }
+    upstream: { repo: string; branch: string }
+    live_models: Array<{ id: string; url: string; sha256: string; bytes: number }>
+    live_env: Record<string, string>
+  }
+  const AUDIO_PLATFORMS = audio.platforms.map((p) => p.platform)
+  const conf = JSON.parse(
+    readFileSync(new URL('test/fixtures/audiocpp/conf/audiocpp-manifest.json', root), 'utf8')
+  ) as object
+
+  it('reads the tags conf’s manifest takes, upstream’s and the fork rebuilds’, and no side tag', () => {
+    const re = new RegExp(audio.tag_pattern)
+    for (const tag of ['v0.9.3', 'v0.9.3-a1b2c3d4', 'v0.10.12-a0123456']) {
+      expect(re.test(tag), tag).toBe(true)
+      expect(() => parseAudiocppManifest({ ...conf, tag_name: tag }), tag).not.toThrow()
+    }
+    for (const tag of ['v0.9.2-drama3-base-small', 'v0.9.3-a1b2c3', '0.9.3', 'master-883-137f740']) {
+      expect(re.test(tag), tag).toBe(false)
+      expect(() => parseAudiocppManifest({ ...conf, tag_name: tag }), tag).toThrow()
+    }
+    expect(audio).toMatchObject({
+      engine: 'audio-cpp',
+      kind: 'audiocpp',
+      pins: 'audiocpp-manifest',
+      pin_repo: 'AtomicBot-ai/atomic-chat-conf',
+      candidate_manifests: { conf: 'backends/audiocpp-manifest.staging.json' },
+      upstream: { repo: '0xShug0/audio.cpp', branch: 'main' },
+    })
+  })
+
+  it('names a required live test only if the live file has it', () => {
+    for (const { file, name } of audio.required_live_tests) {
+      const text = readFileSync(new URL(file, root), 'utf8')
+      const suites = [...text.matchAll(/describe(?:\.skipIf\([^)]*\))?\(\s*'([^']+)'/g)].map((m) => m[1])
+      const tests = [...text.matchAll(/\bit\(\s*'([^']+)'/g)].map((m) => m[1])
+      const names = suites.flatMap((suite) => tests.map((t) => `${suite} ${t}`))
+      expect(names, `${file} has no test named "${name}"`).toContain(name)
+      expect(audio.live_files).toContain(file)
+    }
+  })
+
+  it('runs live on platforms core ships audio.cpp for, the core suites on the same platforms', () => {
+    const shipped = AUDIOCPP_PIN_PLATFORMS.map((p) => p.platform)
+    for (const platform of AUDIO_PLATFORMS) expect(shipped).toContain(platform)
+    expect(coreMatrix(audio.platforms)).toEqual([
+      { platform: 'linux-x64', os: 'ubuntu-latest' },
+      { platform: 'linux-arm64', os: 'ubuntu-24.04-arm' },
+      { platform: 'macos-arm64', os: 'macos-14' },
+    ])
+    for (const platform of AUDIO_PLATFORMS)
+      expect(requiredLiveTests(audio.required_live_tests, platform)).toEqual(audio.required_live_tests)
+  })
+
+  it('fills its live env from what the fetch leaves, Kokoro on the CPU backend', () => {
+    const models = Object.fromEntries(audio.live_models.map((m) => [m.id, liveModelPath('/models', m)]))
+    const env = expandLiveEnv(audio.live_env, { engine_dir: '/e', tag: 't', manifest: '/m.json', models })
+    expect(env).toEqual({
+      ATOMIC_LIVE_AUDIO_ENGINE: '/e',
+      ATOMIC_LIVE_AUDIO_TAG: 't',
+      ATOMIC_LIVE_AUDIO_MANIFEST: '/m.json',
+      // The host's separators: the fetch writes these paths for the host it runs on.
+      ATOMIC_LIVE_AUDIO_MODEL: join('/models', '9a4ca6176460cdc8', 'kokoro-82m-q8_0.gguf'),
+      ATOMIC_LIVE_AUDIO_FAMILY: 'kokoro_tts',
+      ATOMIC_LIVE_AUDIO_TASK: 'tts',
+      ATOMIC_LIVE_AUDIO_MODE: 'offline',
+      ATOMIC_LIVE_AUDIO_BACKEND: 'cpu',
+    })
+    // Pinned by Hugging Face revision, not `main`.
+    expect(audio.live_models[0]?.url).toMatch(/\/resolve\/[0-9a-f]{40}\//)
+    expect(liveModelsKey(audio.live_models)).toMatch(/^[0-9a-f]{16}$/)
+  })
+
+  it('protects paths that exist', () => {
+    for (const path of [...audio.protected_paths, ...audio.live_files, audio.contract]) {
+      if (!path.endsWith('*')) {
+        expect(existsSync(new URL(path, root)), path).toBe(true)
+        continue
+      }
+      const dir = path.slice(0, path.lastIndexOf('/') + 1)
+      const prefix = path.slice(dir.length, -1)
+      expect(
+        readdirSync(new URL(dir, root)).some((name) => name.startsWith(prefix)),
+        path
+      ).toBe(true)
+    }
+  })
+
+  it('writes the results.json conf’s approval gate reads: engine, the mirror’s repo and tag, pass', () => {
+    const tag = 'v0.9.3-a1b2c3d4'
+    const repo = 'AtomicBot-ai/atomic-chat-conf'
+    const r = resolved({
+      engine: 'audio-cpp',
+      candidate: { repo, tag, source: 'release', complete: true, missing: [], core_assets: [] },
+      pin: {
+        source: 'audiocpp-manifest',
+        tag: null,
+        repo,
+        per_platform: Object.fromEntries(AUDIO_PLATFORMS.map((p) => [p, { tag: null }])),
+      },
+      platforms: audio.platforms,
+      live_matrix: audio.platforms.map(({ platform, runner }) => ({
+        platform,
+        os: runner,
+        role: 'candidate' as const,
+        tag,
+        repo,
+      })),
+    })
+    const passed: VitestReport = {
+      testResults: [
+        {
+          name: '/runner/atomic-chat-core/test/live/audio-install.test.ts',
+          assertionResults: audio.required_live_tests.map((t) => ({ fullName: t.name, status: 'passed' })),
+        },
+      ],
+    }
+    const out = buildResults({
+      run: { mode: 'ci' },
+      config: audio,
+      resolve: r,
+      surface: surface('pass'),
+      cells: [
+        ...r.live_matrix.map((m) =>
+          liveCell({ ...m, fixture: null, vitest: passed, required: audio.required_live_tests })
+        ),
+        ...AUDIO_PLATFORMS.map((platform) =>
+          coreCell({
+            platform,
+            steps: { unit: 'success', build: 'success', build_bin: 'success', e2e: 'success' },
+            expected: audio.core_suites,
+          })
+        ),
+      ],
+      platforms: AUDIO_PLATFORMS,
+      now: 'x',
+    })
+    // conf's `resultsRefusal` (atomic-chat-conf .github/scripts/upstream-verify.mjs): all four.
+    expect(out).toMatchObject({ status: 'pass', engine: 'audio-cpp', candidate: { repo, tag } })
+    // No approved build yet: no pin cells to compare with, which is not a reason to hold the run.
+    expect(out.cells.filter((c) => c.kind === 'live' && c.role === 'pin').map((c) => c.status)).toEqual([
+      'no-pin',
+      'no-pin',
+      'no-pin',
+    ])
   })
 })

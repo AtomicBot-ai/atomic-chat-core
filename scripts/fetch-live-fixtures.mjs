@@ -16,7 +16,9 @@
 // --engine sd-cpp (a config of `kind: sdcpp`) fetches stable-diffusion.cpp instead: this host's CPU
 // archive of the release, unpacked alone, the config's `live_models` into --models (default
 // <out>/models; shared between builds), and manifest.json and live.json for the live env
-// (scripts/lib/sdcpp-fixtures.mjs).
+// (scripts/lib/sdcpp-fixtures.mjs). --engine audio-cpp (`kind: audiocpp`) does the same for audio.cpp
+// (scripts/lib/audiocpp-fixtures.mjs: Kokoro as the model) and also writes what the build prints for
+// --help, --version and --list-devices into help.txt, version.txt and list-devices.txt.
 //
 // Writes into <out>: bin-path.txt and model-path.txt (exported as ATOMIC_LIVE_UPSTREAM_BIN /
 // ATOMIC_LIVE_UPSTREAM_MODEL, or the engine's own prefix such as ATOMIC_LIVE_PRISM_*), tag.txt
@@ -42,6 +44,7 @@ import { fileURLToPath } from 'node:url'
 import { assetPatternFor, DEFAULT_RELEASE_REPO, digestMatches, pickRelease } from './lib/live-fixtures.mjs'
 import { engineContract, hostPlatform } from './lib/engine-io.mjs'
 import { fetchSdcppFixtures } from './lib/sdcpp-fixtures.mjs'
+import { fetchAudiocppFixtures } from './lib/audiocpp-fixtures.mjs'
 
 const arg = (name) => {
   const index = process.argv.indexOf(name)
@@ -75,9 +78,13 @@ const CAPTURE = process.argv.includes('--capture')
 
 mkdirSync(OUT, { recursive: true })
 
-if (engineConfig?.kind === 'sdcpp') {
-  if (!TAG) throw new Error('--engine sd-cpp needs --tag')
-  await fetchSdcppFixtures({
+/** The engines whose builds are a ggml project's release (`kind` in the config), by their fetch. */
+const RELEASE_FETCHES = { sdcpp: fetchSdcppFixtures, audiocpp: fetchAudiocppFixtures }
+const releaseFetch = RELEASE_FETCHES[engineConfig?.kind]
+
+if (releaseFetch) {
+  if (!TAG) throw new Error(`--engine ${ENGINE} needs --tag`)
+  await releaseFetch({
     out: OUT,
     tag: TAG,
     repo: arg('--repo') ?? engineConfig.default_repo,
