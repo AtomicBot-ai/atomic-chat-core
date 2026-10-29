@@ -208,6 +208,21 @@ describe.skipIf(!posix)('spawnAudioServer', () => {
     expect(gone).toHaveLength(1)
   })
 
+  it('picks its port with randomFreePort unless told otherwise', async () => {
+    // A fake that exits before it listens, so the default range is used without a server in it.
+    const spec = await engine({ mode: 'load-fail' })
+    let port: number | undefined
+    const defaults = deps({
+      onSpawned: async (_pid, chosen) => {
+        port = chosen
+      },
+    })
+    delete defaults.freePort
+    await refusal(spawnAudioServer(spec, defaults))
+    expect(port).toBeGreaterThanOrEqual(3000)
+    expect(port).toBeLessThanOrEqual(4000)
+  })
+
   it('reports a missing model file the way the engine says it', async () => {
     const spec = await engine({}, {})
     const error = await refusal(spawnAudioServer({ ...spec, modelPath: join(dir, 'missing.gguf') }, deps()))
