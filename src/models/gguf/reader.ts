@@ -4,6 +4,9 @@
  * Reads magic, version, tensor count and the metadata KV block only — never the tensor table.
  * Every value is stringified the way the Rust reader does (`to_string()`, `[a, b]` for arrays of
  * up to 24 elements, a placeholder for longer ones), so downstream code sees identical strings.
+ * One deliberate exception: an integer `<arch>.attention.head_count_kv` is inlined at any length up
+ * to `MAX_PER_LAYER_ARRAY_LEN`, because a hybrid model names its attention layers there, one entry
+ * per block, and the KV-cache estimate needs every entry (LFM2.5-2.6B has 30 blocks, 8 of them attend).
  *
  * Pure over a byte buffer; callers feed it a file prefix and grow it while it asks for more.
  */
@@ -35,6 +38,16 @@ export const GGUF_VALUE_TYPE_NAMES = [
 export const MAX_GGUF_STRING_BYTES = 1024 * 1024
 export const MAX_GGUF_ARRAY_LEN = 1_000_000
 export const INLINE_ARRAY_MAX_LEN = 24
+/** The longest per-layer array inlined past `INLINE_ARRAY_MAX_LEN`: more blocks than any model has. */
+export const MAX_PER_LAYER_ARRAY_LEN = 4096
+
+/** Integer GGUF value types (`u8` … `i32`, `u64`, `i64`). */
+const INTEGER_TYPES = new Set([0, 1, 2, 3, 4, 5, 10, 11])
+
+/** Keys whose integer arrays are one entry per block and are inlined at any length. */
+function isPerLayerKey(key: string): boolean {
+  return /^[^.]+\.attention\.head_count_kv$/.test(key)
+}
 
 /** The buffer ended before the header did; feed more bytes and retry. */
 export class GgufNeedMoreData extends Error {
@@ -148,7 +161,7 @@ function valueType(n: number): number {
   return n
 }
 
-function readValue(c: Cursor, type: number): string {
+function readValue(c: Cursor, type: number, perLayer = false): string {
   switch (type) {
     case 0:
       return String(c.u8())
@@ -180,7 +193,8 @@ function readValue(c: Cursor, type: number): string {
       if (len > BigInt(MAX_GGUF_ARRAY_LEN))
         throw new GgufParseError(`Array length ${len} is unreasonably large`)
       const n = Number(len)
-      if (n > INLINE_ARRAY_MAX_LEN) {
+      const inlineAll = perLayer && INTEGER_TYPES.has(elemType) && n <= MAX_PER_LAYER_ARRAY_LEN
+      if (n > INLINE_ARRAY_MAX_LEN && !inlineAll) {
         skipArray(c, elemType, n)
         return `<Array of type ${GGUF_VALUE_TYPE_NAMES[elemType]} with ${n} elements, data skipped>`
       }
@@ -244,7 +258,7 @@ export function readGgufMetadata(bytes: Uint8Array): GgufMetadata {
     try {
       const key = readString(c)
       const type = valueType(c.u32())
-      metadata[key] = readValue(c, type)
+      metadata[key] = readValue(c, type, isPerLayerKey(key))
     } catch (e) {
       if (e instanceof GgufNeedMoreData) throw e
       throw new GgufParseError(`Error reading metadata entry ${i}: ${(e as Error).message}`)

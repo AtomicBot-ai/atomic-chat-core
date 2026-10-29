@@ -590,3 +590,120 @@ describe('nextRetry / autoUnloadTargets / resolveModelMaxCtxTrain', () => {
     expect(warn).toHaveBeenCalled()
   })
 })
+
+describe('planLlamaLoad — window ceiling on unified memory below 16 GiB', () => {
+  const GiB = 2 ** 30
+  const MODEL = '/data/llamacpp/models/m/model.gguf'
+  // LiquidAI/LFM2.5-2.6B-GGUF Q4_K_M as the core's reader renders its GGUF (QA 2.2.29 B05): the
+  // per-layer `head_count_kv` names the 8 of 30 blocks that attend, 16 KiB of KV per token.
+  const LFM25_META = {
+    'general.architecture': 'lfm2',
+    'lfm2.block_count': '30',
+    'lfm2.context_length': '131072',
+    'lfm2.embedding_length': '2048',
+    'lfm2.attention.head_count': '32',
+    'lfm2.attention.head_count_kv':
+      '[0, 0, 8, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 8, 0, 0, 8, 0, 0]',
+  }
+  // meta-llama/Llama-3.2-3B-Instruct Q4_K_M: dense, 28 blocks × 8 KV heads of 128, 112 KiB a token.
+  const LLAMA32_3B_META = {
+    'general.architecture': 'llama',
+    'llama.block_count': '28',
+    'llama.context_length': '131072',
+    'llama.embedding_length': '3072',
+    'llama.attention.head_count': '24',
+    'llama.attention.head_count_kv': '8',
+    'llama.attention.key_length': '128',
+    'llama.attention.value_length': '128',
+  }
+  const LLAMA32_3B_WEIGHTS = 2_019_377_696
+  // `MTL0: Apple M3 (5461 MiB, 5461 MiB free)`: Metal's two thirds of an 8 GiB Mac.
+  const METAL_8 = [
+    { id: 'MTL0', name: 'Apple M3', mem: 5_461, free: 5_461 },
+    { id: 'BLAS', name: 'Accelerate', mem: 0, free: 0 },
+  ]
+  const smallMac = (
+    over: Partial<LoadPlanDeps> & { files?: Record<string, number>; meta?: Record<string, string> } = {}
+  ) =>
+    deps({
+      files: { [MODEL]: 1_674_455_040 },
+      meta: LFM25_META,
+      unifiedMemory: async () => ({ totalMemoryBytes: 8 * GiB }),
+      listDevices: async () => METAL_8,
+      ...over,
+    })
+
+  it('caps the window fit may pick for LFM2.5 2.6B on an 8 GiB Mac, beside the half-of-RAM margin', async () => {
+    const plan = await planLlamaLoad(input({ fit: true, fit_target: '1024' }), smallMac())
+    expect(plan.config.fit_target).toBe('1365')
+    // 32768 tokens at 16 KiB: 512 MiB of KV instead of fit's 131072 tokens and 2048 MiB.
+    expect(plan.fitCtxCeiling).toBe(32_768)
+    expect(plan.maxCtxTrain).toBe(131_072)
+    expect(plan.warnings).toContain(
+      'Unified memory below 16 GiB: capping the window fit may pick for "m" at 32768 tokens.'
+    )
+  })
+
+  it('narrows a dense model to what its estimate fits beside the weights and the reserve', async () => {
+    const plan = await planLlamaLoad(
+      input({ fit: true, fit_target: '' }),
+      smallMac({ meta: LLAMA32_3B_META, files: { [MODEL]: LLAMA32_3B_WEIGHTS } })
+    )
+    expect(plan.config.fit_target).toBe('1365')
+    // 4096 − 1926 − 1024 MiB leave 1146 MiB: 10487 tokens at 112 KiB, so 10240.
+    expect(plan.fitCtxCeiling).toBe(10_240)
+  })
+
+  it('counts the ceiling across every slot, and drops it when one slot no longer fits the floor', async () => {
+    const two = await planLlamaLoad(
+      input({ fit: true, fit_target: '', concurrent_mode: true, concurrent_slots: 2 }),
+      smallMac()
+    )
+    // Two slots of 32768 at 16 KiB: 1024 MiB of the 1475 MiB left.
+    expect(two.fitCtxCeiling).toBe(2 * 32_768)
+    // Four slots of Llama-3.2-3B: 4096 tokens each would need 1792 MiB of the 1487 MiB left.
+    const four = await planLlamaLoad(
+      input({ fit: true, fit_target: '', concurrent_mode: true, concurrent_slots: 4 }),
+      smallMac({ meta: LLAMA32_3B_META, files: { [MODEL]: LLAMA32_3B_WEIGHTS } })
+    )
+    expect(four.fitCtxCeiling).toBeUndefined()
+  })
+
+  it('leaves the window to llama.cpp on a 16 GiB Mac', async () => {
+    const plan = await planLlamaLoad(
+      input({ fit: true, fit_target: '' }),
+      smallMac({
+        unifiedMemory: async () => ({ totalMemoryBytes: 16 * GiB }),
+        listDevices: async () => [{ id: 'MTL0', name: 'Apple M4', mem: 12_124, free: 12_124 }],
+      })
+    )
+    expect(plan.config.fit_target).toBe(String(12_124 - 8 * 1024))
+    expect(plan.fitCtxCeiling).toBeUndefined()
+    expect('fitCtxCeiling' in plan).toBe(false)
+  })
+
+  it.each([
+    ['fit is off', { fit: false, fit_target: '' }, {}],
+    ['the user set their own margin', { fit: true, fit_target: '2048' }, {}],
+    ['the user raised the fit floor past the ceiling', { fit: true, fit_target: '', fit_ctx: '65536' }, {}],
+    ['the user pinned another device', { fit: true, fit_target: '', device: 'none' }, {}],
+    ['the GGUF cannot be read', { fit: true, fit_target: '' }, { readGgufMetadata: async () => undefined }],
+    [
+      'the model was trained for less than fits',
+      { fit: true, fit_target: '' },
+      { meta: { ...LFM25_META, 'lfm2.context_length': '4096' } },
+    ],
+  ])('caps nothing when %s', async (_name, config, over) => {
+    const plan = await planLlamaLoad(input(config), smallMac(over as Partial<LoadPlanDeps>))
+    expect(plan.fitCtxCeiling).toBeUndefined()
+    expect(plan.warnings.some((w) => w.startsWith('Unified memory below 16 GiB'))).toBe(false)
+  })
+
+  it('caps nothing for an embedding model', async () => {
+    const plan = await planLlamaLoad(
+      { ...input({ fit: true, fit_target: '' }), isEmbedding: true },
+      smallMac()
+    )
+    expect(plan.fitCtxCeiling).toBeUndefined()
+  })
+})

@@ -534,6 +534,7 @@ export class LlamacppRuntime implements LocalRuntime {
       modelPath: plan.modelPath,
       port: plan.port,
       mmprojPath: plan.mmprojPath ?? null,
+      ...(plan.fitCtxCeiling !== undefined ? { fitCtxCeiling: plan.fitCtxCeiling } : {}),
     })
     const exeDir = dirname(plan.exePath)
     const { env, cwd } = buildProcessEnv({
@@ -694,7 +695,8 @@ export class LlamacppRuntime implements LocalRuntime {
 
   /**
    * The context window a loaded session was asked for. Under fit that is not the one it runs with:
-   * no `--ctx-size` is sent and llama.cpp picks the window, which only the server's `/props` knows.
+   * no `--ctx-size` is sent (only the load plan's ceiling on a small unified-memory Mac) and llama.cpp
+   * picks the window, which only the server's `/props` knows.
    */
   getCtxSize(modelId: string): number | undefined {
     const configured = this.sessions.get(modelId)?.plan.config.ctx_size

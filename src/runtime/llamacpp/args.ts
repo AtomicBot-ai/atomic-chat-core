@@ -96,6 +96,11 @@ export interface LlamaArgsInput {
   modelPath: string
   port: number
   mmprojPath?: string | null
+  /**
+   * Under fit, the window the load plan caps llama.cpp at on a small unified-memory Mac: emitted as
+   * `--ctx-size`, which ends fit's context search while fit still places the layers.
+   */
+  fitCtxCeiling?: number
 }
 
 export interface LlamaArgsPlan {
@@ -389,6 +394,8 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
     push('--embedding', '--pooling', 'mean')
   } else {
     if (cfg.ctx_size > 0 && !cfg.fit) push('--ctx-size', String(cfg.ctx_size))
+    else if (cfg.fit && !ik && input.fitCtxCeiling !== undefined && input.fitCtxCeiling > 0)
+      push('--ctx-size', String(input.fitCtxCeiling))
     if (cfg.n_predict > 0) push('--n-predict', String(cfg.n_predict))
     if (cfg.cache_type_k !== '' && cfg.cache_type_k !== 'f16') {
       const safeK = sanitizeCacheType(cfg.cache_type_k)

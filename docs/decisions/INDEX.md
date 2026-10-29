@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-29** — [Cap the fitted window on unified-memory Macs below 16 GiB](2026-10-29-cap-the-fitted-window-on-unified-memory-below-16-gib.md) — qualifies ADR 2026-09-29: below 16 GiB of RAM the load plan also sends `--ctx-size`, 32768 (room for the agents' ~20K prompts) narrowed until weights + KV estimate + 1 GiB fit the margin's budget; the reader inlines a per-layer `head_count_kv` and the estimate counts only layers with KV heads (QA 2.2.29 B05: LFM2.5-2.6B took 131072 tokens on an 8 GiB Mac, now 32768; Llama-3.2-3B 10240)
 - **2026-10-29** — [Refuse unknown chat roles and mixed embedding inputs before a local engine](2026-10-29-refuse-unknown-chat-roles-and-mixed-embedding-inputs.md) — `validate.ts`: chat roles `system`/`developer`/`user`/`assistant`/`tool` (`messages[i].role`), Responses message roles (`input[i].role`), embeddings `input` all token ids, all token arrays, or strings and input items (`param: input`); local engines only, the embedding module before it starts.
 - **2026-10-28** — [Report unknown embedding models without chat sessions](2026-10-28-report-unknown-embedding-models-without-chat-sessions.md)
 

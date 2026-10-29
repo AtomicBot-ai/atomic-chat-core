@@ -2,6 +2,11 @@
  * KV-cache size estimate from GGUF metadata. Port of `gguf/utils.rs`
  * (`kv_cache_bits_per_element`, `estimate_kv_cache_internal`). Error strings are the Rust
  * `Display` texts, which the app receives verbatim.
+ *
+ * Beyond the port: a per-layer `head_count_kv` array (`[0, 0, 8, …]`, which `reader.ts` inlines at
+ * any length) counts only the layers with KV heads, each with its own count, as llama.cpp allocates
+ * them — a hybrid model's recurrent layers hold no KV cache. The Rust estimate cannot read the array
+ * and counts every block with `head_count` heads (15 times LFM2.5-2.6B's real 16 KiB per token).
  */
 
 import { parseRustU64 } from '../../util/index.js'
@@ -64,6 +69,24 @@ const u64 = (meta: Record<string, string>, key: string): number | undefined => {
   return raw === undefined ? undefined : parseRustU64(raw)
 }
 
+/**
+ * The KV heads of each layer from an inline integer array, or `undefined` for anything else: a
+ * scalar, the reader's placeholder, a malformed list, or one in which no layer has a KV head.
+ */
+function perLayerKvHeads(raw: string | undefined): number[] | undefined {
+  const text = raw?.trim()
+  if (!text || !text.startsWith('[') || !text.endsWith(']')) return undefined
+  const inner = text.slice(1, -1).trim()
+  if (inner === '') return undefined
+  const heads: number[] = []
+  for (const part of inner.split(',')) {
+    const n = parseRustU64(part.trim())
+    if (n === undefined) return undefined
+    heads.push(n)
+  }
+  return heads.some((n) => n > 0) ? heads : undefined
+}
+
 export function estimateKvCache(
   meta: Record<string, string>,
   ctxSize: number | undefined,
@@ -77,9 +100,16 @@ export function estimateKvCache(
   if (nLayer === undefined || nLayer <= 0) throw new KvCacheError(KV_CACHE_ERRORS.blockCountInvalid)
 
   const headCount = u64(meta, `${arch}.attention.head_count`)
+  const layerKvHeads = perLayerKvHeads(meta[`${arch}.attention.head_count_kv`])
   const headCountKv = u64(meta, `${arch}.attention.head_count_kv`)
-  const nHead = headCountKv !== undefined && headCountKv > 0 ? headCountKv : (headCount ?? 0)
+  const nHead = layerKvHeads
+    ? Math.max(...layerKvHeads)
+    : headCountKv !== undefined && headCountKv > 0
+      ? headCountKv
+      : (headCount ?? 0)
   if (nHead === 0) throw new KvCacheError(KV_CACHE_ERRORS.headCountInvalid)
+  /** KV heads summed over the layers: `block_count × heads` for a scalar, the array's sum per layer. */
+  const kvHeadsAcrossLayers = layerKvHeads ? layerKvHeads.reduce((a, b) => a + b, 0) : nLayer * nHead
 
   let keyLen = u64(meta, `${arch}.attention.key_length`) ?? 0
   let valLen = u64(meta, `${arch}.attention.value_length`) ?? 0
@@ -102,7 +132,8 @@ export function estimateKvCache(
   const slidingWindow = slidingWindowRaw !== undefined && slidingWindowRaw > 0 ? slidingWindowRaw : undefined
 
   const bitsPerToken =
-    nLayer * nHead * (keyLen * kvCacheBitsPerElement(cacheTypeK) + valLen * kvCacheBitsPerElement(cacheTypeV))
+    kvHeadsAcrossLayers *
+    (keyLen * kvCacheBitsPerElement(cacheTypeK) + valLen * kvCacheBitsPerElement(cacheTypeV))
   const kvPerToken = Math.ceil(bitsPerToken / 8)
   const fullCost = ctxLen * kvPerToken
   const size =

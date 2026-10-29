@@ -269,6 +269,8 @@ describe('planLlamaArgs', () => {
  * step once `n_ctx` is set. So `--ctx-size N --fit on` would pin the window at N, not cap it: under
  * fit no `--ctx-size` goes out, llama.cpp picks the window from the trained context down, and the
  * app shows the one the server reports (QA 2.2.25: 16K on screen, `n_ctx_slot = 128000` running).
+ * The one exception is the load plan's ceiling on a unified-memory Mac below 16 GiB: there pinning
+ * the window is the point (QA 2.2.29 B05), and fit still places the layers under it.
  */
 describe('context size and fit', () => {
   const CONTEXT_FLAGS = new Set(['--ctx-size', '--fit', '--fit-ctx', '--fit-target'])
@@ -312,11 +314,43 @@ describe('context size and fit', () => {
     ['an embedding load never sends a window', { fit: false, ctx_size: 4096 }, true, ['--fit', 'off']],
   ]
 
+  const CEILING_CASES: Array<[string, Partial<LlamacppConfig>, boolean, string[]]> = [
+    [
+      'fit on under the small-Mac ceiling: the window is pinned there, beside the margin',
+      { fit: true, ctx_size: 32768, fit_target: '1365' },
+      false,
+      ['--ctx-size', '6144', '--fit', 'on', '--fit-target', '1365'],
+    ],
+    [
+      'fit off: the chosen window, never the ceiling',
+      { fit: false, ctx_size: 4096 },
+      false,
+      ['--ctx-size', '4096', '--fit', 'off'],
+    ],
+    ['an embedding load never sends a window', { fit: true, ctx_size: 4096 }, true, ['--fit', 'on']],
+  ]
+
   describe.each(PROVIDERS)('%s', (provider, version_backend) => {
     it.each(CASES)('%s', (_name, cfg, isEmbedding, expected) => {
       const argv = buildLlamaArgs({ ...base(), version_backend, ...cfg }, { ...input, provider, isEmbedding })
       expect(contextArgs(argv)).toEqual(expected)
     })
+
+    it.each(CEILING_CASES)('%s', (_name, cfg, isEmbedding, expected) => {
+      const argv = buildLlamaArgs(
+        { ...base(), version_backend, ...cfg },
+        { ...input, provider, isEmbedding, fitCtxCeiling: 6144 }
+      )
+      expect(contextArgs(argv)).toEqual(expected)
+    })
+  })
+
+  it('sends no ceiling to an ik build, which takes no fit flags at all', () => {
+    const argv = buildLlamaArgs(
+      { ...base(), version_backend: 'b6000/ik-cpu', fit: true, ctx_size: 32768 },
+      { ...input, fitCtxCeiling: 6144 }
+    )
+    expect(contextArgs(argv)).toEqual([])
   })
 })
 

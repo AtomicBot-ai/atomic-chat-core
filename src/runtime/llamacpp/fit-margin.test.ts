@@ -3,10 +3,14 @@ import {
   DEFAULT_FIT_CTX,
   DEFAULT_FIT_TARGET_MIB,
   FIT_COMPUTE_RESERVE_BYTES,
+  FIT_CTX_ALIGN,
+  SMALL_UNIFIED_MEMORY_CTX_CAP,
   UNIFIED_MEMORY_LLAMA_SHARE,
   metalDevice,
+  smallUnifiedMemoryCtxCeiling,
   unifiedMemoryFitTargetMiB,
 } from './fit-margin.js'
+import type { SmallUnifiedMemoryCtxInput } from './fit-margin.js'
 
 const MiB = 1024 * 1024
 const GiB = 1024 * MiB
@@ -136,5 +140,119 @@ describe('unifiedMemoryFitTargetMiB', () => {
         })
         if (margin !== undefined) expect(margin).toBeGreaterThan(DEFAULT_FIT_TARGET_MIB)
       }
+  })
+})
+
+describe('smallUnifiedMemoryCtxCeiling', () => {
+  // LiquidAI/LFM2.5-2.6B-GGUF Q4_K_M, the catalog's pick for 8 GB Macs: 1674455040 bytes, a 131072
+  // trained context, 30 blocks of which 8 attend (8 KV heads of 64): the core's estimate reads its
+  // per-layer `head_count_kv` and gets llama.cpp's 16 KiB of fp16 KV per token.
+  const LFM25_WEIGHTS = 1_674_455_040
+  const LFM25_KV_ESTIMATE = (ctx: number) => ctx * 16 * 1024
+  // `MTL0: Apple M3 (5461 MiB, 5461 MiB free)` on an 8 GiB Mac; the margin leaves llama.cpp 4096 MiB.
+  const EIGHT_GIB_BUDGET = 4096 * MiB
+
+  const lfm25 = (over: Partial<SmallUnifiedMemoryCtxInput> = {}): SmallUnifiedMemoryCtxInput => ({
+    totalMemoryBytes: 8 * GiB,
+    budgetBytes: EIGHT_GIB_BUDGET,
+    weightsBytes: LFM25_WEIGHTS,
+    trainedCtx: 131_072,
+    minCtx: DEFAULT_FIT_CTX,
+    kvBytesAt: LFM25_KV_ESTIMATE,
+    ...over,
+  })
+
+  it('caps LFM2.5 2.6B on an 8 GiB Mac at 32768 tokens where fit would take all 128K', () => {
+    // 4096 − 1597 − 1024 MiB leave 1475 MiB; 32768 tokens at 16 KiB need 512 MiB of it. llama.cpp
+    // then holds 512 MiB of KV cache instead of the 2048 MiB of 131072 tokens.
+    expect(SMALL_UNIFIED_MEMORY_CTX_CAP).toBe(32_768)
+    expect(smallUnifiedMemoryCtxCeiling(lfm25())).toBe(SMALL_UNIFIED_MEMORY_CTX_CAP)
+  })
+
+  it('narrows a model whose estimate counts every block to what that estimate fits', () => {
+    // LFM2.5-2.6B as an estimate blind to its per-layer heads counted it: 30 blocks × 32 heads,
+    // 240 KiB a token. 1475 MiB hold 6293 of those, so 6144 by whole 256s.
+    expect(smallUnifiedMemoryCtxCeiling(lfm25({ kvBytesAt: (ctx) => ctx * 240 * 1024 }))).toBe(6144)
+  })
+
+  it('gives a model with a small KV cache the whole ceiling', () => {
+    // A 0.7 GiB model at 12 KiB per token fits 32768 tokens with room to spare.
+    expect(
+      smallUnifiedMemoryCtxCeiling(
+        lfm25({ weightsBytes: 0.7 * GiB, trainedCtx: 131_072, kvBytesAt: (ctx) => ctx * 12 * 1024 })
+      )
+    ).toBe(SMALL_UNIFIED_MEMORY_CTX_CAP)
+  })
+
+  it('narrows a dense model to what the budget holds with the compute reserve', () => {
+    // meta-llama/Llama-3.2-3B Q4_K_M: 2019377696 bytes, 112 KiB of KV per token.
+    expect(
+      smallUnifiedMemoryCtxCeiling(
+        lfm25({ weightsBytes: 2_019_377_696, kvBytesAt: (ctx) => ctx * 112 * 1024 })
+      )
+    ).toBe(10_240)
+  })
+
+  it.each([16, 18, 24, 64, 128])('leaves a %i GiB Mac to fit', (ram) => {
+    expect(smallUnifiedMemoryCtxCeiling(lfm25({ totalMemoryBytes: ram * GiB }))).toBeUndefined()
+  })
+
+  it.each([
+    ['RAM is unknown', { totalMemoryBytes: 0 }],
+    ['the trained context is unknown', { trainedCtx: undefined }],
+    ['the KV cache cannot be estimated', { kvBytesAt: () => undefined }],
+    ['the weights fill the budget', { weightsBytes: 3.5 * GiB }],
+    // Phi-3.5-mini: 2.2 GiB of weights and no GQA, 384 KiB per token — not even 4096 tokens fit.
+    [
+      'not even the fit floor fits',
+      { weightsBytes: 2.2 * GiB, kvBytesAt: (ctx: number) => ctx * 384 * 1024 },
+    ],
+    ['the user’s floor is above the ceiling', { minCtx: 65_536 }],
+  ])('caps nothing when %s', (_name, over) => {
+    expect(smallUnifiedMemoryCtxCeiling(lfm25(over as Partial<SmallUnifiedMemoryCtxInput>))).toBeUndefined()
+  })
+
+  it('caps nothing for a model trained for no more than fits, since fit can pick no wider', () => {
+    expect(smallUnifiedMemoryCtxCeiling(lfm25({ trainedCtx: 4096 }))).toBeUndefined()
+    expect(
+      smallUnifiedMemoryCtxCeiling(lfm25({ trainedCtx: 10_000, kvBytesAt: (ctx) => ctx * 12 * 1024 }))
+    ).toBeUndefined()
+  })
+
+  it('narrows a short trained window that does not fit, first onto the 256 grid', () => {
+    const asked: number[] = []
+    const ceiling = smallUnifiedMemoryCtxCeiling(
+      lfm25({
+        trainedCtx: 10_000,
+        kvBytesAt: (ctx) => {
+          asked.push(ctx)
+          return ctx <= 9_000 ? 0 : 2 * GiB
+        },
+      })
+    )
+    expect(asked.slice(0, 3)).toEqual([10_000, 9_984, 9_728])
+    expect(ceiling).toBe(8_960)
+  })
+
+  it('only ever answers a whole number of 256s between the fit floor and the ceiling', () => {
+    for (const ram of [4, 8, 12])
+      for (const weights of [0.25, 0.5, 1, 2, 3])
+        for (const kib of [6, 16, 64, 112, 144, 240, 384]) {
+          const ceiling = smallUnifiedMemoryCtxCeiling(
+            lfm25({
+              totalMemoryBytes: ram * GiB,
+              budgetBytes: (ram * GiB) / 2,
+              weightsBytes: weights * GiB,
+              kvBytesAt: (ctx) => ctx * kib * 1024,
+            })
+          )
+          if (ceiling === undefined) continue
+          expect(ceiling % FIT_CTX_ALIGN).toBe(0)
+          expect(ceiling).toBeGreaterThanOrEqual(DEFAULT_FIT_CTX)
+          expect(ceiling).toBeLessThanOrEqual(SMALL_UNIFIED_MEMORY_CTX_CAP)
+          expect(weights * GiB + ceiling * kib * 1024 + FIT_COMPUTE_RESERVE_BYTES).toBeLessThanOrEqual(
+            (ram * GiB) / 2
+          )
+        }
   })
 })

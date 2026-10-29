@@ -91,3 +91,56 @@ describe('ggufContextLength', () => {
     expect(ggufContextLength({})).toBeUndefined()
   })
 })
+
+describe('estimateKvCache — per-layer head_count_kv', () => {
+  // LiquidAI/LFM2.5-2.6B-GGUF: 30 blocks, attention in 8 of them with 8 KV heads of 64 (2048 / 32).
+  const LFM25_KV_HEADS = [
+    0, 0, 8, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 8, 0, 0, 8, 0, 0,
+  ]
+  const lfm2 = (headCountKv: string, extra: Record<string, string> = {}) => ({
+    'general.architecture': 'lfm2',
+    'lfm2.block_count': '30',
+    'lfm2.context_length': '131072',
+    'lfm2.embedding_length': '2048',
+    'lfm2.attention.head_count': '32',
+    'lfm2.attention.head_count_kv': headCountKv,
+    ...extra,
+  })
+
+  it('counts only the layers that attend, as llama.cpp allocates them: 16 KiB a token for LFM2.5-2.6B', () => {
+    const est = estimateKvCache(lfm2(`[${LFM25_KV_HEADS.join(', ')}]`), 131_072)
+    expect(est.per_token_size).toBe(8 * 8 * (64 + 64) * 2)
+    expect(est.per_token_size).toBe(16 * 1024)
+    expect(est.size).toBe(2 * 2 ** 30)
+  })
+
+  it('gives each layer its own head count', () => {
+    const m = { ...meta(3, 8, 128, 4096), 'llama.attention.head_count_kv': '[2, 4, 0]' }
+    expect(estimateKvCache(m, 4096).per_token_size).toBe(6 * (128 + 128) * 2)
+  })
+
+  it('reads a uniform array exactly like the scalar it spells out', () => {
+    const scalar = estimateKvCache({ ...meta(4, 32, 128, 8192), 'llama.attention.head_count_kv': '8' }, 8192)
+    const array = estimateKvCache(
+      { ...meta(4, 32, 128, 8192), 'llama.attention.head_count_kv': '[8, 8, 8, 8]' },
+      8192
+    )
+    expect(array).toEqual(scalar)
+  })
+
+  it('keeps averaging a sliding window over the attention layers it counts', () => {
+    const m = lfm2('[0, 8, 0]', { 'lfm2.block_count': '3', 'lfm2.attention.sliding_window': '1024' })
+    const est = estimateKvCache(m, 4096)
+    expect(est.per_token_size).toBe(8 * 128 * 2)
+    expect(est.size).toBe(Math.floor((4096 * est.per_token_size + 1024 * est.per_token_size) / 2))
+  })
+
+  it.each([
+    ['the reader’s placeholder', '<Array of type Int32 with 30 elements, data skipped>'],
+    ['an array in which no layer has KV heads', '[0, 0, 0]'],
+    ['a malformed array', '[8, x, 8]'],
+    ['an empty array', '[]'],
+  ])('falls back to every block with head_count heads for %s, as before', (_name, raw) => {
+    expect(estimateKvCache(lfm2(raw), 4096).per_token_size).toBe(30 * 32 * (64 + 64) * 2)
+  })
+})

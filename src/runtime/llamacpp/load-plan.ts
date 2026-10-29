@@ -29,6 +29,7 @@ import {
   DEFAULT_FIT_CTX,
   DEFAULT_FIT_TARGET_MIB,
   metalDevice,
+  smallUnifiedMemoryCtxCeiling,
   unifiedMemoryFitTargetMiB,
 } from './fit-margin.js'
 import {
@@ -123,6 +124,11 @@ export interface LoadPlan {
   isEmbedding: boolean
   timeoutSecs: number
   maxCtxTrain: number | undefined
+  /**
+   * Under fit on a unified-memory Mac below 16 GiB: the window the core caps llama.cpp at, in tokens
+   * across every slot (`--ctx-size`; fit still places the layers). Absent: llama.cpp picks the window.
+   */
+  fitCtxCeiling?: number
   warnings: string[]
 }
 
@@ -350,13 +356,20 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
   // 19. legacy stringly `fit`
   if (typeof (cfg as { fit: unknown }).fit === 'string') cfg.fit = true
 
-  // 19b. fit margin on unified memory (a margin the user set stands)
+  // 19b. fit margin on unified memory, and the window ceiling below 16 GiB (a margin the user set stands)
+  let fitCtxCeiling: number | undefined
   if (cfg.fit && !input.isEmbedding && isDefaultFitTarget(cfg.fit_target)) {
-    const marginMiB = await unifiedMemoryMargin(exePath, modelPath, cfg, deps)
-    if (marginMiB !== undefined) {
-      cfg.fit_target = String(marginMiB)
+    const fit = await unifiedMemoryFit(exePath, modelPath, cfg, maxCtxTrain, deps)
+    if (fit?.marginMiB !== undefined) {
+      cfg.fit_target = String(fit.marginMiB)
       warn(
-        `Unified memory: fitting "${modelId}" with a ${marginMiB} MiB margin so llama.cpp leaves half of RAM to the system.`
+        `Unified memory: fitting "${modelId}" with a ${fit.marginMiB} MiB margin so llama.cpp leaves half of RAM to the system.`
+      )
+    }
+    if (fit?.ctxCeiling !== undefined) {
+      fitCtxCeiling = fit.ctxCeiling
+      warn(
+        `Unified memory below 16 GiB: capping the window fit may pick for "${modelId}" at ${fit.ctxCeiling} tokens.`
       )
     }
   }
@@ -376,6 +389,7 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     isEmbedding: input.isEmbedding,
     timeoutSecs,
     maxCtxTrain,
+    ...(fitCtxCeiling !== undefined ? { fitCtxCeiling } : {}),
     warnings,
   }
 }
@@ -455,26 +469,42 @@ async function assertCompleteGguf(
 }
 
 /**
- * The widened `--fit-target` on a unified-memory Mac, or `undefined` to keep llama.cpp's default:
- * off Apple silicon, on a device the user pinned elsewhere, or when the backend lists no Metal device.
+ * Fit on a unified-memory Mac: the widened `--fit-target` (`undefined` keeps llama.cpp's default) and,
+ * below 16 GiB of RAM, the window ceiling in tokens across every slot. `undefined` altogether off Apple
+ * silicon, on a device the user pinned elsewhere, or when the backend lists no Metal device.
  */
-async function unifiedMemoryMargin(
+async function unifiedMemoryFit(
   exePath: string,
   modelPath: string,
   cfg: LlamacppConfig,
+  maxCtxTrain: number | undefined,
   deps: LoadPlanDeps
-): Promise<number | undefined> {
+): Promise<{ marginMiB: number | undefined; ctxCeiling: number | undefined } | undefined> {
   if (!deps.unifiedMemory || !deps.listDevices) return undefined
   const memory = await deps.unifiedMemory().catch(() => undefined)
   if (!memory) return undefined
   const gpu = metalDevice(await deps.listDevices(exePath).catch(() => []))
   if (!gpu || (cfg.device !== '' && cfg.device !== gpu.id)) return undefined
-  return unifiedMemoryFitTargetMiB({
+  const gpuFreeBytes = gpu.free * 2 ** 20
+  const weightsBytes = await gpuWeightsBytes(modelPath, cfg, deps)
+  const slots = fitSlots(cfg)
+  const minCtx = fitMinCtx(cfg)
+  const kvBytesAt = await kvCacheEstimator(modelPath, cfg, slots, deps)
+  const marginMiB = unifiedMemoryFitTargetMiB({
     totalMemoryBytes: memory.totalMemoryBytes,
-    gpuFreeBytes: gpu.free * 2 ** 20,
-    weightsBytes: await gpuWeightsBytes(modelPath, cfg, deps),
-    minContextKvBytes: await minContextKvBytes(modelPath, cfg, deps),
+    gpuFreeBytes,
+    weightsBytes,
+    minContextKvBytes: kvBytesAt(minCtx) ?? 0,
   })
+  const perSlot = smallUnifiedMemoryCtxCeiling({
+    totalMemoryBytes: memory.totalMemoryBytes,
+    budgetBytes: gpuFreeBytes - (marginMiB ?? DEFAULT_FIT_TARGET_MIB) * 2 ** 20,
+    weightsBytes,
+    trainedCtx: maxCtxTrain,
+    minCtx,
+    kvBytesAt,
+  })
+  return { marginMiB, ctxCeiling: perSlot === undefined ? undefined : perSlot * slots }
 }
 
 /** No margin of the user's own: the key is empty or holds llama.cpp's default. */
@@ -493,21 +523,37 @@ async function gpuWeightsBytes(modelPath: string, cfg: LlamacppConfig, deps: Loa
   return total
 }
 
-/** The KV cache at the smallest window fit may settle on, across every slot; 0 when unreadable. */
-async function minContextKvBytes(
+/** The sequences fit sizes the KV cache for: concurrent mode's slots, else `--parallel`. */
+function fitSlots(cfg: LlamacppConfig): number {
+  return cfg.concurrent_mode ? Math.max(cfg.concurrent_slots, 2) : Math.max(cfg.parallel, 1)
+}
+
+/** `--fit-ctx`, the smallest window fit may settle on, or llama.cpp's default. */
+function fitMinCtx(cfg: LlamacppConfig): number {
+  const fitCtx = parseInt(String(cfg.fit_ctx).trim(), 10)
+  return Number.isFinite(fitCtx) && fitCtx > 0 ? fitCtx : DEFAULT_FIT_CTX
+}
+
+/** The KV cache at a window per slot, across every slot; `undefined` when the GGUF cannot tell. */
+async function kvCacheEstimator(
   modelPath: string,
   cfg: LlamacppConfig,
+  slots: number,
   deps: LoadPlanDeps
-): Promise<number> {
-  const fitCtx = parseInt(String(cfg.fit_ctx).trim(), 10)
-  const minCtx = Number.isFinite(fitCtx) && fitCtx > 0 ? fitCtx : DEFAULT_FIT_CTX
-  const slots = cfg.concurrent_mode ? Math.max(cfg.concurrent_slots, 2) : Math.max(cfg.parallel, 1)
+): Promise<(ctx: number) => number | undefined> {
+  let meta: Record<string, string> | undefined
   try {
-    const meta = await deps.readGgufMetadata(modelPath)
-    if (!meta) return 0
-    return estimateKvCache(meta, minCtx, cfg.cache_type_k, cfg.cache_type_v).size * slots
+    meta = await deps.readGgufMetadata(modelPath)
   } catch {
-    return 0
+    meta = undefined
+  }
+  return (ctx) => {
+    if (!meta) return undefined
+    try {
+      return estimateKvCache(meta, ctx, cfg.cache_type_k, cfg.cache_type_v).size * slots
+    } catch {
+      return undefined
+    }
   }
 }
 
