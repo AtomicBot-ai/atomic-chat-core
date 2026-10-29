@@ -154,27 +154,23 @@ describe('parseAudioDevices', () => {
 })
 
 describe('audioVersionVerdict', () => {
-  it('passes audio.cpp carrying the backend, and a build that names no backends', async () => {
-    const text = await fixture('version-macos-arm64.txt')
-    expect(audioVersionVerdict('s', text, ok, 'darwin', 'metal')).toBeUndefined()
-    expect(audioVersionVerdict('s', text, ok, 'darwin', 'cpu')).toBeUndefined()
-    expect(audioVersionVerdict('s', 'audio.cpp 1.0.0\n', ok, 'linux', 'vulkan')).toBeUndefined()
+  it('passes audio.cpp whatever backends it lists', async () => {
+    expect(audioVersionVerdict('s', await fixture('version-macos-arm64.txt'), ok, 'darwin')).toBeUndefined()
+    // The fork's Windows arm64 CUDA build loads ggml-cuda.dll at run time and lists only the CPU.
+    expect(audioVersionVerdict('s', 'audio.cpp 0.9.3\nbackends: cpu\n', ok, 'win32')).toBeUndefined()
+    expect(audioVersionVerdict('s', 'audio.cpp 1.0.0\n', ok, 'linux')).toBeUndefined()
   })
 
-  it('refuses a build without the backend, another program, silence and a missing library', async () => {
-    const text = await fixture('version-macos-arm64.txt')
-    expect(audioVersionVerdict('s', text, ok, 'darwin', 'cuda')?.message).toBe(
-      'The audio engine build does not carry the cuda backend.'
-    )
-    expect(audioVersionVerdict('s', 'usage: llama-server', ok, 'linux', 'cpu')?.message).toBe(
+  it('refuses another program, silence and a missing library', () => {
+    expect(audioVersionVerdict('s', 'usage: llama-server', ok, 'linux')?.message).toBe(
       'The downloaded binary is not audio.cpp.'
     )
-    expect(audioVersionVerdict('s', '  ', { code: 1, signal: null }, 'linux', 'cpu')).toMatchObject({
+    expect(audioVersionVerdict('s', '  ', { code: 1, signal: null }, 'linux')).toMatchObject({
       code: 'ENGINE_INSTALL_FAILED',
       message: 'The audio engine exited without printing anything.',
       details: 's: exit code 1',
     })
-    expect(audioVersionVerdict('s', '', { code: null, signal: 'SIGKILL' }, 'linux', 'cpu')?.details).toBe(
+    expect(audioVersionVerdict('s', '', { code: null, signal: 'SIGKILL' }, 'linux')?.details).toBe(
       's: signal SIGKILL'
     )
     expect(
@@ -182,11 +178,10 @@ describe('audioVersionVerdict', () => {
         's',
         'error while loading shared libraries: libvulkan.so.1',
         { code: 127, signal: null },
-        'linux',
-        'vulkan'
+        'linux'
       )?.message
     ).toBe('The audio engine could not load a library it needs.')
-    expect(audioVersionVerdict('s', '', { code: 0xc000_0135, signal: null }, 'win32', 'cuda')?.message).toBe(
+    expect(audioVersionVerdict('s', '', { code: 0xc000_0135, signal: null }, 'win32')?.message).toBe(
       'The audio engine could not load a library it needs.'
     )
   })

@@ -163,16 +163,17 @@ const statusOf = (binary: string, exit: ExitInfo): string =>
     : `${binary}: exit code ${exit.code}`
 
 /**
- * The verdict on a finished `--version` run: nothing when the binary is audio.cpp and carries
- * `backend`, otherwise the error to raise. A binary the OS loader could not start is a missing
- * runtime, not the wrong program, so the loader's words are read before the output is.
+ * The verdict on a finished `--version` run: nothing when the binary is audio.cpp, otherwise the error
+ * to raise. A binary the OS loader could not start is a missing runtime, not the wrong program, so the
+ * loader's words are read before the output is. The `backends:` line is not checked: a build that
+ * loads its GPU backend at run time (the fork's Windows arm64 CUDA build) lists only `cpu` there, so
+ * whether a GPU build reaches its device is `--list-devices`' question.
  */
 export function audioVersionVerdict(
   binary: string,
   text: string,
   exit: ExitInfo,
-  platform: NodeJS.Platform,
-  backend: AudioBackend
+  platform: NodeJS.Platform
 ): AtomicCoreError | undefined {
   const output = [...text].slice(0, 800).join('')
   const status = statusOf(binary, exit)
@@ -182,19 +183,10 @@ export function audioVersionVerdict(
       'The audio engine could not load a library it needs.',
       output.trim() === '' ? status : `${status}\n${output}`
     )
-  const info = parseAudioVersion(text)
-  if (!info) {
-    if (text.trim() === '')
-      return audioError('ENGINE_INSTALL_FAILED', 'The audio engine exited without printing anything.', status)
-    return audioError('ENGINE_INSTALL_FAILED', 'The downloaded binary is not audio.cpp.', output)
-  }
-  if (info.backends.length > 0 && !info.backends.includes(backend))
-    return audioError(
-      'ENGINE_INSTALL_FAILED',
-      `The audio engine build does not carry the ${backend} backend.`,
-      `backends: ${info.backends.join(',')}`
-    )
-  return undefined
+  if (parseAudioVersion(text)) return undefined
+  if (text.trim() === '')
+    return audioError('ENGINE_INSTALL_FAILED', 'The audio engine exited without printing anything.', status)
+  return audioError('ENGINE_INSTALL_FAILED', 'The downloaded binary is not audio.cpp.', output)
 }
 
 /**
@@ -234,7 +226,7 @@ async function setExecutable(path: string, deps: AudioInstallDeps): Promise<void
 
 /**
  * An unpacked tree made runnable and checked: `audiocpp_server` present and executable, answering
- * `--version` as audio.cpp with `backend` among its backends, and — for a GPU build — listing a GPU.
+ * `--version` as audio.cpp, and — for a GPU build — listing a GPU.
  * Throws `ENGINE_INSTALL_FAILED` otherwise, which moves the install to the next build of the ladder.
  */
 export async function prepareAudiocppTree(
@@ -260,7 +252,7 @@ export async function prepareAudiocppTree(
     })
   try {
     const version = await probe(['--version'])
-    const versionFailure = audioVersionVerdict(server, version.text, version.exit, platform, backend)
+    const versionFailure = audioVersionVerdict(server, version.text, version.exit, platform)
     if (versionFailure) throw versionFailure
     const devices = backend === 'cpu' ? null : await probe(['--list-devices'])
     const devicesFailure =
