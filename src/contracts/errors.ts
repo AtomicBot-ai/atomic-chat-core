@@ -174,6 +174,37 @@ export const DIFFUSION_ERROR_CODES = [
 export type DiffusionErrorCode = (typeof DIFFUSION_ERROR_CODES)[number]
 
 /**
+ * Audio generation (`src/contracts/audio.ts`), camelCase bodies like diffusion's. Codes shared with
+ * the image list keep its spelling and meaning; `UNSUPPORTED_MODE` and `REQUEST_REJECTED` are audio's.
+ */
+export const AUDIO_ERROR_CODES = [
+  'ENGINE_MISSING',
+  'ENGINE_INSTALL_FAILED',
+  'ENGINE_CRASHED',
+  'MODEL_MISSING',
+  'MODEL_LOAD_FAILED',
+  /** The engine served something other than the family and task the load asked for. */
+  'MODEL_INCOMPATIBLE',
+  'MODEL_NOT_LOADED',
+  'OUT_OF_MEMORY',
+  'UNSUPPORTED_BACKEND',
+  /** The loaded model serves another mode than the job asks for. */
+  'UNSUPPORTED_MODE',
+  'INVALID_REQUEST',
+  /** audio.cpp refused the request (a missing reference voice, an option the family does not take); `details` carries its words. */
+  'REQUEST_REJECTED',
+  /** The engine answered with something that is not a WAV. */
+  'INVALID_OUTPUT',
+  'JOB_BUSY',
+  'JOB_NOT_FOUND',
+  'CANCELLED',
+  'DISK_FULL',
+  'BACKEND_IN_USE',
+  'INTERNAL',
+] as const
+export type AudioErrorCode = (typeof AUDIO_ERROR_CODES)[number]
+
+/**
  * Managed text runtimes: the container environment, its durable setup operations and the GPU
  * residency rule (`src/contracts/environment.ts`). Proposed; nothing raises these yet. Ported
  * selectively from `origin/feat/tenzor-rt` @ `632b934` (design D1; see `docs/decisions/`).
@@ -217,7 +248,12 @@ export const MANAGED_ERROR_CODES = [
 export type ManagedErrorCode = (typeof MANAGED_ERROR_CODES)[number]
 
 export type ErrorCode =
-  RuntimeErrorCode | ExtensionErrorCode | CoreErrorCode | DiffusionErrorCode | ManagedErrorCode
+  | RuntimeErrorCode
+  | ExtensionErrorCode
+  | CoreErrorCode
+  | DiffusionErrorCode
+  | AudioErrorCode
+  | ManagedErrorCode
 
 /**
  * Disk-failure tags. Rendered into the error message as `Error: [<tag>] <detail>`; the app's

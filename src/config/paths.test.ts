@@ -121,6 +121,18 @@ describe('dataLayout', () => {
       remoteJobsFile: join('/data', 'diffusion', 'remote-jobs.json'),
     })
   })
+  it('puts audio generation under <data>/audio and its gallery in <data>/audios', () => {
+    expect(layout.audio).toEqual({
+      root: join('/data', 'audio'),
+      backendsDir: join('/data', 'audio', 'backends'),
+      modelsDir: join('/data', 'audio', 'models'),
+      runDir: join('/data', 'audio', 'run'),
+      tmpDir: join('/data', 'audio', 'tmp'),
+      manifestCache: join('/data', 'audio', 'audiocpp-manifest.cache.json'),
+      failedBackendsFile: join('/data', 'audio', 'failed-backends.json'),
+      defaultOutputDir: join('/data', 'audios'),
+    })
+  })
 })
 
 describe('path helpers', () => {

@@ -12,6 +12,7 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { AudioErrorEvent, AudioJobEvent, AudioStateEvent } from './audio.js'
 import type { EngineBuildChangedEvent } from './engine-builds.js'
 import type { EngineChangedEvent } from './engines.js'
 import type { FoundryLocalAcceleratorsEvent } from './foundry-local.js'
@@ -176,6 +177,16 @@ export interface CoreEvents {
   /** Video generation shares `state` and `error`; its jobs have their own two, so image consumers see no new shape. */
   'diffusion:video-progress': DiffusionVideoProgressEvent
   'diffusion:video-job': DiffusionVideoJobEvent
+
+  /**
+   * Audio generation (`src/contracts/audio.ts`), camelCase like diffusion. `state` on every change of
+   * the engine install, the model or the output folder; `job` on every job transition and phase;
+   * `error` for a failure nobody is awaiting. audio.cpp reports no progress, so there is no
+   * per-step event.
+   */
+  'audio:state': AudioStateEvent
+  'audio:job': AudioJobEvent
+  'audio:error': AudioErrorEvent
 
   /**
    * Managed text runtimes (`src/contracts/environment.ts`; openspec change `add-tensorrt-llm-linux`).
