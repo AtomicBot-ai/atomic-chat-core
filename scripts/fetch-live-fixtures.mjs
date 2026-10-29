@@ -17,7 +17,7 @@
 // archive of the release, unpacked alone, the config's `live_models` into --models (default
 // <out>/models; shared between builds), and manifest.json and live.json for the live env
 // (scripts/lib/sdcpp-fixtures.mjs). --engine audio-cpp (`kind: audiocpp`) does the same for audio.cpp
-// (scripts/lib/audiocpp-fixtures.mjs: Kokoro as the model) and also writes what the build prints for
+// (scripts/lib/audiocpp-fixtures.mjs: MOSS-TTS-Nano as the model) and also writes what the build prints for
 // --help, --version and --list-devices into help.txt, version.txt and list-devices.txt.
 //
 // Writes into <out>: bin-path.txt and model-path.txt (exported as ATOMIC_LIVE_UPSTREAM_BIN /

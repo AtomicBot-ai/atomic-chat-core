@@ -48,13 +48,13 @@ export type AudioJobState = 'queued' | 'generating' | 'completed' | 'failed' | '
 export type AudioJobPhase = 'queued' | 'loading' | 'generating' | 'saving'
 
 export interface LoadAudioModelRequest {
-  /** The catalog's id, e.g. `kokoro-82m:q8_0`; also the server's model id. */
+  /** The catalog's id, e.g. `moss-tts-nano-100m:q8_0`; also the server's model id. */
   modelId: string
   displayName: string
   mode: AudioMode
   /** The GGUF (or package directory) to serve: absolute, or relative to `<data>/audio/models`. */
   file: string
-  /** audio.cpp's family, e.g. `kokoro_tts`, `qwen3_tts`, `ace_step`, `stable_audio`. */
+  /** audio.cpp's family, e.g. `moss_tts_nano`, `qwen3_tts`, `ace_step`, `stable_audio`. */
   family: string
   task: AudioTask
   /** `models[].load_options`. */

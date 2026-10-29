@@ -1,6 +1,6 @@
 // What audio.cpp's live tests run on (`node scripts/fetch-live-fixtures.mjs --engine audio-cpp`): this
 // host's CPU archive of a release, unpacked alone into its own folder, the model files of the
-// config's `live_models` (Kokoro) checked against their sha256 in a folder of their own, a manifest of
+// config's `live_models` (MOSS-TTS-Nano) checked against their sha256 in a folder of their own, a manifest of
 // the release for the install test (ATOMIC_AUDIOCPP_MANIFEST_URL), and what the build prints for
 // `--help`, `--version` and `--list-devices` (help.txt, version.txt, list-devices.txt: the shape of
 // test/fixtures/audiocpp/v<version>/). sd.cpp's fetch (sdcpp-fixtures.mjs) with audio.cpp's release

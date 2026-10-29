@@ -10,7 +10,7 @@
  *   ATOMIC_LIVE=1
  *   ATOMIC_LIVE_AUDIO_ENGINE=/path/to/dir         (holds audiocpp_server; copied into the temporary data folder)
  *   ATOMIC_LIVE_AUDIO_MODEL=/path/to/model.gguf   (read where it is)
- *   ATOMIC_LIVE_AUDIO_FAMILY=kokoro_tts           (optional; audio.cpp's family, default kokoro_tts)
+ *   ATOMIC_LIVE_AUDIO_FAMILY=moss_tts_nano        (optional; audio.cpp's family, default moss_tts_nano)
  *   ATOMIC_LIVE_AUDIO_MODE=speech                 (optional; speech, music or effects, default speech)
  *   ATOMIC_LIVE_AUDIO_TASK=tts                    (optional; default the mode's: tts for speech, gen otherwise)
  *   ATOMIC_LIVE_AUDIO_TAG=v0.9.3                  (optional; the build's release tag, default v0.9.3)
@@ -25,8 +25,9 @@
  *                                                 both, and the generation is skipped without them)
  *
  * Speech says a short sentence; music and effects make 3 s. The long job that is cancelled says a
- * long text, or asks for 120 s. Upstream's release builds have no eSpeak-ng: Kokoro refuses every
- * speech request on them ("Could not load eSpeak-ng"); the fork's builds carry it.
+ * long text, or asks for 120 s. Neither upstream's release builds nor ours carry eSpeak-ng (GPL; ADR
+ * 2026-10-29), so a model that phonemizes with it (Kokoro) refuses every speech request
+ * ("Could not load eSpeak-ng"); MOSS-TTS-Nano, Qwen3-TTS, Stable Audio and ACE-Step need none.
  *
  * Nothing is written outside the temporary data folder.
  */
@@ -62,7 +63,7 @@ import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
 
 const ENGINE = process.env['ATOMIC_LIVE_AUDIO_ENGINE'] ?? ''
 const MODEL = process.env['ATOMIC_LIVE_AUDIO_MODEL'] ?? ''
-const FAMILY = process.env['ATOMIC_LIVE_AUDIO_FAMILY'] || 'kokoro_tts'
+const FAMILY = process.env['ATOMIC_LIVE_AUDIO_FAMILY'] || 'moss_tts_nano'
 const MODE_ENV = process.env['ATOMIC_LIVE_AUDIO_MODE'] || 'speech'
 const TASK_ENV = process.env['ATOMIC_LIVE_AUDIO_TASK'] ?? ''
 const TAG = process.env['ATOMIC_LIVE_AUDIO_TAG'] || 'v0.9.3'
@@ -160,11 +161,11 @@ function phasesOf(id: string): string[] {
   return phases
 }
 
-/** Why a job failed, with a hint for the one failure an upstream build is known for. */
+/** Why a job failed, with a hint for a model that needs eSpeak-ng, which no build we run carries. */
 function failure(job: AudioJob): string {
   const text = JSON.stringify(job.error ?? null)
   return /espeak/i.test(text)
-    ? `${text} — this build has no eSpeak-ng (an upstream release?): Kokoro speaks only on the fork's builds`
+    ? `${text} — this model phonemizes with eSpeak-ng, which audio.cpp builds here do not carry: pick a model that needs none (MOSS-TTS-Nano, Qwen3-TTS)`
     : text
 }
 

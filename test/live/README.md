@@ -90,14 +90,14 @@ Stage 5 providers, each opt-in on its own:
   (`test/fixtures/audiocpp/conf/audiocpp-manifest.staging.json`: upstream `0xShug0/audio.cpp` v0.9.3, which has no
   Linux or Windows arm64 build). It downloads this host's archive twice: 35 MB on an Apple Silicon Mac.
   `node scripts/fetch-live-fixtures.mjs --engine audio-cpp --tag <tag> [--repo …] --out .live-audio` fetches a release,
-  its manifest, Kokoro-82M q8 (189 MB, pinned by revision and sha256) and the build's `--help`, `--version` and
+  its manifest, MOSS-TTS-Nano-100M q8 (193 MB, pinned by revision and sha256) and the build's `--help`, `--version` and
   `--list-devices` (`help.txt`, `version.txt`, `list-devices.txt`), and writes `live.json` for the config's `live_env`:
   `ATOMIC_LIVE_AUDIO_ENGINE` (the unpacked build), `ATOMIC_LIVE_AUDIO_TAG`, `ATOMIC_LIVE_AUDIO_MANIFEST`,
-  `ATOMIC_LIVE_AUDIO_MODEL` (Kokoro), `ATOMIC_LIVE_AUDIO_FAMILY=kokoro_tts`, `ATOMIC_LIVE_AUDIO_TASK=tts`,
+  `ATOMIC_LIVE_AUDIO_MODEL` (MOSS-TTS-Nano), `ATOMIC_LIVE_AUDIO_FAMILY=moss_tts_nano`, `ATOMIC_LIVE_AUDIO_TASK=tts`,
   `ATOMIC_LIVE_AUDIO_MODE=speech` and `ATOMIC_LIVE_AUDIO_BACKEND=cpu`, which `test/live/audio.test.ts` reads.
   `npm run engine:check -- --engine audio-cpp --tag <tag>` runs the whole check.
 - audio.cpp runtime (`test/live/audio.test.ts`): `ATOMIC_LIVE_AUDIO_ENGINE` (a folder holding `audiocpp_server`) and
-  `ATOMIC_LIVE_AUDIO_MODEL` (a GGUF, read where it is) turn it on; `ATOMIC_LIVE_AUDIO_FAMILY` (default `kokoro_tts`),
+  `ATOMIC_LIVE_AUDIO_MODEL` (a GGUF, read where it is) turn it on; `ATOMIC_LIVE_AUDIO_FAMILY` (default `moss_tts_nano`),
   `ATOMIC_LIVE_AUDIO_MODE` (`speech`, `music` or `effects`, default `speech`), `ATOMIC_LIVE_AUDIO_TASK` (default the
   mode's: `tts` for speech, `gen` otherwise), `ATOMIC_LIVE_AUDIO_TAG` (default `v0.9.3`), `ATOMIC_LIVE_AUDIO_BACKEND=cpu`
   (every load on the CPU backend through `ATOMIC_AUDIO_BACKEND`, as on CI runners). The build goes into the temporary
@@ -109,8 +109,8 @@ Stage 5 providers, each opt-in on its own:
   generates, the server stopped → the next job respawns it → unload. A model that speaks only in a cloned voice
   (`requiresVoiceRef`: Qwen3-TTS Base) needs `ATOMIC_LIVE_AUDIO_VOICE_REF` (a WAV) and
   `ATOMIC_LIVE_AUDIO_REFERENCE_TEXT` (its transcript); without them the generation is skipped with that message.
-  Upstream's release builds have no eSpeak-ng, so Kokoro refuses every speech request on them
-  (`Could not load eSpeak-ng`); the fork's builds carry it. On upstream v0.9.3, run Stable Audio or Qwen3-TTS instead:
+  No build carries eSpeak-ng (upstream's never did; the fork leaves it out, ADR 2026-10-29), so Kokoro refuses every
+  speech request (`Could not load eSpeak-ng`). MOSS-TTS-Nano, Qwen3-TTS, Stable Audio and ACE-Step need none, e.g.:
 
   ```sh
   ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \

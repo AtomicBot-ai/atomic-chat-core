@@ -498,7 +498,7 @@ describe('the audio-cpp configuration', () => {
       expect(requiredLiveTests(audio.required_live_tests, platform)).toEqual(audio.required_live_tests)
   })
 
-  it('fills its live env from what the fetch leaves, Kokoro on the CPU backend', () => {
+  it('fills its live env from what the fetch leaves, MOSS-TTS-Nano on the CPU backend', () => {
     const models = Object.fromEntries(audio.live_models.map((m) => [m.id, liveModelPath('/models', m)]))
     const env = expandLiveEnv(audio.live_env, { engine_dir: '/e', tag: 't', manifest: '/m.json', models })
     expect(env).toEqual({
@@ -506,8 +506,8 @@ describe('the audio-cpp configuration', () => {
       ATOMIC_LIVE_AUDIO_TAG: 't',
       ATOMIC_LIVE_AUDIO_MANIFEST: '/m.json',
       // The host's separators: the fetch writes these paths for the host it runs on.
-      ATOMIC_LIVE_AUDIO_MODEL: join('/models', '9a4ca6176460cdc8', 'kokoro-82m-q8_0.gguf'),
-      ATOMIC_LIVE_AUDIO_FAMILY: 'kokoro_tts',
+      ATOMIC_LIVE_AUDIO_MODEL: join('/models', '823b0de64f01f1ee', 'moss-tts-nano-100m-q8_0.gguf'),
+      ATOMIC_LIVE_AUDIO_FAMILY: 'moss_tts_nano',
       ATOMIC_LIVE_AUDIO_TASK: 'tts',
       ATOMIC_LIVE_AUDIO_MODE: 'speech',
       ATOMIC_LIVE_AUDIO_BACKEND: 'cpu',

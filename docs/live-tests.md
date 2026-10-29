@@ -830,15 +830,16 @@ differs; the archive, completeness, manifest and fetch logic is sd.cpp's, with a
   macos-arm64 (`macos-15`), CPU archives only. The install test installs the build through a manifest
   `fetch-live-fixtures` writes from the release (`ATOMIC_AUDIOCPP_MANIFEST_URL`), refuses a tampered sha256 and holds
   `--version` to the tag's version. The runtime test holds `audiocpp_server --help` to every flag core passes and every
-  route it calls, installs the build through the same manifest, and runs Kokoro-82M q8 (`live_models`, 189 MB) on the
+  route it calls, installs the build through the same manifest, and runs MOSS-TTS-Nano-100M q8 (`live_models`, 193 MB) on the
   CPU backend (`ATOMIC_LIVE_AUDIO_BACKEND=cpu` → `ATOMIC_AUDIO_BACKEND=cpu`): load, the contract's load lines in the
   engine's output, a sentence of speech with its WAV, recipe and gallery item, a long text cancelled while it is
   spoken (the server stopped), a respawn, an unload.
 - **Upstream's builds cannot pass in CI**: 0xShug0 publishes no Linux or Windows arm64 build, so the surface breaks on
-  both CPU archives and the linux-arm64 cell has nothing to fetch; and its builds have no eSpeak-ng, so Kokoro refuses
-  every speech request (`Could not load eSpeak-ng`) and the runtime test fails on them too. On one Mac
-  (`npm run engine:check -- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3`) the live cell runs; the result
-  fails on the surface and the Kokoro job. The fork's builds (static eSpeak-ng) are the ones the pipeline approves.
+  both CPU archives and the linux-arm64 cell has nothing to fetch. On one Mac
+  (`npm run engine:check -- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3`) the live cell runs and passes;
+  the result fails on the surface. The fork's builds are the ones the pipeline approves.
+- **No build carries eSpeak-ng** (GPL-3.0; the fork leaves it out, ADR 2026-10-29), so a model that phonemizes with it
+  (Kokoro) refuses every speech request (`Could not load eSpeak-ng`); the live model is one that needs none.
 
 On this machine, against any build and any model on disk (`test/live/README.md` lists every variable):
 
@@ -855,7 +856,7 @@ ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \
   npx vitest run --project live test/live/audio.test.ts
 ```
 
-Kokoro needs a build with eSpeak-ng (the fork's). `ATOMIC_LIVE_AUDIO_MANIFEST` installs the build through a manifest
+`ATOMIC_LIVE_AUDIO_MANIFEST` installs the build through a manifest
 instead of copying the folder; conf's bootstrap staging manifest
 (`test/fixtures/audiocpp/conf/audiocpp-manifest.staging.json`) downloads upstream's 35 MB macOS archive.
 
@@ -867,7 +868,7 @@ gh workflow run engine-candidate.yml --ref <core release> -f engine=audio-cpp -f
 ```
 
 `node scripts/fetch-live-fixtures.mjs --engine audio-cpp --tag <tag> [--repo …] --out .live-audio [--models <dir>]`
-fetches the archive into `.live-audio/engine-<tag>/` and Kokoro into `<dir>` (default `.live-audio/models`), and writes
+fetches the archive into `.live-audio/engine-<tag>/` and MOSS-TTS-Nano into `<dir>` (default `.live-audio/models`), and writes
 `manifest.json`, `live.json`, and `help.txt`, `version.txt` and `list-devices.txt` (the shape of
 `test/fixtures/audiocpp/v<version>/`). A core release without `.github/engine-candidate/audio-cpp.json` cannot check
 audio.cpp.

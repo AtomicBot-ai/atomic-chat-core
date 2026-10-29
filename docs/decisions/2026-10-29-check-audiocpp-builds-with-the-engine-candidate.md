@@ -55,7 +55,8 @@ title: "Check audio.cpp builds with the engine candidate workflow"
     installed through a manifest the fetch writes from the release (`ATOMIC_AUDIOCPP_MANIFEST_URL`), a
     tampered sha256 refused, `--version` naming the tag's version. Without
     `ATOMIC_LIVE_AUDIO_MANIFEST` it installs conf's bootstrap staging manifest. The fetch also brings
-    Kokoro-82M q8 (189 MB, pinned by Hugging Face revision and sha256) and fills `ATOMIC_LIVE_AUDIO_*`
+    MOSS-TTS-Nano-100M q8 (193 MB, pinned by Hugging Face revision and sha256; a speech model that needs no
+    eSpeak-ng, which no build carries) and fills `ATOMIC_LIVE_AUDIO_*`
     (`ENGINE TAG MANIFEST MODEL FAMILY TASK MODE BACKEND`) for the runtime's live tests, which join
     `live_files` and `required_live_tests` when they land; it writes the build's `--help`, `--version`
     and `--list-devices` beside them, the shape of `test/fixtures/audiocpp/v<version>/`. The live
@@ -67,8 +68,7 @@ title: "Check audio.cpp builds with the engine candidate workflow"
   ones the gate backs. On this machine (macOS arm64, M4 Pro)
   `npm run engine:check -- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3` resolves, runs the
   surface (help, routes, version and probe pass) and the live install (3/3 in 6 s), and fails only on
-  those two archives. Kokoro does not speak on upstream's builds (no eSpeak-ng), which the runtime's
-  live tests will show. Metal, CUDA, Vulkan and Windows are not run (`not_verified`). A core release
+  those two archives. Metal, CUDA, Vulkan and Windows are not run (`not_verified`). A core release
   without `.github/engine-candidate/audio-cpp.json` cannot check audio.cpp.
 - **Owner:** team
 - **Links:** `.github/engine-candidate/audio-cpp.json`, `.github/workflows/engine-candidate.yml`,
