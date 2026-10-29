@@ -1,0 +1,12 @@
+---
+date: 2026-10-29
+title: "Serve /v1/audio/speech from the loaded audio model through the job runner"
+---
+
+# 2026-10-29 — Serve /v1/audio/speech from the loaded audio model through the job runner
+
+- **Context:** audio.cpp's `audiocpp_server` speaks OpenAI's `/v1/audio/speech` itself, but the core runs it as a job behind `/atomic/v1/audio`, with a gallery write, `audio:job` events, an idle timer and a cancel that stops the process (ADR 2026-10-29, audio generation is a module of its own). Forwarding `/v1/audio/speech` to the engine would skip all of that, let the engine run requests while the studio runs a job, and leave a hung-up client's generation running, since audio.cpp ignores a JSON client that leaves.
+- **Decision:** the public server answers `POST /v1/audio/speech` itself, the way it answers `/v1/images/generations` (ADR 2026-09-18). `src/server/public/audio-speech.ts` parses OpenAI's body, keeping the fields the engine has (`input` ≤ 4096, `voice`, `speed`, `instructions` → `instruct`, `response_format` `wav`/`pcm`) plus `seed` and `language`, runs it as a speech job through `AudioService.speechBackend()` (the same `startAudioJob` as the studio's jobs, with the job id handed back so a hang-up cancels it) and answers with the clip's bytes, the job, seed, sample rate and channels in `X-Atomic-*` headers. Only the loaded model speaks, and only a speech model: a music or effects model is `model_not_loaded` here; a `model` naming anything else is `404 model_not_found`. Encoded formats and `stream_format: sse` are refused; a `speed` of 1 is dropped because Qwen3-TTS refuses the key. The trace reports `backend: atomic-audio`, endpoint `audio/speech`, never the words.
+- **Consequences:** the route is not in `/openapi.json` yet: that document is imported from the app (`scripts/import-app-static.mjs`) and the app's iteration describes it, together with the request analytics labels. No streaming and no `mp3`/`opus`. OpenAI's model names (`tts-1`, `gpt-4o-mini-tts`) and voices (`alloy`, …) are not aliased: such a client gets a 404 or an engine 400 until a follow-up maps them to the loaded model and its default voice. Unlike `/images/generations`, which answers 503 for a model it does not have, this route answers 404.
+- **Owner:** `team`.
+- **Links:** `src/server/public/{audio-speech,audio-speech-params}.ts`, `src/audio/service.ts` (`speechBackend`), `test/e2e/audio-speech-api.test.ts`.
