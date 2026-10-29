@@ -76,7 +76,7 @@ export type AudioEngineInstall =
   | {
       state: 'installed'
       backend: AudioBackend
-      /** Release tag, e.g. `v0.9.3-a1b2c3d`. */
+      /** Release tag, e.g. `v0.9.3-a1b2c3d4`. */
       tag: string
       /** Manifest backend id, e.g. `macos-arm64`. */
       backendId: string
@@ -151,6 +151,12 @@ export interface AudioCapabilities {
   voices: string[]
   /** Speech only: the model clones a voice from reference audio (`voiceRef`). */
   supportsVoiceRef: boolean
+  /**
+   * Speech only: the model speaks only in a cloned voice, so a job without `voiceRef` is refused by
+   * the engine (Qwen3-TTS Base: it still lists the CustomVoice `voice_id` values, which it cannot use,
+   * so `voices` is empty then).
+   */
+  requiresVoiceRef: boolean
 }
 
 /** A WAV to read on the core's computer, or WAV bytes (a `data:audio/wav;base64,` prefix is accepted). */
@@ -183,6 +189,12 @@ export interface AudioGenerateRequest {
   negativePrompt?: string
   /** Any other request option the model declares; the named fields above win over the same key here. */
   options?: AudioOptions
+}
+
+/** `POST /atomic/v1/audio/jobs`: what to make, in which mode. */
+export interface AudioJobSubmission {
+  mode: AudioMode
+  request: AudioGenerateRequest
 }
 
 export interface AudioJobProgress {
