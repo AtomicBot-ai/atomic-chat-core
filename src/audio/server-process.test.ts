@@ -12,7 +12,7 @@ import { AtomicCoreError } from '../contracts/index.js'
 import { sampleAudioSpec } from '../../test/helpers/audio-fixtures.js'
 import { writeFakeAudioLaunchers } from '../../test/helpers/fake-audiocpp-server.js'
 import type { FakeAudioOptions } from '../../test/helpers/fake-audiocpp-server.js'
-import { isProcessAlive, randomFreePort } from '../runtime/shared/index.js'
+import { isProcessAlive } from '../runtime/shared/index.js'
 import { createAudioHttpClient } from './http.js'
 import { SERVER_CONFIG_FILE, spawnAudioServer } from './server-process.js'
 import type { SpawnAudioServerDeps } from './server-process.js'
@@ -47,8 +47,24 @@ async function engine(
   return sampleAudioSpec({ binaryDir, modelPath, backend: 'cpu', ...over })
 }
 
+/**
+ * A port the OS hands out (its ephemeral range), so these fakes never land in `randomFreePort`'s
+ * 3000–4000, where the diffusion and llama.cpp tests running in parallel pick theirs: a fake from
+ * here answering on one of their ports reads as a foreign listener there.
+ */
+const ephemeralPort = (): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as { port: number }
+      probe.close(() => resolve(port))
+    })
+  })
+
 const deps = (over: Partial<SpawnAudioServerDeps> = {}): SpawnAudioServerDeps => ({
   http,
+  freePort: ephemeralPort,
   runDir: join(dir, 'run'),
   tmpDir: join(dir, 'tmp'),
   env: { ...process.env, HOME: '/home/someone' },
@@ -257,7 +273,7 @@ describe.skipIf(!posix)('spawnAudioServer', () => {
       const handle = await spawnAudioServer(
         spec,
         deps({
-          freePort: async () => ports.shift() ?? randomFreePort([]),
+          freePort: async () => ports.shift() ?? ephemeralPort(),
           log: (level, msg) => level === 'warn' && warnings.push(msg),
         })
       )
