@@ -509,7 +509,7 @@ describe('the audio-cpp configuration', () => {
       ATOMIC_LIVE_AUDIO_MODEL: join('/models', '9a4ca6176460cdc8', 'kokoro-82m-q8_0.gguf'),
       ATOMIC_LIVE_AUDIO_FAMILY: 'kokoro_tts',
       ATOMIC_LIVE_AUDIO_TASK: 'tts',
-      ATOMIC_LIVE_AUDIO_MODE: 'offline',
+      ATOMIC_LIVE_AUDIO_MODE: 'speech',
       ATOMIC_LIVE_AUDIO_BACKEND: 'cpu',
     })
     // Pinned by Hugging Face revision, not `main`.

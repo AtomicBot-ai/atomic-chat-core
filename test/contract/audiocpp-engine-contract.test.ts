@@ -1,15 +1,29 @@
 /**
  * The audio.cpp engine contract (test/fixtures/audiocpp/engine-contract.json) is written by hand, so
- * each part is held here to what it describes: every flag core passes and every route it calls to
- * the real `audiocpp_server --help` of v0.9.3 (its usage block, option lines and endpoint list), the
- * routes to the upstream strings searched for them, the probe and version patterns to the install
+ * each part is held here to what it describes: the flags to `buildAudioServerArgs` and the routes to
+ * the paths src/audio calls, both to the real `audiocpp_server --help` of v0.9.3 (its usage block,
+ * option lines and endpoint list), the log text to the output reader and the fake server, the
+ * strings to the upstream text searched for them, the probe and version patterns to the install
  * probe's parser and the real `--version`, and the archives to conf's release names (upstream's and
  * the fork's) and the backend ladder of src/engine-builds/select.ts. A change on either side fails
  * here until the other follows.
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { audioServerBinaryName, parseAudioDevices, parseAudioVersion } from '../../src/audio/index.js'
+import {
+  audioServerBinaryName,
+  buildAudioServerArgs,
+  exitedOnTakenAudioPort,
+  HEALTH_PATH,
+  MODELS_PATH,
+  parseAudioDevices,
+  parseAudioVersion,
+  readModelFact,
+  SPEECH_PATH,
+  TASK_PATH,
+  VOICES_PATH,
+} from '../../src/audio/index.js'
+import type { AudioModelFacts } from '../../src/audio/index.js'
 import {
   audioBackendKindOf,
   audiocppHostChoice,
@@ -30,7 +44,14 @@ type Contract = AudiocppContract & {
   version: { pattern: string; commit_pattern: string }
   flags: Array<{ flag: string; severity: string; source: string }>
   routes: Array<{ method: string; path: string; source: string; severity: 'break' }>
-  strings: Array<{ id: string; text: string; channel: string; upstream_text: string | null; source: string }>
+  strings: Array<{
+    id: string
+    text: string
+    channel: string
+    upstream_text: string | null
+    source: string
+    severity_if_lost: string
+  }>
   assets: {
     core_backends: Array<{
       platform: string
@@ -97,18 +118,103 @@ describe('the audio.cpp engine contract: flags and routes', () => {
     }
   })
 
-  it('searches 0xShug0’s sources for exactly the routes, as the quoted paths the dispatcher compares', () => {
+  it('searches 0xShug0’s sources for the routes, as the quoted paths the dispatcher compares', () => {
     const routes = contract.strings.filter((s) => s.channel === 'http-route')
-    expect(routes).toHaveLength(contract.strings.length)
     expect(routes.map((s) => s.text).sort()).toEqual(contract.routes.map((r) => r.path).sort())
     for (const s of routes) {
       expect(s.upstream_text).toBe(`"${s.text}"`)
       expect(s.source).toBe(contract.routes.find((r) => r.path === s.text)?.source)
     }
+    // The rest is log text, audio.cpp's own: searched as it stands in the source, in files it watches.
+    expect(contract.strings.filter((s) => s.channel !== 'http-route').every((s) => s.channel === 'log')).toBe(
+      true
+    )
+    for (const s of contract.strings) expect(s.upstream_text, s.id).toContain(s.text)
     const watched = contract.upstream.watched_paths.map((w) => w.path)
-    for (const path of ['app/server/main.cpp', 'app/server/request_dispatch.h', 'CMakeLists.txt'])
+    for (const path of [
+      'app/server/main.cpp',
+      'app/server/request_dispatch.h',
+      'app/server/http.cpp',
+      'app/server/runtime.cpp',
+      'src/framework/runtime/registry.cpp',
+      'src/framework/core/load_progress.cpp',
+      'CMakeLists.txt',
+    ])
       expect(watched).toContain(path)
     expect(contract.upstream).toMatchObject({ repo: '0xShug0/audio.cpp', branch: 'main' })
+  })
+})
+
+describe('the audio.cpp engine contract: the code it describes', () => {
+  const byId = (id: string) => contract.strings.find((s) => s.id === id)
+  const flagsOf = (argv: string[]) => argv.filter((a) => a.startsWith('--'))
+
+  it('names exactly the flags buildAudioServerArgs passes', () => {
+    const emitted = new Set([
+      ...flagsOf(buildAudioServerArgs('/run/server.json', 8080, 'metal')),
+      ...flagsOf(buildAudioServerArgs('/run/server.json', 8080, 'cpu', 4)),
+    ])
+    expect(new Set(contract.flags.map((f) => f.flag))).toEqual(emitted)
+    expect(contract.flags).toHaveLength(emitted.size)
+    for (const f of contract.flags) expect(f.source, f.flag).toBe('src/audio/args.ts')
+    // Without a thread count the server picks its own: --threads is the one flag not always passed.
+    expect(
+      [...emitted].filter((flag) => !flagsOf(buildAudioServerArgs('/c.json', 1, 'cpu')).includes(flag))
+    ).toEqual(['--threads'])
+  })
+
+  it('knows every flag literal of the argv builder', () => {
+    const source = readFileSync('src/audio/args.ts', 'utf8')
+    const literals = [...source.matchAll(/'(--?[A-Za-z][\w-]*)'/g)].map((m) => m[1] as string)
+    expect(new Set(literals)).toEqual(new Set(contract.flags.map((f) => f.flag)))
+  })
+
+  it('names the routes src/audio calls, by its own constants, in the files that hold them', () => {
+    const bare = (path: string) => path.replace(/\?.*$/, '')
+    expect(contract.routes.map((r) => [`${r.method} ${r.path}`, r.source])).toEqual([
+      [`GET ${HEALTH_PATH}`, 'src/audio/server-process.ts'],
+      [`GET ${bare(MODELS_PATH)}`, 'src/audio/server-process.ts'],
+      [`POST ${SPEECH_PATH}`, 'src/audio/request.ts'],
+      [`POST ${TASK_PATH}`, 'src/audio/request.ts'],
+      [`GET ${VOICES_PATH}`, 'src/audio/server-process.ts'],
+    ])
+    for (const r of contract.routes) expect(readFileSync(r.source, 'utf8'), r.path).toContain(`'${r.path}`)
+  })
+
+  it('lists the log text the output reader reads, and the reader reads it as the real loader prints it', () => {
+    const read = contract.strings.filter((s) => s.source === 'src/audio/output.ts').map((s) => s.id)
+    expect(read.sort()).toEqual(['error.port-taken', 'model.supports-speaker-reference', 'model.variant'])
+    // Lines as v0.9.3 prints them with --log (Qwen3-TTS 0.6B Base, the spike's run).
+    const facts: AudioModelFacts = {}
+    readModelFact(facts, `[TRACE ts=20261029-144906] ${byId('model.variant')?.text} 0b6-base`)
+    readModelFact(facts, `[TRACE ts=20261029-144906] ${byId('model.supports-speaker-reference')?.text} 1`)
+    expect(facts).toEqual({ variant: '0b6-base', supportsSpeakerReference: true })
+    expect(
+      exitedOnTakenAudioPort(`audiocpp_server failed: ${byId('error.port-taken')?.text} 127.0.0.1:8080`)
+    ).toBe(true)
+    expect(flagsOf(buildAudioServerArgs('/c.json', 1, 'cpu'))).toContain('--log')
+  })
+
+  it('lists the load-progress keys --load-progress 1 asks for, and nothing core reads among them', () => {
+    const load = contract.strings.filter((s) => s.id.startsWith('load.'))
+    expect(load.map((s) => s.text)).toEqual([
+      'runtime.load.phase',
+      '.weights.upload_progress',
+      'server.load.progress',
+    ])
+    for (const s of load) expect([s.source, s.severity_if_lost], s.id).toEqual(['src/audio/args.ts', 'info'])
+    const argv = buildAudioServerArgs('/c.json', 1, 'cpu')
+    expect(argv.slice(argv.indexOf('--load-progress'), argv.indexOf('--load-progress') + 2)).toEqual([
+      '--load-progress',
+      '1',
+    ])
+    // The help screen names the same keys.
+    for (const s of load) expect(HELP, s.id).toContain(s.text)
+  })
+
+  it('lists only log text the fake server prints, so the e2e suite sees what the real engine says', () => {
+    const fake = readFileSync('test/helpers/fake-audiocpp-server.mjs', 'utf8')
+    for (const s of contract.strings.filter((x) => x.channel === 'log')) expect(fake, s.id).toContain(s.text)
   })
 })
 

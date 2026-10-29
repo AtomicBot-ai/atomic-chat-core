@@ -94,8 +94,37 @@ Stage 5 providers, each opt-in on its own:
   `--list-devices` (`help.txt`, `version.txt`, `list-devices.txt`), and writes `live.json` for the config's `live_env`:
   `ATOMIC_LIVE_AUDIO_ENGINE` (the unpacked build), `ATOMIC_LIVE_AUDIO_TAG`, `ATOMIC_LIVE_AUDIO_MANIFEST`,
   `ATOMIC_LIVE_AUDIO_MODEL` (Kokoro), `ATOMIC_LIVE_AUDIO_FAMILY=kokoro_tts`, `ATOMIC_LIVE_AUDIO_TASK=tts`,
-  `ATOMIC_LIVE_AUDIO_MODE=offline` and `ATOMIC_LIVE_AUDIO_BACKEND=cpu`, which the audio runtime's live tests read.
+  `ATOMIC_LIVE_AUDIO_MODE=speech` and `ATOMIC_LIVE_AUDIO_BACKEND=cpu`, which `test/live/audio.test.ts` reads.
   `npm run engine:check -- --engine audio-cpp --tag <tag>` runs the whole check.
+- audio.cpp runtime (`test/live/audio.test.ts`): `ATOMIC_LIVE_AUDIO_ENGINE` (a folder holding `audiocpp_server`) and
+  `ATOMIC_LIVE_AUDIO_MODEL` (a GGUF, read where it is) turn it on; `ATOMIC_LIVE_AUDIO_FAMILY` (default `kokoro_tts`),
+  `ATOMIC_LIVE_AUDIO_MODE` (`speech`, `music` or `effects`, default `speech`), `ATOMIC_LIVE_AUDIO_TASK` (default the
+  mode's: `tts` for speech, `gen` otherwise), `ATOMIC_LIVE_AUDIO_TAG` (default `v0.9.3`), `ATOMIC_LIVE_AUDIO_BACKEND=cpu`
+  (every load on the CPU backend through `ATOMIC_AUDIO_BACKEND`, as on CI runners). The build goes into the temporary
+  data folder as `<data>/audio/backends/<tag>/<host's CPU backend id>/` with the real probe and an `install.json`, or,
+  with `ATOMIC_LIVE_AUDIO_MANIFEST`, is installed through that manifest. Holds `audiocpp_server --help` to every flag
+  `buildAudioServerArgs` passes and every route of `test/fixtures/audiocpp/engine-contract.json`, then load →
+  capabilities and the contract's load lines in the engine's real output → one job (speech: a sentence; music and
+  effects: `durationSec` 3) with its WAV, recipe and gallery item → a long job (a long text, or 120 s) cancelled while it
+  generates, the server stopped → the next job respawns it → unload. A model that speaks only in a cloned voice
+  (`requiresVoiceRef`: Qwen3-TTS Base) needs `ATOMIC_LIVE_AUDIO_VOICE_REF` (a WAV) and
+  `ATOMIC_LIVE_AUDIO_REFERENCE_TEXT` (its transcript); without them the generation is skipped with that message.
+  Upstream's release builds have no eSpeak-ng, so Kokoro refuses every speech request on them
+  (`Could not load eSpeak-ng`); the fork's builds carry it. On upstream v0.9.3, run Stable Audio or Qwen3-TTS instead:
+
+  ```sh
+  ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \
+    ATOMIC_LIVE_AUDIO_MODEL=<models>/stable-audio-3-small-sfx-q8_0.gguf ATOMIC_LIVE_AUDIO_FAMILY=stable_audio \
+    ATOMIC_LIVE_AUDIO_MODE=effects npx vitest run --project live test/live/audio.test.ts
+  ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \
+    ATOMIC_LIVE_AUDIO_MODEL=<models>/qwen3-tts-12hz-0.6b-base-q8_0.gguf ATOMIC_LIVE_AUDIO_FAMILY=qwen3_tts \
+    ATOMIC_LIVE_AUDIO_VOICE_REF=<ref.wav> ATOMIC_LIVE_AUDIO_REFERENCE_TEXT="<what ref.wav says>" \
+    npx vitest run --project live test/live/audio.test.ts
+  ```
+
+  Each run prints `live audio capabilities` and `live audio run` (load, job, engine and cancel times, the clips' length).
+  On an M4 Pro with upstream v0.9.3: Stable Audio 3 Small SFX q8 about 9 s on Metal and 25 s on the CPU, Qwen3-TTS
+  0.6B Base q8 about 14 s on Metal and 22 s on the CPU.
 
 Managed TensorRT-LLM install on Linux (`test/live/managed-install.test.ts`, task 2.18): `ATOMIC_LIVE=1` **and**
 `ATOMIC_LIVE_MANAGED=1`, on a throwaway Linux VM with an NVIDIA GPU, driver ≥ the descriptor's minimum and passwordless

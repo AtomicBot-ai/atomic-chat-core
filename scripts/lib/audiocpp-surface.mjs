@@ -28,7 +28,7 @@ export const AUDIOCPP_CHECKS = [
   { id: 'version.output', title: '`--version` names the version of the tag' },
   { id: 'assets.core_backends', title: 'an archive for every backend core installs' },
   { id: 'upstream.watched_paths', title: 'changes to the sources core depends on' },
-  { id: 'upstream.contract_strings', title: 'the routes core calls are still in the sources' },
+  { id: 'upstream.contract_strings', title: 'the routes and log text core uses are still in the sources' },
   { id: 'upstream.release_notes', title: 'commits announcing a removal or rename' },
 ]
 
@@ -46,7 +46,7 @@ const HINTS = {
   'assets.core_backends':
     'Archive names: conf mirror-audiocpp.yml (MATRIX), backend ids: src/engine-builds/select.ts; update both and the contract.',
   'upstream.watched_paths': 'Update the contract’s upstream.watched_paths.',
-  'upstream.contract_strings': 'Core calls this route; find what upstream serves now.',
+  'upstream.contract_strings': 'Core calls this route or matches this text; find what upstream has now.',
   'upstream.release_notes': 'Read the commit: it may remove or rename something core uses.',
 }
 

@@ -29,7 +29,7 @@
     "ATOMIC_LIVE_AUDIO_MODEL": "{model:kokoro}",
     "ATOMIC_LIVE_AUDIO_FAMILY": "kokoro_tts",
     "ATOMIC_LIVE_AUDIO_TASK": "tts",
-    "ATOMIC_LIVE_AUDIO_MODE": "offline",
+    "ATOMIC_LIVE_AUDIO_MODE": "speech",
     "ATOMIC_LIVE_AUDIO_BACKEND": "cpu"
   },
   "platforms": [
@@ -48,7 +48,7 @@
     }
   ],
   "live_timeout_minutes": 30,
-  "live_files": ["test/live/audio-install.test.ts"],
+  "live_files": ["test/live/audio.test.ts", "test/live/audio-install.test.ts"],
   "required_live_tests": [
     {
       "file": "test/live/audio-install.test.ts",
@@ -61,6 +61,14 @@
     {
       "file": "test/live/audio-install.test.ts",
       "name": "a real audio.cpp build installed from its manifest is refused when its sha256 does not match the manifest"
+    },
+    {
+      "file": "test/live/audio.test.ts",
+      "name": "a real audio.cpp engine answers --help with every flag the core passes"
+    },
+    {
+      "file": "test/live/audio.test.ts",
+      "name": "a real audio.cpp engine installs the tree, loads the model, generates, cancels and unloads"
     }
   ],
   "core_suites": ["unit", "build", "build_bin", "e2e"],
@@ -71,7 +79,11 @@
     "scripts/engine-surface-diff.mjs",
     "scripts/fetch-live-fixtures.mjs",
     "scripts/lib/",
+    "src/audio/args.test.ts",
     "src/audio/install.test.ts",
+    "src/audio/output.test.ts",
+    "src/audio/request.test.ts",
+    "src/audio/server-process.test.ts",
     "test/contract/engine-pin.test.ts",
     "test/contract/engine-results.test.ts",
     "test/contract/engine-surface.test.ts",

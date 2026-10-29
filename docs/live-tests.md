@@ -821,18 +821,43 @@ differs; the archive, completeness, manifest and fetch logic is sd.cpp's, with a
 - **The surface** reads `audiocpp_server --help` (every flag core passes, as a whole token of the usage block or an
   option line, and every route core calls with its method in the `Endpoints:` list), `--version` (the install probe's
   `audio.cpp ` line; the version has to be the tag's `X.Y.Z`, the `git:` commit the upstream tag's), `--list-devices`,
-  the archives by backend, and 0xShug0's history between the two tags: the watched server sources, the routes as the
-  quoted paths the dispatcher compares, and commits announcing a removal. The contract is
-  `test/fixtures/audiocpp/engine-contract.json`.
-- **Live** is `test/live/audio-install.test.ts` on linux-x64, linux-arm64 and macos-arm64 (`macos-15`), CPU archives
-  only: the build installed through a manifest `fetch-live-fixtures` writes from the release
-  (`ATOMIC_AUDIOCPP_MANIFEST_URL`), a tampered sha256 refused, `--version` naming the tag's version. The fetch also
-  brings Kokoro-82M q8 (`live_models`, 189 MB) and fills `ATOMIC_LIVE_AUDIO_*` for the runtime's live tests, which join
-  `live_files` and `required_live_tests` when they land.
+  the archives by backend, and 0xShug0's history between the two tags: the watched server and loader sources, the
+  routes as the quoted paths the dispatcher compares, the log text core reads (`runtime.model.variant`,
+  `runtime.model.supports_speaker_reference`, `could not bind`) and the lines it asks for without reading them yet
+  (`audiocpp_server listening on`, the `--load-progress` keys, `model path does not exist`), and commits announcing a
+  removal. The contract is `test/fixtures/audiocpp/engine-contract.json`.
+- **Live** is `test/live/audio.test.ts` and `test/live/audio-install.test.ts` on linux-x64, linux-arm64 and
+  macos-arm64 (`macos-15`), CPU archives only. The install test installs the build through a manifest
+  `fetch-live-fixtures` writes from the release (`ATOMIC_AUDIOCPP_MANIFEST_URL`), refuses a tampered sha256 and holds
+  `--version` to the tag's version. The runtime test holds `audiocpp_server --help` to every flag core passes and every
+  route it calls, installs the build through the same manifest, and runs Kokoro-82M q8 (`live_models`, 189 MB) on the
+  CPU backend (`ATOMIC_LIVE_AUDIO_BACKEND=cpu` → `ATOMIC_AUDIO_BACKEND=cpu`): load, the contract's load lines in the
+  engine's output, a sentence of speech with its WAV, recipe and gallery item, a long text cancelled while it is
+  spoken (the server stopped), a respawn, an unload.
 - **Upstream's builds cannot pass in CI**: 0xShug0 publishes no Linux or Windows arm64 build, so the surface breaks on
-  both CPU archives and the linux-arm64 cell has nothing to fetch. On one Mac
+  both CPU archives and the linux-arm64 cell has nothing to fetch; and its builds have no eSpeak-ng, so Kokoro refuses
+  every speech request (`Could not load eSpeak-ng`) and the runtime test fails on them too. On one Mac
   (`npm run engine:check -- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3`) the live cell runs; the result
-  still fails on the surface. The fork's builds are the ones the pipeline approves.
+  fails on the surface and the Kokoro job. The fork's builds (static eSpeak-ng) are the ones the pipeline approves.
+
+On this machine, against any build and any model on disk (`test/live/README.md` lists every variable):
+
+```bash
+# Stable Audio 3 Small SFX on upstream v0.9.3, on Metal; ATOMIC_LIVE_AUDIO_BACKEND=cpu for the CPU backend
+ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \
+  ATOMIC_LIVE_AUDIO_MODEL=<models>/stable-audio-3-small-sfx-q8_0.gguf \
+  ATOMIC_LIVE_AUDIO_FAMILY=stable_audio ATOMIC_LIVE_AUDIO_MODE=effects \
+  npx vitest run --project live test/live/audio.test.ts
+# Qwen3-TTS 0.6B Base speaks only in a cloned voice: a reference WAV and its transcript
+ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \
+  ATOMIC_LIVE_AUDIO_MODEL=<models>/qwen3-tts-12hz-0.6b-base-q8_0.gguf ATOMIC_LIVE_AUDIO_FAMILY=qwen3_tts \
+  ATOMIC_LIVE_AUDIO_VOICE_REF=<ref.wav> ATOMIC_LIVE_AUDIO_REFERENCE_TEXT="<what ref.wav says>" \
+  npx vitest run --project live test/live/audio.test.ts
+```
+
+Kokoro needs a build with eSpeak-ng (the fork's). `ATOMIC_LIVE_AUDIO_MANIFEST` installs the build through a manifest
+instead of copying the folder; conf's bootstrap staging manifest
+(`test/fixtures/audiocpp/conf/audiocpp-manifest.staging.json`) downloads upstream's 35 MB macOS archive.
 
 ```bash
 gh workflow run engine-candidate.yml -f engine=audio-cpp -f tag=v0.9.3 -f candidate_id=audiocpp-smoke -f core_ref=main
