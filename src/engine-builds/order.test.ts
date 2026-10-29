@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { compareBuilds, isNewerBuild, sdcppBuildKey } from './order.js'
+import { audiocppBuildKey, compareBuilds, isNewerBuild, sdcppBuildKey } from './order.js'
 
 describe('compareBuilds for GenieX (change add-geniex-runtime, task 4.4)', () => {
   it('orders by published_at, an unreadable date oldest of all', () => {
@@ -41,6 +41,42 @@ describe('compareBuilds for sd.cpp', () => {
     ['dev-build', 'other-dev', 0],
   ] as const)('%s vs %s → %i', (a, b, sign) => {
     expect(Math.sign(compareBuilds('sd-cpp', { tag: a }, { tag: b }))).toBe(sign)
+  })
+})
+
+describe('audiocppBuildKey', () => {
+  it.each([
+    ['v0.9.3', [0, 9, 3, 0]],
+    ['v0.9.3-a1b2c3d4', [0, 9, 3, 1]],
+    ['v10.0.12', [10, 0, 12, 0]],
+    ['v0.9.2-drama3-base-small', null],
+    ['0.9.3', null],
+    ['v0.9', null],
+    ['master-883-137f740', null],
+  ] as const)('%s → %j', (tag, key) => {
+    expect(audiocppBuildKey(tag)).toEqual(key)
+  })
+})
+
+describe('compareBuilds for audio.cpp', () => {
+  it.each([
+    // [a, b, sign of compare(a, b)]
+    ['v0.9.4', 'v0.9.3', 1],
+    ['v0.10.0', 'v0.9.9', 1],
+    ['v1.0.0', 'v0.99.99', 1],
+    ['v0.9.3', 'v0.9.4', -1],
+    // At an equal version the fork's build is newer than the bare upstream tag…
+    ['v0.9.3-a1b2c3d4', 'v0.9.3', 1],
+    ['v0.9.3', 'v0.9.3-a1b2c3d4', -1],
+    // …but older than the next upstream version, and equal to another fork build of it.
+    ['v0.9.3-a1b2c3d4', 'v0.9.4', -1],
+    ['v0.9.3-a1111111', 'v0.9.3-a2222222', 0],
+    ['v0.9.3', 'v0.9.3', 0],
+    // An unknown order is older than any known one.
+    ['dev-build', 'v0.0.1', -1],
+    ['v0.0.1', 'dev-build', 1],
+  ] as const)('%s vs %s → %i', (a, b, sign) => {
+    expect(Math.sign(compareBuilds('audio-cpp', { tag: a }, { tag: b }))).toBe(sign)
   })
 })
 

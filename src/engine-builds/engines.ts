@@ -8,6 +8,7 @@
 import { AtomicCoreError } from '../contracts/index.js'
 import type { EngineBuildId, EngineBuildRef } from '../contracts/index.js'
 import { listInstalledBackends, prepareSdcppTree, writeInstallRecord } from '../diffusion/install.js'
+import { listInstalledAudioBuilds, prepareAudiocppTree, writeAudioInstallRecord } from '../audio/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { listDownloadedMlx, probeMlxServer, readBundledMlx, writeMlxInstallRecord } from './builds.js'
 import type { BundledMlx } from './builds.js'
@@ -20,6 +21,7 @@ import {
 import { listLiteRtLmBuilds, prepareLiteRtLmTree, writeLiteRtLmInstallRecord } from './litert-lm.js'
 import { listGeniexBuilds, prepareGeniexTree, writeGeniexInstallRecord } from './geniex.js'
 import {
+  audiocppAssetUrl,
   FOUNDRY_LOCAL_C_API_VERSIONS,
   foundryLocalAssetUrl,
   mlxAssetUrl,
@@ -28,7 +30,10 @@ import {
   SUPPORTED_LITERT_LM_ABI,
 } from './manifest.js'
 import type {
+  AudiocppManifest,
   FoundryLocalManifest,
+  GgmlReleaseAsset,
+  GgmlReleaseManifest,
   GeniexManifest,
   LiteRtLmManifest,
   ManifestOf,
@@ -37,6 +42,8 @@ import type {
 } from './manifest.js'
 import { compareBuilds } from './order.js'
 import {
+  audioBackendKindOf,
+  audiocppHostChoice,
   backendKindOf,
   companionFor,
   foundryLocalHostChoice,
@@ -89,7 +96,8 @@ export type EngineHostPlatform =
 export interface EngineContext {
   /** This engine's `<data>/…/backends`. */
   root: string
-  failedBackendsFile: string
+  /** Where this engine remembers the rungs of its ladder that failed here; absent, it remembers none. */
+  failedBackendsFile: string | undefined
   resourcesDir?: string | undefined
   platform: NodeJS.Platform
   hardware: () => Promise<Pick<HardwareFacts, 'osType' | 'arch' | 'cpuExtensions' | 'gpus'>>
@@ -139,9 +147,10 @@ export interface EngineDescriptor<M> {
   prepare?(staging: string, ctx: EngineContext): Promise<void>
   /**
    * Make the unpacked tree runnable and prove it runs here; throws `ENGINE_INSTALL_FAILED`. What it
-   * answers (if anything) reaches `record` as `info.probe`.
+   * answers (if anything) reaches `record` as `info.probe`. `backendId` is the build being installed
+   * (audio.cpp checks the build carries that backend and, for a GPU build, sees a device).
    */
-  probe(staging: string, ctx: EngineContext): Promise<EngineProbeFacts | void>
+  probe(staging: string, ctx: EngineContext, backendId: string): Promise<EngineProbeFacts | void>
   /** The ownership marker and `install.json`. */
   record(staging: string, info: BuildRecordInfo): Promise<void>
   builds(ctx: EngineContext): Promise<Build[]>
@@ -159,6 +168,26 @@ const pin = (asset: { sha256?: string; size?: number }) => ({
   ...(asset.size !== undefined ? { size: asset.size } : {}),
 })
 
+/** The failed rungs of the engine's ladder on this machine; none when it keeps no file. */
+const failedRungs = (ctx: EngineContext): Promise<Set<string>> =>
+  ctx.failedBackendsFile ? readFailedBackends(ctx.failedBackendsFile) : Promise.resolve(new Set())
+
+const rememberRung = (ctx: EngineContext, tag: string, backendId: string): Promise<void> =>
+  ctx.failedBackendsFile ? rememberFailedBackend(ctx.failedBackendsFile, tag, backendId) : Promise.resolve()
+
+/** A ggml release's build and its companion (the Windows cudart beside the CUDA 12 build), as listed. */
+function ggmlArchives(
+  manifest: GgmlReleaseManifest,
+  backendId: string,
+  url: (manifest: GgmlReleaseManifest, asset: GgmlReleaseAsset) => string
+): ArchiveRef[] {
+  const ids = [backendId, companionFor(backendId)]
+  return ids.flatMap((id) => {
+    const asset = manifest.assets.find((candidate) => candidate.backend === id)
+    return asset ? [{ ...pin(asset), url: url(manifest, asset), name: asset.name }] : []
+  })
+}
+
 /** The newest of `builds` by the engine's order; the first one wins a tie. */
 function newest(engine: EngineBuildId, builds: Build[]): Build | undefined {
   let best: Build | undefined
@@ -171,15 +200,9 @@ const sdcpp: EngineDescriptor<SdcppManifest> = {
   async hostChoice(ctx, manifest) {
     const host = sdcppHostOf(await ctx.hardware())
     if (!manifest) return { ladder: [], backend_id: null, reason: 'The sd.cpp manifest is unavailable.' }
-    return sdcppHostChoice(host, manifest, await readFailedBackends(ctx.failedBackendsFile))
+    return sdcppHostChoice(host, manifest, await failedRungs(ctx))
   },
-  archives(manifest, backendId) {
-    const ids = [backendId, companionFor(backendId)]
-    return ids.flatMap((id) => {
-      const asset = manifest.assets.find((candidate) => candidate.backend === id)
-      return asset ? [{ ...pin(asset), url: sdcppAssetUrl(manifest, asset), name: asset.name }] : []
-    })
-  },
+  archives: (manifest, backendId) => ggmlArchives(manifest, backendId, sdcppAssetUrl),
   probe: (staging, ctx) =>
     prepareSdcppTree(staging, { platform: ctx.platform, ...(ctx.log ? { log: ctx.log } : {}) }),
   record: (staging, info) =>
@@ -206,7 +229,60 @@ const sdcpp: EngineDescriptor<SdcppManifest> = {
   },
   /** The newest install, which `selectModelInstall` hands the next load. */
   active: (builds) => builds[0],
-  rememberFailedRung: (ctx, tag, backendId) => rememberFailedBackend(ctx.failedBackendsFile, tag, backendId),
+  rememberFailedRung: rememberRung,
+}
+
+/**
+ * audio.cpp (`audiocpp_server`): sd.cpp's shape throughout — one tag, the host's ladder over the same
+ * backend ids (no ROCm), the cudart companion beside the Windows CUDA 12 build, flat archives (the
+ * fork's `.zip`s and upstream's `.tar.gz`s alike hold the server at their root), its own failed rungs.
+ * The probe runs `--version` (audio.cpp, carrying the build's backend) and, for a GPU build,
+ * `--list-devices` (a device of that kind is there); a failure sends the install down the ladder.
+ */
+const audiocpp: EngineDescriptor<AudiocppManifest> = {
+  release: (manifest) => ({ tag: manifest.tag_name, published_at: null }),
+  async hostChoice(ctx, manifest) {
+    const host = sdcppHostOf(await ctx.hardware())
+    if (!manifest) return { ladder: [], backend_id: null, reason: 'The audio.cpp manifest is unavailable.' }
+    return audiocppHostChoice(host, manifest, await failedRungs(ctx))
+  },
+  archives: (manifest, backendId) => ggmlArchives(manifest, backendId, audiocppAssetUrl),
+  async probe(staging, ctx, backendId) {
+    const backend = audioBackendKindOf(backendId)
+    if (!backend)
+      throw new AtomicCoreError('ENGINE_INSTALL_FAILED', `audio.cpp has no build for ${backendId}.`)
+    await prepareAudiocppTree(staging, backend, {
+      platform: ctx.platform,
+      ...(ctx.log ? { log: ctx.log } : {}),
+    })
+  },
+  async record(staging, info) {
+    const backend = audioBackendKindOf(info.backendId)
+    if (!backend)
+      throw new AtomicCoreError('ENGINE_INSTALL_FAILED', `audio.cpp has no build for ${info.backendId}.`)
+    await writeAudioInstallRecord(staging, {
+      tag: info.tag,
+      backendId: info.backendId,
+      backend,
+      engine: 'audio-cpp',
+      sha256: info.sha256,
+      installedAtMs: info.installedAtMs,
+      dir: staging,
+    })
+  },
+  async builds(ctx) {
+    return (await listInstalledAudioBuilds(ctx.root, ctx.platform)).map((record) => ({
+      tag: record.tag,
+      backend_id: record.backendId,
+      origin: 'downloaded',
+      dir: record.dir,
+      installed_at_ms: record.installedAtMs,
+      published_at: null,
+    }))
+  },
+  /** The newest install, as for sd.cpp: the build the audio service starts the next server from. */
+  active: (builds) => builds[0],
+  rememberFailedRung: rememberRung,
 }
 
 const mlx: EngineDescriptor<MlxManifest> = {
@@ -398,4 +474,5 @@ export const ENGINE_DESCRIPTORS: { [K in EngineBuildId]: EngineDescriptor<Manife
   'foundry-local': foundryLocal,
   'litert-lm': liteRtLm,
   'geniex': geniex,
+  'audio-cpp': audiocpp,
 }

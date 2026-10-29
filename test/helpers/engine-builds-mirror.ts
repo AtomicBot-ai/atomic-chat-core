@@ -11,6 +11,7 @@ import { createServer as createHttpsServer } from 'node:https'
 import { connect as netConnect } from 'node:net'
 import type { Server, Socket } from 'node:net'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { c as tarCreate } from 'tar'
 import { tlsFixture } from './proxy-servers.js'
 
@@ -90,6 +91,48 @@ export function nodeLauncher(script: string, env: Record<string, string>): strin
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join('\n')
   return `${exports}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"`
+}
+
+/** What `audiocpp_server` v0.9.3 printed on an Apple M4 Pro (`test/fixtures/audiocpp/v0.9.3/`). */
+const AUDIOCPP_FIXTURES = fileURLToPath(new URL('../fixtures/audiocpp/v0.9.3/', import.meta.url))
+
+/**
+ * A `#!/bin/sh` body for `audiocpp_server` that answers the core's install probe with v0.9.3's own
+ * output: `--version` (`backends: cpu,metal`) and `--list-devices` (one Metal GPU). A CPU build passes
+ * on any host; a Vulkan or CUDA build fails its probe, which sends the install down the ladder.
+ */
+export function fakeAudiocppServer(): string {
+  const fixture = (name: string) => JSON.stringify(join(AUDIOCPP_FIXTURES, name))
+  return [
+    'case "$1" in',
+    `  --version) cat ${fixture('version-macos-arm64.txt')} ;;`,
+    `  --list-devices) cat ${fixture('list-devices-macos-arm64.txt')} ;;`,
+    `  *) cat ${fixture('no-config.txt')} >&2; exit 1 ;;`,
+    'esac',
+  ].join('\n')
+}
+
+/**
+ * An archive laid out as upstream `0xShug0/audio.cpp` packs its `.tar.gz` releases: `./`-prefixed
+ * entries, `audiocpp_server` (the fake) and `audiocpp_cli` at the root beside `LICENSE`, `tools/` and
+ * `model_specs/`; and what a manifest pins it by.
+ */
+export async function audiocppUpstreamArchive(
+  workDir: string,
+  name: string
+): Promise<{ body: Buffer; sha256: string; size: number }> {
+  const src = join(workDir, `${name}.src`)
+  await mkdir(join(src, 'tools', 'models'), { recursive: true })
+  await mkdir(join(src, 'model_specs'), { recursive: true })
+  await writeFile(join(src, 'audiocpp_server'), `#!/bin/sh\n${fakeAudiocppServer()}\n`, { mode: 0o755 })
+  await writeFile(join(src, 'audiocpp_cli'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  await writeFile(join(src, 'LICENSE'), 'MIT License\n')
+  await writeFile(join(src, 'tools', 'models', 'prepare_kokoro_gguf.py'), '# upstream tool\n')
+  await writeFile(join(src, 'model_specs', 'kokoro_tts.json'), '{}\n')
+  const out = join(workDir, name)
+  await tarCreate({ gzip: true, cwd: src, file: out }, ['.'])
+  const body = await readFile(out)
+  return { body, sha256: createHash('sha256').update(body).digest('hex'), size: body.length }
 }
 
 const port = (server: Server): number => {

@@ -11,3 +11,13 @@ Apple M4 Pro, 2026-10-29. Paths in the model listings are replaced with `/models
 | `no-config.txt` | `audiocpp_server` with no arguments (exit 1) |
 | `health.json` | `GET /health` of a server started with one model and `lazy_load: false` |
 | `models-qwen3-tts.json` | `GET /v1/models?include_params=true` of a Qwen3-TTS 0.6B Base server |
+
+## `conf/`
+
+conf manifests (`backends/audiocpp-manifest*.json` of `AtomicBot-ai/atomic-chat-conf`), the sd.cpp
+document's shape:
+
+| File | What |
+| --- | --- |
+| `audiocpp-manifest.staging.json` | conf's bootstrap staging manifest, verbatim (conf commit `4c5fb98`): upstream `0xShug0/audio.cpp` `v0.9.3`, no `download_base`, upstream's `.tar.gz`/`.zip` names |
+| `audiocpp-manifest.json` | a fork build as the mirror publishes it (hand-made): `v0.9.3-a1b2c3d4`, `download_base`, every backend id of the schema plus the cudart companion; the hashes are of the names, not of real archives |

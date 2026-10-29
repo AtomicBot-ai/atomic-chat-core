@@ -733,9 +733,9 @@ export async function createAtomicCore(
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
-    // sd.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads conf's
-    // manifests, installs, activates and removes them; image generation and the MLX runtime lend it
-    // their load locks and their sessions.
+    // sd.cpp, audio.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads
+    // conf's manifests, installs, activates and removes them; image generation and the MLX runtime
+    // lend it their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
     const engineBuilds: EngineBuildsService = new EngineBuildsService({
@@ -746,8 +746,12 @@ export async function createAtomicCore(
         'foundry-local': foundryLocalPaths.backendsDir,
         'litert-lm': layout.provider('litert-lm').backendsDir,
         'geniex': layout.provider('geniex').backendsDir,
+        'audio-cpp': layout.audio.backendsDir,
       },
-      failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+      failedBackendsFiles: {
+        'sd-cpp': join(layout.diffusion.root, 'failed-backends.json'),
+        'audio-cpp': layout.audio.failedBackendsFile,
+      },
       resourcesDir: options.resourcesDir,
       platform,
       downloader,
@@ -761,6 +765,7 @@ export async function createAtomicCore(
         }),
         'litert-lm': liteRtManifest,
         'geniex': new EngineManifestSource(engineManifestKinds.geniex, { env, fetchFor, log }),
+        'audio-cpp': new EngineManifestSource(engineManifestKinds['audio-cpp'], { env, fetchFor, log }),
       },
       hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost, 'geniex': geniexHost },
       hostProbes: {
@@ -787,6 +792,8 @@ export async function createAtomicCore(
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
         'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
         'geniex': geniexRuntime ? geniexRuntime.engineHost() : IDLE_ENGINE_HOST,
+        // Until the audio service is wired: then its `engineHost()` (load lock, servers, activation).
+        'audio-cpp': IDLE_ENGINE_HOST,
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),

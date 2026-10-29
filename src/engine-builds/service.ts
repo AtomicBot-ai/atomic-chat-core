@@ -1,6 +1,7 @@
 /**
- * Engine builds of sd.cpp and MLX: the catalog, the update check, the install, the removal and the
- * cleanup at start (openspec change `move-sdcpp-mlx-install-to-core`, spec `engine-builds`).
+ * Engine builds (sd.cpp, audio.cpp, MLX, Foundry Local, LiteRT-LM, GenieX): the catalog, the update
+ * check, the install, the removal and the cleanup at start (openspec change
+ * `move-sdcpp-mlx-install-to-core`, spec `engine-builds`).
  *
  * The core advises and the client decides (ADR 2026-09-27): the catalog and the update check only
  * read; an install happens when a client calls it, and that call is also the client's consent to
@@ -17,9 +18,10 @@
  * decision during its acceptance): the old ones stay listed, inactive, for the user to remove. The
  * `retired` and `kept_in_use` of an install answer are therefore always empty.
  *
- * sd.cpp walks down the host's ladder when a build unpacks but fails its probe (design D7): the pair
- * is remembered in `<data>/diffusion/failed-backends.json` and the next build is installed under the
- * same task id; only the last build's failure reaches the client.
+ * sd.cpp and audio.cpp walk down the host's ladder when a build unpacks but fails its probe (design
+ * D7): the pair is remembered in the engine's own failed-backends file
+ * (`<data>/diffusion/failed-backends.json`, `<data>/audio/failed-backends.json`) and the next build is
+ * installed under the same task id; only the last build's failure reaches the client.
  */
 
 import { readdir, rm } from 'node:fs/promises'
@@ -87,10 +89,14 @@ export const IDLE_ENGINE_HOST: EngineHost = {
 
 export interface EngineBuildsDeps {
   dataFolder: string
-  /** `<data>/diffusion/backends` and `<data>/mlx/backends`. */
+  /** Each engine's `<data>/…/backends` (`<data>/diffusion/backends`, `<data>/audio/backends`, …). */
   roots: Record<EngineBuildId, string>
-  /** `<data>/diffusion/failed-backends.json`. */
-  failedBackendsFile: string
+  /**
+   * Where each engine with a ladder remembers the builds that failed their probe on this machine:
+   * sd.cpp `<data>/diffusion/failed-backends.json`, audio.cpp `<data>/audio/failed-backends.json`. An
+   * engine absent here remembers nothing.
+   */
+  failedBackendsFiles: Partial<Record<EngineBuildId, string>>
   /** The desktop app's `resources/bin`; absent on `atc`. */
   resourcesDir?: string | undefined
   platform: NodeJS.Platform
@@ -146,6 +152,7 @@ const ENGINE_LABELS: Record<EngineBuildId, string> = {
   'foundry-local': 'Foundry Local',
   'litert-lm': 'LiteRT-LM',
   'geniex': 'GenieX',
+  'audio-cpp': 'audio.cpp',
 }
 
 export function parseEngineBuildId(raw: string): EngineBuildId {
@@ -334,7 +341,7 @@ export class EngineBuildsService {
     const sha256 = archives[0]?.sha256 ?? null
     const context = this.context(engine)
     const probe: (staging: string) => Promise<EngineProbeFacts | void> =
-      this.deps.probe?.[engine] ?? ((staging) => descriptor.probe(staging, context))
+      this.deps.probe?.[engine] ?? ((staging) => descriptor.probe(staging, context, backendId))
     let facts: EngineProbeFacts | null = null
     const { replaced } = await installStaged({
       dataFolder: this.deps.dataFolder,
@@ -476,7 +483,7 @@ export class EngineBuildsService {
   private context(engine: EngineBuildId): EngineContext {
     return {
       root: this.deps.roots[engine],
-      failedBackendsFile: this.deps.failedBackendsFile,
+      failedBackendsFile: this.deps.failedBackendsFiles[engine],
       resourcesDir: this.deps.resourcesDir,
       platform: this.deps.platform,
       hardware: this.deps.hardware,

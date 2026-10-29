@@ -4,7 +4,10 @@
  * (the mlx-vlm fork's `mlx-server`), openspec change `move-sdcpp-mlx-install-to-core` design D6;
  * `backends/foundry-local-manifest.json` (Microsoft Foundry Local releases), change
  * `add-foundry-local` design D2; `backends/litert-lm-manifest.json` (Google's LiteRT-LM wheels on PyPI),
- * change `add-litert-lm-runtime` design D2.
+ * change `add-litert-lm-runtime` design D2; `backends/audiocpp-manifest.json` (audio.cpp's
+ * `audiocpp_server`, from the Atomic fork or, on the bootstrap path, upstream `0xShug0/audio.cpp`),
+ * which has the sd.cpp document's shape: both are a "ggml release manifest", parsed by one function
+ * that takes the engine's tag pattern and default repository.
  *
  * The source follows the house pattern of `PrismCatalogService` and `cached-document.ts`: conf main
  * over `fetch` with an 8 s budget and the request's proxy, an `ATOMIC_*_MANIFEST_URL` override that
@@ -55,12 +58,17 @@ export const LITERT_LM_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/litert-lm-manifest.json'
 export const GENIEX_MANIFEST_URL =
   'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/geniex-manifest.json'
+export const AUDIOCPP_MANIFEST_URL =
+  'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/audiocpp-manifest.json'
 export const ENGINE_MANIFEST_TIMEOUT_MS = 8_000
 /** A fetched manifest is reused for this long unless the caller forces a re-read. */
 export const ENGINE_MANIFEST_TTL_MS = 60 * 60 * 1000
 export const SDCPP_UPSTREAM_REPO = 'leejet/stable-diffusion.cpp'
+/** The fork's releases; the bootstrap manifest names upstream `0xShug0/audio.cpp` instead. */
+export const AUDIOCPP_UPSTREAM_REPO = 'AtomicBot-ai/audio.cpp'
 
-export interface SdcppAsset {
+/** One archive of a ggml release manifest (sd.cpp, audio.cpp). */
+export interface GgmlReleaseAsset {
   backend: string
   name: string
   sha256?: string
@@ -69,15 +77,36 @@ export interface SdcppAsset {
   companion?: boolean
 }
 
-export interface SdcppManifest {
+/**
+ * conf's manifest of an engine built from a ggml project's releases: one tag, one archive per
+ * backend id, optionally re-hosted on conf's signed mirror.
+ */
+export interface GgmlReleaseManifest {
   updated_at?: string
   upstream_repo?: string
-  /** `master-<n>-<sha>`, `-a<sha>` for a rebuild by the Atomic fork. */
+  /** The release tag; `-a<rev>` marks a rebuild by the Atomic fork. */
   tag_name: string
   /** The signed mirror; absent, archives come from the upstream release. */
   download_base?: string
-  assets: SdcppAsset[]
+  assets: GgmlReleaseAsset[]
 }
+
+/** What differs between the engines whose manifest is a ggml release manifest. */
+export interface GgmlReleaseManifestSpec {
+  /** The engine's name in error messages: `the <label> manifest …`. */
+  label: string
+  /** The tags conf's schema allows; anything else (an upstream side tag, a path) is refused. */
+  tagPattern: RegExp
+  /** Where archives come from when the manifest names neither a mirror nor a valid repository. */
+  defaultRepo: string
+}
+
+export type SdcppAsset = GgmlReleaseAsset
+/** `tag_name` is `master-<n>-<sha>`, `-a<sha>` for a rebuild by the Atomic fork. */
+export type SdcppManifest = GgmlReleaseManifest
+export type AudiocppAsset = GgmlReleaseAsset
+/** `tag_name` is upstream's `vX.Y.Z`, `-a<rev>` for a build by the Atomic fork at commit `<rev>`. */
+export type AudiocppManifest = GgmlReleaseManifest
 
 export interface MlxAsset {
   backend: string
@@ -214,6 +243,8 @@ export interface GeniexManifest {
 export type GeniexAcceptance = LiteRtLmAcceptance
 
 const SDCPP_TAG_RE = /^master-[0-9]+-[0-9a-f]{7}(-a[0-9a-f]{7})?$/
+/** Upstream's release tags only: side tags such as `v0.9.2-drama3-base-small` are not engine releases. */
+const AUDIOCPP_TAG_RE = /^v\d+\.\d+\.\d+(-a[0-9a-f]{7})?$/
 const MLX_TAG_RE = /^mlxvlm-macos-arm64-[0-9a-f]{7,40}$/
 const BACKEND_ID_RE = /^[a-z0-9.-]+$/
 /** A bare file name: it lands in a download path and a URL. */
@@ -248,7 +279,7 @@ export function isDateTime(value: unknown): value is string {
   return day.getUTCFullYear() === y && day.getUTCMonth() === m - 1 && day.getUTCDate() === d
 }
 
-function sanitizeAsset(raw: unknown): SdcppAsset | null {
+function sanitizeAsset(raw: unknown): GgmlReleaseAsset | null {
   if (!isRecord(raw)) return null
   if (typeof raw['backend'] !== 'string' || !BACKEND_ID_RE.test(raw['backend'])) return null
   if (typeof raw['name'] !== 'string' || !ASSET_NAME_RE.test(raw['name'])) return null
@@ -264,9 +295,9 @@ function sanitizeAsset(raw: unknown): SdcppAsset | null {
 }
 
 /** Assets that parse, one per backend id; `null` when none is usable. */
-function sanitizeAssets(raw: unknown): SdcppAsset[] {
+function sanitizeAssets(raw: unknown): GgmlReleaseAsset[] {
   if (!Array.isArray(raw)) throw new Error('the manifest has no assets array')
-  const out: SdcppAsset[] = []
+  const out: GgmlReleaseAsset[] = []
   const seen = new Set<string>()
   for (const item of raw) {
     const asset = sanitizeAsset(item)
@@ -278,12 +309,28 @@ function sanitizeAssets(raw: unknown): SdcppAsset[] {
   return out
 }
 
-/** `backends/sdcpp-manifest.json`, or throw why it is not one. */
-export function parseSdcppManifest(data: unknown): SdcppManifest {
-  if (!isRecord(data)) throw new Error('the sd.cpp manifest is not an object')
+export const SDCPP_MANIFEST_SPEC: GgmlReleaseManifestSpec = {
+  label: 'sd.cpp',
+  tagPattern: SDCPP_TAG_RE,
+  defaultRepo: SDCPP_UPSTREAM_REPO,
+}
+
+export const AUDIOCPP_MANIFEST_SPEC: GgmlReleaseManifestSpec = {
+  label: 'audio.cpp',
+  tagPattern: AUDIOCPP_TAG_RE,
+  defaultRepo: AUDIOCPP_UPSTREAM_REPO,
+}
+
+/**
+ * A ggml release manifest of the engine `spec` describes, or throw why it is not one: strict on the
+ * tag, lenient per asset (one that does not parse is skipped, the first of a backend id wins), keys
+ * the schema does not have dropped.
+ */
+export function parseGgmlReleaseManifest(data: unknown, spec: GgmlReleaseManifestSpec): GgmlReleaseManifest {
+  if (!isRecord(data)) throw new Error(`the ${spec.label} manifest is not an object`)
   const tag = data['tag_name']
-  if (typeof tag !== 'string' || !SDCPP_TAG_RE.test(tag))
-    throw new Error(`the sd.cpp manifest has no valid tag_name (${JSON.stringify(tag)})`)
+  if (typeof tag !== 'string' || !spec.tagPattern.test(tag))
+    throw new Error(`the ${spec.label} manifest has no valid tag_name (${JSON.stringify(tag)})`)
   const assets = sanitizeAssets(data['assets'])
   const repo = data['upstream_repo']
   const base = data['download_base']
@@ -297,6 +344,19 @@ export function parseSdcppManifest(data: unknown): SdcppManifest {
       : {}),
     assets,
   }
+}
+
+/** `backends/sdcpp-manifest.json`, or throw why it is not one. */
+export function parseSdcppManifest(data: unknown): SdcppManifest {
+  return parseGgmlReleaseManifest(data, SDCPP_MANIFEST_SPEC)
+}
+
+/**
+ * `backends/audiocpp-manifest.json`, or throw why it is not one. The archives may be the fork's
+ * `.zip`s or, on the bootstrap path, upstream's `.tar.gz`s; both unpack flat.
+ */
+export function parseAudiocppManifest(data: unknown): AudiocppManifest {
+  return parseGgmlReleaseManifest(data, AUDIOCPP_MANIFEST_SPEC)
 }
 
 /** `backends/mlx-manifest.json`, or throw why it is not one. */
@@ -546,11 +606,28 @@ export function assetInstallable(asset: { sha256?: string; size?: number }): boo
   return typeof asset.sha256 === 'string' && typeof asset.size === 'number'
 }
 
+/**
+ * The mirror when the manifest names one, else the GitHub release of `upstream_repo` (`defaultRepo`
+ * when absent), whose tag never carries the Atomic `-a<rev>` suffix.
+ */
+export function ggmlReleaseAssetUrl(
+  manifest: GgmlReleaseManifest,
+  asset: GgmlReleaseAsset,
+  defaultRepo: string
+): string {
+  if (manifest.download_base) return `${manifest.download_base}/${manifest.tag_name}/${asset.name}`
+  const repo = manifest.upstream_repo ?? defaultRepo
+  return `https://github.com/${repo}/releases/download/${manifest.tag_name.replace(ATOMIC_TAG_SUFFIX_RE, '')}/${asset.name}`
+}
+
 /** The mirror when the manifest names one, else the upstream release (which never carries `-a<sha>`). */
 export function sdcppAssetUrl(manifest: SdcppManifest, asset: SdcppAsset): string {
-  if (manifest.download_base) return `${manifest.download_base}/${manifest.tag_name}/${asset.name}`
-  const repo = manifest.upstream_repo ?? SDCPP_UPSTREAM_REPO
-  return `https://github.com/${repo}/releases/download/${manifest.tag_name.replace(ATOMIC_TAG_SUFFIX_RE, '')}/${asset.name}`
+  return ggmlReleaseAssetUrl(manifest, asset, SDCPP_UPSTREAM_REPO)
+}
+
+/** The mirror when the manifest names one, else the fork's (or upstream's) release of the bare tag. */
+export function audiocppAssetUrl(manifest: AudiocppManifest, asset: AudiocppAsset): string {
+  return ggmlReleaseAssetUrl(manifest, asset, AUDIOCPP_UPSTREAM_REPO)
 }
 
 export function mlxAssetUrl(manifest: MlxManifest, asset: MlxAsset): string {
@@ -581,6 +658,7 @@ export interface ManifestOf {
   'foundry-local': FoundryLocalManifest
   'litert-lm': LiteRtLmManifest
   'geniex': GeniexManifest
+  'audio-cpp': AudiocppManifest
 }
 
 export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: ManifestKind<ManifestOf[K]> } {
@@ -624,6 +702,13 @@ export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: Manif
       urlEnv: 'ATOMIC_GENIEX_MANIFEST_URL',
       parse: (data) => parseGeniexManifest(data, { coreVersion: CORE_VERSION, abis: SUPPORTED_GENIEX_ABI }),
       cacheFile: join(layout.provider('geniex').root, 'geniex-manifest.cache.json'),
+    },
+    'audio-cpp': {
+      label: 'audio.cpp manifest',
+      url: AUDIOCPP_MANIFEST_URL,
+      urlEnv: 'ATOMIC_AUDIOCPP_MANIFEST_URL',
+      parse: parseAudiocppManifest,
+      cacheFile: layout.audio.manifestCache,
     },
   }
 }

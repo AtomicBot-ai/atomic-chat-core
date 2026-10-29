@@ -7,6 +7,9 @@
  *     loaded (unloaded with `engine-updated`, the old build kept) → removed.
  *   - MLX: the installer's build active → a newer one installed → the next load starts it → a restart
  *     with an installer newer still makes the installer's build active and keeps the download.
+ *   - audio.cpp: catalog → install from the mirror → the fork's `-a<rev>` build of the same version
+ *     offered and installed beside it → the old one removed; conf's bootstrap manifest installed from
+ *     upstream `0xShug0/audio.cpp`'s flat `.tar.gz`.
  *
  * No imports from `src/`. POSIX only: the fake engines are shell launchers.
  */
@@ -21,7 +24,13 @@ import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import * as sd from '../helpers/compiled-diffusion.js'
 import type { SdContext } from '../helpers/compiled-diffusion.js'
-import { launcherArchive, nodeLauncher, startReleaseMirror } from '../helpers/engine-builds-mirror.js'
+import {
+  audiocppUpstreamArchive,
+  fakeAudiocppServer,
+  launcherArchive,
+  nodeLauncher,
+  startReleaseMirror,
+} from '../helpers/engine-builds-mirror.js'
 import type { ReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import { FAKE_SIDECAR_SCRIPT } from '../helpers/fake-sidecar-server.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
@@ -888,3 +897,201 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
     }, 60_000)
   }
 )
+
+// ---------------------------------------------------------------------------------------------
+// audio.cpp
+// ---------------------------------------------------------------------------------------------
+
+/** Every id a host of the CI matrix picks; the fake answers as a Metal build, so a CPU build passes anywhere. */
+const AUDIO_HOST_IDS = ['macos-arm64', 'linux-cpu-x64', 'linux-cpu-arm64', 'linux-vulkan-x64']
+/** conf's bootstrap manifest has no arm64 Linux build: upstream publishes none. */
+const AUDIO_BOOTSTRAP_HOST = !(process.platform === 'linux' && process.arch === 'arm64')
+const AUDIOCPP_STAGING = fileURLToPath(
+  new URL('../fixtures/audiocpp/conf/audiocpp-manifest.staging.json', import.meta.url)
+)
+
+/** What `install.json` says the build was made for. */
+const AUDIO_KIND: Record<string, string> = {
+  'macos-arm64': 'metal',
+  'linux-cpu-x64': 'cpu',
+  'linux-cpu-arm64': 'cpu',
+  'linux-vulkan-x64': 'vulkan',
+}
+
+describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('audio.cpp builds through the core', () => {
+  async function audioRelease(tag: string, manifestFile: string) {
+    const archive = await launcherArchive(ctx.dataFolder, `audio-${tag}.tar.gz`, {
+      audiocpp_server: fakeAudiocppServer(),
+    })
+    mirror.serve(`/releases/${tag}/audio.tar.gz`, archive.body)
+    await writeFile(
+      manifestFile,
+      JSON.stringify({
+        upstream_repo: 'AtomicBot-ai/audio.cpp',
+        tag_name: tag,
+        download_base: MIRROR,
+        assets: AUDIO_HOST_IDS.map((backend) => ({
+          backend,
+          name: 'audio.tar.gz',
+          sha256: archive.sha256,
+          size: archive.size,
+        })),
+      })
+    )
+  }
+
+  it('lists, installs, offers the fork build of the same version as an update, keeps both and removes the old one', async () => {
+    const folder = ctx.dataFolder
+    const manifest = join(folder, 'audiocpp-manifest.json')
+    await audioRelease('v0.9.3', manifest)
+    const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+      ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(manifest).href,
+    })
+    const proxy = mirror.proxy
+
+    const before = await json<Catalog>(await post(ready, '/engine-builds/audio-cpp/catalog', { force: true }))
+    expect(before.manifest).toMatchObject({ tag: 'v0.9.3', source: 'remote' })
+    expect(AUDIO_HOST_IDS).toContain(before.host_backend_id)
+    expect(before.host_download_bytes).toBeGreaterThan(0)
+    expect(before.installed).toEqual([])
+
+    const events = await sd.collectEvents(ctx, ready)
+    const first = await json<{ installed: boolean; build: { tag: string; backend_id: string } }>(
+      await post(ready, '/engine-builds/audio-cpp/install', { task_id: 'audio-first', proxy })
+    )
+    expect(first).toMatchObject({ installed: true, build: { tag: 'v0.9.3', origin: 'downloaded' } })
+    // A Vulkan host walks down to the CPU build: the fake carries no Vulkan backend.
+    const host = first.build.backend_id
+    expect(AUDIO_HOST_IDS).toContain(host)
+    const oldDir = join(folder, 'audio', 'backends', 'v0.9.3', host)
+    expect((await readdir(oldDir)).sort()).toEqual(['.atomic-owned', 'audiocpp_server', 'install.json'])
+    expect(JSON.parse(await readFile(join(oldDir, 'install.json'), 'utf8'))).toMatchObject({
+      tag: 'v0.9.3',
+      backendId: host,
+      backend: AUDIO_KIND[host],
+      engine: 'audio-cpp',
+    })
+    await waitFor(
+      () =>
+        events.some(
+          (e) =>
+            e.event === 'engine-build:changed' &&
+            e.data['engine'] === 'audio-cpp' &&
+            e.data['reason'] === 'install'
+        ),
+      'engine-build:changed install for audio-cpp'
+    )
+    expect(events.some((e) => e.event === 'download:progress' && e.data['taskId'] === 'audio-first')).toBe(
+      true
+    )
+    expect(
+      await json(await post(ready, '/engine-builds/audio-cpp/updates', { force: true, proxy }))
+    ).toMatchObject({ update_needed: false, current: { tag: 'v0.9.3', backend_id: host } })
+
+    // conf publishes the fork's build of the same version: newer, offered, installed beside the old one.
+    await audioRelease('v0.9.3-a1b2c3d4', manifest)
+    expect(
+      await json(await post(ready, '/engine-builds/audio-cpp/updates', { force: true, proxy }))
+    ).toMatchObject({ update_needed: true, target: { tag: 'v0.9.3-a1b2c3d4' } })
+    expect(
+      await json(await post(ready, '/engine-builds/audio-cpp/install', { task_id: 'audio-update', proxy }))
+    ).toMatchObject({ installed: true, build: { tag: 'v0.9.3-a1b2c3d4', backend_id: host } })
+    const catalog = await json<Catalog>(await post(ready, '/engine-builds/audio-cpp/catalog'))
+    expect(catalog.active).toMatchObject({ tag: 'v0.9.3-a1b2c3d4', origin: 'downloaded' })
+    expect(catalog.installed.map((build) => [build.tag, build.active, build.removable])).toEqual([
+      ['v0.9.3-a1b2c3d4', true, true],
+      ['v0.9.3', false, true],
+    ])
+
+    // Removal of the old build; a folder the core did not mark is refused.
+    const foreign = join(folder, 'audio', 'backends', 'v0.9.0', 'hand-made')
+    await mkdir(foreign, { recursive: true })
+    const unowned = await control(ctx, ready, '/engine-builds/audio-cpp/v0.9.0/hand-made', {
+      method: 'DELETE',
+    })
+    expect(unowned.status).toBe(400)
+    expect(existsSync(foreign)).toBe(true)
+    expect(
+      await json(await control(ctx, ready, `/engine-builds/audio-cpp/v0.9.3/${host}`, { method: 'DELETE' }))
+    ).toEqual({ removed: true })
+    expect(existsSync(oldDir)).toBe(false)
+    const after = await json<Catalog>(await post(ready, '/engine-builds/audio-cpp/catalog'))
+    expect(after.installed.map((build) => build.tag)).toEqual(['v0.9.3-a1b2c3d4'])
+    expect(mirror.seen.filter((path) => path.endsWith('/audio.tar.gz'))).toEqual([
+      '/releases/v0.9.3/audio.tar.gz',
+      '/releases/v0.9.3-a1b2c3d4/audio.tar.gz',
+    ])
+  }, 120_000)
+
+  it.skipIf(!AUDIO_BOOTSTRAP_HOST)(
+    "installs from conf's bootstrap manifest: upstream 0xShug0/audio.cpp's flat .tar.gz, its tools/ and model_specs/ kept",
+    async () => {
+      const folder = ctx.dataFolder
+      const staging = JSON.parse(await readFile(AUDIOCPP_STAGING, 'utf8')) as {
+        upstream_repo: string
+        tag_name: string
+        assets: Array<{ backend: string; name: string; sha256: string; size: number }>
+      }
+      expect(staging).toMatchObject({ upstream_repo: '0xShug0/audio.cpp', tag_name: 'v0.9.3' })
+      expect(staging).not.toHaveProperty('download_base')
+      // Each upstream name serves one archive of upstream's layout, pinned by its own hash.
+      const archive = await audiocppUpstreamArchive(folder, 'upstream.tar.gz')
+      for (const asset of staging.assets)
+        mirror.serve(`/0xShug0/audio.cpp/releases/download/v0.9.3/${asset.name}`, archive.body)
+      const manifest = join(folder, 'audiocpp-manifest.staging.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          ...staging,
+          assets: staging.assets.map((asset) => ({ ...asset, sha256: archive.sha256, size: archive.size })),
+        })
+      )
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(manifest).href,
+      })
+
+      const catalog = await json<Catalog>(
+        await post(ready, '/engine-builds/audio-cpp/catalog', { force: true })
+      )
+      expect(catalog.manifest).toMatchObject({ tag: 'v0.9.3', source: 'remote' })
+      const installed = await json<{ installed: boolean; build: { backend_id: string } }>(
+        await post(ready, '/engine-builds/audio-cpp/install', {
+          task_id: 'audio-bootstrap',
+          proxy: mirror.proxy,
+        })
+      )
+      expect(installed).toMatchObject({ installed: true, build: { tag: 'v0.9.3' } })
+      const host = installed.build.backend_id
+      const name = staging.assets.find((asset) => asset.backend === host)?.name as string
+      expect(name).toMatch(/\.tar\.gz$/)
+      expect(mirror.seen).toEqual([`/0xShug0/audio.cpp/releases/download/v0.9.3/${name}`])
+      const dir = join(folder, 'audio', 'backends', 'v0.9.3', host)
+      expect((await readdir(dir)).sort()).toEqual([
+        '.atomic-owned',
+        'LICENSE',
+        'audiocpp_cli',
+        'audiocpp_server',
+        'install.json',
+        'model_specs',
+        'tools',
+      ])
+    },
+    120_000
+  )
+
+  it('answers "no manifest" for audio.cpp when the source has none, and installs nothing', async () => {
+    const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons, [], {
+      ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(join(ctx.dataFolder, 'missing.json')).href,
+    })
+    expect(await json(await post(ready, '/engine-builds/audio-cpp/catalog', { force: true }))).toMatchObject({
+      engine: 'audio-cpp',
+      manifest: null,
+      manifest_error: expect.stringMatching(/^audio\.cpp manifest from file:/),
+      host_backend_id: null,
+      host_reason: 'The audio.cpp manifest is unavailable.',
+      installed: [],
+    })
+    const install = await post(ready, '/engine-builds/audio-cpp/install', { task_id: 'audio-none' })
+    expect(await install.json()).toMatchObject({ error: { code: 'UPSTREAM_ERROR' } })
+  }, 60_000)
+})

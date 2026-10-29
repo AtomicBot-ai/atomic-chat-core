@@ -15,8 +15,10 @@ import { makeZip } from '../../test/helpers/make-zip.js'
 import { OWNER_MARKER } from '../diffusion/install.js'
 import { writeLiteRtLmInstallRecord } from './litert-lm.js'
 import { writeGeniexInstallRecord } from './geniex.js'
-import type { EngineProbeFacts } from './engines.js'
+import { ENGINE_DESCRIPTORS } from './engines.js'
+import type { Build, EngineContext, EngineProbeFacts } from './engines.js'
 import {
+  parseAudiocppManifest,
   parseFoundryLocalManifest,
   parseGeniexManifest,
   parseLiteRtLmManifest,
@@ -24,6 +26,7 @@ import {
   parseSdcppManifest,
 } from './manifest.js'
 import type {
+  AudiocppManifest,
   FoundryLocalManifest,
   GeniexManifest,
   LiteRtLmManifest,
@@ -177,12 +180,14 @@ function harness(
     'foundry-local': ManifestRead<FoundryLocalManifest>
     'litert-lm': ManifestRead<LiteRtLmManifest>
     'geniex': ManifestRead<GeniexManifest>
+    'audio-cpp': ManifestRead<AudiocppManifest>
   } = {
     'sd-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'mlx': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'foundry-local': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'litert-lm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'geniex': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'audio-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
   }
   const events: Array<{ name: string; payload: unknown }> = []
   const changed: Array<CoreEvents['engine-build:changed']> = []
@@ -192,6 +197,7 @@ function harness(
       .replace(MIRROR, server.url('/releases'))
       .replace('https://github.com/AtomicBot-ai/mlx-vlm/releases/download', server.url('/releases'))
       .replace('https://github.com/microsoft/foundry-local/releases/download', server.url('/releases'))
+      .replace('https://github.com/0xShug0/audio.cpp/releases/download', server.url('/releases'))
       .replace('https://files.pythonhosted.org/packages', server.url('/releases'))
       .replace(
         'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex',
@@ -213,6 +219,7 @@ function harness(
     'foundry-local': new FakeHost(),
     'litert-lm': new FakeHost(),
     'geniex': new FakeHost(),
+    'audio-cpp': new FakeHost(),
   }
   let clock = 1_000
   const service = new EngineBuildsService({
@@ -223,8 +230,12 @@ function harness(
       'foundry-local': FOUNDRY_ROOT(),
       'litert-lm': LITERT_ROOT(),
       'geniex': GENIEX_ROOT(),
+      'audio-cpp': data.layout.audio.backendsDir,
     },
-    failedBackendsFile: join(data.layout.diffusion.root, 'failed-backends.json'),
+    failedBackendsFiles: {
+      'sd-cpp': join(data.layout.diffusion.root, 'failed-backends.json'),
+      'audio-cpp': data.layout.audio.failedBackendsFile,
+    },
     resourcesDir: opts.resourcesDir,
     platform: opts.platform ?? 'linux',
     downloader,
@@ -234,6 +245,7 @@ function harness(
       'foundry-local': { read: async () => manifests['foundry-local'] },
       'litert-lm': { read: async () => manifests['litert-lm'] },
       'geniex': { read: async () => manifests.geniex },
+      'audio-cpp': { read: async () => manifests['audio-cpp'] },
     },
     hostPlatforms: {
       'foundry-local': opts.foundryLocalHost ?? { platform: 'linux-x64' },
@@ -271,6 +283,9 @@ function harness(
   const setGeniex = (manifest: GeniexManifest) => {
     manifests.geniex = { manifest, source: 'remote', fetched_at: 1, error: null }
   }
+  const setAudio = (manifest: AudiocppManifest) => {
+    manifests['audio-cpp'] = { manifest, source: 'remote', fetched_at: 1, error: null }
+  }
   return {
     service,
     downloader,
@@ -283,6 +298,7 @@ function harness(
     setFoundry,
     setLiteRtLm,
     setGeniex,
+    setAudio,
     manifests,
   }
 }
@@ -350,8 +366,9 @@ describe('IDLE_ENGINE_HOST', () => {
 })
 
 describe('parseEngineBuildId', () => {
-  it('knows sd-cpp, mlx, foundry-local and litert-lm only', () => {
+  it('knows the engine-build ids only', () => {
     expect(parseEngineBuildId('mlx')).toBe('mlx')
+    expect(parseEngineBuildId('audio-cpp')).toBe('audio-cpp')
     expect(parseEngineBuildId('foundry-local')).toBe('foundry-local')
     expect(parseEngineBuildId('litert-lm')).toBe('litert-lm')
     expect(() => parseEngineBuildId('llamacpp')).toThrow(
@@ -1608,5 +1625,405 @@ describe('GenieX builds (task 4.4)', () => {
       host_reason: 'GenieX runs on Windows arm64 only, not darwin arm64.',
     })
     expect(parseEngineBuildId('geniex')).toBe('geniex')
+  })
+})
+
+// --- audio.cpp -------------------------------------------------------------------------------------
+
+/** `audiocpp_server` answering the install probe as v0.9.3 does, built with `backends` and seeing `devices`. */
+const audioServer = (backends: string, devices: string[]) => ({
+  audiocpp_server: [
+    'case "$1" in',
+    `  --version) printf 'audio.cpp 0.9.3\\ngit: 41c1f8ff 2026-10-26\\nbuild: Release\\nbackends: ${backends}\\n' ;;`,
+    `  --list-devices) printf 'available_devices=${devices.length + 1}\\n${devices.join('\\n')}\\nCPU:0 "cpu" [CPU]\\n' ;;`,
+    '  *) exit 1 ;;',
+    'esac',
+  ].join('\n'),
+})
+const AUDIO_VULKAN = audioServer('cpu,vulkan', ['Vulkan:0 "Radeon" [GPU]'])
+/** A Vulkan build on a machine whose driver shows it no GPU. */
+const AUDIO_VULKAN_BLIND = audioServer('cpu,vulkan', [])
+const AUDIO_CPU = audioServer('cpu', [])
+
+function audioManifest(tag: string, assets: ReturnType<typeof serve>): AudiocppManifest {
+  return parseAudiocppManifest({
+    tag_name: tag,
+    upstream_repo: 'AtomicBot-ai/audio.cpp',
+    download_base: MIRROR,
+    assets,
+  })
+}
+
+const AUDIO_ROOT = () => data.layout.audio.backendsDir
+
+describe.skipIf(!POSIX)('audio.cpp builds', () => {
+  it('installs the host build under <data>/audio/backends, probed, recorded and activated', async () => {
+    const h = harness()
+    const tag = 'v0.9.3-a1b2c3d4'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, {
+          'linux-vulkan-x64': { name: 'audio-vulkan.tar.gz', body: await archive('av', AUDIO_VULKAN) },
+          'linux-cpu-x64': { name: 'audio-cpu.tar.gz', body: await archive('ac', AUDIO_CPU) },
+        })
+      )
+    )
+    expect(await h.service.catalog('audio-cpp')).toMatchObject({
+      engine: 'audio-cpp',
+      manifest: { tag, source: 'remote' },
+      host_backend_id: 'linux-vulkan-x64',
+      installed: [],
+      active: null,
+    })
+
+    const result = await h.service.install('audio-cpp', { task_id: 'audio-backend-1' })
+
+    const dir = join(AUDIO_ROOT(), tag, 'linux-vulkan-x64')
+    expect(result).toEqual({
+      installed: true,
+      build: { tag, backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
+      retired: [],
+      kept_in_use: [],
+    })
+    expect((await ls(dir)).sort()).toEqual(['.atomic-owned', 'audiocpp_server', 'install.json'])
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toEqual({
+      tag,
+      backendId: 'linux-vulkan-x64',
+      backend: 'vulkan',
+      engine: 'audio-cpp',
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      installedAtMs: expect.any(Number),
+    })
+    expect(h.hosts['audio-cpp'].calls).toEqual([`activate ${dir} false`])
+    expect(h.hosts['sd-cpp'].calls).toEqual([])
+    expect(h.changed).toEqual([{ engine: 'audio-cpp', reason: 'install' }])
+    expect(h.engineChanged).toEqual([{ engine: 'audio-cpp', reason: 'install' }])
+    expect((await h.service.catalog('audio-cpp')).active).toMatchObject({
+      tag,
+      backend_id: 'linux-vulkan-x64',
+    })
+    expect(await h.service.activeDir('audio-cpp')).toBe(dir)
+  })
+
+  it('walks down the ladder when the GPU build sees no device, remembering it in <data>/audio only', async () => {
+    const h = harness()
+    const tag = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, {
+          'linux-vulkan-x64': { name: 'audio-vulkan.tar.gz', body: await archive('ab', AUDIO_VULKAN_BLIND) },
+          'linux-cpu-x64': { name: 'audio-cpu.tar.gz', body: await archive('ac', AUDIO_CPU) },
+        })
+      )
+    )
+
+    const result = await h.service.install('audio-cpp', { task_id: 'audio-ladder' })
+
+    expect(result).toMatchObject({
+      installed: true,
+      build: { backend_id: 'linux-cpu-x64' },
+      failed_backend_ids: ['linux-vulkan-x64'],
+    })
+    expect(await ls(join(AUDIO_ROOT(), tag))).toEqual(['linux-cpu-x64'])
+    expect(JSON.parse(await readFile(data.layout.audio.failedBackendsFile, 'utf8'))).toEqual([
+      `${tag}/linux-vulkan-x64`,
+    ])
+    expect(await ls(data.layout.diffusion.root)).not.toContain('failed-backends.json')
+    expect((await h.service.catalog('audio-cpp')).host_backend_id).toBe('linux-cpu-x64')
+    // sd.cpp's ladder on the same tag-shaped key is untouched.
+    h.setSd(
+      sdManifest(
+        'master-900-aaaaaaa',
+        serve('master-900-aaaaaaa', {
+          'linux-vulkan-x64': { name: 'sd.tar.gz', body: await archive('sv', SD_OK) },
+        })
+      )
+    )
+    expect((await h.service.catalog('sd-cpp')).host_backend_id).toBe('linux-vulkan-x64')
+  })
+
+  it('fails with the probe output when the last build is not audio.cpp, leaving nothing behind', async () => {
+    const h = harness()
+    const tag = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, {
+          'linux-cpu-x64': {
+            name: 'audio-cpu.tar.gz',
+            body: await archive('ax', { audiocpp_server: 'echo "stable-diffusion.cpp"' }),
+          },
+        })
+      )
+    )
+    await expect(h.service.install('audio-cpp', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'The downloaded binary is not audio.cpp.',
+      details: expect.stringContaining('stable-diffusion.cpp'),
+    })
+    expect(await ls(join(AUDIO_ROOT(), tag))).toEqual([])
+    expect(h.hosts['audio-cpp'].calls).toEqual([])
+  })
+
+  it("installs conf's bootstrap build from upstream 0xShug0/audio.cpp: a flat .tar.gz with tools/ and model_specs/", async () => {
+    const h = harness()
+    const src = join(data.root, 'archive-src', 'upstream')
+    await mkdir(join(src, 'tools', 'models'), { recursive: true })
+    await mkdir(join(src, 'model_specs'), { recursive: true })
+    await writeFile(join(src, 'audiocpp_server'), `#!/bin/sh\n${AUDIO_CPU.audiocpp_server}\n`, {
+      mode: 0o755,
+    })
+    await writeFile(join(src, 'audiocpp_cli'), '#!/bin/sh\nexit 0\n', { mode: 0o644 })
+    await writeFile(join(src, 'LICENSE'), 'MIT')
+    await writeFile(join(src, 'tools', 'models', 'prepare_kokoro_gguf.py'), 'py')
+    await writeFile(join(src, 'model_specs', 'kokoro_tts.json'), '{}')
+    const name = 'audio-v0.9.3-bin-ubuntu-x64-cpu-portable.tar.gz'
+    const out = join(data.root, 'archive-src', name)
+    // Upstream packs `./`-prefixed entries.
+    await tarCreate({ gzip: true, cwd: src, file: out }, ['.'])
+    const body = await readFile(out)
+    server.files.set(`/releases/v0.9.3/${name}`, { body })
+    h.setAudio(
+      parseAudiocppManifest({
+        upstream_repo: '0xShug0/audio.cpp',
+        tag_name: 'v0.9.3',
+        assets: [{ backend: 'linux-cpu-x64', name, sha256: sha(body), size: body.length }],
+      })
+    )
+
+    const result = await h.service.install('audio-cpp', { task_id: 'audio-bootstrap' })
+
+    expect(result).toMatchObject({ installed: true, build: { tag: 'v0.9.3', backend_id: 'linux-cpu-x64' } })
+    expect(archiveRequests().map((r) => r.path)).toEqual([`/releases/v0.9.3/${name}`])
+    const dir = join(AUDIO_ROOT(), 'v0.9.3', 'linux-cpu-x64')
+    expect((await ls(dir)).sort()).toEqual([
+      '.atomic-owned',
+      'LICENSE',
+      'audiocpp_cli',
+      'audiocpp_server',
+      'install.json',
+      'model_specs',
+      'tools',
+    ])
+    // The probe made the CLI beside the server executable too.
+    expect((await lstat(join(dir, 'audiocpp_cli'))).mode & 0o111).not.toBe(0)
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({ backend: 'cpu' })
+  })
+
+  it('offers the fork build of the same version as an update, keeps the old one and removes it on request', async () => {
+    const h = harness()
+    const first = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        first,
+        serve(first, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('a1', AUDIO_VULKAN) } })
+      )
+    )
+    await h.service.install('audio-cpp', { task_id: 'a1' })
+    expect(await h.service.checkUpdates('audio-cpp')).toMatchObject({ update_needed: false })
+
+    const rebuild = 'v0.9.3-a1b2c3d4'
+    h.setAudio(
+      audioManifest(
+        rebuild,
+        serve(rebuild, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('a2', AUDIO_VULKAN) } })
+      )
+    )
+    expect(await h.service.checkUpdates('audio-cpp')).toMatchObject({
+      update_needed: true,
+      current: { tag: first, backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
+      target: { tag: rebuild, backend_id: 'linux-vulkan-x64' },
+    })
+    expect(await h.service.install('audio-cpp', { task_id: 'a2' })).toMatchObject({ installed: true })
+    expect(await ls(AUDIO_ROOT())).toEqual([first, rebuild])
+    const catalog = await h.service.catalog('audio-cpp')
+    expect(catalog.active).toMatchObject({ tag: rebuild })
+    expect(catalog.installed.map((build) => [build.tag, build.active, build.removable])).toEqual([
+      [rebuild, true, true],
+      [first, false, true],
+    ])
+
+    // conf rolled back to the bare tag: neither offered nor installed.
+    h.setAudio(
+      audioManifest(
+        first,
+        serve(first, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('a3', AUDIO_VULKAN) } })
+      )
+    )
+    expect(await h.service.checkUpdates('audio-cpp')).toMatchObject({ update_needed: false })
+    expect(await h.service.install('audio-cpp', { task_id: 'a3', force: true })).toMatchObject({
+      installed: false,
+      reason: 'active-is-newer',
+    })
+
+    await expect(
+      h.service.remove('audio-cpp', rebuild, 'linux-vulkan-x64', { refuseActive: true })
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST', details: 'active' })
+    expect(await h.service.remove('audio-cpp', first, 'linux-vulkan-x64')).toEqual({ removed: true })
+    expect(await ls(AUDIO_ROOT())).toEqual([rebuild])
+    expect(h.changed.at(-1)).toEqual({ engine: 'audio-cpp', reason: 'uninstall' })
+  })
+
+  it('sizes the Windows CUDA 12 build with its cudart companion, and offers no ROCm build to an AMD card', async () => {
+    const cuda = harness({
+      facts: {
+        osType: 'windows',
+        arch: 'x86_64',
+        cpuExtensions: [],
+        gpus: [
+          {
+            name: 'GeForce',
+            vendor: 'NVIDIA',
+            total_memory: 8192,
+            uuid: 'gpu-0',
+            driver_version: '560.94',
+            nvidia_info: { index: 0, compute_capability: '8.9' },
+            vulkan_info: null,
+          } as never,
+        ],
+      },
+    })
+    const PIN = '0'.repeat(64)
+    const assets = [
+      { backend: 'win-cuda12-x64', name: 'audio-cuda.zip', sha256: PIN, size: 300 },
+      { backend: 'win-cudart-cu12', name: 'cudart.zip', sha256: PIN, size: 200, companion: true },
+      { backend: 'win-rocm-7.14-x64', name: 'audio-rocm.zip', sha256: PIN, size: 100 },
+      { backend: 'win-cpu-x64', name: 'audio-cpu.zip', sha256: PIN, size: 50 },
+    ]
+    cuda.setAudio(audioManifest('v0.9.3', assets))
+    expect(await cuda.service.catalog('audio-cpp')).toMatchObject({
+      host_backend_id: 'win-cuda12-x64',
+      host_download_bytes: 500,
+    })
+  })
+
+  it('says why there is nothing to install without a manifest', async () => {
+    expect(await harness().service.catalog('audio-cpp')).toMatchObject({
+      manifest: null,
+      manifest_error: 'offline',
+      host_backend_id: null,
+      host_reason: 'The audio.cpp manifest is unavailable.',
+    })
+    await expect(harness().service.install('audio-cpp', { task_id: 't' })).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR',
+    })
+  })
+
+  it('clears the leftovers of an interrupted install under <data>/audio/backends at start, never a build', async () => {
+    const h = harness()
+    const tag = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('al', AUDIO_VULKAN) } })
+      )
+    )
+    await h.service.install('audio-cpp', { task_id: 'al' })
+    const build = join(AUDIO_ROOT(), tag, 'linux-vulkan-x64')
+    await mkdir(`${build}.incoming-9`, { recursive: true })
+    await mkdir(`${build}.incoming-9.download`, { recursive: true })
+    await mkdir(join(AUDIO_ROOT(), 'v0.9.4', 'linux-cpu-x64.retired-3'), { recursive: true })
+    h.changed.length = 0
+
+    await h.service.startupCleanup()
+
+    expect(await ls(join(AUDIO_ROOT(), tag))).toEqual(['linux-vulkan-x64'])
+    expect(await ls(join(AUDIO_ROOT(), 'v0.9.4'))).toEqual([])
+    expect(h.changed).toEqual([])
+  })
+})
+
+describe('the audio-cpp row of ENGINE_DESCRIPTORS', () => {
+  const row = ENGINE_DESCRIPTORS['audio-cpp']
+  const manifest = parseAudiocppManifest({
+    upstream_repo: '0xShug0/audio.cpp',
+    tag_name: 'v0.9.3-a1b2c3d4',
+    assets: [
+      { backend: 'win-cuda12-x64', name: 'cuda.zip', sha256: 'a'.repeat(64), size: 3 },
+      { backend: 'win-cudart-cu12', name: 'cudart.zip', sha256: 'b'.repeat(64), size: 2, companion: true },
+      { backend: 'win-cpu-x64', name: 'cpu.zip' },
+    ],
+  })
+  const ctx = (): EngineContext => ({
+    root: data.layout.audio.backendsDir,
+    failedBackendsFile: undefined,
+    platform: 'linux',
+    hardware: async () => LINUX_VULKAN,
+    hostPlatform: { platform: null, reason: 'unused' },
+  })
+
+  it('releases the manifest tag, unordered by date, and downloads the CUDA 12 build with its cudart', () => {
+    expect(row.release(manifest)).toEqual({ tag: 'v0.9.3-a1b2c3d4', published_at: null })
+    expect(row.archives(manifest, 'win-cuda12-x64')).toEqual([
+      {
+        url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/cuda.zip',
+        name: 'cuda.zip',
+        sha256: 'a'.repeat(64),
+        size: 3,
+      },
+      {
+        url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/cudart.zip',
+        name: 'cudart.zip',
+        sha256: 'b'.repeat(64),
+        size: 2,
+      },
+    ])
+    // Unpinned: listed for the catalog, refused by the install.
+    expect(row.archives(manifest, 'win-cpu-x64')).toEqual([
+      { url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/cpu.zip', name: 'cpu.zip' },
+    ])
+    expect(row.archives(manifest, 'linux-cpu-x64')).toEqual([])
+  })
+
+  it('refuses to probe or record a build audio.cpp has no backend for', async () => {
+    await expect(row.probe(data.root, ctx(), 'win-rocm-7.14-x64')).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'audio.cpp has no build for win-rocm-7.14-x64.',
+    })
+    const info = {
+      tag: 'v0.9.3',
+      backendId: 'win-cudart-cu12',
+      sha256: null,
+      installedAtMs: 1,
+      publishedAt: null,
+      cApiVersion: null,
+      abi: null,
+      probe: null,
+    }
+    await expect(row.record(data.root, info)).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED' })
+  })
+
+  it('without a failed-backends file remembers nothing and skips nothing', async () => {
+    await row.rememberFailedRung?.(ctx(), 'v0.9.3-a1b2c3d4', 'linux-vulkan-x64')
+    const vulkan = parseAudiocppManifest({
+      tag_name: 'v0.9.3-a1b2c3d4',
+      assets: [
+        { backend: 'linux-vulkan-x64', name: 'v.zip' },
+        { backend: 'linux-cpu-x64', name: 'c.zip' },
+      ],
+    })
+    expect(await row.hostChoice(ctx(), vulkan)).toEqual({
+      ladder: ['linux-vulkan-x64', 'linux-cpu-x64'],
+      backend_id: 'linux-vulkan-x64',
+      reason: null,
+    })
+    expect(await row.hostChoice(ctx(), null)).toMatchObject({
+      reason: 'The audio.cpp manifest is unavailable.',
+    })
+  })
+
+  it('makes the newest install active', () => {
+    const build = (tag: string, at: number): Build => ({
+      tag,
+      backend_id: 'linux-cpu-x64',
+      origin: 'downloaded',
+      dir: `/b/${tag}`,
+      installed_at_ms: at,
+      published_at: null,
+    })
+    expect(row.active([build('v0.9.4', 2), build('v0.9.3', 1)])?.tag).toBe('v0.9.4')
+    expect(row.active([])).toBeUndefined()
   })
 })
