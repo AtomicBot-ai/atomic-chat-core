@@ -30,6 +30,7 @@ import {
   sseEvent,
 } from './forward.js'
 import { policyRefusal } from './policy.js'
+import { responsesRolesRefusal } from './validate.js'
 import type { Backend } from './forward.js'
 import type { LocalTarget } from './types.js'
 import { SseLineReader } from './sse.js'
@@ -98,6 +99,14 @@ export async function serveResponses(ex: Exchange): Promise<void> {
     return
   }
   trace.backend = session.provider
+  // The translation copies a message item's role into the chat messages, where a chat template drops
+  // one it does not know; MLX gets the same answer.
+  const malformed = responsesRolesRefusal(json)
+  if (malformed !== undefined) {
+    trace.errorKind = 'bad_request'
+    answer(ex, 400, malformed, [['Content-Type', 'application/json']])
+    return
+  }
   const backend: Backend = { kind: 'local', session }
   if (session.provider === 'mlx') {
     await passthrough(ex, backend, `http://127.0.0.1:${session.port}/v1/responses`, session.apiKey, raw)

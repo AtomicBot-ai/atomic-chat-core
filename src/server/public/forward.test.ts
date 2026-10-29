@@ -112,6 +112,108 @@ describe('refusals before the engine', () => {
     expect(ok.status).toBe(200)
     expect(calls).toBe(1)
   })
+
+  it('refuses a chat role OpenAI does not define on every local engine, and passes the roles clients send', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"choices":[{"message":{"content":"VALIDATION_TEST"}}]}')
+    })
+    const server = await startPublic({
+      sessions: [
+        localSession(port),
+        localSession(port, { provider: 'mlx', modelId: 'mlx-model', apiKey: '' }),
+        localSession(port, { provider: 'vllm', modelId: 'vllm-model' }),
+      ],
+    })
+
+    for (const model of ['demo', 'mlx-model', 'vllm-model']) {
+      const res = await postJson(server, '/chat/completions', {
+        model,
+        max_tokens: 64,
+        messages: [{ role: 'not-a-real-role', content: 'Reply exactly VALIDATION_TEST.' }],
+      })
+      expect(res.status, model).toBe(400)
+      expect(res.headers.get('content-type'), model).toBe('application/json')
+      expect(await res.json(), model).toEqual({
+        error: {
+          message:
+            "Invalid value for 'messages[0].role': 'not-a-real-role'. Supported values are: 'system', 'developer', 'user', 'assistant' and 'tool'.",
+          type: 'invalid_request_error',
+          param: 'messages[0].role',
+          code: 'invalid_value',
+        },
+      })
+    }
+    const missing = await postJson(server, '/chat/completions', {
+      model: 'demo',
+      messages: [{ content: 'x' }],
+    })
+    expect(await missing.json()).toMatchObject({
+      error: { param: 'messages[0].role', code: 'missing_required_parameter' },
+    })
+    expect(seen).toEqual([])
+
+    const conversation = [
+      { role: 'system', content: 'Be brief.' },
+      { role: 'developer', content: 'Use tools.' },
+      { role: 'user', content: [{ type: 'text', text: 'What is 6 x 7?' }] },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'mul', arguments: '{"a":6,"b":7}' } }],
+      },
+      { role: 'tool', tool_call_id: 'c1', content: '42' },
+    ]
+    const ok = await postJson(server, '/chat/completions', { model: 'demo', messages: conversation })
+    expect(ok.status).toBe(200)
+    expect(seen.map((body) => JSON.parse(body).messages)).toEqual([conversation])
+  })
+
+  it('refuses a mixed embeddings input to a local session and passes the OpenAI forms', async () => {
+    const seen: unknown[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(JSON.parse(body).input)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"object":"list","data":[]}')
+    })
+    const server = await startPublic({
+      sessions: [localSession(port, { modelId: 'nomic-embed-text-v1.5', isEmbedding: true })],
+    })
+    const embed = (input: unknown) =>
+      postJson(server, '/embeddings', { model: 'nomic-embed-text-v1.5', input })
+
+    for (const input of [['test', 7], ['alpha', 7, 'omega'], [[1, 2], ['x']], [1, 2.5], 7]) {
+      const res = await embed(input)
+      expect(res.status, JSON.stringify(input)).toBe(400)
+      expect(res.headers.get('content-type')).toBe('application/json')
+      expect(await res.json()).toMatchObject({ error: { type: 'invalid_request_error', param: 'input' } })
+    }
+    expect(seen).toEqual([])
+
+    const valid = ['alpha', ['alpha', 'omega'], [101, 7], [[101, 7], [0]]]
+    for (const input of valid) expect((await embed(input)).status, JSON.stringify(input)).toBe(200)
+    expect(seen).toEqual(valid)
+  })
+
+  it('leaves the roles and the input to a remote provider, which validates its own requests', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((req, _body, res) => {
+      seen.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{}')
+    })
+    const server = await startPublic({ remote: [remoteProvider({ baseUrl: `http://127.0.0.1:${port}/v1` })] })
+
+    const chat = await postJson(server, '/chat/completions', {
+      model: 'cloud-model',
+      messages: [{ role: 'not-a-real-role', content: 'x' }],
+    })
+    const embeddings = await postJson(server, '/embeddings', { model: 'cloud-model', input: ['alpha', 7] })
+    expect([chat.status, embeddings.status]).toEqual([200, 200])
+    expect(seen).toEqual(['/v1/chat/completions', '/v1/embeddings'])
+  })
 })
 
 describe('remote providers', () => {

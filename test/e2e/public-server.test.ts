@@ -321,6 +321,17 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
     const invalid = await post('{not json')
     expect(invalid.status).toBe(400)
     expect(await invalid.text()).toMatch(/^Invalid JSON body: /)
+    const role = await post(
+      JSON.stringify({
+        model: 'demo',
+        max_tokens: 64,
+        messages: [{ role: 'not-a-real-role', content: 'Reply exactly VALIDATION_TEST.' }],
+      })
+    )
+    expect([role.status, role.headers.get('content-type')]).toEqual([400, 'application/json'])
+    expect(await role.json()).toMatchObject({
+      error: { type: 'invalid_request_error', param: 'messages[0].role', code: 'invalid_value' },
+    })
   })
 
   it.skipIf(!POSIX)('grows the context of an overflowing model and replays the request', async () => {

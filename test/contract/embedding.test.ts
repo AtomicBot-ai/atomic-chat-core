@@ -141,6 +141,23 @@ describe('contract: /v1/embeddings to the embedding module', () => {
     expect((await post('{"model":"embeddinggemma-2","input":"x","dimensions":256}')).status).toBe(400)
   })
 
+  it('refuses an input that mixes forms without reaching the engine, and passes token arrays byte for byte', async () => {
+    for (const input of ['["test",7]', '["alpha",7,"omega"]', '[[1,2],[3,"x"]]', '[1,2.5]']) {
+      const mixed = await post(`{"model":"embeddinggemma-2","input":${input}}`)
+      expect(mixed.status, input).toBe(400)
+      expect(mixed.headers.get('x-fake-body-sha256'), input).toBeNull()
+      expect(await mixed.json(), input).toMatchObject({
+        error: { type: 'invalid_request_error', param: 'input' },
+      })
+    }
+    for (const input of ['[101,7,102]', '[[101,7],[102]]']) {
+      const body = `{"model":"embeddinggemma-2","input":${input}}`
+      const res = await post(body)
+      expect(res.status, input).toBe(200)
+      expect(res.headers.get('x-fake-body-sha256')).toBe(createHash('sha256').update(body).digest('hex'))
+    }
+  })
+
   it('lists the model and returns a JSON error for an unknown name without chat sessions', async () => {
     const models = (await (
       await fetch(`http://127.0.0.1:${server.port}/v1/models`, {

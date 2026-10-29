@@ -59,6 +59,57 @@ describe('/responses', () => {
     })
   })
 
+  it('refuses a message role the Responses API does not define before llama.cpp or MLX sees it', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((req, _body, res) => {
+      seen.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"choices":[{"message":{"role":"assistant","content":"ok"}}]}')
+    })
+    const server = await startPublic({
+      sessions: [
+        localSession(port),
+        localSession(port, { provider: 'mlx', modelId: 'mlx-model', apiKey: '' }),
+      ],
+    })
+
+    for (const model of ['demo', 'mlx-model']) {
+      const res = await postJson(server, '/responses', {
+        model,
+        input: [
+          { role: 'user', content: 'hi' },
+          { type: 'message', role: 'not-a-real-role', content: 'x' },
+        ],
+      })
+      expect(res.status, model).toBe(400)
+      expect(res.headers.get('content-type'), model).toBe('application/json')
+      expect(await res.json(), model).toEqual({
+        error: {
+          message:
+            "Invalid value for 'input[1].role': 'not-a-real-role'. Supported values are: 'user', 'assistant', 'system' and 'developer'.",
+          type: 'invalid_request_error',
+          param: 'input[1].role',
+          code: 'invalid_value',
+        },
+      })
+    }
+    expect(seen).toEqual([])
+
+    for (const model of ['demo', 'mlx-model']) {
+      const ok = await postJson(server, '/responses', {
+        model,
+        input: [
+          { role: 'developer', content: 'Be brief.' },
+          { role: 'user', content: 'hi' },
+          { type: 'function_call', call_id: 'c1', name: 'f', arguments: '{}' },
+          { type: 'function_call_output', call_id: 'c1', output: '42' },
+        ],
+      })
+      expect(ok.status, model).toBe(200)
+    }
+    expect(seen).toEqual(['/v1/chat/completions', '/v1/responses'])
+  })
+
   it('passes an engine error through with its status', async () => {
     const { port } = await startUpstream((_req, _body, res) => {
       res.writeHead(503, { 'content-type': 'text/plain' })

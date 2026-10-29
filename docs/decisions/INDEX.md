@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-10-29** — [Refuse unknown chat roles and mixed embedding inputs before a local engine](2026-10-29-refuse-unknown-chat-roles-and-mixed-embedding-inputs.md) — `validate.ts`: chat roles `system`/`developer`/`user`/`assistant`/`tool` (`messages[i].role`), Responses message roles (`input[i].role`), embeddings `input` all token ids, all token arrays, or strings and input items (`param: input`); local engines only, the embedding module before it starts.
 - **2026-10-28** — [Report unknown embedding models without chat sessions](2026-10-28-report-unknown-embedding-models-without-chat-sessions.md)
 
 - **2026-10-27** — [GenieX runs in a host mode of the core binary with generation in a Worker](2026-10-27-geniex-runs-in-a-host-mode-with-generation-in-a-worker.md) — `geniex-host probe|inspect|serve`; the library in a Bun Worker bound by `bun:ffi` (`worker.ts` and `ffi-bun.ts` allow-listed), a synchronous token callback posting to the main thread, a cancel flag in a `SharedArrayBuffer`; the Worker bundled as its own entry of each binary; tool calls, thinking and a JSON-schema grammar handled by the host; unverified on hardware until the spike.

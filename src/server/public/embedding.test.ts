@@ -171,6 +171,63 @@ describe('POST /v1/embeddings for the embedding module', () => {
     expect(log).toEqual(['acquire 60000', 'release'])
   })
 
+  it.each([
+    [['test', 7], 'input[1] is a number, but input[0] is a string.'],
+    [['alpha', 7, 'omega'], 'input[1] is a number, but input[0] is a string.'],
+    [
+      [
+        [1, 2],
+        [3, 'x'],
+      ],
+      'input[1][1] is a string, not a token id.',
+    ],
+    [[1, 2.5], 'input[1] is 2.5, not a token id'],
+    [['alpha', [1, 2]], 'input[1] is an array, but input[0] is a string.'],
+    [7, 'expected a string or an array, but got a number instead'],
+  ])('refuses the input %j before an idle model is started', async (input, says) => {
+    const { fake, log } = backend(() => ready(1))
+    const { server, events } = await publicWith({ embedding: fake })
+    const res = await post(server.port, JSON.stringify({ model: 'embeddinggemma-2', input }))
+    expect(res.status).toBe(400)
+    expect(res.headers.get('content-type')).toContain('application/json')
+    expect(await res.json()).toEqual({
+      error: {
+        message: expect.stringContaining(says),
+        type: 'invalid_request_error',
+        param: 'input',
+        code: expect.stringMatching(/^invalid_(type|value)$/),
+      },
+    })
+    expect(log).toEqual([])
+    expect(events.at(-1)).toMatchObject({
+      phase: 'finished',
+      observation: { endpoint: 'embeddings', backend: EMBEDDING_BACKEND_LABEL, status: 400 },
+    })
+  })
+
+  it('passes a string, strings, token ids, token id arrays and input items beside strings', async () => {
+    const seen: string[] = []
+    const upstream = await startUpstream((_req, body, res) => {
+      seen.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"object":"list","data":[]}')
+    })
+    const { fake } = backend(() => ready(upstream.port))
+    const { server } = await publicWith({ embedding: fake })
+    const bodies = [
+      'test',
+      ['alpha', 'omega'],
+      [101, 7, 102],
+      [[101, 7], [102]],
+      [
+        'caption',
+        { content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }] },
+      ],
+    ].map((input) => JSON.stringify({ model: 'embeddinggemma-2', input }))
+    for (const body of bodies) expect((await post(server.port, body)).status, body).toBe(200)
+    expect(seen).toEqual(bodies)
+  })
+
   it('names the field of inline media the engine would not read, in the OpenAI shape', async () => {
     let reached = false
     const upstream = await startUpstream((_req, _body, res) => {

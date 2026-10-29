@@ -50,6 +50,7 @@ import {
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
+import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
 import type { LocalTarget } from './types.js'
 import {
@@ -248,6 +249,19 @@ export async function serveForward(ex: Exchange): Promise<void> {
     if (empty !== undefined) {
       trace.errorKind = 'bad_request'
       answer(ex, 400, empty, [['Content-Type', 'application/json']])
+      return
+    }
+    // A chat template drops a message whose role it does not know and answers the rest; llama.cpp
+    // reads a mixed embeddings `input` (`["a", 7]`) as one prompt. Neither reaches an engine.
+    const malformed =
+      ex.path === '/chat/completions'
+        ? messageRolesRefusal(json)
+        : ex.path === '/embeddings'
+          ? embeddingInputRefusal(json)
+          : undefined
+    if (malformed !== undefined) {
+      trace.errorKind = 'bad_request'
+      answer(ex, 400, malformed, [['Content-Type', 'application/json']])
       return
     }
     key = session.apiKey

@@ -207,3 +207,7 @@ there as an expected failure, leaves the thread stuck in "Growing the Mind..." w
 ## Regression B02: embedding-only model lookup
 
 With only Nomic or another embedding model configured, start the public server from the app. Confirm `/v1/models` lists the embedding model and a valid embedding request returns 200. Request `qa-missing` at `/v1/embeddings`: require JSON 404 with `error.code = model_not_found`, naming the unknown model. Repeat with a chat model loaded; the error must be identical. Automated binary coverage is in `test/e2e/embedding.test.ts`; the desktop scenario still requires an app built with this core revision.
+
+## Regressions B13 and B14: malformed requests to local models
+
+With a chat model (Qwen2.5 0.5B or LFM2.5 2.6B) loaded and nomic-embed-text-v1.5 configured, start the public server from the app. Send `/v1/chat/completions` with `messages: [{"role": "not-a-real-role", "content": "Reply exactly VALIDATION_TEST."}]`: require JSON 400 with `error.param = messages[0].role` and `error.code = invalid_value`, and no reply from the model. Send `/v1/embeddings` with `input` `["test", 7]`, then `["alpha", 7, "omega"]`: require JSON 400 with `error.param = input`. A string, an array of strings, an array of token ids and an array of token id arrays must still return 200. Repeat both after stopping and starting the server. Automated binary coverage is in `test/e2e/public-server.test.ts` and `test/e2e/embedding.test.ts`; the desktop scenario still requires an app built with this core revision.
