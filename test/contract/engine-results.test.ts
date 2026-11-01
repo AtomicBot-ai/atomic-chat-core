@@ -412,7 +412,7 @@ describe('the llamacpp-upstream configuration', () => {
     expect(coreMatrix(config.platforms)).toEqual([
       { platform: 'linux-x64', os: 'ubuntu-latest' },
       { platform: 'linux-arm64', os: 'ubuntu-24.04-arm' },
-      { platform: 'macos-arm64', os: 'macos-14' },
+      { platform: 'macos-arm64', os: 'macos-15' },
       { platform: 'windows-x64', os: 'windows-2022', shard: '1/2', part: '-1' },
       { platform: 'windows-x64', os: 'windows-2022', shard: '2/2', part: '-2' },
       { platform: 'windows-arm64', os: 'windows-11-arm', shard: '1/2', part: '-1' },
@@ -492,7 +492,7 @@ describe('the audio-cpp configuration', () => {
     expect(coreMatrix(audio.platforms)).toEqual([
       { platform: 'linux-x64', os: 'ubuntu-latest' },
       { platform: 'linux-arm64', os: 'ubuntu-24.04-arm' },
-      { platform: 'macos-arm64', os: 'macos-14' },
+      { platform: 'macos-arm64', os: 'macos-15' },
     ])
     for (const platform of AUDIO_PLATFORMS)
       expect(requiredLiveTests(audio.required_live_tests, platform)).toEqual(audio.required_live_tests)

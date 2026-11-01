@@ -43,7 +43,7 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: ubuntu-24.04-arm
-          - os: macos-14
+          - os: macos-15
           - { os: windows-2022, shard: 1/2 }
           - { os: windows-2022, shard: 2/2 }
           - { os: windows-11-arm, shard: 1/2 }
@@ -68,7 +68,7 @@ jobs:
       - if: runner.os == 'macOS'
         run: npm run test:coverage
         env:
-          # macos-14 has 3 vCPUs and Vitest forks one fewer worker than that by default.
+          # macos-15 has 3 vCPUs and Vitest forks one fewer worker than that by default.
           VITEST_MAX_FORKS: 3
       - if: runner.os != 'macOS'
         run: npm test -- ${{ matrix.shard && format('--shard={0}', matrix.shard) || '' }}
@@ -86,7 +86,7 @@ jobs:
       fail-fast: false
       matrix:
         # Same OS list as `unit`: the e2e suites drive the binary compiled on each of them.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-2022, windows-11-arm]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-2022, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -116,7 +116,7 @@ jobs:
           done
       - run: npm run test:e2e
         env:
-          # As in `unit`: all three of macos-14's vCPUs. The e2e suites mostly wait on the compiled
+          # As in `unit`: all three of macos-15's vCPUs. The e2e suites mostly wait on the compiled
           # binary and its fake engines. Empty elsewhere, which leaves Vitest's default.
           VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
       - uses: actions/upload-artifact@v4
@@ -132,7 +132,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-11-arm, ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        os: [windows-2022, windows-11-arm, ubuntu-latest, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
