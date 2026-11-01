@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { AudioJob } from '../contracts/index.js'
@@ -22,11 +23,11 @@ const record = (id: string, state: AudioJob['state'] = 'queued'): AudioJobRecord
 describe('AudioState', () => {
   it('answers the default output folder until one is chosen, and goes back to it', () => {
     const state = new AudioState(paths)
-    expect(state.outputDir()).toBe('/data/audios')
+    expect(state.outputDir()).toBe(join('/data', 'audios'))
     state.outputDirOverride = '/sounds'
     expect(state.outputDir()).toBe('/sounds')
     state.outputDirOverride = '   '
-    expect(state.outputDir()).toBe('/data/audios')
+    expect(state.outputDir()).toBe(join('/data', 'audios'))
   })
 
   it('arms the idle deadline from the setting, never with 0, and clears it', () => {

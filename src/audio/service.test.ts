@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { AudioJob, CoreEvents, LoadAudioModelRequest } from '../contracts/index.js'
 import type { GpuClaim } from '../runtime/shared/index.js'
@@ -50,6 +50,10 @@ const speechLoad = (over: Partial<LoadAudioModelRequest> = {}): LoadAudioModelRe
   task: 'tts',
   ...over,
 })
+
+/** A job past its queue, on a loaded machine too: a fixed pause was too short on Windows runners. */
+const generating = (w: { service: AudioService }, id: string) =>
+  vi.waitFor(() => expect(w.service.getJob(id)?.progress?.phase).toBe('generating'))
 
 async function world(over: Partial<AudioServiceDeps> = {}, options: { install?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'atomic-core-audio-service-'))
@@ -184,11 +188,11 @@ describe('jobs through the service', () => {
     await w.service.loadModel(speechLoad())
     w.http.reply.current = hangUntilAborted
     const first = await w.service.generate('speech', { text: 'long' })
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await generating(w, first.id)
     expect(await w.service.cancelJob(first.id)).toEqual({ cancelled: true, serverStopped: true })
     const second = await w.service.generate('speech', { text: 'long again' })
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(w.handles).toHaveLength(2)
+    await vi.waitFor(() => expect(w.handles).toHaveLength(2))
+    await generating(w, second.id)
     await w.service.unloadModel()
     expect((w.service.getJob(second.id) as AudioJob).state).toBe('cancelled')
     expect((await w.service.status()).model.state).toBe('unloaded')
@@ -223,7 +227,7 @@ describe('speechBackend', () => {
 
     w.http.reply.current = hangUntilAborted
     const long = await backend.start({ text: 'long' })
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await generating(w, long.id)
     await backend.cancel(long.id)
     expect(await long.done).toMatchObject({ ok: false, error: { code: 'CANCELLED' } })
 
@@ -312,7 +316,7 @@ describe('engineHost', () => {
     await w.service.loadModel(speechLoad())
     w.http.reply.current = hangUntilAborted
     const job = await w.service.generate('speech', { text: 'long' })
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await generating(w, job.id)
     const newer = await installBuild(w.layout.audio.backendsDir, 'v0.9.4-a1b2c3d4', 'metal', 2)
     await host.exclusive(() => host.activate(newer, false))
     expect(w.service.getJob(job.id)?.state).toBe('cancelled')
@@ -374,7 +378,7 @@ describe('GPU residency', () => {
 
     w.http.reply.current = hangUntilAborted
     const job = await w.service.generate('speech', { text: 'long' })
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await generating(w, job.id)
     expect(w.service.gpuOccupancy()).toEqual([
       {
         model_id: 'kokoro-82m:q8_0',
@@ -401,15 +405,16 @@ describe('GPU residency', () => {
       },
     })
     const loading = w.service.loadModel(speechLoad({ modelId: 'music', mode: 'music', task: 'gen' }))
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(w.service.gpuOccupancy()).toEqual([
-      { model_id: 'music', cards: [], auxiliary: false, state: 'loading' },
-    ])
+    await vi.waitFor(() =>
+      expect(w.service.gpuOccupancy()).toEqual([
+        { model_id: 'music', cards: [], auxiliary: false, state: 'loading' },
+      ])
+    )
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
     release()
     await loading
     void w.service.loadModel(speechLoad())
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(w.service.gpuOccupancy().map((o) => o.state)).toEqual(['stopping'])
+    await vi.waitFor(() => expect(w.service.gpuOccupancy().map((o) => o.state)).toEqual(['stopping']))
   })
 
   it('stops a claim waiting for its turn when an unload is asked for', async () => {
@@ -459,11 +464,10 @@ describe('shutdown', () => {
     await w.service.loadModel(speechLoad())
     w.http.reply.current = hangUntilAborted
     const job = await w.service.generate('speech', { text: 'long' })
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await generating(w, job.id)
     await w.service.shutdown()
     expect(w.handles[0]?.terminated).toBe(1)
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(w.service.getJob(job.id)?.state).toBe('cancelled')
+    await vi.waitFor(() => expect(w.service.getJob(job.id)?.state).toBe('cancelled'))
     await expect(w.service.generate('speech', { text: 'x' })).rejects.toMatchObject({
       code: 'ENGINE_CRASHED',
     })
