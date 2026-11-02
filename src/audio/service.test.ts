@@ -146,14 +146,18 @@ describe('loadModel', () => {
   })
 
   it('stops a load in flight when the model is unloaded', async () => {
+    let entered!: () => void
+    const spawning = new Promise<void>((resolve) => (entered = resolve))
     const w = await world({
-      spawn: (_spec, signal) =>
-        new Promise((_resolve, reject) =>
+      spawn: (_spec, signal) => {
+        entered()
+        return new Promise((_resolve, reject) =>
           signal?.addEventListener('abort', () => reject(audioError('CANCELLED', 'stopped')), { once: true })
-        ),
+        )
+      },
     })
     const loading = w.service.loadModel(speechLoad()).catch((error: unknown) => error)
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await spawning
     await w.service.unloadModel()
     expect(await loading).toMatchObject({ code: 'CANCELLED' })
     expect((await w.service.status()).model.state).toBe('unloaded')
@@ -420,16 +424,20 @@ describe('GPU residency', () => {
   })
 
   it('stops a claim waiting for its turn when an unload is asked for', async () => {
+    let entered!: () => void
+    const claiming = new Promise<void>((resolve) => (entered = resolve))
     const w = await world({
-      claimGpu: (_claim, signal) =>
-        new Promise((_resolve, reject) =>
+      claimGpu: (_claim, signal) => {
+        entered()
+        return new Promise((_resolve, reject) =>
           signal?.addEventListener('abort', () => reject(audioError('CANCELLED', 'claim cancelled')), {
             once: true,
           })
-        ),
+        )
+      },
     })
     const loading = w.service.loadModel(speechLoad()).catch((error: unknown) => error)
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await claiming
     await w.service.unloadModel()
     expect(await loading).toMatchObject({ code: 'CANCELLED' })
     expect((await w.service.status()).model.state).toBe('unloaded')
