@@ -368,12 +368,16 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
         })
       )
       expect(configured.idleUnloadSecs).toBe(1)
-      // The idle task looks every 30 s; a one-second allowance has expired by then.
-      await waitFor(
-        () => events.some((e) => e.event === 'audio:state' && e.data['reason'] === 'idle'),
-        'the idle unload',
-        45_000
-      )
+      // The idle task looks every 30 s; a one-second allowance has expired by then. `unloading`
+      // carries the same reason but comes before the server is stopped: wait for `unloaded`.
+      const idleUnloaded = () =>
+        events.some(
+          (e) =>
+            e.event === 'audio:state' &&
+            e.data['reason'] === 'idle' &&
+            (e.data['status'] as { model?: { state?: string } } | undefined)?.model?.state === 'unloaded'
+        )
+      await waitFor(idleUnloaded, 'the idle unload', 45_000)
       expect(alive(pid)).toBe(false)
       expect((await status(ready)).model.state).toBe('unloaded')
       expect(journalled(ctx)).toEqual([])
