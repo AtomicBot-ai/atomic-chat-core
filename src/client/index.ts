@@ -5,3 +5,5 @@
  */
 export { CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 export * from './control-client.js'
+
+export * from './model-catalog.js'

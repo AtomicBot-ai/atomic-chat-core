@@ -15,6 +15,7 @@ describe('Hugging Face discovery', () => {
     const fetchImpl: typeof fetch = async (input, init) => {
       request = new Request(input, init)
       return Response.json({
+        sha: 'a'.repeat(40),
         siblings: [
           { rfilename: 'large.Q8_0.gguf', size: 800 },
           { rfilename: 'small.Q4_K_XL.gguf', lfs: { size: 400, sha256: 'abc' } },
@@ -25,10 +26,15 @@ describe('Hugging Face discovery', () => {
       })
     }
     const files = await fetchHfGgufFiles('owner/repo', { fetch: fetchImpl, token: 'secret' })
-    expect(request?.url).toContain('/api/models/owner/repo?blobs=true&files_metadata=true')
+    expect(request?.url).toContain('/api/models/owner/repo/revision/main?blobs=true&files_metadata=true')
     expect(request?.headers.get('authorization')).toBe('Bearer secret')
     expect(files.map((file) => file.filename)).toEqual(['small.Q4_K_XL.gguf', 'large.Q8_0.gguf'])
-    expect(files[0]).toMatchObject({ size: 400, sha256: 'abc' })
+    expect(files[0]).toMatchObject({
+      size: 400,
+      sha256: 'abc',
+      revision: 'a'.repeat(40),
+      downloadUrl: `https://huggingface.co/owner/repo/resolve/${'a'.repeat(40)}/small.Q4_K_XL.gguf`,
+    })
     expect(chooseDefaultHfFile(files).filename).toBe('small.Q4_K_XL.gguf')
     expect(chooseDefaultHfFile(files.filter((file) => !file.filename.includes('Q4_K_XL'))).filename).toBe(
       'large.Q8_0.gguf'
@@ -40,7 +46,31 @@ describe('Hugging Face discovery', () => {
       fetchHfGgufFiles('owner/gated', { fetch: async () => new Response('', { status: 403 }) })
     ).rejects.toMatchObject({ code: 'IO_ERROR', details: expect.stringContaining('HF_TOKEN') })
     await expect(
-      fetchHfGgufFiles('owner/empty', { fetch: async () => Response.json({ siblings: [] }) })
+      fetchHfGgufFiles('owner/empty', {
+        fetch: async () => Response.json({ sha: 'a'.repeat(40), siblings: [] }),
+      })
     ).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
+  })
+})
+
+describe('immutable Hugging Face revisions', () => {
+  it('reads the requested revision and rejects an absent or mismatched commit', async () => {
+    const revision = 'b'.repeat(40)
+    const files = await fetchHfGgufFiles('owner/repo', {
+      revision,
+      fetch: async (url) => {
+        expect(String(url)).toContain(`/revision/${revision}?`)
+        return Response.json({ sha: revision, siblings: [{ rfilename: 'm.gguf', size: 4 }] })
+      },
+    })
+    expect(files[0]?.downloadUrl).toContain(`/resolve/${revision}/`)
+    for (const sha of [undefined, 'main', 'a'.repeat(40)]) {
+      await expect(
+        fetchHfGgufFiles('owner/repo', {
+          revision,
+          fetch: async () => Response.json({ sha, siblings: [{ rfilename: 'm.gguf', size: 4 }] }),
+        })
+      ).rejects.toMatchObject({ code: 'IO_ERROR' })
+    }
   })
 })

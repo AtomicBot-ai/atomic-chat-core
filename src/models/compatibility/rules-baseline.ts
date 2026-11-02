@@ -1,3 +1,4 @@
+// models/atomic-prism-models.json is a deprecated editable catalog, generated from catalog.json. Its compatibility-export contract remains a supported core input.
 // Offline snapshot of atomic-chat-conf/models/atomic-prism-models.json (without `$schema`): what the
 // core decides with when neither the live rules nor their disk cache are available. Re-copy it from
 // conf when the rules change there; a live document always wins.
