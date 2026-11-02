@@ -51,10 +51,12 @@ export class AudioState {
   capabilities: AudioCapabilities | undefined
   /** A server whose GPU claim succeeded and that is starting: it holds the GPU before it is a session. */
   starting: AudioServerSpec | undefined
-  /** A server being taken down whose exit is not confirmed yet: no longer the session, still on the GPU. */
+  /** A teardown in flight, through child exit and journal removal; the next load waits for it. */
   stopping: { spec: AudioServerSpec; done: Promise<void> } | undefined
   modelState: AudioModelState = 'unloaded'
   modelError: AudioErrorBody | undefined
+  /** A load or unload supersedes the state changes of an older asynchronous teardown. */
+  modelGeneration = 0
   activeJobId: string | undefined
   /** Set while the owner shuts down: nothing starts any more. */
   closing = false

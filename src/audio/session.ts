@@ -155,6 +155,7 @@ export async function loadFromSpec(
   signal?: AbortSignal
 ): Promise<LoadedAudioModel> {
   const { state } = deps
+  state.modelGeneration += 1
   state.setModelState('loading')
   await emitAudioState(deps, reason)
 
@@ -204,29 +205,35 @@ export async function loadFromSpec(
  */
 export async function takeDownSession(deps: AudioSessionDeps, graceMs?: number): Promise<boolean> {
   const { state } = deps
+  // Another caller may already be stopping this server outside the load lock (a cancel or crash).
+  while (state.stopping) await state.stopping.done
   const session = state.session
   if (!session) return false
   state.session = undefined
   // Still on the GPU until its exit is confirmed: GPU residency sees it as stopping until then.
-  const exit = session.server.terminate(graceMs).then(() => undefined)
-  const stopping = { spec: session.spec, done: exit.catch(() => undefined) }
+  const stopping = { spec: session.spec, done: Promise.resolve() }
   state.stopping = stopping
-  try {
-    await exit
-  } catch (error) {
-    // Not confirmed: a server that may still be running stays the session, never forgotten.
-    if (session.server.exitStatus() === undefined && state.session === undefined) state.session = session
-    throw error
-  } finally {
-    if (state.stopping === stopping) state.stopping = undefined
-  }
-  await deps.onServerGone?.(session.server.pid)
+  const exit = Promise.resolve().then(async () => {
+    try {
+      await session.server.terminate(graceMs)
+      await deps.onServerGone?.(session.server.pid)
+    } catch (error) {
+      // Not confirmed: a server that may still be running stays the session, never forgotten.
+      if (session.server.exitStatus() === undefined && state.session === undefined) state.session = session
+      throw error
+    } finally {
+      if (state.stopping === stopping) state.stopping = undefined
+    }
+  })
+  stopping.done = exit.catch(() => undefined)
+  await exit
   return true
 }
 
 /** Explicit unload: stop the server, forget the spec, report `unloaded`. */
 export async function unloadSession(deps: AudioSessionDeps, reason: string): Promise<void> {
   const { state } = deps
+  state.modelGeneration += 1
   if (state.modelState === 'loaded') {
     state.setModelState('unloading')
     await emitAudioState(deps, reason)
@@ -261,7 +268,10 @@ export async function stopKeepingSpec(
   error?: AudioErrorBody
 ): Promise<void> {
   const { state } = deps
+  const generation = state.modelGeneration
   await takeDownSession(deps)
+  // A new load/unload owns the state now; this teardown only stopped its original server.
+  if (state.closing || state.modelGeneration !== generation) return
   state.clearIdle()
   if (error) state.setModelState('failed', error)
   else state.setModelState('unloaded')

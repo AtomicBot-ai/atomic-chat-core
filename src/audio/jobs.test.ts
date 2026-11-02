@@ -30,7 +30,7 @@ import {
   withoutInlineAudio,
 } from './jobs.js'
 import type { AudioJobDeps } from './jobs.js'
-import { loadFromSpec } from './session.js'
+import { loadFromSpec, unloadSession } from './session.js'
 import { AudioState } from './state.js'
 import type { AudioServerSpec } from './types.js'
 
@@ -102,6 +102,30 @@ async function world(spec: Partial<AudioServerSpec> = {}, loaded = true): Promis
 const errorEvents = (w: World) => w.events.filter((e) => e.name === 'audio:error').map((e) => e.payload)
 
 describe('a speech job', () => {
+  it.each(['replace', 'unload', 'shutdown'] as const)(
+    'refuses a reference voice read overtaken by %s before registering or sending a job',
+    async (change) => {
+      const w = await world()
+      let finishRead!: (bytes: Buffer) => void
+      w.deps.readSource = () => new Promise<Buffer>((resolve) => (finishRead = resolve))
+      const starting = startAudioJob(w.deps, 'speech', {
+        text: 'Hello',
+        voiceRef: { path: '/reference.wav' },
+      }).catch((error: unknown) => error)
+      if (change === 'shutdown') w.state.closing = true
+      else {
+        await unloadSession(w.deps, 'unload')
+        if (change === 'replace')
+          await loadFromSpec(w.deps, sampleAudioSpec({ modelId: 'another-voice' }), 'load')
+      }
+      finishRead(sampleWav())
+      expect(await starting).toMatchObject({ code: change === 'shutdown' ? 'ENGINE_CRASHED' : 'CANCELLED' })
+      expect(w.state.activeJobId).toBeUndefined()
+      expect(w.http.posts).toEqual([])
+      expect(w.events.filter((event) => event.name === 'audio:job')).toEqual([])
+    }
+  )
+
   it('goes through its phases, sends the speech request, saves the clip and re-arms the idle timer', async () => {
     const w = await world()
     const { job, done } = await startAudioJob(w.deps, 'speech', {
