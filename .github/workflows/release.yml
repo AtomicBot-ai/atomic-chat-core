@@ -100,7 +100,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
-        with: { node-version: 22 }
+        with: { node-version: 22, registry-url: 'https://registry.npmjs.org/' }
       - run: npm config set registry https://registry.npmjs.org/
       - run: bun install --frozen-lockfile
 
