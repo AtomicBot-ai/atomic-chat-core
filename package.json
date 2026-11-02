@@ -1,6 +1,6 @@
 {
   "name": "@atomic-chat/core",
-  "version": "0.20.6",
+  "version": "0.20.7",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AtomicBot-ai/atomic-chat-core.git"

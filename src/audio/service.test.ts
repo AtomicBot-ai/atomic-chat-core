@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { AudioJob, CoreEvents, LoadAudioModelRequest } from '../contracts/index.js'
 import type { GpuClaim } from '../runtime/shared/index.js'
+import { isProcessAlive } from '../runtime/shared/index.js'
+import { installFakeAudioEngine, writeFakeAudioModel } from '../../test/helpers/fake-audiocpp-server.js'
 import {
   fakeHandle,
   hangUntilAborted,
@@ -144,14 +146,18 @@ describe('loadModel', () => {
   })
 
   it('stops a load in flight when the model is unloaded', async () => {
+    let entered!: () => void
+    const spawning = new Promise<void>((resolve) => (entered = resolve))
     const w = await world({
-      spawn: (_spec, signal) =>
-        new Promise((_resolve, reject) =>
+      spawn: (_spec, signal) => {
+        entered()
+        return new Promise((_resolve, reject) =>
           signal?.addEventListener('abort', () => reject(audioError('CANCELLED', 'stopped')), { once: true })
-        ),
+        )
+      },
     })
     const loading = w.service.loadModel(speechLoad()).catch((error: unknown) => error)
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await spawning
     await w.service.unloadModel()
     expect(await loading).toMatchObject({ code: 'CANCELLED' })
     expect((await w.service.status()).model.state).toBe('unloaded')
@@ -418,16 +424,20 @@ describe('GPU residency', () => {
   })
 
   it('stops a claim waiting for its turn when an unload is asked for', async () => {
+    let entered!: () => void
+    const claiming = new Promise<void>((resolve) => (entered = resolve))
     const w = await world({
-      claimGpu: (_claim, signal) =>
-        new Promise((_resolve, reject) =>
+      claimGpu: (_claim, signal) => {
+        entered()
+        return new Promise((_resolve, reject) =>
           signal?.addEventListener('abort', () => reject(audioError('CANCELLED', 'claim cancelled')), {
             once: true,
           })
-        ),
+        )
+      },
     })
     const loading = w.service.loadModel(speechLoad()).catch((error: unknown) => error)
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    await claiming
     await w.service.unloadModel()
     expect(await loading).toMatchObject({ code: 'CANCELLED' })
     expect((await w.service.status()).model.state).toBe('unloaded')
@@ -459,6 +469,91 @@ describe('GPU residency', () => {
 })
 
 describe('shutdown', () => {
+  it.skipIf(process.platform === 'win32')(
+    'confirms a real child exits while its model is loading',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'atomic-core-audio-shutdown-'))
+      dirs.push(dir)
+      await installFakeAudioEngine(dir, { loadMs: 30_000 })
+      await writeFakeAudioModel(dir)
+      let spawned!: (pid: number) => void
+      const entered = new Promise<number>((resolve) => (spawned = resolve))
+      const service = new AudioService({
+        paths: dataLayout(dir).audio,
+        emit: () => {},
+        log: () => {},
+        journal: { add: async (pid) => spawned(pid), remove: async () => {} },
+      })
+      const loading = service.loadModel(speechLoad()).catch((error: unknown) => error)
+      const pid = await entered
+      expect(isProcessAlive(pid)).toBe(true)
+      await service.shutdown()
+      const aliveAfterShutdown = isProcessAlive(pid)
+      expect(await loading).toMatchObject({ code: 'CANCELLED' })
+      expect(aliveAfterShutdown).toBe(false)
+    }
+  )
+
+  it('waits for a cancelled load to confirm its child is gone', async () => {
+    let spawned!: () => void
+    const entered = new Promise<void>((resolve) => (spawned = resolve))
+    let finishStop!: () => void
+    const stopped = new Promise<void>((resolve) => (finishStop = resolve))
+    let childAlive = true
+    const w = await world({
+      spawn: async (_spec, signal) => {
+        spawned()
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener('abort', () => resolve(), { once: true })
+        )
+        await stopped
+        childAlive = false
+        throw audioError('CANCELLED', 'The child has stopped.')
+      },
+    })
+    const loading = w.service.loadModel(speechLoad()).catch((error: unknown) => error)
+    await entered
+    let returnedWithLiveChild: boolean | undefined
+    const closing = w.service.shutdown().then(() => (returnedWithLiveChild = childAlive))
+    // Let an incorrectly early shutdown settle while the child's exit is held.
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    finishStop()
+    await closing
+    expect(await loading).toMatchObject({ code: 'CANCELLED' })
+    expect(returnedWithLiveChild).toBe(false)
+    expect(w.service.gpuOccupancy()).toEqual([])
+  })
+
+  it('waits for an already stopping server and its journal cleanup', async () => {
+    let removing!: () => void
+    const entered = new Promise<void>((resolve) => (removing = resolve))
+    let finishRemove!: () => void
+    const removed = new Promise<void>((resolve) => (finishRemove = resolve))
+    let journalled = true
+    const w = await world({
+      journal: {
+        add: async () => {},
+        remove: async () => {
+          removing()
+          await removed
+          journalled = false
+        },
+      },
+    })
+    await w.service.loadModel(speechLoad())
+    w.http.reply.current = hangUntilAborted
+    const job = await w.service.generate('speech', { text: 'long' })
+    await generating(w, job.id)
+    const cancelling = w.service.cancelJob(job.id)
+    await entered
+    let returnedWithJournal: boolean | undefined
+    const closing = w.service.shutdown().then(() => (returnedWithJournal = journalled))
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    finishRemove()
+    await Promise.all([closing, cancelling])
+    expect(returnedWithJournal).toBe(false)
+  })
+
   it('stops the job and the server, and starts nothing after', async () => {
     const w = await world()
     await w.service.loadModel(speechLoad())

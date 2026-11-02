@@ -241,6 +241,12 @@ export async function startAudioJob(
       ? await resolveVoiceRef(request.voiceRef, deps.readSource)
       : undefined
   // Reading the reference took a moment: another job may have started meanwhile.
+  if (state.closing) throw audioError('ENGINE_CRASHED', 'The audio engine is shutting down.')
+  if (state.spec !== spec)
+    throw audioError(
+      'CANCELLED',
+      'The audio model changed while the reference voice was being read. Try again.'
+    )
   busy()
 
   const id = randomUUID().replaceAll('-', '')

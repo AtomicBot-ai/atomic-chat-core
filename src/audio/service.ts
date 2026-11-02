@@ -21,7 +21,7 @@ import type {
   LoadedAudioModel,
 } from '../contracts/index.js'
 import { AsyncMutex, samePath } from '../diffusion/index.js'
-import type { EngineHost } from '../engine-builds/service.js'
+import type { EngineHost } from '../engine-builds/index.js'
 import type { AudioSpeechBackend } from '../server/index.js'
 import type { BackendOutputSink, GpuClaimHook, GpuOccupancy } from '../runtime/shared/index.js'
 import { resolveAudioBackend } from './args.js'
@@ -336,6 +336,7 @@ export class AudioService {
       this.loading = loading
       try {
         if (state.closing) throw audioError('ENGINE_CRASHED', 'The audio engine is shutting down.')
+        state.modelGeneration += 1
         if (state.activeJobId !== undefined)
           await cancelAudioJob(this.deps, state.activeJobId).catch(() => undefined)
         await takeDownSession(this.deps)
@@ -498,6 +499,7 @@ export class AudioService {
         record.cancel.abort.abort()
       }
     }
-    await shutdownAudioSession(this.deps)
+    // Loads and respawns own this lock until their aborted spawn has cleaned up its child.
+    await this.deps.loadLock.run(() => shutdownAudioSession(this.deps))
   }
 }

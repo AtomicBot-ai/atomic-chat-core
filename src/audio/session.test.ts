@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { AudioStatus, CoreEvents } from '../contracts/index.js'
@@ -183,6 +183,46 @@ describe('loadFromSpec', () => {
 })
 
 describe('takeDownSession, unloadSession, stopKeepingSpec', () => {
+  it.each(['cancelled', 'crashed'])(
+    'keeps a replacement load loading when an old %s teardown finishes',
+    async (reason) => {
+      const w = await world()
+      await loadFromSpec(w.deps, sampleAudioSpec(), 'load')
+      let removing!: () => void
+      const entered = new Promise<void>((resolve) => (removing = resolve))
+      let finishRemove!: () => void
+      const removed = new Promise<void>((resolve) => (finishRemove = resolve))
+      w.deps.onServerGone = async () => {
+        removing()
+        await removed
+      }
+      const stopping = stopKeepingSpec(
+        w.deps,
+        reason,
+        reason === 'crashed' ? { code: 'ENGINE_CRASHED', message: 'old server failed' } : undefined
+      )
+      await entered
+      let finishSpawn!: () => void
+      const ready = new Promise<void>((resolve) => (finishSpawn = resolve))
+      const spawn = w.deps.spawn
+      w.deps.spawn = async (spec, signal) => {
+        await ready
+        return spawn(spec, signal)
+      }
+      const loading = loadFromSpec(w.deps, sampleAudioSpec({ modelId: 'replacement' }), 'replacement')
+      await vi.waitFor(() => expect(w.reasons()).toContain('replacement'))
+      finishRemove()
+      await stopping
+      const duringLoad = w.state.modelState
+      finishSpawn()
+      await loading
+      expect(duringLoad).toBe('loading')
+      expect(w.reasons()).not.toContain(reason)
+      expect(w.state.session?.info.modelId).toBe('replacement')
+      expect(w.state.modelState).toBe('loaded')
+    }
+  )
+
   it('stops the server, forgets it, and keeps or drops the spec as asked', async () => {
     const w = await world()
     await loadFromSpec(w.deps, sampleAudioSpec(), 'load')

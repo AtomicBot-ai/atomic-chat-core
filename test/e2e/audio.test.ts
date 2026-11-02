@@ -107,6 +107,28 @@ async function loadedOwner(fake: FakeAudioOptions = {}, model: Record<string, un
 describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
   'audio generation on the compiled core',
   () => {
+    it('waits for a loading audio server to stop before the owner exits', async () => {
+      await installFakeAudioEngine(ctx.dataFolder, { pidFile: ctx.pidFile, loadMs: 30_000 })
+      await writeFakeAudioModel(ctx.dataFolder)
+      const { ready, child } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
+      const loading = control(ctx, ready, '/audio/model/load', {
+        method: 'POST',
+        body: JSON.stringify(SPEECH),
+      }).then(
+        () => undefined,
+        () => undefined
+      )
+      await waitFor(() => existsSync(ctx.pidFile), 'the audio server to spawn')
+      const pid = Number((await readFile(ctx.pidFile, 'utf8')).trim().split('\n')[0])
+      expect(alive(pid)).toBe(true)
+      const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+      child.kill('SIGTERM')
+      await exited
+      await loading
+      expect(alive(pid)).toBe(false)
+      expect(journalled(ctx)).toEqual([])
+    })
+
     it('refuses a load without an engine, then loads, speaks with events, fills the gallery and unloads', async () => {
       const { ready: bare } = await core.startDaemon(ctx.dataFolder, ctx.daemons)
       expect(await status(bare)).toMatchObject({
