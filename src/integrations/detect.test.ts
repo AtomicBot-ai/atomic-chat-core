@@ -42,10 +42,11 @@ describe('detectAgent', () => {
       expect((await detectAgent(agent('openclaw'), deps)).installed).toBe(false)
       await rm(launcher, { recursive: true })
       await writeFile(launcher, '#!/bin/sh\n')
+      const candidate = `${home}/.local/bin/openclaw`
       expect(await detectAgent(agent('openclaw'), deps)).toEqual({
         installed: true,
-        path: launcher,
-        program: launcher,
+        path: candidate,
+        program: candidate,
       })
     } finally {
       await rm(home, { recursive: true, force: true })
