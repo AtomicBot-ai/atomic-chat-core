@@ -335,7 +335,7 @@ describe('the sd-cpp configuration', () => {
     expect(coreMatrix(config.platforms)).toEqual([
       { platform: 'linux-x64', os: 'ubuntu-latest' },
       { platform: 'linux-arm64', os: 'ubuntu-24.04-arm' },
-      { platform: 'macos-arm64', os: 'macos-14' },
+      { platform: 'macos-arm64', os: 'macos-15' },
     ])
     for (const { platform } of config.platforms)
       expect(requiredLiveTests(config.required_live_tests, platform)).toEqual(config.required_live_tests)

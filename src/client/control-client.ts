@@ -71,6 +71,18 @@ import type {
   ImageGenerateRequest,
   ImageJob,
   LoadDiffusionModelRequest,
+  AudioCancelResult,
+  AudioCapabilities,
+  AudioConfig,
+  AudioGalleryListOptions,
+  AudioGalleryPage,
+  AudioGenerateRequest,
+  AudioJob,
+  AudioMode,
+  AudioModelFile,
+  AudioStatus,
+  LoadAudioModelRequest,
+  LoadedAudioModel,
   VideoCapabilities,
   VideoEstimate,
   VideoGalleryPage,
@@ -615,6 +627,71 @@ export class CoreClient {
       method: 'PUT',
       body: JSON.stringify({ png: pngBase64 }),
     })
+  }
+
+  // --- audio generation on audio.cpp: speech, music and sound effects ---------------------------
+
+  audioStatus(): Promise<AudioStatus> {
+    return this.call('/audio/status')
+  }
+
+  /** Optional settings: the output folder (`null` restores `<data>/audios`) and the idle unload. */
+  configureAudio(config: AudioConfig): Promise<AudioStatus> {
+    return this.call('/audio/config', { method: 'PUT', body: JSON.stringify(config) })
+  }
+
+  /** An empty path restores `<data>/audios`. */
+  setAudioOutputDir(path: string): Promise<AudioStatus> {
+    return this.call('/audio/output-dir', { method: 'PUT', body: JSON.stringify({ path }) })
+  }
+
+  async listAudioModelFiles(): Promise<AudioModelFile[]> {
+    return (await this.call<{ files: AudioModelFile[] }>('/audio/model-files')).files
+  }
+
+  /** A file named relative to `<data>/audio/models`. */
+  async deleteAudioModelFile(relativePath: string): Promise<void> {
+    await this.call('/audio/model-files', { method: 'DELETE', body: JSON.stringify({ relativePath }) })
+  }
+
+  /** Answers once the server serves the model. */
+  loadAudioModel(request: LoadAudioModelRequest): Promise<LoadedAudioModel> {
+    return this.call('/audio/model/load', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  async unloadAudioModel(): Promise<void> {
+    await this.call('/audio/model/unload', { method: 'POST' })
+  }
+
+  /** Reset the idle-unload deadline without generating. */
+  async touchAudioIdle(): Promise<void> {
+    await this.call('/audio/idle/touch', { method: 'POST' })
+  }
+
+  audioCapabilities(): Promise<AudioCapabilities> {
+    return this.call('/audio/capabilities')
+  }
+
+  /** Answers the job at once; its phases and outcome arrive as `audio:job` events. */
+  generateAudio(mode: AudioMode, request: AudioGenerateRequest): Promise<AudioJob> {
+    return this.call('/audio/jobs', { method: 'POST', body: JSON.stringify({ mode, request }) })
+  }
+
+  async audioJob(id: string): Promise<AudioJob | null> {
+    return (await this.call<{ job: AudioJob | null }>(`/audio/jobs/${encodeURIComponent(id)}`)).job
+  }
+
+  cancelAudioJob(id: string): Promise<AudioCancelResult> {
+    return this.call(`/audio/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+  }
+
+  audioGallery(options: AudioGalleryListOptions): Promise<AudioGalleryPage> {
+    const query = new URLSearchParams({ offset: String(options.offset), limit: String(options.limit) })
+    return this.call(`/audio/gallery?${query.toString()}`)
+  }
+
+  async deleteAudioGalleryItem(id: string): Promise<void> {
+    await this.call(`/audio/gallery/${encodeURIComponent(id)}`, { method: 'DELETE' })
   }
 
   /** Restart a poisoned engine at the context it already has. */

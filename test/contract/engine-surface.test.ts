@@ -483,3 +483,34 @@ describe('golden: b11463 → b11617', () => {
     )
   })
 })
+
+describe('report.md for each engine the check knows', () => {
+  const report = buildReport(contract, goldenInputs(), { now: '2026-10-15T00:00:00.000Z' })
+  const heading = (engine: string | undefined, source: string) =>
+    renderMarkdown({
+      ...report,
+      engine,
+      inputs: { ...report.inputs, pin_resolution: { source, tag: 'x' } },
+    })
+      .split('\n')
+      .filter((line) => line.startsWith('# ') || line.startsWith('- Pin: '))
+      .map((line) => line.replace(/ \(conf `[0-9a-f]+`\)$/, ''))
+
+  it('names the engine and where its pin came from', () => {
+    expect(heading('llamacpp-upstream', 'list')).toEqual([
+      '# llama.cpp surface: b11617 against b11463 — PASS',
+      '- Pin: the release list',
+    ])
+    expect(heading('atomic-prism', 'prism-manifest')[1]).toBe('- Pin: prism-manifest')
+    expect(heading('sd-cpp', 'sdcpp-manifest')).toEqual([
+      '# stable-diffusion.cpp surface: b11617 against b11463 — PASS',
+      "- Pin: conf's sd.cpp manifest",
+    ])
+    expect(heading('audio-cpp', 'audiocpp-manifest')).toEqual([
+      '# audio.cpp surface: b11617 against b11463 — PASS',
+      "- Pin: conf's audio.cpp manifest",
+    ])
+    expect(heading(undefined, 'override')[1]).toBe('- Pin: given')
+    expect(heading(undefined, 'legacy')[1]).toBe('- Pin: the legacy manifest')
+  })
+})

@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolvePins, resolvePrismPins, resolveSdcppPins } from './engine-pin.mjs'
+import { resolveAudiocppPins, resolvePins, resolvePrismPins, resolveSdcppPins } from './engine-pin.mjs'
 
 export const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 export const CONF_REPO = 'AtomicBot-ai/atomic-chat-conf'
@@ -18,6 +18,8 @@ export const CONF_FILES = {
   prism: 'backends/atomic-prism-manifest.json',
   sdcpp: 'backends/sdcpp-manifest.json',
   sdcppStaging: 'backends/sdcpp-manifest.staging.json',
+  audiocpp: 'backends/audiocpp-manifest.json',
+  audiocppStaging: 'backends/audiocpp-manifest.staging.json',
 }
 
 const TOKEN = () => process.env.GITHUB_TOKEN || process.env.GH_TOKEN
@@ -47,11 +49,22 @@ export function engineContract(config) {
 /** The engine's release tags: `b11617` unless the config names its own (`tag_pattern`). */
 export const engineTagRe = (config) => new RegExp(config.tag_pattern ?? '^b\\d+$')
 
-/** The engine's pin per platform, from the conf file core reads it from (`pins` in the config). */
+/** The pin sources a config may name (`pins`), each reading conf's manifest of that engine. */
+const PIN_SOURCES = {
+  'prism-manifest': (conf, coreVersion) => resolvePrismPins({ manifest: conf.prism, coreVersion }),
+  'sdcpp-manifest': (conf, coreVersion) => resolveSdcppPins({ manifest: conf.sdcpp, coreVersion }),
+  'audiocpp-manifest': (conf, coreVersion) => resolveAudiocppPins({ manifest: conf.audiocpp, coreVersion }),
+}
+
+/**
+ * The engine's pin per platform, from the conf file core reads it from (`pins` in the config);
+ * without one, conf's llama.cpp release list.
+ */
 export function enginePins(config, conf, coreVersion) {
-  if (config.pins === 'prism-manifest') return resolvePrismPins({ manifest: conf.prism, coreVersion })
-  if (config.pins === 'sdcpp-manifest') return resolveSdcppPins({ manifest: conf.sdcpp, coreVersion })
-  return resolvePins({ releases: conf.releases, manifest: conf.manifest, coreVersion })
+  const pins = PIN_SOURCES[config.pins]
+  return pins
+    ? pins(conf, coreVersion)
+    : resolvePins({ releases: conf.releases, manifest: conf.manifest, coreVersion })
 }
 
 /** `GET https://api.github.com<path>` as JSON; `null` on a 404 when `allow404`. */
@@ -98,8 +111,8 @@ export function git(cwd, args, options = {}) {
 }
 
 /**
- * conf's release list, legacy manifest, mirror script, PrismML manifest and both sd.cpp manifests
- * (the live one and the staging one a candidate waits in) at one commit: a local checkout (`dir`),
+ * conf's release list, legacy manifest, mirror script, PrismML manifest and both sd.cpp and both
+ * audio.cpp manifests (the live one and the staging one a candidate waits in) at one commit: a local checkout (`dir`),
  * or a ref of AtomicBot-ai/atomic-chat-conf resolved to its sha first, so one run reads one version.
  * A file that cannot be read is `undefined` and named in `errors`; `docs` holds each JSON file by
  * path.
@@ -142,12 +155,16 @@ export async function loadConf({ dir, ref }) {
   conf.prism = await json(CONF_FILES.prism)
   conf.sdcpp = await json(CONF_FILES.sdcpp)
   conf.sdcppStaging = await json(CONF_FILES.sdcppStaging)
+  conf.audiocpp = await json(CONF_FILES.audiocpp)
+  conf.audiocppStaging = await json(CONF_FILES.audiocppStaging)
   conf.docs = {
     [CONF_FILES.releases]: conf.releases,
     [CONF_FILES.manifest]: conf.manifest,
     [CONF_FILES.prism]: conf.prism,
     [CONF_FILES.sdcpp]: conf.sdcpp,
     [CONF_FILES.sdcppStaging]: conf.sdcppStaging,
+    [CONF_FILES.audiocpp]: conf.audiocpp,
+    [CONF_FILES.audiocppStaging]: conf.audiocppStaging,
   }
   return conf
 }
@@ -209,7 +226,8 @@ export function fetchBuild({ tag, repo, out, model = true, engine, models }) {
 /**
  * Run each of `invocations` (the contract's `-h`, `--version`, `--list-devices`) beside the binary's
  * libraries, as core does; the output is stdout, a newline, stderr — the shape `runHelp` reads. An
- * invocation naming a `bin` (sd.cpp's `sd-cli`) runs that executable from `bin`'s folder.
+ * invocation naming a `bin` (sd.cpp's `sd-cli`, audio.cpp's `audiocpp_server`) runs that executable
+ * from `bin`'s folder.
  */
 export function runInvocations(bin, invocations, timeoutMs = 60_000) {
   return invocations.map(({ argv, bin: name }) => {

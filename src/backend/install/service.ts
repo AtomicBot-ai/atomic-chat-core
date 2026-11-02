@@ -254,7 +254,7 @@ export interface RemoveBackendOptions {
 interface DownloadPlan {
   items: DownloadItem[]
   archives: string[]
-  /** Unpacked into `build/bin` after the layout is normalised. */
+  /** Unpacked into `build/bin` before the layout is normalised, which would sweep them in unopened. */
   companions?: string[]
 }
 
@@ -404,12 +404,14 @@ export class BackendService {
         await extractArchive(archive, staging)
         await rm(archive, { force: true })
       }
-      await normalizeBackendLayout(staging, llamaServerExeName(platform))
-      await mergeCudartIntoBin(staging)
+      // Companions go first: a flat pack (PrismML's Windows CUDA zip) is normalised by moving every
+      // entry at the staging root into `build/bin`, the companion archive still waiting there with them.
       for (const companion of plan.companions ?? []) {
         await mergeCompanionIntoBin(staging, companion)
         await rm(companion, { force: true })
       }
+      await normalizeBackendLayout(staging, llamaServerExeName(platform))
+      await mergeCudartIntoBin(staging)
 
       const verify =
         this.deps.provider === 'atomic-prism'

@@ -643,7 +643,15 @@ const cell = (v) => (v === null || v === undefined || v === '' ? '—' : String(
 const code = (v) => (v === null || v === undefined || v === '' ? '—' : `\`${v}\``)
 
 /** The engine as report.md names it: upstream llama.cpp and PrismML's fork both run llama.cpp. */
-const ENGINE_TITLES = { 'sd-cpp': 'stable-diffusion.cpp' }
+const ENGINE_TITLES = { 'sd-cpp': 'stable-diffusion.cpp', 'audio-cpp': 'audio.cpp' }
+
+/** Where the pin came from, as report.md says it. */
+const PIN_SOURCES = {
+  'list': 'the release list',
+  'legacy': 'the legacy manifest',
+  'sdcpp-manifest': "conf's sd.cpp manifest",
+  'audiocpp-manifest': "conf's audio.cpp manifest",
+}
 
 /** `report.md`: the same report for a human, rendered from the JSON alone. */
 export function renderMarkdown(report) {
@@ -666,7 +674,7 @@ export function renderMarkdown(report) {
   const facts = []
   if (res)
     facts.push(
-      `Pin: ${res.source === 'override' ? 'given' : `${res.source === 'list' ? 'the release list' : res.source === 'legacy' ? 'the legacy manifest' : res.source === 'sdcpp-manifest' ? "conf's sd.cpp manifest" : res.source}`}` +
+      `Pin: ${res.source === 'override' ? 'given' : (PIN_SOURCES[res.source] ?? res.source)}` +
         (res.legacy?.tag ? `; legacy manifest names \`${res.legacy.tag}\`` : '') +
         (conf?.sha ? ` (conf \`${conf.sha.slice(0, 10)}\`)` : '')
     )
@@ -691,7 +699,7 @@ export function renderMarkdown(report) {
     if (list.length === 0) continue
     lines.push(`## ${severity} (${list.length})`, '')
     for (const f of list) {
-      const names = f.evidence?.flags ?? f.evidence?.archives
+      const names = f.evidence?.flags ?? f.evidence?.routes ?? f.evidence?.archives
       lines.push(`- \`${f.id}\` — ${f.message}${Array.isArray(names) ? `: ${names.join(', ')}` : ''}`)
       if (f.hint) lines.push(`  - ${f.hint}`)
       const commits = f.evidence?.commits

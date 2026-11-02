@@ -3,6 +3,7 @@ import { AtomicCoreError } from '../contracts/index.js'
 import {
   ENGINE_THROTTLE_MS,
   captureReport,
+  audioFailureReport,
   diffusionFailureReport,
   inferenceFailureReport,
   internalErrorReport,
@@ -211,6 +212,45 @@ describe('diffusionFailureReport', () => {
     (code) => {
       const error = new AtomicCoreError(code as 'CANCELLED', 'x')
       expect(diffusionFailureReport({ phase: 'job', error })).toBeNull()
+    }
+  )
+})
+
+describe('audioFailureReport', () => {
+  it('reports an engine crash during a job with the engine lines', () => {
+    const error = new AtomicCoreError('ENGINE_CRASHED', 'stopped', 'GGML_ASSERT failed: n > 0')
+    expect(audioFailureReport({ phase: 'job', error, family: 'ace_step' })).toMatchObject({
+      source: 'audio_job',
+      level: 'error',
+      fingerprint: ['audio-failure', 'ENGINE_CRASHED'],
+      tags: { provider: 'audio', error_code: 'ENGINE_CRASHED', audio_family: 'ace_step' },
+      extra: { engine_errors: 'GGML_ASSERT failed: n > 0' },
+      throttle: { key: 'audio:job:ace_step:ENGINE_CRASHED' },
+    })
+  })
+
+  it('reports a load failure; out of memory and a bad WAV are warnings; a plain throw is INTERNAL', () => {
+    expect(
+      audioFailureReport({ phase: 'load', error: new AtomicCoreError('MODEL_LOAD_FAILED', 'x') })
+    ).toMatchObject({ source: 'audio_load', fingerprint: ['audio-load-failure', 'MODEL_LOAD_FAILED'] })
+    expect(
+      audioFailureReport({ phase: 'job', error: new AtomicCoreError('OUT_OF_MEMORY', 'x') })?.level
+    ).toBe('warning')
+    expect(
+      audioFailureReport({ phase: 'job', error: new AtomicCoreError('INVALID_OUTPUT', 'x') })?.level
+    ).toBe('warning')
+    expect(audioFailureReport({ phase: 'job', error: new Error('x') })?.fingerprint).toEqual([
+      'audio-failure',
+      'INTERNAL',
+    ])
+  })
+
+  it.each([['ENGINE_MISSING'], ['CANCELLED'], ['UNSUPPORTED_MODE'], ['REQUEST_REJECTED'], ['JOB_BUSY']])(
+    'ignores %s',
+    (code) => {
+      expect(
+        audioFailureReport({ phase: 'job', error: new AtomicCoreError(code as 'CANCELLED', 'x') })
+      ).toBeNull()
     }
   )
 })

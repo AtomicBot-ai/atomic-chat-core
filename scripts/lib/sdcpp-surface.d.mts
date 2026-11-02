@@ -64,6 +64,27 @@ export type SdcppMissing =
   | { kind: 'manifest'; reason: string }
   | { kind: 'manifest-asset'; backend: string; name?: string; reason: string }
 
+/**
+ * What differs between the engines whose builds are a ggml project's release, one archive per backend
+ * id cut from an upstream tag (sd.cpp, audio.cpp).
+ */
+export interface ReleaseSpec {
+  /** `sd.cpp`, `audio.cpp`: the project in messages. */
+  project: string
+  tagParts: (tag: string) => { upstream_tag: string; atomic_rev: string | null } | null
+  /** The archive a contract pattern names for the build of `tag`. */
+  assetRe: (pattern: string, tag: string) => RegExp
+  /** The part of an archive's name that says which build it is, without the tag. */
+  archiveKind: (name: string, tag: string) => string
+  parseManifest: (value: unknown) => {
+    tag_name: string
+    download_base?: string
+    assets: Array<{ backend: string; name: string; sha256?: string; size?: number }>
+  } | null
+}
+
+export declare const SDCPP_RELEASE: ReleaseSpec
+export declare function escapeRegExp(s: string): string
 export declare const SDCPP_CHECKS: ReadonlyArray<{ id: string; title: string }>
 export declare const MIN_SD_HELP_OPTIONS: number
 export declare function parseSdHelp(text: string): SdHelpOption[]
@@ -92,6 +113,48 @@ export declare function checkSdVersion(
   input: { tag?: string | null; output: string }
 ): Finding[]
 export declare function sdAssetRe(pattern: string, sha7: string): RegExp
+export declare function releaseBackendArchives(
+  contract: SdcppContract,
+  tag: string,
+  assets: readonly string[],
+  release: ReleaseSpec
+): Record<string, string[]>
+export declare function releaseCoreAssets(
+  contract: SdcppContract,
+  tag: string,
+  assets: readonly string[],
+  release: ReleaseSpec
+): string[]
+export declare function checkReleaseAssets(
+  contract: SdcppContract,
+  input: {
+    candidate: { tag: string; assets: readonly string[] }
+    pin: { tag: string; assets: readonly string[] } | null
+  },
+  release: ReleaseSpec
+): Finding[]
+export declare function releaseCompleteness(
+  input: {
+    contract: SdcppContract
+    tag: string
+    assets: readonly ReleaseAssetInfo[]
+    platforms?: readonly string[]
+    manifest?: unknown
+    downloadBase?: string
+  },
+  release: ReleaseSpec
+): { complete: boolean; missing: SdcppMissing[] }
+export declare function releaseReport(
+  contract: SdcppContract,
+  inputs: SurfaceInputs,
+  own: {
+    findings: Finding[]
+    skipped: Record<string, string>
+    checks: ReadonlyArray<{ id: string; title: string }>
+    hints: Readonly<Record<string, string>>
+  },
+  options?: { now?: string; contractSha256?: string }
+): SurfaceReport
 export declare function sdcppBackendArchives(
   contract: SdcppContract,
   tag: string,

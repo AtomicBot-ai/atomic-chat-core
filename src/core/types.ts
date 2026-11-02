@@ -4,6 +4,7 @@ import type { BackendOutputSink, LocalLoadOptions } from '../runtime/index.js'
 import type { WireDecisionOptions } from '../decision/index.js'
 import type { WireEmbeddingOptions } from '../embedding/index.js'
 import type { WireDiffusionOptions } from '../diffusion/index.js'
+import type { WireAudioOptions } from '../audio/index.js'
 import type { HardwareProbeResult } from '../hardware/index.js'
 import type { Prober, TunnelSpawner, TunnelTimings } from '../remote-access/index.js'
 import type { TelemetryControl } from '../telemetry/index.js'
@@ -28,6 +29,8 @@ export interface AtomicCoreOptions {
   remoteAccess?: { spawner?: TunnelSpawner; prober?: Prober; timings?: Partial<TunnelTimings> }
   /** Test seams of the image-generation service (a fake engine, short timings). */
   diffusion?: WireDiffusionOptions['overrides']
+  /** Test seams of the audio-generation service (a fake engine, short timings). */
+  audio?: WireAudioOptions['overrides']
   /** Test seams of the decision module (a fake engine, installed packs, the `-h` probe). */
   decision?: WireDecisionOptions['overrides']
   /** Test seams of the embedding module (a fake engine, installed packs). */

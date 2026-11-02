@@ -43,8 +43,8 @@ export interface EngineRemoveOptions {
 }
 
 /**
- * The engines registered on this host, in catalog order: the three llama.cpp providers and sd.cpp
- * everywhere, MLX on macOS, Foundry Local where its platform rule holds (`foundryLocal`, change
+ * The engines registered on this host, in catalog order: the three llama.cpp providers, sd.cpp and
+ * audio.cpp everywhere, MLX on macOS, Foundry Local where its platform rule holds (`foundryLocal`, change
  * `add-foundry-local` design D7), LiteRT-LM likewise (`liteRtLm`, change `add-litert-lm-runtime`
  * design D7), GenieX on a Snapdragon X (`geniex`, change `add-geniex-runtime` design D3), a managed engine where this core offers it (Linux, Windows with
  * Atomic Chat's WSL distribution).

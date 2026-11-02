@@ -91,6 +91,7 @@ import type { EngineHandle } from '../engines/index.js'
 import { DEFAULT_ENVIRONMENT_ID } from '../runtime/environment/index.js'
 import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
+import { wireAudio } from '../audio/index.js'
 import { MEDIA_ADAPTERS, MediaCatalogService, MediaService } from '../media/index.js'
 import {
   EngineBuildsService,
@@ -117,7 +118,7 @@ import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
 import { compatibilityFor, removeLegacyPrismSetups, wirePrismCompatibility } from './prism.js'
 import { APP_LEASE_CHECK_MS, appLeaseDecision, stalledMs, workInProgress } from './app-lease.js'
-import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
+import { AUDIO_GPU_PROVIDER, DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
 import {
@@ -327,6 +328,7 @@ export async function createAtomicCore(
     const gpuResidency = wireGpuResidency({
       runtimes,
       diffusion: () => diffusion,
+      audio: () => audio,
       leftovers: () => managedLeftovers(),
       sessions: facade,
     })
@@ -733,9 +735,24 @@ export async function createAtomicCore(
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
-    // sd.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads conf's
-    // manifests, installs, activates and removes them; image generation and the MLX runtime lend it
-    // their load locks and their sessions.
+    // Audio generation on audio.cpp: one resident `audiocpp_server`, an exclusive GPU occupant like
+    // image generation. Its builds are the engine-builds row `audio-cpp`.
+    const audio = wireAudio({
+      layout,
+      journal,
+      instanceId: lock.instanceId,
+      emit: (name, payload) => emitter.emit(name, payload),
+      log: runtimeLog,
+      platform,
+      env,
+      claimGpu: gpuResidency.hook(AUDIO_GPU_PROVIDER),
+      ...(options.audio ? { overrides: options.audio } : {}),
+      ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
+
+    // sd.cpp, audio.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads
+    // conf's manifests, installs, activates and removes them; image generation and the MLX runtime
+    // lend it their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
     const engineBuilds: EngineBuildsService = new EngineBuildsService({
@@ -746,8 +763,12 @@ export async function createAtomicCore(
         'foundry-local': foundryLocalPaths.backendsDir,
         'litert-lm': layout.provider('litert-lm').backendsDir,
         'geniex': layout.provider('geniex').backendsDir,
+        'audio-cpp': layout.audio.backendsDir,
       },
-      failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+      failedBackendsFiles: {
+        'sd-cpp': join(layout.diffusion.root, 'failed-backends.json'),
+        'audio-cpp': layout.audio.failedBackendsFile,
+      },
       resourcesDir: options.resourcesDir,
       platform,
       downloader,
@@ -761,6 +782,7 @@ export async function createAtomicCore(
         }),
         'litert-lm': liteRtManifest,
         'geniex': new EngineManifestSource(engineManifestKinds.geniex, { env, fetchFor, log }),
+        'audio-cpp': new EngineManifestSource(engineManifestKinds['audio-cpp'], { env, fetchFor, log }),
       },
       hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost, 'geniex': geniexHost },
       hostProbes: {
@@ -787,6 +809,7 @@ export async function createAtomicCore(
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
         'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
         'geniex': geniexRuntime ? geniexRuntime.engineHost() : IDLE_ENGINE_HOST,
+        'audio-cpp': audio.engineHost(),
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
@@ -1192,6 +1215,7 @@ export async function createAtomicCore(
           stop: () => (core as AtomicCore).stopRemoteAccess(),
         },
         diffusion,
+        audio,
         engineBuilds,
         engines,
         decision: {
@@ -1291,6 +1315,7 @@ export async function createAtomicCore(
             (runtime.gpuOccupancy?.() ?? []).map((occupant) => ({ ...occupant, provider }))
           ),
           ...diffusion.gpuOccupancy().map((occupant) => ({ ...occupant, provider: DIFFUSION_GPU_PROVIDER })),
+          ...audio.gpuOccupancy().map((occupant) => ({ ...occupant, provider: AUDIO_GPU_PROVIDER })),
         ])
       // An app that crashes cannot detach. Its registration expires after missed heartbeats;
       // unlike the CLI daemon, this owner then unloads models and releases its lock — but not for
@@ -1341,6 +1366,7 @@ export async function createAtomicCore(
       externalSessions,
       appLeaseTimer,
       diffusion,
+      audio,
       managed,
       managedTrustedHosts,
       decision,

@@ -4,7 +4,8 @@
 // the config's `live_models` checked against their sha256 in a folder of their own, shared between
 // builds and cached apart from them, and a manifest of the release for the install test
 // (ATOMIC_SDCPP_MANIFEST_URL). The manifest and the archive choice are pure; `fetchSdcppFixtures`
-// does the downloads.
+// does the downloads. Each takes sd.cpp's release spec; audio.cpp's fetch
+// (scripts/lib/audiocpp-fixtures.mjs) is the same with its own.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
@@ -12,8 +13,7 @@ import { chmod, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { sdcppTagParts } from './engine-pin.mjs'
-import { sdcppBackendArchives } from './sdcpp-surface.mjs'
+import { releaseBackendArchives, SDCPP_RELEASE } from './sdcpp-surface.mjs'
 import { digestMatches } from './live-fixtures.mjs'
 
 /** `sha256:<hex>` → `<hex>`; `undefined` for anything else. */
@@ -24,13 +24,14 @@ const digestHex = (digest) => (/^sha256:[0-9a-f]{64}$/.test(digest ?? '') ? dige
  * (`{name, size, digest, browser_download_url}`): the backend every host of that platform falls back
  * to. Throws when the contract has none for the platform or the release has none or two.
  */
-export function sdcppHostArchive(contract, tag, assets, platform) {
+export function releaseHostArchive(contract, tag, assets, platform, release) {
   const backend = (contract.assets?.core_backends ?? []).find((b) => b.platform === platform && b.cpu)
-  if (!backend) throw new Error(`sd.cpp ships no CPU build for ${platform}`)
-  const names = sdcppBackendArchives(
+  if (!backend) throw new Error(`${release.project} ships no CPU build for ${platform}`)
+  const names = releaseBackendArchives(
     contract,
     tag,
-    assets.map((a) => a.name)
+    assets.map((a) => a.name),
+    release
   )[backend.backend]
   if (names.length !== 1)
     throw new Error(
@@ -39,17 +40,24 @@ export function sdcppHostArchive(contract, tag, assets, platform) {
   return { backend: backend.backend, asset: assets.find((a) => a.name === names[0]) }
 }
 
+/** sd.cpp's CPU archive of `platform` (`releaseHostArchive`). */
+export function sdcppHostArchive(contract, tag, assets, platform) {
+  return releaseHostArchive(contract, tag, assets, platform, SDCPP_RELEASE)
+}
+
 /**
- * conf's sd.cpp manifest for `repo`@`tag`, as conf's mirror would write it: every archive a contract
- * backend takes, pinned by its size and the sha256 of the release's digest, downloaded from the
- * release itself (`download_base`). What the install test points ATOMIC_SDCPP_MANIFEST_URL at, so
- * the core picks, downloads, checks and probes the candidate as it would for a user.
+ * conf's manifest of the engine for `repo`@`tag`, as conf's mirror would write it: every archive a
+ * contract backend takes, pinned by its size and the sha256 of the release's digest, downloaded from
+ * the release itself (`download_base`). What the install test points the core's manifest URL at
+ * (ATOMIC_SDCPP_MANIFEST_URL, ATOMIC_AUDIOCPP_MANIFEST_URL), so the core picks, downloads, checks and
+ * probes the candidate as it would for a user.
  */
-export function sdcppInstallManifest({ contract, tag, repo, assets, updatedAt }) {
-  const archives = sdcppBackendArchives(
+export function releaseInstallManifest({ contract, tag, repo, assets, updatedAt }, release) {
+  const archives = releaseBackendArchives(
     contract,
     tag,
-    assets.map((a) => a.name)
+    assets.map((a) => a.name),
+    release
   )
   const entries = []
   for (const b of contract.assets?.core_backends ?? []) {
@@ -71,6 +79,11 @@ export function sdcppInstallManifest({ contract, tag, repo, assets, updatedAt })
     download_base: `https://github.com/${repo}/releases/download`,
     assets: entries,
   }
+}
+
+/** conf's sd.cpp manifest for `repo`@`tag` (`releaseInstallManifest`). */
+export function sdcppInstallManifest(input) {
+  return releaseInstallManifest(input, SDCPP_RELEASE)
 }
 
 /** Where a live model lives under the models folder: by its sha256, so two models never collide. */
@@ -138,31 +151,34 @@ async function findFile(dir, wanted) {
 }
 
 /**
- * Everything one live cell of sd.cpp needs, under `out`: the archive (reused while it matches the
- * release digest), its tree unpacked into `engine-<tag>/`, the models under `modelsDir` (skipped with
- * `skipModel`), `manifest.json`, and the files the live step and the cell read: `bin-path.txt`,
- * `model-path.txt`, `tag.txt`, `live.json` (the values `live_env` names) and `fixture.json`.
+ * Everything one live cell of a release engine needs, under `out`: the archive (reused while it
+ * matches the release digest), its tree unpacked into `engine-<tag>/`, the models under `modelsDir`
+ * (skipped with `skipModel`), `manifest.json`, and the files the live step and the cell read:
+ * `bin-path.txt`, `model-path.txt`, `tag.txt`, `live.json` (the values `live_env` names) and
+ * `fixture.json`. `engine` is the release spec plus the server's name, the executables to mark
+ * runnable, the env the engine folder is printed as and what to capture of the server (`captures`:
+ * a file under `out` per argv, stdout, a newline, stderr).
  */
-export async function fetchSdcppFixtures({
-  out,
-  tag,
-  repo,
-  config,
-  contract,
-  modelsDir,
-  skipModel,
-  token,
-  platform,
-}) {
+export async function fetchReleaseFixtures(
+  { out, tag, repo, config, contract, modelsDir, skipModel, token, platform },
+  engine
+) {
   const api = `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`
   const headers = { 'user-agent': 'atomic-chat-core-live-fixtures', 'accept': 'application/vnd.github+json' }
   if (token) headers.authorization = `Bearer ${token}`
   const res = await fetch(api, { headers })
   if (!res.ok) throw new Error(`${api} -> ${res.status}`)
   const release = await res.json()
-  if (!sdcppTagParts(release.tag_name)) throw new Error(`${release.tag_name} is not an sd.cpp tag`)
-  const { backend, asset } = sdcppHostArchive(contract, release.tag_name, release.assets ?? [], platform)
-  console.log(`using sd.cpp ${release.tag_name} (${backend}) from ${repo}`)
+  if (!engine.tagParts(release.tag_name))
+    throw new Error(`${release.tag_name} is not an ${engine.project} tag`)
+  const { backend, asset } = releaseHostArchive(
+    contract,
+    release.tag_name,
+    release.assets ?? [],
+    platform,
+    engine
+  )
+  console.log(`using ${engine.project} ${release.tag_name} (${backend}) from ${repo}`)
 
   mkdirSync(out, { recursive: true })
   const archive = join(out, asset.name)
@@ -178,14 +194,18 @@ export async function fetchSdcppFixtures({
   const exe = (name) => (process.platform === 'win32' ? `${name}.exe` : name)
   const unpacked = join(out, `engine-${release.tag_name}`)
   extract(archive, unpacked)
-  const server = await findFile(unpacked, exe('sd-server'))
-  if (!server) throw new Error(`no ${exe('sd-server')} inside ${asset.name}`)
+  const server = await findFile(unpacked, exe(engine.server))
+  if (!server) throw new Error(`no ${exe(engine.server)} inside ${asset.name}`)
   const engineDir = dirname(server)
   if (process.platform !== 'win32')
-    for (const name of ['sd-server', 'sd-cli'])
+    for (const name of engine.executables)
       if (existsSync(join(engineDir, name))) await chmod(join(engineDir, name), 0o755)
-  const version = spawnSync(server, ['--version'], { cwd: engineDir, encoding: 'utf8', timeout: 60_000 })
-  const versionOutput = `${version.stdout ?? ''}\n${version.stderr ?? ''}`.trim()
+  const printed = (argv) => {
+    const r = spawnSync(server, argv, { cwd: engineDir, encoding: 'utf8', timeout: 60_000 })
+    return `${r.stdout ?? ''}\n${r.stderr ?? ''}`
+  }
+  const versionOutput = printed(['--version']).trim()
+  for (const { file, argv } of engine.captures ?? []) await writeFile(join(out, file), printed(argv))
 
   const models = {}
   const records = []
@@ -206,7 +226,7 @@ export async function fetchSdcppFixtures({
   const manifest = join(out, 'manifest.json')
   await writeFile(
     manifest,
-    `${JSON.stringify(sdcppInstallManifest({ contract, tag: release.tag_name, repo, assets: release.assets ?? [], updatedAt: release.published_at }), null, 2)}\n`
+    `${JSON.stringify(releaseInstallManifest({ contract, tag: release.tag_name, repo, assets: release.assets ?? [], updatedAt: release.published_at }, engine), null, 2)}\n`
   )
   const main = records[0]
   await writeFile(join(out, 'bin-path.txt'), server)
@@ -240,6 +260,19 @@ export async function fetchSdcppFixtures({
       2
     )}\n`
   )
-  console.log(`ATOMIC_LIVE_SD_ENGINE=${engineDir}`)
+  console.log(`${engine.engineEnv}=${engineDir}`)
   for (const [id, path] of Object.entries(models)) console.log(`model ${id}: ${path}`)
+}
+
+/** sd.cpp's release spec with what its fetch needs: `sd-server`, beside it `sd-cli`. */
+const SDCPP_FIXTURES = {
+  ...SDCPP_RELEASE,
+  server: 'sd-server',
+  executables: ['sd-server', 'sd-cli'],
+  engineEnv: 'ATOMIC_LIVE_SD_ENGINE',
+}
+
+/** Everything one live cell of sd.cpp needs, under `out` (`fetchReleaseFixtures`). */
+export function fetchSdcppFixtures(input) {
+  return fetchReleaseFixtures(input, SDCPP_FIXTURES)
 }

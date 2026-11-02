@@ -35,7 +35,7 @@
 
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { DiffusionBackend } from '../contracts/index.js'
+import type { AudioBackend, DiffusionBackend } from '../contracts/index.js'
 import { getSupportedFeatures } from '../backend/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import type { FoundryLocalPlatform, LiteRtLmPlatform } from './manifest.js'
@@ -156,13 +156,27 @@ export function companionFor(backendId: string): 'win-cudart-cu12' | null {
   return backendId === WIN_CUDA12 ? WIN_CUDART_CU12 : null
 }
 
-/** The compute backend a manifest id was built for, for the install record. */
+/** The compute backend a manifest id was built for, for the sd.cpp install record. */
 export function backendKindOf(backendId: string): DiffusionBackend {
   if (backendId.startsWith('macos-')) return 'metal'
   if (backendId.includes('-cuda')) return 'cuda'
   if (backendId.includes('-rocm')) return 'rocm'
   if (backendId.includes('-vulkan')) return 'vulkan'
   return 'cpu'
+}
+
+/**
+ * The compute backend an audio.cpp manifest id was built for: what the install record keeps, what the
+ * probe checks the build carries and what the server is started with (`--backend`). `null` for an id
+ * audio.cpp has no build of — ROCm (never offered), the cudart companion, anything unknown — which is
+ * therefore never on the ladder.
+ */
+export function audioBackendKindOf(backendId: string): AudioBackend | null {
+  if (backendId.startsWith('macos-')) return 'metal'
+  if (/-cuda\d+-/.test(backendId)) return 'cuda'
+  if (backendId.includes('-vulkan-')) return 'vulkan'
+  if (backendId.includes('-cpu-')) return 'cpu'
+  return null
 }
 
 // --- core: the host from the core's hardware facts, failed rungs, MLX ------------------------------
@@ -199,43 +213,91 @@ export interface SdcppHostChoice {
   reason: string | null
 }
 
+/** What a ggml engine's host choice says when no build applies: its feature and its project name. */
+interface GgmlEngineWords {
+  /** `Image generation`, `Audio generation`. */
+  feature: string
+  /** `stable-diffusion.cpp`, `audio.cpp`. */
+  project: string
+}
+
 /** Why no build applies, in words a settings card can show (the app's `unsupportedReason`). */
-function unsupportedReason(host: { os: string; arch: string }): string {
-  if (host.os === 'macos') return 'Image generation needs an Apple Silicon Mac; Intel Macs are not supported.'
-  if (host.os !== 'windows' && host.os !== 'linux') return `Image generation is not supported on ${host.os}.`
+function unsupportedReason(host: { os: string; arch: string }, words: GgmlEngineWords): string {
+  if (host.os === 'macos') return `${words.feature} needs an Apple Silicon Mac; Intel Macs are not supported.`
+  if (host.os !== 'windows' && host.os !== 'linux') return `${words.feature} is not supported on ${host.os}.`
   if (host.arch !== 'x64')
-    return `The release manifest lists no stable-diffusion.cpp build for ${host.arch} ${host.os} yet.`
+    return `The release manifest lists no ${words.project} build for ${host.arch} ${host.os} yet.`
   return 'The release manifest lists no build for this computer.'
 }
 
+type GgmlHost = Omit<DiffusionBackendSelectionInput, 'available' | 'os'> & { os: string }
+type GgmlManifestAssets = { tag_name: string; assets: readonly { backend: string; companion?: boolean }[] }
+
 /**
- * The ladder for `manifest`, leaving out the builds that failed here on this tag; when that leaves
- * nothing, the last build is offered again, so a retry ends on its own error rather than on "no build
- * for this computer" (the app's `backendLadderForHost`).
+ * The ladder for `manifest` over `available` of its builds, leaving out the builds that failed here on
+ * this tag; when that leaves nothing, the last build is offered again, so a retry ends on its own error
+ * rather than on "no build for this computer" (the app's `backendLadderForHost`).
  */
-export function sdcppHostChoice(
-  host: Omit<DiffusionBackendSelectionInput, 'available' | 'os'> & { os: string },
-  manifest: { tag_name: string; assets: readonly { backend: string; companion?: boolean }[] },
-  failed: ReadonlySet<string>
+function ggmlHostChoice(
+  host: GgmlHost,
+  manifest: GgmlManifestAssets,
+  failed: ReadonlySet<string>,
+  available: string[],
+  words: GgmlEngineWords
 ): SdcppHostChoice {
   const supported = host.os === 'macos' || host.os === 'windows' || host.os === 'linux'
   const ladder = supported
-    ? diffusionBackendLadder({
-        ...host,
-        os: host.os as DiffusionHostOs,
-        available: manifest.assets.filter((asset) => !asset.companion).map((asset) => asset.backend),
-      })
+    ? diffusionBackendLadder({ ...host, os: host.os as DiffusionHostOs, available })
     : []
-  if (ladder.length === 0) return { ladder: [], backend_id: null, reason: unsupportedReason(host) }
+  if (ladder.length === 0) return { ladder: [], backend_id: null, reason: unsupportedReason(host, words) }
   const usable = ladder.filter((id) => !failed.has(failedBackendKey(manifest.tag_name, id)))
   const offered = usable.length > 0 ? usable : ladder.slice(-1)
   return { ladder: offered, backend_id: offered[0] ?? null, reason: null }
 }
 
+const buildIds = (manifest: GgmlManifestAssets): string[] =>
+  manifest.assets.filter((asset) => !asset.companion).map((asset) => asset.backend)
+
+/** sd.cpp's ladder for this host over what `manifest` ships, without the rungs that failed on its tag. */
+export function sdcppHostChoice(
+  host: GgmlHost,
+  manifest: GgmlManifestAssets,
+  failed: ReadonlySet<string>
+): SdcppHostChoice {
+  return ggmlHostChoice(host, manifest, failed, buildIds(manifest), {
+    feature: 'Image generation',
+    project: 'stable-diffusion.cpp',
+  })
+}
+
+/**
+ * audio.cpp's ladder: sd.cpp's, over the same backend-id vocabulary, without ROCm (audio.cpp ships no
+ * ROCm build, so an AMD card on Windows runs Vulkan) and without any id `audioBackendKindOf` does not
+ * know. The failed rungs are audio.cpp's own (`<data>/audio/failed-backends.json`).
+ */
+export function audiocppHostChoice(
+  host: GgmlHost,
+  manifest: GgmlManifestAssets,
+  failed: ReadonlySet<string>
+): SdcppHostChoice {
+  return ggmlHostChoice(
+    { ...host, features: { ...host.features, rocm: false } },
+    manifest,
+    failed,
+    buildIds(manifest).filter((id) => audioBackendKindOf(id) !== null),
+    { feature: 'Audio generation', project: 'audio.cpp' }
+  )
+}
+
 /** The app kept "a few tags' worth of rungs"; older entries name tags no manifest serves. */
 export const FAILED_BACKENDS_LIMIT = 16
 
-/** `<tag>/<backend_id>` pairs that failed their probe on this machine; empty when unreadable. */
+/**
+ * `<tag>/<backend_id>` pairs that failed their probe on this machine; empty when unreadable. Each
+ * engine with a ladder keeps its own file (sd.cpp `<data>/diffusion/failed-backends.json`, audio.cpp
+ * `<data>/audio/failed-backends.json`): the two engines share backend ids and may share tags' shape,
+ * but a build of one failing says nothing about the other.
+ */
 export async function readFailedBackends(file: string): Promise<Set<string>> {
   try {
     const parsed: unknown = JSON.parse(await readFile(file, 'utf8'))

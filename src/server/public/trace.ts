@@ -50,6 +50,8 @@ export function endpointFromPath(path: string): string {
       return 'images/generations'
     case '/images/edits':
       return 'images/edits'
+    case '/audio/speech':
+      return 'audio/speech'
     case '/systemone':
       return 'systemone'
     case '/router/score':

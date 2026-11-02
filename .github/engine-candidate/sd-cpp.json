@@ -57,7 +57,7 @@
     {
       "platform": "macos-arm64",
       "runner": "macos-26",
-      "core_runner": "macos-14"
+      "core_runner": "macos-15"
     }
   ],
   "live_timeout_minutes": 90,

@@ -253,14 +253,23 @@ describe.skipIf(!posix)('spawnServer', () => {
 
   it('kills a server that does not finish loading in time', async () => {
     const spec = await engine({ mode: 'hang' }, 1_500)
-    const error = await refusal(spawnServer(spec, join(dir, 'scratch'), { http }))
+    // The pid the core spawned (the launcher execs the fake), not the fake's own pid file: on a loaded
+    // machine the deadline can pass before the fake has run a line, so it may never write one.
+    let spawned: number | undefined
+    const error = await refusal(
+      spawnServer(spec, join(dir, 'scratch'), {
+        http,
+        onSpawned: async (pid) => {
+          spawned = pid
+        },
+      })
+    )
     expect(error.code).toBe('MODEL_LOAD_FAILED')
     expect(error.message).toBe('The image model did not finish loading within 2 seconds.')
     // What it printed before the deadline (on a loaded machine possibly nothing yet) rides in the details.
     expect(typeof error.details).toBe('string')
-    const [pid] = await startedPids()
-    expect(pid).toBeGreaterThan(0)
-    expect(isProcessAlive(pid as number)).toBe(false)
+    expect(spawned).toBeGreaterThan(0)
+    expect(isProcessAlive(spawned as number)).toBe(false)
   })
 
   it('refuses a missing binary before spawning anything', async () => {

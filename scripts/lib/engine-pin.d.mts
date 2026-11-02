@@ -58,9 +58,9 @@ export declare function upstreamRemoteBackends(
 export interface Pins {
   /**
    * Which conf file decided: the release list when this core reads it, else the legacy manifest;
-   * the PrismML manifest for `atomic-prism`.
+   * the PrismML manifest for `atomic-prism`, conf's sd.cpp and audio.cpp manifests for theirs.
    */
-  source: 'list' | 'legacy' | 'prism-manifest' | 'sdcpp-manifest' | 'none'
+  source: 'list' | 'legacy' | 'prism-manifest' | 'sdcpp-manifest' | 'audiocpp-manifest' | 'none'
   core_version: string
   per_platform: Record<string, { backend: string; tag: string | null }>
   list: { readable: boolean; per_platform: Record<string, string | null> | null }
@@ -133,3 +133,22 @@ export interface SdcppPinManifest {
 
 export declare function parseSdcppPinManifest(value: unknown): SdcppPinManifest | null
 export declare function resolveSdcppPins(input: { manifest: unknown; coreVersion: string }): Pins
+
+export declare const AUDIOCPP_PIN_PLATFORMS: readonly PinPlatform[]
+
+export interface AudiocppTagParts {
+  /** `X.Y.Z`: what `audiocpp_server --version` prints. */
+  version: string
+  /** `vX.Y.Z`: the tag without the fork's `-a<rev>`, upstream's and the one the archives are named by. */
+  upstream_tag: string
+  /** The Atomic fork's rev of a rebuild; `null` on a bare upstream tag. */
+  atomic_rev: string | null
+}
+
+export declare function audiocppTagParts(tag: string): AudiocppTagParts | null
+
+/** conf's audio.cpp manifest: an sd.cpp manifest with audio.cpp's tags. */
+export type AudiocppPinManifest = SdcppPinManifest
+
+export declare function parseAudiocppPinManifest(value: unknown): AudiocppPinManifest | null
+export declare function resolveAudiocppPins(input: { manifest: unknown; coreVersion: string }): Pins

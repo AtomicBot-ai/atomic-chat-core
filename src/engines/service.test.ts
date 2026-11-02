@@ -5,23 +5,39 @@ import { EnginesService, hostEngines } from './service.js'
 import type { EngineHandle } from './service.js'
 
 describe('hostEngines', () => {
-  it('lists the llama.cpp providers, sd.cpp and MLX on macOS, and no managed engine', () => {
+  it('lists the llama.cpp providers, sd.cpp, audio.cpp and MLX on macOS, and no managed engine', () => {
     expect(hostEngines('darwin', [])).toEqual([
       'llamacpp-upstream',
       'llamacpp',
       'atomic-prism',
       'sd-cpp',
+      'audio-cpp',
       'mlx',
     ])
   })
 
+  it('lists audio-cpp right after sd-cpp on every desktop platform, as an engine build', () => {
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      const engines = hostEngines(platform, [])
+      expect(engines.indexOf('audio-cpp')).toBe(engines.indexOf('sd-cpp') + 1)
+    }
+    expect(ENGINE_KINDS['audio-cpp']).toBe('engine-build')
+  })
+
   it('has no MLX off macOS, and the managed engines this core offers', () => {
-    expect(hostEngines('win32', [])).toEqual(['llamacpp-upstream', 'llamacpp', 'atomic-prism', 'sd-cpp'])
+    expect(hostEngines('win32', [])).toEqual([
+      'llamacpp-upstream',
+      'llamacpp',
+      'atomic-prism',
+      'sd-cpp',
+      'audio-cpp',
+    ])
     expect(hostEngines('linux', ['vllm', 'tensorrt-llm'])).toEqual([
       'llamacpp-upstream',
       'llamacpp',
       'atomic-prism',
       'sd-cpp',
+      'audio-cpp',
       'tensorrt-llm',
       'vllm',
     ])
@@ -37,7 +53,7 @@ describe('hostEngines', () => {
       const engines = hostEngines(platform, [], { foundryLocal: true })
       expect(engines).toContain('foundry-local')
       expect(engines.indexOf('foundry-local')).toBe(
-        engines.indexOf('sd-cpp') + (platform === 'darwin' ? 2 : 1)
+        engines.indexOf('sd-cpp') + (platform === 'darwin' ? 3 : 2)
       )
     }
   })
@@ -52,6 +68,7 @@ describe('hostEngines', () => {
       'llamacpp',
       'atomic-prism',
       'sd-cpp',
+      'audio-cpp',
       'litert-lm',
       'vllm',
     ])
@@ -70,6 +87,7 @@ describe('hostEngines', () => {
       'llamacpp',
       'atomic-prism',
       'sd-cpp',
+      'audio-cpp',
       'geniex',
     ])
     expect(hostEngines('win32', [], { geniex: false })).not.toContain('geniex')

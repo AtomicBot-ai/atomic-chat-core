@@ -149,8 +149,12 @@ async function engineBuilds(h: Harness, tag: string) {
       'foundry-local': join(dataFolder, 'foundry-local', 'backends'),
       'litert-lm': join(dataFolder, 'litert-lm', 'backends'),
       'geniex': join(dataFolder, 'geniex', 'backends'),
+      'audio-cpp': layout.audio.backendsDir,
     },
-    failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+    failedBackendsFiles: {
+      'sd-cpp': join(layout.diffusion.root, 'failed-backends.json'),
+      'audio-cpp': layout.audio.failedBackendsFile,
+    },
     platform: process.platform,
     downloader: {
       download: async (_task: string, items: DownloadItem[]) => {
@@ -169,6 +173,9 @@ async function engineBuilds(h: Harness, tag: string) {
       'geniex': {
         read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
       },
+      'audio-cpp': {
+        read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
+      },
     },
     hardware: async () => ({ osType: 'macos', arch: 'arm64', cpuExtensions: [], gpus: [] }),
     hosts: {
@@ -177,6 +184,7 @@ async function engineBuilds(h: Harness, tag: string) {
       'foundry-local': IDLE_ENGINE_HOST,
       'litert-lm': IDLE_ENGINE_HOST,
       'geniex': IDLE_ENGINE_HOST,
+      'audio-cpp': IDLE_ENGINE_HOST,
     },
     availableSpace: async () => undefined,
     emit: () => {},

@@ -3,9 +3,11 @@
 // and the same check on this machine alone. --engine picks .github/engine-candidate/<engine>.json:
 // upstream llama.cpp (`llamacpp-upstream`, b-tags from ggml-org, pinned by conf's release list),
 // PrismML's fork (`atomic-prism`, prism-b<N>-<sha7> tags from PrismML-Eng/llama.cpp, pinned by conf's
-// PrismML manifest, live tests on a Bonsai GGUF) or stable-diffusion.cpp (`sd-cpp`, master-<N>-<sha7>
+// PrismML manifest, live tests on a Bonsai GGUF), stable-diffusion.cpp (`sd-cpp`, master-<N>-<sha7>
 // builds of the Atomic fork and their signed mirror master-<N>-<sha7>-a<rev> in conf, pinned by conf's
-// sd.cpp manifest, live tests on FLUX.2 Klein).
+// sd.cpp manifest, live tests on FLUX.2 Klein) or audio.cpp (`audio-cpp`, vX.Y.Z builds of the Atomic
+// fork or of 0xShug0 and their signed mirror vX.Y.Z[-a<rev>] in conf, pinned by conf's audio.cpp
+// manifest, live tests installing the build from a manifest).
 //
 //   resolve  fix core and conf to one commit each, pick the candidate (the newest complete tag of
 //            --repo unless --tag), check its archives are all up, compute the pin per platform and
@@ -20,7 +22,8 @@
 //            `-- --repo AtomicBot-ai/atomic-chat-conf --tag b11463`, `-- --bin <llama-server>`,
 //            `-- --tag b10875 --pin b10874 --suites live`,
 //            `-- --engine atomic-prism --tag prism-b10787-73bfe6c`,
-//            `-- --engine sd-cpp --tag master-883-137f740`. Writes results.json, results.md,
+//            `-- --engine sd-cpp --tag master-883-137f740`,
+//            `-- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3`. Writes results.json, results.md,
 //            report.json and report.md into --out (default .engine-check/); exit 0 only on pass.
 //
 // CI passes its inputs as env (ENGINE, TAG, REPO, CANDIDATE_ID, CORE_REF, PIN, CONF_REF, SUITES);
@@ -75,9 +78,10 @@ import {
   sha256File,
   upstreamTagCommit,
 } from './lib/engine-io.mjs'
-import { sdcppTagParts } from './lib/engine-pin.mjs'
+import { audiocppTagParts, sdcppTagParts } from './lib/engine-pin.mjs'
 import { expandLiveEnv, liveModelsKey } from './lib/live-fixtures.mjs'
 import { sdcppCompleteness, sdcppCoreAssets } from './lib/sdcpp-surface.mjs'
+import { audiocppCompleteness, audiocppCoreAssets } from './lib/audiocpp-surface.mjs'
 
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'))
 const readJsonIf = (path) => (path && existsSync(path) ? readJson(path) : undefined)
@@ -112,22 +116,43 @@ function protectedChanges(config, sha) {
 }
 
 /**
- * An sd.cpp release as the candidate (`--tag`, else the newest complete one of `repo`): complete when
- * every archive core and conf's mirror need is up with its digest, and on conf's signed mirror when
- * the staging manifest (`candidate_manifests.conf`, or the live manifest when that is the one naming
- * the tag) pins exactly those bytes. `commit` is the leejet tag's, from `git ls-remote`.
+ * The engines whose builds are a ggml project's release, one archive per backend id cut from an
+ * upstream tag (`kind` in the config): how a tag reads, when a release is complete, the archives core
+ * installs and conf's live manifest of the engine.
  */
-async function resolveSdcppCandidate({ config, contract, repo, tag, conf, keys, errors }) {
+const RELEASE_KINDS = {
+  sdcpp: {
+    tagParts: sdcppTagParts,
+    completeness: sdcppCompleteness,
+    coreAssets: sdcppCoreAssets,
+    liveManifest: CONF_FILES.sdcpp,
+  },
+  audiocpp: {
+    tagParts: audiocppTagParts,
+    completeness: audiocppCompleteness,
+    coreAssets: audiocppCoreAssets,
+    liveManifest: CONF_FILES.audiocpp,
+  },
+}
+
+/**
+ * A release of an sd.cpp or audio.cpp build as the candidate (`--tag`, else the newest complete one of
+ * `repo`): complete when every archive core and conf's mirror need is up with its digest, and on
+ * conf's signed mirror when the staging manifest (`candidate_manifests.conf`, or the live manifest
+ * when that is the one naming the tag) pins exactly those bytes. `commit` is the upstream tag's, from
+ * `git ls-remote`; an sd.cpp tag names its first seven characters too.
+ */
+async function resolveReleaseCandidate({ config, kind, contract, repo, tag, conf, keys, errors }) {
   const isTag = (v) => engineTagRe(config).test(v ?? '')
   const staging = config.candidate_manifests?.conf
   const manifestFor = (t) => {
     if (repo !== CONF_REPO || !staging) return { path: null, manifest: undefined }
     // Staging names the candidate on its way to approval; the live manifest, a build already out.
-    const path = [staging, CONF_FILES.sdcpp].find((p) => conf.docs?.[p]?.tag_name === t) ?? staging
+    const path = [staging, kind.liveManifest].find((p) => conf.docs?.[p]?.tag_name === t) ?? staging
     return { path, manifest: conf.docs?.[path] ?? null }
   }
   const completeness = (release) =>
-    sdcppCompleteness({
+    kind.completeness({
       contract,
       tag: release.tag_name,
       assets: release.assets ?? [],
@@ -144,11 +169,11 @@ async function resolveSdcppCandidate({ config, contract, repo, tag, conf, keys, 
     release = releases.find((r) => completeness(r).complete)
     if (!release) throw new Error(`no complete tag among the ${releases.length} newest releases of ${repo}`)
   }
-  const parts = sdcppTagParts(release.tag_name)
+  const parts = kind.tagParts(release.tag_name)
   const upstreamRepo = contract.upstream?.repo
   const commit = upstreamTagCommit(upstreamRepo, parts.upstream_tag)
   if (!commit) errors.push(`${upstreamRepo} has no tag ${parts.upstream_tag} (or git ls-remote failed)`)
-  else if (!commit.startsWith(parts.sha7))
+  else if (parts.sha7 && !commit.startsWith(parts.sha7))
     errors.push(`${upstreamRepo} ${parts.upstream_tag} is ${commit}, not the ${parts.sha7} its name says`)
   const manifest = manifestFor(release.tag_name).path
   return {
@@ -161,7 +186,7 @@ async function resolveSdcppCandidate({ config, contract, repo, tag, conf, keys, 
     published_at: release.published_at ?? null,
     ...(manifest ? { manifest } : {}),
     ...completeness(release),
-    core_assets: sdcppCoreAssets(
+    core_assets: kind.coreAssets(
       contract,
       release.tag_name,
       (release.assets ?? []).map((a) => a.name)
@@ -210,9 +235,10 @@ async function resolveRun({
   const keys = platforms.map((p) => p.platform)
 
   let candidate
-  if (config.kind === 'sdcpp') {
+  const kind = RELEASE_KINDS[config.kind]
+  if (kind) {
     if (bin) throw new Error(`${engine} is checked from a release (--tag), not a local binary`)
-    candidate = await resolveSdcppCandidate({ config, contract, repo, tag, conf, keys, errors })
+    candidate = await resolveReleaseCandidate({ config, kind, contract, repo, tag, conf, keys, errors })
   } else if (bin) {
     const out = run(bin, ['--version'], { cwd: dirname(bin), timeout: 60_000 })
     const output = `${out.stdout}\n${out.stderr}`
@@ -281,7 +307,7 @@ async function resolveRun({
     pins.per_platform['linux-x64']?.tag ?? keys.map((k) => pins.per_platform[k]?.tag).find(Boolean) ?? null
   // The pin's archives from the candidate's repo when it has them (the mirror's signed bytes against
   // the mirror's), else from the engine's own repo.
-  // sd.cpp's pin lives in conf only (`pin_repo`): the fork has no `-a<rev>` tags.
+  // sd.cpp's and audio.cpp's pins live in conf only (`pin_repo`): the forks have no `-a<rev>` tags.
   let pinRepo = null
   if (pinTag)
     pinRepo =

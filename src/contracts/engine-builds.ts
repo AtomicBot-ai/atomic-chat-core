@@ -1,7 +1,8 @@
 /**
  * Engine builds the core installs itself: stable-diffusion.cpp (`sd-server`) and MLX (`mlx-server`),
  * from conf's `backends/sdcpp-manifest.json` and `backends/mlx-manifest.json` (openspec change
- * `move-sdcpp-mlx-install-to-core`, spec `engine-builds`). snake_case on the wire, like `/backends`
+ * `move-sdcpp-mlx-install-to-core`, spec `engine-builds`), and since then Foundry Local, LiteRT-LM,
+ * GenieX and audio.cpp (`audiocpp_server`, `backends/audiocpp-manifest.json`). snake_case on the wire, like `/backends`
  * and `/environments`.
  *
  * The core advises and the client decides (ADR 2026-09-27): nothing here installs on a schedule.
@@ -10,7 +11,14 @@
 
 import type { ProxyConfig } from './backend-advisor.js'
 
-export const ENGINE_BUILD_IDS = ['sd-cpp', 'mlx', 'foundry-local', 'litert-lm', 'geniex'] as const
+export const ENGINE_BUILD_IDS = [
+  'sd-cpp',
+  'mlx',
+  'foundry-local',
+  'litert-lm',
+  'geniex',
+  'audio-cpp',
+] as const
 export type EngineBuildId = (typeof ENGINE_BUILD_IDS)[number]
 
 /**
@@ -111,8 +119,8 @@ export interface EngineBuildInstallResult {
   /** Always empty, like `retired`. */
   kept_in_use: EngineBuildRef[]
   /**
-   * sd.cpp: builds higher on this host's ladder that unpacked but failed their probe on the way down
-   * (design D7); they are skipped for this tag from now on.
+   * sd.cpp and audio.cpp: builds higher on this host's ladder that unpacked but failed their probe on
+   * the way down (design D7); they are skipped for this tag from now on.
    */
   failed_backend_ids?: string[]
 }

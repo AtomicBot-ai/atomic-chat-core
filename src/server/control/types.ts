@@ -48,6 +48,18 @@ import type {
   RouterScoreResponse,
   SystemoneResponse,
   DeviceInfo,
+  AudioCancelResult,
+  AudioCapabilities,
+  AudioConfig,
+  AudioGalleryListOptions,
+  AudioGalleryPage,
+  AudioGenerateRequest,
+  AudioJob,
+  AudioMode,
+  AudioModelFile,
+  AudioStatus,
+  LoadAudioModelRequest,
+  LoadedAudioModel,
   DiffusionCancelResult,
   DownloadProgress,
   DiffusionConfig,
@@ -356,6 +368,30 @@ export interface DiffusionControl {
 }
 
 /**
+ * Audio generation on audio.cpp (`src/audio/`): camelCase bodies like image generation's. The route
+ * has already parsed the body.
+ */
+export interface AudioControl {
+  config: (config: AudioConfig) => Promise<AudioStatus>
+  status: () => Promise<AudioStatus>
+  setOutputDir: (path: string) => Promise<AudioStatus>
+  listModelFiles: () => Promise<AudioModelFile[]>
+  /** A file named relative to `<data>/audio/models`. */
+  deleteModelFile: (relativePath: string) => Promise<void>
+  /** Answers once the server serves the model, which can take minutes. */
+  loadModel: (request: LoadAudioModelRequest) => Promise<LoadedAudioModel>
+  unloadModel: () => Promise<void>
+  touchIdle: () => void
+  capabilities: () => AudioCapabilities
+  /** Answers the job at once; its phases and outcome arrive as `audio:job` events. */
+  generate: (mode: AudioMode, request: AudioGenerateRequest) => Promise<AudioJob>
+  getJob: (id: string) => AudioJob | null
+  cancelJob: (id: string) => Promise<AudioCancelResult>
+  gallery: (options: AudioGalleryListOptions) => Promise<AudioGalleryPage>
+  deleteGalleryItem: (id: string) => Promise<void>
+}
+
+/**
  * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). Bodies snake_case,
  * like the engine and `settings.json`. `score` and `decide` are fail-open: they answer an outcome,
  * never an error, so the app's router sees exactly what an in-core caller sees.
@@ -479,6 +515,7 @@ export interface ControlServerDeps {
   disk: DiskControl
   remoteAccess: RemoteAccessControl
   diffusion: DiffusionControl
+  audio: AudioControl
   engineBuilds: EngineBuildControl
   /** Absent in a core built without the `/engines` layer; its routes then say so. */
   engines?: EngineControl

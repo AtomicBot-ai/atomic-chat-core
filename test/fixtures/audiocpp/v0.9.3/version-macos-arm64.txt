@@ -1,0 +1,4 @@
+audio.cpp 0.9.3
+git: 41c1f8ff 2026-10-26
+build: Release, apple-clang 21.0.0.21000101, Darwin arm64
+backends: cpu,metal

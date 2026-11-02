@@ -5,7 +5,7 @@ export declare const CANDIDATE_ID_RE: RegExp
 
 export interface EngineCandidateConfig {
   engine: string
-  /** `sdcpp`: stable-diffusion.cpp's resolve, surface and fetch; absent: llama.cpp's. */
+  /** `sdcpp`, `audiocpp`: stable-diffusion.cpp's or audio.cpp's resolve, surface and fetch; absent: llama.cpp's. */
   kind?: string
   contract: string
   default_repo: string

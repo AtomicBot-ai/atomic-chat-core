@@ -170,6 +170,11 @@ describe('error envelope', () => {
     expect(statusForCode('GENIEX_VARIANT_UNSUPPORTED')).toBe(422)
     expect(statusForCode('GENIEX_MODEL_REQUIRES_NEWER_ENGINE')).toBe(409)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
+    // Audio generation: the loaded model makes another mode (state); audio.cpp refused the job; the engine
+    // returned no WAV.
+    expect(statusForCode('UNSUPPORTED_MODE')).toBe(409)
+    expect(statusForCode('REQUEST_REJECTED')).toBe(422)
+    expect(statusForCode('INVALID_OUTPUT')).toBe(500)
   })
 
   it.each([

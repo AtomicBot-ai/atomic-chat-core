@@ -2,6 +2,8 @@
  * The `/engines` layer through the compiled binary (change `unify-engine-lifecycle`, task 4.3):
  *
  *   - versions over the fixture mirror: the llama.cpp manifest and an sd.cpp manifest from `file://`;
+ *   - audio.cpp listed, installed and updated to the fork's build of the same version, the old one
+ *     removed and the active one refused;
  *   - a llama.cpp update applied by the core while a model runs from the fake `llama-server`: the
  *     model is unloaded, `version_backend` moves, the old pack goes;
  *   - another installed pack made active while a model runs;
@@ -23,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { startBackendInstallFixture } from '../helpers/backend-install-e2e.js'
 import type { InstallFixture } from '../helpers/backend-install-e2e.js'
 import * as core from '../helpers/compiled-core.js'
-import { startReleaseMirror } from '../helpers/engine-builds-mirror.js'
+import { fakeAudiocppServer, launcherArchive, startReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
 import { liteRtLmTestPlatform } from '../helpers/litert-lm-host.js'
@@ -815,6 +817,112 @@ describe.skipIf(!existsSync(BIN) || !POSIX)('GenieX through /engines', () => {
       const removed = await send(ready, 'DELETE', '/engines/geniex/builds/0.9.3/win-arm64')
       expect(await removed.json()).toEqual({ removed: true })
       expect((await entry()).builds.map((build) => build.version)).toEqual(['0.9.4'])
+    } finally {
+      await mirror.close()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------------------------
+// audio.cpp
+// ---------------------------------------------------------------------------------------------
+
+/** The ids a host of the CI matrix picks; one fake archive (answering as a Metal build) serves them all. */
+const AUDIO_HOST_IDS = ['macos-arm64', 'linux-cpu-x64', 'linux-cpu-arm64', 'linux-vulkan-x64']
+
+describe.skipIf(!existsSync(BIN) || !POSIX)('audio.cpp through /engines', () => {
+  it('lists, installs and updates the build, and never removes the active one', async () => {
+    const mirror = await startReleaseMirror()
+    try {
+      const manifest = join(dataFolder, 'audiocpp-manifest.json')
+      const publish = async (tag: string) => {
+        const archive = await launcherArchive(dataFolder, `audio-${tag}.tar.gz`, {
+          audiocpp_server: fakeAudiocppServer(),
+        })
+        mirror.serve(`/releases/${tag}/audio.tar.gz`, archive.body)
+        await writeFile(
+          manifest,
+          JSON.stringify({
+            upstream_repo: 'AtomicBot-ai/audio.cpp',
+            tag_name: tag,
+            download_base: 'https://mirror.atomic.invalid/releases',
+            assets: AUDIO_HOST_IDS.map((backend) => ({
+              backend,
+              name: 'audio.tar.gz',
+              sha256: archive.sha256,
+              size: archive.size,
+            })),
+          })
+        )
+      }
+      await publish('v0.9.3')
+      const { ready } = await core.startDaemon(dataFolder, daemons, [], {
+        ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(manifest).href,
+      })
+      const proxy = mirror.proxy
+      const entry = async (force = false) =>
+        (await versions(ready, { force, proxy })).find(
+          (candidate) => candidate.engine === 'audio-cpp'
+        ) as Entry
+
+      const listed = await versions(ready, { force: true, proxy })
+      // Right after sd.cpp, on every desktop platform.
+      expect(listed.findIndex((candidate) => candidate.engine === 'audio-cpp')).toBe(
+        listed.findIndex((candidate) => candidate.engine === 'sd-cpp') + 1
+      )
+      const first = listed.find((candidate) => candidate.engine === 'audio-cpp') as Entry
+      expect(first).toMatchObject({
+        kind: 'engine-build',
+        active_choice: 'core',
+        builds: [],
+        active: null,
+        latest: { version: 'v0.9.3' },
+        source: 'remote',
+      })
+      expect(AUDIO_HOST_IDS).toContain(first.latest?.variant)
+
+      const installed = await send(ready, 'POST', '/engines/audio-cpp/update', {
+        task_id: 'audio-engines-1',
+        proxy,
+      })
+      const applied = (await installed.json()) as {
+        updated: boolean
+        active: { version: string; variant: string }
+      }
+      expect(applied).toMatchObject({ updated: true, active: { version: 'v0.9.3' } })
+      // A Vulkan host walks down to the CPU build: the fake carries no Vulkan backend.
+      const variant = applied.active.variant
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: 'v0.9.3',
+          variant,
+          active: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
+      const viaEngines = await send(ready, 'DELETE', `/engines/audio-cpp/builds/v0.9.3/${variant}`)
+      expect(viaEngines.status).toBe(400)
+      expect(((await viaEngines.json()) as { error: { details?: string } }).error.details).toBe('active')
+      expect(existsSync(join(dataFolder, 'audio', 'backends', 'v0.9.3', variant))).toBe(true)
+
+      // conf publishes the fork's build of v0.9.3: newer, offered, installed; the bare tag is then removable.
+      await publish('v0.9.3-a1b2c3d4')
+      expect((await entry(true)).update).toMatchObject({
+        needed: true,
+        target: { version: 'v0.9.3-a1b2c3d4' },
+      })
+      const updated = await send(ready, 'POST', '/engines/audio-cpp/update', {
+        task_id: 'audio-engines-2',
+        proxy,
+      })
+      expect(await updated.json()).toMatchObject({
+        updated: true,
+        active: { version: 'v0.9.3-a1b2c3d4', variant },
+      })
+      const removed = await send(ready, 'DELETE', `/engines/audio-cpp/builds/v0.9.3/${variant}`)
+      expect(await removed.json()).toEqual({ removed: true })
+      expect((await entry()).builds.map((build) => build.version)).toEqual(['v0.9.3-a1b2c3d4'])
     } finally {
       await mirror.close()
     }

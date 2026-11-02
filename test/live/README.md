@@ -82,6 +82,49 @@ Stage 5 providers, each opt-in on its own:
   probed; a tampered sha256 refused; `--version` naming the tag's commit. `node scripts/fetch-live-fixtures.mjs --engine
   sd-cpp --tag <tag> --out .live-sd` fetches a release, its manifest and FLUX.2 Klein for both files, and
   `npm run engine:check -- --engine sd-cpp --tag <tag>` runs the whole check.
+- audio.cpp (`test/live/audio-install.test.ts`): installs a real build the way a user gets it, from a manifest of conf's
+  shape (`ATOMIC_AUDIOCPP_MANIFEST_URL`): picked for the host, downloaded, size and sha256 checked, unpacked and probed
+  (`--version`, and `--list-devices` for a GPU build); a tampered sha256 refused; `--version` naming the tag's `X.Y.Z`.
+  `ATOMIC_LIVE_AUDIO_MANIFEST` (a path or an `https://` URL, such as conf's `backends/audiocpp-manifest.json` on
+  raw.githubusercontent.com) picks the manifest; without it the test installs from conf's bootstrap staging manifest
+  (`test/fixtures/audiocpp/conf/audiocpp-manifest.staging.json`: upstream `0xShug0/audio.cpp` v0.9.3, which has no
+  Linux or Windows arm64 build). It downloads this host's archive twice: 35 MB on an Apple Silicon Mac.
+  `node scripts/fetch-live-fixtures.mjs --engine audio-cpp --tag <tag> [--repo …] --out .live-audio` fetches a release,
+  its manifest, MOSS-TTS-Nano-100M q8 (193 MB, pinned by revision and sha256) and the build's `--help`, `--version` and
+  `--list-devices` (`help.txt`, `version.txt`, `list-devices.txt`), and writes `live.json` for the config's `live_env`:
+  `ATOMIC_LIVE_AUDIO_ENGINE` (the unpacked build), `ATOMIC_LIVE_AUDIO_TAG`, `ATOMIC_LIVE_AUDIO_MANIFEST`,
+  `ATOMIC_LIVE_AUDIO_MODEL` (MOSS-TTS-Nano), `ATOMIC_LIVE_AUDIO_FAMILY=moss_tts_nano`, `ATOMIC_LIVE_AUDIO_TASK=tts`,
+  `ATOMIC_LIVE_AUDIO_MODE=speech` and `ATOMIC_LIVE_AUDIO_BACKEND=cpu`, which `test/live/audio.test.ts` reads.
+  `npm run engine:check -- --engine audio-cpp --tag <tag>` runs the whole check.
+- audio.cpp runtime (`test/live/audio.test.ts`): `ATOMIC_LIVE_AUDIO_ENGINE` (a folder holding `audiocpp_server`) and
+  `ATOMIC_LIVE_AUDIO_MODEL` (a GGUF, read where it is) turn it on; `ATOMIC_LIVE_AUDIO_FAMILY` (default `moss_tts_nano`),
+  `ATOMIC_LIVE_AUDIO_MODE` (`speech`, `music` or `effects`, default `speech`), `ATOMIC_LIVE_AUDIO_TASK` (default the
+  mode's: `tts` for speech, `gen` otherwise), `ATOMIC_LIVE_AUDIO_TAG` (default `v0.9.3`), `ATOMIC_LIVE_AUDIO_BACKEND=cpu`
+  (every load on the CPU backend through `ATOMIC_AUDIO_BACKEND`, as on CI runners). The build goes into the temporary
+  data folder as `<data>/audio/backends/<tag>/<host's CPU backend id>/` with the real probe and an `install.json`, or,
+  with `ATOMIC_LIVE_AUDIO_MANIFEST`, is installed through that manifest. Holds `audiocpp_server --help` to every flag
+  `buildAudioServerArgs` passes and every route of `test/fixtures/audiocpp/engine-contract.json`, then load →
+  capabilities and the contract's load lines in the engine's real output → one job (speech: a sentence; music and
+  effects: `durationSec` 3) with its WAV, recipe and gallery item → a long job (a long text, or 120 s) cancelled while it
+  generates, the server stopped → the next job respawns it → unload. A model that speaks only in a cloned voice
+  (`requiresVoiceRef`: Qwen3-TTS Base) needs `ATOMIC_LIVE_AUDIO_VOICE_REF` (a WAV) and
+  `ATOMIC_LIVE_AUDIO_REFERENCE_TEXT` (its transcript); without them the generation is skipped with that message.
+  No build carries eSpeak-ng (upstream's never did; the fork leaves it out, ADR 2026-10-29), so Kokoro refuses every
+  speech request (`Could not load eSpeak-ng`). MOSS-TTS-Nano, Qwen3-TTS, Stable Audio and ACE-Step need none, e.g.:
+
+  ```sh
+  ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \
+    ATOMIC_LIVE_AUDIO_MODEL=<models>/stable-audio-3-small-sfx-q8_0.gguf ATOMIC_LIVE_AUDIO_FAMILY=stable_audio \
+    ATOMIC_LIVE_AUDIO_MODE=effects npx vitest run --project live test/live/audio.test.ts
+  ATOMIC_LIVE=1 ATOMIC_LIVE_AUDIO_ENGINE=<dir with audiocpp_server> \
+    ATOMIC_LIVE_AUDIO_MODEL=<models>/qwen3-tts-12hz-0.6b-base-q8_0.gguf ATOMIC_LIVE_AUDIO_FAMILY=qwen3_tts \
+    ATOMIC_LIVE_AUDIO_VOICE_REF=<ref.wav> ATOMIC_LIVE_AUDIO_REFERENCE_TEXT="<what ref.wav says>" \
+    npx vitest run --project live test/live/audio.test.ts
+  ```
+
+  Each run prints `live audio capabilities` and `live audio run` (load, job, engine and cancel times, the clips' length).
+  On an M4 Pro with upstream v0.9.3: Stable Audio 3 Small SFX q8 about 9 s on Metal and 25 s on the CPU, Qwen3-TTS
+  0.6B Base q8 about 14 s on Metal and 22 s on the CPU.
 
 Managed TensorRT-LLM install on Linux (`test/live/managed-install.test.ts`, task 2.18): `ATOMIC_LIVE=1` **and**
 `ATOMIC_LIVE_MANAGED=1`, on a throwaway Linux VM with an NVIDIA GPU, driver ≥ the descriptor's minimum and passwordless

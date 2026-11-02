@@ -4,8 +4,19 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
+import audiocppFork from '../../test/fixtures/audiocpp/conf/audiocpp-manifest.json' with { type: 'json' }
+import audiocppBootstrap from '../../test/fixtures/audiocpp/conf/audiocpp-manifest.staging.json' with { type: 'json' }
 import {
   assetInstallable,
+  AUDIOCPP_MANIFEST_SPEC,
+  AUDIOCPP_MANIFEST_URL,
+  AUDIOCPP_UPSTREAM_REPO,
+  audiocppAssetUrl,
+  ggmlReleaseAssetUrl,
+  parseAudiocppManifest,
+  parseGgmlReleaseManifest,
+  SDCPP_MANIFEST_SPEC,
+  SDCPP_UPSTREAM_REPO,
   EngineManifestSource,
   ENGINE_MANIFEST_TTL_MS,
   manifestKinds,
@@ -25,7 +36,13 @@ import {
   parseGeniexManifest,
   SUPPORTED_GENIEX_ABI,
 } from './manifest.js'
-import type { GeniexManifest, LiteRtLmManifest, MlxManifest, SdcppManifest } from './manifest.js'
+import type {
+  AudiocppManifest,
+  GeniexManifest,
+  LiteRtLmManifest,
+  MlxManifest,
+  SdcppManifest,
+} from './manifest.js'
 
 const SDCPP = {
   $schema: './sdcpp-schema.json',
@@ -90,6 +107,96 @@ describe('parseSdcppManifest', () => {
   it('marks an asset without sha256 or size as not installable', () => {
     const parsed = parseSdcppManifest(SDCPP)
     expect(parsed.assets.map(assetInstallable)).toEqual([true, true, false])
+  })
+})
+
+describe('parseGgmlReleaseManifest', () => {
+  const spec = { label: 'demo.cpp', tagPattern: /^r\d+$/, defaultRepo: 'example/demo.cpp' }
+
+  it('takes the tag pattern and the name in its errors from the engine it parses for', () => {
+    expect(parseGgmlReleaseManifest({ tag_name: 'r7', assets: SDCPP.assets }, spec).tag_name).toBe('r7')
+    expect(() => parseGgmlReleaseManifest({ ...SDCPP }, spec)).toThrow(
+      'the demo.cpp manifest has no valid tag_name ("master-883-137f740-a36f1b1a")'
+    )
+    expect(() => parseGgmlReleaseManifest([], spec)).toThrow('the demo.cpp manifest is not an object')
+  })
+
+  it('reads the sd.cpp manifest exactly as parseSdcppManifest does', () => {
+    expect(parseGgmlReleaseManifest(SDCPP, SDCPP_MANIFEST_SPEC)).toEqual(parseSdcppManifest(SDCPP))
+    expect(SDCPP_MANIFEST_SPEC.defaultRepo).toBe(SDCPP_UPSTREAM_REPO)
+    expect(() => parseSdcppManifest(null)).toThrow('the sd.cpp manifest is not an object')
+  })
+})
+
+describe('parseAudiocppManifest', () => {
+  it('reads the fork manifest the mirror publishes: an -a<rev> tag, download_base, every build and the companion', () => {
+    const parsed = parseAudiocppManifest(audiocppFork)
+    expect(parsed).toMatchObject({
+      upstream_repo: 'AtomicBot-ai/audio.cpp',
+      tag_name: 'v0.9.3-a1b2c3d4',
+      download_base: 'https://github.com/AtomicBot-ai/atomic-chat-conf/releases/download',
+    })
+    expect(parsed.assets).toHaveLength(12)
+    expect(parsed.assets.filter((asset) => asset.companion)).toEqual([
+      expect.objectContaining({ backend: 'win-cudart-cu12', name: 'audio-v0.9.3-cudart-win-cu12-x64.zip' }),
+    ])
+    expect(parsed.assets.every(assetInstallable)).toBe(true)
+    expect(parsed).not.toHaveProperty('$schema')
+  })
+
+  it("reads conf's bootstrap manifest: upstream 0xShug0/audio.cpp, no mirror, upstream .tar.gz and .zip names", () => {
+    const parsed = parseAudiocppManifest(audiocppBootstrap)
+    expect(parsed).toEqual({
+      updated_at: '2026-10-29T11:50:24Z',
+      upstream_repo: '0xShug0/audio.cpp',
+      tag_name: 'v0.9.3',
+      assets: audiocppBootstrap.assets,
+    })
+    expect(parsed.assets.map((asset) => asset.name.replace(/^.*\.(zip|tar\.gz)$/, '$1'))).toEqual([
+      'tar.gz',
+      'tar.gz',
+      'tar.gz',
+      'zip',
+      'zip',
+      'zip',
+      'zip',
+    ])
+  })
+
+  it.each([
+    ['v0.9.3', true],
+    ['v10.20.300', true],
+    ['v0.9.3-a1b2c3d4', true],
+    // An upstream side tag is not an engine release.
+    ['v0.9.2-drama3-base-small', false],
+    ['v0.8.2-audio8-perf-hotfix', false],
+    // `-a` then exactly seven hex digits: `-a1b2c3d` has six.
+    ['v0.9.3-a1b2c3d', false],
+    ['v0.9.3-a1b2c3d45', false],
+    ['0.9.3', false],
+    ['v0.9', false],
+    ['master-883-137f740', false],
+    ['../v0.9.3', false],
+  ] as const)('tag %s accepted: %s', (tag, ok) => {
+    const parse = () => parseAudiocppManifest({ ...audiocppBootstrap, tag_name: tag })
+    if (ok) expect(parse().tag_name).toBe(tag)
+    else expect(parse).toThrow(`the audio.cpp manifest has no valid tag_name (${JSON.stringify(tag)})`)
+  })
+
+  it('skips an asset whose name is a path or not an archive, and refuses a manifest with none left', () => {
+    const parsed = parseAudiocppManifest({
+      ...audiocppBootstrap,
+      assets: [
+        { backend: 'linux-cpu-x64', name: '../audio.tar.gz', sha256: 'a'.repeat(64), size: 1 },
+        { backend: 'linux-cpu-x64', name: 'audio.exe', sha256: 'a'.repeat(64), size: 1 },
+        { backend: 'linux-cpu-x64', name: 'audio.tar.gz', sha256: 'a'.repeat(64), size: 1 },
+      ],
+    })
+    expect(parsed.assets).toEqual([
+      { backend: 'linux-cpu-x64', name: 'audio.tar.gz', sha256: 'a'.repeat(64), size: 1 },
+    ])
+    expect(() => parseAudiocppManifest({ ...audiocppBootstrap, assets: [] })).toThrow(/no usable asset/)
+    expect(() => parseAudiocppManifest('v0.9.3')).toThrow('the audio.cpp manifest is not an object')
   })
 })
 
@@ -520,6 +627,40 @@ describe('asset URLs', () => {
     )
   })
 
+  it('downloads audio.cpp from the mirror, or from the release of upstream_repo (the fork by default) without the Atomic suffix', () => {
+    const fork = parseAudiocppManifest(audiocppFork)
+    const mac = fork.assets.find(
+      (asset) => asset.backend === 'macos-arm64'
+    ) as AudiocppManifest['assets'][number]
+    expect(audiocppAssetUrl(fork, mac)).toBe(
+      'https://github.com/AtomicBot-ai/atomic-chat-conf/releases/download/v0.9.3-a1b2c3d4/audio-v0.9.3-bin-macos-arm64.zip'
+    )
+    const { download_base: _base, ...unmirrored } = fork
+    expect(audiocppAssetUrl(unmirrored, mac)).toBe(
+      'https://github.com/AtomicBot-ai/audio.cpp/releases/download/v0.9.3/audio-v0.9.3-bin-macos-arm64.zip'
+    )
+    const { upstream_repo: _repo, ...bare } = unmirrored
+    expect(audiocppAssetUrl(bare, mac)).toBe(
+      `https://github.com/${AUDIOCPP_UPSTREAM_REPO}/releases/download/v0.9.3/audio-v0.9.3-bin-macos-arm64.zip`
+    )
+    const bootstrap = parseAudiocppManifest(audiocppBootstrap)
+    expect(bootstrap.assets.map((asset) => audiocppAssetUrl(bootstrap, asset))).toContain(
+      'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/audio-v0.9.3-bin-macos-arm64-metal.tar.gz'
+    )
+    expect(AUDIOCPP_MANIFEST_SPEC.defaultRepo).toBe('AtomicBot-ai/audio.cpp')
+  })
+
+  it('builds every ggml release URL from the repository the caller names when the manifest names none', () => {
+    const manifest = { tag_name: 'r7-a1234567', assets: [] }
+    const asset = { backend: 'linux-cpu-x64', name: 'a.zip' }
+    expect(ggmlReleaseAssetUrl(manifest, asset, 'example/demo.cpp')).toBe(
+      'https://github.com/example/demo.cpp/releases/download/r7/a.zip'
+    )
+    expect(ggmlReleaseAssetUrl({ ...manifest, download_base: 'https://m.test' }, asset, 'x/y')).toBe(
+      'https://m.test/r7-a1234567/a.zip'
+    )
+  })
+
   it('downloads Foundry Local from the GitHub release of upstream_repo', () => {
     const manifest = parseFoundryLocalManifest(
       FOUNDRY([FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z')]),
@@ -552,7 +693,7 @@ afterEach(() => data.cleanup())
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
 function source<T>(
-  kind: 'sd-cpp' | 'mlx' | 'litert-lm' | 'geniex',
+  kind: 'sd-cpp' | 'mlx' | 'litert-lm' | 'geniex' | 'audio-cpp',
   respond: (url: string) => Response | Promise<Response>,
   opts: { env?: Record<string, string>; clock?: { now: number } } = {}
 ) {
@@ -712,6 +853,39 @@ describe('EngineManifestSource', () => {
     })
     expect((await local.src.read()).manifest?.releases[0]?.version).toBe('0.9.4')
     expect(local.urls).toEqual([])
+  })
+
+  it('reads the audio.cpp manifest from conf main or ATOMIC_AUDIOCPP_MANIFEST_URL and caches it as <data>/audio/audiocpp-manifest.cache.json', async () => {
+    const remote = source<AudiocppManifest>('audio-cpp', () => json(audiocppBootstrap))
+    expect((await remote.src.read()).manifest?.tag_name).toBe('v0.9.3')
+    expect(remote.urls).toEqual([AUDIOCPP_MANIFEST_URL])
+    expect(AUDIOCPP_MANIFEST_URL).toBe(
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/audiocpp-manifest.json'
+    )
+    expect(data.layout.audio.manifestCache).toBe(join(data.root, 'audio', 'audiocpp-manifest.cache.json'))
+    const cached = JSON.parse(await readFile(data.layout.audio.manifestCache, 'utf8'))
+    expect(cached.manifest.upstream_repo).toBe('0xShug0/audio.cpp')
+
+    const file = join(data.root, 'audiocpp-manifest.json')
+    await writeFile(file, JSON.stringify(audiocppFork))
+    const local = source<AudiocppManifest>('audio-cpp', () => json(audiocppBootstrap), {
+      env: { ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(file).href },
+    })
+    expect((await local.src.read()).manifest?.tag_name).toBe('v0.9.3-a1b2c3d4')
+    expect(local.urls).toEqual([])
+  })
+
+  it('answers "no manifest" with the reason while conf has not published the audio.cpp one yet (404)', async () => {
+    const { src } = source<AudiocppManifest>(
+      'audio-cpp',
+      () => new Response('404: Not Found', { status: 404 })
+    )
+    expect(await src.read()).toEqual({
+      manifest: null,
+      source: null,
+      fetched_at: null,
+      error: `audio.cpp manifest from ${AUDIOCPP_MANIFEST_URL}: HTTP 404`,
+    })
   })
 
   it('fetches an https:// override instead of conf main', async () => {
