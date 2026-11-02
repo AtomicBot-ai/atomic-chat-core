@@ -188,6 +188,15 @@ describe('RemoteAccessManager', () => {
     expect(r.log.spawns).toHaveLength(1)
   })
 
+  it('refuses an invalid tunnel URL before trusting a host or probing it', async () => {
+    const r = rig([endingIn({ kind: 'url', url: 'not a URL' })])
+    r.manager.start()
+    expect(await r.eventIn('error')).toMatchObject({ error: 'no_url', url: null })
+    expect(r.hosts.tunnelHost()).toBeUndefined()
+    expect(r.probes()).toBe(0)
+    expect(r.log.terminations).toBe(1)
+  })
+
   it('retries over HTTP/2 when a URL never registers', async () => {
     const r = rig([endingIn({ kind: 'timed-out', sawUrl: true }), readyWithUrl()])
     r.manager.start()
