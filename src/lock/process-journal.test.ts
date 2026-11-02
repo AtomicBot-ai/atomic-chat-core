@@ -41,6 +41,11 @@ describe('journal file', () => {
     expect(onDisk.version).toBe(1)
   })
 
+  it('recovers valid records from the legacy bare-array journal', async () => {
+    await writeFile(data.layout.core.processes, JSON.stringify([record(), { pid: 7 }, null]))
+    expect((await ProcessJournal.open(data.layout)).list()).toEqual([record()])
+  })
+
   it('keeps concurrent adds from losing entries', async () => {
     const journal = await ProcessJournal.open(data.layout)
     await Promise.all([1, 2, 3, 4, 5].map((pid) => journal.add(record({ pid }))))
@@ -57,6 +62,8 @@ describe('journal file', () => {
     await writeFile(data.layout.core.processes, '{"processes": [{"pid": 1, "inst')
     expect((await ProcessJournal.open(data.layout)).list()).toEqual([])
     await writeFile(data.layout.core.processes, '{"processes": [{"pid": 1}, 5, null]}')
+    expect((await ProcessJournal.open(data.layout)).list()).toEqual([])
+    await writeFile(data.layout.core.processes, 'null')
     expect((await ProcessJournal.open(data.layout)).list()).toEqual([])
     await writeFile(data.layout.core.processes, '"nope"')
     expect((await ProcessJournal.open(data.layout)).list()).toEqual([])

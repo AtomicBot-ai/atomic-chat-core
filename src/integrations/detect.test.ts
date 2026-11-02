@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { AGENTS, findAgent } from './catalog.js'
 import { detectAgent, detectAgents } from './detect.js'
@@ -27,6 +30,27 @@ describe('detectAgent', () => {
       path: '/home/u/.local/bin/openclaw',
       program: '/home/u/.local/bin/openclaw',
     })
+  })
+
+  it('accepts a real off-PATH launcher file, but ignores directories and missing paths', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'atomic-agent-detection-'))
+    const launcher = join(home, '.local', 'bin', 'openclaw')
+    const deps = { platform: 'linux' as const, home, env: {}, onPath: async () => false }
+    try {
+      expect((await detectAgent(agent('openclaw'), deps)).installed).toBe(false)
+      await mkdir(launcher, { recursive: true })
+      expect((await detectAgent(agent('openclaw'), deps)).installed).toBe(false)
+      await rm(launcher, { recursive: true })
+      await writeFile(launcher, '#!/bin/sh\n')
+      const candidate = `${home}/.local/bin/openclaw`
+      expect(await detectAgent(agent('openclaw'), deps)).toEqual({
+        installed: true,
+        path: candidate,
+        program: candidate,
+      })
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
   })
 
   it('honours OPENCLAW_PREFIX before the default locations', async () => {

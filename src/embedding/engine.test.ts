@@ -99,6 +99,30 @@ describe('EmbeddingEngineResolver', () => {
     await r.reject('/gone/llama-server', 'nothing to remember')
   })
 
+  it('remembers real files refused at readiness and allows a deliberate retry', async () => {
+    const exe = join(data.root, 'llama-server')
+    await writeFile(exe, 'engine')
+    const logs: string[] = []
+    const r = new EmbeddingEngineResolver({
+      layout: dataLayout(data.root),
+      log: (_level, message) => logs.push(message),
+    })
+    r.forgetRejected()
+    await r.reject(exe, 'answered 501')
+    await expect(r.resolve(exe, 0)).rejects.toMatchObject({
+      details: expect.stringContaining('refused at readiness: answered 501'),
+    })
+    r.forgetRejected()
+    expect((await r.resolve(exe, 0)).path).toBe(exe)
+    expect(logs).toEqual([
+      `embedding engine ${exe} rejected at readiness: answered 501`,
+      'embedding engines refused at readiness will be tried again',
+    ])
+    await expect(r.resolve(data.root, 0)).rejects.toMatchObject({
+      details: `${data.root}: no such file`,
+    })
+  })
+
   it('scans the installed upstream packs of the data folder', async () => {
     const layout = dataLayout(data.root)
     const dir = join(
