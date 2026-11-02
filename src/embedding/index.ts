@@ -1,3 +1,4 @@
+// Desktop authoring uses models/catalog.json; models/embedding.json is its deprecated generated export for older consumers.
 /**
  * The embedding model: one stock llama.cpp `llama-server --embedding` that the public server's
  * `/v1/embeddings` forwards to when a client names it, with a projector for one that reads images or
