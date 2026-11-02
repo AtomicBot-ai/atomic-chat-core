@@ -6,7 +6,7 @@
 import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { dataLayout } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
 import type {
@@ -428,7 +428,11 @@ describe('remote video jobs', () => {
     f.video = { ...f.video, poll: async () => ({ state: 'running' }) }
     const { s } = service(f)
     await s.generateVideo(videoRequest())
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await vi.waitFor(async () =>
+      expect(
+        (await new RemoteJobStore(layout.diffusion.remoteJobsFile).list()).map((j) => j.submission.id)
+      ).toEqual(['up-1'])
+    )
     await s.shutdown()
     expect(
       (await new RemoteJobStore(layout.diffusion.remoteJobsFile).list()).map((j) => j.submission.id)
