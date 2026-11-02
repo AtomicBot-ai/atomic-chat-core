@@ -82,15 +82,18 @@ describe('normalizeBackendLayout', () => {
     await expect(normalizeBackendLayout(dir, 'llama-server')).resolves.toBeUndefined()
     await expect(normalizeBackendLayout('', 'llama-server')).rejects.toThrow('Invalid argument')
   })
-  it('moves a flat layout into build/bin, keeping build/version.txt/backend.txt', async () => {
+  it('moves a flat layout into build/bin, keeping build/version.txt/backend.txt and caller-kept entries', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'atomic-flat-'))
     await writeFile(join(dir, 'llama-server'), 'x')
     await writeFile(join(dir, 'lib.so'), 'l')
     await writeFile(join(dir, 'version.txt'), 'b1')
-    await normalizeBackendLayout(dir, 'llama-server')
+    await writeFile(join(dir, 'cudart.zip'), 'c')
+    await normalizeBackendLayout(dir, 'llama-server', new Set(['cudart.zip']))
     expect(await exists(join(dir, 'build/bin/llama-server'))).toBe(true)
     expect(await exists(join(dir, 'build/bin/lib.so'))).toBe(true)
     expect(await exists(join(dir, 'version.txt'))).toBe(true)
+    expect(await exists(join(dir, 'cudart.zip'))).toBe(true)
+    expect(await exists(join(dir, 'build/bin/cudart.zip'))).toBe(false)
     expect(await exists(join(dir, 'llama-server'))).toBe(false)
   })
   it('relocates a nested llama-* directory and fails when the exe is nowhere', async () => {

@@ -22,7 +22,7 @@
 import { chmod, mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { samePath } from '../../diffusion/containment.js'
 import type { LocalProviderId } from '../../contracts/index.js'
@@ -404,9 +404,14 @@ export class BackendService {
         await extractArchive(archive, staging)
         await rm(archive, { force: true })
       }
-      await normalizeBackendLayout(staging, llamaServerExeName(platform))
+      const companions = plan.companions ?? []
+      await normalizeBackendLayout(
+        staging,
+        llamaServerExeName(platform),
+        companions.length > 0 ? new Set(companions.map((p) => basename(p))) : undefined
+      )
       await mergeCudartIntoBin(staging)
-      for (const companion of plan.companions ?? []) {
+      for (const companion of companions) {
         await mergeCompanionIntoBin(staging, companion)
         await rm(companion, { force: true })
       }
