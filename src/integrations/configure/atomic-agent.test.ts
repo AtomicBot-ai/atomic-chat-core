@@ -76,6 +76,58 @@ describe('configuring Atomic Agent', () => {
   it('honours ATOMIC_AGENT_STATE_DIR, trimming the value', async () => {
     home = await makeAgentHome()
     await configureAtomicAgent(agentInput(home.fs, { env: { ATOMIC_AGENT_STATE_DIR: ' state ' } }))
-    expect(Object.keys(await home.tree())).toEqual(['state/config.json'])
+    expect(Object.keys(await home.tree())).toEqual([
+      'state/config.json',
+      'state/config.json.atomic-chat-backup.json',
+    ])
+  })
+
+  it('turns off the local fallback only when none is configured', () => {
+    const fresh = atomicAgentPatchConfig({}, 'u', 'm', '') as { llm: Record<string, unknown> }
+    expect(fresh.llm['fallback']).toEqual({ appendLocal: false })
+    const chain = { chain: ['openrouter'], appendLocal: true }
+    const own = atomicAgentPatchConfig({ llm: { fallback: chain } }, 'u', 'm', '') as {
+      llm: Record<string, unknown>
+    }
+    expect(own.llm['fallback']).toEqual(chain)
+  })
+
+  it('tells the agent the served window when known, and nothing otherwise', () => {
+    const ours = (ctx?: number) =>
+      (
+        atomicAgentPatchConfig({}, 'u', ' m ', '', ctx) as {
+          llm: { providers: Array<Record<string, unknown>> }
+        }
+      ).llm.providers[1]
+    expect(ours(32768)?.['userModels']).toEqual([{ id: 'm', kind: 'chat', contextWindow: 32768 }])
+    expect(ours()).not.toHaveProperty('userModels')
+  })
+
+  it('records the keys it replaced and the local-llama entry it seeded', async () => {
+    home = await makeAgentHome()
+    await home.seed(
+      '.atomic-agent/config.json',
+      JSON.stringify({ llm: { activeTextProvider: 'local-llama' } })
+    )
+    await configureAtomicAgent(agentInput(home.fs))
+    await configureAtomicAgent(agentInput(home.fs, { model: 'other' }))
+    const backup = JSON.parse(
+      (await home.read('.atomic-agent/config.json.atomic-chat-backup.json')) as string
+    )
+    expect(backup).toEqual({
+      keys: [
+        { path: ['llm', 'activeTextProvider'], before: 'local-llama', ours: 'atomic-chat' },
+        { path: ['llm', 'activeEmbeddingProvider'], ours: 'local-llama' },
+        { path: ['llm', 'fallback'], ours: { appendLocal: false } },
+      ],
+      seeded: [
+        {
+          id: 'local-llama',
+          kind: 'llama-server',
+          baseUrl: 'http://127.0.0.1:8080',
+          url: 'http://127.0.0.1:8080',
+        },
+      ],
+    })
   })
 })
