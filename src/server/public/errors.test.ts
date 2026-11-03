@@ -8,6 +8,7 @@ import {
   emptyMessagesRefusal,
   isComputeBackendError,
   isContextLimitError,
+  isLlamaContextOverflow,
   isContextOverflowFinishLength,
   modelNotFoundJson,
   selectedProviderUnavailableJson,
@@ -286,4 +287,10 @@ describe('structureBackendErrorBody', () => {
       error: { message: '{"error":"segfault"}', type: 'server_error', code: 'server_error' },
     })
   })
+})
+
+it('recognizes a specific llama context overflow without hiding unrelated context failures', () => {
+  expect(isLlamaContextOverflow('{"error":{"type":"exceed_context_size_error"}}')).toBe(true)
+  expect(isLlamaContextOverflow('request (12 tokens) exceeds the available context size')).toBe(true)
+  expect(isLlamaContextOverflow('failed to initialize context size')).toBe(false)
 })

@@ -157,7 +157,10 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     expectScrubbed()
   })
 
-  it('reports an engine that crashes after loading, and a compute failure behind the public API', async () => {
+  it.each([
+    ['chat/completions', 400],
+    ['messages', 500],
+  ] as const)('reports an engine crash and one compute failure behind /v1/%s', async (route, status) => {
     const marker = join(dataFolder, 'compute-error.marker')
     await core.writeModel(dataFolder, 'crashy')
     await core.writeFakeBackend(dataFolder, {
@@ -173,12 +176,16 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
       body: JSON.stringify({ port: 0 }),
     })
     const { port } = (await started.json()) as { port: number }
-    const chat = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    const chat = await fetch(`http://127.0.0.1:${port}/v1/${route}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'crashy', messages: [{ role: 'user', content: 'my secret prompt' }] }),
+      body: JSON.stringify({
+        model: 'crashy',
+        max_tokens: 32,
+        messages: [{ role: 'user', content: 'my secret prompt' }],
+      }),
     })
-    expect(chat.status).toBe(400)
+    expect(chat.status).toBe(status)
     await eventually(1)
     expect(events[0]).toMatchObject({
       level: 'warning',

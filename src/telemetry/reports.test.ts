@@ -263,45 +263,23 @@ describe('audioFailureReport', () => {
 describe('inferenceFailureReport', () => {
   const base = { provider: 'llamacpp-upstream' as const, modelId: 'm-Q8_0', oom: false }
 
-  it('reports a compute failure as a warning with the engine headline', () => {
-    const report = inferenceFailureReport({
-      ...base,
-      status: 500,
-      body: '{"error":{"code":500,"message":"Compute error.\\nmore"}}',
-      compute: true,
-      oom: true,
-    })
-    expect(report).toMatchObject({
-      level: 'warning',
+  it.each([
+    [500, true, true, 'warning', 'oom'],
+    [503, false, true, 'warning', 'oom'],
+    [500, true, false, 'warning', 'compute'],
+    [503, false, false, 'error', '503'],
+  ] as const)('classifies HTTP %i (compute %s, OOM %s)', (status, compute, oom, level, kind) => {
+    expect(inferenceFailureReport({ ...base, status, compute, oom })).toMatchObject({
+      level,
       type: 'InferenceFailure',
-      message: 'Compute error.',
-      fingerprint: ['inference-failure', 'llamacpp-upstream', 'oom'],
-      tags: { http_status: 500, failure_kind: 'oom', quant: 'Q8_0' },
+      message: `HTTP ${status}`,
+      fingerprint: ['inference-failure', base.provider, kind],
+      tags: { http_status: status, failure_kind: kind, quant: 'Q8_0' },
     })
-  })
-
-  it('reports another 5xx as an error', () => {
-    expect(
-      inferenceFailureReport({ ...base, status: 503, body: 'upstream down', compute: false })
-    ).toMatchObject({
-      level: 'error',
-      message: 'upstream down',
-      fingerprint: ['inference-failure', 'llamacpp-upstream', '503'],
-    })
-    expect(
-      inferenceFailureReport({ ...base, status: 502, body: '{"error":"bad gateway"}', compute: false })
-        ?.message
-    ).toBe('bad gateway')
-    expect(inferenceFailureReport({ ...base, status: 500, body: '', compute: false })?.message).toBe(
-      'HTTP 500'
-    )
-    expect(
-      inferenceFailureReport({ ...base, status: 500, body: '{"message":"m"}', compute: true })?.message
-    ).toBe('m')
   })
 
   it('leaves a 4xx to the app', () => {
-    expect(inferenceFailureReport({ ...base, status: 400, body: 'context', compute: false })).toBeNull()
+    expect(inferenceFailureReport({ ...base, status: 400, compute: false })).toBeNull()
   })
 })
 

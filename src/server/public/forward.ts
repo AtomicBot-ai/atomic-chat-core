@@ -44,6 +44,7 @@ import {
   emptyMessagesRefusal,
   isComputeBackendError,
   isContextLimitError,
+  isLlamaContextOverflow,
   isContextOverflowFinishLength,
   modelNotFoundJson,
   selectedProviderUnavailableJson,
@@ -476,6 +477,24 @@ async function growAndRetry(
   return true
 }
 
+/** Only a terminal failure from a local engine belongs to this core. Inspect its body here only. */
+function reportInferenceFailure(ex: Exchange, backend: Backend, status: number, body: string): void {
+  if (backend.kind !== 'local' || status < 500) return
+  const oom = bodyIndicatesOom(body)
+  const compute = isComputeBackendError(status, body)
+  if (!oom && !compute && isLlamaContextOverflow(body)) return
+  captureReport(
+    ex.deps.errors,
+    inferenceFailureReport({
+      provider: backend.session.provider,
+      modelId: backend.session.modelId,
+      status,
+      compute,
+      oom,
+    })
+  )
+}
+
 async function upstreamError(
   ex: Exchange,
   backend: Backend,
@@ -501,17 +520,7 @@ async function upstreamError(
       // it started. An error it knows (a context overflow) gets its own OpenAI body; any other is
       // wrapped like every local engine's.
       recordFailure()
-      captureReport(
-        ex.deps.errors,
-        inferenceFailureReport({
-          provider,
-          modelId,
-          status,
-          body: errorBody,
-          compute: false,
-          oom: trace.oomDetected,
-        })
-      )
+      reportInferenceFailure(ex, backend, status, errorBody)
       const mapped = policy.mapError(status, errorBody)
       if (mapped !== null) {
         answer(ex, status, serdeToString(mapped as JsonValue), [['Content-Type', 'application/json']])
@@ -537,26 +546,13 @@ async function upstreamError(
       trace.oomDetected = true
       trace.ctxOverflowDetected = false
       const oom = bodyIndicatesOom(errorBody)
-      captureReport(
-        ex.deps.errors,
-        inferenceFailureReport({ provider, modelId, status, body: errorBody, compute: true, oom })
-      )
+      reportInferenceFailure(ex, backend, status, errorBody)
       answer(ex, 400, computeErrorEnvelope(oom))
       return
     }
 
     recordFailure()
-    captureReport(
-      ex.deps.errors,
-      inferenceFailureReport({
-        provider,
-        modelId,
-        status,
-        body: errorBody,
-        compute: false,
-        oom: trace.oomDetected,
-      })
-    )
+    reportInferenceFailure(ex, backend, status, errorBody)
     answer(ex, status, structureBackendErrorBody(errorBody, trace.oomDetected, trace.ctxOverflowDetected))
     return
   }
@@ -673,6 +669,7 @@ async function messagesFallback(
         trace.upstreamStatus = fallback.status
         trace.oomDetected = bodyIndicatesOom(fallbackError)
         trace.ctxOverflowDetected = isContextLimitError(fallback.status, fallbackError)
+        reportInferenceFailure(ex, backend, fallback.status, fallbackError)
         // A declared session's own error wording (its context overflow) reads the same here as on
         // the chat route itself.
         const policy = backend.kind === 'local' ? backend.session.policy : undefined
@@ -730,6 +727,7 @@ async function messagesFallback(
   trace.upstreamStatus = response.status
   trace.oomDetected = bodyIndicatesOom(errorBody)
   trace.ctxOverflowDetected = isContextLimitError(response.status, errorBody)
+  reportInferenceFailure(ex, backend, response.status, errorBody)
   answer(ex, response.status, errorBody)
 }
 

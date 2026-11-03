@@ -23,11 +23,16 @@ import type { JsonValue } from '../shims/index.js'
 const LLAMA_CONTEXT_OVERFLOW = /request \(\d+ tokens\) exceeds the available context size/i
 export const LLAMA_CONTEXT_OVERFLOW_TYPE = 'exceed_context_size_error'
 
+/** A specific engine refusal suitable for excluding an oversized prompt from error reporting. */
+export function isLlamaContextOverflow(body: string): boolean {
+  return LLAMA_CONTEXT_OVERFLOW.test(body) || errorTypeOf(body) === LLAMA_CONTEXT_OVERFLOW_TYPE
+}
+
 /** A request that no longer fits the loaded context window, as llama.cpp and MLX word it. */
 export function isContextLimitError(status: number, body: string): boolean {
   if (![400, 413, 500, 503].includes(status)) return false
   const b = body.toLowerCase()
-  if (LLAMA_CONTEXT_OVERFLOW.test(body) || errorTypeOf(body) === LLAMA_CONTEXT_OVERFLOW_TYPE) return true
+  if (isLlamaContextOverflow(body)) return true
   // Older builds' wording.
   if (b.includes('the request exceeds the available context size')) return true
   if (b.includes('max_kv_size') || b.includes('max-kv-size') || b.includes('max kv size')) return true
@@ -166,8 +171,7 @@ function llamaOverflowSizes(body: string): { prompt: number; window: number } | 
  */
 export function anthropicPromptTooLong(status: number, body: string): string | undefined {
   if (status !== 400) return undefined
-  if (!LLAMA_CONTEXT_OVERFLOW.test(body) && errorTypeOf(body) !== LLAMA_CONTEXT_OVERFLOW_TYPE)
-    return undefined
+  if (!isLlamaContextOverflow(body)) return undefined
   const sizes = llamaOverflowSizes(body)
   if (sizes === undefined) return undefined
   return serdeToString({

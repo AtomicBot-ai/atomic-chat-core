@@ -263,18 +263,6 @@ export function audioFailureReport(input: {
   }
 }
 
-function upstreamMessage(body: string): string {
-  try {
-    const parsed = JSON.parse(body) as { error?: { message?: unknown } | string; message?: unknown }
-    const message =
-      typeof parsed.error === 'string' ? parsed.error : (parsed.error?.message ?? parsed.message)
-    if (typeof message === 'string') return headline(message)
-  } catch {
-    /* not JSON: the body is the message */
-  }
-  return headline(body)
-}
-
 /**
  * A running local engine that failed a request: a compute failure that leaves the backend unusable
  * (a Metal OOM during prompt processing, "failed to decode") at `warning`, any other 5xx at `error`.
@@ -284,25 +272,23 @@ export function inferenceFailureReport(input: {
   provider: LocalProviderId
   modelId: string
   status: number
-  body: string
   compute: boolean
   oom: boolean
 }): ErrorReport | null {
-  if (!input.compute && input.status < 500) return null
-  const kind = input.compute ? (input.oom ? 'oom' : 'compute') : String(input.status)
+  if (input.status < 500) return null
+  const kind = input.oom ? 'oom' : input.compute ? 'compute' : String(input.status)
   return {
     source: 'inference',
-    level: input.compute ? 'warning' : 'error',
+    level: input.compute || input.oom ? 'warning' : 'error',
     type: 'InferenceFailure',
-    message: upstreamMessage(input.body) || `HTTP ${input.status}`,
+    message: `HTTP ${input.status}`,
     fingerprint: ['inference-failure', input.provider, kind],
     tags: {
       provider: input.provider,
-      model_id: modelTag(input.modelId),
       quant: quantOf(input.modelId),
       http_status: input.status,
       failure_kind: kind,
     },
-    throttle: { key: `inference:${input.provider}:${input.modelId}:${kind}`, windowMs: ENGINE_THROTTLE_MS },
+    throttle: { key: `inference:${input.provider}:${kind}`, windowMs: ENGINE_THROTTLE_MS },
   }
 }

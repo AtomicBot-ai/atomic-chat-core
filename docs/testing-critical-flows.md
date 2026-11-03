@@ -109,3 +109,9 @@ formatting, 10,105 unit/contract tests (4 skipped), coverage floors on 323 files
 compatibility suite passed all 11 tests. Privacy cases cover arbitrary error codes/class names,
 multi-line messages containing apparent stack frames, and user-named backend paths after a
 build version. The cause chain and unknown-error grouping use the same stripped stack.
+
+
+For coding agents, the local Anthropic fallback shares the direct chat route's inference
+classification. HTTP tests distinguish a recovered first attempt, an oversized prompt, a
+terminal OOM and a terminal 503. The compiled-binary fake-ingest scenario exercises both
+routes and checks the grouping and absence of prompt text.
