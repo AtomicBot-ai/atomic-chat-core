@@ -392,6 +392,43 @@ describe('Anthropic thinking on a llama.cpp engine (QA B08)', () => {
     expect(fallbacks[1]).not.toHaveProperty('max_tokens')
   })
 
+  it('answers a turn with system messages in its conversation natively, the system messages merged', async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const turn = {
+      model: 'demo',
+      max_tokens: 32000,
+      thinking: { type: 'adaptive' },
+      system: [{ type: 'text', text: 'You are Claude Code.' }],
+      messages: [
+        { role: 'user', content: 'how are you?' },
+        { role: 'assistant', content: [{ type: 'text', text: 'Fine.' }] },
+        { role: 'system', content: 'The user switched to plan mode.' },
+        { role: 'user', content: 'and now?' },
+      ],
+    }
+    expect((await postJson(server, '/messages', turn)).status).toBe(200)
+    expect(seen).toEqual([
+      {
+        url: '/v1/messages',
+        body: {
+          ...turn,
+          system: [
+            { type: 'text', text: 'You are Claude Code.' },
+            { type: 'text', text: '\n\nThe user switched to plan mode.' },
+          ],
+          messages: [turn.messages[0], turn.messages[1], turn.messages[3]],
+        },
+      },
+    ])
+  })
+
   it('leaves /messages to an engine other than llama.cpp as sent', async () => {
     const seen: string[] = []
     const { port } = await startUpstream((_req, body, res) => {

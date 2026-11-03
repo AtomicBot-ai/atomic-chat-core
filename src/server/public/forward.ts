@@ -50,6 +50,7 @@ import {
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
+import { mergedSystemMessages } from './system-messages.js'
 import { isLlamaCppServer, noThinkingTemplateKwargs } from './thinking.js'
 import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
@@ -299,9 +300,19 @@ export async function serveForward(ex: Exchange): Promise<void> {
     trace.inspecting && stream && ex.path === '/chat/completions' && backend.kind === 'local'
       ? maybeInjectStreamUsage(raw)
       : undefined
-  const withoutThinking =
-    noThinking !== undefined && isJsonObject(json)
-      ? Buffer.from(serdeToString({ ...json, chat_template_kwargs: noThinking }))
+  // System messages inside the conversation join `system` before a strict llama.cpp template sees
+  // them, so the turn is answered natively instead of by the fallback (QA B08).
+  const systemMerged =
+    isMessages && backend.kind === 'local' ? mergedSystemMessages(backend.session.provider, json) : undefined
+  const rewritten =
+    (noThinking !== undefined || systemMerged !== undefined) && isJsonObject(json)
+      ? Buffer.from(
+          serdeToString({
+            ...json,
+            ...systemMerged,
+            ...(noThinking !== undefined ? { chat_template_kwargs: noThinking } : {}),
+          })
+        )
       : undefined
 
   const signal = clientGone(ex)
@@ -310,7 +321,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     response = await sendUpstream(url, {
       method: ex.method,
       headers: outboundHeaders(ex, ['host', 'authorization'], backend, key),
-      body: injected ?? withoutThinking ?? raw,
+      body: injected ?? rewritten ?? raw,
       connectTimeoutMs: connectTimeoutMs(ex),
       signal,
     })
