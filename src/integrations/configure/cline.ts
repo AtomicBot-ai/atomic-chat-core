@@ -1,9 +1,14 @@
 /**
- * Cline — no config file at all.
+ * Cline — configured by its own `cline auth` subcommand.
  *
- * Port of `configure_cline` in `src-tauri/src/core/system/commands.rs`. Cline stores its provider
- * settings itself; the supported way in is its own `cline auth` subcommand, so configuring it means
- * running a process and reporting what it said. Nothing is written to disk by us.
+ * Port of `configure_cline` in `src-tauri/src/core/system/commands.rs` and `cline_config.rs`. The
+ * supported way in is `cline auth --provider openai-compatible …`, which saves the provider into
+ * Cline's `providers.json` (`<CLINE_DIR>/data/settings/providers.json`) and makes it
+ * `lastUsedProvider`, so configuring it means running a process and reporting what it said. It has
+ * no flag for the context window, which Cline 3.x reads from the entry's `contextWindow` (and the
+ * reply cap from `maxTokens`): both are set on the saved entry afterwards, and removed when the
+ * window is unknown. The entry and `lastUsedProvider` from before are kept in the backup sidecar for
+ * the desktop's Disconnect, read before `cline auth` rewrites them.
  *
  * On Windows the npm-installed `cline` is a batch shim (`cline.cmd`), which `CreateProcessW` refuses
  * to execute directly, so the call is routed through `cmd /C`.
@@ -11,9 +16,15 @@
 
 import { execFile } from 'node:child_process'
 import { AtomicCoreError } from '../../contracts/index.js'
-import { keyOr } from '../config-io.js'
+import type { ConfigFs, JsonValue } from '../config-io.js'
+import { canonicalJson, expandTilde, keyOr, parseJsonStrict } from '../config-io.js'
+import { knownWindow, outputCap, readSidecar, sameJson, writeSidecar } from './backup.js'
+import type { JsonObject } from './json-tree.js'
+import { asJsonObject } from './json-tree.js'
 import type { ConfigureInput } from './registry.js'
 import { registerWriter } from './registry.js'
+
+const PROVIDER = 'openai-compatible'
 
 export interface SpawnResult {
   code: number
@@ -33,7 +44,7 @@ export function clineAuthCommand(
   const args = [
     'auth',
     '--provider',
-    'openai-compatible',
+    PROVIDER,
     '--apikey',
     keyOr(apiKey, 'local'),
     '--modelid',
@@ -63,9 +74,58 @@ export function spawnProcess(program: string, args: string[]): Promise<SpawnResu
   })
 }
 
+/**
+ * `providers.json` where Cline resolves it: `$CLINE_PROVIDER_SETTINGS_PATH`, else
+ * `$CLINE_DATA_DIR/settings`, else `$CLINE_DIR/data/settings`, else `~/.cline/data/settings`.
+ */
+export function clineProvidersPath(env: NodeJS.ProcessEnv, home: string): string {
+  const value = (name: string) => {
+    const raw = env[name]?.trim()
+    return raw ? expandTilde(raw, home) : undefined
+  }
+  const file = value('CLINE_PROVIDER_SETTINGS_PATH')
+  if (file !== undefined) return file
+  const data = value('CLINE_DATA_DIR') ?? `${value('CLINE_DIR') ?? '.cline'}/data`
+  return `${data}/settings/providers.json`
+}
+
+async function readProviders(fs: ConfigFs, path: string): Promise<JsonObject> {
+  const text = await fs.read(path)
+  const parsed = text === undefined ? {} : parseJsonStrict(text, fs.absolute(path))
+  const root = asJsonObject(parsed)
+  if (!root) throw new AtomicCoreError('IO_ERROR', `${fs.absolute(path)} is not a JSON object`)
+  return root
+}
+
+const entrySettings = (root: JsonObject): JsonObject | undefined =>
+  asJsonObject(asJsonObject(asJsonObject(root['providers'])?.[PROVIDER])?.['settings'])
+
+/** Whether the entry still points where we pointed it. */
+function holdsOurs(root: JsonObject, written: JsonValue | undefined): boolean {
+  const settings = entrySettings(root)
+  const ours = asJsonObject(written)
+  return (
+    settings !== undefined &&
+    ours !== undefined &&
+    sameJson(settings['baseUrl'], ours['baseUrl']) &&
+    sameJson(settings['model'], ours['model'])
+  )
+}
+
 export async function configureCline(input: ConfigureInput): Promise<void> {
   const { program, args } = clineAuthCommand(input.apiUrl, input.model, input.apiKey, input.platform)
   const spawn = input.spawn ?? spawnProcess
+
+  // What the desktop's Disconnect restores, read before `cline auth` rewrites it — and kept as it
+  // is across reconnects while the file still holds ours.
+  const path = clineProvidersPath(input.env, input.fs.home)
+  const before = await readProviders(input.fs, path)
+  const backup = await readSidecar(input.fs, path)
+  const kept = backup !== undefined && holdsOurs(before, backup['written']) ? backup['previous'] : undefined
+  const previous: JsonValue = kept ?? {
+    lastUsedProvider: before['lastUsedProvider'] ?? null,
+    entry: asJsonObject(before['providers'])?.[PROVIDER] ?? null,
+  }
 
   let result: SpawnResult
   try {
@@ -80,6 +140,32 @@ export async function configureCline(input: ConfigureInput): Promise<void> {
     const detail = stderr === '' ? result.stdout.trim() : stderr
     throw new AtomicCoreError('INTERNAL_ERROR', `\`cline auth\` failed: ${detail}`)
   }
+
+  // `cline auth` has no flag for the window; set it on the entry it saved, or clear what the entry
+  // carried for the endpoint it pointed at before.
+  const after = await readProviders(input.fs, path)
+  const settings = entrySettings(after)
+  if (settings !== undefined) {
+    const was = canonicalJson(settings)
+    const window = knownWindow(input.contextLength)
+    if (window !== undefined) {
+      settings['contextWindow'] = window
+      settings['maxTokens'] = outputCap(window)
+    } else {
+      delete settings['contextWindow']
+      delete settings['maxTokens']
+    }
+    // Cline keeps the file owner-only: it holds every provider's key.
+    if (canonicalJson(settings) !== was) {
+      await input.fs.write(path, canonicalJson(after), input.platform === 'win32' ? {} : { mode: 0o600 })
+    }
+  }
+  await writeSidecar(
+    input.fs,
+    path,
+    { previous, written: { baseUrl: input.apiUrl, model: input.model } },
+    input.platform
+  )
 }
 
 registerWriter('cline', configureCline)

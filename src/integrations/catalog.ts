@@ -332,14 +332,9 @@ export function childEnv(
   const key = apiKey || 'atomic'
   switch (agent.id) {
     case 'copilot':
-      return {
-        COPILOT_PROVIDER_BASE_URL: apiUrl,
-        COPILOT_PROVIDER_TYPE: 'openai',
-        COPILOT_MODEL: model,
-        COPILOT_OFFLINE: 'true',
-        // Copilot is the one that omits the key entirely when there is none.
-        ...(apiKey ? { COPILOT_PROVIDER_API_KEY: apiKey } : {}),
-      }
+      // The endpoint, key and limits are our entry in Copilot's providers.json
+      // (`configure/copilot.ts`); this selects it for the run, as `--model` would.
+      return { COPILOT_MODEL: `atomic-chat/${model}` }
     case 'goose': {
       // Goose derives its chat path from OPENAI_BASE_URL, prefix included; with the window and output
       // cap it compacts before the server refuses.

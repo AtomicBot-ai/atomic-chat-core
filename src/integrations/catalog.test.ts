@@ -97,13 +97,8 @@ describe('apiUrlFor', () => {
 
 describe('childEnv', () => {
   it('sets what each env-configured agent reads, and nothing for the rest', () => {
-    expect(childEnv(agent('copilot'), 'http://h/v1', 'm', 'k')).toEqual({
-      COPILOT_PROVIDER_BASE_URL: 'http://h/v1',
-      COPILOT_PROVIDER_TYPE: 'openai',
-      COPILOT_MODEL: 'm',
-      COPILOT_OFFLINE: 'true',
-      COPILOT_PROVIDER_API_KEY: 'k',
-    })
+    // Copilot's endpoint and key live in providers.json; the run only selects our model there.
+    expect(childEnv(agent('copilot'), 'http://h/v1', 'm', 'k')).toEqual({ COPILOT_MODEL: 'atomic-chat/m' })
     expect(childEnv(agent('goose'), 'http://h', 'm', '')).toEqual({
       GOOSE_PROVIDER: 'openai',
       GOOSE_MODEL: 'm',
@@ -151,8 +146,8 @@ describe('childEnv', () => {
     expect(childEnv(agent('codex'), 'http://h/v1', 'm', '')).toEqual({})
   })
 
-  it('omits the Copilot key when there is none, instead of sending the word "atomic"', () => {
-    expect(childEnv(agent('copilot'), 'http://h/v1', 'm', '')).not.toHaveProperty('COPILOT_PROVIDER_API_KEY')
+  it('never puts the Copilot key in the environment', () => {
+    expect(childEnv(agent('copilot'), 'http://h/v1', 'm', 'k')).not.toHaveProperty('COPILOT_PROVIDER_API_KEY')
   })
 
   it('lists the ambient credentials that must be cleared on the child', () => {
