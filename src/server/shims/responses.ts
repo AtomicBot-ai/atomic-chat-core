@@ -280,14 +280,19 @@ function responsesTextFormatToChat(format: JsonValue): JsonValue | undefined {
   }
 }
 
-/** Map a Chat Completions `usage` block to the Responses `usage` shape. */
+/**
+ * Map a Chat Completions `usage` block to the Responses `usage` shape. The cached part of the prompt
+ * is carried over (llama.cpp reports it as `prompt_tokens_details.cached_tokens`); Codex shows it and
+ * counts it, so a hard-coded 0 read as "nothing cached" on every turn.
+ */
 function mapUsage(usage: JsonValue): JsonValue {
   const input = asU64(field(usage, 'prompt_tokens')) ?? 0
   const output = asU64(field(usage, 'completion_tokens')) ?? 0
   const total = asU64(field(usage, 'total_tokens')) ?? input + output
+  const cached = asU64(field(field(usage, 'prompt_tokens_details'), 'cached_tokens')) ?? 0
   return {
     input_tokens: input,
-    input_tokens_details: { cached_tokens: 0 },
+    input_tokens_details: { cached_tokens: cached },
     output_tokens: output,
     output_tokens_details: { reasoning_tokens: 0 },
     total_tokens: total,

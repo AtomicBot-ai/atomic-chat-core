@@ -203,6 +203,40 @@ describe('api:request analytics', () => {
     expect(JSON.stringify(events)).not.toContain('secret')
   })
 
+  it('keeps the window the session served with each request, and the cached part of its prompt (QA B04)', async () => {
+    let window = 32768
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+          usage: {
+            prompt_tokens: 9040,
+            completion_tokens: 1,
+            prompt_tokens_details: { cached_tokens: 9000 },
+          },
+        })
+      )
+    })
+    const { server, finished } = await observed(false, {
+      sessions: [localSession(port)],
+      remote: [remoteProvider({ baseUrl: `http://127.0.0.1:${port}/v1` })],
+      contextWindow: () => Promise.resolve(window),
+    })
+    const ask = (model: string) =>
+      postJson(server, '/chat/completions', { model, messages: [{ role: 'user', content: 'hi' }] })
+
+    await (await ask('demo')).text()
+    // The model is reloaded with a larger window: the first request keeps the one it ran with.
+    window = 65536
+    await (await ask('demo')).text()
+    await (await ask('cloud-model')).text()
+
+    const done = await finished(3)
+    expect(done.map((d) => d.finish?.ctx_len)).toEqual([32768, 65536, null])
+    expect(done[0]?.finish).toMatchObject({ prompt_tokens: 9040, cached_tokens: 9000 })
+  })
+
   it('keeps model polling, docs, preflight, scanners and hidden paths out of analytics', async () => {
     const { server, events } = await observed(true)
     const base = `http://127.0.0.1:${server.port}`

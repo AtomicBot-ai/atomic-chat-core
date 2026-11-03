@@ -30,6 +30,7 @@ import {
   sseEvent,
 } from './forward.js'
 import { policyRefusal } from './policy.js'
+import { sessionWindow } from './context-window.js'
 import { responsesRolesRefusal } from './validate.js'
 import type { Backend } from './forward.js'
 import type { LocalTarget } from './types.js'
@@ -99,6 +100,7 @@ export async function serveResponses(ex: Exchange): Promise<void> {
     return
   }
   trace.backend = session.provider
+  trace.recordWindow(() => sessionWindow(ex.deps, session))
   // The translation copies a message item's role into the chat messages, where a chat template drops
   // one it does not know; MLX gets the same answer.
   const malformed = responsesRolesRefusal(json)

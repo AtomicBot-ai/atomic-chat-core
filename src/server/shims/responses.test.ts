@@ -251,6 +251,14 @@ describe('chatResponseToResponses', () => {
     )['usage']
     expect(usage).toMatchObject({ input_tokens: 3, output_tokens: 0, total_tokens: 3 })
   })
+
+  it("carries the prompt's cached part over, and says 0 only when the engine does not say", () => {
+    const usage = (u: JsonValue) => obj(chatResponseToResponses({ usage: u }, 'r', 'm'))['usage']
+    expect(
+      usage({ prompt_tokens: 9040, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 9000 } })
+    ).toMatchObject({ input_tokens: 9040, input_tokens_details: { cached_tokens: 9000 } })
+    expect(usage({ prompt_tokens: 3 })).toMatchObject({ input_tokens_details: { cached_tokens: 0 } })
+  })
 })
 
 describe('ResponsesStreamConverter', () => {

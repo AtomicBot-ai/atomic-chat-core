@@ -17,6 +17,18 @@ import type { JsonValue } from '../../src/server/shims/index.js'
 
 type Input = Record<string, JsonValue>
 
+/**
+ * Where the port deliberately reports more than the recorded Rust inspector; the expectation is
+ * corrected, never skipped. The port's finish fields also carry `cached_tokens`, the part of the
+ * prompt the engine reused (audit 2026-11-03 S6); no recorded case reports a cache, so it is `null`
+ * in every one of them.
+ */
+function applyKnownDivergence(input: Input, expected: JsonValue): JsonValue {
+  if (input['kind'] !== 'stream_telemetry' || expected === null || typeof expected !== 'object')
+    return expected
+  return { ...expected, cached_tokens: null }
+}
+
 describe('inspector-telemetry', () => {
   const { index, cases } = loadFixtureSet<Input, JsonValue>('inspector-telemetry')
 
@@ -56,6 +68,6 @@ describe('inspector-telemetry', () => {
       default:
         throw new Error(`unknown case kind ${String(input['kind'])}`)
     }
-    expect(actual).toEqual(c.expected)
+    expect(actual).toEqual(applyKnownDivergence(input, c.expected))
   })
 })

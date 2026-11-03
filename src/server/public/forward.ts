@@ -33,6 +33,7 @@ import { LOCAL_SEARCH_ORDER, resolveRemoteProvider, resolveSelectedRoute } from 
 import type { LocalProvider, RemoteProvider, SelectedRoute } from '../../router/index.js'
 import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
 import { autoIncreaseCtx } from './ctx.js'
+import { sessionWindow } from './context-window.js'
 import { SseLineReader } from './sse.js'
 import { StreamTelemetry, isUsageOnlyChunk, maybeInjectStreamUsage } from './telemetry.js'
 import { endpointFromPath } from './trace.js'
@@ -240,6 +241,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     }
     backend = { kind: 'local', session }
     trace.backend = session.provider
+    trace.recordWindow(() => sessionWindow(ex.deps, session))
     const refused = session.policy && policyRefusal(session.policy, ex.path, modelId, json)
     if (refused) {
       trace.errorKind = 'bad_request'
