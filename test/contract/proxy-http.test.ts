@@ -91,10 +91,24 @@ const REMOTE_BEARER = 'Bearer sk-remote'
  * Also recorded later: the proxy sent an Anthropic `/v1/messages` request to a llama.cpp session as it
  * came, so a request without `thinking` thought at the server's default anyway; the port adds
  * `chat_template_kwargs: {enable_thinking: false}` to it, on `/v1/messages` and on the chat-completions
- * fallback (QA B08, `src/server/public/thinking.ts`).
+ * fallback (QA B08, `src/server/public/thinking.ts`). That fallback also kept no `max_tokens`, so an
+ * engine started with `n_predict -1` wrote until its context was full; to a llama.cpp session the port
+ * keeps the request's `max_tokens`, as llama.cpp's own `/v1/messages` does.
  */
 const UNKNOWN_MODEL_TEXT = /^No running session found for model '(.*)'$/
 const SESSION_BEARER = 'Bearer session-key'
+
+/** The positive `max_tokens` of an Anthropic request, which a llama.cpp fallback keeps. */
+function messagesMaxTokens(request: Input['request']): number | undefined {
+  if (!request.path.endsWith('/messages') || request.body === null) return undefined
+  try {
+    const body = JSON.parse(request.body) as JsonValue
+    const value = isJsonObject(body) ? body['max_tokens'] : undefined
+    return typeof value === 'number' && value > 0 ? value : undefined
+  } catch {
+    return undefined
+  }
+}
 
 function asksForNoThinking(request: Input['request']): boolean {
   if (!request.path.endsWith('/messages') || request.body === null) return false
@@ -108,10 +122,19 @@ function asksForNoThinking(request: Input['request']): boolean {
 
 function applyKnownDivergence(expected: Expected, input: Input): void {
   const noThinking = asksForNoThinking(input.request)
+  const maxTokens = messagesMaxTokens(input.request)
   for (const call of expected.upstream_calls) {
     if (call.headers['authorization'] === REMOTE_BEARER) call.headers['x-custom'] = 'from-provider'
     if (noThinking && call.headers['authorization'] === SESSION_BEARER && isJsonObject(call.body)) {
       call.body['chat_template_kwargs'] = { enable_thinking: false }
+    }
+    if (
+      maxTokens !== undefined &&
+      call.path.endsWith('/chat/completions') &&
+      call.headers['authorization'] === SESSION_BEARER &&
+      isJsonObject(call.body)
+    ) {
+      call.body['max_tokens'] = maxTokens
     }
   }
   const { response } = expected

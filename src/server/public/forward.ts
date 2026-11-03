@@ -50,7 +50,7 @@ import {
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
-import { noThinkingTemplateKwargs } from './thinking.js'
+import { isLlamaCppServer, noThinkingTemplateKwargs } from './thinking.js'
 import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
 import type { LocalTarget } from './types.js'
@@ -609,6 +609,19 @@ async function messagesFallback(
   const errorKind = backend.kind === 'local' ? 'local_model_error' : 'remote_provider_error'
   const chat = anthropicRequestToChat(json)
   if (isJsonObject(chat) && noThinking !== undefined) chat['chat_template_kwargs'] = noThinking
+  // llama.cpp's own `/v1/messages` stops at the request's `max_tokens`; the translation keeps that
+  // cap, or an engine started with `n_predict -1` writes until its context is full. Other engines
+  // keep the translation as the Rust proxy shipped it, without the cap.
+  const maxTokens = isJsonObject(json) ? json['max_tokens'] : undefined
+  if (
+    isJsonObject(chat) &&
+    backend.kind === 'local' &&
+    isLlamaCppServer(backend.session.provider) &&
+    typeof maxTokens === 'number' &&
+    maxTokens > 0
+  ) {
+    chat['max_tokens'] = maxTokens
+  }
   if (chat !== null) {
     let base = url
     while (base.endsWith('/messages')) base = base.slice(0, -'/messages'.length)

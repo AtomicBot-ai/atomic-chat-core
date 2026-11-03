@@ -356,6 +356,42 @@ describe('Anthropic thinking on a llama.cpp engine (QA B08)', () => {
     expect(seen[1]?.body).toMatchObject({ chat_template_kwargs: { enable_thinking: false } })
   })
 
+  it("keeps the request's max_tokens on a llama.cpp fallback, and only there", async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      if (req.url === '/v1/messages') {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'System message must be at the beginning.' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'fine' }, finish_reason: 'stop' }],
+        })
+      )
+    })
+    const server = await startPublic({
+      sessions: [
+        localSession(port),
+        localSession(port, { provider: 'mlx', modelId: 'mlx-model', apiKey: '' }),
+      ],
+    })
+
+    // Claude Code's own turn asks for adaptive thinking: the template keeps thinking, the cap stays.
+    const turn = { ...titleRequest, stream: false, thinking: { type: 'adaptive' } }
+    expect((await postJson(server, '/messages', turn)).status).toBe(200)
+    expect((await postJson(server, '/messages', { ...turn, model: 'mlx-model' })).status).toBe(200)
+
+    const fallbacks = seen.filter((s) => s.url === '/v1/chat/completions').map((s) => s.body)
+    expect(fallbacks).toHaveLength(2)
+    expect(fallbacks[0]).toMatchObject({ model: 'demo', max_tokens: 32000 })
+    expect(fallbacks[0]).not.toHaveProperty('chat_template_kwargs')
+    expect(fallbacks[1]).toMatchObject({ model: 'mlx-model' })
+    expect(fallbacks[1]).not.toHaveProperty('max_tokens')
+  })
+
   it('leaves /messages to an engine other than llama.cpp as sent', async () => {
     const seen: string[] = []
     const { port } = await startUpstream((_req, body, res) => {

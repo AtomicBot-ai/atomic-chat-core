@@ -25,6 +25,11 @@ const LLAMACPP_SERVERS: ReadonlySet<LocalProvider> = new Set([
   'atomic-prism',
 ])
 
+/** Whether `provider` is llama.cpp's own server, whose `/v1/messages` reads the Anthropic fields itself. */
+export function isLlamaCppServer(provider: LocalProvider): boolean {
+  return LLAMACPP_SERVERS.has(provider)
+}
+
 function hasKey(value: JsonValue | undefined, key: string): boolean {
   return isJsonObject(value) && Object.prototype.hasOwnProperty.call(value, key)
 }
