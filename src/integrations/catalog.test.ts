@@ -8,6 +8,7 @@ import {
   HERMES_CONTEXT_LENGTH,
   offPathCandidates,
   poolsideStandaloneBaseUrl,
+  runArgsFor,
 } from './catalog.js'
 
 const agent = (id: string) => {
@@ -106,8 +107,7 @@ describe('childEnv', () => {
     expect(childEnv(agent('goose'), 'http://h', 'm', '')).toEqual({
       GOOSE_PROVIDER: 'openai',
       GOOSE_MODEL: 'm',
-      OPENAI_HOST: 'http://h',
-      OPENAI_BASE_PATH: 'v1/chat/completions',
+      OPENAI_BASE_URL: 'http://h/v1',
       OPENAI_API_KEY: 'atomic',
     })
     expect(childEnv(agent('openhands'), 'http://h/v1', 'm', 'k')).toEqual({
@@ -123,6 +123,28 @@ describe('childEnv', () => {
     expect(childEnv(agent('muse'), 'http://h/v1', 'm', 'k')).toEqual({ META_API_KEY: 'k' })
     expect(childEnv(agent('codex'), 'http://h/v1', 'm', 'k')).toEqual({ ATOMIC_CHAT_API_KEY: 'k' })
     expect(childEnv(agent('kilo'), 'http://h/v1', 'm', 'k')).toEqual({})
+  })
+
+  it('gives Goose the server prefix, and its window and output cap when known', () => {
+    expect(
+      childEnv(agent('goose'), 'http://h', 'm', 'k', { contextLength: 16384, apiPrefix: '/api/v1' })
+    ).toEqual({
+      GOOSE_PROVIDER: 'openai',
+      GOOSE_MODEL: 'm',
+      OPENAI_BASE_URL: 'http://h/api/v1',
+      OPENAI_API_KEY: 'k',
+      GOOSE_CONTEXT_LIMIT: '16384',
+      GOOSE_MAX_TOKENS: '4096',
+    })
+    expect(
+      childEnv(agent('goose'), 'http://h', 'm', 'k', { contextLength: 262144 })['GOOSE_MAX_TOKENS']
+    ).toBe('8192')
+  })
+
+  it('starts Kilo on our model, and every other agent on its fixed arguments', () => {
+    expect(runArgsFor(agent('kilo'), 'org/m')).toEqual(['--model', 'atomic/org/m'])
+    expect(runArgsFor(agent('kilo'), '')).toEqual([])
+    expect(runArgsFor(agent('goose'), 'm')).toEqual(['session'])
   })
 
   it('gives Codex no key variable for a keyless server, whose profile names none', () => {

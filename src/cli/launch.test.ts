@@ -98,9 +98,16 @@ describe('refusals', () => {
 
 describe('agentEnvironment', () => {
   it('drops ambient provider credentials and adds what the agent reads', () => {
-    const base = { PATH: '/bin', OPENAI_API_KEY: 'leaked', ANTHROPIC_API_KEY: 'leaked', HOME: '/home/u' }
+    const base = {
+      PATH: '/bin',
+      OPENAI_API_KEY: 'leaked',
+      ANTHROPIC_API_KEY: 'leaked',
+      OPENAI_HOST: 'https://api.openai.com',
+      HOME: '/home/u',
+    }
     const env = agentEnvironment(base, findAgent('goose') as never, 'http://127.0.0.1:6767', 'm', 'k')
     expect(env['OPENAI_API_KEY'], 'goose gets its own value, not the ambient one').toBe('k')
+    expect(env['OPENAI_HOST'], 'an ambient host would beat OPENAI_BASE_URL').toBeUndefined()
     expect(env['ANTHROPIC_API_KEY']).toBeUndefined()
     expect(env['PATH']).toBe('/bin')
     expect(env['GOOSE_MODEL']).toBe('m')
@@ -231,7 +238,9 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('launching an agent', () => {
     expect(code, 'the agent’s exit code is ours').toBe(7)
     expect(ran[0]?.args).toEqual(['session', '--debug'])
     expect(ran[0]?.env['GOOSE_PROVIDER']).toBe('openai')
-    expect(ran[0]?.env['OPENAI_HOST'], 'Goose appends its own path').toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+    expect(ran[0]?.env['OPENAI_BASE_URL'], 'the server prefix rides on the base URL').toMatch(
+      /^http:\/\/127\.0\.0\.1:\d+\/v1$/
+    )
   })
 
   it('keeps serving after a GUI agent opens, until it is interrupted', async () => {

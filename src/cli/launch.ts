@@ -22,8 +22,9 @@ import {
   detectAgents,
   findAgent,
   MUSE_CLI_REFUSAL,
+  runArgsFor,
 } from '../integrations/index.js'
-import type { Agent, AgentDetection } from '../integrations/index.js'
+import type { Agent, AgentDetection, ChildEnvOptions } from '../integrations/index.js'
 import { ModelRegistry } from '../models/index.js'
 import { layoutFor, printFirstRunNotice, sessionProcess } from './commands/index.js'
 import type { CliIo } from './io.js'
@@ -195,8 +196,11 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
       io.stderr(`  Model     ${modelId}\n`)
       io.stderr(`  Session   ${sessionProcess(session)}, port ${session.port}\n\n`)
 
-      const args = [...agent.runArgs, ...agentArgs]
-      const env = agentEnvironment(io.env, agent, apiUrl, modelId, apiKey)
+      const args = [...runArgsFor(agent, modelId), ...agentArgs]
+      const env = agentEnvironment(io.env, agent, apiUrl, modelId, apiKey, {
+        contextLength,
+        apiPrefix: server.prefix,
+      })
       const run = deps.run ?? runAgent
 
       if (agent.runMode === 'gui') {
@@ -362,11 +366,12 @@ export function agentEnvironment(
   agent: Agent,
   apiUrl: string,
   model: string,
-  apiKey: string
+  apiKey: string,
+  options: ChildEnvOptions = {}
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base }
   for (const name of CONFLICTING_PROVIDER_ENV) delete env[name]
-  return { ...env, ...childEnv(agent, apiUrl, model, apiKey) }
+  return { ...env, ...childEnv(agent, apiUrl, model, apiKey, options) }
 }
 
 export function runAgent(spec: RunSpec): Promise<number> {

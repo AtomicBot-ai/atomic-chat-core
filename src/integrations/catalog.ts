@@ -219,7 +219,7 @@ export const AGENTS: readonly Agent[] = [
     detectBin: 'goose',
     aliases: [],
     requiresModel: true,
-    // Goose appends its own path via OPENAI_BASE_PATH.
+    // Handed the bare host like Claude Code; `childEnv` adds the server's prefix to OPENAI_BASE_URL.
     endpointWithPrefix: false,
     docsUrl: 'https://block.github.io/goose/',
     // A bare `goose` only prints help.
@@ -293,6 +293,9 @@ export function apiUrlFor(agent: Agent, baseUrl: string, prefix: string): string
 export const CONFLICTING_PROVIDER_ENV: readonly string[] = [
   'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
+  // Goose reads an OPENAI_HOST from the environment before OPENAI_BASE_URL, and its base path with it.
+  'OPENAI_HOST',
+  'OPENAI_BASE_PATH',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_OAUTH_TOKEN',
@@ -303,18 +306,28 @@ export const CONFLICTING_PROVIDER_ENV: readonly string[] = [
   'OPENROUTER_API_KEY',
 ]
 
+/** What `childEnv` may need beyond the endpoint: the served window and the server's API prefix. */
+export interface ChildEnvOptions {
+  /** The window the served model was loaded with, when known. */
+  contextLength?: number | undefined
+  /** The API prefix for an agent handed the bare host (Goose); `/v1` when not given. */
+  apiPrefix?: string | undefined
+}
+
 /**
- * Environment the spawned agent needs on top of its config file. Five agents are configured purely
- * through environment variables that `configure_*` persists to the user's shell rc — that file is
- * not live in a process we are about to spawn, so the same variables are set on the child. Codex's
- * profile names the variable its key is read from (`env_key`) but never holds the key, so the key
- * goes on the child — only when there is one, as the profile names the variable only then.
+ * Environment the spawned agent needs on top of its config file. Four agents are configured through
+ * environment variables that `configure_*` persists to the user's shell rc — that file is not live in
+ * a process we are about to spawn, so the same variables are set on the child. Goose gets its own
+ * only here, for the one session. Codex's profile names the variable its key is read from
+ * (`env_key`) but never holds the key, so the key goes on the child — only when there is one, as the
+ * profile names the variable only then.
  */
 export function childEnv(
   agent: Agent,
   apiUrl: string,
   model: string,
-  apiKey: string
+  apiKey: string,
+  options: ChildEnvOptions = {}
 ): Record<string, string> {
   const key = apiKey || 'atomic'
   switch (agent.id) {
@@ -327,14 +340,23 @@ export function childEnv(
         // Copilot is the one that omits the key entirely when there is none.
         ...(apiKey ? { COPILOT_PROVIDER_API_KEY: apiKey } : {}),
       }
-    case 'goose':
+    case 'goose': {
+      // Goose derives its chat path from OPENAI_BASE_URL, prefix included; with the window and output
+      // cap it compacts before the server refuses.
+      const ctx = options.contextLength !== undefined && options.contextLength > 0 ? options.contextLength : 0
       return {
         GOOSE_PROVIDER: 'openai',
         GOOSE_MODEL: model,
-        OPENAI_HOST: apiUrl,
-        OPENAI_BASE_PATH: 'v1/chat/completions',
+        OPENAI_BASE_URL: `${apiUrl}${options.apiPrefix ?? '/v1'}`,
         OPENAI_API_KEY: key,
+        ...(ctx
+          ? {
+              GOOSE_CONTEXT_LIMIT: String(ctx),
+              GOOSE_MAX_TOKENS: String(Math.min(8192, Math.floor(ctx / 4))),
+            }
+          : {}),
       }
+    }
     case 'openhands':
       // The litellm `openai/` prefix is required for a custom OpenAI-compatible base_url.
       return { LLM_MODEL: `openai/${model}`, LLM_BASE_URL: apiUrl, LLM_API_KEY: key }
@@ -351,6 +373,14 @@ export function childEnv(
     default:
       return {}
   }
+}
+
+/**
+ * The arguments that start `agent` on `model`: its fixed `runArgs`, plus `--model atomic/<id>` for
+ * Kilo, which otherwise opens on the model it last used before the one its config selects.
+ */
+export function runArgsFor(agent: Agent, model: string): string[] {
+  return agent.id === 'kilo' && model ? ['--model', `atomic/${model}`, ...agent.runArgs] : [...agent.runArgs]
 }
 
 /** Poolside wants the root without `/v1`; it appends its own paths. */
