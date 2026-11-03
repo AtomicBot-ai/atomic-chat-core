@@ -23,12 +23,10 @@ export const ZCODE_PROVIDER_ID = 'atomic-chat'
 const ZCODE_PROVIDER_NAME = 'Atomic Chat'
 /** ZCode only admits a provider whose API key is non-blank; the local server ignores it when auth is off. */
 export const ZCODE_KEY_PLACEHOLDER = 'atomic'
-/**
- * ZCode assumes 200K of context for any model it does not recognise — a wild over-claim for a local
- * model, which then never compacts and overflows mid-turn.
- */
-export const ZCODE_CONTEXT_WINDOW = 65_536
+/** Output cap per turn; with the served window known, a quarter of it at most. */
 const ZCODE_MAX_OUTPUT_TOKENS = 8_192
+/** Sidecar (`<config>.atomic-chat-backup.json`) key for the default selection a Connect replaced. */
+export const ZCODE_SELECTION_KEY = 'config.defaultModelSelection'
 /**
  * ZCode's default request mapping sends `thinking`, `enable_thinking`, `reasoning_effort` and
  * `reasoning`, none of which llama-server reads. It does read `chat_template_kwargs`, and
@@ -94,12 +92,15 @@ const isOurs = (rule: JsonValue) => isObject(rule) && rule['providerId'] === ZCO
  * Apply Atomic Chat's provider, its model rule and the default selection to a parsed
  * `provider_config.json` (`undefined` when the file does not exist yet). Only entries whose
  * `providerId` is ours are replaced; every other provider, rule and key is carried over untouched.
+ * `contextLength`, the served window, becomes the model's `contextWindow` so ZCode compacts in
+ * time; unknown, ZCode's own default stands.
  */
 export function zcodePatchProviderConfig(
   existing: JsonValue | undefined,
   apiUrl: string,
   model: string,
-  apiKey: string | undefined
+  apiKey: string | undefined,
+  contextLength?: number
 ): JsonValue {
   const modelId = model.trim()
   if (modelId === '')
@@ -160,6 +161,11 @@ export function zcodePatchProviderConfig(
   )
   modelRules['manualProviderModelRules'] = manual.filter((rule) => !isOurs(rule))
   const rules = arrayAt(modelRules, 'providerModelRules', 'config.modelConfigRules.providerModelRules')
+  const context = contextLength && contextLength > 0 ? contextLength : undefined
+  const maxOutput =
+    context === undefined
+      ? ZCODE_MAX_OUTPUT_TOKENS
+      : Math.max(1, Math.min(ZCODE_MAX_OUTPUT_TOKENS, Math.floor(context / 4)))
   modelRules['providerModelRules'] = [
     ...rules.filter((rule) => !isOurs(rule)),
     {
@@ -167,12 +173,12 @@ export function zcodePatchProviderConfig(
       modelId,
       config: {
         properties: {
-          contextWindow: ZCODE_CONTEXT_WINDOW,
+          ...(context === undefined ? {} : { contextWindow: context }),
           // An id matching one of ZCode's vision patterns would otherwise claim image input.
           inputFormat: { supportsImage: false },
         },
         optionSpecs: {
-          maxOutputTokens: { max: ZCODE_MAX_OUTPUT_TOKENS, map: ZCODE_MAX_TOKENS_MAP },
+          maxOutputTokens: { max: maxOutput, map: ZCODE_MAX_TOKENS_MAP },
           reasoningLevel: { values: ['disabled', 'enabled'], map: ZCODE_REASONING_MAP },
         },
       },
@@ -275,7 +281,8 @@ export async function configureZcodeIn(
   apiUrl: string,
   model: string,
   apiKey: string | undefined,
-  lockDeps: ZcodeLockDeps & { maxWaitMs?: number; staleAfterMs?: number } = {}
+  lockDeps: ZcodeLockDeps & { maxWaitMs?: number; staleAfterMs?: number } = {},
+  contextLength?: number
 ): Promise<void> {
   const path = join(dir, 'provider_config.json')
   // ZCode imports the providers of its pre-3.x `config.json` once, on the first start that finds no
@@ -302,7 +309,18 @@ export async function configureZcodeIn(
         )
       }
     }
-    const patched = zcodePatchProviderConfig(existing, apiUrl, model, apiKey)
+    const previous =
+      isObject(existing) && isObject(existing['config'])
+        ? existing['config']['defaultModelSelection']
+        : undefined
+    const patched = zcodePatchProviderConfig(existing, apiUrl, model, apiKey, contextLength)
+
+    // The user's own default model, kept aside for the app's Disconnect.
+    if (!isOurs(previous ?? null)) {
+      const sidecar = join(dir, 'provider_config.json.atomic-chat-backup.json')
+      if (previous === undefined) await fs.remove(sidecar)
+      else await fs.write(sidecar, canonicalJson({ [ZCODE_SELECTION_KEY]: previous }))
+    }
 
     // A file ZCode cannot validate costs the user every custom provider, so keep the pre-Atomic
     // version once. It holds their API keys too, hence owner-only like the file itself.
@@ -324,6 +342,8 @@ registerWriter('zcode', async (input) =>
     await zcodeConfigDir(input.fs, input.env['ZCODE_DATA_BASE_DIR']),
     input.apiUrl,
     input.model,
-    input.apiKey
+    input.apiKey,
+    {},
+    input.contextLength
   )
 )
