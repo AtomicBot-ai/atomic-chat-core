@@ -91,6 +91,10 @@ type Doc = { error?: string | null }
  * message; the port keeps one that comes after the first turn where it is, as a `<system-reminder>`
  * in the user turn around it, so the start of the prompt does not change and llama.cpp keeps its
  * prompt cache (audit 2026-11-03 S1, `placeSystemMessages`).
+ *
+ * No recorded case reaches the other two: the Rust shim dropped Codex's `namespace` tools (its MCP
+ * servers), which the port offers as `<ns>__<name>` functions and whose calls it names back in their
+ * namespace (S7), and it reported `cached_tokens: 0` where the port carries the engine's count (S6).
  */
 function applyKnownDivergence(name: string, expected: JsonValue): JsonValue {
   if (name !== 'request_merges_system_and_developer_into_leading_system') return expected

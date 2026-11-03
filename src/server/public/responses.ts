@@ -11,11 +11,12 @@
 import {
   ResponsesStreamConverter,
   chatResponseToResponses,
+  namespacedToolNames,
   newResponseId,
   responsesRequestToChat,
   serdeToString,
 } from '../shims/index.js'
-import type { JsonValue } from '../shims/index.js'
+import type { JsonValue, NamespacedToolNames } from '../shims/index.js'
 import { MANAGED_PROVIDER_IDS } from '../../contracts/index.js'
 import type { LocalProvider } from '../../router/index.js'
 import { answer, clientGone, connectTimeoutMs } from './exchange.js'
@@ -195,6 +196,8 @@ async function translate(
   }
 
   const responseId = newResponseId()
+  // Codex runs a call to one of its MCP tools only in the namespace it offered the tool in.
+  const names = namespacedToolNames(json)
   if (!stream) {
     const bytes = await readBody(response.body).catch(() => Buffer.alloc(0))
     let chat: JsonValue = null
@@ -203,7 +206,7 @@ async function translate(
     } catch {
       chat = null
     }
-    answer(ex, 200, serdeToString(chatResponseToResponses(chat, responseId, modelId)), [
+    answer(ex, 200, serdeToString(chatResponseToResponses(chat, responseId, modelId, names)), [
       ['Content-Type', 'application/json'],
     ])
     return
@@ -213,7 +216,7 @@ async function translate(
     200,
     [['Content-Type', 'text/event-stream'], ['Cache-Control', 'no-cache'], ...ex.cors].flat()
   )
-  await pipeBody(ex.res, responsesEvents(response, responseId, modelId, ex.trace), () =>
+  await pipeBody(ex.res, responsesEvents(response, responseId, modelId, names, ex.trace), () =>
     response.body.destroy()
   )
 }
@@ -222,10 +225,11 @@ async function* responsesEvents(
   upstream: UpstreamResponse,
   responseId: string,
   modelId: string,
+  names: NamespacedToolNames,
   trace: RequestTrace
 ): AsyncGenerator<string> {
   const telemetry = trace.startTelemetry()
-  const conv = new ResponsesStreamConverter(responseId, modelId)
+  const conv = new ResponsesStreamConverter(responseId, modelId, names)
   yield sseEvent(conv.createdEvent())
   const reader = new SseLineReader()
   let usage: JsonValue | undefined

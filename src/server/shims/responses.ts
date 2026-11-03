@@ -106,7 +106,7 @@ export function responsesRequestToChat(body: JsonValue): JsonValue {
 
   const tools = field(body, 'tools')
   if (Array.isArray(tools)) {
-    const chatTools = tools.map(responsesToolToChat).filter((t): t is JsonValue => t !== undefined)
+    const chatTools = tools.flatMap(responsesToolToChat)
     if (chatTools.length > 0) out['tools'] = chatTools
   }
   const toolChoice = field(body, 'tool_choice')
@@ -195,7 +195,10 @@ function responsesInputItemToChat(item: JsonValue): JsonValue | undefined {
       return { role, content: flattenContentToText(field(item, 'content')) }
     }
     case 'function_call': {
-      const name = asStr(field(item, 'name')) ?? ''
+      // A call Codex made in a namespace is replayed under the name the model saw for it.
+      const namespace = asStr(field(item, 'namespace'))
+      const bare = asStr(field(item, 'name')) ?? ''
+      const name = namespace === undefined ? bare : flatToolName(namespace, bare)
       const args = asStr(field(item, 'arguments')) ?? '{}'
       // Rust: `get("call_id").or_else(|| get("id"))` — the fallback to `id` happens only when
       // `call_id` is absent; a present non-string `call_id` (e.g. null) yields "" instead.
@@ -239,18 +242,79 @@ export function flattenContentToText(content: JsonValue | undefined): string {
   return ''
 }
 
-function responsesToolToChat(tool: JsonValue): JsonValue | undefined {
-  // A Responses function tool is flat: {type, name, description, parameters}. Built-in tools
-  // (web_search, etc.) have no Chat equivalent and are dropped, as is a function without `name`.
-  if (asStr(field(tool, 'type')) !== 'function') return undefined
-  const name = field(tool, 'name')
-  if (name === undefined) return undefined
+/** Codex's own namespace for its top-level tools: a function in it is called by its plain name. */
+const DEFAULT_FUNCTION_NAMESPACE = 'functions'
+
+/**
+ * The chat function name for function `name` in Responses namespace `namespace`: `<ns>__<name>`, the
+ * way MCP tools have always been named, and the plain name in Codex's default namespace. A namespace
+ * that already ends in the delimiter is not given a second one.
+ */
+export function flatToolName(namespace: string, name: string): string {
+  if (namespace === '' || namespace === DEFAULT_FUNCTION_NAMESPACE) return name
+  return namespace.endsWith('__') ? `${namespace}${name}` : `${namespace}__${name}`
+}
+
+/** The namespace and name of each function the request offered in a namespace, by its chat name. */
+export type NamespacedToolNames = ReadonlyMap<string, { namespace: string; name: string }>
+
+function namespaceFunctions(tool: JsonValue): Array<{ namespace: string; fn: JsonValue; name: string }> {
+  if (asStr(field(tool, 'type')) !== 'namespace') return []
+  const namespace = asStr(field(tool, 'name'))
+  const tools = field(tool, 'tools')
+  if (namespace === undefined || !Array.isArray(tools)) return []
+  const out: Array<{ namespace: string; fn: JsonValue; name: string }> = []
+  for (const fn of tools) {
+    const name = asStr(field(fn, 'name'))
+    if (asStr(field(fn, 'type')) === 'function' && name !== undefined) out.push({ namespace, fn, name })
+  }
+  return out
+}
+
+/**
+ * How to name a call back in the namespace it was offered in (Codex sends its MCP tools as
+ * `{type: "namespace", name, tools: [...]}` and runs a call only with its `namespace`). Functions in
+ * the default namespace need no entry: a call without one lands there.
+ */
+export function namespacedToolNames(body: JsonValue): NamespacedToolNames {
+  const names = new Map<string, { namespace: string; name: string }>()
+  const tools = field(body, 'tools')
+  if (!Array.isArray(tools)) return names
+  for (const tool of tools) {
+    for (const { namespace, name } of namespaceFunctions(tool)) {
+      const flat = flatToolName(namespace, name)
+      if (flat !== name && !names.has(flat)) names.set(flat, { namespace, name })
+    }
+  }
+  return names
+}
+
+function functionToChat(tool: JsonValue, name: JsonValue, namespaceDescription?: string): JsonValue {
   const func: JsonObject = { name: clone(name) }
-  const description = field(tool, 'description')
+  const own = field(tool, 'description')
+  // A function in a namespace that has no description of its own is described by the namespace's.
+  const description = (own === undefined || own === '') && namespaceDescription ? namespaceDescription : own
   if (description !== undefined) func['description'] = clone(description)
   const parameters = field(tool, 'parameters')
   if (parameters !== undefined) func['parameters'] = clone(parameters)
   return { type: 'function', function: func }
+}
+
+function responsesToolToChat(tool: JsonValue): JsonValue[] {
+  // A namespace (Codex's MCP servers) becomes its functions, each under its flat name, described by
+  // its own description or else the namespace's. Its freeform tools are dropped like top-level ones.
+  if (asStr(field(tool, 'type')) === 'namespace') {
+    const described = asStr(field(tool, 'description'))
+    return namespaceFunctions(tool).map(({ namespace, fn, name }) =>
+      functionToChat(fn, flatToolName(namespace, name), described)
+    )
+  }
+  // A Responses function tool is flat: {type, name, description, parameters}. Built-in tools
+  // (web_search, etc.) have no Chat equivalent and are dropped, as is a function without `name`.
+  if (asStr(field(tool, 'type')) !== 'function') return []
+  const name = field(tool, 'name')
+  if (name === undefined) return []
+  return [functionToChat(tool, name)]
 }
 
 function responsesToolChoiceToChat(toolChoice: JsonValue): JsonValue {
@@ -258,7 +322,12 @@ function responsesToolChoiceToChat(toolChoice: JsonValue): JsonValue {
   if (typeof toolChoice === 'string') return toolChoice
   if (isJsonObject(toolChoice)) {
     const name = asStr(field(toolChoice, 'name'))
-    return name !== undefined ? { type: 'function', function: { name } } : clone(toolChoice)
+    const namespace = asStr(field(toolChoice, 'namespace'))
+    if (name === undefined) return clone(toolChoice)
+    return {
+      type: 'function',
+      function: { name: namespace === undefined ? name : flatToolName(namespace, name) },
+    }
   }
   return 'auto'
 }
@@ -299,8 +368,14 @@ function mapUsage(usage: JsonValue): JsonValue {
   }
 }
 
+/** A call's `name`, and its `namespace` when the request offered it in one. */
+function callName(name: JsonValue, names: NamespacedToolNames | undefined): JsonObject {
+  const named = typeof name === 'string' ? names?.get(name) : undefined
+  return named === undefined ? { name } : { name: named.name, namespace: named.namespace }
+}
+
 /** Build the `output` array (assistant message, then function_call items) from a Chat message. */
-function messageToOutputItems(message: JsonValue | undefined): JsonValue[] {
+function messageToOutputItems(message: JsonValue | undefined, names?: NamespacedToolNames): JsonValue[] {
   const output: JsonValue[] = []
   if (message === undefined) return output
 
@@ -325,7 +400,7 @@ function messageToOutputItems(message: JsonValue | undefined): JsonValue[] {
         type: 'function_call',
         id: newFcId(),
         call_id: asStr(field(tc, 'id')) ?? '',
-        name: name === undefined ? '' : clone(name),
+        ...callName(name === undefined ? '' : clone(name), names),
         arguments: asStr(field(fn, 'arguments')) ?? '',
         status: 'completed',
       })
@@ -343,7 +418,9 @@ function messageToOutputItems(message: JsonValue | undefined): JsonValue[] {
 export function chatResponseToResponses(
   chat: JsonValue,
   responseId: string,
-  modelFallback: string
+  modelFallback: string,
+  /** The request's namespaced functions (`namespacedToolNames`), whose calls are named back. */
+  names?: NamespacedToolNames
 ): JsonValue {
   const model = asStr(field(chat, 'model')) ?? modelFallback
   const created = asU64(field(chat, 'created')) ?? 0
@@ -352,7 +429,7 @@ export function chatResponseToResponses(
   const first = Array.isArray(choices) ? choices[0] : undefined
   const message = field(first, 'message')
 
-  const output = messageToOutputItems(message)
+  const output = messageToOutputItems(message, names)
   const usage = field(chat, 'usage')
 
   return {
@@ -399,10 +476,13 @@ export class ResponsesStreamConverter {
   private text = ''
   // tool calls keyed by the Chat `tool_calls[].index`
   private tools = new Map<number, ToolAcc>()
+  private readonly names: NamespacedToolNames | undefined
 
-  constructor(responseId: string, model: string) {
+  /** `names`: the request's namespaced functions (`namespacedToolNames`), whose calls are named back. */
+  constructor(responseId: string, model: string, names?: NamespacedToolNames) {
     this.responseId = responseId
     this.model = model
+    this.names = names
   }
 
   private nextSeq(): number {
@@ -513,7 +593,7 @@ export class ResponsesStreamConverter {
               id: acc.itemId,
               status: 'in_progress',
               call_id: acc.callId,
-              name: acc.name,
+              ...callName(acc.name, this.names),
               arguments: '',
             },
           })
@@ -597,7 +677,7 @@ export class ResponsesStreamConverter {
         id: acc.itemId,
         status: 'completed',
         call_id: acc.callId,
-        name: acc.name,
+        ...callName(acc.name, this.names),
         arguments: acc.args,
       })
       events.push({

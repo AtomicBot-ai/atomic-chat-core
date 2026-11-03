@@ -3,7 +3,9 @@ import type { JsonObject, JsonValue } from './json.js'
 import {
   ResponsesStreamConverter,
   chatResponseToResponses,
+  flatToolName,
   flattenContentToText,
+  namespacedToolNames,
   placeSystemMessages,
   newResponseId,
   responsesRequestToChat,
@@ -188,6 +190,62 @@ describe('responsesRequestToChat', () => {
     const fn = obj(obj((chat['tools'] as JsonValue[])[0] as JsonValue)['function'] as JsonValue)
     obj(fn['parameters'] as JsonValue)['type'] = 'mutated'
     expect(body.tools[0]?.parameters.type).toBe('object')
+  })
+})
+
+describe('namespaced tools', () => {
+  it('names a namespaced function <ns>__<name>, once, and a default-namespace one by its own name', () => {
+    expect(flatToolName('mcp__docs', 'search')).toBe('mcp__docs__search')
+    expect(flatToolName('mcp__foo__', 'opt_in')).toBe('mcp__foo__opt_in')
+    expect(flatToolName('functions', 'shell')).toBe('shell')
+    const names = namespacedToolNames({
+      tools: [
+        { type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'shell' }] },
+        {
+          type: 'namespace',
+          name: 'mcp__docs',
+          tools: [
+            { type: 'function', name: 'search' },
+            { type: 'custom', name: 'x' },
+          ],
+        },
+        { type: 'function', name: 'plain' },
+      ],
+    })
+    expect([...names]).toEqual([['mcp__docs__search', { namespace: 'mcp__docs', name: 'search' }]])
+  })
+
+  it('wraps a namespaced tool_choice under its chat name', () => {
+    expect(
+      obj(
+        responsesRequestToChat({
+          input: 'x',
+          tool_choice: { type: 'function', name: 'search', namespace: 'mcp__docs' },
+        })
+      )['tool_choice']
+    ).toEqual({ type: 'function', function: { name: 'mcp__docs__search' } })
+  })
+
+  it('leaves a call to a function it does not know by that name as the model named it', () => {
+    const names = namespacedToolNames({
+      tools: [{ type: 'namespace', name: 'mcp__docs', tools: [{ type: 'function', name: 'search' }] }],
+    })
+    const conv = new ResponsesStreamConverter('r', 'm', names)
+    conv.onChunk({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: 'c', function: { name: 'shell' } }] } }],
+    })
+    const done = conv
+      .finish()
+      .map(obj)
+      .find((e) => e['type'] === 'response.output_item.done')
+    expect(done?.['item']).toEqual({
+      type: 'function_call',
+      id: expect.any(String),
+      status: 'completed',
+      call_id: 'c',
+      name: 'shell',
+      arguments: '',
+    })
   })
 })
 
