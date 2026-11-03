@@ -86,9 +86,9 @@ describe('classifyExit / classifyProcessOutput', () => {
     const exit = { code: 1, signal: null }
     expect(classifyProcessOutput(exit, '', stdout, 'linux', 'llamacpp').code).toBe('MODEL_ARCH_NOT_SUPPORTED')
     expect(classifyProcessOutput(exit, '', stdout, 'linux', 'llamacpp-upstream').code).toBe(
-      'MODEL_FILE_CORRUPT'
+      'MODEL_ARCH_NOT_SUPPORTED'
     )
-    expect(classifyProcessOutput(exit, '', stdout, 'linux').code).toBe('MODEL_FILE_CORRUPT')
+    expect(classifyProcessOutput(exit, '', stdout, 'linux').code).toBe('MODEL_ARCH_NOT_SUPPORTED')
     expect(classifyStderr(stdout, 'llamacpp').code).toBe('MODEL_ARCH_NOT_SUPPORTED')
     // The other corruption markers stay corruption on both.
     expect(classifyStderr('invalid magic', 'llamacpp').code).toBe('MODEL_FILE_CORRUPT')

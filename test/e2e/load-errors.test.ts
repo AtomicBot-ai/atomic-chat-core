@@ -49,7 +49,7 @@ function journalled(): unknown[] {
 }
 
 describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('load failures per provider', () => {
-  it('reads a tensor-count mismatch as an unsupported architecture on the TurboQuant fork and as a corrupt file upstream', async () => {
+  it('reads a tensor-count mismatch as an unsupported architecture on the TurboQuant fork and upstream', async () => {
     await core.writeModel(dataFolder, 'demo')
     await core.writeFakeBackend(dataFolder, { FAKE_LLAMA_MODE: 'tensor-count' })
     await core.writeFakeBackend(dataFolder, { FAKE_LLAMA_MODE: 'tensor-count' }, { provider: 'llamacpp' })
@@ -76,7 +76,8 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('load failures
     })
     expect(upstream.status).toBe(500)
     const upstreamBody = (await upstream.json()) as { error: { code: string; details?: string } }
-    expect(upstreamBody.error.code).toBe('MODEL_FILE_CORRUPT')
+    // An Ollama conversion whose digest matches can differ too (2026-11-02-tensor-layout-error).
+    expect(upstreamBody.error.code).toBe('MODEL_ARCH_NOT_SUPPORTED')
     expect(upstreamBody.error.details).toContain('wrong number of tensors')
 
     // Neither load left a session or a journalled process.

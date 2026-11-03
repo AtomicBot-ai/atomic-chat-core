@@ -521,12 +521,12 @@ describe('failure paths', () => {
     expect(record.env['LLAMA_API_KEY']).toMatch(/\S/)
   })
 
-  // TurboQuant's `error.rs` (app commit ec1fd3ea7): the fork reads a tensor-count mismatch as an
-  // unsupported layout, upstream as a damaged file; the runtime classifies with its own provider.
-  it('classifies a tensor-count mismatch by the provider that loaded it', async () => {
+  // A tensor-count mismatch is an unsupported layout on the fork and upstream alike: an Ollama
+  // conversion whose digest matches can still differ (2026-11-02-tensor-layout-error).
+  it('classifies a tensor-count mismatch as an unsupported architecture on every provider', async () => {
     await data.writeModel('layout')
     const upstream = await makeRuntime({ spawn: fakeLlamaSpawn({ mode: 'tensor-count' }) })
-    await expect(upstream.load('layout')).rejects.toMatchObject({ code: 'MODEL_FILE_CORRUPT' })
+    await expect(upstream.load('layout')).rejects.toMatchObject({ code: 'MODEL_ARCH_NOT_SUPPORTED' })
     const turboquant = await makeRuntime({
       provider: 'llamacpp',
       spawn: fakeLlamaSpawn({ mode: 'tensor-count' }),
