@@ -187,9 +187,9 @@ describe('defaultSettingValues', () => {
     // vLLM (change add-vllm-runtime): KV cache size and memory share are 0 — vLLM's own and core's auto.
     expect(defaultSettingValues('vllm')).toEqual({
       gpu_id: '',
-      context_length: 8192,
+      context_length: 0,
       max_output_tokens: 4096,
-      max_num_seqs: 1,
+      max_num_seqs: 0,
       kv_cache_memory_gib: 0,
       gpu_memory_utilization: 0,
       cuda_graphs: 'auto',
@@ -215,9 +215,9 @@ describe('defaultSettingValues', () => {
   it('ships the sglang defaults', () => {
     expect(defaultSettingValues('sglang')).toEqual({
       gpu_id: '',
-      context_length: 8192,
+      context_length: 0,
       max_output_tokens: 4096,
-      max_running_requests: 1,
+      max_running_requests: 0,
       mem_fraction_static: 0,
       max_total_tokens: 0,
       cuda_graphs: 'auto',

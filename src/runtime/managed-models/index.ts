@@ -8,6 +8,7 @@
  */
 export * from './quant-format.js'
 export * from './compatibility.js'
+export * from './auto-limits.js'
 export * from './check.js'
 export * from './model-dir.js'
 export * from './registry.js'

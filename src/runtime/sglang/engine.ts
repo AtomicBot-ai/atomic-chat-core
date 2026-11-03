@@ -8,7 +8,12 @@ import { defaultDescriptorUrl } from '../environment/index.js'
 import type { ManagedEngineSpec } from '../managed-engines/spec.js'
 import type { ManagedTextCapabilities } from '../managed-text/index.js'
 import type { SessionRoutePolicy } from '../shared/index.js'
-import { SGLANG_ROUTES, mapSglangContextLengthError, sglangAdapter } from './adapter.js'
+import {
+  SGLANG_ROUTES,
+  mapSglangContextLengthError,
+  sglangAdapter,
+  type SglangLaunchPlan,
+} from './adapter.js'
 import { sglangCheckEngine, sglangLaunchPlan } from './memory.js'
 import { sglangSettings, type SglangSettings } from './settings.js'
 
@@ -42,5 +47,6 @@ export const SGLANG_ENGINE: ManagedEngineSpec<SglangSettings> = {
   settings: sglangSettings,
   check: sglangCheckEngine,
   launchPlan: sglangLaunchPlan,
+  planContextLength: (plan) => (plan as Partial<SglangLaunchPlan> | undefined)?.contextLength,
   routePolicy: sglangRoutePolicy,
 }

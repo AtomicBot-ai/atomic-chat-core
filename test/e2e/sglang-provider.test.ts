@@ -337,8 +337,11 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the sgla
     const share = Number(argOf(args, '--mem-fraction-static'))
     expect(share).toBeGreaterThanOrEqual(0.5)
     expect(share).toBeLessThanOrEqual(0.95)
-    expect(argOf(args, '--max-running-requests')).toBe('1')
-    expect(argOf(args, '--cuda-graph-max-bs-decode')).toBe('1')
+    // Automatic window and request count (auto-limits.ts): a tiny model on a free 24 GB card gets the
+    // widest window and two requests, the CUDA graphs captured up to them.
+    expect(argOf(args, '--context-length')).toBe('65536')
+    expect(argOf(args, '--max-running-requests')).toBe('2')
+    expect(argOf(args, '--cuda-graph-max-bs-decode')).toBe('2')
   })
 
   it('Доля задана вручную: the memory share setting reaches SGLang as it is', async () => {
@@ -416,9 +419,10 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the sgla
     expect(containersOf('sglang')[0]?.gpus).toBe(`device=${SECOND_GPU}`)
   })
 
-  it('Невалидная настройка: zero parallel requests refuses the load with INVALID_ARGUMENT before any container', async () => {
+  it('Невалидная настройка: negative parallel requests refuse the load with INVALID_ARGUMENT before any container', async () => {
     const { ready } = await start()
-    const res = await post(ready, '/models/sglang/qwen3/load', { overrides: { max_running_requests: 0 } })
+    // 0 is the automatic count (auto-limits.ts); below it is refused.
+    const res = await post(ready, '/models/sglang/qwen3/load', { overrides: { max_running_requests: -1 } })
     expect(await res.json()).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
     expect(dockerState().calls).not.toContain('create')
   })

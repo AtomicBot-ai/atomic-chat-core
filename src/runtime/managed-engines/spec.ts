@@ -56,6 +56,12 @@ export interface ManagedEngineSpec<S extends ManagedEngineSettings = ManagedEngi
    * to its adapter as `ManagedLaunchContext.plan` (vLLM's KV cache bytes and memory share, design D9).
    */
   launchPlan?(settings: S, checkpoint: CheckpointMemoryInputs, gpu: GpuFacts, host: HostMemory): unknown
+  /**
+   * Optional: the window a session runs with, read off its launch plan, for an engine whose window can
+   * be automatic (vLLM, SGLang: chosen by the memory rule in `launchPlan`). Absent, or `undefined` for
+   * a plan without one: the validated settings' `context_length`.
+   */
+  planContextLength?(plan: unknown): number | undefined
   /** What the public server must know about a session to route it honestly. */
   routePolicy(
     capabilities: ManagedTextCapabilities | null,

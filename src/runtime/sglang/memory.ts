@@ -26,6 +26,8 @@
 import type { GpuFacts } from '../../contracts/index.js'
 import {
   checkpointIsMultimodal,
+  checkpointMaxContext,
+  fitAutoLimits,
   freeMemoryBytes,
   isUnifiedMemory,
   kvCacheQuantAlgo,
@@ -86,11 +88,56 @@ export function sglangKvCacheBytes(
 }
 
 /**
+ * The window and request count a load runs with on `gpu`: the pinned ones, or — for a setting left at
+ * 0 — the widest pair SGLang's own memory rule (`sglangMemoryNeed`) passes on the card's free memory
+ * (`auto-limits.ts`). With a KV token limit the window must also fit inside it.
+ */
+export function sglangLimits(
+  settings: SglangSettings,
+  checkpoint: CheckpointMemoryInputs,
+  gpu: GpuFacts,
+  host: HostMemory
+): { context_length: number; max_running_requests: number } {
+  if (settings.context_length > 0 && settings.max_running_requests > 0)
+    return { context_length: settings.context_length, max_running_requests: settings.max_running_requests }
+  const free = freeMemoryBytes(gpu, host)
+  const { context, sequences } = fitAutoLimits({
+    contextAuto: settings.context_length === 0,
+    sequencesAuto: settings.max_running_requests === 0,
+    context: settings.context_length,
+    sequences: settings.max_running_requests,
+    maxOutputTokens: settings.max_output_tokens,
+    trainedContext: checkpointMaxContext(checkpoint.configJson),
+    fits: (context_length, max_running_requests) =>
+      (settings.max_total_tokens === null || context_length <= settings.max_total_tokens) &&
+      memoryNeedAt(gpu, checkpoint, { ...settings, context_length, max_running_requests }, host)
+        .neededBytes <= free,
+  })
+  return { context_length: context, max_running_requests: sequences }
+}
+
+/**
  * SGLang's memory rule on `gpu`: weights + KV cache estimate + its own overhead + a margin for what
  * other processes may take meanwhile; on a card with the host's memory, whatever of `MemAvailable`
- * lies beyond half the host's memory counts as needed too.
+ * lies beyond half the host's memory counts as needed too. An automatic window or request count is
+ * first resolved on the same card (`sglangLimits`).
  */
 export function sglangMemoryNeed(
+  gpu: GpuFacts,
+  checkpoint: CheckpointMemoryInputs,
+  settings: SglangSettings,
+  host: HostMemory
+): MemoryNeed {
+  return memoryNeedAt(
+    gpu,
+    checkpoint,
+    { ...settings, ...sglangLimits(settings, checkpoint, gpu, host) },
+    host
+  )
+}
+
+/** `sglangMemoryNeed` at a pinned window and request count. */
+function memoryNeedAt(
   gpu: GpuFacts,
   checkpoint: CheckpointMemoryInputs,
   settings: SglangSettings,
@@ -111,7 +158,8 @@ export function sglangMemoryNeed(
     neededBytes,
     kvReserveBasis: kv.basis,
     details:
-      `weight_bytes=${checkpoint.weightBytesTotal} kv_cache_bytes=${kv.bytes} kv_reserve_basis=${kv.basis} ` +
+      `weight_bytes=${checkpoint.weightBytesTotal} context_length=${settings.context_length} ` +
+      `max_running_requests=${settings.max_running_requests} kv_cache_bytes=${kv.bytes} kv_reserve_basis=${kv.basis} ` +
       `engine_overhead_bytes=${SGLANG_ENGINE_OVERHEAD_BYTES} free_margin_bytes=${SGLANG_FREE_MEMORY_MARGIN_BYTES}` +
       (unified ? ` system_reserve_bytes=${systemReserve}` : '') +
       ` needed_bytes=${neededBytes}`,
@@ -139,7 +187,10 @@ export function sglangLaunchPlan(
   gpu: GpuFacts,
   host: HostMemory
 ): SglangLaunchPlan {
+  const limits = sglangLimits(settings, checkpoint, gpu, host)
   return {
+    contextLength: limits.context_length,
+    maxRunningRequests: limits.max_running_requests,
     memFractionStatic: settings.mem_fraction_static ?? sglangMemFractionStatic(settings, gpu, host),
     multimodal: checkpointIsMultimodal(checkpoint.configJson),
   }

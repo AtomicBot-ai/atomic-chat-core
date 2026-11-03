@@ -13,13 +13,15 @@ import {
   type GenerationDefaults,
 } from '../managed-text/generation-defaults.js'
 import { settingValues } from '../managed-text/setting-values.js'
+import { MANAGED_AUTO_CONTEXTS } from '../managed-models/auto-limits.js'
 
 export interface SglangSettings {
   /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */
   gpu_id: string | null
+  /** `--context-length`; 0 is automatic, the widest window the memory rule passes (`auto-limits.ts`). */
   context_length: number
   max_output_tokens: number
-  /** `--max-running-requests`. */
+  /** `--max-running-requests`; 0 is automatic, 2 when the memory rule passes, else 1. */
   max_running_requests: number
   /**
    * `--mem-fraction-static`: the share of the card's free memory SGLang keeps for weights and KV
@@ -64,10 +66,11 @@ const KEYS = [
 
 const DEFAULTS: SglangSettings = {
   gpu_id: null,
-  context_length: 8192,
+  // Automatic, as vLLM's (integrations audit 2026-11-03, S2): 8192 tokens and one request refused
+  // every coding agent's 13-27K-token prompt.
+  context_length: 0,
   max_output_tokens: 4096,
-  // One request at a time, as every managed engine (owner's decision, change add-vllm-runtime).
-  max_running_requests: 1,
+  max_running_requests: 0,
   mem_fraction_static: null,
   max_total_tokens: null,
   cuda_graphs: 'auto',
@@ -93,11 +96,11 @@ export function validateSglangSettings(raw: Record<string, unknown>): SglangSett
     }
     settings.gpu_id = raw['gpu_id'] as string
   }
-  if (raw['context_length'] !== undefined)
+  if (raw['context_length'] !== undefined && raw['context_length'] !== 0)
     settings.context_length = integer('context_length', raw['context_length'], 512, 1_048_576)
   if (raw['max_output_tokens'] !== undefined)
     settings.max_output_tokens = integer('max_output_tokens', raw['max_output_tokens'], 1, 1_048_576)
-  if (raw['max_running_requests'] !== undefined)
+  if (raw['max_running_requests'] !== undefined && raw['max_running_requests'] !== 0)
     settings.max_running_requests = integer('max_running_requests', raw['max_running_requests'], 1, 256)
   // Below 1: the rest of SGLang's free memory is its room for activations and CUDA graphs.
   if (raw['mem_fraction_static'] !== undefined && raw['mem_fraction_static'] !== null)
@@ -124,11 +127,13 @@ export function validateSglangSettings(raw: Record<string, unknown>): SglangSett
   if (raw['seed'] !== undefined && raw['seed'] !== null)
     settings.seed = integer('seed', raw['seed'], 1, 2_147_483_647)
   settings.generation = readGenerationDefaults('sglang', raw)
-  if (settings.max_output_tokens >= settings.context_length) {
+  // An automatic window is only ever one of the candidates above the output cap (`auto-limits.ts`).
+  const widest = settings.context_length === 0 ? MANAGED_AUTO_CONTEXTS[0] : settings.context_length
+  if (settings.max_output_tokens >= widest) {
     invalid(
       'max_output_tokens',
       settings.max_output_tokens,
-      `must be less than the context length (${settings.context_length})`
+      `must be less than the context length (${widest})`
     )
   }
   return settings

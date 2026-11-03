@@ -23,7 +23,12 @@ const family = (over: Partial<ModelFamilySupport> = {}): ModelFamilySupport => (
   structured_output: true,
   ...over,
 })
-const PLAN: SglangLaunchPlan = { memFractionStatic: 0.7234, multimodal: true }
+const PLAN: SglangLaunchPlan = {
+  contextLength: 8192,
+  maxRunningRequests: 1,
+  memFractionStatic: 0.7234,
+  multimodal: true,
+}
 const context = (
   over: Partial<ManagedLaunchContext<SglangSettings>> = {}
 ): ManagedLaunchContext<SglangSettings> => ({
@@ -97,6 +102,13 @@ describe('buildLaunch: argv', () => {
     }
   })
 
+  it('starts with the window and request count of the plan, the automatic ones included', () => {
+    const argv = argvOf({ plan: { ...PLAN, contextLength: 65_536, maxRunningRequests: 2 } })
+    expect(flag(argv, '--context-length')).toBe('65536')
+    expect(flag(argv, '--max-running-requests')).toBe('2')
+    expect(flag(argv, '--cuda-graph-max-bs-decode')).toBe('2')
+  })
+
   it('passes every further option the settings set', () => {
     const argv = argvOf({
       settings: sglangSettings({
@@ -107,6 +119,8 @@ describe('buildLaunch: argv', () => {
         dtype: 'bfloat16',
         seed: 7,
       }),
+      // A pinned count reaches the launch through the plan, which keeps it (`sglangLimits`).
+      plan: { ...PLAN, maxRunningRequests: 2 },
     })
     expect(flag(argv, '--max-running-requests')).toBe('2')
     expect(flag(argv, '--max-total-tokens')).toBe('16384')
@@ -176,7 +190,10 @@ describe('buildLaunch: argv', () => {
   })
 
   it('CUDA graphs: auto captures decode graphs up to the parallel requests, on is SGLang’s own, off disables both phases', () => {
-    const auto = argvOf({ settings: sglangSettings({ max_running_requests: 3 }) })
+    const auto = argvOf({
+      settings: sglangSettings({ max_running_requests: 3 }),
+      plan: { ...PLAN, maxRunningRequests: 3 },
+    })
     expect(flag(auto, '--cuda-graph-max-bs-decode')).toBe('3')
     expect(auto).not.toContain('--disable-decode-cuda-graph')
     const on = argvOf({ settings: sglangSettings({ cuda_graphs: 'on' }) })

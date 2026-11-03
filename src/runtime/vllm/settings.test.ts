@@ -34,8 +34,17 @@ describe('vllmSettings', () => {
       async_scheduling: false,
       generation: {},
     })
-    // Nothing stored at all: one request at a time.
-    expect(vllmSettings({}).max_num_seqs).toBe(1)
+    // Nothing stored at all: the window and the request count are automatic (auto-limits.ts).
+    expect(vllmSettings({})).toMatchObject({ context_length: 0, max_num_seqs: 0 })
+  })
+
+  it('reads 0 as an automatic window and request count, and checks the output cap against the widest window', () => {
+    expect(vllmSettings({ context_length: 0, max_num_seqs: 0 })).toMatchObject({
+      context_length: 0,
+      max_num_seqs: 0,
+    })
+    expect(vllmSettings({ context_length: 0, max_output_tokens: 16_384 }).max_output_tokens).toBe(16_384)
+    expect(() => vllmSettings({ context_length: 0, max_output_tokens: 65_536 })).toThrow(/max_output_tokens/)
   })
 
   it('reads every further option, the generation defaults as vLLM names them, "" and 0 as not set', () => {
@@ -77,7 +86,7 @@ describe('vllmSettings', () => {
   })
 
   it.each([
-    ['Невалидная настройка: zero concurrent requests', { max_num_seqs: 0 }],
+    ['Невалидная настройка: negative concurrent requests', { max_num_seqs: -1 }],
     ['a context below 512 tokens', { context_length: 100 }],
     ['an output cap not below the context', { context_length: 4096, max_output_tokens: 4096 }],
     ['an unknown CUDA graphs mode', { cuda_graphs: 'sometimes' }],
