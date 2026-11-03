@@ -33,9 +33,9 @@
     "opencode__jsonc_preferred_json_cleaned",
     "openclaude__fresh",
     "openclaude__rerun",
-    "openclaude__empty_key_same_output",
+    "openclaude__empty_key_uses_placeholder",
     "openclaude__existing_profiles_preserved",
-    "openclaude__matching_profile_replaced_in_place",
+    "openclaude__users_own_atomic_chat_profile_kept",
     "openclaude__profiles_not_array_replaced",
     "cline__auth_success",
     "cline__auth_success_empty_key",
@@ -142,7 +142,7 @@
     },
     "shell": "`input.shell` is $SHELL during the run. The four env-var agents (copilot, goose, openhands, muse, poolside) pick their rc file from it: a value ending in `/bash` selects ~/.bash_profile on macOS and ~/.bashrc on Linux, anything else selects ~/.zshenv. These fixtures were emitted on a host where cfg!(target_os) = macos, so the bash cases show ~/.bash_profile; on Linux the same writer targets ~/.bashrc."
   },
-  "note": "Since 2026-10-27 the eight codex__* cases are retired: they pinned the two managed regions the Rust writer put into the user's shared ~/.codex/config.toml (root model/model_provider at the top, [model_providers.atomic] at the end), which left a user with a root `model` of their own with a duplicate key and a Codex that would not start. Codex now runs on a profile file of Atomic Chat's own and the shared file is only ever repaired; the core's configure/codex.test.ts and codex-repair.test.ts pin that (core ADR 2026-10-27-codex-runs-on-a-profile-of-its-own).",
+  "note": "Since 2026-10-27 the eight codex__* cases are retired: they pinned the two managed regions the Rust writer put into the user's shared ~/.codex/config.toml (root model/model_provider at the top, [model_providers.atomic] at the end), which left a user with a root `model` of their own with a duplicate key and a Codex that would not start. Codex now runs on a profile file of Atomic Chat's own and the shared file is only ever repaired; the core's configure/codex.test.ts and codex-repair.test.ts pin that (core ADR 2026-10-27-codex-runs-on-a-profile-of-its-own). Since 2026-11-03 the claude_code__* and openclaude__* cases come from the app's claude_config.rs (a13a1e979): both writers keep a `<file>.atomic-chat-backup.json` sidecar for Disconnect, Claude Code also gets the provider switches and the title switch, OpenClaude gets its key, shell-override env values and an id-only profile match (openclaude__matching_profile_replaced_in_place became openclaude__users_own_atomic_chat_profile_kept, openclaude__empty_key_same_output became openclaude__empty_key_uses_placeholder).",
   "source": {
     "commit": "ccf542733",
     "file": "src-tauri/src/core/cli/fixture_dump.rs"

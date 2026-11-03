@@ -5,6 +5,7 @@ import { configureClaudeCode } from './claude-code.js'
 import { writerFor } from './registry.js'
 
 const PATH = '.claude/settings.json'
+const BACKUP = `${PATH}.atomic-chat-backup.json`
 const MODEL_KEYS = [
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
@@ -25,10 +26,80 @@ describe('configureClaudeCode', () => {
     expect(writerFor('claude-code')).toBe(configureClaudeCode)
   })
 
-  it('writes only ~/.claude/settings.json', async () => {
+  it('writes only ~/.claude/settings.json and its backup', async () => {
     home = await makeAgentHome()
     await configureClaudeCode(agentInput(home.fs))
-    expect(Object.keys(await home.tree())).toEqual([PATH])
+    expect(Object.keys(await home.tree())).toEqual([PATH, BACKUP])
+  })
+
+  it('writes the window, an output cap, the provider switches and the title switch', async () => {
+    home = await makeAgentHome()
+    await configureClaudeCode({ ...agentInput(home.fs), contextLength: 32768 })
+    let env = (await settings())['env']!
+    expect(env['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('32768')
+    expect(env['CLAUDE_CODE_MAX_OUTPUT_TOKENS']).toBe('8192')
+    expect(env['CLAUDE_CODE_DISABLE_TERMINAL_TITLE']).toBe('1')
+    for (const name of ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']) {
+      expect(env[name]).toBe('')
+    }
+
+    await configureClaudeCode({ ...agentInput(home.fs), contextLength: 16384 })
+    expect((await settings())['env']?.['CLAUDE_CODE_MAX_OUTPUT_TOKENS']).toBe('4096')
+
+    // An unknown window is not invented, and the earlier one does not linger.
+    await configureClaudeCode(agentInput(home.fs))
+    env = (await settings())['env']!
+    expect(env).not.toHaveProperty('CLAUDE_CODE_MAX_CONTEXT_TOKENS')
+    expect(env).not.toHaveProperty('CLAUDE_CODE_MAX_OUTPUT_TOKENS')
+  })
+
+  it("keeps the user's own values in the backup across reconnects", async () => {
+    home = await makeAgentHome()
+    await home.seed(PATH, JSON.stringify({ model: 'opus', env: { CLAUDE_CODE_USE_BEDROCK: '1' } }))
+    await configureClaudeCode(agentInput(home.fs))
+    await configureClaudeCode(agentInput(home.fs, { model: 'other' }))
+    const backup = JSON.parse((await home.read(BACKUP)) ?? '{}')
+    const entry = (key: string) =>
+      backup.entries.find((e: { path: string[] }) => e.path[e.path.length - 1] === key)
+    expect(entry('model')).toMatchObject({ existed: true, previous: 'opus', written: 'other' })
+    expect(entry('CLAUDE_CODE_USE_BEDROCK')).toMatchObject({ existed: true, previous: '1', written: '' })
+    expect(entry('ANTHROPIC_BASE_URL')).toEqual({
+      path: ['env', 'ANTHROPIC_BASE_URL'],
+      existed: false,
+      written: 'http://127.0.0.1:1337/v1',
+    })
+    expect(backup.fileExisted).toBe(true)
+  })
+
+  it("takes an earlier release's values out instead of recording them as the user's", async () => {
+    home = await makeAgentHome()
+    await home.seed(
+      PATH,
+      JSON.stringify({
+        model: 'old',
+        env: {
+          ANTHROPIC_BASE_URL: 'http://localhost:1337',
+          ANTHROPIC_AUTH_TOKEN: 'atomic',
+          ANTHROPIC_MODEL: 'old',
+        },
+      })
+    )
+    await configureClaudeCode(agentInput(home.fs, { apiUrl: 'http://127.0.0.1:1337' }))
+    const backup = JSON.parse((await home.read(BACKUP)) ?? '{}')
+    for (const entry of backup.entries) expect(entry.existed, JSON.stringify(entry.path)).toBe(false)
+  })
+
+  it('writes into $CLAUDE_CONFIG_DIR and reads past a byte-order mark', async () => {
+    home = await makeAgentHome()
+    await home.seed('cc/settings.json', '\uFEFF{"theme": "dark"}')
+    await configureClaudeCode(agentInput(home.fs, { env: { CLAUDE_CONFIG_DIR: `${home.path}/cc` } }))
+    expect(Object.keys(await home.tree())).toEqual([
+      'cc/settings.json',
+      'cc/settings.json.atomic-chat-backup.json',
+    ])
+    const root = JSON.parse((await home.read('cc/settings.json')) ?? '{}')
+    expect(root['theme']).toBe('dark')
+    expect(root['env']['ANTHROPIC_AUTH_TOKEN']).toBe('sk-atomic-fixture-key')
   })
 
   it('writes no model key at all on a fresh home when no model is loaded', async () => {
@@ -84,6 +155,6 @@ describe('configureClaudeCode', () => {
   it('works from a home directory whose path contains a space', async () => {
     home = await makeAgentHome('atomic claude home-')
     await configureClaudeCode(agentInput(home.fs))
-    expect(Object.keys(await home.tree())).toEqual([PATH])
+    expect(Object.keys(await home.tree())).toEqual([PATH, BACKUP])
   })
 })
