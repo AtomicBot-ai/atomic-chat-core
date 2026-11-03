@@ -10,10 +10,13 @@
  */
 
 /**
- * The context window assumed when nothing else says otherwise — the same single value the app
- * settled on after five different defaults disagreed across its tree.
+ * The context window assumed when nothing else says otherwise. It was 16384, the single value the
+ * app settled on after five different defaults disagreed across its tree; a coding agent's first
+ * request alone is 13-27K tokens (Claude Code, OpenCode, Codex — integrations audit 2026-11-03, S4),
+ * so 16K refused every agent. 32768 is the ladder's own next step. Small Macs are narrowed back
+ * toward 16K by memory (`smallMemoryDefaultCtx`).
  */
-export const DEFAULT_CTX_LEN = 16384
+export const DEFAULT_CTX_LEN = 32768
 
 export function computeNextCtxLen(currentCtxLen: number, maxCtxLen?: number): number {
   let next: number

@@ -135,6 +135,7 @@ export interface LlamacppRuntimeOptions {
   resolveLatestBackend?: LoadPlanDeps['resolveLatestBackend'] | undefined
   cpuInfo?: LoadPlanDeps['cpuInfo'] | undefined
   unifiedMemory?: LoadPlanDeps['unifiedMemory'] | undefined
+  systemMemory?: LoadPlanDeps['systemMemory'] | undefined
   ensureGemmaMtpDraft?: LoadPlanDeps['ensureGemmaMtpDraft'] | undefined
   ensureDflashDraft?: LoadPlanDeps['ensureDflashDraft'] | undefined
   /** Model that must never be auto-unloaded. */
@@ -491,6 +492,7 @@ export class LlamacppRuntime implements LocalRuntime {
       },
       cpuInfo: this.options.cpuInfo ?? (async () => undefined),
       ...(this.options.unifiedMemory ? { unifiedMemory: this.options.unifiedMemory } : {}),
+      ...(this.options.systemMemory ? { systemMemory: this.options.systemMemory } : {}),
       listDevices: (exePath) => this.getDevices(exePath),
       exists: async (path) => {
         const { stat } = await import('node:fs/promises')
@@ -535,6 +537,7 @@ export class LlamacppRuntime implements LocalRuntime {
       port: plan.port,
       mmprojPath: plan.mmprojPath ?? null,
       ...(plan.fitCtxCeiling !== undefined ? { fitCtxCeiling: plan.fitCtxCeiling } : {}),
+      ...(plan.cacheRamMiB !== undefined ? { cacheRamMiB: plan.cacheRamMiB } : {}),
     })
     const exeDir = dirname(plan.exePath)
     const { env, cwd } = buildProcessEnv({

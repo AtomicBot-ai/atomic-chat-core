@@ -92,15 +92,40 @@ describe('MlxRuntime', () => {
 
     expect(session).toMatchObject({ model_id: 'qwen', model_path: dir, api_key: '', is_embedding: false })
     expect(await argvs()).toEqual([
-      ['--model', dir, '--host', '127.0.0.1', '--port', String(session.port), '--max-kv-size', '16384'],
+      ['--model', dir, '--host', '127.0.0.1', '--port', String(session.port), '--max-kv-size', '32768'],
     ])
-    expect(r.getCtxSize('qwen')).toBe(16384)
+    expect(r.getCtxSize('qwen')).toBe(32768)
     const res = await fetch(`http://127.0.0.1:${session.port}/v1/chat/completions`, {
       method: 'POST',
       body: JSON.stringify({ model: dir, messages: [] }),
     })
     expect(res.status).toBe(200)
     expect(journal.list().map((record) => record.provider)).toEqual(['mlx'])
+  })
+
+  it('narrows the 32K default by the KV cache on a Mac below 16 GiB, never below the previous 16K', async () => {
+    const GiB = 2 ** 30
+    // 28 layers × 8 KV heads × 128 at 16 bits: 112 KiB a token.
+    const shape = {
+      max_position_embeddings: 131_072,
+      num_hidden_layers: 28,
+      num_attention_heads: 16,
+      num_key_value_heads: 8,
+      head_dim: 128,
+    }
+    const ctxOn = async (id: string, totalMemoryBytes: number, settings: Record<string, unknown> = {}) => {
+      await writeMlxModel(id, shape)
+      const r = runtime(settings, {}, { unifiedMemory: async () => ({ totalMemoryBytes }) })
+      await r.load(id)
+      return r.getCtxSize(id)
+    }
+    // 8 GiB: half of it less the 1 GiB reserve is 3072 MiB, 28086 tokens — 27904 in steps of 256.
+    expect(await ctxOn('m8', 8 * GiB)).toBe(27_904)
+    expect(await ctxOn('m16', 16 * GiB)).toBe(32_768)
+    // A quantized KV cache (4 bits) fits the whole default.
+    expect(await ctxOn('q8', 8 * GiB, { kv_quant_scheme: 'uniform', kv_bits: 4 })).toBe(32_768)
+    // 4 GiB: 1024 MiB left, 9362 tokens — the previous 16K default holds as the floor.
+    expect(await ctxOn('m4', 4 * GiB)).toBe(16_384)
   })
 
   it('writes the start line to log before spawning', async () => {
@@ -110,7 +135,7 @@ describe('MlxRuntime', () => {
     const session = await r.load('qwen')
 
     expect(logged).toContainEqual(
-      `info: starting mlx-server for mlx/qwen: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`
+      `info: starting mlx-server for mlx/qwen: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 32768`
     )
   })
 
@@ -126,7 +151,7 @@ describe('MlxRuntime', () => {
     })
 
     expect(logged).toContainEqual(
-      `info: starting mlx-server.exe for mlx/qwen-win: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`
+      `info: starting mlx-server.exe for mlx/qwen-win: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 32768`
     )
   })
 
@@ -498,7 +523,7 @@ describe('MlxRuntime', () => {
     )
     const session = await r.load('m')
     expect(logged).toEqual([
-      `info: starting mlx-server for mlx/m: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 16384`,
+      `info: starting mlx-server for mlx/m: --model ${dir} --host 127.0.0.1 --port ${session.port} --max-kv-size 32768`,
       'warn: backendOutput sink threw: sink boom; further sink errors for this session are ignored',
     ])
   })

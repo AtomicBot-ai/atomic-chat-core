@@ -116,6 +116,7 @@ const VARIANTS: { [K in keyof LlamacppConfig]: ReadonlyArray<LlamacppConfig[K]> 
   llamacpp_env: [''],
   extra_args: [''], // user arguments are not core's surface
   reasoning_preserve: [false, true],
+  reasoning_budget: [-1, 8192, 0],
   mtp: [false, true],
   mtp_draft_path: ['', '/mtp-draft.gguf'],
   dflash: [false, true],
@@ -163,11 +164,14 @@ interface Input {
   isEmbedding: boolean
   mmprojPath: string | null
   backend: string
+  /** The load plan's `--cache-ram` on a machine with at most 16 GiB of RAM. */
+  cacheRamMiB: number | undefined
 }
 
 const INPUT_VARIANTS: { [K in keyof Input]: ReadonlyArray<Input[K]> } = {
   isEmbedding: [false, true],
   mmprojPath: [null, '/mmproj.gguf'],
+  cacheRamMiB: [undefined, 2048],
   // Vulkan turns flash attention `auto` off, which decides whether `--cache-type-v` is emitted.
   backend: ['linux-cpu-x64', 'linux-vulkan-x64'],
 }
@@ -275,6 +279,7 @@ function chatPresence(builds: readonly number[]): { chat: Presence; dflash: Pres
           modelPath: '/m.gguf',
           port: 8080,
           mmprojPath: input.mmprojPath,
+          ...(input.cacheRamMiB !== undefined ? { cacheRamMiB: input.cacheRamMiB } : {}),
         }
       )
       record(probed ? dflash : chat, argv, build)

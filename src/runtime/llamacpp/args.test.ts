@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { LlamacppConfig } from '../../contracts/index.js'
+import { REASONING_BUDGET_MESSAGE } from './generation-limits.js'
 import {
+  CACHE_RAM_MIN_BUILD,
+  REASONING_BUDGET_TOKENS_MIN_BUILD,
   buildLlamaArgs,
   isTurboquantVersion,
   parseBuildNumber,
@@ -164,6 +167,7 @@ describe('planLlamaArgs', () => {
       '8080',
       '-ngl',
       '-1',
+      '--no-cont-batching',
       '--parallel',
       '1',
       '-kvu',
@@ -351,6 +355,76 @@ describe('context size and fit', () => {
       { ...input, fitCtxCeiling: 6144 }
     )
     expect(contextArgs(argv)).toEqual([])
+  })
+})
+
+/** Integrations audit 2026-11-03: S3 (slots), P3 (continuous batching), X6 (answer and thinking caps), S5 (cache). */
+describe('agent-friendly serving flags', () => {
+  const at = (cfg: Partial<LlamacppConfig>, extra: Partial<typeof input> & { cacheRamMiB?: number } = {}) =>
+    planLlamaArgs({ ...base(), version_backend: 'b11463/macos-arm64', ...cfg }, { ...input, ...extra })
+  const valueOf = (argv: string[], flag: string) =>
+    argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined
+
+  it('always shares one KV pool between the slots, whatever their number', () => {
+    for (const parallel of [1, 2, 4]) {
+      const { argv } = at({ parallel })
+      expect(valueOf(argv, '--parallel')).toBe(String(parallel))
+      expect(argv.filter((a) => a === '-kvu')).toHaveLength(1)
+    }
+    // 0 leaves the slot count to llama.cpp (4 on b12019); the pool is still one.
+    const auto = at({ parallel: 0 }).argv
+    expect(auto).not.toContain('--parallel')
+    expect(auto).toContain('-kvu')
+    expect(valueOf(at({ parallel: 1, concurrent_mode: true, concurrent_slots: 6 }).argv, '--parallel')).toBe(
+      '6'
+    )
+  })
+
+  it('says continuous batching both ways, since llama.cpp has it on unless told otherwise', () => {
+    expect(at({ cont_batching: true }).argv).toContain('--cont-batching')
+    expect(at({ cont_batching: true }).argv).not.toContain('--no-cont-batching')
+    expect(at({ cont_batching: false }).argv).toContain('--no-cont-batching')
+    // ik builds keep the old form.
+    expect(at({ cont_batching: false, version_backend: 'b7000/ik-cuda-x64' }).argv).not.toContain(
+      '--no-cont-batching'
+    )
+  })
+
+  it('caps thinking with a budget and the message that ends it, from the build that takes a token count', () => {
+    const { argv } = at({ reasoning_budget: 8192 })
+    expect(valueOf(argv, '--reasoning-budget')).toBe('8192')
+    expect(valueOf(argv, '--reasoning-budget-message')).toBe(REASONING_BUDGET_MESSAGE)
+    // 0 ends thinking at once: no message to inject.
+    expect(valueOf(at({ reasoning_budget: 0 }).argv, '--reasoning-budget')).toBe('0')
+    expect(at({ reasoning_budget: 0 }).argv).not.toContain('--reasoning-budget-message')
+    // -1, the serde default of a config written before the setting: llama.cpp's own unbounded thinking.
+    expect(at({ reasoning_budget: -1 }).argv).not.toContain('--reasoning-budget')
+    expect(base().reasoning_budget).toBe(-1)
+    expect(at({ reasoning_budget: 8192 }, { isEmbedding: true }).argv).not.toContain('--reasoning-budget')
+  })
+
+  it('skips the budget, with a warning, on builds whose flag takes only -1 or 0', () => {
+    const edge = REASONING_BUDGET_TOKENS_MIN_BUILD
+    expect(at({ reasoning_budget: 8192, version_backend: `b${edge}/macos-arm64` }).argv).toContain(
+      '--reasoning-budget'
+    )
+    const old = at({ reasoning_budget: 8192, version_backend: `b${edge - 1}/macos-arm64` })
+    expect(old.argv).not.toContain('--reasoning-budget')
+    expect(old.warnings.some((w) => w.includes('predates token budgets'))).toBe(true)
+    expect(at({ reasoning_budget: 8192, version_backend: 'b11463/ik-cuda' }).argv).not.toContain(
+      '--reasoning-budget'
+    )
+  })
+
+  it('passes the load plan’s answer cap and prompt cache size, the cache only to builds that have one', () => {
+    expect(valueOf(at({ n_predict: 16_384 }).argv, '--n-predict')).toBe('16384')
+    expect(at({ n_predict: -1 }).argv).not.toContain('--n-predict')
+    expect(valueOf(at({}, { cacheRamMiB: 1024 }).argv, '--cache-ram')).toBe('1024')
+    expect(at({}).argv).not.toContain('--cache-ram')
+    expect(
+      at({ version_backend: `b${CACHE_RAM_MIN_BUILD - 1}/macos-arm64` }, { cacheRamMiB: 1024 }).argv
+    ).not.toContain('--cache-ram')
+    expect(at({}, { cacheRamMiB: 1024, isEmbedding: true }).argv).not.toContain('--cache-ram')
   })
 })
 

@@ -31,6 +31,7 @@ const UPSTREAM_KEYS = [
   'threads_batch',
   'ctx_shift',
   'n_predict',
+  'reasoning_budget',
   'ubatch_size',
   'device',
   'split_mode',
@@ -49,8 +50,8 @@ const UPSTREAM_KEYS = [
 
 describe('settingsSchema', () => {
   it.each<[LocalProviderId, number]>([
-    ['llamacpp-upstream', 35],
-    ['llamacpp', 31],
+    ['llamacpp-upstream', 36],
+    ['llamacpp', 32],
     ['mlx', 11],
     ['foundation-models', 0],
     ['tensorrt-llm', 18],
@@ -113,8 +114,20 @@ describe('defaultSettingValues', () => {
       cache_type_v: 'f16',
       defrag_thold: 0.1,
       rope_scale: 1.0,
+      // Integrations audit 2026-11-03: two slots over one KV pool, batching on as llama.cpp has it,
+      // an automatic answer cap and a thinking budget.
+      parallel: 2,
+      cont_batching: true,
+      n_predict: 0,
+      reasoning_budget: 8192,
     })
     expect(Object.keys(upstream)).toEqual(UPSTREAM_KEYS)
+    expect(defaultSettingValues('atomic-prism')).toMatchObject({
+      parallel: 2,
+      cont_batching: true,
+      n_predict: 0,
+      reasoning_budget: 8192,
+    })
     expect(defaultSettingValues('llamacpp')).toMatchObject({ cache_type_k: 'turbo3', cache_type_v: 'turbo3' })
     expect(defaultSettingValues('llamacpp')).not.toHaveProperty('mtp')
     expect(defaultSettingValues('mlx')).toEqual({

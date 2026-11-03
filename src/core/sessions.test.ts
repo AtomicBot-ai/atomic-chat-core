@@ -184,7 +184,8 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
   it('grows the context of a local model whose request overflowed it, and replays the request', async () => {
     const core = await createCore()
     await data.writeModel('demo')
-    await installFakeBackend(data.layout, { minCtx: 8192 })
+    // Above the 32K window a fit-off load gets by default (DEFAULT_CTX_LEN): the first answer overflows.
+    await installFakeBackend(data.layout, { minCtx: 40_000 })
     // With fit on (the default) llama.cpp sizes the window itself and the core declines to grow it.
     await core.settings.update('llamacpp-upstream', { fit: false })
     const before = await core.load('llamacpp-upstream', 'demo')
@@ -199,18 +200,19 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('serving a model end to end', () => {
     expect(answer.status).toBe(200)
     const [after] = core.sessions()
     expect(after?.pid).not.toBe(before.pid)
-    expect(core.llamacpp().getCtxSize('demo')).toBeGreaterThanOrEqual(8192)
+    expect(core.llamacpp().getCtxSize('demo')).toBeGreaterThanOrEqual(40_000)
   })
 
   it.skipIf(process.platform === 'win32')(
     'serves an MLX model through the public API and grows its context when mlx-vlm overflows',
     async () => {
       const resources = join(data.root, 'resources')
-      await writeFakeSidecarBinary(resources, 'mlx-server', { kind: 'mlx', minCtx: 30000 })
+      // Above MLX's 32K default window: the first answer overflows.
+      await writeFakeSidecarBinary(resources, 'mlx-server', { kind: 'mlx', minCtx: 40_000 })
       const modelDir = join(data.root, 'mlx', 'models', 'qwen-mlx')
       await mkdir(modelDir, { recursive: true })
       await writeFile(join(modelDir, 'model.safetensors'), 'w')
-      await writeFile(join(modelDir, 'config.json'), JSON.stringify({ max_position_embeddings: 32768 }))
+      await writeFile(join(modelDir, 'config.json'), JSON.stringify({ max_position_embeddings: 65_536 }))
       const core = await AtomicCore.create({
         dataFolder: data.root,
         controlPort: 0,

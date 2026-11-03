@@ -128,3 +128,45 @@ export function smallUnifiedMemoryCtxCeiling(input: SmallUnifiedMemoryCtxInput):
   }
   return undefined
 }
+
+/**
+ * The default window of a load that sizes nothing itself — llama.cpp with fit off, MLX — before 32K
+ * became the default (`DEFAULT_CTX_LEN`): it stays the floor on a small Mac, so the change never
+ * gives anyone a narrower window than before.
+ */
+export const PREVIOUS_DEFAULT_CTX = 16_384
+
+export interface SmallMemoryDefaultCtxInput {
+  /** Physical RAM, shared by the CPU and the GPU. */
+  totalMemoryBytes: number
+  /** The model's weights in memory. */
+  weightsBytes: number
+  /** The default window before memory narrows it: 32K, or the trained context when smaller. */
+  defaultCtx: number
+  /** The KV cache at `ctx` tokens; `undefined` when it cannot be estimated. */
+  kvBytesAt: (ctx: number) => number | undefined
+}
+
+/**
+ * The default window on a unified-memory Mac below 16 GiB, or `undefined` elsewhere (the default
+ * stands). Half of RAM is the engine's, as with fit (`UNIFIED_MEMORY_LLAMA_SHARE`): the default is
+ * narrowed in steps of 256 tokens until the weights, the KV cache and the compute reserve fit it, but
+ * never below {@link PREVIOUS_DEFAULT_CTX} (or the default itself when that is smaller) — and stays
+ * there when the KV cache cannot be estimated.
+ */
+export function smallMemoryDefaultCtx(input: SmallMemoryDefaultCtxInput): number | undefined {
+  if (!(input.totalMemoryBytes > 0) || input.totalMemoryBytes >= SMALL_UNIFIED_MEMORY_BYTES) return undefined
+  const floor = Math.min(PREVIOUS_DEFAULT_CTX, input.defaultCtx)
+  const room =
+    input.totalMemoryBytes * UNIFIED_MEMORY_LLAMA_SHARE -
+    Math.max(0, input.weightsBytes) -
+    FIT_COMPUTE_RESERVE_BYTES
+  let ctx = input.defaultCtx
+  while (ctx > floor) {
+    const kv = input.kvBytesAt(ctx)
+    if (kv === undefined) return floor
+    if (kv <= room) return ctx
+    ctx -= ctx % FIT_CTX_ALIGN === 0 ? FIT_CTX_ALIGN : ctx % FIT_CTX_ALIGN
+  }
+  return floor
+}
