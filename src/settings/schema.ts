@@ -103,6 +103,7 @@ const LLAMACPP_VALUE_TYPES: Readonly<Record<string, CanonicalValueType>> = {
   llamacpp_env: 'string',
   extra_args: 'string',
   reasoning_preserve: 'boolean',
+  reasoning_budget: 'number',
   mtp: 'boolean',
   mtp_draft_path: 'string',
   dflash: 'boolean',

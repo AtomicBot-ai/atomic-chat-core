@@ -260,6 +260,7 @@ export class ManagedTextRuntime<
     const family = familyFromResolved(ready, resolved)
 
     const { descriptor } = ready
+    let launchPlan: unknown
     // Again right before the lifecycle registers this load (synchronously, inside `lifecycle.load`):
     // a removal that began while this load was probing the host must not find it past the check.
     this.assertNotHeldOff(modelId)
@@ -290,15 +291,26 @@ export class ManagedTextRuntime<
       // Pre-launch check, phase 2 (finding 1): the memory line alone, re-probed fresh once
       // stopPrevious (above) has actually freed the card — never the snapshot `facts` took before
       // eviction, which is why this is a lifecycle hook and not just more code in this function.
-      beforeCreate: () => this.checkMemoryBeforeCreate(gpu.gpu_id, descriptor, resolved, check, settings),
+      // The plan is kept: an automatic window is decided there, and the session's limits name it.
+      beforeCreate: async () => {
+        launchPlan = await this.checkMemoryBeforeCreate(gpu.gpu_id, descriptor, resolved, check, settings)
+        return launchPlan
+      },
       ...(opts.timeoutSecs !== undefined ? { timeoutMs: opts.timeoutSecs * 1000 } : {}),
       ...(signal !== undefined ? { signal } : {}),
       ...(substituted !== undefined ? { gpuSubstituted: substituted } : {}),
     })
+    // A ready session the lifecycle kept (same settings) ran no `beforeCreate`: its window stands.
+    const previous = this.sessionCapabilities.get(modelId)
+    const contextLength =
+      this.engine.planContextLength?.(launchPlan) ??
+      (previous !== undefined && previous.generation === (session.generation ?? '')
+        ? previous.limits.contextLength
+        : settings.context_length)
     this.sessionCapabilities.set(modelId, {
       generation: session.generation ?? '',
       capabilities: this.engine.adapter.capabilities({ settings, family }),
-      limits: { contextLength: settings.context_length, maxOutputTokens: settings.max_output_tokens },
+      limits: { contextLength, maxOutputTokens: settings.max_output_tokens },
     })
     return session
   }

@@ -35,6 +35,7 @@ import { decisionSettingsOf, parseDecisionSettingsPatch } from './decision.js'
 import { embeddingSettingsOf, parseEmbeddingSettingsPatch } from './embedding.js'
 import { LOCAL_PROVIDER_IDS, canonicalizeSettingValues, defaultSettingValues } from './schema.js'
 import { classifyImport, legacyHash, planImport } from './import.js'
+import { applyDefaultMigrations } from './default-migrations.js'
 import type { ImportOutcome, Resolutions } from './import.js'
 
 export const SETTINGS_FILE_VERSION = 1
@@ -256,6 +257,8 @@ export class SettingsStore {
         fs,
         now
       )
+      // A fresh file already holds the new defaults: this only records the migrations as done.
+      store.migrateDefaults()
       await store.persist()
       return store
     }
@@ -268,7 +271,7 @@ export class SettingsStore {
     }
     let raw: unknown
     try {
-      raw = JSON.parse(text)
+      raw = JSON.parse(text.replace(/^\uFEFF/, ''))
     } catch (e) {
       throw new AtomicCoreError('IO_ERROR', `${path} is not valid JSON: ${(e as Error).message}`)
     }
@@ -284,8 +287,23 @@ export class SettingsStore {
       fs,
       now
     )
-    if (options.ownerScope && !raw['owner_scope']) await store.persist()
+    const migrated = store.migrateDefaults()
+    if ((options.ownerScope && !raw['owner_scope']) || migrated) await store.persist()
     return store
+  }
+
+  /**
+   * Move stored values still at a default core no longer ships (`default-migrations.ts`). A moved
+   * value is a change like any other — the revision moves with it, so the app mirrors it. Returns
+   * whether the document changed and must be written.
+   */
+  private migrateDefaults(): boolean {
+    const outcome = applyDefaultMigrations(this.doc.providers, this.doc.state)
+    if (outcome.moved.length > 0) {
+      this.doc.revision += 1
+      this.doc.updated_at = new Date(this.now()).toISOString()
+    }
+    return outcome.recorded.length > 0
   }
 
   get revision(): number {

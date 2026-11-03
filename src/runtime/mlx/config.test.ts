@@ -125,6 +125,17 @@ describe('resolveMlxCtxSize', () => {
     expect(resolveMlxCtxSize(32_768, undefined)).toBe(32_768)
   })
 
+  it('defaults to 32K now, and lets the small-Mac memory rule narrow only the default', () => {
+    expect(MLX_DEFAULT_CTX_CAP).toBe(32_768)
+    const narrow = (ctx: number) => Math.min(ctx, 20_480)
+    expect(resolveMlxCtxSize(undefined, 262_144, narrow)).toBe(20_480)
+    expect(resolveMlxCtxSize(undefined, 262_144, () => undefined)).toBe(32_768)
+    // A pinned window is the user's: never narrowed.
+    expect(resolveMlxCtxSize(65_536, 262_144, narrow)).toBe(65_536)
+    // Unknown trained context: the small fallback, as before.
+    expect(resolveMlxCtxSize(undefined, undefined, narrow)).toBe(MLX_DEFAULT_CTX_FALLBACK)
+  })
+
   it('is what buildMlxConfig loads with', () => {
     expect(
       buildMlxConfig({}, { draftKind: 'dflash', draftPath: '', blockSize: 0 }, { maxCtxTrain: 40_960 })

@@ -60,7 +60,13 @@ import {
   mlxModelMissing,
   mlxTimeout,
 } from './errors.js'
-import { readMlxMaxCtxTrain, repairLegacyShardName, resolveLocalDraftDir } from './model-files.js'
+import { smallMemoryDefaultCtx } from '../llamacpp/fit-margin.js'
+import {
+  readMlxMaxCtxTrain,
+  readMlxMemoryFacts,
+  repairLegacyShardName,
+  resolveLocalDraftDir,
+} from './model-files.js'
 
 export const MLX_SERVER_BINARY = 'mlx-server'
 /** The extension's `timeout` default, in seconds. */
@@ -107,6 +113,11 @@ export interface MlxRuntimeOptions {
    * the ones the core downloaded (`EngineBuildsService.resolveMlxBinary`). Absent, `resourcesDir`.
    */
   resolveBinary?: () => Promise<string | undefined>
+  /**
+   * RAM the GPU shares with the system (Apple silicon). Below 16 GiB the default window is narrowed
+   * toward 16K until the model fits half of it (`smallMemoryDefaultCtx`); absent, the 32K default.
+   */
+  unifiedMemory?: () => Promise<{ totalMemoryBytes: number } | undefined>
   /** Test seams. */
   spawn?: typeof spawnAndAwaitReady
   exists?: (path: string) => boolean
@@ -250,7 +261,25 @@ export class MlxRuntime implements LocalRuntime {
         })
       }
     }
-    const config = buildMlxConfig(cfg, draft, { ...(maxCtxTrain !== undefined ? { maxCtxTrain } : {}) })
+    const memory = await this.options.unifiedMemory?.().catch(() => undefined)
+    const facts = memory
+      ? await readMlxMemoryFacts(modelPath, kvQuantBits(cfg)).catch(() => undefined)
+      : undefined
+    const narrowDefaultCtx =
+      memory && facts
+        ? (defaultCtx: number) =>
+            smallMemoryDefaultCtx({
+              totalMemoryBytes: memory.totalMemoryBytes,
+              weightsBytes: facts.weightsBytes,
+              defaultCtx,
+              kvBytesAt: (ctx) =>
+                facts.kvBytesPerToken === undefined ? undefined : ctx * facts.kvBytesPerToken,
+            })
+        : undefined
+    const config = buildMlxConfig(cfg, draft, {
+      ...(maxCtxTrain !== undefined ? { maxCtxTrain } : {}),
+      ...(narrowDefaultCtx ? { narrowDefaultCtx } : {}),
+    })
     const args = buildMlxServerArgs(modelPath, port, config)
     const timeoutSecs = opts.timeoutSecs ?? asNumber(cfg['timeout']) ?? MLX_DEFAULT_TIMEOUT_SECS
     const env: Record<string, string> = {}
@@ -433,4 +462,11 @@ export class MlxRuntime implements LocalRuntime {
   private exists(path: string): boolean {
     return (this.options.exists ?? existsSync)(path)
   }
+}
+
+/** The KV cache's bits per element when quantization is on (`uniform`/`turboquant` with `kv_bits`), else 0. */
+function kvQuantBits(cfg: MlxExtensionConfigInput): number {
+  const scheme = cfg.kv_quant_scheme
+  const bits = asNumber(cfg.kv_bits)
+  return (scheme === 'uniform' || scheme === 'turboquant') && bits !== undefined && bits > 0 ? bits : 0
 }

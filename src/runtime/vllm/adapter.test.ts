@@ -24,6 +24,8 @@ const family = (over: Partial<ModelFamilySupport> = {}): ModelFamilySupport => (
   ...over,
 })
 const PLAN: VllmLaunchPlan = {
+  maxModelLen: 8192,
+  maxNumSeqs: 1,
   kvCacheMemoryBytes: null,
   gpuMemoryUtilization: 0.87,
   multimodal: true,
@@ -70,6 +72,19 @@ describe('buildLaunch: argv', () => {
     expect(flag(launch.argv, '--max-num-seqs')).toBe('1')
     expect(launch.argv).not.toContain('--kv-cache-memory-bytes')
     expect(flag(launch.argv, '--gpu-memory-utilization')).toBe('0.87')
+  })
+
+  it('starts with the window and request count of the plan, the automatic ones included', () => {
+    const launch = vllmAdapter.buildLaunch(context({ plan: { ...PLAN, maxModelLen: 65_536, maxNumSeqs: 2 } }))
+    expect(flag(launch.argv, '--max-model-len')).toBe('65536')
+    expect(flag(launch.argv, '--max-num-seqs')).toBe('2')
+  })
+
+  it('refuses a plan without a window: the memory rule decides it before the container', () => {
+    const { maxModelLen: _dropped, ...noWindow } = PLAN
+    expect(() => vllmAdapter.buildLaunch(context({ plan: noWindow }))).toThrow(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+    )
   })
 
   it('passes --kv-cache-memory-bytes only when the KV cache size setting fixes it', () => {

@@ -140,7 +140,9 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', (
 
   it('routes to an engine another process owns and asks that owner to grow its context', async () => {
     let engineCalls = 0
-    const engine = await startStub((_req, res) => {
+    const engine = await startStub((req, res) => {
+      // The server reads the session's window from `/props` once per generation; only chat counts.
+      if (req.path === '/props') return json(res, 200, { default_generation_settings: { n_ctx: 8192 } })
       engineCalls++
       if (engineCalls === 1)
         return json(res, 500, { error: { message: 'the request exceeds the available context size' } })
@@ -189,7 +191,8 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', (
     await answering
 
     expect(await answer.json()).toEqual({ choices: [{ message: { content: 'after the owner reloaded' } }] })
-    expect(engine.requests[0]?.headers.authorization).toBe('Bearer owner-key')
+    const chats = engine.requests.filter((request) => request.path !== '/props')
+    expect(chats[0]?.headers.authorization).toBe('Bearer owner-key')
     expect(engineCalls).toBe(2)
   })
 })

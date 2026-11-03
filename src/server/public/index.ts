@@ -53,6 +53,7 @@ export type {
 export { hostAndKeyGate, isValidHost, removePrefix } from './gates.js'
 export type { HostAndKeyConfig } from './gates.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
+export { SessionWindows } from './context-window.js'
 export {
   forwardableHeaders,
   pipeBody,

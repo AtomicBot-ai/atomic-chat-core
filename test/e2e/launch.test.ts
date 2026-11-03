@@ -160,7 +160,11 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('launch throug
     expect(await sessions(ready)).toEqual([expect.objectContaining({ model_id: 'demo' })])
     const models = await fetch(`${endpoint}/models`, { headers: { authorization: 'Bearer atomic' } })
     expect(models.status).toBe(200)
-    expect(JSON.stringify(await models.json())).toContain('demo')
+    const listing = (await models.json()) as { data: Array<{ id: string; context_length?: number }> }
+    expect(JSON.stringify(listing)).toContain('demo')
+    // The window the server advertises for the model is the one ZCode is told below.
+    const window = listing.data.find((model) => model.id === 'demo')?.context_length
+    expect(window).toBeGreaterThan(0)
     expect((await fetch(`${endpoint}/models`)).status).toBe(401)
 
     // The provider file: ours added, theirs kept, the model rule with the context window ZCode is told.
@@ -181,7 +185,7 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('launch throug
       expect.objectContaining({
         providerId: 'atomic-chat',
         modelId: 'demo',
-        config: expect.objectContaining({ properties: expect.objectContaining({ contextWindow: 65536 }) }),
+        config: expect.objectContaining({ properties: expect.objectContaining({ contextWindow: window }) }),
       }),
     ])
     expect(written.config.defaultModelSelection).toMatchObject({ providerId: 'atomic-chat', modelId: 'demo' })

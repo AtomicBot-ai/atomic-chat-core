@@ -37,6 +37,16 @@
       "source": "src/runtime/llamacpp/args.ts"
     },
     {
+      "name": "CACHE_RAM_MIN_BUILD",
+      "build": 6723,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
+      "name": "REASONING_BUDGET_TOKENS_MIN_BUILD",
+      "build": 8287,
+      "source": "src/runtime/llamacpp/args.ts"
+    },
+    {
       "name": "MTP_MIN_BUILD",
       "build": 9180,
       "source": "src/runtime/llamacpp/args.ts"
@@ -121,6 +131,24 @@
         "chat-dflash": [
           {
             "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--cache-ram",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 6723,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": 6723,
             "until": null
           }
         ]
@@ -806,6 +834,24 @@
       }
     },
     {
+      "flag": "--no-cont-batching",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
       "flag": "--no-kv-offload",
       "severity": "break",
       "emitters": {
@@ -1033,6 +1079,42 @@
         "decision-upstream": [
           {
             "from": 11370,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--reasoning-budget",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 8287,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": 8287,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
+      "flag": "--reasoning-budget-message",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": 8287,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": 8287,
             "until": null
           }
         ]

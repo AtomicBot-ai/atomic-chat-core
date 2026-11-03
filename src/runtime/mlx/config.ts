@@ -51,7 +51,9 @@ export interface MlxDraftSelection {
  * The context a model loads at when nothing pins one: the training maximum,
  * capped — a 256K coder model must not allocate a 256K KV cache on a 16 GB
  * Mac just because it could. The auto-increase ladder still climbs from
- * here, capped at the training maximum. See ADR 2026-06-15.
+ * here, capped at the training maximum. See ADR 2026-06-15. 32K since the
+ * integrations audit (S4): an agent's first request is 13-27K tokens; a Mac
+ * below 16 GiB is narrowed back toward 16K by memory (`resolveMlxCtxSize`).
  */
 export const MLX_DEFAULT_CTX_CAP = DEFAULT_CTX_LEN
 
@@ -107,22 +109,29 @@ export function selectMlxDraftSettings(config: MlxExtensionConfigInput): MlxDraf
  * An explicit, valid `ctx_size` (a user-pinned value, or the auto-increase
  * override) wins, clamped to the training maximum when that is known — MLX
  * never clamped, unlike llama.cpp, so it could ask for a window the model
- * was not trained to hold. Unset falls back to `min(trainMax, cap)`, or
- * {@link MLX_DEFAULT_CTX_FALLBACK} when the training maximum is unknown.
+ * was not trained to hold. Unset falls back to `min(trainMax, cap)`, passed
+ * through `narrowDefault` (the small-Mac memory rule, `smallMemoryDefaultCtx`),
+ * or {@link MLX_DEFAULT_CTX_FALLBACK} when the training maximum is unknown.
  */
-export function resolveMlxCtxSize(ctxSize: Numeric | undefined, maxCtxTrain: number | undefined): number {
+export function resolveMlxCtxSize(
+  ctxSize: Numeric | undefined,
+  maxCtxTrain: number | undefined,
+  narrowDefault?: (defaultCtx: number) => number | undefined
+): number {
   const trainMax = typeof maxCtxTrain === 'number' && maxCtxTrain > 0 ? maxCtxTrain : undefined
   const explicit = asNumber(ctxSize)
   if (explicit !== undefined && explicit > 0) {
     return trainMax ? Math.min(explicit, trainMax) : explicit
   }
-  return trainMax ? Math.min(trainMax, MLX_DEFAULT_CTX_CAP) : MLX_DEFAULT_CTX_FALLBACK
+  if (!trainMax) return MLX_DEFAULT_CTX_FALLBACK
+  const ctx = Math.min(trainMax, MLX_DEFAULT_CTX_CAP)
+  return Math.min(ctx, narrowDefault?.(ctx) ?? ctx)
 }
 
 export function buildMlxConfig(
   config: MlxExtensionConfigInput,
   draft: MlxDraftSelection,
-  options: { maxCtxTrain?: number } = {}
+  options: { maxCtxTrain?: number; narrowDefaultCtx?: (defaultCtx: number) => number | undefined } = {}
 ): MlxServerConfig {
   const draftPath = draft.draftPath.trim()
   const kvScheme =
@@ -133,7 +142,7 @@ export function buildMlxConfig(
   const kvBits = kvScheme && kvBitsRaw !== undefined && kvBitsRaw > 0 ? kvBitsRaw : 0
 
   return {
-    ctx_size: resolveMlxCtxSize(config.ctx_size, options.maxCtxTrain),
+    ctx_size: resolveMlxCtxSize(config.ctx_size, options.maxCtxTrain, options.narrowDefaultCtx),
     draft_model_path: draftPath,
     block_size: draftPath ? draft.blockSize : 0,
     draft_kind: draftPath ? draft.draftKind : 'dflash',

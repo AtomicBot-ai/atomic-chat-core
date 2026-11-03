@@ -34,7 +34,7 @@ describe('computeNextCtxLen', () => {
     expect(Number.isInteger(computeNextCtxLen(40001))).toBe(true)
   })
 
-  it('has one default, the same one the app settled on', () => {
-    expect(DEFAULT_CTX_LEN).toBe(16384)
+  it("has one default: 32K, room for an agent's first request", () => {
+    expect(DEFAULT_CTX_LEN).toBe(32768)
   })
 })

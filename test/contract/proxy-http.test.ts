@@ -87,12 +87,64 @@ const REMOTE_BEARER = 'Bearer sk-remote'
  * Recorded later, so not in `index.json`: the proxy answered a model nothing serves with a plain-text
  * 404; the port answers OpenAI's `model_not_found` JSON envelope with the same text as its message
  * (ADR 2026-10-21-answer-an-unknown-model-and-an-empty-conversation-with-openai-errors).
+ *
+ * Also recorded later: the proxy sent an Anthropic `/v1/messages` request to a llama.cpp session as it
+ * came, so a request without `thinking` thought at the server's default anyway; the port adds
+ * `chat_template_kwargs: {enable_thinking: false}` to it, on `/v1/messages` and on the chat-completions
+ * fallback (QA B08, `src/server/public/thinking.ts`). That fallback also kept no `max_tokens`, so an
+ * engine started with `n_predict -1` wrote until its context was full; to a llama.cpp session the port
+ * keeps the request's `max_tokens`, as llama.cpp's own `/v1/messages` does.
+ *
+ * No recorded case exercises these, so they need no correction below: to a llama.cpp session the
+ * port keeps a system message from inside an Anthropic conversation where it is, as a
+ * `<system-reminder>` in a user turn, on `/v1/messages` and on the fallback, where the proxy sent it
+ * as it came and its translation moved it into the leading system message (`system-messages.ts`).
+ * A llama.cpp context overflow on `/v1/messages` is answered as the Anthropic API's 400
+ * `prompt is too long: N tokens > M maximum`, without the fallback, where the proxy tried the fallback
+ * and relayed its error. `/v1/models` gives a local model whose window the host knows
+ * `context_length` and `meta.n_ctx` (the replay has no `contextWindow`, so no case shows them).
  */
 const UNKNOWN_MODEL_TEXT = /^No running session found for model '(.*)'$/
+const SESSION_BEARER = 'Bearer session-key'
 
-function applyKnownDivergence(expected: Expected): void {
+/** The positive `max_tokens` of an Anthropic request, which a llama.cpp fallback keeps. */
+function messagesMaxTokens(request: Input['request']): number | undefined {
+  if (!request.path.endsWith('/messages') || request.body === null) return undefined
+  try {
+    const body = JSON.parse(request.body) as JsonValue
+    const value = isJsonObject(body) ? body['max_tokens'] : undefined
+    return typeof value === 'number' && value > 0 ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function asksForNoThinking(request: Input['request']): boolean {
+  if (!request.path.endsWith('/messages') || request.body === null) return false
+  try {
+    const body = JSON.parse(request.body) as JsonValue
+    return isJsonObject(body) && body['thinking'] === undefined && body['chat_template_kwargs'] === undefined
+  } catch {
+    return false
+  }
+}
+
+function applyKnownDivergence(expected: Expected, input: Input): void {
+  const noThinking = asksForNoThinking(input.request)
+  const maxTokens = messagesMaxTokens(input.request)
   for (const call of expected.upstream_calls) {
     if (call.headers['authorization'] === REMOTE_BEARER) call.headers['x-custom'] = 'from-provider'
+    if (noThinking && call.headers['authorization'] === SESSION_BEARER && isJsonObject(call.body)) {
+      call.body['chat_template_kwargs'] = { enable_thinking: false }
+    }
+    if (
+      maxTokens !== undefined &&
+      call.path.endsWith('/chat/completions') &&
+      call.headers['authorization'] === SESSION_BEARER &&
+      isJsonObject(call.body)
+    ) {
+      call.body['max_tokens'] = maxTokens
+    }
   }
   const { response } = expected
   const text = isJsonObject(response.body) ? response.body['text'] : undefined
@@ -376,7 +428,7 @@ describe('proxy-http', () => {
 
   it.each(cases.map((c) => [c.name, c] as const))('%s', async (_name, c) => {
     const expected = structuredClone(c.expected)
-    applyKnownDivergence(expected)
+    applyKnownDivergence(expected, c.input)
     expect(await runCase(c.input)).toEqual(expected)
   })
 })

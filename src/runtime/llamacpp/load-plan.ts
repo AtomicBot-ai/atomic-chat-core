@@ -6,7 +6,9 @@
  * Owns: settings merge, `latest/` sentinel resolution, flash-attn clamp for old builds, AVX preflight,
  * model.yml → paths (first shard, mmproj), artifact validation, Llama 3 template override, MTP/DFlash
  * draft resolution and capability gates, `dflash_n_max`, mutual exclusion, ctx clamp, env, port and
- * API key. Does NOT spawn; `nextRetry()` encodes the two post-failure retries.
+ * API key; beyond the extension, the default window with fit off, the answer cap (`n_predict` 0 is
+ * automatic) and the host prompt cache on a small machine. Does NOT spawn; `nextRetry()` encodes the
+ * two post-failure retries.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
@@ -25,13 +27,16 @@ import { generateApiKey } from '../shared/index.js'
 import type { GpuCards } from '../shared/index.js'
 import { withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
+import { DEFAULT_CTX_LEN } from './ctx-ladder.js'
 import {
   DEFAULT_FIT_CTX,
   DEFAULT_FIT_TARGET_MIB,
   metalDevice,
+  smallMemoryDefaultCtx,
   smallUnifiedMemoryCtxCeiling,
   unifiedMemoryFitTargetMiB,
 } from './fit-margin.js'
+import { promptCacheRamMiB, resolveNPredict } from './generation-limits.js'
 import {
   BACKEND_NOT_CONFIGURED_MESSAGE,
   CPU_NO_AVX_ERROR_CODE,
@@ -92,6 +97,11 @@ export interface LoadPlanDeps {
    * GPU's own memory is llama.cpp's to fill, and fit keeps its default margin there.
    */
   unifiedMemory?: () => Promise<{ totalMemoryBytes: number } | undefined>
+  /**
+   * The machine's physical RAM on any platform, for the host prompt cache (`--cache-ram`); absent or
+   * `undefined`, llama.cpp keeps its own cache size.
+   */
+  systemMemory?: () => Promise<{ totalMemoryBytes: number } | undefined>
   /** `<exe> --list-devices`: what fit will measure as free on each device. */
   listDevices?: (exePath: string) => Promise<DeviceInfo[]>
   exists: (path: string) => Promise<boolean>
@@ -126,9 +136,12 @@ export interface LoadPlan {
   maxCtxTrain: number | undefined
   /**
    * Under fit on a unified-memory Mac below 16 GiB: the window the core caps llama.cpp at, in tokens
-   * across every slot (`--ctx-size`; fit still places the layers). Absent: llama.cpp picks the window.
+   * of the one KV pool every slot shares (`--ctx-size` with `-kvu`; fit still places the layers).
+   * Absent: llama.cpp picks the window.
    */
   fitCtxCeiling?: number
+  /** `--cache-ram` (MiB) on a machine with at most 16 GiB of RAM; absent: llama.cpp's 8192 MiB. */
+  cacheRamMiB?: number
   warnings: string[]
 }
 
@@ -374,6 +387,26 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     }
   }
 
+  // 19c. fit off with no window chosen: llama.cpp would take the whole trained context (`n_ctx = 0`,
+  // `common/common.h:459`) — 256K on a current coder model. Core picks DEFAULT_CTX_LEN instead, the
+  // trained context when smaller, narrowed on a small unified-memory Mac like fit's ceiling.
+  if (!cfg.fit && !input.isEmbedding && !(cfg.ctx_size > 0)) {
+    cfg.ctx_size = await defaultFitOffCtx(modelPath, cfg, maxCtxTrain, deps)
+    warn(`No context size is set with fit off; loading "${modelId}" with ${cfg.ctx_size} tokens.`)
+  }
+
+  // 19d. the answer cap: `n_predict` 0 is automatic, never above the window core knows the load runs
+  // with (fit off: the window; fit on: the ceiling, else at most the trained context).
+  if (!input.isEmbedding) {
+    const window = !cfg.fit ? cfg.ctx_size : (fitCtxCeiling ?? maxCtxTrain)
+    cfg.n_predict = resolveNPredict(cfg.n_predict, window)
+  }
+
+  // 19e. the host prompt cache on a machine with at most 16 GiB of RAM (generation-limits.ts).
+  const cacheRamMiB = input.isEmbedding
+    ? undefined
+    : promptCacheRamMiB((await deps.systemMemory?.().catch(() => undefined))?.totalMemoryBytes)
+
   return {
     provider: input.provider,
     modelId,
@@ -390,6 +423,7 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     timeoutSecs,
     maxCtxTrain,
     ...(fitCtxCeiling !== undefined ? { fitCtxCeiling } : {}),
+    ...(cacheRamMiB !== undefined ? { cacheRamMiB } : {}),
     warnings,
   }
 }
@@ -470,8 +504,9 @@ async function assertCompleteGguf(
 
 /**
  * Fit on a unified-memory Mac: the widened `--fit-target` (`undefined` keeps llama.cpp's default) and,
- * below 16 GiB of RAM, the window ceiling in tokens across every slot. `undefined` altogether off Apple
- * silicon, on a device the user pinned elsewhere, or when the backend lists no Metal device.
+ * below 16 GiB of RAM, the window ceiling in tokens of the KV pool the slots share. `undefined`
+ * altogether off Apple silicon, on a device the user pinned elsewhere, or when the backend lists no
+ * Metal device.
  */
 async function unifiedMemoryFit(
   exePath: string,
@@ -487,16 +522,17 @@ async function unifiedMemoryFit(
   if (!gpu || (cfg.device !== '' && cfg.device !== gpu.id)) return undefined
   const gpuFreeBytes = gpu.free * 2 ** 20
   const weightsBytes = await gpuWeightsBytes(modelPath, cfg, deps)
-  const slots = fitSlots(cfg)
   const minCtx = fitMinCtx(cfg)
-  const kvBytesAt = await kvCacheEstimator(modelPath, cfg, slots, deps)
+  const kvBytesAt = await kvCacheEstimator(modelPath, cfg, deps)
   const marginMiB = unifiedMemoryFitTargetMiB({
     totalMemoryBytes: memory.totalMemoryBytes,
     gpuFreeBytes,
     weightsBytes,
     minContextKvBytes: kvBytesAt(minCtx) ?? 0,
   })
-  const perSlot = smallUnifiedMemoryCtxCeiling({
+  // The ceiling is the pool itself: under `-kvu` every slot draws from one cache of `n_ctx` cells
+  // (`src/llama-context.cpp:389-390`: `n_ctx_seq = n_ctx`), so it is not multiplied by the slots.
+  const ctxCeiling = smallUnifiedMemoryCtxCeiling({
     totalMemoryBytes: memory.totalMemoryBytes,
     budgetBytes: gpuFreeBytes - (marginMiB ?? DEFAULT_FIT_TARGET_MIB) * 2 ** 20,
     weightsBytes,
@@ -504,7 +540,32 @@ async function unifiedMemoryFit(
     minCtx,
     kvBytesAt,
   })
-  return { marginMiB, ctxCeiling: perSlot === undefined ? undefined : perSlot * slots }
+  return { marginMiB, ctxCeiling }
+}
+
+/**
+ * The window a fit-off load without one gets: DEFAULT_CTX_LEN, or the trained context when smaller;
+ * on a unified-memory Mac below 16 GiB narrowed toward the previous 16K default until the weights
+ * and the KV cache fit half of RAM (`smallMemoryDefaultCtx`).
+ */
+async function defaultFitOffCtx(
+  modelPath: string,
+  cfg: LlamacppConfig,
+  maxCtxTrain: number | undefined,
+  deps: LoadPlanDeps
+): Promise<number> {
+  const ctx =
+    maxCtxTrain !== undefined && maxCtxTrain > 0 ? Math.min(maxCtxTrain, DEFAULT_CTX_LEN) : DEFAULT_CTX_LEN
+  const memory = await deps.unifiedMemory?.().catch(() => undefined)
+  if (!memory) return ctx
+  return (
+    smallMemoryDefaultCtx({
+      totalMemoryBytes: memory.totalMemoryBytes,
+      weightsBytes: await gpuWeightsBytes(modelPath, cfg, deps),
+      defaultCtx: ctx,
+      kvBytesAt: await kvCacheEstimator(modelPath, cfg, deps),
+    }) ?? ctx
+  )
 }
 
 /** No margin of the user's own: the key is empty or holds llama.cpp's default. */
@@ -523,9 +584,14 @@ async function gpuWeightsBytes(modelPath: string, cfg: LlamacppConfig, deps: Loa
   return total
 }
 
-/** The sequences fit sizes the KV cache for: concurrent mode's slots, else `--parallel`. */
+/**
+ * The sequences llama.cpp sizes the cache for: concurrent mode's slots, else `--parallel` (0 leaves
+ * it to llama.cpp, whose auto is 4 slots, `tools/server/server.cpp:126-130`). With one unified pool
+ * they no longer multiply the cache; only each sliding-window layer keeps a window per sequence.
+ */
 function fitSlots(cfg: LlamacppConfig): number {
-  return cfg.concurrent_mode ? Math.max(cfg.concurrent_slots, 2) : Math.max(cfg.parallel, 1)
+  if (cfg.concurrent_mode) return Math.max(cfg.concurrent_slots, 2)
+  return cfg.parallel > 0 ? cfg.parallel : 4
 }
 
 /** `--fit-ctx`, the smallest window fit may settle on, or llama.cpp's default. */
@@ -534,13 +600,16 @@ function fitMinCtx(cfg: LlamacppConfig): number {
   return Number.isFinite(fitCtx) && fitCtx > 0 ? fitCtx : DEFAULT_FIT_CTX
 }
 
-/** The KV cache at a window per slot, across every slot; `undefined` when the GGUF cannot tell. */
+/**
+ * The unified KV cache at a pool of `ctx` cells, every slot included (`-kvu` is always sent, see
+ * args.ts); `undefined` when the GGUF cannot tell.
+ */
 async function kvCacheEstimator(
   modelPath: string,
   cfg: LlamacppConfig,
-  slots: number,
   deps: LoadPlanDeps
 ): Promise<(ctx: number) => number | undefined> {
+  const layout = { nSeq: fitSlots(cfg), ...(cfg.ubatch_size > 0 ? { nUbatch: cfg.ubatch_size } : {}) }
   let meta: Record<string, string> | undefined
   try {
     meta = await deps.readGgufMetadata(modelPath)
@@ -550,7 +619,7 @@ async function kvCacheEstimator(
   return (ctx) => {
     if (!meta) return undefined
     try {
-      return estimateKvCache(meta, ctx, cfg.cache_type_k, cfg.cache_type_v).size * slots
+      return estimateKvCache(meta, ctx, cfg.cache_type_k, cfg.cache_type_v, layout).size
     } catch {
       return undefined
     }
