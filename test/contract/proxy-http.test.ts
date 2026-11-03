@@ -87,12 +87,32 @@ const REMOTE_BEARER = 'Bearer sk-remote'
  * Recorded later, so not in `index.json`: the proxy answered a model nothing serves with a plain-text
  * 404; the port answers OpenAI's `model_not_found` JSON envelope with the same text as its message
  * (ADR 2026-10-21-answer-an-unknown-model-and-an-empty-conversation-with-openai-errors).
+ *
+ * Also recorded later: the proxy sent an Anthropic `/v1/messages` request to a llama.cpp session as it
+ * came, so a request without `thinking` thought at the server's default anyway; the port adds
+ * `chat_template_kwargs: {enable_thinking: false}` to it, on `/v1/messages` and on the chat-completions
+ * fallback (QA B08, `src/server/public/thinking.ts`).
  */
 const UNKNOWN_MODEL_TEXT = /^No running session found for model '(.*)'$/
+const SESSION_BEARER = 'Bearer session-key'
 
-function applyKnownDivergence(expected: Expected): void {
+function asksForNoThinking(request: Input['request']): boolean {
+  if (!request.path.endsWith('/messages') || request.body === null) return false
+  try {
+    const body = JSON.parse(request.body) as JsonValue
+    return isJsonObject(body) && body['thinking'] === undefined && body['chat_template_kwargs'] === undefined
+  } catch {
+    return false
+  }
+}
+
+function applyKnownDivergence(expected: Expected, input: Input): void {
+  const noThinking = asksForNoThinking(input.request)
   for (const call of expected.upstream_calls) {
     if (call.headers['authorization'] === REMOTE_BEARER) call.headers['x-custom'] = 'from-provider'
+    if (noThinking && call.headers['authorization'] === SESSION_BEARER && isJsonObject(call.body)) {
+      call.body['chat_template_kwargs'] = { enable_thinking: false }
+    }
   }
   const { response } = expected
   const text = isJsonObject(response.body) ? response.body['text'] : undefined
@@ -376,7 +396,7 @@ describe('proxy-http', () => {
 
   it.each(cases.map((c) => [c.name, c] as const))('%s', async (_name, c) => {
     const expected = structuredClone(c.expected)
-    applyKnownDivergence(expected)
+    applyKnownDivergence(expected, c.input)
     expect(await runCase(c.input)).toEqual(expected)
   })
 })

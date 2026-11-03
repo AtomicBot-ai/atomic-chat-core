@@ -274,6 +274,105 @@ describe('sseEvent', () => {
   })
 })
 
+describe('Anthropic thinking on a llama.cpp engine (QA B08)', () => {
+  // What Claude Code sends for its session title to a model it does not know: no `thinking`, the
+  // default 32k output budget, a short system prompt and the user's first message.
+  const titleRequest = {
+    model: 'demo',
+    max_tokens: 32000,
+    stream: true,
+    system: [
+      { type: 'text', text: 'You are naming a coding session. Return JSON with a single "title" field.' },
+    ],
+    messages: [{ role: 'user', content: '<session>how are you?</session>' }],
+  }
+  const anthropicReply = JSON.stringify({ type: 'message', content: [{ type: 'text', text: '{}' }] })
+
+  it("sends a request that asks for no thinking with the template's thinking turned off, and nothing else changed", async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, ...JSON.parse(body) })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    expect((await postJson(server, '/messages', titleRequest)).status).toBe(200)
+    expect(
+      (await postJson(server, '/messages', { ...titleRequest, thinking: { type: 'disabled' } })).status
+    ).toBe(200)
+    expect(seen).toEqual([
+      { url: '/v1/messages', ...titleRequest, chat_template_kwargs: { enable_thinking: false } },
+      {
+        url: '/v1/messages',
+        ...titleRequest,
+        thinking: { type: 'disabled' },
+        chat_template_kwargs: { enable_thinking: false },
+      },
+    ])
+  })
+
+  it('passes a request that asks for thinking, or sets the switch itself, byte for byte', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const asked = [
+      { ...titleRequest, thinking: { type: 'adaptive' } },
+      { ...titleRequest, thinking: { type: 'enabled', budget_tokens: 4096 } },
+      { ...titleRequest, chat_template_kwargs: { enable_thinking: true } },
+    ]
+    for (const body of asked) expect((await postJson(server, '/messages', body)).status).toBe(200)
+    expect(seen).toEqual(asked.map((body) => JSON.stringify(body)))
+  })
+
+  it('turns thinking off on the chat-completions fallback too', async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      if (req.url === '/v1/messages') {
+        // What a strict chat template answers for a system message after the first turn.
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'System message must be at the beginning.' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'fine' }, finish_reason: 'stop' }],
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const res = await postJson(server, '/messages', { ...titleRequest, stream: false })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ content: [{ type: 'text', text: 'fine' }] })
+    expect(seen.map((s) => s.url)).toEqual(['/v1/messages', '/v1/chat/completions'])
+    expect(seen[1]?.body).toMatchObject({ chat_template_kwargs: { enable_thinking: false } })
+  })
+
+  it('leaves /messages to an engine other than llama.cpp as sent', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({
+      sessions: [localSession(port, { provider: 'mlx', modelId: 'mlx-model', apiKey: '' })],
+    })
+
+    const body = { ...titleRequest, model: 'mlx-model' }
+    expect((await postJson(server, '/messages', body)).status).toBe(200)
+    expect(seen).toEqual([JSON.stringify(body)])
+  })
+})
+
 describe('error reports', () => {
   it('reports a failing local engine: compute failures as warnings, other 5xx as errors, 4xx never', async () => {
     const replies = [

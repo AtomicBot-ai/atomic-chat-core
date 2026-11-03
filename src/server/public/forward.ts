@@ -28,7 +28,7 @@ import {
   isJsonObject,
   serdeToString,
 } from '../shims/index.js'
-import type { JsonValue } from '../shims/index.js'
+import type { JsonObject, JsonValue } from '../shims/index.js'
 import { LOCAL_SEARCH_ORDER, resolveRemoteProvider, resolveSelectedRoute } from '../../router/index.js'
 import type { LocalProvider, RemoteProvider, SelectedRoute } from '../../router/index.js'
 import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
@@ -50,6 +50,7 @@ import {
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
+import { noThinkingTemplateKwargs } from './thinking.js'
 import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
 import type { LocalTarget } from './types.js'
@@ -273,6 +274,13 @@ export async function serveForward(ex: Exchange): Promise<void> {
     return
   }
 
+  // An Anthropic request that asks for no thinking gets none from a llama.cpp chat template either
+  // (QA B08): on `/v1/messages` and on the chat-completions fallback alike.
+  const noThinking =
+    isMessages && backend.kind === 'local'
+      ? noThinkingTemplateKwargs(backend.session.provider, json)
+      : undefined
+
   // A session that declares its routes and has no `/v1/messages` of its own goes straight to the
   // chat-completions translation: asking it first would only be refused (findings-2.14-r1.md item 4).
   if (
@@ -281,7 +289,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     backend.session.policy &&
     !backend.session.policy.routes.some((r) => r.method === 'POST' && r.path === '/v1/messages')
   ) {
-    await messagesFallback(ex, backend, url, key, json)
+    await messagesFallback(ex, backend, url, key, json, noThinking)
     return
   }
 
@@ -291,6 +299,10 @@ export async function serveForward(ex: Exchange): Promise<void> {
     trace.inspecting && stream && ex.path === '/chat/completions' && backend.kind === 'local'
       ? maybeInjectStreamUsage(raw)
       : undefined
+  const withoutThinking =
+    noThinking !== undefined && isJsonObject(json)
+      ? Buffer.from(serdeToString({ ...json, chat_template_kwargs: noThinking }))
+      : undefined
 
   const signal = clientGone(ex)
   let response: UpstreamResponse
@@ -298,7 +310,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     response = await sendUpstream(url, {
       method: ex.method,
       headers: outboundHeaders(ex, ['host', 'authorization'], backend, key),
-      body: injected ?? raw,
+      body: injected ?? withoutThinking ?? raw,
       connectTimeoutMs: connectTimeoutMs(ex),
       signal,
     })
@@ -309,7 +321,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
   }
 
   if (!isSuccess(response.status)) {
-    if (isMessages) await messagesFallback(ex, backend, url, key, json, response)
+    if (isMessages) await messagesFallback(ex, backend, url, key, json, noThinking, response)
     else await upstreamError(ex, backend, modelId, raw, response)
     return
   }
@@ -586,6 +598,8 @@ async function messagesFallback(
   url: string,
   key: string | undefined,
   json: JsonValue,
+  /** `chat_template_kwargs` that keep a llama.cpp template from thinking the request did not ask for. */
+  noThinking: JsonObject | undefined,
   /** The engine's own answer to `/messages`; absent when the session is known not to serve it. */
   response?: UpstreamResponse
 ): Promise<void> {
@@ -594,6 +608,7 @@ async function messagesFallback(
   trace.anthropicFallback = true
   const errorKind = backend.kind === 'local' ? 'local_model_error' : 'remote_provider_error'
   const chat = anthropicRequestToChat(json)
+  if (isJsonObject(chat) && noThinking !== undefined) chat['chat_template_kwargs'] = noThinking
   if (chat !== null) {
     let base = url
     while (base.endsWith('/messages')) base = base.slice(0, -'/messages'.length)
