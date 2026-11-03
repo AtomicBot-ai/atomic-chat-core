@@ -17,18 +17,21 @@ export interface ReportableEvents {
 export function reportCoreEvents(
   events: ReportableEvents,
   sink: ErrorSink,
-  platform: NodeJS.Platform
+  platform: NodeJS.Platform,
+  diffusionEvents = true
 ): () => void {
   const offDied = events.on('session:died', (died) => captureReport(sink, sessionDeathReport(died, platform)))
-  const offDiffusion = events.on('diffusion:error', (failure) =>
-    captureReport(
-      sink,
-      diffusionFailureReport({
-        phase: failure.jobId === undefined ? 'load' : 'job',
-        error: new AtomicCoreError(failure.code, failure.message, failure.details),
-      })
-    )
-  )
+  const offDiffusion = diffusionEvents
+    ? events.on('diffusion:error', (failure) =>
+        captureReport(
+          sink,
+          diffusionFailureReport({
+            phase: failure.jobId === undefined ? 'load' : 'job',
+            error: new AtomicCoreError(failure.code, failure.message, failure.details),
+          })
+        )
+      )
+    : () => {}
   const offAudio = events.on('audio:error', (failure) =>
     captureReport(
       sink,

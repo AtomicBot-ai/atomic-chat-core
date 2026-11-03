@@ -165,3 +165,4 @@ add a new one that says which record it supersedes.
 
 - **2026-11-01** — [Read HF metadata at an immutable model revision](2026-11-01-pin-model-download-plans.md).
 - [Strip a leading UTF-8 BOM when reading settings.json](2026-11-03-strip-utf8-bom-when-reading-settings-json.md)
+- **2026-11-03** — [Keep failure diagnostics outside the wire contract](2026-11-03-keep-failure-diagnostics-outside-the-wire-contract.md).

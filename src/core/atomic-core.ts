@@ -38,7 +38,7 @@ import { managedExternalRoutePolicy } from './managed-engines.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
-import { captureReport, loadFailureReport } from '../telemetry/index.js'
+import { captureReport, failureObserver, loadFailureReport } from '../telemetry/index.js'
 import type { ErrorSink, TelemetryControl } from '../telemetry/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
@@ -203,6 +203,7 @@ export class AtomicCore {
       externalPolicy: managedExternalRoutePolicy,
     })
     this.remoteAccess = new RemoteAccessManager({
+      onFailure: failureObserver(parts.errors),
       ...parts.remoteAccess,
       server: () => this.publicServer.endpoint(),
       hosts: this.trustedHosts,

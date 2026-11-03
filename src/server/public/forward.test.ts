@@ -569,6 +569,46 @@ describe('a context overflow on /v1/messages (audit X1)', () => {
 })
 
 describe('error reports', () => {
+  it.each([
+    [200, 'ok', []],
+    [400, 'invalid request', []],
+    [500, 'Compute error: out of memory', [['warning', 'oom']]],
+    [503, 'request (12 tokens) exceeds the available context size', []],
+    [503, 'failed to initialize context size', [['error', '503']]],
+  ] as const)(
+    'reports only the final local /messages fallback failure (%i)',
+    async (status, message, expected) => {
+      const captured: ErrorReport[] = []
+      const { port } = await startUpstream((req, _body, res) => {
+        if (req.url === '/v1/messages') {
+          res.writeHead(500)
+          res.end('initial route failure')
+          return
+        }
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify(
+            status === 200
+              ? { choices: [{ message: { content: 'ok' } }] }
+              : { error: { message: message + ' PRIVATE_ENGINE_TEXT' } }
+          )
+        )
+      })
+      const server = await startPublic({
+        sessions: [localSession(port)],
+        errors: { capture: (report) => captured.push(report) },
+      })
+      const response = await postJson(server, '/messages', {
+        model: 'demo',
+        max_tokens: 32,
+        messages: [{ role: 'user', content: 'PRIVATE_PROMPT' }],
+      })
+      expect(response.status).toBe(status)
+      expect(captured.map((report) => [report.level, report.tags?.['failure_kind']])).toEqual(expected)
+      expect(JSON.stringify(captured)).not.toMatch(/PRIVATE_ENGINE_TEXT|PRIVATE_PROMPT/)
+    }
+  )
+
   it('reports a failing local engine: compute failures as warnings, other 5xx as errors, 4xx never', async () => {
     const replies = [
       [500, { error: { message: 'Compute error: out of memory' } }],

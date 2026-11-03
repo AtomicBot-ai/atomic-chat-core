@@ -774,3 +774,21 @@ describe('EmbeddingService shutdown', () => {
     })
   })
 })
+
+it('observes the original failed load before its public state loses the cause', async () => {
+  const cause = Object.assign(new Error('disk unavailable'), { code: 'EIO' })
+  const error = new AtomicCoreError('IO_ERROR', 'load failed', undefined, { cause })
+  const failures: unknown[] = []
+  const h = harness({
+    spawn: async () => {
+      throw error
+    },
+    onFailure: (value) => {
+      failures.push(value)
+    },
+  })
+  await expect(h.service.load()).rejects.toBe(error)
+  expect(failures).toEqual([error])
+  expect((failures[0] as Error).cause).toBe(cause)
+  expect(h.service.getStatus().error).toEqual({ code: 'IO_ERROR', message: 'load failed' })
+})

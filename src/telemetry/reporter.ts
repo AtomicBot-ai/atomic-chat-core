@@ -1,3 +1,4 @@
+import { errorChain } from './diagnostics.js'
 import { randomUUID } from 'node:crypto'
 import type { TelemetryConfig } from './config.js'
 import { resolveConsent } from './consent.js'
@@ -68,6 +69,7 @@ export class ErrorReporter implements TelemetryControl {
   private readonly perIssue = new Map<string, number[]>()
   private total: number[] = []
   private blockedUntil = 0
+  private readonly reportedErrors = new WeakSet<Error>()
   private readonly pending = new Set<Promise<void>>()
 
   constructor(options: ErrorReporterOptions) {
@@ -123,8 +125,9 @@ export class ErrorReporter implements TelemetryControl {
     const config = this.options.config
     if (!config || !this.consent().enabled) return
     try {
+      const chain = errorChain(report.error)
+      if (chain.some((error) => this.reportedErrors.has(error))) return
       const now = this.now()
-      if (report.throttle && !this.admitThrottle(report.throttle.key, report.throttle.windowMs, now)) return
       const event = buildEvent(report, {
         config,
         eventId: this.newEventId(),
@@ -141,6 +144,10 @@ export class ErrorReporter implements TelemetryControl {
         breadcrumbs: [...this.breadcrumbs],
         scrub: this.scrub,
       })
+      // The owning boundary consumes this failure even when rate limits suppress the send.
+      // Otherwise its HTTP wrapper can bypass the cooldown under a different grouping key.
+      for (const error of chain) this.reportedErrors.add(error)
+      if (report.throttle && !this.admitThrottle(issueKey(event), report.throttle.windowMs, now)) return
       if (!this.admit(issueKey(event), now)) return
       this.send(event, config, now)
     } catch (error) {
@@ -216,10 +223,7 @@ export class ErrorReporter implements TelemetryControl {
 
 /** What makes two events the same issue for dedup and caps. */
 function issueKey(event: SentryEvent): string {
-  if (event.fingerprint) return event.fingerprint.join(' ')
-  const exception = event.exception.values[0]
-  const top = exception?.stacktrace?.frames.at(-1)
-  return [event.level, exception?.type, exception?.value, top?.filename, top?.function].join(' ')
+  return event.fingerprint.join('\u0000')
 }
 
 /**

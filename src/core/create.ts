@@ -109,6 +109,7 @@ import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-acce
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
 import {
   captureReport,
+  failureObserver,
   createCoreReporter,
   processFailureReport,
   reportCoreEvents,
@@ -188,7 +189,8 @@ export async function createAtomicCore(
       onListenerError: (event, error) =>
         captureReport(reporter, processFailureReport('event_listener', error, { event })),
     })
-    if (reporter) reportCoreEvents(emitter, reporter, options.platform ?? process.platform)
+    const onFailure = failureObserver(reporter)
+    if (reporter) reportCoreEvents(emitter, reporter, options.platform ?? process.platform, false)
     const settings = await SettingsStore.open(layout.core.settings, { ownerScope: scope })
     // Settings written through the CLI/control API must reach the attached app immediately so it
     // can refresh the legacy rollback copy before acknowledging the revision. Migration
@@ -245,6 +247,7 @@ export async function createAtomicCore(
     // One downloader per core process: it owns the active-task table that `cancel` works from, so
     // two of them would each know only half of what is running.
     const downloader = new Downloader({
+      onFailure,
       dataFolder: layout.root,
       platform: process.platform,
       fetch: options.fetch ?? fetch,
@@ -668,6 +671,7 @@ export async function createAtomicCore(
       const existing = backendServices.get(provider)
       if (existing) return existing
       const created = new BackendService({
+        onFailure,
         layout,
         provider,
         downloader,
@@ -727,6 +731,7 @@ export async function createAtomicCore(
     })
 
     const diffusion = wireDiffusion({
+      onFailure,
       layout,
       journal,
       instanceId: lock.instanceId,
@@ -866,6 +871,7 @@ export async function createAtomicCore(
       arch: managedArch,
       windows: managedWindows,
     } = wireManagedEnvironment({
+      onFailure,
       env,
       platform,
       layout,
@@ -974,6 +980,7 @@ export async function createAtomicCore(
     // Both start on the user's own llama.cpp build first when it is new enough: it runs on this machine.
     const upstreamBackend = () => String(settings.get('llamacpp-upstream')['version_backend'] ?? '')
     const decision = wireDecision({
+      onFailure,
       layout,
       settings,
       upstreamBackend,
@@ -991,6 +998,7 @@ export async function createAtomicCore(
     // The embedding model the public `/v1/embeddings` serves by name: its own process too, started
     // with the decision model below.
     const embedding = wireEmbedding({
+      onFailure,
       layout,
       settings,
       upstreamBackend,

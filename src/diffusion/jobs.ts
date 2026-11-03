@@ -210,6 +210,7 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
       return { ok: true, outcome: { job, images: outcome.images } }
     },
     (raw: unknown): JobResult<Job> => {
+      deps.onFailure?.(raw, { component: 'diffusion', operation: 'job' })
       const error = errorBody(raw)
       finishJob(deps, id, { ok: false, error })
       if (state.activeJobId === id) state.activeJobId = undefined

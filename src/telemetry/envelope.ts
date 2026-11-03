@@ -1,7 +1,7 @@
+import { diagnosticFingerprint, diagnosticTags, errorChain, reportDiagnostic } from './diagnostics.js'
 import type { TelemetryConfig } from './config.js'
 import type { ParsedDsn } from './dsn.js'
 import { errorCodeOf, sanitizeTags } from './policy.js'
-import { headline, scrubText } from './scrub.js'
 import type { ScrubContext } from './scrub.js'
 import { parseStack } from './stack.js'
 import type { StackFrame } from './stack.js'
@@ -63,32 +63,58 @@ export interface SentryEvent {
   user: { id?: string; ip_address: null }
   contexts: { os: { name: string; version?: string }; device: { arch: string; memory_size?: number } }
   tags: Record<string, string>
-  fingerprint?: string[]
+  fingerprint: string[]
   exception: { values: SentryException[] }
   breadcrumbs?: { values: Array<Breadcrumb & { category: 'log' }> }
   extra?: Record<string, string>
 }
 
-const MAX_EXTRA = 4096
+// Free-form model IDs, request routes and log fields are not diagnostic facts.
+const REPORT_TAG_KEYS = new Set([
+  'source',
+  'provider',
+  'error_code',
+  'http_status',
+  'crash_kind',
+  'exit_code',
+  'signal',
+  'backend',
+  'oom_subtype',
+  'quant',
+  'context_length',
+  'gpu_layers',
+  'cache_type_k',
+  'is_embedding',
+  'failure_kind',
+  'family',
+  'engine',
+])
 
-function describeThrown(
-  error: unknown,
-  scrub: ScrubContext
-): { type: string; value: string; stack?: string } {
+const EXCEPTION_TYPES = new Set([
+  'Error',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'ReferenceError',
+  'URIError',
+  'EvalError',
+  'AggregateError',
+  'DOMException',
+  'AbortError',
+  'SystemError',
+  'AtomicCoreError',
+])
+
+function describeThrown(error: unknown): { type: string } {
   if (error instanceof Error) {
     const code = errorCodeOf(error)
     // A coded core error reads best as its code: "OUT_OF_MEMORY: Out of memory".
-    const type = error.name === 'AtomicCoreError' && code ? code : error.name || 'Error'
-    return {
-      type,
-      value: headline(scrubText(error.message, scrub)) || type,
-      ...(error.stack ? { stack: error.stack } : {}),
-    }
+    const type =
+      error.name === 'AtomicCoreError' && code ? code : EXCEPTION_TYPES.has(error.name) ? error.name : 'Error'
+    return { type }
   }
-  if (typeof error === 'string')
-    return { type: 'NonError', value: headline(scrubText(error, scrub)) || 'NonError' }
-  // Never stringify an arbitrary object: it may hold a request body.
-  return { type: 'NonError', value: `A non-Error ${error === null ? 'null' : typeof error} was thrown` }
+  // Even a string may be a prompt or a request body. Never serialize thrown values.
+  return { type: 'NonError' }
 }
 
 /**
@@ -98,12 +124,13 @@ function describeThrown(
 export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent {
   const thrown =
     report.error !== undefined
-      ? describeThrown(report.error, ctx.scrub)
+      ? describeThrown(report.error)
       : {
-          type: report.type ?? report.source,
-          value: headline(scrubText(report.message ?? '', ctx.scrub)) || report.source,
+          type:
+            report.type && /^[A-Za-z][A-Za-z0-9_.]{0,63}$/.test(report.type) ? report.type : report.source,
         }
-  const frames = 'stack' in thrown ? parseStack(thrown.stack) : []
+  const diagnostic = reportDiagnostic(report)
+  const frames = report.error instanceof Error ? parseStack(report.error.stack, report.error.message) : []
   const tags = {
     ...sanitizeTags({
       core_version: ctx.coreVersion,
@@ -115,11 +142,8 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
       system_ram_mb: ctx.system?.memoryMb,
     }),
     ...ctx.appTags,
-    ...sanitizeTags({ source: report.source, ...report.tags }, { scrub: ctx.scrub }),
-  }
-  const extra: Record<string, string> = {}
-  for (const [key, value] of Object.entries(report.extra ?? {})) {
-    extra[key] = scrubText(value, ctx.scrub).slice(0, MAX_EXTRA)
+    ...sanitizeTags({ source: report.source, ...report.tags }, { allow: REPORT_TAG_KEYS, scrub: ctx.scrub }),
+    ...sanitizeTags(diagnosticTags(report.error, diagnostic)),
   }
   return {
     event_id: ctx.eventId,
@@ -140,21 +164,26 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
       },
     },
     tags,
-    ...(report.fingerprint ? { fingerprint: report.fingerprint } : {}),
+    fingerprint: diagnosticFingerprint(report.error, diagnostic, String(report.tags?.['provider'] ?? '')),
     exception: {
       values: [
+        ...errorChain(report.error)
+          .slice(1)
+          .reverse()
+          .map((cause): SentryException => ({
+            type: errorCodeOf(cause) ?? (EXCEPTION_TYPES.has(cause.name) ? cause.name : 'Error'),
+            value: 'Underlying failure',
+            mechanism: { type: 'cause', handled: report.level !== 'fatal' },
+            stacktrace: { frames: parseStack(cause.stack, cause.message) },
+          })),
         {
           type: thrown.type,
-          value: thrown.value,
+          value: `${diagnostic.component} ${diagnostic.operation}: ${diagnostic.reason}`,
           mechanism: { type: report.source, handled: report.level !== 'fatal' },
           ...(frames.length ? { stacktrace: { frames } } : {}),
         },
       ],
     },
-    ...(ctx.breadcrumbs.length
-      ? { breadcrumbs: { values: ctx.breadcrumbs.map((b) => ({ ...b, category: 'log' as const })) } }
-      : {}),
-    ...(Object.keys(extra).length ? { extra } : {}),
   }
 }
 

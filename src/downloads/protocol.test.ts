@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { classifyFailure } from '../telemetry/index.js'
 import {
   classifyDownloadStatus,
   classifyResumeStatus,
@@ -13,6 +14,35 @@ import {
   validateContentRange,
   validateProxyConfig,
 } from './protocol.js'
+
+it.each([
+  [401, 'expected', 'authentication'],
+  [404, 'expected', 'not_found'],
+  [400, 'expected', 'invalid_request'],
+  [500, 'operational', 'upstream'],
+] as const)(
+  'keeps HTTP %s diagnostics through the public plain-Error wrapper',
+  (status, category, reason) => {
+    const cause = classifyDownloadStatus(status, 'private body')
+    const error = new Error(cause.message, { cause })
+    expect(classifyFailure(error, { component: 'http', operation: 'request' })).toMatchObject({
+      component: 'downloads',
+      category,
+      reason,
+    })
+    expect(JSON.stringify(cause)).not.toContain('diagnostic')
+  }
+)
+
+it('preserves a network cause without inventing a diagnosis from its text', () => {
+  const cause = Object.assign(new Error('secret host'), { code: 'ECONNRESET' })
+  const error = new DownloadRequestError('retryable', 'fetch failed', { cause })
+  expect(error.cause).toBe(cause)
+  expect(classifyFailure(error, { component: 'downloads', operation: 'download' })).toMatchObject({
+    category: 'operational',
+    reason: 'network',
+  })
+})
 
 describe('sidecarPath / retryDelayMs', () => {
   it('appends the extension and backs off exponentially with a cap', () => {

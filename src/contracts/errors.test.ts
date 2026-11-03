@@ -96,3 +96,22 @@ describe('AtomicCoreError', () => {
     expect(new Set(DIFFUSION_ERROR_CODES).has('MODEL_INCOMPATIBLE')).toBe(true)
   })
 })
+
+it('keeps diagnostics and cause internal, including through a spread and a wire round trip', () => {
+  const cause = new Error('private cause')
+  const error = new AtomicCoreError('IO_ERROR', 'public message', 'public details', {
+    cause,
+    diagnostic: { component: 'downloads', operation: 'download', reason: 'disk_full' },
+  })
+  expect(error.cause).toBe(cause)
+  expect(error.diagnostic?.reason).toBe('disk_full')
+  expect({ ...error }).not.toHaveProperty('diagnostic')
+  expect({ ...error }).not.toHaveProperty('cause')
+  expect(JSON.parse(JSON.stringify(error))).toEqual({
+    code: 'IO_ERROR',
+    message: 'public message',
+    details: 'public details',
+  })
+  expect(AtomicCoreError.fromBody(error.toJSON())).not.toHaveProperty('diagnostic')
+  expect(AtomicCoreError.fromBody(error.toJSON())).not.toHaveProperty('cause')
+})
