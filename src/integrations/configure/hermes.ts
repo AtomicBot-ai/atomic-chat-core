@@ -22,8 +22,8 @@ const REQUEST_TIMEOUT_SECONDS = 180
 
 /**
  * Seeded when no config exists. The installer runs with `--skip-setup`, which skips the wizard that
- * would create one, so on a fresh install there was nothing to patch at all. This carries exactly
- * the anchors the patch logic below looks for.
+ * would create one (and on Windows writes no config at all). It mirrors the `model:` block of
+ * Hermes' own `cli-config.yaml.example`, which the macOS/Linux installer copies in instead.
  */
 const DEFAULT_CONFIG = `model:
   default: anthropic/claude-opus-4.6
@@ -49,6 +49,103 @@ export function replaceYamlScalarValue(line: string, value: string): string {
   return colon < 0 ? line : `${line.slice(0, colon + 1)} ${value}`
 }
 
+/** A column-0 mapping key: not indented, not a list item, not a comment, not blank. */
+function isTopLevelYamlKey(line: string): boolean {
+  const c = line.charAt(0)
+  return c !== '' && c !== ' ' && c !== '\t' && c !== '-' && c !== '#'
+}
+
+/** Drop a trailing `# comment` (YAML only starts one after whitespace). */
+function stripYamlComment(text: string): string {
+  return text.replace(/(^|\s)#.*$/, '')
+}
+
+/** `key: value` of a column-0 mapping line, the value without its comment; `undefined` otherwise. */
+function topLevelYamlKey(line: string): { key: string; value: string } | undefined {
+  if (!isTopLevelYamlKey(line)) return undefined
+  const colon = line.indexOf(':')
+  if (colon < 0) return undefined
+  return { key: line.slice(0, colon).trim(), value: stripYamlComment(line.slice(colon + 1)).trim() }
+}
+
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length
+}
+
+function isBlankOrComment(line: string): boolean {
+  const t = line.trim()
+  return t === '' || t.startsWith('#')
+}
+
+/**
+ * Point the top-level `model:` section at our endpoint, and touch nothing outside it.
+ *
+ * Hermes' chat route comes from `model.default` (`model.model` is an alias), `model.provider` and
+ * `model.base_url` alone; a section it cannot read leaves it on its built-in default, an empty model
+ * on provider `auto`, which falls through to OpenRouter. The same three keys recur under
+ * `auxiliary:`, `delegation:`, `compression:` and others, so only direct children of the top-level
+ * `model:` key are ours. A missing key is added, a scalar `model: <id>` (also valid Hermes) becomes
+ * a block, and a file with no `model:` at all gets one appended.
+ */
+export function patchModelSection(content: string, model: string, provider: string, apiUrl: string): string {
+  const out = lines(content)
+  const wanted: Array<[string, string]> = [
+    ['default', model],
+    ['provider', provider],
+    ['base_url', apiUrl],
+  ]
+  const block = (indent: string) => wanted.map(([key, value]) => `${indent}${key}: ${value}`)
+
+  const headerIdx = out.findIndex((line) => topLevelYamlKey(line)?.key === 'model')
+  const header = headerIdx < 0 ? undefined : topLevelYamlKey(out[headerIdx] as string)
+  if (header === undefined) {
+    while (out.length > 0 && (out[out.length - 1] as string).trim() === '') out.pop()
+    out.push('model:', ...block('  '))
+    return endWithNewline(out.join('\n'))
+  }
+
+  // The section runs to the next column-0 key; comments and blank lines inside it are kept.
+  let end = out.length
+  for (let i = headerIdx + 1; i < out.length; i++) {
+    if (isTopLevelYamlKey(out[i] as string)) {
+      end = i
+      break
+    }
+  }
+  // Anything still indented under a scalar `model: <id>` header is that scalar's continuation.
+  const isScalar = header.value !== ''
+  const section = out.slice(headerIdx + 1, end).filter((line) => !isScalar || isBlankOrComment(line))
+  if (isScalar) {
+    out.splice(headerIdx, end - headerIdx, 'model:', ...block('  '), ...section)
+    return endWithNewline(out.join('\n'))
+  }
+
+  const firstChild = section.find((line) => !isBlankOrComment(line))
+  const childIndent = firstChild === undefined ? '  ' : firstChild.slice(0, indentOf(firstChild))
+  const missing: string[] = []
+  for (const [key, value] of wanted) {
+    const keyPattern = new RegExp(`^${key}\\s*:`)
+    const at = section.findIndex(
+      (line) =>
+        !isBlankOrComment(line) && indentOf(line) === childIndent.length && keyPattern.test(line.trim())
+    )
+    if (at < 0) {
+      missing.push(`${childIndent}${key}: ${value}`)
+      continue
+    }
+    section[at] = replaceYamlScalarValue(section[at] as string, value)
+    // A nested value (a mapping-valued `default`, a wrapped scalar) would dangle under the new one.
+    for (let i = at + 1; i < section.length;) {
+      const line = section[i] as string
+      if (isBlankOrComment(line)) i++
+      else if (indentOf(line) > childIndent.length) section.splice(i, 1)
+      else break
+    }
+  }
+  out.splice(headerIdx + 1, end - headerIdx - 1, ...missing, ...section)
+  return endWithNewline(out.join('\n'))
+}
+
 /**
  * Split the document into (before, entries, after) around `custom_providers:`. `entries` is one
  * array of raw lines per list item; blank lines inside the block are dropped, which is why a rerun
@@ -66,7 +163,7 @@ export function splitCustomProviders(content: string): {
 
   for (const line of lines(content)) {
     if (phase === 'before') {
-      const t = line.trim()
+      const t = stripYamlComment(line).trim()
       if (t === 'custom_providers:' || t === 'custom_providers: []' || t === 'custom_providers:[]') {
         phase = t.includes('[]') ? 'after' : 'inBlock'
       } else {
@@ -125,6 +222,13 @@ export function rebuildCustomProviders(before: string[], entries: string[][], af
 
 /** Add or update only our entry, leaving the user's other bridges untouched and in order. */
 export function upsertAtomicProvider(content: string, apiUrl: string, model: string, ctx: number): string {
+  // An inline list cannot be spliced, and a second `custom_providers:` would make the whole file
+  // unreadable to Hermes (duplicate key); leave it rather than append one.
+  const inline = lines(content)
+    .map(topLevelYamlKey)
+    .find((entry) => entry?.key === 'custom_providers')?.value
+  if (inline !== undefined && inline !== '' && inline.replace(/\s/g, '') !== '[]')
+    return endWithNewline(content)
   const { before, entries, after } = splitCustomProviders(content)
   const kept = entries.filter((entry) => !entryIsOurs(entry))
   kept.push([
@@ -138,12 +242,6 @@ export function upsertAtomicProvider(content: string, apiUrl: string, model: str
   return rebuildCustomProviders(before, kept, after)
 }
 
-/** A column-0 mapping key: not indented, not a list item, not a comment, not blank. */
-function isTopLevelYamlKey(line: string): boolean {
-  const c = line.charAt(0)
-  return c !== '' && c !== ' ' && c !== '\t' && c !== '-' && c !== '#'
-}
-
 /**
  * Ensure `providers.<id>.request_timeout_seconds` exists, creating the `providers:` map and the
  * provider sub-block as needed. A value the user already set is left alone — we only fill the gap.
@@ -153,18 +251,20 @@ export function upsertProviderRequestTimeout(content: string, providerId: string
   const provKeyLine = `  ${providerId}:`
   const fieldLine = `    request_timeout_seconds: ${seconds}`
 
-  const providersIdx = out.findIndex((line) => {
-    const t = line.replace(/\s+$/, '')
-    return isTopLevelYamlKey(line) && (t === 'providers:' || t === 'providers: {}' || t === 'providers:{}')
-  })
+  const providersIdx = out.findIndex((line) => topLevelYamlKey(line)?.key === 'providers')
+  const providers = providersIdx < 0 ? undefined : topLevelYamlKey(out[providersIdx] as string)
 
-  if (providersIdx < 0) {
+  if (providers === undefined) {
     while (out.length > 0 && (out[out.length - 1] as string).trim() === '') out.pop()
     out.push('providers:', provKeyLine, fieldLine)
     return endWithNewline(out.join('\n'))
   }
 
-  if ((out[providersIdx] as string).replace(/\s+$/, '') !== 'providers:') out[providersIdx] = 'providers:'
+  // Hermes' YAML reader rejects a duplicate key, and then runs on its defaults: an inline map we
+  // cannot edit line by line is left as it is rather than shadowed by a second `providers:`.
+  if (providers.value !== '' && providers.value.replace(/\s/g, '') !== '{}')
+    return endWithNewline(out.join('\n'))
+  if (providers.value !== '') out[providersIdx] = 'providers:'
 
   // The providers block runs until the next column-0 key.
   let blockEnd = out.length
@@ -229,29 +329,11 @@ export const configureHermes: ConfigureWriter = async ({ apiUrl, model, fs, env,
     content = DEFAULT_CONFIG
   }
 
-  // Only the FIRST occurrence of each key is ours: a later `default:` belongs to some other block.
-  let didDefault = false
-  let didProvider = false
-  let didBaseUrl = false
-  const patched = lines(content).map((line) => {
-    const t = line.trim()
-    if (!didDefault && t.startsWith('default:')) {
-      didDefault = true
-      return replaceYamlScalarValue(line, model)
-    }
-    if (!didProvider && t.startsWith('provider:')) {
-      didProvider = true
-      return replaceYamlScalarValue(line, 'custom')
-    }
-    if (!didBaseUrl && t.startsWith('base_url:')) {
-      didBaseUrl = true
-      return replaceYamlScalarValue(line, apiUrl)
-    }
-    return line
-  })
+  // Bare `custom` routes to `model.base_url`; Hermes trusts that URL while `model.provider` is `custom`.
+  const patched = patchModelSection(content, model, 'custom', apiUrl)
 
   // Hermes refuses any model whose context window is below 64K, so the floor is not negotiable.
-  const withProvider = upsertAtomicProvider(patched.join('\n'), apiUrl, model, HERMES_CONTEXT_LENGTH)
+  const withProvider = upsertAtomicProvider(patched, apiUrl, model, HERMES_CONTEXT_LENGTH)
   const withTimeout = upsertProviderRequestTimeout(withProvider, 'custom', REQUEST_TIMEOUT_SECONDS)
   await fs.write(configPath, content.endsWith('\n') ? endWithNewline(withTimeout) : withTimeout)
 
