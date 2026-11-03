@@ -22,7 +22,9 @@ interface AgentConfigInput {
   api_key: string
   seed_files: Record<string, string>
   shell?: string
-  prior_runs?: Array<{ api_url: string; model: string; api_key: string }>
+  /** The served window, when the case gives the writer one (`comparator_notes.context_length`). */
+  context_length?: number
+  prior_runs?: Array<{ api_url: string; model: string; api_key: string; context_length?: number }>
 }
 
 interface AgentConfigExpectation {
@@ -129,8 +131,16 @@ describe.skipIf(replayable.length === 0)('replaying the ported writers', () => {
         return { code: 1, stdout: '', stderr: `${detail}\n` }
       },
     }
+    const withWindow = (contextLength: number | undefined) =>
+      contextLength === undefined ? options : { ...options, contextLength }
     for (const prior of fixture.input.prior_runs ?? []) {
-      await configureAgent(fixture.input.agent, prior.api_url, prior.model, prior.api_key, options)
+      await configureAgent(
+        fixture.input.agent,
+        prior.api_url,
+        prior.model,
+        prior.api_key,
+        withWindow(prior.context_length)
+      )
     }
 
     const run = configureAgent(
@@ -138,7 +148,7 @@ describe.skipIf(replayable.length === 0)('replaying the ported writers', () => {
       fixture.input.api_url,
       fixture.input.model,
       fixture.input.api_key,
-      options
+      withWindow(fixture.input.context_length)
     )
     if (fixture.expected.ok) {
       await run
