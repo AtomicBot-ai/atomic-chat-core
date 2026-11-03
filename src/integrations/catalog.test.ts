@@ -174,14 +174,17 @@ describe('offPathCandidates', () => {
     expect(offPathCandidates('openclaw', '/home/u', { OPENCLAW_PREFIX: '   ' }, 'linux')).toHaveLength(2)
   })
 
-  // `zcode_app_candidates` (`core/system/commands.rs`, app commit ec1fd3ea7).
-  it("knows where ZCode's installers put the desktop app", () => {
+  // `zcode_app_candidates_for` (`core/system/commands.rs`).
+  it("knows where ZCode's installers put the desktop app, Preview build included", () => {
     expect(offPathCandidates('zcode', '/Users/u', {}, 'darwin')).toEqual([
       '/Applications/ZCode.app/Contents/MacOS/ZCode',
+      '/Applications/ZCode Preview.app/Contents/MacOS/ZCode Preview',
       '/Users/u/Applications/ZCode.app/Contents/MacOS/ZCode',
+      '/Users/u/Applications/ZCode Preview.app/Contents/MacOS/ZCode Preview',
     ])
     expect(offPathCandidates('zcode', undefined, {}, 'darwin')).toEqual([
       '/Applications/ZCode.app/Contents/MacOS/ZCode',
+      '/Applications/ZCode Preview.app/Contents/MacOS/ZCode Preview',
     ])
     expect(
       offPathCandidates(
@@ -192,14 +195,45 @@ describe('offPathCandidates', () => {
       )
     ).toEqual([
       'C:\\Users\\u\\AppData\\Local\\Programs\\ZCode\\ZCode.exe',
+      'C:\\Users\\u\\AppData\\Local\\Programs\\ZCode Preview\\ZCode Preview.exe',
       'C:\\Program Files\\ZCode\\ZCode.exe',
+      'C:\\Program Files\\ZCode Preview\\ZCode Preview.exe',
     ])
     expect(offPathCandidates('zcode', 'C:\\Users\\u', {}, 'win32')).toEqual([])
-    expect(offPathCandidates('zcode', '/home/u', {}, 'linux')).toEqual(['/opt/ZCode/zcode'])
+    expect(offPathCandidates('zcode', '/home/u', {}, 'linux')).toEqual([
+      '/opt/ZCode/zcode',
+      '/opt/ZCode Preview/zcode-preview',
+      '/usr/bin/zcode-preview',
+    ])
+  })
+
+  // `zed_cli_candidates` / `zed_app_candidates` (`core/system/commands.rs`).
+  it("finds Zed's CLI, then the editor, where its installers put them", () => {
+    expect(offPathCandidates('zed', '/Users/u', {}, 'darwin')).toEqual([
+      '/Users/u/.local/bin/zed',
+      '/Applications/Zed.app/Contents/MacOS/cli',
+      '/Applications/Zed Preview.app/Contents/MacOS/cli',
+      '/Users/u/Applications/Zed.app/Contents/MacOS/cli',
+      '/Users/u/Applications/Zed Preview.app/Contents/MacOS/cli',
+      '/Applications/Zed.app/Contents/MacOS/zed',
+      '/Users/u/Applications/Zed.app/Contents/MacOS/zed',
+    ])
+    expect(offPathCandidates('zed', '/home/u', {}, 'linux')).toEqual([
+      '/home/u/.local/bin/zed',
+      '/home/u/.local/zed.app/bin/zed',
+      '/home/u/.local/zed-preview.app/bin/zed',
+    ])
+    expect(offPathCandidates('zed', 'C:\\Users\\u', { ProgramFiles: 'C:\\Program Files' }, 'win32')).toEqual([
+      'C:\\Users\\u\\AppData\\Local\\Programs\\Zed\\bin\\zed.exe',
+      'C:\\Program Files\\Zed\\bin\\zed.exe',
+      'C:\\Users\\u\\AppData\\Local\\Programs\\Zed\\Zed.exe',
+      'C:\\Program Files\\Zed\\Zed.exe',
+    ])
+    expect(offPathCandidates('zed', undefined, {}, 'linux')).toEqual([])
   })
 
   it('guesses nothing for the agents that install onto PATH', () => {
-    for (const bin of ['codex', 'claude', 'zed'])
+    for (const bin of ['codex', 'claude', 'opencode'])
       expect(offPathCandidates(bin, '/home/u', {}, 'linux')).toEqual([])
   })
 })
