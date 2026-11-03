@@ -142,6 +142,43 @@ function errorTypeOf(body: string): string | undefined {
   return typeof type === 'string' ? type : undefined
 }
 
+/** The prompt size and window of a llama.cpp context overflow, from its fields or its message. */
+function llamaOverflowSizes(body: string): { prompt: number; window: number } | undefined {
+  const parsed = parseJson(body)
+  const error = isJsonObject(parsed) ? parsed['error'] : undefined
+  if (isJsonObject(error)) {
+    const prompt = asU64(error['n_prompt_tokens'])
+    const window = asU64(error['n_ctx'])
+    if (prompt !== undefined && window !== undefined && window > 0) return { prompt, window }
+  }
+  const message = isJsonObject(error) && typeof error['message'] === 'string' ? error['message'] : body
+  const sizes =
+    /request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)/i.exec(message) ??
+    /input \((\d+) tokens\) is larger than the max context size \((\d+) tokens\)/i.exec(message)
+  return sizes ? { prompt: Number(sizes[1]), window: Number(sizes[2]) } : undefined
+}
+
+/**
+ * A llama.cpp context overflow as the Anthropic API words one: a 400 `invalid_request_error` whose
+ * message is exactly `prompt is too long: N tokens > M maximum`. Claude Code matches that wording to
+ * compact the conversation and retry; any other text it shows as a failed turn. `undefined` for any
+ * other error, or an overflow that does not say both sizes.
+ */
+export function anthropicPromptTooLong(status: number, body: string): string | undefined {
+  if (status !== 400) return undefined
+  if (!LLAMA_CONTEXT_OVERFLOW.test(body) && errorTypeOf(body) !== LLAMA_CONTEXT_OVERFLOW_TYPE)
+    return undefined
+  const sizes = llamaOverflowSizes(body)
+  if (sizes === undefined) return undefined
+  return serdeToString({
+    type: 'error',
+    error: {
+      type: 'invalid_request_error',
+      message: `prompt is too long: ${sizes.prompt} tokens > ${sizes.window} maximum`,
+    },
+  })
+}
+
 function isStructuredErrorBody(body: string): boolean {
   const parsed = parseJson(body)
   return isJsonObject(parsed) && isJsonObject(parsed['error'])

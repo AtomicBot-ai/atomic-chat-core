@@ -37,6 +37,7 @@ import { SseLineReader } from './sse.js'
 import { StreamTelemetry, isUsageOnlyChunk, maybeInjectStreamUsage } from './telemetry.js'
 import { endpointFromPath } from './trace.js'
 import {
+  anthropicPromptTooLong,
   bodyIndicatesOom,
   computeErrorEnvelope,
   emptyMessagesRefusal,
@@ -616,8 +617,16 @@ async function messagesFallback(
 ): Promise<void> {
   const errorBody = response === undefined ? undefined : await readUpstreamText(response)
   const trace = ex.trace
-  trace.anthropicFallback = true
   const errorKind = backend.kind === 'local' ? 'local_model_error' : 'remote_provider_error'
+  // A prompt the engine's window cannot hold would not fit as chat completions either: the client is
+  // told in the Anthropic API's own words, which make Claude Code compact the conversation (audit X1).
+  if (
+    response !== undefined &&
+    errorBody !== undefined &&
+    answeredPromptTooLong(ex, backend, response.status, errorBody)
+  )
+    return
+  trace.anthropicFallback = true
   const chat = anthropicRequestToChat(json)
   if (isJsonObject(chat) && noThinking !== undefined) chat['chat_template_kwargs'] = noThinking
   // llama.cpp's own `/v1/messages` stops at the request's `max_tokens`; the translation keeps that
@@ -657,6 +666,7 @@ async function messagesFallback(
       })
       if (!isSuccess(fallback.status)) {
         const fallbackError = await readUpstreamText(fallback)
+        if (answeredPromptTooLong(ex, backend, fallback.status, fallbackError)) return
         trace.errorKind = errorKind
         trace.upstreamStatus = fallback.status
         trace.oomDetected = bodyIndicatesOom(fallbackError)
@@ -719,6 +729,23 @@ async function messagesFallback(
   trace.oomDetected = bodyIndicatesOom(errorBody)
   trace.ctxOverflowDetected = isContextLimitError(response.status, errorBody)
   answer(ex, response.status, errorBody)
+}
+
+/**
+ * Answer a local engine's context overflow on `/messages` as Anthropic's `prompt is too long`; `false`
+ * for any other error, which the caller handles as before. A remote provider words its own errors.
+ */
+function answeredPromptTooLong(ex: Exchange, backend: Backend, status: number, errorBody: string): boolean {
+  if (backend.kind !== 'local') return false
+  const tooLong = anthropicPromptTooLong(status, errorBody)
+  if (tooLong === undefined) return false
+  const trace = ex.trace
+  trace.errorKind = 'local_model_error'
+  trace.upstreamStatus = status
+  trace.oomDetected = false
+  trace.ctxOverflowDetected = true
+  answer(ex, 400, tooLong, [['Content-Type', 'application/json']])
+  return true
 }
 
 async function* anthropicStream(upstream: UpstreamResponse): AsyncGenerator<string> {

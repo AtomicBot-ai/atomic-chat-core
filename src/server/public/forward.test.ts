@@ -489,6 +489,85 @@ describe('Anthropic thinking on a llama.cpp engine (QA B08)', () => {
   })
 })
 
+describe('a context overflow on /v1/messages (audit X1)', () => {
+  // What llama.cpp b12019 answers, streamed or not, for a prompt its window cannot hold.
+  const overflow = JSON.stringify({
+    error: {
+      code: 400,
+      message: 'request (70000 tokens) exceeds the available context size (65536 tokens), try increasing it',
+      type: 'exceed_context_size_error',
+      n_prompt_tokens: 70000,
+      n_ctx: 65536,
+    },
+  })
+  const promptTooLong = {
+    type: 'error',
+    error: { type: 'invalid_request_error', message: 'prompt is too long: 70000 tokens > 65536 maximum' },
+  }
+  const turn = { model: 'demo', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] }
+
+  it("answers in the Anthropic API's words, which make Claude Code compact, without a fallback", async () => {
+    const seen: Array<string | undefined> = []
+    const { port } = await startUpstream((req, _body, res) => {
+      seen.push(req.url)
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(overflow)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const res = await postJson(server, '/messages', turn)
+    expect(res.status).toBe(400)
+    expect(res.headers.get('content-type')).toBe('application/json')
+    expect(await res.json()).toEqual(promptTooLong)
+    expect(seen).toEqual(['/v1/messages'])
+
+    // OpenAI routes keep llama.cpp's own error, as before.
+    const chat = await postJson(server, '/chat/completions', { ...turn, max_tokens: undefined })
+    expect(chat.status).toBe(400)
+    expect(await chat.json()).toEqual(JSON.parse(overflow))
+  })
+
+  it('answers the same way when the chat-completions fallback overflows, read from the message too', async () => {
+    const { port } = await startUpstream((req, _body, res) => {
+      if (req.url === '/v1/messages') {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'System message must be at the beginning.' } }))
+        return
+      }
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          error: {
+            code: 400,
+            message:
+              'request (70000 tokens) exceeds the available context size (65536 tokens), try increasing it',
+            type: 'exceed_context_size_error',
+          },
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const res = await postJson(server, '/messages', turn)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual(promptTooLong)
+  })
+
+  it("relays a remote provider's own error as it came", async () => {
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(overflow)
+    })
+    const server = await startPublic({
+      remote: [remoteProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, models: ['demo'] })],
+    })
+
+    const res = await postJson(server, '/messages', turn)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual(JSON.parse(overflow))
+  })
+})
+
 describe('error reports', () => {
   it('reports a failing local engine: compute failures as warnings, other 5xx as errors, 4xx never', async () => {
     const replies = [

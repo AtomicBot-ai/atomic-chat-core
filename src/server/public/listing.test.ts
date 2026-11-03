@@ -4,6 +4,7 @@ import {
   closeAll,
   closedPort,
   localSession,
+  remoteProvider,
   startPublic,
   startUpstream,
 } from '../../../test/helpers/public-server.js'
@@ -77,6 +78,71 @@ describe('/muse-code/models', () => {
 })
 
 describe('/models', () => {
+  it("advertises each local session's real window, and none where it is not known", async () => {
+    const asked: string[] = []
+    const server = await startPublic({
+      sessions: [
+        localSession(1, { modelId: 'gguf' }),
+        localSession(2, { provider: 'mlx', modelId: 'mlx-model' }),
+        localSession(3, {
+          provider: 'vllm',
+          modelId: 'vllm-model',
+          policy: {
+            routes: [],
+            tools: true,
+            structuredOutput: true,
+            mapError: () => null,
+            contextLength: 8192,
+          },
+        }),
+      ],
+      remote: [remoteProvider()],
+      contextWindow: (target) => {
+        asked.push(target.modelId)
+        return Promise.resolve(target.provider === 'llamacpp-upstream' ? 65536 : undefined)
+      },
+    })
+
+    const models = await fetch(`http://127.0.0.1:${server.port}/v1/models`).then((r) => r.json())
+    expect(models).toEqual({
+      object: 'list',
+      data: [
+        {
+          id: 'gguf',
+          object: 'model',
+          created: 1,
+          owned_by: 'llama.cpp-upstream',
+          context_length: 65536,
+          meta: { n_ctx: 65536 },
+        },
+        { id: 'mlx-model', object: 'model', created: 1, owned_by: 'mlx' },
+        {
+          id: 'vllm-model',
+          object: 'model',
+          created: 1,
+          owned_by: 'vllm',
+          context_length: 8192,
+          meta: { n_ctx: 8192 },
+        },
+        { id: 'cloud-model', object: 'model', created: 1, owned_by: 'remote' },
+      ],
+    })
+    // A declared session states its window; nobody asks the engine for it.
+    expect(asked).toEqual(['gguf', 'mlx-model'])
+
+    // Muse Code compacts at the window it is told: the real one, where known.
+    const muse = await fetch(`http://127.0.0.1:${server.port}/v1/muse-code/models`).then((r) => r.json())
+    const limits = (
+      muse as { data: Array<{ id: string; metadata: { 'muse-code': { limit: object } } }> }
+    ).data.map((m) => [m.id, m.metadata['muse-code'].limit])
+    expect(limits).toEqual([
+      ['gguf', { context: 65536, output: 32_768 }],
+      ['mlx-model', { context: 32_768, output: 32_768 }],
+      ['vllm-model', { context: 8192, output: 32_768 }],
+      ['cloud-model', { context: 200_000, output: 32_768 }],
+    ])
+  })
+
   it('lists a loaded TensorRT-LLM model under its own owner label', async () => {
     const server = await startPublic({
       sessions: [

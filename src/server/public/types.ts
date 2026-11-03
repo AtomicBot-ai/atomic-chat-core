@@ -57,6 +57,8 @@ export interface LocalTarget {
   isEmbedding: boolean
   /** Absent for an engine that takes every route (llama.cpp, MLX): the server's own defaults apply. */
   policy?: LocalTargetPolicy
+  /** Changes each time the model is loaded again (`SessionInfo.generation`), when the session has one. */
+  generation?: string
 }
 
 /** What asking the owning runtime for a larger context produced. */
@@ -209,6 +211,12 @@ export interface PublicServerDeps {
    * a round trip to the llama.cpp extension; in the core it is the runtime's own `increaseCtx`.
    */
   increaseCtx: (provider: LocalProvider, modelId: string, trigger: string) => Promise<CtxIncreaseOutcome>
+  /**
+   * The context window a local session serves, when the host can learn it (`SessionWindows`): what
+   * `/models` advertises and the request log records. Absent: no window is advertised, except the one
+   * a declared session states itself.
+   */
+  contextWindow?: (target: LocalTarget) => Promise<number | undefined>
   /**
    * Whether the app's API screen is watching. Only then are prompt and reply previews and stream
    * telemetry collected (ATO-113); the analytics observation is sent regardless.

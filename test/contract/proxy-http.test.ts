@@ -99,6 +99,10 @@ const REMOTE_BEARER = 'Bearer sk-remote'
  * port keeps a system message from inside an Anthropic conversation where it is, as a
  * `<system-reminder>` in a user turn, on `/v1/messages` and on the fallback, where the proxy sent it
  * as it came and its translation moved it into the leading system message (`system-messages.ts`).
+ * A llama.cpp context overflow on `/v1/messages` is answered as the Anthropic API's 400
+ * `prompt is too long: N tokens > M maximum`, without the fallback, where the proxy tried the fallback
+ * and relayed its error. `/v1/models` gives a local model whose window the host knows
+ * `context_length` and `meta.n_ctx` (the replay has no `contextWindow`, so no case shows them).
  */
 const UNKNOWN_MODEL_TEXT = /^No running session found for model '(.*)'$/
 const SESSION_BEARER = 'Bearer session-key'
