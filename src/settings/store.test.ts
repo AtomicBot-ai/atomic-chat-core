@@ -198,6 +198,18 @@ describe('SettingsStore.open', () => {
     expect(fs.ops.filter((op) => op.startsWith('write'))).toEqual([])
   })
 
+  it('tolerates a leading UTF-8 BOM when reading an existing file', async () => {
+    const fs = new FakeFs()
+    fs.files.set(
+      PATH,
+      `\uFEFF${JSON.stringify({ version: 1, revision: 3, providers: { mlx: { timeout: 42 } } })}`
+    )
+    const { store } = await openFresh(fs)
+    expect(store.revision).toBe(3)
+    expect(store.get('mlx')['timeout']).toBe(42)
+    expect(fs.ops.filter((op) => op.startsWith('write'))).toEqual([])
+  })
+
   it('canonicalizes hand-edited string values on read', async () => {
     const fs = new FakeFs()
     fs.files.set(

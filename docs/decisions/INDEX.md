@@ -164,3 +164,4 @@ add a new one that says which record it supersedes.
 - **2026-09-15** — [Serialize owner lifecycle and preserve serve flags](2026-09-15-serialize-owner-lifecycle-and-preserve-serve-flags.md)
 
 - **2026-11-01** — [Read HF metadata at an immutable model revision](2026-11-01-pin-model-download-plans.md).
+- [Strip a leading UTF-8 BOM when reading settings.json](2026-11-03-strip-utf8-bom-when-reading-settings-json.md)
