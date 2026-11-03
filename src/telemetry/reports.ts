@@ -1,3 +1,4 @@
+import { classifyFailure } from './diagnostics.js'
 /**
  * What each failure the core observes becomes as a report — or null when it is not a defect worth
  * an issue. Pure: callers hand in what they know, the reporter scrubs and sends.
@@ -5,16 +6,8 @@
 
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreEvents, LocalProviderId } from '../contracts/index.js'
-import { RECOVERABLE_LOAD_ERROR_CODES, isCrashExit, signalNumber } from '../runtime/llamacpp/index.js'
-import {
-  ENVIRONMENT_FAILURE_CODES,
-  errorCodeOf,
-  isCancellation,
-  isClientAbort,
-  markerLines,
-  oomSubtype,
-  quantOf,
-} from './policy.js'
+import { isCrashExit, signalNumber } from '../runtime/llamacpp/index.js'
+import { errorCodeOf, isCancellation, isClientAbort, markerLines, oomSubtype, quantOf } from './policy.js'
 import { headline } from './scrub.js'
 import type { ErrorReport, ErrorSink } from './types.js'
 
@@ -47,9 +40,15 @@ export function processFailureReport(
 ): ErrorReport | null {
   // Losing the race for the instance lock is how a second launch learns an owner already runs.
   if (source === 'startup' && errorCodeOf(error) === 'CORE_ALREADY_RUNNING') return null
+  const diagnostic = classifyFailure(error, {
+    component: 'core',
+    operation: source === 'startup' ? 'startup' : 'event',
+  })
+  if (source === 'event_listener' && diagnostic.category === 'expected') return null
   return {
     source,
-    level: source === 'event_listener' ? 'error' : 'fatal',
+    level:
+      source === 'event_listener' ? (diagnostic.category === 'operational' ? 'warning' : 'error') : 'fatal',
     error,
     tags: { error_code: errorCodeOf(error), event: context.event },
   }
@@ -58,8 +57,8 @@ export function processFailureReport(
 // ── the HTTP servers ─────────────────────────────────────────────────────────
 
 /**
- * A request that failed on our side. Coded `AtomicCoreError`s are answers, not defects, and a client
- * that hung up is its own business; what is left is a bug behind the HTTP boundary.
+ * A request that failed on our side. The category distinguishes coded defects from expected
+ * answers; a disconnected client does not turn its abandoned request into a defect.
  */
 export function internalErrorReport(input: {
   source: 'control_route' | 'public_server'
@@ -67,10 +66,14 @@ export function internalErrorReport(input: {
   status: number
   route?: string
 }): ErrorReport | null {
-  if (input.status < 500 || input.error instanceof AtomicCoreError || isClientAbort(input.error)) return null
+  if (isClientAbort(input.error)) return null
+  const diagnostic = classifyFailure(input.error, { component: 'http', operation: 'request' })
+  if (diagnostic.category === 'expected' || (input.status < 500 && diagnostic.category !== 'defect'))
+    return null
   return {
     source: input.source,
-    level: 'error',
+    diagnostic,
+    level: diagnostic.category === 'operational' ? 'warning' : 'error',
     error: input.error,
     tags: { route: input.route, http_status: input.status, error_code: errorCodeOf(input.error) },
   }
@@ -139,13 +142,15 @@ export function loadFailureReport(input: {
 }): ErrorReport | null {
   if (isCancellation(input.error)) return null
   const code = errorCodeOf(input.error) ?? 'UNKNOWN'
-  if (RECOVERABLE_LOAD_ERROR_CODES.has(code) || NOT_ENGINE_FAILURES.has(code)) return null
+  const diagnostic = classifyFailure(input.error, { component: 'runtime', operation: 'load' })
+  if (diagnostic.category === 'expected' || NOT_ENGINE_FAILURES.has(code)) return null
   const details = detailsOf(input.error)
   const o = input.overrides ?? {}
   const engineErrors = markerLines(details)
   return {
     source: 'model_load',
-    level: ENVIRONMENT_FAILURE_CODES.has(code) ? 'warning' : 'error',
+    diagnostic,
+    level: diagnostic.category === 'operational' ? 'warning' : 'error',
     error: input.error,
     fingerprint: ['model-load-failure', input.provider, code],
     tags: {
@@ -198,11 +203,16 @@ export function diffusionFailureReport(input: {
 }): ErrorReport | null {
   if (isCancellation(input.error)) return null
   const code = errorCodeOf(input.error) ?? 'INTERNAL'
-  if (RECOVERABLE_DIFFUSION_CODES.has(code)) return null
+  const diagnostic = classifyFailure(input.error, {
+    component: 'diffusion',
+    operation: input.phase === 'load' ? 'load' : 'job',
+  })
+  if (diagnostic.category === 'expected') return null
   const engineErrors = markerLines(detailsOf(input.error))
   return {
     source: input.phase === 'load' ? 'diffusion_load' : 'diffusion_job',
-    level: code === 'OUT_OF_MEMORY' || code === 'INVALID_OUTPUT' ? 'warning' : 'error',
+    diagnostic,
+    level: diagnostic.category === 'operational' || code === 'INVALID_OUTPUT' ? 'warning' : 'error',
     error: input.error,
     fingerprint: [input.phase === 'load' ? 'diffusion-load-failure' : 'diffusion-failure', code],
     tags: { provider: 'diffusion', error_code: code, diffusion_family: input.family, engine: input.engine },

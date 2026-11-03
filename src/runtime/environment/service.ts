@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../../contracts/index.js'
 /**
  * The part that actually runs a setup: it holds the record, decides nothing itself, and turns each
  * decision the reducer makes into one piece of external work.
@@ -100,6 +101,8 @@ export interface EnvironmentProvisioner {
 }
 
 export interface EnvironmentServiceOptions {
+  onFailure?: FailureObserver
+
   store: OperationStore
   environmentId: string
   instanceId: string
@@ -938,6 +941,17 @@ export class EnvironmentService {
           : { code: 'IO_ERROR' as const, message: (error as Error).message }
       // A refusal from the reducer means this result no longer applies; there is nothing to record.
       if (error instanceof AtomicCoreError && error.code === 'MANAGED_OPERATION_CONFLICT') return
+      if (!controller.signal.aborted)
+        this.options.onFailure?.(error, {
+          component: 'environment',
+          operation:
+            effect.kind === 'remove' || effect.kind === 'cleanup'
+              ? 'remove'
+              : effect.kind === 'pull-image'
+                ? 'download'
+                : 'setup',
+          stage: 'execute',
+        })
       await this.apply(operationId, { type: 'failed', ...identity, error: failure }).catch(() => undefined)
     } finally {
       if (this.aborts.get(operationId) === controller) this.aborts.delete(operationId)

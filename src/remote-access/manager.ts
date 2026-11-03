@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * Remote access: a Cloudflare quick tunnel in front of the Local API Server.
  *
@@ -67,6 +68,8 @@ export interface TunnelHosts {
 }
 
 export interface RemoteAccessManagerDeps {
+  onFailure?: FailureObserver
+
   spawner: TunnelSpawner
   prober: Prober
   timings?: Partial<TunnelTimings>
@@ -145,7 +148,7 @@ export class RemoteAccessManager {
       // The endpoint carries the *bound* port (a fallback can change it) and a host that listens.
       this.supervisor = this.supervise(run, server.origin, stopped).catch((error: Error) => {
         this.deps.log?.('warn', `remote access: the tunnel supervisor failed: ${error.message}`)
-        if (this.isCurrent(run)) return this.endRun(run, this.tunnel, failed('exited'))
+        if (this.isCurrent(run)) return this.endRun(run, this.tunnel, failed('exited'), error)
       })
     }
     return this.announce()
@@ -259,7 +262,12 @@ export class RemoteAccessManager {
    * Ends the process and records how the run ended. An exit that cannot be confirmed overrides
    * `outcome`: the truth is then "may still be running".
    */
-  private async endRun(run: number, tunnel: TunnelProcess | undefined, outcome: Phase): Promise<void> {
+  private async endRun(
+    run: number,
+    tunnel: TunnelProcess | undefined,
+    outcome: Phase,
+    error?: unknown
+  ): Promise<void> {
     const confirmed = tunnel ? await tunnel.terminate(this.timings) : true
     // Overtaken (a stop timed out, or the core is shutting down): whoever took over has already
     // written the state and cleared the host.
@@ -277,6 +285,22 @@ export class RemoteAccessManager {
       await this.deps.journal?.clear().catch(() => {})
     } else {
       this.phase = failed('stop_failed')
+    }
+    if (this.phase.kind === 'failed') {
+      const reason = this.phase.error
+      this.deps.onFailure?.(error ?? new Error('Tunnel failed'), {
+        component: 'remote_access',
+        operation: 'tunnel',
+        ...(error
+          ? {}
+          : reason === 'exited'
+            ? { category: 'operational', reason: 'process_exit' }
+            : reason === 'cloudflared_unavailable'
+              ? { category: 'operational', reason: 'not_found' }
+              : reason === 'not_reachable'
+                ? { category: 'operational', reason: 'network' }
+                : {}),
+      })
     }
     if (outcome.kind === 'failed')
       this.deps.log?.('warn', `remote access: the tunnel ended: ${outcome.error}`)

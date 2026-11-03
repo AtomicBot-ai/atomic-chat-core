@@ -270,6 +270,7 @@ function settle<J extends ImageJob | VideoJob>(
     const job = deps.state.anyJob(id) as J
     return { ok: true, outcome: { job, images: outcome.bytes } }
   }
+  deps.onFailure?.(outcome.raw, { component: 'diffusion', operation: 'job' })
   const error: DiffusionErrorBody = errorBody(outcome.raw)
   finishJob(deps, id, { ok: false, error })
   if (error.code !== 'CANCELLED') deps.emit('diffusion:error', { ...error, jobId: id })

@@ -1,3 +1,4 @@
+import type { FailureObserver, FailureDiagnostic } from '../contracts/index.js'
 /**
  * Resumable multi-file downloader. Port of `_download_files_internal` / `download_single_file` in
  * `src-tauri/src/core/downloads/helpers.rs` and the task registry in `commands.rs`.
@@ -61,6 +62,8 @@ export interface DownloadOptions {
 export const DOWNLOAD_CANCELLED = 'Download cancelled'
 
 export interface DownloaderDeps {
+  onFailure?: FailureObserver
+
   dataFolder: string
   platform: NodeJS.Platform
   fetch: typeof fetch
@@ -141,6 +144,19 @@ const isInside = (child: string, parent: string) => {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
+// Keep the historical Error and message while allowing every observing boundary to classify it.
+function preflightFailure(message: string, reason: NonNullable<FailureDiagnostic['reason']>): Error {
+  return Object.defineProperty(new Error(message), 'diagnostic', {
+    value: {
+      component: 'downloads',
+      operation: 'download',
+      stage: 'validate',
+      reason,
+      category: reason === 'invalid_request' ? 'expected' : 'operational',
+    } satisfies FailureDiagnostic,
+  })
+}
+
 export class Downloader {
   private readonly tasks = new Map<string, Task>()
   private readonly deps: Required<
@@ -197,6 +213,10 @@ export class Downloader {
     this.tasks.set(taskId, task)
     try {
       await this.run(taskId, items, options, task.controller.signal)
+    } catch (error) {
+      if (!task.controller.signal.aborted)
+        this.deps.onFailure?.(error, { component: 'downloads', operation: 'download' })
+      throw error
     } finally {
       if (this.tasks.get(taskId) === task) this.tasks.delete(taskId)
     }
@@ -213,7 +233,7 @@ export class Downloader {
     for (const item of items) {
       if (item.proxy) {
         const problem = validateProxyConfig(item.proxy)
-        if (problem) throw new Error(`Error: ${problem}`)
+        if (problem) throw preflightFailure(`Error: ${problem}`, 'invalid_request')
       }
     }
 
@@ -230,9 +250,12 @@ export class Downloader {
     for (const item of items) {
       const savePath = resolve(dataFolder, item.save_path)
       const limit = checkPathWithinLimit(savePath, platform)
-      if (limit) throw new Error(limit)
+      if (limit) throw preflightFailure(limit, 'disk_path_too_long')
       if (!isInside(await canonicalizeExistingPrefix(savePath), resolvedRoot)) {
-        throw new Error(`Path ${savePath} is outside of Jan data folder ${dataFolder}`)
+        throw preflightFailure(
+          `Path ${savePath} is outside of Jan data folder ${dataFolder}`,
+          'invalid_request'
+        )
       }
       savePaths.push(savePath)
       if (resume) {
@@ -247,7 +270,7 @@ export class Downloader {
       await this.deps.availableSpace(dataFolder),
       remainingBytes(totalSize, partialSizes)
     )
-    if (space) throw new Error(space)
+    if (space) throw preflightFailure(space, 'disk_full')
 
     const progress = new Map<string, number>()
     const emitProgress = () => {
@@ -355,7 +378,7 @@ export class Downloader {
       })
     } catch (e) {
       if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
-      throw new DownloadRequestError('retryable', (e as Error).message)
+      throw new DownloadRequestError('retryable', (e as Error).message, { cause: e })
     }
     if (startBytes > 0) {
       if (res.status === 206) {
@@ -417,7 +440,7 @@ export class Downloader {
     }
   ): Promise<string> {
     const { signal, headers, progress, emitProgress, reportStage } = ctx
-    const disk = (e: unknown) => new Error(diskErrToString(e))
+    const disk = (e: unknown) => new Error(diskErrToString(e), { cause: e })
     const fetchImpl = this.deps.fetchFor(item, this.deps.fetch)
     if (item.proxy && shouldBypassProxy(item.url, item.proxy.no_proxy ?? []))
       this.deps.log('info', `Bypassing proxy for URL ${item.url}`)
@@ -580,7 +603,8 @@ export class Downloader {
       for (;;) {
         if (retryCount >= MAX_STREAM_RETRIES) {
           throw new Error(
-            `Download failed after ${MAX_STREAM_RETRIES} retries at byte ${durable}: ${streamError}`
+            `Download failed after ${MAX_STREAM_RETRIES} retries at byte ${durable}: ${streamError}`,
+            { cause: streamError }
           )
         }
         if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
@@ -658,6 +682,6 @@ export class Downloader {
 
 /** Request errors reach the caller as plain `Error`s with the Rust message text. */
 function rethrowAsString(e: unknown): never {
-  if (e instanceof DownloadRequestError) throw new Error(e.message)
+  if (e instanceof DownloadRequestError) throw new Error(e.message, { cause: e })
   throw e
 }

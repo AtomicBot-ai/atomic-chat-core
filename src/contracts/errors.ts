@@ -1,3 +1,4 @@
+import type { FailureDiagnostic } from './diagnostics.js'
 /**
  * Error codes shared with the Atomic Chat app. The app matches on `code` verbatim
  * (`extractModelErrorMessage`, `classifyDownloadFailure`), so these strings are a wire contract.
@@ -7,121 +8,127 @@
  */
 
 /** Runtime / model-load codes (Rust `ErrorCode`, `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`). */
-export type RuntimeErrorCode =
-  | 'BINARY_NOT_FOUND'
-  | 'MODEL_LOAD_FAILED'
-  | 'MODEL_FILE_NOT_FOUND'
-  | 'MODEL_LOAD_TIMED_OUT'
+const RUNTIME_CODES = [
+  'BINARY_NOT_FOUND',
+  'MODEL_LOAD_FAILED',
+  'MODEL_FILE_NOT_FOUND',
+  'MODEL_LOAD_TIMED_OUT',
   /** The user stopped a load before the engine reported ready (the plugins' `ModelLoadCancelled`). */
-  | 'MODEL_LOAD_CANCELLED'
-  | 'INVALID_ARGUMENT'
-  | 'IO_ERROR'
-  | 'INTERNAL_ERROR'
-  | 'DEVICE_LIST_PARSE_FAILED'
-  | 'OS_VERSION_UNSUPPORTED'
-  | 'OUT_OF_MEMORY'
-  | 'MODEL_ARCH_NOT_SUPPORTED'
-  | 'MULTIMODAL_PROJECTOR_LOAD_FAILED'
-  | 'MODEL_FILE_CORRUPT'
-  | 'LLAMA_CPP_PROCESS_ERROR'
+  'MODEL_LOAD_CANCELLED',
+  'INVALID_ARGUMENT',
+  'IO_ERROR',
+  'INTERNAL_ERROR',
+  'DEVICE_LIST_PARSE_FAILED',
+  'OS_VERSION_UNSUPPORTED',
+  'OUT_OF_MEMORY',
+  'MODEL_ARCH_NOT_SUPPORTED',
+  'MULTIMODAL_PROJECTOR_LOAD_FAILED',
+  'MODEL_FILE_CORRUPT',
+  'LLAMA_CPP_PROCESS_ERROR',
   /** MLX plugin (`tauri-plugin-mlx/src/error.rs`): an mlx-server failure no pattern explained. */
-  | 'MLX_PROCESS_ERROR'
+  'MLX_PROCESS_ERROR',
   /** Foundation Models plugin (`tauri-plugin-foundation-models/src/error.rs`). */
-  | 'FOUNDATION_MODELS_UNAVAILABLE'
+  'FOUNDATION_MODELS_UNAVAILABLE',
   /** Foundry Local (change `add-foundry-local`): the variant's accelerator is not prepared yet. */
-  | 'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED'
+  'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED',
   /** Foundry Local: the variant's accelerator or device does not exist on this platform. */
-  | 'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED'
+  'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED',
   /** Foundry Local: the host process failed, or the library inside it did. */
-  | 'FOUNDRY_LOCAL_HOST_ERROR'
+  'FOUNDRY_LOCAL_HOST_ERROR',
   /** LiteRT-LM (change `add-litert-lm-runtime`): the host process failed, or the library inside it did. */
-  | 'LITERT_LM_HOST_ERROR'
+  'LITERT_LM_HOST_ERROR',
   /** LiteRT-LM: the variant's backend or target NPU does not run on this platform or in this file. */
-  | 'LITERT_LM_VARIANT_UNSUPPORTED'
+  'LITERT_LM_VARIANT_UNSUPPORTED',
   /** LiteRT-LM: an NPU variant needs the OpenVINO accelerator prepared first. */
-  | 'LITERT_LM_ACCELERATOR_NOT_PREPARED'
+  'LITERT_LM_ACCELERATOR_NOT_PREPARED',
   /** LiteRT-LM: the file needs a newer LiteRT-LM than the active build; `details` names the version. */
-  | 'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE'
+  'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE',
   /** GenieX (change `add-geniex-runtime`): the host process failed, or the library inside it did; the message is the library's. */
-  | 'GENIEX_HOST_ERROR'
+  'GENIEX_HOST_ERROR',
   /** GenieX: the bundle is for another chip, the device is not for this plugin, or the library found no such device. */
-  | 'GENIEX_VARIANT_UNSUPPORTED'
+  'GENIEX_VARIANT_UNSUPPORTED',
   /** GenieX: the bundle needs a newer GenieX than the active build; `details` names the version. */
-  | 'GENIEX_MODEL_REQUIRES_NEWER_ENGINE'
-  | 'SERVER_START_FAILED'
-  | 'SERVER_START_TIMED_OUT'
-  | 'PROCESS_ERROR'
+  'GENIEX_MODEL_REQUIRES_NEWER_ENGINE',
+  'SERVER_START_FAILED',
+  'SERVER_START_TIMED_OUT',
+  'PROCESS_ERROR',
+] as const
+export type RuntimeErrorCode = (typeof RUNTIME_CODES)[number]
 
 /**
  * Codes raised by the TypeScript extension layer of the app (coded `Error.code` own-properties);
  * the web-app maps them to actionable toasts. Source: extensions/llamacpp-upstream-extension/src/index.ts:173-204, util.ts:49.
  */
-export type ExtensionErrorCode =
-  | 'MODEL_SHARDS_INCOMPLETE'
-  | 'CPU_NO_AVX'
-  | 'BACKEND_TAG_UNRESOLVED'
-  | 'BACKEND_INSUFFICIENT_DISK_SPACE'
-  | 'TRANSCRIPTION_MODEL_MISSING'
-  | 'TRANSCRIPTION_UNSUPPORTED'
+const EXTENSION_CODES = [
+  'MODEL_SHARDS_INCOMPLETE',
+  'CPU_NO_AVX',
+  'BACKEND_TAG_UNRESOLVED',
+  'BACKEND_INSUFFICIENT_DISK_SPACE',
+  'TRANSCRIPTION_MODEL_MISSING',
+  'TRANSCRIPTION_UNSUPPORTED',
+] as const
+export type ExtensionErrorCode = (typeof EXTENSION_CODES)[number]
 
 /** Codes raised by the core itself (new; not present in the Rust app). */
-export type CoreErrorCode =
-  | 'CORE_ALREADY_RUNNING'
-  | 'CORE_NOT_RUNNING'
-  | 'CORE_START_FAILED'
-  | 'CORE_PROTOCOL_MISMATCH'
-  | 'ALREADY_MIGRATED'
-  | 'NO_MODEL_LOADED'
-  | 'MODEL_NOT_LOADED'
-  | 'MODEL_NOT_FOUND'
-  | 'PROVIDER_NOT_FOUND'
-  | 'UNAUTHORIZED'
-  | 'FORBIDDEN_HOST'
+const CORE_CODES = [
+  'CORE_ALREADY_RUNNING',
+  'CORE_NOT_RUNNING',
+  'CORE_START_FAILED',
+  'CORE_PROTOCOL_MISMATCH',
+  'ALREADY_MIGRATED',
+  'NO_MODEL_LOADED',
+  'MODEL_NOT_LOADED',
+  'MODEL_NOT_FOUND',
+  'PROVIDER_NOT_FOUND',
+  'UNAUTHORIZED',
+  'FORBIDDEN_HOST',
   /** No ChatGPT subscription is connected, or its sign-in expired and needs doing again. */
-  | 'AUTH_REQUIRED'
+  'AUTH_REQUIRED',
   /** A sign-in did not complete: the browser reported an error, `state` did not match, or the code exchange failed. */
-  | 'AUTH_FAILED'
-  | 'AUTH_CANCELLED'
+  'AUTH_FAILED',
+  'AUTH_CANCELLED',
   /** An external service (a token endpoint, the subscription API) could not be reached or refused. */
-  | 'UPSTREAM_ERROR'
+  'UPSTREAM_ERROR',
   /** A tunnel needs a running public server to point at. */
-  | 'REMOTE_ACCESS_SERVER_STOPPED'
+  'REMOTE_ACCESS_SERVER_STOPPED',
   /** The tunnel is being stopped; ask again once it is down. */
-  | 'REMOTE_ACCESS_OPERATION_IN_PROGRESS'
+  'REMOTE_ACCESS_OPERATION_IN_PROGRESS',
   /** A previous tunnel could not be confirmed dead; only Stop is offered until it is. */
-  | 'REMOTE_ACCESS_STOP_FAILED'
+  'REMOTE_ACCESS_STOP_FAILED',
   /** The decision model is turned off, or no model file is configured for it. */
-  | 'DECISION_NOT_CONFIGURED'
+  'DECISION_NOT_CONFIGURED',
   /** No installed engine build serves `llama-server --decision` (API version 1). */
-  | 'DECISION_ENGINE_UNSUPPORTED'
+  'DECISION_ENGINE_UNSUPPORTED',
   /** The decision model is not running right now (starting, failed or stopped). */
-  | 'DECISION_UNAVAILABLE'
+  'DECISION_UNAVAILABLE',
   /** `decision.model_path` is a folder that lacks files of a laya checkpoint; `details` lists them. */
-  | 'DECISION_CHECKPOINT_INCOMPLETE'
+  'DECISION_CHECKPOINT_INCOMPLETE',
   /** A decision model was asked to load as a chat or embedding session; it runs only in the decision module. */
-  | 'DECISION_MODEL_NOT_CHAT'
+  'DECISION_MODEL_NOT_CHAT',
   /** The embedding model is turned off, or no model file is configured for it. */
-  | 'EMBEDDING_NOT_CONFIGURED'
+  'EMBEDDING_NOT_CONFIGURED',
   /** No installed llama.cpp build is new enough for the embedding model; the message names the build. */
-  | 'EMBEDDING_ENGINE_UNSUPPORTED'
+  'EMBEDDING_ENGINE_UNSUPPORTED',
   /** The embedding model is not running right now (starting, failed or stopped). */
-  | 'EMBEDDING_UNAVAILABLE'
+  'EMBEDDING_UNAVAILABLE',
   /** `embedding.model_path` is not an embedding GGUF (a chat, decision or reranker model). */
-  | 'EMBEDDING_MODEL_NOT_EMBEDDING'
+  'EMBEDDING_MODEL_NOT_EMBEDDING',
   /**
    * The file cannot run on the requested engine (a PrismML-only Bonsai file on stock llama.cpp, or a
    * build too old for it); `details` is the JSON compatibility verdict. Never retried elsewhere.
    */
-  | 'MODEL_ENGINE_INCOMPATIBLE'
+  'MODEL_ENGINE_INCOMPATIBLE',
   /** A legacy layout no current engine runs (Bonsai Q2_0 group-128); `details` names the replacement. */
-  | 'MODEL_FORMAT_LEGACY'
+  'MODEL_FORMAT_LEGACY',
   /** Another install of the same engine build (sd.cpp, MLX) is running; wait for it. */
-  | 'ENGINE_INSTALL_IN_PROGRESS'
+  'ENGINE_INSTALL_IN_PROGRESS',
   /**
    * `POST /backends/atomic-prism/catalog` with `requires`/`min_build`: no build this machine can run
    * meets them; `details` is `{requires, min_build}` as asked (change close-cli-core-gaps, D2).
    */
-  | 'BACKEND_BUILD_UNAVAILABLE'
+  'BACKEND_BUILD_UNAVAILABLE',
+] as const
+export type CoreErrorCode = (typeof CORE_CODES)[number]
 
 /**
  * Image generation (`tauri-plugin-atomic-diffusion/src/error.rs`, `NativeDiffusionErrorCode` in the
@@ -247,13 +254,16 @@ export const MANAGED_ERROR_CODES = [
 ] as const
 export type ManagedErrorCode = (typeof MANAGED_ERROR_CODES)[number]
 
-export type ErrorCode =
-  | RuntimeErrorCode
-  | ExtensionErrorCode
-  | CoreErrorCode
-  | DiffusionErrorCode
-  | AudioErrorCode
-  | ManagedErrorCode
+/** The wire code type and the telemetry allow-list share the same browser-safe catalog. */
+export const ERROR_CODES = [
+  ...RUNTIME_CODES,
+  ...EXTENSION_CODES,
+  ...CORE_CODES,
+  ...DIFFUSION_ERROR_CODES,
+  ...AUDIO_ERROR_CODES,
+  ...MANAGED_ERROR_CODES,
+] as const
+export type ErrorCode = (typeof ERROR_CODES)[number]
 
 /**
  * Disk-failure tags. Rendered into the error message as `Error: [<tag>] <detail>`; the app's
@@ -276,15 +286,23 @@ export interface ErrorBody {
   details?: string
 }
 
+export interface AtomicCoreErrorOptions {
+  cause?: unknown
+  diagnostic?: FailureDiagnostic
+}
+
 export class AtomicCoreError extends Error {
   readonly code: ErrorCode
   readonly details: string | undefined
+  declare readonly diagnostic?: FailureDiagnostic
 
-  constructor(code: ErrorCode, message: string, details?: string) {
-    super(message)
+  constructor(code: ErrorCode, message: string, details?: string, options?: AtomicCoreErrorOptions) {
+    super(message, options && 'cause' in options ? { cause: options.cause } : undefined)
     this.name = 'AtomicCoreError'
     this.code = code
     this.details = details
+    if (options?.diagnostic)
+      Object.defineProperty(this, 'diagnostic', { value: Object.freeze({ ...options.diagnostic }) })
   }
 
   toJSON(): ErrorBody {

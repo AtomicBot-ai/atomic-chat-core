@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { CoreEvents } from '../contracts/index.js'
+import { failureObserver } from '../telemetry/index.js'
+import type { ErrorReport } from '../telemetry/index.js'
 import { FixtureHttpServer } from '../../test/helpers/fixture-http-server.js'
 import { PROGRESS_EMIT_INTERVAL_BYTES } from './protocol.js'
 import {
@@ -50,6 +52,35 @@ const exists = (p: string) =>
   )
 
 describe('Downloader', () => {
+  it('observes the original network cause once and keeps invalid preflight input quiet', async () => {
+    const dataFolder = await mkdtemp(join(tmpdir(), 'atomic-dl-diagnostics-'))
+    const reports: ErrorReport[] = []
+    const cause = Object.assign(new Error('connection failed'), { code: 'ECONNRESET' })
+    const dl = new Downloader({
+      dataFolder,
+      platform: 'linux',
+      fetch: async () => {
+        throw cause
+      },
+      sleep: async () => {},
+      availableSpace: async () => undefined,
+      emit: () => {},
+      onFailure: failureObserver({ capture: (report) => reports.push(report) }),
+    })
+    await expect(
+      dl.download('invalid', [{ url: 'http://fixture.invalid', save_path: '../outside', size: 1 }])
+    ).rejects.toThrow('outside')
+    expect(reports).toHaveLength(0)
+    await expect(
+      dl.download('network', [{ url: 'http://fixture.invalid', save_path: 'm/model.gguf', size: 1 }])
+    ).rejects.toThrow('connection failed')
+    expect(reports).toHaveLength(1)
+    expect((reports[0]?.error as Error).cause).toMatchObject({ cause })
+    expect(reports[0]).toMatchObject({
+      level: 'warning',
+      diagnostic: { component: 'downloads', reason: 'network' },
+    })
+  })
   it('downloads, verifies sha256 and size, reports progress and removes the sidecars', async () => {
     server.files.set('/ok.bin', { body })
     const { dl, dataFolder, events } = await make()

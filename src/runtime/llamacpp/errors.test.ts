@@ -67,6 +67,26 @@ describe('isCrashExit', () => {
 })
 
 describe('classifyExit / classifyProcessOutput', () => {
+  it('retains native exit facts without changing the public error body', () => {
+    const error = classifyProcessOutput({ code: null, signal: 'SIGABRT' }, 'GGML_ASSERT(x)', '', 'linux')
+    expect(error.diagnostic).toEqual({
+      component: 'runtime',
+      operation: 'load',
+      stage: 'ready',
+      exitCode: null,
+      signal: 'SIGABRT',
+      nativeFailure: 'assertion',
+      reason: 'native_crash',
+    })
+    expect(JSON.parse(JSON.stringify(error))).toEqual({
+      code: 'LLAMA_CPP_PROCESS_ERROR',
+      message: CRASH_MESSAGE,
+      details: 'GGML_ASSERT(x)',
+    })
+    expect(
+      classifyProcessOutput({ code: 1, signal: null }, '', 'out of memory', 'linux').diagnostic
+    ).toMatchObject({ exitCode: 1, signal: null })
+  })
   it('upgrades only the generic error on a crash', () => {
     expect(classifyExit({ code: null, signal: 11 }, '', 'linux').message).toBe(CRASH_MESSAGE)
     expect(classifyExit({ code: null, signal: 11 }, 'out of memory', 'linux').code).toBe('OUT_OF_MEMORY')

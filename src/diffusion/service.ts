@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * The image-generation service: the twenty operations of the app's `DiffusionService`, one method
  * each, over the module's state. The command surface of `commands.rs` in
@@ -91,6 +92,8 @@ import { historyMultiplier, VideoHistory } from './video-history.js'
 import { VIDEO_JOB_KIND } from './video-job.js'
 
 export interface DiffusionServiceDeps {
+  onFailure?: FailureObserver
+
   paths: DiffusionPaths
   /** The core's data folder, which `configure` must name. */
   dataFolder: string
@@ -203,6 +206,7 @@ export class DiffusionService {
             : {}),
         }))
     this.deps = {
+      ...(options.onFailure ? { onFailure: options.onFailure } : {}),
       state: this.state,
       emit: options.emit,
       log,

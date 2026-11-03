@@ -1,3 +1,4 @@
+import { AtomicCoreError } from '../contracts/index.js'
 import { describe, expect, it, vi } from 'vitest'
 import { parseDsn } from './dsn.js'
 import {
@@ -186,7 +187,8 @@ describe('ErrorReporter', () => {
     expect(h.sent).toHaveLength(PER_ISSUE_HOURLY_CAP)
 
     const t = harness()
-    for (let i = 0; i < TOTAL_HOURLY_CAP + 5; i++) t.reporter.capture(report({ fingerprint: [`f${i}`] }))
+    for (let i = 0; i < TOTAL_HOURLY_CAP + 5; i++)
+      t.reporter.capture(report({ tags: { provider: `engine${i}` } }))
     await t.reporter.flush()
     expect(t.sent).toHaveLength(TOTAL_HOURLY_CAP)
     t.advance(3_600_000)
@@ -198,11 +200,11 @@ describe('ErrorReporter', () => {
   it('stays quiet while Sentry rate-limits us', async () => {
     const h = harness()
     h.fetch.mockResolvedValueOnce(new Response(null, { status: 429, headers: { 'Retry-After': '120' } }))
-    h.reporter.capture(report({ fingerprint: ['a'] }))
+    h.reporter.capture(report({ tags: { provider: 'a' } }))
     await h.reporter.flush()
-    h.reporter.capture(report({ fingerprint: ['b'] }))
+    h.reporter.capture(report({ tags: { provider: 'b' } }))
     h.advance(120_000)
-    h.reporter.capture(report({ fingerprint: ['c'] }))
+    h.reporter.capture(report({ tags: { provider: 'c' } }))
     await h.reporter.flush()
     expect(h.fetch).toHaveBeenCalledTimes(2)
   })
@@ -212,9 +214,9 @@ describe('ErrorReporter', () => {
     h.fetch.mockResolvedValueOnce(new Response(null, { status: 413 }))
     h.fetch.mockRejectedValueOnce(new Error('offline'))
     h.fetch.mockRejectedValueOnce('down')
-    h.reporter.capture(report({ fingerprint: ['a'] }))
-    h.reporter.capture(report({ fingerprint: ['b'] }))
-    h.reporter.capture(report({ fingerprint: ['c'] }))
+    h.reporter.capture(report({ tags: { provider: 'a' } }))
+    h.reporter.capture(report({ tags: { provider: 'b' } }))
+    h.reporter.capture(report({ tags: { provider: 'c' } }))
     await h.reporter.flush()
     expect(h.errors).toEqual([
       'error report rejected: HTTP 413',
@@ -248,17 +250,15 @@ describe('ErrorReporter', () => {
     await harness().reporter.flush()
   })
 
-  it('attaches the last scrubbed log lines', async () => {
+  it('does not transmit log lines even when callers provide breadcrumbs', async () => {
     const h = harness({ scrub: { homeDir: '/home/bob' } })
     for (let i = 0; i < 32; i++) h.reporter.breadcrumb('warning', `line ${i} at /home/bob/x`)
     h.reporter.breadcrumb('error', 'y'.repeat(400))
     h.reporter.setScrubContext({})
     h.reporter.capture(report())
     await h.reporter.flush()
-    const values = (h.sent[0]?.event['breadcrumbs'] as { values: Array<{ message: string }> }).values
-    expect(values).toHaveLength(30)
-    expect(values[0]?.message).toBe('line 3 at ~/x')
-    expect(values.at(-1)?.message).toHaveLength(300)
+    expect(h.sent[0]?.event).not.toHaveProperty('breadcrumbs')
+    expect(JSON.stringify(h.sent)).not.toContain('line 3')
   })
 })
 
@@ -299,4 +299,39 @@ describe('retryAfterMs', () => {
   ])('%j → %i ms', (headers, ms) => {
     expect(retryAfterMs(new Headers(headers))).toBe(ms)
   })
+})
+
+it('reports the original failure once when a wrapper reaches another boundary', async () => {
+  const h = harness()
+  const original = new Error('failure')
+  h.reporter.capture({ source: 'operation', level: 'error', error: original })
+  h.advance(DEDUP_WINDOW_MS + 1)
+  h.reporter.capture({
+    source: 'control_route',
+    level: 'error',
+    error: new AtomicCoreError('INTERNAL_ERROR', 'wrapped', undefined, { cause: original }),
+  })
+  await h.reporter.flush()
+  expect(h.sent).toHaveLength(1)
+})
+
+it('does not let HTTP propagation bypass the owning boundary cooldown', async () => {
+  const h = harness()
+  for (let i = 0; i < 2; i++) {
+    const error = new AtomicCoreError('OUT_OF_MEMORY', 'model load failed')
+    h.reporter.capture({
+      source: 'model_load',
+      level: 'warning',
+      error,
+      throttle: { key: 'load', windowMs: 300_000 },
+    })
+    h.reporter.capture({
+      source: 'control_route',
+      level: 'error',
+      error: new AtomicCoreError('IO_ERROR', 'HTTP wrapper', undefined, { cause: error }),
+    })
+    h.advance(DEDUP_WINDOW_MS + 1)
+  }
+  await h.reporter.flush()
+  expect(h.sent).toHaveLength(1)
 })

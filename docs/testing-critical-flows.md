@@ -65,3 +65,47 @@ Line coverage alone never raises a grade. A PR may not lower a grade.
 | `tensorrt-llm` model compatibility check (`POST /models/tensorrt-llm/check`, no network, no Docker) | Strong | `src/runtime/tensorrt-llm/{compatibility,check,quant-format,curated-inventory-digests}.test.ts` (architecture/quantization/compute-capability verdicts, the real KV-cache reserve formula and its `weight_fraction` fallback, curated-model digest verification, unified-memory cards compared against host memory, `fits_other_gpus`), `src/server/control/routes/models.test.ts` (the route, malformed-body 400, absent-provider 404); `test/e2e/tensorrt-llm-check.test.ts` (compiled binary: a compatible checkpoint against the pinned descriptor and this host's real card, `MODEL_INCOMPATIBLE` for an unsupported architecture, GGUF rejected outright, no container or Docker call while checking, falls back to the latest cached descriptor when nothing is installed, `MANAGED_METADATA_INVALID` when nothing was ever cached) | maintained |
 | Unified `core.log`: shared `[date][time][target][LEVEL]` format and rotation, engine output via `backendOutput`, `atomic-chat-app-core` stderr header (`add-unified-logs`) | Strong (core), Missing (app Logs window / export) | `src/host/log-file.test.ts` (rotation before an over-limit write, archive pruning oldest-first at 4 kept, disabled with one warning, and never a throw, on a rotation that leaves nothing writable, on a close that fails mid-rotation and on an unwritable folder, a failed rename retried on the next write, `[`/`]`/control characters in a target replaced by `_`, rotation succeeding while another reader holds the file open), `test/contract/core-log.test.ts` (the pinned `test/fixtures/core-log/sample.log` written byte-for-byte through the real `openLogFile`/`formatLogLine`, and the strict-header/continuation-line split), `src/host/app-daemon.test.ts` (fake deps: the tee'd core logger, `backendOutput` wired to the file with the `engine:<provider>/<model>` target, `failFatally`'s text duplicated at `ERROR`, usage errors before the file opens, `--version`), `src/runtime/shared/{backend-output,redact-args}.test.ts` (a throwing sink swallowed after one `warn` per session, a throwing `warn` swallowed too, `--api-key`/`--api-key=<v>` masked), `src/runtime/{llamacpp,mlx,foundation-models}/runtime.test.ts` and `src/diffusion/server-process.test.ts` (the engine start line, `backendOutput` fed from `onLine`/`deliver` alongside `logPath`/`verbose`), `src/core/create.test.ts` (`backendOutput` reaches all four runtime kinds); `test/e2e/app-core-log.test.ts` on the compiled `atomic-chat-app-core` binary: `core.log` created and appended across a restart with the version/pid start line, every stderr line headed in UTC, a busy `--control-port` logged as one `ERROR` entry in the file and on stderr before exit 1, an unwritable logs folder disables the file writer (one `WARN` on stderr) while the daemon keeps serving and heading stderr, the CLI's `atomic-chat-core daemon` keeps its unheaded `[level] message` stderr and writes no file, and the engine start line is a `core` entry (so on stderr too) written to `core.log` ahead of the engine's own stdout/stderr, which land in `core.log` under `engine:<provider>/<model>` and never on stderr | the app's Logs window and export (`[app]`/`[core]` merge) — `docs/app-e2e.md` scenario 17 |
 | Mobile paths survive desktop legacy removal | Missing | — | Existing mobile build/contract checks in phase 6 |
+
+## Core diagnostic handoff to the Sentry fixer
+
+**Partial.** `src/contracts/errors.test.ts` verifies that causes/diagnostics never enter ErrorBody;
+`src/telemetry/diagnostics.test.ts`, `envelope.test.ts` and `reporter.test.ts` cover finite classification,
+bounded causes, private payloads from every report source, grouping and propagation dedup (including
+an HTTP wrapper after the owning boundary suppressed a repeated report). Decision/embedding lifecycle
+and diffusion session tests retain the original failure while public state stays unchanged.
+`test/e2e/telemetry.test.ts` verifies the versioned metadata from the compiled owner against fake ingest.
+The sibling pipeline tests validate project/repository binding, isolated state, protected files, ADR
+append-only checks and npm source-map evidence. On 2026-11-03, the real VPS Docker verifier passed
+five integration cases for both profiles, including before/after assertions and secret-free checks.
+The isolated Gemini pilot `5994a6ee-88ff-4aa3-81cf-1701761594eb` read five real events from
+`ATOMIC-CHAT-CORE-2G`, resolved their release commits via dist and ran MCP/Docker checks, but timed out
+in the fix phase. It produced `verification_failed`, with evidence retained and no publication.
+A second Gemini run (`fb6dbb4b-5e7a-4b1a-aad7-cbad4172e344`) produced a BOM regression
+that failed on the original settings reader and passed on its proposed fix. Independent lint,
+typecheck and formatting passed. The full Linux unit gate initially timed out. A keyless replay
+exposed the runner's noexec temporary directory; seven affected suites (352 tests) passed on the
+unmodified base after correcting the test environment. The final keyless replay
+(`core-adr-final-01a1a0ea`) used the same proposed patch. It returned `verified` on
+`59bd1a23e2e7` with 10,557 unit/contract, 388 Bun contract, 11 runtime compatibility and
+236 compiled-binary Linux e2e passes. Four Windows events supported the BOM diagnosis.
+The separate Linux truncated-JSON event remains unexplained by that fix. Real PR publication,
+platform CI and post-release monitoring are still outside this pilot's evidence. The app's `make test-core-live`
+passed all 19 supervisor/relay tests, including consent, on macOS arm64. A separate local reporting
+build passed two desktop failure/retry cases and delivered zero versus one diffusion/job event
+with consent off versus on (see `docs/app-e2e.md`). The desktop test
+`test/app-e2e/telemetry.test.ts` also passed against the reporting build and the final core.
+Windows/macOS PR CI remains a separate gate. This additional handoff grade does not
+replace the existing Strong consent/reporting flow. The core pipeline remains disabled.
+
+Stack evidence: a fatal settings parse in the compiled macOS arm64 app-core reached a local fake
+ingest with `src/settings/store.ts:273`. For the published `@atomic-chat/core@0.20.7`, the pipeline
+verified npm SHA-512 and gitHead against tag `v0.20.7` (`59bd1a23e2e7`), and mapped the parse call
+at `dist/settings/store.js:147` to `src/settings/store.ts:271` at that commit. The public npm registry
+returned 404 for the pilot release `0.20.4`; a frame from that artifact has no verified mapping.
+
+The final macOS arm64 `npm run verify` with Node 22 and Bun 1.4.4 passed lint, typecheck,
+formatting, 10,105 unit/contract tests (4 skipped), coverage floors on 323 files, both builds,
+389 Bun contract tests and 224 compiled-binary tests (10 skipped). The separate runtime
+compatibility suite passed all 11 tests. Privacy cases cover arbitrary error codes/class names,
+multi-line messages containing apparent stack frames, and user-named backend paths after a
+build version. The cause chain and unknown-error grouping use the same stripped stack.

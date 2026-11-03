@@ -6,7 +6,7 @@
  * Port of src-tauri/src/core/server/remote_access/tests.rs (image-generation line, `767ff6350`).
  */
 import { describe, expect, it } from 'vitest'
-import type { RemoteAccessState, RemoteAccessStatus } from '../contracts/index.js'
+import type { RemoteAccessState, RemoteAccessStatus, FailureDiagnostic } from '../contracts/index.js'
 import { DynamicTrustedHosts } from '../server/index.js'
 import { RemoteAccessManager, remoteAccessRefusal } from './manager.js'
 import type { Prober } from './probe.js'
@@ -33,12 +33,37 @@ const readyWithUrl = (over: Script = {}): Script => ({ ready: { kind: 'url', url
 const endingIn = (ready: Ready): Script => ({ ready })
 const hanging = (): Script => ({})
 
+it('reports the original supervisor failure once before announcing the failed state', async () => {
+  const error = new TypeError('unexpected spawn failure')
+  const failures: Array<[unknown, FailureDiagnostic]> = []
+  const states: string[] = []
+  const manager = new RemoteAccessManager({
+    spawner: () => {
+      throw error
+    },
+    prober: { verify: async () => true },
+    server: () => ({ origin: 'http://127.0.0.1:1337', hasApiKey: false }),
+    hosts: new DynamicTrustedHosts(),
+    emit: (status) => states.push(status.state),
+    onFailure: (cause, context) => {
+      expect(states).not.toContain('error')
+      failures.push([cause, context])
+    },
+  })
+  manager.start()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(manager.status().state).toBe('error')
+  expect(failures).toEqual([[error, { component: 'remote_access', operation: 'tunnel' }]])
+})
+
 function rig(
   scripts: Array<Script | undefined>,
   prober: { reachable: boolean; delayMs?: number } = { reachable: true }
 ) {
   const log = { spawns: [] as Array<[string, string | undefined]>, terminations: 0, kills: 0 }
   const events: RemoteAccessStatus[] = []
+  const failures: Array<[unknown, FailureDiagnostic]> = []
   const hosts = new DynamicTrustedHosts()
   const journal = { recorded: [] as Array<[number, string]>, cleared: 0 }
   const exitHooks = new Set<() => void>()
@@ -80,6 +105,7 @@ function rig(
     },
   }
   const manager = new RemoteAccessManager({
+    onFailure: (error, diagnostic) => failures.push([error, diagnostic]),
     spawner: (origin, protocol) => {
       log.spawns.push([origin, protocol])
       const script = queue.shift()
@@ -117,6 +143,7 @@ function rig(
     journal,
     exitHooks,
     eventIn,
+    failures,
     probes: () => probes,
     states: () => events.map((status) => status.state),
     setServer: (next: ServerEndpoint | undefined) => (server = next),
@@ -169,6 +196,8 @@ describe('RemoteAccessManager', () => {
     r.manager.start()
     const failed = await r.eventIn('error')
     expect(failed.error).toBe('cloudflared_unavailable')
+    expect(r.failures).toHaveLength(1)
+    expect(r.failures[0]?.[1]).toMatchObject({ category: 'operational', reason: 'not_found' })
     // The user may try again.
     expect(failed.canStart).toBe(true)
     expect(r.hosts.tunnelHost()).toBeUndefined()

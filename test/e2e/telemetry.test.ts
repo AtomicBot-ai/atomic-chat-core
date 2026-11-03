@@ -124,7 +124,12 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
       user: { id: 'device-42', ip_address: null },
       tags: { source: 'model_load', provider: 'llamacpp-upstream', quant: 'Q4_K_M', gpu_model: 'Apple M3' },
     })
-    expect(event.fingerprint?.slice(0, 2)).toEqual(['model-load-failure', 'llamacpp-upstream'])
+    expect(event.fingerprint?.slice(0, 4)).toEqual(['core-v1', 'runtime', 'load', 'llamacpp-upstream'])
+    expect(event.tags).toMatchObject({
+      diagnostic_version: 'core-v1',
+      component: 'runtime',
+      operation: 'load',
+    })
     expect(JSON.stringify(event)).not.toContain('hunter2')
     expectScrubbed()
 
@@ -148,7 +153,7 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     expect(stderr).toContain('ENOTDIR')
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ level: 'fatal', tags: { source: 'startup', error_code: 'ENOTDIR' } })
-    expect(events[0]?.exception.values[0]?.value).toContain('<data>/atomic-core')
+    expect(events[0]?.exception.values.at(-1)?.value).toBe('core startup: unknown')
     expectScrubbed()
   })
 
@@ -177,8 +182,8 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     await eventually(1)
     expect(events[0]).toMatchObject({
       level: 'warning',
-      fingerprint: ['inference-failure', 'llamacpp-upstream', 'compute'],
-      exception: { values: [{ type: 'InferenceFailure', value: 'Compute error.' }] },
+      fingerprint: ['core-v1', 'runtime', 'inference', 'llamacpp-upstream', 'compute', '', '', 'compute'],
+      exception: { values: [{ type: 'InferenceFailure', value: 'runtime inference: compute' }] },
     })
 
     const pid = Number(readFileSync(pidFile, 'utf8').trim().split('\n').at(-1))
@@ -186,7 +191,16 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     await eventually(2)
     expect(events[1]).toMatchObject({
       level: 'error',
-      fingerprint: ['backend-crash', 'llamacpp-upstream', 'sigsegv'],
+      fingerprint: [
+        'core-v1',
+        'runtime',
+        'exit',
+        'llamacpp-upstream',
+        'process_exit',
+        'sigsegv',
+        '',
+        'process_exit',
+      ],
       tags: { source: 'backend_crash', signal: 'SIGSEGV' },
     })
     expect(JSON.stringify(events)).not.toContain('my secret prompt')

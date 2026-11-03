@@ -76,6 +76,7 @@ describe('errorCodeOf / isCancellation / isClientAbort', () => {
     [new AtomicCoreError('OUT_OF_MEMORY', 'x'), 'OUT_OF_MEMORY'],
     [Object.assign(new Error('x'), { code: 'ENOENT' }), 'ENOENT'],
     [Object.assign(new Error('x'), { code: 'lowercase' }), undefined],
+    [Object.assign(new Error('x'), { code: 'CUSTOM_PRIVATE_TOKEN' }), undefined],
     [Object.assign(new Error('x'), { code: 42 }), undefined],
     [null, undefined],
   ])('errorCodeOf(%s) = %s', (error, code) => {

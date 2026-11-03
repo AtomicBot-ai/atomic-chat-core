@@ -179,11 +179,26 @@ export function classifyProcessOutput(
   provider: LocalProviderId = 'llamacpp-upstream'
 ): AtomicCoreError {
   const base = classifyExit(exit, stderr, platform, provider)
-  if (base.code !== 'LLAMA_CPP_PROCESS_ERROR') return base
   const fromStdout = classifyStderr(stdout, provider)
-  if (fromStdout.code !== 'LLAMA_CPP_PROCESS_ERROR') return fromStdout
-  if (stderr.trim() === '' && stdout.trim() !== '') {
-    return new AtomicCoreError(base.code, base.message, stdout)
-  }
-  return base
+  const selected =
+    base.code !== 'LLAMA_CPP_PROCESS_ERROR'
+      ? base
+      : fromStdout.code !== 'LLAMA_CPP_PROCESS_ERROR'
+        ? fromStdout
+        : stderr.trim() === '' && stdout.trim() !== ''
+          ? new AtomicCoreError(base.code, base.message, stdout)
+          : base
+  // Preserve the Rust-compatible body while retaining facts that disappear when details are scrubbed.
+  return new AtomicCoreError(selected.code, selected.message, selected.details, {
+    diagnostic: {
+      component: 'runtime',
+      operation: 'load',
+      stage: 'ready',
+      exitCode: exit.code,
+      signal: exit.signal,
+      ...(selected.code === 'LLAMA_CPP_PROCESS_ERROR' && /GGML_ASSERT/.test(stderr + stdout)
+        ? ({ nativeFailure: 'assertion', reason: 'native_crash' } as const)
+        : {}),
+    },
+  })
 }

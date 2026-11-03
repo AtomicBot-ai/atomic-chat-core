@@ -689,3 +689,19 @@ describe('videoCapabilities', () => {
     expect(() => videoCapabilities(h.state)).toThrow(expect.objectContaining({ code: 'MODEL_INCOMPATIBLE' }))
   })
 })
+
+it('observes the original diffusion error while keeping its public event unchanged', async () => {
+  const h = harness()
+  const raw = new Error('underlying failure')
+  const failures: unknown[] = []
+  h.deps.onFailure = (error) => {
+    failures.push(error)
+  }
+  h.failNextSpawn(raw)
+  await expect(loadFromSpec(h.deps, sampleSpec(), 'load')).rejects.toMatchObject({ cause: raw })
+  expect(failures).toHaveLength(1)
+  expect((failures[0] as Error).cause).toBe(raw)
+  const event = h.events.find((e) => e.name === 'diffusion:error')
+  expect(event?.payload).not.toHaveProperty('cause')
+  expect(event?.payload).not.toHaveProperty('diagnostic')
+})

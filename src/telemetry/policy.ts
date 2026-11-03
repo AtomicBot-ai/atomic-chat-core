@@ -1,3 +1,4 @@
+import { ERROR_CODES } from '../contracts/index.js'
 import { scrubText } from './scrub.js'
 import type { ScrubContext } from './scrub.js'
 
@@ -83,10 +84,53 @@ export function markerLines(
   return kept.length ? kept.join('\n') : undefined
 }
 
-/** A code worth a tag: the core's SCREAMING_SNAKE codes and Node's `E…` codes. */
+// Only named system and upstream errors are safe evidence. A string shaped like a code can
+// still contain a token or a user identifier; unfamiliar codes group by the safe source stack.
+const REPORTABLE_CODES: ReadonlySet<string> = new Set([
+  ...ERROR_CODES,
+  'ABORT_ERR',
+  'EACCES',
+  'EADDRINUSE',
+  'EADDRNOTAVAIL',
+  'EAI_AGAIN',
+  'EBUSY',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EEXIST',
+  'EHOSTUNREACH',
+  'EINVAL',
+  'EIO',
+  'EISDIR',
+  'EMFILE',
+  'ENAMETOOLONG',
+  'ENETUNREACH',
+  'ENFILE',
+  'ENODEV',
+  'ENOENT',
+  'ENOMEM',
+  'ENOSPC',
+  'ENOTDIR',
+  'ENOTFOUND',
+  'ENOTSUP',
+  'EPERM',
+  'EPIPE',
+  'EROFS',
+  'ETIMEDOUT',
+  'EXDEV',
+  'ERR_STREAM_PREMATURE_CLOSE',
+  'ERR_STREAM_DESTROYED',
+  'ERR_STREAM_WRITE_AFTER_END',
+  'REMOTE_RATE_LIMITED',
+  'REMOTE_QUOTA',
+  'REMOTE_UNAVAILABLE',
+  'REMOTE_TIMEOUT',
+])
+
+/** A recognized public core, system or upstream code, never arbitrary thrown text. */
 export function errorCodeOf(error: unknown): string | undefined {
   const code = (error as { code?: unknown } | null | undefined)?.code
-  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code : undefined
+  return typeof code === 'string' && REPORTABLE_CODES.has(code) ? code : undefined
 }
 
 const CANCELLATION_CODES = new Set(['MODEL_LOAD_CANCELLED', 'CANCELLED', 'AUTH_CANCELLED', 'ABORT_ERR'])

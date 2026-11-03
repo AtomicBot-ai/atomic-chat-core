@@ -2,6 +2,7 @@
  * Browser-safe contracts shared with the Atomic Chat app. No `node:*` imports allowed here.
  */
 export * from './errors.js'
+export * from './diagnostics.js'
 export * from './session.js'
 export * from './model-yml.js'
 export * from './settings.js'

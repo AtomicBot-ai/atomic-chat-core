@@ -25,6 +25,15 @@ describe('captureReport', () => {
 })
 
 describe('processFailureReport', () => {
+  it('filters expected listener failures and grades operational ones while keeping uncaught failures fatal', () => {
+    const invalid = new AtomicCoreError('INVALID_ARGUMENT', 'bad input')
+    expect(processFailureReport('event_listener', invalid)).toBeNull()
+    expect(processFailureReport('event_listener', new DOMException('cancel', 'AbortError'))).toBeNull()
+    expect(
+      processFailureReport('event_listener', Object.assign(new Error('disk'), { code: 'ENOSPC' }))?.level
+    ).toBe('warning')
+    expect(processFailureReport('uncaught_exception', invalid)?.level).toBe('fatal')
+  })
   it('makes a daemon-killing throw fatal and a listener throw an error', () => {
     const error = new TypeError('x is not a function')
     expect(processFailureReport('uncaught_exception', error)).toMatchObject({
@@ -50,6 +59,7 @@ describe('internalErrorReport', () => {
     const error = new TypeError('boom')
     expect(internalErrorReport({ source: 'control_route', error, status: 500, route: '/x/:id' })).toEqual({
       source: 'control_route',
+      diagnostic: { component: 'http', operation: 'request', category: 'defect', reason: 'internal' },
       level: 'error',
       error,
       tags: { route: '/x/:id', http_status: 500, error_code: undefined },
@@ -57,9 +67,9 @@ describe('internalErrorReport', () => {
   })
 
   it.each([
-    ['a coded answer', new AtomicCoreError('INTERNAL_ERROR', 'x'), 500],
+    ['an expected coded answer', new AtomicCoreError('INVALID_ARGUMENT', 'x'), 500],
     ['a client that hung up', Object.assign(new Error('x'), { code: 'EPIPE' }), 500],
-    ['a 4xx', new TypeError('x'), 400],
+    ['a 4xx', new Error('x'), 400],
   ])('ignores %s', (_label, error, status) => {
     expect(internalErrorReport({ source: 'public_server', error, status })).toBeNull()
   })
@@ -122,6 +132,7 @@ describe('loadFailureReport', () => {
     const report = loadFailureReport({ provider: 'llamacpp-upstream', modelId: 'a/b-Q4_0', error, overrides })
     expect(report).toEqual({
       source: 'model_load',
+      diagnostic: { component: 'runtime', operation: 'load', category: 'unknown', reason: 'unknown' },
       level: 'error',
       error,
       fingerprint: ['model-load-failure', 'llamacpp-upstream', 'LLAMA_CPP_PROCESS_ERROR'],
@@ -164,16 +175,13 @@ describe('loadFailureReport', () => {
     )
   })
 
-  it.each([
-    ['MODEL_FILE_NOT_FOUND'],
-    ['CPU_NO_AVX'],
-    ['MODEL_LOAD_CANCELLED'],
-    ['PROVIDER_NOT_FOUND'],
-    ['CORE_ALREADY_RUNNING'],
-  ])('ignores %s', (code) => {
-    const error = new AtomicCoreError(code as 'CPU_NO_AVX', 'x')
-    expect(loadFailureReport({ provider: 'llamacpp', modelId: 'm', error })).toBeNull()
-  })
+  it.each([['MODEL_LOAD_CANCELLED'], ['PROVIDER_NOT_FOUND'], ['CORE_ALREADY_RUNNING']])(
+    'ignores %s',
+    (code) => {
+      const error = new AtomicCoreError(code as 'CPU_NO_AVX', 'x')
+      expect(loadFailureReport({ provider: 'llamacpp', modelId: 'm', error })).toBeNull()
+    }
+  )
 })
 
 describe('diffusionFailureReport', () => {
@@ -207,13 +215,10 @@ describe('diffusionFailureReport', () => {
     ])
   })
 
-  it.each([['ENGINE_MISSING'], ['CANCELLED'], ['DISK_FULL'], ['INVALID_DIMENSIONS']])(
-    'ignores %s',
-    (code) => {
-      const error = new AtomicCoreError(code as 'CANCELLED', 'x')
-      expect(diffusionFailureReport({ phase: 'job', error })).toBeNull()
-    }
-  )
+  it.each([['ENGINE_MISSING'], ['CANCELLED'], ['INVALID_DIMENSIONS']])('ignores %s', (code) => {
+    const error = new AtomicCoreError(code as 'CANCELLED', 'x')
+    expect(diffusionFailureReport({ phase: 'job', error })).toBeNull()
+  })
 })
 
 describe('audioFailureReport', () => {
@@ -298,4 +303,21 @@ describe('inferenceFailureReport', () => {
   it('leaves a 4xx to the app', () => {
     expect(inferenceFailureReport({ ...base, status: 400, body: 'context', compute: false })).toBeNull()
   })
+})
+
+it('reports typed internal failures and resource failures without changing their HTTP answer', () => {
+  expect(
+    internalErrorReport({
+      source: 'control_route',
+      status: 500,
+      error: new AtomicCoreError('INTERNAL_ERROR', 'x'),
+    })
+  ).toMatchObject({ level: 'error', diagnostic: { category: 'defect' } })
+  expect(
+    diffusionFailureReport({ phase: 'job', error: new AtomicCoreError('DISK_FULL', 'x') })
+  ).toMatchObject({ level: 'warning' })
+  for (const code of ['MODEL_FILE_NOT_FOUND', 'CPU_NO_AVX'] as const)
+    expect(
+      loadFailureReport({ provider: 'mlx', modelId: 'm', error: new AtomicCoreError(code, 'x') })
+    ).toMatchObject({ level: 'warning' })
 })

@@ -4,7 +4,7 @@
  * `src-tauri/src/core/downloads/helpers.rs`.
  */
 
-import type { DownloadStage, ProxyConfig } from '../contracts/index.js'
+import type { DownloadStage, ProxyConfig, FailureDiagnostic } from '../contracts/index.js'
 
 export const MAX_STREAM_RETRIES = 5
 export const RETRY_BASE_DELAY_MS = 1_000
@@ -36,12 +36,33 @@ export function downloadStage(kind: DownloadStage['kind'], attempt: number): Dow
 export type DownloadRequestErrorKind = 'retryable' | 'restart' | 'fatal'
 
 export class DownloadRequestError extends Error {
+  declare readonly diagnostic?: FailureDiagnostic
   constructor(
     readonly kind: DownloadRequestErrorKind,
-    message: string
+    message: string,
+    options?: { cause?: unknown; status?: number }
   ) {
-    super(message)
+    super(message, options)
     this.name = 'DownloadRequestError'
+    if (options?.status !== undefined) {
+      const expected = [400, 401, 403, 404, 422].includes(options.status)
+      Object.defineProperty(this, 'diagnostic', {
+        value: {
+          component: 'downloads',
+          operation: 'download',
+          stage: 'execute',
+          category: expected ? 'expected' : 'operational',
+          reason:
+            options.status === 401 || options.status === 403
+              ? 'authentication'
+              : options.status === 404
+                ? 'not_found'
+                : expected
+                  ? 'invalid_request'
+                  : 'upstream',
+        } satisfies FailureDiagnostic,
+      })
+    }
   }
 }
 
@@ -104,15 +125,19 @@ export function classifyResumeStatus(status: number, body: string): DownloadRequ
     return new DownloadRequestError('restart', `Server did not accept resume offset: HTTP status ${status}`)
   }
   if (isRetryableStatus(status)) {
-    return new DownloadRequestError('retryable', `Resume request failed with HTTP status ${status}`)
+    return new DownloadRequestError('retryable', `Resume request failed with HTTP status ${status}`, {
+      status,
+    })
   }
-  return new DownloadRequestError('fatal', `Failed to resume download: HTTP status ${status}, ${body}`)
+  return new DownloadRequestError('fatal', `Failed to resume download: HTTP status ${status}, ${body}`, {
+    status,
+  })
 }
 
 /** Classify a non-2xx answer to a plain request. */
 export function classifyDownloadStatus(status: number, body: string): DownloadRequestError {
   const message = `Failed to download: HTTP status ${status}, ${body}`
-  return new DownloadRequestError(isRetryableStatus(status) ? 'retryable' : 'fatal', message)
+  return new DownloadRequestError(isRetryableStatus(status) ? 'retryable' : 'fatal', message, { status })
 }
 
 /** Lives in `contracts/backend-advisor.ts` now (the advisor routes carry it); re-exported so nothing here moves. */
