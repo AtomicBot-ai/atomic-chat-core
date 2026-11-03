@@ -268,7 +268,7 @@ export class SettingsStore {
     }
     let raw: unknown
     try {
-      raw = JSON.parse(text)
+      raw = JSON.parse(text.replace(/^\uFEFF/, ''))
     } catch (e) {
       throw new AtomicCoreError('IO_ERROR', `${path} is not valid JSON: ${(e as Error).message}`)
     }
