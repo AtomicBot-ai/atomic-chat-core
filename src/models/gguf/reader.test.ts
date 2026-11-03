@@ -215,6 +215,25 @@ describe('readGgufMetadata', () => {
     expect(meta.metadata['after']).toBe('still-readable')
   })
 
+  it('inlines a boolean sliding_window_pattern at any length, one flag per block (Gemma 4 31B: 60)', () => {
+    const flags = (n: number) => ({
+      t: 'arr' as const,
+      elem: 7,
+      items: Array.from({ length: n }, (_, i) => ({ t: 'bool' as const, v: i % 6 !== 5 })),
+    })
+    const meta = readGgufMetadata(
+      gguf([
+        ['gemma4.attention.sliding_window_pattern', flags(60)],
+        ['gemma4.other_flags', flags(60)],
+        ['after', { t: 'str', v: 'still-readable' }],
+      ])
+    )
+    const sixty = Array.from({ length: 60 }, (_, i) => String(i % 6 !== 5)).join(', ')
+    expect(meta.metadata['gemma4.attention.sliding_window_pattern']).toBe(`[${sixty}]`)
+    expect(meta.metadata['gemma4.other_flags']).toBe('<Array of type Bool with 60 elements, data skipped>')
+    expect(meta.metadata['after']).toBe('still-readable')
+  })
+
   it('rejects a wrong magic, unknown types and oversized strings with the Rust messages', () => {
     expect(() => readGgufMetadata(gguf([], { magic: 'GGML' }))).toThrow(new GgufParseError('Not a GGUF file'))
     const badType = gguf([['k', { t: 'u8', v: 1 }]])
