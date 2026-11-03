@@ -111,9 +111,12 @@ describe('childEnv', () => {
       LLM_API_KEY: 'k',
     })
     expect(childEnv(agent('poolside'), 'http://h/v1', 'm', '')).toEqual({
-      POOLSIDE_STANDALONE_BASE_URL: 'http://h',
+      POOLSIDE_STANDALONE_BASE_URL: 'http://h/v1',
       POOLSIDE_API_KEY: 'atomic',
       POOLSIDE_STANDALONE_MODEL: 'm',
+    })
+    expect(childEnv(agent('poolside'), 'http://h/v1', 'm', 'k', { contextLength: 32768 })).toMatchObject({
+      POOLSIDE_STANDALONE_CONTEXT_LENGTH: '32768',
     })
     expect(childEnv(agent('muse'), 'http://h/v1', 'm', 'k')).toEqual({ META_API_KEY: 'k' })
     expect(childEnv(agent('codex'), 'http://h/v1', 'm', 'k')).toEqual({ ATOMIC_CHAT_API_KEY: 'k' })
@@ -159,11 +162,10 @@ describe('childEnv', () => {
 })
 
 describe('poolsideStandaloneBaseUrl', () => {
-  it('strips the API prefix and any trailing slashes', () => {
-    expect(poolsideStandaloneBaseUrl('http://127.0.0.1:1337/v1')).toBe('http://127.0.0.1:1337')
-    expect(poolsideStandaloneBaseUrl('http://127.0.0.1:1337/v1/')).toBe('http://127.0.0.1:1337')
+  it('keeps the API prefix Poolside documents, and drops trailing slashes', () => {
+    expect(poolsideStandaloneBaseUrl('http://127.0.0.1:1337/v1')).toBe('http://127.0.0.1:1337/v1')
+    expect(poolsideStandaloneBaseUrl('http://127.0.0.1:1337/v1/')).toBe('http://127.0.0.1:1337/v1')
     expect(poolsideStandaloneBaseUrl('  http://127.0.0.1:1337//  ')).toBe('http://127.0.0.1:1337')
-    expect(poolsideStandaloneBaseUrl('http://127.0.0.1:1337')).toBe('http://127.0.0.1:1337')
   })
 })
 

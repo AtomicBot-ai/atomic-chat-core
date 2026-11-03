@@ -315,12 +315,12 @@ export interface ChildEnvOptions {
 }
 
 /**
- * Environment the spawned agent needs on top of its config file. Four agents are configured through
- * environment variables that `configure_*` persists to the user's shell rc — that file is not live in
- * a process we are about to spawn, so the same variables are set on the child. Goose gets its own
- * only here, for the one session. Codex's profile names the variable its key is read from
- * (`env_key`) but never holds the key, so the key goes on the child — only when there is one, as the
- * profile names the variable only then.
+ * Environment the spawned agent needs on top of its config file. Six agents are configured purely
+ * through environment variables, only ever on the process we start and never for the user: Goose,
+ * OpenHands, Poolside, Muse Code, Copilot (selecting its providers.json entry) and Codex. Codex's
+ * profile names the variable its key is read from (`env_key`) but never holds the key, so the key goes
+ * on the child — only when there is one, as the profile names the variable only then.
+ * `options.contextLength`, the served window when known, tells Goose and Poolside when to compact.
  */
 export function childEnv(
   agent: Agent,
@@ -360,6 +360,9 @@ export function childEnv(
         POOLSIDE_STANDALONE_BASE_URL: poolsideStandaloneBaseUrl(apiUrl),
         POOLSIDE_API_KEY: key,
         POOLSIDE_STANDALONE_MODEL: model,
+        ...(options.contextLength && options.contextLength > 0
+          ? { POOLSIDE_STANDALONE_CONTEXT_LENGTH: String(options.contextLength) }
+          : {}),
       }
     case 'muse':
       return { META_API_KEY: key }
@@ -378,11 +381,12 @@ export function runArgsFor(agent: Agent, model: string): string[] {
   return agent.id === 'kilo' && model ? ['--model', `atomic/${model}`, ...agent.runArgs] : [...agent.runArgs]
 }
 
-/** Poolside wants the root without `/v1`; it appends its own paths. */
+/**
+ * Poolside's docs give the standalone base URL with its API prefix (`/v1`), so it is kept; only
+ * surrounding whitespace and trailing slashes go.
+ */
 export function poolsideStandaloneBaseUrl(apiUrl: string): string {
-  const trimmed = apiUrl.trim().replace(/\/+$/, '')
-  const withoutV1 = trimmed.endsWith('/v1') ? trimmed.slice(0, -'/v1'.length) : trimmed
-  return withoutV1.replace(/\/+$/, '')
+  return apiUrl.trim().replace(/\/+$/, '')
 }
 
 /**
