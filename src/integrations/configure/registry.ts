@@ -23,6 +23,11 @@ export interface ConfigureInput {
   spawn?: (program: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>
   /** The agent's launcher as detection found it (bare name or absolute path); Codex asks it its version. */
   program?: string
+  /**
+   * The window the served model was loaded with, when known. An agent told nothing assumes
+   * 128K-272K and never compacts before a 16K-64K local server refuses.
+   */
+  contextLength?: number
 }
 
 export type ConfigureWriter = (input: ConfigureInput) => Promise<void>
@@ -50,6 +55,7 @@ export interface ConfigureOptions {
   env?: NodeJS.ProcessEnv
   spawn?: ConfigureInput['spawn']
   program?: string
+  contextLength?: number
 }
 
 /**
@@ -91,5 +97,6 @@ export async function configureAgent(
     env,
     ...(options.spawn ? { spawn: options.spawn } : {}),
     ...(options.program ? { program: options.program } : {}),
+    ...(options.contextLength ? { contextLength: options.contextLength } : {}),
   })
 }

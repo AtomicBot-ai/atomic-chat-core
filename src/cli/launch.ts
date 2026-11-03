@@ -35,7 +35,9 @@ export const DEFAULT_LAUNCH_API_KEY = 'atomic'
 
 export interface LaunchDeps {
   /** Write the agent's config files. Injected so tests never touch a real home directory. */
-  configure?: ((agent: Agent, apiUrl: string, model: string, apiKey: string) => Promise<void>) | undefined
+  configure?:
+    | ((agent: Agent, apiUrl: string, model: string, apiKey: string, contextLength?: number) => Promise<void>)
+    | undefined
   /** Run the agent; resolves with its exit code. Injected in tests. */
   run?: ((spec: RunSpec) => Promise<number>) | undefined
   detect?: typeof detectAgents | undefined
@@ -167,15 +169,19 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
 
       const configure =
         deps.configure ??
-        ((a, u, m, k) =>
+        ((a, u, m, k, ctx) =>
           configureAgent(a, u, m, k, {
             env: io.env,
             spawn: runCommand,
             // Codex asks the launcher we are about to run for its version.
             program: detection.program,
+            ...(ctx ? { contextLength: ctx } : {}),
           }))
+      // Fit may have chosen another window than the one asked for: the session says which.
+      const contextLength =
+        (await sessionContextLength(session)) ?? (fit ? undefined : Number(overrides['ctx_size']))
       try {
-        await configure(agent, apiUrl, modelId, apiKey)
+        await configure(agent, apiUrl, modelId, apiKey, contextLength)
       } catch (e) {
         throw new AtomicCoreError(
           'IO_ERROR',
@@ -414,4 +420,28 @@ export function runCommand(
       else resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })
     })
   })
+}
+
+/** The window a llama.cpp session was loaded with, from its `/props`; `undefined` when it cannot say. */
+export async function sessionContextLength(session: {
+  port: number
+  api_key: string
+}): Promise<number | undefined> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${session.port}/props`, {
+      headers: session.api_key ? { Authorization: `Bearer ${session.api_key}` } : {},
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!response.ok) return undefined
+    const body = (await response.json()) as {
+      n_ctx?: unknown
+      default_generation_settings?: { n_ctx?: unknown }
+    }
+    for (const value of [body.default_generation_settings?.n_ctx, body.n_ctx]) {
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value)
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
 }
