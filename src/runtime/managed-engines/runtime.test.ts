@@ -615,6 +615,31 @@ describe('ManagedTextRuntime: an engine’s launch plan', () => {
     expect(launchPlan).toHaveBeenCalledTimes(1)
     expect(launchPlan.mock.calls[0]?.[2]).toMatchObject({ free_vram_bytes: 23_000 * MiB })
   })
+
+  it('names the window the plan chose in the session limits, and keeps it when the session is reused', async () => {
+    // vLLM and SGLang decide an automatic window in their plan (auto-limits.ts).
+    const launchPlan = vi.fn(() => ({ window: 65_536 }))
+    const planContextLength = (plan: unknown) => (plan as { window?: number } | undefined)?.window
+    build()
+    runtime = new ManagedTextRuntime(
+      { ...TENSORRT_LLM_ENGINE, launchPlan, planContextLength } as typeof TENSORRT_LLM_ENGINE,
+      {
+        lifecycle: () => lastLifecycle,
+        readyInstallation: () => installation(),
+        hostFacts: async () => facts,
+        model: (id: string) => readManagedModel(data.layout.provider('tensorrt-llm').modelsDir, id),
+        settings: () => stored,
+        stopPrevious: undefined,
+        releaseModelElsewhere: async () => {},
+      } as never
+    )
+    await runtime.load('qwen3')
+    expect(runtime.routePolicy('qwen3')).toMatchObject({ contextLength: 65_536 })
+    // Same settings: the lifecycle keeps the ready session and runs no plan.
+    await runtime.load('qwen3')
+    expect(launchPlan).toHaveBeenCalledTimes(1)
+    expect(runtime.routePolicy('qwen3')).toMatchObject({ contextLength: 65_536 })
+  })
 })
 
 describe('ManagedTextRuntime: the same model in another managed provider', () => {

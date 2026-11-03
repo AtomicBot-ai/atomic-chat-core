@@ -28,15 +28,17 @@ import {
   isJsonObject,
   serdeToString,
 } from '../shims/index.js'
-import type { JsonValue } from '../shims/index.js'
+import type { JsonObject, JsonValue } from '../shims/index.js'
 import { LOCAL_SEARCH_ORDER, resolveRemoteProvider, resolveSelectedRoute } from '../../router/index.js'
 import type { LocalProvider, RemoteProvider, SelectedRoute } from '../../router/index.js'
 import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
 import { autoIncreaseCtx } from './ctx.js'
+import { sessionWindow } from './context-window.js'
 import { SseLineReader } from './sse.js'
 import { StreamTelemetry, isUsageOnlyChunk, maybeInjectStreamUsage } from './telemetry.js'
 import { endpointFromPath } from './trace.js'
 import {
+  anthropicPromptTooLong,
   bodyIndicatesOom,
   computeErrorEnvelope,
   emptyMessagesRefusal,
@@ -50,6 +52,8 @@ import {
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
+import { placedSystemMessages } from './system-messages.js'
+import { isLlamaCppServer, noThinkingTemplateKwargs } from './thinking.js'
 import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
 import type { LocalTarget } from './types.js'
@@ -237,6 +241,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     }
     backend = { kind: 'local', session }
     trace.backend = session.provider
+    trace.recordWindow(() => sessionWindow(ex.deps, session))
     const refused = session.policy && policyRefusal(session.policy, ex.path, modelId, json)
     if (refused) {
       trace.errorKind = 'bad_request'
@@ -273,6 +278,18 @@ export async function serveForward(ex: Exchange): Promise<void> {
     return
   }
 
+  // An Anthropic request that asks for no thinking gets none from a llama.cpp chat template either
+  // (QA B08): on `/v1/messages` and on the chat-completions fallback alike.
+  const noThinking =
+    isMessages && backend.kind === 'local'
+      ? noThinkingTemplateKwargs(backend.session.provider, json)
+      : undefined
+  // System messages inside the conversation stay where they are, as reminders in a user turn, before a
+  // strict llama.cpp template sees them (QA B08, audit S1): on `/v1/messages` and on the fallback.
+  const placed =
+    isMessages && backend.kind === 'local' ? placedSystemMessages(backend.session.provider, json) : undefined
+  const messagesJson: JsonValue = placed !== undefined && isJsonObject(json) ? { ...json, ...placed } : json
+
   // A session that declares its routes and has no `/v1/messages` of its own goes straight to the
   // chat-completions translation: asking it first would only be refused (findings-2.14-r1.md item 4).
   if (
@@ -281,7 +298,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     backend.session.policy &&
     !backend.session.policy.routes.some((r) => r.method === 'POST' && r.path === '/v1/messages')
   ) {
-    await messagesFallback(ex, backend, url, key, json)
+    await messagesFallback(ex, backend, url, key, messagesJson, noThinking)
     return
   }
 
@@ -291,6 +308,15 @@ export async function serveForward(ex: Exchange): Promise<void> {
     trace.inspecting && stream && ex.path === '/chat/completions' && backend.kind === 'local'
       ? maybeInjectStreamUsage(raw)
       : undefined
+  const rewritten =
+    (noThinking !== undefined || placed !== undefined) && isJsonObject(messagesJson)
+      ? Buffer.from(
+          serdeToString({
+            ...messagesJson,
+            ...(noThinking !== undefined ? { chat_template_kwargs: noThinking } : {}),
+          })
+        )
+      : undefined
 
   const signal = clientGone(ex)
   let response: UpstreamResponse
@@ -298,7 +324,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     response = await sendUpstream(url, {
       method: ex.method,
       headers: outboundHeaders(ex, ['host', 'authorization'], backend, key),
-      body: injected ?? raw,
+      body: injected ?? rewritten ?? raw,
       connectTimeoutMs: connectTimeoutMs(ex),
       signal,
     })
@@ -309,7 +335,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
   }
 
   if (!isSuccess(response.status)) {
-    if (isMessages) await messagesFallback(ex, backend, url, key, json, response)
+    if (isMessages) await messagesFallback(ex, backend, url, key, messagesJson, noThinking, response)
     else await upstreamError(ex, backend, modelId, raw, response)
     return
   }
@@ -586,14 +612,38 @@ async function messagesFallback(
   url: string,
   key: string | undefined,
   json: JsonValue,
+  /** `chat_template_kwargs` that keep a llama.cpp template from thinking the request did not ask for. */
+  noThinking: JsonObject | undefined,
   /** The engine's own answer to `/messages`; absent when the session is known not to serve it. */
   response?: UpstreamResponse
 ): Promise<void> {
   const errorBody = response === undefined ? undefined : await readUpstreamText(response)
   const trace = ex.trace
-  trace.anthropicFallback = true
   const errorKind = backend.kind === 'local' ? 'local_model_error' : 'remote_provider_error'
+  // A prompt the engine's window cannot hold would not fit as chat completions either: the client is
+  // told in the Anthropic API's own words, which make Claude Code compact the conversation (audit X1).
+  if (
+    response !== undefined &&
+    errorBody !== undefined &&
+    answeredPromptTooLong(ex, backend, response.status, errorBody)
+  )
+    return
+  trace.anthropicFallback = true
   const chat = anthropicRequestToChat(json)
+  if (isJsonObject(chat) && noThinking !== undefined) chat['chat_template_kwargs'] = noThinking
+  // llama.cpp's own `/v1/messages` stops at the request's `max_tokens`; the translation keeps that
+  // cap, or an engine started with `n_predict -1` writes until its context is full. Other engines
+  // keep the translation as the Rust proxy shipped it, without the cap.
+  const maxTokens = isJsonObject(json) ? json['max_tokens'] : undefined
+  if (
+    isJsonObject(chat) &&
+    backend.kind === 'local' &&
+    isLlamaCppServer(backend.session.provider) &&
+    typeof maxTokens === 'number' &&
+    maxTokens > 0
+  ) {
+    chat['max_tokens'] = maxTokens
+  }
   if (chat !== null) {
     let base = url
     while (base.endsWith('/messages')) base = base.slice(0, -'/messages'.length)
@@ -618,6 +668,7 @@ async function messagesFallback(
       })
       if (!isSuccess(fallback.status)) {
         const fallbackError = await readUpstreamText(fallback)
+        if (answeredPromptTooLong(ex, backend, fallback.status, fallbackError)) return
         trace.errorKind = errorKind
         trace.upstreamStatus = fallback.status
         trace.oomDetected = bodyIndicatesOom(fallbackError)
@@ -680,6 +731,23 @@ async function messagesFallback(
   trace.oomDetected = bodyIndicatesOom(errorBody)
   trace.ctxOverflowDetected = isContextLimitError(response.status, errorBody)
   answer(ex, response.status, errorBody)
+}
+
+/**
+ * Answer a local engine's context overflow on `/messages` as Anthropic's `prompt is too long`; `false`
+ * for any other error, which the caller handles as before. A remote provider words its own errors.
+ */
+function answeredPromptTooLong(ex: Exchange, backend: Backend, status: number, errorBody: string): boolean {
+  if (backend.kind !== 'local') return false
+  const tooLong = anthropicPromptTooLong(status, errorBody)
+  if (tooLong === undefined) return false
+  const trace = ex.trace
+  trace.errorKind = 'local_model_error'
+  trace.upstreamStatus = status
+  trace.oomDetected = false
+  trace.ctxOverflowDetected = true
+  answer(ex, 400, tooLong, [['Content-Type', 'application/json']])
+  return true
 }
 
 async function* anthropicStream(upstream: UpstreamResponse): AsyncGenerator<string> {

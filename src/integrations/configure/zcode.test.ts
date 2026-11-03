@@ -13,10 +13,10 @@ import { configureAgent } from './registry.js'
 import {
   acquireZcodeLock,
   configureZcodeIn,
-  ZCODE_CONTEXT_WINDOW,
   ZCODE_KEY_PLACEHOLDER,
   ZCODE_PROVIDER_ID,
   ZCODE_REASONING_MAP,
+  ZCODE_SELECTION_KEY,
   zcodeConfigDir,
   zcodePatchProviderConfig,
 } from './zcode.js'
@@ -83,7 +83,9 @@ describe('zcodePatchProviderConfig', () => {
     expect(modelRules(out, 'manualProviderModelRules')).toEqual([])
     const rule = modelRules(out, 'providerModelRules')[0] as Json
     expect(rule['modelId']).toBe('qwen3-4b')
-    expect(rule['config']['properties']['contextWindow']).toBe(ZCODE_CONTEXT_WINDOW)
+    // With the served window unknown, ZCode's own default stands.
+    expect(rule['config']['properties']).not.toHaveProperty('contextWindow')
+    expect(rule['config']['optionSpecs']['maxOutputTokens']['max']).toBe(8192)
     expect(rule['config']['optionSpecs']['reasoningLevel']['map']).toBe(ZCODE_REASONING_MAP)
     expect(out['config']['defaultModelSelection']).toEqual({
       providerId: ZCODE_PROVIDER_ID,
@@ -92,6 +94,25 @@ describe('zcodePatchProviderConfig', () => {
     })
     // A file ZCode never had gets no order list invented for it.
     expect(out['config']).not.toHaveProperty('providerOrder')
+  })
+
+  it('writes the served window and a quarter of it for output', () => {
+    for (const [context, maxOutput] of [
+      [65536, 8192],
+      [16384, 4096],
+      [8192, 2048],
+    ] as const) {
+      const out = zcodePatchProviderConfig(undefined, URL, 'm', undefined, context) as Json
+      const rule = (modelRules(out, 'providerModelRules')[0] as Json)['config']
+      expect(rule['properties']['contextWindow']).toBe(context)
+      expect(rule['optionSpecs']['maxOutputTokens']['max']).toBe(maxOutput)
+    }
+    // A reconnect with another window rewrites it.
+    const again = zcodePatchProviderConfig(patch(undefined, 'm'), URL, 'm', undefined, 32768) as Json
+    expect(modelRules(again, 'providerModelRules')).toHaveLength(1)
+    expect(
+      (modelRules(again, 'providerModelRules')[0] as Json)['config']['properties']['contextWindow']
+    ).toBe(32768)
   })
 
   it("uses the server's key when there is one", () => {
@@ -218,6 +239,21 @@ describe('configureZcodeIn', () => {
     }
   })
 
+  it("keeps the user's default model aside for Disconnect, never ours", async () => {
+    const fs = nodeConfigFs(home)
+    const sidecar = join(dir(), 'provider_config.json.atomic-chat-backup.json')
+    await mkdir(dir(), { recursive: true })
+    await writeFile(join(dir(), 'provider_config.json'), JSON.stringify(userFile()))
+
+    await configureZcodeIn(fs, dir(), URL, 'qwen3-4b', undefined, {}, 32768)
+    await configureZcodeIn(fs, dir(), URL, 'gemma-4', undefined)
+    expect(JSON.parse(await readFile(sidecar, 'utf8'))).toEqual({
+      [ZCODE_SELECTION_KEY]: userFile()['config']['defaultModelSelection'],
+    })
+    const written = JSON.parse(await readFile(join(dir(), 'provider_config.json'), 'utf8')) as Json
+    expect(written['config']['defaultModelSelection']['modelId']).toBe('gemma-4')
+  })
+
   it('creates the directory for a first write and keeps no backup of nothing', async () => {
     await configureZcodeIn(nodeConfigFs(home), dir(), URL, 'm', 'sk')
     expect((await readdir(dir())).sort()).toEqual(['provider_config.json'])
@@ -248,17 +284,20 @@ describe('configureZcodeIn', () => {
     }
   )
 
-  it('is what `launch` runs for zcode, with $ZCODE_DATA_BASE_DIR honoured', async () => {
+  it('is what `launch` runs for zcode, with $ZCODE_DATA_BASE_DIR and the window honoured', async () => {
     const base = join(home, 'moved')
     await configureAgent('zcode', URL, 'qwen3-4b', '', {
       home,
       platform: 'linux',
       env: { ZCODE_DATA_BASE_DIR: base },
+      contextLength: 16384,
     })
     const written = JSON.parse(
       await readFile(join(base, '.zcode', 'v2', 'provider_config.json'), 'utf8')
     ) as Json
     expect(written['config']['defaultModelSelection']['modelId']).toBe('qwen3-4b')
+    const rule = (modelRules(written, 'providerModelRules')[0] as Json)['config']
+    expect(rule['properties']['contextWindow']).toBe(16384)
   })
 })
 

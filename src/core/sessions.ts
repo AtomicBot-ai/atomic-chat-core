@@ -223,7 +223,7 @@ export class LocalSessions {
 
 function toLocalTarget(
   provider: LocalProvider,
-  session: Pick<SessionInfo, 'model_id' | 'port' | 'api_key' | 'is_embedding'>,
+  session: Pick<SessionInfo, 'model_id' | 'port' | 'api_key' | 'is_embedding' | 'generation'>,
   policy?: SessionRoutePolicy
 ): LocalTarget {
   return {
@@ -233,6 +233,7 @@ function toLocalTarget(
     apiKey: session.api_key,
     isEmbedding: session.is_embedding,
     ...(policy === undefined ? {} : { policy }),
+    ...(session.generation === undefined ? {} : { generation: session.generation }),
   }
 }
 

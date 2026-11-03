@@ -14,11 +14,18 @@
  *  - `activeEmbeddingProvider` is repaired only when it is missing or dangling, and always to
  *    `local-llama`. Repairing it to US would quietly hand memory recall to Atomic Chat, which is not
  *    what Run asked for.
+ *
+ * With no `llm.fallback` block the agent appends `local-llama` to every chain, so a failure of ours
+ * (a 404 included) is retried on :8080 and reported as "The local model isn't running": Connect
+ * writes `appendLocal: false` there. What the `llm` keys held before is recorded in
+ * `config.json.atomic-chat-backup.json` for the app's Disconnect. Mirrors `configure_atomic_agent_at`
+ * in the app's `core/system/commands.rs`, byte for byte.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { JsonValue } from '../config-io.js'
 import { canonicalJson, parseJsonStrict } from '../config-io.js'
+import { getAt, readBackup, renderBackup, trackKeys, writeBackupText } from './json-key-backup.js'
 import type { JsonObject } from './json-tree.js'
 import { asJsonArray, asJsonObject } from './json-tree.js'
 import type { ConfigureWriter } from './registry.js'
@@ -82,7 +89,8 @@ export function atomicAgentPatchConfig(
   parsed: JsonValue,
   apiUrl: string,
   model: string,
-  apiKey: string
+  apiKey: string,
+  contextLength?: number
 ): JsonObject {
   // The agent's `parseOptionalString` rejects `""` outright rather than treating it as absent, so an
   // empty model would take the whole file down at its next start. Fail before touching anything.
@@ -121,6 +129,11 @@ export function atomicAgentPatchConfig(
     supportsTools: true,
     requestTimeoutMs: timeout,
   }
+  // `userModels` outranks the bundled catalog in the agent's `resolveModel`; without it a local model
+  // is assumed to hold 128K and is never compacted before the server refuses.
+  if (contextLength !== undefined) {
+    entry['userModels'] = [{ id: model.trim(), kind: 'chat', contextWindow: contextLength }]
+  }
   if (existing >= 0) providers[existing] = entry
   else providers.push(entry)
 
@@ -131,16 +144,53 @@ export function atomicAgentPatchConfig(
   // Pressing Run is an explicit "use this", so the text provider is switched outright.
   llm['activeTextProvider'] = PROVIDER_ID
   if (repair) llm['activeEmbeddingProvider'] = LOCAL_PROVIDER_ID
+  // A chain the user configured is theirs.
+  if (llm['fallback'] === undefined || llm['fallback'] === null) llm['fallback'] = { appendLocal: false }
 
   return root
 }
 
-export const configureAtomicAgent: ConfigureWriter = async ({ apiUrl, model, apiKey, fs, env }) => {
+/** The `llm` keys Connect may overwrite besides our provider entry. */
+export const ATOMIC_AGENT_TRACKED_PATHS: string[][] = [
+  ['llm', 'activeTextProvider'],
+  ['llm', 'activeEmbeddingProvider'],
+  ['llm', 'fallback'],
+]
+
+export const configureAtomicAgent: ConfigureWriter = async ({
+  apiUrl,
+  model,
+  apiKey,
+  fs,
+  env,
+  contextLength,
+}) => {
   const override = env['ATOMIC_AGENT_STATE_DIR']?.trim()
   const path = `${override && override !== '' ? override : '.atomic-agent'}/config.json`
   const text = await fs.read(path)
   const parsed = text === undefined ? {} : parseJsonStrict(text, fs.absolute(path))
-  await fs.write(path, canonicalJson(atomicAgentPatchConfig(parsed, apiUrl, model, apiKey)))
+  const before = JSON.parse(JSON.stringify(parsed)) as JsonValue
+  const patched = atomicAgentPatchConfig(parsed, apiUrl, model, apiKey, contextLength)
+
+  // The `local-llama` entry this Connect added, or an earlier one did: Disconnect drops it when
+  // nothing else is left.
+  const previous = await readBackup(fs, path)
+  const listed = (value: JsonValue) => asJsonArray(getAt(value, ['llm', 'providers'])) ?? []
+  const same = (a: JsonValue, b: JsonValue) => canonicalJson(a) === canonicalJson(b)
+  const seeded = [...(previous?.seeded ?? [])]
+  const original = listed(before)
+  for (const entry of listed(patched)) {
+    if (
+      asJsonObject(entry)?.['id'] === LOCAL_PROVIDER_ID &&
+      !original.some((e) => same(e, entry)) &&
+      !seeded.some((e) => same(e, entry))
+    ) {
+      seeded.push(entry)
+    }
+  }
+  const keys = trackKeys(before, patched, ATOMIC_AGENT_TRACKED_PATHS, previous?.keys ?? [])
+  await fs.write(path, canonicalJson(patched))
+  await writeBackupText(fs, path, renderBackup({ keys, seeded }))
 }
 
 registerWriter('atomic-agent', configureAtomicAgent)

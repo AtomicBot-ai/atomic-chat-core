@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { homedir, release as osRelease } from 'node:os'
+import { homedir, release as osRelease, totalmem } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
 import type {
@@ -308,6 +308,8 @@ export async function createAtomicCore(
           probeUnifiedMemory(
             nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
           ),
+        // Any platform: the host prompt cache (`--cache-ram`) is sized by the machine's RAM.
+        systemMemory: async () => ({ totalMemoryBytes: totalmem() }),
         log: runtimeLog,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
@@ -349,6 +351,10 @@ export async function createAtomicCore(
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
           claimGpu: gpuResidency.hook('mlx'),
+          unifiedMemory: async () =>
+            probeUnifiedMemory(
+              nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+            ),
           log: runtimeLog,
           ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
         })

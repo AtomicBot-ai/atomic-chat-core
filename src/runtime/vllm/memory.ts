@@ -26,6 +26,8 @@
 import type { GpuFacts } from '../../contracts/index.js'
 import {
   checkpointIsMultimodal,
+  checkpointMaxContext,
+  fitAutoLimits,
   freeMemoryBytes,
   isUnifiedMemory,
   kvCacheQuantAlgo,
@@ -110,11 +112,70 @@ function vllmWeightsOnCard(checkpoint: CheckpointMemoryInputs, settings: VllmSet
 }
 
 /**
+ * The window and request count a load runs with on `gpu`: the pinned ones, or — for a setting left at
+ * 0 — the widest pair vLLM's own memory rule (`vllmMemoryNeed`) passes on the card's free memory
+ * (`auto-limits.ts`). With a fixed KV cache size the window must also fit it, as vLLM checks at start
+ * ("max seq len … larger than the available KV cache memory").
+ */
+export function vllmLimits(
+  settings: VllmSettings,
+  checkpoint: CheckpointMemoryInputs,
+  gpu: GpuFacts,
+  host: HostMemory
+): { context_length: number; max_num_seqs: number } {
+  if (settings.context_length > 0 && settings.max_num_seqs > 0)
+    return { context_length: settings.context_length, max_num_seqs: settings.max_num_seqs }
+  const free = freeMemoryBytes(gpu, host)
+  const shape = readKvCacheShape(checkpoint.configJson)
+  const { context, sequences } = fitAutoLimits({
+    contextAuto: settings.context_length === 0,
+    sequencesAuto: settings.max_num_seqs === 0,
+    context: settings.context_length,
+    sequences: settings.max_num_seqs,
+    maxOutputTokens: settings.max_output_tokens,
+    trainedContext: checkpointMaxContext(checkpoint.configJson),
+    fits: (context_length, max_num_seqs) => {
+      const pinned = { ...settings, context_length, max_num_seqs }
+      if (fixedMemoryNeed(gpu, checkpoint, pinned, host) > free) return false
+      if (settings.kv_cache_memory_gib === null || shape === undefined) return true
+      const oneSequence = vllmKvCacheBytes(
+        checkpoint,
+        { ...pinned, kv_cache_memory_gib: null, max_num_seqs: 1 },
+        gpu,
+        false
+      )
+      return oneSequence.bytes <= settings.kv_cache_memory_gib * GiB
+    },
+  })
+  return { context_length: context, max_num_seqs: sequences }
+}
+
+/**
  * vLLM's memory rule on `gpu`: weights on the card + KV cache in bytes + its own overhead (CUDA context
  * included) + a margin for what other processes may take meanwhile; on a card with the host's memory,
- * whatever of `MemAvailable` lies beyond half the host's memory counts as needed too.
+ * whatever of `MemAvailable` lies beyond half the host's memory counts as needed too. An automatic
+ * window or request count is first resolved on the same card (`vllmLimits`).
  */
 export function vllmMemoryNeed(
+  gpu: GpuFacts,
+  checkpoint: CheckpointMemoryInputs,
+  settings: VllmSettings,
+  host: HostMemory
+): MemoryNeed {
+  return memoryNeedAt(gpu, checkpoint, { ...settings, ...vllmLimits(settings, checkpoint, gpu, host) }, host)
+}
+
+function fixedMemoryNeed(
+  gpu: GpuFacts,
+  checkpoint: CheckpointMemoryInputs,
+  settings: VllmSettings,
+  host: HostMemory
+): number {
+  return memoryNeedAt(gpu, checkpoint, settings, host).neededBytes
+}
+
+/** `vllmMemoryNeed` at a pinned window and request count. */
+function memoryNeedAt(
   gpu: GpuFacts,
   checkpoint: CheckpointMemoryInputs,
   settings: VllmSettings,
@@ -134,6 +195,7 @@ export function vllmMemoryNeed(
     details:
       `weight_bytes=${checkpoint.weightBytesTotal}` +
       (offloadedBytes > 0 ? ` cpu_offload_bytes=${offloadedBytes}` : '') +
+      ` context_length=${settings.context_length} max_num_seqs=${settings.max_num_seqs}` +
       ` kv_cache_bytes=${kv.bytes} kv_reserve_basis=${kv.basis} ` +
       `engine_overhead_bytes=${VLLM_ENGINE_OVERHEAD_BYTES} free_margin_bytes=${VLLM_FREE_MEMORY_MARGIN_BYTES}` +
       (unified ? ` system_reserve_bytes=${systemReserve}` : '') +
@@ -159,7 +221,10 @@ export function vllmLaunchPlan(
   gpu: GpuFacts,
   host: HostMemory
 ): VllmLaunchPlan {
+  const limits = vllmLimits(settings, checkpoint, gpu, host)
   return {
+    maxModelLen: limits.context_length,
+    maxNumSeqs: limits.max_num_seqs,
     kvCacheMemoryBytes:
       settings.kv_cache_memory_gib === null ? null : Math.round(settings.kv_cache_memory_gib * GiB),
     gpuMemoryUtilization: settings.gpu_memory_utilization ?? vllmGpuMemoryUtilization(gpu, host),

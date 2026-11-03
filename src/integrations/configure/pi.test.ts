@@ -65,6 +65,58 @@ describe('configurePi', () => {
     expect(JSON.parse((await home.read(SETTINGS)) ?? '').theme).toBe('nord')
   })
 
+  it('declares the window, output cap and a compaction budget when the window is known', async () => {
+    home = await makeAgentHome()
+    await home.seed(
+      SETTINGS,
+      '{"compaction": {"modelOverrides": {"atomic/old": {"reserveTokens": 1}, "x/y": {}}}}'
+    )
+    await configurePi({ ...agentInput(home.fs, { model: 'm' }), contextLength: 16384 })
+    expect(JSON.parse((await home.read(MODELS)) ?? '').providers.atomic.models).toEqual([
+      { id: 'm', contextWindow: 16384, maxTokens: 4096 },
+    ])
+    expect(JSON.parse((await home.read(SETTINGS)) ?? '').compaction).toEqual({
+      modelOverrides: { 'x/y': {}, 'atomic/m': { reserveTokens: 4096, keepRecentTokens: 4096 } },
+    })
+
+    // Unknown: no window invented, and our old override goes with nothing left behind.
+    await home.seed(SETTINGS, '{"compaction": {"modelOverrides": {"atomic/old": {}}}}')
+    await configurePi(agentInput(home.fs, { model: 'm' }))
+    expect(JSON.parse((await home.read(MODELS)) ?? '').providers.atomic.models).toEqual([{ id: 'm' }])
+    expect(JSON.parse((await home.read(SETTINGS)) ?? '').compaction).toBeUndefined()
+  })
+
+  it('keeps the default model it replaces, and a provider of the same id that is not ours', async () => {
+    home = await makeAgentHome()
+    await home.seed(SETTINGS, '{"defaultProvider": "openai", "defaultModel": "gpt-5"}')
+    await home.seed(MODELS, '{"providers": {"atomic": {"api": "anthropic-messages"}}}')
+    await configurePi(agentInput(home.fs))
+    await configurePi(agentInput(home.fs))
+    expect(JSON.parse((await home.read(`${SETTINGS}.atomic-chat-backup.json`)) ?? '').previous).toEqual({
+      defaultProvider: 'openai',
+      defaultModel: 'gpt-5',
+    })
+    expect(JSON.parse((await home.read(`${MODELS}.atomic-chat-backup.json`)) ?? '').previous).toEqual({
+      providers: { atomic: { api: 'anthropic-messages' } },
+    })
+  })
+
+  it('keeps an "atomic" provider that is not an object as the user\'s, and replaces it', async () => {
+    home = await makeAgentHome()
+    await home.seed(MODELS, '{"providers": {"atomic": "hand-written"}}')
+    await configurePi(agentInput(home.fs))
+    expect(JSON.parse((await home.read(MODELS)) ?? '').providers.atomic.name).toBe('Atomic Chat')
+    expect(JSON.parse((await home.read(`${MODELS}.atomic-chat-backup.json`)) ?? '').previous).toEqual({
+      providers: { atomic: 'hand-written' },
+    })
+  })
+
+  it('writes under $PI_CODING_AGENT_DIR, a leading ~ meaning the home', async () => {
+    home = await makeAgentHome()
+    await configurePi(agentInput(home.fs, { env: { PI_CODING_AGENT_DIR: '~/pi-dir' } }))
+    expect(Object.keys(await home.tree())).toEqual(['pi-dir/models.json', 'pi-dir/settings.json'])
+  })
+
   it('works from a home directory whose path contains a space', async () => {
     home = await makeAgentHome('atomic pi home-')
     await configurePi(agentInput(home.fs))

@@ -15,6 +15,8 @@ import {
   type SettingsFs,
 } from './store.js'
 
+import { DEFAULT_MIGRATIONS } from './default-migrations.js'
+
 const PATH = '/data/atomic-core/settings.json'
 
 /** In-memory `node:fs/promises` subset with an operation log for ordering assertions. */
@@ -67,6 +69,59 @@ async function openFresh(fs = new FakeFs()) {
 function onDisk(fs: FakeFs) {
   return JSON.parse(fs.files.get(PATH)!) as Record<string, unknown>
 }
+
+/** Integrations audit 2026-11-03: defaults core changed, moved once in files that still hold the old ones. */
+describe('SettingsStore.open — default migrations', () => {
+  const OLD_DEFAULTS = {
+    'llamacpp-upstream': { parallel: 1, cont_batching: false, n_predict: -1, fit: true },
+    'atomic-prism': { parallel: 3, cont_batching: false, n_predict: 512 },
+    'vllm': { context_length: 8192, max_num_seqs: 1 },
+    'sglang': { context_length: 16384, max_running_requests: 1 },
+  }
+
+  it('moves values still at an old default to the new one, leaves the user’s own, and records it once', async () => {
+    const fs = new FakeFs()
+    fs.files.set(PATH, JSON.stringify({ version: 1, revision: 7, providers: OLD_DEFAULTS }))
+    const { store } = await openFresh(fs)
+    expect(store.get('llamacpp-upstream')).toMatchObject({
+      parallel: 2,
+      cont_batching: true,
+      n_predict: 0,
+      fit: true,
+    })
+    // Values the user had moved off the old default stay as they were.
+    expect(store.get('atomic-prism')).toMatchObject({ parallel: 3, cont_batching: true, n_predict: 512 })
+    expect(store.get('vllm')).toMatchObject({ context_length: 0, max_num_seqs: 0 })
+    expect(store.get('sglang')).toMatchObject({ context_length: 16384, max_running_requests: 0 })
+    // A moved value is a change: the revision moves and the file is written, with the record.
+    expect(store.revision).toBe(8)
+    const disk = onDisk(fs)
+    expect(disk['revision']).toBe(8)
+    expect((disk['state'] as Record<string, unknown>)['default_migrations']).toEqual(
+      DEFAULT_MIGRATIONS.map((m) => m.id)
+    )
+  })
+
+  it('never moves a value again once recorded: the old default set afterwards is the user’s', async () => {
+    const fs = new FakeFs()
+    fs.files.set(PATH, JSON.stringify({ version: 1, revision: 1, providers: OLD_DEFAULTS }))
+    const { store } = await openFresh(fs)
+    await store.update('llamacpp-upstream', { parallel: 1 })
+    const writes = fs.ops.filter((op) => op.startsWith('write')).length
+    const { store: reopened } = await openFresh(fs)
+    expect(reopened.get('llamacpp-upstream')['parallel']).toBe(1)
+    expect(fs.ops.filter((op) => op.startsWith('write')).length).toBe(writes)
+  })
+
+  it('gives a fresh file the new defaults and records every migration as done', async () => {
+    const { fs, store } = await openFresh()
+    expect(store.get('llamacpp-upstream')).toMatchObject({ parallel: 2, cont_batching: true, n_predict: 0 })
+    expect(store.revision).toBe(0)
+    expect((onDisk(fs)['state'] as Record<string, unknown>)['default_migrations']).toEqual(
+      DEFAULT_MIGRATIONS.map((m) => m.id)
+    )
+  })
+})
 
 describe('SettingsStore.open', () => {
   it('stamps an owner scope on legacy settings and rejects reuse by the other owner', async () => {
@@ -132,7 +187,11 @@ describe('SettingsStore.open', () => {
 
   it('reads an existing file without rewriting it', async () => {
     const fs = new FakeFs()
-    fs.files.set(PATH, JSON.stringify({ version: 1, revision: 3, providers: { mlx: { timeout: 42 } } }))
+    const state = { default_migrations: DEFAULT_MIGRATIONS.map((m) => m.id) }
+    fs.files.set(
+      PATH,
+      JSON.stringify({ version: 1, revision: 3, providers: { mlx: { timeout: 42 } }, state })
+    )
     const { store } = await openFresh(fs)
     expect(store.revision).toBe(3)
     expect(store.get('mlx')['timeout']).toBe(42)

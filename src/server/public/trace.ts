@@ -86,6 +86,8 @@ export class RequestTrace {
   ctxOverflowDetected = false
   /** Streamed telemetry for the inspector, when a relay collected any. */
   telemetry: StreamTelemetry | undefined
+  /** The window of the session the request went to, once known (`recordWindow`). */
+  ctxLen: number | null = null
 
   private readonly startedAt = now()
   private readonly startedAtMs = Date.now()
@@ -161,6 +163,21 @@ export class RequestTrace {
     return this.telemetry
   }
 
+  /**
+   * Keep the window of the session the request goes to with the request, as it is now: the log shows
+   * it after that model has been reloaded with another window, or unloaded (QA B04). Read only when
+   * the request is reported at all; one that finishes before the window is known reports none.
+   */
+  recordWindow(read: () => Promise<number | undefined>): void {
+    if (!this.deps.emit) return
+    void read().then(
+      (window) => {
+        if (window !== undefined) this.ctxLen = window
+      },
+      () => {}
+    )
+  }
+
   /** Telemetry from a whole (non-streamed) response body: there is no time to first token. */
   stash(fields: TelemetryFields): void {
     this.stashed = { ...fields, ttft_ms: null }
@@ -221,6 +238,7 @@ export class RequestTrace {
       finish = {
         ttft_ms: null,
         prompt_tokens: null,
+        cached_tokens: null,
         completion_tokens: null,
         total_tokens: null,
         tokens_estimated: false,
@@ -230,6 +248,7 @@ export class RequestTrace {
         reply_preview: null,
         reply_chars: null,
         ...telemetry,
+        ctx_len: this.ctxLen,
         // PRIVACY (ATO-113): whatever collected it, no reply text leaves for a request nobody watched.
         ...(this.inspecting ? {} : { reply_preview: null }),
         status: status || null,

@@ -139,7 +139,12 @@ describe('the static memory share', () => {
       ),
     }
     const plan = sglangLaunchPlan(sglangSettings({}), model(hybrid), card(), HOST)
-    expect(Object.keys(plan).sort()).toEqual(['memFractionStatic', 'multimodal'])
+    expect(Object.keys(plan).sort()).toEqual([
+      'contextLength',
+      'maxRunningRequests',
+      'memFractionStatic',
+      'multimodal',
+    ])
     const argv = sglangAdapter.buildLaunch({
       modelId: 'Qwen/Qwen3.5-2B',
       settings: sglangSettings({}),
@@ -182,7 +187,7 @@ describe('the KV cache the check counts', () => {
     expect(sglangKvCacheBytes(model(), sglangSettings({ max_total_tokens: 2048 }), card()).bytes).toBe(
       2048 * PER_TOKEN_BF16
     )
-    const fp8 = sglangSettings({ kv_cache_dtype: 'fp8' })
+    const fp8 = sglangSettings({ kv_cache_dtype: 'fp8', context_length: 8192, max_running_requests: 1 })
     expect(sglangKvCacheBytes(model(), fp8, card()).bytes).toBe((8192 * PER_TOKEN_BF16) / 2)
     expect(sglangKvCacheBytes(model(), fp8, card({ compute_capability: '8.6' })).bytes).toBe(
       8192 * PER_TOKEN_BF16
@@ -195,7 +200,11 @@ describe('the KV cache the check counts', () => {
         i % 4 === 3 ? 'full_attention' : 'linear_attention'
       ),
     })
-    const settings = sglangSettings({ context_length: 2048, max_output_tokens: 1024 })
+    const settings = sglangSettings({
+      context_length: 2048,
+      max_output_tokens: 1024,
+      max_running_requests: 1,
+    })
     expect(sglangKvCacheBytes(hybrid, settings, card()).bytes).toBe(2048 * 2 * 7 * 8 * 128 * 2)
   })
 

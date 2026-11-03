@@ -47,6 +47,12 @@ describe('configureKilo', () => {
     await expect(configureKilo(agentInput(home.fs))).rejects.toThrow('kilo.jsonc is not a JSON object')
   })
 
+  it('writes into $KILO_CONFIG_DIR, read after the global directory', async () => {
+    home = await makeAgentHome()
+    await configureKilo(agentInput(home.fs, { env: { KILO_CONFIG_DIR: `${home.path}/kd` } }))
+    expect(Object.keys(await home.tree())).toEqual(['kd/kilo.jsonc'])
+  })
+
   it('works from a home directory whose path contains a space', async () => {
     home = await makeAgentHome('atomic kilo home-')
     await configureKilo(agentInput(home.fs))

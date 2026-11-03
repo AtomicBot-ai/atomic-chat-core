@@ -16,6 +16,7 @@
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { LlamacppConfig, LocalProviderId } from '../../contracts/index.js'
 import { f32Differs, formatRustF32 } from '../../util/index.js'
+import { REASONING_BUDGET_MESSAGE } from './generation-limits.js'
 
 export { f32Differs, formatRustF32 }
 
@@ -39,6 +40,17 @@ export const LOAD_MODE_ONLY_MIN_BUILD = 10875
  * is a no-op there that only prints a deprecation warning, so it is not sent.
  */
 export const DEFRAG_THOLD_NO_OP_MIN_BUILD = 6245
+/**
+ * First upstream release with the host-memory prompt cache and its `--cache-ram` limit
+ * (ggml-org/llama.cpp#16391, merged as d00cbea; b6721 is two commits short of it).
+ */
+export const CACHE_RAM_MIN_BUILD = 6723
+/**
+ * First upstream release whose `--reasoning-budget` takes a token count and has
+ * `--reasoning-budget-message` (ggml-org/llama.cpp#20297, acb7c79). Before it the flag accepted only
+ * -1 and 0, and any other value failed the launch (`common/arg.cpp` at b8285: "invalid value").
+ */
+export const REASONING_BUDGET_TOKENS_MIN_BUILD = 8287
 
 /** Cache types supported by stock ggml-org builds. */
 export const STANDARD_CACHE_TYPES: readonly string[] = [
@@ -73,6 +85,9 @@ export const LLAMACPP_CONFIG_SERDE_DEFAULTS = {
   dflash_draft_path: '',
   dflash_n_max: 0,
   reasoning_preserve: false,
+  // Absent, as in every config written before the setting existed: no budget, llama.cpp's own -1.
+  // What a load gets by default is the settings schema's value (generation-limits.ts).
+  reasoning_budget: -1,
   extra_args: '',
 } as const satisfies Partial<LlamacppConfig>
 
@@ -101,6 +116,8 @@ export interface LlamaArgsInput {
    * `--ctx-size`, which ends fit's context search while fit still places the layers.
    */
   fitCtxCeiling?: number
+  /** `--cache-ram` in MiB, from the load plan on a machine with at most 16 GiB of RAM. */
+  cacheRamMiB?: number
 }
 
 export interface LlamaArgsPlan {
@@ -301,7 +318,11 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   }
 
   if (cfg.ctx_shift) push('--context-shift')
+  // Explicit both ways: llama.cpp batches continuously unless told not to (`common/common.h:577`,
+  // `cont_batching = true`), so a setting that only ever sent the "on" flag could not turn it off.
+  // ik builds keep the old form.
   if (cfg.cont_batching) push('--cont-batching')
+  else if (!ik) push('--no-cont-batching')
   if (!ik && build !== undefined && build >= LOAD_MODE_ONLY_MIN_BUILD) {
     if (cfg.no_mmap && cfg.mlock) push('--load-mode', 'mlock')
     else if (cfg.no_mmap) push('--load-mode', 'none')
@@ -312,10 +333,15 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   }
   if (cfg.no_kv_offload) push('--no-kv-offload')
 
-  if (cfg.parallel > 0) {
-    push('--parallel', String(cfg.parallel))
-    if (cfg.parallel === 1) push('-kvu') // ggml-org/llama.cpp#17450
-  }
+  if (cfg.parallel > 0) push('--parallel', String(cfg.parallel))
+  // One KV pool for every slot (ggml-org/llama.cpp#17450): each slot may use the whole window
+  // (`src/llama-context.cpp:389-390`, `n_ctx_seq = n_ctx`) and the slots together never take more than
+  // one window's memory, so `--parallel N` costs no KV memory beyond a sliding-window layer's window
+  // per slot. Without it llama.cpp splits the window, `n_ctx / N` each. Caveat: the slots share the
+  // pool — one long prompt can fill it, and when concurrent slots outgrow it llama.cpp first clears
+  // idle slots, then fails every active one with "Context size has been exceeded."
+  // (`tools/server/server-context.cpp:4703-4744`).
+  push('-kvu')
 
   // Speculative decoding: DFlash wins when both are set.
   const addMtp = () => {
@@ -397,6 +423,27 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
     else if (cfg.fit && !ik && input.fitCtxCeiling !== undefined && input.fitCtxCeiling > 0)
       push('--ctx-size', String(input.fitCtxCeiling))
     if (cfg.n_predict > 0) push('--n-predict', String(cfg.n_predict))
+    // The thinking budget: llama.cpp applies it to requests that set none, and only to templates with
+    // a thinking end tag (`tools/server/server-common.cpp:1517-1531`). -1 (or absent) leaves thinking
+    // unbounded, 0 ends it at once.
+    if (!ik && cfg.reasoning_budget >= 0) {
+      if (build !== undefined && build >= REASONING_BUDGET_TOKENS_MIN_BUILD) {
+        push('--reasoning-budget', String(Math.floor(cfg.reasoning_budget)))
+        if (cfg.reasoning_budget > 0) push('--reasoning-budget-message', REASONING_BUDGET_MESSAGE)
+      } else {
+        warnings.push(
+          `Reasoning budget requested but backend build ${version}/${backend} predates token budgets (b${REASONING_BUDGET_TOKENS_MIN_BUILD}); skipping`
+        )
+      }
+    }
+    if (
+      !ik &&
+      input.cacheRamMiB !== undefined &&
+      input.cacheRamMiB > 0 &&
+      build !== undefined &&
+      build >= CACHE_RAM_MIN_BUILD
+    )
+      push('--cache-ram', String(Math.floor(input.cacheRamMiB)))
     if (cfg.cache_type_k !== '' && cfg.cache_type_k !== 'f16') {
       const safeK = sanitizeCacheType(cfg.cache_type_k)
       if (safeK !== 'f16') push('--cache-type-k', safeK)
