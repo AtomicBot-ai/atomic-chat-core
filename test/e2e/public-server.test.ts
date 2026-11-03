@@ -68,7 +68,11 @@ async function sessionPid(ready: ReadyLine): Promise<number | undefined> {
 }
 
 /** A model loaded behind a running public server, with the fake backend configured by `env`. */
-async function servedModel(env: Record<string, string> = {}, settings: Record<string, unknown> = {}) {
+async function servedModel(
+  env: Record<string, string> = {},
+  settings: Record<string, unknown> = {},
+  loadBody: object = {}
+) {
   await core.writeModel(dataFolder, 'demo')
   await core.writeFakeBackend(dataFolder, env)
   const { ready } = await core.startDaemon(dataFolder, daemons)
@@ -79,7 +83,7 @@ async function servedModel(env: Record<string, string> = {}, settings: Record<st
     })
     expect(patched.status, await patched.clone().text()).toBe(200)
   }
-  const session = await load(ready, 'demo')
+  const session = await load(ready, 'demo', loadBody)
   const port = await startServer(ready)
   const post = (path: string, body: object) =>
     fetch(`http://127.0.0.1:${port}/v1${path}`, {
@@ -336,7 +340,12 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
 
   it.skipIf(!POSIX)('grows the context of an overflowing model and replays the request', async () => {
     // With fit on (the default) llama.cpp sizes the window itself and the core declines to grow it.
-    const { ready, session, post } = await servedModel({ FAKE_LLAMA_MIN_CTX: '8192' }, { fit: false })
+    // An explicit 4K window overflows the 8K the request needs whatever the default is on this host.
+    const { ready, session, post } = await servedModel(
+      { FAKE_LLAMA_MIN_CTX: '8192' },
+      { fit: false },
+      { overrides: { ctx_size: 4096 } }
+    )
 
     const answer = await post('/chat/completions', {
       model: 'demo',

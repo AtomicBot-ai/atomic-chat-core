@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { configDirFrom, isOurServerUrl, outputCap, ourServerFromUrl, redo } from './json-backup.js'
 import type { JsonObject } from './json-tree.js'
@@ -15,7 +16,8 @@ describe('json-backup', () => {
     expect(configDirFrom('  ', '/home/u')).toBeUndefined()
     expect(configDirFrom('relative/dir', '/home/u')).toBeUndefined()
     expect(configDirFrom('~', '/home/u')).toBe('/home/u')
-    expect(configDirFrom('~/cc', '/home/u')).toBe('/home/u/cc')
+    // `~/` joins with the platform's separator.
+    expect(configDirFrom('~/cc', '/home/u')).toBe(join('/home/u', 'cc'))
     expect(configDirFrom('/opt/cc', '/home/u')).toBe('/opt/cc')
     expect(configDirFrom('C:\\Users\\u\\cc', '/home/u')).toBe('C:\\Users\\u\\cc')
   })

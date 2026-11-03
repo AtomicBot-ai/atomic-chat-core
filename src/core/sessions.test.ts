@@ -1,6 +1,16 @@
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import type * as NodeOs from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+// The default window and its growth are sized by the machine's RAM below 16 GiB (load-plan.ts,
+// tested there). These end-to-end cases count growth steps from the 32K default, so the host's own
+// RAM — 7 GiB on a CI Mac — must not decide what they see.
+vi.mock('node:os', async (importOriginal) => {
+  const os = await importOriginal<typeof NodeOs>()
+  const totalmem = () => 64 * 2 ** 30
+  return { ...os, totalmem, default: { ...os, totalmem } }
+})
 import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../test/helpers/fake-backend-pack.js'
 import {
   cores,
