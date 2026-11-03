@@ -76,6 +76,14 @@ describe('configureCodex', () => {
     expect(await home.tree()).toEqual({ [PROFILE]: GOLDEN })
   })
 
+  it('tells Codex the window the session was loaded with', async () => {
+    home = await makeAgentHome()
+    await configureCodex({ ...agentInput(home.fs, { apiKey: '' }), contextLength: 32768 })
+    const parsed = parseToml((await home.read(PROFILE)) ?? '')
+    expect(parsed['model_context_window']).toBe(32768)
+    expect(parsed['model_auto_compact_token_limit']).toBe(24576)
+  })
+
   it('omits env_key for a keyless server rather than writing a placeholder', async () => {
     home = await makeAgentHome()
     await configureCodex(agentInput(home.fs, { apiKey: '' }))
@@ -300,6 +308,20 @@ describe('renderCodexProfile', () => {
     expect(renderCodexProfile('http://127.0.0.1:1337/v1', 'AtomicChat/Qwen3.5-9B-GGUF', '')).toBe(
       GOLDEN_KEYLESS
     )
+  })
+
+  it('writes a known window with compaction at three quarters of it, and nothing for an unknown one', () => {
+    // Byte-identical to the desktop writer's `a_known_window_is_written_with_a_compaction_limit`.
+    expect(renderCodexProfile('http://127.0.0.1:1337/v1', 'AtomicChat/Qwen3.5-9B-GGUF', 'sk-x', 16384)).toBe(
+      GOLDEN.replace(
+        'model_provider = "atomic-chat"\n',
+        'model_provider = "atomic-chat"\nmodel_context_window = 16384\nmodel_auto_compact_token_limit = 12288\n'
+      )
+    )
+    const parsed = parseToml(renderCodexProfile('http://h/v1', 'm', '', 65535))
+    expect(parsed['model_context_window']).toBe(65535)
+    expect(parsed['model_auto_compact_token_limit']).toBe(49151)
+    expect(renderCodexProfile('http://h/v1', 'm', '', 0)).not.toContain('model_context_window')
   })
 })
 
