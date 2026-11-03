@@ -374,13 +374,50 @@ export function agentEnvironment(
   return { ...env, ...childEnv(agent, apiUrl, model, apiKey, options) }
 }
 
+export interface SpawnTarget {
+  file: string
+  args: string[]
+  /** Hand `args` to the process as written: the cmd.exe line below is quoted for cmd, not for MSVC. */
+  windowsVerbatimArguments: boolean
+}
+
+/**
+ * What to spawn for an agent launcher. On Windows an npm-installed agent is a `.cmd` shim
+ * (`codex.cmd`): Node refuses to spawn a batch file without a shell (EINVAL) and does not look a bare
+ * name up through PATHEXT (ENOENT). A shim, or a bare name that may resolve to one, therefore runs
+ * through `cmd.exe /d /s /c "<line>"` — the route `configure/codex.ts` takes for `codex --version`,
+ * with each token quoted so a launcher path or an argument with spaces survives. `/s` makes cmd strip
+ * exactly the outer quotes. An `.exe`, or an absolute path without an extension, spawns directly.
+ */
+export function spawnTarget(
+  program: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform
+): SpawnTarget {
+  const shim = /\.(cmd|bat)$/i.test(program)
+  const bareName = !/[\\/]/.test(program) && !/\.[^.\\/]+$/.test(program)
+  if (platform !== 'win32' || !(shim || bareName)) {
+    return { file: program, args, windowsVerbatimArguments: false }
+  }
+  const line = [program, ...args].map(quoteForCmd).join(' ')
+  return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${line}"`], windowsVerbatimArguments: true }
+}
+
+/** A token as cmd.exe and the MSVC argument parser both read it back. `%VAR%` still expands. */
+function quoteForCmd(token: string): string {
+  if (/^[\w\-.:\\/=@+,]+$/.test(token)) return token
+  return `"${token.replace(/"/g, '""')}"`
+}
+
 export function runAgent(spec: RunSpec): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(spec.program, spec.args, {
+    const target = spawnTarget(spec.program, spec.args)
+    const child = spawn(target.file, target.args, {
       env: spec.env,
       stdio: spec.detached ? 'ignore' : 'inherit',
       detached: spec.detached,
       windowsHide: true,
+      windowsVerbatimArguments: target.windowsVerbatimArguments,
     })
     let settled = false
     child.once('error', (e) => {

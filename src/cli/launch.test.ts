@@ -8,7 +8,14 @@ import { AtomicCore } from '../core/index.js'
 import { AGENTS, findAgent } from '../integrations/index.js'
 import type { AgentDetection } from '../integrations/index.js'
 import { recordingIo } from './io.js'
-import { agentEnvironment, launchCommand, runAgent, runCommand, splitAgentArgs } from './launch.js'
+import {
+  agentEnvironment,
+  launchCommand,
+  runAgent,
+  runCommand,
+  spawnTarget,
+  splitAgentArgs,
+} from './launch.js'
 import type { LaunchDeps, RunSpec } from './launch.js'
 
 let data: TmpDataFolder
@@ -322,6 +329,38 @@ describe('splitAgentArgs', () => {
     expect(splitAgentArgs(['claude', '--fit=false'])).toEqual({
       own: ['claude', '--no-fit'],
       forwarded: [],
+    })
+  })
+})
+
+describe('spawnTarget', () => {
+  it('runs npm shims and bare names through cmd.exe on Windows', () => {
+    expect(spawnTarget('codex', ['--profile', 'atomic-chat'], 'win32')).toEqual({
+      file: 'cmd.exe',
+      args: ['/d', '/s', '/c', '"codex --profile atomic-chat"'],
+      windowsVerbatimArguments: true,
+    })
+    const shim = 'C:\\Users\\John Smith\\AppData\\Roaming\\npm\\openclaw.cmd'
+    expect(spawnTarget(shim, ['chat', 'say "hi" & bye'], 'win32')).toEqual({
+      file: 'cmd.exe',
+      args: ['/d', '/s', '/c', `""${shim}" chat "say ""hi"" & bye""`],
+      windowsVerbatimArguments: true,
+    })
+  })
+
+  it('spawns executables directly, and everything off Windows', () => {
+    const exe = 'C:\\Users\\u\\.local\\bin\\claude.exe'
+    expect(spawnTarget(exe, ['--help'], 'win32')).toEqual({
+      file: exe,
+      args: ['--help'],
+      windowsVerbatimArguments: false,
+    })
+    // An absolute path without an extension is not looked up; spawning it reports what is wrong.
+    expect(spawnTarget('C:\\missing\\agent', [], 'win32').file).toBe('C:\\missing\\agent')
+    expect(spawnTarget('codex', ['--profile', 'atomic-chat'], 'linux')).toEqual({
+      file: 'codex',
+      args: ['--profile', 'atomic-chat'],
+      windowsVerbatimArguments: false,
     })
   })
 })
