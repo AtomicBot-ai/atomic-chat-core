@@ -185,25 +185,14 @@ describe('SettingsStore.open', () => {
     expect(fs.files.has(`${PATH}.tmp`)).toBe(false)
   })
 
-  it('reads an existing file without rewriting it', async () => {
+  it.each([
+    ['plain UTF-8', ''],
+    ['UTF-8 with a leading BOM', '\uFEFF'],
+  ])('reads existing %s settings without rewriting them', async (_encoding, prefix) => {
     const fs = new FakeFs()
     const state = { default_migrations: DEFAULT_MIGRATIONS.map((m) => m.id) }
-    fs.files.set(
-      PATH,
-      JSON.stringify({ version: 1, revision: 3, providers: { mlx: { timeout: 42 } }, state })
-    )
-    const { store } = await openFresh(fs)
-    expect(store.revision).toBe(3)
-    expect(store.get('mlx')['timeout']).toBe(42)
-    expect(fs.ops.filter((op) => op.startsWith('write'))).toEqual([])
-  })
-
-  it('tolerates a leading UTF-8 BOM when reading an existing file', async () => {
-    const fs = new FakeFs()
-    fs.files.set(
-      PATH,
-      `\uFEFF${JSON.stringify({ version: 1, revision: 3, providers: { mlx: { timeout: 42 } } })}`
-    )
+    const json = JSON.stringify({ version: 1, revision: 3, providers: { mlx: { timeout: 42 } }, state })
+    fs.files.set(PATH, prefix + json)
     const { store } = await openFresh(fs)
     expect(store.revision).toBe(3)
     expect(store.get('mlx')['timeout']).toBe(42)
