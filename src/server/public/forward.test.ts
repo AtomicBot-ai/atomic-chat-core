@@ -392,7 +392,7 @@ describe('Anthropic thinking on a llama.cpp engine (QA B08)', () => {
     expect(fallbacks[1]).not.toHaveProperty('max_tokens')
   })
 
-  it('answers a turn with system messages in its conversation natively, the system messages merged', async () => {
+  it('answers a turn with system messages in its conversation natively, each kept in place', async () => {
     const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
     const { port } = await startUpstream((req, body, res) => {
       seen.push({ url: req.url, body: JSON.parse(body) })
@@ -419,13 +419,56 @@ describe('Anthropic thinking on a llama.cpp engine (QA B08)', () => {
         url: '/v1/messages',
         body: {
           ...turn,
-          system: [
-            { type: 'text', text: 'You are Claude Code.' },
-            { type: 'text', text: '\n\nThe user switched to plan mode.' },
+          // The system prompt llama.cpp has cached is not touched: the reminder joins the next user turn.
+          messages: [
+            turn.messages[0],
+            turn.messages[1],
+            {
+              role: 'user',
+              content: '<system-reminder>\nThe user switched to plan mode.\n</system-reminder>\n\nand now?',
+            },
           ],
-          messages: [turn.messages[0], turn.messages[1], turn.messages[3]],
         },
       },
+    ])
+  })
+
+  it('keeps the reminder in place on the chat-completions fallback too', async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      if (req.url === '/v1/messages') {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'Failed to parse tool call' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const turn = {
+      model: 'demo',
+      max_tokens: 100,
+      thinking: { type: 'adaptive' },
+      system: 'You are Claude Code.',
+      messages: [
+        { role: 'user', content: 'how are you?' },
+        { role: 'assistant', content: 'Fine.' },
+        { role: 'system', content: 'Plan mode.' },
+        { role: 'user', content: 'and now?' },
+      ],
+    }
+    expect((await postJson(server, '/messages', turn)).status).toBe(200)
+    expect(seen[1]?.body['messages']).toEqual([
+      { role: 'system', content: 'You are Claude Code.' },
+      { role: 'user', content: 'how are you?' },
+      { role: 'assistant', content: 'Fine.' },
+      { role: 'user', content: '<system-reminder>\nPlan mode.\n</system-reminder>\n\nand now?' },
     ])
   })
 

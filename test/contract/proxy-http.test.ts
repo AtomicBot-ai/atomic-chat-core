@@ -94,6 +94,11 @@ const REMOTE_BEARER = 'Bearer sk-remote'
  * fallback (QA B08, `src/server/public/thinking.ts`). That fallback also kept no `max_tokens`, so an
  * engine started with `n_predict -1` wrote until its context was full; to a llama.cpp session the port
  * keeps the request's `max_tokens`, as llama.cpp's own `/v1/messages` does.
+ *
+ * No recorded case exercises these, so they need no correction below: to a llama.cpp session the
+ * port keeps a system message from inside an Anthropic conversation where it is, as a
+ * `<system-reminder>` in a user turn, on `/v1/messages` and on the fallback, where the proxy sent it
+ * as it came and its translation moved it into the leading system message (`system-messages.ts`).
  */
 const UNKNOWN_MODEL_TEXT = /^No running session found for model '(.*)'$/
 const SESSION_BEARER = 'Bearer session-key'

@@ -50,7 +50,7 @@ import {
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
-import { mergedSystemMessages } from './system-messages.js'
+import { placedSystemMessages } from './system-messages.js'
 import { isLlamaCppServer, noThinkingTemplateKwargs } from './thinking.js'
 import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
@@ -281,6 +281,11 @@ export async function serveForward(ex: Exchange): Promise<void> {
     isMessages && backend.kind === 'local'
       ? noThinkingTemplateKwargs(backend.session.provider, json)
       : undefined
+  // System messages inside the conversation stay where they are, as reminders in a user turn, before a
+  // strict llama.cpp template sees them (QA B08, audit S1): on `/v1/messages` and on the fallback.
+  const placed =
+    isMessages && backend.kind === 'local' ? placedSystemMessages(backend.session.provider, json) : undefined
+  const messagesJson: JsonValue = placed !== undefined && isJsonObject(json) ? { ...json, ...placed } : json
 
   // A session that declares its routes and has no `/v1/messages` of its own goes straight to the
   // chat-completions translation: asking it first would only be refused (findings-2.14-r1.md item 4).
@@ -290,7 +295,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     backend.session.policy &&
     !backend.session.policy.routes.some((r) => r.method === 'POST' && r.path === '/v1/messages')
   ) {
-    await messagesFallback(ex, backend, url, key, json, noThinking)
+    await messagesFallback(ex, backend, url, key, messagesJson, noThinking)
     return
   }
 
@@ -300,16 +305,11 @@ export async function serveForward(ex: Exchange): Promise<void> {
     trace.inspecting && stream && ex.path === '/chat/completions' && backend.kind === 'local'
       ? maybeInjectStreamUsage(raw)
       : undefined
-  // System messages inside the conversation join `system` before a strict llama.cpp template sees
-  // them, so the turn is answered natively instead of by the fallback (QA B08).
-  const systemMerged =
-    isMessages && backend.kind === 'local' ? mergedSystemMessages(backend.session.provider, json) : undefined
   const rewritten =
-    (noThinking !== undefined || systemMerged !== undefined) && isJsonObject(json)
+    (noThinking !== undefined || placed !== undefined) && isJsonObject(messagesJson)
       ? Buffer.from(
           serdeToString({
-            ...json,
-            ...systemMerged,
+            ...messagesJson,
             ...(noThinking !== undefined ? { chat_template_kwargs: noThinking } : {}),
           })
         )
@@ -332,7 +332,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
   }
 
   if (!isSuccess(response.status)) {
-    if (isMessages) await messagesFallback(ex, backend, url, key, json, noThinking, response)
+    if (isMessages) await messagesFallback(ex, backend, url, key, messagesJson, noThinking, response)
     else await upstreamError(ex, backend, modelId, raw, response)
     return
   }

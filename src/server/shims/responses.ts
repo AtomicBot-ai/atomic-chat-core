@@ -18,6 +18,7 @@
 import { randomUUID } from 'node:crypto'
 import type { JsonObject, JsonValue } from './json.js'
 import { isJsonObject, serdeToString } from './json.js'
+import { asSystemReminder } from './reminders.js'
 
 function uuidSimple(): string {
   return randomUUID().replace(/-/g, '')
@@ -82,7 +83,7 @@ export function responsesRequestToChat(body: JsonValue): JsonValue {
     }
   }
 
-  const out: JsonObject = { messages: mergeSystemMessages(messages) }
+  const out: JsonObject = { messages: placeSystemMessages(messages) }
 
   const model = field(body, 'model')
   if (model !== undefined) out['model'] = clone(model)
@@ -122,26 +123,65 @@ export function responsesRequestToChat(body: JsonValue): JsonValue {
 }
 
 /**
- * Collapse every `system`/`developer` message into a single leading `system` message, joined by a
- * blank line; messages whose flattened text is empty contribute nothing, and if nothing remains no
- * system message is emitted. Strict chat templates (notably Qwen3-family GGUFs) raise "System
- * message must be at the beginning" when a request carries more than one system message or places
- * one after the first turn — which Codex does by combining `instructions` with developer/system
- * input items. Order of the other messages is preserved.
+ * Place the `system`/`developer` messages for a strict chat template (notably Qwen3-family GGUFs,
+ * which raise "System message must be at the beginning" for a second system message or a later one;
+ * Codex sends `instructions` and developer input items). Those before the first turn become one
+ * leading `system` message, joined by a blank line. A later one stays where it is, as user text
+ * wrapped in `<system-reminder>`, so the start of the prompt does not change and llama.cpp keeps its
+ * prompt cache: it is put before the text of the user message that follows it, or else at the end
+ * of the user or tool message before it (never between a tool call and its result), or else in a
+ * user message of its own. Messages whose flattened text is empty contribute nothing; the order of
+ * the other messages is preserved.
  */
-export function mergeSystemMessages(messages: JsonValue[]): JsonValue[] {
-  const systemParts: string[] = []
-  const rest: JsonValue[] = []
-
-  for (const msg of messages) {
+export function placeSystemMessages(messages: JsonValue[]): JsonValue[] {
+  const isSystem = (msg: JsonValue): boolean => {
     const role = asStr(field(msg, 'role')) ?? ''
-    if (role === 'system' || role === 'developer') {
-      const text = flattenContentToText(field(msg, 'content'))
-      if (text !== '') systemParts.push(text)
+    return role === 'system' || role === 'developer'
+  }
+  const systemParts: string[] = []
+  let start = 0
+  for (; start < messages.length && isSystem(messages[start] as JsonValue); start++) {
+    const text = flattenContentToText(field(messages[start], 'content'))
+    if (text !== '') systemParts.push(text)
+  }
+
+  const rest: JsonValue[] = []
+  let pending: string[] = []
+  const flushBefore = () => {
+    if (pending.length === 0) return
+    const reminder = pending.join('\n\n')
+    pending = []
+    const previous = rest.at(-1)
+    const role = asStr(field(previous, 'role'))
+    const content = field(previous, 'content')
+    if ((role === 'user' || role === 'tool') && typeof content === 'string' && isJsonObject(previous)) {
+      rest[rest.length - 1] = {
+        ...previous,
+        content: content === '' ? reminder : `${content}\n\n${reminder}`,
+      }
     } else {
-      rest.push(msg)
+      rest.push({ role: 'user', content: reminder })
     }
   }
+  for (const msg of messages.slice(start)) {
+    if (isSystem(msg)) {
+      const text = flattenContentToText(field(msg, 'content'))
+      if (text.trim() !== '') pending.push(asSystemReminder(text))
+      continue
+    }
+    const role = asStr(field(msg, 'role'))
+    const content = field(msg, 'content')
+    if (pending.length > 0 && role === 'user' && typeof content === 'string' && isJsonObject(msg)) {
+      const reminder = pending.join('\n\n')
+      pending = []
+      rest.push({ ...msg, content: content === '' ? reminder : `${reminder}\n\n${content}` })
+      continue
+    }
+    // Tool results answer the assistant's calls directly; a reminder waits until they are all in.
+    if (role !== 'tool') flushBefore()
+    rest.push(msg)
+  }
+  flushBefore()
 
   if (systemParts.length === 0) return rest
   return [{ role: 'system', content: systemParts.join('\n\n') }, ...rest]

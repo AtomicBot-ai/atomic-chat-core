@@ -85,6 +85,26 @@ const CHAT_IDS = [
 
 type Doc = { error?: string | null }
 
+/**
+ * Where the port deliberately differs from the recorded Rust behaviour; the expectation is corrected,
+ * never skipped. The Rust shim moved every system and developer message into the leading system
+ * message; the port keeps one that comes after the first turn where it is, as a `<system-reminder>`
+ * in the user turn around it, so the start of the prompt does not change and llama.cpp keeps its
+ * prompt cache (audit 2026-11-03 S1, `placeSystemMessages`).
+ */
+function applyKnownDivergence(name: string, expected: JsonValue): JsonValue {
+  if (name !== 'request_merges_system_and_developer_into_leading_system') return expected
+  return {
+    chat: {
+      messages: [
+        { content: 'base policy\n\nproject rules', role: 'system' },
+        { content: 'hi\n\n<system-reminder>\nlate system\n</system-reminder>', role: 'user' },
+      ],
+      model: 'm',
+    },
+  }
+}
+
 function describeSet(set: string, body: () => void) {
   if (PENDING.has(set) && !FORCED.has(set)) describe.skip(`${set} (pending port)`, body)
   else describe(set, body)
@@ -128,7 +148,7 @@ describeSet('responses-shim', () => {
       default:
         throw new Error(`unknown case kind ${String(input['kind'])}`)
     }
-    expect(normalizeIds(actual, RESPONSES_IDS)).toEqual(c.expected)
+    expect(normalizeIds(actual, RESPONSES_IDS)).toEqual(applyKnownDivergence(c.name, c.expected))
   })
 })
 
