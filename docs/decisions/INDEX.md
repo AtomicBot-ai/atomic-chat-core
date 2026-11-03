@@ -11,6 +11,7 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-03 — Serve coding agents with their window, bounded output and two shared-KV slots](2026-11-03-serve-coding-agents-with-their-window-and-bounded-output.md)
 - [2026-11-02 — Wait for audio lifecycle cleanup and reject superseded jobs](2026-11-02-wait-for-audio-lifecycle-cleanup.md)
 
 - **2026-10-29** — [Serve /v1/audio/speech from the loaded audio model through the job runner](2026-10-29-serve-v1-audio-speech-from-the-loaded-audio-model.md) — answered by the core, not forwarded: OpenAI body (`input` ≤ 4096, `voice`, `speed`, `instructions`, `response_format` wav/pcm) → a speech job via `AudioService.speechBackend()`, clip bytes + `X-Atomic-*` headers; a hang-up cancels; music/effects model → `model_not_loaded`, other `model` → 404; no OpenAI name aliases yet; not in `/openapi.json` until the app's iteration.
